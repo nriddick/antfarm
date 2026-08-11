@@ -673,15 +673,19 @@ struct ConsumerView
                 // then the MT items. It takes all shards' completers being
                 // gone for work to starve, in which case no progress is
                 // possible anyway.
-                immutable sweeper = processShard(bp, nextSeq, idx, tindexOff, tcountOff,
-                                                 progOff, tlen, sq, myShi, false);
+                immutable sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
+                                                  progOff, tlen, sq, myShi, false, false) & 1) != 0;
                 if (sweeper)
                 {
                     immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
+                    bool adopted;
                     foreach (s; 0 .. nshards)
                         if (s != myShi)
-                            processShard(bp, nextSeq, idx, tindexOff, tcountOff,
-                                         progOff, tlen, sq, s, true);
+                        {
+                            immutable r = processShard(bp, nextSeq, idx, tindexOff, tcountOff,
+                                                       progOff, tlen, sq, s, true, !adopted);
+                            if (r & 2) adopted = true;
+                        }
                     tertiaryMt(bp, idx, tindexOff, tlen, tmt);
                 }
                 else
@@ -813,13 +817,25 @@ private:
                     immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
                     foreach (s; 0 .. nshards)
                         processShard(bp, seq, idx, tindexOff, tcountOff,
-                                     progOff, tlen, sq, s, true);
+                                     progOff, tlen, sq, s, true, false);
                 }
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
             seq = tnext;
         }
         tryReleaseTrailing();
+    }
+
+    /// Migrate the position leaf tally to a new leaf index (spec 2a
+    /// ordering: inc ahead, then dec).
+    void migratePositionLeaf(uint nl) nothrow @nogc @system
+    {
+        if (nl == curLti) return;
+        immutable lo = atomicFetchAdd(F.Lt[curKi * MAX_LEAVES + nl][0], 1);
+        if (lo == 0)
+            atomicFetchAdd(F.Rt[curKi][0], 1);
+        decRef(curKi, curLti);
+        curLti = nl;
     }
 
     /// Spec 5h: when the number of consumers passing through an exhausted
@@ -832,16 +848,26 @@ private:
         {
             IDc += 1;
             immutable sq2 = cast(uint) atomicLoad!(MemoryOrder.raw)(F.stats[curKi].sqcs);
-            immutable nl = cast(uint)(IDc % sq2);
-            if (nl != curLti)
-            {
-                immutable lo = atomicFetchAdd(F.Lt[curKi * MAX_LEAVES + nl][0], 1);
-                if (lo == 0)
-                    atomicFetchAdd(F.Rt[curKi][0], 1);
-                decRef(curKi, curLti);
-                curLti = nl;
-            }
+            migratePositionLeaf(cast(uint)(IDc % sq2));
         }
+    }
+
+    /// Undersaturation repair, complementing 5h: a sweeper finding a
+    /// foreign shard with Z <= 1 (essentially no native traffic) nudges its
+    /// IDc by the round-robin distance into that shard, patching the hole a
+    /// pre-empted or unsubscribed native left behind. If a laggard native
+    /// later wakes and finds the shard overbalanced, the 5h oversaturation
+    /// nudge moves it out again. Self-limiting: each entering sweeper's
+    /// failed exit-claim raises the shard's Z, so the signal disappears
+    /// after a couple of adopters.
+    void adopt(uint shi, uint sq, ulong tseq) nothrow @nogc @system
+    {
+        immutable myShi = cast(uint)((cast(ulong) IDc + tseq) % sq);
+        immutable delta = (shi + sq - myShi) % sq;
+        if (delta == 0) return;
+        IDc += delta;
+        immutable sq2 = cast(uint) atomicLoad!(MemoryOrder.raw)(F.stats[curKi].sqcs);
+        migratePositionLeaf(cast(uint)(IDc % sq2));
     }
 
     /// Spec 5f: enter a payload. Claims bounded by MaxCs; calls bounded by
@@ -871,19 +897,21 @@ private:
     /// checkFirst (sweeps of foreign shards and re-walks), a plain load
     /// short-circuits fully-claimed shards without an RMW.
     ///
-    /// Returns true when this consumer added the final completion sum for
-    /// the shard (spec 5e-k): it adds Shlen to Tprogress, accounts the
-    /// table's size into the segment's Sd if the table thereby completed,
-    /// and gains the sweeper role.
-    bool processShard(shared(ulong)* bp, ulong tseq, ulong tseqIdx, ulong tindexOff,
+    /// Returns a bitmask: bit 0 set when this consumer added the final
+    /// completion sum for the shard (spec 5e-k): it adds Shlen to
+    /// Tprogress, accounts the table's size into the segment's Sd/Sbal if
+    /// the table thereby completed, and gains the sweeper role. Bit 1 set
+    /// when, sweeping a foreign shard, it found the shard starved
+    /// (Z <= 1) and adopted it (only when allowAdopt).
+    uint processShard(shared(ulong)* bp, ulong tseq, ulong tseqIdx, ulong tindexOff,
                       ulong tcountOff, ulong progOff, uint tlen, uint sq, uint shi,
-                      bool checkFirst) nothrow @nogc @system
+                      bool checkFirst, bool allowAdopt) nothrow @nogc @system
     {
         uint shstart, shlen, shbase;
         // 5e-d: small tables are claimed wholesale by shard 0 only.
         if (tlen < SMALL_TABLE_THRESHOLD)
         {
-            if (shi != 0) return false;
+            if (shi != 0) return 0;
             shstart = 0;
             shlen = tlen;
             shbase = tlen;
@@ -897,22 +925,41 @@ private:
             shstart = shi * shbase + (shi < shrm ? shi : shrm);
         }
         if (shlen == 0)
-            return false;
+            return 0;
         // 5e-g/h.
         immutable chunk = shbase >= BIG_CHUNK * 16 ? BIG_CHUNK : CLAIM_CHUNK;
         immutable shiter = (shlen + chunk - 1) / chunk;
         auto shc = &bp[tcountOff + shi * 8];
-        if (checkFirst && cast(uint)(atomicLoad!(MemoryOrder.raw)(*shc) >> 32) >= shiter)
-            return false;
+        if (checkFirst)
+        {
+            immutable claims = cast(uint)(atomicLoad!(MemoryOrder.raw)(*shc) >> 32);
+            if (claims >= shiter)
+            {
+                // Shard already exhausted; a starved one (Z <= 1: at most
+                // one prior exhausted-visitor) may be adopted.
+                if (allowAdopt && claims - shiter <= 1)
+                {
+                    adopt(shi, sq, tseq);
+                    return 2;
+                }
+                return 0;
+            }
+        }
         for (;;)
         {
             // 5e-i.
             immutable x = cast(uint)(atomicFetchAdd(*shc, 1UL << 32) >> 32);
             if (x >= shiter)
             {
+                immutable z = x - shiter;
                 if (!checkFirst)
-                    feedback(x - shiter, sq); // 5h: Z = X - Shiter
-                return false;
+                    feedback(z, sq); // 5h: Z = X - Shiter
+                else if (allowAdopt && z <= 1)
+                {
+                    adopt(shi, sq, tseq);
+                    return 2;
+                }
+                return 0;
             }
             // 5e-j.
             immutable runstart = shstart + x * chunk;
@@ -942,7 +989,7 @@ private:
                     immutable ob = atomicFetchSub(F.stats[tki].sbal, cast(long) tsize);
                     if (ob < cast(long) tsize) fatal("segment balance underflow");
                 }
-                return true;
+                return 1;
             }
         }
     }

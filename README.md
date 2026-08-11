@@ -53,6 +53,15 @@ library plus a test runner.
   in which case Sub0 preserves the data. `write()` enforces
   `Done > 1 => MaxCs >= 2` so a sweeper always finds a claim slot (a
   primary visit burns exactly one claim).
+- **Undersaturation repair (generation 4).** The complement of the 5h
+  oversaturation nudge: a sweeper finding a foreign shard with
+  `Z = X - Shiter <= 1` (essentially no native traffic) nudges its IDc by
+  the round-robin distance into that shard — `IDc += (shi - myShi + sq) % sq`
+  — and migrates its position leaf, patching the hole a pre-empted or
+  unsubscribed native left. A laggard native waking to an overbalanced
+  shard nudges itself out via 5h. Self-limiting: each entering sweeper's
+  failed exit-claim raises the shard's Z, so the signal disappears after a
+  couple of adopters. At most one adoption per consumer per table.
 - **Subscribe attaches in place.** Instead of the spec's walk-back then
   walk-forward-with-held-Subs, the subscriber scans all K segments once from
   `Eg`, picks the earliest segment with `Rt' > 0`, deposits a `Sub` there,
