@@ -139,7 +139,8 @@ struct SegStats
     shared ulong seqt;  /// sequence of the first valid payload table for that epoch
     shared ulong cs;    /// snapshot of the number of consumers
     shared ulong sqcs;  /// sqcsOf(cs)
-    ulong[4] pad;
+    shared ulong sd;    /// consumed-size accumulator (gen2): sum of completed table sizes
+    ulong[3] pad;
 }
 static assert(SegStats.sizeof == 64);
 
@@ -419,6 +420,7 @@ struct AntFarm
             atomicStore!(MemoryOrder.raw)(stats[ki].seqt, wtprime);
             atomicStore!(MemoryOrder.raw)(stats[ki].cs, cast(ulong) cs);
             atomicStore!(MemoryOrder.raw)(stats[ki].sqcs, cast(ulong) sq);
+            atomicStore!(MemoryOrder.raw)(stats[ki].sd, 0UL); // fresh epoch: nothing consumed
             atomicStore!(MemoryOrder.rel)(stats[ki].es, cast(long) e);
         }
         if (enew > eold)
@@ -435,7 +437,8 @@ struct AntFarm
         w[2] = (cast(ulong) m << 32) | cast(uint) n;  // Tmt | Tlen
         w[3] = cs;
         w[4] = sq;
-        w[5] = 0; w[6] = 0; w[7] = 0;
+        w[5] = size; // table size, accounted into the segment's Sd on completion
+        w[6] = 0; w[7] = 0;
 
         // Tindex: total index first, MT index second.
         ulong po = payOff;
@@ -484,14 +487,44 @@ struct AntFarm
 }
 
 /// Spec 5a: a POD struct exclusively owned by one consumer at a time.
+///
+/// Generation 2 reference model: the consumer holds a *position* reference
+/// on the segment of the last table it validated, plus a local array of
+/// *trailing* references on segments it has passed through but not yet
+/// confirmed complete. A segment is confirmed complete when its consumed-
+/// size accumulator pushes the segment's first table sequence across the
+/// next segment boundary: Seqt[Ki] + Sd[Ki] >= (Ei+1) * segCap. Since
+/// tables are contiguous and a table's size is accounted exactly once (by
+/// the consumer whose Tprogress add lands on Tlen), the crossing fires
+/// exactly when every table starting in the segment is complete.
+///
+/// Invariants:
+///  - Every consumer holds a reference on every segment it has entered but
+///    not yet confirmed complete. Hence an incomplete segment is protected
+///    from producer overwrite by every passerby still subscribed.
+///  - The last unsubscriber deposits Sub0 at its earliest unconfirmed held
+///    segment, preserving the backlog for the next subscriber.
+///  - If producers stall on a held trailing reference, consumers catch up
+///    to Wt, go idle, and re-walk the oldest held segment claiming
+///    leftovers until it confirms: blocking creates the idleness that
+///    resolves it.
 struct ConsumerView
 {
     AntFarm* F;
     long IDc = -1;      /// taken from F's Reqs during subscription
     ulong nextSeq;      /// sequence of the next table to read
-    uint curKi;         /// segment whose tally this consumer currently holds
-    uint curLti;        /// leaf tally index actually used (cached: stats may change)
+    uint curKi;         /// position reference: segment of last validated table
+    ulong curEi;        /// ... its epoch
+    uint curLti;        /// ... leaf tally index actually used
     bool hasRef;
+
+    /// Trailing references: segments entered but not yet confirmed complete.
+    /// Pushed in increasing epoch order; bounded by K because a held
+    /// trailing reference blocks producers from lapping it.
+    uint[KMAX] trailKi;
+    ulong[KMAX] trailEi;
+    uint[KMAX] trailLti;
+    uint trailN;
 
     /// Spec 5a. Returns the (non-negative) starting epoch on success, or a
     /// negative value on failure.
@@ -503,9 +536,8 @@ struct ConsumerView
 
         // 5a-b: walk backwards from Eg through the segments to the earliest
         // one whose Rt' is nonzero (the "pulse"). The pulse invariant
-        // (5b: Sub0 at construction and on last unsubscribe) guarantees one
-        // exists; the only way to observe none is a race with a
-        // not-last unsubscribe, in which case we stand at the frontier.
+        // guarantees one exists; the only way to observe none is a race with
+        // a not-last unsubscribe, in which case we stand at the frontier.
         immutable eg = atomicLoad!(MemoryOrder.acq)(f.Eg);
         long bestE = long.max;
         long bestSeg = -1;
@@ -559,30 +591,39 @@ struct ConsumerView
         IDc = idc;
         nextSeq = seqt;
         curKi = seg;
+        curEi = cast(ulong) es;
         curLti = lti;
+        trailN = 0;
         hasRef = true;
         return es;
     }
 
-    /// Spec 5b.
+    /// Spec 5b. References on confirmed-complete segments are dropped first;
+    /// the last unsubscriber plants Sub0 at its earliest unconfirmed held
+    /// segment, preserving the backlog for the next subscriber.
     void unsubscribe() nothrow @nogc @system
     {
         if (!hasRef) return;
         auto f = F;
-        // 5b-a: when sub_consumer returns 1 we are the last unsubscriber and
-        // deposit Sub0 into our Rt before decrementing, preserving the
-        // always-a-live-pulse invariant. The deposit is a bit-or: idempotent
-        // and independent of the consumer count in the low half.
+        tryReleaseTrailing();
+        immutable ski = trailN ? trailKi[0] : curKi;
+        // 5b-a: the last unsubscriber deposits Sub0 before decrementing,
+        // preserving the always-a-live-pulse invariant. Deposit is a bit-or:
+        // idempotent and independent of the consumer count.
         if (f.sub_consumer() == 1)
-            rtSetBits(f.Rt[curKi][0], SUB0);
-        // 5b-b: normal decrement process.
-        decRef();
+            rtSetBits(f.Rt[ski][0], SUB0);
+        // 5b-b: normal decrement process for every held reference.
+        decRef(curKi, curLti);
+        foreach (i; 0 .. trailN)
+            decRef(trailKi[i], trailLti[i]);
+        trailN = 0;
         hasRef = false;
         IDc = -1;
     }
 
     /// Consume one table if available. Returns false when no valid table is
-    /// published at the current position yet (caller may spin or sleep).
+    /// published at the current position yet; on that idle path the consumer
+    /// first mops up its oldest unconfirmed segment.
     bool consumeNext() nothrow @nogc @system
     {
         if (!hasRef) return false;
@@ -591,16 +632,18 @@ struct ConsumerView
         immutable idx = nextSeq & f.Lmask;
         // 5c: load-acquire the sentinel and validate location and value.
         if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(nextSeq))
+        {
+            sweepOldestTrailing();
             return false;
+        }
 
-        // Breaching a segment boundary: inc the newer segment's leaf tally,
-        // then dec the current one (spec 5c/2a ordering). Done here, after
-        // sentinel validation, because a valid sentinel implies the
-        // producer has initialized this segment's stats.
+        // Breaching a segment boundary: take a reference on the newer
+        // segment; the old position reference becomes a trailing one and is
+        // released only when its segment is confirmed complete.
         immutable ei = nextSeq >> f.segShift;
         immutable ki = cast(uint)(ei & f.kMask);
         if (ki != curKi)
-            moveRef(ki);
+            moveRef(ki, ei);
 
         immutable tnext = atomicLoad!(MemoryOrder.raw)(bp[idx + 1]);
         immutable w2 = atomicLoad!(MemoryOrder.raw)(bp[idx + 2]);
@@ -611,49 +654,64 @@ struct ConsumerView
         immutable progOff = tindexOff + tlen + tmt + PROG_PAD;
         immutable tcountOff = progOff + 8;
 
-        // 5e-a: O(1) skip of fully-completed tables. The skip only covers
-        // primary work: MT payloads can outlive their shard's completion,
-        // so the MT sweep always runs.
         if (tlen > 0)
         {
             immutable myShi = cast(uint)((cast(ulong) IDc + nextSeq) % sq);
             if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
             {
-                // 5e: primary path (own shard), then the tertiary sweep of
-                // shards starved of consumers entirely.
-                processShard(bp, idx, tindexOff, tcountOff, progOff, tlen, sq, myShi, false);
-                immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
-                foreach (s; 0 .. nshards)
-                    if (s != myShi)
-                        processShard(bp, idx, tindexOff, tcountOff, progOff, tlen, sq, s, true);
+                // 5e: primary path. The consumer completing a shard gains
+                // the sweeper role: one linear pass over the other shards,
+                // then the MT items. It takes all shards' completers being
+                // gone for work to starve, in which case no progress is
+                // possible anyway.
+                immutable sweeper = processShard(bp, nextSeq, idx, tindexOff, tcountOff,
+                                                 progOff, tlen, sq, myShi, false);
+                if (sweeper)
+                {
+                    immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
+                    foreach (s; 0 .. nshards)
+                        if (s != myShi)
+                            processShard(bp, nextSeq, idx, tindexOff, tcountOff,
+                                         progOff, tlen, sq, s, true);
+                    tertiaryMt(bp, idx, tindexOff, tlen, tmt);
+                }
+                else
+                {
+                    // 5g: secondary round-robin share of the MT payloads.
+                    secondaryMt(bp, idx, tindexOff, tlen, tmt, sq);
+                }
             }
-            mtSweep(bp, idx, tindexOff, tlen, tmt, sq);
+            else
+            {
+                // Complete table: cheap pre-checked MT pass only (MT
+                // payloads can outlive their shards' completion).
+                tertiaryMt(bp, idx, tindexOff, tlen, tmt);
+            }
         }
 
         nextSeq = tnext;
+        tryReleaseTrailing();
         return true;
     }
 
 private:
-    /// Decrement the currently-held leaf tally with root propagation (spec
-    /// 2a). Edge transition (dec returns 1) repeats on Rt with release
-    /// semantics; underflows are fatal.
-    void decRef() nothrow @nogc @system
+    /// Decrement a held leaf tally with root propagation (spec 2a). Edge
+    /// transition (dec returns 1) repeats on Rt; underflows are fatal.
+    void decRef(uint ki, uint lti) nothrow @nogc @system
     {
         auto f = F;
-        immutable lo = atomicFetchSub(f.Lt[curKi * MAX_LEAVES + curLti][0], 1);
+        immutable lo = atomicFetchSub(f.Lt[ki * MAX_LEAVES + lti][0], 1);
         if (lo <= 0) fatal("leaf tally underflow");
         if (lo == 1)
         {
-            immutable ro = atomicFetchSub(f.Rt[curKi][0], 1);
+            immutable ro = atomicFetchSub(f.Rt[ki][0], 1);
             if ((ro & COUNTMASK) == 0) fatal("root tally underflow");
         }
     }
 
-    /// Increment segment ki's leaf tally (edge propagates to Rt), then
-    /// release the previously-held one. Increment-ahead-before-decrement
-    /// (spec 2a) leaves no zero-gap for producers to observe.
-    void moveRef(uint ki) nothrow @nogc @system
+    /// Take the position reference on segment ki and demote the old one to
+    /// a trailing reference. Increment-ahead (spec 2a) leaves no zero-gap.
+    void moveRef(uint ki, ulong ei) nothrow @nogc @system
     {
         auto f = F;
         atomicLoad!(MemoryOrder.acq)(f.stats[ki].es); // pair with producer's release
@@ -662,14 +720,92 @@ private:
         immutable lo = atomicFetchAdd(f.Lt[ki * MAX_LEAVES + lti][0], 1);
         if (lo == 0)
             atomicFetchAdd(f.Rt[ki][0], 1);
-        decRef();
+        if (trailN == KMAX) fatal("trailing reference overflow");
+        trailKi[trailN] = curKi;
+        trailEi[trailN] = curEi;
+        trailLti[trailN] = curLti;
+        ++trailN;
         curKi = ki;
+        curEi = ei;
         curLti = lti;
+    }
+
+    /// Release trailing references on segments confirmed complete:
+    /// Seqt[Ki] + Sd[Ki] reaching the next segment boundary means every
+    /// table starting in the segment is complete.
+    void tryReleaseTrailing() nothrow @nogc @system
+    {
+        auto f = F;
+        uint w = 0;
+        foreach (i; 0 .. trailN)
+        {
+            immutable ki = trailKi[i];
+            immutable boundary = (trailEi[i] + 1) << f.segShift;
+            immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
+            immutable sd = atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd);
+            if (seqt + sd >= boundary)
+                decRef(ki, trailLti[i]);
+            else
+            {
+                trailKi[w] = ki;
+                trailEi[w] = trailEi[i];
+                trailLti[w] = trailLti[i];
+                ++w;
+            }
+        }
+        trailN = w;
+    }
+
+    /// Idle path: re-walk the oldest unconfirmed held segment claiming any
+    /// leftover work, so the segment confirms and its reference can be
+    /// released. The data is guaranteed present and intact: we hold a
+    /// reference on the segment, so producers cannot have overwritten it.
+    void sweepOldestTrailing() nothrow @nogc @system
+    {
+        if (trailN == 0) return;
+        auto f = F;
+        auto bp = f.buf;
+        immutable ki = trailKi[0];
+        immutable boundary = (trailEi[0] + 1) << f.segShift;
+        immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
+        if (seqt + atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd) >= boundary)
+        {
+            tryReleaseTrailing();
+            return;
+        }
+        ulong seq = seqt;
+        while (seq < boundary)
+        {
+            immutable idx = seq & f.Lmask;
+            if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(seq))
+                fatal("held segment's table was overwritten");
+            immutable tnext = atomicLoad!(MemoryOrder.raw)(bp[idx + 1]);
+            immutable w2 = atomicLoad!(MemoryOrder.raw)(bp[idx + 2]);
+            immutable tlen = cast(uint) w2;
+            immutable tmt = cast(uint)(w2 >> 32);
+            immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(bp[idx + 4]);
+            immutable tindexOff = idx + THEAD_LEN;
+            immutable progOff = tindexOff + tlen + tmt + PROG_PAD;
+            immutable tcountOff = progOff + 8;
+            if (tlen > 0)
+            {
+                if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
+                {
+                    immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
+                    foreach (s; 0 .. nshards)
+                        processShard(bp, seq, idx, tindexOff, tcountOff,
+                                     progOff, tlen, sq, s, true);
+                }
+                tertiaryMt(bp, idx, tindexOff, tlen, tmt);
+            }
+            seq = tnext;
+        }
+        tryReleaseTrailing();
     }
 
     /// Spec 5h: when the number of consumers passing through an exhausted
     /// shard significantly exceeds SqCs, nudge IDc by +1 and migrate the
-    /// leaf tally, landing in a different bucket on the next table.
+    /// position leaf tally, landing in a different bucket on the next table.
     void feedback(ulong z, uint sq) nothrow @nogc @system
     {
         if (sq == 0) return;
@@ -683,13 +819,7 @@ private:
                 immutable lo = atomicFetchAdd(F.Lt[curKi * MAX_LEAVES + nl][0], 1);
                 if (lo == 0)
                     atomicFetchAdd(F.Rt[curKi][0], 1);
-                immutable od = atomicFetchSub(F.Lt[curKi * MAX_LEAVES + curLti][0], 1);
-                if (od <= 0) fatal("leaf tally underflow");
-                if (od == 1)
-                {
-                    immutable ro = atomicFetchSub(F.Rt[curKi][0], 1);
-                    if ((ro & COUNTMASK) == 0) fatal("root tally underflow");
-                }
+                decRef(curKi, curLti);
                 curLti = nl;
             }
         }
@@ -697,7 +827,7 @@ private:
 
     /// Spec 5f: enter a payload. Claims bounded by MaxCs; calls bounded by
     /// Done. With loopAll, keep executing iterations until the calls are
-    /// exhausted (secondary path); otherwise execute at most one.
+    /// exhausted (secondary/tertiary paths); otherwise execute at most one.
     void enterPayload(shared(ulong)* bp, ulong absIdx, bool loopAll) nothrow @nogc @system
     {
         auto head = cast(PayloadHeader*)(bp + absIdx);
@@ -719,18 +849,22 @@ private:
 
     /// Spec 5e: work claims on one shard, mapping it to a linear slice of
     /// Tindex claimed by chunks on the shard's Tcount counter. With
-    /// checkFirst (tertiary sweep of foreign shards), a plain load
-    /// short-circuits fully-claimed shards without an RMW; otherwise this
-    /// loop is the spec's primary pathway for the consumer's own shard.
-    void processShard(shared(ulong)* bp, ulong tseqIdx, ulong tindexOff, ulong tcountOff,
-                      ulong progOff, uint tlen, uint sq, uint shi, bool checkFirst)
-        nothrow @nogc @system
+    /// checkFirst (sweeps of foreign shards and re-walks), a plain load
+    /// short-circuits fully-claimed shards without an RMW.
+    ///
+    /// Returns true when this consumer added the final completion sum for
+    /// the shard (spec 5e-k): it adds Shlen to Tprogress, accounts the
+    /// table's size into the segment's Sd if the table thereby completed,
+    /// and gains the sweeper role.
+    bool processShard(shared(ulong)* bp, ulong tseq, ulong tseqIdx, ulong tindexOff,
+                      ulong tcountOff, ulong progOff, uint tlen, uint sq, uint shi,
+                      bool checkFirst) nothrow @nogc @system
     {
         uint shstart, shlen, shbase;
         // 5e-d: small tables are claimed wholesale by shard 0 only.
         if (tlen < SMALL_TABLE_THRESHOLD)
         {
-            if (shi != 0) return;
+            if (shi != 0) return false;
             shstart = 0;
             shlen = tlen;
             shbase = tlen;
@@ -744,13 +878,13 @@ private:
             shstart = shi * shbase + (shi < shrm ? shi : shrm);
         }
         if (shlen == 0)
-            return;
+            return false;
         // 5e-g/h.
         immutable chunk = shbase >= BIG_CHUNK * 16 ? BIG_CHUNK : CLAIM_CHUNK;
         immutable shiter = (shlen + chunk - 1) / chunk;
         auto shc = &bp[tcountOff + shi * 8];
         if (checkFirst && cast(uint)(atomicLoad!(MemoryOrder.raw)(*shc) >> 32) >= shiter)
-            return;
+            return false;
         for (;;)
         {
             // 5e-i.
@@ -759,7 +893,7 @@ private:
             {
                 if (!checkFirst)
                     feedback(x - shiter, sq); // 5h: Z = X - Shiter
-                break;
+                return false;
             }
             // 5e-j.
             immutable runstart = shstart + x * chunk;
@@ -771,34 +905,52 @@ private:
             }
             // 5e-k: the consumer adding the final completion sum for the
             // shard increments Tprogress by the shard length, whichever
-            // consumer (owner or sweeper) that happens to be. This bounds
-            // Tprogress mutations to SqCs.
+            // consumer (owner, sweeper, or re-walker) that happens to be.
             immutable y = atomicFetchAdd(*shc, cast(ulong) runlen);
             if ((y & 0xFFFF_FFFFUL) == shlen - runlen)
-                atomicFetchAdd(bp[progOff], cast(ulong) shlen);
+            {
+                immutable tp = atomicFetchAdd(bp[progOff], cast(ulong) shlen);
+                if (tp + shlen == tlen)
+                {
+                    // Table complete: account its size into its segment's
+                    // consumed-size accumulator. We provably still hold a
+                    // reference on that segment (it was unconfirmed until
+                    // now), so no producer can be re-zeroing Sd.
+                    immutable tsize = atomicLoad!(MemoryOrder.raw)(bp[tseqIdx + 5]);
+                    immutable tki = cast(uint)((tseq >> F.segShift) & F.kMask);
+                    atomicFetchAdd(F.stats[tki].sd, tsize);
+                }
+                return true;
+            }
         }
     }
 
-    /// Spec 5g plus tertiary coverage. Secondary: round-robin assignment of
-    /// the multithreaded payloads by shard index. Tertiary: a full sweep
-    /// entering any MT payload that still has iterations and a free claim
-    /// slot, so MT payloads complete even if their designated consumers
-    /// unsubscribed or were pre-empted. A primary visit burns exactly one
-    /// claim per payload, and write() enforces MaxCs >= 2 on MT payloads,
-    /// so a sweeper always finds a slot.
-    void mtSweep(shared(ulong)* bp, ulong tseqIdx, ulong tindexOff,
-                 uint tlen, uint tmt, uint sq) nothrow @nogc @system
+    /// Spec 5g: secondary work claims. Round-robin assignment of the
+    /// multithreaded payloads by shard index, iterating each payload's
+    /// internal counter.
+    void secondaryMt(shared(ulong)* bp, ulong tseqIdx, ulong tindexOff,
+                     uint tlen, uint tmt, uint sq) nothrow @nogc @system
     {
         if (tmt == 0) return;
-        immutable mtBase = tindexOff + tlen;
-        // Secondary (spec 5g).
         immutable shi = cast(uint)((cast(ulong) IDc + nextSeq) % sq);
+        immutable mtBase = tindexOff + tlen;
         for (ulong j = shi; j < tmt; j += sq)
         {
             immutable poff = atomicLoad!(MemoryOrder.raw)(bp[mtBase + j]);
             enterPayload(bp, tseqIdx + poff, true);
         }
-        // Tertiary: cheap pre-checks, then drain anything left.
+    }
+
+    /// Tertiary MT sweep: enter any MT payload that still has iterations
+    /// and a free claim slot, so MT payloads complete even if their
+    /// designated consumers unsubscribed or were pre-empted. A primary
+    /// visit burns exactly one claim per payload, and write() enforces
+    /// MaxCs >= 2 on MT payloads, so a sweeper always finds a slot.
+    void tertiaryMt(shared(ulong)* bp, ulong tseqIdx, ulong tindexOff,
+                    uint tlen, uint tmt) nothrow @nogc @system
+    {
+        if (tmt == 0) return;
+        immutable mtBase = tindexOff + tlen;
         foreach (j; 0 .. tmt)
         {
             immutable poff = atomicLoad!(MemoryOrder.raw)(bp[mtBase + j]);

@@ -24,6 +24,28 @@ library plus a test runner.
 
 ## Deviations / decisions worth knowing
 
+- **Generation 2 reference model (lossless consumption).** Consumers hold a
+  *position* reference plus a local array of *trailing* references on
+  segments entered but not yet confirmed complete. The consumer whose
+  `Tprogress` add lands on `Tlen` accounts the table's size (stored in
+  `Thead[5]`) into a new per-segment field `Sd`, which producers zero when
+  re-initializing the segment. When `Seqt[Ki] + Sd[Ki]` reaches the next
+  segment boundary, every table starting in `Ki` is complete and trailing
+  references on `Ki` are released. The last unsubscriber plants Sub0 at its
+  earliest *unconfirmed* held segment, so a later subscriber re-walks and
+  drains the backlog exactly once (testBacklog). Idle consumers re-walk
+  their oldest unconfirmed segment claiming leftovers, which keeps the
+  system deadlock-free: producer stalls create the consumer idleness that
+  resolves them.
+- **Completer-as-sweeper (generation 2).** The consumer whose 5e-k add
+  completes a shard gains the sweeper role: one linear pass over foreign
+  shard counters (plain-load pre-check, then normal chunk claiming), then a
+  pre-checked drain of all MT payloads. Sweeps of foreign shards can't
+  recursively trigger more sweeps. Starvation requires every shard's
+  completer to be gone — i.e., no consumers and hence no progress anyway —
+  in which case Sub0 preserves the data. `write()` enforces
+  `Done > 1 => MaxCs >= 2` so a sweeper always finds a claim slot (a
+  primary visit burns exactly one claim).
 - **Subscribe attaches in place.** Instead of the spec's walk-back then
   walk-forward-with-held-Subs, the subscriber scans all K segments once from
   `Eg`, picks the earliest segment with `Rt' > 0`, deposits a `Sub` there,
@@ -38,23 +60,14 @@ library plus a test runner.
   unable to corrupt the consumer count in the low half. Uses
   `core.stdc.stdatomic` fetch-and/or where available (LDC/GDC); DMD falls
   back to `core.atomic.atomicOp` (same semantics).
-- **Tertiary sweep (beyond spec).** The spec leaves fallback/tertiary
-  behavior open; without it, a shard starved of consumers (unsubscribes,
-  preemption, IDc nudges collapsing residue classes) never completes and
-  consumers stall. Here: after the primary shard is exhausted, a consumer
-  sweeps foreign shard counters (plain-load pre-check, then normal chunk
-  claiming), and after the secondary MT round-robin it sweeps *all* MT
-  payloads (pre-check `calls < Done && claims < MaxCs`, then enter and
-  drain). Result: any single consumer passing through a table fully
-  completes it. `write()` enforces `Done > 1 => MaxCs >= 2` so a sweeper
-  always finds a claim slot (a primary visit burns exactly one claim).
-- **Leaf index is cached in the view** (`curLti`) because a segment's `SqCs`
-  changes across epochs; decrementing a leaf chosen by a newer `SqCs` would
-  corrupt the tallies.
-- **Segment-tally transitions are lazy**: a consumer moves its tally when it
-  *validates* a table's sentinel in the new segment (which implies the
-  producer has initialized that segment's stats), not when it reads the
-  `Tnext` link.
+- **Leaf tally indices are cached per held reference** (`curLti`,
+  `trailLti[]`) because a segment's `SqCs` changes across epochs;
+  decrementing a leaf chosen by a newer `SqCs` would corrupt the tallies.
+- **Segment-tally transitions are lazy**: a consumer takes its reference
+  when it *validates* a table's sentinel in the new segment (which implies
+  the producer has initialized that segment's stats), not when it reads the
+  `Tnext` link. The old segment's reference is retained (trailing) until
+  the segment is confirmed complete via the `Sd` crossing.
 - **PayloadHeader is 17 ulongs** (136 bytes): the spec's field list
   (MaxCs/Done, Plen, Call, 6 filler, Pcount, 7 filler) sums to 17, not 16.
 - **`PayloadBody = const(ulong)[]`** — a mutable slice of const ulongs

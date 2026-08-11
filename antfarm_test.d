@@ -463,6 +463,81 @@ void testChurn(size_t nsteady)
     printf("testChurn(%zu) OK\n", nsteady); fflush(stdout);
 }
 
+// ---------------------------------------------------------------------
+// Test 7: lossless backlog. Producer outruns consumers; A consumes part
+// and unsubscribes (planting Sub0 at its earliest unconfirmed segment);
+// B subscribes later and drains the rest. Every payload executes exactly
+// its Done times.
+// ---------------------------------------------------------------------
+
+void testBacklog()
+{
+    auto f = AntFarm.create(1 << 14, 8, 2, 1, 2048, 2, 1024);
+    scope (exit) f.destroy();
+
+    enum N = 3000;
+    allocCalls(N);
+    scope (exit) freeCalls();
+
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto bodies = cast(ulong*) malloc(N * 3 * ulong.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    scope (exit) { free(headers); free(bodies); free(entries); }
+    long expected;
+    foreach (i; 0 .. N)
+    {
+        headers[i] = PayloadHeader.init;
+        immutable mt = i % 6 == 0;
+        headers[i].maxCs = mt ? 2 : 1;
+        headers[i].done = mt ? 3 : 1;
+        headers[i].call = &testCb;
+        immutable plen = 1 + i % 3;
+        bodies[i * 3] = i;
+        bodies[i * 3 + 1] = headers[i].done;
+        entries[i].header = &headers[i]; entries[i].body = bodies[i * 3 .. i * 3 + plen];
+        expected += headers[i].done;
+    }
+
+    p1ctx = ProdCtx(f, entries, N, Tier.small);
+    auto p = new Thread({ producerMain(&p1ctx); });
+    p.start();
+    Thread.sleep(30.msecs); // producer fills the buffer and stalls on Sub0
+
+    ConsumerView a;
+    check(a.subscribe(f) >= 0, "A subscribes");
+    foreach (_; 0 .. 20)
+        a.consumeNext();
+    a.unsubscribe();
+    // A was the last unsubscriber: exactly one Sub0 pulse remains, holding
+    // the backlog.
+    uint pulses;
+    foreach (ki; 0 .. 8)
+        if (lowHalf(f, cast(uint) ki) >= SUB0) ++pulses;
+    check(pulses == 1, "Sub0 planted at earliest unconsumed segment");
+
+    ConsumerView b;
+    check(b.subscribe(f) >= 0, "B subscribes");
+    auto deadline = MonoTime.currTime + 60.seconds;
+    while (atomicLoad!(MemoryOrder.acq)(g_totalCalls) < expected)
+    {
+        b.consumeNext();
+        if (MonoTime.currTime > deadline)
+        {
+            fprintf(stderr, "backlog watchdog timeout\n");
+            import core.stdc.stdlib : abort;
+            abort();
+        }
+    }
+    b.unsubscribe();
+    p.join();
+
+    foreach (i; 0 .. N)
+        check(g_calls[i] == headers[i].done, "backlog exact call count");
+    check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained");
+
+    printf("testBacklog OK\n"); fflush(stdout);
+}
+
 void main()
 {
     testArithmetic();
@@ -472,5 +547,6 @@ void main()
     testSubscriptionCap();
     testChurn(3);
     testChurn(1);
+    testBacklog();
     printf("ALL TESTS PASSED\n");
 }

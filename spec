@@ -91,13 +91,13 @@ ConsumerView is initialized with subscribe(AntFarm F); when it's called:
 Returns: A signed long positive epoch if it succeeds or a negative value if it fails.
 a. The subscriber 'Si' calls F.add_consumer() which fetch_incs Cf. If a slot is available, it fetch_incs Reqs and returns that result. If not, F is oversubscribed and Si fetch_decs Cf and returns a negative value.
 b. Get F.Eg and walk backwards through corresponding Rts to the earliest segment where Rt' > 0. Rt' is the least significant half of Rt.
-c. fetch_add-release a 'Sub' value to that Rt. 'Sub' is 2^32 such that it tracks subscribers in the most significant half, apart from normal consumers incrementing in Rt'. Sub0 is a special bit at 2^16. The number of unique increments in either band is bounded by enum MAX_CONSUMERS_LIMIT = 128; leaving plenty of space for our purposes. For construction at epoch 0 and when the *last consumer* unsubscribes, Rt' is inc'd with 'Sub0' = 2^16. If Si's Sub increment returns a value such that Rt'>=Sub0 and the high half == 0, Si is the first subscriber and is designated to clear Sub0 in step f.
+c. fetch_add-release a 'Sub' value to that Rt. 'Sub' is 2^32 such that it tracks subscribers in the most significant half, apart from normal consumers incrementing in Rt'. Sub0 is a special bit at 2^16. The number of unique increments in either band is bounded by enum MAX_CONSUMERS_LIMIT = 128; leaving plenty of space for our purposes. For construction at epoch 0 and when the *last consumer* unsubscribes, Rt' is OR-released with 'Sub0' = 2^16. If Si's Sub increment returns a value such that Rt'>=Sub0 and the high half == 0, Si is the first subscriber and is designated to clear Sub0 in step f.
 d. Then if Rt' is *still* over 0, we know from our inc/dec ordering rules or Sub0 deposit that no producer has seen Rt drop to 0 in the interim. And now Si has a happens-first increment in the most signficant half which is all the same to a producer. Otherwise such a window is possible and Si must walk forward from here.
 e. Given Rt' > 0, Si performs the normal process of leaf tally increment and root propagation. Si is fully established as a consumer Ci.
-f. For the subscriber designated in step c, it decs Sub0 out of the Rt.
+f. For the subscriber designated in step c, it AND-releases Sub0 out of the Rt.
 g. Si decs its Sub values from any Rts it previously incremented.
 
-** The OR and AND operations for Sub0 lower to CAS on x86, but this is a cold corner of code where preventing double adds or subs is preferable.
+** The OR and AND operations for Sub0 lower to CAS on x86, but this is a cold corner of code where proactively preventing double adds or subs is preferable. It should only be executed by the last/first subscriber anyways.
 
 5b. Unsubscription
 Inactive consumers block reclamation unless they unsubscribe() from F.
