@@ -29,10 +29,17 @@ library plus a test runner.
   segments entered but not yet confirmed complete. The consumer whose
   `Tprogress` add lands on `Tlen` accounts the table's size (stored in
   `Thead[5]`) into a new per-segment field `Sd`, which producers zero when
-  re-initializing the segment. When `Seqt[Ki] + Sd[Ki]` reaches the next
-  segment boundary, every table starting in `Ki` is complete and trailing
-  references on `Ki` are released. The last unsubscriber plants Sub0 at its
-  earliest *unconfirmed* held segment, so a later subscriber re-walks and
+  re-initializing the segment. A segment is confirmed complete — and its
+  trailing references released — when `Seqt[Ki] + Sd[Ki]` reaches the next
+  segment boundary (the crossing is impossible while `Wt` is still inside
+  the segment) *and* `Sbal[Ki] == 0`. `Sbal` is the signed balance that
+  producers increment by table size (before the sentinel release) and
+  finishing consumers decrement; it defeats the false completion picture a
+  large table finishing ahead of a small one would otherwise give. A
+  segment completely spanned by one table gets `Seqt` past its boundary and
+  no increments, so it confirms trivially and is released as soon as the
+  consumer follows the chain past it. The last unsubscriber plants Sub0 at
+  its *unconfirmed* held segment, so a later subscriber re-walks and
   drains the backlog exactly once (testBacklog). Idle consumers re-walk
   their oldest unconfirmed segment claiming leftovers, which keeps the
   system deadlock-free: producer stalls create the consumer idleness that

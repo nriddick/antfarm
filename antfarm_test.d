@@ -538,6 +538,81 @@ void testBacklog()
     printf("testBacklog OK\n"); fflush(stdout);
 }
 
+// ---------------------------------------------------------------------
+// Test 8: tables spanning segment boundaries, including one that fully
+// spans a segment. Verifies exact execution and that the Sd/Sbal
+// accounting settles to zero balance everywhere after the drain.
+// ---------------------------------------------------------------------
+
+void testSpannedTables()
+{
+    // segCap = 2048; bulk quota 6000 allows one table to span ~3 segments.
+    auto f = AntFarm.create(1 << 14, 8, 2, 1, 6000, 2, 1024);
+    scope (exit) f.destroy();
+
+    enum N = 64;
+    allocCalls(N);
+    scope (exit) freeCalls();
+
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    scope (exit) free(headers);
+    // One huge body (~5000 ulongs -> its table fully spans a segment),
+    // one large body (~3000 -> spans a boundary), the rest small.
+    auto huge = cast(ulong*) malloc(5000 * ulong.sizeof);
+    auto large = cast(ulong*) malloc(3000 * ulong.sizeof);
+    auto small = cast(ulong*) malloc((N - 2) * 2 * ulong.sizeof);
+    scope (exit) { free(huge); free(large); free(small); }
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    scope (exit) free(entries);
+
+    long expected;
+    foreach (i; 0 .. N)
+    {
+        headers[i] = PayloadHeader.init;
+        headers[i].maxCs = 1;
+        headers[i].done = 1;
+        headers[i].call = &testCb;
+        ++expected;
+    }
+    foreach (i; 0 .. 5000) huge[i] = (i == 0) ? 0 : 1;      // payload 0: body[0] = index
+    foreach (i; 0 .. 3000) large[i] = (i == 0) ? 1 : 1;     // payload 1
+    huge[0] = 0; large[0] = 1;
+    entries[0].header = &headers[0]; entries[0].body = huge[0 .. 5000];
+    entries[1].header = &headers[1]; entries[1].body = large[0 .. 3000];
+    foreach (i; 2 .. N)
+    {
+        small[(i - 2) * 2] = i;
+        small[(i - 2) * 2 + 1] = 1;
+        entries[i].header = &headers[i]; entries[i].body = small[(i - 2) * 2 .. (i - 2) * 2 + 2];
+    }
+    // Order: some small tables, the huge one, the large one, more small.
+    // (entries already in that order: 0 huge, 1 large, then small.)
+
+    auto cctx = ConsCtx(f, expected, MonoTime.currTime + 60.seconds);
+    auto c = new Thread({ consumerMain(&cctx); });
+    c.start();
+    check(f.registerProducer(Tier.bulk) >= 0, "register bulk");
+    ulong exi = 0;
+    size_t off;
+    while (off < N)
+    {
+        immutable n = f.write(entries[off .. N], exi, Tier.bulk);
+        off += n;
+        if (n == 0) { ConsumerView dummy; Thread.yield(); }
+    }
+    f.unregisterProducer(Tier.bulk);
+    c.join();
+
+    foreach (i; 0 .. N)
+        check(g_calls[i] == 1, "spanned exact call count");
+    foreach (ki; 0 .. 8)
+    {
+        check(atomicLoad!(MemoryOrder.raw)(f.stats[ki].sbal) == 0, "balance settled");
+        check((atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & COUNTMASK) == 0, "no leaked refs");
+    }
+    printf("testSpannedTables OK\n"); fflush(stdout);
+}
+
 void main()
 {
     testArithmetic();
@@ -548,5 +623,6 @@ void main()
     testChurn(3);
     testChurn(1);
     testBacklog();
+    testSpannedTables();
     printf("ALL TESTS PASSED\n");
 }

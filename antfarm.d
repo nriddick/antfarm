@@ -139,8 +139,9 @@ struct SegStats
     shared ulong seqt;  /// sequence of the first valid payload table for that epoch
     shared ulong cs;    /// snapshot of the number of consumers
     shared ulong sqcs;  /// sqcsOf(cs)
-    shared ulong sd;    /// consumed-size accumulator (gen2): sum of completed table sizes
-    ulong[3] pad;
+    shared ulong sd;    /// consumed-size accumulator: sum of completed table sizes
+    shared long sbal;   /// outstanding balance: +size by producer, -size by completer
+    ulong[2] pad;
 }
 static assert(SegStats.sizeof == 64);
 
@@ -421,10 +422,17 @@ struct AntFarm
             atomicStore!(MemoryOrder.raw)(stats[ki].cs, cast(ulong) cs);
             atomicStore!(MemoryOrder.raw)(stats[ki].sqcs, cast(ulong) sq);
             atomicStore!(MemoryOrder.raw)(stats[ki].sd, 0UL); // fresh epoch: nothing consumed
+            atomicStore!(MemoryOrder.raw)(stats[ki].sbal, 0L); // ... and nothing outstanding
             atomicStore!(MemoryOrder.rel)(stats[ki].es, cast(long) e);
         }
         if (enew > eold)
             atomicOp!"+="(Eg, cast(long)(enew - eold));
+
+        // Account the table's size into its starting segment's outstanding
+        // balance. This increment happens-before the sentinel release
+        // below, so a completing consumer's decrement always follows the
+        // corresponding increment and the balance never goes negative.
+        atomicFetchAdd(stats[(wret >> segShift) & kMask].sbal, cast(long) size);
 
         // Write the table (spec 4a/4b). The magic buffer makes the linear
         // address range contiguous even across the Ln wrap point.
@@ -491,12 +499,13 @@ struct AntFarm
 /// Generation 2 reference model: the consumer holds a *position* reference
 /// on the segment of the last table it validated, plus a local array of
 /// *trailing* references on segments it has passed through but not yet
-/// confirmed complete. A segment is confirmed complete when its consumed-
-/// size accumulator pushes the segment's first table sequence across the
-/// next segment boundary: Seqt[Ki] + Sd[Ki] >= (Ei+1) * segCap. Since
-/// tables are contiguous and a table's size is accounted exactly once (by
-/// the consumer whose Tprogress add lands on Tlen), the crossing fires
-/// exactly when every table starting in the segment is complete.
+/// confirmed complete. Confirmation requires both Seqt[Ki] + Sd[Ki] to
+/// reach the next segment boundary (Sd accumulates completed table sizes;
+/// the crossing is impossible while Wt is still inside the segment) and
+/// Sbal[Ki] == 0 (the signed balance producers increment by table size and
+/// finishing consumers decrement: nothing written remains incomplete).
+/// The balance condition defeats the false picture given by a large table
+/// completing ahead of a small one.
 ///
 /// Invariants:
 ///  - Every consumer holds a reference on every segment it has entered but
@@ -731,8 +740,15 @@ private:
     }
 
     /// Release trailing references on segments confirmed complete:
-    /// Seqt[Ki] + Sd[Ki] reaching the next segment boundary means every
-    /// table starting in the segment is complete.
+    /// Seqt[Ki] + Sd[Ki] reaching the next segment boundary means the
+    /// segment's table stream reached the boundary (the crossing is
+    /// impossible while Wt is still inside the segment), and Sbal[Ki] == 0
+    /// means no written table remains incomplete. Both conditions together
+    /// are exact: a large table completing ahead of a small one can force
+    /// the crossing early, but the balance still shows it outstanding.
+    /// A segment completely spanned by one table never receives
+    /// increments; its Seqt points past the boundary, so it confirms
+    /// trivially and is released as soon as the consumer moves on.
     void tryReleaseTrailing() nothrow @nogc @system
     {
         auto f = F;
@@ -743,7 +759,8 @@ private:
             immutable boundary = (trailEi[i] + 1) << f.segShift;
             immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
             immutable sd = atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd);
-            if (seqt + sd >= boundary)
+            immutable sbal = atomicLoad!(MemoryOrder.raw)(f.stats[ki].sbal);
+            if (seqt + sd >= boundary && sbal == 0)
                 decRef(ki, trailLti[i]);
             else
             {
@@ -768,7 +785,9 @@ private:
         immutable ki = trailKi[0];
         immutable boundary = (trailEi[0] + 1) << f.segShift;
         immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
-        if (seqt + atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd) >= boundary)
+        immutable confirmed = seqt + atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd) >= boundary
+            && atomicLoad!(MemoryOrder.raw)(f.stats[ki].sbal) == 0;
+        if (confirmed)
         {
             tryReleaseTrailing();
             return;
@@ -913,12 +932,15 @@ private:
                 if (tp + shlen == tlen)
                 {
                     // Table complete: account its size into its segment's
-                    // consumed-size accumulator. We provably still hold a
-                    // reference on that segment (it was unconfirmed until
-                    // now), so no producer can be re-zeroing Sd.
+                    // consumed-size accumulator and out of the outstanding
+                    // balance. We provably still hold a reference on that
+                    // segment (it was unconfirmed until now), so no
+                    // producer can be re-zeroing the accumulators.
                     immutable tsize = atomicLoad!(MemoryOrder.raw)(bp[tseqIdx + 5]);
                     immutable tki = cast(uint)((tseq >> F.segShift) & F.kMask);
                     atomicFetchAdd(F.stats[tki].sd, tsize);
+                    immutable ob = atomicFetchSub(F.stats[tki].sbal, cast(long) tsize);
+                    if (ob < cast(long) tsize) fatal("segment balance underflow");
                 }
                 return true;
             }
