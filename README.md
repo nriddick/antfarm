@@ -61,7 +61,15 @@ library plus a test runner.
   unsubscribed native left. A laggard native waking to an overbalanced
   shard nudges itself out via 5h. Self-limiting: each entering sweeper's
   failed exit-claim raises the shard's Z, so the signal disappears after a
-  couple of adopters. At most one adoption per consumer per table.
+  couple of adopters. At most one adoption per consumer per table; small
+  tables are excluded since their lone shard always reads starved.
+- **Carried sweeper role for small tables (generation 5).** Small tables
+  concentrate all claims on shard 0 (5e-d), so under churn they can have
+  no native consumer at all. A consumer that completed a shard of the
+  previous table sweeps a small next table regardless of its own shard
+  assignment, chaining the role forward while small tables continue. The
+  idle re-walk backstop still applies, but the hot path no longer stalls
+  producers waiting for it.
 - **Subscribe attaches in place.** Instead of the spec's walk-back then
   walk-forward-with-held-Subs, the subscriber scans all K segments once from
   `Eg`, picks the earliest segment with `Rt' > 0`, deposits a `Sub` there,

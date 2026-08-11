@@ -613,6 +613,92 @@ void testSpannedTables()
     printf("testSpannedTables OK\n"); fflush(stdout);
 }
 
+// Writes at most 12 entries per call, so every table is a small table.
+void smallProducerMain(ProdCtx* c)
+{
+    auto reg = c.f.registerProducer(c.tier);
+    if (reg < 0) fatal("producer overregistration");
+    ulong exi;
+    size_t off;
+    while (off < c.count)
+    {
+        immutable batch = c.count - off < 12 ? c.count - off : 12;
+        immutable n = c.f.write(c.entries[off .. off + batch], exi, c.tier);
+        off += n;
+        if (n == 0)
+            Thread.yield();
+    }
+    c.f.unregisterProducer(c.tier);
+}
+
+// Small tables only: starvation of the single shard 0 under churn, covered
+// by the carried sweeper role (and the idle re-walk backstop).
+void testSmallTableChurn()
+{
+    auto f = AntFarm.create(1 << 16, 8, 6, 1, 4096, 4, 2048);
+    scope (exit) f.destroy();
+
+    enum N = 4000;
+    allocCalls(N);
+    scope (exit) freeCalls();
+
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    scope (exit) { free(headers); free(bodies); free(entries); }
+    long expected;
+    foreach (i; 0 .. N)
+    {
+        headers[i] = PayloadHeader.init;
+        immutable mt = i % 4 == 0;
+        headers[i].maxCs = mt ? 4 : 1;
+        headers[i].done = mt ? 6 : 1;
+        headers[i].call = &testCb;
+        bodies[i * 2] = i;
+        bodies[i * 2 + 1] = headers[i].done;
+        entries[i].header = &headers[i]; entries[i].body = bodies[i * 2 .. i * 2 + 2];
+        expected += headers[i].done;
+    }
+
+    atomicStore!(MemoryOrder.raw)(g_churnStop, 0);
+    p1ctx = ProdCtx(f, entries, N, Tier.bulk);
+    auto p = new Thread({ smallProducerMain(&p1ctx); });
+
+    Thread[2] steady;
+    ConsCtx[2] sctx;
+    auto deadline = MonoTime.currTime + 90.seconds;
+    foreach (i; 0 .. 2)
+    {
+        sctx[i] = ConsCtx(f, expected, deadline);
+        auto cc = &sctx[i];
+        steady[i] = new Thread({ consumerMain(cc); });
+    }
+    Thread[2] churners;
+    ChurnCtx[2] hctx;
+    foreach (i; 0 .. 2)
+    {
+        hctx[i] = ChurnCtx(f, deadline);
+        auto hc = &hctx[i];
+        churners[i] = new Thread({ churnerMain(hc); });
+    }
+
+    foreach (t; steady) t.start();
+    foreach (t; churners) t.start();
+    p.start();
+    p.join();
+    foreach (t; steady) t.join();
+    atomicStore!(MemoryOrder.raw)(g_churnStop, 1);
+    foreach (t; churners) t.join();
+
+    foreach (i; 0 .. N)
+        check(g_calls[i] == headers[i].done, "small-table churn exact call count");
+    check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained after small-table churn");
+    foreach (ki; 0 .. 8)
+        check((atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & COUNTMASK) == 0, "no leaked refs");
+
+    printf("testSmallTableChurn OK\n"); fflush(stdout);
+}
+
 void main()
 {
     testArithmetic();
@@ -624,5 +710,6 @@ void main()
     testChurn(1);
     testBacklog();
     testSpannedTables();
+    testSmallTableChurn();
     printf("ALL TESTS PASSED\n");
 }

@@ -535,6 +535,13 @@ struct ConsumerView
     uint[KMAX] trailLti;
     uint trailN;
 
+    /// Carried sweeper role: set when this consumer completed a shard of the
+    /// previous table. Small tables concentrate all claims on shard 0
+    /// (5e-d), so under churn they may have no native consumer at all; a
+    /// carried sweeper sweeps a small next table regardless of its own
+    /// shard assignment.
+    bool sweeperNext;
+
     /// Spec 5a. Returns the (non-negative) starting epoch on success, or a
     /// negative value on failure.
     long subscribe(AntFarm* f) nothrow @nogc @system
@@ -603,6 +610,7 @@ struct ConsumerView
         curEi = cast(ulong) es;
         curLti = lti;
         trailN = 0;
+        sweeperNext = false;
         hasRef = true;
         return es;
     }
@@ -666,6 +674,7 @@ struct ConsumerView
         if (tlen > 0)
         {
             immutable myShi = cast(uint)((cast(ulong) IDc + nextSeq) % sq);
+            bool sweeper;
             if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
             {
                 // 5e: primary path. The consumer completing a shard gains
@@ -673,8 +682,15 @@ struct ConsumerView
                 // then the MT items. It takes all shards' completers being
                 // gone for work to starve, in which case no progress is
                 // possible anyway.
-                immutable sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
-                                                  progOff, tlen, sq, myShi, false, false) & 1) != 0;
+                sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
+                                        progOff, tlen, sq, myShi, false, false) & 1) != 0;
+                // Small tables are claimed wholesale by shard 0 (5e-d), so
+                // they starve whenever no active consumer maps there. A
+                // consumer carrying the sweeper role from the previous
+                // table sweeps a small table regardless of its own shard.
+                if (!sweeper && sweeperNext && tlen < SMALL_TABLE_THRESHOLD && myShi != 0)
+                    sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
+                                            progOff, tlen, sq, 0, true, false) & 1) != 0;
                 if (sweeper)
                 {
                     immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
@@ -700,6 +716,7 @@ struct ConsumerView
                 // payloads can outlive their shards' completion).
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
+            sweeperNext = sweeper;
         }
 
         nextSeq = tnext;
@@ -936,8 +953,9 @@ private:
             if (claims >= shiter)
             {
                 // Shard already exhausted; a starved one (Z <= 1: at most
-                // one prior exhausted-visitor) may be adopted.
-                if (allowAdopt && claims - shiter <= 1)
+                // one prior exhausted-visitor) may be adopted. Small tables
+                // are excluded: their lone shard always reads starved.
+                if (allowAdopt && tlen >= SMALL_TABLE_THRESHOLD && claims - shiter <= 1)
                 {
                     adopt(shi, sq, tseq);
                     return 2;
@@ -954,7 +972,7 @@ private:
                 immutable z = x - shiter;
                 if (!checkFirst)
                     feedback(z, sq); // 5h: Z = X - Shiter
-                else if (allowAdopt && z <= 1)
+                else if (allowAdopt && tlen >= SMALL_TABLE_THRESHOLD && z <= 1)
                 {
                     adopt(shi, sq, tseq);
                     return 2;
