@@ -1,0 +1,4 @@
+*.o
+*.obj
+antfarm_test*
+!antfarm_test.d
