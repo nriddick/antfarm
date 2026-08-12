@@ -31,9 +31,8 @@ The second set of segment metadata has these values:
 * 'Cs'. A snapshot of the number of consumers
 * 'SqCs' from section 2a and other derived statistics as are convenient.
 * 'Sd' (revision 2) the consumed-size accumulator: the sum of the sizes of all completed tables starting in this segment. See 5j.
-* 'Sbal' (revision 2) a signed outstanding-bytes balance: producers increment it by the table size and the finishing consumer decrements it. See 5j.
 
-When a producer 'Pi's space reservation transitions across one or more segments, Pi initializes these values such that a load-acquired Es matching a Ci's expected value verifies the others. Sd and Sbal are zeroed at the same time, before the release-store of Es.
+When a producer 'Pi's space reservation transitions across one or more segments, Pi initializes these values such that a load-acquired Es matching a Ci's expected value verifies the others. Sd is zeroed at the same time, before the release-store of Es. (Only consumers holding a reference ever add to Sd, and only after validating a sentinel released after initialization, so the zeroing can race nothing.)
 
 2c. Farm-level Metadata Fields
 There are these shared mutable fields:
@@ -54,7 +53,7 @@ At Farm creation we prevent a state where all segments have no references and pr
 3a. Production Arithmetic and Safety
 Consider 'Exmax', the maximum simultaneous excursion of the Farm's maximum set of producers. If 'Exi' is a producer 'Pi's single commit limit, Exmax is the sum of all Exis. We structure Exi as a running *quota* of ulongs all producers abide such that any Pi knows it can blindly reserve that much space before checking for consumer references. Or otherwise stated, each Pi regards Exmax as a runoff zone it must observe before renewing its quota of Exi ulongs. Exmax should account for a maximum of K-1 segments' capacities.
 
-When can Exi refresh? A prime opportunity: When a Pi fetch_add reserves 'W' space on Wt, it necessarily receives a return value 'Wret' where Wret + W = a momentary Wt' with staleness bounded by Exmax - Exi. The beginning of the next segment 'Seqb' from Wt' is given by simple arithmetic of segment capacity * next segment epoch, or ((Wt' * K / Ln) + 1) * (Ln / K). If Seqb - Wret >= Exmax, Pi can promptly renew its quota. (The renewal is sound because every producer's outstanding blind writes then provably land before Seqb, i.e. within the segment already being written; the sweep is what certifies *new* segments.) If a producer leaves it can pass its quota along, otherwise a new producer assumes an empty quota and uses the following mechanism to refresh.
+When can Exi refresh? A prime opportunity: When a Pi fetch_add reserves 'W' space on Wt, it necessarily receives a return value 'Wret' where Wret + W = a momentary Wt' with staleness bounded by Exmax - Exi. The beginning of the next segment 'Seqb' from Wt' is given by simple arithmetic of segment capacity * next segment epoch, or ((Wt' * K / Ln) + 1) * (Ln / K). If Seqb - Wt' >= Exmax, Pi can promptly renew its quota: every outstanding blind write then provably lands within the segment already being written. (Revision 1 stated Seqb - Wret >= Exmax, which is also sound -- reservations past Wret were paid from quota, so Wt plus outstanding quota is bounded by Wret + Exmax -- but the Wt' form is direct. Note both forms are inert when Exmax exceeds a segment's capacity; renewal then always goes through the sweep.) If a producer leaves it can pass its quota along, otherwise a new producer assumes an empty quota and uses the following mechanism to refresh.
 
 If a Pi has depleted its quota and could use a refresh, it scans the set of contiguously forward Rts (again, probably 4 or 8) for 0s and adds their full capacities until it has found >=Exmax space or encounters a live segment and breaks. A timely Wt' indicates the following segment as a good starting place. A more costly evaluation reanchors Pi's view of Wt with a fetch_add(Wt, 0). If sweeping after reanchoring fails then backpressure is simply too high; full for Pi's purposes.
 
@@ -89,11 +88,9 @@ If Ti's size exceeds a depleted Exi, the calling producer Pi attempts to refresh
 Revision note: write() also validates payload headers. Done must be in 1..2^16-1 (the calls field is 16 bits), MaxCs >= 1, and Done > 1 requires MaxCs >= 2 -- a multithreaded payload must admit at least two entrants, because a primary visit burns exactly one claim per payload (5e) and a later sweeper must always find a free claim slot to drain it (5i). Violations are fatal.
 
 4b. After fetch_add() to the Write Tail
-Pi renews Exi opportunistically with Wt' and the segment boundary as detailed before. If Wt' is observed to cross segment/epoch boundaries, their metadata are initialized and Eg is advanced by the delta. Wt', or the sequence *after* the current write(), becomes those segments' Seqt, the first valid table for that segment. Otherwise Seqt would almost certainly point to a previous segment and backtracking is ill-advised. This way consumers and especially subscribers can seek forward using Seqt for orientation. Segment initialization zeroes Sd and Sbal (2b) before the release-store of Es.
+Pi renews Exi opportunistically with Wt' and the segment boundary as detailed before. If Wt' is observed to cross segment/epoch boundaries, their metadata are initialized and Eg is advanced by the delta. Wt', or the sequence *after* the current write(), becomes those segments' Seqt, the first valid table for that segment. Otherwise Seqt would almost certainly point to a previous segment and backtracking is ill-advised. This way consumers and especially subscribers can seek forward using Seqt for orientation. Segment initialization zeroes Sd (2b) before the release-store of Es.
 
-Pi then fetch-adds the table's total size into Sbal of the segment containing Wret (the table's starting segment), *before* the sentinel is released. A completing consumer's decrement (5j) therefore always follows the corresponding increment and the balance never goes negative.
-
-The table parts described in 4a are written in in the reserved space. However Thead's first value is a sentinel computed from Wret, but it is store-released as the *last* value written such that consumers validating the expected sequence also validate the table contents.
+Pi then writes the table parts described in 4a into the reserved space. However Thead's first value is a sentinel computed from Wret, but it is store-released as the *last* value written such that consumers validating the expected sequence also validate the table contents.
 
 5. Consumption
 
@@ -138,7 +135,7 @@ Thead's contents are essential for orientation:
 * 'Tnext' the Seq of the next table.
 * uint 'Tmt' the number of multi-threaded payloads
 * uint 'Tlen' the total number of payloads
-* 'Tsize' (revision) the table's total size in ulongs, accounted into Sd/Sbal on completion (5j).
+* 'Tsize' (revision) the table's total size in ulongs, accounted into Sd on completion (5j).
 * Derived stats the producer can compute as is convenient (Cs and SqCs used at write time).
 
 5e. Consumption Strategy - Primary Work Claims
@@ -156,7 +153,7 @@ i. Ci gets claim X = fetch_add(Shc, 2^32) >> 32. If X >= Shiter the shard is alr
 j. If X < Shiter it maps to a run of Tindex of Chunk length at Shstart + X * Chunk. If X == Shiter-1, Ci truncates the run to the remainder (Shlen & (Chunk-1)) if it's nonzero.
 k. When a Ci finishes a run do Y = fetch_add(Shc, run_length); if Y << 32 == (Shlen - run_length) << 32 then Ci completed the shard and adds Shlen to Tprogress.
     - This bounds the number of mutations to Tprogress to SqCs.
-    - Revision: the completer additionally gains the *sweeper role* for this table (5i), and if its Tprogress add lands exactly on Tlen it is the table's finisher and performs the Sd/Sbal accounting (5j).
+    - Revision: the completer additionally gains the *sweeper role* for this table (5i), and if its Tprogress add lands exactly on Tlen it is the table's finisher and performs the Sd accounting (5j).
 l. Then Ci returns to step i; or if X>=Shiter it enters the secondary pathway.
 
 Note the primary path burns exactly one payload claim per payload per table (each payload index lives in exactly one shard's runs), which is what makes the sweeper's guaranteed claim slot in 5i work.
@@ -197,18 +194,16 @@ Undersaturation repair (complementing 5h). A sweeper reads the same Z value on f
 The carried role and small tables. Small tables concentrate all claims on shard 0 (5e-d), so under churn they may have no native consumer at all. A consumer that completed a shard of the previous table therefore carries the sweeper role one table forward: if the next table is small, it sweeps that table's single shard regardless of its own Shi, and if the sweep completes the shard the role chains forward again. The idle re-walk of 5j remains the backstop, but the hot path no longer stalls producers waiting for it.
 
 5j. Segment Completion Tracking and Reference Retention (revision 2+)
-Revision 1's consumers released a segment's reference as soon as they breached the next boundary, which permits unexecuted work to be overwritten when consumers outpace completion. Revision 2 retains references until completion is *confirmed*, using two new segment statistics (2b):
-* 'Sd' accumulates the sizes of completed tables starting in the segment; the table's finisher (the Ci whose Tprogress add lands on Tlen) adds Tsize to Sd of the table's starting segment.
-* 'Sbal' is a signed balance: producers add Tsize before the sentinel release (4b) and the finisher subtracts it. Increments always precede their decrements, so the balance never goes negative; a negative is fatal.
-Both are zeroed by producers rolling back around into the segment, before the release-store of Es. The finisher provably still holds a reference on the segment (it was unconfirmed until this moment), so its accounting can never race a producer's re-zeroing.
+Revision 1's consumers released a segment's reference as soon as they breached the next boundary, which permits unexecuted work to be overwritten when consumers outpace completion. Revision 2 retains references until completion is *confirmed*, using the consumed-size accumulator 'Sd' (2b): the table's finisher (the Ci whose Tprogress add lands on Tlen) adds Tsize to Sd of the table's starting segment. Sd is zeroed by producers rolling back around into the segment, before the release-store of Es. The finisher provably still holds a reference on the segment (it was unconfirmed until this moment), so its accounting can never race a producer's re-zeroing.
 
-A trailing reference on Ki (held with epoch Ei) is released when both:
-    Seqt[Ki] + Sd[Ki] >= (Ei + 1) * (Ln / K)   -- the crossing
-and Sbal[Ki] == 0.                              -- nothing outstanding
-The crossing is impossible while Wt is still inside the segment (completed bytes cannot exceed written bytes), so it certifies the table stream reached the boundary; but a large table completing ahead of a small one can force the crossing early, which is why the balance must also read zero. Together the conditions are exact: every table starting in the segment is complete. A segment completely spanned by one table never receives increments and its Seqt points past its boundary, so it confirms trivially and is released as soon as the consumer follows the chain past it.
+A trailing reference on Ki (held with epoch Ei) is released when:
+    Es[Ki+1] == Ei + 1                      -- the next segment is initialized,
+                                               so no more tables can start in Ki
+and Seqt[Ki] + Sd[Ki] >= Seqt[Ki+1]         -- the span is fully consumed.
+The target is exact: tables are contiguous, so the sizes of all tables starting in Ki sum to precisely Seqt[Ki+1] - Seqt[Ki], and Sd accrues each table's size exactly once, only on completion. A large table completing ahead of a small one leaves the small one's size missing and cannot force the crossing. A segment completely spanned by one table gets a Seqt at or past Seqt[Ki+1] and confirms trivially. While any reference on Ki is held, no producer can lap past it, so the next segment's stats remain at epoch Ei+1 once initialized. (An earlier draft used an arithmetic boundary plus a signed outstanding balance 'Sbal' incremented by producers and decremented by finishers; that had a producer-producer race -- one producer initializing the segment could zero the balance after another had already incremented it for a table starting there -- and a stale-balance deadlock mode. Comparing against Seqt[Ki+1] removes the balance entirely.)
 
 The retained-reference invariant: every consumer holds a reference on every segment it has entered but not yet confirmed complete. An incomplete segment is therefore protected by *every* passerby still subscribed; a non-last unsubscriber may simply drop its references, and the last one plants Sub0 at its earliest unconfirmed segment (5b). New subscribers land exactly at the frontier of unconsumed work and drain it exactly once.
 
-Consumers consult Sd/Sbal only on position changes and on idleness, never per payload: after each table advance, at unsubscribe, and on the idle path below.
+Consumers consult Sd only on position changes and on idleness, never per payload: after each table advance, at unsubscribe, and on the idle path below.
 
 Deadlock freedom and the idle re-walk. If producers stall on a held trailing reference, consumers catch up to Wt and their next-table sentinels stop validating. On that idle path a consumer re-walks its oldest unconfirmed segment from Seqt, claiming any leftover runs in every shard and draining MT items (the data is guaranteed present and intact: the consumer's own held reference forbids overwrite), then releases what confirmed. Blocking creates the idleness that resolves it.

@@ -30,16 +30,19 @@ library plus a test runner.
   `Tprogress` add lands on `Tlen` accounts the table's size (stored in
   `Thead[5]`) into a new per-segment field `Sd`, which producers zero when
   re-initializing the segment. A segment is confirmed complete — and its
-  trailing references released — when `Seqt[Ki] + Sd[Ki]` reaches the next
-  segment boundary (the crossing is impossible while `Wt` is still inside
-  the segment) *and* `Sbal[Ki] == 0`. `Sbal` is the signed balance that
-  producers increment by table size (before the sentinel release) and
-  finishing consumers decrement; it defeats the false completion picture a
-  large table finishing ahead of a small one would otherwise give. A
-  segment completely spanned by one table gets `Seqt` past its boundary and
-  no increments, so it confirms trivially and is released as soon as the
-  consumer follows the chain past it. The last unsubscriber plants Sub0 at
-  its *unconfirmed* held segment, so a later subscriber re-walks and
+  trailing references released — when the next segment has been
+  initialized for epoch Ei+1 (so no more tables can start in `Ki`) and
+  `Seqt[Ki] + Sd[Ki] >= Seqt[Ki+1]`. The target is exact because tables
+  are contiguous: the sizes of all tables starting in `Ki` sum to
+  precisely `Seqt[Ki+1] - Seqt[Ki]`, so a large table completing ahead of
+  a small one cannot force the crossing. (Generation 3 used an arithmetic
+  boundary plus a signed `Sbal` balance; it had a producer-producer race —
+  an initializing producer could zero the balance after another producer
+  had already incremented it — so generation 6 compares against
+  `Seqt[Ki+1]` and drops the balance entirely.) A segment completely
+  spanned by one table gets `Seqt` at or past `Seqt[Ki+1]` and confirms
+  trivially. The last unsubscriber plants Sub0 at its *unconfirmed* held
+  segment, so a later subscriber re-walks and
   drains the backlog exactly once (testBacklog). Idle consumers re-walk
   their oldest unconfirmed segment claiming leftovers, which keeps the
   system deadlock-free: producer stalls create the consumer idleness that

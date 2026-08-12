@@ -540,8 +540,7 @@ void testBacklog()
 
 // ---------------------------------------------------------------------
 // Test 8: tables spanning segment boundaries, including one that fully
-// spans a segment. Verifies exact execution and that the Sd/Sbal
-// accounting settles to zero balance everywhere after the drain.
+// spans a segment. Verifies exact execution and that no references leak.
 // ---------------------------------------------------------------------
 
 void testSpannedTables()
@@ -606,10 +605,7 @@ void testSpannedTables()
     foreach (i; 0 .. N)
         check(g_calls[i] == 1, "spanned exact call count");
     foreach (ki; 0 .. 8)
-    {
-        check(atomicLoad!(MemoryOrder.raw)(f.stats[ki].sbal) == 0, "balance settled");
         check((atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & COUNTMASK) == 0, "no leaked refs");
-    }
     printf("testSpannedTables OK\n"); fflush(stdout);
 }
 
