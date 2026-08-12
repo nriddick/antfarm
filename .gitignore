@@ -2,3 +2,7 @@
 *.obj
 antfarm_test*
 !antfarm_test.d
+review_torture/torture_tests
+review_torture/torture_tests_tsan
+review_torture/torture_tests_dmd
+review_torture/last_run.log
