@@ -1,0 +1,214 @@
+Ant Farm: An M:N Concurrent Queue with Superlative Scaling
+(Revision 2 — folds in the reference implementation's first five generations:
+attach-in-place subscription, Sub0 as bit operations, the sweeper role and
+tertiary behavior, undersaturation repair, the carried sweeper role for
+small tables, and segment completion tracking with reference retention.)
+
+1. General Idea
+Picture a farmer walking along a path placing down objects which a swarm of ants are picking up and taking away. He can't see the ants. He doesn't even know how many there are. How can he avoid stepping on the ants? The answer: the ants maintain signage at regular intervals tallying how many ants are in the area. If it's higher than zero, the farmer waits. The last ant to leave changes the tally (a reference counter) to zero. Thus the farmer only needs to watch for one signal to change, and doesn't need to try and communicate directly with any ants. And the ants have a panoply of strategies to break down and haul away their work pieces. Really the Ant Farm is a combination of known techniques and a disregard of FIFO guarantees; towards objectives of minimal synchronization upkeep, enhanced cache performance, and flexible role switching and load balancing.
+
+The implementation of this idea: A circular buffer using the "magic buffer" memory mapping such that the second half of the buffer wraps the first half. The buffer has a power-2 length 'Ln' in sizes to fit the mapping requirements of Linux and Windows and uses 64bit ulong as its base unit. The buffer has a power-2 number 'K' (probably 4 or 8) of segments at regular intervals, each segment representing a successive epoch 'E' of data. A sequence number 'Seq' is the element number of the buffer as it wraps around; Seq & (Ln-1) gives the array index for that sequence. Seq * K / Ln = the epoch for that Seq. An Ei & (K-1) = the segment index 'Ki' for that Ei and span of Seqs. Pains are taken to *eliminate* CAS operations from the hot paths of the module. The reference implementation is in D and the Farm should be allocated into 64byte-aligned memory with manual lifetime; at the time of writing D's garbage collector only guarantees alignment to 16 bytes. Another caveat: this system is designed such that most errors are fatal with very few exceptions. Just about every interface to the Farm is @nogc nothrow @system code.
+
+Safety argument in one paragraph, since later sections rely on it: producers only ever write within quota verified by sweeps of contiguously-forward zero Rts, and total outstanding quota Exmax is bounded by K-1 segments' capacities, strictly less than a lap. A consumer holding any tally therefore protects not just that segment but everything ahead of it within one lap: any sweep far enough ahead to threaten the consumer's unread data must pass contiguously through the held segment and break. Conversely, a producer cannot jump a lap on blind quota alone, so the protection cannot be outflanked. Consumers' unread data is always protected, and the system never overwrites unexecuted work. (Revision 2 makes this airtight: consumers retain references until segments are *confirmed complete*; see 5j.)
+
+2. Fields
+
+2a. Metadata Fields: Segment Tallies
+There are two preallocated K-length circular buffers of segment metadata, tallies (reference counters) and snapshots of general stats. The tallies are modified by consumers and subscribers; there is a root tally 'Rt' and array of leaf tallies 'Lt' for each segment 'Ki'. Rt tracks active consumers and prospective subscribers; more on that later. Let 'Cs' be the segment's number of consumers snapshot, 'SqCs' that value's square root, and 'IDc' be a consumer 'Ci's ID value. The square root function used throughout the module returns a minimum value of 1 for Cs<=4. Its purpose is to balance consumers across shards and this prevents divide-by-zero on future operations. As consumers move through payload tables, they increment a reference on the next table's segment then decrement their current one. All modifications to root tallies should be release and all bare reads should be with acquire.
+
+IDc % SqCs gives the Lti for that Ci and Ki. If the *actual* number of consumers majorly differs from Cs, or the span of IDs is fragmented and/or bunched up, performance may degrade but safety is inviolate. Enough Lts are preallocated for an enum MAX_CONSUMERS_LIMIT = 128 -- or rather the ceiling-square root of 12.
+
+Ci claims a reference to Ki by fetch-incrementing its Lti, and relinquishes by fetch-dec. When the operation is an edge transition to/from zero, that is when the inc() returns 0 or the dec() returns 1, Ci repeats that operation on Rt with release semantics. Underflows below 0 are fatal errors in any context and all fields subject to decs are signed integer types. Important invariant: Consumers *must* always increment a tally ahead before decrementing their current one. This ordering is necessary to leave no gaps where a producer might spuriously observe an Rt with a zero value. Producers load-acquire Rt and shall regard segments with nonzero Rts as contributing no available space. Distributing consumers across the leaf tallies reduces contention and producers need only one shared signal per segment to evaluate write limits.
+
+Revision notes:
+* Rt is a bitfield: the 32 most significant bits count prospective subscribers ('Sub' = 2^32, see 5a); the least significant half 'Rt'' holds the Sub0 bit at 2^16 above an active-consumer count bounded by MAX_CONSUMERS_LIMIT. Underflow checks on Rt test only the count bits below the Sub0 bit, so a set Sub0 can never mask a genuine count underflow.
+* Because a segment's SqCs snapshot changes across epochs, a Ci must cache the Lti used at each increment and decrement that same leaf. The ConsumerView keeps one Lti per held reference.
+
+2b. Metadata Fields: Segment Statistics
+The second set of segment metadata has these values:
+* 'Es' The epoch for that segment.
+* 'Seqt' The sequence that points to the first valid payload table for that segment.
+* 'Cs'. A snapshot of the number of consumers
+* 'SqCs' from section 2a and other derived statistics as are convenient.
+* 'Sd' (revision 2) the consumed-size accumulator: the sum of the sizes of all completed tables starting in this segment. See 5j.
+* 'Sbal' (revision 2) a signed outstanding-bytes balance: producers increment it by the table size and the finishing consumer decrements it. See 5j.
+
+When a producer 'Pi's space reservation transitions across one or more segments, Pi initializes these values such that a load-acquired Es matching a Ci's expected value verifies the others. Sd and Sbal are zeroed at the same time, before the release-store of Es.
+
+2c. Farm-level Metadata Fields
+There are these shared mutable fields:
+* 'Cf' The current number of subscribed consumers.
+* 'Reqs' A monotonically increasing counter of total subscription requests.
+* 'Prbulk' The current number of bulk producers; more on producer tiers later.
+* 'Prsm' The current number of small producers.
+* 'Wt' The write tail sequence.
+* 'Eg' The current global epoch.
+
+Plus miscellaneous immutable stats and derived stats as are convenient.
+
+2d. Epoch 0
+At Farm creation we prevent a state where all segments have no references and producers might happily loop through the buffer with no one to block them. There are also zero known subscribers and no leaves or shards in which to distribute them. Thus we construct epoch 0's Rt with a dummy 'Sub0' value, blocking producers from overwriting Seq 0 until consumers digest it. More on subscription later; here it suffices to say the first subscription should succeed and failure is a fatal error. The Farm's constructor also takes an expected number of initial consumers > 0 to ballpark their distribution. Note that Sub0 does not block producers from writing to epoch 0. The segment where a write tail resides is not breached if there are consumers ahead of it, and epoch 0 begins with a full segment length ahead of the write tail and consumers bounded behind it.
+
+3. Production
+
+3a. Production Arithmetic and Safety
+Consider 'Exmax', the maximum simultaneous excursion of the Farm's maximum set of producers. If 'Exi' is a producer 'Pi's single commit limit, Exmax is the sum of all Exis. We structure Exi as a running *quota* of ulongs all producers abide such that any Pi knows it can blindly reserve that much space before checking for consumer references. Or otherwise stated, each Pi regards Exmax as a runoff zone it must observe before renewing its quota of Exi ulongs. Exmax should account for a maximum of K-1 segments' capacities.
+
+When can Exi refresh? A prime opportunity: When a Pi fetch_add reserves 'W' space on Wt, it necessarily receives a return value 'Wret' where Wret + W = a momentary Wt' with staleness bounded by Exmax - Exi. The beginning of the next segment 'Seqb' from Wt' is given by simple arithmetic of segment capacity * next segment epoch, or ((Wt' * K / Ln) + 1) * (Ln / K). If Seqb - Wret >= Exmax, Pi can promptly renew its quota. (The renewal is sound because every producer's outstanding blind writes then provably land before Seqb, i.e. within the segment already being written; the sweep is what certifies *new* segments.) If a producer leaves it can pass its quota along, otherwise a new producer assumes an empty quota and uses the following mechanism to refresh.
+
+If a Pi has depleted its quota and could use a refresh, it scans the set of contiguously forward Rts (again, probably 4 or 8) for 0s and adds their full capacities until it has found >=Exmax space or encounters a live segment and breaks. A timely Wt' indicates the following segment as a good starting place. A more costly evaluation reanchors Pi's view of Wt with a fetch_add(Wt, 0). If sweeping after reanchoring fails then backpressure is simply too high; full for Pi's purposes.
+
+3b. Producer Tiers and Notes on Contention
+The Farm uses two tiers of producer to cap the max excursion, so one or a few enumerated batch writers can commit large chunks and the thread pool can occasionally write a couple kilobytes at a time. The single write tail is a linear point of contention and it's on a performant developer's shoulders to control the frequency of adds to it. Important invariant: The number of *actual* simultaneous producers *must* not exceed the maximums to prevent stomping consumers. Prbulk and Prsm provide a decent mechanism to ensure it, where Farm-level interfaces return negative values if producers overregister.
+
+4. write() Details
+4a. Call and Return
+Arguments:
+* 'Payloads' a slice or input range of PayloadEntry structs.
+* 'Exi' reference to the caller's quota.
+* 'R' = 'Bulk' or 'Small' (default Small) the tier of the caller.
+
+Returns: The number of Payloads written.
+
+PayloadEntry:
+* PayloadHeader* header. More on that later.
+* PayloadBody body; where alias PayloadBody = const(ulong)[]; type-erased data. (Revision note: a mutable slice of const ulongs; `const ulong[]` would const the slice itself and make PayloadEntry unassignable in D.)
+
+Producers commit a table 'Ti' of Payloads up to Exi in total size, with sections for:
+* 'Thead' TableHeader describing Ti's configuration. More on that later.
+* 'Tindex' dense index of where each Payload sits in the buffer. Divided into sections of length 'Tlen' and 'Tmt', where Tmt is the number of inherently multithreaded payloads and Tlen is the number of total payloads. Both indicate only the number actually written. The total index is placed first and MT index second.
+* 7 ulongs padding.
+* 'Tprogress' table-level progress counter. When a Ci identifies itself adding the final completion sum for its shard, it increments Tprogress by the shard length.
+* 7 ulongs padding.
+* 'Tcount' combination claims/completions counters where the consumers fetch_add the 32 most significant bits as claims and 32 LSB as completions. There are SqCs such counters, and each one is followed with 7 ulongs of padding.
+* The Payloads laid sequentially.
+* 7 ulongs padding at the end of the table.
+
+If Ti's size exceeds a depleted Exi, the calling producer Pi attempts to refresh it. Pi truncates the table to however many Payloads it can fit and fetch_adds the final size to Wt to get Wret and Wt'. At this level producers do nothing to resolve fullness, they merely return commit lengths dwindling to 0. But it's worth mentioning that producers can share roles as consumers.
+
+Revision note: write() also validates payload headers. Done must be in 1..2^16-1 (the calls field is 16 bits), MaxCs >= 1, and Done > 1 requires MaxCs >= 2 -- a multithreaded payload must admit at least two entrants, because a primary visit burns exactly one claim per payload (5e) and a later sweeper must always find a free claim slot to drain it (5i). Violations are fatal.
+
+4b. After fetch_add() to the Write Tail
+Pi renews Exi opportunistically with Wt' and the segment boundary as detailed before. If Wt' is observed to cross segment/epoch boundaries, their metadata are initialized and Eg is advanced by the delta. Wt', or the sequence *after* the current write(), becomes those segments' Seqt, the first valid table for that segment. Otherwise Seqt would almost certainly point to a previous segment and backtracking is ill-advised. This way consumers and especially subscribers can seek forward using Seqt for orientation. Segment initialization zeroes Sd and Sbal (2b) before the release-store of Es.
+
+Pi then fetch-adds the table's total size into Sbal of the segment containing Wret (the table's starting segment), *before* the sentinel is released. A completing consumer's decrement (5j) therefore always follows the corresponding increment and the balance never goes negative.
+
+The table parts described in 4a are written in in the reserved space. However Thead's first value is a sentinel computed from Wret, but it is store-released as the *last* value written such that consumers validating the expected sequence also validate the table contents.
+
+5. Consumption
+
+5a. ConsumerView Overview, Creation and Subscription
+A Ci's ConsumerView is a POD struct to be exclusively owned by one Ci at a time with these fields:
+* 'F' reference to the target Ant Farm.
+* 'IDc' taken from F's Reqs during subscription.
+* The position reference: segment Ki, its epoch, and the Lti used.
+* Trailing references: a local array of (Ki, epoch, Lti) triples for segments entered but not yet confirmed complete (5j). Bounded by K, since a held trailing reference blocks any lap past it.
+* A carried-sweeper flag (5i).
+Then derived and tracked stats as are convenient.
+
+ConsumerView is initialized with subscribe(AntFarm F); when it's called:
+Returns: A signed long positive epoch if it succeeds or a negative value if it fails.
+a. The subscriber 'Si' calls F.add_consumer() which fetch_incs Cf. If a slot is available, it fetch_incs Reqs and returns that result. If not, F is oversubscribed and Si fetch_decs Cf and returns a negative value.
+b. Get F.Eg and walk backwards through corresponding Rts (covering each of the K segments exactly once) to the earliest segment where Rt' > 0, using each segment's Es to rank age. Rt' is the least significant half of Rt. The pulse invariant (5b) guarantees a candidate exists; the one exception is a transient race with a *not-last* unsubscribe, in which case Si stands at the frontier segment Eg & (K-1).
+c. fetch_add-release a 'Sub' value to that Rt. 'Sub' is 2^32 such that it tracks subscribers in the most significant half, apart from normal consumers incrementing in Rt'. Sub0 is a special bit at 2^16. The number of unique increments in either band is bounded by enum MAX_CONSUMERS_LIMIT = 128; leaving plenty of space for our purposes. For construction at epoch 0 and when the *last consumer* unsubscribes, Rt' is OR-released with 'Sub0' = 2^16. If Si's Sub increment returns a value such that Rt'>=Sub0 and the high half == 0, Si is the first subscriber and is designated to clear Sub0 in step f.
+d. (Revision: replaces the walk-forward.) Si attaches *in place*, regardless of what the low half did in the interim. The held Sub is all the same to a producer (5a-c), so it blocks any lap of this segment while Si establishes a real reference; if the low half meanwhile hit zero and producers swept past, Si simply starts at the segment's *current* Es/Seqt -- it was not subscribed for the overwritten data and loses nothing it was entitled to. Si performs the normal process of leaf tally increment and root propagation, caching the Lti used. Si is fully established as a consumer Ci.
+e. (As d.) Given the reference established, there is continuously a nonzero Rt at this segment: first the Sub, then the leaf propagation.
+f. For the subscriber designated in step c, it AND-releases Sub0 out of the Rt. The ordering (establish leaf, then clear Sub0, then remove Sub) keeps Rt continuously nonzero and makes double-clearing impossible.
+g. Si decs its Sub value from the Rt.
+
+** The OR and AND operations for Sub0 lower to CAS on x86, but this is a cold corner of code where proactively preventing double adds or subs is preferable. It should only be executed by the last/first subscriber anyways.
+
+5b. Unsubscription
+Inactive consumers block reclamation unless they unsubscribe() from F.
+a. Ci first releases any trailing references on segments it can confirm complete (5j).
+b. Ci calls F.sub_consumer(). When this returns 1, Ci is the last unsubscriber and OR-releases Sub0 into its Rt -- revision: into the Rt of its *earliest unconfirmed held segment* (or its position segment if all are confirmed). This plants the pulse exactly at the frontier of unconsumed work, so the next subscriber re-walks and drains the backlog exactly once (5j).
+c. Then Ci performs the dec() process from 2a for every reference it holds: the position reference and all trailing ones.
+
+With Rt-0 constructed as Sub0, and the last sub making a Sub0 deposit, this creates an invariant where there is always a live "pulse" somewhere in the buffer for the Si in 5a-b to walk back and find a segment untrodden by producers.
+
+5c. Consumer Orientation
+A Ci often needs to seek data, for instance if it's newly subscribed. Segment metadata provides a reasonable starting point. Consumers load-acquire the segment epoch and might spin or return if it's not the expected value. From there it has a starting Seq to a table, where the same applies to the sentinel value at that Seq.
+
+Seek costs per entry are primarily amortized by publishing large tables. I have considered building in skip lists or other structures dynamically updated by consumers but am sticking with what's essentially a linked list of one table pointing to the next. Within tables the SqCs+1 set of counters keep a small target for both consumer contention and progress tracking.
+
+As consumers move to new tables, they check transitions across segment boundaries. Revision: Ci incs a leaf tally at the newer table's segment when it *validates* that table's sentinel -- a valid sentinel implies the producer has initialized that segment's stats, so the increment always reads a live SqCs. The old segment's reference is not decremented at the transition; it is demoted to a trailing reference and released only on confirmed completion (5j).
+
+Thead's contents are essential for orientation:
+* 'Tsent' sentinel computed from the 64bit sequence pointing at the start of the table. Consumers load-acquire and validate the location and value
+* 'Tnext' the Seq of the next table.
+* uint 'Tmt' the number of multi-threaded payloads
+* uint 'Tlen' the total number of payloads
+* 'Tsize' (revision) the table's total size in ulongs, accounted into Sd/Sbal on completion (5j).
+* Derived stats the producer can compute as is convenient (Cs and SqCs used at write time).
+
+5e. Consumption Strategy - Primary Work Claims
+Finding a table, Ci can use a combination of header values and local stats to decide how to consume. The main pathway is this, mapping a shard of consumers to a linear slice of Tindex claimed by chunks on a sharded progress counter:
+a. Tprogress gives an O(1) view of the table's overall completion; Ci checks if Tprogress == Tlen then all entries are complete and Ci skips. (Revision: the skip covers primary work only; MT payloads can outlive their shards' completion, so a cheap pre-checked MT pass still runs -- 5i.)
+b. 'Tseq' is the table's starting sequence.
+c. (IDc + Tseq) % SqCs yields Ci's shard index 'Shi' and counter 'Shc' exactly like its leaf index.
+d. If Tlen < enum SMALL_TABLE_THRESHOLD = 64 then consumers with Shi == 0 claim the entire table by chunks as below; the others do not.
+e. Tlen / SqCs and Tlen % SqCs yield a base length 'Shbase' and 'Shrm'; Shlen = Shi < Shrm ? Shbase + 1 : Shbase;
+f. With starting index 'Shstart' = Shi * Shbase + (Shi < Shrm ? Shi : Shrm);
+g. 'Chunk' is enum CLAIM_CHUNK = 16; or if Shbase >= 1024 then use BIG_CHUNK = 64;
+h. 'Shiter' = Shlen >> log2(Chunk) + (Shlen & (Chunk - 1) > 0 ? 1 : 0)
+i. Ci gets claim X = fetch_add(Shc, 2^32) >> 32. If X >= Shiter the shard is already fully claimed and we move to step l.
+    - X is a useful feedback signal for Ci to remember for later.
+j. If X < Shiter it maps to a run of Tindex of Chunk length at Shstart + X * Chunk. If X == Shiter-1, Ci truncates the run to the remainder (Shlen & (Chunk-1)) if it's nonzero.
+k. When a Ci finishes a run do Y = fetch_add(Shc, run_length); if Y << 32 == (Shlen - run_length) << 32 then Ci completed the shard and adds Shlen to Tprogress.
+    - This bounds the number of mutations to Tprogress to SqCs.
+    - Revision: the completer additionally gains the *sweeper role* for this table (5i), and if its Tprogress add lands exactly on Tlen it is the table's finisher and performs the Sd/Sbal accounting (5j).
+l. Then Ci returns to step i; or if X>=Shiter it enters the secondary pathway.
+
+Note the primary path burns exactly one payload claim per payload per table (each payload index lives in exactly one shard's runs), which is what makes the sweeper's guaranteed claim slot in 5i work.
+
+5f. Payload Mechanisms
+A Payload's physical layout:
+* 'Phead' PayloadHeader (revision: 17 ulongs = 136 bytes -- the field list below sums to 17, not 16)
+    - uint 'MaxCs' maximum consumers per payload; 1 for single threaded, >1 for multithreaded.
+    - uint 'Done' number of iterations to complete; 1 for single threaded, 2..G granularity steps for multithreaded.
+    - 'Plen' payload body length in ulongs
+    - 'Call' callback function pointer which decodes Pbody and executes an iteration of work
+        + where alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration);
+    - 6 ulongs filler
+    - 'Pcount' 32 MSB claims like Tcount; next 16 MSB number of times Called; 16 LSB number of Calls completed.
+    - 7 ulongs filler
+* 'Pbody' PayloadBody (const(ulong)[]); type-erased const parameters for Call's work
+
+For a Ci entering a payload, consumption begins with Ci incrementing the claims. If it's below MaxCs then Ci increments calls which becomes a parameter to Call. Call performs an iteration if the parameter is below Done and increments completions. MaxCs prevents overallocation of Calling consumers.
+
+5g. Secondary Work Claims
+If Tmt > 0 there are some payloads that are themselves multithreaded. In the primary pathway, Ci's Shi maps it to a slice of the full payload set using the shard counters for iteration. Here Shi maps to a round-robin assignment of the multithreaded Payloads using a Payload's internal counter for iteration. The primary path fills in the completion status for the whole table. The secondary path adds work to high value items as consumers run out of single threaded items.
+
+This structures the consumer strategy such that exactly 1 consumer normally enters a single-threaded Payload, and ~SqCs consumers normally enter a MT payload. Tertiary behavior, left open in revision 1, is now specified by the sweeper role in 5i.
+
+5h. Feedback Potential (Oversaturation)
+If Ci adds no work in either the primary or secondary path, it was entirely oversaturating the table. Ci can additionally track how many gross iterations it contributed between Shlen and the Done values of the MT payloads it saw. The value X from 5e-i has some useful properties.
+
+Let 'Z' = X - Shiter; the iterations are completed, then each Ci increments Shc one more time and sees the shard is fully claimed. Z then is how many consumers actually pass through a shard. If Ci observes Z significantly over SqCs, it can check the Farm level Cf and see if the shard is overloaded. Ci then nudges its IDc by +1 and migrates its leaf tally to the new IDc. Then on the next table Ci lands in a different bucket of consumers. This gradually maintains shard balance with a local feedback signal.
+
+5i. The Sweeper Role (Tertiary Behavior, revision 2+)
+The consumer whose 5e-k completion sum lands on Shlen -- adding Shlen to Tprogress -- gains the sweeper role for that table. This pulls one sweeper from each shard, so it takes all shards' completers being gone (hence no consumers and no progress anyway) for work to starve, without forcing much extra contention. The sweeper makes one linear pass:
+* Foreign shards: for each shard other than its own, a plain load short-circuits fully-claimed shards (claims >= Shiter) without an RMW; otherwise it claims and processes runs exactly as in the primary path. The 5e-k completion rule fires for whichever consumer lands the final sum, owner or sweeper, so Tprogress mutations stay bounded by SqCs.
+* MT items: a full pass over the MT index with plain-load pre-checks (skip if calls >= Done or claims >= MaxCs), entering and draining (looping calls until exhausted) anything left. Because a primary visit burns exactly one claim per payload and write() enforces Done > 1 => MaxCs >= 2 (4a), a sweeper always finds a claim slot.
+Sweeps of foreign shards do not recursively confer the role. A late visitor finding Tprogress == Tlen still runs the pre-checked MT pass, since MT payloads can outlive their shards' completion.
+
+Undersaturation repair (complementing 5h). A sweeper reads the same Z value on foreign shards. Finding Z <= 1 -- essentially no native traffic -- it nudges its IDc by the round-robin distance into that shard, IDc += (Shi_foreign - Shi_own + SqCs) % SqCs, and migrates its leaf tally, patching the hole a pre-empted or unsubscribed native left. A laggard native waking to an overbalanced shard nudges itself out via 5h. The signal is self-limiting: each entering sweeper's failed exit-claim raises the shard's Z, so it disappears after a couple of adopters. A consumer adopts at most one shard per table. Small tables are excluded: their lone shard always reads starved by construction.
+
+The carried role and small tables. Small tables concentrate all claims on shard 0 (5e-d), so under churn they may have no native consumer at all. A consumer that completed a shard of the previous table therefore carries the sweeper role one table forward: if the next table is small, it sweeps that table's single shard regardless of its own Shi, and if the sweep completes the shard the role chains forward again. The idle re-walk of 5j remains the backstop, but the hot path no longer stalls producers waiting for it.
+
+5j. Segment Completion Tracking and Reference Retention (revision 2+)
+Revision 1's consumers released a segment's reference as soon as they breached the next boundary, which permits unexecuted work to be overwritten when consumers outpace completion. Revision 2 retains references until completion is *confirmed*, using two new segment statistics (2b):
+* 'Sd' accumulates the sizes of completed tables starting in the segment; the table's finisher (the Ci whose Tprogress add lands on Tlen) adds Tsize to Sd of the table's starting segment.
+* 'Sbal' is a signed balance: producers add Tsize before the sentinel release (4b) and the finisher subtracts it. Increments always precede their decrements, so the balance never goes negative; a negative is fatal.
+Both are zeroed by producers rolling back around into the segment, before the release-store of Es. The finisher provably still holds a reference on the segment (it was unconfirmed until this moment), so its accounting can never race a producer's re-zeroing.
+
+A trailing reference on Ki (held with epoch Ei) is released when both:
+    Seqt[Ki] + Sd[Ki] >= (Ei + 1) * (Ln / K)   -- the crossing
+and Sbal[Ki] == 0.                              -- nothing outstanding
+The crossing is impossible while Wt is still inside the segment (completed bytes cannot exceed written bytes), so it certifies the table stream reached the boundary; but a large table completing ahead of a small one can force the crossing early, which is why the balance must also read zero. Together the conditions are exact: every table starting in the segment is complete. A segment completely spanned by one table never receives increments and its Seqt points past its boundary, so it confirms trivially and is released as soon as the consumer follows the chain past it.
+
+The retained-reference invariant: every consumer holds a reference on every segment it has entered but not yet confirmed complete. An incomplete segment is therefore protected by *every* passerby still subscribed; a non-last unsubscriber may simply drop its references, and the last one plants Sub0 at its earliest unconfirmed segment (5b). New subscribers land exactly at the frontier of unconsumed work and drain it exactly once.
+
+Consumers consult Sd/Sbal only on position changes and on idleness, never per payload: after each table advance, at unsubscribe, and on the idle path below.
+
+Deadlock freedom and the idle re-walk. If producers stall on a held trailing reference, consumers catch up to Wt and their next-table sentinels stop validating. On that idle path a consumer re-walks its oldest unconfirmed segment from Seqt, claiming any leftover runs in every shard and draining MT items (the data is guaranteed present and intact: the consumer's own held reference forbids overwrite), then releases what confirmed. Blocking creates the idleness that resolves it.
