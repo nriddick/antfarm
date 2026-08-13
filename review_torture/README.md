@@ -41,6 +41,7 @@ make -C review_torture baseline   # existing antfarm_test.d
 - `torture_common.d` — counters, batch builder, producer/consumer helpers
 - `torture_tests.d` — T01–T18
 - `CODE_REVIEW.md` — findings
+- `POSTMORTEM.md` — settled directions for C1–C4 / H0 (next revision brief)
 - `last_run.log` — latest full run capture (gitignored)
 - `Makefile`
 
@@ -74,8 +75,5 @@ next revision of the farm.
 3. **Producers may consume.** Producers sharing the consumer role is supported
    and is the documented escape hatch on stall (spec 4a): a stalled producer
    may subscribe a `ConsumerView` and drain before retrying `write`.
-4. **Producer registration via tickets.** `registerProducer` allocates a slot
-   and returns a sentinel value unique to that slot; `write()` gains a required
-   ticket parameter that must match one of the registered producer slots, so
-   unregistered writers cannot bypass the Exmax invariant (H0). Tier slot
-   pools (bulk/small) are the natural place to hold the sentinels.
+4. **Producer registration via tickets.** `registerProducer` increments a dedicated `Reqs_p` (not the consumer `Reqs_c`) and returns a Token struct which contains the slot index and a hashed value using that index and `Reqs_p`. On the Farm side, this sets a slot in preallocated arrays for max-bulk and max-small producers. Producers deregister using their Token as a parameter, which changes the hash value at the slot index to some invalid value. (The arrays are also initialized with some invalid value.) `write()` gains a required Token parameter which verifies that the hash matches the value at Token's slot index for that role, so unregistered writers cannot bypass the Exmax invariant (H0). Consumer `IDc` stays a dense sequence from `Reqs_c`.
+5. **Detect pathological payload lengths during write()** and abort if a Payload length exceeds the bulk producer's max capacity.
