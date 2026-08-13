@@ -1,0 +1,50 @@
+===== touch body=16 16MiB =====
+digest  Ln=2097152 (16.0 MiB)  nc=8  tlen=256  jobs~36608  mix=touch  repeats=3
+arm          mix     body         jobs     ns/job     Mjob/s  note
+linear16     touch     16        36608      30.85     32.417
+linear1      touch     16        36608      48.54     20.600
+           vs linear16: 1.57x
+shuffled16   touch     16        36608      31.27     31.978
+           vs linear16: 1.01x
+copyout16    touch     16        36608      31.71     31.534
+           vs linear16: 1.03x
+===== chase body=16 =====
+digest  Ln=2097152 (16.0 MiB)  nc=8  tlen=256  jobs~36608  mix=chase  repeats=3
+arm          mix     body         jobs     ns/job     Mjob/s  note
+linear16     chase     16        36608      46.80     21.367
+linear1      chase     16        36608      63.68     15.704
+           vs linear16: 1.36x
+shuffled16   chase     16        36608      46.60     21.460
+           vs linear16: 1.00x
+copyout16    chase     16        36608      46.39     21.556
+           vs linear16: 0.99x
+===== alt body=16 =====
+digest  Ln=2097152 (16.0 MiB)  nc=8  tlen=256  jobs~36608  mix=alt  repeats=3
+arm          mix     body         jobs     ns/job     Mjob/s  note
+linear16     alt       16        36608      29.62     33.756
+linear1      alt       16        36608      48.40     20.661
+           vs linear16: 1.63x
+shuffled16   alt       16        36608      30.59     32.694
+           vs linear16: 1.03x
+copyout16    alt       16        36608      30.58     32.700
+           vs linear16: 1.03x
+===== touch body=16 128MiB =====
+digest  Ln=16777216 (128.0 MiB)  nc=8  tlen=256  jobs~200000  mix=touch  repeats=3
+arm          mix     body         jobs     ns/job     Mjob/s  note
+linear16     touch     16       200192      29.57     33.816
+linear1      touch     16       200192      48.03     20.822
+           vs linear16: 1.62x
+shuffled16   touch     16       200192      30.03     33.305
+           vs linear16: 1.02x
+copyout16    touch     16       200192      28.81     34.716
+           vs linear16: 0.97x
+===== touch body=1024 128MiB =====
+digest  Ln=16777216 (128.0 MiB)  nc=8  tlen=256  jobs~9472  mix=touch  repeats=3
+arm          mix     body         jobs     ns/job     Mjob/s  note
+linear16     touch   1024         9472     276.33      3.619
+linear1      touch   1024         9472     284.86      3.510
+           vs linear16: 1.03x
+shuffled16   touch   1024         9472     294.56      3.395
+           vs linear16: 1.07x
+copyout16    touch   1024         9472     270.75      3.694
+           vs linear16: 0.98x

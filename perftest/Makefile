@@ -1,0 +1,33 @@
+# Synthetic throughput sweep for a 16 MiB farm.
+# Release flags on purpose: this is a perf tool, not a correctness suite.
+ROOT := ..
+DC ?= ldc2
+DFLAGS ?= -O2 -release
+
+.PHONY: all run run-once digest-run tail-run clean
+
+all: throughput digest tail tail
+
+throughput: throughput.d $(ROOT)/antfarm.d
+	$(DC) $(DFLAGS) throughput.d $(ROOT)/antfarm.d -of=$@
+
+digest: digest.d $(ROOT)/antfarm.d
+	$(DC) $(DFLAGS) digest.d $(ROOT)/antfarm.d -of=$@
+
+tail: tail.d $(ROOT)/antfarm.d
+	$(DC) $(DFLAGS) tail.d $(ROOT)/antfarm.d -of=$@
+
+run: throughput
+	./throughput
+
+run-once: throughput
+	./throughput --once
+
+digest-run: digest
+	./digest
+
+tail-run: tail
+	./tail | tee last_tail.txt
+
+clean:
+	rm -f throughput digest tail *.o

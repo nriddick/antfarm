@@ -6,3 +6,6 @@ review_torture/torture_tests
 review_torture/torture_tests_tsan
 review_torture/torture_tests_dmd
 review_torture/last_run.log
+perftest/throughput
+perftest/digest
+perftest/tail

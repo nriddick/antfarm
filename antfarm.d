@@ -659,6 +659,13 @@ struct ConsumerView
     /// shard assignment.
     bool sweeperNext;
 
+    /// Bench-only (perftest/tail). 0 = production: drain the shard, use
+    /// CLAIM_CHUNK / BIG_CHUNK. Nonzero max-runs ends the visit after that
+    /// many claimed runs and still advances nextSeq (leftovers: idle re-walk).
+    /// Nonzero chunk replaces the spec chunk size.
+    uint benchMaxRuns;
+    uint benchChunk;
+
     /// Spec 5a. Returns the (non-negative) starting epoch on success, or a
     /// negative value on failure.
     long subscribe(AntFarm* f) nothrow @nogc @system
@@ -795,6 +802,12 @@ struct ConsumerView
                 // consumer carrying the sweeper role from the previous
                 // table sweeps a small table regardless of its own shard.
                 if (!sweeper && sweeperNext && tlen < SMALL_TABLE_THRESHOLD && myShi != 0)
+                    sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
+                                            progOff, tlen, sq, 0, true, false) & 1) != 0;
+                // Bench yielders (benchMaxRuns != 0) also try shard 0 on a
+                // small next table, so a mid-tick sentinel is visible after
+                // one run instead of waiting for a native Shi==0 visitor.
+                if (!sweeper && benchMaxRuns != 0 && tlen < SMALL_TABLE_THRESHOLD && myShi != 0)
                     sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
                                             progOff, tlen, sq, 0, true, false) & 1) != 0;
                 if (sweeper)
@@ -1108,9 +1121,11 @@ private:
         }
         if (shlen == 0)
             return 0;
-        // 5e-g/h.
-        immutable chunk = shbase >= BIG_CHUNK * 16 ? BIG_CHUNK : CLAIM_CHUNK;
+        // 5e-g/h. benchChunk / benchMaxRuns are 0 in production.
+        immutable specChunk = shbase >= BIG_CHUNK * 16 ? BIG_CHUNK : CLAIM_CHUNK;
+        immutable chunk = benchChunk != 0 ? benchChunk : specChunk;
         immutable shiter = (shlen + chunk - 1) / chunk;
+        uint runsDone;
         auto shc = &bp[tcountOff + shi * 8];
         if (checkFirst)
         {
@@ -1175,6 +1190,9 @@ private:
                 }
                 return 1;
             }
+            ++runsDone;
+            if (benchMaxRuns != 0 && runsDone >= benchMaxRuns)
+                return 0;
         }
     }
 
