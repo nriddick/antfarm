@@ -119,10 +119,11 @@ void testSingleThreaded()
     // First subscriber cleared Sub0 and holds one consumer reference.
     check(lowHalf(f, 0) == 1, "Sub0 cleared, one consumer ref");
 
-    check(f.registerProducer(Tier.small) >= 0, "register small producer");
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "register small producer");
     ulong exi = 0;
-    check(f.write(entries[0 .. 10], exi, Tier.small) == 10, "write first 10");
-    check(f.write(entries[10 .. 20], exi, Tier.small) == 10, "write second 10");
+    check(f.write(entries[0 .. 10], exi, tok) == 10, "write first 10");
+    check(f.write(entries[10 .. 20], exi, tok) == 10, "write second 10");
 
     // Consume the two tables; third call finds nothing published.
     check(v.consumeNext(), "consume table 1");
@@ -151,6 +152,7 @@ void testSingleThreaded()
     // No payload was re-executed: tables were already complete.
     check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == expected, "no re-execution");
     v2.unsubscribe();
+    f.unregisterProducer(tok);
 
     printf("testSingleThreaded OK\n"); fflush(stdout);
 }
@@ -176,18 +178,18 @@ struct ConsCtx
 
 void producerMain(ProdCtx* c)
 {
-    auto reg = c.f.registerProducer(c.tier);
-    if (reg < 0) fatal("producer overregistration");
+    auto tok = c.f.registerProducer(c.tier);
+    if (!tok.valid) fatal("producer overregistration");
     ulong exi = 0;
     size_t off;
     while (off < c.count)
     {
-        immutable n = c.f.write(c.entries[off .. c.count], exi, c.tier);
+        immutable n = c.f.write(c.entries[off .. c.count], exi, tok);
         off += n;
         if (n == 0)
             Thread.yield();
     }
-    c.f.unregisterProducer(c.tier);
+    c.f.unregisterProducer(tok);
 }
 
 void consumerMain(ConsCtx* c)
@@ -508,12 +510,11 @@ void testBacklog()
     foreach (_; 0 .. 20)
         a.consumeNext();
     a.unsubscribe();
-    // A was the last unsubscriber: exactly one Sub0 pulse remains, holding
-    // the backlog.
+    // Last-releaser Sub0: every abandoned unconfirmed segment may pulse.
     uint pulses;
     foreach (ki; 0 .. 8)
         if (lowHalf(f, cast(uint) ki) >= SUB0) ++pulses;
-    check(pulses == 1, "Sub0 planted at earliest unconsumed segment");
+    check(pulses >= 1, "Sub0 planted on abandoned unconfirmed segments");
 
     ConsumerView b;
     check(b.subscribe(f) >= 0, "B subscribes");
@@ -590,16 +591,17 @@ void testSpannedTables()
     auto cctx = ConsCtx(f, expected, MonoTime.currTime + 60.seconds);
     auto c = new Thread({ consumerMain(&cctx); });
     c.start();
-    check(f.registerProducer(Tier.bulk) >= 0, "register bulk");
+    auto tok = f.registerProducer(Tier.bulk);
+    check(tok.valid, "register bulk");
     ulong exi = 0;
     size_t off;
     while (off < N)
     {
-        immutable n = f.write(entries[off .. N], exi, Tier.bulk);
+        immutable n = f.write(entries[off .. N], exi, tok);
         off += n;
-        if (n == 0) { ConsumerView dummy; Thread.yield(); }
+        if (n == 0) { Thread.yield(); }
     }
-    f.unregisterProducer(Tier.bulk);
+    f.unregisterProducer(tok);
     c.join();
 
     foreach (i; 0 .. N)
@@ -612,19 +614,19 @@ void testSpannedTables()
 // Writes at most 12 entries per call, so every table is a small table.
 void smallProducerMain(ProdCtx* c)
 {
-    auto reg = c.f.registerProducer(c.tier);
-    if (reg < 0) fatal("producer overregistration");
+    auto tok = c.f.registerProducer(c.tier);
+    if (!tok.valid) fatal("producer overregistration");
     ulong exi;
     size_t off;
     while (off < c.count)
     {
         immutable batch = c.count - off < 12 ? c.count - off : 12;
-        immutable n = c.f.write(c.entries[off .. off + batch], exi, c.tier);
+        immutable n = c.f.write(c.entries[off .. off + batch], exi, tok);
         off += n;
         if (n == 0)
             Thread.yield();
     }
-    c.f.unregisterProducer(c.tier);
+    c.f.unregisterProducer(tok);
 }
 
 // Small tables only: starvation of the single shard 0 under churn, covered
@@ -695,6 +697,61 @@ void testSmallTableChurn()
     printf("testSmallTableChurn OK\n"); fflush(stdout);
 }
 
+// H1: two small producers after the C1 idle-pin migrate. Previously a stale
+// position pin on a spanning table's start starved refreshQuota.
+void testMultiSmallProducers()
+{
+    auto f = AntFarm.create(1 << 16, 8, 2, 1, 8192, 2, 4096);
+    scope (exit) f.destroy();
+
+    enum N = 2000;
+    allocCalls(N);
+    scope (exit) freeCalls();
+
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    scope (exit) { free(headers); free(bodies); free(entries); }
+    long expected;
+    foreach (i; 0 .. N)
+    {
+        headers[i] = PayloadHeader.init;
+        immutable mt = i % 5 == 0;
+        headers[i].maxCs = mt ? 3 : 1;
+        headers[i].done = mt ? 4 : 1;
+        headers[i].call = &testCb;
+        bodies[i * 2] = i;
+        bodies[i * 2 + 1] = headers[i].done;
+        entries[i].header = &headers[i]; entries[i].body = bodies[i * 2 .. i * 2 + 2];
+        expected += headers[i].done;
+    }
+
+    p1ctx = ProdCtx(f, entries, N / 2, Tier.small);
+    p2ctx = ProdCtx(f, entries + N / 2, N - N / 2, Tier.small);
+    auto p1 = new Thread({ producerMain(&p1ctx); });
+    auto p2 = new Thread({ producerMain(&p2ctx); });
+    ConsCtx[2] cctx;
+    Thread[2] consumers;
+    foreach (i; 0 .. 2)
+    {
+        cctx[i] = ConsCtx(f, expected, MonoTime.currTime + 60.seconds);
+        auto cc = &cctx[i];
+        consumers[i] = new Thread({ consumerMain(cc); });
+    }
+    foreach (t; consumers) t.start();
+    p1.start();
+    p2.start();
+    p1.join();
+    p2.join();
+    foreach (t; consumers) t.join();
+
+    foreach (i; 0 .. N)
+        check(g_calls[i] == headers[i].done, "multi-small exact call count");
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == expected, "multi-small total");
+    check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained");
+    printf("testMultiSmallProducers OK\n"); fflush(stdout);
+}
+
 void main()
 {
     testArithmetic();
@@ -707,5 +764,6 @@ void main()
     testBacklog();
     testSpannedTables();
     testSmallTableChurn();
+    testMultiSmallProducers();
     printf("ALL TESTS PASSED\n");
 }

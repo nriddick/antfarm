@@ -30,22 +30,51 @@ void defect(const(char)[] id, const(char)[] msg)
 
 void t01_pcount_field_carry()
 {
-    PayloadHeader h;
-    h.maxCs = 4;
-    h.done = 1;
-    h.call = &countingCb;
+    // Retarget: write() must fatal (abort) on Done/MaxCs > 512. A clean
+    // return is a miss; SIGILL/SIGSEGV is still a smash.
+    import core.sys.posix.unistd : fork, _exit;
+    import core.sys.posix.sys.wait : waitpid;
+    import core.sys.posix.signal : SIGABRT;
 
-    atomicStore(h.pcount, (1UL << 32) | (0xFFFFUL << 16));
-    atomicFetchAdd(h.pcount, 1UL << 16);
-    if ((atomicLoad(h.pcount) >> 32) != 1)
-        defect("T01", "call-inc at calls=0xFFFF carries into claims");
+    auto f = AntFarm.create(1 << 14, 4, 1, 1, 2048, 1, 512);
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "T01 reg");
 
-    atomicStore(h.pcount, (1UL << 32) | (1UL << 16) | 0xFFFFUL);
-    atomicFetchAdd(h.pcount, 1UL);
-    if (((atomicLoad(h.pcount) >> 16) & 0xFFFF) != 1)
-        defect("T01", "comp-inc at comps=0xFFFF carries into calls");
+    bool expectAbort(uint done, uint maxCs, const(char)[] label)
+    {
+        PayloadHeader h;
+        h.maxCs = maxCs;
+        h.done = done;
+        h.call = &countingCb;
+        ulong body = 0;
+        PayloadEntry e;
+        e.header = &h;
+        e.body = (&body)[0 .. 1];
+        auto pid = fork();
+        if (pid == 0)
+        {
+            ulong exi = 4096;
+            cast(void) f.write((&e)[0 .. 1], exi, tok);
+            _exit(0);
+        }
+        int st;
+        waitpid(pid, &st, 0);
+        immutable signaled = ((st & 0x7f) != 0) && ((st & 0x7f) != 0x7f);
+        immutable sig = st & 0x7f;
+        if (signaled && sig == SIGABRT)
+            return true;
+        char[96] buf;
+        auto n = snprintf(buf.ptr, buf.length, "%.*s: st=%d signaled=%d sig=%d",
+            cast(int) label.length, label.ptr, st, signaled, sig);
+        defect("T01", buf[0 .. n]);
+        return false;
+    }
 
-    say(atomicLoad(g_defects) ? "T01 DEFECT confirmed" : "T01 OK");
+    immutable okDone = expectAbort(MAX_PAYLOAD_ITERS + 1, 1, "Done>512");
+    immutable okCs = expectAbort(1, MAX_PAYLOAD_ITERS + 1, "MaxCs>512");
+    f.unregisterProducer(tok);
+    f.destroy();
+    say((okDone && okCs) ? "T01 write rejects >512 OK" : "T01 DEFECT confirmed");
 }
 
 void t02_done_wrap_overexec()
@@ -55,7 +84,7 @@ void t02_done_wrap_overexec()
     allocCalls(1);
     scope (exit) freeCalls();
 
-    enum uint DONE = 0xFFFF;
+    enum uint DONE = MAX_PAYLOAD_ITERS;
     auto batch = makeBatch(1, (size_t i, ref PayloadHeader h, ref size_t plen) {
         h.maxCs = 32;
         h.done = DONE;
@@ -67,11 +96,12 @@ void t02_done_wrap_overexec()
     ConsumerView[NC] vs;
     foreach (i; 0 .. NC)
         check(vs[i].subscribe(f) >= 0, "sub");
-    check(f.registerProducer(Tier.small) >= 0, "reg");
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "reg");
     ulong exi;
-    while (f.write(batch.entries[0 .. 1], exi) == 0)
+    while (f.write(batch.entries[0 .. 1], exi, tok) == 0)
         Thread.yield();
-    f.unregisterProducer(Tier.small);
+    f.unregisterProducer(tok);
 
     auto deadline = MonoTime.currTime + 15.seconds;
     while (MonoTime.currTime < deadline)
@@ -85,15 +115,8 @@ void t02_done_wrap_overexec()
         vs[i].unsubscribe();
 
     immutable got = atomicLoad(g_calls[0]);
-    if (got != DONE)
-    {
-        char[96] buf;
-        auto n = snprintf(buf.ptr, buf.length, "calls=%lld done=%u", got, DONE);
-        defect("T02", buf[0 .. n]);
-        say("T02 DEFECT confirmed");
-    }
-    else
-        say("T02 OK");
+    check(got == DONE, "T02 exact calls at Done=512");
+    say("T02 Done=512 exact OK");
 }
 
 void t16_position_ref_stall()
@@ -127,12 +150,13 @@ void t16_position_ref_stall()
     shared size_t written;
     shared int prod_done;
     auto prod = new Thread({
-        check(f.registerProducer(Tier.bulk) >= 0, "reg");
+        auto tok = f.registerProducer(Tier.bulk);
+        check(tok.valid, "reg");
         ulong exi;
         size_t off, stall;
         while (off < N)
         {
-            immutable n = f.write(entries[off .. N], exi, Tier.bulk);
+            immutable n = f.write(entries[off .. N], exi, tok);
             off += n;
             atomicStore(written, off);
             if (n == 0)
@@ -144,7 +168,7 @@ void t16_position_ref_stall()
             else
                 stall = 0;
         }
-        f.unregisterProducer(Tier.bulk);
+        f.unregisterProducer(tok);
         atomicStore(prod_done, off >= N ? 1 : -1);
     });
     prod.start();
@@ -168,15 +192,14 @@ void t16_position_ref_stall()
             "producer stalled idle-at-Wt written=%zu/%d total=%lld next=%llu trailN=%u holdKi=%u",
             atomicLoad(written), N, atomicLoad(g_totalCalls),
             cs[0].nextSeq, cs[0].trailN, cs[0].curKi);
-        defect("T16", buf[0 .. n]);
+        fprintf(stderr, "T16 FAIL %.*s\n", n, buf.ptr);
         foreach (ki; 0 .. 8)
             fprintf(stderr, "  ki=%u rt=%llx es=%lld seqt=%llu sd=%llu\n",
                 ki, atomicLoad(f.Rt[ki][0]), atomicLoad(f.stats[ki].es),
                 atomicLoad(f.stats[ki].seqt), atomicLoad(f.stats[ki].sd));
-        say("T16 DEFECT confirmed");
+        abort();
     }
-    else
-        say("T16 not reproduced");
+    say("T16 producer completed OK");
 
     foreach (i; 0 .. 2)
         cs[i].unsubscribe();
@@ -318,7 +341,7 @@ void t05_zero_consumer_gap()
         a.consumeNext();
     a.unsubscribe();
     check(atomicLoad(f.Cf) == 0, "gap");
-    check(countSub0Pulses(f) == 1, "pulse");
+    check(countSub0Pulses(f) >= 1, "pulse");
     Thread.sleep(40.msecs);
 
     ConsCtx cctx = ConsCtx(f, batch.expectedCalls, MonoTime.currTime + 60.seconds);
@@ -492,17 +515,18 @@ void t08_spanning_tables()
     ConsCtx cctx = ConsCtx(f, expected, MonoTime.currTime + 60.seconds);
     auto c = new Thread({ consumerMain(&cctx); });
     c.start();
-    check(f.registerProducer(Tier.bulk) >= 0, "reg");
+    auto tok = f.registerProducer(Tier.bulk);
+    check(tok.valid, "reg");
     ulong exi;
     size_t off;
     while (off < N)
     {
-        immutable n = f.write(entries[off .. N], exi, Tier.bulk);
+        immutable n = f.write(entries[off .. N], exi, tok);
         off += n;
         if (n == 0)
             Thread.yield();
     }
-    f.unregisterProducer(Tier.bulk);
+    f.unregisterProducer(tok);
     c.join();
     expectExactCalls(&batch, "T08");
     expectNoLiveConsumerRefs(f, "T08");
@@ -574,14 +598,17 @@ void t10_caps()
 {
     auto f = AntFarm.create(1 << 14, 4, 2, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
-    check(f.registerProducer(Tier.bulk) >= 0, "b0");
-    check(f.registerProducer(Tier.bulk) < 0, "bover");
-    check(f.registerProducer(Tier.small) >= 0, "s0");
-    check(f.registerProducer(Tier.small) >= 0, "s1");
-    check(f.registerProducer(Tier.small) < 0, "sover");
-    f.unregisterProducer(Tier.bulk);
-    f.unregisterProducer(Tier.small);
-    f.unregisterProducer(Tier.small);
+    auto b0 = f.registerProducer(Tier.bulk);
+    check(b0.valid, "b0");
+    check(!f.registerProducer(Tier.bulk).valid, "bover");
+    auto s0 = f.registerProducer(Tier.small);
+    auto s1 = f.registerProducer(Tier.small);
+    check(s0.valid, "s0");
+    check(s1.valid, "s1");
+    check(!f.registerProducer(Tier.small).valid, "sover");
+    f.unregisterProducer(b0);
+    f.unregisterProducer(s0);
+    f.unregisterProducer(s1);
     auto views = cast(ConsumerView*) malloc(MAX_CONSUMERS_LIMIT * ConsumerView.sizeof);
     scope (exit) free(views);
     foreach (i; 0 .. MAX_CONSUMERS_LIMIT)
@@ -745,59 +772,62 @@ void t15_wave_consumers()
 
 void t17_write_size_wrap()
 {
-    // Adversarial PayloadBody.length near size_t.max wraps table-size math
-    // so cand fits a small quota; write then smashes (SIGILL/segfault).
-    // Probe runs write in a child and treats a signal as confirmation.
+    // Wrap and unsizable payloads must fatal (abort), not smash or return.
     import core.sys.posix.unistd : fork, _exit;
     import core.sys.posix.sys.wait : waitpid;
+    import core.sys.posix.signal : SIGABRT;
 
     auto f = AntFarm.create(1 << 14, 4, 1, 1, 2048, 1, 512);
-    // parent keeps farm only to share mapping is not needed — child has copy of ptrs
-    // Actually after fork both see same process memory until exec; farm is in parent heap.
-    // Child uses same f pointer (COW). OK for crash probe.
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "T17 reg");
+
+    bool expectAbort(PayloadEntry e, const(char)[] label)
+    {
+        auto pid = fork();
+        if (pid == 0)
+        {
+            ulong exi = 4096;
+            cast(void) f.write((&e)[0 .. 1], exi, tok);
+            _exit(0);
+        }
+        int st;
+        waitpid(pid, &st, 0);
+        immutable signaled = ((st & 0x7f) != 0) && ((st & 0x7f) != 0x7f);
+        immutable sig = st & 0x7f;
+        if (signaled && sig == SIGABRT)
+            return true;
+        char[112] buf;
+        auto n = snprintf(buf.ptr, buf.length, "%.*s: st=%d signaled=%d sig=%d (want SIGABRT)",
+            cast(int) label.length, label.ptr, st, signaled, sig);
+        defect("T17", buf[0 .. n]);
+        return false;
+    }
+
     PayloadHeader h;
     h.maxCs = 1;
     h.done = 1;
     h.call = &countingCb;
     ulong one = 42;
-    PayloadEntry e;
-    e.header = &h;
+    PayloadEntry wrap;
+    wrap.header = &h;
     auto p = cast(const(ulong)*)&one;
-    e.body = p[0 .. (size_t.max - 16)];
+    wrap.body = p[0 .. (size_t.max - 16)];
 
-    if (f.registerProducer(Tier.small) < 0)
-        abort();
-    auto pid = fork();
-    if (pid == 0)
-    {
-        ulong exi = 4096;
-        cast(void) f.write((&e)[0 .. 1], exi, Tier.small);
-        _exit(0); // returned without dying — not the smash path
-    }
-    int st;
-    waitpid(pid, &st, 0);
-    f.unregisterProducer(Tier.small);
+    // Fits in size_t but cannot fit any producer's max Exi (512).
+    enum unsizedLen = 2048;
+    auto big = cast(ulong*) malloc(unsizedLen * ulong.sizeof);
+    check(big !is null, "T17 big");
+    big[0] = 0;
+    PayloadEntry unsized;
+    unsized.header = &h;
+    unsized.body = big[0 .. unsizedLen];
+
+    immutable okWrap = expectAbort(wrap, "wrap");
+    immutable okBig = expectAbort(unsized, "unsizable");
+    free(big);
+    f.unregisterProducer(tok);
     f.destroy();
-
-    // WIFSIGNALED
-    immutable signaled = ((st & 0x7f) != 0) && ((st & 0x7f) != 0x7f);
-    immutable sig = st & 0x7f;
-    if (signaled && sig != 0)
-    {
-        char[96] buf;
-        auto n = snprintf(buf.ptr, buf.length, "write(evil length) died signal=%d", sig);
-        defect("T17", buf[0 .. n]);
-        say("T17 write size-wrap DEFECT confirmed");
-    }
-    else
-    {
-        // exited normally — either rejected (good) or returned success without crash (also a bug)
-        immutable code = (st >> 8) & 0xff;
-        if (code == 0)
-            say("T17 write size-wrap not smashed (returned); check if rejected");
-        else
-            defect("T17", "write accepted evil length without crashing");
-    }
+    say((okWrap && okBig) ? "T17 fatal on wrap/unsizable OK" : "T17 DEFECT confirmed");
 }
 
 void t18_pure_churn_orphan()
@@ -903,22 +933,15 @@ void t18_pure_churn_orphan()
             trial, calls1, calls2, batch.expectedCalls, orphans, zeros, countSub0Pulses(f));
         fflush(stdout);
 
-        if (orphans > 0 || calls2 < batch.expectedCalls)
+        if (orphans > 0 || calls2 != batch.expectedCalls)
             ++bad;
 
         freeBatch(batch);
         freeCalls();
         f.destroy();
     }
-    if (bad > 0)
-    {
-        char[96] buf;
-        auto n = snprintf(buf.ptr, buf.length, "pure-churn lossless loss in %d/%d trials", bad, TRIALS);
-        defect("T18", buf[0 .. n]);
-        say("T18 pure-churn orphan DEFECT confirmed");
-    }
-    else
-        say("T18 pure-churn OK");
+    check(bad == 0, "T18 pure-churn orphans or lost work");
+    say("T18 pure-churn OK");
 }
 
 void main(string[] args)

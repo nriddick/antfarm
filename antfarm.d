@@ -4,9 +4,9 @@
  + Implementation of the spec in this directory ("Ant Farm: An M:N Concurrent
  + Queue with Superlative Scaling"). A circular buffer using the "magic
  + buffer" memory mapping, K segments with root/leaf reference tallies,
- + quota-bounded producers and sharded consumers. No CAS operations are used;
- + all synchronization is fetch-add / fetch-sub plus acquire/release
- + load/store.
+ + quota-bounded producers and sharded consumers. No CAS on hot paths;
+ + all hot-path synchronization is fetch-add / fetch-sub plus acquire/release
+ + load/store. Registration claims a ticket slot with a CAS (cold path).
  +
  + Errors are fatal (process abort) rather than exceptional, per spec.
  + Interfaces are @nogc nothrow @system.
@@ -18,12 +18,8 @@
 module antfarm;
 
 import core.atomic;
-// The stdc fetch-and/fetch-or aliases are not emitted under DMD
-// (version(DigitalMars) blocks them off); fall back to core.atomic there.
-version (DigitalMars) {}
-else import core.stdc.stdatomic : atomic_fetch_and_explicit, atomic_fetch_or_explicit, memory_order;
 import core.stdc.stdio : fprintf, stderr, snprintf;
-import core.stdc.stdlib : abort, aligned_alloc, free;
+import core.stdc.stdlib : abort, aligned_alloc, calloc, free;
 
 version (Posix)
 {
@@ -51,38 +47,21 @@ enum KMAX = 16;
 
 /// Spec 5a: a subscriber reference lives in the most significant half of Rt.
 enum ulong SUB = 1UL << 32;
-/// Spec 5a-c: Sub0 is a special bit at 2^16 in the least significant half.
+/// Spec 2a/5b: Sub0 is a counted pin in units of 2^16, not a bit.
 enum ulong SUB0 = 1UL << 16;
 /// Mask for Rt' (least significant half of Rt).
 enum ulong LOWMASK = 0xFFFF_FFFFUL;
 /// Mask for the active-consumer count bits within Rt' (below the Sub0 bit).
 enum ulong COUNTMASK = SUB0 - 1;
+/// Spec 4a: Done and MaxCs are capped so packed 16-bit fields cannot wrap
+/// through write().
+enum uint MAX_PAYLOAD_ITERS = 512;
 
 private enum ulong SENTINEL_XOR = 0x9E37_79B9_7F4A_7C15UL;
 
 /// Sentinel stored (release) as the first word of a table; computed from the
 /// 64-bit sequence pointing at the start of the table (spec 5c/Thead).
 ulong sentinelOf(ulong seq) pure nothrow @nogc @safe { return seq ^ SENTINEL_XOR; }
-
-/// Atomically set bits (used for the Sub0 deposit): idempotent and
-/// independent of the consumer count in the low half of Rt.
-private void rtSetBits(ref shared ulong v, ulong bits) nothrow @nogc @system
-{
-    version (DigitalMars)
-        atomicOp!"|="(v, bits);
-    else
-        atomic_fetch_or_explicit(&v, bits, memory_order.memory_order_seq_cst);
-}
-
-/// Atomically clear bits (used to clear Sub0): cannot corrupt the consumer
-/// count even if the bit is already clear.
-private void rtClearBits(ref shared ulong v, ulong bits) nothrow @nogc @system
-{
-    version (DigitalMars)
-        atomicOp!"&="(v, ~bits);
-    else
-        atomic_fetch_and_explicit(&v, ~bits, memory_order.memory_order_seq_cst);
-}
 
 /// Spec 2a: square root with a minimum value of 1 for Cs <= 4, capped at the
 /// preallocated leaf count. ceil_sqrt(128) == 12.
@@ -132,6 +111,16 @@ struct PayloadEntry
 /// Spec 3b: producer tiers.
 enum Tier : ubyte { small, bulk }
 
+/// Spec 3b/4a: registration ticket hashed from (slot, Reqs_p). Hash 0 is invalid.
+struct Token
+{
+    Tier tier;
+    uint slot;
+    ulong hash;
+
+    bool valid() const pure nothrow @nogc @safe { return hash != 0; }
+}
+
 /// Per-segment statistics (spec 2b). Padded to a cache line.
 struct SegStats
 {
@@ -158,6 +147,39 @@ private enum ulong THEAD_LEN = 8;
 private enum ulong PROG_PAD = 7;
 private enum ulong END_PAD = 7;
 
+/// Overflow-checked addition used by write() size math (spec 4a).
+private ulong addChecked(ulong a, ulong b, const(char)[] msg) nothrow @nogc @system
+{
+    if (b > ulong.max - a) fatal(msg);
+    return a + b;
+}
+
+/// Table size in ulongs: Thead + index + pads + Tprogress + Tcount + payloads + end pad.
+private ulong tableSizeChecked(ulong n, ulong m, ulong sq, ulong psum) nothrow @nogc @system
+{
+    ulong s = THEAD_LEN;
+    s = addChecked(s, n, "table size overflow");
+    s = addChecked(s, m, "table size overflow");
+    s = addChecked(s, PROG_PAD, "table size overflow");
+    s = addChecked(s, 1, "table size overflow");
+    s = addChecked(s, 7, "table size overflow");
+    if (sq > ulong.max / 8) fatal("table size overflow");
+    s = addChecked(s, 8 * sq, "table size overflow");
+    s = addChecked(s, psum, "table size overflow");
+    s = addChecked(s, END_PAD, "table size overflow");
+    return s;
+}
+
+/// Hash of (slot, Reqs_p). Never zero: 0 is the invalid-slot sentinel.
+private ulong mixToken(uint slot, ulong reqs) pure nothrow @nogc @safe
+{
+    ulong x = reqs ^ (0x9E3779B97F4A7C15UL + (cast(ulong) slot << 1));
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9UL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBUL;
+    x ^= x >> 31;
+    return x == 0 ? 1 : x;
+}
+
 struct AntFarm
 {
     // ---- immutable configuration (spec 1, 3) ----
@@ -177,15 +199,20 @@ struct AntFarm
     // ---- magic buffer ----
     shared(ulong)* buf; /// 2*Ln ulongs mapped; second half mirrors the first
     ulong bufBytes;     /// Ln * 8
-    int shmFd;
+    int shmFd = -1;
 
     // ---- farm-level mutable metadata (spec 2c), one cache line each ----
     align(64) shared ulong Wt;      /// write tail sequence
     align(64) shared long Eg;       /// current global epoch
     align(64) shared long Cf;       /// current number of subscribed consumers
-    align(64) shared ulong Reqs;    /// monotonically increasing subscription counter
+    align(64) shared ulong Reqs_c;  /// consumer subscription counter; source of IDc
+    align(64) shared ulong Reqs_p;  /// producer registration counter; Token hash input
     align(64) shared long Prbulk;   /// current number of bulk producers
     align(64) shared long Prsm;     /// current number of small producers
+
+    // ---- producer tickets (spec 3b); 0 = free slot ----
+    shared(ulong)* prodHashBulk;
+    shared(ulong)* prodHashSmall;
 
     // ---- segment metadata (spec 2a/2b) ----
     align(64) shared ulong[8][KMAX] Rt;              /// root tallies, one per segment
@@ -251,6 +278,16 @@ struct AntFarm
         f.buf = cast(shared(ulong)*) p;
         f.bufBytes = bytes;
         f.shmFd = fd;
+        if (maxBulk > 0)
+        {
+            f.prodHashBulk = cast(shared(ulong)*) calloc(maxBulk, ulong.sizeof);
+            if (f.prodHashBulk is null) fatal("alloc producer tickets failed");
+        }
+        if (maxSmall > 0)
+        {
+            f.prodHashSmall = cast(shared(ulong)*) calloc(maxSmall, ulong.sizeof);
+            if (f.prodHashSmall is null) fatal("alloc producer tickets failed");
+        }
 
         foreach (i; 0 .. KMAX)
             atomicStore!(MemoryOrder.raw)(f.stats[i].es, -1L);
@@ -266,10 +303,23 @@ struct AntFarm
 
     void destroy() nothrow @nogc @system
     {
+        if (atomicLoad!(MemoryOrder.raw)(Cf) != 0)
+            fatal("destroy with live consumers");
+        foreach (i; 0 .. maxBulk)
+            if (prodHashBulk !is null && atomicLoad!(MemoryOrder.raw)(prodHashBulk[i]) != 0)
+                fatal("destroy with live bulk ticket");
+        foreach (i; 0 .. maxSmall)
+            if (prodHashSmall !is null && atomicLoad!(MemoryOrder.raw)(prodHashSmall[i]) != 0)
+                fatal("destroy with live small ticket");
+        if (prodHashBulk !is null)
+            free(cast(void*) prodHashBulk);
+        if (prodHashSmall !is null)
+            free(cast(void*) prodHashSmall);
         if (buf !is null)
             munmap(cast(void*) buf, 2 * bufBytes);
         if (shmFd >= 0)
             close(shmFd);
+        shmFd = -1;
         free(cast(void*) &this);
     }
 
@@ -277,7 +327,7 @@ struct AntFarm
     // Registration (spec 5a-a, 5b-a, 3b)
     // ------------------------------------------------------------------
 
-    /// fetch-inc Cf; on success fetch-inc Reqs and return it (the IDc).
+    /// fetch-inc Cf; on success fetch-inc Reqs_c and return it (the IDc).
     /// Returns a negative value if oversubscribed.
     long add_consumer() nothrow @nogc @system
     {
@@ -287,7 +337,7 @@ struct AntFarm
             atomicFetchSub(Cf, 1);
             return -1;
         }
-        return cast(long) atomicFetchAdd(Reqs, 1);
+        return cast(long) atomicFetchAdd(Reqs_c, 1);
     }
 
     /// Returns the previous Cf; when it returns 1 the caller is the last
@@ -299,32 +349,95 @@ struct AntFarm
         return prev;
     }
 
-    /// Spec 3b: returns negative if producers overregister.
-    long registerProducer(Tier t) nothrow @nogc @system
+    /// Spec 3b: allocate a ticketed slot. An invalid Token means the tier is full.
+    Token registerProducer(Tier t) nothrow @nogc @system
     {
-        if (t == Tier.bulk)
+        immutable cap = t == Tier.bulk ? maxBulk : maxSmall;
+        auto pr = t == Tier.bulk ? &Prbulk : &Prsm;
+        auto hashes = t == Tier.bulk ? prodHashBulk : prodHashSmall;
+        if (cap == 0 || hashes is null)
+            return Token.init;
+        immutable p = atomicFetchAdd(*pr, 1);
+        if (p >= cap)
         {
-            immutable p = atomicFetchAdd(Prbulk, 1);
-            if (p >= maxBulk) { atomicFetchSub(Prbulk, 1); return -1; }
-            return p;
+            atomicFetchSub(*pr, 1);
+            return Token.init;
         }
-        else
+        immutable reqs = atomicFetchAdd(Reqs_p, 1);
+        foreach (i; 0 .. cap)
         {
-            immutable p = atomicFetchAdd(Prsm, 1);
-            if (p >= maxSmall) { atomicFetchSub(Prsm, 1); return -1; }
-            return p;
+            immutable h = mixToken(cast(uint) i, reqs);
+            if (cas(&hashes[i], 0UL, h))
+                return Token(t, cast(uint) i, h);
         }
+        fatal("producer slot missing");
+        return Token.init;
     }
 
-    void unregisterProducer(Tier t) nothrow @nogc @system
+    /// Spec 3b: a Token that does not match the live slot is fatal.
+    void unregisterProducer(Token tok) nothrow @nogc @system
     {
-        if (t == Tier.bulk)
+        if (!tok.valid) fatal("unregister invalid token");
+        immutable cap = tok.tier == Tier.bulk ? maxBulk : maxSmall;
+        auto hashes = tok.tier == Tier.bulk ? prodHashBulk : prodHashSmall;
+        if (hashes is null || tok.slot >= cap) fatal("unregister bad slot");
+        if (atomicLoad!(MemoryOrder.raw)(hashes[tok.slot]) != tok.hash)
+            fatal("unregister token mismatch");
+        atomicStore!(MemoryOrder.raw)(hashes[tok.slot], 0UL);
+        if (tok.tier == Tier.bulk)
         {
             if (atomicFetchSub(Prbulk, 1) <= 0) fatal("Prbulk underflow");
         }
         else
         {
             if (atomicFetchSub(Prsm, 1) <= 0) fatal("Prsm underflow");
+        }
+    }
+
+    /// Spec 4a: write() fatals unless tok matches a live slot of its tier.
+    private void requireToken(Token tok) nothrow @nogc @system
+    {
+        if (!tok.valid) fatal("write requires a producer token");
+        immutable cap = tok.tier == Tier.bulk ? maxBulk : maxSmall;
+        auto hashes = tok.tier == Tier.bulk ? prodHashBulk : prodHashSmall;
+        if (hashes is null || tok.slot >= cap) fatal("write bad token slot");
+        if (atomicLoad!(MemoryOrder.raw)(hashes[tok.slot]) != tok.hash)
+            fatal("write token mismatch");
+    }
+
+    /// Bits 16..31 of Rt': Sub0 units. At rest 0 or 1; transiently more.
+    private enum ulong SUB0MASK = LOWMASK ^ COUNTMASK;
+
+    /// Plant one Sub0 on an incomplete epoch that currently has no consumer
+    /// count and no pulse. Does not retract: a racing 0→1 clears Sub0.
+    void plantIfUnprotected(ulong e) nothrow @nogc @system
+    {
+        immutable ki = cast(uint)(e & kMask);
+        if (atomicLoad!(MemoryOrder.acq)(stats[ki].es) != cast(long) e)
+            return;
+        immutable ei1 = e + 1;
+        immutable ki1 = cast(uint)(ei1 & kMask);
+        if (atomicLoad!(MemoryOrder.raw)(stats[ki1].es) != cast(long) ei1)
+            return;
+        immutable seqt = atomicLoad!(MemoryOrder.raw)(stats[ki].seqt);
+        immutable seqtN = atomicLoad!(MemoryOrder.raw)(stats[ki1].seqt);
+        immutable sd = atomicLoad!(MemoryOrder.raw)(stats[ki].sd);
+        if (seqt >= seqtN || seqt + sd >= seqtN)
+            return;
+        immutable rt = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
+        if ((rt & COUNTMASK) != 0 || (rt & SUB0MASK) != 0)
+            return;
+        atomicFetchAdd(Rt[ki][0], SUB0);
+    }
+
+    /// After unsubscribe, cover any incomplete epoch still sitting at Rt==0.
+    void plantUnprotectedIncomplete() nothrow @nogc @system
+    {
+        foreach (i; 0 .. K)
+        {
+            immutable es = atomicLoad!(MemoryOrder.raw)(stats[i].es);
+            if (es >= 0)
+                plantIfUnprotected(cast(ulong) es);
         }
     }
 
@@ -359,12 +472,14 @@ struct AntFarm
 
     /// Spec 4. Writes as many of `payloads` as fit the caller's quota `exi`;
     /// returns the number written. Returns 0 (full) when backpressure is too
-    /// high; callers retry or wait on consumers.
-    ulong write(scope PayloadEntry[] payloads, ref ulong exi, Tier tier = Tier.small)
+    /// high; callers retry or wait on consumers. `tok` is required.
+    ulong write(scope PayloadEntry[] payloads, ref ulong exi, Token tok)
         nothrow @nogc @system
     {
+        requireToken(tok);
         if (payloads.length == 0) return 0;
-        immutable quota = tier == Tier.bulk ? quotaBulk : quotaSmall;
+        immutable quota = tok.tier == Tier.bulk ? quotaBulk : quotaSmall;
+        immutable maxExi = quotaBulk > quotaSmall ? quotaBulk : quotaSmall;
         immutable csl = atomicLoad!(MemoryOrder.acq)(Cf);
         immutable cs = csl > 0 ? cast(uint) csl : 1;
         immutable sq = sqcsOf(cs);
@@ -379,23 +494,31 @@ struct AntFarm
             foreach (i, ref pe; payloads)
             {
                 if (pe.header is null || pe.header.call is null) fatal("bad payload header");
-                if (pe.header.maxCs == 0) fatal("payload MaxCs == 0");
-                if (pe.header.done == 0 || pe.header.done > 0xFFFF) fatal("payload Done out of range");
+                if (pe.header.maxCs == 0 || pe.header.maxCs > MAX_PAYLOAD_ITERS)
+                    fatal("payload MaxCs out of range");
+                if (pe.header.done == 0 || pe.header.done > MAX_PAYLOAD_ITERS)
+                    fatal("payload Done out of range");
                 if (pe.header.done > 1 && pe.header.maxCs < 2)
                     fatal("multithreaded payload requires MaxCs >= 2");
+                if (pe.body.length > ulong.max - PHEAD_LEN)
+                    fatal("payload size overflow");
                 immutable psz = PHEAD_LEN + pe.body.length;
+                immutable oneMt = pe.header.maxCs > 1 ? 1UL : 0UL;
+                immutable singleton = tableSizeChecked(1, oneMt, sq, psz);
+                if (singleton > maxExi)
+                    fatal("payload larger than any producer Exi");
                 immutable cm = m + (pe.header.maxCs > 1 ? 1 : 0);
-                immutable cand = THEAD_LEN + (i + 1 + cm) + PROG_PAD + 1 + 7 + 8 * sq + psum + psz + END_PAD;
+                immutable cand = tableSizeChecked(i + 1, cm, sq, addChecked(psum, psz, "payload sum overflow"));
                 if (cand > exi) break;
                 n = i + 1;
                 m = cast(uint) cm;
-                psum += psz;
+                psum = addChecked(psum, psz, "payload sum overflow");
             }
             if (n > 0) break;
             if (!refreshQuota(exi, quota)) return 0;
         }
 
-        immutable size = THEAD_LEN + (n + m) + PROG_PAD + 1 + 7 + 8 * sq + psum + END_PAD;
+        immutable size = tableSizeChecked(n, m, sq, psum);
 
         // Reserve space on the write tail (spec 3a, 4b).
         immutable wret = atomicOp!"+="(Wt, size) - size;
@@ -427,6 +550,12 @@ struct AntFarm
         if (enew > eold)
             atomicOp!"+="(Eg, cast(long)(enew - eold));
 
+        // A write that crossed past Ki made Ki unable to accept more tables.
+        // If no consumer ever entered it, last-releaser never runs and Rt
+        // stays 0 — plant Sub0 so the next subscribe walk can find it.
+        foreach (e; eold + 1 .. enew + 1)
+            plantIfUnprotected(e - 1);
+
         // Write the table (spec 4a/4b). The magic buffer makes the linear
         // address range contiguous even across the Ln wrap point.
         auto w = cast(ulong*) buf + (wret & Lmask);
@@ -446,14 +575,14 @@ struct AntFarm
         foreach (i; 0 .. n)
         {
             w[THEAD_LEN + i] = po;
-            po += PHEAD_LEN + payloads[i].body.length;
+            po = addChecked(po, PHEAD_LEN + payloads[i].body.length, "Tindex overflow");
         }
         po = payOff;
         size_t mi = THEAD_LEN + n;
         foreach (i; 0 .. n)
         {
             immutable o = po;
-            po += PHEAD_LEN + payloads[i].body.length;
+            po = addChecked(po, PHEAD_LEN + payloads[i].body.length, "Tindex overflow");
             if (payloads[i].header.maxCs > 1)
                 w[mi++] = o;
         }
@@ -489,30 +618,26 @@ struct AntFarm
 
 /// Spec 5a: a POD struct exclusively owned by one consumer at a time.
 ///
-/// Generation 2 reference model: the consumer holds a *position* reference
-/// on the segment of the last table it validated, plus a local array of
-/// *trailing* references on segments it has passed through but not yet
-/// confirmed complete. Confirmation (5j): the next segment has been
-/// initialized for epoch Ei+1 (so no more tables can start in Ki) and
-/// Seqt[Ki] + Sd[Ki] >= Seqt[Ki+1], where Sd accumulates completed table
-/// sizes. The target is exact because tables are contiguous: the sizes of
-/// all tables starting in Ki sum to precisely Seqt[Ki+1] - Seqt[Ki], so a
-/// large table completing ahead of a small one cannot force the crossing.
+/// The consumer holds a *position* reference on the segment of the last
+/// table it validated (or, when idle at Wt, the initialized frontier of
+/// nextSeq), plus a local array of *trailing* references on segments it
+/// has passed through but not yet confirmed complete. Confirmation (5j):
+/// the next segment has been initialized for epoch Ei+1 and
+/// Seqt[Ki] + Sd[Ki] >= Seqt[Ki+1].
 ///
 /// Invariants:
-///  - Every consumer holds a reference on every segment it has entered but
-///    not yet confirmed complete. Hence an incomplete segment is protected
-///    from producer overwrite by every passerby still subscribed.
-///  - The last unsubscriber deposits Sub0 at its earliest unconfirmed held
-///    segment, preserving the backlog for the next subscriber.
-///  - If producers stall on a held trailing reference, consumers catch up
-///    to Wt, go idle, and re-walk the oldest held segment claiming
-///    leftovers until it confirms: blocking creates the idleness that
-///    resolves it.
+///  - Every subscribed consumer always holds at least one pin; an idle
+///    consumer migrates that pin onto nextSeq's initialized segment.
+///  - The last *releaser* of an unconfirmed segment plants Sub0 via add /
+///    maybe-sub. First consumer of a segment (count 0→1) subtracts it.
+///  - Farm-empty with everything confirmed still plants exactly one pulse,
+///    using the same last-releaser helper on the confirmed position.
 struct ConsumerView
 {
+    @disable this(this);
+
     AntFarm* F;
-    long IDc = -1;      /// taken from F's Reqs during subscription
+    ulong IDc;          /// taken from F's Reqs_c during subscription
     ulong nextSeq;      /// sequence of the next table to read
     uint curKi;         /// position reference: segment of last validated table
     ulong curEi;        /// ... its epoch
@@ -569,34 +694,25 @@ struct ConsumerView
 
         // 5a-c: deposit a Sub in the most significant half. The held Sub
         // blocks producers from lapping this segment while we establish the
-        // real consumer reference, so there is no zero-gap window regardless
-        // of what the low half did in the interim.
-        immutable old = atomicFetchAdd(f.Rt[seg][0], SUB);
-        immutable low = old & LOWMASK;
-        immutable high = old >> 32;
-        // 5a-c: first subscriber designation.
-        immutable clearer = low >= SUB0 && high == 0;
+        // real consumer reference. Sub does not plant or clear Sub0.
+        atomicFetchAdd(f.Rt[seg][0], SUB);
 
-        // 5a-e: normal leaf tally increment with root propagation.
+        // 5a-d: attach in place. Fail closed if the frontier was never written.
         immutable es = atomicLoad!(MemoryOrder.acq)(f.stats[seg].es);
         immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(f.stats[seg].sqcs);
         immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[seg].seqt);
-        immutable lti = cast(uint)(idc % sq);
-        immutable lo = atomicFetchAdd(f.Lt[seg * MAX_LEAVES + lti][0], 1);
-        if (lo == 0)
-            atomicFetchAdd(f.Rt[seg][0], 1);
-
-        // 5a-f: the designated first subscriber clears Sub0. Ordering
-        // (establish leaf, then clear Sub0, then remove Sub) keeps Rt
-        // continuously nonzero and makes double-clearing impossible; the
-        // clear is a bit-and so it cannot corrupt the consumer count.
-        if (clearer)
-            rtClearBits(f.Rt[seg][0], SUB0);
-        // 5a-g: remove our Sub.
-        atomicFetchSub(f.Rt[seg][0], SUB);
-
+        if (es < 0 || sq == 0)
+        {
+            atomicFetchSub(f.Rt[seg][0], SUB);
+            f.sub_consumer();
+            return -1;
+        }
         F = f;
-        IDc = idc;
+        IDc = cast(ulong) idc;
+        immutable lti = cast(uint)(IDc % sq);
+        incLeaf(seg, lti);
+        // 5a-g: remove our Sub. The 0→1 on Rt already retracted Sub0 if present.
+        atomicFetchSub(f.Rt[seg][0], SUB);
         nextSeq = seqt;
         curKi = seg;
         curEi = cast(ulong) es;
@@ -607,27 +723,24 @@ struct ConsumerView
         return es;
     }
 
-    /// Spec 5b. References on confirmed-complete segments are dropped first;
-    /// the last unsubscriber plants Sub0 at its earliest unconfirmed held
-    /// segment, preserving the backlog for the next subscriber.
+    /// Spec 5b. Confirmed trails drop with a plain dec. Unconfirmed refs,
+    /// and a last-of-farm confirmed position, use the last-releaser helper
+    /// (add Sub0, dec the count, retract if this thread was not last).
     void unsubscribe() nothrow @nogc @system
     {
         if (!hasRef) return;
         auto f = F;
         tryReleaseTrailing();
-        immutable ski = trailN ? trailKi[0] : curKi;
-        // 5b-a: the last unsubscriber deposits Sub0 before decrementing,
-        // preserving the always-a-live-pulse invariant. Deposit is a bit-or:
-        // idempotent and independent of the consumer count.
-        if (f.sub_consumer() == 1)
-            rtSetBits(f.Rt[ski][0], SUB0);
-        // 5b-b: normal decrement process for every held reference.
-        decRef(curKi, curLti);
+        immutable lastOfFarm = f.sub_consumer() == 1;
+        immutable posPulse = lastOfFarm || !confirmed(curKi, curEi);
+        decRef(curKi, curLti, posPulse);
         foreach (i; 0 .. trailN)
-            decRef(trailKi[i], trailLti[i]);
+            decRef(trailKi[i], trailLti[i], true);
         trailN = 0;
         hasRef = false;
-        IDc = -1;
+        IDc = 0;
+        f.plantUnprotectedIncomplete();
+        F = null;
     }
 
     /// Consume one table if available. Returns false when no valid table is
@@ -642,6 +755,7 @@ struct ConsumerView
         // 5c: load-acquire the sentinel and validate location and value.
         if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(nextSeq))
         {
+            migrateToFrontier();
             sweepOldestTrailing();
             return false;
         }
@@ -712,22 +826,57 @@ struct ConsumerView
         }
 
         nextSeq = tnext;
+        migrateToFrontier();
         tryReleaseTrailing();
         return true;
     }
 
 private:
+    /// Spec 2a: take a count. Only the thread that observes 0→1 retracts Sub0.
+    void takeRootCount(uint ki) nothrow @nogc @system
+    {
+        immutable old = atomicFetchAdd(F.Rt[ki][0], 1);
+        immutable extra = old & AntFarm.SUB0MASK;
+        if ((old & COUNTMASK) == 0 && extra != 0)
+            atomicFetchSub(F.Rt[ki][0], extra);
+    }
+
+    /// Spec 2a/5b last-releaser: plant Sub0, dec the count, retract if not last.
+    void releaseRootLeavePulse(uint ki) nothrow @nogc @system
+    {
+        atomicFetchAdd(F.Rt[ki][0], SUB0);
+        immutable old = atomicFetchSub(F.Rt[ki][0], 1);
+        if ((old & COUNTMASK) == 0) fatal("root tally underflow");
+        if ((old & COUNTMASK) > 1)
+            atomicFetchSub(F.Rt[ki][0], SUB0);
+    }
+
+    /// Increment a leaf; on 0→1 propagate to Rt and retract Sub0 if present.
+    void incLeaf(uint ki, uint lti) nothrow @nogc @system
+    {
+        immutable lo = atomicFetchAdd(F.Lt[ki * MAX_LEAVES + lti][0], 1);
+        if (lo == 0)
+            takeRootCount(ki);
+    }
+
     /// Decrement a held leaf tally with root propagation (spec 2a). Edge
     /// transition (dec returns 1) repeats on Rt; underflows are fatal.
-    void decRef(uint ki, uint lti) nothrow @nogc @system
+    /// `leavePulse` uses the last-releaser helper so an unconfirmed (or
+    /// last-of-farm confirmed) drop never becomes visible as Rt == 0.
+    void decRef(uint ki, uint lti, bool leavePulse = false) nothrow @nogc @system
     {
         auto f = F;
         immutable lo = atomicFetchSub(f.Lt[ki * MAX_LEAVES + lti][0], 1);
         if (lo <= 0) fatal("leaf tally underflow");
         if (lo == 1)
         {
-            immutable ro = atomicFetchSub(f.Rt[ki][0], 1);
-            if ((ro & COUNTMASK) == 0) fatal("root tally underflow");
+            if (leavePulse)
+                releaseRootLeavePulse(ki);
+            else
+            {
+                immutable ro = atomicFetchSub(f.Rt[ki][0], 1);
+                if ((ro & COUNTMASK) == 0) fatal("root tally underflow");
+            }
         }
     }
 
@@ -738,10 +887,9 @@ private:
         auto f = F;
         atomicLoad!(MemoryOrder.acq)(f.stats[ki].es); // pair with producer's release
         immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(f.stats[ki].sqcs);
+        if (sq == 0) fatal("moveRef into uninitialized segment");
         immutable lti = cast(uint)(IDc % sq);
-        immutable lo = atomicFetchAdd(f.Lt[ki * MAX_LEAVES + lti][0], 1);
-        if (lo == 0)
-            atomicFetchAdd(f.Rt[ki][0], 1);
+        incLeaf(ki, lti);
         if (trailN == KMAX) fatal("trailing reference overflow");
         trailKi[trailN] = curKi;
         trailEi[trailN] = curEi;
@@ -750,6 +898,23 @@ private:
         curKi = ki;
         curEi = ei;
         curLti = lti;
+    }
+
+    /// Spec 5c: if the position is confirmed and nextSeq names an initialized
+    /// epoch, move the pin onto that frontier. Always ≥1 pin.
+    void migrateToFrontier() nothrow @nogc @system
+    {
+        auto f = F;
+        immutable ei = nextSeq >> f.segShift;
+        immutable ki = cast(uint)(ei & f.kMask);
+        if (ki == curKi && ei == curEi)
+            return;
+        if (!confirmed(curKi, curEi))
+            return;
+        if (atomicLoad!(MemoryOrder.acq)(f.stats[ki].es) != cast(long) ei)
+            return;
+        moveRef(ki, ei);
+        tryReleaseTrailing();
     }
 
     /// Confirmation predicate: segment Ki at epoch Ei is complete when the
@@ -847,9 +1012,7 @@ private:
     void migratePositionLeaf(uint nl) nothrow @nogc @system
     {
         if (nl == curLti) return;
-        immutable lo = atomicFetchAdd(F.Lt[curKi * MAX_LEAVES + nl][0], 1);
-        if (lo == 0)
-            atomicFetchAdd(F.Rt[curKi][0], 1);
+        incLeaf(curKi, nl);
         decRef(curKi, curLti);
         curLti = nl;
     }
@@ -893,17 +1056,20 @@ private:
     {
         auto head = cast(PayloadHeader*)(bp + absIdx);
         immutable c = atomicFetchAdd(head.pcount, 1UL << 32);
+        if ((c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
         if ((c >> 32) >= head.maxCs)
             return; // overallocated
         do
         {
             immutable d = atomicFetchAdd(head.pcount, 1UL << 16);
             immutable called = (d >> 16) & 0xFFFF;
+            if (called == 0xFFFF) fatal("Pcount calls wrap");
             if (called >= head.done)
                 break;
             auto body_ = (cast(const(ulong)*)(cast(ulong*) bp + absIdx + PHEAD_LEN))[0 .. head.plen];
             head.call(head, body_, called);
-            atomicFetchAdd(head.pcount, 1UL);
+            immutable oldc = atomicFetchAdd(head.pcount, 1UL);
+            if ((oldc & 0xFFFF) == 0xFFFF) fatal("Pcount comps wrap");
         }
         while (loopAll);
     }
@@ -965,7 +1131,9 @@ private:
         for (;;)
         {
             // 5e-i.
-            immutable x = cast(uint)(atomicFetchAdd(*shc, 1UL << 32) >> 32);
+            immutable rawc = atomicFetchAdd(*shc, 1UL << 32);
+            if ((rawc >> 32) == 0xFFFF_FFFFUL) fatal("Tcount claims wrap");
+            immutable x = cast(uint)(rawc >> 32);
             if (x >= shiter)
             {
                 immutable z = x - shiter;
@@ -990,6 +1158,7 @@ private:
             // shard increments Tprogress by the shard length, whichever
             // consumer (owner, sweeper, or re-walker) that happens to be.
             immutable y = atomicFetchAdd(*shc, cast(ulong) runlen);
+            if ((y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
             if ((y & 0xFFFF_FFFFUL) == shlen - runlen)
             {
                 immutable tp = atomicFetchAdd(bp[progOff], cast(ulong) shlen);

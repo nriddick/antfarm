@@ -130,8 +130,8 @@ struct ProdCtx
 
 void producerMain(ProdCtx* c)
 {
-    auto reg = c.f.registerProducer(c.tier);
-    check(reg >= 0, "producer overregistration");
+    auto tok = c.f.registerProducer(c.tier);
+    check(tok.valid, "producer overregistration");
     ulong exi = 0;
     size_t off;
     size_t stall;
@@ -139,7 +139,7 @@ void producerMain(ProdCtx* c)
     {
         immutable remain = c.count - off;
         immutable take = (c.maxBatch == 0 || c.maxBatch >= remain) ? remain : c.maxBatch;
-        immutable n = c.f.write(c.entries[off .. off + take], exi, c.tier);
+        immutable n = c.f.write(c.entries[off .. off + take], exi, tok);
         off += n;
         if (c.written !is null)
             atomicStore(*c.written, off);
@@ -155,7 +155,7 @@ void producerMain(ProdCtx* c)
         else
             stall = 0;
     }
-    c.f.unregisterProducer(c.tier);
+    c.f.unregisterProducer(tok);
 }
 
 struct ConsCtx
