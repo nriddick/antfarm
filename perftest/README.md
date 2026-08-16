@@ -37,9 +37,9 @@ moves); the batched-callback numbers below are the queue-overhead view.
 
 | Goal | Config | Result |
 |------|--------|--------|
-| Payloads/s | `K=4` `nc=4` `nb=1` `ns=4` `body=2` `batch=256` | **174 Mpps** / 2.7 GiB/s body |
-| 16-ulong body | `K=4` `nc=4` `nb=1` `ns=4` `body=16` `batch=80` | **132 Mpps** / 16.2 GiB/s body |
-| Body bytes/s | `K=4` `nc=4` `nb=1` `ns=4` `body=1024` `batch=64` | 6.2 Mpps / **48.1 GiB/s** body |
+| Payloads/s | `K=4` `nc=4` `nb=1` `ns=4` `body=2` `batch=256` | **168 Mpps** / 2.6 GiB/s body |
+| 16-ulong body | `K=4` `nc=4` `nb=1` `ns=4` `body=16` `batch=80` | **120 Mpps** / 14.7 GiB/s body |
+| Body bytes/s | `K=4` `nc=4` `nb=1` `ns=4` `body=1024` `batch=80` | 6.0 Mpps / **47.2 GiB/s** body |
 
 With the batched callback the topology ranking changes: a mix of **1 bulk +
 4 small producers** beats 2 bulk producers at `nc=4` and `nc=8` (the old
@@ -47,7 +47,7 @@ global-atomic callback masked producer-side work). `batch=1` is still the
 worst shape. The full ranked table is `last_sweep.txt`.
 
 The old global-atomic point `K=8 nc=8 nb=2 body=16 batch=256` remains a
-robust production config: **~61 Mpps** global-atomic / **~80 Mpps**
+robust production config: **~61 Mpps** global-atomic / **~77 Mpps**
 batched on this host.
 ## Dual-role bench (small producers that are also consumers)
 
@@ -62,14 +62,37 @@ Latest run (`last_dual.txt`, 16 MiB, body=16, 3-run medians):
 
 | K | nd | tier | batch | consume | Mpps | MiB/s | stalls |
 |---:|---:|:---|---:|---:|---:|---:|---:|
-| 4 | 1 | small | 1 | drain | 10.9 | 1,331 | 0 |
-| 4 | 1 | small | 80 | drain | 39.4 | 4,814 | 0 |
-| 4 | 2 | small | 80 | drain | 60.8 | 7,424 | 0 |
-| 4 | 4 | small | 1 | strict alt (1) | 6.0 | 735 | 11.9M |
-| 4 | 4 | small | 1 | drain | 6.8 | 834 | 0 |
-| 4 | 4 | small | 63 | strict alt (1) | 71.6 | 8,745 | 237k |
-| 4 | 4 | small | 80 | drain | 93.6 | 11,420 | 20k |
-| 4 | 8 | small | 80 | drain | **112.4** | **13,717** | 406k |
+| 4 | 1 | small | 1 | drain | 10.9 | 1,329 | 0 |
+| 4 | 1 | small | 80 | drain | 38.6 | 4,707 | 0 |
+| 4 | 2 | small | 80 | drain | 64.1 | 7,830 | 0 |
+| 4 | 4 | small | 1 | strict alt (1) | 6.0 | 738 | 11.9M |
+| 4 | 4 | small | 1 | drain | 6.7 | 819 | 0 |
+| 4 | 4 | small | 63 | strict alt (1) | 69.6 | 8,496 | 355k |
+| 4 | 4 | small | 80 | drain | 87.5 | 10,676 | 0 |
+| 4 | 8 | small | 80 | drain | **114.2** | **13,938** | 62k |
+
+## ZERO_ST_RMW experimental ST path
+
+`--d-version=ZERO_ST_RMW` replaces the ST fast path's one remaining Pcount
+claims RMW with a regular non-atomic increment, relying entirely on the
+shard `Tcount` chunk claim for exclusivity. Build it with:
+
+```
+ldc2 -O2 -release --d-version=ZERO_ST_RMW throughput.d ../antfarm.d -of=throughput
+```
+
+Measured at `K=8 nc=8 nb=2 body=16 batch=256`:
+
+| callback | default RMW gate | ZERO_ST_RMW |
+|---|---:|---:|
+| per-worker batched | ~76–78 Mpps | ~76–77 Mpps |
+| global-atomic | ~60–61 Mpps | ~63 Mpps |
+
+The gain is real only under the legacy global-atomic callback; with the
+batched callback the ST RMW is not the bottleneck. **Unease:** a
+per-element search path outside the chunk digest would create duplicate ST
+entry, and a consumer that crashes mid-chunk is already illegal, so the
+chunk claim is the only guard. Treat this as an experiment, not a default.
 
 Key trend: small **strictly alternating** writes (`batch=1`) are dominated
 by small-table write cost and fill stalls; `batch >= 63` and draining after
@@ -126,19 +149,19 @@ Metric: ticks just before `write()` of a 1-payload small-tier sentinel → first
 
 | Scene | Arm | tlen | spin | p50 | p99 | p99.9 | note |
 |-------|-----|------|------|-----|-----|-------|------|
-| idle | stock | — | — | 351 ns | 3.2 µs | 7.3 µs | floor |
-| mid-drain | stock | 256 | 0 | 641 ns | 2.6 µs | 3.4 µs | empty Call hides coupling |
-| mid-drain | stock | 256 | 1 µs | 5.3 µs | 22.4 µs | 24.5 µs | ~2 chunks left |
-| mid-drain | stock | 256 | 10 µs | 50.5 µs | 212.1 µs | 215.8 µs | scales with job time |
-| mid-drain | stock | 2048 | 1 µs | 11.9 µs | 29.7 µs | 193.6 µs* | p99.9 noisy |
-| mid-drain | stock | 8192 | 1 µs | 12.9 µs | 30.2 µs | 1.09 ms* | p50/p99 flat |
-| mid-drain | yield16 | 256 | 1 µs | 5.2 µs | 5.5 µs | 8.3 µs | visit ends after 16 |
-| mid-drain | claim1 | 256 | 1 µs | 321 ns | 571 ns | 1.1 µs | visit ends after 1 |
-| mid-drain | stock | 32 | 1 µs | 341 ns | 2.7 µs | 8.5 µs | small dump |
-| burst | stock | 256 | 1 µs | 14.1 µs | 32.5 µs | 34.7 µs | first 13.9/31.8, last 14.8/32.9 |
-| near-full | stock | 256 | 0 | 360 ns | 5.0 µs | 1.65 ms | admit 91ns/4.6µs; parked=31696 |
-| mailbox | — | 256 | 1 µs | 81 ns | 131 ns | 44.4 µs | independent of dump size |
-| mailbox | — | 8192 | 1 µs | 91 ns | 160 ns | 3.0 µs | |
+| idle | stock | — | — | 370 ns | 3.3 µs | 8.4 µs | floor |
+| mid-drain | stock | 256 | 0 | 651 ns | 2.6 µs | 3.7 µs | empty Call hides coupling |
+| mid-drain | stock | 256 | 1 µs | 5.3 µs | 22.5 µs | 26.3 µs | ~2 chunks left |
+| mid-drain | stock | 256 | 10 µs | 50.5 µs | 212.2 µs | 322.9 µs | scales with job time |
+| mid-drain | stock | 2048 | 1 µs | 12.1 µs | 31.5 µs | 318.6 µs* | p99.9 noisy |
+| mid-drain | stock | 8192 | 1 µs | 14.2 µs | 32.2 µs | 1.31 ms* | p50/p99 flat |
+| mid-drain | yield16 | 256 | 1 µs | 5.2 µs | 5.5 µs | 17.0 µs | visit ends after 16 |
+| mid-drain | claim1 | 256 | 1 µs | 331 ns | 531 ns | 1.1 µs | visit ends after 1 |
+| mid-drain | stock | 32 | 1 µs | 330 ns | 2.7 µs | 9.8 µs | small dump |
+| burst | stock | 256 | 1 µs | 14.1 µs | 32.6 µs | 35.9 µs | first 13.9/31.3, last 14.9/32.9 |
+| near-full | stock | 256 | 0 | 341 ns | 1.62 ms | 2.19 ms | admit 91ns/2.8µs; parked=31696 |
+| mailbox | — | 256 | 1 µs | 90 ns | 150 ns | 131.4 µs | independent of dump size |
+| mailbox | — | 8192 | 1 µs | 100 ns | 210 ns | 79.0 µs | |
 
 *p99.9 is noisy run-to-run; p50/p99 are the stable tail signal.
 

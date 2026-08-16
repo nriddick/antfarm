@@ -286,7 +286,7 @@ struct AntFarm
         static __gshared int shmCounter;
         char[64] name;
         snprintf(name.ptr, name.length, "/antfarm-%d-%d", cast(int) getpid(),
-                 atomicFetchAdd(shmCounter, 1));
+                 atomicFetchAdd!(MemoryOrder.raw)(shmCounter, 1));
         int fd = shm_open(name.ptr, O_RDWR | O_CREAT | O_EXCL, 384); // 0600
         if (fd < 0) fatal("shm_open failed");
         shm_unlink(name.ptr);
@@ -380,20 +380,20 @@ struct AntFarm
     /// Returns a negative value if oversubscribed.
     long add_consumer() nothrow @nogc @system
     {
-        immutable prev = atomicFetchAdd(Cf, 1);
+        immutable prev = atomicFetchAdd!(MemoryOrder.raw)(Cf, 1);
         if (prev >= MAX_CONSUMERS_LIMIT)
         {
-            atomicFetchSub(Cf, 1);
+            atomicFetchSub!(MemoryOrder.raw)(Cf, 1);
             return -1;
         }
-        return cast(long) atomicFetchAdd(Reqs_c, 1);
+        return cast(long) atomicFetchAdd!(MemoryOrder.raw)(Reqs_c, 1);
     }
 
     /// Returns the previous Cf; when it returns 1 the caller is the last
     /// unsubscriber (spec 5b-a).
     long sub_consumer() nothrow @nogc @system
     {
-        immutable prev = atomicFetchSub(Cf, 1);
+        immutable prev = atomicFetchSub!(MemoryOrder.raw)(Cf, 1);
         if (prev <= 0) fatal("Cf underflow");
         return prev;
     }
@@ -406,17 +406,17 @@ struct AntFarm
         auto hashes = t == Tier.bulk ? prodHashBulk : prodHashSmall;
         if (cap == 0 || hashes is null)
             return Token.init;
-        immutable p = atomicFetchAdd(*pr, 1);
+        immutable p = atomicFetchAdd!(MemoryOrder.raw)(*pr, 1);
         if (p >= cap)
         {
-            atomicFetchSub(*pr, 1);
+            atomicFetchSub!(MemoryOrder.raw)(*pr, 1);
             return Token.init;
         }
-        immutable reqs = atomicFetchAdd(Reqs_p, 1);
+        immutable reqs = atomicFetchAdd!(MemoryOrder.raw)(Reqs_p, 1);
         foreach (i; 0 .. cap)
         {
             immutable h = mixToken(cast(uint) i, reqs);
-            if (cas(prodSlot(hashes, i), 0UL, h))
+            if (cas!(MemoryOrder.raw, MemoryOrder.raw)(prodSlot(hashes, i), 0UL, h))
                 return Token(t, cast(uint) i, h);
         }
         fatal("producer slot missing");
@@ -435,11 +435,11 @@ struct AntFarm
         atomicStore!(MemoryOrder.raw)(*prodSlot(hashes, tok.slot), 0UL);
         if (tok.tier == Tier.bulk)
         {
-            if (atomicFetchSub(Prbulk, 1) <= 0) fatal("Prbulk underflow");
+            if (atomicFetchSub!(MemoryOrder.raw)(Prbulk, 1) <= 0) fatal("Prbulk underflow");
         }
         else
         {
-            if (atomicFetchSub(Prsm, 1) <= 0) fatal("Prsm underflow");
+            if (atomicFetchSub!(MemoryOrder.raw)(Prsm, 1) <= 0) fatal("Prsm underflow");
         }
     }
 
@@ -480,7 +480,7 @@ struct AntFarm
             immutable rt = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
             if ((rt & COUNTMASK) != 0 || (rt & SUB0MASK) != 0)
                 return;
-            if (cas(&Rt[ki][0], rt, rt + SUB0))
+            if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&Rt[ki][0], rt, rt + SUB0))
                 return;
         }
     }
@@ -504,7 +504,7 @@ struct AntFarm
     /// Quota is renewed only if at least Exmax of free space is verified.
     private bool refreshQuota(ref ulong exi, ulong quota) nothrow @nogc @system
     {
-        immutable anchor = atomicOp!"+="(Wt, 0UL);
+        immutable anchor = atomicLoad!(MemoryOrder.raw)(Wt);
         immutable ea = anchor >> segShift;
         ulong freeSp = 0;
         foreach (j; 1 .. K)
@@ -539,7 +539,7 @@ struct AntFarm
         if (payloads.length == 0) return 0;
         if (avgCost > MAX_AVG_COST) fatal("avgCost out of range");
         immutable quota = tok.tier == Tier.bulk ? quotaBulk : quotaSmall;
-        immutable csl = atomicLoad!(MemoryOrder.acq)(Cf);
+        immutable csl = atomicLoad!(MemoryOrder.raw)(Cf);
         immutable cs = csl > 0 ? cast(uint) csl : 1;
         immutable sq = sqcsOf(cs);
 
@@ -595,7 +595,7 @@ struct AntFarm
         immutable size = tableSizeChecked(n, m, sq, psum);
 
         // Reserve space on the write tail (spec 3a, 4b).
-        immutable wret = atomicOp!"+="(Wt, size) - size;
+        immutable wret = atomicFetchAdd!(MemoryOrder.raw)(Wt, size);
         immutable wtprime = wret + size;
         exi -= size;
 
@@ -605,6 +605,11 @@ struct AntFarm
         // the quota may be renewed without touching Rt. (Inert when
         // Exmax > segCap; renewal then always goes through the sweep.)
         immutable seqb = ((wtprime >> segShift) + 1) << segShift;
+        // Wt' form, spec 3a.  The Wret form (seqb - wret >= exmax) was
+        // also tested; it renews more often but, with a single bulk
+        // producer where quota == exmax == segCap, it can keep exi
+        // permanently renewed and let the producer lap without sweeping,
+        // which stalls the benchmark.  Keep the direct Wt' form.
         if (seqb - wtprime >= exmax)
             exi = quota;
 
@@ -622,7 +627,7 @@ struct AntFarm
             atomicStore!(MemoryOrder.rel)(stats[ki].es, cast(long) e);
         }
         if (enew > eold)
-            atomicOp!"+="(Eg, cast(long)(enew - eold));
+            atomicFetchAdd!(MemoryOrder.raw)(Eg, cast(long)(enew - eold));
 
         // A write that crossed past Ki made Ki unable to accept more tables.
         // If no consumer ever entered it, last-releaser never runs and Rt
@@ -790,7 +795,7 @@ struct ConsumerView
         // 5a-c: deposit a Sub in the most significant half. The held Sub
         // blocks producers from lapping this segment while we establish the
         // real consumer reference. Sub does not plant or clear Sub0.
-        atomicFetchAdd(f.Rt[seg][0], SUB);
+        atomicFetchAdd!(MemoryOrder.rel)(f.Rt[seg][0], SUB);
 
         // 5a-d: attach in place. Fail closed if the frontier was never written.
         immutable es = atomicLoad!(MemoryOrder.acq)(f.stats[seg].es);
@@ -798,7 +803,7 @@ struct ConsumerView
         immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[seg].seqt);
         if (es < 0 || sq == 0)
         {
-            atomicFetchSub(f.Rt[seg][0], SUB);
+            atomicFetchSub!(MemoryOrder.rel)(f.Rt[seg][0], SUB);
             f.sub_consumer();
             return -1;
         }
@@ -807,7 +812,7 @@ struct ConsumerView
         immutable lti = cast(uint)(IDc % sq);
         incLeaf(seg, lti);
         // 5a-g: remove our Sub. The 0→1 on Rt already retracted Sub0 if present.
-        atomicFetchSub(f.Rt[seg][0], SUB);
+        atomicFetchSub!(MemoryOrder.rel)(f.Rt[seg][0], SUB);
         nextSeq = seqt;
         curKi = seg;
         curEi = cast(ulong) es;
@@ -963,10 +968,10 @@ private:
     /// Spec 2a: take a count. Only the thread that observes 0→1 retracts Sub0.
     void takeRootCount(uint ki) nothrow @nogc @system
     {
-        immutable old = atomicFetchAdd(F.Rt[ki][0], 1);
+        immutable old = atomicFetchAdd!(MemoryOrder.rel)(F.Rt[ki][0], 1);
         immutable extra = old & AntFarm.SUB0MASK;
         if ((old & COUNTMASK) == 0 && extra != 0)
-            atomicFetchSub(F.Rt[ki][0], extra);
+            atomicFetchSub!(MemoryOrder.rel)(F.Rt[ki][0], extra);
     }
 
     /// Spec 2a/5b last-releaser: plant Sub0, dec the count, retract if not
@@ -978,7 +983,7 @@ private:
     {
         for (;;)
         {
-            immutable old = atomicLoad!(MemoryOrder.raw)(F.Rt[ki][0]);
+            immutable old = atomicLoad!(MemoryOrder.acq)(F.Rt[ki][0]);
             immutable c = old & COUNTMASK;
             if (c == 0) fatal("root tally underflow");
             ulong nv;
@@ -995,7 +1000,7 @@ private:
                 // Not last: plain decrement, SUB0 field unchanged.
                 nv = old - 1;
             }
-            if (cas(&F.Rt[ki][0], old, nv))
+            if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&F.Rt[ki][0], old, nv))
                 return;
         }
     }
@@ -1003,7 +1008,7 @@ private:
     /// Increment a leaf; on 0→1 propagate to Rt and retract Sub0 if present.
     void incLeaf(uint ki, uint lti) nothrow @nogc @system
     {
-        immutable lo = atomicFetchAdd(F.Lt[ki * MAX_LEAVES + lti][0], 1);
+        immutable lo = atomicFetchAdd!(MemoryOrder.raw)(F.Lt[ki * MAX_LEAVES + lti][0], 1);
         if (lo == 0)
             takeRootCount(ki);
     }
@@ -1015,7 +1020,7 @@ private:
     void decRef(uint ki, uint lti, bool leavePulse = false) nothrow @nogc @system
     {
         auto f = F;
-        immutable lo = atomicFetchSub(f.Lt[ki * MAX_LEAVES + lti][0], 1);
+        immutable lo = atomicFetchSub!(MemoryOrder.raw)(f.Lt[ki * MAX_LEAVES + lti][0], 1);
         if (lo <= 0) fatal("leaf tally underflow");
         if (lo == 1)
         {
@@ -1023,7 +1028,7 @@ private:
                 releaseRootLeavePulse(ki);
             else
             {
-                immutable ro = atomicFetchSub(f.Rt[ki][0], 1);
+                immutable ro = atomicFetchSub!(MemoryOrder.rel)(f.Rt[ki][0], 1);
                 if ((ro & COUNTMASK) == 0) fatal("root tally underflow");
             }
         }
@@ -1263,40 +1268,57 @@ private:
         // secondaryMt/tertiaryMt only walk the MT index (MaxCs > 1), never
         // ST payloads.  So no second consumer can legally enter this payload.
         //
-        // We still keep the Pcount claims RMW as a gate (the old behavior):
+        // We still keep the Pcount claims RMW as a gate in the default build:
         // if a duplicate ever did arrive, it sees claims >= MaxCs == 1 and
         // returns without executing.  Nothing reads the calls/completions
         // fields for ST payloads, so they are left untouched.
+        //
+        // version(ZERO_ST_RMW) is an experimental zero-RMW ST path.  It
+        // replaces that gate with a regular (non-atomic) claims increment,
+        // relying entirely on the shard Tcount chunk claim for exclusivity.
+        // Measured (K=8 nc=8 nb=2 body=16 batch=256): ~4% faster with the
+        // legacy --global-count callback, neutral with the default
+        // per-worker-batched callback.  But it makes duplicate ST entry a
+        // real risk if this code ever gains a per-element search path
+        // outside the chunk digest, and a consumer that crashes mid-chunk
+        // is simply illegal.  Use with that unease in mind.
         if (head.maxCs == 1 && head.done == 1 && !loopAll)
         {
-            immutable c = atomicFetchAdd(head.pcount, 1UL << 32);
-            if (VERIFY_WRAPS && (c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
-            if ((c >> 32) >= head.maxCs)
-                return; // overallocated
-            // The claims RMW above is the gate.  No other consumer can pass
-            // it for MaxCs == 1, and nothing reads the calls/completions
-            // fields for ST payloads (secondaryMt/tertiaryMt only walk the
-            // MT index, and table completion is tracked by Tcount/Tprogress).
-            // So just do the Call; no further Pcount stores are needed.
+            version (ZERO_ST_RMW)
+            {
+                auto pc = cast(ulong*)&head.pcount;
+                *pc += 1UL << 32;
+            }
+            else
+            {
+                immutable c = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 32);
+                if (VERIFY_WRAPS && (c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
+                if ((c >> 32) >= head.maxCs)
+                    return; // overallocated
+            }
+            // Nothing reads the calls/completions fields for ST payloads
+            // (secondaryMt/tertiaryMt only walk the MT index, and table
+            // completion is tracked by Tcount/Tprogress).  So just do the
+            // Call; no further Pcount stores are needed.
             auto body_ = (cast(const(ulong)*)(cast(ulong*) bp + absIdx + PHEAD_LEN))[0 .. head.plen];
             head.call(head, body_, 0);
             return;
         }
 
-        immutable c = atomicFetchAdd(head.pcount, 1UL << 32);
+        immutable c = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 32);
         if (VERIFY_WRAPS && (c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
         if ((c >> 32) >= head.maxCs)
             return; // overallocated
         do
         {
-            immutable d = atomicFetchAdd(head.pcount, 1UL << 16);
+            immutable d = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 16);
             immutable called = (d >> 16) & 0xFFFF;
             if (VERIFY_WRAPS && called == 0xFFFF) fatal("Pcount calls wrap");
             if (called >= head.done)
                 break;
             auto body_ = (cast(const(ulong)*)(cast(ulong*) bp + absIdx + PHEAD_LEN))[0 .. head.plen];
             head.call(head, body_, called);
-            immutable oldc = atomicFetchAdd(head.pcount, 1UL);
+            immutable oldc = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL);
             if (VERIFY_WRAPS && (oldc & 0xFFFF) == 0xFFFF) fatal("Pcount comps wrap");
         }
         while (loopAll);
@@ -1367,7 +1389,7 @@ private:
         for (;;)
         {
             // 5e-i.
-            immutable rawc = atomicFetchAdd(*shc, 1UL << 32);
+            immutable rawc = atomicFetchAdd!(MemoryOrder.raw)(*shc, 1UL << 32);
             if (VERIFY_WRAPS && (rawc >> 32) == 0xFFFF_FFFFUL) fatal("Tcount claims wrap");
             immutable x = cast(uint)(rawc >> 32);
             if (x >= shiter)
@@ -1396,11 +1418,11 @@ private:
             // 5e-k: the consumer adding the final completion sum for the
             // shard increments Tprogress by the shard length, whichever
             // consumer (owner, sweeper, or re-walker) that happens to be.
-            immutable y = atomicFetchAdd(*shc, cast(ulong) runlen);
+            immutable y = atomicFetchAdd!(MemoryOrder.raw)(*shc, cast(ulong) runlen);
             if (VERIFY_WRAPS && (y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
             if ((y & 0xFFFF_FFFFUL) == shlen - runlen)
             {
-                immutable tp = atomicFetchAdd(bp[progOff], cast(ulong) shlen);
+                immutable tp = atomicFetchAdd!(MemoryOrder.raw)(bp[progOff], cast(ulong) shlen);
                 if (tp + shlen == tlen)
                 {
                     // Table complete: account its size into its starting
@@ -1410,7 +1432,7 @@ private:
                     // re-zeroing the accumulator.
                     immutable tsize = atomicLoad!(MemoryOrder.raw)(bp[tseqIdx + 5]);
                     immutable tki = cast(uint)((tseq >> F.segShift) & F.kMask);
-                    atomicFetchAdd(F.stats[tki].sd, tsize);
+                    atomicFetchAdd!(MemoryOrder.raw)(F.stats[tki].sd, tsize);
                 }
                 return 1;
             }

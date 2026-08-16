@@ -19,7 +19,9 @@ O(new tables) instead of O(tables in the segment). Revision 6 folds in the
 single-threaded single-shot fast path of 5f: the shard counter already
 assigns an ST payload to exactly one consumer, so that consumer keeps only
 the Pcount claims fetch_add as an entry gate, executes the Call, and leaves
-the calls/completions fields untouched.)
+the calls/completions fields untouched. Revision 6 also makes atomic memory
+orders explicit: root tally RMWs are release, root tally loads are acquire,
+and all other atomics are raw/monotonic.)
 
 1. General Idea
 Picture a farmer walking along a path placing down objects which a swarm of ants are picking up and taking away. He can't see the ants. He doesn't even know how many there are. How can he avoid stepping on the ants? The answer: the ants maintain signage at regular intervals tallying how many ants are in the area. If it's higher than zero, the farmer waits. The last ant to leave a *confirmed-complete* area changes the tally (a reference counter) to zero. The last ant to leave an *incomplete* area instead leaves a Sub0 pin, so the farmer still sees a nonzero tally and will not step there. Thus the farmer only needs to watch for one signal to change, and doesn't need to try and communicate directly with any ants. And the ants have a panoply of strategies to break down and haul away their work pieces. Really the Ant Farm is a combination of known techniques and a disregard of FIFO guarantees; towards objectives of minimal synchronization upkeep, enhanced cache performance, and flexible role switching and load balancing.

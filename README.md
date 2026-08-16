@@ -23,18 +23,10 @@ The sweep callback is now a **per-worker batched counter** by default
 global-atomic point is included below for continuity; the batched numbers
 are the queue-overhead view.
 
-**Production-shaped topology `nc=8`, `nb=2`, `K=8`, 16 MiB ring, batch ≥ 128:**
-
-| Shape | Batched callback | Global-atomic callback |
-|---|---:|---:|
-| `body=16` (128 B payload), `batch=256` | **~79.8 M payloads/s** | **~61.0 M payloads/s** (~7.4 GiB/s of body) |
-| `body=16`, `batch=80` | ~68.3 M payloads/s | ~58.1 M payloads/s |
-| `body=1024` (8 KiB payload), `batch=256` | ~3.3 M payloads/s, ~25.4 GiB/s of body | ~3.4 M payloads/s, ~26.2 GiB/s of body |
-
 **Best batched-callback shape found by the latest sweep:** `K=4`, `nc=4`,
-`nb=1`, `ns=4` — **174 M payloads/s** at `body=2`, `batch=256`, and
-**132 M payloads/s** at `body=16`, `batch=80`; best body bytes/s is
-**~48.1 GiB/s** at `body=1024`, `batch=64`.
+`nb=1`, `ns=4` — **168 M payloads/s** at `body=2`, `batch=256`, and
+**120 M payloads/s** at `body=16`, `batch=80`; best body bytes/s is
+**~47.2 GiB/s** at `body=1024`, `batch=80`.
 
 These numbers move around with CPU frequency/boost; treat them as a fresh
 run rather than a new plateau.
@@ -52,11 +44,11 @@ From `construction/perftest/last_tail.txt` (pinned `nc=6`, publish → first `Ca
 
 | Scene | p50 | p99 | p99.9 |
 |---|---:|---:|---:|
-| idle | 351 ns | 3.2 µs | 7.3 µs |
-| mid-drain, dump 256 | 5.3 µs | 22.4 µs | 24.5 µs |
-| mid-drain, dump 2048 | 11.9 µs | 29.7 µs | 193.6 µs* |
-| mid-drain, dump 8192 | **12.9 µs** | **30.2 µs** | 1.09 ms* |
-| small dump (32) | 341 ns | 2.7 µs | 8.5 µs |
+| idle | 370 ns | 3.3 µs | 8.4 µs |
+| mid-drain, dump 256 | 5.3 µs | 22.5 µs | 26.3 µs |
+| mid-drain, dump 2048 | 12.1 µs | 31.5 µs | 318.6 µs* |
+| mid-drain, dump 8192 | **14.2 µs** | **32.2 µs** | 1.31 ms* |
+| small dump (32) | 330 ns | 2.7 µs | 9.8 µs |
 
 *p99.9 is noisy run-to-run; p50/p99 are the stable tail signal.
 
@@ -80,7 +72,7 @@ From `disruptortest/BENCHMARK_SUMMARY.md`, same host, C++/GCC `-O2`:
 
 | Config | Disruptor WorkerPool | Ant Farm |
 |---|---:|---:|
-| 8 workers, 2 producers, 16 MiB ring | 9.7–10.3 M events/s | **~61 M payloads/s** global-atomic / ~80 M batched (~6× / ~7.8×) |
+| 8 workers, 2 producers, 16 MiB ring | 9.7–10.3 M events/s | **~61 M payloads/s** global-atomic / ~77 M batched (~6× / ~7.6×) |
 | 1 worker, 1 producer, ring 8192 | **126–145 M events/s** | 40.6–42.8 M payloads/s |
 | tail, 8W, dump 8192, empty handler | ~61 µs p50 / ~190 µs p99 | ~14 µs p50 / ~30 µs p99 (nc=6) |
 
@@ -90,7 +82,7 @@ The structural reason: Disruptor's `WorkProcessor` makes **one CAS per event** o
 
 From `moodytest/SUMMARY.md`:
 
-- **Raw item throughput favors moodycamel.** Native bounded 16 MiB with `try_enqueue_bulk(32)`: ~120–743 M items/s depending on tokens and topology; 1p/1c no-token ~212 M items/s. A fresh local probe of no-tokens configurations (16-byte elements, 16 MiB subqueue cap) ran 120–190 M items/s. At 8 KiB payloads it reaches ~45.8 GiB/s (tokens), above Ant Farm's ~26 GiB/s body at 8 KiB with the global-atomic callback (and ~48.1 GiB/s with the batched callback, though that source is cache-resident). Part of this is the comparison itself: moodycamel's 16 B item is just the item, while an Ant Farm payload carries a 128-byte header plus table index/padding overhead.
+- **Raw item throughput favors moodycamel.** Native bounded 16 MiB with `try_enqueue_bulk(32)`: ~120–743 M items/s depending on tokens and topology; 1p/1c no-token ~212 M items/s. A fresh local probe of no-tokens configurations (16-byte elements, 16 MiB subqueue cap) ran 120–190 M items/s. At 8 KiB payloads it reaches ~45.8 GiB/s (tokens), above Ant Farm's ~26 GiB/s body at 8 KiB with the global-atomic callback (and ~47.2 GiB/s with the batched callback, though that source is cache-resident). Part of this is the comparison itself: moodycamel's 16 B item is just the item, while an Ant Farm payload carries a 128-byte header plus table index/padding overhead.
 - **Occupied tail favors Ant Farm.** Moodycamel no-token mid-drain p50 is FIFO-drain-shaped: 46 µs at dump 256, 370 µs at 2048, **1485 µs at 8192** (1 µs spin, 6 consumers). Tokens flatten the large-dump tail to ~143–287 µs. Ant Farm is ~5.3/12/14 µs p50 and ~30 µs p99 across the same dump sizes.
 - **Idle latency is close.** Moodycamel idle p50 is ~0.23–0.26 µs; Ant Farm is ~0.37 µs. Moodycamel wins the empty ring by a small margin.
 
