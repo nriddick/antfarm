@@ -544,6 +544,8 @@ struct AntFarm
         immutable sq = sqcsOf(cs);
 
         // Fit as many payloads as the quota allows (spec 4a truncation).
+        // Base size of every table: Thead + progress pads + Tcount + end pad.
+        immutable base = THEAD_LEN + PROG_PAD + 1 + 7 + 8UL * sq + END_PAD;
         size_t n;
         uint m;
         ulong psum;
@@ -569,15 +571,22 @@ struct AntFarm
                 // quota (not the farm max) keeps write()==0 strictly meaning
                 // "farm full": a small-tier caller cannot spin forever on a
                 // payload that only fits the bulk tier.
-                immutable singleton = tableSizeChecked(1, oneMt, sq, psz);
+                immutable singletonBase = base + 1UL + oneMt;
+                if (psz > ulong.max - singletonBase)
+                    fatal("table size overflow");
+                immutable singleton = singletonBase + psz;
                 if (singleton > quota)
                     fatal("payload larger than this producer tier's Exi");
                 immutable cm = m + (pe.header.maxCs > 1 ? 1 : 0);
-                immutable cand = tableSizeChecked(i + 1, cm, sq, addChecked(psum, psz, "payload sum overflow"));
+                immutable psumNext = addChecked(psum, psz, "payload sum overflow");
+                immutable fixed = base + (cast(ulong) i + 1) + cm;
+                if (fixed > ulong.max - psumNext)
+                    fatal("table size overflow");
+                immutable cand = fixed + psumNext;
                 if (cand > exi) break;
                 n = i + 1;
                 m = cast(uint) cm;
-                psum = addChecked(psum, psz, "payload sum overflow");
+                psum = psumNext;
             }
             if (n > 0) break;
             if (!refreshQuota(exi, quota)) return 0;
@@ -1242,7 +1251,38 @@ private:
     /// exhausted (secondary/tertiary paths); otherwise execute at most one.
     void enterPayload(shared(ulong)* bp, ulong absIdx, bool loopAll) nothrow @nogc @system
     {
+        pragma(inline, true);
         auto head = cast(PayloadHeader*)(bp + absIdx);
+
+        // Fast path for single-threaded single-shot payloads.
+        //
+        // processShard allocates every payload index to exactly one consumer
+        // via the shard Tcount claim RMW (fetch_add, unique x, disjoint
+        // runs); sweeper and idle re-walk paths use the same Tcount counter
+        // and can only claim chunks the original visitor never claimed, and
+        // secondaryMt/tertiaryMt only walk the MT index (MaxCs > 1), never
+        // ST payloads.  So no second consumer can legally enter this payload.
+        //
+        // We still keep the Pcount claims RMW as a gate (the old behavior):
+        // if a duplicate ever did arrive, it sees claims >= MaxCs == 1 and
+        // returns without executing.  Nothing reads the calls/completions
+        // fields for ST payloads, so they are left untouched.
+        if (head.maxCs == 1 && head.done == 1 && !loopAll)
+        {
+            immutable c = atomicFetchAdd(head.pcount, 1UL << 32);
+            if (VERIFY_WRAPS && (c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
+            if ((c >> 32) >= head.maxCs)
+                return; // overallocated
+            // The claims RMW above is the gate.  No other consumer can pass
+            // it for MaxCs == 1, and nothing reads the calls/completions
+            // fields for ST payloads (secondaryMt/tertiaryMt only walk the
+            // MT index, and table completion is tracked by Tcount/Tprogress).
+            // So just do the Call; no further Pcount stores are needed.
+            auto body_ = (cast(const(ulong)*)(cast(ulong*) bp + absIdx + PHEAD_LEN))[0 .. head.plen];
+            head.call(head, body_, 0);
+            return;
+        }
+
         immutable c = atomicFetchAdd(head.pcount, 1UL << 32);
         if (VERIFY_WRAPS && (c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
         if ((c >> 32) >= head.maxCs)

@@ -18,22 +18,33 @@ So the right mental model is: **producers publish tables of mixed-size jobs into
 
 ### 2.1 Throughput (16 MiB farm, Ryzen 5 5500, `ldc2 -O2 -release`)
 
-The production-shaped topology is **`nc=8`, `nb=2`, `K=8`, 16 MiB ring, batch ≥ 128**:
+The sweep callback is now a **per-worker batched counter** by default
+(`--global-count` restores the old one-global-atomic callback). The old
+global-atomic point is included below for continuity; the batched numbers
+are the queue-overhead view.
 
-| Shape | Result |
-|---|---:|
-| `body=16` (128 B payload), `batch=80` | **59.2 M payloads/s** (~7.1 GiB/s of body) |
-| `body=2`, `batch=256` | **61.5 M payloads/s** |
-| `body=16`, `batch=512` | ~61.2–61.6 M payloads/s (K=8) |
-| `body=1024` (8 KiB payload), `batch=80` | ~4.3 M payloads/s, **~32.8 GiB/s of body** |
+**Production-shaped topology `nc=8`, `nb=2`, `K=8`, 16 MiB ring, batch ≥ 128:**
+
+| Shape | Batched callback | Global-atomic callback |
+|---|---:|---:|
+| `body=16` (128 B payload), `batch=256` | **~79.8 M payloads/s** | **~61.0 M payloads/s** (~7.4 GiB/s of body) |
+| `body=16`, `batch=80` | ~68.3 M payloads/s | ~58.1 M payloads/s |
+| `body=1024` (8 KiB payload), `batch=256` | ~3.3 M payloads/s, ~25.4 GiB/s of body | ~3.4 M payloads/s, ~26.2 GiB/s of body |
+
+**Best batched-callback shape found by the latest sweep:** `K=4`, `nc=4`,
+`nb=1`, `ns=4` — **174 M payloads/s** at `body=2`, `batch=256`, and
+**132 M payloads/s** at `body=16`, `batch=80`; best body bytes/s is
+**~48.1 GiB/s** at `body=1024`, `batch=64`.
+
+These numbers move around with CPU frequency/boost; treat them as a fresh
+run rather than a new plateau.
 
 Important nuances from `construction/perftest`:
 
 - **Batching matters more than anything.** `batch=1` is 4–5× slower. The batch curve keeps climbing to ~256–512.
-- **One consumer is the weakest count** now that the `SqCs=1` floor stops at `Cs <= 2`: two consumers still share one shard but add a worker, and beat one consumer (~44 M vs ~38–41 M payloads/s at `nb=2`). Eight consumers with two bulk producers remains the robust winner.
-- **`nc=8 nb=2` beats `nb=1` and `ns=4`.** A single bulk producer is a publish-side serialization tax that grows with ring size (24.8 Mpps at 128 MiB vs 40.2 for two bulk producers).
+- With the batched callback the producer mix ranking changes: **1 bulk + 4 small producers** beats 2 bulk producers at `nc=4` and `nc=8`; the old global-atomic callback masked producer-side work.
 - **8–16 MiB is the sweet spot.** It matches the 16 MiB L3. A 32 MiB ring drops ~25% throughput; 256 MiB drops ~38%. The one operational win of a big ring is that `write()==0` disappears (producers are never full).
-- **Execute-side cost is ~31.2 ns/job** in the digest bench (linear claim 16, body-touching `Call`). Claim amortization is real: claim-1 costs ~46.7 ns/job, a **~1.5× claim dividend**. Shuffled vs linear layout is ~free (30.3 vs 31.2 ns/job).
+- **Execute-side cost is ~30.9 ns/job** in the digest bench (linear claim 16, body-touching `Call`). Claim amortization is real: claim-1 costs ~49.2 ns/job, a **~1.6× claim dividend**. Shuffled vs linear layout is ~free (31.1 vs 30.9 ns/job).
 
 ### 2.2 Tail latency — the real product
 
@@ -41,11 +52,13 @@ From `construction/perftest/last_tail.txt` (pinned `nc=6`, publish → first `Ca
 
 | Scene | p50 | p99 | p99.9 |
 |---|---:|---:|---:|
-| idle | 380 ns | 3.2 µs | 7.7 µs |
-| mid-drain, dump 256 | 5.2 µs | 22.5 µs | 25.3 µs |
-| mid-drain, dump 2048 | 12.0 µs | 29.9 µs | 273 µs |
-| mid-drain, dump 8192 | **14.3 µs** | **30.2 µs** | 186 µs |
-| small dump (32) | 311 ns | 2.7 µs | 5.0 µs |
+| idle | 351 ns | 3.2 µs | 7.3 µs |
+| mid-drain, dump 256 | 5.3 µs | 22.4 µs | 24.5 µs |
+| mid-drain, dump 2048 | 11.9 µs | 29.7 µs | 193.6 µs* |
+| mid-drain, dump 8192 | **12.9 µs** | **30.2 µs** | 1.09 ms* |
+| small dump (32) | 341 ns | 2.7 µs | 8.5 µs |
+
+*p99.9 is noisy run-to-run; p50/p99 are the stable tail signal.
 
 The headline: **p99 no longer grows with dump size.** A mid-tick write arriving while an 8192-job table is being drained reaches its first worker in ~14 µs p50 / ~30 µs p99, versus ~1.8 ms in earlier revisions. The mechanisms responsible:
 
@@ -67,7 +80,7 @@ From `disruptortest/BENCHMARK_SUMMARY.md`, same host, C++/GCC `-O2`:
 
 | Config | Disruptor WorkerPool | Ant Farm |
 |---|---:|---:|
-| 8 workers, 2 producers, 16 MiB ring | 9.7–10.3 M events/s | **56.0–57.1 M payloads/s** (~5.5–5.8×) |
+| 8 workers, 2 producers, 16 MiB ring | 9.7–10.3 M events/s | **~61 M payloads/s** global-atomic / ~80 M batched (~6× / ~7.8×) |
 | 1 worker, 1 producer, ring 8192 | **126–145 M events/s** | 40.6–42.8 M payloads/s |
 | tail, 8W, dump 8192, empty handler | ~61 µs p50 / ~190 µs p99 | ~14 µs p50 / ~30 µs p99 (nc=6) |
 
@@ -77,7 +90,7 @@ The structural reason: Disruptor's `WorkProcessor` makes **one CAS per event** o
 
 From `moodytest/SUMMARY.md`:
 
-- **Raw item throughput favors moodycamel.** Native bounded 16 MiB with `try_enqueue_bulk(32)`: ~120–743 M items/s depending on tokens and topology; 1p/1c no-token ~212 M items/s. At 8 KiB payloads it reaches ~45.8 GiB/s (tokens), well above Ant Farm's ~26 GiB/s body at 8 KiB. Part of this is the comparison itself: moodycamel's 16 B item is just the item, while an Ant Farm payload carries a 128-byte header plus table index/padding overhead.
+- **Raw item throughput favors moodycamel.** Native bounded 16 MiB with `try_enqueue_bulk(32)`: ~120–743 M items/s depending on tokens and topology; 1p/1c no-token ~212 M items/s. A fresh local probe of no-tokens configurations (16-byte elements, 16 MiB subqueue cap) ran 120–190 M items/s. At 8 KiB payloads it reaches ~45.8 GiB/s (tokens), above Ant Farm's ~26 GiB/s body at 8 KiB with the global-atomic callback (and ~48.1 GiB/s with the batched callback, though that source is cache-resident). Part of this is the comparison itself: moodycamel's 16 B item is just the item, while an Ant Farm payload carries a 128-byte header plus table index/padding overhead.
 - **Occupied tail favors Ant Farm.** Moodycamel no-token mid-drain p50 is FIFO-drain-shaped: 46 µs at dump 256, 370 µs at 2048, **1485 µs at 8192** (1 µs spin, 6 consumers). Tokens flatten the large-dump tail to ~143–287 µs. Ant Farm is ~5.3/12/14 µs p50 and ~30 µs p99 across the same dump sizes.
 - **Idle latency is close.** Moodycamel idle p50 is ~0.23–0.26 µs; Ant Farm is ~0.37 µs. Moodycamel wins the empty ring by a small margin.
 
@@ -110,7 +123,7 @@ Where **not** to deploy it:
 ## 5. Recommended configuration (from the perf work)
 
 - **`K = 4` or `8`** — tied within noise.
-- **`nc = 8`, `nb = 2`** (or `ns = 4` small producers) — the robust winner.
+- **`nc = 8`, `nb = 2`** (or `ns = 4` small producers) — the robust production shape. The latest batched-callback sweep favors **`nc=4`, `nb=1`, `ns=4`** for raw payloads/s.
 - **`batch ≥ 128`, preferably 256–512**; let the producer's quota bound the table size.
 - **Ring `Ln` = 8–16 MiB** on a 16 MiB L3 part; larger only if a never-full guarantee is worth the throughput cliff.
 - **Declare `avgCost` per Call family**: cheap calls → `0` (chunk 32, max amortization); expensive calls → `2–3` (chunk 8–4) to trim tail; avoid `avgCost=5` (chunk 1, −10–12% throughput).

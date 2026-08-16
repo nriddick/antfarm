@@ -9,3 +9,4 @@ review_torture/last_run.log
 perftest/throughput
 perftest/digest
 perftest/tail
+perftest/dual

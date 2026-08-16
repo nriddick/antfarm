@@ -18,11 +18,40 @@ import core.stdc.stdlib : malloc, free, atoi, abort, strtoull;
 
 __gshared shared(long) g_calls;
 __gshared shared(int) g_stop;
+__gshared bool g_globalCount;   // --global-count: old one-global-atomic callback
 
-long benchCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+// Per-worker batched counter.  The old single-global atomic increment made
+// every Callback contend on one cache line (8 workers on one shared
+// counter), so the sweep measured atomic-contention throughput rather than
+// Ant Farm overhead.  Each worker accumulates locally and periodically
+// flushes to the shared counter; the stop condition is still exact because
+// consumers flush on idle and before unsubscribe.
+private uint g_localCalls;
+private enum uint LOCAL_FLUSH = 1024;
+
+long benchCbLocal(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+{
+    if (++g_localCalls >= LOCAL_FLUSH)
+    {
+        atomicFetchAdd(g_calls, cast(long) g_localCalls);
+        g_localCalls = 0;
+    }
+    return 1;
+}
+
+long benchCbGlobal(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
 {
     atomicFetchAdd(g_calls, 1L);
     return 1;
+}
+
+void flushLocalCalls() nothrow @nogc @system
+{
+    if (g_localCalls != 0)
+    {
+        atomicFetchAdd(g_calls, cast(long) g_localCalls);
+        g_localCalls = 0;
+    }
 }
 
 struct Cfg
@@ -136,6 +165,7 @@ void consumerMain(ConsCtx* c)
     {
         if (!v.consumeNext())
         {
+            flushLocalCalls();
             if (atomicLoad!(MemoryOrder.acq)(g_calls) >= c.expected)
                 break;
             if (MonoTime.currTime > c.deadline)
@@ -146,6 +176,7 @@ void consumerMain(ConsCtx* c)
             Thread.yield();
         }
     }
+    flushLocalCalls();
     v.unsubscribe();
 }
 
@@ -204,7 +235,7 @@ Trial runOnce(Cfg c)
     *headers = PayloadHeader.init;
     headers.maxCs = 1;
     headers.done = 1;
-    headers.call = &benchCb;
+    headers.call = g_globalCount ? &benchCbGlobal : &benchCbLocal;
     foreach (i; 0 .. c.body)
         body[i] = i;
     foreach (i; 0 .. poolN)
@@ -347,6 +378,11 @@ Cfg parseArgs(string[] args, Cfg base)
         auto a = args[i];
         if (a == "--once" || a == "--sweep")
             continue;
+        if (a == "--global-count")
+        {
+            g_globalCount = true;
+            continue;
+        }
         if (i + 1 >= args.length)
             break;
         auto v = args[++i];
@@ -383,8 +419,9 @@ void scaleN(ref Cfg c)
 void banner(ref const Cfg c)
 {
     immutable bytes = c.ln * 8.0 / (1024.0 * 1024.0);
-    printf("Ant Farm throughput  Ln=%llu (%.1f MiB)  repeats=%u\n",
-           cast(ulong) c.ln, bytes, c.repeats);
+    printf("Ant Farm throughput  Ln=%llu (%.1f MiB)  repeats=%u  callback=%s\n",
+           cast(ulong) c.ln, bytes, c.repeats,
+           g_globalCount ? "global-atomic".ptr : "per-worker-batched".ptr);
     fflush(stdout);
 }
 

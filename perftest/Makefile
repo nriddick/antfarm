@@ -4,9 +4,9 @@ ROOT := ..
 DC ?= ldc2
 DFLAGS ?= -O2 -release
 
-.PHONY: all run run-once digest-run tail-run clean
+.PHONY: all run run-once dual-run digest-run tail-run clean
 
-all: throughput digest tail tail
+all: throughput dual digest tail tail
 
 throughput: throughput.d $(ROOT)/antfarm.d
 	$(DC) $(DFLAGS) throughput.d $(ROOT)/antfarm.d -of=$@
@@ -17,11 +17,17 @@ digest: digest.d $(ROOT)/antfarm.d
 tail: tail.d $(ROOT)/antfarm.d
 	$(DC) $(DFLAGS) tail.d $(ROOT)/antfarm.d -of=$@
 
+dual: dual.d $(ROOT)/antfarm.d
+	$(DC) $(DFLAGS) dual.d $(ROOT)/antfarm.d -of=$@
+
 run: throughput
 	./throughput
 
 run-once: throughput
 	./throughput --once
+
+dual-run: dual
+	./dual
 
 digest-run: digest
 	./digest
@@ -30,4 +36,4 @@ tail-run: tail
 	./tail | tee last_tail.txt
 
 clean:
-	rm -f throughput digest tail *.o
+	rm -f throughput digest tail dual *.o

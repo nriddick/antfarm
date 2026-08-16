@@ -1,13 +1,17 @@
 # Ant Farm throughput
 
 Synthetic benchmark for a **16 MiB** farm (`Ln = 2^21` ulongs). Verdict on
-what held and what did not: `POSTMORTEM.md`. The work callback in the
-sweep is a single atomic increment so those numbers are queue overhead,
-not payload compute.
+what held and what did not: `POSTMORTEM.md`. The default work callback is a
+**per-worker batched counter** (local increment, one shared atomic flush per
+1024 calls). Earlier sweeps used `--global-count`, a single shared atomic
+increment; that made all eight workers contend on one cache line and the
+number measured atomic-contention throughput rather than Ant Farm overhead.
+`--global-count` is kept for A/B comparisons.
 
 ```
 make -C perftest run          # two-phase sweep (default)
 make -C perftest run-once     # one config (see flags below)
+make -C perftest dual-run     # dual-registered producer/consumer threads
 ```
 
 Release build (`ldc2 -O2 -release`). `fatal()` still prints and aborts.
@@ -24,21 +28,55 @@ Configs that cannot fit one payload in the active quota are skipped.
 A trial that fails to drain in 90s is recorded as `TIMEOUT` and does
 not abort the sweep.
 
-## First 16 MiB sweep (Ryzen 5 5500, 6c/12t, `ldc2 -O2 -release`)
+## Latest 16 MiB sweep (Ryzen 5 5500, 6c/12t, `ldc2 -O2 -release`)
 
-Cheap ST callback, 16 MiB farm sits in L3.
+Per-worker batched callback, 16 MiB farm sits in L3. With the old
+`--global-count` callback the same K=8/nc=8/nb=2/body=16/batch=256 point is
+~60.7 Mpps (the old callback is atomic-contention-bound, so this barely
+moves); the batched-callback numbers below are the queue-overhead view.
 
 | Goal | Config | Result |
 |------|--------|--------|
-| Payloads/s | `K=4` `nc=8` `nb=2` `body=16` `batch=80` | **61 Mpps** / 7.4 GiB/s body |
-| Body bytes/s | same topology, `body=1024` `batch=63` | 4.6 Mpps / **35 GiB/s** body |
+| Payloads/s | `K=4` `nc=4` `nb=1` `ns=4` `body=2` `batch=256` | **174 Mpps** / 2.7 GiB/s body |
+| 16-ulong body | `K=4` `nc=4` `nb=1` `ns=4` `body=16` `batch=80` | **132 Mpps** / 16.2 GiB/s body |
+| Body bytes/s | `K=4` `nc=4` `nb=1` `ns=4` `body=1024` `batch=64` | 6.2 Mpps / **48.1 GiB/s** body |
 
-The winning region is wide: 8 consumers, 2 bulk producers (or 4 small), `batch ≥ 32`. `K=4` and `K=8` are close; `K=4` won this host. `batch=1` is ~4–5× slower. Two consumers was the *worst* consumer count (shard `sqcs=1` like one consumer, plus extra coherence).
+With the batched callback the topology ranking changes: a mix of **1 bulk +
+4 small producers** beats 2 bulk producers at `nc=4` and `nc=8` (the old
+global-atomic callback masked producer-side work). `batch=1` is still the
+worst shape. The full ranked table is `last_sweep.txt`.
 
-Batch guidance (calibration 2026-08-16, `SPECULATIVE_OPT_2026-08-16_1.md` §7.2):
-the batch curve keeps climbing to the quota ceiling — batch 256/512 beats 128
-by ~3% at body=16 (61.7/62.1 vs 60.4 Mpps at K=4). Prefer batches ≥ 128 and
-let the caller's quota bound the table size.
+The old global-atomic point `K=8 nc=8 nb=2 body=16 batch=256` remains a
+robust production config: **~61 Mpps** global-atomic / **~80 Mpps**
+batched on this host.
+## Dual-role bench (small producers that are also consumers)
+
+`make -C perftest dual-run` — every thread registers a producer ticket
+(small tier by default) **and** subscribes a `ConsumerView`, then alternates
+between one `write()` and a consume phase. `--consume 0` means “drain until
+empty”; `--consume N` means exactly N `consumeNext()` calls per produce
+phase. This is the test for the interleaved small-push shape the main sweep
+cannot express.
+
+Latest run (`last_dual.txt`, 16 MiB, body=16, 3-run medians):
+
+| K | nd | tier | batch | consume | Mpps | MiB/s | stalls |
+|---:|---:|:---|---:|---:|---:|---:|---:|
+| 4 | 1 | small | 1 | drain | 10.9 | 1,331 | 0 |
+| 4 | 1 | small | 80 | drain | 39.4 | 4,814 | 0 |
+| 4 | 2 | small | 80 | drain | 60.8 | 7,424 | 0 |
+| 4 | 4 | small | 1 | strict alt (1) | 6.0 | 735 | 11.9M |
+| 4 | 4 | small | 1 | drain | 6.8 | 834 | 0 |
+| 4 | 4 | small | 63 | strict alt (1) | 71.6 | 8,745 | 237k |
+| 4 | 4 | small | 80 | drain | 93.6 | 11,420 | 20k |
+| 4 | 8 | small | 80 | drain | **112.4** | **13,717** | 406k |
+
+Key trend: small **strictly alternating** writes (`batch=1`) are dominated
+by small-table write cost and fill stalls; `batch >= 63` and draining after
+each write recovers high throughput, and more dual threads keep helping on
+this host (8 dual threads is the best measured). `--tier bulk` switches all
+dual threads to bulk tickets if you want the other extreme.
+
 
 ## Digest bench (linear chunk vs scatter)
 
@@ -84,27 +122,30 @@ Metric: ticks just before `write()` of a 1-payload small-tier sentinel → first
 ./tail --no-pin
 ```
 
-### First tail suite (same host)
+### Latest tail suite (same host, claim-gated ST fast path)
 
-| Scene | Arm | tlen | spin | p50 | p99 | note |
-|-------|-----|------|------|-----|-----|------|
-| idle | stock | — | — | 350 ns | 5.5 µs | floor; unpinned max was 1.2 ms |
-| mid-drain | stock | 256 | 0 | 1.5 µs | 3.6 µs | empty Call hides coupling |
-| mid-drain | stock | 256 | 1 µs | 11 µs | **32 µs** | ~2 chunks left |
-| mid-drain | stock | 256 | 10 µs | 101 µs | 267 µs | scales with job time |
-| mid-drain | stock | 2048 | 1 µs | 237 µs | 281 µs | |
-| mid-drain | stock | 8192 | 1 µs | 1.08 ms | **1.82 ms** | grows with dump size |
-| mid-drain | yield16 | 256 | 1 µs | 5.2 µs | 5.4 µs | visit ends after 16 |
-| mid-drain | claim1 | 256 | 1 µs | 340 ns | 431 ns | visit ends after 1 |
-| mid-drain | stock | 32 | 1 µs | 331 ns | 2.7 µs | small dump: skippers hit the sentinel |
-| burst | stock | 256 | 1 µs | 20 µs | 55 µs | last faster than first (not shard-0 pileup) |
-| near-full | stock | 256 | 0 | 351 ns | 7.9 µs | p99.9 1.5 ms; **zeros=0** under spray; parked wall at 30768 jobs |
-| mailbox | — | 256 | 1 µs | 90 ns | 130 ns | independent of dump size |
-| mailbox | — | 8192 | 1 µs | 91 ns | 131 ns | |
+| Scene | Arm | tlen | spin | p50 | p99 | p99.9 | note |
+|-------|-----|------|------|-----|-----|-------|------|
+| idle | stock | — | — | 351 ns | 3.2 µs | 7.3 µs | floor |
+| mid-drain | stock | 256 | 0 | 641 ns | 2.6 µs | 3.4 µs | empty Call hides coupling |
+| mid-drain | stock | 256 | 1 µs | 5.3 µs | 22.4 µs | 24.5 µs | ~2 chunks left |
+| mid-drain | stock | 256 | 10 µs | 50.5 µs | 212.1 µs | 215.8 µs | scales with job time |
+| mid-drain | stock | 2048 | 1 µs | 11.9 µs | 29.7 µs | 193.6 µs* | p99.9 noisy |
+| mid-drain | stock | 8192 | 1 µs | 12.9 µs | 30.2 µs | 1.09 ms* | p50/p99 flat |
+| mid-drain | yield16 | 256 | 1 µs | 5.2 µs | 5.5 µs | 8.3 µs | visit ends after 16 |
+| mid-drain | claim1 | 256 | 1 µs | 321 ns | 571 ns | 1.1 µs | visit ends after 1 |
+| mid-drain | stock | 32 | 1 µs | 341 ns | 2.7 µs | 8.5 µs | small dump |
+| burst | stock | 256 | 1 µs | 14.1 µs | 32.5 µs | 34.7 µs | first 13.9/31.8, last 14.8/32.9 |
+| near-full | stock | 256 | 0 | 360 ns | 5.0 µs | 1.65 ms | admit 91ns/4.6µs; parked=31696 |
+| mailbox | — | 256 | 1 µs | 81 ns | 131 ns | 44.4 µs | independent of dump size |
+| mailbox | — | 8192 | 1 µs | 91 ns | 160 ns | 3.0 µs | |
 
-`nc=8` oversub (pinned): idle p99 7.1 µs, mid 256/1 µs p99 32.5 µs — same story, not a scheduler lie.
+*p99.9 is noisy run-to-run; p50/p99 are the stable tail signal.
 
-**Stock tail tracks remaining shard work**, which grows with the tick dump. At a 256-job dump and 1 µs jobs, p99 is 32 µs (fine at 60 Hz). At 8192 it is 1.8 ms (a real slice). A dedicated mailbox is ~130 ns either way — that is the OOB channel the design refused. `write()==0` exists when consumers are parked (~30k jobs at this topology) but did not show up under concurrent spray.
+`nc=8` oversub (pinned): idle p50 371 ns / p99 3.4 µs, mid 256/1 µs p50
+8.4 µs / p99 25.5 µs — same story, not a scheduler lie.
+
+**Stock tail tracks remaining shard work**, which grows with the tick dump. At a 256-job dump and 1 µs jobs, p99 is 22.4 µs (fine at 60 Hz). At 8192 it is 29.3 µs, still flat because of first-claimant yield. A dedicated mailbox is ~130 ns either way — the OOB channel the design refused. `write()==0` exists when consumers are parked (~31.7k jobs at this topology) but did not show up under concurrent spray.
 
 ## Single run
 
@@ -124,4 +165,7 @@ Metric: ticks just before `write()` of a 1-payload small-tier sentinel → first
 | `--n` | total payloads | scaled by body (16e6 at 16 ulongs) |
 | `--qb` | bulk quota (0 = segment capacity) | 0 |
 | `--qs` | small quota | 4096 |
+| `--ac` | avgCost chunk hint (0..5) | 1 |
+| `--small` | small-table threshold (0 = auto) | 64 |
+| `--global-count` | old one-global-atomic callback | off |
 | `--repeats` | timed repeats | 3 |
