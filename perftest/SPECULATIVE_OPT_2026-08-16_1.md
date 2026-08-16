@@ -25,7 +25,7 @@ fetch-add-only; no CAS is introduced).
 |---|--------|------|-----------------|------|
 | 1 | Per-tier unsizable-table fatal in `write()` | correctness | `write()==0` becomes strictly "farm full" | none (spec-aligned) |
 | 2 | Gate packed-field wrap fatals behind `version(verify)` | perf (consumer hot path) | ~1–3% consumer side | tripwire lost in release |
-| 3 | Producer-published chunk hint in Thead | perf strategy | chunk adapts to body size; tail vs throughput trade made per-table | none if header-published (agreement by construction) |
+| 3 | Producer-published `avgCost` in Thead: `chunk = MAX_CHUNK >> avgCost` | perf strategy | chunk adapts to declared Call cost; tail vs throughput trade made per-table by the producer | none if header-published (agreement by construction) |
 | 4 | `SMALL_TABLE_THRESHOLD` scaled by shard count | dispatch policy | more tables on the fast path; starvation risk bounded | low (yield + carried sweeper + T18 re-walks backstop) |
 | 5 | Hoist write-side validation out of the retry loop; plain adds in Tindex build | perf (write side) | small; pure restructuring | none |
 | 6 | `PayloadHeader` 17 → 16 words: move `call` next to `pcount`, filler2 7 → 6 words | layout | header 136 → 128 B (two exact lines); pcount line stays isolated | none — only if `call` stays claim-gated (see §8) |
@@ -129,33 +129,55 @@ tuned where it matters:
   it — BIG_CHUNK is effectively dead today.
 
 **The real tension.** p99 tail is leftover shard work and scales with chunk
-size; throughput wants big chunks (fewer `Tcount` RMWs). Cheap payloads and
-expensive payloads want opposite chunk sizes, and one global rule cannot
-serve both.
+size; throughput wants big chunks (fewer `Tcount` RMWs). Cheap Calls and
+expensive Calls want opposite chunk sizes, and one global rule cannot serve
+both. Body size is a poor proxy for Call cost — the digest bench's "cold
+chase" arm showed a 16-ulong body can be arbitrarily expensive — so the
+signal should come from the producer, who wrote the Call.
 
-**Proposal.** Let the producer publish the average body size (or a direct
-chunk hint) in Thead's spare words (antfarm.d:577 currently zeroes w[6] and
-w[7]):
-
-```d
-w[6] = n > 0 ? psum / n : 0;   // avg body size in ulongs
-```
-
-Consumers pick the chunk from the header:
+**Proposal: a producer-declared cost class, `avgCost`.** `write()` gains an
+optional trailing parameter `uint avgCost = 1`, a log2 cost class in
+`0 .. log2(MAX_CHUNK)`. The producer knows its Call's cost profile; it
+declares how much the chunk should shrink from the ceiling:
 
 ```d
-immutable avgBody = atomicLoad!(MemoryOrder.raw)(bp[idx + 6]);
-immutable specChunk = avgBody <= 32 ? 32 : avgBody <= 256 ? 16 : 8;
+// producer side (write()): the default is the middle of the range.
+//   0 = Calls are very cheap  -> chunk shifts by 0 (ceiling, max amortization)
+//   n = Calls are more costly -> chunk shifts down by n (short visits, less tail)
+// validation: avgCost > log2(MAX_CHUNK) is a caller error -> fatal
+w[6] = avgCost;                 // Thead spare word (antfarm.d:577, was 0)
+
+// consumer side (processShard):
+immutable specChunk = MAX_CHUNK >> avgCost;   // read from bp[idx + 6]
 ```
+
+Concrete setting that matches "default is in the middle": `MAX_CHUNK = 32`,
+`avgCost ∈ [0, 5]`, default `avgCost = 1` → chunk **16**, the current
+`CLAIM_CHUNK` and the midpoint of [1, 32]. Cheap-call producers pass 0
+(chunk 32), mid-cost keep the default (16), expensive pass 2–3 (8–4), and a
+Call that should never batch passes 5 (1). The bench override
+(`benchChunk != 0`) keeps precedence over the header value so the existing
+yield16/claim1 tail attribution still works.
 
 Safety: the postmortem's "mixed chunk sizes on one Tcount deadlock" required
 consumers disagreeing on the *same* table's `shiter`. A header-published
-chunk is read identically by everyone, so agreement holds by construction.
-The claim/completion arithmetic is per-table and unchanged.
+`avgCost` is read identically by everyone, so agreement holds by
+construction. The claim/completion arithmetic is per-table and unchanged.
+The 5e-m yield interacts as intended: expensive Calls get small chunks, so
+the first claimant finishes a run sooner and the leftover (and p99) shrinks.
 
-Provisional breakpoints (to be calibrated, item 7): cheap bodies (≤ 32
-ulongs) → chunk 32–64 to maximize claim amortization; mid (≤ 256) → 16;
-large → 8 so a visit (and its leftover tail) stays short.
+Notes / open items (calibration, item 7):
+- Ceiling: `MAX_CHUNK = 32` keeps the default at 16 with `avgCost = 1`. If
+  the digest chunk arms show 32/64 still paying for very cheap Calls, raise
+  the ceiling to 64 and default to `avgCost = 2` (still chunk 16).
+- The `shbase >= 1024` switch disappears: chunk becomes a pure function of
+  the producer's hint, which is also simpler to reason about.
+- Truncation is unaffected: `write()` may commit `n < len`, but the hint
+  still describes the written table.
+- Item 4's `tlen >= sq * chunk` small-table rule then depends on the
+  per-table chunk — a cheap table (chunk 32) shards at `tlen >= 3·32` (sq=3),
+  an expensive one (chunk 8) at `tlen >= 24`. Consistent: the decision is
+  per-table, made by consumers from the same header word.
 
 ---
 
@@ -220,14 +242,17 @@ does not see.
 
 1. **Chunk × body** (isolates claim amortization): extend `digest` with
    chunk arms {1, 4, 8, 16, 32, 64, 128} × body {2, 16, 64, 256}. Find
-   where the amortization dividend saturates; this sets the cheap-body chunk.
+   where the amortization dividend saturates; this sets the cheap-Call chunk.
 2. **Batch tail** (isolates table-size amortization at the top): throughput
    phase 2 on the winner with batch {63, 80, 128, 160, 256}; 128 won this
    session, confirm it is not noise.
-3. **Chunk hint** (validates item 3): implement the header hint behind a
-   flag, sweep the breakpoints, then run the tail scenes (mid-drain
-   256/2048/8192) to confirm the large-body chunk=8 shortens p99 without
-   moving Mpps.
+3. **avgCost** (validates item 3): implement the optional
+   `write(..., avgCost)` parameter + Thead word behind a flag, then sweep
+   `avgCost ∈ {0, 1, 2, 3, 5}` on the throughput bench (body=16, cheap
+   `Call`) — expect class 0 to win there — and on the tail scenes
+   (mid-drain 256/2048/8192 with a body-touching `Call`), where the
+   expensive classes must shorten p99 without moving Mpps. The digest chunk
+   arms {1, 4, 8, 16, 32, 64} decide the `MAX_CHUNK` ceiling (32 vs 64).
 4. **Threshold** (validates item 4): make it a farm field, sweep {32, 48,
    64, 128, 192, 256} on the tail scenes and the batch=63/64 pair on
    throughput.
