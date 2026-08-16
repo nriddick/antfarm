@@ -424,10 +424,16 @@ struct AntFarm
         immutable sd = atomicLoad!(MemoryOrder.raw)(stats[ki].sd);
         if (seqt >= seqtN || seqt + sd >= seqtN)
             return;
-        immutable rt = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
-        if ((rt & COUNTMASK) != 0 || (rt & SUB0MASK) != 0)
-            return;
-        atomicFetchAdd(Rt[ki][0], SUB0);
+        // CAS the plant so a racing 0->1 subscriber cannot be straddled by
+        // a bare fetch_add(SUB0).
+        for (;;)
+        {
+            immutable rt = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
+            if ((rt & COUNTMASK) != 0 || (rt & SUB0MASK) != 0)
+                return;
+            if (cas(&Rt[ki][0], rt, rt + SUB0))
+                return;
+        }
     }
 
     /// After unsubscribe, cover any incomplete epoch still sitting at Rt==0.
@@ -764,6 +770,7 @@ struct ConsumerView
         {
             migrateToFrontier();
             sweepOldestTrailing();
+            sweepCurrentPosition();
             return false;
         }
 
@@ -828,14 +835,16 @@ struct ConsumerView
                     // 5g: secondary round-robin share of the MT payloads.
                     secondaryMt(bp, idx, tindexOff, tlen, tmt, sq);
                 }
+                sweeperNext = sweeper;
             }
             else
             {
                 // Complete table: cheap pre-checked MT pass only (MT
-                // payloads can outlive their shards' completion).
+                // payloads can outlive their shards' completion). Do not
+                // touch sweeperNext here: a carried sweeper role must
+                // survive across already-complete tables (H11).
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
-            sweeperNext = sweeper;
         }
 
         nextSeq = tnext;
@@ -854,14 +863,35 @@ private:
             atomicFetchSub(F.Rt[ki][0], extra);
     }
 
-    /// Spec 2a/5b last-releaser: plant Sub0, dec the count, retract if not last.
+    /// Spec 2a/5b last-releaser: plant Sub0, dec the count, retract if not
+    /// last. The add/dec/retract sequence is a single CAS loop: the old
+    /// fetch-add/sub sequence could retract a SUB0 that a racing first
+    /// subscriber had already cleared, underflowing the low half and
+    /// borrowing from the SUB field.
     void releaseRootLeavePulse(uint ki) nothrow @nogc @system
     {
-        atomicFetchAdd(F.Rt[ki][0], SUB0);
-        immutable old = atomicFetchSub(F.Rt[ki][0], 1);
-        if ((old & COUNTMASK) == 0) fatal("root tally underflow");
-        if ((old & COUNTMASK) > 1)
-            atomicFetchSub(F.Rt[ki][0], SUB0);
+        for (;;)
+        {
+            immutable old = atomicLoad!(MemoryOrder.raw)(F.Rt[ki][0]);
+            immutable c = old & COUNTMASK;
+            if (c == 0) fatal("root tally underflow");
+            ulong nv;
+            if (c == 1)
+            {
+                // Last root: leave one pulse. Preserve any pulse already
+                // present; add one only if none exists.
+                nv = old & ~COUNTMASK;
+                if ((old & AntFarm.SUB0MASK) == 0)
+                    nv += SUB0;
+            }
+            else
+            {
+                // Not last: plain decrement, SUB0 field unchanged.
+                nv = old - 1;
+            }
+            if (cas(&F.Rt[ki][0], old, nv))
+                return;
+        }
     }
 
     /// Increment a leaf; on 0→1 propagate to Rt and retract Sub0 if present.
@@ -992,6 +1022,49 @@ private:
         immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
         ulong seq = seqt;
         while (seq < boundary)
+        {
+            immutable idx = seq & f.Lmask;
+            if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(seq))
+                fatal("held segment's table was overwritten");
+            immutable tnext = atomicLoad!(MemoryOrder.raw)(bp[idx + 1]);
+            immutable w2 = atomicLoad!(MemoryOrder.raw)(bp[idx + 2]);
+            immutable tlen = cast(uint) w2;
+            immutable tmt = cast(uint)(w2 >> 32);
+            immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(bp[idx + 4]);
+            immutable tindexOff = idx + THEAD_LEN;
+            immutable progOff = tindexOff + tlen + tmt + PROG_PAD;
+            immutable tcountOff = progOff + 8;
+            if (tlen > 0)
+            {
+                if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
+                {
+                    immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
+                    foreach (s; 0 .. nshards)
+                        processShard(bp, seq, idx, tindexOff, tcountOff,
+                                     progOff, tlen, sq, s, true, false);
+                }
+                tertiaryMt(bp, idx, tindexOff, tlen, tmt);
+            }
+            seq = tnext;
+        }
+        tryReleaseTrailing();
+    }
+
+    /// Idle path: re-walk the current position segment from its first table
+    /// up to nextSeq, claiming any work that earlier hot-path visits left
+    /// behind (for example a small table skipped by a consumer whose shard
+    /// was not 0 and which had no carried-sweeper role). The segment is
+    /// protected by the position reference, so the data is present.
+    void sweepCurrentPosition() nothrow @nogc @system
+    {
+        auto f = F;
+        auto bp = f.buf;
+        immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[curKi].seqt);
+        immutable end = nextSeq;
+        if (seqt >= end)
+            return;
+        ulong seq = seqt;
+        while (seq < end)
         {
             immutable idx = seq & f.Lmask;
             if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(seq))
