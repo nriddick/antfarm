@@ -101,10 +101,12 @@ moodycamel execute compare) was skipped because there was no consume-side
 layout gap to sell.
 
 **Mid-tick tail is leftover shard work, and it grows with the dump.**
-`consumeNext` is one table. `processShard` does not yield after
-`CLAIM_CHUNK`. It claims until that consumer is done with its shard
-(`sqcsOf(6) = 3` slices). A 1-payload table at `Tnext` is invisible until
-that visit returns, and then only to `Shi == 0` or a carried sweeper.
+`consumeNext` is one table. Stock `processShard` claims until that consumer
+is done with its shard (`sqcsOf(6) = 3` slices), so a 1-payload table at
+`Tnext` is invisible until that visit returns — and then only to
+`Shi == 0` or a carried sweeper. Revision 4 (spec 5e-m) adds a bounded
+exception: the first claimant of a shared shard may stop after an
+accounted chunk when `Tnext` is already live; see the update below.
 
 Same 1 µs background `Call`, stock path:
 
@@ -198,10 +200,12 @@ on enqueue.
   jobs, that is tens of microseconds and the ring stays the only channel.
   If dumps grow to thousands, refusing an OOB path is a latency choice
   (~1.8 ms vs ~130 ns on this box), not a free invariant.
-- Do not flip production to yield-per-chunk or claim-1 to buy tail.
-  Drain and `Tcount` arithmetic assume one `shiter` and a visit that
-  finishes the shard (or a sweeper). Changing visit length is a spec
-  revision, not a flag.
+- Do not flip production to yield-per-chunk or claim-1 wholesale.
+  Drain and `Tcount` arithmetic assume every claimed run is executed and
+  every shard finishes (or a sweeper). Revision 4 adds a bounded exception:
+  the first claimant of a shared shard may stop early only after its run is
+  accounted and only when `Tnext` is already live (spec 5e-m). That is a
+  spec revision, not a flag.
 - Keep `fatal()` in release. A wrapped `Tcount` / unsizable payload /
   bad token is not a throughput event.
 
@@ -222,6 +226,29 @@ on enqueue.
   visit.
 - A second farm, steal deque, or moodycamel as a *dump* path. Not needed
   to explain these results.
+
+---
+
+## Revision 4 tail update
+
+Same host, `ldc2 -O2 -release`, pinned `nc=6`, `samples=10000`,
+`repeats=3`, median of 3. Stock is the pre-revision-4 binary; rev4 is the
+first-claimant yield of spec 5e-m. The mailbox is the OOB reference and is
+unchanged (the farm still drains the dump behind it).
+
+| Scene | tlen | spin | stock p50 | stock p99 | rev4 p50 | rev4 p99 |
+|-------|------|------|-----------|-----------|----------|----------|
+| mid-drain stock | 256 | 1 µs | 27.7 µs | 33.9 µs | 5.3 µs | 35.4 µs |
+| mid-drain stock | 2048 | 1 µs | 205.4 µs | 303.4 µs | 11.8 µs | 232.9 µs |
+| mid-drain stock | 8192 | 1 µs | 915.3 µs | 1.19 ms | 45.0 µs | 814.3 µs |
+| mailbox | 8192 | 1 µs | 100 ns | 221 ns | 101 ns | 290 ns |
+
+Revision 4 buys most of the yield-16 p50 at stock correctness: the first
+claimant leaves the shard to the consumer(s) behind it as soon as `Tnext`
+is live. The p99 at 8192 remains ~0.8 ms because the shard completer still
+earns the sweeper role and must sweep foreign shards, and because OS
+pre-emption can still delay the claimant that stayed behind. A mailbox is
+still the only path that removes dump size from the tail entirely.
 
 ---
 

@@ -1199,6 +1199,8 @@ private:
         immutable chunk = benchChunk != 0 ? benchChunk : specChunk;
         immutable shiter = (shlen + chunk - 1) / chunk;
         uint runsDone;
+        uint ownClaims = 0;
+        bool firstClaimant = false;
         auto shc = &bp[tcountOff + shi * 8];
         if (checkFirst)
         {
@@ -1235,6 +1237,9 @@ private:
                 return 0;
             }
             // 5e-j.
+            ++ownClaims;
+            if (x == 0)
+                firstClaimant = true;
             immutable runstart = shstart + x * chunk;
             immutable runlen = chunk < shlen - x * chunk ? chunk : shlen - x * chunk;
             foreach (i; 0 .. runlen)
@@ -1266,6 +1271,30 @@ private:
             ++runsDone;
             if (benchMaxRuns != 0 && runsDone >= benchMaxRuns)
                 return 0;
+            // Mid-tick latency relief (see perftest/POSTMORTEM.md): the
+            // first claimant of a shard (the consumer that drew X == 0)
+            // can detect that the shard is shared by observing more claim
+            // strides than its own (claimsNow > ownClaims). After finishing
+            // a claim-chunk + consume-chunk iteration, probe whether Tnext
+            // is already published; if it is, stop working this shard so
+            // consumeNext can advance to the live table (for example a
+            // mid-tick 1-payload write) instead of draining the whole shard
+            // first. Only the first claimant may break, so at most one
+            // consumer per shard can leave early, and only when the shard
+            // is shared. The consumers that claimed the other strides will
+            // finish the shard, so unsubscription after the break cannot
+            // starve it; OS pre-emption can delay completion but the idle
+            // re-walk remains the backstop.
+            if (!checkFirst && firstClaimant)
+            {
+                immutable claimsNow = atomicLoad!(MemoryOrder.raw)(*shc) >> 32;
+                if (claimsNow > ownClaims)
+                {
+                    immutable tnext = atomicLoad!(MemoryOrder.raw)(bp[tseqIdx + 1]);
+                    if (atomicLoad!(MemoryOrder.acq)(bp[tnext & F.Lmask]) == sentinelOf(tnext))
+                        return 0;
+                }
+            }
         }
     }
 
