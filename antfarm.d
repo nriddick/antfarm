@@ -19,7 +19,8 @@ module antfarm;
 
 import core.atomic;
 import core.stdc.stdio : fprintf, stderr, snprintf;
-import core.stdc.stdlib : abort, aligned_alloc, calloc, free;
+import core.stdc.stdlib : abort, aligned_alloc, free;
+import core.stdc.string : memset;
 
 version (Posix)
 {
@@ -44,6 +45,12 @@ enum CLAIM_CHUNK = 16;
 enum BIG_CHUNK = 64;
 /// Maximum supported number of segments K (spec suggests 4 or 8).
 enum KMAX = 16;
+
+/// Spec 3b: producer ticket slot stride in ulongs. Each slot's hash sits on
+/// its own 64-byte cache line: tickets are shared mutable state under the
+/// registration CAS, and the buffer cannot align them beyond 8 bytes, so
+/// the stride (not the natural ulong size) must carry the isolation.
+private enum size_t PROD_SLOT_STRIDE = 8;
 
 /// Spec 5a: a subscriber reference lives in the most significant half of Rt.
 enum ulong SUB = 1UL << 32;
@@ -180,6 +187,14 @@ private ulong mixToken(uint slot, ulong reqs) pure nothrow @nogc @safe
     return x == 0 ? 1 : x;
 }
 
+/// Slot i's hash word within a producer ticket array. PROD_SLOT_STRIDE
+/// ulongs (64 bytes) per slot, so a CAS on one hash never touches another
+/// slot's cache line.
+private shared(ulong)* prodSlot(shared(ulong)* hashes, size_t i) nothrow @nogc @system
+{
+    return hashes + i * PROD_SLOT_STRIDE;
+}
+
 struct AntFarm
 {
     // ---- immutable configuration (spec 1, 3) ----
@@ -280,13 +295,19 @@ struct AntFarm
         f.shmFd = fd;
         if (maxBulk > 0)
         {
-            f.prodHashBulk = cast(shared(ulong)*) calloc(maxBulk, ulong.sizeof);
+            // 64-aligned so slot 0's line cannot bleed into an unrelated
+            // heap chunk; zeroed because aligned_alloc does not zero.
+            f.prodHashBulk = cast(shared(ulong)*)
+                aligned_alloc(64, maxBulk * PROD_SLOT_STRIDE * 8);
             if (f.prodHashBulk is null) fatal("alloc producer tickets failed");
+            memset(cast(void*) f.prodHashBulk, 0, maxBulk * PROD_SLOT_STRIDE * 8);
         }
         if (maxSmall > 0)
         {
-            f.prodHashSmall = cast(shared(ulong)*) calloc(maxSmall, ulong.sizeof);
+            f.prodHashSmall = cast(shared(ulong)*)
+                aligned_alloc(64, maxSmall * PROD_SLOT_STRIDE * 8);
             if (f.prodHashSmall is null) fatal("alloc producer tickets failed");
+            memset(cast(void*) f.prodHashSmall, 0, maxSmall * PROD_SLOT_STRIDE * 8);
         }
 
         foreach (i; 0 .. KMAX)
@@ -306,10 +327,10 @@ struct AntFarm
         if (atomicLoad!(MemoryOrder.raw)(Cf) != 0)
             fatal("destroy with live consumers");
         foreach (i; 0 .. maxBulk)
-            if (prodHashBulk !is null && atomicLoad!(MemoryOrder.raw)(prodHashBulk[i]) != 0)
+            if (prodHashBulk !is null && atomicLoad!(MemoryOrder.raw)(*prodSlot(prodHashBulk, i)) != 0)
                 fatal("destroy with live bulk ticket");
         foreach (i; 0 .. maxSmall)
-            if (prodHashSmall !is null && atomicLoad!(MemoryOrder.raw)(prodHashSmall[i]) != 0)
+            if (prodHashSmall !is null && atomicLoad!(MemoryOrder.raw)(*prodSlot(prodHashSmall, i)) != 0)
                 fatal("destroy with live small ticket");
         if (prodHashBulk !is null)
             free(cast(void*) prodHashBulk);
@@ -367,7 +388,7 @@ struct AntFarm
         foreach (i; 0 .. cap)
         {
             immutable h = mixToken(cast(uint) i, reqs);
-            if (cas(&hashes[i], 0UL, h))
+            if (cas(prodSlot(hashes, i), 0UL, h))
                 return Token(t, cast(uint) i, h);
         }
         fatal("producer slot missing");
@@ -381,9 +402,9 @@ struct AntFarm
         immutable cap = tok.tier == Tier.bulk ? maxBulk : maxSmall;
         auto hashes = tok.tier == Tier.bulk ? prodHashBulk : prodHashSmall;
         if (hashes is null || tok.slot >= cap) fatal("unregister bad slot");
-        if (atomicLoad!(MemoryOrder.raw)(hashes[tok.slot]) != tok.hash)
+        if (atomicLoad!(MemoryOrder.raw)(*prodSlot(hashes, tok.slot)) != tok.hash)
             fatal("unregister token mismatch");
-        atomicStore!(MemoryOrder.raw)(hashes[tok.slot], 0UL);
+        atomicStore!(MemoryOrder.raw)(*prodSlot(hashes, tok.slot), 0UL);
         if (tok.tier == Tier.bulk)
         {
             if (atomicFetchSub(Prbulk, 1) <= 0) fatal("Prbulk underflow");
@@ -401,7 +422,7 @@ struct AntFarm
         immutable cap = tok.tier == Tier.bulk ? maxBulk : maxSmall;
         auto hashes = tok.tier == Tier.bulk ? prodHashBulk : prodHashSmall;
         if (hashes is null || tok.slot >= cap) fatal("write bad token slot");
-        if (atomicLoad!(MemoryOrder.raw)(hashes[tok.slot]) != tok.hash)
+        if (atomicLoad!(MemoryOrder.raw)(*prodSlot(hashes, tok.slot)) != tok.hash)
             fatal("write token mismatch");
     }
 
