@@ -60,7 +60,9 @@ ulong lowHalf(AntFarm* f, uint ki)
 void testArithmetic()
 {
     check(sqcsOf(1) == 1, "sqcsOf(1)");
-    check(sqcsOf(4) == 1, "sqcsOf(4)");
+    check(sqcsOf(2) == 1, "sqcsOf(2)");
+    check(sqcsOf(3) == 2, "sqcsOf(3)");
+    check(sqcsOf(4) == 2, "sqcsOf(4)");
     check(sqcsOf(5) == 3, "sqcsOf(5)");
     check(sqcsOf(100) == 10, "sqcsOf(100)");
     check(sqcsOf(128) == 12, "sqcsOf(128)");

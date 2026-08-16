@@ -75,11 +75,11 @@ private enum ulong SENTINEL_XOR = 0x9E37_79B9_7F4A_7C15UL;
 /// 64-bit sequence pointing at the start of the table (spec 5c/Thead).
 ulong sentinelOf(ulong seq) pure nothrow @nogc @safe { return seq ^ SENTINEL_XOR; }
 
-/// Spec 2a: square root with a minimum value of 1 for Cs <= 4, capped at the
+/// Spec 2a: square root with a minimum value of 1 for Cs <= 2, capped at the
 /// preallocated leaf count. ceil_sqrt(128) == 12.
 uint sqcsOf(ulong cs) pure nothrow @nogc @safe
 {
-    if (cs <= 4) return 1;
+    if (cs <= 2) return 1;
     ulong r = 2;
     while (r * r < cs) ++r;
     return r > MAX_LEAVES ? MAX_LEAVES : cast(uint) r;

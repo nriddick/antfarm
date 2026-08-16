@@ -22,18 +22,18 @@ The production-shaped topology is **`nc=8`, `nb=2`, `K=8`, 16 MiB ring, batch �
 
 | Shape | Result |
 |---|---:|
-| `body=16` (128 B payload), `batch=80` | **56.0–57.1 M payloads/s** (~6.8 GiB/s of body) |
-| `body=2`, `batch=256` | **59.5 M payloads/s** |
-| `body=16`, `batch=512` | ~61.8–62.1 M payloads/s (K=4) |
-| `body=1024` (8 KiB payload), `batch=63..80` | ~3.2–3.5 M payloads/s, **~26 GiB/s of body** |
+| `body=16` (128 B payload), `batch=80` | **59.2 M payloads/s** (~7.1 GiB/s of body) |
+| `body=2`, `batch=256` | **61.5 M payloads/s** |
+| `body=16`, `batch=512` | ~61.2–61.6 M payloads/s (K=8) |
+| `body=1024` (8 KiB payload), `batch=80` | ~4.3 M payloads/s, **~32.8 GiB/s of body** |
 
 Important nuances from `construction/perftest`:
 
 - **Batching matters more than anything.** `batch=1` is 4–5× slower. The batch curve keeps climbing to ~256–512.
-- **Two consumers is the worst count**, not one: `SqCs=1` like one consumer, plus an extra coherence participant. One consumer gets ~41–43 M payloads/s; eight consumers with two bulk producers is the robust winner.
+- **One consumer is the weakest count** now that the `SqCs=1` floor stops at `Cs <= 2`: two consumers still share one shard but add a worker, and beat one consumer (~44 M vs ~38–41 M payloads/s at `nb=2`). Eight consumers with two bulk producers remains the robust winner.
 - **`nc=8 nb=2` beats `nb=1` and `ns=4`.** A single bulk producer is a publish-side serialization tax that grows with ring size (24.8 Mpps at 128 MiB vs 40.2 for two bulk producers).
 - **8–16 MiB is the sweet spot.** It matches the 16 MiB L3. A 32 MiB ring drops ~25% throughput; 256 MiB drops ~38%. The one operational win of a big ring is that `write()==0` disappears (producers are never full).
-- **Execute-side cost is ~31.5 ns/job** in the digest bench (linear claim 16, body-touching `Call`). Claim amortization is real: claim-1 costs ~47 ns/job, a **1.5–1.6× claim dividend**. Shuffled vs linear layout is ~free.
+- **Execute-side cost is ~31.2 ns/job** in the digest bench (linear claim 16, body-touching `Call`). Claim amortization is real: claim-1 costs ~46.7 ns/job, a **~1.5× claim dividend**. Shuffled vs linear layout is ~free (30.3 vs 31.2 ns/job).
 
 ### 2.2 Tail latency — the real product
 
@@ -41,11 +41,11 @@ From `construction/perftest/last_tail.txt` (pinned `nc=6`, publish → first `Ca
 
 | Scene | p50 | p99 | p99.9 |
 |---|---:|---:|---:|
-| idle | 371 ns | 3.3 µs | 7.3 µs |
-| mid-drain, dump 256 | 5.3 µs | 22.5 µs | 28.3 µs |
-| mid-drain, dump 2048 | 12.0 µs | 29.8 µs | 167 µs |
-| mid-drain, dump 8192 | **14.0 µs** | **30.0 µs** | 57.2 µs |
-| small dump (32) | 331 ns | 2.6 µs | 4.9 µs |
+| idle | 380 ns | 3.2 µs | 7.7 µs |
+| mid-drain, dump 256 | 5.2 µs | 22.5 µs | 25.3 µs |
+| mid-drain, dump 2048 | 12.0 µs | 29.9 µs | 273 µs |
+| mid-drain, dump 8192 | **14.3 µs** | **30.2 µs** | 186 µs |
+| small dump (32) | 311 ns | 2.7 µs | 5.0 µs |
 
 The headline: **p99 no longer grows with dump size.** A mid-tick write arriving while an 8192-job table is being drained reaches its first worker in ~14 µs p50 / ~30 µs p99, versus ~1.8 ms in earlier revisions. The mechanisms responsible:
 
@@ -57,7 +57,7 @@ The headline: **p99 no longer grows with dump size.** A mid-tick write arriving 
 
 ### 2.3 Scaling expectations
 
-The current data tops out at `nc=8` on a 6c/12t host. The design's scaling bets are visible: per-consumer shard counters, leaf tallies distributed by `sqrt(Cs)`, sweeper-based load balancing, and claim granularity of 16 mean **more consumers should scale better than Disruptor WorkerPool does**. That remains to be proven on more cores, and NUMA is explicitly uninvestigated.
+The current data tops out at `nc=8` on a 6c/12t host. This revision lowered the `SqCs=1` floor from `Cs <= 4` to `Cs <= 2`, so 3–4 consumers now shard across 2 leaf tallies and 2 claim counters; paired A/B on this host shows that lifts `nc=3`/`nc=4` slightly and leaves `nc=8` unchanged. The design's scaling bets are visible: per-consumer shard counters, leaf tallies distributed by `sqrt(Cs)`, sweeper-based load balancing, and claim granularity of 16 mean **more consumers should scale better than Disruptor WorkerPool does**. That remains to be proven on more cores, and NUMA is explicitly uninvestigated.
 
 ## 3. How it compares
 
