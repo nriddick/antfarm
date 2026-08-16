@@ -728,6 +728,15 @@ struct ConsumerView
     /// shard assignment.
     bool sweeperNext;
 
+    /// Idle-path re-walk cursor: the sequence up to which the current
+    /// position segment has been drained by sweepCurrentPosition. Tables
+    /// before it are confirmed complete (claims/completions only move
+    /// forward and the segment's tables are written in sequence order), so
+    /// a park re-walk resumes from here instead of re-scanning the whole
+    /// segment — which grows O(tables) with every mid-tick write and cost
+    /// the idle floor. Reset when the position moves to a new segment.
+    ulong sweepSeq;
+
     /// Bench-only (perftest/tail). 0 = production: drain the shard, use
     /// the table's chunk from its published avgCost (5e rev5). Nonzero
     /// max-runs ends the visit after that many claimed runs and still
@@ -796,6 +805,7 @@ struct ConsumerView
         curLti = lti;
         trailN = 0;
         sweeperNext = false;
+        sweepSeq = 0;
         hasRef = true;
         return es;
     }
@@ -1028,6 +1038,7 @@ private:
         curKi = ki;
         curEi = ei;
         curLti = lti;
+        sweepSeq = 0; // new position segment: re-walk from its first table
     }
 
     /// Spec 5c: if the position is confirmed and nextSeq names an initialized
@@ -1137,11 +1148,14 @@ private:
         tryReleaseTrailing();
     }
 
-    /// Idle path: re-walk the current position segment from its first table
-    /// up to nextSeq, claiming any work that earlier hot-path visits left
-    /// behind (for example a small table skipped by a consumer whose shard
-    /// was not 0 and which had no carried-sweeper role). The segment is
-    /// protected by the position reference, so the data is present.
+    /// Idle path: re-walk the current position segment from the last drained
+    /// position up to nextSeq, claiming any work that earlier hot-path
+    /// visits left behind (for example a small table skipped by a consumer
+    /// whose shard was not 0 and which had no carried-sweeper role). The
+    /// segment is protected by the position reference, so the data is
+    /// present. Tables before the sweepSeq cursor are confirmed complete,
+    /// so each park resumes where the previous pass stopped: the walk stays
+    /// O(new tables) instead of O(tables in the segment) per miss.
     void sweepCurrentPosition() nothrow @nogc @system
     {
         auto f = F;
@@ -1150,7 +1164,7 @@ private:
         immutable end = nextSeq;
         if (seqt >= end)
             return;
-        ulong seq = seqt;
+        ulong seq = seqt > sweepSeq ? seqt : sweepSeq;
         while (seq < end)
         {
             immutable idx = seq & f.Lmask;
@@ -1177,6 +1191,7 @@ private:
             }
             seq = tnext;
         }
+        sweepSeq = end;
         tryReleaseTrailing();
     }
 
