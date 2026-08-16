@@ -387,10 +387,66 @@ the loop-local by reference) — noted in `review_torture/README.md`.
 
 ---
 
-## 9. Audit provenance
+## 9. Buffer-size study (2026-08-16)
+
+Motivation: does a larger ring pay — either because 16 MiB ≈ L3 is a cliff,
+or because a multi-MB Exmax fits inside a larger buffer's segment span and
+activates opportunistic quota renewal (`seqb - wtprime >= exmax` in 3a/4b)?
+Raw data: `calib_buffersize.txt`, `calib_buffersize2.txt`.
+
+Method: `throughput --once`, K=8 nc=8 nb=2 ns=0, body=16, batch=128,
+repeats=3, EPP=performance, Ln ∈ {2, 4, 8, 16, 32, 64, 128, 256} MiB
+(`--ln MiB<<17`), across three quota regimes:
+
+| Ln | default (qb=segCap, renewal inert) | qb=1 MiB (active ≥8 MiB) | qb=2 MiB (active ≥16 MiB) |
+|----|----|----|----|
+| 2 MiB | 59.1 | — | — |
+| 4 MiB | 58.3 | 56.0 | — |
+| 8 MiB | 59.8 | 59.5 | 59.1 |
+| 16 MiB | 57.9 | 58.6 | 57.3 |
+| **32 MiB** | **43.3** | **43.5** | **44.3** |
+| 64 MiB | 41.2 | 41.8 | 41.3 |
+| 128 MiB | 39.3 | 39.3 | 39.8 |
+| 256 MiB | 36.1 | 37.0 | 36.1 |
+
+K=4 tracks K=8 exactly at 8/32/128/256 MiB.
+
+### Findings
+
+1. **Sweet spot is 8–16 MiB (~58–60 Mpps).** 16 MiB equals the 16 MiB L3;
+   2–4 MiB are equally good. Nothing is gained beyond it.
+2. **The cliff at 32 MiB (−25%) and the continued decline to 36 Mpps at
+   256 MiB are memory-subsystem effects, not the Exmax mechanics.** The
+   renewal hypothesis is falsified: activating opportunistic renewal
+   (qb=1/2 MiB so exmax ≤ segCap for Ln ≥ 32 MiB) changes nothing vs the
+   sweep-based renewal — the Rt sweep is cold (~once per 240 writes) and
+   cheap (≤ 7 acquire loads). The decline tracks the contended mutable
+   lines (Tcount/Pcount/Rt) and payload streams falling out of L3, then
+   4 KiB TLB pressure growing with the doubled magic mapping.
+3. **Stalls vanish at ≥ 32 MiB** (0 vs ~150–270k at ≤ 16 MiB): the one
+   operational win of a big ring — producers never see `write()==0` — at
+   the cost of 25–40% throughput.
+4. **Publish is the sensitive side at scale**: nb=1 at 128 MiB collapses to
+   24.8 Mpps (vs 40.2 for nb=2); ns=4 lands at 36.4.
+5. **Consumer-side execute cost is size-invariant** (digest linear16
+   body=16: 30.3 → 31.8 ns/job from 16 → 256 MiB) and **shuffled ≈ linear
+   even at 256 MiB** (31.3 vs 32.4 ns/job) — the earlier "layout does not
+   matter at scale" finding holds; the walk is not the bottleneck, the
+   ring's contended lines are.
+
+### Implication
+
+Keep 16 MiB for throughput on this host. A larger ring buys a never-full
+guarantee at a real cliff; the TLB half of the 32→256 decline is a
+kernel-side lever (huge pages for the shm mapping), not a farm change.
+
+---
+
+## 10. Audit provenance
 
 Probe: `/tmp/layout_probe.d` (offsetof/alignof/sizeof + table-offset
 arithmetic compiled against `antfarm.d`; output captured 2026-08-16).
 Sweep records this session: `last_sweep.txt`, `sweep_current2.txt`,
-`sweep_preyield.txt`, `sweep_t18prev.txt`; environmental note at the top
-of this file.
+`sweep_preyield.txt`, `sweep_t18prev.txt`, `calib_sweep.txt`,
+`calib_throughput.txt`, `calib_item2.txt`, `calib_buffersize.txt`,
+`calib_buffersize2.txt`; environmental note at the top of this file.
