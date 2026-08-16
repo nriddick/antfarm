@@ -51,6 +51,32 @@ Shared test counters must be `__gshared shared(T)` (see comments). Plain
 `shared T` module globals are TLS and will silently break multi-threaded
 accounting under LDC.
 
+## Known TSAN noise (harness, not the farm)
+
+`make -C review_torture run-tsan` (`-fsanitize=thread`, halt_on_error) stops
+on one data race, and it is a test-harness bug, not `antfarm.d`:
+
+- **Location**: `torture_tests.d:378` — `stormerMain` writing
+  `StormCtx.cycles` (`torture_tests.d:359`); both race stacks are entirely
+  inside `torture_tests.d`, no `antfarm` frames.
+- **Cause**: D closures capture loop-body locals by reference. In T06 the
+  six storm threads are spawned with `storm[i] = new Thread({ stormerMain(hc); })`
+  inside the loop; every closure captures the *same* `hc` variable (whose
+  final value is `&hctx[5]`), so all six threads concurrently write one
+  ctx's `cycles`. (Minimal repro of the capture semantics: four closures
+  each incrementing `&xs[i]` in a loop all increment `xs[3]`.)
+- **Implication**: the storm threads still subscribe/unsubscribe and
+  exercise the farm (T06's correctness checks pass), but the fan-out
+  collapses onto one `StormCtx` — `hctx[0..4]` are unused and the cycle
+  count is racy.
+- **Effect on the run**: `halt_on_error=1` stops at this first report, so
+  tests after T06 get no TSAN coverage. Treat any TSAN report *other than*
+  `torture_tests.d:378/:412` as a real finding; this one is known noise.
+- **Fix (not applied, cosmetic)**: spawn each storm thread through a
+  helper that takes the `StormCtx*` by value so every closure captures its
+  own instance, e.g. `auto spawn(ref StormCtx c) { return new Thread({ stormerMain(&c); }); }`
+  — then `storm[i] = spawn(hctx[i]);`. Harmless to the farm either way.
+
 ## Design decisions (author, 2026-08-11)
 
 These resolve the open questions from `CODE_REVIEW.md` and set policy for the
