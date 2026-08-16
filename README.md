@@ -95,8 +95,11 @@ library plus a test runner.
   the producer has initialized that segment's stats), not when it reads the
   `Tnext` link. The old segment's reference is retained (trailing) until
   the segment is confirmed complete via the `Sd` crossing.
-- **PayloadHeader is 17 ulongs** (136 bytes): the spec's field list
-  (MaxCs/Done, Plen, Call, 6 filler, Pcount, 7 filler) sums to 17, not 16.
+- **PayloadHeader is 16 ulongs** (128 bytes, revision 5): MaxCs/Done,
+  Plen, 6 filler, Pcount, Call, 6 filler. Call sits adjacent to Pcount so
+  they share one cache line; that is safe because Call is dereferenced only
+  by a consumer holding a valid claim (the same thread that just wrote
+  Pcount).
 - **`PayloadBody = const(ulong)[]`** — a mutable slice of const ulongs
   (`const ulong[]` would const the slice itself and make `PayloadEntry`
   unassignable).

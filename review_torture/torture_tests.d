@@ -693,6 +693,25 @@ void t13_create_validation()
     auto f = AntFarm.create(1 << 14, 2, 1, 1, 2048, 1, 512);
     check(f.K == 2 && f.segCap == (1 << 13) && f.exmax == 2560, "geom");
     f.destroy();
+    // An unused bulk tier must not inject a segCap quota into the Exmax
+    // check (regression: nb==0 with a default qb used to fatal "quota
+    // exceeds Exmax" unless the caller mirrored qs into qb).
+    auto f0 = AntFarm.create(1 << 14, 2, 1, 0, 0, 2, 512);
+    check(f0.exmax == 1024, "nb0 exmax");
+    auto tok = f0.registerProducer(Tier.small);
+    check(tok.valid, "nb0 reg");
+    PayloadHeader h;
+    h.maxCs = 1;
+    h.done = 1;
+    h.call = &countingCb;
+    ulong v = 7;
+    PayloadEntry e;
+    e.header = &h;
+    e.body = (cast(const(ulong)*) &v)[0 .. 1];
+    ulong exi = 512;
+    check(f0.write((&e)[0 .. 1], exi, tok) == 1, "nb0 write");
+    f0.unregisterProducer(tok);
+    f0.destroy();
     say("T13 create OK");
 }
 
@@ -825,9 +844,31 @@ void t17_write_size_wrap()
     immutable okWrap = expectAbort(wrap, "wrap");
     immutable okBig = expectAbort(unsized, "unsizable");
     free(big);
+
+    // Per-tier sizing: a payload that fits only the bulk tier's quota
+    // (singleton in (quotaSmall, quotaBulk]) must abort from a small-tier
+    // producer - previously it cleared the farm-max check and then returned
+    // write()==0 forever - and must be publishable from a bulk producer.
+    enum midLen = 1500; // singleton 56 + 17 + 1500 = 1573 in (512, 2048]
+    auto mid = cast(ulong*) malloc(midLen * ulong.sizeof);
+    check(mid !is null, "T17 mid");
+    mid[0] = 0;
+    PayloadEntry midsize;
+    midsize.header = &h;
+    midsize.body = mid[0 .. midLen];
+    immutable okMidSmall = expectAbort(midsize, "midsize-small");
+    auto tokb = f.registerProducer(Tier.bulk);
+    check(tokb.valid, "T17 bulk reg");
+    ulong exi = 2048;
+    immutable wrote = f.write((&midsize)[0 .. 1], exi, tokb);
+    f.unregisterProducer(tokb);
+    check(wrote == 1, "midsize bulk write");
+    free(mid);
     f.unregisterProducer(tok);
     f.destroy();
-    say((okWrap && okBig) ? "T17 fatal on wrap/unsizable OK" : "T17 DEFECT confirmed");
+    say((okWrap && okBig && okMidSmall && wrote == 1)
+        ? "T17 fatal on wrap/unsizable/per-tier OK"
+        : "T17 DEFECT confirmed");
 }
 
 void t18_pure_churn_orphan()

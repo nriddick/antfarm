@@ -37,12 +37,17 @@ else
 enum MAX_CONSUMERS_LIMIT = 128;
 /// Spec 2a: preallocated leaf tallies per segment: ceiling square root of 128.
 enum MAX_LEAVES = 12;
-/// Spec 5e-d.
+/// Spec 5e (revision 5): small-table threshold ceiling for the auto rule
+/// clamp(sq * chunk, 16, 256); also the fixed default (farm field 0 selects
+/// the auto rule).
 enum SMALL_TABLE_THRESHOLD = 64;
-/// Spec 5e-g.
-enum CLAIM_CHUNK = 16;
-/// Spec 5e-g.
-enum BIG_CHUNK = 64;
+/// Spec 5e (revision 5): chunk ceiling for the avgCost hint; a producer
+/// declares its Call cost class in write() and consumers compute
+/// specChunk = MAX_CHUNK >> avgCost. Default avgCost = 1 -> chunk 16, the
+/// midpoint of [1, 32] and the pre-revision default.
+enum uint MAX_CHUNK = 32;
+/// log2(MAX_CHUNK); avgCost outside 0 .. MAX_AVG_COST is a caller error.
+enum uint MAX_AVG_COST = 5;
 /// Maximum supported number of segments K (spec suggests 4 or 8).
 enum KMAX = 16;
 
@@ -87,6 +92,17 @@ void fatal(const(char)[] msg) nothrow @nogc @system
     abort();
 }
 
+/// Packed-field wrap guards (Tcount/Pcount claims, calls, completions).
+/// Provably unreachable under the 512 caps, the claim-per-payload rule and
+/// MAX_CONSUMERS_LIMIT (see perftest/SPECULATIVE_OPT_2026-08-16_1.md §2),
+/// and the A/B shows gating them saves ~0% (median 59.64 vs 59.31 Mpps at
+/// the winner) — below the 1% adoption bar — so they stay on in release as
+/// the corruption tripwire. -d-version=noverify is the opt-out.
+version (noverify)
+    private enum bool VERIFY_WRAPS = false;
+else
+    private enum bool VERIFY_WRAPS = true;
+
 /// Spec 4a: type-erased const parameters for Call's work.
 alias PayloadBody = const(ulong)[];
 
@@ -94,17 +110,21 @@ alias PayloadBody = const(ulong)[];
 alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration) nothrow @nogc @system;
 
 /// Spec 5f: payload header, 16 ulongs (128 bytes) as laid out in the buffer.
+/// Call sits immediately after Pcount: it is dereferenced only after a valid
+/// claim is acquired (by the consumer that just wrote Pcount), so it can
+/// share Pcount's cache line without adding cross-thread traffic; with the
+/// 6 filler words after Call, Pcount's line is fully covered in every phase.
 struct PayloadHeader
 {
     uint maxCs;             /// maximum consumers per payload; 1 = single threaded
     uint done;              /// iterations to complete; 1 = single threaded
     ulong plen;             /// payload body length in ulongs
-    Callback call;          /// work callback
     ulong[6] filler;
     shared ulong pcount;    /// 32 MSB claims | 16 bits calls | 16 LSB completions
-    ulong[7] filler2;
+    Callback call;          /// work callback — claim-gated, shares Pcount's line
+    ulong[6] filler2;
 }
-static assert(PayloadHeader.sizeof == 136);
+static assert(PayloadHeader.sizeof == 128);
 /// PayloadHeader length in ulongs.
 private enum ulong PHEAD_LEN = PayloadHeader.sizeof / 8;
 
@@ -210,6 +230,9 @@ struct AntFarm
     uint maxSmall;
     ulong quotaSmall;   /// Exi for small producers
     ulong exmax;        /// Exmax: sum of all producer quotas (spec 3a)
+    /// Small-table threshold (spec 5e-d, revision 5): 0 selects the auto
+    /// rule clamp(sq * chunk, 16, 256); otherwise a fixed override.
+    uint smallThreshold;
 
     // ---- magic buffer ----
     shared(ulong)* buf; /// 2*Ln ulongs mapped; second half mirrors the first
@@ -240,18 +263,22 @@ struct AntFarm
 
     static AntFarm* create(ulong ln = 1 << 20, uint k = 8, uint expectedConsumers = 4,
                            uint maxBulk = 2, ulong quotaBulk = 0,
-                           uint maxSmall = 16, ulong quotaSmall = 4096) nothrow @nogc @system
+                           uint maxSmall = 16, ulong quotaSmall = 4096,
+                           uint smallThreshold = SMALL_TABLE_THRESHOLD) nothrow @nogc @system
     {
         if (k < 2 || k > KMAX || (k & (k - 1)) != 0) fatal("K must be a power of 2 in [2, KMAX]");
         if (ln < (1 << 14) || (ln & (ln - 1)) != 0) fatal("Ln must be a power of 2 >= 2^14");
         immutable segCap = ln / k;
         if (segCap < 2048) fatal("segment capacity too small");
         if (expectedConsumers == 0) fatal("expected consumers must be > 0");
-        if (quotaBulk == 0) quotaBulk = segCap;
+        // An unused bulk tier must not inject a segCap quota into the Exmax
+        // check: with maxBulk == 0, quotaBulk stays 0 and takes no part.
+        if (maxBulk > 0 && quotaBulk == 0) quotaBulk = segCap;
         if (quotaSmall == 0) fatal("small quota must be > 0");
         if (maxBulk + maxSmall == 0) fatal("no producer capacity configured");
         immutable exmax = cast(ulong) maxBulk * quotaBulk + cast(ulong) maxSmall * quotaSmall;
-        if (quotaBulk > exmax || quotaSmall > exmax) fatal("quota exceeds Exmax");
+        if (maxBulk > 0 && quotaBulk > exmax) fatal("quota exceeds Exmax");
+        if (maxSmall > 0 && quotaSmall > exmax) fatal("quota exceeds Exmax");
         if (exmax > (k - 1) * segCap) fatal("Exmax exceeds K-1 segments' capacities");
 
         // Magic buffer: reserve 2*Ln, map the same file into both halves.
@@ -290,6 +317,7 @@ struct AntFarm
         f.maxSmall = maxSmall;
         f.quotaSmall = quotaSmall;
         f.exmax = exmax;
+        f.smallThreshold = smallThreshold;
         f.buf = cast(shared(ulong)*) p;
         f.bufBytes = bytes;
         f.shmFd = fd;
@@ -497,16 +525,20 @@ struct AntFarm
         return false;
     }
 
-    /// Spec 4. Writes as many of `payloads` as fit the caller's quota `exi`;
-    /// returns the number written. Returns 0 (full) when backpressure is too
-    /// high; callers retry or wait on consumers. `tok` is required.
-    ulong write(scope PayloadEntry[] payloads, ref ulong exi, Token tok)
-        nothrow @nogc @system
+    /// Spec 4 (revision 5). Writes as many of `payloads` as fit the caller's
+    /// quota `exi`; returns the number written. Returns 0 (full) when
+    /// backpressure is too high; callers retry or wait on consumers. `tok`
+    /// is required. `avgCost` is the producer's declared Call cost class, a
+    /// log2 shift in 0 .. MAX_AVG_COST: 0 means Calls are very cheap (chunk
+    /// stays at MAX_CHUNK, maximum claim amortization), larger values shrink
+    /// the chunk (short visits, less tail); the default 1 lands on chunk 16.
+    ulong write(scope PayloadEntry[] payloads, ref ulong exi, Token tok,
+                uint avgCost = 1) nothrow @nogc @system
     {
         requireToken(tok);
         if (payloads.length == 0) return 0;
+        if (avgCost > MAX_AVG_COST) fatal("avgCost out of range");
         immutable quota = tok.tier == Tier.bulk ? quotaBulk : quotaSmall;
-        immutable maxExi = quotaBulk > quotaSmall ? quotaBulk : quotaSmall;
         immutable csl = atomicLoad!(MemoryOrder.acq)(Cf);
         immutable cs = csl > 0 ? cast(uint) csl : 1;
         immutable sq = sqcsOf(cs);
@@ -531,9 +563,15 @@ struct AntFarm
                     fatal("payload size overflow");
                 immutable psz = PHEAD_LEN + pe.body.length;
                 immutable oneMt = pe.header.maxCs > 1 ? 1UL : 0UL;
+                // Per-tier check: a payload whose minimal table exceeds this
+                // producer's tier quota can never be published by it, so this
+                // is a caller error, not backpressure. Checking the caller's
+                // quota (not the farm max) keeps write()==0 strictly meaning
+                // "farm full": a small-tier caller cannot spin forever on a
+                // payload that only fits the bulk tier.
                 immutable singleton = tableSizeChecked(1, oneMt, sq, psz);
-                if (singleton > maxExi)
-                    fatal("payload larger than any producer Exi");
+                if (singleton > quota)
+                    fatal("payload larger than this producer tier's Exi");
                 immutable cm = m + (pe.header.maxCs > 1 ? 1 : 0);
                 immutable cand = tableSizeChecked(i + 1, cm, sq, addChecked(psum, psz, "payload sum overflow"));
                 if (cand > exi) break;
@@ -595,21 +633,25 @@ struct AntFarm
         w[3] = cs;
         w[4] = sq;
         w[5] = size; // table size, accounted into the segment's Sd on completion
-        w[6] = 0; w[7] = 0;
+        w[6] = avgCost; // chunk hint: specChunk = MAX_CHUNK >> avgCost (5e rev5)
+        w[7] = 0;
 
-        // Tindex: total index first, MT index second.
+        // Tindex: total index first, MT index second. Plain adds: po is
+        // bounded by the table size, which the fit loop's overflow-checked
+        // psum already validated against exi (spec 4a's checked arithmetic
+        // ran there), so it cannot wrap here.
         ulong po = payOff;
         foreach (i; 0 .. n)
         {
             w[THEAD_LEN + i] = po;
-            po = addChecked(po, PHEAD_LEN + payloads[i].body.length, "Tindex overflow");
+            po += PHEAD_LEN + payloads[i].body.length;
         }
         po = payOff;
         size_t mi = THEAD_LEN + n;
         foreach (i; 0 .. n)
         {
             immutable o = po;
-            po = addChecked(po, PHEAD_LEN + payloads[i].body.length, "Tindex overflow");
+            po += PHEAD_LEN + payloads[i].body.length;
             if (payloads[i].header.maxCs > 1)
                 w[mi++] = o;
         }
@@ -687,9 +729,10 @@ struct ConsumerView
     bool sweeperNext;
 
     /// Bench-only (perftest/tail). 0 = production: drain the shard, use
-    /// CLAIM_CHUNK / BIG_CHUNK. Nonzero max-runs ends the visit after that
-    /// many claimed runs and still advances nextSeq (leftovers: idle re-walk).
-    /// Nonzero chunk replaces the spec chunk size.
+    /// the table's chunk from its published avgCost (5e rev5). Nonzero
+    /// max-runs ends the visit after that many claimed runs and still
+    /// advances nextSeq (leftovers: idle re-walk). Nonzero chunk replaces
+    /// the published chunk size.
     uint benchMaxRuns;
     uint benchChunk;
 
@@ -829,18 +872,18 @@ struct ConsumerView
                 // they starve whenever no active consumer maps there. A
                 // consumer carrying the sweeper role from the previous
                 // table sweeps a small table regardless of its own shard.
-                if (!sweeper && sweeperNext && tlen < SMALL_TABLE_THRESHOLD && myShi != 0)
+                if (!sweeper && sweeperNext && tlen < smallThresh(sq, bp, idx) && myShi != 0)
                     sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
                                             progOff, tlen, sq, 0, true, false) & 1) != 0;
                 // Bench yielders (benchMaxRuns != 0) also try shard 0 on a
                 // small next table, so a mid-tick sentinel is visible after
                 // one run instead of waiting for a native Shi==0 visitor.
-                if (!sweeper && benchMaxRuns != 0 && tlen < SMALL_TABLE_THRESHOLD && myShi != 0)
+                if (!sweeper && benchMaxRuns != 0 && tlen < smallThresh(sq, bp, idx) && myShi != 0)
                     sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
                                             progOff, tlen, sq, 0, true, false) & 1) != 0;
                 if (sweeper)
                 {
-                    immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
+                    immutable nshards = tlen < smallThresh(sq, bp, idx) ? 1 : sq;
                     bool adopted;
                     foreach (s; 0 .. nshards)
                         if (s != myShi)
@@ -875,6 +918,29 @@ struct ConsumerView
     }
 
 private:
+    /// Spec 5e (revision 5): chunk for this table from its published
+    /// avgCost. The producer declared the Call cost class: cheap classes
+    /// get big chunks (claim amortization), expensive classes get small
+    /// chunks (short visits, less leftover tail). Clamped so a corrupted
+    /// header can never produce a zero chunk. All consumers read the same
+    /// header word, so Tcount shiter arithmetic cannot disagree.
+    uint chunkOf(shared(ulong)* bp, ulong tseqIdx) nothrow @nogc @system
+    {
+        immutable ac = cast(uint) atomicLoad!(MemoryOrder.raw)(bp[tseqIdx + 6]);
+        return MAX_CHUNK >> (ac > MAX_AVG_COST ? MAX_AVG_COST : ac);
+    }
+
+    /// Spec 5e-d (revision 5): small-table threshold for this table. A
+    /// nonzero farm field is the fixed override (64 = pre-revision
+    /// behavior); 0 selects the auto rule clamp(sq * chunk, 16, 256), so a
+    /// table shards iff it can give every shard at least one full chunk.
+    uint smallThresh(uint sq, shared(ulong)* bp, ulong tseqIdx) nothrow @nogc @system
+    {
+        if (F.smallThreshold != 0) return F.smallThreshold;
+        immutable t = sq * chunkOf(bp, tseqIdx);
+        return t < 16 ? 16 : (t > 256 ? 256 : t);
+    }
+
     /// Spec 2a: take a count. Only the thread that observes 0→1 retracts Sub0.
     void takeRootCount(uint ki) nothrow @nogc @system
     {
@@ -1059,7 +1125,7 @@ private:
             {
                 if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
                 {
-                    immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
+                    immutable nshards = tlen < smallThresh(sq, bp, idx) ? 1 : sq;
                     foreach (s; 0 .. nshards)
                         processShard(bp, seq, idx, tindexOff, tcountOff,
                                      progOff, tlen, sq, s, true, false);
@@ -1102,7 +1168,7 @@ private:
             {
                 if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
                 {
-                    immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
+                    immutable nshards = tlen < smallThresh(sq, bp, idx) ? 1 : sq;
                     foreach (s; 0 .. nshards)
                         processShard(bp, seq, idx, tindexOff, tcountOff,
                                      progOff, tlen, sq, s, true, false);
@@ -1163,20 +1229,20 @@ private:
     {
         auto head = cast(PayloadHeader*)(bp + absIdx);
         immutable c = atomicFetchAdd(head.pcount, 1UL << 32);
-        if ((c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
+        if (VERIFY_WRAPS && (c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
         if ((c >> 32) >= head.maxCs)
             return; // overallocated
         do
         {
             immutable d = atomicFetchAdd(head.pcount, 1UL << 16);
             immutable called = (d >> 16) & 0xFFFF;
-            if (called == 0xFFFF) fatal("Pcount calls wrap");
+            if (VERIFY_WRAPS && called == 0xFFFF) fatal("Pcount calls wrap");
             if (called >= head.done)
                 break;
             auto body_ = (cast(const(ulong)*)(cast(ulong*) bp + absIdx + PHEAD_LEN))[0 .. head.plen];
             head.call(head, body_, called);
             immutable oldc = atomicFetchAdd(head.pcount, 1UL);
-            if ((oldc & 0xFFFF) == 0xFFFF) fatal("Pcount comps wrap");
+            if (VERIFY_WRAPS && (oldc & 0xFFFF) == 0xFFFF) fatal("Pcount comps wrap");
         }
         while (loopAll);
     }
@@ -1196,9 +1262,13 @@ private:
                       ulong tcountOff, ulong progOff, uint tlen, uint sq, uint shi,
                       bool checkFirst, bool allowAdopt) nothrow @nogc @system
     {
+        // 5e-d (revision 5): threshold and chunk come from the table's own
+        // header (farm override or auto rule; avgCost), so every consumer
+        // agrees on sharding and shiter for this table.
+        immutable thresh = smallThresh(sq, bp, tseqIdx);
         uint shstart, shlen, shbase;
         // 5e-d: small tables are claimed wholesale by shard 0 only.
-        if (tlen < SMALL_TABLE_THRESHOLD)
+        if (tlen < thresh)
         {
             if (shi != 0) return 0;
             shstart = 0;
@@ -1216,7 +1286,7 @@ private:
         if (shlen == 0)
             return 0;
         // 5e-g/h. benchChunk / benchMaxRuns are 0 in production.
-        immutable specChunk = shbase >= BIG_CHUNK * 16 ? BIG_CHUNK : CLAIM_CHUNK;
+        immutable specChunk = chunkOf(bp, tseqIdx);
         immutable chunk = benchChunk != 0 ? benchChunk : specChunk;
         immutable shiter = (shlen + chunk - 1) / chunk;
         uint runsDone;
@@ -1231,7 +1301,7 @@ private:
                 // Shard already exhausted; a starved one (Z <= 1: at most
                 // one prior exhausted-visitor) may be adopted. Small tables
                 // are excluded: their lone shard always reads starved.
-                if (allowAdopt && tlen >= SMALL_TABLE_THRESHOLD && claims - shiter <= 1)
+                if (allowAdopt && tlen >= thresh && claims - shiter <= 1)
                 {
                     adopt(shi, sq, tseq);
                     return 2;
@@ -1243,14 +1313,14 @@ private:
         {
             // 5e-i.
             immutable rawc = atomicFetchAdd(*shc, 1UL << 32);
-            if ((rawc >> 32) == 0xFFFF_FFFFUL) fatal("Tcount claims wrap");
+            if (VERIFY_WRAPS && (rawc >> 32) == 0xFFFF_FFFFUL) fatal("Tcount claims wrap");
             immutable x = cast(uint)(rawc >> 32);
             if (x >= shiter)
             {
                 immutable z = x - shiter;
                 if (!checkFirst)
                     feedback(z, sq); // 5h: Z = X - Shiter
-                else if (allowAdopt && tlen >= SMALL_TABLE_THRESHOLD && z <= 1)
+                else if (allowAdopt && tlen >= thresh && z <= 1)
                 {
                     adopt(shi, sq, tseq);
                     return 2;
@@ -1272,7 +1342,7 @@ private:
             // shard increments Tprogress by the shard length, whichever
             // consumer (owner, sweeper, or re-walker) that happens to be.
             immutable y = atomicFetchAdd(*shc, cast(ulong) runlen);
-            if ((y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
+            if (VERIFY_WRAPS && (y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
             if ((y & 0xFFFF_FFFFUL) == shlen - runlen)
             {
                 immutable tp = atomicFetchAdd(bp[progOff], cast(ulong) shlen);

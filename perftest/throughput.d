@@ -37,6 +37,8 @@ struct Cfg
     ulong n = 16_000_000;
     ulong qb = 0;      // 0 → segCap
     ulong qs = 4096;
+    uint avgCost = 1;  // chunk hint: MAX_CHUNK >> avgCost
+    uint small = 64;   // small-table threshold; 0 = auto clamp(sq*chunk,16,256)
     uint repeats = 3;
     bool nSet;
 }
@@ -61,6 +63,7 @@ struct ProdCtx
     size_t count;          // payloads this producer must commit
     Tier tier;
     uint batch;
+    uint avgCost;          // chunk hint for write()
     shared uint* stalls;
     shared int* timedOut;
     MonoTime deadline;
@@ -109,7 +112,7 @@ void producerMain(ProdCtx* c)
         immutable remain = c.count - done;
         immutable take = remain < c.batch ? remain : c.batch;
         immutable span = take < c.poolN ? take : c.poolN;
-        immutable wrote = c.f.write(c.pool[0 .. span], exi, tok);
+        immutable wrote = c.f.write(c.pool[0 .. span], exi, tok, c.avgCost);
         done += wrote;
         if (wrote == 0)
         {
@@ -179,11 +182,11 @@ Trial runOnce(Cfg c)
     }
 
     immutable segCap = c.ln / c.k;
-    // create() defaults quotaBulk==0 to segCap and then requires every
-    // configured quota ≤ Exmax. An unused bulk tier (nb==0) must not
-    // inject a segCap quota into that check.
-    immutable qb = c.nb == 0 ? c.qs : (c.qb == 0 ? 0 : c.qb);
-    auto f = AntFarm.create(c.ln, c.k, c.nc, c.nb, qb, c.ns, c.qs);
+    // create() defaults quotaBulk==0 to segCap only when the bulk tier is
+    // in use (nb > 0), so an unused bulk tier cannot inject a segCap quota
+    // into the Exmax check; pass the configured value straight through.
+    immutable qb = c.qb;
+    auto f = AntFarm.create(c.ln, c.k, c.nc, c.nb, qb, c.ns, c.qs, c.small);
 
     immutable poolN = c.batch < 256 ? 256 : c.batch;
     auto headers = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);
@@ -235,7 +238,7 @@ Trial runOnce(Cfg c)
         immutable share = remain / (np - i);
         pctx[i] = ProdCtx(f, entries, poolN, share,
                           i < c.nb ? Tier.bulk : Tier.small,
-                          c.batch, &stalls, &timedOut, deadline);
+                          c.batch, c.avgCost, &stalls, &timedOut, deadline);
         cursor += share;
     }
     foreach (i; 0 .. c.nc)
@@ -357,6 +360,8 @@ Cfg parseArgs(string[] args, Cfg base)
         else if (a == "--n") { c.n = strtoull(v.ptr, null, 0); c.nSet = true; }
         else if (a == "--qb") c.qb = strtoull(v.ptr, null, 0);
         else if (a == "--qs") c.qs = strtoull(v.ptr, null, 0);
+        else if (a == "--ac") c.avgCost = cast(uint) atoi(v.ptr);
+        else if (a == "--small") c.small = cast(uint) atoi(v.ptr);
         else if (a == "--repeats") c.repeats = cast(uint) atoi(v.ptr);
         else
             --i;
@@ -433,7 +438,7 @@ int runSweep(Cfg base)
     printHeader();
 
     enum uint[] bodies = [2, 16, 64, 256, 1024];
-    enum uint[] batches = [1, 8, 16, 32, 63, 64, 80, 128];
+    enum uint[] batches = [1, 8, 16, 32, 63, 64, 80, 128, 256];
 
     Trial best2 = best;
     Trial bestBytes = best;

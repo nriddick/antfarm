@@ -50,6 +50,8 @@ struct Cfg
     bool runMailbox = false;
     bool allArms = false; // default suite picks arms per scene
     Arm oneArm = Arm.stock;
+    uint avgCost = 1;  // chunk hint for dump writes
+    uint small = 64;   // small-table threshold; 0 = auto
 }
 
 __gshared shared(long) g_bg;
@@ -70,6 +72,8 @@ __gshared size_t g_cap;
 
 __gshared ulong g_spinNs;
 __gshared uint g_burstN;
+__gshared uint g_avgCost = 1;  // chunk hint for dump/sentinel writes
+__gshared uint g_small = 64;   // small-table threshold; 0 = auto
 __gshared shared(long) g_mbox; // 0 = empty; ticks of a mailbox sentinel
 
 long nowTicks() nothrow @nogc @system
@@ -277,7 +281,7 @@ FarmSet startFarm(Cfg cfg, Arm arm, uint nc)
 {
     FarmSet s;
     s.nc = nc;
-    s.f = AntFarm.create(cfg.ln, cfg.k, nc, 1, 0, 1, 4096);
+    s.f = AntFarm.create(cfg.ln, cfg.k, nc, 1, 0, 1, 4096, cfg.small);
     s.bulk = s.f.registerProducer(Tier.bulk);
     s.small = s.f.registerProducer(Tier.small);
     if (!s.bulk.valid || !s.small.valid)
@@ -361,7 +365,7 @@ void stopFarm(ref FarmSet s)
 
 ulong writeDump(ref FarmSet s, uint tlen)
 {
-    return s.f.write(s.dump[0 .. tlen], s.exiB, s.bulk);
+    return s.f.write(s.dump[0 .. tlen], s.exiB, s.bulk, g_avgCost);
 }
 
 ulong writeSent(ref FarmSet s, long t0ticks, ulong slot)
@@ -372,7 +376,7 @@ ulong writeSent(ref FarmSet s, long t0ticks, ulong slot)
     PayloadEntry e;
     e.header = s.sentH;
     e.body = s.sentBody[0 .. s.dump[0].body.length];
-    return s.f.write((&e)[0 .. 1], s.exiS, s.small);
+    return s.f.write((&e)[0 .. 1], s.exiS, s.small, g_avgCost);
 }
 
 Row runIdle(Cfg cfg, Arm arm, uint nc)
@@ -802,7 +806,7 @@ Row runNear(Cfg cfg, uint nc)
         if (n == 0)
             break;
         parked += n;
-        if (s.f.write((&probe)[0 .. 1], s.exiS, s.small) == 0)
+        if (s.f.write((&probe)[0 .. 1], s.exiS, s.small, g_avgCost) == 0)
         {
             r.parked = parked;
             break;
@@ -984,6 +988,8 @@ Cfg parse(string[] args)
         if (i + 1 >= args.length) break;
         auto v = args[++i];
         if (a == "--nc") c.nc = cast(uint) atoi(v.ptr);
+        else if (a == "--ac") c.avgCost = cast(uint) atoi(v.ptr);
+        else if (a == "--small") c.small = cast(uint) atoi(v.ptr);
         else if (a == "--tlen") c.tlen = cast(uint) atoi(v.ptr);
         else if (a == "--spin") c.spinNs = strtoull(v.ptr, null, 0);
         else if (a == "--samples") c.samples = cast(uint) atoi(v.ptr);
@@ -1039,6 +1045,8 @@ Row medBurst(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
 void main(string[] args)
 {
     auto cfg = parse(args);
+    g_avgCost = cfg.avgCost;
+    g_small = cfg.small;
     g_cap = cfg.samples + cfg.warmup + 4096;
     if (cfg.burstN * ((cfg.samples + cfg.warmup) / cfg.burstN + 4) > g_cap)
         g_cap = cfg.burstN * ((cfg.samples + cfg.warmup) / cfg.burstN + 8);

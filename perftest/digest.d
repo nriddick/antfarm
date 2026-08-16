@@ -39,6 +39,7 @@ struct Cfg
     Mix mix = Mix.touch;
     bool allArms = true;
     Arm oneArm = Arm.linear16;
+    uint chunk = 0; // 0 = per-arm default (1 for linear1, else 16)
 }
 
 __gshared shared(long) g_calls;
@@ -236,6 +237,7 @@ struct ConsCtx
     Arm arm;
     long expected;
     MonoTime deadline;
+    uint chunk; // 0 = per-arm default (1 for linear1, else 16)
 }
 
 void consumerMain(ConsCtx* c)
@@ -251,7 +253,7 @@ void consumerMain(ConsCtx* c)
         return;
     }
 
-    immutable chunk = c.arm == Arm.linear1 ? 1u : 16u;
+    immutable chunk = c.chunk != 0 ? c.chunk : (c.arm == Arm.linear1 ? 1u : 16u);
     immutable copyOut = c.arm == Arm.copyout16;
     ulong* tmp;
     size_t tmpWords;
@@ -387,7 +389,7 @@ Trial runOnce(Cfg cfg, Arm arm)
     Thread[] consumers = new Thread[cfg.nc];
     auto drainDeadline = MonoTime.currTime + 60.seconds;
     foreach (i; 0 .. cfg.nc)
-        cctx[i] = ConsCtx(f, arm, cast(long) published, drainDeadline);
+        cctx[i] = ConsCtx(f, arm, cast(long) published, drainDeadline, cfg.chunk);
 
     final class ConsJob
     {
@@ -502,6 +504,7 @@ Cfg parse(string[] args)
         if (i + 1 >= args.length) break;
         auto v = args[++i];
         if (a == "--body") c.body = cast(uint) atoi(v.ptr);
+        else if (a == "--chunk") c.chunk = cast(uint) atoi(v.ptr);
         else if (a == "--jobs") c.jobs = strtoull(v.ptr, null, 0);
         else if (a == "--tlen") c.tlen = cast(uint) atoi(v.ptr);
         else if (a == "--ln") c.ln = strtoull(v.ptr, null, 0);

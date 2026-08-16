@@ -1,12 +1,19 @@
 Ant Farm: An M:N Concurrent Queue with Superlative Scaling
-(Revision 4 — living spec. Revision 2 folded in the reference implementation's
+(Revision 5 — living spec. Revision 2 folded in the reference implementation's
 first five generations: attach-in-place subscription, the sweeper role and
 tertiary behavior, undersaturation repair, the carried sweeper role for small
 tables, and segment completion tracking with reference retention. Revision 3
 folds in the gen6 review closures: last-releaser Sub0 as add/sub rather than
 bit operations, idle frontier-pin migration, ticketed write(), Done/MaxCs
 capped at 512, and overflow-checked payload sizing. Revision 4 folds in the
-first-claimant mid-tick yield of 5e-m.)
+first-claimant mid-tick yield of 5e-m. Revision 5 folds in the post-sweep
+review closures: the unsizable-table check is per producer tier (4a) so
+write()==0 strictly means full, an unused producer tier takes no quota part
+in Exmax (3b), producer ticket slots are 64-byte strided (3b), the
+PayloadHeader is 16 ulongs with Call adjacent to Pcount (5f), write()
+takes an optional AvgCost cost class that sets each table's chunk to
+MAX_CHUNK >> AvgCost (4a/5e-g), and the small-table threshold is a farm
+field with an optional auto rule (5e-d).)
 
 1. General Idea
 Picture a farmer walking along a path placing down objects which a swarm of ants are picking up and taking away. He can't see the ants. He doesn't even know how many there are. How can he avoid stepping on the ants? The answer: the ants maintain signage at regular intervals tallying how many ants are in the area. If it's higher than zero, the farmer waits. The last ant to leave a *confirmed-complete* area changes the tally (a reference counter) to zero. The last ant to leave an *incomplete* area instead leaves a Sub0 pin, so the farmer still sees a nonzero tally and will not step there. Thus the farmer only needs to watch for one signal to change, and doesn't need to try and communicate directly with any ants. And the ants have a panoply of strategies to break down and haul away their work pieces. Really the Ant Farm is a combination of known techniques and a disregard of FIFO guarantees; towards objectives of minimal synchronization upkeep, enhanced cache performance, and flexible role switching and load balancing.
@@ -77,6 +84,11 @@ Arguments:
 * 'Exi' reference to the caller's quota.
 * 'R' = 'Bulk' or 'Small' (default Small) the tier of the caller.
 * 'Token' the caller's registration ticket (3b). Required; a mismatch is fatal.
+* 'AvgCost' (revision 5, optional, default 1) the producer's declared Call
+  cost class: a log2 shift in 0 .. log2(MAX_CHUNK) published in Thead. 0
+  means Calls are very cheap (chunk stays at MAX_CHUNK, maximum claim
+  amortization); larger values shrink the chunk (short visits, less tail).
+  write() fatals on AvgCost out of range.
 
 Returns: The number of Payloads written.
 
@@ -164,10 +176,10 @@ Finding a table, Ci can use a combination of header values and local stats to de
 a. Tprogress gives an O(1) view of the table's overall completion; Ci checks if Tprogress == Tlen then all entries are complete and Ci skips. (Revision: the skip covers primary work only; MT payloads can outlive their shards' completion, so a cheap pre-checked MT pass still runs -- 5i.)
 b. 'Tseq' is the table's starting sequence.
 c. (IDc + Tseq) % SqCs yields Ci's shard index 'Shi' and counter 'Shc' exactly like its leaf index.
-d. If Tlen < enum SMALL_TABLE_THRESHOLD = 64 then consumers with Shi == 0 claim the entire table by chunks as below; the others do not.
+d. If Tlen < the table's small threshold then consumers with Shi == 0 claim the entire table by chunks as below; the others do not. (Revision 5: the threshold is a farm field; 0 selects the auto rule clamp(SqCs * Chunk, 16, 256), so a table shards iff every shard can get at least one full chunk; the default fixed value is 64, the pre-revision constant. All consumers derive the same threshold from the same header/farm values.)
 e. Tlen / SqCs and Tlen % SqCs yield a base length 'Shbase' and 'Shrm'; Shlen = Shi < Shrm ? Shbase + 1 : Shbase;
 f. With starting index 'Shstart' = Shi * Shbase + (Shi < Shrm ? Shi : Shrm);
-g. 'Chunk' is enum CLAIM_CHUNK = 16; or if Shbase >= 1024 then use BIG_CHUNK = 64;
+g. 'Chunk' (revision 5) = MAX_CHUNK >> AvgCost, read from the table header word published by write(); MAX_CHUNK = 32 so the default AvgCost = 1 lands on 16, the midpoint of [1, 32] and the pre-revision default. Every consumer reads the same header word, so Shiter cannot disagree across visitors.
 h. 'Shiter' = Shlen >> log2(Chunk) + (Shlen & (Chunk - 1) > 0 ? 1 : 0)
 i. Ci gets claim X = fetch_add(Shc, 2^32) >> 32. If the claims half wrapped to 0, fatal (4a). If X >= Shiter the shard is already fully claimed and we move to step l.
     - X is a useful feedback signal for Ci to remember for later.
@@ -195,15 +207,14 @@ Note the primary path burns exactly one payload claim per payload per table (eac
 
 5f. Payload Mechanisms
 A Payload's physical layout:
-* 'Phead' PayloadHeader (revision: 17 ulongs = 136 bytes -- the field list below sums to 17, not 16)
+* 'Phead' PayloadHeader (revision 5: 16 ulongs = 128 bytes)
     - uint 'MaxCs' maximum consumers per payload; 1 for single threaded, >1 for multithreaded. write() fatals on MaxCs == 0 or MaxCs > 512.
     - uint 'Done' number of iterations to complete; 1 for single threaded, 2..512 granularity steps for multithreaded. write() fatals on Done == 0 or Done > 512.
     - 'Plen' payload body length in ulongs
-    - 'Call' callback function pointer which decodes Pbody and executes an iteration of work
-        + where alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration);
     - 6 ulongs filler
     - 'Pcount' 32 MSB claims like Tcount; next 16 MSB number of times Called; 16 LSB number of Calls completed. After any packed fetch_add, if the field just incremented has wrapped to 0 the process fatals. Under the 512 caps, worst-case call increments are about Done + MaxCs, far below 2^16; 32-bit claim wrap still requires pathological visitor accumulation. The hot path stays fetch_add (no CAS saturating loop).
-    - 7 ulongs filler
+    - 'Call' callback function pointer which decodes Pbody and executes an iteration of work; alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration). (Revision 5: Call sits immediately after Pcount so the two share one cache line; safe because Call is dereferenced only by a consumer holding a valid claim -- the same thread that just wrote Pcount -- so no cross-thread coherence traffic is added. The 6 filler ulongs after Call complete the line in every buffer phase.)
+    - 6 ulongs filler
 * 'Pbody' PayloadBody (const(ulong)[]); type-erased const parameters for Call's work
 
 For a Ci entering a payload, consumption begins with Ci incrementing the claims. If it's below MaxCs then Ci increments calls which becomes a parameter to Call. Call performs an iteration if the parameter is below Done and increments completions. MaxCs prevents overallocation of Calling consumers.
