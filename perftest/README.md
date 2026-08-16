@@ -35,6 +35,11 @@ Cheap ST callback, 16 MiB farm sits in L3.
 
 The winning region is wide: 8 consumers, 2 bulk producers (or 4 small), `batch ≥ 32`. `K=4` and `K=8` are close; `K=4` won this host. `batch=1` is ~4–5× slower. Two consumers was the *worst* consumer count (shard `sqcs=1` like one consumer, plus extra coherence).
 
+Batch guidance (calibration 2026-08-16, `SPECULATIVE_OPT_2026-08-16_1.md` §7.2):
+the batch curve keeps climbing to the quota ceiling — batch 256/512 beats 128
+by ~3% at body=16 (61.7/62.1 vs 60.4 Mpps at K=4). Prefer batches ≥ 128 and
+let the caller's quota bound the table size.
+
 ## Digest bench (linear chunk vs scatter)
 
 `make -C perftest digest-run` — execute-only window, `Call` reads the body.

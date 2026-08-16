@@ -21,14 +21,14 @@ fetch-add-only; no CAS is introduced).
 
 ## 0. Summary
 
-| # | Change | Kind | Expected effect | Risk |
-|---|--------|------|-----------------|------|
-| 1 | Per-tier unsizable-table fatal in `write()` | correctness | `write()==0` becomes strictly "farm full" | none (spec-aligned) |
-| 2 | Gate packed-field wrap fatals behind `version(verify)` | perf (consumer hot path) | ~1–3% consumer side | tripwire lost in release |
-| 3 | Producer-published `avgCost` in Thead: `chunk = MAX_CHUNK >> avgCost` | perf strategy | chunk adapts to declared Call cost; tail vs throughput trade made per-table by the producer | none if header-published (agreement by construction) |
-| 4 | `SMALL_TABLE_THRESHOLD` scaled by shard count | dispatch policy | more tables on the fast path; starvation risk bounded | low (yield + carried sweeper + T18 re-walks backstop) |
-| 5 | Hoist write-side validation out of the retry loop; plain adds in Tindex build | perf (write side) | small; pure restructuring | none |
-| 6 | `PayloadHeader` 17 → 16 words: move `call` next to `pcount`, filler2 7 → 6 words | layout | header 136 → 128 B (two exact lines); pcount line stays isolated | none — only if `call` stays claim-gated (see §8) |
+| # | Change | Kind | Status (2026-08-16) | Result |
+|---|--------|------|---------------------|--------|
+| 1 | Per-tier unsizable-table fatal in `write()` | correctness | **implemented** | `write()==0` strictly "farm full"; T17 extended; T13 covers nb==0 |
+| 2 | Gate packed-field wrap fatals | perf (consumer) | **evaluated, not adopted** | A/B ~0% (verify 59.64 vs 59.31 Mpps) — below the 1% bar; checks stay on, opt-out only |
+| 3 | `avgCost` chunk hint (MAX_CHUNK=32, default 1) | perf strategy | **implemented** | chunk 1 costs −10–12% throughput; chunks 8–32 equivalent; tail p99.9 8192: 246→130 µs at chunk 8 |
+| 4 | Small-table threshold farm field + auto rule | dispatch policy | **implemented** (default 64) | no measurable effect in throughput or tail sweeps; default unchanged |
+| 5 | Plain adds in Tindex build (hoist evaluated, not applied) | perf (write) | **implemented** | no hoist (would fatal on truncated-batch tails); plain adds safe |
+| 6 | `PayloadHeader` 17 → 16 words, `call` next to `pcount` | layout | **implemented** | 128 B; baseline + T01–T18 green |
 
 ---
 
@@ -98,12 +98,14 @@ payload iteration — ~2 branches on already-loaded registers, roughly 1–3%
 of consumer-side payload cost. The per-chunk ones in `processShard` are
 nearly free (one branch per claim RMW).
 
-**Proposal.** Gate them behind `version(verify)` — torture/TSAN builds keep
-them, the perf release omits them — with an invariant comment at each site
-stating the bound (Done/MaxCs ≤ 512, claim-per-payload, consumer limit).
-Alternative: keep them, since they are ~1% and are the last line against
-memory corruption. Decide after the chunk experiments (item 3) move more
-cost than this.
+**Verdict — evaluated, NOT adopted (2026-08-16).** The A/B (K=8 nc=8 nb=2
+body=16 batch=128, 3 alternating runs each, median of 3): verify-on 59.64
+Mpps vs verify-off 59.31 Mpps. The gating saves ~0% — below the 1% adoption
+bar, and the branches are free on already-loaded registers. The checks stay
+in the release build as the corruption tripwire; the implementation remains
+in `antfarm.d` as `VERIFY_WRAPS` (constant-folded, default true) with
+`-d-version=noverify` as the opt-out for anyone who wants to re-measure on
+a different workload.
 
 **Do not remove:** `requireToken` (spec 3b, one load per `write()`), the
 write-side header validations (spec 4a — item 1 argues those fatals are the
@@ -166,18 +168,32 @@ construction. The claim/completion arithmetic is per-table and unchanged.
 The 5e-m yield interacts as intended: expensive Calls get small chunks, so
 the first claimant finishes a run sooner and the leftover (and p99) shrinks.
 
-Notes / open items (calibration, item 7):
-- Ceiling: `MAX_CHUNK = 32` keeps the default at 16 with `avgCost = 1`. If
-  the digest chunk arms show 32/64 still paying for very cheap Calls, raise
-  the ceiling to 64 and default to `avgCost = 2` (still chunk 16).
-- The `shbase >= 1024` switch disappears: chunk becomes a pure function of
-  the producer's hint, which is also simpler to reason about.
+**Implemented (2026-08-16).** `write(..., avgCost = 1)` validates the range,
+publishes `w[6] = avgCost`; consumers compute `chunk = MAX_CHUNK >> avgCost`
+(clamped). Calibration results:
+
+- **Throughput** (K=8 nc=8 nb=2): chunk 1 (avgCost=5) is a clear regression
+  (−10 to −12%: 52.4–54.9 vs 57.7–60.4 Mpps), confirming claim amortization
+  matters; chunks 8/16/32 (avgCost 2/1/0) are equivalent within ±4% noise.
+  The digest arms agree: at body=16 the dividend saturates at chunk 8–16
+  (31.5→31.2→31.0 ns/job at 16/32/64; chunk 1 is 48.5), so MAX_CHUNK=32
+  captures the ceiling — no need to raise it to 64.
+- **Tail** (mid-drain 8192/1 µs, stock): p50/p99 are flat across avgCost
+  (≈50 µs / ≈115 µs — the 5e-m yield already owns the tail); p99.9 trims
+  with smaller chunks (chunk 16: 246 µs → chunk 8: 130 µs → chunk 1:
+  125 µs). So expensive-Call producers get a real extreme-tail win at no
+  measured cost elsewhere.
+- Default `avgCost = 1` (chunk 16) stays; producers with cheap Calls may
+  pass 0 (chunk 32) for the small amortization edge at no tail risk.
+
+Notes / open items:
+- Ceiling: `MAX_CHUNK = 32` confirmed by the digest arms (64/128 add ≤ 1%).
+- The `shbase >= 1024` switch is gone: chunk is a pure function of the
+  producer's hint, simpler to reason about.
 - Truncation is unaffected: `write()` may commit `n < len`, but the hint
   still describes the written table.
-- Item 4's `tlen >= sq * chunk` small-table rule then depends on the
-  per-table chunk — a cheap table (chunk 32) shards at `tlen >= 3·32` (sq=3),
-  an expensive one (chunk 8) at `tlen >= 24`. Consistent: the decision is
-  per-table, made by consumers from the same header word.
+- Item 4's auto rule depends on the per-table chunk; the farm-field
+  override is orthogonal (see §4).
 
 ---
 
@@ -194,30 +210,40 @@ mechanism that gives tlen=32 a 2.7 µs mid-tick p99), but starvation exposure
 grows whenever no shard-0-capable consumer arrives. The backstops (5e-m
 yield, carried sweeper, T18 idle re-walks) make a higher threshold safe.
 
-**Proposal.** Shard iff `tlen >= sq * chunk`, else shard-0 wholesale
-(small-table path). Concretely `threshold = clamp(sq * chunk, 16, 256)`:
-48 for sq=3 (more tables on the fast path), 192 for sq=12 (avoids
-micro-shards of ~1 chunk). Make it a farm field (read once per table, not an
-enum) so the tail bench can sweep it.
+**Implemented (2026-08-16): farm field + auto rule, default stays 64.**
+`create(..., smallThreshold = 64)`; 0 selects the auto rule
+`clamp(sq * chunk, 16, 256)` computed per table from the same header words
+every consumer reads. `--small` sweeps the field in the benches.
 
-Measure with the tail scenes (mid-drain 256/2048/8192), not the throughput
-sweep: the threshold's value is dispatch latency, which the throughput bench
-does not see.
+Calibration verdict — **no measurable effect; the default is unchanged.**
+- Throughput: batch=63 and batch=64 × small ∈ {32, 48, 64, 128, 192, 256,
+  0} all land in 57.1–60.4 Mpps with no ordering — the band is run noise
+  (identical configs in adjacent phases differed by ±2%).
+- Tail: mid-drain 256/2048/8192 × small ∈ {32, 64, 128, 256} are flat
+  (8192 p99 ≈ 118–124 µs across all values).
+
+The 5e-m yield + carried sweeper + T18 re-walks already absorb whatever the
+threshold controls, so 64 (pre-revision behavior, zero change for existing
+configs) is kept; the auto rule remains available for farms with very
+different shard counts.
 
 ---
 
 ## 5. Cheap release wins, zero correctness risk
 
-- **Hoist write-side validation out of the retry loop.** The fit loop
-  (antfarm.d:500–522) re-validates the whole batch (null headers, MaxCs/Done
-  ranges, overflow, singleton size) on every `refreshQuota` retry. Validate
-  once before the loop; the loop then only does candidate sizing. Pure
-  restructuring; matters in stall-heavy mixes (nb=1 topologies show tens of
-  thousands of stalls).
-- **Plain adds in the Tindex build.** `addChecked` at antfarm.d:584/590 is
-  redundant with the fit loop's overflow-checked `psum`: the running offset
-  `po` is `payOff + Σpsz`, bounded by the table size which already passed
-  checked arithmetic. Safe post-validation.
+- **Hoist write-side validation out of the retry loop — evaluated, NOT
+  applied.** The fit loop (antfarm.d:500–522) re-validates on every
+  `refreshQuota` retry, but retries are rare (only when nothing fits and a
+  refresh succeeds), so the win is negligible. Hoisting to the top of the
+  call would change behavior: the loop validates payloads lazily as they
+  are accepted, so a truncated batch never touches entries past the
+  truncation point; an up-front pass would fatal on uninitialized tails of
+  partially-populated arrays. Lazy validation is the spec contract
+  ("validates every payload header before accepting it").
+- **Plain adds in the Tindex build — implemented (2026-08-16).**
+  `addChecked` in the Tindex pass was redundant with the fit loop's
+  overflow-checked `psum`: `po` is bounded by the table size (≤ quota ≤
+  exmax ≪ ulong.max), so the plain adds cannot wrap. Zero behavior change.
 - **`moveRef`'s extra acquire** of `stats[ki].es` (antfarm.d:931) is
   belt-and-braces — the sentinel acquire already orders the segment stats.
   Keep unless measured; it runs once per table transition.
@@ -238,30 +264,34 @@ does not see.
 
 ---
 
-## 7. Calibration experiments before committing constants
+## 7. Calibration experiments — DONE (2026-08-16)
 
-1. **Chunk × body** (isolates claim amortization): extend `digest` with
-   chunk arms {1, 4, 8, 16, 32, 64, 128} × body {2, 16, 64, 256}. Find
-   where the amortization dividend saturates; this sets the cheap-Call chunk.
-2. **Batch tail** (isolates table-size amortization at the top): throughput
-   phase 2 on the winner with batch {63, 80, 128, 160, 256}; 128 won this
-   session, confirm it is not noise.
-3. **avgCost** (validates item 3): implement the optional
-   `write(..., avgCost)` parameter + Thead word behind a flag, then sweep
-   `avgCost ∈ {0, 1, 2, 3, 5}` on the throughput bench (body=16, cheap
-   `Call`) — expect class 0 to win there — and on the tail scenes
-   (mid-drain 256/2048/8192 with a body-touching `Call`), where the
-   expensive classes must shorten p99 without moving Mpps. The digest chunk
-   arms {1, 4, 8, 16, 32, 64} decide the `MAX_CHUNK` ceiling (32 vs 64).
-4. **Threshold** (validates item 4): make it a farm field, sweep {32, 48,
-   64, 128, 192, 256} on the tail scenes and the batch=63/64 pair on
-   throughput.
-5. **Wrap-fatals gating** (validates item 2): build with and without
-   `version(verify)`; measure consumer-side Mpps delta. Adopt only if > 1%.
+Raw data: `calib_sweep.txt`, `calib_throughput.txt`, `calib_item2.txt`.
 
-Order: item 1 first (one line, correctness), then 5 (pure restructuring),
-then the calibration runs (7) before committing 3/4, and 2 last since it
-trades a tripwire for < 3%.
+1. **Chunk × body** (isolates claim amortization): digest `--chunk {1, 4,
+   8, 16, 32, 64, 128}` × body {2, 16, 64, 256}. Amortization saturates at
+   chunk 8–16 for cheap bodies (body=16: 48.5 → 31.5 → 31.2 → 31.0 ns/job
+   at 1/16/32/64; 64/128 add ≤ 1%). At body=256 the effect washes out
+   (bandwidth-bound, noisy). **MAX_CHUNK = 32 confirmed.**
+2. **Batch tail** (table-size amortization): batch {63, 80, 128, 160, 256,
+   512} on both K=8 and K=4 at body=16. The curve keeps climbing to ~256–512
+   (K=4: 59.7 → 60.4 → 60.9 → 61.7 → 62.1 Mpps at 63/128/160/256/512),
+   plateauing at the quota ceiling. **"Plateau at 32" is wrong — batches ≥
+   128, larger still pays.** README guidance updated.
+3. **avgCost** (validates item 3): implemented + swept {0, 1, 2, 3, 5}.
+   Chunk 1 costs −10–12% throughput; chunks 8–32 equivalent; tail p99.9 at
+   8192 trims 246 → 130 µs going 16 → 8. **Default 1 kept.**
+4. **Threshold** (validates item 4): farm field + `--small` sweep {32, 48,
+   64, 128, 192, 256, 0} on throughput (batch 63/64) and tail (256/2048/
+   8192): no measurable effect anywhere. **Default 64 kept (zero behavior
+   change); auto rule available.**
+5. **Wrap-fatals gating** (validates item 2): A/B verify-on vs off at the
+   winner: 59.64 vs 59.31 Mpps — ~0%, below the 1% bar. **Not adopted;
+   checks stay on, `-d-version=noverify` opt-out left in place.**
+
+Order executed: item 1 (correctness) → 5 (restructuring) → 6 (header) →
+3/4 (implemented behind defaults) → calibration 1–4 → 2 last. All changes
+green on baseline + T01–T18 (LDC and DMD variants).
 
 ---
 
@@ -305,7 +335,7 @@ pcount at mod64 55/63/7/15 for sq=1..4, and consecutive pcounts are ≥ 136 B
 apart — so the after-guard is what isolates the line, and it is present in
 every phase. No fix needed.
 
-### One proposed change: `PayloadHeader` 17 → 16 words
+### One proposed change: `PayloadHeader` 17 → 16 words — IMPLEMENTED
 
 The pcount guard can drop one word (filler2 7 → 6) **only if the exposed
 word is claim-gated** — data read exclusively by the consumer that just
@@ -313,7 +343,7 @@ wrote pcount (it already owns the line, so no extra coherence traffic).
 `call` qualifies: `enterPayload` dereferences it only after the
 `claims >= maxCs` gate. `maxCs`/`done` do *not* qualify — `tertiaryMt`
 pre-checks them without claiming, so a claim-less reader would pull the
-line. Proposed layout:
+line. Implemented layout (2026-08-16):
 
 ```d
 struct PayloadHeader
