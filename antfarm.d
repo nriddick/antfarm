@@ -583,7 +583,37 @@ struct AntFarm
             if ((rt & COUNTMASK) != 0 || (rt & SUB0MASK) != 0)
                 return;
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&Rt[ki][0], rt, rt + SUB0))
+            {
+                // The plant may have raced a finisher: Seqt/Sd/SeqtN were
+                // read once above, and a finisher could have completed the
+                // segment between that read and this CAS, leaving Sub0 on a
+                // confirmed segment (spec 5b-a violation, capacity leak
+                // until a new subscriber's 0->1 retracts it). Re-verify
+                // completeness and retract exactly the unit we planted if
+                // the segment is now confirmed.
+                //
+                // The retract CAS compares against the exact value we set
+                // (rt + SUB0): it fails if a racing subscriber took a count
+                // or cleared the pulse in the meantime, so it can never
+                // remove someone else's pulse and never leaves the buffer
+                // without one -- a confirmed segment needs no pulse, and an
+                // incomplete one is never retracted here.
+                //
+                // On x86 TSO the re-read is airtight for the
+                // entered-and-released path: the last releaser's plain dec
+                // on a confirmed segment is a release RMW on Rt and the
+                // plant's Rt load above is acquire, so observing count 0
+                // synchronizes with that release and orders the finisher's
+                // earlier Sd add. A never-entered segment pulsed correctly
+                // and completed later is the residual case (self-healing on
+                // the next 0->1).
+                immutable sd2 = atomicLoad!(MemoryOrder.raw)(stats[ki].sd);
+                immutable seqt2 = atomicLoad!(MemoryOrder.raw)(stats[ki].seqt);
+                immutable seqtN2 = atomicLoad!(MemoryOrder.raw)(stats[ki1].seqt);
+                if (seqt2 + sd2 >= seqtN2)
+                    cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&Rt[ki][0], rt + SUB0, rt);
                 return;
+            }
         }
     }
 

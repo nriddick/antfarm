@@ -987,6 +987,169 @@ void t18_pure_churn_orphan()
     say("T18 pure-churn OK");
 }
 
+void t20_plant_confirmed_segment()
+{
+    // D2 regression: plantIfUnprotected reads Seqt/Sd/SeqtN once, then CASes
+    // Sub0 onto Rt without re-reading them.  A finisher completing the
+    // segment between the sd read and the CAS leaves Sub0 on a confirmed
+    // segment (spec 5b-a violation: confirmed must reach Rt==0) until a new
+    // subscriber's 0→1 retracts it.  The fix re-verifies completeness after
+    // the plant CAS and retracts the pulse (exact-value CAS) if a finisher
+    // completed the segment in between.
+    //
+    // The natural window is nanoseconds, so a stress run cannot reliably
+    // trigger the race.  This arm instead maximizes plant activity -- write
+    // crossings and unsubscribe sweeps both call plantIfUnprotected -- and
+    // asserts the invariant the fix preserves: after a full drain, every
+    // confirmed segment carries no stray pulse beyond the single legitimate
+    // empty-farm pulse, and exact call accounting holds.  A reverted fix
+    // that makes the race observable (or a future change that widens the
+    // window) fails the scan.
+    //
+    // Mechanism demo (not in-suite): build antfarm.d with a 2ms sleep
+    // between the plant's sd read and its CAS (-d-version=D2_WIDEN in a
+    // scratch copy) and re-run this geometry: ~200k stale plants detected,
+    // ~100% retracted by the fix.
+    enum TRIALS = 4;
+    int bad;
+    foreach (trial; 0 .. TRIALS)
+    {
+        // K=16: segCap = 2^18/16 = 16384.  Bodies ~7800 -> 2 tables/segment,
+        // so finishers complete segments frequently while the producer
+        // crosses boundaries and churners sweep.
+        auto f = AntFarm.create(1 << 18, 16, 6, 1, 9000, 3, 2048);
+        scope (exit) f.destroy();
+        enum N = 4000;
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+        auto bodies = cast(ulong*) malloc(N * 7800 * ulong.sizeof);
+        auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+        scope (exit) { free(headers); free(bodies); free(entries); }
+        long expected;
+        foreach (i; 0 .. N)
+        {
+            headers[i] = PayloadHeader.init;
+            headers[i].maxCs = 1;
+            headers[i].done = 1;
+            headers[i].call = &countingCb;
+            bodies[i * 7800] = i;
+            entries[i] = PayloadEntry(&headers[i], bodies[i * 7800 .. i * 7800 + 7800]);
+            expected += 1;
+        }
+        atomicStore(g_totalCalls, 0);
+
+        void steadyConsumer(long exp)
+        {
+            ConsumerView v;
+            if (v.subscribe(f) < 0) fatal("T20 steady sub");
+            auto deadline = MonoTime.currTime + 90.seconds;
+            while (atomicLoad!(MemoryOrder.acq)(g_totalCalls) < exp)
+            {
+                if (!v.consumeNext() && MonoTime.currTime > deadline)
+                {
+                    fprintf(stderr, "T20 steady watchdog\n");
+                    abort();
+                }
+            }
+            v.unsubscribe();
+        }
+        void churner(int rounds)
+        {
+            auto deadline = MonoTime.currTime + 90.seconds;
+            int done = 0;
+            while (done < rounds && MonoTime.currTime < deadline)
+            {
+                ConsumerView v;
+                if (v.subscribe(f) < 0) { Thread.yield(); continue; }
+                foreach (_; 0 .. 3)
+                    v.consumeNext();
+                v.unsubscribe(); // triggers plantUnprotectedIncomplete sweep
+                ++done;
+            }
+        }
+
+        enum NSTEADY = 4;
+        Thread[NSTEADY] steady;
+        foreach (i; 0 .. NSTEADY)
+        {
+            auto job = new class { void run() { steadyConsumer(expected); } };
+            steady[i] = new Thread(&job.run);
+            steady[i].start();
+        }
+        enum NCHURN = 3;
+        Thread[NCHURN] churn;
+        foreach (i; 0 .. NCHURN)
+        {
+            auto job = new class { void run() { churner(600); } };
+            churn[i] = new Thread(&job.run);
+            churn[i].start();
+        }
+
+        auto tok = f.registerProducer(Tier.bulk);
+        check(tok.valid, "T20 reg");
+        size_t off;
+        while (off < N)
+        {
+            immutable n = f.write(entries[off .. N], tok);
+            off += n;
+            if (n == 0) Thread.yield();
+        }
+        f.unregisterProducer(tok);
+        foreach (t; churn) t.join();
+        foreach (t; steady) t.join();
+
+        // Invariant scan: after full drain and all unsubscribed, every
+        // confirmed segment must have Rt_low == 0, except the single
+        // legitimate empty-farm pulse (last-of-farm leaves it on its
+        // confirmed position).  A D2 stale plant shows as a confirmed
+        // segment with Rt_low != 0 in addition to that pulse.
+        uint pulses;
+        uint confirmedWithPulse;
+        uint confirmedCount;
+        foreach (ki; 0 .. 16)
+        {
+            immutable es = atomicLoad!(MemoryOrder.raw)(f.stats[ki].es);
+            if (es < 0) continue;
+            // confirmed: next segment initialized and span fully consumed
+            immutable ei1 = cast(ulong) es + 1;
+            immutable ki1 = cast(uint)(ei1 & f.kMask);
+            if (atomicLoad!(MemoryOrder.raw)(f.stats[ki1].es) != cast(long) ei1)
+                continue;
+            immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
+            immutable seqtN = atomicLoad!(MemoryOrder.raw)(f.stats[ki1].seqt);
+            immutable sd = atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd);
+            if (seqt + sd < seqtN)
+                continue; // still incomplete: legitimately may carry Sub0
+            ++confirmedCount;
+            immutable rt = atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]);
+            if ((rt & LOWMASK) != 0)
+            {
+                ++confirmedWithPulse;
+                ++pulses;
+            }
+        }
+        // The empty-farm pulse is one confirmed segment with Rt_low != 0.
+        if (confirmedWithPulse > 1)
+        {
+            fprintf(stderr, "T20 trial %d: %u confirmed segments with pulse (expected <= 1)\n",
+                trial, confirmedWithPulse);
+            ++bad;
+        }
+        immutable got = atomicLoad(g_totalCalls);
+        if (got != expected)
+        {
+            fprintf(stderr, "T20 trial %d: calls=%lld expected=%lld\n", trial, got, expected);
+            ++bad;
+        }
+        fprintf(stderr, "T20 trial %d: confirmed=%u pulses=%u calls=%lld/%lld\n",
+            trial, confirmedCount, pulses, got, expected);
+        fflush(stderr);
+    }
+    check(bad == 0, "T20 stale plant on confirmed segment or lost work");
+    say("T20 plant-confirmed-segment OK");
+}
+
 void main(string[] args)
 {
     bool runAll = args.length <= 1;
@@ -1010,6 +1173,8 @@ void main(string[] args)
         t17_write_size_wrap();
     if (want("T18"))
         t18_pure_churn_orphan();
+    if (want("T20"))
+        t20_plant_confirmed_segment();
 
     if (want("T03"))
         t03_concurrent_exact();
