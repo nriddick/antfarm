@@ -21,6 +21,7 @@ import core.atomic;
 import core.stdc.stdio : fprintf, stderr, snprintf;
 import core.stdc.stdlib : abort, aligned_alloc, free;
 import core.stdc.string : memset;
+import std.range.primitives : ElementType, empty, isInputRange;
 
 version (Posix)
 {
@@ -671,8 +672,22 @@ struct AntFarm
     ulong write(scope PayloadEntry[] payloads, ref Token tok,
                 uint avgCost = 1) nothrow @nogc @system
     {
+        return writeImpl(payloads, tok, avgCost);
+    }
+
+    /// ditto: input range overload.
+    ulong write(R)(scope R payloads, ref Token tok,
+                   uint avgCost = 1) nothrow @nogc @system
+        if (isInputRange!R && is(ElementType!R == PayloadEntry))
+    {
+        return writeImpl(payloads, tok, avgCost);
+    }
+
+    private ulong writeImpl(R)(scope R payloads, ref Token tok,
+                              uint avgCost) nothrow @nogc @system
+    {
         requireToken(tok);
-        if (payloads.length == 0) return 0;
+        if (payloads.empty) return 0;
         if (avgCost > MAX_AVG_COST) fatal("avgCost out of range");
         immutable quota = tok.tier == Tier.bulk ? quotaBulk : quotaSmall;
         immutable csl = atomicLoad!(MemoryOrder.raw)(Cf);
@@ -688,7 +703,8 @@ struct AntFarm
         for (;;)
         {
             n = 0; m = 0; psum = 0;
-            foreach (i, ref pe; payloads)
+            size_t i = 0;
+            foreach (ref pe; payloads)
             {
                 if (pe.header is null || pe.header.call is null) fatal("bad payload header");
                 if (pe.header.maxCs == 0 || pe.header.maxCs > MAX_PAYLOAD_ITERS)
@@ -723,6 +739,7 @@ struct AntFarm
                 n = i + 1;
                 m = cast(uint) cm;
                 psum = psumNext;
+                ++i;
             }
             if (n > 0) break;
             if (!refreshQuota(tok.quotaLeft, quota)) return 0;
@@ -796,19 +813,25 @@ struct AntFarm
         // psum already validated against exi (spec 4a's checked arithmetic
         // ran there), so it cannot wrap here.
         ulong po = payOff;
-        foreach (i; 0 .. n)
+        size_t i = 0;
+        foreach (ref pe; payloads)
         {
+            if (i >= n) break;
             w[THEAD_LEN + i] = po;
-            po += PHEAD_LEN + payloads[i].body.length;
+            po += PHEAD_LEN + pe.body.length;
+            ++i;
         }
         po = payOff;
         size_t mi = THEAD_LEN + n;
-        foreach (i; 0 .. n)
+        i = 0;
+        foreach (ref pe; payloads)
         {
+            if (i >= n) break;
             immutable o = po;
-            po += PHEAD_LEN + payloads[i].body.length;
-            if (payloads[i].header.maxCs > 1)
+            po += PHEAD_LEN + pe.body.length;
+            if (pe.header.maxCs > 1)
                 w[mi++] = o;
+            ++i;
         }
 
         w[progOff] = 0;                          // Tprogress
@@ -816,19 +839,21 @@ struct AntFarm
 
         // Payloads.
         po = payOff;
-        foreach (i; 0 .. n)
+        i = 0;
+        foreach (ref pe; payloads)
         {
-            auto src = &payloads[i];
+            if (i >= n) break;
             auto h = cast(PayloadHeader*)(w + po);
-            h.maxCs = src.header.maxCs;
-            h.done = src.header.done;
-            h.plen = src.body.length;
-            h.call = src.header.call;
+            h.maxCs = pe.header.maxCs;
+            h.done = pe.header.done;
+            h.plen = pe.body.length;
+            h.call = pe.header.call;
             h.filler[] = 0;
             h.filler2[] = 0;
             atomicStore!(MemoryOrder.raw)(h.pcount, 0UL);
-            (w + po + PHEAD_LEN)[0 .. src.body.length] = src.body[];
-            po += PHEAD_LEN + src.body.length;
+            (w + po + PHEAD_LEN)[0 .. pe.body.length] = pe.body[];
+            po += PHEAD_LEN + pe.body.length;
+            ++i;
         }
         w[size - END_PAD .. size] = 0;
 

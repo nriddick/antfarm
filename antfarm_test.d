@@ -158,6 +158,64 @@ void testSingleThreaded()
     printf("testSingleThreaded OK\n"); fflush(stdout);
 }
 
+// Input-range write overload: a simple input range over the same malloc'd
+// entries, not a D slice.
+struct PayloadRange
+{
+    PayloadEntry* p;
+    size_t len;
+    size_t i;
+
+    @property bool empty() const nothrow @nogc @safe { return i >= len; }
+    @property ref PayloadEntry front() nothrow @nogc @system { return p[i]; }
+    void popFront() nothrow @nogc @system { ++i; }
+}
+
+void testInputRangeWrite()
+{
+    auto f = AntFarm.create(1 << 18, 8, 2, 1, 8192, 4, 2048);
+    scope (exit) f.destroy();
+
+    enum N = 20;
+    allocCalls(N);
+    scope (exit) freeCalls();
+
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    scope (exit) { free(headers); free(bodies); free(entries); }
+    long expected;
+    foreach (i; 0 .. N)
+    {
+        headers[i] = PayloadHeader.init;
+        headers[i].maxCs = (i >= 18) ? 3 : 1;   // two MT payloads
+        headers[i].done = (i >= 18) ? 5 : 1;
+        headers[i].call = &testCb;
+        bodies[i * 2] = i;
+        bodies[i * 2 + 1] = headers[i].done;
+        entries[i].header = &headers[i]; entries[i].body = bodies[i * 2 .. i * 2 + 2];
+        expected += headers[i].done;
+    }
+
+    ConsumerView v;
+    check(v.subscribe(f) == 0, "subscribe before range write");
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "register small producer");
+
+    PayloadRange range = PayloadRange(entries, N);
+    check(f.write(range, tok) == N, "write input range");
+    check(v.consumeNext(), "consume range-written table");
+    check(!v.consumeNext(), "no extra range table");
+
+    foreach (i; 0 .. N)
+        check(g_calls[i] == headers[i].done, "range exact call count");
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == expected, "range total");
+
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+    printf("testInputRangeWrite OK\n"); fflush(stdout);
+}
+
 // ---------------------------------------------------------------------
 // Test 3: concurrent producers and consumers, exact call accounting
 // ---------------------------------------------------------------------
@@ -757,6 +815,7 @@ void main()
 {
     testArithmetic();
     testSingleThreaded();
+    testInputRangeWrite();
     testConcurrent();
     testWraparound();
     testSubscriptionCap();
