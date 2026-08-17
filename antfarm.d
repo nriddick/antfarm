@@ -138,14 +138,27 @@ struct PayloadEntry
 /// Spec 3b: producer tiers.
 enum Tier : ubyte { small, bulk }
 
-/// Spec 3b/4a: registration ticket hashed from (slot, Reqs_p). Hash 0 is invalid.
+/// Spec 3b/4a: registration ticket carrying the producer's private quota.
+/// The hash validates the slot; `quotaLeft` is the caller-held mirror of the
+/// farm's authoritative ledger (prodSlotQuota). It is deliberately private:
+/// the caller passes the Token by reference and never reads or writes it;
+/// write() validates the mirror against the ledger on every call.
 struct Token
 {
     Tier tier;
     uint slot;
     ulong hash;
+    private ulong quotaLeft;
 
     bool valid() const pure nothrow @nogc @safe { return hash != 0; }
+
+    private this(Tier t, uint s, ulong h, ulong grant) pure nothrow @nogc @safe
+    {
+        tier = t;
+        slot = s;
+        hash = h;
+        quotaLeft = grant;
+    }
 }
 
 /// Per-segment statistics (spec 2b). Padded to a cache line.
@@ -213,6 +226,16 @@ private ulong mixToken(uint slot, ulong reqs) pure nothrow @nogc @safe
 private shared(ulong)* prodSlot(shared(ulong)* hashes, size_t i) nothrow @nogc @system
 {
     return hashes + i * PROD_SLOT_STRIDE;
+}
+
+/// Slot i's authoritative remaining quota, one ulong past the hash (same
+/// cache line). The farm owns this value; the Token's private quota is only
+/// a caller-held mirror. write() validates the mirror against the ledger and
+/// syncs the ledger on every reservation and refresh, so a forged token
+/// cannot mint blind quota past Exmax.
+private shared(ulong)* prodSlotQuota(shared(ulong)* hashes, size_t i) nothrow @nogc @system
+{
+    return hashes + i * PROD_SLOT_STRIDE + 1;
 }
 
 struct AntFarm
@@ -417,14 +440,19 @@ struct AntFarm
         {
             immutable h = mixToken(cast(uint) i, reqs);
             if (cas!(MemoryOrder.raw, MemoryOrder.raw)(prodSlot(hashes, i), 0UL, h))
-                return Token(t, cast(uint) i, h);
+            {
+                immutable grant = t == Tier.bulk ? quotaBulk : quotaSmall;
+                auto tok = Token(t, cast(uint) i, h, grant);
+                atomicStore!(MemoryOrder.raw)(*prodSlotQuota(hashes, i), grant);
+                return tok;
+            }
         }
         fatal("producer slot missing");
         return Token.init;
     }
 
     /// Spec 3b: a Token that does not match the live slot is fatal.
-    void unregisterProducer(Token tok) nothrow @nogc @system
+    void unregisterProducer(ref Token tok) nothrow @nogc @system
     {
         if (!tok.valid) fatal("unregister invalid token");
         immutable cap = tok.tier == Tier.bulk ? maxBulk : maxSmall;
@@ -433,6 +461,7 @@ struct AntFarm
         if (atomicLoad!(MemoryOrder.raw)(*prodSlot(hashes, tok.slot)) != tok.hash)
             fatal("unregister token mismatch");
         atomicStore!(MemoryOrder.raw)(*prodSlot(hashes, tok.slot), 0UL);
+        atomicStore!(MemoryOrder.raw)(*prodSlotQuota(hashes, tok.slot), 0UL);
         if (tok.tier == Tier.bulk)
         {
             if (atomicFetchSub!(MemoryOrder.raw)(Prbulk, 1) <= 0) fatal("Prbulk underflow");
@@ -441,10 +470,14 @@ struct AntFarm
         {
             if (atomicFetchSub!(MemoryOrder.raw)(Prsm, 1) <= 0) fatal("Prsm underflow");
         }
+        // Zero the token so a second unregister is a clean no-op failure,
+        // and any write with a stale ticket is rejected by requireToken.
+        tok = Token.init;
     }
 
-    /// Spec 4a: write() fatals unless tok matches a live slot of its tier.
-    private void requireToken(Token tok) nothrow @nogc @system
+    /// Spec 4a: write() fatals unless tok matches a live slot of its tier
+    /// and its quota mirror does not exceed the farm's authoritative ledger.
+    private void requireToken(ref Token tok) nothrow @nogc @system
     {
         if (!tok.valid) fatal("write requires a producer token");
         immutable cap = tok.tier == Tier.bulk ? maxBulk : maxSmall;
@@ -452,6 +485,18 @@ struct AntFarm
         if (hashes is null || tok.slot >= cap) fatal("write bad token slot");
         if (atomicLoad!(MemoryOrder.raw)(*prodSlot(hashes, tok.slot)) != tok.hash)
             fatal("write token mismatch");
+        immutable ledger = atomicLoad!(MemoryOrder.raw)(*prodSlotQuota(hashes, tok.slot));
+        if (tok.quotaLeft > ledger)
+            fatal("write quota exceeds farm ledger (forged token)");
+    }
+
+    /// Push the token's quota mirror into the authoritative ledger. Called
+    /// after every quota mutation in write() (refresh, reservation, and the
+    /// opportunistic renewal) so the next call's requireToken stays valid.
+    private void syncQuota(ref Token tok) nothrow @nogc @system
+    {
+        auto hashes = tok.tier == Tier.bulk ? prodHashBulk : prodHashSmall;
+        atomicStore!(MemoryOrder.raw)(*prodSlotQuota(hashes, tok.slot), tok.quotaLeft);
     }
 
     /// Bits 16..31 of Rt': Sub0 units. At rest 0 or 1; transiently more.
@@ -526,13 +571,13 @@ struct AntFarm
     }
 
     /// Spec 4 (revision 5). Writes as many of `payloads` as fit the caller's
-    /// quota `exi`; returns the number written. Returns 0 (full) when
-    /// backpressure is too high; callers retry or wait on consumers. `tok`
-    /// is required. `avgCost` is the producer's declared Call cost class, a
-    /// log2 shift in 0 .. MAX_AVG_COST: 0 means Calls are very cheap (chunk
-    /// stays at MAX_CHUNK, maximum claim amortization), larger values shrink
-    /// the chunk (short visits, less tail); the default 1 lands on chunk 16.
-    ulong write(scope PayloadEntry[] payloads, ref ulong exi, Token tok,
+    /// remaining quota (carried inside `tok`); returns the number written.
+    /// Returns 0 (full) when backpressure is too high; callers retry or wait
+    /// on consumers. `tok` is required, and is passed by reference so the
+    /// farm can maintain the quota state; the caller must never inspect or
+    /// copy the token's private quota. `avgCost` is the producer's declared
+    /// Call cost class, a log2 shift in 0 .. MAX_AVG_COST.
+    ulong write(scope PayloadEntry[] payloads, ref Token tok,
                 uint avgCost = 1) nothrow @nogc @system
     {
         requireToken(tok);
@@ -583,13 +628,14 @@ struct AntFarm
                 if (fixed > ulong.max - psumNext)
                     fatal("table size overflow");
                 immutable cand = fixed + psumNext;
-                if (cand > exi) break;
+                if (cand > tok.quotaLeft) break;
                 n = i + 1;
                 m = cast(uint) cm;
                 psum = psumNext;
             }
             if (n > 0) break;
-            if (!refreshQuota(exi, quota)) return 0;
+            if (!refreshQuota(tok.quotaLeft, quota)) return 0;
+            syncQuota(tok); // ledger follows a successful refresh
         }
 
         immutable size = tableSizeChecked(n, m, sq, psum);
@@ -597,7 +643,8 @@ struct AntFarm
         // Reserve space on the write tail (spec 3a, 4b).
         immutable wret = atomicFetchAdd!(MemoryOrder.raw)(Wt, size);
         immutable wtprime = wret + size;
-        exi -= size;
+        tok.quotaLeft -= size;
+        syncQuota(tok);
 
         // Opportunistic quota renewal (spec 3a/4b): if the distance from
         // Wt' to the end of its segment is at least Exmax, all outstanding
@@ -607,11 +654,14 @@ struct AntFarm
         immutable seqb = ((wtprime >> segShift) + 1) << segShift;
         // Wt' form, spec 3a.  The Wret form (seqb - wret >= exmax) was
         // also tested; it renews more often but, with a single bulk
-        // producer where quota == exmax == segCap, it can keep exi
+        // producer where quota == exmax == segCap, it can keep the quota
         // permanently renewed and let the producer lap without sweeping,
         // which stalls the benchmark.  Keep the direct Wt' form.
         if (seqb - wtprime >= exmax)
-            exi = quota;
+        {
+            tok.quotaLeft = quota;
+            syncQuota(tok);
+        }
 
         // Segment/epoch transitions (spec 4b): initialize metadata for each
         // crossed segment, release-storing Es last; advance Eg by the delta.

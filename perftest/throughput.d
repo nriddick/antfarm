@@ -128,8 +128,7 @@ void producerMain(ProdCtx* c)
         fprintf(stderr, "producer overregistration\n");
         abort();
     }
-    ulong exi;
-    size_t done;
+    ulong done;
     uint localStalls;
     while (done < c.count && atomicLoad(g_stop) == 0)
     {
@@ -141,7 +140,7 @@ void producerMain(ProdCtx* c)
         immutable remain = c.count - done;
         immutable take = remain < c.batch ? remain : c.batch;
         immutable span = take < c.poolN ? take : c.poolN;
-        immutable wrote = c.f.write(c.pool[0 .. span], exi, tok, c.avgCost);
+        immutable wrote = c.f.write(c.pool[0 .. span], tok, c.avgCost);
         done += wrote;
         if (wrote == 0)
         {

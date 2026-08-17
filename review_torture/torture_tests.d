@@ -53,8 +53,7 @@ void t01_pcount_field_carry()
         auto pid = fork();
         if (pid == 0)
         {
-            ulong exi = 4096;
-            cast(void) f.write((&e)[0 .. 1], exi, tok);
+            cast(void) f.write((&e)[0 .. 1], tok);
             _exit(0);
         }
         int st;
@@ -98,8 +97,7 @@ void t02_done_wrap_overexec()
         check(vs[i].subscribe(f) >= 0, "sub");
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "reg");
-    ulong exi;
-    while (f.write(batch.entries[0 .. 1], exi, tok) == 0)
+    while (f.write(batch.entries[0 .. 1], tok) == 0)
         Thread.yield();
     f.unregisterProducer(tok);
 
@@ -152,11 +150,10 @@ void t16_position_ref_stall()
     auto prod = new Thread({
         auto tok = f.registerProducer(Tier.bulk);
         check(tok.valid, "reg");
-        ulong exi;
         size_t off, stall;
         while (off < N)
         {
-            immutable n = f.write(entries[off .. N], exi, tok);
+            immutable n = f.write(entries[off .. N], tok);
             off += n;
             atomicStore(written, off);
             if (n == 0)
@@ -517,11 +514,10 @@ void t08_spanning_tables()
     c.start();
     auto tok = f.registerProducer(Tier.bulk);
     check(tok.valid, "reg");
-    ulong exi;
     size_t off;
     while (off < N)
     {
-        immutable n = f.write(entries[off .. N], exi, tok);
+        immutable n = f.write(entries[off .. N], tok);
         off += n;
         if (n == 0)
             Thread.yield();
@@ -708,8 +704,7 @@ void t13_create_validation()
     PayloadEntry e;
     e.header = &h;
     e.body = (cast(const(ulong)*) &v)[0 .. 1];
-    ulong exi = 512;
-    check(f0.write((&e)[0 .. 1], exi, tok) == 1, "nb0 write");
+    check(f0.write((&e)[0 .. 1], tok) == 1, "nb0 write");
     f0.unregisterProducer(tok);
     f0.destroy();
     say("T13 create OK");
@@ -805,8 +800,7 @@ void t17_write_size_wrap()
         auto pid = fork();
         if (pid == 0)
         {
-            ulong exi = 4096;
-            cast(void) f.write((&e)[0 .. 1], exi, tok);
+            cast(void) f.write((&e)[0 .. 1], tok);
             _exit(0);
         }
         int st;
@@ -859,8 +853,7 @@ void t17_write_size_wrap()
     immutable okMidSmall = expectAbort(midsize, "midsize-small");
     auto tokb = f.registerProducer(Tier.bulk);
     check(tokb.valid, "T17 bulk reg");
-    ulong exi = 2048;
-    immutable wrote = f.write((&midsize)[0 .. 1], exi, tokb);
+    immutable wrote = f.write((&midsize)[0 .. 1], tokb);
     f.unregisterProducer(tokb);
     check(wrote == 1, "midsize bulk write");
     free(mid);

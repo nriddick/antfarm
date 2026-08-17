@@ -123,9 +123,8 @@ void testSingleThreaded()
 
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "register small producer");
-    ulong exi = 0;
-    check(f.write(entries[0 .. 10], exi, tok) == 10, "write first 10");
-    check(f.write(entries[10 .. 20], exi, tok) == 10, "write second 10");
+    check(f.write(entries[0 .. 10], tok) == 10, "write first 10");
+    check(f.write(entries[10 .. 20], tok) == 10, "write second 10");
 
     // Consume the two tables; third call finds nothing published.
     check(v.consumeNext(), "consume table 1");
@@ -182,11 +181,10 @@ void producerMain(ProdCtx* c)
 {
     auto tok = c.f.registerProducer(c.tier);
     if (!tok.valid) fatal("producer overregistration");
-    ulong exi = 0;
     size_t off;
     while (off < c.count)
     {
-        immutable n = c.f.write(c.entries[off .. c.count], exi, tok);
+        immutable n = c.f.write(c.entries[off .. c.count], tok);
         off += n;
         if (n == 0)
             Thread.yield();
@@ -595,11 +593,10 @@ void testSpannedTables()
     c.start();
     auto tok = f.registerProducer(Tier.bulk);
     check(tok.valid, "register bulk");
-    ulong exi = 0;
     size_t off;
     while (off < N)
     {
-        immutable n = f.write(entries[off .. N], exi, tok);
+        immutable n = f.write(entries[off .. N], tok);
         off += n;
         if (n == 0) { Thread.yield(); }
     }
@@ -618,12 +615,11 @@ void smallProducerMain(ProdCtx* c)
 {
     auto tok = c.f.registerProducer(c.tier);
     if (!tok.valid) fatal("producer overregistration");
-    ulong exi;
     size_t off;
     while (off < c.count)
     {
         immutable batch = c.count - off < 12 ? c.count - off : 12;
-        immutable n = c.f.write(c.entries[off .. off + batch], exi, tok);
+        immutable n = c.f.write(c.entries[off .. off + batch], tok);
         off += n;
         if (n == 0)
             Thread.yield();

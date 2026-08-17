@@ -132,14 +132,13 @@ void producerMain(ProdCtx* c)
 {
     auto tok = c.f.registerProducer(c.tier);
     check(tok.valid, "producer overregistration");
-    ulong exi = 0;
     size_t off;
     size_t stall;
     while (off < c.count)
     {
         immutable remain = c.count - off;
         immutable take = (c.maxBatch == 0 || c.maxBatch >= remain) ? remain : c.maxBatch;
-        immutable n = c.f.write(c.entries[off .. off + take], exi, tok);
+        immutable n = c.f.write(c.entries[off .. off + take], tok);
         off += n;
         if (c.written !is null)
             atomicStore(*c.written, off);

@@ -40,10 +40,24 @@ make -C review_torture baseline   # existing antfarm_test.d
 
 - `torture_common.d` — counters, batch builder, producer/consumer helpers
 - `torture_tests.d` — T01–T18
+- `t19_flood_lap.d` — T19: interleaved bulk dump + mid-tick small writes +
+  subscription churn (four arms: no mid-tick, pure churn, consuming churn,
+  steady consumer) plus a forged-token quota test
 - `CODE_REVIEW.md` — findings
 - `POSTMORTEM.md` — settled directions for C1–C4 / H0 (next revision brief)
 - `last_run.log` — latest full run capture (gitignored)
 - `Makefile`
+
+Run T19 on its own: `make -C review_torture run-t19` (LDC),
+`run-t19-dmd`, or `run-t19-tsan`.
+
+## Producer quota lives in the Token
+
+`write()` no longer takes a caller-owned `ulong exi`. The remaining quota is
+carried privately inside the `Token` and mirrored in a farm-side ledger slot;
+`write()` validates the mirror against the ledger on every call and fatals on
+a forged token. Callers must keep the same `Token` variable across writes
+(pass by reference) and must not inspect or copy its private fields.
 
 ## Notes
 

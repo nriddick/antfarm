@@ -83,15 +83,16 @@ If a Pi has depleted its quota and could use a refresh, it scans the set of cont
 3b. Producer Tiers and Notes on Contention
 The Farm uses two tiers of producer to cap the max excursion, so one or a few enumerated batch writers can commit large chunks and the thread pool can occasionally write a couple kilobytes at a time. The single write tail is a linear point of contention and it's on a performant developer's shoulders to control the frequency of adds to it. Important invariant: The number of *actual* simultaneous producers *must* not exceed the maximums to prevent stomping consumers.
 
-Registration is how that invariant is enforced. The Farm preallocates two slot arrays, one of length maxBulk and one of length maxSmall, each entry holding a hash and initialized to an invalid value. registerProducer(tier) fetch-increments the matching Pr counter (returning negative and backing out if the tier is full), fetch-increments Reqs_p, writes a hash of (slot index, Reqs_p) into a free slot, and returns a Token { slot, hash }. unregisterProducer(Token) writes invalid into that slot and decrements the tier counter; a Token that does not match the slot is fatal. write() takes a required Token and fatals if the hash does not match the live slot for that tier. Unregistered threads therefore cannot call write() and cannot bypass Exmax. Reqs_p is not Reqs_c: a unified counter would advance IDc on every producer registration and immediately fragment consumers across shards.
+Registration is how that invariant is enforced. The Farm preallocates two slot arrays, one of length maxBulk and one of length maxSmall, each entry holding a hash (and an authoritative quota ledger) and initialized to an invalid value. registerProducer(tier) fetch-increments the matching Pr counter (returning negative and backing out if the tier is full), fetch-increments Reqs_p, writes a hash of (slot index, Reqs_p) into a free slot, initializes the slot's quota ledger to the tier quota, and returns a Token { slot, hash, private quota }. unregisterProducer(ref Token) writes invalid into that slot, clears the ledger, zeroes the token, and decrements the tier counter; a Token that does not match the slot is fatal. write() takes the Token by reference and fatals if the hash does not match the live slot or if the token's private quota mirror exceeds the farm's ledger for that slot. Unregistered threads therefore cannot call write() and cannot bypass Exmax, and a registered caller cannot forge a fresh quota past its grant by mutating the token. Reqs_p is not Reqs_c: a unified counter would advance IDc on every producer registration and immediately fragment consumers across shards.
 
 4. write() Details
 4a. Call and Return
 Arguments:
 * 'Payloads' a slice or input range of PayloadEntry structs.
-* 'Exi' reference to the caller's quota.
-* 'R' = 'Bulk' or 'Small' (default Small) the tier of the caller.
 * 'Token' the caller's registration ticket (3b). Required; a mismatch is fatal.
+  The Token is passed by reference; it carries the caller's remaining quota as
+  a private field, and the Farm mirrors it in a per-slot ledger so a forged
+  ticket cannot exceed the granted excursion.
 * 'AvgCost' (revision 5, optional, default 1) the producer's declared Call
   cost class: a log2 shift in 0 .. log2(MAX_CHUNK) published in Thead. 0
   means Calls are very cheap (chunk stays at MAX_CHUNK, maximum claim

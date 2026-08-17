@@ -245,8 +245,6 @@ struct FarmSet
     AntFarm* f;
     Token bulk;
     Token small;
-    ulong exiB;
-    ulong exiS;
     PayloadHeader* bgH;
     PayloadHeader* sentH;
     PayloadEntry* dump;
@@ -286,8 +284,6 @@ FarmSet startFarm(Cfg cfg, Arm arm, uint nc)
     s.small = s.f.registerProducer(Tier.small);
     if (!s.bulk.valid || !s.small.valid)
         fatal("register");
-    s.exiB = 0;
-    s.exiS = 0;
     s.bgH = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);
     s.sentH = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);
     // Cover the largest mid-drain cell (8192) even when Cfg.tlen is smaller.
@@ -365,7 +361,7 @@ void stopFarm(ref FarmSet s)
 
 ulong writeDump(ref FarmSet s, uint tlen)
 {
-    return s.f.write(s.dump[0 .. tlen], s.exiB, s.bulk, g_avgCost);
+    return s.f.write(s.dump[0 .. tlen], s.bulk, g_avgCost);
 }
 
 ulong writeSent(ref FarmSet s, long t0ticks, ulong slot)
@@ -376,7 +372,7 @@ ulong writeSent(ref FarmSet s, long t0ticks, ulong slot)
     PayloadEntry e;
     e.header = s.sentH;
     e.body = s.sentBody[0 .. s.dump[0].body.length];
-    return s.f.write((&e)[0 .. 1], s.exiS, s.small, g_avgCost);
+    return s.f.write((&e)[0 .. 1], s.small, g_avgCost);
 }
 
 Row runIdle(Cfg cfg, Arm arm, uint nc)
@@ -806,7 +802,7 @@ Row runNear(Cfg cfg, uint nc)
         if (n == 0)
             break;
         parked += n;
-        if (s.f.write((&probe)[0 .. 1], s.exiS, s.small, g_avgCost) == 0)
+        if (s.f.write((&probe)[0 .. 1], s.small, g_avgCost) == 0)
         {
             r.parked = parked;
             break;

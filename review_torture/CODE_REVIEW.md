@@ -228,15 +228,19 @@ safety argument.
 
 ### H0. `write()` does not enforce `registerProducer` (Exmax bypass)
 
-**Status:** CONFIRMED (low-level probe)  
-**Where:** register at 303–317 vs `write` at 363+  
-**Spec 3b:** actual simultaneous producers must not exceed tier maxima
+**Status:** CLOSED (token-carried quota ledger, 2026-08-16)
 
-Unregistered threads can call `write` successfully. N > maxBulk+maxSmall writers
-break the Exmax safety argument and can stomp consumer-protected data.
+The ticket originally enforced identity, not excursion: a registered caller
+could forge `exi = quotaSmall` each call and mint blind quota past Exmax,
+letting a single producer lap the ring over unexecuted work. Fixed by moving
+the remaining quota into a private `Token` field, mirroring it in a per-slot
+farm ledger, and fataling in `write()` when the mirror exceeds the ledger.
+`unregisterProducer` now takes `ref Token` and zeroes the ticket; `write()`
+takes `ref Token` and manages the quota internally. Callers no longer pass
+or own `exi`.
 
-**Fix:** Require a producer ticket inside `write`, or only expose write via a
-handle obtained from `registerProducer`.
+**Regression:** T19 (`review_torture/t19_flood_lap.d`) covers the four
+churn/mid-tick arms plus a forged-token child that must SIGABRT.
 
 ### H1. Multi-small-producer near-completion stalls (related to C1)
 

@@ -339,7 +339,6 @@ Trial runOnce(Cfg cfg, Arm arm)
             fatal("register");
     }
 
-    ulong[] exi = new ulong[cfg.nb];
     ulong published;
     uint stalls;
     auto deadlinePub = MonoTime.currTime + 30.seconds;
@@ -355,7 +354,7 @@ Trial runOnce(Cfg cfg, Arm arm)
         immutable remain = total - published;
         immutable want = remain < cfg.tlen ? cast(uint) remain : cfg.tlen;
         immutable before = atomicLoad(f.Wt);
-        immutable n = f.write(entries[0 .. want], exi[pi], toks[pi]);
+        immutable n = f.write(entries[0 .. want], toks[pi]);
         if (n == 0)
         {
             ++stalls;

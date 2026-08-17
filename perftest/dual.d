@@ -118,8 +118,7 @@ void dualMain(DualCtx* c)
         abort();
     }
 
-    ulong exi = 0;
-    size_t produced;
+    ulong produced;
     uint localStalls;
 
     while (atomicLoad(g_stop) == 0 && MonoTime.currTime <= c.deadline)
@@ -130,7 +129,7 @@ void dualMain(DualCtx* c)
             immutable remain = c.produce - produced;
             immutable take = remain < c.batch ? remain : c.batch;
             immutable span = take < c.poolN ? take : c.poolN;
-            immutable wrote = c.f.write(c.pool[0 .. span], exi, tok, c.avgCost);
+            immutable wrote = c.f.write(c.pool[0 .. span], tok, c.avgCost);
             produced += wrote;
             if (wrote == 0)
                 ++localStalls;
