@@ -11,6 +11,12 @@ Concretely:
 - **Variable payloads.** Each payload is a 128-byte `PayloadHeader` plus a type-erased `const(ulong)[]` body. Payloads may be single-threaded (`MaxCs = 1`) or multithreaded (`Done`/`MaxCs` up to 512), so a payload can describe one job or a mini-parallel task.
 - **Deliberately relaxed ordering.** There is no FIFO guarantee. Within a published table, consumers shard the index by `(IDc + Tseq) % SqCs` and claim chunks of the shard. Work is executed in claim order *within* a shard, not globally. A mid-tick one-payload write can overtake an in-flight dump table.
 - **Failure is fatal.** Invariant violations (counter wraps, bad tokens, unsizable payloads) abort the process; this is the spec's corruption tripwire, and the perf work found the checks cost ~0%.
+- **Producer quotas live in the ticket.** Each producer registers for a tier and receives a single-owner `Token` carrying a private quota mirror, validated against a farm-side per-slot ledger on every `write()`. Tokens transfer (copy consumes the source); a forged or copied ticket fatals on the ledger mismatch, so a registered caller cannot mint blind quota past Exmax. Callers pass the same `Token` by reference for the producer's lifetime.
+
+### 1.1 Build variants
+
+- **`ZERO_ST_RMW`** (`-d-version=ZERO_ST_RMW`): the single-threaded single-shot (ST) fast path in `enterPayload` drops the Pcount claims RMW entirely and uses a plain increment, relying solely on the shard Tcount chunk claim for exclusivity. Measured ~4% faster with the legacy global-count callback, neutral with the default per-worker-batched callback. It makes duplicate ST entry a real risk if a per-element search path is ever added outside the chunk digest; keep the default build for production.
+- **`noverify`** (`-d-version=noverify`): disables the packed-counter wrap tripwires (`VERIFY_WRAPS`). They are provably unreachable under the 512 caps and cost ~0%; keep them on in release.
 
 So the right mental model is: **producers publish tables of mixed-size jobs into a bounded ring; consumers independently claim runs of jobs, sharded to avoid contention; the only producer↔consumer coupling is per-segment reference tallies.**
 

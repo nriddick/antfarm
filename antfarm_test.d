@@ -87,7 +87,7 @@ void testArithmetic()
 
 void testSingleThreaded()
 {
-    auto f = AntFarm.create(1 << 16, 8, 2, 1, 8192, 4, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 2, 1, 8192, 4, 2048);
     scope (exit) f.destroy();
 
     // Epoch 0: Sub0 pulse present, blocking reclamation of segment 0.
@@ -282,10 +282,12 @@ __gshared ProdCtx p1ctx, p2ctx;
 
 void testWraparound()
 {
-    auto f = AntFarm.create(1 << 14, 8, 1, 1, 2048, 2, 1024);
+    auto f = AntFarm.create(1 << 18, 8, 1, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
 
-    enum N = 4000;
+    // ~20 ulongs/payload (tiny bodies pack ~17/table); 40000 payloads
+    // write ~790K ulongs, lapping the 2^18 ring ~3x.
+    enum N = 40000;
     allocCalls(N);
     scope (exit) freeCalls();
 
@@ -335,7 +337,7 @@ void testWraparound()
 
 void testSubscriptionCap()
 {
-    auto f = AntFarm.create(1 << 14, 8, 4, 1, 2048, 2, 1024);
+    auto f = AntFarm.create(1 << 18, 8, 4, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
 
     auto views = cast(ConsumerView*) malloc(MAX_CONSUMERS_LIMIT * ConsumerView.sizeof);
@@ -396,7 +398,7 @@ void churnerMain(ChurnCtx* c)
 
 void testChurn(size_t nsteady)
 {
-    auto f = AntFarm.create(1 << 16, 8, 6, 1, 4096, 4, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 6, 1, 4096, 4, 2048);
     scope (exit) f.destroy();
 
     enum N = 4000;
@@ -474,7 +476,7 @@ void testChurn(size_t nsteady)
 
 void testBacklog()
 {
-    auto f = AntFarm.create(1 << 14, 8, 2, 1, 2048, 2, 1024);
+    auto f = AntFarm.create(1 << 18, 8, 2, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
 
     enum N = 3000;
@@ -546,8 +548,9 @@ void testBacklog()
 
 void testSpannedTables()
 {
-    // segCap = 2048; bulk quota 6000 allows one table to span ~3 segments.
-    auto f = AntFarm.create(1 << 14, 8, 2, 1, 6000, 2, 1024);
+    // segCap = 2^18/8 = 32768; bulk quota 110000 allows a 100k table to
+    // span ~3 segments and a 34k table to span a boundary.
+    auto f = AntFarm.create(1 << 18, 8, 2, 1, 110000, 2, 1024);
     scope (exit) f.destroy();
 
     enum N = 64;
@@ -556,10 +559,10 @@ void testSpannedTables()
 
     auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     scope (exit) free(headers);
-    // One huge body (~5000 ulongs -> its table fully spans a segment),
-    // one large body (~3000 -> spans a boundary), the rest small.
-    auto huge = cast(ulong*) malloc(5000 * ulong.sizeof);
-    auto large = cast(ulong*) malloc(3000 * ulong.sizeof);
+    // One huge body (~100000 ulongs -> its table fully spans segments),
+    // one large body (~34000 -> spans a boundary), the rest small.
+    auto huge = cast(ulong*) malloc(100000 * ulong.sizeof);
+    auto large = cast(ulong*) malloc(34000 * ulong.sizeof);
     auto small = cast(ulong*) malloc((N - 2) * 2 * ulong.sizeof);
     scope (exit) { free(huge); free(large); free(small); }
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
@@ -574,11 +577,11 @@ void testSpannedTables()
         headers[i].call = &testCb;
         ++expected;
     }
-    foreach (i; 0 .. 5000) huge[i] = (i == 0) ? 0 : 1;      // payload 0: body[0] = index
-    foreach (i; 0 .. 3000) large[i] = (i == 0) ? 1 : 1;     // payload 1
+    foreach (i; 0 .. 100000) huge[i] = (i == 0) ? 0 : 1;    // payload 0: body[0] = index
+    foreach (i; 0 .. 34000) large[i] = (i == 0) ? 1 : 1;    // payload 1
     huge[0] = 0; large[0] = 1;
-    entries[0].header = &headers[0]; entries[0].body = huge[0 .. 5000];
-    entries[1].header = &headers[1]; entries[1].body = large[0 .. 3000];
+    entries[0].header = &headers[0]; entries[0].body = huge[0 .. 100000];
+    entries[1].header = &headers[1]; entries[1].body = large[0 .. 34000];
     foreach (i; 2 .. N)
     {
         small[(i - 2) * 2] = i;
@@ -631,7 +634,7 @@ void smallProducerMain(ProdCtx* c)
 // by the carried sweeper role (and the idle re-walk backstop).
 void testSmallTableChurn()
 {
-    auto f = AntFarm.create(1 << 16, 8, 6, 1, 4096, 4, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 6, 1, 4096, 4, 2048);
     scope (exit) f.destroy();
 
     enum N = 4000;
@@ -699,7 +702,7 @@ void testSmallTableChurn()
 // position pin on a spanning table's start starved refreshQuota.
 void testMultiSmallProducers()
 {
-    auto f = AntFarm.create(1 << 16, 8, 2, 1, 8192, 2, 4096);
+    auto f = AntFarm.create(1 << 18, 8, 2, 1, 8192, 2, 4096);
     scope (exit) f.destroy();
 
     enum N = 2000;

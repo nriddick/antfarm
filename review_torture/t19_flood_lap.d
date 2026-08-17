@@ -171,7 +171,7 @@ enum Arm : ubyte
 
 void runArm(Arm arm)
 {
-    auto f = AntFarm.create(1 << 16, 8, 8, 1, 4096, 4, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 8, 1, 4096, 4, 2048);
     scope (exit) f.destroy();
 
     enum N = 600;
@@ -268,7 +268,7 @@ void testQuotaResetRejected()
         check(pid >= 0, "T19 fork");
         if (pid == 0)
         {
-            auto f = AntFarm.create(1 << 14, 8, 1, 1, 2048, 1, 512);
+            auto f = AntFarm.create(1 << 18, 8, 1, 1, 2048, 1, 512);
             auto tok = f.registerProducer(Tier.small);
             if (!tok.valid)
                 _exit(90);

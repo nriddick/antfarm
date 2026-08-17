@@ -36,7 +36,7 @@ void t01_pcount_field_carry()
     import core.sys.posix.sys.wait : waitpid;
     import core.sys.posix.signal : SIGABRT;
 
-    auto f = AntFarm.create(1 << 14, 4, 1, 1, 2048, 1, 512);
+    auto f = AntFarm.create(1 << 18, 4, 1, 1, 2048, 1, 512);
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "T01 reg");
 
@@ -78,7 +78,7 @@ void t01_pcount_field_carry()
 
 void t02_done_wrap_overexec()
 {
-    auto f = AntFarm.create(1 << 16, 8, 8, 1, 8192, 4, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 8, 1, 8192, 4, 2048);
     scope (exit) f.destroy();
     allocCalls(1);
     scope (exit) freeCalls();
@@ -119,7 +119,11 @@ void t02_done_wrap_overexec()
 
 void t16_position_ref_stall()
 {
-    auto f = AntFarm.create(1 << 15, 8, 2, 2, 10000, 0, 1024);
+    // Large Exmax stall geometry: segCap = Ln/K = 2^18/8 = 32768 and
+    // Exmax = 2*81920 = 163840 ~= 5*segCap, so the idle re-walk must
+    // migrate a confirmed position pin forward or refreshQuota's forward
+    // sweep breaks at it and the producer stalls.
+    auto f = AntFarm.create(1 << 18, 8, 2, 2, 81920, 0, 0);
     scope (exit) f.destroy();
 
     enum N = 120;
@@ -315,7 +319,7 @@ void t04_many_consumers_two_producers()
 
 void t05_zero_consumer_gap()
 {
-    auto f = AntFarm.create(1 << 14, 8, 2, 1, 2048, 2, 1024);
+    auto f = AntFarm.create(1 << 18, 8, 2, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
     enum N = 1600;
     allocCalls(N);
@@ -377,7 +381,7 @@ void stormerMain(StormCtx* c)
 
 void t06_subscription_storm()
 {
-    auto f = AntFarm.create(1 << 16, 8, 8, 1, 8192, 6, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 8, 1, 8192, 6, 2048);
     scope (exit) f.destroy();
     enum N = 5000;
     allocCalls(N);
@@ -428,7 +432,7 @@ void t06_subscription_storm()
 
 void t07_small_table_churn()
 {
-    auto f = AntFarm.create(1 << 16, 8, 8, 1, 4096, 6, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 8, 1, 4096, 6, 2048);
     scope (exit) f.destroy();
     enum N = 4500;
     allocCalls(N);
@@ -474,15 +478,18 @@ void t07_small_table_churn()
 
 void t08_spanning_tables()
 {
-    auto f = AntFarm.create(1 << 14, 8, 4, 1, 6000, 2, 1024);
+    // segCap = 2^18/8 = 32768; huge (100k) spans ~3 segments, large (34k)
+    // spans a boundary, the rest small. Bulk quota 110000 covers the huge
+    // singleton and keeps Exmax <= (K-1)*segCap.
+    auto f = AntFarm.create(1 << 18, 8, 4, 1, 110000, 2, 1024);
     scope (exit) f.destroy();
     enum N = 64;
     allocCalls(N);
     scope (exit) freeCalls();
     auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    auto huge = cast(ulong*) malloc(5000 * ulong.sizeof);
-    auto large = cast(ulong*) malloc(3000 * ulong.sizeof);
+    auto huge = cast(ulong*) malloc(100000 * ulong.sizeof);
+    auto large = cast(ulong*) malloc(34000 * ulong.sizeof);
     auto small = cast(ulong*) malloc((N - 2) * 2 * ulong.sizeof);
     long expected;
     foreach (i; 0 .. N)
@@ -495,8 +502,8 @@ void t08_spanning_tables()
     }
     huge[0] = 0;
     large[0] = 1;
-    entries[0] = PayloadEntry(&headers[0], huge[0 .. 5000]);
-    entries[1] = PayloadEntry(&headers[1], large[0 .. 3000]);
+    entries[0] = PayloadEntry(&headers[0], huge[0 .. 100000]);
+    entries[1] = PayloadEntry(&headers[1], large[0 .. 34000]);
     foreach (i; 2 .. N)
     {
         small[(i - 2) * 2] = i;
@@ -561,7 +568,7 @@ long boundedSlowCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @s
 
 void t09_slow_mt_bounds()
 {
-    auto f = AntFarm.create(1 << 16, 8, 16, 1, 8192, 4, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 16, 1, 8192, 4, 2048);
     scope (exit) f.destroy();
     enum N = 120;
     allocCalls(N);
@@ -592,7 +599,7 @@ void t09_slow_mt_bounds()
 
 void t10_caps()
 {
-    auto f = AntFarm.create(1 << 14, 4, 2, 1, 2048, 2, 1024);
+    auto f = AntFarm.create(1 << 18, 4, 2, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
     auto b0 = f.registerProducer(Tier.bulk);
     check(b0.valid, "b0");
@@ -623,9 +630,11 @@ void t10_caps()
 
 void t11_late_subscriber_multilap()
 {
-    auto f = AntFarm.create(1 << 14, 8, 1, 1, 2048, 2, 1024);
+    auto f = AntFarm.create(1 << 18, 8, 1, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
-    enum N = 3500;
+    // ~20 ulongs/payload (tiny bodies pack ~17/table); 40000 payloads
+    // write ~790K ulongs, lapping the 2^18 ring ~3x.
+    enum N = 40000;
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
@@ -654,7 +663,7 @@ void t11_late_subscriber_multilap()
 
 void t12_no_reexecution_on_resub()
 {
-    auto f = AntFarm.create(1 << 15, 8, 2, 1, 4096, 4, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 2, 1, 4096, 4, 2048);
     scope (exit) f.destroy();
     enum N = 200;
     allocCalls(N);
@@ -686,13 +695,13 @@ void t12_no_reexecution_on_resub()
 
 void t13_create_validation()
 {
-    auto f = AntFarm.create(1 << 14, 2, 1, 1, 2048, 1, 512);
-    check(f.K == 2 && f.segCap == (1 << 13) && f.exmax == 2560, "geom");
+    auto f = AntFarm.create(1 << 18, 2, 1, 1, 2048, 1, 512);
+    check(f.K == 2 && f.segCap == (1 << 17) && f.exmax == 2560, "geom");
     f.destroy();
     // An unused bulk tier must not inject a segCap quota into the Exmax
     // check (regression: nb==0 with a default qb used to fatal "quota
     // exceeds Exmax" unless the caller mirrored qs into qb).
-    auto f0 = AntFarm.create(1 << 14, 2, 1, 0, 0, 2, 512);
+    auto f0 = AntFarm.create(1 << 18, 2, 1, 0, 0, 2, 512);
     check(f0.exmax == 1024, "nb0 exmax");
     auto tok = f0.registerProducer(Tier.small);
     check(tok.valid, "nb0 reg");
@@ -714,7 +723,7 @@ void t14_k_geometry()
 {
     foreach (k; [cast(uint) 4, cast(uint) 16])
     {
-        auto f = AntFarm.create(1 << 16, k, 4, 1, 4096, 4, 1024);
+        auto f = AntFarm.create(1 << 18, k, 4, 1, 4096, 4, 1024);
         scope (exit) f.destroy();
         enum N = 800;
         allocCalls(N);
@@ -735,7 +744,7 @@ void t14_k_geometry()
 
 void t15_wave_consumers()
 {
-    auto f = AntFarm.create(1 << 16, 8, 6, 1, 8192, 8, 2048);
+    auto f = AntFarm.create(1 << 18, 8, 6, 1, 8192, 8, 2048);
     scope (exit) f.destroy();
     enum N = 4000;
     allocCalls(N);
@@ -791,7 +800,7 @@ void t17_write_size_wrap()
     import core.sys.posix.sys.wait : waitpid;
     import core.sys.posix.signal : SIGABRT;
 
-    auto f = AntFarm.create(1 << 14, 4, 1, 1, 2048, 1, 512);
+    auto f = AntFarm.create(1 << 18, 4, 1, 1, 2048, 1, 512);
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "T17 reg");
 
@@ -875,7 +884,7 @@ void t18_pure_churn_orphan()
     int bad;
     foreach (trial; 0 .. TRIALS)
     {
-        auto f = AntFarm.create(1 << 16, 8, 8, 1, 4096, 4, 2048);
+        auto f = AntFarm.create(1 << 18, 8, 8, 1, 4096, 4, 2048);
         enum N = 600;
         allocCalls(N);
         auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {

@@ -1,9 +1,0 @@
-digest  Ln=2097152 (16.0 MiB)  nc=8  tlen=256  jobs~36608  mix=touch  repeats=3
-arm          mix     body         jobs     ns/job     Mjob/s  note
-linear16     touch     16        36608      30.86     32.408
-linear1      touch     16        36608      49.19     20.330
-           vs linear16: 1.59x
-shuffled16   touch     16        36608      31.08     32.174
-           vs linear16: 1.01x
-copyout16    touch     16        36608      30.66     32.619
-           vs linear16: 0.99x

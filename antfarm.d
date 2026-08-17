@@ -143,6 +143,13 @@ enum Tier : ubyte { small, bulk }
 /// farm's authoritative ledger (prodSlotQuota). It is deliberately private:
 /// the caller passes the Token by reference and never reads or writes it;
 /// write() validates the mirror against the ledger on every call.
+///
+/// Tokens are single-owner: copying is a *transfer*. The copy constructor
+/// copies tier/slot/quotaLeft, release-stores the valid hash *last* (so a
+/// reader that acquire-loads a valid hash is guaranteed to see the other
+/// fields), then clears the source's hash so at most one live token exists
+/// per slot and a stale copy fails requireToken. Assignment takes the
+/// argument by value, which routes through the same transfer copy.
 struct Token
 {
     Tier tier;
@@ -158,6 +165,35 @@ struct Token
         slot = s;
         hash = h;
         quotaLeft = grant;
+    }
+
+    private void invalidate() nothrow @nogc @system
+    {
+        hash = 0;
+        quotaLeft = 0;
+    }
+
+    /// Transfer-only copy: the source is consumed. The destination's valid
+    /// hash is release-stored last so a reader that acquire-loads the hash
+    /// also sees tier/slot/quotaLeft; the source hash is then cleared.
+    this(ref Token src) nothrow @nogc @system
+    {
+        tier = src.tier;
+        slot = src.slot;
+        quotaLeft = src.quotaLeft;
+        atomicStore!(MemoryOrder.rel)(*cast(shared ulong*) &hash, src.hash);
+        atomicStore!(MemoryOrder.raw)(*cast(shared ulong*) &src.hash, 0UL);
+    }
+
+    /// Transfer-only assignment: the by-value argument was already moved
+    /// into this temporary by the copy constructor above.
+    ref Token opAssign(Token src) nothrow @nogc @system
+    {
+        tier = src.tier;
+        slot = src.slot;
+        quotaLeft = src.quotaLeft;
+        atomicStore!(MemoryOrder.raw)(*cast(shared ulong*) &hash, src.hash);
+        return this;
     }
 }
 
@@ -289,15 +325,33 @@ struct AntFarm
                            uint maxSmall = 16, ulong quotaSmall = 4096,
                            uint smallThreshold = SMALL_TABLE_THRESHOLD) nothrow @nogc @system
     {
+        // Construction constraints (spec 1/3b):
+        //  - K is the useful power-of-two range [2, KMAX=16].
+        //  - Ln >= 2^18 (2 MiB with the ulong base unit); smaller rings were
+        //    never studied and per-table header overhead would dominate.
+        //  - segCap = Ln/K has a floor so header/pad space never dominates a
+        //    segment's capacity (subsumed by Ln >= 2^18 with K <= 16).
+        //  - Exmax <= (K-1)*segCap so a full quota excursion is strictly
+        //    less than a lap (spec 3a safety argument).
+        //  - quotaRole > 0 iff maxRole > 0: an enabled role must declare a
+        //    positive quota; a disabled role's quota is normalized to 0 and
+        //    takes no part in Exmax.
         if (k < 2 || k > KMAX || (k & (k - 1)) != 0) fatal("K must be a power of 2 in [2, KMAX]");
-        if (ln < (1 << 14) || (ln & (ln - 1)) != 0) fatal("Ln must be a power of 2 >= 2^14");
+        if (ln < (1 << 18) || (ln & (ln - 1)) != 0) fatal("Ln must be a power of 2 >= 2^18");
         immutable segCap = ln / k;
         if (segCap < 2048) fatal("segment capacity too small");
         if (expectedConsumers == 0) fatal("expected consumers must be > 0");
-        // An unused bulk tier must not inject a segCap quota into the Exmax
-        // check: with maxBulk == 0, quotaBulk stays 0 and takes no part.
-        if (maxBulk > 0 && quotaBulk == 0) quotaBulk = segCap;
-        if (quotaSmall == 0) fatal("small quota must be > 0");
+        // Quota-role rule (spec 3b): normalize disabled roles, validate
+        // enabled ones. Bulk auto-defaults to segCap when enabled with an
+        // unspecified quota (legacy convenience); small fatals on 0.
+        if (maxBulk == 0)
+            quotaBulk = 0;
+        else if (quotaBulk == 0)
+            quotaBulk = segCap;
+        if (maxSmall == 0)
+            quotaSmall = 0;
+        else if (quotaSmall == 0)
+            fatal("small quota must be > 0");
         if (maxBulk + maxSmall == 0) fatal("no producer capacity configured");
         immutable exmax = cast(ulong) maxBulk * quotaBulk + cast(ulong) maxSmall * quotaSmall;
         if (maxBulk > 0 && quotaBulk > exmax) fatal("quota exceeds Exmax");
@@ -472,7 +526,7 @@ struct AntFarm
         }
         // Zero the token so a second unregister is a clean no-op failure,
         // and any write with a stale ticket is rejected by requireToken.
-        tok = Token.init;
+        tok.invalidate();
     }
 
     /// Spec 4a: write() fatals unless tok matches a live slot of its tier
@@ -511,7 +565,10 @@ struct AntFarm
             return;
         immutable ei1 = e + 1;
         immutable ki1 = cast(uint)(ei1 & kMask);
-        if (atomicLoad!(MemoryOrder.raw)(stats[ki1].es) != cast(long) ei1)
+        // Acquire pairs with the producer's release-store of Es[ki1], so a
+        // matching epoch also orders the Seqt[ki1] read below (valid Es
+        // implies valid header metadata, as with the table sentinel).
+        if (atomicLoad!(MemoryOrder.acq)(stats[ki1].es) != cast(long) ei1)
             return;
         immutable seqt = atomicLoad!(MemoryOrder.raw)(stats[ki].seqt);
         immutable seqtN = atomicLoad!(MemoryOrder.raw)(stats[ki1].seqt);
@@ -549,7 +606,11 @@ struct AntFarm
     /// Quota is renewed only if at least Exmax of free space is verified.
     private bool refreshQuota(ref ulong exi, ulong quota) nothrow @nogc @system
     {
-        immutable anchor = atomicLoad!(MemoryOrder.raw)(Wt);
+        // Spec 3a reanchor: a fetch_add(Wt, 0) RMW participates in Wt's
+        // modification order and returns the write tail at its linearization
+        // point, so the sweep below starts from a timely view rather than a
+        // possibly-stale plain load. (+0 keeps the value unchanged.)
+        immutable anchor = atomicFetchAdd!(MemoryOrder.raw)(Wt, 0UL);
         immutable ea = anchor >> segShift;
         ulong freeSp = 0;
         foreach (j; 1 .. K)
