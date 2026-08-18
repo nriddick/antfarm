@@ -30,6 +30,8 @@ version (Posix)
     import core.sys.posix.sys.types;
     import core.sys.posix.fcntl;
     import core.sys.posix.unistd;
+    version (linux)
+        import core.sys.linux.sys.mman : madvise, MADV_HUGEPAGE;
 }
 else
     static assert(false, "antfarm: magic buffer mapping only implemented for Posix in this port");
@@ -324,7 +326,8 @@ struct AntFarm
     static AntFarm* create(ulong ln = 1 << 20, uint k = 8, uint expectedConsumers = 4,
                            uint maxBulk = 2, ulong quotaBulk = 0,
                            uint maxSmall = 16, ulong quotaSmall = 4096,
-                           uint smallThreshold = SMALL_TABLE_THRESHOLD) nothrow @nogc @system
+                           uint smallThreshold = SMALL_TABLE_THRESHOLD,
+                           bool hugePages = false) nothrow @nogc @system
     {
         // Construction constraints (spec 1/3b):
         //  - K is the useful power-of-two range [2, KMAX=16].
@@ -376,6 +379,22 @@ struct AntFarm
         if (mmap(cast(char*) p + bytes, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0)
                 == MAP_FAILED)
             fatal("mmap second half failed");
+
+        if (hugePages)
+        {
+            version (linux)
+            {
+                // THP advice on the tmpfs-backed shm mapping.  The magic
+                // buffer is file-backed so the same huge pages are visible
+                // through both halves of the alias.
+                if (madvise(p, bytes, MADV_HUGEPAGE) != 0)
+                    fatal("madvise first half huge pages failed");
+                if (madvise(cast(char*) p + bytes, bytes, MADV_HUGEPAGE) != 0)
+                    fatal("madvise second half huge pages failed");
+            }
+            else
+                fatal("huge pages only supported on Linux");
+        }
 
         auto mem = aligned_alloc(64, (AntFarm.sizeof + 63) & ~cast(size_t) 63);
         if (mem is null) fatal("alloc failed");

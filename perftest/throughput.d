@@ -69,6 +69,7 @@ struct Cfg
     uint avgCost = 1;  // chunk hint: MAX_CHUNK >> avgCost
     uint small = 64;   // small-table threshold; 0 = auto clamp(sq*chunk,16,256)
     uint repeats = 3;
+    bool huge;   // --huge: MADV_HUGEPAGE on the magic-buffer mapping
     bool nSet;
 }
 
@@ -216,7 +217,7 @@ Trial runOnce(Cfg c)
     // in use (nb > 0), so an unused bulk tier cannot inject a segCap quota
     // into the Exmax check; pass the configured value straight through.
     immutable qb = c.qb;
-    auto f = AntFarm.create(c.ln, c.k, c.nc, c.nb, qb, c.ns, c.qs, c.small);
+    auto f = AntFarm.create(c.ln, c.k, c.nc, c.nb, qb, c.ns, c.qs, c.small, c.huge);
 
     immutable poolN = c.batch < 256 ? 256 : c.batch;
     auto headers = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);
@@ -382,6 +383,11 @@ Cfg parseArgs(string[] args, Cfg base)
             g_globalCount = true;
             continue;
         }
+        if (a == "--huge")
+        {
+            c.huge = true;
+            continue;
+        }
         if (i + 1 >= args.length)
             break;
         auto v = args[++i];
@@ -418,9 +424,10 @@ void scaleN(ref Cfg c)
 void banner(ref const Cfg c)
 {
     immutable bytes = c.ln * 8.0 / (1024.0 * 1024.0);
-    printf("Ant Farm throughput  Ln=%llu (%.1f MiB)  repeats=%u  callback=%s\n",
+    printf("Ant Farm throughput  Ln=%llu (%.1f MiB)  repeats=%u  callback=%s  huge=%s\n",
            cast(ulong) c.ln, bytes, c.repeats,
-           g_globalCount ? "global-atomic".ptr : "per-worker-batched".ptr);
+           g_globalCount ? "global-atomic".ptr : "per-worker-batched".ptr,
+           c.huge ? "yes".ptr : "no".ptr);
     fflush(stdout);
 }
 

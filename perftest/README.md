@@ -9,9 +9,16 @@ number measured atomic-contention throughput rather than Ant Farm overhead.
 `--global-count` is kept for A/B comparisons.
 
 ```
-make -C perftest run          # two-phase sweep (default)
-make -C perftest run-once     # one config (see flags below)
-make -C perftest dual-run     # dual-registered producer/consumer threads
+make -C perftest run              # two-phase sweep (default)
+make -C perftest run-once         # one config (see flags below)
+make -C perftest run-huge         # same sweep, THP-backed magic buffer
+make -C perftest run-once-huge    # one config with --huge
+make -C perftest dual-run         # dual-registered producer/consumer threads
+make -C perftest digest-run       # digest bench
+make -C perftest tail-run         # tail bench
+make -C perftest dual-run-huge    # etc.
+make -C perftest digest-run-huge
+make -C perftest tail-run-huge
 ```
 
 Release build (`ldc2 -O2 -release`). `fatal()` still prints and aborts.
@@ -49,6 +56,29 @@ worst shape. The full ranked table is `last_sweep.txt`.
 The old global-atomic point `K=8 nc=8 nb=2 body=16 batch=256` remains a
 robust production config: **~61 Mpps** global-atomic / **~77 Mpps**
 batched on this host.
+
+## Huge pages (THP)
+
+Add `--huge` to any perftest (or use the `*-huge` make targets) to advise
+the magic-buffer mapping with `MADV_HUGEPAGE`. This is a Linux/THP path:
+the same tmpfs-backed `shm` file is mapped twice, so the 2 MiB pages appear
+through both halves of the alias (`ShmemPmdMapped`).
+
+Measured on the same Ryzen 5 5500 host, per-worker batched callback, 16 MiB
+farm (`repeats=5`, longer runs):
+
+| Config | 4K pages | `--huge` | Delta |
+|--------|---------:|---------:|------:|
+| `K=4 nc=4 nb=1 ns=4 body=2 batch=256` | ~180–186 Mpps | ~243–246 Mpps | **+30–36%** |
+| `K=4 nc=4 nb=1 ns=4 body=16 batch=80` | ~126–127 Mpps | ~164–165 Mpps | **+30%** |
+| `K=4 nc=4 nb=1 ns=4 body=1024 batch=80` | ~6.4–7.1 Mpps | ~9.7 Mpps | **+36–51%** |
+| `K=8 nc=8 nb=2 ns=0 body=16 batch=256` | ~77–78 Mpps | ~88–89 Mpps | **+14%** |
+
+The 16 MiB ring is exactly the L3 size on this host, and huge pages remove
+most of the page-walk cost from a fully cache-resident working set. The
+same shapes at 32 MiB and larger showed only ~0–5% movement, so the win is
+concentrated in the recommended 8–16 MiB production ring.
+
 ## Dual-role bench (small producers that are also consumers)
 
 `make -C perftest dual-run` — every thread registers a producer ticket
@@ -190,5 +220,6 @@ Metric: ticks just before `write()` of a 1-payload small-tier sentinel → first
 | `--qs` | small quota | 4096 |
 | `--ac` | avgCost chunk hint (0..5) | 1 |
 | `--small` | small-table threshold (0 = auto) | 64 |
+| `--huge` | MADV_HUGEPAGE on the magic-buffer mapping (Linux) | off |
 | `--global-count` | old one-global-atomic callback | off |
 | `--repeats` | timed repeats | 3 |

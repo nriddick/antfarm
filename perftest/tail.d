@@ -52,6 +52,7 @@ struct Cfg
     Arm oneArm = Arm.stock;
     uint avgCost = 1;  // chunk hint for dump writes
     uint small = 64;   // small-table threshold; 0 = auto
+    bool huge;         // --huge: MADV_HUGEPAGE on the magic-buffer mapping
 }
 
 __gshared shared(long) g_bg;
@@ -279,7 +280,7 @@ FarmSet startFarm(Cfg cfg, Arm arm, uint nc)
 {
     FarmSet s;
     s.nc = nc;
-    s.f = AntFarm.create(cfg.ln, cfg.k, nc, 1, 0, 1, 4096, cfg.small);
+    s.f = AntFarm.create(cfg.ln, cfg.k, nc, 1, 0, 1, 4096, cfg.small, cfg.huge);
     s.bulk = s.f.registerProducer(Tier.bulk);
     s.small = s.f.registerProducer(Tier.small);
     if (!s.bulk.valid || !s.small.valid)
@@ -950,6 +951,7 @@ Cfg parse(string[] args)
     {
         auto a = args[i];
         if (a == "--no-pin") { c.pin = false; continue; }
+        if (a == "--huge") { c.huge = true; continue; }
         if (a == "--idle-only")
         {
             c.runMid = c.runBurst = c.runNear = c.runOversub = false;
@@ -1054,10 +1056,10 @@ void main(string[] args)
         fatal("hist alloc");
 
     immutable ncpu = cast(int) sysconf(_SC_NPROCESSORS_ONLN);
-    printf("tail  Ln=%llu (%.1f MiB)  nc=%u  samples=%u  warmup=%u  cpus=%d  pin=%s  repeats=%u\n",
+    printf("tail  Ln=%llu (%.1f MiB)  nc=%u  samples=%u  warmup=%u  cpus=%d  pin=%s  repeats=%u  huge=%s\n",
            cast(ulong) cfg.ln, cfg.ln * 8.0 / (1024.0 * 1024.0),
            cfg.nc, cfg.samples, cfg.warmup, ncpu,
-           cfg.pin ? "yes".ptr : "no".ptr, cfg.repeats);
+           cfg.pin ? "yes".ptr : "no".ptr, cfg.repeats, cfg.huge ? "yes".ptr : "no".ptr);
     printf("metric: ticks before write() of 1-payload sentinel → first insn of its Call\n");
     printf("100us is fine at 60Hz; 1ms is a real slice; p99 that grows with tlen is shard coupling\n");
     printHeader();

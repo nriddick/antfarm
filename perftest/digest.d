@@ -40,6 +40,7 @@ struct Cfg
     bool allArms = true;
     Arm oneArm = Arm.linear16;
     uint chunk = 0; // 0 = per-arm default (1 for linear1, else 16)
+    bool huge;      // --huge: MADV_HUGEPAGE on the magic-buffer mapping
 }
 
 __gshared shared(long) g_calls;
@@ -304,7 +305,7 @@ Trial runOnce(Cfg cfg, Arm arm)
     immutable nTables = (cfg.jobs + cfg.tlen - 1) / cfg.tlen;
     immutable total = nTables * cfg.tlen;
 
-    auto f = AntFarm.create(cfg.ln, cfg.k, cfg.nc, cfg.nb, 0, 0, 4096);
+    auto f = AntFarm.create(cfg.ln, cfg.k, cfg.nc, cfg.nb, 0, 0, 4096, SMALL_TABLE_THRESHOLD, cfg.huge);
     auto headers = cast(PayloadHeader*) malloc(cfg.tlen * PayloadHeader.sizeof);
     auto body = cast(ulong*) malloc(cfg.body * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(cfg.tlen * PayloadEntry.sizeof);
@@ -490,6 +491,7 @@ Cfg parse(string[] args)
         if (a == "--touch") { c.mix = Mix.touch; continue; }
         if (a == "--chase") { c.mix = Mix.chase; continue; }
         if (a == "--alt") { c.mix = Mix.alt; continue; }
+        if (a == "--huge") { c.huge = true; continue; }
         if (a == "--arm" && i + 1 < args.length)
         {
             auto v = args[++i];
@@ -537,10 +539,10 @@ void main(string[] args)
     foreach (i; 0 .. g_worldN)
         g_world[i] = i * 0x9E37_79B9_7F4A_7C15UL;
 
-    printf("digest  Ln=%llu (%.1f MiB)  nc=%u  tlen=%u  jobs~%llu  mix=%s  repeats=%u\n",
+    printf("digest  Ln=%llu (%.1f MiB)  nc=%u  tlen=%u  jobs~%llu  mix=%s  repeats=%u  huge=%s\n",
            cast(ulong) cfg.ln, cfg.ln * 8.0 / (1024.0 * 1024.0),
            cfg.nc, cfg.tlen, cast(ulong) cfg.jobs,
-           mixName[cfg.mix].ptr, cfg.repeats);
+           mixName[cfg.mix].ptr, cfg.repeats, cfg.huge ? "yes".ptr : "no".ptr);
     printHeader();
     fflush(stdout);
 

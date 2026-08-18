@@ -42,6 +42,7 @@ Important nuances from `construction/perftest`:
 - **Batching matters more than anything.** `batch=1` is 4–5× slower. The batch curve keeps climbing to ~256–512.
 - With the batched callback the producer mix ranking changes: **1 bulk + 4 small producers** beats 2 bulk producers at `nc=4` and `nc=8`; the old global-atomic callback masked producer-side work.
 - **8–16 MiB is the sweet spot.** It matches the 16 MiB L3. A 32 MiB ring drops ~25% throughput; 256 MiB drops ~38%. The one operational win of a big ring is that `write()==0` disappears (producers are never full).
+- **Huge pages are a real win at the L3-sized ring, and they make the sweet spot more peaked rather than flattening it.** `--huge` on the 16 MiB farm measured ~180–186→~243–246 Mpps (`body=2`), ~126–127→~164–165 Mpps (`body=16`), and ~6.4–7.1→~9.7 Mpps (`body=1024`); at 32 MiB and larger the effect is only ~0–5%.
 - **Execute-side cost is ~30.9 ns/job** in the digest bench (linear claim 16, body-touching `Call`). Claim amortization is real: claim-1 costs ~49.2 ns/job, a **~1.6× claim dividend**. Shuffled vs linear layout is ~free (31.1 vs 30.9 ns/job).
 
 ### 2.2 Tail latency — the real product
@@ -88,8 +89,8 @@ The structural reason: Disruptor's `WorkProcessor` makes **one CAS per event** o
 
 From `moodytest/SUMMARY.md`:
 
-- **Raw item throughput favors moodycamel.** Native bounded 16 MiB with `try_enqueue_bulk(32)`: ~120–743 M items/s depending on tokens and topology; 1p/1c no-token ~212 M items/s. A fresh local probe of no-tokens configurations (16-byte elements, 16 MiB subqueue cap) ran 120–190 M items/s. At 8 KiB payloads it reaches ~45.8 GiB/s (tokens), above Ant Farm's ~26 GiB/s body at 8 KiB with the global-atomic callback (and ~47.2 GiB/s with the batched callback, though that source is cache-resident). Part of this is the comparison itself: moodycamel's 16 B item is just the item, while an Ant Farm payload carries a 128-byte header plus table index/padding overhead.
-- **Occupied tail favors Ant Farm.** Moodycamel no-token mid-drain p50 is FIFO-drain-shaped: 46 µs at dump 256, 370 µs at 2048, **1485 µs at 8192** (1 µs spin, 6 consumers). Tokens flatten the large-dump tail to ~143–287 µs. Ant Farm is ~5.3/12/14 µs p50 and ~30 µs p99 across the same dump sizes.
+- **Raw item throughput favors moodycamel.** Native bounded 16 MiB with `try_enqueue_bulk(32)`: ~120–743 M items/s depending on tokens and topology. A fresh local probe of no-consumer-tokens configurations (16-byte elements, 16 MiB subqueue cap) ran 120–190 M items/s. With consumers tokens this number can be several times higher, but this also creates pinned pipelines as opposed to the work-distributing Ant Farm model. At 8 KiB payloads it reaches ~45.8 GiB/s (tokens), about equal to Ant Farm's ~47GiB/s at 8 KiB. Part of this is the comparison itself: moodycamel's 16 B item is just the item, while an Ant Farm payload carries a 128-byte header plus table index/padding overhead.
+- **Occupied tail favors Ant Farm.** Moodycamel no-token mid-drain p50 is FIFO-drain-shaped: 46 µs at dump 256, 370 µs at 2048, **1485 µs at 8192** (1 µs spin simulating per-item work, 6 consumers). Tokens flatten the large-dump tail to ~143–287 µs. Ant Farm is ~5.3/12/14 µs p50 and ~30 µs p99 across the same dump sizes.
 - **Idle latency is close.** Moodycamel idle p50 is ~0.23–0.26 µs; Ant Farm is ~0.37 µs. Moodycamel wins the empty ring by a small margin.
 
 The summary line: moodycamel is a **strong bounded-ring transport**; Ant Farm is a **work distributor**. Ant Farm's relaxed ordering and first-claimant yield are exactly what keep an urgent mid-tick job from waiting behind the FIFO drain; moodycamel's FIFO order is exactly what makes its occupied tail grow with the backlog.
@@ -116,7 +117,7 @@ Where **not** to deploy it:
 - **Single-consumer throughput.** Disruptor's 1P→1W path (and simple SPSC rings) beat it.
 - **Blocking/sleeping workers.** The current story is spinning consumers; futex wake is unmeasured.
 - **Unbounded or elastic backlog.** The ring is fixed; `write()==0` is the backpressure and a hard fill wall is the design.
-- **Very large never-full rings.** You can buy zero stalls at ≥ 32 MiB, but it costs 25–38% throughput on this host unless huge pages/NUMA are addressed.
+- **Very large never-full rings.** You can buy zero stalls at ≥ 32 MiB, but it costs 25–38% throughput on this host unless NUMA is addressed (huge pages alone do not close the gap beyond L3).
 
 ## 5. Recommended configuration (from the perf work)
 
@@ -125,12 +126,37 @@ Where **not** to deploy it:
 - **`batch ≥ 128`, preferably 256–512**; let the producer's quota bound the table size.
 - **Ring `Ln` = 8–16 MiB** on a 16 MiB L3 part; larger only if a never-full guarantee is worth the throughput cliff.
 - **Declare `avgCost` per Call family**: cheap calls → `0` (chunk 32, max amortization); expensive calls → `2–3` (chunk 8–4) to trim tail; avoid `avgCost=5` (chunk 1, −10–12% throughput).
+- **Enable huge pages for the magic buffer on Linux** (`AntFarm.create(..., true)`, or perftest `--huge`): measured +14–50% on the 16 MiB ring, negligible beyond L3.
 - **Pin consumers** to physical cores; keep `fatal()` in release — the wrap checks are ~free.
+
+### 5.1 Huge pages: which Ant Farm configurations likely benefit
+
+From the current measurements, the huge-page win is concentrated in:
+
+- **8–16 MiB rings on hosts with a similar L3 size.** This is the main
+  sweet spot; 32 MiB and larger rings showed only ~0–5% movement.
+- **Multi-producer / multi-consumer topologies that are already fast.**
+  Huge pages amplify the best shapes (`K=4` or `8`, `nc=2–8`, with a
+  small-producer mix) more than they rescue slow ones.
+- **Both small and large payload bodies at the L3-sized ring.** `body=2`,
+  `body=16`, and `body=1024` all improved; the benefit is not body-size
+  specific.
+- **Hosts that support THP/hugetlb and have memory to spare.** The current
+  implementation uses `madvise(MADV_HUGEPAGE)` on the Linux magic-buffer
+  mapping, so `THP=never` or a missing hugetlb reservation means no win.
+
+Configurations less likely to benefit:
+
+- **Rings >32 MiB** — outside L3, DRAM bandwidth dominates and the huge-page
+  gain is small or within noise.
+- **Rings below 2 MiB** — too small to map a 2 MiB page usefully.
+- **Memory-tight deployments** — 2 MiB pages add allocation/fragmentation
+  pressure without enough TLB win.
 
 ## 6. What is still open
 
-The repo's own "not measured" list is the honest caveat set: makespan of a full tick, sleeping workers/futex wake, mid-tick writes that span a segment boundary, huge pages for the magic-buffer mapping, real game `Call` bodies, and — most relevant to the scaling claim — **tests beyond 8 consumers and NUMA behavior**. The architecture gives good reasons to expect Ant Farm to keep scaling as a task distributor, but that is still a hypothesis pending hardware.
+The repo's own "not measured" list is the honest caveat set: makespan of a full tick, sleeping workers/futex wake, real game `Call` bodies, and — most relevant to the scaling claim — **tests beyond 8 consumers and NUMA behavior**. Huge pages for the magic-buffer mapping are now covered in `perftest/README.md` (strong at the L3-sized ring, small beyond it). The architecture gives good reasons to expect Ant Farm to keep scaling as a task distributor, but that is still a hypothesis pending hardware.
 
 ---
 
-**Artifacts:** `construction/spec2` (living spec), `construction/perftest/{README,POSTMORTEM,SPECULATIVE_OPT_2026-08-16_1,last_sweep,last_digest,last_tail}.txt`, `moodytest/SUMMARY.md`, and `disruptortest/BENCHMARK_SUMMARY.md`.
+**Artifacts:** `construction/spec2` (living spec), `construction/perftest/README.md`, `construction/perftest/HUGE_PAGES.md`, `construction/perftest/{POSTMORTEM,SPECULATIVE_OPT_2026-08-16_1,last_sweep,last_digest,last_tail}.txt`, `moodytest/SUMMARY.md`, and `disruptortest/BENCHMARK_SUMMARY.md`.

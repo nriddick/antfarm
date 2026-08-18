@@ -4,7 +4,7 @@ ROOT := ..
 DC ?= ldc2
 DFLAGS ?= -O2 -release
 
-.PHONY: all run run-once dual-run digest-run tail-run clean
+.PHONY: all run run-once dual-run digest-run tail-run run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
 
 all: throughput dual digest tail tail
 
@@ -34,6 +34,21 @@ digest-run: digest
 
 tail-run: tail
 	./tail | tee last_tail.txt
+
+run-huge: throughput
+	./throughput --huge
+
+run-once-huge: throughput
+	./throughput --once --huge
+
+dual-run-huge: dual
+	./dual --huge
+
+digest-run-huge: digest
+	./digest --huge
+
+tail-run-huge: tail
+	./tail --huge | tee last_tail_huge.txt
 
 clean:
 	rm -f throughput digest tail dual *.o
