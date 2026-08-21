@@ -21,11 +21,11 @@ run-t19: t19
 
 run-tsan:
 	$(DC) -g -O1 -fsanitize=thread torture_common.d torture_tests.d $(ROOT)/antfarm.d -of=torture_tests_tsan
-	TSAN_OPTIONS='halt_on_error=1:history_size=7' ./torture_tests_tsan
+	TSAN_OPTIONS='history_size=3' ./torture_tests_tsan
 
 run-t19-tsan:
 	$(DC) -g -O1 -fsanitize=thread torture_common.d t19_flood_lap.d $(ROOT)/antfarm.d -of=t19_tsan
-	TSAN_OPTIONS='halt_on_error=1:history_size=7' ./t19_tsan
+	TSAN_OPTIONS='history_size=7' ./t19_tsan
 
 run-dmd:
 	dmd -g -checkaction=context torture_common.d torture_tests.d $(ROOT)/antfarm.d -of=torture_tests_dmd

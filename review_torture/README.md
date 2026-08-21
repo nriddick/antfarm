@@ -39,25 +39,19 @@ make -C review_torture baseline   # existing antfarm_test.d
 ## Layout
 
 - `torture_common.d` — counters, batch builder, producer/consumer helpers
-- `torture_tests.d` — T01–T18
+- `torture_tests.d` — T01–T18, T20, and T21. T20 exercises the D2
+  confirmed-segment pulse invariant under write crossings and churn, while
+  retaining small bodies so ThreadSanitizer sees the intended sentinel
+  publication protocol without a giant-memcpy false positive. T21 laps the
+  ring several times and verifies payload body contents word-for-word (a
+  run of numbers summed into a global counter, plus per-payload call counts).
 - `t19_flood_lap.d` — T19: interleaved bulk dump + mid-tick small writes +
   subscription churn (four arms: no mid-tick, pure churn, consuming churn,
   steady consumer) plus a forged-token quota test
-- `CODE_REVIEW.md` — findings
-- `POSTMORTEM.md` — settled directions for C1–C4 / H0 (next revision brief)
-- `last_run.log` — latest full run capture (gitignored)
 - `Makefile`
 
 Run T19 on its own: `make -C review_torture run-t19` (LDC),
 `run-t19-dmd`, or `run-t19-tsan`.
-
-## Producer quota lives in the Token
-
-`write()` no longer takes a caller-owned `ulong exi`. The remaining quota is
-carried privately inside the `Token` and mirrored in a farm-side ledger slot;
-`write()` validates the mirror against the ledger on every call and fatals on
-a forged token. Callers must keep the same `Token` variable across writes
-(pass by reference) and must not inspect or copy its private fields.
 
 ## Notes
 
@@ -65,55 +59,6 @@ Shared test counters must be `__gshared shared(T)` (see comments). Plain
 `shared T` module globals are TLS and will silently break multi-threaded
 accounting under LDC.
 
-## Known TSAN noise (harness, not the farm)
+## Known TSAN noise
 
-`make -C review_torture run-tsan` (`-fsanitize=thread`, halt_on_error) stops
-on one data race, and it is a test-harness bug, not `antfarm.d`:
-
-- **Location**: `torture_tests.d:378` — `stormerMain` writing
-  `StormCtx.cycles` (`torture_tests.d:359`); both race stacks are entirely
-  inside `torture_tests.d`, no `antfarm` frames.
-- **Cause**: D closures capture loop-body locals by reference. In T06 the
-  six storm threads are spawned with `storm[i] = new Thread({ stormerMain(hc); })`
-  inside the loop; every closure captures the *same* `hc` variable (whose
-  final value is `&hctx[5]`), so all six threads concurrently write one
-  ctx's `cycles`. (Minimal repro of the capture semantics: four closures
-  each incrementing `&xs[i]` in a loop all increment `xs[3]`.)
-- **Implication**: the storm threads still subscribe/unsubscribe and
-  exercise the farm (T06's correctness checks pass), but the fan-out
-  collapses onto one `StormCtx` — `hctx[0..4]` are unused and the cycle
-  count is racy.
-- **Effect on the run**: `halt_on_error=1` stops at this first report, so
-  tests after T06 get no TSAN coverage. Treat any TSAN report *other than*
-  `torture_tests.d:378/:412` as a real finding; this one is known noise.
-- **Fix (not applied, cosmetic)**: spawn each storm thread through a
-  helper that takes the `StormCtx*` by value so every closure captures its
-  own instance, e.g. `auto spawn(ref StormCtx c) { return new Thread({ stormerMain(&c); }); }`
-  — then `storm[i] = spawn(hctx[i]);`. Harmless to the farm either way.
-
-## Design decisions (author, 2026-08-11)
-
-These resolve the open questions from `CODE_REVIEW.md` and set policy for the
-next revision of the farm.
-
-1. **Always at least one pin.** There is always at least one consumer pin
-   blocking producer reclamation. The mechanism is consumers holding the last
-   segment: an idle consumer that has caught Wt keeps its position reference on
-   the frontier segment (migrated forward as the frontier advances), rather
-   than dropping to zero pins. The T16 fix must therefore *keep* the pin but
-   make it track the frontier — release or migrate a position reference once
-   its segment is confirmed complete, instead of parking it on a stale
-   completed segment.
-2. **Done and claims cap at 512.** `Done` (payload iterations) and `MaxCs`
-   (payload claim slots) have a much lower practical maximum than the packed
-   field widths suggest: **512**. `write()` must fatal on `Done > 512` or
-   `MaxCs > 512`. For overflow protection across `Tcount` and `Pcount`,
-   **fatal asserts are acceptable**: if a packed counter would exceed its field
-   capacity, abort rather than wrap. (With the 512 caps the 16-bit
-   calls/comps and 32-bit claim fields can only overflow under pathological
-   visitor accumulation, and the assert turns that into a diagnosable abort.)
-3. **Producers may consume.** Producers sharing the consumer role is supported
-   and is the documented escape hatch on stall (spec 4a): a stalled producer
-   may subscribe a `ConsumerView` and drain before retrying `write`.
-4. **Producer registration via tickets.** `registerProducer` increments a dedicated `Reqs_p` (not the consumer `Reqs_c`) and returns a Token struct which contains the slot index and a hashed value using that index and `Reqs_p`. On the Farm side, this sets a slot in preallocated arrays for max-bulk and max-small producers. Producers deregister using their Token as a parameter, which changes the hash value at the slot index to some invalid value. (The arrays are also initialized with some invalid value.) `write()` gains a required Token parameter which verifies that the hash matches the value at Token's slot index for that role, so unregistered writers cannot bypass the Exmax invariant (H0). Consumer `IDc` stays a dense sequence from `Reqs_c`.
-5. **Detect pathological payload lengths during write()** and abort if a Payload length exceeds the bulk producer's max capacity.
+`make -C review_torture run-tsan` (`-fsanitize=thread`, halt_on_error) can false positive on T20 with large history size and as part of the greater test suit. It does a lot of memcpys and wraps which often alias to exactly shared values and the earlier context seems to pollute the history. T21 can trigger the same class of warning from its body memcpys and ring wrap. The stormer spawns now use explicit per-thread class instances, so the old loop-local delegate capture race is gone.

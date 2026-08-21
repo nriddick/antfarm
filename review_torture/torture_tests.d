@@ -18,6 +18,49 @@ import core.stdc.stdlib : malloc, free, abort, exit;
 
 __gshared shared(int) g_defects;
 
+// T21: payload-body content verification over several laps of the ring.
+// Shared counters must be __gshared shared(T) (see torture_common.d).
+__gshared shared(long) g_contentSum;
+__gshared shared(long) g_contentBad;
+
+private enum size_t T21_BODY_LEN = 32;
+private enum size_t T21_N = 30000;
+
+long contentSumCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+{
+    // Count the call first so a corrupted body still advances the global
+    // total and consumers do not spin until the watchdog.
+    atomicFetchAdd(g_totalCalls, 1L);
+
+    // Corrupted plen could make the body slice empty or huge; never index
+    // before validating the length.
+    if (b.length != T21_BODY_LEN)
+    {
+        atomicFetchAdd(g_contentBad, 1L);
+        return 0;
+    }
+
+    immutable idx = cast(size_t) b[0];
+    if (idx < g_npayloads)
+        atomicFetchAdd(g_calls[idx], 1L);
+    else
+        atomicFetchAdd(g_contentBad, 1L);
+
+    // Body is a run of numbers: b[k] == idx + k for all k.
+    ulong sum = 0;
+    bool ok = true;
+    foreach (k, v; b)
+    {
+        sum += v;
+        if (v != cast(ulong) idx + k)
+            ok = false;
+    }
+    if (!ok)
+        atomicFetchAdd(g_contentBad, 1L);
+    atomicFetchAdd(g_contentSum, cast(long) sum);
+    return 1;
+}
+
 void defect(const(char)[] id, const(char)[] msg)
 {
     atomicFetchAdd(g_defects, 1);
@@ -356,27 +399,52 @@ void t05_zero_consumer_gap()
 }
 
 __gshared shared(int) g_stormStop;
-struct StormCtx { AntFarm* f; MonoTime deadline; int cycles; }
-void stormerMain(StormCtx* c)
+
+// Explicit class instead of a loop-local delegate: D closures capture
+// loop-body locals by reference, so the old `auto hc = &hctx[i];
+// new Thread({ stormerMain(hc); })` made every thread use the last
+// hctx slot and race on its `cycles`.  A class instance per thread has
+// its own fields and is joined before the main thread reads them.
+class StormJob
 {
-    int n;
-    while (!atomicLoad(g_stormStop))
+    AntFarm* f;
+    MonoTime deadline;
+    uint burst;
+    bool varyBurst;
+    int cycles;
+
+    this(AntFarm* farm, MonoTime limit, uint burstCount, bool vary = false)
     {
-        ConsumerView v;
-        if (v.subscribe(c.f) >= 0)
-        {
-            foreach (_; 0 .. 30)
-            {
-                v.consumeNext();
-                if (MonoTime.currTime > c.deadline)
-                    abort();
-            }
-            v.unsubscribe();
-            ++n;
-        }
-        Thread.yield();
+        f = farm;
+        deadline = limit;
+        burst = burstCount;
+        varyBurst = vary;
     }
-    c.cycles = n;
+
+    void run()
+    {
+        int n;
+        while (!atomicLoad(g_stormStop))
+        {
+            ConsumerView v;
+            if (v.subscribe(f) >= 0)
+            {
+                immutable count = varyBurst
+                    ? 6 + cast(uint)(cast(size_t)&v & 7)
+                    : burst;
+                foreach (_; 0 .. count)
+                {
+                    v.consumeNext();
+                    if (MonoTime.currTime > deadline)
+                        abort();
+                }
+                v.unsubscribe();
+                ++n;
+            }
+            Thread.yield();
+        }
+        cycles = n;
+    }
 }
 
 void t06_subscription_storm()
@@ -405,12 +473,11 @@ void t06_subscription_storm()
         steady[i] = new Thread({ consumerMain(cc); });
     }
     Thread[6] storm;
-    StormCtx[6] hctx;
+    StormJob[6] jobs;
     foreach (i; 0 .. 6)
     {
-        hctx[i] = StormCtx(f, deadline);
-        auto hc = &hctx[i];
-        storm[i] = new Thread({ stormerMain(hc); });
+        jobs[i] = new StormJob(f, deadline, 30);
+        storm[i] = new Thread(&jobs[i].run);
     }
     ProdCtx pctx = ProdCtx(f, batch.entries, N, Tier.bulk, 32);
     auto p = new Thread({ producerMain(&pctx); });
@@ -424,7 +491,7 @@ void t06_subscription_storm()
     expectExactCalls(&batch, "T06");
     expectNoLiveConsumerRefs(f, "T06");
     int cycles;
-    foreach (i; 0 .. 6) cycles += hctx[i].cycles;
+    foreach (i; 0 .. 6) cycles += jobs[i].cycles;
     check(cycles > 0, "storm progress");
     printf("T06 storm OK cycles=%d\n", cycles);
     fflush(stdout);
@@ -455,12 +522,11 @@ void t07_small_table_churn()
         steady[i] = new Thread({ consumerMain(cc); });
     }
     Thread[4] storm;
-    StormCtx[4] hctx;
+    StormJob[4] jobs;
     foreach (i; 0 .. 4)
     {
-        hctx[i] = StormCtx(f, deadline);
-        auto hc = &hctx[i];
-        storm[i] = new Thread({ stormerMain(hc); });
+        jobs[i] = new StormJob(f, deadline, 30);
+        storm[i] = new Thread(&jobs[i].run);
     }
     ProdCtx pctx = ProdCtx(f, batch.entries, N, Tier.bulk, 10);
     auto p = new Thread({ producerMain(&pctx); });
@@ -898,30 +964,13 @@ void t18_pure_churn_orphan()
         auto deadline = MonoTime.currTime + 40.seconds;
         enum NH = 8;
         Thread[NH] storm;
-        StormCtx[NH] hctx;
         foreach (i; 0 .. NH)
         {
-            // short bursts so churners leave early segments incomplete
-            hctx[i] = StormCtx(f, deadline);
-            auto hc = &hctx[i];
-            storm[i] = new Thread({
-                // inline short-burst churner
-                while (!atomicLoad(g_stormStop))
-                {
-                    ConsumerView v;
-                    if (v.subscribe(hc.f) >= 0)
-                    {
-                        foreach (_; 0 .. 6 + cast(int)(cast(size_t)&v & 7))
-                        {
-                            v.consumeNext();
-                            if (MonoTime.currTime > hc.deadline)
-                                abort();
-                        }
-                        v.unsubscribe();
-                    }
-                    Thread.yield();
-                }
-            });
+            // Short bursts so churners leave early segments incomplete.
+            // Explicit object per thread; do not use a loop-local delegate
+            // (D closure capture would alias every thread to one context).
+            auto job = new StormJob(f, deadline, 0, true);
+            storm[i] = new Thread(&job.run);
         }
         ProdCtx pctx = ProdCtx(f, batch.entries, N, Tier.bulk, 8);
         auto p = new Thread({ producerMain(&pctx); });
@@ -1006,24 +1055,28 @@ void t20_plant_confirmed_segment()
     // that makes the race observable (or a future change that widens the
     // window) fails the scan.
     //
-    // Mechanism demo (not in-suite): build antfarm.d with a 2ms sleep
-    // between the plant's sd read and its CAS (-d-version=D2_WIDEN in a
-    // scratch copy) and re-run this geometry: ~200k stale plants detected,
-    // ~100% retracted by the fix.
-    enum TRIALS = 4;
+    // Mechanism demo (not in-suite): instrument a scratch antfarm.d build
+    // with a 2ms sleep between the plant's sd read and its CAS, then run a
+    // few-tables-per-segment geometry. It exposes stale plants; the fix's
+    // post-CAS exact-value retract removes them. This arm deliberately uses
+    // small bodies because it is the durable invariant check, not the
+    // widened-window mechanism demonstration.
+    enum TRIALS = 8;
     int bad;
     foreach (trial; 0 .. TRIALS)
     {
-        // K=16: segCap = 2^18/16 = 16384.  Bodies ~7800 -> 2 tables/segment,
-        // so finishers complete segments frequently while the producer
-        // crosses boundaries and churners sweep.
+        // K=16 and one-payload tables make the producer cross segments often.
+        // Tiny bodies deliberately avoid turning this invariant test into a
+        // giant memcpy-versus-sentinel TSan publication-protocol false positive.
+        // 10000 single-payload tables write roughly three Ln laps, yielding
+        // many segment crossings, finishers, and unsubscribe sweeps.
         auto f = AntFarm.create(1 << 18, 16, 6, 1, 9000, 3, 2048);
         scope (exit) f.destroy();
-        enum N = 4000;
+        enum N = 10000;
         allocCalls(N);
         scope (exit) freeCalls();
         auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
-        auto bodies = cast(ulong*) malloc(N * 7800 * ulong.sizeof);
+        auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
         auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
         scope (exit) { free(headers); free(bodies); free(entries); }
         long expected;
@@ -1033,8 +1086,8 @@ void t20_plant_confirmed_segment()
             headers[i].maxCs = 1;
             headers[i].done = 1;
             headers[i].call = &countingCb;
-            bodies[i * 7800] = i;
-            entries[i] = PayloadEntry(&headers[i], bodies[i * 7800 .. i * 7800 + 7800]);
+            bodies[i * 2] = i;
+            entries[i] = PayloadEntry(&headers[i], bodies[i * 2 .. i * 2 + 2]);
             expected += 1;
         }
         atomicStore(g_totalCalls, 0);
@@ -1091,7 +1144,7 @@ void t20_plant_confirmed_segment()
         size_t off;
         while (off < N)
         {
-            immutable n = f.write(entries[off .. N], tok);
+            immutable n = f.write(entries[off .. off + 1], tok);
             off += n;
             if (n == 0) Thread.yield();
         }
@@ -1150,6 +1203,77 @@ void t20_plant_confirmed_segment()
     say("T20 plant-confirmed-segment OK");
 }
 
+void t21_payload_content_multilap()
+{
+    // Write enough payloads to lap the 2^18-ulong ring several times while
+    // consumers drain.  Every body is a run of numbers b[k] == idx + k;
+    // the callback checks each word, sums the run into g_contentSum, and
+    // keeps the usual per-payload call accounting.  A wrap or offset bug
+    // that corrupts body contents therefore shows up as a per-word bad,
+    // a global sum mismatch, or a per-payload call-count mismatch.
+    //
+    // Geometry: one small producer (quota 4096), two consumers, and
+    // N=30000 bodies of 32 ulongs.  Each table carries up to 82 payloads
+    // and reserves ~4056 ulongs, so total Wt is ~1.48M ulongs: ~5.7 laps.
+    auto f = AntFarm.create(1 << 18, 8, 2, 0, 0, 1, 4096);
+    scope (exit) f.destroy();
+
+    enum size_t N = T21_N;
+    enum size_t BODY_LEN = T21_BODY_LEN;
+
+    allocCalls(N);
+    scope (exit) freeCalls();
+    atomicStore!(MemoryOrder.raw)(g_contentSum, 0L);
+    atomicStore!(MemoryOrder.raw)(g_contentBad, 0L);
+
+    // Manual exact-size allocation; makeBatch's 4096-ulong-per-slot body
+    // arena would be far larger than needed for N=30000.
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto bodies = cast(ulong*) malloc(N * BODY_LEN * ulong.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    check(headers !is null && bodies !is null && entries !is null, "T21 alloc");
+    scope (exit)
+    {
+        free(headers);
+        free(bodies);
+        free(entries);
+    }
+
+    foreach (i; 0 .. N)
+    {
+        headers[i] = PayloadHeader.init;
+        headers[i].maxCs = 1;
+        headers[i].done = 1;
+        headers[i].call = &contentSumCb;
+        foreach (k; 0 .. BODY_LEN)
+            bodies[i * BODY_LEN + k] = i + k;
+        entries[i].header = &headers[i];
+        entries[i].body = bodies[i * BODY_LEN .. i * BODY_LEN + BODY_LEN];
+    }
+
+    PayloadBatch batch;
+    batch.headers = headers;
+    batch.entries = entries;
+    batch.count = N;
+    batch.expectedCalls = N;
+
+    runPair(f, &batch, 2, Tier.small, 0, 120);
+
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) > 3 * f.Ln, "T21 wrapped several laps");
+    expectExactCalls(&batch, "T21");
+    check(atomicLoad!(MemoryOrder.raw)(g_contentBad) == 0, "T21 payload content");
+
+    immutable ulong expectedSum = BODY_LEN * (N * (N - 1) / 2)
+                                + N * (BODY_LEN * (BODY_LEN - 1) / 2);
+    check(atomicLoad!(MemoryOrder.raw)(g_contentSum) == cast(long) expectedSum, "T21 content sum");
+    expectNoLiveConsumerRefs(f, "T21");
+
+    printf("T21 payload content multilap OK Wt=%lld laps=%.2f\n",
+        cast(long) atomicLoad!(MemoryOrder.raw)(f.Wt),
+        cast(double) atomicLoad!(MemoryOrder.raw)(f.Wt) / cast(double) f.Ln);
+    fflush(stdout);
+}
+
 void main(string[] args)
 {
     bool runAll = args.length <= 1;
@@ -1175,6 +1299,8 @@ void main(string[] args)
         t18_pure_churn_orphan();
     if (want("T20"))
         t20_plant_confirmed_segment();
+    if (want("T21"))
+        t21_payload_content_multilap();
 
     if (want("T03"))
         t03_concurrent_exact();

@@ -126,7 +126,7 @@ Where **not** to deploy it:
 - **`batch ≥ 128`, preferably 256–512**; let the producer's quota bound the table size.
 - **Ring `Ln` = 8–16 MiB** on a 16 MiB L3 part; larger only if a never-full guarantee is worth the throughput cliff.
 - **Declare `avgCost` per Call family**: cheap calls → `0` (chunk 32, max amortization); expensive calls → `2–3` (chunk 8–4) to trim tail; avoid `avgCost=5` (chunk 1, −10–12% throughput).
-- **Enable huge pages for the magic buffer on Linux** (`AntFarm.create(..., true)`, or perftest `--huge`): measured +14–50% on the 16 MiB ring, negligible beyond L3.
+- **Enable huge pages for the magic buffer on Linux** (`AntFarm.create(..., true)`, perftest `--huge`, or `ANTFARM_HUGE_PAGES=1`): measured +14–50% on the 16 MiB ring, negligible beyond L3.
 - **Pin consumers** to physical cores; keep `fatal()` in release — the wrap checks are ~free.
 
 ### 5.1 Huge pages: which Ant Farm configurations likely benefit

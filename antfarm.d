@@ -327,7 +327,7 @@ struct AntFarm
                            uint maxBulk = 2, ulong quotaBulk = 0,
                            uint maxSmall = 16, ulong quotaSmall = 4096,
                            uint smallThreshold = SMALL_TABLE_THRESHOLD,
-                           bool hugePages = false) nothrow @nogc @system
+                           bool hugePages = true) nothrow @nogc @system
     {
         // Construction constraints (spec 1/3b):
         //  - K is the useful power-of-two range [2, KMAX=16].
