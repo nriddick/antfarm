@@ -8,7 +8,7 @@
  +/
 module torture_tests;
 
-import antfarm;
+import antfarm_templates;
 import torture_common;
 import core.atomic;
 import core.thread;
@@ -86,9 +86,7 @@ void t01_pcount_field_carry()
     bool expectAbort(uint done, uint maxCs, const(char)[] label)
     {
         PayloadHeader h;
-        h.maxCs = maxCs;
-        h.done = done;
-        h.call = &countingCb;
+        initPayloadHeader!countingCb(&h, maxCs, done);
         ulong body = 0;
         PayloadEntry e;
         e.header = &h;
@@ -176,10 +174,7 @@ void t16_position_ref_stall()
     bodies.length = N;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
-        headers[i].maxCs = 1;
-        headers[i].done = 1;
-        headers[i].call = &countingCb;
+        initPayloadHeader!countingCb(&headers[i], 1, 1);
         bodies[i] = cast(ulong*) malloc(800 * ulong.sizeof);
         bodies[i][0] = i;
         entries[i].header = &headers[i];
@@ -560,10 +555,7 @@ void t08_spanning_tables()
     long expected;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
-        headers[i].maxCs = 1;
-        headers[i].done = 1;
-        headers[i].call = &countingCb;
+        initPayloadHeader!countingCb(&headers[i], 1, 1);
         ++expected;
     }
     huge[0] = 0;
@@ -613,9 +605,8 @@ __gshared shared(long)* g_payInflight;
 __gshared size_t g_payInflightN;
 __gshared shared(long) g_overMax;
 
-long boundedSlowCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long boundedSlowCb(size_t idx, immutable PayloadHeader* h, ulong iter) nothrow @nogc @system
 {
-    immutable idx = cast(size_t) b[0];
     long cur = 1;
     if (g_payInflight !is null && idx < g_payInflightN)
     {
@@ -626,7 +617,7 @@ long boundedSlowCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @s
     ulong x = iter;
     foreach (i; 0 .. 20_000)
         x = x * 6364136223846793005UL + 1;
-    countingCb(h, b, iter);
+    countingCb(idx);
     if (g_payInflight !is null && idx < g_payInflightN)
         atomicFetchSub(g_payInflight[idx], 1);
     return cast(long)(x & 0xff);
@@ -650,12 +641,24 @@ void t09_slow_mt_bounds()
         g_payInflight = null;
         g_payInflightN = 0;
     }
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        h.maxCs = 4;
-        h.done = 12;
-        h.call = &boundedSlowCb;
-        plen = 2;
-    });
+    PayloadBatch batch;
+    batch.count = N;
+    batch.headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    batch.entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    batch.bodyStore = cast(ulong*) malloc(N * 2 * ulong.sizeof);
+    batch.bodyCap = N * 2;
+    batch.bodyUsed = 0;
+    batch.expectedCalls = 0;
+    check(batch.headers !is null && batch.entries !is null && batch.bodyStore !is null, "T09 batch alloc");
+    foreach (i; 0 .. N)
+    {
+        auto body = batch.bodyStore[i * 2 .. i * 2 + 2];
+        batch.entries[i] = payloadEntryRuntime!(boundedSlowCb, true)(
+            &batch.headers[i], body, 4, 12, i,
+            cast(immutable PayloadHeader*) &batch.headers[i]);
+        batch.expectedCalls += 12;
+    }
+    batch.bodyUsed = N * 2;
     scope (exit) freeBatch(batch);
     runPair(f, &batch, 20, Tier.bulk, 0, 120);
     expectExactCalls(&batch, "T09");
@@ -772,9 +775,7 @@ void t13_create_validation()
     auto tok = f0.registerProducer(Tier.small);
     check(tok.valid, "nb0 reg");
     PayloadHeader h;
-    h.maxCs = 1;
-    h.done = 1;
-    h.call = &countingCb;
+    initPayloadHeader!countingCb(&h, 1, 1);
     ulong v = 7;
     PayloadEntry e;
     e.header = &h;
@@ -892,9 +893,7 @@ void t17_write_size_wrap()
     }
 
     PayloadHeader h;
-    h.maxCs = 1;
-    h.done = 1;
-    h.call = &countingCb;
+    initPayloadHeader!countingCb(&h, 1, 1);
     ulong one = 42;
     PayloadEntry wrap;
     wrap.header = &h;
@@ -1082,10 +1081,7 @@ void t20_plant_confirmed_segment()
         long expected;
         foreach (i; 0 .. N)
         {
-            headers[i] = PayloadHeader.init;
-            headers[i].maxCs = 1;
-            headers[i].done = 1;
-            headers[i].call = &countingCb;
+            initPayloadHeader!countingCb(&headers[i], 1, 1);
             bodies[i * 2] = i;
             entries[i] = PayloadEntry(&headers[i], bodies[i * 2 .. i * 2 + 2]);
             expected += 1;

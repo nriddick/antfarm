@@ -13,7 +13,7 @@
  +/
 module t19_flood_lap;
 
-import antfarm;
+import antfarm_templates;
 import torture_common;
 import core.atomic;
 import core.thread;
@@ -24,7 +24,7 @@ import core.stdc.stdlib : abort;
 __gshared shared(int) g_stop;
 __gshared shared(long) g_sentinelCalls;
 
-long sentinelCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long sentinelCb(ulong marker) nothrow @nogc @system
 {
     atomicFetchAdd!(MemoryOrder.raw)(g_sentinelCalls, 1L);
     return 1;
@@ -142,13 +142,8 @@ class SentinelJob
         check(tok.valid, "T19 sentinel registration");
 
         PayloadHeader h;
-        h.maxCs = 1;
-        h.done = 1;
-        h.call = &sentinelCb;
         ulong body = ulong.max;
-        PayloadEntry e;
-        e.header = &h;
-        e.body = (cast(const(ulong)*) &body)[0 .. 1];
+        PayloadEntry e = payloadEntry!sentinelCb(&h, (&body)[0 .. 1], body);
 
         // This variable must persist across the entire producer lifetime.
         while (atomicLoad!(MemoryOrder.raw)(g_stop) == 0)
@@ -274,13 +269,8 @@ void testQuotaResetRejected()
                 _exit(90);
 
             PayloadHeader h;
-            h.maxCs = 1;
-            h.done = 1;
-            h.call = &sentinelCb;
             ulong body = 0;
-            PayloadEntry e;
-            e.header = &h;
-            e.body = (cast(const(ulong)*) &body)[0 .. 1];
+            PayloadEntry e = payloadEntry!sentinelCb(&h, (&body)[0 .. 1], body);
 
             // Drain the granted quota first: the ledger shrinks below quota.
             while (f.write((&e)[0 .. 1], tok) != 0) {}

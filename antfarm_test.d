@@ -1,9 +1,9 @@
 /++
- + Tests for the Ant Farm. Run: dmd -g -O -inline antfarm.d antfarm_test.d -of=antfarm_test && ./antfarm_test
+ + Tests for the Ant Farm. Run: dmd -g -O -inline antfarm.d antfarm_templates.d antfarm_test.d -of=antfarm_test && ./antfarm_test
  +/
 module antfarm_test;
 
-import antfarm;
+import antfarm_templates;
 import core.atomic;
 import core.thread;
 import core.time;
@@ -20,11 +20,21 @@ __gshared size_t g_npayloads;
 __gshared shared(long) g_totalCalls;
 __gshared ulong* g_keepalive;      // keeps GC away (we malloc instead)
 
-long testCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+private long incCalls(size_t idx) nothrow @nogc @system
 {
-    atomicFetchAdd(g_calls[cast(size_t) b[0]], 1L);
+    atomicFetchAdd(g_calls[idx], 1L);
     atomicFetchAdd(g_totalCalls, 1L);
     return 1;
+}
+
+long testCb(size_t idx, ulong done) nothrow @nogc @system
+{
+    return incCalls(idx);
+}
+
+long testCb1(size_t idx) nothrow @nogc @system
+{
+    return incCalls(idx);
 }
 
 void allocCalls(size_t n)
@@ -105,13 +115,10 @@ void testSingleThreaded()
     scope (exit) { free(headers); free(bodies); free(entries); }
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
-        headers[i].maxCs = (i >= 18) ? 3 : 1;   // two MT payloads
-        headers[i].done = (i >= 18) ? 5 : 1;
-        headers[i].call = &testCb;
-        bodies[i * 2] = i;
-        bodies[i * 2 + 1] = headers[i].done;
-        entries[i].header = &headers[i]; entries[i].body = bodies[i * 2 .. i * 2 + 2];
+        immutable uint maxCs = (i >= 18) ? 3 : 1;   // two MT payloads
+        immutable uint done = (i >= 18) ? 5 : 1;
+        entries[i] = payloadEntryRuntime!testCb(
+            &headers[i], bodies[i * 2 .. i * 2 + 2], maxCs, done, i, done);
     }
     immutable expected = 18 * 1 + 2 * 5;
 
@@ -187,14 +194,11 @@ void testInputRangeWrite()
     long expected;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
-        headers[i].maxCs = (i >= 18) ? 3 : 1;   // two MT payloads
-        headers[i].done = (i >= 18) ? 5 : 1;
-        headers[i].call = &testCb;
-        bodies[i * 2] = i;
-        bodies[i * 2 + 1] = headers[i].done;
-        entries[i].header = &headers[i]; entries[i].body = bodies[i * 2 .. i * 2 + 2];
-        expected += headers[i].done;
+        immutable uint maxCs = (i >= 18) ? 3 : 1;   // two MT payloads
+        immutable uint done = (i >= 18) ? 5 : 1;
+        entries[i] = payloadEntryRuntime!testCb(
+            &headers[i], bodies[i * 2 .. i * 2 + 2], maxCs, done, i, done);
+        expected += done;
     }
 
     ConsumerView v;
@@ -288,15 +292,12 @@ void testConcurrent()
     long expected;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
         immutable mt = i % 5 == 0;
-        headers[i].maxCs = mt ? 3 : 1;
-        headers[i].done = mt ? 4 : 1;
-        headers[i].call = &testCb;
-        bodies[i * 2] = i;
-        bodies[i * 2 + 1] = headers[i].done;
-        entries[i].header = &headers[i]; entries[i].body = bodies[i * 2 .. i * 2 + 2];
-        expected += headers[i].done;
+        immutable uint maxCs = mt ? 3 : 1;
+        immutable uint done = mt ? 4 : 1;
+        entries[i] = payloadEntryRuntime!testCb(
+            &headers[i], bodies[i * 2 .. i * 2 + 2], maxCs, done, i, done);
+        expected += done;
     }
 
     auto p1 = new Thread({ producerMain(&p1ctx); });
@@ -356,16 +357,19 @@ void testWraparound()
     long expected;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
         immutable mt = i % 7 == 0;
-        headers[i].maxCs = mt ? 2 : 1;
-        headers[i].done = mt ? 3 : 1;
-        headers[i].call = &testCb;
+        immutable uint maxCs = mt ? 2 : 1;
+        immutable uint done = mt ? 3 : 1;
         immutable plen = 1 + i % 3;
-        bodies[i * 3] = i;
-        bodies[i * 3 + 1] = headers[i].done;
-        entries[i].header = &headers[i]; entries[i].body = bodies[i * 3 .. i * 3 + plen];
-        expected += headers[i].done;
+        auto body = bodies[i * 3 .. i * 3 + plen];
+        if (plen == 1)
+            entries[i] = payloadEntryRuntime!testCb1(&headers[i], body, maxCs, done, i);
+        else
+        {
+            entries[i] = payloadEntryRuntime!testCb(&headers[i], body, maxCs, done, i, done);
+            entries[i].body = body;
+        }
+        expected += done;
     }
 
     p1ctx = ProdCtx(f, entries, N, Tier.small);
@@ -470,15 +474,12 @@ void testChurn(size_t nsteady)
     long expected;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
         immutable mt = i % 4 == 0;
-        headers[i].maxCs = mt ? 4 : 1;
-        headers[i].done = mt ? 6 : 1;
-        headers[i].call = &testCb;
-        bodies[i * 2] = i;
-        bodies[i * 2 + 1] = headers[i].done;
-        entries[i].header = &headers[i]; entries[i].body = bodies[i * 2 .. i * 2 + 2];
-        expected += headers[i].done;
+        immutable uint maxCs = mt ? 4 : 1;
+        immutable uint done = mt ? 6 : 1;
+        entries[i] = payloadEntryRuntime!testCb(
+            &headers[i], bodies[i * 2 .. i * 2 + 2], maxCs, done, i, done);
+        expected += done;
     }
 
     atomicStore!(MemoryOrder.raw)(g_churnStop, 0);
@@ -548,16 +549,19 @@ void testBacklog()
     long expected;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
         immutable mt = i % 6 == 0;
-        headers[i].maxCs = mt ? 2 : 1;
-        headers[i].done = mt ? 3 : 1;
-        headers[i].call = &testCb;
+        immutable uint maxCs = mt ? 2 : 1;
+        immutable uint done = mt ? 3 : 1;
         immutable plen = 1 + i % 3;
-        bodies[i * 3] = i;
-        bodies[i * 3 + 1] = headers[i].done;
-        entries[i].header = &headers[i]; entries[i].body = bodies[i * 3 .. i * 3 + plen];
-        expected += headers[i].done;
+        auto body = bodies[i * 3 .. i * 3 + plen];
+        if (plen == 1)
+            entries[i] = payloadEntryRuntime!testCb1(&headers[i], body, maxCs, done, i);
+        else
+        {
+            entries[i] = payloadEntryRuntime!testCb(&headers[i], body, maxCs, done, i, done);
+            entries[i].body = body;
+        }
+        expected += done;
     }
 
     p1ctx = ProdCtx(f, entries, N, Tier.small);
@@ -629,10 +633,7 @@ void testSpannedTables()
     long expected;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
-        headers[i].maxCs = 1;
-        headers[i].done = 1;
-        headers[i].call = &testCb;
+        initPayloadHeader!testCb(&headers[i], 1, 1);
         ++expected;
     }
     foreach (i; 0 .. 100000) huge[i] = (i == 0) ? 0 : 1;    // payload 0: body[0] = index
@@ -706,15 +707,12 @@ void testSmallTableChurn()
     long expected;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
         immutable mt = i % 4 == 0;
-        headers[i].maxCs = mt ? 4 : 1;
-        headers[i].done = mt ? 6 : 1;
-        headers[i].call = &testCb;
-        bodies[i * 2] = i;
-        bodies[i * 2 + 1] = headers[i].done;
-        entries[i].header = &headers[i]; entries[i].body = bodies[i * 2 .. i * 2 + 2];
-        expected += headers[i].done;
+        immutable uint maxCs = mt ? 4 : 1;
+        immutable uint done = mt ? 6 : 1;
+        entries[i] = payloadEntryRuntime!testCb(
+            &headers[i], bodies[i * 2 .. i * 2 + 2], maxCs, done, i, done);
+        expected += done;
     }
 
     atomicStore!(MemoryOrder.raw)(g_churnStop, 0);
@@ -774,15 +772,12 @@ void testMultiSmallProducers()
     long expected;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
         immutable mt = i % 5 == 0;
-        headers[i].maxCs = mt ? 3 : 1;
-        headers[i].done = mt ? 4 : 1;
-        headers[i].call = &testCb;
-        bodies[i * 2] = i;
-        bodies[i * 2 + 1] = headers[i].done;
-        entries[i].header = &headers[i]; entries[i].body = bodies[i * 2 .. i * 2 + 2];
-        expected += headers[i].done;
+        immutable uint maxCs = mt ? 3 : 1;
+        immutable uint done = mt ? 4 : 1;
+        entries[i] = payloadEntryRuntime!testCb(
+            &headers[i], bodies[i * 2 .. i * 2 + 2], maxCs, done, i, done);
+        expected += done;
     }
 
     p1ctx = ProdCtx(f, entries, N / 2, Tier.small);

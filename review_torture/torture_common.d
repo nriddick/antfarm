@@ -3,7 +3,7 @@
  +/
 module torture_common;
 
-import antfarm;
+import antfarm_templates;
 import core.atomic;
 import core.thread;
 import core.time;
@@ -46,10 +46,9 @@ void freeCalls()
     g_npayloads = 0;
 }
 
-long countingCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long countingCb(size_t idx) nothrow @nogc @system
 {
     // body[0] = payload index
-    immutable idx = cast(size_t) b[0];
     if (g_calls !is null && idx < g_npayloads)
         atomicFetchAdd(g_calls[idx], 1L);
     atomicFetchAdd(g_totalCalls, 1L);
@@ -57,12 +56,15 @@ long countingCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @syst
 }
 
 /// Slow-ish CPU burn callback used to keep multiple entrants concurrent.
-long slowCountingCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+/// Kept in packed form so it can be used with the template shims; the
+/// trailing `ulong` is the callback iteration when used with
+/// `withIteration = true`.
+long slowCountingCb(size_t idx, ulong iter) nothrow @nogc @system
 {
-    ulong x = iter ^ cast(ulong) b[0];
+    ulong x = iter ^ idx;
     foreach (i; 0 .. 20_000)
         x = x * 6364136223846793005UL + 1;
-    return countingCb(h, b, iter) ^ cast(long)(x & 1);
+    return countingCb(idx) ^ cast(long)(x & 1);
 }
 
 struct PayloadBatch
@@ -94,8 +96,7 @@ PayloadBatch makeBatch(size_t n, scope void delegate(size_t i, ref PayloadHeader
         b.headers[i] = PayloadHeader.init;
         size_t plen = 2;
         fill(i, b.headers[i], plen);
-        if (b.headers[i].call is null)
-            b.headers[i].call = &countingCb;
+        initPayloadHeader!countingCb(&b.headers[i], b.headers[i].maxCs, b.headers[i].done);
         check(b.bodyUsed + plen <= b.bodyCap, "body arena overflow");
         auto slice = b.bodyStore[b.bodyUsed .. b.bodyUsed + plen];
         // default body layout: [index, done]
