@@ -1270,6 +1270,95 @@ void t21_payload_content_multilap()
     fflush(stdout);
 }
 
+void t22_avgcost_sharding()
+{
+    // The auto small-table threshold rule is normally off in the correctness
+    // suites (AntFarm.create defaults smallThreshold to 64).  Turn it on and
+    // write tables on both sides of each avgCost threshold with 8 consumers
+    // (sq = 3):
+    //   avgCost 0 -> chunk 32 -> threshold 96  (95 small, 97 sharded)
+    //   avgCost 1 -> chunk 16 -> threshold 48  (47 small, 49 sharded)
+    //   avgCost 2 -> chunk  8 -> threshold 24  (23 small, 25 sharded)
+    //   avgCost 3 -> chunk  4 -> threshold 16  (15 small, 17 sharded)
+    //   avgCost 5 -> chunk  1 -> threshold 16  (15 small, 17 sharded)
+    // Exact per-payload accounting must hold across every consumer geometry.
+    auto f = AntFarm.create(1 << 18, 8, 8, 1, 0, 1, 4096, 0);
+    scope (exit) f.destroy();
+
+    enum N = 400;
+    allocCalls(N);
+    scope (exit) freeCalls();
+    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+        immutable mt = i % 5 == 0;
+        h.maxCs = mt ? 3 : 1;
+        h.done = mt ? 4 : 1;
+        plen = 2;
+    });
+    scope (exit) freeBatch(batch);
+
+    static struct TableSpec
+    {
+        uint tlen;
+        uint avgCost;
+        Tier tier;
+    }
+    immutable TableSpec[] specs = [
+        TableSpec(95, 0, Tier.bulk),
+        TableSpec(97, 0, Tier.bulk),
+        TableSpec(47, 1, Tier.bulk),
+        TableSpec(49, 1, Tier.bulk),
+        TableSpec(23, 2, Tier.small),
+        TableSpec(25, 2, Tier.small),
+        TableSpec(15, 3, Tier.small),
+        TableSpec(17, 3, Tier.small),
+        TableSpec(15, 5, Tier.small),
+        TableSpec(17, 5, Tier.small),
+    ];
+
+    enum NC = 8;
+    Thread[NC] consumers;
+    ConsCtx[NC] cctx;
+    auto deadline = MonoTime.currTime + 90.seconds;
+    foreach (i; 0 .. NC)
+    {
+        cctx[i] = ConsCtx(f, batch.expectedCalls, deadline);
+        auto cc = &cctx[i];
+        consumers[i] = new Thread({ consumerMain(cc); });
+    }
+    foreach (t; consumers)
+        t.start();
+    while (atomicLoad!(MemoryOrder.acq)(f.Cf) < NC)
+        Thread.yield();
+
+    auto btok = f.registerProducer(Tier.bulk);
+    auto stok = f.registerProducer(Tier.small);
+    check(btok.valid, "T22 bulk reg");
+    check(stok.valid, "T22 small reg");
+
+    size_t off = 0;
+    foreach (spec; specs)
+    {
+        auto slice = batch.entries[off .. off + spec.tlen];
+        if (spec.tier == Tier.bulk)
+            check(f.write(slice, btok, spec.avgCost) == spec.tlen, "T22 bulk write full table");
+        else
+            check(f.write(slice, stok, spec.avgCost) == spec.tlen, "T22 small write full table");
+        off += spec.tlen;
+    }
+    check(off == N, "T22 wrote all payloads");
+
+    f.unregisterProducer(btok);
+    f.unregisterProducer(stok);
+
+    foreach (t; consumers)
+        t.join();
+
+    expectExactCalls(&batch, "T22");
+    check(countSub0Pulses(f) == 1, "T22 pulse");
+    expectNoLiveConsumerRefs(f, "T22");
+    say("T22 avgCost sharding exact OK");
+}
+
 void main(string[] args)
 {
     bool runAll = args.length <= 1;
@@ -1297,6 +1386,8 @@ void main(string[] args)
         t20_plant_confirmed_segment();
     if (want("T21"))
         t21_payload_content_multilap();
+    if (want("T22"))
+        t22_avgcost_sharding();
 
     if (want("T03"))
         t03_concurrent_exact();
