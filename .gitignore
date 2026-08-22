@@ -13,3 +13,5 @@ perftest/throughput
 perftest/digest
 perftest/tail
 perftest/dual
+perftest/throughput_eager
+perftest/throughput_sd64
