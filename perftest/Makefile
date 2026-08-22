@@ -4,7 +4,7 @@ ROOT := ..
 DC ?= ldc2
 DFLAGS ?= -O2 -release
 
-.PHONY: all run run-once dual-run digest-run tail-run run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
+.PHONY: all run run-once dual-run digest-run tail-run grid-run run-grid run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
 
 all: throughput dual digest tail tail
 
@@ -25,6 +25,11 @@ run: throughput
 
 run-once: throughput
 	./throughput --once
+
+grid-run: throughput
+	./throughput --grid 8
+
+run-grid: grid-run
 
 dual-run: dual
 	./dual

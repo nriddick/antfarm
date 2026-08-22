@@ -2,9 +2,12 @@
  + Synthetic throughput sweep for a 16 MiB Ant Farm.
  +
  +   make -C perftest run
+ +   ./throughput --grid 8
  +
  + Default mode searches topology, then payload/table shape, and prints a
  + ranked table. `--once` runs a single configuration (see README).
+ + `--grid N` runs a single-phase small-producer grid (nb=0) across ns and
+ + nc from 1 through N.
  +/
 module throughput;
 
@@ -15,6 +18,7 @@ import core.thread;
 import core.time;
 import core.stdc.stdio;
 import core.stdc.stdlib : malloc, free, atoi, abort, strtoull;
+import core.stdc.math : sqrt;
 
 __gshared shared(long) g_calls;
 __gshared shared(int) g_stop;
@@ -69,6 +73,7 @@ struct Cfg
     uint avgCost = 1;  // chunk hint: MAX_CHUNK >> avgCost
     uint small = 64;   // small-table threshold; 0 = auto clamp(sq*chunk,16,256)
     uint repeats = 3;
+    uint grid;   // --grid N: single-phase small-producer grid size
     bool huge;   // --huge: MADV_HUGEPAGE on the magic-buffer mapping
     bool nSet;
 }
@@ -335,6 +340,9 @@ Trial runMedian(Cfg c)
         if (!rs[n - 1].ok)
             return rs[n - 1];
     }
+    if (n == 0)
+        return rs[0];
+
     // median by mpps
     foreach (i; 0 .. n)
         foreach (j; i + 1 .. n)
@@ -404,6 +412,7 @@ Cfg parseArgs(string[] args, Cfg base)
         else if (a == "--ac") c.avgCost = cast(uint) atoi(v.ptr);
         else if (a == "--small") c.small = cast(uint) atoi(v.ptr);
         else if (a == "--repeats") c.repeats = cast(uint) atoi(v.ptr);
+        else if (a == "--grid") c.grid = cast(uint) atoi(v.ptr);
         else
             --i;
     }
@@ -429,6 +438,87 @@ void banner(ref const Cfg c)
            g_globalCount ? "global-atomic".ptr : "per-worker-batched".ptr,
            c.huge ? "yes".ptr : "no".ptr);
     fflush(stdout);
+}
+
+int runGrid(Cfg base, uint gridN)
+{
+    if (gridN == 0 || gridN > MAX_CONSUMERS_LIMIT)
+    {
+        fprintf(stderr, "grid must be in 1..%u\n", MAX_CONSUMERS_LIMIT);
+        return 1;
+    }
+
+    banner(base);
+    printf("\n== phase 1: small-producer grid nb=0, ns/nc 1..%u (body=%u batch=%u) ==\n",
+           gridN, base.body, base.batch);
+    printHeader();
+
+    Trial[] results;
+    Trial best;
+    best.mpps = -1;
+
+    foreach (ns; 1 .. gridN + 1)
+        foreach (nc; 1 .. gridN + 1)
+        {
+            Cfg c = base;
+            c.nb = 0;
+            c.ns = ns;
+            c.nc = nc;
+            scaleN(c);
+            auto t = runMedian(c);
+            printRow(t);
+            fflush(stdout);
+            if (t.ok)
+            {
+                results ~= t;
+                if (t.mpps > best.mpps)
+                    best = t;
+            }
+        }
+
+    if (results.length == 0)
+    {
+        printf("grid produced no successful runs\n");
+        return 1;
+    }
+
+    // Aggregate across all successful topologies. Each topology contributes
+    // its repeated-run median Mpps as the representative throughput.
+    double sum = 0;
+    double sumSq = 0;
+    foreach (r; results)
+    {
+        sum += r.mpps;
+        sumSq += r.mpps * r.mpps;
+    }
+    immutable n = results.length;
+    immutable aggMean = sum / n;
+    double aggStddev = 0;
+    if (n > 1)
+    {
+        immutable variance = (sumSq - sum * sum / n) / (n - 1);
+        aggStddev = variance > 0 ? sqrt(variance) : 0;
+    }
+
+    double[] vals;
+    foreach (r; results)
+        vals ~= r.mpps;
+    foreach (i; 0 .. n)
+        foreach (j; i + 1 .. n)
+            if (vals[j] < vals[i])
+            {
+                auto tmp = vals[i];
+                vals[i] = vals[j];
+                vals[j] = tmp;
+            }
+    immutable aggMedian = vals[n / 2];
+
+    printf("\nbest small-producer grid: nc=%u ns=%u  %.3f Mpps  %.1f MiB/s\n",
+           best.cfg.nc, best.cfg.ns, best.mpps, best.mibs);
+    printf("grid aggregate: %llu topologies  mean=%.3f Mpps  stddev=%.3f Mpps  median=%.3f Mpps\n",
+           cast(ulong) n, aggMean, aggStddev, aggMedian);
+    fflush(stdout);
+    return 0;
 }
 
 int runSweep(Cfg base)
@@ -545,6 +635,13 @@ void main(string[] args)
     base = parseArgs(args, base);
     scaleN(base);
 
+    if (base.grid > 0)
+    {
+        auto rc = runGrid(base, base.grid);
+        if (rc != 0)
+            abort();
+        return;
+    }
     if (once)
     {
         banner(base);

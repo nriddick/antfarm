@@ -148,7 +148,7 @@ uint walkShard(shared(ulong)* bp, ulong tseqIdx, ulong tindexOff, ulong tcountOf
     nothrow @nogc @system
 {
     uint shstart, shlen, shbase;
-    if (tlen < SMALL_TABLE_THRESHOLD)
+    if (tlen < DEFAULT_SMALL_TABLE_THRESHOLD)
     {
         if (shi != 0) return 0;
         shstart = 0;
@@ -221,7 +221,7 @@ bool digestTable(ConsumerView* v, uint chunk, bool copyOut, ulong* tmp, size_t t
                                        tmp, tmpWords) & 1) != 0;
         if (sweeper)
         {
-            immutable nshards = tlen < SMALL_TABLE_THRESHOLD ? 1 : sq;
+            immutable nshards = tlen < DEFAULT_SMALL_TABLE_THRESHOLD ? 1 : sq;
             foreach (s; 0 .. nshards)
                 if (s != myShi)
                     walkShard(bp, idx, tindexOff, tcountOff, progOff,
@@ -305,7 +305,7 @@ Trial runOnce(Cfg cfg, Arm arm)
     immutable nTables = (cfg.jobs + cfg.tlen - 1) / cfg.tlen;
     immutable total = nTables * cfg.tlen;
 
-    auto f = AntFarm.create(cfg.ln, cfg.k, cfg.nc, cfg.nb, 0, 0, 4096, SMALL_TABLE_THRESHOLD, cfg.huge);
+    auto f = AntFarm.create(cfg.ln, cfg.k, cfg.nc, cfg.nb, 0, 0, 4096, DEFAULT_SMALL_TABLE_THRESHOLD, cfg.huge);
     auto headers = cast(PayloadHeader*) malloc(cfg.tlen * PayloadHeader.sizeof);
     auto body = cast(ulong*) malloc(cfg.body * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(cfg.tlen * PayloadEntry.sizeof);
@@ -526,9 +526,9 @@ Cfg parse(string[] args)
 void main(string[] args)
 {
     auto cfg = parse(args);
-    if (cfg.tlen < SMALL_TABLE_THRESHOLD)
+    if (cfg.tlen < DEFAULT_SMALL_TABLE_THRESHOLD)
     {
-        fprintf(stderr, "tlen must be >= %u (sharded tables)\n", SMALL_TABLE_THRESHOLD);
+        fprintf(stderr, "tlen must be >= %u (sharded tables)\n", DEFAULT_SMALL_TABLE_THRESHOLD);
         abort();
     }
 

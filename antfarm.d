@@ -40,10 +40,10 @@ else
 enum MAX_CONSUMERS_LIMIT = 128;
 /// Spec 2a: preallocated leaf tallies per segment: ceiling square root of 128.
 enum MAX_LEAVES = 12;
-/// Spec 5e (revision 5): small-table threshold ceiling for the auto rule
-/// clamp(sq * chunk, 16, 256); also the fixed default (farm field 0 selects
-/// the auto rule).
-enum SMALL_TABLE_THRESHOLD = 64;
+/// A default suggestion for small table threshold. A Farm can be constructed
+/// with a custom threshold, or to zero which uses a rule such that each shard
+/// gets at least one chunk.
+enum DEFAULT_SMALL_TABLE_THRESHOLD = 64;
 /// Spec 5e (revision 5): chunk ceiling for the avgCost hint; a producer
 /// declares its Call cost class in write() and consumers compute
 /// specChunk = MAX_CHUNK >> avgCost. Default avgCost = 1 -> chunk 16, the
@@ -105,6 +105,14 @@ version (noverify)
     private enum bool VERIFY_WRAPS = false;
 else
     private enum bool VERIFY_WRAPS = true;
+
+/// Compile-time switch for trailing-reference check frequency.
+/// Default: eager release check after every table (baseline).
+/// -d-version=SdCheckEveryN: check every SD_CHECK_EVERY_N table advances.
+version (SdCheckEveryN)
+    enum uint SD_CHECK_EVERY_N = 64;
+else
+    enum uint SD_CHECK_EVERY_N = 1;
 
 /// Spec 4a: type-erased const parameters for Call's work.
 alias PayloadBody = const(ulong)[];
@@ -326,7 +334,7 @@ struct AntFarm
     static AntFarm* create(ulong ln = 1 << 20, uint k = 8, uint expectedConsumers = 4,
                            uint maxBulk = 2, ulong quotaBulk = 0,
                            uint maxSmall = 16, ulong quotaSmall = 4096,
-                           uint smallThreshold = SMALL_TABLE_THRESHOLD,
+                           uint smallThreshold = DEFAULT_SMALL_TABLE_THRESHOLD,
                            bool hugePages = true) nothrow @nogc @system
     {
         // Construction constraints (spec 1/3b):
@@ -936,6 +944,12 @@ struct ConsumerView
     /// the idle floor. Reset when the position moves to a new segment.
     ulong sweepSeq;
 
+    /// Trailing-reference check counter. With -d-version=SdCheckEveryN,
+    /// tryReleaseTrailing() runs every SD_CHECK_EVERY_N table advances
+    /// instead of after every table. The default build keeps N = 1, i.e.
+    /// the original eager behavior.
+    uint sdCheckCounter;
+
     /// Bench-only (perftest/tail). 0 = production: drain the shard, use
     /// the table's chunk from its published avgCost (5e rev5). Nonzero
     /// max-runs ends the visit after that many claimed runs and still
@@ -1005,6 +1019,7 @@ struct ConsumerView
         trailN = 0;
         sweeperNext = false;
         sweepSeq = 0;
+        sdCheckCounter = 0;
         hasRef = true;
         return es;
     }
@@ -1122,7 +1137,11 @@ struct ConsumerView
 
         nextSeq = tnext;
         migrateToFrontier();
-        tryReleaseTrailing();
+        if (++sdCheckCounter >= SD_CHECK_EVERY_N)
+        {
+            sdCheckCounter = 0;
+            tryReleaseTrailing();
+        }
         return true;
     }
 

@@ -111,3 +111,11 @@ phase-1 topology  : K=4 nc=2 nb=0 ns=4  (held fixed in phase 2)
 Ant Farm dual-role throughput  Ln=2097152 (16.0 MiB)  repeats=3  tier=small  huge=yes
 K    nd tier  body   bat  cons          N      sec     Mpps    MiB/s   stalls  note
  4    6 small    16    63     6    4000000    0.021  186.146  22722.9     8549
+
+Ant Farm dual-role throughput  Ln=2097152 (16.0 MiB)  repeats=3  tier=small  huge=yes
+K    nd tier  body   bat  cons          N      sec     Mpps    MiB/s   stalls  note
+ 4    6 small    16    63     1    4000000    0.024  163.732  19986.8   324376
+
+Ant Farm dual-role throughput  Ln=2097152 (16.0 MiB)  repeats=3  tier=small  huge=yes
+K    nd tier  body   bat  cons          N      sec     Mpps    MiB/s   stalls  note
+ 4    6 small    16    63     2    4000000    0.022  179.077  21860.0   121076

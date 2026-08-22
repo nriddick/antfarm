@@ -1,20 +1,43 @@
+--ac 3 (chunk size 4)
 tail  Ln=2097152 (16.0 MiB)  nc=6  samples=10000  warmup=200  cpus=12  pin=yes  repeats=3  huge=yes
 metric: ticks before write() of 1-payload sentinel → first insn of its Call
 100us is fine at 60Hz; 1ms is a real slice; p99 that grows with tlen is shard coupling
 scene      arm       nc  tlen   spin      n      p50      p99    p99.9      max   miss   zero  note
-idle       stock      6     0      -  10000    340ns    431ns    471ns  181.2us      0      0  
-mid-drain  stock      6   256    0ns  10000    642ns    2.5us    3.3us    6.7us      0      0  
-mid-drain  stock      6   256    1us  10000    5.2us   22.4us   24.1us   25.2us      0      0  
-mid-drain  stock      6   256   10us  10000   50.4us  212.0us  213.4us  215.6us      0      0  
-mid-drain  stock      6  2048    1us  10000   11.9us   29.1us   30.9us   32.9us      0      0  
-mid-drain  stock      6  8192    1us  10000   15.1us   29.1us   31.6us   33.4us      0      0  
-mid-drain  yield16    6   256    1us  10000    5.1us    5.4us    7.5us    7.9us      0      0  
-mid-drain  claim1     6   256    1us  10000    311ns    410ns    451ns    3.3us      0      0  
-mid-drain  stock      6    32    1us  10000    290ns    401ns    3.4us   10.7us      0     21  
-mailbox    stock      6   256    1us  10000     90ns    131ns   20.3us   45.6us      0      0  
-mailbox    stock      6  8192    1us  10000    100ns    631ns   25.8us   41.7us      0      0  
-burst      stock      6   256    1us  10208   14.8us   32.5us   35.4us  253.1us      0      0  first 13.8us/31.2us  last 15.4us/32.7us
-near-full  stock      6   256    0ns   1000    321ns    431ns    2.4us  559.7us      0      0  admit 90ns/170ns  parked=31696
+idle       stock      6     0      -  10000    330ns    431ns    491ns  170.0us      0      0  
+mid-drain  stock      6   256    0ns  10004    571ns    1.3us    2.7us    9.3us      4      0  
+mid-drain  stock      6   256    1us  10000    4.9us    5.5us    9.8us   34.6us      0      0  
+mid-drain  stock      6   256   10us  10000   50.3us   50.7us   52.4us   53.6us      0      0  
+mid-drain  stock      6  2048    1us  10000    3.3us    6.8us    9.1us   23.2us      0      0  
+mid-drain  stock      6  8192    1us  10000    4.4us    8.1us    9.0us   11.6us      0      0  
+mid-drain  yield16    6   256    1us  10000    5.2us    5.5us    7.2us    7.6us      0      0  
+mid-drain  claim1     6   256    1us  10000    310ns    421ns    942ns    3.5us      0      0  
+mid-drain  stock      6    32    1us  10006    1.1us    2.2us    4.5us   21.6us      6     21  
+mailbox    stock      6   256    1us  10000     90ns   29.9us  264.5us  500.3us      0      0  
+mailbox    stock      6  8192    1us  10000    100ns  138.4us  393.2us  464.1us      0      0  
+burst      stock      6   256    1us  10208    5.7us   14.1us   14.9us  254.6us      0      0  first 5.2us/13.6us  last 6.0us/14.1us
+near-full  stock      6   256    0ns   1000    340ns    451ns   1.21ms   1.61ms      0      0  admit 91ns/191ns  parked=31696
 oversub check (nc=8 on this host):
-idle       stock      8     0      -  10000    341ns    450ns    601ns  296.9us      0      0  
-mid-drain  stock      8   256    1us  10000    8.4us   25.5us   27.1us   29.0us      0      0  
+idle       stock      8     0      -  10000    350ns    451ns    521ns  189.2us      0      0  
+mid-drain  stock      8   256    1us  10000    4.3us    8.5us   14.3us   28.8us      0      0  
+
+--ac 1 (chunk size 16)
+tail  Ln=2097152 (16.0 MiB)  nc=6  samples=10000  warmup=200  cpus=12  pin=yes  repeats=3  huge=yes
+metric: ticks before write() of 1-payload sentinel → first insn of its Call
+100us is fine at 60Hz; 1ms is a real slice; p99 that grows with tlen is shard coupling
+scene      arm       nc  tlen   spin      n      p50      p99    p99.9      max   miss   zero  note
+idle       stock      6     0      -  10000    341ns    450ns    511ns  177.8us      0      0  
+mid-drain  stock      6   256    0ns  10003    642ns    2.5us    3.3us   11.9us      3      0  
+mid-drain  stock      6   256    1us  10000    5.3us   22.5us   25.1us   29.5us      0      0  
+mid-drain  stock      6   256   10us  10000   50.4us  211.9us  213.6us  223.1us      0      0  
+mid-drain  stock      6  2048    1us  10000   13.9us   29.9us   31.8us   39.7us      0      0  
+mid-drain  stock      6  8192    1us  10000   14.6us   30.0us   32.0us   33.7us      0      0  
+mid-drain  yield16    6   256    1us  10000    5.1us    5.4us    7.4us   17.3us      0      0  
+mid-drain  claim1     6   256    1us  10000    311ns    421ns    561ns    2.1us      0      0  
+mid-drain  stock      6    32    1us  10000    310ns    421ns    3.3us   11.6us      0     21  
+mailbox    stock      6   256    1us  10000     90ns   23.2us  279.1us  447.9us      0      0  
+mailbox    stock      6  8192    1us  10000    100ns  114.4us  322.8us  453.1us      0      0  
+burst      stock      6   256    1us  10208   14.6us   32.6us   34.9us  253.1us      0      0  first 13.7us/31.1us  last 15.3us/32.9us
+near-full  stock      6   256    0ns   1000    321ns    431ns    5.8us  564.5us      0      0  admit 91ns/170ns  parked=31696
+oversub check (nc=8 on this host):
+idle       stock      8     0      -  10000    341ns    441ns    531ns  310.4us      0      0  
+mid-drain  stock      8   256    1us  10000    8.4us   25.4us   25.9us   28.6us      0      0  

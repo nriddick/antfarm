@@ -37,6 +37,11 @@ are the queue-overhead view.
 These numbers move around with CPU frequency/boost; treat them as a fresh
 run rather than a new plateau.
 
+`./throughput --grid N` runs the single-phase small-producer grid (`nb=0`)
+over every `ns`/`nc` pair from 1 through `N`, without the body/batch phase.
+After the table it prints a top-level aggregate mean, sample std-dev, and
+median across all successful topologies (using each topology's median Mpps).
+
 Important nuances from `construction/perftest`:
 
 - **Batching matters more than anything.** `batch=1` is 4–5× slower. The batch curve keeps climbing to ~256–512.
