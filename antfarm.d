@@ -11,19 +11,31 @@
  + Errors are fatal (process abort) rather than exceptional, per spec.
  + Interfaces are @nogc nothrow @system.
  +
- + Port note: the magic buffer is implemented for Posix via shm_open +
- + mmap MAP_FIXED of the same file twice (Linux: could equally use
- + memfd_create). Windows is not wired up in this port.
+ + Port note: the magic buffer is a dual virtual map of one physical
+ + region. Posix: shm_open + mmap MAP_FIXED twice (Linux may madvise
+ + MADV_HUGEPAGE). Windows 10 1803+: VirtualAlloc2 placeholders +
+ + MapViewOfFile3; hugePages uses SEC_LARGE_PAGES (SeLockMemoryPrivilege).
  +/
 module antfarm;
 
 import core.atomic;
 import core.stdc.stdio : fprintf, stderr, snprintf;
-import core.stdc.stdlib : abort, aligned_alloc, free;
+import core.stdc.stdlib : abort, malloc, free, getenv;
 import core.stdc.string : memset;
 import std.range.primitives : ElementType, empty, isInputRange;
 
-version (Posix)
+version (CRuntime_Microsoft) {}
+else
+    import core.stdc.stdlib : aligned_alloc;
+
+version (Windows)
+{
+    import core.sys.windows.winbase;
+    import core.sys.windows.windef;
+    import core.sys.windows.winnt;
+    pragma(lib, "advapi32");
+}
+else version (Posix)
 {
     import core.sys.posix.sys.mman;
     import core.sys.posix.sys.stat;
@@ -34,7 +46,277 @@ version (Posix)
         import core.sys.linux.sys.mman : madvise, MADV_HUGEPAGE;
 }
 else
-    static assert(false, "antfarm: magic buffer mapping only implemented for Posix in this port");
+    static assert(false, "antfarm: magic buffer mapping only implemented for Windows and Posix");
+
+version (Windows)
+{
+    private enum MEM_RESERVE_PLACEHOLDER = 0x00040000;
+    private enum MEM_REPLACE_PLACEHOLDER = 0x00004000;
+    private enum MEM_PRESERVE_PLACEHOLDER = 0x00000002;
+    private enum MEM_LARGE_PAGES_FLAG = 0x20000000;
+    private enum FILE_MAP_LARGE_PAGES_FLAG = 0x20000000;
+    private enum SEC_LARGE_PAGES_FLAG = 0x80000000;
+    private enum MemExtendedParameterAddressRequirements = 1;
+
+    private struct MEM_ADDRESS_REQUIREMENTS
+    {
+        PVOID  LowestStartingAddress;
+        PVOID  HighestEndingAddress;
+        size_t Alignment;
+    }
+
+    private struct MEM_EXTENDED_PARAMETER
+    {
+        ulong typeAndReserved;
+        union
+        {
+            ulong  ULong64;
+            void*  Pointer;
+            size_t Size;
+            HANDLE Handle;
+            DWORD  ULong;
+        }
+    }
+
+    private alias FnVirtualAlloc2 = extern (Windows) PVOID function(
+        HANDLE, PVOID, size_t, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG) @nogc nothrow;
+    private alias FnMapViewOfFile3 = extern (Windows) PVOID function(
+        HANDLE, HANDLE, PVOID, ulong, size_t, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG) @nogc nothrow;
+    private alias FnGetLargePageMinimum = extern (Windows) size_t function() @nogc nothrow;
+
+    private __gshared FnVirtualAlloc2 pVirtualAlloc2;
+    private __gshared FnMapViewOfFile3 pMapViewOfFile3;
+    private __gshared FnGetLargePageMinimum pGetLargePageMinimum;
+    private __gshared bool winApisResolved;
+
+    private T winLoad(T)(const(char)* dll, const(char)* name) nothrow @nogc @system
+    {
+        auto h = GetModuleHandleA(dll);
+        if (h is null)
+            h = LoadLibraryA(dll);
+        if (h is null) return null;
+        return cast(T) GetProcAddress(h, name);
+    }
+
+    private void resolveWinMapApis() nothrow @nogc @system
+    {
+        if (winApisResolved) return;
+        pVirtualAlloc2 = winLoad!FnVirtualAlloc2("kernelbase.dll", "VirtualAlloc2");
+        if (pVirtualAlloc2 is null)
+            pVirtualAlloc2 = winLoad!FnVirtualAlloc2("kernel32.dll", "VirtualAlloc2");
+        pMapViewOfFile3 = winLoad!FnMapViewOfFile3("kernelbase.dll", "MapViewOfFile3");
+        if (pMapViewOfFile3 is null)
+            pMapViewOfFile3 = winLoad!FnMapViewOfFile3("kernel32.dll", "MapViewOfFile3");
+        pGetLargePageMinimum = winLoad!FnGetLargePageMinimum("kernel32.dll", "GetLargePageMinimum");
+        winApisResolved = true;
+    }
+
+    private bool enableLockPages() nothrow @nogc @system
+    {
+        HANDLE tok;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok))
+            return false;
+        scope (exit) CloseHandle(tok);
+        TOKEN_PRIVILEGES tp;
+        tp.PrivilegeCount = 1;
+        if (!LookupPrivilegeValueW(null, SE_LOCK_MEMORY_NAME.ptr, &tp._Privileges.Luid))
+            return false;
+        tp._Privileges.Attributes = SE_PRIVILEGE_ENABLED;
+        SetLastError(0);
+        if (!AdjustTokenPrivileges(tok, FALSE, &tp, 0, null, null))
+            return false;
+        return GetLastError() == 0;
+    }
+
+    private void fatalWin(const(char)[] msg) nothrow @nogc @system
+    {
+        char[160] buf = void;
+        auto n = snprintf(buf.ptr, buf.length, "%.*s (GetLastError=%u)",
+            cast(int) msg.length, msg.ptr, GetLastError());
+        if (n < 0) n = 0;
+        if (n > buf.length) n = buf.length;
+        fatal(buf[0 .. n]);
+    }
+
+    /// This SKU rejects MapViewOfFile3(MEM_REPLACE_PLACEHOLDER | MEM_LARGE_PAGES)
+    /// (ERROR_INVALID_PARAMETER). Dual MapViewOfFileEx with FILE_MAP_LARGE_PAGES works.
+    private void* mapMagicBufferWindowsLarge(size_t bytes) nothrow @nogc @system
+    {
+        if (!enableLockPages())
+            fatal("antfarm: SeLockMemoryPrivilege not held. Grant Lock Pages in Memory to this user, log off, and retry (see README)");
+        if (pGetLargePageMinimum is null)
+            fatal("antfarm: GetLargePageMinimum unavailable");
+        auto lp = pGetLargePageMinimum();
+        if (lp == 0 || (bytes % lp) != 0)
+            fatal("antfarm: ring size is not a multiple of the large-page minimum");
+
+        auto section = CreateFileMappingW(INVALID_HANDLE_VALUE, null,
+            PAGE_READWRITE | SEC_COMMIT | SEC_LARGE_PAGES_FLAG,
+            cast(DWORD)(bytes >> 32), cast(DWORD) bytes, null);
+        if (section is null)
+            fatalWin("antfarm: CreateFileMapping SEC_LARGE_PAGES failed");
+
+        foreach (attempt; 0 .. 16)
+        {
+            MEM_ADDRESS_REQUIREMENTS req;
+            req.Alignment = lp;
+            MEM_EXTENDED_PARAMETER ext;
+            ext.typeAndReserved = MemExtendedParameterAddressRequirements;
+            ext.Pointer = &req;
+            auto hole = pVirtualAlloc2(null, null, 2 * bytes,
+                MEM_RESERVE, PAGE_NOACCESS, &ext, 1);
+            char* base;
+            if (hole !is null)
+            {
+                base = cast(char*) hole;
+                VirtualFree(hole, 0, MEM_RELEASE);
+            }
+            else
+            {
+                hole = VirtualAlloc(null, 2 * bytes + lp, MEM_RESERVE, PAGE_NOACCESS);
+                if (hole is null)
+                    continue;
+                base = cast(char*)((cast(size_t) hole + lp - 1) & ~(lp - 1));
+                VirtualFree(hole, 0, MEM_RELEASE);
+            }
+            auto v1 = MapViewOfFileEx(section, FILE_MAP_ALL_ACCESS | FILE_MAP_LARGE_PAGES_FLAG,
+                0, 0, bytes, base);
+            if (v1 is null)
+                continue;
+            auto v2 = MapViewOfFileEx(section, FILE_MAP_ALL_ACCESS | FILE_MAP_LARGE_PAGES_FLAG,
+                0, 0, bytes, base + bytes);
+            if (v2 is null)
+            {
+                UnmapViewOfFile(v1);
+                continue;
+            }
+            CloseHandle(section);
+            return v1;
+        }
+        CloseHandle(section);
+        fatalWin("antfarm: MapViewOfFileEx large-page dual map failed");
+        return null;
+    }
+}
+
+private void* afAlignedAlloc(size_t bytes) nothrow @nogc @system
+{
+    immutable n = (bytes + 63) & ~cast(size_t) 63;
+    version (CRuntime_Microsoft)
+    {
+        // malloc + prefix: avoid _aligned_malloc dllimport on the DMD link line.
+        auto raw = malloc(n + 64 + (void*).sizeof);
+        if (raw is null) return null;
+        auto a = (cast(size_t) raw + (void*).sizeof + 63) & ~cast(size_t) 63;
+        (cast(void**) a)[-1] = raw;
+        return cast(void*) a;
+    }
+    else
+        return aligned_alloc(64, n);
+}
+
+private void afAlignedFree(void* p) nothrow @nogc @system
+{
+    if (p is null) return;
+    version (CRuntime_Microsoft)
+        free((cast(void**) p)[-1]);
+    else
+        free(p);
+}
+
+/// `ANTFARM_HUGE_PAGES=0` forces 4K; `=1` forces huge pages. Unset keeps `requested`.
+private bool wantHugePages(bool requested) nothrow @nogc @system
+{
+    auto e = getenv("ANTFARM_HUGE_PAGES");
+    if (e is null || e[0] == 0) return requested;
+    if (e[0] == '0') return false;
+    if (e[0] == '1') return true;
+    return requested;
+}
+
+/// Dual-map `bytes` so `[0, bytes)` aliases `[bytes, 2*bytes)`.
+private void* mapMagicBuffer(size_t bytes, bool hugePages) nothrow @nogc @system
+{
+    version (Windows)
+    {
+        resolveWinMapApis();
+        if (pVirtualAlloc2 is null || pMapViewOfFile3 is null)
+            fatal("antfarm: VirtualAlloc2/MapViewOfFile3 unavailable (need Windows 10 1803+)");
+
+        if (hugePages)
+            return mapMagicBufferWindowsLarge(bytes);
+
+        auto p = pVirtualAlloc2(null, null, 2 * bytes,
+            MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, null, 0);
+        if (p is null)
+            fatalWin("antfarm: VirtualAlloc2 placeholder reserve failed");
+        if (!VirtualFree(p, bytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
+            fatalWin("antfarm: VirtualFree placeholder split failed");
+
+        auto section = CreateFileMappingW(INVALID_HANDLE_VALUE, null, PAGE_READWRITE,
+            cast(DWORD)(bytes >> 32), cast(DWORD) bytes, null);
+        if (section is null)
+            fatalWin("antfarm: CreateFileMapping failed");
+
+        auto v1 = pMapViewOfFile3(section, null, p, 0, bytes,
+            MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, null, 0);
+        auto v2 = pMapViewOfFile3(section, null, cast(char*) p + bytes, 0, bytes,
+            MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, null, 0);
+        CloseHandle(section);
+        if (v1 is null || v2 is null)
+        {
+            if (v1 !is null) UnmapViewOfFile(v1);
+            if (v2 !is null) UnmapViewOfFile(v2);
+            fatalWin("antfarm: MapViewOfFile3 dual map failed");
+        }
+        return v1;
+    }
+    else version (Posix)
+    {
+        static __gshared int shmCounter;
+        char[64] name;
+        snprintf(name.ptr, name.length, "/antfarm-%d-%d", cast(int) getpid(),
+                 atomicFetchAdd!(MemoryOrder.raw)(shmCounter, 1));
+        int fd = shm_open(name.ptr, O_RDWR | O_CREAT | O_EXCL, 384); // 0600
+        if (fd < 0) fatal("shm_open failed");
+        shm_unlink(name.ptr);
+        if (ftruncate(fd, cast(off_t) bytes) != 0) fatal("ftruncate failed");
+        void* p = mmap(null, 2 * bytes, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED) fatal("mmap reserve failed");
+        if (mmap(p, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED)
+            fatal("mmap first half failed");
+        if (mmap(cast(char*) p + bytes, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0)
+                == MAP_FAILED)
+            fatal("mmap second half failed");
+        close(fd);
+
+        if (hugePages)
+        {
+            version (linux)
+            {
+                if (madvise(p, bytes, MADV_HUGEPAGE) != 0)
+                    fatal("madvise first half huge pages failed");
+                if (madvise(cast(char*) p + bytes, bytes, MADV_HUGEPAGE) != 0)
+                    fatal("madvise second half huge pages failed");
+            }
+            else
+                fatal("huge pages only supported on Linux");
+        }
+        return p;
+    }
+}
+
+private void unmapMagicBuffer(void* p, size_t bytes) nothrow @nogc @system
+{
+    if (p is null) return;
+    version (Windows)
+    {
+        UnmapViewOfFile(p);
+        UnmapViewOfFile(cast(char*) p + bytes);
+    }
+    else version (Posix)
+        munmap(p, 2 * bytes);
+}
 
 /// Spec 2a/5a: maximum number of simultaneous subscribed consumers.
 enum MAX_CONSUMERS_LIMIT = 128;
@@ -307,7 +589,7 @@ struct AntFarm
     // ---- magic buffer ----
     shared(ulong)* buf; /// 2*Ln ulongs mapped; second half mirrors the first
     ulong bufBytes;     /// Ln * 8
-    int shmFd = -1;
+    bool usedLargePages; /// Windows SEC_LARGE_PAGES / Linux MADV_HUGEPAGE requested and applied
 
     // ---- farm-level mutable metadata (spec 2c), one cache line each ----
     align(64) shared ulong Wt;      /// write tail sequence
@@ -370,41 +652,11 @@ struct AntFarm
         if (maxSmall > 0 && quotaSmall > exmax) fatal("quota exceeds Exmax");
         if (exmax > (k - 1) * segCap) fatal("Exmax exceeds K-1 segments' capacities");
 
-        // Magic buffer: reserve 2*Ln, map the same file into both halves.
         immutable bytes = segCap * k * 8;
-        static __gshared int shmCounter;
-        char[64] name;
-        snprintf(name.ptr, name.length, "/antfarm-%d-%d", cast(int) getpid(),
-                 atomicFetchAdd!(MemoryOrder.raw)(shmCounter, 1));
-        int fd = shm_open(name.ptr, O_RDWR | O_CREAT | O_EXCL, 384); // 0600
-        if (fd < 0) fatal("shm_open failed");
-        shm_unlink(name.ptr);
-        if (ftruncate(fd, cast(off_t) bytes) != 0) fatal("ftruncate failed");
-        void* p = mmap(null, 2 * bytes, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (p == MAP_FAILED) fatal("mmap reserve failed");
-        if (mmap(p, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED)
-            fatal("mmap first half failed");
-        if (mmap(cast(char*) p + bytes, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0)
-                == MAP_FAILED)
-            fatal("mmap second half failed");
+        hugePages = wantHugePages(hugePages);
+        auto p = mapMagicBuffer(bytes, hugePages);
 
-        if (hugePages)
-        {
-            version (linux)
-            {
-                // THP advice on the tmpfs-backed shm mapping.  The magic
-                // buffer is file-backed so the same huge pages are visible
-                // through both halves of the alias.
-                if (madvise(p, bytes, MADV_HUGEPAGE) != 0)
-                    fatal("madvise first half huge pages failed");
-                if (madvise(cast(char*) p + bytes, bytes, MADV_HUGEPAGE) != 0)
-                    fatal("madvise second half huge pages failed");
-            }
-            else
-                fatal("huge pages only supported on Linux");
-        }
-
-        auto mem = aligned_alloc(64, (AntFarm.sizeof + 63) & ~cast(size_t) 63);
+        auto mem = afAlignedAlloc(AntFarm.sizeof);
         if (mem is null) fatal("alloc failed");
         auto f = cast(AntFarm*) mem;
         *f = AntFarm.init;
@@ -425,20 +677,20 @@ struct AntFarm
         f.smallThreshold = smallThreshold;
         f.buf = cast(shared(ulong)*) p;
         f.bufBytes = bytes;
-        f.shmFd = fd;
+        f.usedLargePages = hugePages;
         if (maxBulk > 0)
         {
             // 64-aligned so slot 0's line cannot bleed into an unrelated
             // heap chunk; zeroed because aligned_alloc does not zero.
             f.prodHashBulk = cast(shared(ulong)*)
-                aligned_alloc(64, maxBulk * PROD_SLOT_STRIDE * 8);
+                afAlignedAlloc(maxBulk * PROD_SLOT_STRIDE * 8);
             if (f.prodHashBulk is null) fatal("alloc producer tickets failed");
             memset(cast(void*) f.prodHashBulk, 0, maxBulk * PROD_SLOT_STRIDE * 8);
         }
         if (maxSmall > 0)
         {
             f.prodHashSmall = cast(shared(ulong)*)
-                aligned_alloc(64, maxSmall * PROD_SLOT_STRIDE * 8);
+                afAlignedAlloc(maxSmall * PROD_SLOT_STRIDE * 8);
             if (f.prodHashSmall is null) fatal("alloc producer tickets failed");
             memset(cast(void*) f.prodHashSmall, 0, maxSmall * PROD_SLOT_STRIDE * 8);
         }
@@ -466,15 +718,11 @@ struct AntFarm
             if (prodHashSmall !is null && atomicLoad!(MemoryOrder.raw)(*prodSlot(prodHashSmall, i)) != 0)
                 fatal("destroy with live small ticket");
         if (prodHashBulk !is null)
-            free(cast(void*) prodHashBulk);
+            afAlignedFree(cast(void*) prodHashBulk);
         if (prodHashSmall !is null)
-            free(cast(void*) prodHashSmall);
-        if (buf !is null)
-            munmap(cast(void*) buf, 2 * bufBytes);
-        if (shmFd >= 0)
-            close(shmFd);
-        shmFd = -1;
-        free(cast(void*) &this);
+            afAlignedFree(cast(void*) prodHashSmall);
+        unmapMagicBuffer(cast(void*) buf, bufBytes);
+        afAlignedFree(cast(void*) &this);
     }
 
     // ------------------------------------------------------------------

@@ -67,6 +67,28 @@ ulong lowHalf(AntFarm* f, uint ki)
 // Test 1: arithmetic
 // ---------------------------------------------------------------------
 
+void testMagicWrap()
+{
+    void probe(bool huge, const(char)[] label)
+    {
+        auto f = AntFarm.create(1 << 18, 8, 1, 1, 2048, 1, 512,
+            DEFAULT_SMALL_TABLE_THRESHOLD, huge);
+        scope (exit) f.destroy();
+        if (huge && !f.usedLargePages)
+            return; // ANTFARM_HUGE_PAGES=0
+        auto p = cast(ulong*) f.buf;
+        p[0] = 0x1111_2222_3333_4444UL;
+        p[f.Ln - 1] = 0xAAAA_BBBB_CCCC_DDDDUL;
+        check(p[f.Ln] == p[0], label);
+        check(p[2 * f.Ln - 1] == p[f.Ln - 1], label);
+        p[f.Ln] = 0x5555_6666_7777_8888UL;
+        check(p[0] == 0x5555_6666_7777_8888UL, label);
+    }
+    probe(false, "wrap 4K");
+    probe(true, "wrap large pages");
+    printf("testMagicWrap OK\n"); fflush(stdout);
+}
+
 void testArithmetic()
 {
     check(sqcsOf(1) == 1, "sqcsOf(1)");
@@ -808,6 +830,7 @@ void testMultiSmallProducers()
 
 void main()
 {
+    testMagicWrap();
     testArithmetic();
     testSingleThreaded();
     testInputRangeWrite();

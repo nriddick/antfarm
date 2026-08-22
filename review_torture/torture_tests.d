@@ -73,6 +73,13 @@ void defect(const(char)[] id, const(char)[] msg)
 
 void t01_pcount_field_carry()
 {
+    version (Windows)
+    {
+        say("T01 skipped (fork abort-probe)");
+        return;
+    }
+    else version (Posix)
+    {
     // Retarget: write() must fatal (abort) on Done/MaxCs > 512. A clean
     // return is a miss; SIGILL/SIGSEGV is still a smash.
     import core.sys.posix.unistd : fork, _exit;
@@ -115,6 +122,7 @@ void t01_pcount_field_carry()
     f.unregisterProducer(tok);
     f.destroy();
     say((okDone && okCs) ? "T01 write rejects >512 OK" : "T01 DEFECT confirmed");
+    }
 }
 
 void t02_done_wrap_overexec()
@@ -862,6 +870,13 @@ void t15_wave_consumers()
 
 void t17_write_size_wrap()
 {
+    version (Windows)
+    {
+        say("T17 skipped (fork abort-probe)");
+        return;
+    }
+    else version (Posix)
+    {
     // Wrap and unsizable payloads must fatal (abort), not smash or return.
     import core.sys.posix.unistd : fork, _exit;
     import core.sys.posix.sys.wait : waitpid;
@@ -936,6 +951,7 @@ void t17_write_size_wrap()
     say((okWrap && okBig && okMidSmall && wrote == 1)
         ? "T17 fatal on wrap/unsizable/per-tier OK"
         : "T17 DEFECT confirmed");
+    }
 }
 
 void t18_pure_churn_orphan()

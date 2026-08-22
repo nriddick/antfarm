@@ -13,7 +13,28 @@ Concretely:
 - **Failure is fatal.** Invariant violations (counter wraps, bad tokens, unsizable payloads) abort the process; this is the spec's corruption tripwire, and the perf work found the checks cost ~0%.
 - **Producer quotas live in the ticket.** Each producer registers for a tier and receives a single-owner `Token` carrying a private quota mirror, validated against a farm-side per-slot ledger on every `write()`. Tokens transfer (copy consumes the source); a forged or copied ticket fatals on the ledger mismatch, so a registered caller cannot mint blind quota past Exmax. Callers pass the same `Token` by reference for the producer's lifetime.
 
-### 1.1 Build variants
+### 1.1 Windows (10 1803+)
+
+The magic buffer is `VirtualAlloc2` placeholders + `MapViewOfFile3` of one pagefile-backed section. `create(..., hugePages=true)` (the default) maps that section with **2 MiB large pages** (`SEC_LARGE_PAGES` + `MEM_LARGE_PAGES`). That needs `SeLockMemoryPrivilege` on this account:
+
+```text
+# elevated once, then log off/on
+dmd -g grant_lock_pages.d -ofgrant_lock_pages.exe
+grant_lock_pages.exe
+```
+
+Until that grant is live in the logon token, `create()` fatals. Override for 4K pages: `ANTFARM_HUGE_PAGES=0`. Fork-based abort probes (T01, T17, T19 quota) are skipped.
+
+```text
+dmd -g antfarm.d antfarm_templates.d antfarm_test.d -ofantfarm_test.exe
+dmd -g -checkaction=context review_torture/torture_common.d review_torture/torture_tests.d antfarm.d antfarm_templates.d -ofreview_torture/torture_tests.exe
+dmd -g -i live_hybrid.d antfarm.d antfarm_templates.d -I../threadpool/source -oflive_hybrid.exe
+ldc2 -O2 -release perftest\throughput.d antfarm.d -ofperftest\throughput.exe
+```
+
+`throughput.d` is not a complete program by itself — it must be compiled **with** `antfarm.d` (same for `digest` / `tail` / `dual`). Same with `ldc2` for the other binaries. `live_hybrid` pins P-only vs P+E consumers using `threadpool` topology on this i7-12700H.
+
+### 1.2 Build variants
 
 - **`ZERO_ST_RMW`** (`-d-version=ZERO_ST_RMW`): the single-threaded single-shot (ST) fast path in `enterPayload` drops the Pcount claims RMW entirely and uses a plain increment, relying solely on the shard Tcount chunk claim for exclusivity. Measured ~4% faster with the legacy global-count callback, neutral with the default per-worker-batched callback. It makes duplicate ST entry a real risk if a per-element search path is ever added outside the chunk digest; keep the default build for production.
 - **`noverify`** (`-d-version=noverify`): disables the packed-counter wrap tripwires (`VERIFY_WRAPS`). They are provably unreachable under the 512 caps and cost ~0%; keep them on in release.

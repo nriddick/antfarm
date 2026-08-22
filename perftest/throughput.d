@@ -3,6 +3,7 @@
  +
  +   make -C perftest run
  +   ./throughput --grid 8
+ +   ldc2 -O2 -release throughput.d ../antfarm.d -of=throughput.exe
  +
  + Default mode searches topology, then payload/table shape, and prints a
  + ranked table. `--once` runs a single configuration (see README).
