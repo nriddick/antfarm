@@ -104,6 +104,12 @@ void rec(shared(size_t)* n, long* buf, long ns) nothrow @nogc @system
         buf[i] = ns;
 }
 
+size_t histCount(ref shared(size_t) n) nothrow @nogc @system
+{
+    immutable v = atomicLoad(n);
+    return v < g_cap ? v : g_cap;
+}
+
 void spinFor(ulong ns) nothrow @nogc @system
 {
     if (ns == 0) return;
@@ -249,6 +255,26 @@ struct ConsCtx
     bool doPin;
 }
 
+// Module-level (not nested in startFarm): a function-nested class keeps
+// `_outer` on the creating stack frame, and startFarm returns while the
+// workers are still running.  Jobs live in FarmSet.jobs; threads take
+// `&jobs[i].run` so a loop-local cannot alias every worker to the last
+// context (see review_torture/torture_tests.d).
+final class ConsJob
+{
+    ConsCtx c;
+    this(ConsCtx c) { this.c = c; }
+    void run() { consumerMain(&c); }
+}
+
+final class MboxJob
+{
+    uint cpu;
+    bool doPin;
+    this(uint cpu, bool doPin) { this.cpu = cpu; this.doPin = doPin; }
+    void run() { mailboxMain(cpu, doPin); }
+}
+
 void consumerMain(ConsCtx* c)
 {
     if (c.doPin && !pinTo(c.cpu))
@@ -268,8 +294,8 @@ void consumerMain(ConsCtx* c)
     if (yielder)
         v.benchMaxRuns = 1;
     atomicFetchAdd(g_ready, 1);
-    while (atomicLoad(g_go) == 0) {}
-    while (atomicLoad(g_go) == 1)
+    while (atomicLoad!(MemoryOrder.acq)(g_go) == 0) {}
+    while (atomicLoad!(MemoryOrder.acq)(g_go) == 1)
         v.consumeNext();
     v.unsubscribe();
 }
@@ -285,7 +311,7 @@ struct FarmSet
     ulong* bgBody;
     ulong* sentBody;
     Thread[] consumers;
-    ConsCtx* cctx;
+    ConsJob[] jobs;
     uint nc;
 }
 
@@ -345,24 +371,16 @@ FarmSet startFarm(Cfg cfg, Arm arm, uint nc)
         s.dump[i].header = s.bgH;
         s.dump[i].body = s.bgBody[0 .. cfg.body];
     }
-    atomicStore(g_go, 0);
+    atomicStore!(MemoryOrder.rel)(g_go, 0);
     atomicStore(g_ready, 0);
     atomicStore(g_pinOk, 1);
-    s.cctx = cast(ConsCtx*) malloc(nc * ConsCtx.sizeof);
+    s.jobs = new ConsJob[](nc);
     s.consumers = new Thread[nc];
-
-    final class ConsJob
-    {
-        ConsCtx* c;
-        this(ConsCtx* c) { this.c = c; }
-        void run() { consumerMain(c); }
-    }
 
     foreach (i; 0 .. nc)
     {
-        s.cctx[i] = ConsCtx(s.f, arm, i, cfg.pin);
-        auto job = new ConsJob(&s.cctx[i]);
-        s.consumers[i] = new Thread(&job.run);
+        s.jobs[i] = new ConsJob(ConsCtx(s.f, arm, i, cfg.pin));
+        s.consumers[i] = new Thread(&s.jobs[i].run);
         s.consumers[i].start();
     }
     waitReady(nc, MonoTime.currTime + 5.seconds);
@@ -378,13 +396,12 @@ FarmSet startFarm(Cfg cfg, Arm arm, uint nc)
 
 void stopFarm(ref FarmSet s)
 {
-    atomicStore(g_go, 2);
+    atomicStore!(MemoryOrder.rel)(g_go, 2);
     foreach (th; s.consumers)
         th.join();
     s.f.unregisterProducer(s.bulk);
     s.f.unregisterProducer(s.small);
     s.f.destroy();
-    free(s.cctx);
     free(s.bgH);
     free(s.sentH);
     free(s.dump);
@@ -423,7 +440,7 @@ Row runIdle(Cfg cfg, Arm arm, uint nc)
     auto s = startFarm(cfg, arm, nc);
     GC.collect();
     GC.disable();
-    atomicStore(g_go, 1);
+    atomicStore!(MemoryOrder.rel)(g_go, 1);
 
     immutable want = cfg.warmup + cfg.samples;
     long seen;
@@ -458,7 +475,7 @@ Row runIdle(Cfg cfg, Arm arm, uint nc)
     if (r.err.length)
         return r;
     // drop warmup from the front of the recorded arrays
-    immutable got = atomicLoad(g_nlat);
+    immutable got = histCount(g_nlat);
     size_t use = got;
     long* lat = g_lat;
     if (got > cfg.warmup)
@@ -467,7 +484,7 @@ Row runIdle(Cfg cfg, Arm arm, uint nc)
         use = got - cfg.warmup;
     }
     r.lat = pctOf(lat, use);
-    r.wlat = pctOf(g_wlat, atomicLoad(g_nwlat));
+    r.wlat = pctOf(g_wlat, histCount(g_nwlat));
     r.ok = r.lat.n > 0;
     if (!r.ok)
         r.err = "no samples";
@@ -488,7 +505,7 @@ Row runMid(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
     auto s = startFarm(cfg, arm, nc);
     GC.collect();
     GC.disable();
-    atomicStore(g_go, 1);
+    atomicStore!(MemoryOrder.rel)(g_go, 1);
 
     immutable trigger = tlen <= 16 ? 1u : (tlen / 4 < 16 ? 16u : tlen / 4);
     immutable want = cfg.warmup + cfg.samples;
@@ -562,7 +579,7 @@ Row runMid(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
     stopFarm(s);
     if (r.err.length)
         return r;
-    immutable got = atomicLoad(g_nlat);
+    immutable got = histCount(g_nlat);
     size_t use = got;
     long* lat = g_lat;
     if (got > cfg.warmup)
@@ -571,7 +588,7 @@ Row runMid(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
         use = got - cfg.warmup;
     }
     r.lat = pctOf(lat, use);
-    r.wlat = pctOf(g_wlat, atomicLoad(g_nwlat));
+    r.wlat = pctOf(g_wlat, histCount(g_nwlat));
     r.ok = r.lat.n > 0;
     if (!r.ok)
         r.err = r.miss ? "all misses" : "no samples";
@@ -583,8 +600,8 @@ void mailboxMain(uint cpu, bool doPin)
     if (doPin && !pinTo(cpu))
         atomicStore(g_pinOk, 0);
     atomicFetchAdd(g_ready, 1);
-    while (atomicLoad(g_go) == 0) {}
-    while (atomicLoad(g_go) == 1)
+    while (atomicLoad!(MemoryOrder.acq)(g_go) == 0) {}
+    while (atomicLoad!(MemoryOrder.acq)(g_go) == 1)
     {
         immutable t0 = atomicLoad!(MemoryOrder.acq)(g_mbox);
         if (t0 != 0)
@@ -611,13 +628,6 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
     auto s = startFarm(cfg, Arm.stock, nc);
     immutable ncpu = onlineCpus();
     immutable mcpu = (nc + 1 < ncpu) ? nc + 1 : (ncpu ? ncpu - 1 : 0);
-    final class MboxJob
-    {
-        uint cpu;
-        bool doPin;
-        this(uint cpu, bool doPin) { this.cpu = cpu; this.doPin = doPin; }
-        void run() { mailboxMain(cpu, doPin); }
-    }
     auto mj = new MboxJob(mcpu, cfg.pin);
     auto mth = new Thread(&mj.run);
     mth.start();
@@ -625,7 +635,7 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
 
     GC.collect();
     GC.disable();
-    atomicStore(g_go, 1);
+    atomicStore!(MemoryOrder.rel)(g_go, 1);
 
     immutable trigger = tlen <= 16 ? 1u : (tlen / 4 < 16 ? 16u : tlen / 4);
     immutable want = cfg.warmup + cfg.samples;
@@ -675,12 +685,12 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
         }
     }
     GC.enable();
-    atomicStore(g_go, 2);
+    atomicStore!(MemoryOrder.rel)(g_go, 2);
     mth.join();
     stopFarm(s);
     if (r.err.length)
         return r;
-    immutable got = atomicLoad(g_nlat);
+    immutable got = histCount(g_nlat);
     size_t use = got;
     long* lat = g_lat;
     if (got > cfg.warmup)
@@ -719,7 +729,7 @@ Row runBurst(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
     auto s = startFarm(cfg, arm, nc);
     GC.collect();
     GC.disable();
-    atomicStore(g_go, 1);
+    atomicStore!(MemoryOrder.rel)(g_go, 1);
 
     immutable trigger = tlen <= 16 ? 1u : 16u;
     immutable bursts = (cfg.warmup + cfg.samples + cfg.burstN - 1) / cfg.burstN;
@@ -784,9 +794,9 @@ Row runBurst(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
     stopFarm(s);
     if (r.err.length)
         return r;
-    r.lat = pctOf(g_lat, atomicLoad(g_nlat));
-    r.first = pctOf(g_first, atomicLoad(g_nfirst));
-    r.last = pctOf(g_last, atomicLoad(g_nlast));
+    r.lat = pctOf(g_lat, histCount(g_nlat));
+    r.first = pctOf(g_first, histCount(g_nfirst));
+    r.last = pctOf(g_last, histCount(g_nlast));
     r.ok = r.lat.n > 0;
     if (!r.ok)
         r.err = "no samples";
@@ -799,10 +809,17 @@ struct SprayCtx
     uint tlen;
 }
 
+final class SprayJob
+{
+    SprayCtx* c;
+    this(SprayCtx* c) { this.c = c; }
+    void run() { sprayMain(c); }
+}
+
 void sprayMain(SprayCtx* c)
 {
-    while (atomicLoad(g_go) == 0) {}
-    while (atomicLoad(g_go) == 1)
+    while (atomicLoad!(MemoryOrder.acq)(g_go) == 0) {}
+    while (atomicLoad!(MemoryOrder.acq)(g_go) == 1)
     {
         if (writeDump(*c.s, c.tlen) == 0)
             Thread.yield();
@@ -849,15 +866,9 @@ Row runNear(Cfg cfg, uint nc)
 
     GC.collect();
     GC.disable();
-    atomicStore(g_go, 1);
+    atomicStore!(MemoryOrder.rel)(g_go, 1);
 
     auto spray = SprayCtx(&s, cfg.tlen);
-    final class SprayJob
-    {
-        SprayCtx* c;
-        this(SprayCtx* c) { this.c = c; }
-        void run() { sprayMain(c); }
-    }
     auto sj = new SprayJob(&spray);
     auto sprayTh = new Thread(&sj.run);
     sprayTh.start();
@@ -895,17 +906,17 @@ Row runNear(Cfg cfg, uint nc)
             break;
         }
     }
-    atomicStore(g_go, 2);
+    atomicStore!(MemoryOrder.rel)(g_go, 2);
     sprayTh.join();
     // stopFarm also sets g_go=2 and joins consumers
     GC.enable();
     // consumers still running; stopFarm joins them
-    atomicStore(g_go, 2);
+    atomicStore!(MemoryOrder.rel)(g_go, 2);
     stopFarm(s);
     if (r.err.length)
         return r;
-    r.lat = pctOf(g_lat, atomicLoad(g_nlat));
-    r.wlat = pctOf(g_wlat, atomicLoad(g_nwlat));
+    r.lat = pctOf(g_lat, histCount(g_nlat));
+    r.wlat = pctOf(g_wlat, histCount(g_nwlat));
     r.ok = true; // zeros-only is still a result
     return r;
 }

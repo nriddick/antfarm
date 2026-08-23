@@ -29,6 +29,7 @@ Until that grant is live in the logon token, `create()` fatals. Override for 4K 
 dmd -g antfarm.d antfarm_templates.d antfarm_test.d -ofantfarm_test.exe
 dmd -g -checkaction=context review_torture/torture_common.d review_torture/torture_tests.d antfarm.d antfarm_templates.d -ofreview_torture/torture_tests.exe
 dmd -g -i live_hybrid.d antfarm.d antfarm_templates.d -I../threadpool/source -oflive_hybrid.exe
+dmd -g -i hello_antfarm.d antfarm.d -I../threadpool/source -ofhello_antfarm.exe
 ldc2 -O2 -release perftest\throughput.d antfarm.d -ofperftest\throughput.exe
 ```
 

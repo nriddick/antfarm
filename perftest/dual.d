@@ -24,28 +24,38 @@ import core.stdc.stdlib : malloc, free, atoi, abort, strtoull;
 
 __gshared shared(long) g_calls;
 __gshared shared(int) g_stop;
+__gshared shared(int) g_ready;
 
 // Per-worker batched counter, same idea as throughput.d: a single global
 // atomic would measure callback contention instead of Ant Farm overhead.
-private uint g_localCalls;
+// Function-local `static` is TLS in D; one helper so increment and flush
+// share the same slot.
 private enum uint LOCAL_FLUSH = 1024;
+
+uint* workerCalls() nothrow @nogc @system
+{
+    static uint n;
+    return &n;
+}
 
 long benchCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
 {
-    if (++g_localCalls >= LOCAL_FLUSH)
+    auto p = workerCalls();
+    if (++(*p) >= LOCAL_FLUSH)
     {
-        atomicFetchAdd(g_calls, cast(long) g_localCalls);
-        g_localCalls = 0;
+        atomicFetchAdd(g_calls, cast(long) *p);
+        *p = 0;
     }
     return 1;
 }
 
 void flushLocalCalls() nothrow @nogc @system
 {
-    if (g_localCalls != 0)
+    auto p = workerCalls();
+    if (*p != 0)
     {
-        atomicFetchAdd(g_calls, cast(long) g_localCalls);
-        g_localCalls = 0;
+        atomicFetchAdd(g_calls, cast(long) *p);
+        *p = 0;
     }
 }
 
@@ -92,10 +102,14 @@ struct DualCtx
     long expected;
     MonoTime deadline;
     shared int* timedOut;
+    uint peers;             // dual-thread count; subscribe barrier
     size_t produced;
     uint stalls;
 }
 
+// Module-level (not function-nested) so `_outer` cannot dangle. Threads
+// take `&jobs[i].run` from a stable array — a loop-local delegate would
+// alias every worker to the last DualCtx (see review_torture/torture_tests.d).
 final class DualJob
 {
     DualCtx* c;
@@ -105,6 +119,7 @@ final class DualJob
 
 void dualMain(DualCtx* c)
 {
+    *workerCalls() = 0;
     auto tok = c.f.registerProducer(c.tier);
     if (!tok.valid)
     {
@@ -119,10 +134,23 @@ void dualMain(DualCtx* c)
         abort();
     }
 
+    atomicFetchAdd(g_ready, 1);
+    while (atomicLoad!(MemoryOrder.acq)(g_ready) < cast(int) c.peers
+           && atomicLoad!(MemoryOrder.acq)(g_stop) == 0)
+    {
+        if (MonoTime.currTime > c.deadline)
+        {
+            atomicStore(g_stop, 1);
+            atomicStore(*c.timedOut, 1);
+            break;
+        }
+        Thread.yield();
+    }
+
     ulong produced;
     uint localStalls;
 
-    while (atomicLoad(g_stop) == 0 && MonoTime.currTime <= c.deadline)
+    while (atomicLoad!(MemoryOrder.acq)(g_stop) == 0 && MonoTime.currTime <= c.deadline)
     {
         // Produce phase: one small (or bulk) write.
         if (produced < c.produce)
@@ -261,9 +289,11 @@ Trial runDual(Cfg c)
     }
 
     Thread[] threads = new Thread[c.nd];
+    auto jobs = new DualJob[](c.nd);
     shared int timedOut;
     atomicStore(g_calls, 0L);
     atomicStore(g_stop, 0);
+    atomicStore(g_ready, 0);
     atomicStore(timedOut, 0);
 
     immutable expected = cast(long) c.n;
@@ -276,7 +306,7 @@ Trial runDual(Cfg c)
         immutable share = remain / (c.nd - i);
         ctxs[i] = DualCtx(f, entries, poolN, share, c.batch, c.consume,
                           c.avgCost, c.bulk ? Tier.bulk : Tier.small,
-                          expected, deadline, &timedOut, 0, 0);
+                          expected, deadline, &timedOut, c.nd, 0, 0);
         cursor += share;
     }
 
@@ -286,8 +316,8 @@ Trial runDual(Cfg c)
     immutable t0 = MonoTime.currTime;
     foreach (i; 0 .. c.nd)
     {
-        auto job = new DualJob(&ctxs[i]);
-        threads[i] = new Thread(&job.run);
+        jobs[i] = new DualJob(&ctxs[i]);
+        threads[i] = new Thread(&jobs[i].run);
         threads[i].start();
     }
     foreach (th; threads)

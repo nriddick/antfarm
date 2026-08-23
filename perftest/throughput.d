@@ -23,6 +23,7 @@ import core.stdc.math : sqrt;
 
 __gshared shared(long) g_calls;
 __gshared shared(int) g_stop;
+__gshared shared(int) g_ready;
 __gshared bool g_globalCount;   // --global-count: old one-global-atomic callback
 
 // Per-worker batched counter.  The old single-global atomic increment made
@@ -31,15 +32,25 @@ __gshared bool g_globalCount;   // --global-count: old one-global-atomic callbac
 // Ant Farm overhead.  Each worker accumulates locally and periodically
 // flushes to the shared counter; the stop condition is still exact because
 // consumers flush on idle and before unsubscribe.
-private uint g_localCalls;
+//
+// Function-local `static` is TLS in D (unlike C). A module-level mutable
+// is also TLS, but a helper makes the storage duration obvious and gives
+// one identity for increment + flush.
 private enum uint LOCAL_FLUSH = 1024;
+
+uint* workerCalls() nothrow @nogc @system
+{
+    static uint n;
+    return &n;
+}
 
 long benchCbLocal(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
 {
-    if (++g_localCalls >= LOCAL_FLUSH)
+    auto p = workerCalls();
+    if (++(*p) >= LOCAL_FLUSH)
     {
-        atomicFetchAdd(g_calls, cast(long) g_localCalls);
-        g_localCalls = 0;
+        atomicFetchAdd(g_calls, cast(long) *p);
+        *p = 0;
     }
     return 1;
 }
@@ -52,10 +63,11 @@ long benchCbGlobal(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @s
 
 void flushLocalCalls() nothrow @nogc @system
 {
-    if (g_localCalls != 0)
+    auto p = workerCalls();
+    if (*p != 0)
     {
-        atomicFetchAdd(g_calls, cast(long) g_localCalls);
-        g_localCalls = 0;
+        atomicFetchAdd(g_calls, cast(long) *p);
+        *p = 0;
     }
 }
 
@@ -113,6 +125,10 @@ struct ConsCtx
     shared int* timedOut;
 }
 
+// Module-level classes (not function-nested): a nested class keeps `_outer`
+// pointing at the creating stack frame.  Jobs live in a stable array and
+// threads take `&jobs[i].run` so a loop-local cannot alias every worker to
+// the last context (see review_torture/torture_tests.d).
 final class ProdJob
 {
     ProdCtx* c;
@@ -161,18 +177,24 @@ void producerMain(ProdCtx* c)
 
 void consumerMain(ConsCtx* c)
 {
+    *workerCalls() = 0;
     ConsumerView v;
     if (v.subscribe(c.f) < 0)
     {
         fprintf(stderr, "subscribe failed\n");
         abort();
     }
+    atomicFetchAdd(g_ready, 1);
     for (;;)
     {
+        if (atomicLoad!(MemoryOrder.acq)(g_stop) != 0)
+            break;
         if (!v.consumeNext())
         {
             flushLocalCalls();
             if (atomicLoad!(MemoryOrder.acq)(g_calls) >= c.expected)
+                break;
+            if (atomicLoad!(MemoryOrder.acq)(g_stop) != 0)
                 break;
             if (MonoTime.currTime > c.deadline)
             {
@@ -184,6 +206,17 @@ void consumerMain(ConsCtx* c)
     }
     flushLocalCalls();
     v.unsubscribe();
+}
+
+bool waitReady(int n, MonoTime deadline)
+{
+    while (atomicLoad!(MemoryOrder.acq)(g_ready) < n)
+    {
+        if (MonoTime.currTime > deadline)
+            return false;
+        Thread.yield();
+    }
+    return true;
 }
 
 /// Singleton table size for one ST payload; used to skip unsizable configs.
@@ -260,6 +293,7 @@ Trial runOnce(Cfg c)
     shared int timedOut;
     atomicStore(g_calls, 0L);
     atomicStore(g_stop, 0);
+    atomicStore(g_ready, 0);
     atomicStore(stalls, 0);
     atomicStore(timedOut, 0);
 
@@ -281,20 +315,43 @@ Trial runOnce(Cfg c)
     foreach (i; 0 .. c.nc)
         cctx[i] = ConsCtx(f, expected, deadline, &timedOut);
 
+    auto prodJobs = new ProdJob[](np);
+    auto consJobs = new ConsJob[](c.nc);
+
     GC.collect();
     GC.minimize();
     GC.disable();
-    immutable t0 = MonoTime.currTime;
+    // Subscribe before the first write so tables see the live Cf/SqCs
+    // rather than the Cf==0 fallback, and so a producer cannot lap an
+    // unsubscribed farm.
     foreach (i; 0 .. c.nc)
     {
-        auto job = new ConsJob(&cctx[i]);
-        consumers[i] = new Thread(&job.run);
+        consJobs[i] = new ConsJob(&cctx[i]);
+        consumers[i] = new Thread(&consJobs[i].run);
         consumers[i].start();
     }
+    if (!waitReady(cast(int) c.nc, MonoTime.currTime + 5.seconds))
+    {
+        atomicStore(g_stop, 1);
+        foreach (cons; consumers)
+            if (cons !is null)
+                cons.join();
+        GC.enable();
+        free(pctx);
+        free(cctx);
+        free(headers);
+        free(body);
+        free(entries);
+        f.destroy();
+        t.err = "subscribe timeout";
+        return t;
+    }
+
+    immutable t0 = MonoTime.currTime;
     foreach (i; 0 .. np)
     {
-        auto job = new ProdJob(&pctx[i]);
-        producers[i] = new Thread(&job.run);
+        prodJobs[i] = new ProdJob(&pctx[i]);
+        producers[i] = new Thread(&prodJobs[i].run);
         producers[i].start();
     }
     foreach (p; producers)

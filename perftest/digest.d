@@ -48,6 +48,7 @@ __gshared shared(ulong) g_sink;
 __gshared ulong* g_world;
 __gshared size_t g_worldN;
 __gshared shared(int) g_go; // 0 = wait, 1 = consume, 2 = abort
+__gshared shared(int) g_ready;
 
 long touchCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
 {
@@ -241,14 +242,23 @@ struct ConsCtx
     uint chunk; // 0 = per-arm default (1 for linear1, else 16)
 }
 
+// Module-level so `_outer` cannot dangle; threads take `&jobs[i].run`.
+final class ConsJob
+{
+    ConsCtx* c;
+    this(ConsCtx* c) { this.c = c; }
+    void run() { consumerMain(c); }
+}
+
 void consumerMain(ConsCtx* c)
 {
     ConsumerView v;
     if (v.subscribe(c.f) < 0)
         fatal("subscribe failed");
-    while (atomicLoad(g_go) == 0)
+    atomicFetchAdd(g_ready, 1);
+    while (atomicLoad!(MemoryOrder.acq)(g_go) == 0)
         Thread.yield();
-    if (atomicLoad(g_go) == 2)
+    if (atomicLoad!(MemoryOrder.acq)(g_go) == 2)
     {
         v.unsubscribe();
         return;
@@ -385,32 +395,44 @@ Trial runOnce(Cfg cfg, Arm arm)
 
     atomicStore(g_calls, 0L);
     atomicStore(g_go, 0);
+    atomicStore(g_ready, 0);
     auto cctx = cast(ConsCtx*) malloc(cfg.nc * ConsCtx.sizeof);
     Thread[] consumers = new Thread[cfg.nc];
+    auto jobs = new ConsJob[](cfg.nc);
     auto drainDeadline = MonoTime.currTime + 60.seconds;
     foreach (i; 0 .. cfg.nc)
         cctx[i] = ConsCtx(f, arm, cast(long) published, drainDeadline, cfg.chunk);
 
-    final class ConsJob
-    {
-        ConsCtx* c;
-        this(ConsCtx* c) { this.c = c; }
-        void run() { consumerMain(c); }
-    }
-
     foreach (i; 0 .. cfg.nc)
     {
-        auto job = new ConsJob(&cctx[i]);
-        consumers[i] = new Thread(&job.run);
+        jobs[i] = new ConsJob(&cctx[i]);
+        consumers[i] = new Thread(&jobs[i].run);
         consumers[i].start();
     }
-    // Let them subscribe and park on the empty nextSeq before we time.
-    Thread.sleep(20.msecs);
+    auto readyDeadline = MonoTime.currTime + 5.seconds;
+    while (atomicLoad!(MemoryOrder.acq)(g_ready) < cast(int) cfg.nc)
+    {
+        if (MonoTime.currTime > readyDeadline)
+        {
+            atomicStore!(MemoryOrder.rel)(g_go, 2);
+            foreach (th; consumers)
+                if (th !is null)
+                    th.join();
+            free(cctx);
+            free(headers);
+            free(body);
+            free(entries);
+            f.destroy();
+            t.err = "subscribe timeout";
+            return t;
+        }
+        Thread.yield();
+    }
 
     GC.collect();
     GC.disable();
     immutable t0 = MonoTime.currTime;
-    atomicStore(g_go, 1);
+    atomicStore!(MemoryOrder.rel)(g_go, 1);
     foreach (th; consumers)
         th.join();
     immutable t1 = MonoTime.currTime;
