@@ -52,7 +52,7 @@ void flushLocalCalls() nothrow @nogc @system
 struct Cfg
 {
     ulong ln = 1UL << 21;
-    uint k = 4;
+    uint k = 8;
     uint nd = 4;            // dual-registered threads
     uint body = 16;
     uint batch = 1;         // payloads per produce phase (small write size)

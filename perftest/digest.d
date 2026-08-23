@@ -29,7 +29,7 @@ immutable string[3] mixName = ["touch", "chase", "alt"];
 struct Cfg
 {
     ulong ln = 1UL << 21;
-    uint k = 4;
+    uint k = 8;
     uint nc = 8;
     uint nb = 1; // untimed publish; 1×segCap Exmax still refreshes with the dummy pin
     uint body = 16;

@@ -333,7 +333,7 @@ enum DEFAULT_SMALL_TABLE_THRESHOLD = 64;
 enum uint MAX_CHUNK = 32;
 /// log2(MAX_CHUNK); avgCost outside 0 .. MAX_AVG_COST is a caller error.
 enum uint MAX_AVG_COST = 5;
-/// Maximum supported number of segments K (spec suggests 4 or 8).
+/// Maximum supported number of segments K. Default create()/perftest K is 8.
 enum KMAX = 16;
 
 /// Spec 3b: producer ticket slot stride in ulongs. Each slot's hash sits on
@@ -379,14 +379,7 @@ void fatal(const(char)[] msg) nothrow @nogc @system
 
 /// Packed-field wrap guards (Tcount/Pcount claims, calls, completions).
 /// Provably unreachable under the 512 caps, the claim-per-payload rule and
-/// MAX_CONSUMERS_LIMIT (see perftest/SPECULATIVE_OPT_2026-08-16_1.md §2),
-/// and the A/B shows gating them saves ~0% (median 59.64 vs 59.31 Mpps at
-/// the winner) — below the 1% adoption bar — so they stay on in release as
-/// the corruption tripwire. -d-version=noverify is the opt-out.
-version (noverify)
-    private enum bool VERIFY_WRAPS = false;
-else
-    private enum bool VERIFY_WRAPS = true;
+/// MAX_CONSUMERS_LIMIT; they stay on as the corruption tripwire.
 
 /// Compile-time switch for trailing-reference check frequency.
 /// Default: eager release check after every table (baseline).
@@ -1720,34 +1713,16 @@ private:
         // secondaryMt/tertiaryMt only walk the MT index (MaxCs > 1), never
         // ST payloads.  So no second consumer can legally enter this payload.
         //
-        // We still keep the Pcount claims RMW as a gate in the default build:
-        // if a duplicate ever did arrive, it sees claims >= MaxCs == 1 and
-        // returns without executing.  Nothing reads the calls/completions
-        // fields for ST payloads, so they are left untouched.
-        //
-        // version(ZERO_ST_RMW) is an experimental zero-RMW ST path.  It
-        // replaces that gate with a regular (non-atomic) claims increment,
-        // relying entirely on the shard Tcount chunk claim for exclusivity.
-        // Measured (K=8 nc=8 nb=2 body=16 batch=256): ~4% faster with the
-        // legacy --global-count callback, neutral with the default
-        // per-worker-batched callback.  But it makes duplicate ST entry a
-        // real risk if this code ever gains a per-element search path
-        // outside the chunk digest, and a consumer that crashes mid-chunk
-        // is simply illegal.  Use with that unease in mind.
+        // Pcount claims RMW is still the gate: if a duplicate ever did
+        // arrive, it sees claims >= MaxCs == 1 and returns without
+        // executing.  Nothing reads the calls/completions fields for ST
+        // payloads, so they are left untouched.
         if (head.maxCs == 1 && head.done == 1 && !loopAll)
         {
-            version (ZERO_ST_RMW)
-            {
-                auto pc = cast(ulong*)&head.pcount;
-                *pc += 1UL << 32;
-            }
-            else
-            {
-                immutable c = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 32);
-                if (VERIFY_WRAPS && (c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
-                if ((c >> 32) >= head.maxCs)
-                    return; // overallocated
-            }
+            immutable c = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 32);
+            if ((c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
+            if ((c >> 32) >= head.maxCs)
+                return; // overallocated
             // Nothing reads the calls/completions fields for ST payloads
             // (secondaryMt/tertiaryMt only walk the MT index, and table
             // completion is tracked by Tcount/Tprogress).  So just do the
@@ -1758,20 +1733,20 @@ private:
         }
 
         immutable c = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 32);
-        if (VERIFY_WRAPS && (c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
+        if ((c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
         if ((c >> 32) >= head.maxCs)
             return; // overallocated
         do
         {
             immutable d = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 16);
             immutable called = (d >> 16) & 0xFFFF;
-            if (VERIFY_WRAPS && called == 0xFFFF) fatal("Pcount calls wrap");
+            if (called == 0xFFFF) fatal("Pcount calls wrap");
             if (called >= head.done)
                 break;
             auto body_ = (cast(const(ulong)*)(cast(ulong*) bp + absIdx + PHEAD_LEN))[0 .. head.plen];
             head.call(head, body_, called);
             immutable oldc = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL);
-            if (VERIFY_WRAPS && (oldc & 0xFFFF) == 0xFFFF) fatal("Pcount comps wrap");
+            if ((oldc & 0xFFFF) == 0xFFFF) fatal("Pcount comps wrap");
         }
         while (loopAll);
     }
@@ -1842,7 +1817,7 @@ private:
         {
             // 5e-i.
             immutable rawc = atomicFetchAdd!(MemoryOrder.raw)(*shc, 1UL << 32);
-            if (VERIFY_WRAPS && (rawc >> 32) == 0xFFFF_FFFFUL) fatal("Tcount claims wrap");
+            if ((rawc >> 32) == 0xFFFF_FFFFUL) fatal("Tcount claims wrap");
             immutable x = cast(uint)(rawc >> 32);
             if (x >= shiter)
             {
@@ -1871,7 +1846,7 @@ private:
             // shard increments Tprogress by the shard length, whichever
             // consumer (owner, sweeper, or re-walker) that happens to be.
             immutable y = atomicFetchAdd!(MemoryOrder.raw)(*shc, cast(ulong) runlen);
-            if (VERIFY_WRAPS && (y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
+            if ((y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
             if ((y & 0xFFFF_FFFFUL) == shlen - runlen)
             {
                 immutable tp = atomicFetchAdd!(MemoryOrder.raw)(bp[progOff], cast(ulong) shlen);

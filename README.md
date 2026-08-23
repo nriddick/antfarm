@@ -34,11 +34,6 @@ ldc2 -O2 -release perftest\throughput.d antfarm.d -ofperftest\throughput.exe
 
 `throughput.d` is not a complete program by itself — it must be compiled **with** `antfarm.d` (same for `digest` / `tail` / `dual`). Same with `ldc2` for the other binaries. `live_hybrid` pins P-only vs P+E consumers using `threadpool` topology on this i7-12700H.
 
-### 1.2 Build variants
-
-- **`ZERO_ST_RMW`** (`-d-version=ZERO_ST_RMW`): the single-threaded single-shot (ST) fast path in `enterPayload` drops the Pcount claims RMW entirely and uses a plain increment, relying solely on the shard Tcount chunk claim for exclusivity. Measured ~4% faster with the legacy global-count callback, neutral with the default per-worker-batched callback. It makes duplicate ST entry a real risk if a per-element search path is ever added outside the chunk digest; keep the default build for production.
-- **`noverify`** (`-d-version=noverify`): disables the packed-counter wrap tripwires (`VERIFY_WRAPS`). They are provably unreachable under the 512 caps and cost ~0%; keep them on in release.
-
 So the right mental model is: **producers publish tables of mixed-size jobs into a bounded ring; consumers independently claim runs of jobs, sharded to avoid contention; the only producer↔consumer coupling is per-segment reference tallies.**
 
 ## 2. Where it is strong

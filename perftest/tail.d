@@ -2,6 +2,7 @@
  + Tail latency of a mid-tick 1-payload write against production consumeNext.
  +
  +   make -C perftest tail && ./perftest/tail
+ +   ldc2 -O2 -release tail.d ../antfarm.d -of=tail.exe
  +
  + t0 is taken just before write() of the sentinel; Call records now-t0.
  + Background jobs spin; the sentinel only timestamps.
@@ -15,11 +16,18 @@ import core.thread;
 import core.time;
 import core.stdc.stdio;
 import core.stdc.stdlib : malloc, free, abort, atoi, strtoull;
-import core.sys.posix.unistd : sysconf, _SC_NPROCESSORS_ONLN;
 
-version (linux)
+version (Windows)
 {
-    extern (C) int sched_setaffinity(int pid, size_t cpusetsize, const(void)* mask) nothrow @nogc;
+    import core.sys.windows.winbase : GetCurrentThread, GetSystemInfo, SetThreadAffinityMask, SYSTEM_INFO;
+}
+else version (Posix)
+{
+    import core.sys.posix.unistd : sysconf, _SC_NPROCESSORS_ONLN;
+    version (linux)
+    {
+        extern (C) int sched_setaffinity(int pid, size_t cpusetsize, const(void)* mask) nothrow @nogc;
+    }
 }
 
 enum Arm : int { stock, yield16, claim1 }
@@ -31,7 +39,7 @@ immutable string[5] sceneName = ["idle", "mid-drain", "burst", "near-full", "mai
 struct Cfg
 {
     ulong ln = 1UL << 21;
-    uint k = 4;
+    uint k = 8;
     uint nc = 6;
     uint body = 16;
     uint tlen = 256;
@@ -130,9 +138,34 @@ long sentCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
     return 1;
 }
 
+uint onlineCpus() nothrow @nogc @system
+{
+    version (Windows)
+    {
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        return si.dwNumberOfProcessors;
+    }
+    else version (Posix)
+    {
+        immutable n = sysconf(_SC_NPROCESSORS_ONLN);
+        return n > 0 ? cast(uint) n : 0;
+    }
+    else
+        return 0;
+}
+
 bool pinTo(uint cpu) nothrow @nogc @system
 {
-    version (linux)
+    version (Windows)
+    {
+        // SetThreadAffinityMask is one 64-bit group-0 mask. Fail rather than
+        // wrapping the shift (D masks shift counts), which would pin the wrong LP.
+        if (cpu >= size_t.sizeof * 8)
+            return false;
+        return SetThreadAffinityMask(GetCurrentThread(), cast(size_t)(1UL << cpu)) != 0;
+    }
+    else version (linux)
     {
         ulong[16] mask;
         if (cpu >= mask.length * 64)
@@ -335,7 +368,7 @@ FarmSet startFarm(Cfg cfg, Arm arm, uint nc)
     waitReady(nc, MonoTime.currTime + 5.seconds);
     if (cfg.pin)
     {
-        immutable ncpu = cast(uint) sysconf(_SC_NPROCESSORS_ONLN);
+        immutable ncpu = onlineCpus();
         immutable pc = nc < ncpu ? nc : (ncpu ? ncpu - 1 : 0);
         if (!pinTo(pc))
             atomicStore(g_pinOk, 0);
@@ -576,7 +609,7 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
     resetHist();
     // Farm workers drain the dump; a dedicated poller is the OOB channel.
     auto s = startFarm(cfg, Arm.stock, nc);
-    immutable ncpu = cast(uint) sysconf(_SC_NPROCESSORS_ONLN);
+    immutable ncpu = onlineCpus();
     immutable mcpu = (nc + 1 < ncpu) ? nc + 1 : (ncpu ? ncpu - 1 : 0);
     final class MboxJob
     {
@@ -884,7 +917,7 @@ void fmtNs(char* buf, size_t n, long ns)
     else if (ns >= 1000)
         snprintf(buf, n, "%.1fus", ns / 1e3);
     else
-        snprintf(buf, n, "%ldns", ns);
+        snprintf(buf, n, "%lldns", cast(long) ns);
 }
 
 void printHeader()
@@ -906,16 +939,16 @@ void printRow(ref const Row r)
     if (r.scene == Scene.idle)
         snprintf(spin.ptr, spin.length, "-");
     else if (r.spinNs >= 1000)
-        snprintf(spin.ptr, spin.length, "%luus", r.spinNs / 1000);
+        snprintf(spin.ptr, spin.length, "%lluus", cast(ulong)(r.spinNs / 1000));
     else
-        snprintf(spin.ptr, spin.length, "%luns", r.spinNs);
+        snprintf(spin.ptr, spin.length, "%lluns", cast(ulong) r.spinNs);
 
     if (!r.ok)
     {
-        printf("%-10s %-8s %3u %5u %6s %6s %8s %8s %8s %8s %6ld %6ld  %.*s\n",
+        printf("%-10s %-8s %3u %5u %6s %6s %8s %8s %8s %8s %6lld %6lld  %.*s\n",
                sceneName[r.scene].ptr, armName[r.arm].ptr, r.nc, r.tlen, spin.ptr,
                "-".ptr, "-".ptr, "-".ptr, "-".ptr, "-".ptr,
-               r.miss, r.zeros, cast(int) r.err.length, r.err.ptr);
+               cast(long) r.miss, cast(long) r.zeros, cast(int) r.err.length, r.err.ptr);
         return;
     }
     char[64] note;
@@ -935,13 +968,13 @@ void printRow(ref const Row r)
         char[8] w50, w99;
         fmtNs(w50.ptr, w50.length, r.wlat.p50);
         fmtNs(w99.ptr, w99.length, r.wlat.p99);
-        snprintf(note.ptr, note.length, "admit %s/%s  parked=%ld",
-                 w50.ptr, w99.ptr, r.parked);
+        snprintf(note.ptr, note.length, "admit %s/%s  parked=%lld",
+                 w50.ptr, w99.ptr, cast(long) r.parked);
     }
-    printf("%-10s %-8s %3u %5u %6s %6zu %8s %8s %8s %8s %6ld %6ld  %s\n",
+    printf("%-10s %-8s %3u %5u %6s %6zu %8s %8s %8s %8s %6lld %6lld  %s\n",
            sceneName[r.scene].ptr, armName[r.arm].ptr, r.nc, r.tlen, spin.ptr,
            r.lat.n, b[0].ptr, b[1].ptr, b[2].ptr, b[3].ptr,
-           r.miss, r.zeros, note.ptr);
+           cast(long) r.miss, cast(long) r.zeros, note.ptr);
 }
 
 Cfg parse(string[] args)
@@ -1055,7 +1088,7 @@ void main(string[] args)
     if (!g_lat || !g_wlat || !g_first || !g_last)
         fatal("hist alloc");
 
-    immutable ncpu = cast(int) sysconf(_SC_NPROCESSORS_ONLN);
+    immutable ncpu = cast(int) onlineCpus();
     printf("tail  Ln=%llu (%.1f MiB)  nc=%u  samples=%u  warmup=%u  cpus=%d  pin=%s  repeats=%u  huge=%s\n",
            cast(ulong) cfg.ln, cfg.ln * 8.0 / (1024.0 * 1024.0),
            cfg.nc, cfg.samples, cfg.warmup, ncpu,
@@ -1070,7 +1103,7 @@ void main(string[] args)
         printRow(r);
         fflush(stdout);
         if (cfg.pin && atomicLoad(g_pinOk) == 0)
-            printf("           note: sched_setaffinity failed; numbers may be scheduler tails\n");
+            printf("           note: pin failed; numbers may be scheduler tails\n");
     }
 
     if (cfg.runIdle)
