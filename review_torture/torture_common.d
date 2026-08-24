@@ -127,6 +127,7 @@ struct ProdCtx
     Tier tier;
     size_t maxBatch; // 0 = unlimited (write whole remainder)
     shared size_t* written; // optional progress
+    uint avgCost = 1;
 }
 
 void producerMain(ProdCtx* c)
@@ -139,7 +140,7 @@ void producerMain(ProdCtx* c)
     {
         immutable remain = c.count - off;
         immutable take = (c.maxBatch == 0 || c.maxBatch >= remain) ? remain : c.maxBatch;
-        immutable n = c.f.write(c.entries[off .. off + take], tok);
+        immutable n = c.f.write(c.entries[off .. off + take], tok, c.avgCost);
         off += n;
         if (c.written !is null)
             atomicStore(*c.written, off);
@@ -188,6 +189,20 @@ void consumerMain(ConsCtx* c)
     v.unsubscribe();
 }
 
+final class ProdJob
+{
+    ProdCtx* c;
+    this(ProdCtx* c) { this.c = c; }
+    void run() { producerMain(c); }
+}
+
+final class ConsJob
+{
+    ConsCtx* c;
+    this(ConsCtx* c) { this.c = c; }
+    void run() { consumerMain(c); }
+}
+
 void expectExactCalls(PayloadBatch* b, const(char)[] label)
 {
     foreach (i; 0 .. b.count)
@@ -210,6 +225,43 @@ uint countSub0Pulses(AntFarm* f)
         if ((atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & LOWMASK) >= SUB0)
             ++pulses;
     return pulses;
+}
+
+void expectNoLeftoverSub(AntFarm* f, const(char)[] label)
+{
+    foreach (ki; 0 .. f.K)
+    {
+        immutable rt = atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]);
+        if ((rt >> 32) != 0)
+        {
+            fprintf(stderr, "%.*s leftover Sub ki=%u rt=%llx\n",
+                cast(int) label.length, label.ptr, ki, rt);
+            abort();
+        }
+    }
+}
+
+int countUnprotectedIncomplete(AntFarm* f)
+{
+    int orphans;
+    immutable eg = atomicLoad!(MemoryOrder.raw)(f.Eg);
+    foreach (e; 0 .. eg + 1)
+    {
+        immutable ki = cast(uint)(e & f.kMask);
+        if (atomicLoad!(MemoryOrder.raw)(f.stats[ki].es) != e)
+            continue;
+        immutable ki1 = cast(uint)((e + 1) & f.kMask);
+        if (atomicLoad!(MemoryOrder.raw)(f.stats[ki1].es) != e + 1)
+            continue;
+        immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
+        immutable seqtN = atomicLoad!(MemoryOrder.raw)(f.stats[ki1].seqt);
+        immutable sd = atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd);
+        immutable complete = seqt >= seqtN || seqt + sd >= seqtN;
+        immutable rtlow = atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & LOWMASK;
+        if (!complete && rtlow == 0)
+            ++orphans;
+    }
+    return orphans;
 }
 
 void expectNoLiveConsumerRefs(AntFarm* f, const(char)[] label)

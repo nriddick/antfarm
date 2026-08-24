@@ -1,5 +1,5 @@
 /++
- + Adversarial torture suite for antfarm (gen6 / spec2).
+ + Adversarial torture suite for antfarm (SPEC.md).
  +
  +   make -C review_torture run
  +
@@ -236,9 +236,9 @@ void t16_position_ref_stall()
     {
         char[160] buf;
         auto n = snprintf(buf.ptr, buf.length,
-            "producer stalled idle-at-Wt written=%zu/%d total=%lld next=%llu trailN=%u holdKi=%u",
+            "producer stalled idle-at-Wt written=%zu/%d total=%lld next=%llu oldest=%llu newest=%llu posKi=%u",
             atomicLoad(written), N, atomicLoad(g_totalCalls),
-            cs[0].nextSeq, cs[0].trailN, cs[0].curKi);
+            cs[0].nextSeq, cs[0].oldestEi, cs[0].newestEi, cs[0].posKi());
         fprintf(stderr, "T16 FAIL %.*s\n", n, buf.ptr);
         foreach (ki; 0 .. 8)
             fprintf(stderr, "  ki=%u rt=%llx es=%lld seqt=%llu sd=%llu\n",
@@ -1375,6 +1375,164 @@ void t22_avgcost_sharding()
     say("T22 avgCost sharding exact OK");
 }
 
+void t23_late_attach_under_wrap()
+{
+    // Protocol hole T11/T06/T18 miss: attach once, no retry, while the ring
+    // is already wrapping. Producers cannot lap a quiet farm (epoch-0 Sub0),
+    // so one primer consumer starts with them; late subscribers join after
+    // Wt > Ln. Fail on watchdog, lost work, leftover Sub, or unprotected
+    // incomplete segments.
+    enum TRIALS = 3;
+    enum N = 40000;
+    enum NP = 6;
+    enum NLATE = 4;
+    foreach (trial; 0 .. TRIALS)
+    {
+        auto f = AntFarm.create(1 << 18, 8, 1 + NLATE, 0, 0, NP, 4096);
+        scope (exit) f.destroy();
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+            h.maxCs = 1;
+            h.done = 1;
+            plen = 2;
+        });
+        scope (exit) freeBatch(batch);
+
+        auto deadline = MonoTime.currTime + 90.seconds;
+        ProdCtx[NP] pctx;
+        auto prodJobs = new ProdJob[](NP);
+        Thread[NP] producers;
+        foreach (i; 0 .. NP)
+        {
+            immutable remain = N - (N / NP) * i;
+            immutable share = (i + 1 == NP) ? remain : (N / NP);
+            pctx[i] = ProdCtx(f, batch.entries + (N / NP) * i, share,
+                              Tier.small, 64);
+            prodJobs[i] = new ProdJob(&pctx[i]);
+            producers[i] = new Thread(&prodJobs[i].run);
+        }
+
+        ConsCtx primer = ConsCtx(f, batch.expectedCalls, deadline);
+        auto primerJob = new ConsJob(&primer);
+        auto primerT = new Thread(&primerJob.run);
+        primerT.start();
+        foreach (t; producers)
+            t.start();
+
+        auto wrapDeadline = MonoTime.currTime + 30.seconds;
+        while (atomicLoad!(MemoryOrder.raw)(f.Wt) <= f.Ln)
+        {
+            if (MonoTime.currTime > wrapDeadline)
+            {
+                fprintf(stderr, "T23 trial %d: no wrap Wt=%llu\n",
+                    trial, cast(ulong) atomicLoad!(MemoryOrder.raw)(f.Wt));
+                abort();
+            }
+            Thread.yield();
+        }
+
+        ConsCtx[NLATE] lateCtx;
+        auto lateJobs = new ConsJob[](NLATE);
+        Thread[NLATE] late;
+        foreach (i; 0 .. NLATE)
+        {
+            lateCtx[i] = ConsCtx(f, batch.expectedCalls, deadline);
+            lateJobs[i] = new ConsJob(&lateCtx[i]);
+            late[i] = new Thread(&lateJobs[i].run);
+            late[i].start();
+        }
+
+        foreach (t; producers)
+            t.join();
+        primerT.join();
+        foreach (t; late)
+            t.join();
+
+        expectExactCalls(&batch, "T23");
+        expectNoLiveConsumerRefs(f, "T23");
+        expectNoLeftoverSub(f, "T23");
+        check(countUnprotectedIncomplete(f) == 0, "T23 unprotected incomplete");
+        printf("T23 trial %d OK Wt=%llu\n",
+            trial, cast(ulong) atomicLoad!(MemoryOrder.raw)(f.Wt));
+        fflush(stdout);
+    }
+    say("T23 late attach under wrap OK");
+}
+
+void t24_topology_hang_canary()
+{
+    // Scale-down of the throughput grid cells that deadlocked at nc=4,
+    // ns=9/11 (body=1, batch=256, avgCost=0). Subscribe-before-write like
+    // the harness: hang here is the same failure mode whether or not it
+    // is wrap-during-subscribe.
+    foreach (ns; [9u, 11u])
+    {
+        enum NC = 4;
+        enum N = 40000;
+        enum BATCH = 256;
+        auto f = AntFarm.create(1 << 18, 8, NC, 0, 0, ns, 4096);
+        scope (exit) f.destroy();
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+            h.maxCs = 1;
+            h.done = 1;
+            plen = 1;
+        });
+        scope (exit) freeBatch(batch);
+
+        auto deadline = MonoTime.currTime + 90.seconds;
+        ConsCtx[NC] cctx;
+        auto consJobs = new ConsJob[](NC);
+        Thread[NC] consumers;
+        foreach (i; 0 .. NC)
+        {
+            cctx[i] = ConsCtx(f, batch.expectedCalls, deadline);
+            consJobs[i] = new ConsJob(&cctx[i]);
+            consumers[i] = new Thread(&consJobs[i].run);
+            consumers[i].start();
+        }
+        while (atomicLoad!(MemoryOrder.acq)(f.Cf) < NC)
+        {
+            if (MonoTime.currTime > deadline)
+            {
+                fprintf(stderr, "T24 ns=%u subscribe timeout\n", ns);
+                abort();
+            }
+            Thread.yield();
+        }
+
+        auto pctx = new ProdCtx[](ns);
+        auto prodJobs = new ProdJob[](ns);
+        Thread[] producers = new Thread[ns];
+        size_t cursor;
+        foreach (i; 0 .. ns)
+        {
+            immutable remain = N - cursor;
+            immutable share = remain / (ns - i);
+            pctx[i] = ProdCtx(f, batch.entries + cursor, share, Tier.small, BATCH, null, 0);
+            prodJobs[i] = new ProdJob(&pctx[i]);
+            producers[i] = new Thread(&prodJobs[i].run);
+            producers[i].start();
+            cursor += share;
+        }
+        foreach (t; producers)
+            t.join();
+        foreach (t; consumers)
+            t.join();
+
+        expectExactCalls(&batch, "T24");
+        expectNoLiveConsumerRefs(f, "T24");
+        expectNoLeftoverSub(f, "T24");
+        check(countUnprotectedIncomplete(f) == 0, "T24 unprotected incomplete");
+        printf("T24 ns=%u OK Wt=%llu\n",
+            ns, cast(ulong) atomicLoad!(MemoryOrder.raw)(f.Wt));
+        fflush(stdout);
+    }
+    say("T24 topology hang canary OK");
+}
+
 void main(string[] args)
 {
     bool runAll = args.length <= 1;
@@ -1404,6 +1562,10 @@ void main(string[] args)
         t21_payload_content_multilap();
     if (want("T22"))
         t22_avgcost_sharding();
+    if (want("T23"))
+        t23_late_attach_under_wrap();
+    if (want("T24"))
+        t24_topology_hang_canary();
 
     if (want("T03"))
         t03_concurrent_exact();

@@ -1,184 +1,95 @@
-# Ant Farm: a fixed-memory concurrent job distributor
+# Ant Farm
 
-## 1. The picture
+Picture a farmer walking along a path placing down objects which a swarm of ants are picking up and taking away. He can't see the ants. He doesn't know how many there are. How can he avoid stepping on the ants? The answer: the ants maintain signage at regular intervals tallying how many ants are in the area. If it's higher than zero, the farmer waits. The last ant to leave a *confirmed-complete* area changes the tally (a reference counter) to zero. The last ant to leave an *incomplete* area instead leaves a pulse mark, so the farmer still sees a nonzero tally and will not step there. Thus the farmer only needs to watch for one signal to change, and doesn't need to try and communicate directly with any ants. And the ants have a panoply of strategies to break down and haul away their work pieces. Really the Ant Farm is a combination of known techniques and a disregard of FIFO guarantees; towards objectives of minimal synchronization upkeep, enhanced cache performance, and flexible role switching and load balancing.
 
-Ant Farm is best understood as a **fixed-size, M:N job-distribution ring**, not a queue. The name comes from the spec's metaphor: a farmer (producer) walks a circular path placing work; ants (consumers) pick it up and haul it away. The farmer cannot see the ants and does not know how many there are, so the ants maintain signs at regular intervals (segment reference tallies). A nonzero sign means "ants are still working here, do not walk over this ground." The producer only has to watch one signal per segment; it never coordinates with any individual consumer.
-
-Concretely:
-
-- **Fixed memory footprint.** The farm is a power-of-two-length ring of `ulong`s using a "magic buffer" double-mapping, preallocated at creation. Segment metadata, leaf tallies, and producer-ticket arrays are all preallocated. `write()` and `consumeNext()` are `@nogc nothrow`; no per-job allocation exists.
-- **Wait-free-style publishing.** The hot paths are deliberately CAS-free. A producer reserves space with a single `fetch_add` on the write tail, writes a table, and releases a sentinel. A consumer claims work with `fetch_add` on a sharded counter — the common case is **one claim per 16 `Call`s** (`MAX_CHUNK` is 32, default chunk 16).
-- **Variable payloads.** Each payload is a 128-byte `PayloadHeader` plus a type-erased `const(ulong)[]` body. Payloads may be single-threaded (`MaxCs = 1`) or multithreaded (`Done`/`MaxCs` up to 512), so a payload can describe one job or a mini-parallel task.
-- **Deliberately relaxed ordering.** There is no FIFO guarantee. Within a published table, consumers shard the index by `(IDc + Tseq) % SqCs` and claim chunks of the shard. Work is executed in claim order *within* a shard, not globally. A mid-tick one-payload write can overtake an in-flight dump table.
-- **Failure is fatal.** Invariant violations (counter wraps, bad tokens, unsizable payloads) abort the process; this is the spec's corruption tripwire, and the perf work found the checks cost ~0%.
-- **Producer quotas live in the ticket.** Each producer registers for a tier and receives a single-owner `Token` carrying a private quota mirror, validated against a farm-side per-slot ledger on every `write()`. Tokens transfer (copy consumes the source); a forged or copied ticket fatals on the ledger mismatch, so a registered caller cannot mint blind quota past Exmax. Callers pass the same `Token` by reference for the producer's lifetime.
-
-### 1.1 Windows (10 1803+)
-
-The magic buffer is `VirtualAlloc2` placeholders + `MapViewOfFile3` of one pagefile-backed section. `create(..., hugePages=true)` (the default) maps that section with **2 MiB large pages** (`SEC_LARGE_PAGES` + `MEM_LARGE_PAGES`). That needs `SeLockMemoryPrivilege` on this account:
-
-```text
-# elevated once, then log off/on
-dmd -g grant_lock_pages.d -ofgrant_lock_pages.exe
-grant_lock_pages.exe
-```
-
-Until that grant is live in the logon token, `create()` fatals. Override for 4K pages: `ANTFARM_HUGE_PAGES=0`. Fork-based abort probes (T01, T17, T19 quota) are skipped.
-
-```text
-dmd -g antfarm.d antfarm_templates.d antfarm_test.d -ofantfarm_test.exe
-dmd -g -checkaction=context review_torture/torture_common.d review_torture/torture_tests.d antfarm.d antfarm_templates.d -ofreview_torture/torture_tests.exe
-dmd -g -i live_hybrid.d antfarm.d antfarm_templates.d -I../threadpool/source -oflive_hybrid.exe
-dmd -g -i hello_antfarm.d antfarm.d -I../threadpool/source -ofhello_antfarm.exe
-ldc2 -O2 -release perftest\throughput.d antfarm.d -ofperftest\throughput.exe
-```
-
-`throughput.d` is not a complete program by itself — it must be compiled **with** `antfarm.d` (same for `digest` / `tail` / `dual`). Same with `ldc2` for the other binaries. `live_hybrid` pins P-only vs P+E consumers using `threadpool` topology on this i7-12700H.
-
-So the right mental model is: **producers publish tables of mixed-size jobs into a bounded ring; consumers independently claim runs of jobs, sharded to avoid contention; the only producer↔consumer coupling is per-segment reference tallies.**
-
-## 2. Where it is strong
-
-### 2.1 Throughput (16 MiB farm, Ryzen 5 5500, `ldc2 -O2 -release`)
-
-The sweep callback is now a **per-worker batched counter** by default
-(`--global-count` restores the old one-global-atomic callback). The old
-global-atomic point is included below for continuity; the batched numbers
-are the queue-overhead view.
-
-**Best batched-callback shape found by the latest sweep:** `K=4`, `nc=4`,
-`nb=1`, `ns=4` — **168 M payloads/s** at `body=2`, `batch=256`, and
-**120 M payloads/s** at `body=16`, `batch=80`; best body bytes/s is
-**~47.2 GiB/s** at `body=1024`, `batch=80`.
-
-These numbers move around with CPU frequency/boost; treat them as a fresh
-run rather than a new plateau.
-
-`./throughput --grid N` runs the single-phase small-producer grid (`nb=0`)
-over every `ns`/`nc` pair from 1 through `N`, without the body/batch phase.
-After the table it prints a top-level aggregate mean, sample std-dev, and
-median across all successful topologies (using each topology's median Mpps).
-
-Important nuances from `construction/perftest`:
-
-- **Batching matters more than anything.** `batch=1` is 4–5× slower. The batch curve keeps climbing to ~256–512.
-- With the batched callback the producer mix ranking changes: **1 bulk + 4 small producers** beats 2 bulk producers at `nc=4` and `nc=8`; the old global-atomic callback masked producer-side work.
-- **8–16 MiB is the sweet spot.** It matches the 16 MiB L3. A 32 MiB ring drops ~25% throughput; 256 MiB drops ~38%. The one operational win of a big ring is that `write()==0` disappears (producers are never full).
-- **Huge pages are a real win at the L3-sized ring, and they make the sweet spot more peaked rather than flattening it.** `--huge` on the 16 MiB farm measured ~180–186→~243–246 Mpps (`body=2`), ~126–127→~164–165 Mpps (`body=16`), and ~6.4–7.1→~9.7 Mpps (`body=1024`); at 32 MiB and larger the effect is only ~0–5%.
-- **Execute-side cost is ~30.9 ns/job** in the digest bench (linear claim 16, body-touching `Call`). Claim amortization is real: claim-1 costs ~49.2 ns/job, a **~1.6× claim dividend**. Shuffled vs linear layout is ~free (31.1 vs 30.9 ns/job).
-
-### 2.2 Tail latency — the real product
-
-From `construction/perftest/last_tail.txt` (pinned `nc=6`, publish → first `Call`, 1 µs simulated Call spin):
-
-| Scene | p50 | p99 | p99.9 |
-|---|---:|---:|---:|
-| idle | 370 ns | 3.3 µs | 8.4 µs |
-| mid-drain, dump 256 | 5.3 µs | 22.5 µs | 26.3 µs |
-| mid-drain, dump 2048 | 12.1 µs | 31.5 µs | 318.6 µs* |
-| mid-drain, dump 8192 | **14.2 µs** | **32.2 µs** | 1.31 ms* |
-| small dump (32) | 330 ns | 2.7 µs | 9.8 µs |
-
-*p99.9 is noisy run-to-run; p50/p99 are the stable tail signal.
-
-The headline: **p99 no longer grows with dump size.** A mid-tick write arriving while an 8192-job table is being drained reaches its first worker in ~14 µs p50 / ~30 µs p99, versus ~1.8 ms in earlier revisions. The mechanisms responsible:
-
-- **First-claimant mid-tick yield (5e-m):** the first worker to claim a shard may, if it sees the shard is shared and the next table's sentinel is already live, finish its current run and return immediately — so `consumeNext` can advance to the newly published mid-tick job instead of grinding through the rest of the shard.
-- **Idle re-walk cursor (5j):** parked consumers no longer rescan the whole current segment; the idle floor stayed at ~371 ns p50.
-- **`avgCost` chunking:** declaring expensive `Call`s shrinks the chunk (e.g. chunk 8), trimming the extreme tail (8192/1 µs p99.9: 246 µs at chunk 16 → 130 µs at chunk 8) at no throughput cost.
-
-`write()==0` is rare while anyone is draining; when consumers are parked, the ring fills to a hard wall (~31.7k jobs at that topology) and stops — it refuses to pretend to be unbounded.
-
-### 2.3 Scaling expectations
-
-The current data tops out at `nc=8` on a 6c/12t host. This revision lowered the `SqCs=1` floor from `Cs <= 4` to `Cs <= 2`, so 3–4 consumers now shard across 2 leaf tallies and 2 claim counters; paired A/B on this host shows that lifts `nc=3`/`nc=4` slightly and leaves `nc=8` unchanged. The design's scaling bets are visible: per-consumer shard counters, leaf tallies distributed by `sqrt(Cs)`, sweeper-based load balancing, and claim granularity of 16 mean **more consumers should scale better than Disruptor WorkerPool does**. That remains to be proven on more cores, and NUMA is explicitly uninvestigated.
-
-## 3. How it compares
-
-### 3.1 Disruptor WorkerPool — clobbered where it should compete
-
-From `disruptortest/BENCHMARK_SUMMARY.md`, same host, C++/GCC `-O2`:
-
-| Config | Disruptor WorkerPool | Ant Farm |
-|---|---:|---:|
-| 8 workers, 2 producers, 16 MiB ring | 9.7–10.3 M events/s | **~61 M payloads/s** global-atomic / ~77 M batched (~6× / ~7.6×) |
-| 1 worker, 1 producer, ring 8192 | **126–145 M events/s** | 40.6–42.8 M payloads/s |
-| tail, 8W, dump 8192, empty handler | ~61 µs p50 / ~190 µs p99 | ~14 µs p50 / ~30 µs p99 (nc=6) |
-
-The structural reason: Disruptor's `WorkProcessor` makes **one CAS per event** on a single shared `m_workSequence`; Ant Farm amortizes **one `fetch_add` per chunk of 16 calls** across per-shard counters. Disruptor's batched path is fast (115–786 M ops/s) but it is a broadcast `BatchEventProcessor`, not a work-distributing pool, so it is not the right comparison.
-
-### 3.2 moodycamel::ConcurrentQueue — more raw transport, worse distributor tail
-
-From `moodytest/SUMMARY.md`:
-
-- **Raw item throughput favors moodycamel.** Native bounded 16 MiB with `try_enqueue_bulk(32)`: ~120–743 M items/s depending on tokens and topology. A fresh local probe of no-consumer-tokens configurations (16-byte elements, 16 MiB subqueue cap) ran 120–190 M items/s. With consumers tokens this number can be several times higher, but this also creates pinned pipelines as opposed to the work-distributing Ant Farm model. At 8 KiB payloads it reaches ~45.8 GiB/s (tokens), about equal to Ant Farm's ~47GiB/s at 8 KiB. Part of this is the comparison itself: moodycamel's 16 B item is just the item, while an Ant Farm payload carries a 128-byte header plus table index/padding overhead.
-- **Occupied tail favors Ant Farm.** Moodycamel no-token mid-drain p50 is FIFO-drain-shaped: 46 µs at dump 256, 370 µs at 2048, **1485 µs at 8192** (1 µs spin simulating per-item work, 6 consumers). Tokens flatten the large-dump tail to ~143–287 µs. Ant Farm is ~5.3/12/14 µs p50 and ~30 µs p99 across the same dump sizes.
-- **Idle latency is close.** Moodycamel idle p50 is ~0.23–0.26 µs; Ant Farm is ~0.37 µs. Moodycamel wins the empty ring by a small margin.
-
-The summary line: moodycamel is a **strong bounded-ring transport**; Ant Farm is a **work distributor**. Ant Farm's relaxed ordering and first-claimant yield are exactly what keep an urgent mid-tick job from waiting behind the FIFO drain; moodycamel's FIFO order is exactly what makes its occupied tail grow with the backlog.
-
-## 4. Where one might deploy it
-
-Ant Farm fits systems that look like a **game frame tick**:
-
-1. **Main thread / job system** dumps a large table of per-frame jobs each tick.
-2. **A pool of spinning workers** (typically ≥ 8 on bigger cores) claims chunks and executes them.
-3. **Mid-tick, another thread must publish an urgent job** with wait-free-style admission and have it reach a worker in tens of microseconds, even while the frame dump is still draining.
-4. **The working set is bounded** and the ring should sit in L3 (8–16 MiB on the tested host).
-5. **Ordering is either commutative or explicitly managed** — completion order is not FIFO, and that is usually fine for accumulating work (transforms, physics islands, particle updates, asset callbacks) but wrong for strict pipelines or message ordering.
-
-Concrete examples:
-
-- A game engine's per-tick job system: `write()` for the frame dump in bulk, small-tier 1-payload writes for mid-tick "please do this now" tasks.
-- A task distributor for embarrassingly parallel or accumulating work over fixed-memory payload buffers (e.g., batch processing of blocks, AO/lighting tiles, animation evaluation).
-- Any environment where the alternatives are a Disruptor WorkerPool (single CAS per event) or a concurrent queue with FIFO-occupied latency.
-
-Where **not** to deploy it:
-
-- **Strict FIFO / order-sensitive streams.** Ant Farm disclaims FIFO by design.
-- **Single-consumer throughput.** Disruptor's 1P→1W path (and simple SPSC rings) beat it.
-- **Blocking/sleeping workers.** The current story is spinning consumers; futex wake is unmeasured.
-- **Unbounded or elastic backlog.** The ring is fixed; `write()==0` is the backpressure and a hard fill wall is the design.
-- **Very large never-full rings.** You can buy zero stalls at ≥ 32 MiB, but it costs 25–38% throughput on this host unless NUMA is addressed (huge pages alone do not close the gap beyond L3).
-
-## 5. Recommended configuration (from the perf work)
-
-- **`K = 4` or `8`** — tied within noise.
-- **`nc = 8`, `nb = 2`** (or `ns = 4` small producers) — the robust production shape. The latest batched-callback sweep favors **`nc=4`, `nb=1`, `ns=4`** for raw payloads/s.
-- **`batch ≥ 128`, preferably 256–512**; let the producer's quota bound the table size.
-- **Ring `Ln` = 8–16 MiB** on a 16 MiB L3 part; larger only if a never-full guarantee is worth the throughput cliff.
-- **Declare `avgCost` per Call family**: cheap calls → `0` (chunk 32, max amortization); expensive calls → `2–3` (chunk 8–4) to trim tail; avoid `avgCost=5` (chunk 1, −10–12% throughput).
-- **Enable huge pages for the magic buffer on Linux** (`AntFarm.create(..., true)`, perftest `--huge`, or `ANTFARM_HUGE_PAGES=1`): measured +14–50% on the 16 MiB ring, negligible beyond L3.
-- **Pin consumers** to physical cores; keep `fatal()` in release — the wrap checks are ~free.
-
-### 5.1 Huge pages: which Ant Farm configurations likely benefit
-
-From the current measurements, the huge-page win is concentrated in:
-
-- **8–16 MiB rings on hosts with a similar L3 size.** This is the main
-  sweet spot; 32 MiB and larger rings showed only ~0–5% movement.
-- **Multi-producer / multi-consumer topologies that are already fast.**
-  Huge pages amplify the best shapes (`K=4` or `8`, `nc=2–8`, with a
-  small-producer mix) more than they rescue slow ones.
-- **Both small and large payload bodies at the L3-sized ring.** `body=2`,
-  `body=16`, and `body=1024` all improved; the benefit is not body-size
-  specific.
-- **Hosts that support THP/hugetlb and have memory to spare.** The current
-  implementation uses `madvise(MADV_HUGEPAGE)` on the Linux magic-buffer
-  mapping, so `THP=never` or a missing hugetlb reservation means no win.
-
-Configurations less likely to benefit:
-
-- **Rings >32 MiB** — outside L3, DRAM bandwidth dominates and the huge-page
-  gain is small or within noise.
-- **Rings below 2 MiB** — too small to map a 2 MiB page usefully.
-- **Memory-tight deployments** — 2 MiB pages add allocation/fragmentation
-  pressure without enough TLB win.
-
-## 6. What is still open
-
-The repo's own "not measured" list is the honest caveat set: makespan of a full tick, sleeping workers/futex wake, real game `Call` bodies, and — most relevant to the scaling claim — **tests beyond 8 consumers and NUMA behavior**. Huge pages for the magic-buffer mapping are now covered in `perftest/README.md` (strong at the L3-sized ring, small beyond it). The architecture gives good reasons to expect Ant Farm to keep scaling as a task distributor, but that is still a hypothesis pending hardware.
+It is a fixed-memory M:N job distributor, not a queue. Producers publish tables of mixed serial and parallel jobs onto a ring; spinning consumers claim chunks independently. There is no reliable FIFO. `write()` and `consumeNext()` are `@nogc nothrow`. Invariant violations abort. Throughput figures with working range of topologies (~200-390M items/s on Intel 12700H) sit comfortably between moodycamel no-tokens (~100-180M items/s) and with-tokens (~400M-1000M items/s), with the overall shape favoring *more* concurrency compared to moody's no-tokens topologies.
 
 ---
 
-**Artifacts:** `construction/spec2` (living spec), `construction/perftest/README.md`, `construction/perftest/HUGE_PAGES.md`, `construction/perftest/{POSTMORTEM,SPECULATIVE_OPT_2026-08-16_1,last_sweep,last_digest,last_tail}.txt`, `moodytest/SUMMARY.md`, and `disruptortest/BENCHMARK_SUMMARY.md`.
+## Bring a farm up
+
+```d
+import antfarm_templates; // also imports antfarm
+import core.thread;
+
+long job(ulong x) nothrow @nogc @system { /* ... */ return 1; }
+
+void main()
+{
+    auto f = AntFarm.create(); // 8 MiB ring, K=8, 4 expected consumers
+    scope (exit) f.destroy();
+
+    auto tok = f.registerProducer(Tier.small);
+    ConsumerView v;
+    if (v.subscribe(f) < 0) return;
+
+    PayloadHeader hdr;
+    ulong[256] bodies;
+    PayloadEntry[256] table;
+    foreach (i; 0 .. table.length)
+        table[i] = payloadEntry!job(&hdr, bodies[i .. i + 1], i);
+
+    size_t off;
+    while (off < table.length)
+    {
+        immutable n = f.write(table[off .. $], tok); // avgCost defaults to 1 (chunk 16)
+        if (n == 0) { while (!v.consumeNext()) Thread.yield(); continue; }
+        off += n;
+    }
+    while (v.consumeNext()) {}
+
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+}
+```
+
+`create(ln, k, expectedConsumers, maxBulk, quotaBulk, maxSmall, quotaSmall, smallThreshold, hugePages)`:
+
+- `ln` — ring length in ulongs, power of two, ≥ 2¹⁸ (2 MiB of ulongs). Default `1 << 20` is 8 MiB.
+- `k` — segments, 4 or 8.
+- An unused producer tier: pass `maxRole = 0`. Bulk quota `0` with `maxBulk > 0` auto-fills to one segment.
+- `hugePages` defaults on. Windows needs **Lock Pages in Memory** (`grant_lock_pages.exe`, then log off/on) or `create()` fatals; `ANTFARM_HUGE_PAGES=0` forces 4K.
+
+Keep the `Token` by reference for the producer’s life; copying transfers it. `write() == 0` means full — drain and retry, or subscribe yourself and drain. Destroy only with no live consumers or tickets.
+
+```text
+dmd -g antfarm.d antfarm_templates.d antfarm_test.d "-ofantfarm_test.exe"
+dmd -g grant_lock_pages.d "-ofgrant_lock_pages.exe"
+```
+
+---
+
+## Topology and batches
+
+On a 16 MiB ring (L3-sized), the 12700H sweeps were unambiguous:
+
+- **Batch 256** (or at least something significantly > 1). `batch=1` is an order of magnitude slower. Let the producer’s quota bound the table; don’t trickle one payload at a time.
+- **Several small producers with a matching consumer count.** One producer caps out no matter how many consumers you add. Adding both together keeps paying (a 6×6 is already in the 300 M payloads/s range; the grid peak was 13 consumers / 9 producers).
+- **`K = 8` or `4`**, ring sized for L3. Bigger rings buy fewer `write()==0` stalls and lose throughput.
+- **`avgCost`** per Call family: cheap → `0` (chunk 32), expensive → `2`–`3` (chunk 8–4). Default `1` is chunk 16.
+
+A bulk-tier producer can provide greater amortization but writing all that space blocks consumers before the table is done; many relatively modest tables work better. Workers may hold a publish ticket and publish mid-tick — that is a normal use, not a hack.
+
+---
+
+## What it is for
+
+A **frame tick**: dump a large table, spin a pool, and let any thread publish an urgent job that must reach a worker in tens of microseconds while the dump is still draining. Mixed serial and parallel jobs in the same table. Completion order is not FIFO — accumulating work (tiles, islands, transforms, callbacks), not a pipeline.
+
+Wrong tool for ordered streams, for 1P→1W peak transport, or for an unbounded backlog.
+
+---
+
+## Tokenized moodycamel
+
+moodycamel::ConcurrentQueue with producer and consumer tokens is the faster *transport* when you can live with its shape:
+
+- Tokens turn the queue into near-SPSC lanes. Paired threads on this host reach **hundreds of millions to ~1 B items/s** bulk; Ant Farm sits between that and the no-token numbers, as a distributor, with a 128-byte payload header on top.
+- **FIFO.** Occupied tail grows with the backlog (milliseconds behind an 8192-item dump). Ant Farm will overtake a mid-tick job; tokenized moodycamel will not, unless you add another queue.
+- Work stays in the lane it was enqueued on. That is the win if a producer is feeding a dedicated consumer. It is the loss if the next job may be born on any worker and must be claimed by whoever is free.
+
+Use tokens when the graph is paired pipes and order matters. Use Ant Farm when the graph is a swarm, jobs appear from anywhere, and a dump plus a mid-tick “do this now” share one ring.
+
+---
+
+`SPEC.md` is the living spec. `writeup.md` has the 12700H numbers. Tests: `antfarm_test.d`, `review_torture/`. Benches: `perftest/`.

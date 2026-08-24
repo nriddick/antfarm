@@ -12,7 +12,6 @@
 antfarm_test*
 !antfarm_test.d
 grant_lock_pages
-live_hybrid
 review_torture/torture_tests
 review_torture/torture_tests_tsan
 review_torture/torture_tests_dmd

@@ -63,6 +63,17 @@ ulong lowHalf(AntFarm* f, uint ki)
     return atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & LOWMASK;
 }
 
+ulong highHalf(AntFarm* f, uint ki)
+{
+    return atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) >> 32;
+}
+
+void checkNoLeftoverSub(AntFarm* f, const(char)[] msg)
+{
+    foreach (ki; 0 .. f.K)
+        check(highHalf(f, cast(uint) ki) == 0, msg);
+}
+
 // ---------------------------------------------------------------------
 // Test 1: arithmetic
 // ---------------------------------------------------------------------
@@ -149,6 +160,7 @@ void testSingleThreaded()
     check(r == 0, "first subscribe returns epoch 0");
     // First subscriber cleared Sub0 and holds one consumer reference.
     check(lowHalf(f, 0) == 1, "Sub0 cleared, one consumer ref");
+    checkNoLeftoverSub(f, "no leftover Sub after first subscribe");
 
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "register small producer");
@@ -178,6 +190,7 @@ void testSingleThreaded()
     check(v2.subscribe(f) >= 0, "resubscribe");
     foreach (ki; 0 .. 8)
         check(lowHalf(f, cast(uint) ki) < SUB0, "Sub0 cleared on resubscribe");
+    checkNoLeftoverSub(f, "no leftover Sub after resubscribe");
     while (v2.consumeNext()) {}
     // No payload was re-executed: tables were already complete.
     check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == expected, "no re-execution");

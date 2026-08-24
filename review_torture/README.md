@@ -1,6 +1,6 @@
 # review_torture
 
-Adversarial tests + code review for `antfarm.d` (gen6 / spec2).
+Adversarial tests + code review for `antfarm.d` (`SPEC.md`).
 
 ## Build & run
 
@@ -61,4 +61,4 @@ accounting under LDC.
 
 ## Known TSAN noise
 
-`make -C review_torture run-tsan` (`-fsanitize=thread`, halt_on_error) can false positive on T20 with large history size and as part of the greater test suit. It does a lot of memcpys and wraps which often alias to exactly shared values and the earlier context seems to pollute the history. T21 can trigger the same class of warning from its body memcpys and ring wrap. The stormer spawns now use explicit per-thread class instances, so the old loop-local delegate capture race is gone.
+`make -C review_torture run-tsan` (`-fsanitize=thread`, halt_on_error) can false positive on T20 with large history size and as part of the greater test suit. It does a lot of memcpys and wraps which often alias to exactly shared values and the earlier context seems to pollute the history. T21 can trigger the same class of warning from its body memcpys and ring wrap. The stormer spawns now use explicit per-thread class instances, so a previous delegate capture race is gone.
