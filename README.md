@@ -93,3 +93,5 @@ Use tokens when the graph is paired pipes and order matters. Use Ant Farm when t
 ---
 
 `SPEC.md` is the living spec. `writeup.md` has the 12700H numbers. Tests: `antfarm_test.d`, `review_torture/`. Benches: `perftest/`.
+
+Licensed under the Boost Software License 1.0 (`LICENSE`).

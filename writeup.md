@@ -112,4 +112,4 @@ It is the wrong tool for ordered streams, for 1P→1W peak transport, for sleepi
 
 ---
 
-The living spec is `SPEC.md`. Tests are `antfarm_test.d` and `review_torture/`. Throughput and tail live under `perftest/`; raw grids in `throughput.txt` and `latency.txt`. The queue comparison is `queuebenches/benchmarks`.
+The living spec is `SPEC.md`. Tests are `antfarm_test.d` and `review_torture/`. Throughput and tail live under `perftest/`; raw grids in `throughput.txt` and `latency.txt`.
