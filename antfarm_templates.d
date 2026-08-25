@@ -39,6 +39,7 @@
 module antfarm_templates;
 
 public import antfarm;
+import core.atomic;
 import core.stdc.string : memcpy;
 import std.traits : Parameters, ReturnType, hasUnsharedAliasing;
 import std.typecons : tuple;
@@ -227,8 +228,17 @@ private auto decodeArgs(alias fn, bool withIteration = false, size_t i = 0)(
     else
     {
         alias T = P[i];
-        return tuple(*cast(const T*)&body[paramOffset!(fn, i, withIteration)],
-                     decodeArgs!(fn, withIteration, i + 1)(body).expand);
+        // Body words are ring slots. Load them raw; a plain `body[i]` is a
+        // non-atomic read of the same object write() store-raws.
+        enum size_t off = paramOffset!(fn, i, withIteration);
+        enum size_t nwords = (T.sizeof + 7) / 8;
+        ulong[nwords] words = void;
+        foreach (w; 0 .. nwords)
+            words[w] = atomicLoad!(MemoryOrder.raw)(
+                *cast(shared ulong*)(body.ptr + off + w));
+        T val = void;
+        memcpy(cast(void*) &val, words.ptr, T.sizeof);
+        return tuple(val, decodeArgs!(fn, withIteration, i + 1)(body).expand);
     }
 }
 

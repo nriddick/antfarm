@@ -1081,10 +1081,9 @@ void t20_plant_confirmed_segment()
     foreach (trial; 0 .. TRIALS)
     {
         // K=16 and one-payload tables make the producer cross segments often.
-        // Tiny bodies deliberately avoid turning this invariant test into a
-        // giant memcpy-versus-sentinel TSan publication-protocol false positive.
-        // 10000 single-payload tables write roughly three Ln laps, yielding
-        // many segment crossings, finishers, and unsubscribe sweeps.
+        // Tiny bodies keep this an invariant scan (many crossings, finishers,
+        // unsubscribe sweeps) rather than a memcpy bench. 10000 single-payload
+        // tables write roughly three Ln laps.
         auto f = AntFarm.create(1 << 18, 16, 6, 1, 9000, 3, 2048);
         scope (exit) f.destroy();
         enum N = 10000;

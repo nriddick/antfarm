@@ -39,12 +39,12 @@ make -C review_torture baseline   # existing antfarm_test.d
 ## Layout
 
 - `torture_common.d` — counters, batch builder, producer/consumer helpers
-- `torture_tests.d` — T01–T18, T20, and T21. T20 exercises the D2
-  confirmed-segment pulse invariant under write crossings and churn, while
-  retaining small bodies so ThreadSanitizer sees the intended sentinel
-  publication protocol without a giant-memcpy false positive. T21 laps the
-  ring several times and verifies payload body contents word-for-word (a
-  run of numbers summed into a global counter, plus per-payload call counts).
+- `torture_tests.d` — T01–T18, T20–T24. T20 exercises the D2
+  confirmed-segment pulse invariant under write crossings and churn, with
+  small bodies so the arm stays an invariant scan rather than a memcpy
+  bench. T21 laps the ring several times and verifies payload body contents
+  word-for-word (a run of numbers summed into a global counter, plus
+  per-payload call counts).
 - `t19_flood_lap.d` — T19: interleaved bulk dump + mid-tick small writes +
   subscription churn (four arms: no mid-tick, pure churn, consuming churn,
   steady consumer) plus a forged-token quota test
@@ -59,6 +59,13 @@ Shared test counters must be `__gshared shared(T)` (see comments). Plain
 `shared T` module globals are TLS and will silently break multi-threaded
 accounting under LDC.
 
-## Known TSAN noise
+Stormer threads (T06/T18) are one `StormJob` class instance per thread.
+A loop-local delegate capturing `&hctx[i]` made every thread alias the
+last slot — that was a real harness race, not a sanitizer artifact.
 
-`make -C review_torture run-tsan` (`-fsanitize=thread`, halt_on_error) can false positive on T20 with large history size and as part of the greater test suit. It does a lot of memcpys and wraps which often alias to exactly shared values and the earlier context seems to pollute the history. T21 can trigger the same class of warning from its body memcpys and ring wrap. The stormer spawns now use explicit per-thread class instances, so a previous delegate capture race is gone.
+## ThreadSanitizer
+
+1.0.1. `make -C review_torture run-tsan` and `run-t19-tsan` build with LDC
+`-fsanitize=thread -d-version=TSan`. The TSan build defaults to
+`history_size=7 halt_on_error=1` (`__tsan_default_options`; override with
+`TSAN_OPTIONS`). A TSan report is a defect.

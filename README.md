@@ -94,4 +94,6 @@ Use tokens when the graph is paired pipes and order matters. Use Ant Farm when t
 
 `SPEC.md` is the living spec. `writeup.md` has the 12700H numbers. Tests: `antfarm_test.d`, `review_torture/`. Benches: `perftest/`.
 
+1.0.1: TSan hygiene. Ring words are raw atomics, leaf RMWs are acq_rel, and `make -C review_torture run-tsan` defaults to `history_size=7`. A TSan report is a defect.
+
 Licensed under the Boost Software License 1.0 (`LICENSE`).

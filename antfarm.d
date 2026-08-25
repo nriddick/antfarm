@@ -376,6 +376,51 @@ void fatal(const(char)[] msg) nothrow @nogc @system
     abort();
 }
 
+/// Ring words are atomic objects. Consumers load-raw after an acquire of
+/// Tsent; producers must store-raw (not plain) so wrap reuse is atomic vs
+/// atomic, not a plain store racing an atomic load of the same physical word.
+private void storeRaw(ref shared ulong slot, ulong v) nothrow @nogc @system
+{
+    atomicStore!(MemoryOrder.raw)(slot, v);
+}
+
+private void storeRawRange(shared(ulong)* p, size_t n, ulong v = 0) nothrow @nogc @system
+{
+    foreach (i; 0 .. n)
+        atomicStore!(MemoryOrder.raw)(p[i], v);
+}
+
+private ulong loadRaw(ref shared ulong slot) nothrow @nogc @system
+{
+    return atomicLoad!(MemoryOrder.raw)(slot);
+}
+
+// TSan does not carry a non-edge leaf acq_rel through the last-on-leaf's
+// Rt release. Annotate the pin-drop as a release on Rt, and the producer's
+// zero-Rt sweep as the matching acquire, so wrap reuse is not a data race
+// against a callback's remaining plain body loads.
+version (TSan)
+{
+    extern (C) void __tsan_acquire(void* addr) nothrow @nogc @system;
+    extern (C) void __tsan_release(void* addr) nothrow @nogc @system;
+
+    /// Default for a `-d-version=TSan` build. `TSAN_OPTIONS` still overrides.
+    export extern (C) const(char)* __tsan_default_options() nothrow @nogc @system
+    {
+        return "history_size=7 halt_on_error=1";
+    }
+}
+
+private void tsanAcquire(ref shared ulong slot) nothrow @nogc @system
+{
+    version (TSan) __tsan_acquire(cast(void*)&slot);
+}
+
+private void tsanRelease(ref shared ulong slot) nothrow @nogc @system
+{
+    version (TSan) __tsan_release(cast(void*)&slot);
+}
+
 /// Packed-field wrap guards (Tcount/Pcount claims, calls, completions).
 /// Provably unreachable under the 512 caps, the claim-per-payload rule and
 /// MAX_CONSUMERS_LIMIT; they stay on as the corruption tripwire.
@@ -410,6 +455,13 @@ struct PayloadHeader
     ulong[6] filler2;
 }
 static assert(PayloadHeader.sizeof == 128);
+static assert(PayloadHeader.maxCs.offsetof == 0);
+static assert(PayloadHeader.done.offsetof == 4);
+static assert(PayloadHeader.plen.offsetof == 8);
+static assert(PayloadHeader.filler.offsetof == 16);
+static assert(PayloadHeader.pcount.offsetof == 64);
+static assert(PayloadHeader.call.offsetof == 72);
+static assert(PayloadHeader.filler2.offsetof == 80);
 /// PayloadHeader length in ulongs.
 private enum ulong PHEAD_LEN = PayloadHeader.sizeof / 8;
 
@@ -907,7 +959,10 @@ struct AntFarm
         {
             immutable ki = (ea + j) & kMask;
             if (atomicLoad!(MemoryOrder.acq)(Rt[ki][0]) == 0)
+            {
+                tsanAcquire(Rt[ki][0]);
                 freeSp += segCap;
+            }
             else
                 break;
             if (freeSp >= exmax)
@@ -1067,19 +1122,21 @@ struct AntFarm
             plantIfUnprotected(e - 1);
 
         // Write the table (spec 4a/4b). The magic buffer makes the linear
-        // address range contiguous even across the Ln wrap point.
-        auto w = cast(ulong*) buf + (wret & Lmask);
+        // address range contiguous even across the Ln wrap point. Ring words
+        // are stored raw: consumers load-raw after acquiring Tsent, and a
+        // later lap reuses the same physical words.
+        auto w = buf + (wret & Lmask);
         immutable progOff = THEAD_LEN + n + m + PROG_PAD;
         immutable tcountOff = progOff + 8;
         immutable payOff = tcountOff + 8 * sq;
 
-        w[1] = wtprime;                          // Tnext
-        w[2] = (cast(ulong) m << 32) | cast(uint) n;  // Tmt | Tlen
-        w[3] = cs;
-        w[4] = sq;
-        w[5] = size; // table size, accounted into the segment's Sd on completion
-        w[6] = avgCost; // chunk hint: chunk = MAX_CHUNK >> avgCost (spec 5e-g)
-        w[7] = 0;
+        storeRaw(w[1], wtprime);                          // Tnext
+        storeRaw(w[2], (cast(ulong) m << 32) | cast(uint) n);  // Tmt | Tlen
+        storeRaw(w[3], cs);
+        storeRaw(w[4], sq);
+        storeRaw(w[5], size); // table size, accounted into the segment's Sd on completion
+        storeRaw(w[6], avgCost); // chunk hint: chunk = MAX_CHUNK >> avgCost (spec 5e-g)
+        storeRaw(w[7], 0);
 
         // Tindex: total index first, MT index second. Plain adds: po is
         // bounded by the table size, which the fit loop's overflow-checked
@@ -1090,7 +1147,7 @@ struct AntFarm
         foreach (ref pe; payloads)
         {
             if (i >= n) break;
-            w[THEAD_LEN + i] = po;
+            storeRaw(w[THEAD_LEN + i], po);
             po += PHEAD_LEN + pe.body.length;
             ++i;
         }
@@ -1103,32 +1160,33 @@ struct AntFarm
             immutable o = po;
             po += PHEAD_LEN + pe.body.length;
             if (pe.header.maxCs > 1)
-                w[mi++] = o;
+                storeRaw(w[mi++], o);
             ++i;
         }
 
-        w[progOff] = 0;                          // Tprogress
-        w[tcountOff .. tcountOff + 8 * sq] = 0;  // Tcount shards
+        storeRaw(w[progOff], 0);                          // Tprogress
+        storeRawRange(w + tcountOff, 8 * sq);             // Tcount shards
 
-        // Payloads.
+        // Payloads. Header fields are stored as ring words, not as a
+        // PayloadHeader overlay: overlay field writes are plain stores.
         po = payOff;
         i = 0;
         foreach (ref pe; payloads)
         {
             if (i >= n) break;
-            auto h = cast(PayloadHeader*)(w + po);
-            h.maxCs = pe.header.maxCs;
-            h.done = pe.header.done;
-            h.plen = pe.body.length;
-            h.call = pe.header.call;
-            h.filler[] = 0;
-            h.filler2[] = 0;
-            atomicStore!(MemoryOrder.raw)(h.pcount, 0UL);
-            (w + po + PHEAD_LEN)[0 .. pe.body.length] = pe.body[];
+            auto ph = w + po;
+            storeRaw(ph[0], cast(ulong) pe.header.maxCs | (cast(ulong) pe.header.done << 32));
+            storeRaw(ph[1], pe.body.length);
+            storeRawRange(ph + 2, 6);
+            storeRaw(ph[8], 0UL); // pcount
+            storeRaw(ph[9], cast(ulong) cast(void*) pe.header.call);
+            storeRawRange(ph + 10, 6);
+            foreach (k; 0 .. pe.body.length)
+                storeRaw(ph[PHEAD_LEN + k], pe.body[k]);
             po += PHEAD_LEN + pe.body.length;
             ++i;
         }
-        w[size - END_PAD .. size] = 0;
+        storeRawRange(w + (size - END_PAD), END_PAD);
 
         // The sentinel is store-released as the last value written, so that
         // consumers validating the expected sequence also validate the table
@@ -1453,7 +1511,7 @@ private:
     /// Increment a leaf; on 0→1 propagate to Rt and retract Sub0 if present.
     void incLeaf(uint ki, uint lti) nothrow @nogc @system
     {
-        immutable lo = atomicFetchAdd!(MemoryOrder.raw)(F.Lt[ki * MAX_LEAVES + lti][0], 1);
+        immutable lo = atomicFetchAdd!(MemoryOrder.acq_rel)(F.Lt[ki * MAX_LEAVES + lti][0], 1);
         if (lo == 0)
             takeRootCount(ki);
     }
@@ -1465,7 +1523,8 @@ private:
     void decRef(uint ki, uint lti, bool leavePulse = false) nothrow @nogc @system
     {
         auto f = F;
-        immutable lo = atomicFetchSub!(MemoryOrder.raw)(f.Lt[ki * MAX_LEAVES + lti][0], 1);
+        tsanRelease(f.Rt[ki][0]);
+        immutable lo = atomicFetchSub!(MemoryOrder.acq_rel)(f.Lt[ki * MAX_LEAVES + lti][0], 1);
         if (lo <= 0) fatal("leaf tally underflow");
         if (lo == 1)
         {
@@ -1712,36 +1771,43 @@ private:
     {
         pragma(inline, true);
         auto head = cast(PayloadHeader*)(bp + absIdx);
+        // Header fields other than Pcount are ring words. Load them raw so
+        // wrap reuse is atomic vs the producer's store-raw, matching Thead.
+        immutable w0 = loadRaw(bp[absIdx]);
+        immutable maxCs = cast(uint) w0;
+        immutable done = cast(uint)(w0 >> 32);
+        immutable plen = loadRaw(bp[absIdx + 1]);
+        auto fn = cast(Callback) loadRaw(bp[absIdx + 9]);
 
         // Spec 5f: ST single-shot (MaxCs=1, Done=1). The shard Tcount claim
         // already assigned this index to one consumer; sweeper/re-walk use
         // the same counter, MT paths never walk ST payloads. Pcount claims
         // is still the entry gate; calls/completions stay untouched.
-        if (head.maxCs == 1 && head.done == 1 && !loopAll)
+        if (maxCs == 1 && done == 1 && !loopAll)
         {
             immutable c = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 32);
             if ((c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
-            if ((c >> 32) >= head.maxCs)
+            if ((c >> 32) >= maxCs)
                 return; // overallocated
             // Table completion is Tcount/Tprogress; just do the Call.
-            auto body_ = (cast(const(ulong)*)(cast(ulong*) bp + absIdx + PHEAD_LEN))[0 .. head.plen];
-            head.call(head, body_, 0);
+            auto body_ = (cast(const(ulong)*)(bp + absIdx + PHEAD_LEN))[0 .. plen];
+            fn(head, body_, 0);
             return;
         }
 
         immutable c = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 32);
         if ((c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
-        if ((c >> 32) >= head.maxCs)
+        if ((c >> 32) >= maxCs)
             return; // overallocated
         do
         {
             immutable d = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 16);
             immutable called = (d >> 16) & 0xFFFF;
             if (called == 0xFFFF) fatal("Pcount calls wrap");
-            if (called >= head.done)
+            if (called >= done)
                 break;
-            auto body_ = (cast(const(ulong)*)(cast(ulong*) bp + absIdx + PHEAD_LEN))[0 .. head.plen];
-            head.call(head, body_, called);
+            auto body_ = (cast(const(ulong)*)(bp + absIdx + PHEAD_LEN))[0 .. plen];
+            fn(head, body_, called);
             immutable oldc = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL);
             if ((oldc & 0xFFFF) == 0xFFFF) fatal("Pcount comps wrap");
         }
