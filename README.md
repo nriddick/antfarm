@@ -28,38 +28,120 @@ for the colocated scheduler. The combined usage report and immediate work are
 
 ```d
 import antfarm_templates; // also imports antfarm
+import core.atomic;
 import core.thread;
+import std.range : iota;
+import std.stdio;
+import threadpool;
 
-long job(ulong x) nothrow @nogc @system { /* ... */ return 1; }
+enum ulong nTotal = 50_000; // values 1..nTotal: enough to lap the ring
+
+__gshared shared(long) g_sum;   // accumulated by sumJob across pool workers
+__gshared shared(ulong) g_done; // payloads executed so far
+
+long sumJob(ulong x) nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.rel)(g_sum, cast(long) x);
+    atomicFetchAdd!(MemoryOrder.rel)(g_done, 1UL);
+    return 1;
+}
+
+struct FarmBin
+{
+    AntFarm* farm;
+}
+
+// Pool worker: subscribe to the shared farm and claim chunks until done.
+bool pump(WorkerSelf* w) nothrow @nogc @system
+{
+    static ConsumerView v;
+    static bool subscribed;
+
+    if (atomicLoad!(MemoryOrder.acq)(g_done) >= nTotal)
+    {
+        if (subscribed)
+        {
+            v.unsubscribe();
+            subscribed = false;
+        }
+        return false; // idle; director policy applies
+    }
+
+    auto slot = home!FarmBin();
+    if (slot is null)
+        return false;
+    if (!subscribed)
+        subscribed = v.subscribe(slot.farm) >= 0;
+    if (!subscribed)
+        return false;
+
+    return v.consumeNext();
+}
 
 void main()
 {
-    auto f = AntFarm.create(); // 8 MiB ring, K=8, 4 expected consumers
+    auto topo = CacheAwarePool.topology();
+
+    PoolOptions opt;
+    opt.skipSmtSiblings = true;
+    opt.workerBody = &pump;
+
+    uint ncons;
+    foreach (ref p; topo.processors)
+    {
+        if (opt.skipSmtSiblings && p.smtSibling) continue;
+        ++ncons;
+    }
+
+    auto f = AntFarm.create(1UL << 18, 8, ncons, 0, 0, 1, 4096);
     scope (exit) f.destroy();
 
+    // One shared farm; every worker finds it through its home-LLC bin.
+    auto bins = new FarmBin[](topo.llcCount);
+    foreach (ref b; bins)
+        b.farm = f;
+    install(bins);
+    scope (exit) uninstall!FarmBin();
+
+    auto pool = new CacheAwarePool(opt);
+    pool.start();
+    scope (exit) pool.shutdown(true);
+    pool.director().spin(); // workers hot-pump until the drain completes
+
+    // Producer (this thread). payloadRange!sumJob pairs the callback with
+    // the iota of 1..nTotal: each element becomes one payload whose
+    // type-erased callback executes sumJob with that value packed as the
+    // 1-ulong body. write() advances its own copy of the range, so we pop
+    // what landed and retry when it returns 0 (ring full).
     auto tok = f.registerProducer(Tier.small);
-    ConsumerView v;
-    if (v.subscribe(f) < 0) return;
-
-    PayloadHeader hdr;
-    ulong[256] bodies;
-    PayloadEntry[256] table;
-    foreach (i; 0 .. table.length)
-        table[i] = payloadEntry!job(&hdr, bodies[i .. i + 1], i);
-
-    size_t off;
-    while (off < table.length)
+    auto payloads = payloadRange!sumJob(iota(1, nTotal + 1));
+    for (ulong left = nTotal;;)
     {
-        immutable n = f.write(table[off .. $], tok); // avgCost defaults to 1 (chunk 16)
-        if (n == 0) { while (!v.consumeNext()) Thread.yield(); continue; }
-        off += n;
+        immutable w = f.write(payloads, tok); // avgCost 1 (chunk 16)
+        if (w == 0)
+            Thread.yield(); // ring full: workers drain, then retry
+        else
+        {
+            foreach (_; 0 .. w)
+                payloads.popFront();
+            left -= w;
+            if (left == 0) break;
+        }
     }
-    while (v.consumeNext()) {}
-
-    v.unsubscribe();
     f.unregisterProducer(tok);
+
+    while (atomicLoad!(MemoryOrder.acq)(g_done) < nTotal)
+        Thread.sleep(msecs(1));
+
+    immutable expected = nTotal * (nTotal + 1) / 2; // exact sum
+    assert(atomicLoad!(MemoryOrder.acq)(g_sum) == cast(long) expected);
+    writeln("summed 1..", nTotal, " to ", atomicLoad!(MemoryOrder.acq)(g_sum));
 }
 ```
+
+The consumer pool is `CacheAwarePool` from the `threadpool` subpackage: one
+pinned worker per LP (SMT siblings skipped here), each locating the farm
+through its home-LLC bin and claiming chunks in its pump. `main` produces.
 
 `create(ln, k, expectedConsumers, maxBulk, quotaBulk, maxSmall, quotaSmall, smallThreshold, hugePages)`:
 
@@ -73,8 +155,14 @@ Keep the `Token` by reference for the producer’s life; copying transfers it. `
 Job metadata and bodies need not originate as collocated `PayloadEntry`
 objects. `write(headers, bodies, token, avgCost)` lazily pairs independent
 input ranges (header values or pointers, and `const(ulong)[]` bodies), stopping
-at the shorter range. `pairPayloads(headers, bodies)` exposes the same shim for
-composition with other range layers.
+at the shorter range; `pairPayloads(headers, bodies)` exposes the same shim
+for composition with other range layers. `payloadRange!fn(argRange)` goes
+further: it takes the callback function and an input range of its packed
+arguments (a `Tuple` per element for multi-parameter `fn`, the value itself
+for a single parameter) and yields the payload-entry range the example feeds
+to `write()` above. All of these advance only when their consumer pops them:
+`write()` returns how many payloads landed, and the producer pops that many
+before the next call.
 
 `ConsumerView.consumeQuantum()` is the bounded scheduler-oriented counterpart
 to `consumeNext()`: it claims at most one primary chunk from the next table and
@@ -82,6 +170,7 @@ advances. Other consumers, or the normal idle re-walk, finish remaining chunks.
 
 ```text
 dmd -g antfarm.d antfarm_templates.d antfarm_test.d "-ofantfarm_test.exe"
+dmd -g -i iota_sum.d antfarm.d antfarm_templates.d -Ithreadpool/source "-ofiota_sum.exe"
 dmd -g grant_lock_pages.d "-ofgrant_lock_pages.exe"
 ```
 

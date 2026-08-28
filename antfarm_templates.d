@@ -41,8 +41,10 @@ module antfarm_templates;
 public import antfarm;
 import core.atomic;
 import core.stdc.string : memcpy;
-import std.traits : Parameters, ReturnType, hasUnsharedAliasing;
-import std.typecons : tuple;
+import std.traits : Parameters, ReturnType, Unqual, fullyQualifiedName,
+    hasUnsharedAliasing;
+import std.range.primitives : ElementType, isInputRange;
+import std.typecons : Tuple, tuple;
 
 /// Packed body length, in ulongs, of `fn`'s packed parameter list.
 /// With `withIteration = true` the trailing `ulong` iteration parameter is
@@ -129,6 +131,76 @@ PayloadEntry payloadEntryRuntime(alias fn, bool withIteration = false, Args...)(
     initPayloadHeader!(fn, withIteration)(header, maxCs, done);
     packArgsImpl!(fn, withIteration, 0)(buf, args);
     return PayloadEntry(header, buf[0 .. packedLen!(fn, withIteration)]);
+}
+
+/++
+ + Adapts an input range of `fn`'s packed arguments into a payload-entry
+ + input range for the payload-entry `write` overload. Each element becomes
+ + one payload whose generated type-erased callback executes `fn` with that
+ + element's parameters. The shared header and the packed body live inside
+ + the range; `write` copies both into the ring before returning, so the
+ + range need only outlive the `write` call.
+ +
+ + Accepted element forms:
+ +   - a `std.typecons.Tuple` whose fields map onto `fn`'s packed parameters
+ +     in declaration order (any arity);
+ +   - for a single-parameter `fn`, the parameter value itself;
+ +   - for a zero-parameter `fn`, the element is ignored (it only counts
+ +     positions).
+ +
+ + The range advances only when its consumer pops it: `write` iterates its
+ + own copies and returns how many payloads landed, so the producer pops
+ + that many elements before the next `write` call.
+ +/
+struct PayloadArgRange(alias fn, uint maxCs, uint done, bool withIteration, AR)
+    if (isInputRange!AR)
+{
+    static assert(validSignature!(fn, withIteration),
+        "antfarm_templates: unsupported function signature");
+
+    private AR args;
+    private PayloadHeader hdr;
+    private ulong[packedLen!(fn, withIteration)] bodyBuf;
+
+    private this(AR a) nothrow @nogc @system
+    {
+        args = a;
+        initPayloadHeader!(fn, withIteration)(&hdr, maxCs, done);
+    }
+
+    @property bool empty() nothrow @nogc @system { return args.empty; }
+
+    @property PayloadEntry front() nothrow @nogc @system
+    {
+        static if (packedParams!(fn, withIteration).length == 0)
+        {
+            // No packed parameters; the element only counts positions.
+        }
+        else static if (is(Unqual!(ElementType!AR) == Tuple!Ts, Ts...))
+        {
+            packArgsImpl!(fn, withIteration)(bodyBuf, args.front.expand);
+        }
+        else
+        {
+            static assert(packedParams!(fn, withIteration).length == 1,
+                "antfarm_templates: payloadRange elements must be a "
+                ~ "std.typecons.Tuple matching " ~ fullyQualifiedName!fn
+                ~ "'s packed parameters");
+            packArgsImpl!(fn, withIteration)(bodyBuf, args.front);
+        }
+        return PayloadEntry(&hdr, bodyBuf[]);
+    }
+
+    void popFront() nothrow @nogc @system { args.popFront(); }
+}
+
+/// ditto
+PayloadArgRange!(fn, maxCs, done, withIteration, AR)
+        payloadRange(alias fn, uint maxCs = 1, uint done = 1,
+                bool withIteration = false, AR)(AR args) nothrow @nogc @system
+if (isInputRange!AR)
+{
+    return typeof(return)(args);
 }
 
 // ---------------------------------------------------------------------

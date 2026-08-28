@@ -9,6 +9,8 @@ import core.thread;
 import core.time;
 import core.stdc.stdio;
 import core.stdc.stdio : fflush, stdout;
+import std.range : iota;
+import std.typecons : Tuple, tuple;
 import core.stdc.stdlib : malloc, free;
 
 // ---------------------------------------------------------------------
@@ -290,6 +292,58 @@ void testSeparateRangesAndQuantum()
     f.unregisterProducer(tok);
     printf("testSeparateRangesAndQuantum OK\n"); fflush(stdout);
 }
+
+void testPayloadRange()
+{
+    auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
+    scope (exit) f.destroy();
+
+    enum N = 40;
+    allocCalls(2 * N);
+    scope (exit) freeCalls();
+
+    // Tuple form: fields map onto (idx, done) of testCb.
+    struct PairRange
+    {
+        size_t i, n;
+        @property bool empty() const pure nothrow @nogc @safe
+        {
+            return i >= n;
+        }
+        @property Tuple!(size_t, ulong) front() pure nothrow @nogc @safe
+        {
+            return tuple(i + N, 1UL);
+        }
+        void popFront() pure nothrow @nogc @safe { ++i; }
+    }
+
+    ConsumerView v;
+    check(v.subscribe(f) == 0, "subscribe before payloadRange write");
+    auto tok = f.registerProducer(Tier.small);
+
+    // Single-parameter form: element is the packed parameter itself.
+    // ElementType of std.range.iota plugs straight into the single-param path.
+    auto singles = payloadRange!testCb1(iota(0, N));
+    check(f.write(singles, tok) == N, "payloadRange single-param write");
+
+    // Tuple form: any arity, fields in declaration order.
+    auto pairs = payloadRange!testCb(PairRange(0, N));
+    check(f.write(pairs, tok) == N, "payloadRange tuple write");
+
+    while (v.consumeNext()) {}
+    foreach (i; 0 .. 2 * N)
+        check(g_calls[i] == 1, "payloadRange exact per-payload call count");
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == 2 * N,
+          "payloadRange total");
+
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+    printf("testPayloadRange OK\n"); fflush(stdout);
+}
+
+ // ---------------------------------------------------------------------
+ // Test 3: concurrent producers and consumers, exact call accounting
+ // ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
 // Test 3: concurrent producers and consumers, exact call accounting
@@ -883,6 +937,7 @@ void main()
     testArithmetic();
     testSingleThreaded();
     testInputRangeWrite();
+    testPayloadRange();
     testSeparateRangesAndQuantum();
     testConcurrent();
     testWraparound();
