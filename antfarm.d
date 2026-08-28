@@ -695,7 +695,6 @@ struct AntFarm
 
     // ---- farm-level mutable metadata (spec 2c), one cache line each ----
     align(64) shared ulong Wt;      /// write tail sequence
-    align(64) shared long Eg;       /// current global epoch
     align(64) shared long Cf;       /// current number of subscribed consumers
     align(64) shared ulong Reqs_c;  /// consumer subscription counter; source of IDc
     align(64) shared ulong Reqs_p;  /// producer registration counter; Token hash input
@@ -1172,7 +1171,7 @@ struct AntFarm
         }
 
         // Segment/epoch transitions (spec 4b): initialize metadata for each
-        // crossed segment, release-storing Es last; advance Eg by the delta.
+        // crossed segment, release-storing Es last.
         immutable eold = wret >> segShift;
         immutable enew = wtprime >> segShift;
         foreach (e; eold + 1 .. enew + 1)
@@ -1184,8 +1183,6 @@ struct AntFarm
             atomicStore!(MemoryOrder.raw)(stats[ki].sd, 0UL); // fresh epoch: nothing consumed
             atomicStore!(MemoryOrder.rel)(stats[ki].es, cast(long) e);
         }
-        if (enew > eold)
-            atomicFetchAdd!(MemoryOrder.raw)(Eg, cast(long)(enew - eold));
 
         // Spec 4b/2a: a write that crossed past Ki made Ki unable to accept
         // more tables. If no consumer ever entered it, last-releaser never
@@ -1729,10 +1726,9 @@ private:
         if (ei - oldestEi + 1 > f.K)
         {
             fprintf(stderr,
-                "held epoch range exceeds K  oldest=%llu newest=%llu ei=%llu nextSeq=%llu Wt=%llu Eg=%lld K=%u\n",
+                "held epoch range exceeds K  oldest=%llu newest=%llu ei=%llu nextSeq=%llu Wt=%llu K=%u\n",
                 oldestEi, newestEi, ei, nextSeq,
-                atomicLoad!(MemoryOrder.raw)(f.Wt),
-                atomicLoad!(MemoryOrder.raw)(f.Eg), f.K);
+                atomicLoad!(MemoryOrder.raw)(f.Wt), f.K);
             foreach (uint ski; 0 .. f.K)
             {
                 fprintf(stderr, "  ki=%u rt=%llx es=%lld seqt=%llu sd=%llu lt0=%lld lt1=%lld\n",

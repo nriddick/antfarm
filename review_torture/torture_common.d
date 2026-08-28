@@ -244,7 +244,7 @@ void expectNoLeftoverSub(AntFarm* f, const(char)[] label)
 int countUnprotectedIncomplete(AntFarm* f)
 {
     int orphans;
-    immutable eg = atomicLoad!(MemoryOrder.raw)(f.Eg);
+    immutable eg = cast(long)(atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift);
     foreach (e; 0 .. eg + 1)
     {
         immutable ki = cast(uint)(e & f.kMask);

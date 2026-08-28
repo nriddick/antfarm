@@ -1001,8 +1001,8 @@ void t18_pure_churn_orphan()
 
         // orphan incomplete segments with no protection
         int orphans;
-        immutable eg = atomicLoad(f.Eg);
-        foreach (e; 0 .. cast(long) eg + 1)
+        immutable eg = cast(long)(atomicLoad(f.Wt) >> f.segShift);
+        foreach (e; 0 .. eg + 1)
         {
             immutable ki = cast(uint)(e & f.kMask);
             if (atomicLoad(f.stats[ki].es) != e)

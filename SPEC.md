@@ -107,7 +107,6 @@ There are these shared mutable fields:
 - `Prbulk` — the current number of bulk producers; more on producer tiers later.
 - `Prsm` — the current number of small producers.
 - `Wt` — the write tail sequence.
-- `Eg` — the current global epoch.
 
 Plus the producer ticket slot arrays of 3b, and miscellaneous immutable stats and derived stats as are convenient.
 
@@ -183,7 +182,7 @@ At this level producers do nothing else to resolve fullness, they merely return 
 
 ### 4b. After fetch_add() to the Write Tail
 
-`Pi` renews `Exi` opportunistically with `Wt'` and the segment boundary as detailed before. If `Wt'` is observed to cross segment/epoch boundaries, they are proactively marked incomplete with Sub0, their metadata are initialized, and `Eg` is advanced by the delta. All this comes before releasing the table's sentinel value; more on that later. `Wt'`, or the sequence *after* the current `write()`, becomes those segments' `Seqt`, the first valid table for that segment. Otherwise `Seqt` would almost certainly point to a previous segment and backtracking is ill-advised. This way consumers and especially subscribers can seek forward using `Seqt` for orientation. Segment initialization zeroes `Sd` (2b). A `Tnext` equal to this `Wt'` therefore always names an initialized epoch.
+`Pi` renews `Exi` opportunistically with `Wt'` and the segment boundary as detailed before. If `Wt'` is observed to cross segment/epoch boundaries, they are proactively marked incomplete with Sub0 and their metadata are initialized. All this comes before releasing the table's sentinel value; more on that later. `Wt'`, or the sequence *after* the current `write()`, becomes those segments' `Seqt`, the first valid table for that segment. Otherwise `Seqt` would almost certainly point to a previous segment and backtracking is ill-advised. This way consumers and especially subscribers can seek forward using `Seqt` for orientation. Segment initialization zeroes `Sd` (2b). A `Tnext` equal to this `Wt'` therefore always names an initialized epoch.
 
 `Pi` then writes the table parts described in 4a into the reserved space. Thead's first value is a sentinel computed from `Wret`, but it is store-released as the *last* value written such that consumers validating the expected sentinel by its matching sequence also validate the following contents.
 
