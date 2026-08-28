@@ -5,12 +5,16 @@
 *.ilk
 *.dll
 *.lib
+*.a
+.dub/
+dub.selections.json
 .exe
 .ilk
 .pdb
 .obj
 antfarm_test*
 !antfarm_test.d
+/antfarm
 grant_lock_pages
 review_torture/torture_tests
 review_torture/torture_tests_tsan

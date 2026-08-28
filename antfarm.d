@@ -23,7 +23,7 @@ import core.atomic;
 import core.stdc.stdio : fprintf, stderr, snprintf;
 import core.stdc.stdlib : abort, malloc, free, getenv;
 import core.stdc.string : memset;
-import std.range.primitives : ElementType, empty, isInputRange;
+import std.range.primitives : ElementType, empty, front, isInputRange, popFront;
 
 version (CRuntime_Microsoft) {}
 else
@@ -470,6 +470,52 @@ struct PayloadEntry
 {
     PayloadHeader* header;
     PayloadBody body;
+}
+
+/// A lazy zip of independent header and body input ranges.  This is useful
+/// when a job source naturally keeps scheduling metadata separate from its
+/// argument storage.  The range ends when either input ends.
+struct PayloadPairRange(HR, BR)
+{
+    HR headers;
+    BR bodies;
+    private PayloadHeader headerScratch;
+
+    @property bool empty() nothrow @nogc @system
+    {
+        return headers.empty || bodies.empty;
+    }
+
+    @property PayloadEntry front() nothrow @nogc @system
+    {
+        PayloadHeader* hp;
+        static if (is(ElementType!HR == PayloadHeader*))
+            hp = headers.front;
+        else
+        {
+            headerScratch = headers.front;
+            hp = &headerScratch;
+        }
+        return PayloadEntry(hp, cast(PayloadBody) bodies.front);
+    }
+
+    void popFront() nothrow @nogc @system
+    {
+        headers.popFront();
+        bodies.popFront();
+    }
+}
+
+/// Adapt separate header and body input ranges to the ordinary payload-entry
+/// source accepted by `write`. Header elements may be values or pointers;
+/// body elements must be implicitly convertible to `const(ulong)[]`.
+auto pairPayloads(HR, BR)(HR headers, BR bodies) nothrow @nogc @system
+    if (isInputRange!HR && isInputRange!BR &&
+        (is(ElementType!HR == PayloadHeader) ||
+         is(ElementType!HR == PayloadHeader*)) &&
+        is(ElementType!BR : PayloadBody))
+{
+    return PayloadPairRange!(HR, BR)(headers, bodies);
 }
 
 /// Spec 3b: producer tiers.
@@ -997,6 +1043,19 @@ struct AntFarm
         return writeImpl(payloads, tok, avgCost);
     }
 
+    /// Write jobs from independent header and body input ranges.  Pairing is
+    /// positional and stops at the shorter range.  This overload is a lazy
+    /// shim: it does not allocate or materialize `PayloadEntry` pairs.
+    ulong write(HR, BR)(scope HR headers, scope BR bodies, ref Token tok,
+                        uint avgCost = 1) nothrow @nogc @system
+        if (isInputRange!HR && isInputRange!BR &&
+            (is(ElementType!HR == PayloadHeader) ||
+             is(ElementType!HR == PayloadHeader*)) &&
+            is(ElementType!BR : PayloadBody))
+    {
+        return writeImpl(pairPayloads(headers, bodies), tok, avgCost);
+    }
+
     private ulong writeImpl(R)(scope R payloads, ref Token tok,
                               uint avgCost) nothrow @nogc @system
     {
@@ -1432,6 +1491,60 @@ struct ConsumerView
                 // across already-complete tables (spec 5i).
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
+        }
+
+        nextSeq = tnext;
+        migrateToFrontier();
+        if (++sdCheckCounter >= SD_CHECK_EVERY_N)
+        {
+            sdCheckCounter = 0;
+            tryReleaseOldest();
+        }
+        return true;
+    }
+
+    /// Consume at most one primary payload chunk from the next published
+    /// table, then advance to the following table.  Unclaimed chunks remain
+    /// available to other consumers and to the existing idle re-walk.  This
+    /// bounds a scheduler visit without changing the table format.
+    bool consumeQuantum() nothrow @nogc @system
+    {
+        if (!hasRef) return false;
+        auto f = F;
+        auto bp = f.buf;
+        immutable idx = nextSeq & f.Lmask;
+        if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(nextSeq))
+        {
+            migrateToFrontier();
+            sweepOldestTrailing();
+            sweepCurrentPosition();
+            return false;
+        }
+
+        immutable ei = nextSeq >> f.segShift;
+        immutable ki = cast(uint)(ei & f.kMask);
+        if (ei != newestEi)
+            moveRef(ki, ei);
+
+        immutable tnext = atomicLoad!(MemoryOrder.raw)(bp[idx + 1]);
+        immutable w2 = atomicLoad!(MemoryOrder.raw)(bp[idx + 2]);
+        immutable tlen = cast(uint) w2;
+        immutable tmt = cast(uint)(w2 >> 32);
+        immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(bp[idx + 4]);
+        immutable tindexOff = idx + THEAD_LEN;
+        immutable progOff = tindexOff + tlen + tmt + PROG_PAD;
+        immutable tcountOff = progOff + 8;
+
+        if (tlen > 0 && atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
+        {
+            auto shi = cast(uint)((cast(ulong) IDc + nextSeq) % sq);
+            if (tlen < smallThresh(sq, bp, idx))
+                shi = 0;
+            immutable savedMaxRuns = benchMaxRuns;
+            benchMaxRuns = 1;
+            processShard(bp, nextSeq, idx, tindexOff, tcountOff,
+                         progOff, tlen, sq, shi, false, false);
+            benchMaxRuns = savedMaxRuns;
         }
 
         nextSeq = tnext;

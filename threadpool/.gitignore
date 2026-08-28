@@ -1,0 +1,12 @@
+.dub/
+bin/
+*.exe
+*.pdb
+*.obj
+*.lib
+*.dll
+*.so
+*.o
+*.a
+*.lst
+.DS_Store

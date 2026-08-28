@@ -1,0 +1,10 @@
+/.dub/
+/antfarm-fibers
+/antfarm-fibers-test-*
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.pdb
+/vendor/threadpool/bin/

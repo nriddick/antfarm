@@ -1,0 +1,24 @@
+name "antfarm"
+description "Ant Farm M:N jobs, cache-aware threadpool, and colocated Fiber scheduler"
+authors "Nathan Riddick"
+license "BSL-1.0"
+targetType "library"
+importPaths "."
+sourceFiles "antfarm.d" "antfarm_templates.d"
+
+toolchainRequirements {
+	dmd ">=2.112.0"
+	ldc ">=1.42.0"
+}
+
+subPackage "threadpool"
+subPackage "fibers"
+
+configuration "library" {
+	targetType "library"
+}
+
+configuration "unittest" {
+	targetType "executable"
+	mainSourceFile "antfarm_test.d"
+}

@@ -1,8 +1,26 @@
-# Ant Farm
+# Ant Farm 1.5
 
 Picture a farmer walking along a path placing down objects which a swarm of ants are picking up and taking away. He can't see the ants. He doesn't know how many there are. How can he avoid stepping on the ants? The answer: the ants maintain signage at regular intervals tallying how many ants are in the area. If it's higher than zero, the farmer waits. The last ant to leave a *confirmed-complete* area changes the tally (a reference counter) to zero. The last ant to leave an *incomplete* area instead leaves a pulse mark, so the farmer still sees a nonzero tally and will not step there. Thus the farmer only needs to watch for one signal to change, and doesn't need to try and communicate directly with any ants. And the ants have a panoply of strategies to break down and haul away their work pieces. Really the Ant Farm is a combination of known techniques and a disregard of FIFO guarantees; towards objectives of minimal synchronization upkeep, enhanced cache performance, and flexible role switching and load balancing.
 
 It is a fixed-memory M:N job distributor, not a queue. Producers publish tables of mixed serial and parallel jobs onto a ring; spinning consumers claim chunks independently. There is no reliable FIFO. `write()` and `consumeNext()` are `@nogc nothrow`. Invariant violations abort. Throughput figures with working range of topologies (~200-390M items/s on Intel 12700H) sit comfortably between moodycamel no-tokens (~100-180M items/s) and with-tokens (~400M-1000M items/s), with the overall shape favoring *more* concurrency compared to moody's no-tokens topologies.
+
+Version 1.5 is the authoritative home of three cooperating D components:
+
+- `antfarm` is the fixed-memory M:N payload distributor at the repository
+  root;
+- `threadpool` maps persistent workers to cache topology and gives Director
+  policy explicit control over cadence, affinity, and wake-up; and
+- `antfarm_fibers` carries freely migrating druntime Fibers through the same
+  Farm lanes, so waiting userland and short payload work do not require
+  competing worker pools.
+
+The components remain usable independently. The root DUB package advertises
+`threadpool/` and `fibers/` as subpackages; the Fiber package depends on the
+other two by local path. Start with [`threadpool/README.md`](threadpool/README.md)
+for topology and worker ownership, and [`fibers/README.md`](fibers/README.md)
+for the colocated scheduler. The combined usage report and immediate work are
+[`fibers/POSTMORTEM.md`](fibers/POSTMORTEM.md) and
+[`fibers/ROADMAP_pruned.md`](fibers/ROADMAP_pruned.md).
 
 ---
 
@@ -52,6 +70,16 @@ void main()
 
 Keep the `Token` by reference for the producer’s life; copying transfers it. `write() == 0` means full — drain and retry, or subscribe yourself and drain. Destroy only with no live consumers or tickets.
 
+Job metadata and bodies need not originate as collocated `PayloadEntry`
+objects. `write(headers, bodies, token, avgCost)` lazily pairs independent
+input ranges (header values or pointers, and `const(ulong)[]` bodies), stopping
+at the shorter range. `pairPayloads(headers, bodies)` exposes the same shim for
+composition with other range layers.
+
+`ConsumerView.consumeQuantum()` is the bounded scheduler-oriented counterpart
+to `consumeNext()`: it claims at most one primary chunk from the next table and
+advances. Other consumers, or the normal idle re-walk, finish remaining chunks.
+
 ```text
 dmd -g antfarm.d antfarm_templates.d antfarm_test.d "-ofantfarm_test.exe"
 dmd -g grant_lock_pages.d "-ofgrant_lock_pages.exe"
@@ -93,6 +121,11 @@ Use tokens when the graph is paired pipes and order matters. Use Ant Farm when t
 ---
 
 `SPEC.md` is the living spec. `writeup.md` has the 12700H numbers. Tests: `antfarm_test.d`, `review_torture/`. Benches: `perftest/`.
+
+1.5.0: make Ant Farm, the cache-aware threadpool, and the freely migrating
+Fiber scheduler one authoritative project. The lower layers retain their
+allocation-free contracts; the managed worker lane provides the GC-enabled
+bridge used by Fibers.
 
 1.0.1: TSan hygiene. Ring words are raw atomics, leaf RMWs are acq_rel, and `make -C review_torture run-tsan` defaults to `history_size=7`. A TSan report is a defect.
 

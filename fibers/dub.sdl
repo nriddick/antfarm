@@ -1,0 +1,43 @@
+name "antfarm-fibers"
+description "Freely migrating druntime Fiber scheduler backed by Ant Farm"
+authors "Nathan Riddick"
+license "BSL-1.0"
+targetType "library"
+sourcePaths "source"
+importPaths "source"
+dependency "antfarm" path=".."
+dependency "threadpool" path="../threadpool"
+
+configuration "library" {
+    targetType "library"
+}
+
+configuration "unittest" {
+    targetType "executable"
+    mainSourceFile "tests/smoke.d"
+}
+
+configuration "stress" {
+    targetType "executable"
+    mainSourceFile "tests/stress.d"
+}
+
+configuration "benchmark" {
+    targetType "executable"
+    mainSourceFile "examples/benchmark.d"
+}
+
+configuration "benchmark_mt" {
+    targetType "executable"
+    mainSourceFile "examples/benchmark_mt.d"
+}
+
+configuration "benchmark_vs_druntime" {
+    targetType "executable"
+    mainSourceFile "examples/benchmark_vs_druntime.d"
+}
+
+configuration "benchmark_farm_embed" {
+    targetType "executable"
+    mainSourceFile "examples/benchmark_farm_embed.d"
+}

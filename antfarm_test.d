@@ -255,6 +255,42 @@ void testInputRangeWrite()
     printf("testInputRangeWrite OK\n"); fflush(stdout);
 }
 
+void testSeparateRangesAndQuantum()
+{
+    auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
+    scope (exit) f.destroy();
+
+    enum N = 40;
+    allocCalls(N);
+    scope (exit) freeCalls();
+    PayloadHeader[N] headers;
+    ulong[N] words;
+    PayloadBody[N] bodies;
+    foreach (i; 0 .. N)
+    {
+        initPayloadHeader!testCb1(&headers[i], 1, 1);
+        words[i] = i;
+        bodies[i] = words[i .. i + 1];
+    }
+
+    ConsumerView v;
+    check(v.subscribe(f) == 0, "subscribe before separate-range write");
+    auto tok = f.registerProducer(Tier.small);
+    check(f.write(headers[], bodies[], tok, 1) == N,
+          "write separate header/body ranges");
+
+    check(v.consumeQuantum(), "quantum saw table");
+    immutable afterOne = atomicLoad!(MemoryOrder.raw)(g_totalCalls);
+    check(afterOne > 0 && afterOne <= 16, "quantum consumed one chunk");
+    while (v.consumeNext()) {}
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N,
+          "idle sweep completed quantum leftovers");
+
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+    printf("testSeparateRangesAndQuantum OK\n"); fflush(stdout);
+}
+
 // ---------------------------------------------------------------------
 // Test 3: concurrent producers and consumers, exact call accounting
 // ---------------------------------------------------------------------
@@ -847,6 +883,7 @@ void main()
     testArithmetic();
     testSingleThreaded();
     testInputRangeWrite();
+    testSeparateRangesAndQuantum();
     testConcurrent();
     testWraparound();
     testSubscriptionCap();

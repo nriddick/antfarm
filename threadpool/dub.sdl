@@ -1,0 +1,44 @@
+name "threadpool"
+description "Cache-topology-aware thread pool"
+authors "Nathan Riddick"
+license "BSL-1.0"
+targetType "library"
+targetPath "bin"
+sourcePaths "source"
+importPaths "source"
+
+toolchainRequirements {
+	dmd ">=2.112.0"
+	ldc ">=1.42.0"
+}
+
+configuration "library" {
+	targetType "library"
+}
+
+// Default `dub test`: injects -unittest + a generated main.
+// topology_parse.d must contain unittest blocks only — no `main`.
+configuration "unittest" {
+	targetType "executable"
+	sourceFiles "tests/topology_parse.d" "tests/linux_topology_parse.d"
+	stringImportPaths "tests"
+	dflags "-main"
+}
+
+configuration "hello" {
+	targetType "executable"
+	targetName "hello-topology"
+	sourceFiles "examples/hello_topology.d"
+	versions "threadpool_hello"
+}
+
+// Live hardware binary: `dub run -c live-test` (not `dub test`).
+configuration "live-test" {
+	targetType "executable"
+	versions "threadpool_live_sisyphus"
+	sourceFiles "tests/live_sisyphus.d"
+}
+
+platform "windows" {
+	libs "kernel32"
+}
