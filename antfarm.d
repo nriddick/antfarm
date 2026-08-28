@@ -6,8 +6,9 @@
  + producers and sharded consumers. No CAS on hot paths; hot-path
  + synchronization is fetch-add / fetch-sub plus acquire/release load/store.
  + Cold-path CAS: ticket claim, last-releaser pulse, plantIfUnprotected
- + plant/retract (SPEC.md 2a, 3b, 5b). Not open loops: a failed CAS means
- + the word changed, often invalidating the plant. Strong CAS (spec 1).
+ + plant/retract (SPEC.md 2a, 3b, 5b). Retry loops reload fresh state;
+ + their retries are bounded by the low-half/confirmation state settling,
+ + not by back-and-forth noise. Strong CAS (spec 1).
  +
  + Errors are fatal (process abort) rather than exceptional, per spec.
  + Interfaces are @nogc nothrow @system.
@@ -965,14 +966,27 @@ struct AntFarm
             {
                 // Spec 2a post-CAS retract: a finisher may have confirmed
                 // the segment between the completeness read and this plant.
-                // Retract exactly the unit we planted (rt + SUB0 -> rt);
-                // the CAS fails harmlessly if a racing 0->1 already took
-                // the count or cleared the pulse.
+                // Retract exactly the unit we planted. The full-word CAS is
+                // masked to the low half: a concurrent subscriber's SUB
+                // pin/unpin changes the high half and would make a one-shot
+                // exact-value CAS fail while our SUB0 is still present.
+                // The retry is bounded by the low-half state -- it is either
+                // exactly SUB0 (we remove it) or a racing 0->1 has already
+                // changed it (and that same edge clears the pulse).
                 immutable sd2 = atomicLoad!(MemoryOrder.raw)(stats[ki].sd);
                 immutable seqt2 = atomicLoad!(MemoryOrder.raw)(stats[ki].seqt);
                 immutable seqtN2 = atomicLoad!(MemoryOrder.raw)(stats[ki1].seqt);
                 if (seqt2 + sd2 >= seqtN2)
-                    cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&Rt[ki][0], rt + SUB0, rt);
+                {
+                    for (;;)
+                    {
+                        immutable cur = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
+                        if ((cur & LOWMASK) != SUB0)
+                            return;
+                        if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&Rt[ki][0], cur, cur - SUB0))
+                            return;
+                    }
+                }
                 return;
             }
         }
@@ -1329,11 +1343,13 @@ struct ConsumerView
         immutable idc = f.add_consumer();
         if (idc < 0) return idc;
 
-        // Spec 5a-b: acquire Eg (the only unpinned read), then walk
-        // backwards pinning each slot with Sub *before* inspecting Rtlow/Es.
-        // d=0 is the heuristic pin on the frontier. bestSeg is the earliest
-        // Es among Rtlow != 0; else the frontier.
-        immutable eg = atomicLoad!(MemoryOrder.acq)(f.Eg);
+        // Spec 5a-b: derive the walk range from the write tail (the only
+        // unpinned read), then walk backwards pinning each slot with Sub
+        // *before* inspecting Rtlow/Es. d=0 is the heuristic pin on the
+        // frontier. bestSeg is the earliest Es among Rtlow != 0; else the
+        // frontier.
+        immutable wt0 = atomicLoad!(MemoryOrder.acq)(f.Wt);
+        immutable eg = wt0 >> f.segShift;
         uint[KMAX] pinned;
         uint nPinned = 0;
         long bestE = long.max;
@@ -1368,6 +1384,23 @@ struct ConsumerView
             f.sub_consumer();
             return -1;
         }
+
+        // Re-read the write tail now that every slot is pinned. The first
+        // read established the walk range; this one validates that the tail
+        // has not already reserved past the selected epoch. The two reads
+        // are also a cheap invalidation check: a later read cannot see an
+        // older tail than an earlier read of the same atomic.
+        immutable wt1 = atomicLoad!(MemoryOrder.acq)(f.Wt);
+        immutable esU = cast(ulong) es;
+        immutable seqtEpoch = seqt >> f.segShift;
+        if (seqtEpoch < esU || seqtEpoch > esU + f.K - 1 ||
+            (wt1 >> f.segShift) >= esU + f.K)
+        {
+            foreach (i; 0 .. nPinned)
+                atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
+            f.sub_consumer();
+            return -1;
+        }
         F = f;
         IDc = cast(ulong) idc;
         immutable lti = cast(uint)(IDc % sq);
@@ -1385,9 +1418,10 @@ struct ConsumerView
         return es;
     }
 
-    /// Spec 5b. Confirmed prefix drops with a plain dec. Remaining
-    /// interiors use the last-releaser helper; the position does too if
-    /// unconfirmed or last-of-farm.
+    /// Spec 5b. Confirmed prefix drops with a plain dec. Confirmed
+    /// interiors do too; unconfirmed interiors use the last-releaser
+    /// helper. The position uses the helper if unconfirmed or
+    /// last-of-farm; a non-last confirmed position drops plain.
     void unsubscribe() nothrow @nogc @system
     {
         if (!hasRef) return;
@@ -1397,10 +1431,15 @@ struct ConsumerView
         foreach (e; oldestEi .. newestEi)
         {
             immutable ki = cast(uint)(e & f.kMask);
-            decRef(ki, ltiOf(e), true);
+            // Interiors are never the empty-farm pulse: a confirmed
+            // interior must be allowed to reach Rt == 0, and an
+            // unconfirmed one keeps a pulse only while it is still
+            // unconfirmed (retractIfConfirmed closes the race).
+            immutable leavePulse = !confirmed(ki, e);
+            decRef(ki, ltiOf(e), leavePulse, e, true);
         }
         immutable posPulse = lastOfFarm || !confirmed(posKi(), newestEi);
-        decRef(posKi(), ltiOf(newestEi), posPulse);
+        decRef(posKi(), ltiOf(newestEi), posPulse, newestEi, !lastOfFarm);
         hasRef = false;
         IDc = 0;
         f.plantUnprotectedIncomplete();
@@ -1595,7 +1634,16 @@ private:
     /// (add a unit only if none is present); if > 1, old - 1 with Sub0
     /// unchanged. A failed CAS retries against the new word, not the same
     /// snapshot (spec 1, strong CAS).
-    void releaseRootLeavePulse(uint ki) nothrow @nogc @system
+    ///
+    /// When `retractIfConfirmed` is set, the caller wants a pulse only
+    /// while the segment is still unconfirmed. After the last-root CAS
+    /// succeeds, the segment is re-checked; if it has become confirmed in
+    /// the meantime, the pulse we just left is retracted with the same
+    /// low-half masked CAS as plantIfUnprotected. A racing 0->1 changes
+    /// the low half away from Sub0, so the retry loop is bounded by that
+    /// completion state and cannot underflow Rtlow.
+    void releaseRootLeavePulse(uint ki, ulong ei = ulong.max,
+                               bool retractIfConfirmed = false) nothrow @nogc @system
     {
         for (;;)
         {
@@ -1617,7 +1665,20 @@ private:
                 nv = old - 1;
             }
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&F.Rt[ki][0], old, nv))
+            {
+                if (c == 1 && retractIfConfirmed && confirmed(ki, ei))
+                {
+                    for (;;)
+                    {
+                        immutable cur = atomicLoad!(MemoryOrder.acq)(F.Rt[ki][0]);
+                        if ((cur & COUNTMASK) != 0 || (cur & AntFarm.SUB0MASK) == 0)
+                            return; // a racing 0->1 took the count and cleared the pulse
+                        if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&F.Rt[ki][0], cur, cur - SUB0))
+                            return;
+                    }
+                }
                 return;
+            }
         }
     }
 
@@ -1633,7 +1694,11 @@ private:
     /// transition (dec returns 1) repeats on Rt; underflows are fatal.
     /// `leavePulse` uses the last-releaser helper so an unconfirmed (or
     /// last-of-farm confirmed) drop never becomes visible as Rt == 0.
-    void decRef(uint ki, uint lti, bool leavePulse = false) nothrow @nogc @system
+    /// `ei` is the epoch being released; `retractIfConfirmed` asks the
+    /// last-releaser helper to take the pulse back if the segment turns
+    /// out to be confirmed after the CAS (closing the check/release race).
+    void decRef(uint ki, uint lti, bool leavePulse = false,
+                ulong ei = ulong.max, bool retractIfConfirmed = false) nothrow @nogc @system
     {
         auto f = F;
         tsanRelease(f.Rt[ki][0]);
@@ -1642,7 +1707,7 @@ private:
         if (lo == 1)
         {
             if (leavePulse)
-                releaseRootLeavePulse(ki);
+                releaseRootLeavePulse(ki, ei, retractIfConfirmed);
             else
             {
                 immutable ro = atomicFetchSub!(MemoryOrder.rel)(f.Rt[ki][0], 1);
