@@ -148,11 +148,19 @@ Registration is how that invariant is enforced. The Farm preallocates two slot a
 
 Arguments:
 
-- `Payloads` — a slice or input range of `PayloadEntry` structs.
+- `Payloads` — a slice or forward range of `PayloadEntry` structs. `write()`
+  saves independent checkpoints for sizing and emission and does not advance
+  the caller's range.
 - `Token` — the caller's registration ticket (3b). Required; a mismatch is fatal. The Token is passed by reference; it carries the caller's remaining quota as a private field, and the Farm mirrors it in a per-slot ledger so a forged ticket cannot exceed the granted excursion. Tokens are single-owner and transfer-only: copying consumes the source (the copy constructor release-stores the valid hash last, then clears the source's hash), so at most one live token exists per slot and a stale copy fails `requireToken`. `quotaSwept` (3a) travels with the leftover.
 - `AvgCost` — optional, default 1. The producer's declared Call cost class: a log2 shift in `0 .. log2(MAX_CHUNK)` published in Thead. 0 means Calls are very cheap (chunk stays at `MAX_CHUNK`, maximum claim amortization); larger values shrink the chunk (short visits, less tail). `write()` fatals on `AvgCost` out of range.
 
 Returns: the number of Payloads written.
+
+Convenience sources preserve the same table contract: separate header/body
+forward ranges are paired positionally; one common header may be broadcast
+over a body range; and the common-header overload may additionally receive a
+uniform body length in ulongs. The last form treats that length as a caller
+contract and uses it for arithmetic sizing before emission.
 
 `PayloadEntry`:
 
@@ -305,7 +313,11 @@ A Payload's physical layout:
   - 6 ulongs filler.
   - `Pcount` — 32 MSB claims like Tcount; next 16 MSB number of times Called; 16 LSB number of Calls completed. After any packed fetch_add, if the field just incremented has wrapped to 0 the process fatals. Under the 512 caps, worst-case call increments are about `Done + MaxCs`, far below 2<sup>16</sup>; 32-bit claim wrap still requires pathological visitor accumulation. The hot path stays fetch_add (no CAS saturating loop).
   - `Call` — callback function pointer which decodes Pbody and executes an iteration of work; `alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration)`. Call sits immediately after Pcount so the two share one cache line; safe because Call is dereferenced only by a consumer holding a valid claim — the same thread that just wrote Pcount — so no cross-thread coherence traffic is added. The 6 filler ulongs after Call complete the line in every buffer phase.
-- `Pbody` — `PayloadBody` (`const(ulong)[]`); type-erased const parameters for Call's work.
+- `Pbody` — `PayloadBody` (`const(ulong)[]`); read-only type-erased transport
+  words for Call's work. Constness prohibits mutation of the ring body itself;
+  it does not imply transitive immutability of an object reached through an
+  explicitly encoded handle. Generated shims currently impose the separate,
+  stricter rule that packed parameters contain no unshared mutable aliases.
 
 For a `Ci` entering a payload, consumption begins with `Ci` incrementing the claims. If it's below `MaxCs` then `Ci` increments calls which becomes a parameter to Call. Call performs an iteration if the parameter is below `Done` and increments completions. `MaxCs` prevents overallocation of Calling consumers.
 

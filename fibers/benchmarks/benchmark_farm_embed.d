@@ -6,7 +6,8 @@
  +   4. FiberLane managed pump (timers, coverage, flush)
  +
  + (2) is Ant Farm-specific throughput. (3) isolates the pool. (4) is the
- + fiber embedding. Huge pages follow Ant Farm's default.
+ + fiber embedding. Page backing follows Ant Farm's default or the
+ + ANTFARM_HUGE_PAGES override.
  +/
 module benchmark_farm_embed;
 

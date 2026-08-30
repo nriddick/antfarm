@@ -9,9 +9,11 @@ import core.thread;
 import core.time;
 import core.stdc.stdio;
 import core.stdc.stdio : fflush, stdout;
-import std.range : iota;
+import std.range : hasLength, iota, isForwardRange, isInputRange, popFrontN;
 import std.typecons : Tuple, tuple;
 import core.stdc.stdlib : malloc, free;
+
+static assert(!DEFAULT_HUGE_PAGES, "ordinary 4 KiB backing is the public default");
 
 // ---------------------------------------------------------------------
 // Shared test state
@@ -213,6 +215,63 @@ struct PayloadRange
     @property bool empty() const nothrow @nogc @safe { return i >= len; }
     @property ref PayloadEntry front() nothrow @nogc @system { return p[i]; }
     void popFront() nothrow @nogc @system { ++i; }
+    @property PayloadRange save() nothrow @nogc @system { return this; }
+}
+
+// Copying this valid input range shares its cursor. It deliberately has no
+// save checkpoint and must therefore be rejected by write's forward contract.
+final class SharedPayloadInputRange
+{
+    PayloadEntry* p;
+    size_t len;
+    size_t i;
+
+    this(PayloadEntry* entries, size_t count) nothrow @nogc
+    {
+        p = entries;
+        len = count;
+    }
+
+    @property bool empty() const nothrow @nogc @safe { return i >= len; }
+    @property ref PayloadEntry front() nothrow @nogc @system { return p[i]; }
+    void popFront() nothrow @nogc @safe { ++i; }
+}
+static assert(isInputRange!SharedPayloadInputRange);
+static assert(!isForwardRange!SharedPayloadInputRange);
+
+struct CountingArgRange
+{
+    size_t i;
+    size_t n;
+    size_t* frontCalls;
+
+    @property bool empty() const pure nothrow @nogc @safe { return i >= n; }
+    @property size_t front() nothrow @nogc @system
+    {
+        ++*frontCalls;
+        return i;
+    }
+    void popFront() pure nothrow @nogc @safe { ++i; }
+    @property CountingArgRange save() pure nothrow @nogc @safe { return this; }
+    @property size_t length() const pure nothrow @nogc @safe { return n - i; }
+}
+
+struct CountingBodyRange
+{
+    ulong* words;
+    size_t i;
+    size_t n;
+    size_t* frontCalls;
+
+    @property bool empty() const pure nothrow @nogc @safe { return i >= n; }
+    @property PayloadBody front() nothrow @nogc @system
+    {
+        ++*frontCalls;
+        return words[i .. i + 1];
+    }
+    void popFront() pure nothrow @nogc @safe { ++i; }
+    @property CountingBodyRange save() pure nothrow @nogc @safe { return this; }
+    @property size_t length() const pure nothrow @nogc @safe { return n - i; }
 }
 
 void testInputRangeWrite()
@@ -242,6 +301,10 @@ void testInputRangeWrite()
     check(v.subscribe(f) == 0, "subscribe before range write");
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "register small producer");
+
+    auto singlePass = new SharedPayloadInputRange(entries, N);
+    static assert(!__traits(compiles, f.write(singlePass, tok)),
+        "write must reject input ranges that cannot checkpoint");
 
     PayloadRange range = PayloadRange(entries, N);
     check(f.write(range, tok) == N, "write input range");
@@ -315,6 +378,7 @@ void testPayloadRange()
             return tuple(i + N, 1UL);
         }
         void popFront() pure nothrow @nogc @safe { ++i; }
+        @property PairRange save() pure nothrow @nogc @safe { return this; }
     }
 
     ConsumerView v;
@@ -339,6 +403,99 @@ void testPayloadRange()
     v.unsubscribe();
     f.unregisterProducer(tok);
     printf("testPayloadRange OK\n"); fflush(stdout);
+}
+
+void testUniformRanges()
+{
+    enum N = 300; // exceeds one 4096-word small-producer table
+    enum M = 24;
+    enum F = 24;
+    enum K = 8;
+    allocCalls(N + M + F + K);
+    scope (exit) freeCalls();
+
+    auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
+    scope (exit) f.destroy();
+    ConsumerView v;
+    check(v.subscribe(f) == 0, "subscribe before uniform writes");
+    auto tok = f.registerProducer(Tier.small);
+
+    size_t frontCalls;
+    auto jobs = payloadRange!testCb1(CountingArgRange(0, N, &frontCalls));
+    static assert(isForwardRange!(typeof(jobs)));
+    static assert(hasLength!(typeof(jobs)));
+
+    size_t written;
+    size_t tables;
+    while (!jobs.empty)
+    {
+        immutable n = f.write(jobs, tok);
+        if (n == 0)
+        {
+            while (v.consumeNext()) {}
+            continue;
+        }
+        ++tables;
+        written += n;
+        check(jobs.popFrontN(n) == n, "uniform popFrontN");
+        while (v.consumeNext()) {}
+    }
+    check(written == N && tables > 1, "uniform partial-write retry");
+    check(frontCalls == N, "uniform sizing never evaluates front");
+
+    PayloadHeader mutableHeader;
+    initPayloadHeader!testCb1(&mutableHeader, 1, 1);
+    const PayloadHeader commonHeader = mutableHeader;
+    ulong[M + F] words;
+    PayloadBody[M] bodies;
+    foreach (i; 0 .. M)
+    {
+        words[i] = N + i;
+        bodies[i] = words[i .. i + 1];
+    }
+    auto broadcast = broadcastPayloads(commonHeader, bodies[]);
+    static assert(isForwardRange!(typeof(broadcast)));
+    static assert(hasLength!(typeof(broadcast)));
+    auto constPair = pairPayloads((&commonHeader)[0 .. 1], bodies[0 .. 1]);
+    static assert(isForwardRange!(typeof(constPair)));
+    check(constPair.front.header.call is mutableHeader.call,
+        "const header range pairing");
+    auto runtimeConfigured = payloadRange!testCb1(iota(0, 0), 1u, 1u);
+    static assert(isForwardRange!(typeof(runtimeConfigured)));
+    check(runtimeConfigured.empty, "runtime payloadRange configuration");
+    check(f.write(commonHeader, bodies[], tok) == M,
+        "const common-header broadcast write");
+    while (v.consumeNext()) {}
+
+    foreach (i; 0 .. F)
+        words[M + i] = N + M + i;
+    size_t bodyFrontCalls;
+    auto fixedBodies = CountingBodyRange(
+        words.ptr + M, 0, F, &bodyFrontCalls);
+    check(f.write(commonHeader, fixedBodies, 1, tok) == F,
+        "constant call-and-length write");
+    check(bodyFrontCalls == F,
+        "fixed-length sizing never evaluates body front");
+    while (v.consumeNext()) {}
+
+    Tuple!(size_t, ulong)[K] mtArgs;
+    foreach (i; 0 .. K)
+        mtArgs[i] = tuple(cast(size_t)(N + M + F + i), 2UL);
+    auto mtJobs = payloadRange!(testCb, 2, 2)(mtArgs[]);
+    check(f.write(mtJobs, tok) == K, "uniform MT index write");
+    check(mtJobs.popFrontN(K) == K, "uniform MT popFrontN");
+    while (v.consumeNext()) {}
+
+    foreach (i; 0 .. N + M + F)
+        check(g_calls[i] == 1, "uniform exact call count");
+    foreach (i; N + M + F .. N + M + F + K)
+        check(g_calls[i] == 2, "uniform MT exact call count");
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N + M + F + 2 * K,
+        "uniform total");
+
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+    printf("testUniformRanges OK\n"); fflush(stdout);
 }
 
  // ---------------------------------------------------------------------
@@ -938,6 +1095,7 @@ void main()
     testSingleThreaded();
     testInputRangeWrite();
     testPayloadRange();
+    testUniformRanges();
     testSeparateRangesAndQuantum();
     testConcurrent();
     testWraparound();

@@ -4,7 +4,7 @@ ROOT := ..
 DC ?= ldc2
 DFLAGS ?= -O2 -release
 
-.PHONY: all run run-once dual-run digest-run tail-run grid-run run-grid run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
+.PHONY: all run run-once run-once-constant-header run-once-constant-callandlength dual-run dual-grid-run dual-run-constant-header dual-run-constant-callandlength digest-run tail-run grid-run run-grid run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
 
 all: throughput dual digest tail tail
 
@@ -26,6 +26,12 @@ run: throughput
 run-once: throughput
 	./throughput --once
 
+run-once-constant-header: throughput
+	./throughput --once --constant-header
+
+run-once-constant-callandlength: throughput
+	./throughput --once --constant-callandlength
+
 grid-run: throughput
 	./throughput --grid 8
 
@@ -33,6 +39,15 @@ run-grid: grid-run
 
 dual-run: dual
 	./dual
+
+dual-grid-run: dual
+	./dual --grid 8
+
+dual-run-constant-header: dual
+	./dual --constant-header
+
+dual-run-constant-callandlength: dual
+	./dual --constant-callandlength
 
 digest-run: digest
 	./digest

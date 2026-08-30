@@ -24,7 +24,9 @@ import core.atomic;
 import core.stdc.stdio : fprintf, stderr, snprintf;
 import core.stdc.stdlib : abort, malloc, free, getenv;
 import core.stdc.string : memset;
-import std.range.primitives : ElementType, empty, front, isInputRange, popFront;
+import std.range.primitives : ElementType, empty, front, hasLength,
+    isForwardRange, isInputRange, popFront, popFrontN, save;
+import std.traits : Unqual;
 
 version (CRuntime_Microsoft) {}
 else
@@ -327,6 +329,8 @@ enum MAX_LEAVES = 12;
 /// Spec 5e-d default small-table threshold. 0 at construction selects the
 /// auto rule so each shard gets at least one chunk.
 enum DEFAULT_SMALL_TABLE_THRESHOLD = 64;
+/// Default dual-ring backing. Huge pages are an explicit workload-tuned opt-in.
+enum bool DEFAULT_HUGE_PAGES = false;
 /// Spec 5e: chunk ceiling for the avgCost hint. write() publishes AvgCost
 /// in Thead; consumers compute chunk = MAX_CHUNK >> AvgCost. Default
 /// AvgCost = 1 -> chunk 16, the midpoint of [1, 32].
@@ -434,7 +438,8 @@ version (SdCheckEveryN)
 else
     enum uint SD_CHECK_EVERY_N = 1;
 
-/// Spec 4a: type-erased const parameters for Call's work.
+/// Spec 4a: read-only type-erased transport words for Call's work. Constness
+/// protects the ring body, not an object reached through an encoded handle.
 alias PayloadBody = const(ulong)[];
 
 /// Spec 5f: decodes Pbody and executes an iteration of work.
@@ -473,6 +478,22 @@ struct PayloadEntry
     PayloadBody body;
 }
 
+private void copyPayloadHeaderConfig(ref PayloadHeader dst,
+        const PayloadHeader* src) nothrow @nogc @system
+{
+    dst = PayloadHeader.init;
+    dst.maxCs = src.maxCs;
+    dst.done = src.done;
+    dst.plen = src.plen;
+    dst.call = src.call;
+}
+
+private enum bool hasCommonPayloadHeader(R) =
+    __traits(hasMember, R, "commonPayloadHeader");
+
+private enum bool hasFixedPayloadLength(R) =
+    __traits(hasMember, R, "fixedPayloadLength");
+
 /// A lazy zip of independent header and body input ranges.  This is useful
 /// when a job source naturally keeps scheduling metadata separate from its
 /// argument storage.  The range ends when either input ends.
@@ -494,7 +515,13 @@ struct PayloadPairRange(HR, BR)
             hp = headers.front;
         else
         {
-            headerScratch = headers.front;
+            static if (is(ElementType!HR : const(PayloadHeader)*))
+                copyPayloadHeaderConfig(headerScratch, headers.front);
+            else
+            {
+                auto h = headers.front;
+                copyPayloadHeaderConfig(headerScratch, &h);
+            }
             hp = &headerScratch;
         }
         return PayloadEntry(hp, cast(PayloadBody) bodies.front);
@@ -505,6 +532,48 @@ struct PayloadPairRange(HR, BR)
         headers.popFront();
         bodies.popFront();
     }
+
+    static if (isForwardRange!HR && isForwardRange!BR)
+    {
+        @property typeof(this) save() nothrow @nogc @system
+        {
+            typeof(this) result = this;
+            result.headers = headers.save;
+            result.bodies = bodies.save;
+            return result;
+        }
+    }
+
+    static if (hasLength!HR && hasLength!BR)
+    {
+        @property size_t length() nothrow @nogc @system
+        {
+            immutable hn = cast(size_t) headers.length;
+            immutable bn = cast(size_t) bodies.length;
+            return hn < bn ? hn : bn;
+        }
+    }
+
+    size_t popFrontN(size_t n) nothrow @nogc @system
+    {
+        static if (hasLength!HR && hasLength!BR)
+        {
+            immutable count = n < length ? n : length;
+            headers.popFrontN(count);
+            bodies.popFrontN(count);
+            return count;
+        }
+        else
+        {
+            size_t popped;
+            while (popped < n && !empty)
+            {
+                popFront();
+                ++popped;
+            }
+            return popped;
+        }
+    }
 }
 
 /// Adapt separate header and body input ranges to the ordinary payload-entry
@@ -512,11 +581,102 @@ struct PayloadPairRange(HR, BR)
 /// body elements must be implicitly convertible to `const(ulong)[]`.
 auto pairPayloads(HR, BR)(HR headers, BR bodies) nothrow @nogc @system
     if (isInputRange!HR && isInputRange!BR &&
-        (is(ElementType!HR == PayloadHeader) ||
-         is(ElementType!HR == PayloadHeader*)) &&
+        (is(Unqual!(ElementType!HR) == PayloadHeader) ||
+         is(ElementType!HR : const(PayloadHeader)*)) &&
         is(ElementType!BR : PayloadBody))
 {
     return PayloadPairRange!(HR, BR)(headers, bodies);
+}
+
+/// A lazy broadcast of one payload header over a body input range. The
+/// header is copied into the adapter, so its source need only outlive this
+/// call. Unlike pairing with a one-element header range, this adapter ends
+/// only when the body range ends.
+struct PayloadBroadcastRange(BR, bool fixedLength = false)
+    if (isInputRange!BR && is(ElementType!BR : PayloadBody))
+{
+    private BR bodies;
+    private PayloadHeader hdr;
+    static if (fixedLength)
+        private ulong bodyWords;
+
+    private this(const ref PayloadHeader header, BR source,
+            ulong fixedBodyWords = 0)
+            nothrow @nogc @system
+    {
+        bodies = source;
+        copyPayloadHeaderConfig(hdr, &header);
+        static if (fixedLength)
+            bodyWords = fixedBodyWords;
+    }
+
+    /// Uniform-layout protocol consumed by AntFarm.writeImpl.
+    @property PayloadHeader* commonPayloadHeader() nothrow @nogc @system
+    {
+        return &hdr;
+    }
+
+    @property bool empty() nothrow @nogc @system { return bodies.empty; }
+
+    @property PayloadEntry front() nothrow @nogc @system
+    {
+        auto body = cast(PayloadBody) bodies.front;
+        static if (fixedLength)
+            if (body.length != bodyWords)
+                fatal("fixed payload body length mismatch");
+        return PayloadEntry(&hdr, body);
+    }
+
+    static if (fixedLength)
+    {
+        @property ulong fixedPayloadLength() const pure nothrow @nogc @safe
+        {
+            return bodyWords;
+        }
+    }
+
+    void popFront() nothrow @nogc @system { bodies.popFront(); }
+
+    static if (isForwardRange!BR)
+    {
+        @property typeof(this) save() nothrow @nogc @system
+        {
+            typeof(this) result = this;
+            result.bodies = bodies.save;
+            return result;
+        }
+    }
+
+    static if (hasLength!BR)
+    {
+        @property size_t length() nothrow @nogc @system
+        {
+            return cast(size_t) bodies.length;
+        }
+    }
+
+    size_t popFrontN(size_t n) nothrow @nogc @system
+    {
+        return bodies.popFrontN(n);
+    }
+}
+
+/// Broadcast one common payload header over every body in `bodies`.
+auto broadcastPayloads(BR)(const ref PayloadHeader header, BR bodies)
+        nothrow @nogc @system
+    if (isInputRange!BR && is(ElementType!BR : PayloadBody))
+{
+    return PayloadBroadcastRange!BR(header, bodies);
+}
+
+/// Broadcast one common header over uniformly sized bodies. `bodyWords` is a
+/// caller contract: every body must have exactly that many ulongs. This lets
+/// `write` size the table without evaluating each body's `front`.
+auto broadcastPayloads(BR)(const ref PayloadHeader header, BR bodies,
+        ulong bodyWords) nothrow @nogc @system
+    if (isInputRange!BR && is(ElementType!BR : PayloadBody))
+{
+    return PayloadBroadcastRange!(BR, true)(header, bodies, bodyWords);
 }
 
 /// Spec 3b: producer tiers.
@@ -625,6 +785,24 @@ private ulong addChecked(ulong a, ulong b, const(char)[] msg) nothrow @nogc @sys
     return a + b;
 }
 
+private ulong mulChecked(ulong a, ulong b, const(char)[] msg) nothrow @nogc @system
+{
+    if (a != 0 && b > ulong.max / a) fatal(msg);
+    return a * b;
+}
+
+private void validatePayloadHeader(const PayloadHeader* header)
+        nothrow @nogc @system
+{
+    if (header is null || header.call is null) fatal("bad payload header");
+    if (header.maxCs == 0 || header.maxCs > MAX_PAYLOAD_ITERS)
+        fatal("payload MaxCs out of range");
+    if (header.done == 0 || header.done > MAX_PAYLOAD_ITERS)
+        fatal("payload Done out of range");
+    if (header.done > 1 && header.maxCs < 2)
+        fatal("multithreaded payload requires MaxCs >= 2");
+}
+
 /// Table size in ulongs: Thead + index + pads + Tprogress + Tcount + payloads + end pad.
 private ulong tableSizeChecked(ulong n, ulong m, ulong sq, ulong psum) nothrow @nogc @system
 {
@@ -691,7 +869,9 @@ struct AntFarm
     // ---- magic buffer ----
     shared(ulong)* buf; /// 2*Ln ulongs mapped; second half mirrors the first
     ulong bufBytes;     /// Ln * 8
-    bool usedLargePages; /// Windows SEC_LARGE_PAGES / Linux MADV_HUGEPAGE requested and applied
+    /// Windows SEC_LARGE_PAGES was mapped, or Linux MADV_HUGEPAGE advice was
+    /// applied. Linux promotion remains kernel-controlled.
+    bool usedLargePages;
 
     // ---- farm-level mutable metadata (spec 2c), one cache line each ----
     align(64) shared ulong Wt;      /// write tail sequence
@@ -714,11 +894,13 @@ struct AntFarm
     // Construction / destruction
     // ------------------------------------------------------------------
 
+    /// Ordinary 4 KiB backing is the default. Pass `hugePages=true` or set
+    /// `ANTFARM_HUGE_PAGES=1` to opt into the platform huge-page path.
     static AntFarm* create(ulong ln = 1 << 20, uint k = 8, uint expectedConsumers = 4,
                            uint maxBulk = 2, ulong quotaBulk = 0,
                            uint maxSmall = 16, ulong quotaSmall = 4096,
                            uint smallThreshold = DEFAULT_SMALL_TABLE_THRESHOLD,
-                           bool hugePages = true) nothrow @nogc @system
+                           bool hugePages = DEFAULT_HUGE_PAGES) nothrow @nogc @system
     {
         // Construction constraints (spec 1/3b):
         //  - K is the useful power-of-two range [2, KMAX=16].
@@ -1048,10 +1230,11 @@ struct AntFarm
         return writeImpl(payloads, tok, avgCost);
     }
 
-    /// ditto: input range overload.
+    /// ditto: forward range overload. `write` checkpoints the source for its
+    /// sizing and emission passes and never advances the caller's checkpoint.
     ulong write(R)(scope R payloads, ref Token tok,
                    uint avgCost = 1) nothrow @nogc @system
-        if (isInputRange!R && is(ElementType!R == PayloadEntry))
+        if (isForwardRange!R && is(ElementType!R == PayloadEntry))
     {
         return writeImpl(payloads, tok, avgCost);
     }
@@ -1061,12 +1244,33 @@ struct AntFarm
     /// shim: it does not allocate or materialize `PayloadEntry` pairs.
     ulong write(HR, BR)(scope HR headers, scope BR bodies, ref Token tok,
                         uint avgCost = 1) nothrow @nogc @system
-        if (isInputRange!HR && isInputRange!BR &&
-            (is(ElementType!HR == PayloadHeader) ||
-             is(ElementType!HR == PayloadHeader*)) &&
+        if (isForwardRange!HR && isForwardRange!BR &&
+            (is(Unqual!(ElementType!HR) == PayloadHeader) ||
+             is(ElementType!HR : const(PayloadHeader)*)) &&
             is(ElementType!BR : PayloadBody))
     {
         return writeImpl(pairPayloads(headers, bodies), tok, avgCost);
+    }
+
+    /// Broadcast one common header over a forward range of bodies. The
+    /// common metadata is validated once per call rather than once per body.
+    ulong write(BR)(const ref PayloadHeader header, scope BR bodies,
+                    ref Token tok, uint avgCost = 1) nothrow @nogc @system
+        if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
+    {
+        return writeImpl(broadcastPayloads(header, bodies), tok, avgCost);
+    }
+
+    /// Broadcast a common header over bodies whose uniform length is supplied
+    /// by contract. This selects arithmetic sizing even when the body range's
+    /// element type is a runtime slice.
+    ulong write(BR)(const ref PayloadHeader header, scope BR bodies,
+                    ulong bodyWords, ref Token tok,
+                    uint avgCost = 1) nothrow @nogc @system
+        if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
+    {
+        return writeImpl(
+            broadcastPayloads(header, bodies, bodyWords), tok, avgCost);
     }
 
     private ulong writeImpl(R)(scope R payloads, ref Token tok,
@@ -1086,46 +1290,100 @@ struct AntFarm
         size_t n;
         uint m;
         ulong psum;
+
+        static if (hasCommonPayloadHeader!R)
+        {
+            auto commonHeader = payloads.commonPayloadHeader;
+            validatePayloadHeader(commonHeader);
+        }
+
         for (;;)
         {
             n = 0; m = 0; psum = 0;
-            size_t i = 0;
-            foreach (ref pe; payloads)
+            static if (hasCommonPayloadHeader!R && hasFixedPayloadLength!R)
             {
-                if (pe.header is null || pe.header.call is null) fatal("bad payload header");
-                if (pe.header.maxCs == 0 || pe.header.maxCs > MAX_PAYLOAD_ITERS)
-                    fatal("payload MaxCs out of range");
-                if (pe.header.done == 0 || pe.header.done > MAX_PAYLOAD_ITERS)
-                    fatal("payload Done out of range");
-                if (pe.header.done > 1 && pe.header.maxCs < 2)
-                    fatal("multithreaded payload requires MaxCs >= 2");
-                if (pe.body.length > ulong.max - PHEAD_LEN)
+                immutable bodyLen = cast(ulong) payloads.fixedPayloadLength;
+                if (bodyLen > ulong.max - PHEAD_LEN)
                     fatal("payload size overflow");
-                immutable psz = PHEAD_LEN + pe.body.length;
-                immutable oneMt = pe.header.maxCs > 1 ? 1UL : 0UL;
-                // Per-tier check: a payload whose minimal table exceeds this
-                // producer's tier quota can never be published by it, so this
-                // is a caller error, not backpressure. Checking the caller's
-                // quota (not the farm max) keeps write()==0 strictly meaning
-                // "farm full": a small-tier caller cannot spin forever on a
-                // payload that only fits the bulk tier.
+                immutable psz = PHEAD_LEN + bodyLen;
+                immutable oneMt = commonHeader.maxCs > 1 ? 1UL : 0UL;
                 immutable singletonBase = base + 1UL + oneMt;
                 if (psz > ulong.max - singletonBase)
                     fatal("table size overflow");
-                immutable singleton = singletonBase + psz;
-                if (singleton > quota)
+                if (singletonBase + psz > quota)
                     fatal("payload larger than this producer tier's Exi");
-                immutable cm = m + (pe.header.maxCs > 1 ? 1 : 0);
-                immutable psumNext = addChecked(psum, psz, "payload sum overflow");
-                immutable fixed = base + (cast(ulong) i + 1) + cm;
-                if (fixed > ulong.max - psumNext)
-                    fatal("table size overflow");
-                immutable cand = fixed + psumNext;
-                if (cand > tok.quotaLeft) break;
-                n = i + 1;
-                m = cast(uint) cm;
-                psum = psumNext;
-                ++i;
+
+                immutable unit = addChecked(psz, 1UL + oneMt,
+                    "table size overflow");
+                static if (hasLength!R)
+                {
+                    immutable available = cast(size_t) payloads.length;
+                    immutable maxFit = tok.quotaLeft > base
+                        ? (tok.quotaLeft - base) / unit : 0;
+                    n = available;
+                    if (cast(ulong) n > maxFit)
+                        n = cast(size_t) maxFit;
+                    if (n > uint.max) fatal("too many payloads in table");
+                    m = oneMt != 0 ? cast(uint) n : 0;
+                    psum = mulChecked(cast(ulong) n, psz,
+                        "payload sum overflow");
+                }
+                else
+                {
+                    auto scan = payloads.save;
+                    while (!scan.empty)
+                    {
+                        immutable nextN = cast(ulong) n + 1;
+                        immutable cand = addChecked(base,
+                            mulChecked(nextN, unit, "table size overflow"),
+                            "table size overflow");
+                        if (cand > tok.quotaLeft) break;
+                        ++n;
+                        scan.popFront();
+                    }
+                    if (n > uint.max) fatal("too many payloads in table");
+                    m = oneMt != 0 ? cast(uint) n : 0;
+                    psum = mulChecked(cast(ulong) n, psz,
+                        "payload sum overflow");
+                }
+            }
+            else
+            {
+                size_t i = 0;
+                auto scan = payloads.save;
+                foreach (ref pe; scan)
+                {
+                    static if (hasCommonPayloadHeader!R)
+                        auto hp = commonHeader;
+                    else
+                    {
+                        auto hp = pe.header;
+                        validatePayloadHeader(hp);
+                    }
+                    if (pe.body.length > ulong.max - PHEAD_LEN)
+                        fatal("payload size overflow");
+                    immutable psz = PHEAD_LEN + pe.body.length;
+                    immutable oneMt = hp.maxCs > 1 ? 1UL : 0UL;
+                    // A singleton that exceeds this tier can never be
+                    // published by this producer, so it is a contract error.
+                    immutable singletonBase = base + 1UL + oneMt;
+                    if (psz > ulong.max - singletonBase)
+                        fatal("table size overflow");
+                    if (singletonBase + psz > quota)
+                        fatal("payload larger than this producer tier's Exi");
+                    immutable cm = m + (hp.maxCs > 1 ? 1 : 0);
+                    immutable psumNext = addChecked(psum, psz,
+                        "payload sum overflow");
+                    immutable fixed = base + (cast(ulong) i + 1) + cm;
+                    if (fixed > ulong.max - psumNext)
+                        fatal("table size overflow");
+                    immutable cand = fixed + psumNext;
+                    if (cand > tok.quotaLeft) break;
+                    n = i + 1;
+                    m = cast(uint) cm;
+                    psum = psumNext;
+                    ++i;
+                }
             }
             if (n > 0) break;
             if (!refreshQuota(tok.quotaLeft, quota,
@@ -1208,53 +1466,40 @@ struct AntFarm
         storeRaw(w[6], avgCost); // chunk hint: chunk = MAX_CHUNK >> avgCost (spec 5e-g)
         storeRaw(w[7], 0);
 
-        // Tindex: total index first, MT index second. Plain adds: po is
-        // bounded by the table size, which the fit loop's overflow-checked
-        // psum already validated against exi (spec 4a's checked arithmetic
-        // ran there), so it cannot wrap here.
-        ulong po = payOff;
-        size_t i = 0;
-        foreach (ref pe; payloads)
-        {
-            if (i >= n) break;
-            storeRaw(w[THEAD_LEN + i], po);
-            po += PHEAD_LEN + pe.body.length;
-            ++i;
-        }
-        po = payOff;
-        size_t mi = THEAD_LEN + n;
-        i = 0;
-        foreach (ref pe; payloads)
-        {
-            if (i >= n) break;
-            immutable o = po;
-            po += PHEAD_LEN + pe.body.length;
-            if (pe.header.maxCs > 1)
-                storeRaw(w[mi++], o);
-            ++i;
-        }
-
         storeRaw(w[progOff], 0);                          // Tprogress
         storeRawRange(w + tcountOff, 8 * sq);             // Tcount shards
 
-        // Payloads. Header fields are stored as ring words, not as a
-        // PayloadHeader overlay: overlay field writes are plain stores.
-        po = payOff;
-        i = 0;
-        foreach (ref pe; payloads)
+        // Emit both index sections and payload storage in one checkpointed
+        // traversal. Header fields are ring words, not a PayloadHeader
+        // overlay: overlay field writes would be plain stores.
+        ulong po = payOff;
+        size_t mi = THEAD_LEN + n;
+        size_t i = 0;
+        auto emit = payloads.save;
+        while (i < n)
         {
-            if (i >= n) break;
+            auto pe = emit.front;
+            static if (hasCommonPayloadHeader!R)
+                auto hp = commonHeader;
+            else
+                auto hp = pe.header;
+
+            storeRaw(w[THEAD_LEN + i], po);
+            if (hp.maxCs > 1)
+                storeRaw(w[mi++], po);
+
             auto ph = w + po;
-            storeRaw(ph[0], cast(ulong) pe.header.maxCs | (cast(ulong) pe.header.done << 32));
+            storeRaw(ph[0], cast(ulong) hp.maxCs | (cast(ulong) hp.done << 32));
             storeRaw(ph[1], pe.body.length);
             storeRawRange(ph + 2, 6);
             storeRaw(ph[8], 0UL); // pcount
-            storeRaw(ph[9], cast(ulong) cast(void*) pe.header.call);
+            storeRaw(ph[9], cast(ulong) cast(void*) hp.call);
             storeRawRange(ph + 10, 6);
             foreach (k; 0 .. pe.body.length)
                 storeRaw(ph[PHEAD_LEN + k], pe.body[k]);
             po += PHEAD_LEN + pe.body.length;
             ++i;
+            emit.popFront();
         }
         storeRawRange(w + (size - END_PAD), END_PAD);
 

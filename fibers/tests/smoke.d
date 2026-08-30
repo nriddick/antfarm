@@ -1299,17 +1299,6 @@ void mixedPayloadSmoke()
         assert(task.outcome == FiberOutcome.completed);
 }
 
-shared ulong parallelHits;
-shared ulong parallelChecksum;
-
-void parallelGrain(ulong index, ulong count, void* context) nothrow @nogc @system
-{
-    auto hits = cast(shared(ulong)*) context;
-    atomicFetchAdd(*hits, count);
-    foreach (i; index .. index + count)
-        atomicFetchAdd(parallelChecksum, i + 1);
-}
-
 void drainUntil(FiberBackend backend, ref Token token, ref ConsumerView view,
                 size_t waitFor = 0)
 {
@@ -1326,49 +1315,6 @@ void drainUntil(FiberBackend backend, ref Token token, ref ConsumerView view,
         Thread.yield();
     }
     assert(false, "fiber drain stalled");
-}
-
-void parallelForSmoke()
-{
-    auto farm = AntFarm.create(1 << 18, 8, 2, 0, 0, 2, 4096,
-                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
-    auto token = farm.registerProducer(Tier.small);
-    scope (exit) farm.unregisterProducer(token);
-    ConsumerView view;
-    subscribeOrThrow(view, farm);
-    scope (exit) view.unsubscribe();
-
-    atomicStore(parallelHits, 0UL);
-    backend.spawn({
-        FiberDomain.parallelFor(0, 8, &parallelGrain, cast(void*) &parallelHits);
-    });
-    drainUntil(backend, token, view);
-    assert(atomicLoad(parallelHits) == 0);
-    backend.releaseAll(backend.takeCompletions());
-
-    enum length = 1000;
-    enum grain = 7;
-    atomicStore(parallelHits, 0UL);
-    atomicStore(parallelChecksum, 0UL);
-    auto task = backend.spawn({
-        FiberDomain.parallelFor(length, grain, &parallelGrain, cast(void*) &parallelHits);
-    });
-    drainUntil(backend, token, view);
-    assert(atomicLoad(parallelHits) == length);
-    assert(atomicLoad(parallelChecksum) == length * (length + 1) / 2);
-    assert(task.outcome == FiberOutcome.completed);
-    backend.releaseAll(backend.takeCompletions());
-
-    enum wide = 20_000;
-    atomicStore(parallelHits, 0UL);
-    backend.spawn({
-        FiberDomain.parallelFor(wide, 1, &parallelGrain, cast(void*) &parallelHits);
-    });
-    drainUntil(backend, token, view);
-    assert(atomicLoad(parallelHits) == wide);
-    backend.releaseAll(backend.takeCompletions());
 }
 
 void syncPrimitiveSmoke()
@@ -1819,7 +1765,6 @@ void main()
     migrationSmoke();
     wakePolicySmoke();
     mixedPayloadSmoke();
-    parallelForSmoke();
     syncPrimitiveSmoke();
     sharedSignalAndTimerCancellationSmoke();
     threadpoolSmoke();

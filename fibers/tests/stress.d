@@ -831,52 +831,6 @@ void syncPrimitiveStress()
     backend.releaseAll(backend.takeCompletions());
 }
 
-shared ulong parallelHits;
-
-void parallelGrain(ulong, ulong count, void* context) nothrow @nogc @system
-{
-    auto hits = cast(shared(ulong)*) context;
-    atomicFetchAdd(*hits, count);
-}
-
-void parallelForStress()
-{
-    enum fibers = 16;
-    enum length = 4096;
-    auto farm = AntFarm.create(1 << 19, 8, 2, 0, 0, 1, 16_384,
-                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
-    auto token = farm.registerProducer(Tier.small);
-    scope (exit) farm.unregisterProducer(token);
-    ConsumerView view;
-    subscribeOrThrow(view, farm);
-    scope (exit) view.unsubscribe();
-
-    atomicStore(parallelHits, 0UL);
-    foreach (_; 0 .. fibers)
-        backend.spawn({
-            FiberDomain.parallelFor(length, 16, &parallelGrain, cast(void*) &parallelHits);
-        });
-
-    auto spinStart = MonoTime.currTime;
-    ulong spins;
-    while (!backend.drained)
-    {
-        backend.flush(token);
-        if (!view.consumeNext())
-            Thread.yield();
-        ++spins;
-        if ((spins & 0x3FFF) == 0
-            && MonoTime.currTime - spinStart > seconds(8))
-            assert(false, "parallelForStress: drain stalled");
-    }
-    assert(atomicLoad(parallelHits) == fibers * length);
-    auto completed = backend.takeCompletions();
-    assert(completed.length == fibers);
-    backend.releaseAll(completed);
-}
-
 void main()
 {
     auto farm = AntFarm.create(1 << 19, 8, 4, 0, 0, 1, 16_384,
@@ -1003,6 +957,5 @@ void main()
     lifecycleRetentionStress();
     sharedDomainLaneStress();
     remoteSweeperStress();
-    parallelForStress();
     syncPrimitiveStress();
 }

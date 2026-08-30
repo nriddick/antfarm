@@ -22,22 +22,27 @@ configuration "stress" {
     mainSourceFile "tests/stress.d"
 }
 
+configuration "hello" {
+    targetType "executable"
+    mainSourceFile "examples/hello_fibers.d"
+}
+
 configuration "benchmark" {
     targetType "executable"
-    mainSourceFile "examples/benchmark.d"
+    mainSourceFile "benchmarks/benchmark.d"
 }
 
 configuration "benchmark_mt" {
     targetType "executable"
-    mainSourceFile "examples/benchmark_mt.d"
+    mainSourceFile "benchmarks/benchmark_mt.d"
 }
 
 configuration "benchmark_vs_druntime" {
     targetType "executable"
-    mainSourceFile "examples/benchmark_vs_druntime.d"
+    mainSourceFile "benchmarks/benchmark_vs_druntime.d"
 }
 
 configuration "benchmark_farm_embed" {
     targetType "executable"
-    mainSourceFile "examples/benchmark_farm_embed.d"
+    mainSourceFile "benchmarks/benchmark_farm_embed.d"
 }

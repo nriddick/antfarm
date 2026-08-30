@@ -602,15 +602,13 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
         state.lane.noteWake(FiberWakeEvent.lifecycle);
     if (state.lane.backend.fatal)
         throw state.lane.backend.fatalException;
-    immutable rangeCompletions = state.lane.collectRangeCompletions();
     size_t flushed;
     immutable ready = state.lane.ready;
     if (state.lane.flushBatch == 0)
         throw new Exception("antfarm_fibers: flushBatch must be greater than zero");
     // Accumulate while useful farm work is flowing. Flush a full batch, or a
     // short tail immediately before this worker would otherwise idle/cadence.
-    if (ready >= state.lane.flushBatch || (!consumed && ready != 0)
-        || state.lane.rangeReady != 0)
+    if (ready >= state.lane.flushBatch || (!consumed && ready != 0))
         flushed = state.lane.flush(
             state.producer, state.lane.flushBatch, state.lane.avgCost);
     if (flushed != 0)
@@ -623,11 +621,8 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
         {
             if (!consumed && remote.consumer.consumeNext())
                 consumed = true;
-            if (remote.lane.collectRangeCompletions() != 0)
-                remoteWork = true;
             immutable remoteReady = remote.lane.ready;
-            if (remoteReady >= state.lane.flushBatch || remoteReady != 0
-                || remote.lane.rangeReady != 0)
+            if (remoteReady >= state.lane.flushBatch || remoteReady != 0)
             {
                 immutable remoteFlushed = remote.lane.flush(
                     remote.producer, state.lane.flushBatch, state.lane.avgCost);
@@ -637,8 +632,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
                     remoteWork = true;
                 }
             }
-            if (remote.lane.ready != 0 || remote.lane.published != 0
-                || remote.lane.rangeReady != 0)
+            if (remote.lane.ready != 0 || remote.lane.published != 0)
                 remoteWork = true;
         }
     }
@@ -648,9 +642,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     // covered remote lane still has transport. Table size (flushBatch) bounds
     // a visit; do not skip the rest of a table with consumeQuantum.
     if (timersWoken != 0 || consumed || flushed != 0 || remoteWork
-        || rangeCompletions != 0
-        || state.lane.ready != 0 || state.lane.published != 0
-        || state.lane.rangeReady != 0)
+        || state.lane.ready != 0 || state.lane.published != 0)
         return ManagedPumpResult.again;
     long deadline;
     return state.responder

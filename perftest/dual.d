@@ -11,6 +11,12 @@
  +
  + Default: 4 dual threads, all small tier, batch=1 write followed by one
  + consumeNext call, 16-ulong bodies.
+ + `--grid N` sweeps the dual-thread count from 1 through N while holding
+ + the remaining configuration fixed.
+ + `--constant-header` uses the common-header write overload with the same
+ + bodies, batch cadence, and callback.
+ + `--constant-callandlength` additionally supplies the uniform body length,
+ + selecting arithmetic sizing without inspecting body fronts.
  +/
 module dual;
 
@@ -21,10 +27,18 @@ import core.thread;
 import core.time;
 import core.stdc.stdio;
 import core.stdc.stdlib : malloc, free, atoi, abort, strtoull;
+import core.stdc.math : sqrt;
 
 __gshared shared(long) g_calls;
 __gshared shared(int) g_stop;
 __gshared shared(int) g_ready;
+
+enum WriteMode : ubyte
+{
+    payloadEntry,
+    constantHeader,
+    constantCallAndLength,
+}
 
 // Per-worker batched counter, same idea as throughput.d: a single global
 // atomic would measure callback contention instead of Ant Farm overhead.
@@ -59,6 +73,12 @@ void flushLocalCalls() nothrow @nogc @system
     }
 }
 
+ulong singletonSize(uint body, uint sq)
+{
+    // THEAD + one index + pads/progress + Tcount + header/body + end pad.
+    return 8 + 1 + 7 + 1 + 7 + 8UL * sq + 16 + body + 7;
+}
+
 struct Cfg
 {
     ulong ln = 1UL << 21;
@@ -71,9 +91,11 @@ struct Cfg
     uint small = 64;
     ulong n = 4_000_000;
     uint repeats = 3;
+    uint grid;              // --grid N: sweep nd from 1 through N
     bool nSet;
     bool bulk;              // use bulk tier instead of small tier
     bool huge;              // --huge: MADV_HUGEPAGE on the magic-buffer mapping
+    WriteMode writeMode;
 }
 
 struct Trial
@@ -93,11 +115,15 @@ struct DualCtx
 {
     AntFarm* f;
     PayloadEntry* pool;
+    PayloadHeader* commonHeader;
+    PayloadBody* bodies;
     size_t poolN;
     size_t produce;         // this thread's production share
     uint batch;
     uint consume;
     uint avgCost;
+    uint bodyWords;
+    WriteMode writeMode;
     Tier tier;
     long expected;
     MonoTime deadline;
@@ -118,6 +144,19 @@ final class DualJob
 }
 
 void dualMain(DualCtx* c)
+{
+    final switch (c.writeMode)
+    {
+    case WriteMode.payloadEntry:
+        return dualMainImpl!(WriteMode.payloadEntry)(c);
+    case WriteMode.constantHeader:
+        return dualMainImpl!(WriteMode.constantHeader)(c);
+    case WriteMode.constantCallAndLength:
+        return dualMainImpl!(WriteMode.constantCallAndLength)(c);
+    }
+}
+
+private void dualMainImpl(WriteMode writeMode)(DualCtx* c)
 {
     *workerCalls() = 0;
     auto tok = c.f.registerProducer(c.tier);
@@ -158,7 +197,14 @@ void dualMain(DualCtx* c)
             immutable remain = c.produce - produced;
             immutable take = remain < c.batch ? remain : c.batch;
             immutable span = take < c.poolN ? take : c.poolN;
-            immutable wrote = c.f.write(c.pool[0 .. span], tok, c.avgCost);
+            static if (writeMode == WriteMode.constantHeader)
+                immutable wrote = c.f.write(*c.commonHeader,
+                    c.bodies[0 .. span], tok, c.avgCost);
+            else static if (writeMode == WriteMode.constantCallAndLength)
+                immutable wrote = c.f.write(*c.commonHeader,
+                    c.bodies[0 .. span], c.bodyWords, tok, c.avgCost);
+            else
+                immutable wrote = c.f.write(c.pool[0 .. span], tok, c.avgCost);
             produced += wrote;
             if (wrote == 0)
                 ++localStalls;
@@ -248,6 +294,12 @@ Trial runDual(Cfg c)
         t.err = "Exmax exceeds K-1 segments";
         return t;
     }
+    immutable quota = c.bulk ? qb : qs;
+    if (singletonSize(c.body, sqcsOf(c.nd)) > quota)
+    {
+        t.err = "payload exceeds tier quota";
+        return t;
+    }
 
     auto f = AntFarm.create(c.ln, c.k, c.nd, maxBulk, qb, maxSmall, qs, c.small, c.huge);
 
@@ -255,12 +307,14 @@ Trial runDual(Cfg c)
     auto headers = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);
     auto body = cast(ulong*) malloc(c.body * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(poolN * PayloadEntry.sizeof);
-    if (headers is null || body is null || entries is null)
+    auto bodies = cast(PayloadBody*) malloc(poolN * PayloadBody.sizeof);
+    if (headers is null || body is null || entries is null || bodies is null)
     {
         t.err = "alloc";
         if (headers) free(headers);
         if (body) free(body);
         if (entries) free(entries);
+        if (bodies) free(bodies);
         f.destroy();
         return t;
     }
@@ -275,6 +329,7 @@ Trial runDual(Cfg c)
     {
         entries[i].header = headers;
         entries[i].body = body[0 .. c.body];
+        bodies[i] = body[0 .. c.body];
     }
 
     auto ctxs = cast(DualCtx*) malloc(c.nd * DualCtx.sizeof);
@@ -284,6 +339,7 @@ Trial runDual(Cfg c)
         free(headers);
         free(body);
         free(entries);
+        free(bodies);
         f.destroy();
         return t;
     }
@@ -304,8 +360,9 @@ Trial runDual(Cfg c)
     {
         immutable remain = cast(size_t) c.n - cursor;
         immutable share = remain / (c.nd - i);
-        ctxs[i] = DualCtx(f, entries, poolN, share, c.batch, c.consume,
-                          c.avgCost, c.bulk ? Tier.bulk : Tier.small,
+        ctxs[i] = DualCtx(f, entries, headers, bodies, poolN, share,
+                          c.batch, c.consume, c.avgCost, c.body, c.writeMode,
+                          c.bulk ? Tier.bulk : Tier.small,
                           expected, deadline, &timedOut, c.nd, 0, 0);
         cursor += share;
     }
@@ -343,6 +400,7 @@ Trial runDual(Cfg c)
     free(headers);
     free(body);
     free(entries);
+    free(bodies);
     f.destroy();
 
     if (atomicLoad(timedOut))
@@ -365,6 +423,12 @@ Trial runDual(Cfg c)
 Trial runMedian(Cfg c)
 {
     Trial[8] rs;
+    if (c.repeats == 0 || c.repeats > rs.length)
+    {
+        rs[0].cfg = c;
+        rs[0].err = "repeats must be 1..8";
+        return rs[0];
+    }
     uint n;
     foreach (r; 0 .. c.repeats)
     {
@@ -419,6 +483,17 @@ Cfg parseArgs(string[] args, Cfg base)
             c.huge = true;
             continue;
         }
+        if (a == "--constant-header")
+        {
+            c.writeMode = WriteMode.constantHeader;
+            continue;
+        }
+        if (a == "--constant-callandlength" ||
+            a == "--constant-call-and-length")
+        {
+            c.writeMode = WriteMode.constantCallAndLength;
+            continue;
+        }
         if (i + 1 >= args.length)
             break;
         auto v = args[++i];
@@ -433,6 +508,7 @@ Cfg parseArgs(string[] args, Cfg base)
         else if (a == "--small") c.small = cast(uint) atoi(v.ptr);
         else if (a == "--tier") c.bulk = (v == "bulk");
         else if (a == "--repeats") c.repeats = cast(uint) atoi(v.ptr);
+        else if (a == "--grid") c.grid = cast(uint) atoi(v.ptr);
         else
             --i;
     }
@@ -453,10 +529,90 @@ void scaleN(ref Cfg c)
 void banner(ref const Cfg c)
 {
     immutable bytes = c.ln * 8.0 / (1024.0 * 1024.0);
-    printf("Ant Farm dual-role throughput  Ln=%llu (%.1f MiB)  repeats=%u  tier=%s  huge=%s\n",
+    printf("Ant Farm dual-role throughput  Ln=%llu (%.1f MiB)  repeats=%u  tier=%s  write=%s  huge=%s\n",
            cast(ulong) c.ln, bytes, c.repeats, c.bulk ? "bulk".ptr : "small".ptr,
+           c.writeMode == WriteMode.payloadEntry ? "payload-entry".ptr :
+               (c.writeMode == WriteMode.constantHeader ?
+                    "constant-header".ptr : "constant-callandlength".ptr),
            c.huge ? "yes".ptr : "no".ptr);
     fflush(stdout);
+}
+
+int runGrid(Cfg base, uint gridN)
+{
+    if (gridN == 0 || gridN > MAX_CONSUMERS_LIMIT)
+    {
+        fprintf(stderr, "grid must be in 1..%u\n", MAX_CONSUMERS_LIMIT);
+        return 1;
+    }
+
+    banner(base);
+    printf("\n== dual-thread grid nd 1..%u (body=%u batch=%u consume=%u tier=%s) ==\n",
+           gridN, base.body, base.batch, base.consume,
+           base.bulk ? "bulk".ptr : "small".ptr);
+    printHeader();
+
+    Trial[] results;
+    Trial best;
+    best.mpps = -1;
+
+    foreach (nd; 1 .. gridN + 1)
+    {
+        Cfg c = base;
+        c.nd = nd;
+        scaleN(c);
+        auto t = runMedian(c);
+        printRow(t);
+        fflush(stdout);
+        if (t.ok)
+        {
+            results ~= t;
+            if (t.mpps > best.mpps)
+                best = t;
+        }
+    }
+
+    if (results.length == 0)
+    {
+        printf("grid produced no successful runs\n");
+        return 1;
+    }
+
+    double sum = 0;
+    double sumSq = 0;
+    foreach (r; results)
+    {
+        sum += r.mpps;
+        sumSq += r.mpps * r.mpps;
+    }
+    immutable n = results.length;
+    immutable aggMean = sum / n;
+    double aggStddev = 0;
+    if (n > 1)
+    {
+        immutable variance = (sumSq - sum * sum / n) / (n - 1);
+        aggStddev = variance > 0 ? sqrt(variance) : 0;
+    }
+
+    double[] vals;
+    foreach (r; results)
+        vals ~= r.mpps;
+    foreach (i; 0 .. n)
+        foreach (j; i + 1 .. n)
+            if (vals[j] < vals[i])
+            {
+                auto tmp = vals[i];
+                vals[i] = vals[j];
+                vals[j] = tmp;
+            }
+    immutable aggMedian = vals[n / 2];
+
+    printf("\nbest dual-thread grid: nd=%u  %.3f Mpps  %.1f MiB/s\n",
+           best.cfg.nd, best.mpps, best.mibs);
+    printf("grid aggregate: %llu topologies  mean=%.3f Mpps  stddev=%.3f Mpps  median=%.3f Mpps\n",
+           cast(ulong) n, aggMean, aggStddev, aggMedian);
+    fflush(stdout);
+    return 0;
 }
 
 void main(string[] args)
@@ -464,6 +620,15 @@ void main(string[] args)
     Cfg base;
     base = parseArgs(args, base);
     scaleN(base);
+
+    if (base.grid > 0)
+    {
+        auto rc = runGrid(base, base.grid);
+        if (rc != 0)
+            abort();
+        return;
+    }
+
     banner(base);
     printHeader();
     auto t = runMedian(base);

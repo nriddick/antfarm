@@ -3,7 +3,7 @@
  + `home!FarmBin()` both publishes and drains a few payloads.
  +
  + From the threadpool directory:
- +   dmd -g -i examples/hello_antfarm.d ../antfarm/antfarm.d -Isource "-ofhello_antfarm.exe"
+ +   dmd -g -i examples/hello_antfarm.d ../antfarm.d -Isource "-ofhello_antfarm.exe"
  +/
 module hello_antfarm;
 

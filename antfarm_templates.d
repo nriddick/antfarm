@@ -40,10 +40,11 @@ module antfarm_templates;
 
 public import antfarm;
 import core.atomic;
-import core.stdc.string : memcpy;
+import core.stdc.string : memcpy, memset;
 import std.traits : Parameters, ReturnType, Unqual, fullyQualifiedName,
     hasUnsharedAliasing;
-import std.range.primitives : ElementType, isInputRange;
+import std.range.primitives : ElementType, empty, front, hasLength,
+    isForwardRange, isInputRange, popFront, popFrontN, save;
 import std.typecons : Tuple, tuple;
 
 /// Packed body length, in ulongs, of `fn`'s packed parameter list.
@@ -135,7 +136,8 @@ PayloadEntry payloadEntryRuntime(alias fn, bool withIteration = false, Args...)(
 
 /++
  + Adapts an input range of `fn`'s packed arguments into a payload-entry
- + input range for the payload-entry `write` overload. Each element becomes
+ + range. When the argument source is a forward range, the result preserves
+ + its checkpoints and can be passed to `write`. Each element becomes
  + one payload whose generated type-erased callback executes `fn` with that
  + element's parameters. The shared header and the packed body live inside
  + the range; `write` copies both into the ring before returning, so the
@@ -148,11 +150,12 @@ PayloadEntry payloadEntryRuntime(alias fn, bool withIteration = false, Args...)(
  +   - for a zero-parameter `fn`, the element is ignored (it only counts
  +     positions).
  +
- + The range advances only when its consumer pops it: `write` iterates its
- + own copies and returns how many payloads landed, so the producer pops
- + that many elements before the next `write` call.
+ + The range advances only when its consumer pops it: `write` uses saved
+ + checkpoints and returns how many payloads landed, so the producer pops
+ + that many elements before the next `write` call. Its common header and
+ + fixed packed width also select `write`'s uniform sizing path.
  +/
-struct PayloadArgRange(alias fn, uint maxCs, uint done, bool withIteration, AR)
+struct PayloadArgRangeImpl(alias fn, bool withIteration, AR)
     if (isInputRange!AR)
 {
     static assert(validSignature!(fn, withIteration),
@@ -162,11 +165,20 @@ struct PayloadArgRange(alias fn, uint maxCs, uint done, bool withIteration, AR)
     private PayloadHeader hdr;
     private ulong[packedLen!(fn, withIteration)] bodyBuf;
 
-    private this(AR a) nothrow @nogc @system
+    private this(AR a, uint maxCs, uint done) nothrow @nogc @system
     {
         args = a;
         initPayloadHeader!(fn, withIteration)(&hdr, maxCs, done);
     }
+
+    /// Uniform-layout protocol consumed by AntFarm.writeImpl. Every element
+    /// has the same generated header and compile-time packed body width.
+    @property PayloadHeader* commonPayloadHeader() nothrow @nogc @system
+    {
+        return &hdr;
+    }
+
+    enum ulong fixedPayloadLength = packedLen!(fn, withIteration);
 
     @property bool empty() nothrow @nogc @system { return args.empty; }
 
@@ -192,7 +204,35 @@ struct PayloadArgRange(alias fn, uint maxCs, uint done, bool withIteration, AR)
     }
 
     void popFront() nothrow @nogc @system { args.popFront(); }
+
+    static if (isForwardRange!AR)
+    {
+        @property typeof(this) save() nothrow @nogc @system
+        {
+            typeof(this) result = this;
+            result.args = args.save;
+            return result;
+        }
+    }
+
+    static if (hasLength!AR)
+    {
+        @property size_t length() nothrow @nogc @system
+        {
+            return cast(size_t) args.length;
+        }
+    }
+
+    size_t popFrontN(size_t n) nothrow @nogc @system
+    {
+        return args.popFrontN(n);
+    }
 }
+
+/// Backward-compatible explicit type spelling. Common metadata is now stored
+/// in the range instance, while this alias retains the original parameters.
+alias PayloadArgRange(alias fn, uint maxCs, uint done, bool withIteration, AR) =
+    PayloadArgRangeImpl!(fn, withIteration, AR);
 
 /// ditto
 PayloadArgRange!(fn, maxCs, done, withIteration, AR)
@@ -200,7 +240,17 @@ PayloadArgRange!(fn, maxCs, done, withIteration, AR)
                 bool withIteration = false, AR)(AR args) nothrow @nogc @system
 if (isInputRange!AR)
 {
-    return typeof(return)(args);
+    return typeof(return)(args, maxCs, done);
+}
+
+/// Runtime common-header variant. The callback and packed layout remain
+/// compile-time properties; `maxCs` and `done` are stored once in the range.
+PayloadArgRangeImpl!(fn, withIteration, AR)
+        payloadRange(alias fn, bool withIteration = false, AR)(
+                AR args, uint maxCs, uint done) nothrow @nogc @system
+if (isInputRange!AR)
+{
+    return typeof(return)(args, maxCs, done);
 }
 
 // ---------------------------------------------------------------------
@@ -323,7 +373,10 @@ private void packArgsImpl(alias fn, bool withIteration = false, size_t i = 0,
     {
         alias T = P[i];
         T arg = cast(T) args[i];
-        memcpy(&buf[paramOffset!(fn, i, withIteration)], cast(const void*) &arg, T.sizeof);
+        enum size_t off = paramOffset!(fn, i, withIteration);
+        enum size_t bytes = ((T.sizeof + 7) / 8) * ulong.sizeof;
+        memset(&buf[off], 0, bytes);
+        memcpy(&buf[off], cast(const void*) &arg, T.sizeof);
         packArgsImpl!(fn, withIteration, i + 1)(buf, args);
     }
 }

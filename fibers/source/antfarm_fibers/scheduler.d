@@ -1,9 +1,9 @@
 /++
- + Experimental druntime Fiber scheduling layer for Ant Farm.
+ + DRuntime Fiber scheduling layer for Ant Farm.
  +
  + Ant Farm is only the ready-work transport. Long waits live in `WaitSet`,
  + and newly-ready fibers collect in `PublishAccumulator` until a producer
- + flushes a useful table. No Phobos thread-pool package is required.
+ + flushes a useful table. No external thread-pool package is required.
  +/
 module antfarm_fibers.scheduler;
 
@@ -558,39 +558,8 @@ align(64) private struct FiberReadyLaneControl
 {
     shared long publishedCount;
     ubyte[56] publishedPadding;
-    shared size_t completedHeadWord;
-    shared long rangeQueued;
-    ubyte[48] rangePadding;
 }
-static assert(FiberReadyLaneControl.sizeof == 2 * cacheLineSize);
-
-/// @nogc grain body for a parallel range. `index` is the first element of the
-/// grain; `count` is its width (the last grain may be short). The callback
-/// runs on whatever worker claimed the iteration and must not yield, allocate,
-/// or throw. TLS used inside one grain is ordinary thread-local use; it must
-/// not be treated as part of the coordinating Fiber.
-alias ParallelGrain = void function(ulong index, ulong count, void* context)
-    nothrow @nogc @system;
-
-/// One countable MT range published onto a lane Farm. The object stays a
-/// domain root until every grain has completed, so a cancelled coordinator
-/// can unwind without freeing the descriptor under in-flight workers.
-final class ParallelRange
-{
-    PayloadHeader header;
-    ulong bodyWord;
-    ParallelGrain fn;
-    void* context;
-    ulong length;
-    ulong grain;
-    shared ulong outstanding;
-    FiberTask waiter;
-    ulong waiterGeneration;
-    Signal signal;
-    FiberReadyLane lane;
-    ParallelRange queueNext;
-    ParallelRange completedNext;
-}
+static assert(FiberReadyLaneControl.sizeof == cacheLineSize);
 
 /// A resumable unit. Fiber objects may migrate between worker threads while
 /// suspended, as permitted by druntime. Carrying TLS-derived state across a
@@ -606,7 +575,6 @@ final class FiberTask
     private FiberManagedJoinControl* managedJoinControl;
     package FiberBackend backend;
     package FiberReadyLane readyLane;
-    package ParallelRange parallelRange;
     package Fiber fiber;
     package Signal waitSignal;
     package shared(Throwable) failure;
@@ -1401,30 +1369,36 @@ final class PublishAccumulator
     }
 }
 
-/// Lazy PayloadEntry view over a detached snapshot of stolen tasks. The
-/// snapshot is a plain slice: write() may iterate it several times, and
-/// consume may resume a prefix while flush still holds the unpublished
-/// suffix — those two must not share `queueNext`.
-private struct TaskSnapshotRange
+/// Forward range of one-word bodies over a detached snapshot of stolen tasks.
+/// It is passed to Ant Farm's common-header/fixed-length write overload, so
+/// sizing is arithmetic and does not evaluate each task body.
+private struct TaskBodySnapshotRange
 {
-    private PayloadHeader* header;
     private FiberTask[] tasks;
-    private PayloadEntry scratch;
 
     @property bool empty() nothrow @nogc
     {
         return tasks.length == 0;
     }
 
-    @property ref PayloadEntry front() return nothrow @nogc
+    @property PayloadBody front() nothrow @nogc @system
     {
-        scratch = PayloadEntry(header, (&tasks[0].payloadWord)[0 .. 1]);
-        return scratch;
+        return (&tasks[0].payloadWord)[0 .. 1];
     }
 
     void popFront() nothrow @nogc
     {
         tasks = tasks[1 .. $];
+    }
+
+    @property TaskBodySnapshotRange save() nothrow @nogc @system
+    {
+        return this;
+    }
+
+    @property size_t length() const pure nothrow @nogc @safe
+    {
+        return tasks.length;
     }
 }
 
@@ -1490,9 +1464,6 @@ class FiberReadyLane
     private FiberReadyLaneControl* readyControl;
     private PublishAccumulator publishable;
     private PayloadHeader resumeHeader;
-    private Mutex rangeMutex;
-    private ParallelRange rangeHead;
-    private ParallelRange rangeTail;
     private enum snapshotCap = 256;
 
     this(AntFarm* farm)
@@ -1502,7 +1473,6 @@ class FiberReadyLane
         this.farm = farm;
         readyControl = allocateCacheLine!FiberReadyLaneControl();
         publishable = new PublishAccumulator;
-        rangeMutex = new Mutex;
         resumeHeader.maxCs = 1;
         resumeHeader.done = 1;
         resumeHeader.plen = 1;
@@ -1517,63 +1487,6 @@ class FiberReadyLane
         publishable.push(task);
     }
 
-    package void pushRange(ParallelRange range)
-    {
-        assert(range !is null && range.lane is this && range.queueNext is null);
-        synchronized (rangeMutex)
-        {
-            if (rangeTail is null)
-                rangeHead = range;
-            else
-                rangeTail.queueNext = range;
-            rangeTail = range;
-        }
-        atomicFetchAdd!(MemoryOrder.rel)(readyControl.rangeQueued, 1L);
-        noteExternalReady();
-    }
-
-    package void pushCompletedRange(ParallelRange range) nothrow @nogc
-    {
-        auto observed = atomicLoad!(MemoryOrder.acq)(
-            readyControl.completedHeadWord);
-        while (true)
-        {
-            range.completedNext = cast(ParallelRange) cast(void*) observed;
-            immutable replacement = cast(size_t) cast(void*) range;
-            if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
-                    &readyControl.completedHeadWord, observed, replacement))
-                return;
-            observed = atomicLoad!(MemoryOrder.acq)(
-                readyControl.completedHeadWord);
-        }
-    }
-
-    /// Wake coordinators whose MT ranges finished during Farm consumption.
-    /// Pump/control-side only: the grain callback is @nogc and only enqueues.
-    size_t collectRangeCompletions()
-    {
-        auto word = atomicExchange!(MemoryOrder.acq_rel)(
-            &readyControl.completedHeadWord, size_t.init);
-        size_t woken;
-        auto node = cast(ParallelRange) cast(void*) word;
-        while (node !is null)
-        {
-            auto range = node;
-            node = range.completedNext;
-            range.completedNext = null;
-            noteEntered();
-            if (range.waiter !is null
-                && range.waiter.generation == range.waiterGeneration)
-            {
-                range.waiter.parallelRange = null;
-            }
-            range.waiter = null;
-            woken += ownerDomain.wakeWaiters(range.signal);
-            ownerDomain.dropParallelRange(range);
-        }
-        return woken;
-    }
-
     /// Called when readiness originates outside the lane's current worker
     /// flow (signal, timer, cancellation, or a cross-lane join completion).
     /// Threadpool lanes override this to wake their own responder set.
@@ -1583,7 +1496,6 @@ class FiberReadyLane
     /// producer token for this lane's Farm.
     size_t flush(ref Token token, size_t maximum = 32, uint avgCost = 2)
     {
-        collectRangeCompletions();
         if (maximum > snapshotCap) maximum = snapshotCap;
         size_t written;
         auto chain = publishable.stealChain(maximum);
@@ -1601,8 +1513,9 @@ class FiberReadyLane
                     cast(shared(FiberTask)) null);
                 task = next;
             }
-            auto range = TaskSnapshotRange(&resumeHeader, nodes[0 .. n]);
-            written = cast(size_t) farm.write(range, token, avgCost);
+            auto bodies = TaskBodySnapshotRange(nodes[0 .. n]);
+            written = cast(size_t) farm.write(
+                resumeHeader, bodies, 1, token, avgCost);
             if (written < n)
             {
                 foreach (i; written .. n - 1)
@@ -1612,57 +1525,10 @@ class FiberReadyLane
             }
             if (written != 0) notePublished(written);
         }
-        written += flushRanges(token, maximum, avgCost);
-        return written;
-    }
-
-    private size_t flushRanges(ref Token token, size_t maximum, uint avgCost)
-    {
-        if (maximum == 0) return 0;
-        ParallelRange[snapshotCap] nodes = void;
-        size_t n;
-        synchronized (rangeMutex)
-        {
-            while (n < maximum && rangeHead !is null)
-            {
-                nodes[n] = rangeHead;
-                rangeHead = rangeHead.queueNext;
-                nodes[n].queueNext = null;
-                ++n;
-            }
-            if (rangeHead is null) rangeTail = null;
-        }
-        if (n == 0) return 0;
-        atomicFetchSub!(MemoryOrder.rel)(readyControl.rangeQueued, cast(long) n);
-        PayloadEntry[snapshotCap] entries = void;
-        foreach (i; 0 .. n)
-            entries[i] = PayloadEntry(&nodes[i].header,
-                (&nodes[i].bodyWord)[0 .. 1]);
-        immutable written = cast(size_t) farm.write(entries[0 .. n], token, avgCost);
-        if (written < n)
-        {
-            synchronized (rangeMutex)
-            {
-                foreach (i; written .. n - 1)
-                    nodes[i].queueNext = nodes[i + 1];
-                nodes[n - 1].queueNext = rangeHead;
-                rangeHead = nodes[written];
-                if (rangeTail is null) rangeTail = nodes[n - 1];
-            }
-            atomicFetchAdd!(MemoryOrder.rel)(
-                readyControl.rangeQueued, cast(long)(n - written));
-        }
-        if (written != 0) notePublished(written);
         return written;
     }
 
     @property size_t ready() nothrow @nogc { return publishable.length; }
-
-    @property size_t rangeReady() nothrow @nogc
-    {
-        immutable n = atomicLoad!(MemoryOrder.acq)(readyControl.rangeQueued);
-        return n < 0 ? 0 : cast(size_t) n;
-    }
 
     /// Activations written to this lane's Farm and not yet entered. A hole
     /// (`consumeNext` false) is not emptiness while this is nonzero.
@@ -1695,26 +1561,6 @@ class FiberReadyLane
         return 1;
     }
 
-    private static long parallelCallback(PayloadHeader*, PayloadBody body,
-        ulong iteration) nothrow @nogc @system
-    {
-        if (body.length != 1) return 0;
-        auto range = cast(ParallelRange) cast(void*) body[0];
-        immutable start = iteration * range.grain;
-        if (start < range.length)
-        {
-            immutable remaining = range.length - start;
-            immutable count = remaining < range.grain ? remaining : range.grain;
-            auto waiter = range.waiter;
-            if (waiter is null || !waiter.cancellationRequested)
-                range.fn(start, count, range.context);
-        }
-        immutable previous = atomicFetchSub!(MemoryOrder.acq_rel)(
-            range.outstanding, 1UL);
-        if (previous == 1)
-            range.lane.pushCompletedRange(range);
-        return 1;
-    }
 }
 
 
@@ -1747,7 +1593,6 @@ final class FiberDomain
     private bool backendRooted; // roots this owner while roots[] is nonempty
     private Mutex poolMutex;
     private FiberTask[size_t] pool; // stack size → freelist of terminated tasks
-    private ParallelRange[] parallelLive;
     private static FiberTask currentTask;
 
     @property private ref shared(int) accepting() const return nothrow @nogc
@@ -2087,7 +1932,6 @@ final class FiberDomain
                 atomicStore!(MemoryOrder.rel)(task.cancellationDispositionState,
                     cast(ubyte) CancellationDisposition.none);
                 task.readyLane = lane;
-                task.parallelRange = null;
                 if (lifecycleEventsEnabled) task.ensureLifecycleNodes();
                 if (task.fiber.state == Fiber.State.TERM)
                     task.fiber.reset(body);
@@ -2165,8 +2009,6 @@ final class FiberDomain
             && atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) == 0
             && !task.rootedFlag,
             "antfarm_fibers: drain completion and lifecycle events before release");
-        while (task.parallelRange !is null)
-            Thread.yield();
         synchronized (poolMutex)
         {
             assert(!task.pooledFlag, "antfarm_fibers: task released twice");
@@ -2275,82 +2117,6 @@ final class FiberDomain
         sleepUntil(MonoTime.currTime + duration);
     }
 
-    /// Publish a countable MT range on the current fiber's selected lane and
-    /// park until every grain has run. `grain` is a hint: a range that would
-    /// exceed Ant Farm's 512-iteration cap is automatically coarsened.
-    /// Nested parallelFor on one fiber is not part of this working set.
-    static void parallelFor(ulong length, ulong grain, ParallelGrain fn,
-                            void* context = null)
-    {
-        auto task = currentTask;
-        assert(task !is null && task.fiber is Fiber.getThis());
-        if (fn is null)
-            throw new Exception("antfarm_fibers: parallelFor requires a grain body");
-        if (task.cancellationRequested)
-            throw new FiberCancelled;
-        if (task.parallelRange !is null)
-            throw new Exception("antfarm_fibers: nested parallelFor is not supported");
-        if (length == 0) return;
-        if (grain == 0) grain = 1;
-        if (length <= grain)
-        {
-            fn(0, length, context);
-            if (task.cancellationRequested)
-                throw new FiberCancelled;
-            return;
-        }
-        ulong nGrains = (length + grain - 1) / grain;
-        if (nGrains > MAX_PAYLOAD_ITERS)
-        {
-            grain = (length + MAX_PAYLOAD_ITERS - 1) / MAX_PAYLOAD_ITERS;
-            if (grain == 0) grain = 1;
-            nGrains = (length + grain - 1) / grain;
-            if (nGrains > MAX_PAYLOAD_ITERS) nGrains = MAX_PAYLOAD_ITERS;
-        }
-        if (nGrains <= 1)
-        {
-            fn(0, length, context);
-            if (task.cancellationRequested)
-                throw new FiberCancelled;
-            return;
-        }
-
-        auto range = new ParallelRange;
-        range.fn = fn;
-        range.context = context;
-        range.length = length;
-        range.grain = grain;
-        range.waiter = task;
-        range.waiterGeneration = task.generation;
-        range.lane = task.readyLane;
-        range.bodyWord = cast(ulong) cast(void*) range;
-        atomicStore!(MemoryOrder.rel)(range.outstanding, nGrains);
-        range.header.maxCs = 2;
-        range.header.done = cast(uint) nGrains;
-        range.header.plen = 1;
-        range.header.call = &FiberReadyLane.parallelCallback;
-        range.signal = task.backend.allocateWaitKey();
-        task.waitSignal = range.signal;
-        task.parallelRange = range;
-        task.backend.retainParallelRange(range);
-        if (!task.backend.waits.insert(task, range.signal))
-        {
-            task.parallelRange = null;
-            task.backend.dropParallelRange(range);
-            throw new FiberCancelled;
-        }
-        task.readyLane.pushRange(range);
-        Fiber.yield();
-        if (task.cancellationRequested)
-            throw new FiberCancelled;
-    }
-
-    /// grain-size 1 overload.
-    static void parallelFor(ulong length, ParallelGrain fn, void* context = null)
-    {
-        parallelFor(length, 1, fn, context);
-    }
-
     static bool currentCancellationRequested() nothrow @nogc
     {
         auto task = currentTask;
@@ -2376,28 +2142,6 @@ final class FiberDomain
     {
         immutable seq = atomicFetchAdd(timerSequence, 1UL);
         return timerSignalBit | (seq & ~timerSignalBit);
-    }
-
-    package void retainParallelRange(ParallelRange range)
-    {
-        synchronized (rootsMutex)
-            parallelLive ~= range;
-    }
-
-    package void dropParallelRange(ParallelRange range)
-    {
-        synchronized (rootsMutex)
-        {
-            foreach (i, live; parallelLive)
-            {
-                if (live is range)
-                {
-                    parallelLive[i] = parallelLive[$ - 1];
-                    parallelLive.length = parallelLive.length - 1;
-                    return;
-                }
-            }
-        }
     }
 
     package size_t wakeWaiters(Signal signal)
@@ -2692,13 +2436,6 @@ final class FiberDomain
     {
         size_t total;
         foreach (lane; readyLanes) total += lane.ready;
-        return total;
-    }
-
-    @property size_t rangeReady() nothrow @nogc
-    {
-        size_t total;
-        foreach (lane; readyLanes) total += lane.rangeReady;
         return total;
     }
 

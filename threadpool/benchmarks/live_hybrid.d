@@ -1,9 +1,9 @@
 /++
- + Pin Ant Farm consumers using threadpool topology on this hybrid CPU.
- + P-only vs P+E, one 16 MiB farm (fits the 24 MiB L3).
+ + Characterization benchmark: pin Ant Farm consumers using threadpool
+ + topology and compare the performance-core set with all physical cores.
  +
  + From the threadpool directory:
- +   dmd -g -i examples/live_hybrid.d ../antfarm/antfarm.d ../antfarm/antfarm_templates.d -Isource "-oflive_hybrid.exe"
+ +   dmd -g -i benchmarks/live_hybrid.d ../antfarm.d ../antfarm_templates.d -Isource "-oflive_hybrid.exe"
  +/
 module live_hybrid;
 

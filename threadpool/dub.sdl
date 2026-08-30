@@ -16,13 +16,12 @@ configuration "library" {
 	targetType "library"
 }
 
-// Default `dub test`: injects -unittest + a generated main.
-// topology_parse.d must contain unittest blocks only — no `main`.
+// Default `dub test`: topology_parse.d contains unittest blocks only.
 configuration "unittest" {
 	targetType "executable"
+	mainSourceFile "tests/unittest_main.d"
 	sourceFiles "tests/topology_parse.d" "tests/linux_topology_parse.d"
 	stringImportPaths "tests"
-	dflags "-main"
 }
 
 configuration "hello" {
