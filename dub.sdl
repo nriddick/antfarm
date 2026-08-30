@@ -4,7 +4,7 @@ authors "Nathan Riddick"
 license "BSL-1.0"
 targetType "library"
 importPaths "."
-sourceFiles "antfarm.d" "antfarm_templates.d"
+sourceFiles "antfarm.d" "antfarm_allocation.d" "antfarm_templates.d"
 
 toolchainRequirements {
 	dmd ">=2.112.0"

@@ -1,4 +1,4 @@
-# Ant Farm 1.6
+# Ant Farm 1.6.1
 
 Ant Farm is a fixed-memory M:N job distributor for D. Producers publish
 tables of work into a shared ring; any subscribed consumer may claim them.

@@ -1,8 +1,8 @@
 module antfarm_fibers.cacheline;
 
 import core.exception : onOutOfMemoryError;
-import core.stdc.stdlib : aligned_alloc, free;
 import core.stdc.string : memset;
+import antfarm_allocation : allocateAligned64, freeAligned64;
 
 package enum cacheLineSize = 64;
 
@@ -13,7 +13,7 @@ package T* allocateCacheLine(T)() nothrow @nogc
 {
     static assert(T.alignof == cacheLineSize);
     static assert(T.sizeof % cacheLineSize == 0);
-    auto memory = aligned_alloc(cacheLineSize, T.sizeof);
+    auto memory = allocateAligned64(T.sizeof);
     if (memory is null) onOutOfMemoryError();
     memset(memory, 0, T.sizeof);
     return cast(T*) memory;
@@ -21,5 +21,5 @@ package T* allocateCacheLine(T)() nothrow @nogc
 
 package void freeCacheLine(T)(T* control) nothrow @nogc
 {
-    free(control);
+    freeAligned64(control);
 }

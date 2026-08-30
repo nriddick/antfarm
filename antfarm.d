@@ -22,15 +22,12 @@ module antfarm;
 
 import core.atomic;
 import core.stdc.stdio : fprintf, stderr, snprintf;
-import core.stdc.stdlib : abort, malloc, free, getenv;
+import core.stdc.stdlib : abort, free, getenv;
 import core.stdc.string : memset;
+import antfarm_allocation : allocateAligned64, freeAligned64;
 import std.range.primitives : ElementType, empty, front, hasLength,
     isForwardRange, isInputRange, popFront, popFrontN, save;
 import std.traits : Unqual;
-
-version (CRuntime_Microsoft) {}
-else
-    import core.stdc.stdlib : aligned_alloc;
 
 version (Windows)
 {
@@ -205,27 +202,12 @@ version (Windows)
 
 private void* afAlignedAlloc(size_t bytes) nothrow @nogc @system
 {
-    immutable n = (bytes + 63) & ~cast(size_t) 63;
-    version (CRuntime_Microsoft)
-    {
-        // malloc + prefix: avoid _aligned_malloc dllimport on the DMD link line.
-        auto raw = malloc(n + 64 + (void*).sizeof);
-        if (raw is null) return null;
-        auto a = (cast(size_t) raw + (void*).sizeof + 63) & ~cast(size_t) 63;
-        (cast(void**) a)[-1] = raw;
-        return cast(void*) a;
-    }
-    else
-        return aligned_alloc(64, n);
+    return allocateAligned64(bytes);
 }
 
 private void afAlignedFree(void* p) nothrow @nogc @system
 {
-    if (p is null) return;
-    version (CRuntime_Microsoft)
-        free((cast(void**) p)[-1]);
-    else
-        free(p);
+    freeAligned64(p);
 }
 
 /// `ANTFARM_HUGE_PAGES=0` forces 4K; `=1` forces huge pages. Unset keeps `requested`.

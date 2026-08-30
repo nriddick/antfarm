@@ -1,5 +1,21 @@
 # Ant Farm roadmap
 
+## 1.6.1 Windows integration
+
+Patch the Fiber cache-line allocator to use the same Microsoft CRT-safe
+64-byte allocation path as the core Farm. The shared allocator avoids a C11
+`aligned_alloc` import that is unavailable in DMD's Microsoft runtime bindings
+and keeps allocation and deallocation paired on every supported platform.
+
+Verified on 2026-08-30 on Windows x64:
+
+- [x] Root, threadpool, and Fiber unit tests pass under DMD 2.112.1 and LDC
+  1.42.0.
+- [x] The Fiber LDC release stress configuration passes.
+- [x] The review torture and T19 flood/lap suites pass under DMD and LDC.
+- [x] T01 and T17 remain POSIX-only fork/abort probes; ThreadSanitizer remains
+  unavailable in the Windows LDC runtime (`Scoped EH not supported`).
+
 ## 1.6.0 objective
 
 Ship the unified Ant Farm, cache-aware threadpool, and freely migrating Fiber
