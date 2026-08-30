@@ -23,6 +23,14 @@ review_torture/t19
 review_torture/t19_tsan
 review_torture/t19_dmd
 review_torture/last_run.log
+actor_torture/actor_torture
+actor_torture/actor_torture_tsan
+actor_torture/actor_torture_dmd
+actor_torture/actor_torture_mimalloc
+actor_torture/actor_torture_mimalloc_dmd
+actor_torture/actor_torture_mimalloc_debug
+actor_torture/actor_torture_mimalloc_tsan
+actor_torture/.build/
 perftest/throughput
 perftest/digest
 perftest/tail

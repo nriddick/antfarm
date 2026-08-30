@@ -4,7 +4,7 @@ authors "Nathan Riddick"
 license "BSL-1.0"
 targetType "library"
 importPaths "."
-sourceFiles "antfarm.d" "antfarm_allocation.d" "antfarm_templates.d"
+sourceFiles "antfarm.d" "antfarm_allocation.d" "antfarm_templates.d" "antfarm_actor.d" "antfarm_actor_mimalloc.d"
 
 toolchainRequirements {
 	dmd ">=2.112.0"
@@ -21,4 +21,10 @@ configuration "library" {
 configuration "unittest" {
 	targetType "executable"
 	mainSourceFile "antfarm_test.d"
+}
+
+configuration "mimalloc-v3" {
+	targetType "library"
+	versions "AntfarmMimallocV3"
+	libs "mimalloc"
 }

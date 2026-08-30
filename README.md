@@ -29,6 +29,25 @@ ANTFARM_HUGE_PAGES=0 dub test --compiler=ldc2
 
 Ordinary 4 KiB backing is the default. The environment override makes that
 choice explicit for tests even if the calling shell is configured otherwise.
+The experimental actor payload has a separate deterministic-interleaving and
+sustained-contention suite:
+
+```text
+make -C actor_torture run
+make -C actor_torture run-dmd
+make -C actor_torture run-tsan
+```
+
+Its optional mimalloc v3 adapter is documented in
+[ACTOR_ROADMAP.md](ACTOR_ROADMAP.md); ordinary builds retain the C-runtime
+default and do not link mimalloc. The real allocator lane uses the pinned
+submodule:
+
+```text
+git submodule update --init --recursive
+make -C actor_torture run-mimalloc
+make -C actor_torture run-mimalloc-debug
+```
 
 ## First payload
 

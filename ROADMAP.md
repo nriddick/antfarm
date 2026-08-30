@@ -73,7 +73,11 @@ Verified on 2026-08-29 on the current Linux/Ryzen 5 5500 host:
   ring bodies mutable or weakening the default shim policy. Its design must
   define actor lifetime and rooting, one-activation serial ownership,
   republish ordering, stale-handle behavior, and interaction with thread-safe
-  mailboxes.
+  mailboxes. A non-GC A1/A2 evaluation spike now covers the exclusive borrow,
+  intrusive inbox admission, close-before-drain retirement, deterministic
+  interleaving torture, and a pinned mimalloc v3.5.0 adapter with cross-thread
+  reclamation tests; its remaining
+  promotion gates are in [ACTOR_ROADMAP.md](ACTOR_ROADMAP.md).
 - Reconsider bounded parallel work from first principles, with explicit
   lifetime, completion, cancellation, error, and allocation contracts.
 

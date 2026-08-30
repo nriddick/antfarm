@@ -4,11 +4,15 @@
 module antfarm_test;
 
 import antfarm_templates;
+import antfarm_actor;
+import antfarm_allocation : allocateAligned64, freeAligned64;
 import core.atomic;
+import core.memory : GC;
 import core.thread;
 import core.time;
 import core.stdc.stdio;
 import core.stdc.stdio : fflush, stdout;
+import core.stdc.string : memset;
 import std.range : hasLength, iota, isForwardRange, isInputRange, popFrontN;
 import std.typecons : Tuple, tuple;
 import core.stdc.stdlib : malloc, free;
@@ -23,6 +27,104 @@ __gshared shared(long)* g_calls;   // per-payload call counts
 __gshared size_t g_npayloads;
 __gshared shared(long) g_totalCalls;
 __gshared ulong* g_keepalive;      // keeps GC away (we malloc instead)
+
+struct ActorAllocCounts
+{
+    size_t allocations;
+    size_t deallocations;
+}
+
+void* actorTestAllocate(void* context, size_t bytes, size_t alignment)
+    nothrow @nogc @system
+{
+    if (alignment > 64) return null;
+    auto counts = cast(ActorAllocCounts*) context;
+    ++counts.allocations;
+    return allocateAligned64(bytes);
+}
+
+void actorTestDeallocate(void* context, void* memory, size_t, size_t)
+    nothrow @nogc @system
+{
+    auto counts = cast(ActorAllocCounts*) context;
+    ++counts.deallocations;
+    freeAligned64(memory);
+}
+
+struct ActorCounterState
+{
+    ulong mutations;
+    ulong target;
+}
+
+__gshared shared(long) g_actorEntries;
+__gshared shared(long) g_actorConcurrent;
+__gshared shared(long) g_actorCalls;
+
+void actorCounter(ref ActorBorrow!ActorCounterState actor,
+        ref ActorContext context) nothrow @nogc @system
+{
+    immutable entered = atomicFetchAdd!(MemoryOrder.acq_rel)(
+        g_actorEntries, 1L);
+    if (entered != 0)
+        atomicFetchAdd!(MemoryOrder.rel)(g_actorConcurrent, 1L);
+
+    atomicFetchAdd!(MemoryOrder.rel)(g_actorCalls, 1L);
+    ++actor.value.mutations;
+    immutable finished = actor.value.mutations == actor.value.target;
+
+    atomicFetchSub!(MemoryOrder.rel)(g_actorEntries, 1L);
+    if (finished)
+        context.retire();
+    else
+        context.republish();
+}
+
+struct ActorInboxState
+{
+    ulong consumed;
+    ulong sum;
+}
+
+struct ActorInboxMessage
+{
+    ActorInboxNode node;
+    ulong value;
+}
+
+__gshared shared(long) g_inboxEntries;
+__gshared shared(long) g_inboxConcurrent;
+__gshared shared(long) g_inboxActivations;
+__gshared shared(long) g_inboxConsumed;
+__gshared shared(ulong) g_inboxSum;
+__gshared shared(long) g_inboxAccepted;
+__gshared shared(long) g_inboxClosed;
+__gshared shared(long) g_inboxUnexpected;
+
+void inboxActor(ref ActorBorrow!ActorInboxState actor,
+        ref ActorContext context) nothrow @nogc @system
+{
+    enum drainLimit = 7;
+    immutable entered = atomicFetchAdd!(MemoryOrder.acq_rel)(
+        g_inboxEntries, 1L);
+    if (entered != 0)
+        atomicFetchAdd!(MemoryOrder.rel)(g_inboxConcurrent, 1L);
+    atomicFetchAdd!(MemoryOrder.rel)(g_inboxActivations, 1L);
+
+    foreach (_; 0 .. drainLimit)
+    {
+        auto node = context.popInbox();
+        if (node is null) break;
+        auto message = cast(ActorInboxMessage*) node.payload;
+        ++actor.value.consumed;
+        actor.value.sum += message.value;
+        atomicFetchAdd!(MemoryOrder.rel)(g_inboxConsumed, 1L);
+        atomicFetchAdd!(MemoryOrder.rel)(g_inboxSum, message.value);
+        node.complete();
+    }
+
+    atomicFetchSub!(MemoryOrder.rel)(g_inboxEntries, 1L);
+}
 
 private long incCalls(size_t idx) nothrow @nogc @system
 {
@@ -1088,6 +1190,425 @@ void testMultiSmallProducers()
     printf("testMultiSmallProducers OK\n"); fflush(stdout);
 }
 
+// ---------------------------------------------------------------------
+// Experimental actor payload: non-GC storage, serial mutation, retirement
+// ---------------------------------------------------------------------
+
+class ActorConsumerJob
+{
+    AntFarm* farm;
+    shared int* stop;
+    MonoTime deadline;
+
+    this(AntFarm* actorFarm, shared int* stopFlag, MonoTime limit)
+    {
+        farm = actorFarm;
+        stop = stopFlag;
+        deadline = limit;
+    }
+
+    void run()
+    {
+        ConsumerView view;
+        if (view.subscribe(farm) < 0)
+            fatal("actor consumer subscribe failed");
+        while (atomicLoad!(MemoryOrder.acq)(*stop) == 0)
+        {
+            if (!view.consumeNext())
+            {
+                if (MonoTime.currTime >= deadline)
+                    fatal("actor consumer timeout");
+                Thread.yield();
+            }
+        }
+        while (view.consumeNext()) {}
+        view.unsubscribe();
+    }
+}
+
+class ActorInboxProducerJob
+{
+    ActorHandle!ActorInboxState handle;
+    ActorInboxMessage* messages;
+    size_t acceptedCount;
+    size_t closedCount;
+    shared long* ready;
+    shared int* releaseClosedPhase;
+
+    this(ActorHandle!ActorInboxState actorHandle,
+            ActorInboxMessage* first, size_t accepted,
+            size_t closed, shared long* readyCount,
+            shared int* releaseFlag)
+    {
+        handle = actorHandle;
+        messages = first;
+        acceptedCount = accepted;
+        closedCount = closed;
+        ready = readyCount;
+        releaseClosedPhase = releaseFlag;
+    }
+
+    void run()
+    {
+        foreach (i; 0 .. acceptedCount)
+        {
+            immutable result = handle.send(&messages[i].node);
+            if (result == ActorSendResult.queued
+                    || result == ActorSendResult.coalesced)
+                atomicFetchAdd!(MemoryOrder.rel)(g_inboxAccepted, 1L);
+            else
+                atomicFetchAdd!(MemoryOrder.rel)(g_inboxUnexpected, 1L);
+        }
+
+        atomicFetchAdd!(MemoryOrder.rel)(*ready, 1L);
+        while (atomicLoad!(MemoryOrder.acq)(*releaseClosedPhase) == 0)
+            Thread.yield();
+
+        foreach (i; acceptedCount .. acceptedCount + closedCount)
+        {
+            immutable result = handle.send(&messages[i].node);
+            if (result == ActorSendResult.closed)
+                atomicFetchAdd!(MemoryOrder.rel)(g_inboxClosed, 1L);
+            else
+                atomicFetchAdd!(MemoryOrder.rel)(g_inboxUnexpected, 1L);
+        }
+    }
+}
+
+void testActorPayload()
+{
+    enum consumerCount = 4;
+    enum target = 500;
+    auto farm = AntFarm.create(1 << 18, 8, consumerCount,
+        0, 0, 1, 4096);
+    scope (exit) farm.destroy();
+
+    ActorAllocCounts counts;
+    auto allocator = ActorAllocator(&counts,
+        &actorTestAllocate, &actorTestDeallocate);
+    auto actors = ActorRuntime.create(farm, 1, allocator);
+    check(actors !is null, "actor runtime allocation");
+
+    atomicStore!(MemoryOrder.raw)(g_actorEntries, 0L);
+    atomicStore!(MemoryOrder.raw)(g_actorConcurrent, 0L);
+    atomicStore!(MemoryOrder.raw)(g_actorCalls, 0L);
+    auto owner = actors.createActor!(ActorCounterState, actorCounter)(
+        ActorCounterState(0, target));
+    check(owner.valid, "actor creation");
+    auto exhausted = actors.createActor!(ActorCounterState, actorCounter)(
+        ActorCounterState(0, 1));
+    check(!exhausted.valid, "actor capacity exhaustion is explicit");
+    auto oldHandle = owner.handle;
+    immutable warmAllocations = counts.allocations;
+    check(oldHandle.wake() == ActorWakeResult.queued,
+        "first actor wake queues");
+
+    shared int stop;
+    auto deadline = MonoTime.currTime + 30.seconds;
+    ActorConsumerJob[consumerCount] consumerJobs;
+    Thread[consumerCount] consumers;
+    foreach (i; 0 .. consumerCount)
+    {
+        consumerJobs[i] = new ActorConsumerJob(farm, &stop, deadline);
+        consumers[i] = new Thread(&consumerJobs[i].run);
+        consumers[i].start();
+    }
+
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "actor producer registration");
+    GC.disable();
+    while (!owner.retired)
+    {
+        actors.flush(token, 32, 2);
+        // Exercise coalescing while the actor is already queued or running.
+        immutable wakeResult = oldHandle.wake();
+        check(wakeResult == ActorWakeResult.coalesced
+                || wakeResult == ActorWakeResult.closed,
+            "actor repeated wake coalesces");
+        if (MonoTime.currTime >= deadline)
+            fatal("actor retirement timeout");
+        Thread.yield();
+    }
+    GC.enable();
+    atomicStore!(MemoryOrder.rel)(stop, 1);
+    foreach (thread; consumers) thread.join();
+    farm.unregisterProducer(token);
+
+    check(atomicLoad!(MemoryOrder.acq)(g_actorEntries) == 0,
+        "actor entry counter drained");
+    check(atomicLoad!(MemoryOrder.acq)(g_actorConcurrent) == 0,
+        "one exclusive actor borrow at a time");
+    check(atomicLoad!(MemoryOrder.acq)(g_actorCalls) == target,
+        "actor external state mutated exactly once per activation");
+    check(counts.allocations == warmAllocations,
+        "actor warm path performs no allocator calls");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed,
+        "actor explicit reclamation");
+    check(oldHandle.wake() == ActorWakeResult.staleHandle,
+        "reclaimed actor handle is stale");
+
+    // Reuse the stable slot and prove the old generation cannot affect it.
+    auto replacement = actors.createActor!(ActorCounterState, actorCounter)(
+        ActorCounterState(0, 1));
+    check(replacement.valid, "actor slot reuse");
+    auto replacementHandle = replacement.handle;
+    check(replacementHandle.generation != oldHandle.generation,
+        "actor generation advances on reuse");
+    check(oldHandle.wake() == ActorWakeResult.staleHandle,
+        "old actor generation stays stale after reuse");
+
+    ConsumerView replacementView;
+    check(replacementView.subscribe(farm) >= 0,
+        "replacement actor consumer subscribe");
+    token = farm.registerProducer(Tier.small);
+    check(replacementHandle.wake() == ActorWakeResult.queued,
+        "replacement actor wake");
+    while (!replacement.retired)
+    {
+        actors.flush(token);
+        while (replacementView.consumeNext()) {}
+    }
+    replacementView.unsubscribe();
+    farm.unregisterProducer(token);
+    check(replacement.reclaim() == ActorReclaimResult.reclaimed,
+        "replacement actor reclamation");
+
+    // Retirement of a scheduled actor closes it without entering user code.
+    auto closed = actors.createActor!(ActorCounterState, actorCounter)(
+        ActorCounterState(0, 10));
+    auto closedHandle = closed.handle;
+    immutable callsBeforeClose = atomicLoad!(MemoryOrder.acq)(g_actorCalls);
+    check(closedHandle.wake() == ActorWakeResult.queued,
+        "scheduled actor before close");
+    check(closed.requestRetire() == ActorRetireResult.requested,
+        "scheduled actor retirement requested");
+    ConsumerView closedView;
+    check(closedView.subscribe(farm) >= 0,
+        "closed actor consumer subscribe");
+    token = farm.registerProducer(Tier.small);
+    while (!closed.retired)
+    {
+        actors.flush(token);
+        while (closedView.consumeNext()) {}
+    }
+    closedView.unsubscribe();
+    farm.unregisterProducer(token);
+    check(atomicLoad!(MemoryOrder.acq)(g_actorCalls) == callsBeforeClose,
+        "closed scheduled actor does not enter user code");
+    check(closed.reclaim() == ActorReclaimResult.reclaimed,
+        "closed actor reclamation");
+
+    // An idle actor retires synchronously because no activation owns it.
+    auto idle = actors.createActor!(ActorCounterState, actorCounter)(
+        ActorCounterState(0, 1));
+    check(idle.requestRetire() == ActorRetireResult.requested
+            && idle.retired,
+        "idle actor retirement");
+    check(idle.reclaim() == ActorReclaimResult.reclaimed,
+        "idle actor reclamation");
+    check(actors.live == 0 && actors.ready == 0,
+        "actor runtime drained");
+    actors.destroy();
+    check(counts.allocations == counts.deallocations,
+        "actor allocator pairing");
+
+    printf("testActorPayload OK\n"); fflush(stdout);
+}
+
+void testActorInbox()
+{
+    enum consumerCount = 4;
+    enum producerCount = 4;
+    enum acceptedPerProducer = 256;
+    enum closedPerProducer = 128;
+    enum messagesPerProducer = acceptedPerProducer + closedPerProducer;
+    enum messageCount = producerCount * messagesPerProducer;
+
+    auto farm = AntFarm.create(1 << 18, 8, consumerCount,
+        0, 0, 1, 4096);
+    scope (exit) farm.destroy();
+
+    ActorAllocCounts counts;
+    auto allocator = ActorAllocator(&counts,
+        &actorTestAllocate, &actorTestDeallocate);
+    auto actors = ActorRuntime.create(farm, 1, allocator);
+    check(actors !is null, "inbox actor runtime allocation");
+    auto owner = actors.createActor!(ActorInboxState, inboxActor)(
+        ActorInboxState.init);
+    check(owner.valid, "inbox actor creation");
+    auto handle = owner.handle;
+    immutable warmAllocations = counts.allocations;
+
+    auto messages = cast(ActorInboxMessage*) malloc(
+        messageCount * ActorInboxMessage.sizeof);
+    check(messages !is null, "inbox message allocation");
+    scope (exit) free(messages);
+    memset(messages, 0, messageCount * ActorInboxMessage.sizeof);
+    ulong expectedSum;
+    foreach (producer; 0 .. producerCount)
+    {
+        foreach (i; 0 .. messagesPerProducer)
+        {
+            immutable index = producer * messagesPerProducer + i;
+            messages[index].value = index + 1;
+            messages[index].node.initialize(&messages[index], index);
+            if (i < acceptedPerProducer)
+                expectedSum += messages[index].value;
+        }
+    }
+
+    atomicStore!(MemoryOrder.raw)(g_inboxEntries, 0L);
+    atomicStore!(MemoryOrder.raw)(g_inboxConcurrent, 0L);
+    atomicStore!(MemoryOrder.raw)(g_inboxActivations, 0L);
+    atomicStore!(MemoryOrder.raw)(g_inboxConsumed, 0L);
+    atomicStore!(MemoryOrder.raw)(g_inboxSum, 0UL);
+    atomicStore!(MemoryOrder.raw)(g_inboxAccepted, 0L);
+    atomicStore!(MemoryOrder.raw)(g_inboxClosed, 0L);
+    atomicStore!(MemoryOrder.raw)(g_inboxUnexpected, 0L);
+
+    ActorInboxMessage busyProbe;
+    busyProbe.value = messageCount + 1;
+    busyProbe.node.initialize(&busyProbe, messageCount);
+    immutable probeResult = handle.send(&busyProbe.node);
+    check(probeResult == ActorSendResult.queued
+            || probeResult == ActorSendResult.coalesced,
+        "first inbox node submission accepted");
+    atomicFetchAdd!(MemoryOrder.rel)(g_inboxAccepted, 1L);
+    expectedSum += busyProbe.value;
+    check(handle.send(&busyProbe.node) == ActorSendResult.nodeBusy,
+        "owned inbox node cannot be submitted twice");
+
+    shared int stopConsumers;
+    shared int releaseClosedPhase;
+    shared long producersReady;
+    auto deadline = MonoTime.currTime + 30.seconds;
+    ActorConsumerJob[consumerCount] consumerJobs;
+    Thread[consumerCount] consumers;
+    foreach (i; 0 .. consumerCount)
+    {
+        consumerJobs[i] = new ActorConsumerJob(
+            farm, &stopConsumers, deadline);
+        consumers[i] = new Thread(&consumerJobs[i].run);
+    }
+    ActorInboxProducerJob[producerCount] producerJobs;
+    Thread[producerCount] producers;
+    foreach (i; 0 .. producerCount)
+    {
+        producerJobs[i] = new ActorInboxProducerJob(handle,
+            messages + i * messagesPerProducer,
+            acceptedPerProducer, closedPerProducer,
+            &producersReady, &releaseClosedPhase);
+        producers[i] = new Thread(&producerJobs[i].run);
+    }
+
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "inbox producer registration");
+    foreach (thread; consumers) thread.start();
+    foreach (thread; producers) thread.start();
+
+    GC.disable();
+    while (atomicLoad!(MemoryOrder.acq)(producersReady) != producerCount)
+    {
+        actors.flush(token, 32, 2);
+        if (MonoTime.currTime >= deadline)
+            fatal("actor inbox producer timeout");
+        Thread.yield();
+    }
+
+    check(owner.requestRetire() == ActorRetireResult.requested,
+        "inbox actor retirement closes admission");
+    atomicStore!(MemoryOrder.rel)(releaseClosedPhase, 1);
+    while (!owner.retired)
+    {
+        actors.flush(token, 32, 2);
+        if (MonoTime.currTime >= deadline)
+            fatal("actor inbox retirement timeout");
+        Thread.yield();
+    }
+    GC.enable();
+
+    foreach (thread; producers) thread.join();
+    atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
+    foreach (thread; consumers) thread.join();
+    farm.unregisterProducer(token);
+
+    immutable acceptedTotal = producerCount * acceptedPerProducer + 1;
+    immutable closedTotal = producerCount * closedPerProducer;
+    check(atomicLoad!(MemoryOrder.acq)(g_inboxUnexpected) == 0,
+        "inbox sends have deterministic outcomes");
+    check(atomicLoad!(MemoryOrder.acq)(g_inboxAccepted) == acceptedTotal,
+        "all open-generation sends accepted");
+    check(atomicLoad!(MemoryOrder.acq)(g_inboxClosed) == closedTotal,
+        "all post-close sends rejected");
+    check(atomicLoad!(MemoryOrder.acq)(g_inboxConsumed) == acceptedTotal,
+        "all accepted interactions consumed exactly once");
+    check(atomicLoad!(MemoryOrder.acq)(g_inboxSum) == expectedSum,
+        "inbox payload contents published to actor");
+    check(atomicLoad!(MemoryOrder.acq)(g_inboxEntries) == 0
+            && atomicLoad!(MemoryOrder.acq)(g_inboxConcurrent) == 0,
+        "inbox actor retains exclusive callback ownership");
+    check(atomicLoad!(MemoryOrder.acq)(g_inboxActivations) > 1,
+        "bounded inbox drain republishes activations");
+    foreach (i; 0 .. messageCount)
+        check(messages[i].node.available,
+            "accepted and rejected inbox nodes returned to caller");
+    check(busyProbe.node.available,
+        "busy-probe inbox node returned to caller");
+    check(handle.send(&messages[0].node) == ActorSendResult.closed,
+        "retired generation rejects an available node");
+    check(counts.allocations == warmAllocations,
+        "inbox warm path performs no actor allocator calls");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed,
+        "inbox actor explicit reclamation");
+    check(handle.send(&messages[0].node) == ActorSendResult.staleHandle,
+        "reclaimed inbox handle is stale");
+
+    // Leave one accepted interaction queued while retirement closes the
+    // generation. With no consumer active, RETIRED must wait for that node.
+    auto drainOwner = actors.createActor!(ActorInboxState, inboxActor)(
+        ActorInboxState.init);
+    check(drainOwner.valid, "inbox actor slot reuse");
+    auto drainHandle = drainOwner.handle;
+    ActorInboxMessage retirementProbe;
+    retirementProbe.value = 1;
+    retirementProbe.node.initialize(&retirementProbe);
+    immutable drainSend = drainHandle.send(&retirementProbe.node);
+    check(drainSend == ActorSendResult.queued
+            || drainSend == ActorSendResult.coalesced,
+        "pre-close inbox interaction accepted");
+    check(drainOwner.requestRetire() == ActorRetireResult.requested
+            && !drainOwner.retired,
+        "retirement waits for accepted inbox interaction");
+    check(drainHandle.send(&messages[0].node) == ActorSendResult.closed,
+        "closing reused generation rejects new interaction");
+
+    ConsumerView drainView;
+    check(drainView.subscribe(farm) >= 0,
+        "closing inbox actor consumer subscribe");
+    token = farm.registerProducer(Tier.small);
+    check(token.valid, "closing inbox producer registration");
+    while (!drainOwner.retired)
+    {
+        actors.flush(token);
+        while (drainView.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            fatal("closing inbox drain timeout");
+    }
+    drainView.unsubscribe();
+    farm.unregisterProducer(token);
+    check(retirementProbe.node.available,
+        "accepted interaction completed before retirement");
+    check(drainOwner.reclaim() == ActorReclaimResult.reclaimed,
+        "closing inbox actor reclamation");
+    check(actors.live == 0 && actors.ready == 0,
+        "inbox actor runtime drained");
+    actors.destroy();
+    check(counts.allocations == counts.deallocations,
+        "inbox actor allocator pairing");
+
+    printf("testActorInbox OK\n"); fflush(stdout);
+}
+
 void main()
 {
     testMagicWrap();
@@ -1106,5 +1627,7 @@ void main()
     testSpannedTables();
     testSmallTableChurn();
     testMultiSmallProducers();
+    testActorPayload();
+    testActorInbox();
     printf("ALL TESTS PASSED\n");
 }
