@@ -317,6 +317,56 @@ assertions but are not a standalone runtime-lifetime fence.
 aggregate this actor result with non-actor work and with any message payload
 destructors before unloading code or resetting an arena.
 
+## Engine aggregate unload fence
+
+The actor torture suite makes the higher-level contract executable with a
+test-side engine generation owner. This is not an `antfarm_actor` object. It
+combines resident type-erased actor owners with an admission gate for module
+code frames and ownership transferred out of callbacks:
+
+```text
+old-generation caller                    engine generation owner
+---------------------                    -----------------------
+
+erased actor owner in registry --------> callback lifetime claimant
+gate.CAS(acq_rel, count++)  -----------> admitted sender / destructor /
+                                             detached-node claimant
+                                             gate.CAS(acq_rel, set CLOSED)
+                                             reject later admissions
+                                             request actor retirement
+                                             poll RETIRED; reclaim owners
+
+finish old-generation access
+kind diagnostic.fetchSub(acq_rel)
+gate.fetchSub(acq_rel, count--) --------> acquire-load CLOSED | count == 0
+                                             actor registry empty
+                                             simulated unload may cross
+```
+
+Close and non-actor claim acquisition modify the same gate, so each such
+claimant is ordered before close and included, or ordered after close and
+rejected. Per-kind destructor/sender/node counts are diagnostics; the closed
+gate's aggregate count is their authority. Actor callbacks are covered by the
+separately aggregated erased-owner registry. Unload is tested only from the
+resident coordinator after close, so both zero observations are stable.
+
+The sender test pauses at `submissionReleased`, after `G` no longer protects
+the sender frame. The actor consumes the interaction, retires, and is reclaimed
+while the engine sender claim remains live. The detached-node test transfers a
+`PROCESSING` node out of the callback without calling `complete`; the actor
+also retires and is reclaimed first. These cases demonstrate why an engine
+cannot substitute actor retirement for its aggregate module fence.
+
+| Engine handoff | Publication side | Acquisition side | What becomes visible |
+| --- | --- | --- | --- |
+| Module admission to close | An admitted old-generation operation increments the open gate with an `acq_rel` CAS. | Close sets `CLOSED` with an `acq_rel` CAS on the same gate. | The operation is either included in the aggregate count or rejected; it cannot slip across close. |
+| Module claimant to unload | The callback, sender, destructor, or detached-node owner completes old-generation access, updates its diagnostic, then release-decrements the gate. | The resident unload probe acquire-loads the closed gate and requires aggregate count zero. | Completion of all admitted old-generation module-code and transferred-ownership access. |
+| Actor registry to unload | The registry requests retirement, acquire-observes `RETIRED`, and reclaims each erased owner. | The unload probe requires the resident registry to be empty in addition to the closed gate being zero. | No actor handler for the generation can run again, and its state/dispatch registration has been cleared. |
+
+The test's destructor claimant models module-owned resource or message cleanup,
+not a non-POD actor-state destructor. General actor construction/destruction
+remains deliberately undefined.
+
 ## Non-edges and caller obligations
 
 - `ActorHandle` copies are plain values. Publishing a newly created handle to
@@ -370,6 +420,12 @@ multi-actor arm checks the same edges statistically over generation churn. A
 separate forced race lets eight senders reserve before close and then contend
 for one node, requiring exactly one accepted claim and seven `nodeBusy`
 results while retirement waits for every reservation to leave `G`.
+
+The same suite exercises the engine aggregate fence with four independently
+stalled old-generation claimants: callback, destructor, sender, and detached
+inbox node. Every premature unload probe is rejected. The sender and detached-
+node arms additionally reach actor reclamation before releasing their engine
+claims, so the test would fail if unload were based on actor retirement alone.
 
 Allocator lifetime has a separate pinned mimalloc v3.5.0 lane. Actor state,
 runtime, and stable-slot storage are allocated on one thread only after normal

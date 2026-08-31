@@ -11,6 +11,14 @@ Coverage includes:
 - close after reservation, claim, publication, and activation signal;
 - eight simultaneous pre-close reservations racing to claim one node;
 - accepted-before-close drain and reservation quiescence;
+- an engine-side module-generation fence model which closes admission and
+  aggregates resident type-erased actor owners with old-generation code and
+  ownership claims;
+- independent unload stalls for a running actor callback, a module-owned
+  destructor, a sender paused after its actor submission reservation has been
+  released, and a popped-but-uncompleted inbox node;
+- proof in the sender and popped-node cases that the actor can be reclaimed
+  first while the remaining engine claim still forbids the simulated unload;
 - multi-actor ready-queue contention with six producers and six consumers;
 - FIFO order per producer, exact-once delivery, payload checksums, bounded
   carry republishing, 32 rounds of generation reuse, and a disabled GC;
@@ -50,3 +58,10 @@ with allocator override disabled. The root Dub configuration `mimalloc-v3`
 only exposes the optional adapter and names `mimalloc` for downstream linking;
 the pinned correctness lane links its archive directly so it cannot silently
 select another installed version.
+
+The module-generation fence in this suite is deliberately a test-side engine
+model. Its close/count gate is the unload authority, while its per-kind counts
+are diagnostics and its actor registry is driven by one coordinator. It does
+not add module hierarchy to `antfarm_actor`, implement dynamic-library loading,
+or define non-POD actor-state destruction. The "destructor" claimant models
+module-owned resource or message destructor code admitted before close.

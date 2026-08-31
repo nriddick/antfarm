@@ -363,6 +363,22 @@ and message destructors. A safe unload sequence is:
 Old handles continue to name the old generation and report stale or closed;
 they never redirect silently to the replacement generation.
 
+The actor torture suite contains an executable, test-side model of this
+engine-owned fence. A single atomic admission gate linearizes close against
+old-generation code claims, while a resident registry aggregates those claims
+with type-erased actor owners. Four deterministic arms stall a running actor
+callback, a module-owned resource/message destructor, a sender, and a popped-
+but-uncompleted inbox node independently. The sender stalls after its actor
+submission reservation has been released, and the node is deliberately
+transferred out of the actor callback. In both cases the actor retires and is
+reclaimed first, proving that actor quiescence alone cannot authorize unload.
+
+This harness validates the shape of the engine contract without promoting it
+into `antfarm_actor`. Its actor registry is coordinator-driven, it simulates
+rather than performs a dynamic-library unload, and its destructor claim is
+non-actor module work. It does not settle non-POD actor-state construction or
+destruction.
+
 ## Promotion gates
 
 The experimental actor API is ready for broader use only when:
