@@ -19,7 +19,7 @@ an engine can aggregate before unloading code or reclaiming an arena.
 
 ## Current A1/A2 spike
 
-As of 2026-08-30, `antfarm_actor.d` contains two deliberately narrow vertical
+As of 2026-08-31, `antfarm_actor.d` contains two deliberately narrow vertical
 slices:
 
 - a fixed-capacity runtime and stable cache-line slots allocated entirely
@@ -27,6 +27,8 @@ slices:
 - POD state copied into a separate allocator-owned allocation;
 - typed handles, transfer-only owners, and callback-local `scope ref` borrows
   and context;
+- a resident-facing, non-template `ActorErasedAdapter` with erased handles,
+  transfer-only owners, and callback-local borrows for module registries;
 - an intrusive allocation-free ready queue and fixed two-word Farm bodies;
 - coalesced wake, republish, external/self retirement, explicit reclamation,
   generation reuse, and stale-handle rejection;
@@ -132,7 +134,7 @@ runtime.flush(token, maximum);    // fixed-width Farm publication
 
 owner.requestRetire();
 if (owner.retired)
-    owner.reclaim();              // destructor plus allocator release
+    owner.reclaim();              // POD storage allocator release
 ```
 
 The application callback has this exact shape:
@@ -147,6 +149,41 @@ It may mutate `T`, request another activation, or request retirement. The
 handlers that omit it, but they do not prove that an `@system` handler cannot
 stash a pointer or reference. A handler cannot suspend; suspendable work
 remains a Fiber responsibility.
+
+### Resident type-erased adapter
+
+A resident engine can pass `runtime.erasedAdapter` across its reloadable-module
+boundary. The adapter carries opaque runtime context and a resident creation
+function pointer. Creation therefore uses a non-template boundary and returns
+ownership whose layout does not depend on the module's `State`:
+
+```d
+void moduleActor(scope ref ActorErasedBorrow actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    ref State state = actor.value!State();
+    // Mutate state and process interactions.
+}
+
+State initial;
+ActorErasedAdapter adapter = runtime.erasedAdapter;
+ActorErasedOwner owner = adapter.createActor(&initial,
+    State.sizeof, State.alignof, &moduleActor);
+ActorErasedHandle handle = owner.handle;
+```
+
+`ActorErasedBorrow.value!State()` checks the recorded size and alignment before
+returning the callback-local reference. The erased creation call remains an
+`@system` POD byte-copy contract: it cannot inspect a type that has already
+been erased, run a destructor, or make GC references safe in unscanned memory.
+The adapter is non-owning and must not outlive its runtime.
+
+The dispatch pointer can still name reloadable module code. Type erasure makes
+the resident registry and creation/reclamation path independent of `State`; it
+does not itself authorize unloading that code. The engine must keep the module
+generation resident until its erased owners have retired and been reclaimed.
+A typed owner can transfer into the same registry representation with
+`intoErased()`, while `ActorHandle!T.erased` makes a non-owning erased copy.
 
 The built-in inbox is an accumulator-style interaction protocol. Any producer
 may initialize freshly allocated storage with `ActorInboxNode.initialize` and
@@ -215,9 +252,10 @@ engine retirement, not inferred from one actor runtime.
 - DMD and LDC tests for mutation, serial entry, stale handles, generation
   reuse, partial publication, and allocator accounting.
 
-The initial implementation may restrict construction to POD state while the
-state machine is being proved. General placement construction and `@nogc`
-destruction must be addressed before declaring the API stable.
+The current implementation deliberately restricts construction to POD state.
+General placement construction and `@nogc` destruction are deferred until
+real actor-state use provides enough evidence to choose their ownership and
+failure semantics.
 
 ### A2: mailbox admission
 
@@ -243,8 +281,9 @@ future adapter surface without weakening generation admission or retirement.
 
 ### A3: allocator and arena completion
 
-- Add placement construction/destruction for non-POD state without losing
-  `nothrow @nogc` enforcement.
+- Revisit placement construction/destruction for non-POD state only after
+  actual actor-state use clarifies the needed ownership and failure semantics;
+  any eventual design must retain `nothrow @nogc` enforcement.
 - Add adoption of caller-owned stable state.
 - Support no-op per-object deallocation for arenas.
 - Add retirement groups/fences so a region can close admission, retire its
@@ -263,6 +302,8 @@ future adapter surface without weakening generation admission or retirement.
 
 ### A4: integration and characterization
 
+- [x] Add a resident-facing type-erased creation/owner/handle adapter without
+  placing reloadable dispatch pointers in the Farm ring.
 - Provide threadpool wake notification hooks without making actor lifetime a
   threadpool concern.
 - Exercise multiple actor runtimes and Farms, including migration and covering

@@ -186,7 +186,7 @@ empty.
 | Handoff | Publication side | Acquisition side | What becomes visible |
 | --- | --- | --- | --- |
 | Slot reuse to construction | Reclaimer clears/deallocates the old state and release-stores `VACANT`. | Creator uses an `acq_rel` CAS for `VACANT -> CONSTRUCTING` while incrementing the generation. | Completion of old-generation teardown before the slot is initialized again. |
-| Construction to first wake | Creator initializes state bytes and plain slot fields, then `L.store(rel, IDLE)`. | The first successful wake CAS/RMW on `L` is `acq_rel`. | State bytes, `state`, `dispatch`, runtime pointer, and payload identity. |
+| Construction to first wake | Typed creation or the erased adapter initializes state bytes and plain slot fields, including recorded size/alignment, then `L.store(rel, IDLE)`. | The first successful wake CAS/RMW on `L` is `acq_rel`. | State bytes, state metadata, `state`, `dispatch`, runtime pointer, and payload identity. |
 | Idle actor to ready queue | `L.CAS(acq_rel, IDLE -> SCHEDULED)`, then raw `Qnext`, then `H.CAS(acq_rel, slot)`. | Flusher takes `H` with `atomicExchange(acq_rel)`. | The scheduled phase and initialized queue link/slot fields. |
 | Republished actor to ready queue | Callback first release-publishes `RUNNING -> SCHEDULED`; `pushReady` then release-publishes the link through `H`. | Flusher's acquire exchange of `H`. | Completed actor mutations and the new queue membership. |
 | Ready queue to Farm producer | `H` release CAS publishes `Qnext`; each selected node is detached before `write`. | Flusher's acquire exchange, followed by raw link loads. | A private snapshot of distinct scheduled slots. |
@@ -298,11 +298,12 @@ The ring body itself is never cast to mutable actor state.
 and no later activation for that generation will be admitted. It does not mean
 that the surrounding Farm consumer has finished all table accounting.
 
-After an acquire observation of `RETIRED`, the unique owner may deallocate the
-POD state. It clears the external-state and dispatch pointers before publishing
-`VACANT`. Slot allocation for a new generation must acquire that `VACANT`
-publication. Encoding generation and phase in the same atomic word prevents a
-stale check-then-CAS from scheduling a reused slot.
+After an acquire observation of `RETIRED`, the unique typed or erased owner may
+deallocate the POD state using the size and alignment recorded at creation. It
+clears the external-state pointer, dispatch pointer, and metadata before
+publishing `VACANT`. Slot allocation for a new generation must acquire that
+`VACANT` publication. Encoding generation and phase in the same atomic word
+prevents a stale check-then-CAS from scheduling a reused slot.
 
 The per-generation gate now protects built-in inbox submission, but
 `ActorRuntime.destroy` still requires external quiescence: the engine must
@@ -323,6 +324,10 @@ destructors before unloading code or resetting an arena.
 - `scope ref` on `ActorBorrow` and `ActorContext` is a callback type contract,
   not an atomic operation. It neither repairs an escaped state pointer nor
   proves that allocator-derived pointers cannot outlive an arena.
+- `ActorErasedAdapter` is a non-owning resident ABI boundary, not a module
+  lifetime fence. An erased handler pointer may still name reloadable code;
+  the engine must keep that generation loaded through retirement and
+  reclamation.
 - `valid`, `ready`, `live`, and stale-activation counters are observations, not
   ownership grants or shutdown fences.
 - Allocator callbacks must be thread-safe for the creation/reclamation pattern
@@ -349,7 +354,10 @@ inbox producers, bounded seven-node actor drains, exact-once counts and sums,
 node ownership return, retirement after accepted work, deterministic
 post-close rejection, stale-handle rejection, and flat warm-path allocator
 counts. Compile-time assertions also cover the scoped handler type and reject
-conversion from the otherwise matching unscoped function type.
+conversion from the otherwise matching unscoped function type. The erased
+adapter test additionally covers non-template creation, checked erased borrow
+metadata, inbox processing, warm-path allocator stability, stale handles, and
+transfer of a typed owner into resident erased ownership.
 
 The separate actor torture suite compiles production-elided hooks immediately
 after submission reservation, node claim, inbox-head publication, activation

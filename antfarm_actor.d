@@ -218,7 +218,42 @@ struct ActorBorrow(T)
     }
 }
 
-private alias ActorDispatch = void function(void* state, ActorContext* context)
+/// Callback-local, type-erased view used at a resident/module boundary. The
+/// requested POD type must exactly match the size and alignment supplied at
+/// creation. As with `ActorBorrow`, retaining the returned reference is
+/// outside this @system ownership contract.
+struct ActorErasedBorrow
+{
+    private void* state_;
+    private size_t stateSize_;
+    private size_t stateAlignment_;
+    @disable this(this);
+
+    @property ref T value(T)() return nothrow @nogc @system
+    {
+        static assert(__traits(isPOD, T),
+            "type-erased actor state remains POD-only");
+        if (T.sizeof != stateSize_ || T.alignof != stateAlignment_)
+            fatal("type-erased actor borrow type mismatch");
+        return *cast(T*) state_;
+    }
+
+    @property size_t stateSize() const pure nothrow @nogc @safe
+    {
+        return stateSize_;
+    }
+
+    @property size_t stateAlignment() const pure nothrow @nogc @safe
+    {
+        return stateAlignment_;
+    }
+}
+
+/// Exact non-template dispatch ABI for reloadable-module adapters. The
+/// function pointer may name module code, so its generation must remain loaded
+/// until the corresponding erased owner has retired and been reclaimed.
+alias ActorErasedHandler = void function(scope ref ActorErasedBorrow,
+        scope ref ActorContext)
     nothrow @nogc @system;
 
 private enum ulong phaseMask = 0x7;
@@ -260,14 +295,15 @@ private align(64) struct ActorSlot
     shared ulong lifecycle;
     ActorRuntime* runtime;
     void* state;
-    ActorDispatch dispatch;
+    ActorErasedHandler dispatch;
     shared size_t queueNextWord;
     ulong[2] payloadWords;
-    ulong reserved;
+    size_t stateSize;
+    size_t stateAlignment;
     shared size_t inboxHeadWord;
     size_t inboxCarryWord;       // exclusive actor ownership
     shared ulong submissionGate; // closed bit | in-flight send reservations
-    ulong[5] inboxPadding;
+    ulong[4] inboxPadding;
 }
 static assert(ActorSlot.sizeof == 128);
 static assert(ActorSlot.alignof == 64);
@@ -300,6 +336,102 @@ struct ActorHandle(T)
     ActorSendResult send(ActorInboxNode* node) nothrow @nogc @system
     {
         return sendActor(slot_, generation_, node);
+    }
+
+    /// Copy this non-owning capability into its resident, type-erased form.
+    @property ActorErasedHandle erased() pure nothrow @nogc @system
+    {
+        ActorErasedHandle result;
+        result.slot_ = slot_;
+        result.generation_ = generation_;
+        return result;
+    }
+}
+
+/// Copyable, non-owning actor capability whose ABI does not depend on `T`.
+struct ActorErasedHandle
+{
+    private ActorSlot* slot_;
+    private ulong generation_;
+
+    @property bool valid() const pure nothrow @nogc @safe
+    {
+        return slot_ !is null && generation_ != 0;
+    }
+
+    @property ulong generation() const pure nothrow @nogc @safe
+    {
+        return generation_;
+    }
+
+    ActorWakeResult wake() nothrow @nogc @system
+    {
+        return wakeActor(slot_, generation_);
+    }
+
+    ActorSendResult send(ActorInboxNode* node) nothrow @nogc @system
+    {
+        return sendActor(slot_, generation_, node);
+    }
+}
+
+/// Move-only, type-erased retirement and reclamation authority. This is the
+/// owner form intended for a resident engine registry spanning reloadable
+/// module types.
+struct ActorErasedOwner
+{
+    private ActorSlot* slot_;
+    private ulong generation_;
+
+    this(ref ActorErasedOwner src) pure nothrow @nogc @system
+    {
+        slot_ = src.slot_;
+        generation_ = src.generation_;
+        src.slot_ = null;
+        src.generation_ = 0;
+    }
+
+    ref ActorErasedOwner opAssign(ActorErasedOwner src)
+        nothrow @nogc @system
+    {
+        if (slot_ !is null)
+            fatal("overwrite live ActorErasedOwner");
+        slot_ = src.slot_;
+        generation_ = src.generation_;
+        return this;
+    }
+
+    @property bool valid() const pure nothrow @nogc @safe
+    {
+        return slot_ !is null && generation_ != 0;
+    }
+
+    @property ulong generation() const pure nothrow @nogc @safe
+    {
+        return generation_;
+    }
+
+    @property ActorErasedHandle handle() pure nothrow @nogc @system
+    {
+        ActorErasedHandle result;
+        result.slot_ = slot_;
+        result.generation_ = generation_;
+        return result;
+    }
+
+    ActorRetireResult requestRetire() nothrow @nogc @system
+    {
+        return requestActorRetire(slot_, generation_);
+    }
+
+    @property bool retired() const nothrow @nogc @system
+    {
+        return actorRetired(slot_, generation_);
+    }
+
+    ActorReclaimResult reclaim() nothrow @nogc @system
+    {
+        return reclaimActor(slot_, generation_);
     }
 }
 
@@ -347,44 +479,59 @@ struct ActorOwner(T)
 
     @property bool retired() const nothrow @nogc @system
     {
-        if (!valid) return false;
-        immutable word = atomicLoad!(MemoryOrder.acq)(slot_.lifecycle);
-        return wordGeneration(word) == generation_
-            && wordPhase(word) == phaseRetired;
+        return actorRetired(slot_, generation_);
     }
 
-    /// Destroy POD state storage and make the stable slot available to a new
-    /// generation. The owner is invalidated on success.
+    /// Deallocate POD state storage and make the stable slot available to a
+    /// new generation. The owner is invalidated on success.
     ActorReclaimResult reclaim() nothrow @nogc @system
     {
         static assert(__traits(isPOD, T),
             "antfarm_actor A1 supports POD actor state only");
-        if (!valid) return ActorReclaimResult.staleOwner;
-        immutable word = atomicLoad!(MemoryOrder.acq)(slot_.lifecycle);
-        if (wordGeneration(word) != generation_)
-            return ActorReclaimResult.staleOwner;
-        if (wordPhase(word) != phaseRetired)
-            return ActorReclaimResult.busy;
-        immutable gate = atomicLoad!(MemoryOrder.acq)(slot_.submissionGate);
-        if ((gate & submissionClosedBit) == 0
-            || (gate & submissionCountMask) != 0
-            || atomicLoad!(MemoryOrder.acq)(slot_.inboxHeadWord) != 0
-            || slot_.inboxCarryWord != 0)
-            fatal("reclaim actor with live inbox ownership");
+        return reclaimActor(slot_, generation_);
+    }
 
-        auto runtime = slot_.runtime;
-        auto state = slot_.state;
-        slot_.state = null;
-        slot_.dispatch = null;
-        slot_.payloadWords[] = 0;
-        runtime.allocator.deallocate(runtime.allocator.context, state,
-            T.sizeof, T.alignof);
-        atomicFetchSub!(MemoryOrder.acq_rel)(runtime.liveCount, 1UL);
-        atomicStore!(MemoryOrder.rel)(slot_.lifecycle,
-            lifecycleWord(generation_, phaseVacant));
+    /// Transfer the unique owner into the resident, type-erased form.
+    ActorErasedOwner intoErased() nothrow @nogc @system
+    {
+        ActorErasedOwner result;
+        result.slot_ = slot_;
+        result.generation_ = generation_;
         slot_ = null;
         generation_ = 0;
-        return ActorReclaimResult.reclaimed;
+        return result;
+    }
+}
+
+/// Non-owning creation adapter suitable for passing across a resident engine
+/// boundary. It contains no `T`-dependent layout or template entry point. The
+/// runtime must outlive the adapter and every handle/owner created through it.
+private alias ActorErasedCreate = ActorErasedOwner function(void* context,
+        scope const(void)* initialState, size_t stateSize,
+        size_t stateAlignment, ActorErasedHandler handler)
+    nothrow @nogc @system;
+
+struct ActorErasedAdapter
+{
+    private void* context_;
+    private ActorErasedCreate create_;
+
+    @property bool valid() const pure nothrow @nogc @safe
+    {
+        return context_ !is null && create_ !is null;
+    }
+
+    /// Allocate and byte-copy POD state through the runtime's allocator.
+    /// Invalid metadata, capacity exhaustion, or allocator failure returns an
+    /// invalid owner. The handler and any module code it calls must remain
+    /// resident until the returned owner has retired and been reclaimed.
+    ActorErasedOwner createActor(scope const(void)* initialState,
+            size_t stateSize, size_t stateAlignment,
+            ActorErasedHandler handler) nothrow @nogc @system
+    {
+        if (!valid) return ActorErasedOwner.init;
+        return create_(context_, initialState, stateSize, stateAlignment,
+            handler);
     }
 }
 
@@ -483,6 +630,17 @@ align(64) struct ActorRuntime
         return atomicLoad!(MemoryOrder.acq)(staleActivations_);
     }
 
+    /// Return the non-owning, non-template creation boundary intended for a
+    /// resident engine to share with reloadable modules.
+    @property ActorErasedAdapter erasedAdapter()
+        pure nothrow @nogc @system
+    {
+        ActorErasedAdapter result;
+        result.context_ = &this;
+        result.create_ = &createActorFromAdapter;
+        return result;
+    }
+
     /// Allocate and copy-construct POD actor state. Returns an invalid owner
     /// when capacity or allocator storage is unavailable.
     ActorOwner!T createActor(T, alias handler)(T initial)
@@ -494,6 +652,26 @@ align(64) struct ActorRuntime
                 scope ref ActorBorrow!T, scope ref ActorContext)
                 nothrow @nogc @system),
             "actor handler must be void function(scope ref ActorBorrow!T, scope ref ActorContext) nothrow @nogc @system");
+
+        auto erased = createActorErased(cast(const(void)*) &initial,
+            T.sizeof, T.alignof, &actorDispatch!(T, handler));
+        ActorOwner!T result;
+        result.slot_ = erased.slot_;
+        result.generation_ = erased.generation_;
+        erased.slot_ = null;
+        erased.generation_ = 0;
+        return result;
+    }
+
+private:
+    ActorErasedOwner createActorErased(scope const(void)* initialState,
+            size_t stateSize, size_t stateAlignment,
+            ActorErasedHandler handler) nothrow @nogc @system
+    {
+        if (initialState is null || stateSize == 0 || handler is null
+                || stateAlignment == 0
+                || (stateAlignment & (stateAlignment - 1)) != 0)
+            return ActorErasedOwner.init;
 
         ActorSlot* slot;
         ulong generation;
@@ -514,32 +692,37 @@ align(64) struct ActorRuntime
                 break;
             }
         }
-        if (slot is null) return ActorOwner!T.init;
+        if (slot is null) return ActorErasedOwner.init;
 
-        auto state = allocator.allocate(allocator.context, T.sizeof, T.alignof);
+        auto state = allocator.allocate(allocator.context,
+            stateSize, stateAlignment);
         if (state is null)
         {
             atomicStore!(MemoryOrder.rel)(slot.lifecycle,
                 lifecycleWord(generation, phaseVacant));
-            return ActorOwner!T.init;
+            return ActorErasedOwner.init;
         }
-        memcpy(state, cast(const void*) &initial, T.sizeof);
+        memcpy(state, initialState, stateSize);
         atomicStore!(MemoryOrder.raw)(slot.inboxHeadWord, size_t.init);
         slot.inboxCarryWord = 0;
         atomicStore!(MemoryOrder.raw)(slot.submissionGate, 0UL);
         slot.state = state;
-        slot.dispatch = &actorDispatch!(T, handler);
+        slot.dispatch = handler;
+        slot.stateSize = stateSize;
+        slot.stateAlignment = stateAlignment;
         slot.payloadWords[0] = cast(ulong) cast(void*) slot;
         slot.payloadWords[1] = generation;
         atomicFetchAdd!(MemoryOrder.rel)(liveCount, 1UL);
         atomicStore!(MemoryOrder.rel)(slot.lifecycle,
             lifecycleWord(generation, phaseIdle));
 
-        ActorOwner!T result;
+        ActorErasedOwner result;
         result.slot_ = slot;
         result.generation_ = generation;
         return result;
     }
+
+public:
 
     /// Publish up to 256 queued actors. Unwritten activations are returned to
     /// the intrusive queue, so Farm backpressure cannot drop an actor.
@@ -676,7 +859,11 @@ private:
         context.inboxLocal_ = cast(ActorInboxNode*) cast(void*)
             slot.inboxCarryWord;
         slot.inboxCarryWord = 0;
-        slot.dispatch(slot.state, &context);
+        ActorErasedBorrow borrow;
+        borrow.state_ = slot.state;
+        borrow.stateSize_ = slot.stateSize;
+        borrow.stateAlignment_ = slot.stateAlignment;
+        slot.dispatch(borrow, context);
         slot.inboxCarryWord = cast(size_t) cast(void*) context.inboxLocal_;
 
         if (context.retire_)
@@ -725,6 +912,61 @@ private:
             observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
         }
     }
+}
+
+private ActorErasedOwner createActorFromAdapter(void* context,
+        scope const(void)* initialState, size_t stateSize,
+        size_t stateAlignment, ActorErasedHandler handler)
+    nothrow @nogc @system
+{
+    auto runtime = cast(ActorRuntime*) context;
+    return runtime.createActorErased(initialState, stateSize,
+        stateAlignment, handler);
+}
+
+private bool actorRetired(const(ActorSlot)* slot, ulong generation)
+    nothrow @nogc @system
+{
+    if (slot is null || generation == 0) return false;
+    immutable word = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
+    return wordGeneration(word) == generation
+        && wordPhase(word) == phaseRetired;
+}
+
+private ActorReclaimResult reclaimActor(ref ActorSlot* slot,
+        ref ulong generation) nothrow @nogc @system
+{
+    if (slot is null || generation == 0)
+        return ActorReclaimResult.staleOwner;
+    immutable word = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
+    if (wordGeneration(word) != generation)
+        return ActorReclaimResult.staleOwner;
+    if (wordPhase(word) != phaseRetired)
+        return ActorReclaimResult.busy;
+    immutable gate = atomicLoad!(MemoryOrder.acq)(slot.submissionGate);
+    if ((gate & submissionClosedBit) == 0
+            || (gate & submissionCountMask) != 0
+            || atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) != 0
+            || slot.inboxCarryWord != 0)
+        fatal("reclaim actor with live inbox ownership");
+
+    auto runtime = slot.runtime;
+    auto state = slot.state;
+    immutable stateSize = slot.stateSize;
+    immutable stateAlignment = slot.stateAlignment;
+    slot.state = null;
+    slot.dispatch = null;
+    slot.stateSize = 0;
+    slot.stateAlignment = 0;
+    slot.payloadWords[] = 0;
+    runtime.allocator.deallocate(runtime.allocator.context, state,
+        stateSize, stateAlignment);
+    atomicFetchSub!(MemoryOrder.acq_rel)(runtime.liveCount, 1UL);
+    atomicStore!(MemoryOrder.rel)(slot.lifecycle,
+        lifecycleWord(generation, phaseVacant));
+    slot = null;
+    generation = 0;
+    return ActorReclaimResult.reclaimed;
 }
 
 private void closeSubmissionGate(ActorSlot* slot) nothrow @nogc @system
@@ -1016,12 +1258,14 @@ private ActorInboxNode* popInboxNode(ActorSlot* slot,
     return result;
 }
 
-private void actorDispatch(T, alias handler)(void* state, ActorContext* context)
+private void actorDispatch(T, alias handler)(
+        scope ref ActorErasedBorrow erased,
+        scope ref ActorContext context)
     nothrow @nogc @system
 {
     ActorBorrow!T borrow;
-    borrow.state_ = cast(T*) state;
-    handler(borrow, *context);
+    borrow.state_ = cast(T*) erased.state_;
+    handler(borrow, context);
 }
 
 private long actorPayloadCallback(PayloadHeader*, PayloadBody body, ulong)

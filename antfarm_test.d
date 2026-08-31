@@ -90,6 +90,48 @@ static assert(is(typeof(&actorCounter) : ScopedActorCounterHandler));
 static assert(!is(UnscopedActorCounterHandler : ScopedActorCounterHandler),
     "unscoped actor handlers must not satisfy the callback contract");
 
+struct ErasedActorResult
+{
+    ulong activations;
+    ulong messages;
+    ulong sum;
+    size_t observedSize;
+    size_t observedAlignment;
+}
+
+struct ErasedActorState
+{
+    ErasedActorResult* result;
+    ulong target;
+}
+
+void erasedActor(scope ref ActorErasedBorrow actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    ref ErasedActorState state = actor.value!ErasedActorState();
+    ++state.result.activations;
+    state.result.observedSize = actor.stateSize;
+    state.result.observedAlignment = actor.stateAlignment;
+    while (true)
+    {
+        auto node = context.popInbox();
+        if (node is null) break;
+        ++state.result.messages;
+        state.result.sum += node.tag;
+        node.complete();
+    }
+    if (state.result.activations == state.target)
+        context.retire();
+    else
+        context.republish();
+}
+
+private alias UnscopedErasedHandler = void function(
+        ref ActorErasedBorrow, ref ActorContext) nothrow @nogc @system;
+static assert(is(typeof(&erasedActor) : ActorErasedHandler));
+static assert(!is(UnscopedErasedHandler : ActorErasedHandler),
+    "unscoped erased handlers must not satisfy the callback contract");
+
 struct ActorInboxState
 {
     ulong consumed;
@@ -1425,6 +1467,102 @@ void testActorPayload()
     printf("testActorPayload OK\n"); fflush(stdout);
 }
 
+void testActorErasedAdapter()
+{
+    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    scope (exit) farm.destroy();
+
+    ActorAllocCounts counts;
+    auto allocator = ActorAllocator(&counts,
+        &actorTestAllocate, &actorTestDeallocate);
+    auto actors = ActorRuntime.create(farm, 1, allocator);
+    check(actors !is null, "erased actor runtime allocation");
+    auto adapter = actors.erasedAdapter;
+    check(adapter.valid, "erased actor adapter validity");
+
+    ActorErasedAdapter emptyAdapter;
+    ErasedActorResult result;
+    auto initial = ErasedActorState(&result, 3);
+    check(!emptyAdapter.createActor(&initial, initial.sizeof,
+            initial.alignof, &erasedActor).valid,
+        "empty erased adapter rejects creation");
+    check(!adapter.createActor(&initial, initial.sizeof, 3,
+            &erasedActor).valid,
+        "erased adapter rejects non-power-of-two alignment");
+    check(!adapter.createActor(null, initial.sizeof, initial.alignof,
+            &erasedActor).valid,
+        "erased adapter rejects null initial state");
+
+    auto owner = adapter.createActor(&initial, initial.sizeof,
+        initial.alignof, &erasedActor);
+    check(owner.valid, "erased actor creation");
+    auto handle = owner.handle;
+    immutable warmAllocations = counts.allocations;
+
+    ActorInboxNode message;
+    message.initialize(null, 0x1234_5678UL);
+    immutable sent = handle.send(&message);
+    check(sent == ActorSendResult.queued
+            || sent == ActorSendResult.coalesced,
+        "erased actor inbox send");
+
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "erased actor consumer subscribe");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "erased actor producer registration");
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (!owner.retired)
+    {
+        actors.flush(token);
+        while (view.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            fatal("erased actor retirement timeout");
+    }
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+
+    check(result.activations == initial.target && result.messages == 1
+            && result.sum == message.tag,
+        "erased actor dispatch and inbox state");
+    check(result.observedSize == ErasedActorState.sizeof
+            && result.observedAlignment == ErasedActorState.alignof,
+        "erased borrow preserves state metadata");
+    check(message.available, "erased actor completes inbox node");
+    check(counts.allocations == warmAllocations,
+        "erased actor warm path performs no allocator calls");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed,
+        "erased actor reclamation");
+    check(handle.wake() == ActorWakeResult.staleHandle,
+        "erased actor handle becomes stale");
+
+    // A typed module can hand its unique owner to a resident registry without
+    // retaining T in that registry's layout.
+    auto typed = actors.createActor!(ActorCounterState, actorCounter)(
+        ActorCounterState(0, 1));
+    check(typed.valid, "typed actor before owner erasure");
+    auto typedHandle = typed.handle;
+    ActorErasedHandle erasedHandle = typedHandle.erased;
+    auto erasedOwner = typed.intoErased();
+    check(!typed.valid && erasedOwner.valid
+            && erasedHandle.generation == erasedOwner.generation,
+        "typed owner transfers to erased registry form");
+    check(erasedOwner.requestRetire() == ActorRetireResult.requested
+            && erasedOwner.retired,
+        "erased owner retires typed idle actor");
+    check(erasedOwner.reclaim() == ActorReclaimResult.reclaimed,
+        "erased owner reclaims typed actor");
+    check(erasedHandle.wake() == ActorWakeResult.staleHandle,
+        "erased typed handle becomes stale");
+
+    check(actors.live == 0 && actors.ready == 0,
+        "erased actor runtime drained");
+    actors.destroy();
+    check(counts.allocations == counts.deallocations,
+        "erased actor allocator pairing");
+
+    printf("testActorErasedAdapter OK\n"); fflush(stdout);
+}
+
 void testActorInbox()
 {
     enum consumerCount = 4;
@@ -1638,6 +1776,7 @@ void main()
     testSmallTableChurn();
     testMultiSmallProducers();
     testActorPayload();
+    testActorErasedAdapter();
     testActorInbox();
     printf("ALL TESTS PASSED\n");
 }
