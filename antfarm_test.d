@@ -61,8 +61,8 @@ __gshared shared(long) g_actorEntries;
 __gshared shared(long) g_actorConcurrent;
 __gshared shared(long) g_actorCalls;
 
-void actorCounter(ref ActorBorrow!ActorCounterState actor,
-        ref ActorContext context) nothrow @nogc @system
+void actorCounter(scope ref ActorBorrow!ActorCounterState actor,
+        scope ref ActorContext context) nothrow @nogc @system
 {
     immutable entered = atomicFetchAdd!(MemoryOrder.acq_rel)(
         g_actorEntries, 1L);
@@ -79,6 +79,16 @@ void actorCounter(ref ActorBorrow!ActorCounterState actor,
     else
         context.republish();
 }
+
+private alias ScopedActorCounterHandler = void function(
+        scope ref ActorBorrow!ActorCounterState, scope ref ActorContext)
+    nothrow @nogc @system;
+private alias UnscopedActorCounterHandler = void function(
+        ref ActorBorrow!ActorCounterState, ref ActorContext)
+    nothrow @nogc @system;
+static assert(is(typeof(&actorCounter) : ScopedActorCounterHandler));
+static assert(!is(UnscopedActorCounterHandler : ScopedActorCounterHandler),
+    "unscoped actor handlers must not satisfy the callback contract");
 
 struct ActorInboxState
 {
@@ -101,8 +111,8 @@ __gshared shared(long) g_inboxAccepted;
 __gshared shared(long) g_inboxClosed;
 __gshared shared(long) g_inboxUnexpected;
 
-void inboxActor(ref ActorBorrow!ActorInboxState actor,
-        ref ActorContext context) nothrow @nogc @system
+void inboxActor(scope ref ActorBorrow!ActorInboxState actor,
+        scope ref ActorContext context) nothrow @nogc @system
 {
     enum drainLimit = 7;
     immutable entered = atomicFetchAdd!(MemoryOrder.acq_rel)(

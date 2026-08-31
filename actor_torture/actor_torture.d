@@ -91,8 +91,8 @@ private struct BoundaryMessage
     ulong d;
 }
 
-private void boundaryActor(ref ActorBorrow!BoundaryState actor,
-        ref ActorContext context) nothrow @nogc @system
+private void boundaryActor(scope ref ActorBorrow!BoundaryState actor,
+        scope ref ActorContext context) nothrow @nogc @system
 {
     auto output = actor.value.output;
     ++output.activations;
@@ -540,8 +540,8 @@ private ulong stressValue(size_t round, size_t actor, size_t producer,
     return value;
 }
 
-private void stressActor(ref ActorBorrow!StressState actor,
-        ref ActorContext context) nothrow @nogc @system
+private void stressActor(scope ref ActorBorrow!StressState actor,
+        scope ref ActorContext context) nothrow @nogc @system
 {
     ++actor.value.activations;
     immutable limit = 1 + (actor.value.actorId * 5) % 23;
@@ -807,8 +807,8 @@ version (AntfarmMimallocV3)
     }
 
     private void mimallocAlignedActor(
-            ref ActorBorrow!MimallocAlignedState actor,
-            ref ActorContext) nothrow @nogc @system
+            scope ref ActorBorrow!MimallocAlignedState actor,
+            scope ref ActorContext) nothrow @nogc @system
     {
         ++actor.value.marker;
     }

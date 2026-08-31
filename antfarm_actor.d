@@ -172,8 +172,9 @@ struct ActorInboxNode
 }
 static assert(ActorInboxNode.sizeof == 32);
 
-/// Callback-local control. Requests take effect only after the application
-/// callback returns and its ActorBorrow has ended.
+/// Callback-local control. Actor handlers receive this as `scope ref`.
+/// Requests take effect only after the application callback returns and its
+/// ActorBorrow has ended.
 struct ActorContext
 {
     private bool republish_;
@@ -202,8 +203,10 @@ struct ActorContext
 }
 
 /// The only mutable view of actor state. The actor trampoline constructs it
-/// after acquiring serial ownership and passes it by ref to the application
-/// callback. Escaping `value` is outside the @system ownership contract.
+/// after acquiring serial ownership and passes it by `scope ref` to the
+/// application callback. `scope` records the callback-local capability in the
+/// function type; escaping `value` remains outside this @system ownership
+/// contract and is not made safe by the qualifier.
 struct ActorBorrow(T)
 {
     private T* state_;
@@ -488,8 +491,9 @@ align(64) struct ActorRuntime
         static assert(__traits(isPOD, T),
             "antfarm_actor A1 supports POD actor state only");
         static assert(is(typeof(&handler) : void function(
-                ref ActorBorrow!T, ref ActorContext) nothrow @nogc @system),
-            "actor handler must be void function(ref ActorBorrow!T, ref ActorContext) nothrow @nogc @system");
+                scope ref ActorBorrow!T, scope ref ActorContext)
+                nothrow @nogc @system),
+            "actor handler must be void function(scope ref ActorBorrow!T, scope ref ActorContext) nothrow @nogc @system");
 
         ActorSlot* slot;
         ulong generation;

@@ -13,10 +13,18 @@ transition creates a borrow, and every handoff to a later activation crosses a
 release/acquire chain. `PayloadBody` remains read-only ring storage and carries
 only a stable slot address and generation.
 
-This is `@system` ownership. Returning a reference from `ActorBorrow.value`,
-retaining it beyond the callback, accessing actor state through another alias,
-freeing allocator storage before retirement, or destroying the runtime while
-operations can still reach it violates the contract.
+The application handler receives `scope ref ActorBorrow!T` and
+`scope ref ActorContext`. Those qualifiers make the dynamic-extent intent part
+of the handler function type, and actor creation rejects a handler that omits
+either one. They do not add a memory-order edge or a reclamation fence.
+
+This is still `@system` ownership. In particular, the compiler contract is not
+a proof that raw pointers, casts, or nested references cannot escape. Returning
+a reference from `ActorBorrow.value`, retaining it beyond the callback,
+accessing actor state through another alias, freeing allocator storage before
+retirement, or destroying the runtime while operations can still reach it
+violates the contract. Safety comes from the runtime ownership transitions and
+caller-observed quiescence described below.
 
 ## Atomic objects and notation
 
@@ -62,9 +70,11 @@ H.CAS(acq_rel, slot)
                                                                      Pbody.load(raw)
                                                                      L.CAS(acq_rel,
                                                                        SCHEDULED -> RUNNING)
-                                                                     create ActorBorrow
+                                                                     create scope-ref
+                                                                       ActorBorrow/context
                                                                      plain state mutation
-                                                                     destroy ActorBorrow
+                                                                     callback returns;
+                                                                       borrows end
                                                                      L.CAS(acq_rel,
                                                                        RUNNING -> IDLE,
                                                                        SCHEDULED, or RETIRED)
@@ -310,6 +320,9 @@ destructors before unloading code or resetting an arena.
 
 - `ActorHandle` copies are plain values. Publishing a newly created handle to
   another thread requires ordinary application synchronization.
+- `scope ref` on `ActorBorrow` and `ActorContext` is a callback type contract,
+  not an atomic operation. It neither repairs an escaped state pointer nor
+  proves that allocator-derived pointers cannot outlive an arena.
 - `valid`, `ready`, `live`, and stale-activation counters are observations, not
   ownership grants or shutdown fences.
 - Allocator callbacks must be thread-safe for the creation/reclamation pattern
@@ -335,7 +348,8 @@ allocation, and a GC-disabled warm loop. The A2 test adds four concurrent
 inbox producers, bounded seven-node actor drains, exact-once counts and sums,
 node ownership return, retirement after accepted work, deterministic
 post-close rejection, stale-handle rejection, and flat warm-path allocator
-counts.
+counts. Compile-time assertions also cover the scoped handler type and reject
+conversion from the otherwise matching unscoped function type.
 
 The separate actor torture suite compiles production-elided hooks immediately
 after submission reservation, node claim, inbox-head publication, activation

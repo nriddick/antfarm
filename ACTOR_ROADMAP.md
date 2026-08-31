@@ -25,7 +25,8 @@ slices:
 - a fixed-capacity runtime and stable cache-line slots allocated entirely
   through `ActorAllocator`;
 - POD state copied into a separate allocator-owned allocation;
-- typed handles, transfer-only owners, callback-local borrows and context;
+- typed handles, transfer-only owners, and callback-local `scope ref` borrows
+  and context;
 - an intrusive allocation-free ready queue and fixed two-word Farm bodies;
 - coalesced wake, republish, external/self retirement, explicit reclamation,
   generation reuse, and stale-handle rejection;
@@ -64,6 +65,13 @@ mimalloc benchmarking, and engine wake integration remain open below.
 - Only a successful `scheduled -> running` transition can construct an
   `ActorBorrow!T`. The borrow is valid only for the dynamic extent of the
   actor callback.
+- The application handler must declare both `ActorBorrow!T` and `ActorContext`
+  as `scope ref`. This makes callback-local capability intent part of the
+  handler function type, so an unqualified handler is rejected at actor
+  creation.
+- This remains an `@system` API. The qualifiers do not prevent a handler from
+  using casts or raw pointers to escape `ActorBorrow.value`, and they are not
+  a substitute for the lifecycle state machine or a retirement fence.
 - At most one activation for a generation is queued, published, or running.
   Wakes coalesce through a pending bit rather than publishing duplicates.
 - Different actors remain independently runnable and may execute in parallel.
@@ -127,9 +135,18 @@ if (owner.retired)
     owner.reclaim();              // destructor plus allocator release
 ```
 
-The application callback receives an `ActorBorrow!T` and `ActorContext`. It
-may mutate `T`, request another activation, or request retirement. It cannot
-suspend; suspendable work remains a Fiber responsibility.
+The application callback has this exact shape:
+
+```d
+void runActor(scope ref ActorBorrow!State actor,
+        scope ref ActorContext context) nothrow @nogc @system;
+```
+
+It may mutate `T`, request another activation, or request retirement. The
+`scope ref` qualifiers make the dynamic-extent contract visible and reject
+handlers that omit it, but they do not prove that an `@system` handler cannot
+stash a pointer or reference. A handler cannot suspend; suspendable work
+remains a Fiber responsibility.
 
 The built-in inbox is an accumulator-style interaction protocol. Any producer
 may initialize freshly allocated storage with `ActorInboxNode.initialize` and
@@ -232,6 +249,10 @@ future adapter surface without weakening generation admission or retirement.
 - Support no-op per-object deallocation for arenas.
 - Add retirement groups/fences so a region can close admission, retire its
   actors, and bulk-reset its arena only after quiescence.
+- Keep arena and scratch allocator parameters `scope`-qualified where useful,
+  while treating the engine-owned region owner, admission state, and aggregate
+  retirement fence as the authority for reset. Do not base arena safety on
+  transitive compiler lifetime inference.
 - Add reserve/prewarm APIs and a fixed-capacity mode with explicit exhaustion
   results rather than hidden fallback allocation.
 - [x] Pin a real mimalloc v3 release and test cross-thread frees through the
@@ -253,6 +274,35 @@ future adapter surface without weakening generation admission or retirement.
   optimized LDC, and supported LDC ThreadSanitizer configurations.
 - Verify Windows DMD/LDC allocation pairing with the same rigor as the core
   aligned allocator.
+
+This integration is deliberately lower priority than completing the allocator,
+construction, and retirement contracts in A3. Explicit `flush()` followed by
+the application's existing threadpool notification remains sufficient while
+the actor surface is experimental.
+
+There are two notification boundaries to keep distinct. An idle actor becoming
+scheduled first publishes a slot to `ActorRuntime`'s ready queue; this may need
+to wake a thread capable of calling `flush()`. A successful `flush()` then
+publishes one or more activations into the Farm; this may need to wake workers
+which consume that Farm. One integrated worker pump may perform both roles, but
+the ready-queue and Farm publication edges remain separate.
+
+Wake targeting should normally belong to an engine-defined execution lane: a
+runtime/Farm is associated at setup with an immutable, non-owning set of native
+and optional covering workers. Any actor in that runtime can notify the same
+set. Actors requiring different locality should use another lane/runtime/Farm
+or an explicit higher-level route rather than embedding mutable threadpool
+ownership in each actor slot. Waking a subset is only a scheduling preference;
+it does not prevent an already-running consumer of the same Farm from claiming
+the activation, so strict affinity requires separate routing.
+
+The first implementation can use the threadpool's producer-safe `wakeAll()`.
+Narrow notification should eventually use a setup-time, producer-safe wake-set
+handle rather than the single-owner `Director` selection API. A notification
+must occur after the corresponding ready-queue or Farm release-publication and
+is only a nudge: workers still acquire and recheck the actual queue/Farm state.
+One runnable actor needs at most one executing worker, while a backlog of
+distinct ready actors may justify waking more of the eligible set.
 
 ## Engine-owned module generations
 
@@ -277,6 +327,9 @@ they never redirect silently to the replacement generation.
 The experimental actor API is ready for broader use only when:
 
 - The default shim policy and ring ABI are unchanged.
+- Actor handlers use the exact `scope ref ActorBorrow!T` and
+  `scope ref ActorContext` callback contract; documentation does not claim
+  this makes an `@system` escape impossible.
 - A long run with the GC disabled completes without actor-path allocation.
 - Allocator counters show zero warm-path allocations and balanced cold-path
   reclamation.
