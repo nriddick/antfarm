@@ -1,5 +1,23 @@
 # Ant Farm roadmap
 
+## 1.7.0-rc.1 actor waves
+
+Make `actors` a directly onboarded work representation alongside bare
+payloads and Fibers. The release candidate includes explicit non-GC actor
+ownership, generation-tagged handles, exclusive callback-local borrowing,
+coalesced autonomous activation, intrusive inboxes, sealed multi-table waves,
+and Fiber generation triggers for dependent phases.
+
+Verified on 2026-09-02 on the current Linux/Ryzen 5 5500 host:
+
+- [x] Root unit tests pass under DMD and LDC.
+- [x] The forced actor deterministic-interleaving, aggregate unload-fence,
+  sustained-contention, and allocator-adapter suite passes under LDC.
+- [x] Fiber unit tests and the LDC release stress suite, including actor-wave
+  generation handoff, pass.
+- [x] Root onboarding and architecture distinguish autonomous actors, actor
+  waves, bare payloads, and suspendable Fiber control flow.
+
 ## 1.6.1 Windows integration
 
 Patch the Fiber cache-line allocator to use the same Microsoft CRT-safe

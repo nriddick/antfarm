@@ -1,21 +1,23 @@
-# Ant Farm 1.6.1
+# Ant Farm 1.7.0-rc.1
 
 Ant Farm is a fixed-memory M:N job distributor for D. Producers publish
 tables of work into a shared ring; any subscribed consumer may claim them.
 It is designed for unordered compute where work can appear on any thread and
 the next available worker should take it.
 
-This repository contains three cooperating packages:
+This repository contains four cooperating packages:
 
 | Package | Start here when you need |
 | --- | --- |
 | `antfarm` | allocation-free `@nogc nothrow` payload distribution |
 | `threadpool` | persistent workers pinned and grouped by cache topology |
-| `antfarm-fibers` | waiting, yielding, and cancellation on those workers |
+| `actors` | stable identities, owned state, inboxes, and phase-oriented waves |
+| `fibers` | waiting, yielding, and cancellation on those workers |
 
-The packages can be used separately. For the complete relationship and sizing
-rules, see [ARCHITECTURE.md](ARCHITECTURE.md). Current release work is tracked
-in [ROADMAP.md](ROADMAP.md).
+Use `antfarm` alone, or add only the higher-level packages a workload needs.
+For the complete relationship and sizing rules, see
+[ARCHITECTURE.md](ARCHITECTURE.md). Current release work is tracked in
+[ROADMAP.md](ROADMAP.md).
 
 ## Build and test
 
@@ -29,9 +31,8 @@ ANTFARM_HUGE_PAGES=0 dub test --compiler=ldc2
 
 Ordinary 4 KiB backing is the default. The environment override makes that
 choice explicit for tests even if the calling shell is configured otherwise.
-The experimental `actors` package contains autonomous actors and
-multi-table, phase-oriented actor waves. Its actor runtime has a separate
-deterministic-interleaving and sustained-contention suite:
+The actor runtime has a separate deterministic-interleaving and
+sustained-contention suite:
 
 ```text
 make -C actor_torture run
@@ -93,6 +94,80 @@ dmd -g -i examples/iota_sum.d antfarm.d antfarm_templates.d \
     -Ithreadpool/source -of=iota_sum
 ANTFARM_HUGE_PAGES=0 ./iota_sum
 ```
+
+## First actor and wave
+
+The `actors` package adds explicit state lifetime and exclusive callback-local
+borrowing without changing the worker side: ordinary Farm consumers execute
+actor activations and wave tables. An `ActorOwner` controls retirement and
+reclamation, while its copyable `ActorHandle` is the identity used to wake,
+send to, or phase-dispatch the actor. The examples below assume an existing
+Farm, producer token, and active consumer pump.
+
+```d
+import actors;
+
+struct Body { ulong position; }
+
+void onWake(scope ref ActorBorrow!Body actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    ++actor.value.position;
+    // context.republish(); // request another autonomous activation
+}
+
+void movement(scope ref ActorBorrow!Body actor) nothrow @nogc @system
+{
+    actor.value.position += 4;
+}
+
+auto runtime = ActorRuntime.create(farm, 1024);
+auto owner = runtime.createActor!(Body, onWake)(Body.init);
+auto handle = owner.handle;
+
+handle.wake();                 // coalescing autonomous activation
+runtime.flush(token, 32);      // publish queued actors into the Farm
+```
+
+A wave dispatches one phase operation across a collection of idle actor
+handles created by the same runtime. It may span several physical Farm tables,
+but exposes one generation-tagged completion:
+
+```d
+ActorWave wave;
+wave.begin(farm);
+
+size_t offset;
+while (offset < handles.length)
+{
+    immutable written = wave.publish!movement(handles[offset .. $], token);
+    if (written == 0)
+    {
+        if (wave.handle.failed) break;
+        drainOrYield();         // Farm backpressure
+        continue;
+    }
+    offset += written;
+}
+
+auto completion = wave.seal();
+while (!completion.finished)
+    drainOrYield();
+```
+
+Actors in the same wave run in parallel and must not consume one another's
+intermediate writes. Observing `completion.finished` with acquire semantics and
+confirming `!completion.failed` is the boundary after which an orchestrator may
+publish a dependent wave. For cross-actor reads, keep private mutable actor
+state plus caller-owned public projections; write the inactive public buffer
+during a phase and select it only after successful wave completion. The actor
+package supplies the exclusive borrow and completion boundary, not a
+prescribed projection layout.
+
+An `ActorWaveTrigger` can park a Fiber until that boundary instead of polling;
+see [fibers/README.md](fibers/README.md). Detailed lifetime and memory-order
+contracts are in [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md) and
+[ACTOR_MEMORYORDER.md](actors/ACTOR_MEMORYORDER.md).
 
 ## Choosing a write path
 
@@ -160,6 +235,8 @@ ring hole rather than global emptiness. Ant Farm does not promise FIFO order.
 
 - [threadpool/README.md](threadpool/README.md) shows topology discovery,
   worker ownership, and Director wake/cadence policy.
+- [actors/ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md) shows autonomous actors,
+  inbox ownership, retirement, and dependent phase waves.
 - [fibers/README.md](fibers/README.md) shows when and how to run managed Fibers
   on the same workers.
 - [SPEC.md](SPEC.md) is the core algorithm and memory-order contract.
