@@ -1376,6 +1376,35 @@ void syncPrimitiveSmoke()
         && prepostedGenerations.completed == 2);
     backend.releaseAll(backend.takeCompletions());
 
+    // Distinct completion callbacks may publish into the deferred MPSC stack
+    // concurrently. Force a burst of producers so a failed head CAS must
+    // reload the comparison value before retrying.
+    enum triggerCount = 64;
+    FiberGenerationTrigger[triggerCount] concurrentGenerations;
+    Thread[] triggerProducers;
+    shared uint triggerProducersReady;
+    shared uint releaseTriggerProducers;
+    foreach (i; 0 .. triggerCount)
+    {
+        concurrentGenerations[i] = new FiberGenerationTrigger(backend);
+        immutable index = i;
+        triggerProducers ~= new Thread({
+            atomicFetchAdd(triggerProducersReady, 1u);
+            while (atomicLoad!(MemoryOrder.acq)(releaseTriggerProducers) == 0)
+                Thread.yield();
+            concurrentGenerations[index].advance();
+        });
+        triggerProducers[$ - 1].start();
+    }
+    while (atomicLoad!(MemoryOrder.acq)(triggerProducersReady) != triggerCount)
+        Thread.yield();
+    atomicStore!(MemoryOrder.rel)(releaseTriggerProducers, 1u);
+    foreach (producer; triggerProducers)
+        producer.join();
+    assert(backend.pollGenerationTriggers() == triggerCount);
+    foreach (trigger; concurrentGenerations)
+        assert(trigger.completed == 1);
+
     // Cancellation removes a waiter but retains the trigger's empty bucket;
     // a later serialized consumer can register on that same key again.
     auto cancelledGenerations = new FiberGenerationTrigger(backend);

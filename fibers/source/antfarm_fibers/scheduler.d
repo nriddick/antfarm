@@ -2188,12 +2188,11 @@ final class FiberDomain
         while (true)
         {
             atomicStore!(MemoryOrder.raw)(trigger.queueNext_, observed);
-            auto expected = observed;
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
-                    &deferredTriggerHead, expected,
+                    &deferredTriggerHead, observed,
                     cast(shared(FiberGenerationTrigger)) trigger))
                 break;
-            observed = expected;
+            observed = atomicLoad!(MemoryOrder.acq)(deferredTriggerHead);
         }
         // The worker currently dispatching a payload will observe the queue
         // on return. This edge also wakes a responder if delivery originated
@@ -2407,11 +2406,10 @@ final class FiberDomain
         auto observed = atomicLoad!(MemoryOrder.acq)(task.cancelGeneration);
         while (observed < generation)
         {
-            auto expected = observed;
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
-                    &task.control.cancelGeneration, expected, generation))
+                    &task.control.cancelGeneration, observed, generation))
                 return;
-            observed = expected;
+            observed = atomicLoad!(MemoryOrder.acq)(task.cancelGeneration);
         }
     }
 
@@ -2987,11 +2985,10 @@ final class FiberSemaphore
         auto observed = atomicLoad!(MemoryOrder.acq)(permits);
         while (observed > 0)
         {
-            auto expected = observed;
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
-                    &permits, expected, observed - 1))
+                    &permits, observed, observed - 1))
                 return true;
-            observed = expected;
+            observed = atomicLoad!(MemoryOrder.acq)(permits);
         }
         return false;
     }
