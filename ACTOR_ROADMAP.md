@@ -17,10 +17,12 @@ concepts such as module generations, worlds, regions, systems, assets, and hot
 reload remain above it. The package supplies retirement tickets/fences which
 an engine can aggregate before unloading code or reclaiming an arena.
 
-## Current A1/A2 spike
+## Current actor and wave spike
 
-As of 2026-08-31, `antfarm_actor.d` contains two deliberately narrow vertical
-slices:
+As of 2026-08-31, the actor code is deliberately split into
+`antfarm_actors/actor.d` and `antfarm_actors/wave.d`. The former contains the
+autonomous actor runtime and inbox; the latter contains phase-oriented bulk
+dispatch:
 
 - a fixed-capacity runtime and stable cache-line slots allocated entirely
   through `ActorAllocator`;
@@ -39,7 +41,12 @@ slices:
   mutation/serial-entry checks, concurrent inbox producers, and deterministic
   post-close rejection; and
 - a separate actor torture suite with forced send/close interleavings,
-  multi-actor generation churn, and an opt-in mimalloc v3 adapter contract.
+  multi-actor generation churn, and an opt-in mimalloc v3 adapter contract;
+- actor-only waves composed from one or more physical Farm tables, where each
+  table's `Tprogress == Tlen` transition advances `Wprogress`; and
+- reusable generation-tagged wave handles, sealed completion, phase-specific
+  actor operations, structural duplicate/overlap rejection, and dependent-wave
+  visibility tests.
 
 This is evaluation code, not a stable public contract. Adopted/arena-owned
 state, non-POD destruction, retirement groups, custom inbox adapters, real
@@ -77,6 +84,13 @@ mimalloc benchmarking, and engine wake integration remain open below.
 - At most one activation for a generation is queued, published, or running.
   Wakes coalesce through a pending bit rather than publishing duplicates.
 - Different actors remain independently runnable and may execute in parallel.
+- A wave reserves each actor with an unqueued `IDLE -> SCHEDULED` transition
+  before publishing its table. Intrusive membership and a submission-gate pin
+  remain until aggregate wave completion; duplicate actors and overlapping
+  unfinished waves are therefore rejected before publication.
+- Wave operations receive only `scope ref ActorBorrow!T`. They do not receive
+  `ActorContext`; republish, inbox draining, and self-retirement remain the
+  autonomous actor mode.
 
 ### Lifetime and allocation
 
@@ -118,6 +132,13 @@ phase/pending word. It either sets pending before the callback chooses its
 exit state or observes idle and elects the next publisher. There is no separate
 check-then-sleep window.
 
+For waves, `Wprogress == Wlen` is authoritative only after the orchestrator
+seals publication. A table may finish before `ActorWave.publish` returns, so
+`Wlen` is incremented before Farm publication and rolled back if backpressure
+accepts no table. The sealer and last table finisher race through one CAS to
+publish exactly one finished state. An acquire observation of that state joins
+the actor writes from every table in the wave.
+
 ## API direction
 
 The concrete spelling is experimental, but the responsibilities should remain
@@ -128,7 +149,7 @@ auto runtime = ActorRuntime.create(farm, capacity, allocator);
 auto owner = runtime.createActor!(State, runActor)(constructorArgs);
 ActorHandle!State handle = owner.handle;
 
-handle.wake();                    // queued, coalesced, stale, or closed
+handle.wake();                    // queued/coalesced/wave-owned/stale/closed
 handle.send(&interaction.node);   // transfers caller-owned node if accepted
 runtime.flush(token, maximum);    // fixed-width Farm publication
 
@@ -149,6 +170,38 @@ It may mutate `T`, request another activation, or request retirement. The
 handlers that omit it, but they do not prove that an `@system` handler cannot
 stash a pointer or reference. A handler cannot suspend; suspendable work
 remains a Fiber responsibility.
+
+A wave supplies a different operation for each phase while reusing the same
+typed actor handles:
+
+```d
+void movement(scope ref ActorBorrow!State actor) nothrow @nogc @system
+{
+    actor.value.integrate();
+}
+
+ActorWave wave;
+wave.begin(farm);
+size_t offset;
+while (offset < handles.length)
+{
+    immutable written = wave.publish!movement(handles[offset .. $], token);
+    if (written == 0)
+    {
+        if (wave.handle.failed) break; // stale, duplicate, active, wrong Farm
+        continue;                      // Farm backpressure
+    }
+    offset += written;
+}
+ActorWaveHandle completion = wave.seal();
+while (!completion.finished) {}        // or park an orchestrating Fiber
+```
+
+Each successful `publish` call creates one physical table and may accept only
+a prefix. The operation and any module code it reaches must remain resident
+until the completion handle finishes. A dependent phase may begin after an
+acquire observation of `finished`; actors within the same wave remain
+parallel and must not rely on one another's same-wave writes.
 
 ### Resident type-erased adapter
 
@@ -196,7 +249,7 @@ a GC or allocation policy to the actor runtime.
 
 ## First third-party allocator candidate: mimalloc v3
 
-`antfarm_actor_mimalloc.d` is a deliberately thin, optional mimalloc v3
+`antfarm_actors/mimalloc.d` is a deliberately thin, optional mimalloc v3
 adapter. It calls the public C ABI
 [`mi_malloc_aligned(size, alignment)`](https://microsoft.github.io/mimalloc/group__aligned.html)
 and
@@ -211,7 +264,7 @@ change the default allocator. Compile with `AntfarmMimallocV3` and link
 mimalloc, or select Dub's opt-in `mimalloc-v3` configuration:
 
 ```d
-import antfarm_actor_mimalloc;
+import antfarm_actors.mimalloc;
 
 auto runtime = ActorRuntime.create(farm, capacity,
     mimallocV3ActorAllocator());
@@ -347,7 +400,7 @@ distinct ready actors may justify waking more of the eligible set.
 
 ## Engine-owned module generations
 
-Module-generation retirement is deliberately not an `antfarm_actor` hierarchy.
+Module-generation retirement is deliberately not an `antfarm_actors` hierarchy.
 An engine-level owner should aggregate actor retirement fences with every other
 reference to reloadable code: systems, event subscriptions, jobs, resources,
 and message destructors. A safe unload sequence is:
@@ -374,7 +427,7 @@ transferred out of the actor callback. In both cases the actor retires and is
 reclaimed first, proving that actor quiescence alone cannot authorize unload.
 
 This harness validates the shape of the engine contract without promoting it
-into `antfarm_actor`. Its actor registry is coordinator-driven, it simulates
+into `antfarm_actors`. Its actor registry is coordinator-driven, it simulates
 rather than performs a dynamic-library unload, and its destructor claim is
 non-actor module work. It does not settle non-POD actor-state construction or
 destruction.
@@ -396,3 +449,138 @@ The experimental actor API is ready for broader use only when:
 - Arena reset is guarded by an aggregate retirement fence.
 - Shutdown detects live owners, queued activations, producer submissions, or
   unreclaimed state rather than silently freeing underneath them.
+
+## Appendix: Wave usage and published actor state
+
+An actor wave is the actor-specific bulk-synchronous layer over Farm dispatch.
+It is intended for workloads such as game simulation, where many entities can
+run the same phase in parallel, but later phases must observe a coherent result
+from the earlier phase. A tick can therefore be expressed as a sequence such as
+intent, movement, collision, and combat, with one wave boundary wherever
+intermediate state must become visible. Actors in a wave never observe one
+another's timing-dependent, partially updated state.
+
+This model also clarifies the relationship between `ActorHandle` and
+`ActorBorrow`. The handle remains the stable, shareable identity and the borrow
+remains the scoped exclusive capability. They need not become the same type.
+Instead, wave admission and Farm payload gating acquire that capability on
+behalf of the operation: each dispatched operation receives mutable access to
+its own actor, and the orchestrator structurally prevents another unfinished
+wave over the same actors. This gives callers one handle-oriented dispatch
+surface without making an exclusive borrow storable or transferable.
+
+### Aggregate completion
+
+A wave may span several Farm tables. Every table contributes once when its
+`Tprogress` reaches `Tlen`; that event increments `Wprogress`. Once publication
+has been sealed and `Wprogress == Wlen`, one participant claims the transition
+to the finished state. Sealing is necessary because equality while the wave is
+still open only means that all tables published so far have completed, not that
+no more tables will be published. Table publication is counted before it is
+released to consumers, since a small table may finish before `publish()`
+returns; a failed publication must roll that count back.
+
+The progress chain is the completion barrier:
+
+```text
+actor writes -> table completion -> wave progress -> FINISHED -> waiter
+```
+
+Release/acquire ordering across that chain makes actor writes visible to a
+waiter that observes the finished wave. The finishing transition is exactly
+once, regardless of whether it is claimed by the sealer or the last table
+finisher. A failed operation marks the wave failed and must prevent publication
+of its prospective shared state.
+
+`ActorWaveHandle` is the authoritative, pollable completion object. A thread or
+Fiber may spin briefly, park, or arrange a notification, then acquire and
+recheck the handle before publishing a dependent wave. Notifications are only
+hints. A future direct Fiber adapter must use a lost-wake-safe
+register-then-recheck protocol and preserve the actor path's no-allocation
+contract.
+
+The intended orchestration loop is:
+
+1. Begin a wave over a non-overlapping actor set.
+2. Publish table-sized prefixes, retrying later when Farm backpressure returns
+   an unconsumed suffix.
+3. Seal the wave after the final table is admitted.
+4. On final success, commit its public generation before exposing `FINISHED`;
+   on failure, leave the prior generation committed.
+5. Acquire completion, reject a failed result, then publish any dependent wave.
+
+An actor belongs to at most one unfinished wave. Persistent wave membership and
+submission pins preserve both exclusivity and lifetime until aggregate
+completion; autonomous wake, send, and retirement paths must not bypass that
+ownership. Typed wave operation code must likewise remain resident until the
+wave finishes.
+
+### Private canonical state and public projections
+
+The preferred state model is not two freely mutable copies of the whole actor.
+Each actor has private canonical state, mutated only through its exclusive
+borrow, plus a deliberately shaped public projection that other actors may
+read. The projection is double-buffered:
+
+```text
+wave G reads public[G & 1]
+       mutates private state
+       writes complete projection into public[(G + 1) & 1]
+wave completion publishes generation G + 1
+```
+
+All actors in a wave therefore read the same frozen public generation. They may
+freely change private state and fill their own staging projection, but they may
+not inspect another actor's staging slot. On successful aggregate completion,
+the finisher release-publishes the next public generation before exposing
+`FINISHED`. The old read buffer then becomes the staging buffer for the next
+generation. On failure, the generation does not advance and partial staging
+writes remain invisible.
+
+Wave operations should receive an interface conceptually like
+`ActorAccess!(Private, Public)`: a mutable `privateState`, a frozen
+`publicState` view for the current generation, and `publish(Public)` or a
+projector that writes a complete next value. Publishing a complete value is
+preferred to exposing a mutable public reference, because a slot not fully
+overwritten could otherwise leak data from two generations ago. Keeping the
+projection separate also permits compact or structure-of-arrays layouts
+without exposing actor internals.
+
+The current `ActorWave` implementation provides scoped private borrowing,
+exclusive membership, aggregate completion, and the pollable handle. The
+double-buffered public projection is the proposed next layer, not an existing
+API guarantee.
+
+### Generation and membership rules
+
+A monotonically increasing public generation is the commit authority; its
+parity selects the physical buffer. The full generation value must be checked,
+not only the buffer index, so delayed readers cannot mistake a later reuse for
+the generation they requested. Per-entry actor generations still validate
+handles and slot reuse independently.
+
+If every live actor publishes a complete projection in every generation, one
+global public generation is sufficient. Sparse waves require an explicit
+policy. They can copy forward untouched projections, or store per-entry public
+generation metadata and let readers select the newest committed version for
+that actor. Such per-entry tags validate data but do not replace the global
+commit barrier. Membership additions, removals, and slot reuse must also become
+visible only at a defined wave boundary.
+
+Several public tables that form one logical snapshot should share one commit
+epoch, even if their work is spread across several Farm tables. State that is
+intentionally visible at different phase boundaries should use separate wave
+domains instead.
+
+Public views are naturally callback- or wave-scoped. Ordinary actor-to-actor
+reads finish before the next flip, so two buffers suffice. Readers that may
+outlive a wave boundary require an additional lifetime mechanism such as epoch
+pinning, a third buffer, or RCU-style retirement; double buffering alone cannot
+protect them.
+
+Open design work is therefore concentrated in the public projection schema,
+sparse-publication semantics, boundary-safe membership changes, long-lived
+reader pinning, and the direct Fiber completion adapter. None of those should
+weaken the core rule: actors mutate only private state during a wave, observe
+only a frozen committed public generation, and expose the next generation only
+through successful aggregate wave completion.

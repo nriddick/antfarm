@@ -427,6 +427,24 @@ alias PayloadBody = const(ulong)[];
 /// Spec 5f: decodes Pbody and executes an iteration of work.
 alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration) nothrow @nogc @system;
 
+/// Low-level notification attached to one physical payload table. The Farm
+/// invokes `call(context)` exactly once, on the consumer that advances that
+/// table's primary Tprogress to Tlen. The pointed-to hook and its context
+/// must remain stable until notification returns.
+alias TableCompletionCallback = void function(void* context)
+    nothrow @nogc @system;
+
+struct TableCompletionHook
+{
+    void* context;
+    TableCompletionCallback call;
+
+    @property bool valid() const pure nothrow @nogc @safe
+    {
+        return call !is null;
+    }
+}
+
 /// Spec 5f: payload header, 16 ulongs (128 bytes) as laid out in the buffer.
 /// Call sits immediately after Pcount: it is dereferenced only after a valid
 /// claim is acquired (by the consumer that just wrote Pcount), so it can
@@ -748,7 +766,8 @@ static assert(SegStats.sizeof == 64);
 /// Table layout offsets (in ulongs, relative to the table's starting
 /// sequence), spec 4a:
 ///   [0..8)                 Thead: 0 Tsent, 1 Tnext, 2 Tmt<<32|Tlen,
-///                          3 Cs, 4 SqCs, 5 Tsize, 6 AvgCost, 7 spare
+///                          3 Cs, 4 SqCs, 5 Tsize, 6 AvgCost,
+///                          7 optional TableCompletionHook pointer
 ///   [8 .. 8+Tlen+Tmt)      Tindex (total index first, MT index second)
 ///   7 ulongs padding
 ///   Tprogress (1 ulong)
@@ -1209,7 +1228,7 @@ struct AntFarm
     ulong write(scope PayloadEntry[] payloads, ref Token tok,
                 uint avgCost = 1) nothrow @nogc @system
     {
-        return writeImpl(payloads, tok, avgCost);
+        return writeImpl(payloads, tok, avgCost, null);
     }
 
     /// ditto: forward range overload. `write` checkpoints the source for its
@@ -1218,7 +1237,7 @@ struct AntFarm
                    uint avgCost = 1) nothrow @nogc @system
         if (isForwardRange!R && is(ElementType!R == PayloadEntry))
     {
-        return writeImpl(payloads, tok, avgCost);
+        return writeImpl(payloads, tok, avgCost, null);
     }
 
     /// Write jobs from independent header and body input ranges.  Pairing is
@@ -1231,7 +1250,7 @@ struct AntFarm
              is(ElementType!HR : const(PayloadHeader)*)) &&
             is(ElementType!BR : PayloadBody))
     {
-        return writeImpl(pairPayloads(headers, bodies), tok, avgCost);
+        return writeImpl(pairPayloads(headers, bodies), tok, avgCost, null);
     }
 
     /// Broadcast one common header over a forward range of bodies. The
@@ -1240,7 +1259,8 @@ struct AntFarm
                     ref Token tok, uint avgCost = 1) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
-        return writeImpl(broadcastPayloads(header, bodies), tok, avgCost);
+        return writeImpl(broadcastPayloads(header, bodies), tok, avgCost,
+            null);
     }
 
     /// Broadcast a common header over bodies whose uniform length is supplied
@@ -1251,12 +1271,32 @@ struct AntFarm
                     uint avgCost = 1) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
-        return writeImpl(
-            broadcastPayloads(header, bodies, bodyWords), tok, avgCost);
+        return writeImpl(broadcastPayloads(header, bodies, bodyWords), tok,
+            avgCost, null);
+    }
+
+    /// Broadcast a uniform single-shot payload range into one physical table
+    /// and notify `completion` when all callbacks in that table have returned.
+    /// This is intentionally narrower than `write`: aggregate users such as
+    /// actor waves must count the table before calling, because consumers may
+    /// complete it before this function returns.
+    ulong writeTracked(BR)(const ref PayloadHeader header, scope BR bodies,
+                    ulong bodyWords, TableCompletionHook* completion,
+                    ref Token tok, uint avgCost = 1) nothrow @nogc @system
+        if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
+    {
+        if (completion is null || !completion.valid)
+            fatal("tracked table requires a completion hook");
+        if (header.maxCs != 1 || header.done != 1)
+            fatal("tracked table requires single-shot payloads");
+        return writeImpl(broadcastPayloads(header, bodies, bodyWords), tok,
+            avgCost, completion);
     }
 
     private ulong writeImpl(R)(scope R payloads, ref Token tok,
-                              uint avgCost) nothrow @nogc @system
+                              uint avgCost,
+                              TableCompletionHook* completion)
+        nothrow @nogc @system
     {
         requireToken(tok);
         if (payloads.empty) return 0;
@@ -1446,7 +1486,7 @@ struct AntFarm
         storeRaw(w[4], sq);
         storeRaw(w[5], size); // table size, accounted into the segment's Sd on completion
         storeRaw(w[6], avgCost); // chunk hint: chunk = MAX_CHUNK >> avgCost (spec 5e-g)
-        storeRaw(w[7], 0);
+        storeRaw(w[7], cast(ulong) cast(void*) completion);
 
         storeRaw(w[progOff], 0);                          // Tprogress
         storeRawRange(w + tcountOff, 8 * sq);             // Tcount shards
@@ -2313,7 +2353,11 @@ private:
             if ((y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
             if ((y & 0xFFFF_FFFFUL) == shlen - runlen)
             {
-                immutable tp = atomicFetchAdd!(MemoryOrder.raw)(bp[progOff], cast(ulong) shlen);
+                // Tprogress is also a completion join: each shard publishes
+                // all callback writes, and the last RMW acquires the release
+                // chain before notifying an aggregate table observer.
+                immutable tp = atomicFetchAdd!(MemoryOrder.acq_rel)(
+                    bp[progOff], cast(ulong) shlen);
                 if (tp + shlen == tlen)
                 {
                     // Spec 5j: the finisher accounts Tsize into the starting
@@ -2322,6 +2366,20 @@ private:
                     immutable tsize = atomicLoad!(MemoryOrder.raw)(bp[tseqIdx + 5]);
                     immutable tki = cast(uint)((tseq >> F.segShift) & F.kMask);
                     atomicFetchAdd!(MemoryOrder.raw)(F.stats[tki].sd, tsize);
+                    immutable hookWord = atomicLoad!(MemoryOrder.raw)(
+                        bp[tseqIdx + 7]);
+                    if (hookWord != 0)
+                    {
+                        auto hook = cast(TableCompletionHook*) cast(void*)
+                            hookWord;
+                        // Copy both fields before calling: completion may
+                        // release the last external owner of the hook.
+                        immutable notify = hook.call;
+                        auto context = hook.context;
+                        if (notify is null)
+                            fatal("table completion hook lost callback");
+                        notify(context);
+                    }
                 }
                 return 1;
             }

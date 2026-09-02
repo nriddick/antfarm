@@ -1,7 +1,7 @@
 # Actor torture suite
 
 This suite promotes the A2 actor inbox beyond ordinary contention coverage.
-It compiles deterministic test hooks into `antfarm_actor` and forces senders
+It compiles deterministic test hooks into `antfarm_actors.actor` and forces senders
 to stop at each ownership/publication boundary while activation and retirement
 proceed on other threads.
 
@@ -62,6 +62,6 @@ select another installed version.
 The module-generation fence in this suite is deliberately a test-side engine
 model. Its close/count gate is the unload authority, while its per-kind counts
 are diagnostics and its actor registry is driven by one coordinator. It does
-not add module hierarchy to `antfarm_actor`, implement dynamic-library loading,
+not add module hierarchy to `antfarm_actors`, implement dynamic-library loading,
 or define non-POD actor-state destruction. The "destructor" claimant models
 module-owned resource or message destructor code admitted before close.

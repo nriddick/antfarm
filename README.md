@@ -29,8 +29,9 @@ ANTFARM_HUGE_PAGES=0 dub test --compiler=ldc2
 
 Ordinary 4 KiB backing is the default. The environment override makes that
 choice explicit for tests even if the calling shell is configured otherwise.
-The experimental actor payload has a separate deterministic-interleaving and
-sustained-contention suite:
+The experimental `antfarm_actors` package contains autonomous actors and
+multi-table, phase-oriented actor waves. Its actor runtime has a separate
+deterministic-interleaving and sustained-contention suite:
 
 ```text
 make -C actor_torture run

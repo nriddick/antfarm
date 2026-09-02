@@ -2,8 +2,9 @@
 
 ## Scope
 
-This document describes the implemented A1 activation and A2 intrusive-inbox
-protocols in `antfarm_actor.d`. It supplements
+This document describes the implemented autonomous activation and intrusive-
+inbox protocols in `antfarm_actors/actor.d`, plus the phase-oriented aggregate
+protocol in `antfarm_actors/wave.d`. It supplements
 [SPEC.md](SPEC.md), whose Farm sentinel and segment-lifetime rules remain
 unchanged.
 
@@ -35,13 +36,18 @@ caller-observed quiescence described below.
 | `Qnext` | `ActorSlot.queueNextWord` | Link owned by the ready queue while that slot is queued. |
 | `Rc` | `ActorRuntime.readyCount` | Diagnostic/shutdown accounting; not a publication edge. |
 | `Lc` | `ActorRuntime.liveCount` | Allocated-generation accounting; not sufficient by itself for runtime destruction. |
-| `G` | `ActorSlot.submissionGate` | Inbox admission: one `CLOSED` bit and a count of in-flight send reservations in one atomic word. |
+| `G` | `ActorSlot.submissionGate` | Inbox/wave admission: one `CLOSED` bit and a count of in-flight reservations in one atomic word. |
 | `I` | `ActorSlot.inboxHeadWord` | Intrusive MPSC inbox stack, detached and reversed by the exclusive actor. |
 | `Inext` | `ActorInboxNode.nextWord_` | Link owned first by the inbox, then by the actor-private detached batch. |
 | `Nstate` | `ActorInboxNode.state_` | `FREE -> QUEUED -> PROCESSING -> FREE` node-ownership cycle. |
 | `C` | `ActorSlot.inboxCarryWord` | Plain actor-private remainder of a bounded drain; handed to the next activation through `L`. |
+| `Wowner` | `ActorSlot.waveOwnerWord` | Stable owning wave while aggregate membership and its lifetime pin remain active. |
 | `Tsent` | Farm table sentinel | Release-published last by `AntFarm.write`, acquire-validated by a consumer. |
-| `Pbody` | Two const ring words | Stable slot address and generation, raw-stored before `Tsent` and raw-loaded after its acquire. |
+| `Pbody` | Two or three const ring words | Stable slot address and generation; wave payloads add the stable wave address. Raw-stored before `Tsent` and raw-loaded after its acquire. |
+| `Tprogress` | Farm table completion counter | Each shard publishes callback writes with an acquire/release increment; the increment reaching `Tlen` invokes the table hook. |
+| `Wlen` | `ActorWave.tablesPublished_` | Number of physical tables admitted into the open wave. |
+| `Wprogress` | `ActorWave.tablesCompleted_` | Number of table hooks which have joined their table and returned it to the wave. |
+| `Wstatus` | `ActorWave.status_` | `SEALED`, `FINISHING`, `FINISHED`, and `FAILED`; acquire observation of `FINISHED` joins the wave. |
 
 `raw` means an atomic operation with no ordering semantics. It prevents an
 atomic/plain data race on reused storage but does not itself publish preceding
@@ -95,6 +101,53 @@ There are three complementary chains in this chart:
 The queue and Farm chains deliver an activation. The lifecycle chain is the
 authority to touch mutable state. Possessing a ring handle without winning
 `scheduled -> running` does not grant a borrow.
+
+## Wave completion chart
+
+```text
+orchestrator                 Farm table consumers                 observer
+------------                 --------------------                 --------
+
+G.CAS(acq_rel, count++)
+L.CAS(acq_rel,
+  IDLE -> SCHEDULED)
+Wlen.fetchAdd(acq_rel)
+writeTracked(...)
+Tsent.store(rel)       ---> Tsent.load(acq)
+                            L.CAS(acq_rel,
+                              SCHEDULED -> RUNNING)
+                            phase-specific ActorBorrow mutation
+                            L.CAS(acq_rel, RUNNING -> IDLE)
+                            Tprogress.fetchAdd(acq_rel)
+                              last shard: table hook
+                            Wprogress.fetchAdd(acq_rel)
+
+seal: Wstatus.CAS(acq_rel,
+  OPEN -> SEALED)
+sealer or last hook:
+Wstatus.CAS(acq_rel,
+  SEALED -> FINISHING)
+clear intrusive members
+G.fetchSub(acq_rel) for each
+Wstatus.CAS(acq_rel,
+  FINISHING -> FINISHED) --------------------------------------> load(acq)
+```
+
+The wave may have several tables and several Tprogress shards per table.
+Acquire/release RMW modification order joins each shard into its table, then
+each table into Wprogress. `Wprogress == Wlen` may be transient while the
+producer is still publishing, so only `SEALED && Wprogress == Wlen` permits
+the exactly-once `FINISHED` transition. Publishing a dependent wave after an
+acquire observation of `FINISHED` carries all predecessor actor writes into
+the new Farm publication.
+
+While `waveOwnerWord` is nonzero, ordinary `wake`, `send`, and retirement
+requests return `waveOwned`; a rejected send never claims its inbox node. A
+wake/send that
+linearized in the narrow reservation race before membership publication sets
+`PENDING` on the already-scheduled actor. The wave operation retains exclusive
+entry, reports failure, and materializes that pending autonomous activation
+after its borrow ends.
 
 ## Inbox and close chart
 
@@ -313,14 +366,15 @@ then destroy the stable-slot slab. `Lc == 0`, `Rc == 0`, and `H == 0` are useful
 assertions but are not a standalone runtime-lifetime fence.
 
 `ActorOwner.reclaim` acquire-observes `RETIRED` and additionally asserts closed
-`G`/zero reservations and empty `I`/`C`. An engine module-generation fence must
+`G`/zero reservations, empty `I`/`C`, and no `Wowner`. An engine module-
+generation fence must
 aggregate this actor result with non-actor work and with any message payload
 destructors before unloading code or resetting an arena.
 
 ## Engine aggregate unload fence
 
 The actor torture suite makes the higher-level contract executable with a
-test-side engine generation owner. This is not an `antfarm_actor` object. It
+test-side engine generation owner. This is not an `antfarm_actors` object. It
 combines resident type-erased actor owners with an admission gate for module
 code frames and ownership transferred out of callbacks:
 

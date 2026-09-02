@@ -4,8 +4,9 @@ DFLAGS ?= -g -O1
 DC ?= ldc2
 TSAN_OPTIONS ?= history_size=7 halt_on_error=1
 SOURCES := actor_torture.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d \
-	$(ROOT)/antfarm_templates.d $(ROOT)/antfarm_actor.d \
-	$(ROOT)/antfarm_actor_mimalloc.d
+	$(ROOT)/antfarm_templates.d $(ROOT)/antfarm_actors/package.d \
+	$(ROOT)/antfarm_actors/actor.d $(ROOT)/antfarm_actors/wave.d \
+	$(ROOT)/antfarm_actors/mimalloc.d
 LDC_VERSIONS := -d-version=AntfarmActorTestHooks -d-version=AntfarmMimallocV3 \
 	-d-version=AntfarmMimallocStub
 DMD_VERSIONS := -version=AntfarmActorTestHooks -version=AntfarmMimallocV3 \

@@ -4,7 +4,7 @@
 module antfarm_test;
 
 import antfarm_templates;
-import antfarm_actor;
+import antfarm_actors;
 import antfarm_allocation : allocateAligned64, freeAligned64;
 import core.atomic;
 import core.memory : GC;
@@ -176,6 +176,46 @@ void inboxActor(scope ref ActorBorrow!ActorInboxState actor,
     }
 
     atomicFetchSub!(MemoryOrder.rel)(g_inboxEntries, 1L);
+}
+
+struct ActorWaveShared
+{
+    ulong* values;
+    ulong* observed;
+    size_t count;
+}
+
+struct ActorWaveState
+{
+    ActorWaveShared* sharedState;
+    size_t index;
+    ulong localValue;
+    ulong neighborValue;
+}
+
+__gshared shared(long) g_waveAutonomousCalls;
+
+void actorWaveDormant(scope ref ActorBorrow!ActorWaveState,
+        scope ref ActorContext) nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.rel)(g_waveAutonomousCalls, 1L);
+}
+
+void actorWaveProduce(scope ref ActorBorrow!ActorWaveState actor)
+    nothrow @nogc @system
+{
+    actor.value.localValue = cast(ulong) actor.value.index * 3UL + 11UL;
+    actor.value.sharedState.values[actor.value.index] = actor.value.localValue;
+}
+
+void actorWaveObserve(scope ref ActorBorrow!ActorWaveState actor)
+    nothrow @nogc @system
+{
+    immutable neighbor = (actor.value.index + 1)
+        % actor.value.sharedState.count;
+    actor.value.neighborValue = actor.value.sharedState.values[neighbor];
+    actor.value.sharedState.observed[actor.value.index]
+        = actor.value.neighborValue;
 }
 
 private long incCalls(size_t idx) nothrow @nogc @system
@@ -1327,6 +1367,193 @@ class ActorInboxProducerJob
     }
 }
 
+void testActorWave()
+{
+    enum actorCount = 64;
+    enum tableActors = 7;
+    enum consumerCount = 4;
+    auto farm = AntFarm.create(1 << 18, 8, consumerCount,
+        0, 0, 1, 4096);
+    scope (exit) farm.destroy();
+
+    ActorAllocCounts counts;
+    auto allocator = ActorAllocator(&counts,
+        &actorTestAllocate, &actorTestDeallocate);
+    auto actors = ActorRuntime.create(farm, actorCount, allocator);
+    check(actors !is null, "wave actor runtime allocation");
+
+    ulong[actorCount] values;
+    ulong[actorCount] observed;
+    ActorWaveShared sharedState = ActorWaveShared(
+        values.ptr, observed.ptr, actorCount);
+    ActorOwner!ActorWaveState[actorCount] owners;
+    ActorHandle!ActorWaveState[actorCount] handles;
+    foreach (i; 0 .. actorCount)
+    {
+        auto initial = ActorWaveState(&sharedState, i, 0, 0);
+        owners[i] = actors.createActor!(ActorWaveState, actorWaveDormant)(
+            initial);
+        check(owners[i].valid, "wave actor creation");
+        handles[i] = owners[i].handle;
+    }
+    atomicStore!(MemoryOrder.raw)(g_waveAutonomousCalls, 0L);
+
+    shared int stop;
+    auto deadline = MonoTime.currTime + 30.seconds;
+    ActorConsumerJob[consumerCount] consumerJobs;
+    Thread[consumerCount] consumers;
+    foreach (i; 0 .. consumerCount)
+    {
+        consumerJobs[i] = new ActorConsumerJob(farm, &stop, deadline);
+        consumers[i] = new Thread(&consumerJobs[i].run);
+        consumers[i].start();
+    }
+
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "wave producer registration");
+    ActorWave wave;
+
+    // Membership outlives an individual table callback. Even after this
+    // actor has returned to idle, it cannot be admitted a second time while
+    // its aggregate wave remains open.
+    wave.begin(farm);
+    check(wave.publish!actorWaveProduce(handles[0 .. 1], token, 2) == 1,
+        "single actor wave table publication");
+    while (wave.handle.progress != 1)
+    {
+        if (MonoTime.currTime >= deadline)
+            fatal("open actor wave table completion timeout");
+        Thread.yield();
+    }
+    check(handles[0].wake() == ActorWakeResult.waveOwned,
+        "autonomous wake rejected while actor belongs to open wave");
+    ActorInboxNode waveSendProbe;
+    waveSendProbe.initialize();
+    check(handles[0].send(&waveSendProbe) == ActorSendResult.waveOwned
+            && waveSendProbe.available,
+        "inbox send rejected without taking node from open wave");
+    check(owners[0].requestRetire() == ActorRetireResult.waveOwned,
+        "retirement rejected while actor belongs to open wave");
+    check(wave.publish!actorWaveProduce(handles[0 .. 1], token, 2) == 0
+            && wave.handle.failed,
+        "completed table retains aggregate wave membership");
+    auto overlapRejected = wave.seal();
+    while (!overlapRejected.finished) Thread.yield();
+    check(overlapRejected.failed && overlapRejected.length == 1,
+        "overlap rejection preserves prior table completion");
+
+    wave.begin(farm);
+    size_t offset;
+    ulong firstTableCount;
+    while (offset < actorCount)
+    {
+        immutable candidatePast = offset + tableActors < actorCount
+            ? offset + tableActors : actorCount;
+        immutable written = wave.publish!actorWaveProduce(
+            handles[offset .. candidatePast], token, 2);
+        if (written == 0)
+        {
+            check(!wave.handle.failed, "wave publication backpressure only");
+            if (MonoTime.currTime >= deadline)
+                fatal("actor wave publication timeout");
+            Thread.yield();
+            continue;
+        }
+        offset += written;
+        ++firstTableCount;
+        check(!wave.handle.finished,
+            "open wave cannot finish at transient Wprogress equality");
+    }
+    check(firstTableCount > 1, "actor wave spans multiple Farm tables");
+    auto first = wave.seal();
+    while (!first.finished)
+    {
+        if (MonoTime.currTime >= deadline)
+            fatal("first actor wave completion timeout");
+        Thread.yield();
+    }
+    check(!first.failed, "first actor wave completes cleanly");
+    check(first.progress == first.length
+            && first.length == firstTableCount,
+        "wave aggregates exact physical table count");
+    foreach (i; 0 .. actorCount)
+        check(values[i] == cast(ulong) i * 3UL + 11UL,
+            "first wave publishes actor writes");
+
+    // Reusing the stable descriptor creates a new observation generation.
+    // The second phase is published only after acquiring first.finished and
+    // therefore may read every entity result produced by the first phase.
+    wave.begin(farm);
+    check(!first.valid, "reused actor wave invalidates old handle");
+    offset = 0;
+    while (offset < actorCount)
+    {
+        immutable candidatePast = offset + tableActors < actorCount
+            ? offset + tableActors : actorCount;
+        immutable written = wave.publish!actorWaveObserve(
+            handles[offset .. candidatePast], token, 2);
+        if (written == 0)
+        {
+            check(!wave.handle.failed,
+                "dependent wave publication backpressure only");
+            if (MonoTime.currTime >= deadline)
+                fatal("dependent actor wave publication timeout");
+            Thread.yield();
+            continue;
+        }
+        offset += written;
+    }
+    auto second = wave.seal();
+    while (!second.finished)
+    {
+        if (MonoTime.currTime >= deadline)
+            fatal("dependent actor wave completion timeout");
+        Thread.yield();
+    }
+    check(!second.failed, "dependent actor wave completes cleanly");
+    foreach (i; 0 .. actorCount)
+    {
+        immutable neighbor = (i + 1) % actorCount;
+        check(observed[i] == cast(ulong) neighbor * 3UL + 11UL,
+            "dependent wave observes predecessor state");
+    }
+
+    // Reservation makes duplicate membership a structural failure before a
+    // table becomes visible, and cancellation restores the actor to idle.
+    wave.begin(farm);
+    ActorHandle!ActorWaveState[2] duplicate;
+    duplicate[0] = handles[0];
+    duplicate[1] = handles[0];
+    check(wave.publish!actorWaveProduce(duplicate[], token, 2) == 0,
+        "duplicate actor rejected from wave");
+    auto rejected = wave.seal();
+    check(rejected.finished && rejected.failed
+            && rejected.length == 0 && rejected.progress == 0,
+        "rejected empty wave finishes with failure");
+
+    atomicStore!(MemoryOrder.rel)(stop, 1);
+    foreach (thread; consumers) thread.join();
+    farm.unregisterProducer(token);
+    check(atomicLoad!(MemoryOrder.acq)(g_waveAutonomousCalls) == 0,
+        "wave dispatch does not enter autonomous actor handler");
+
+    foreach (ref owner; owners)
+    {
+        check(owner.requestRetire() == ActorRetireResult.requested
+                && owner.retired,
+            "wave actor retires from restored idle state");
+        check(owner.reclaim() == ActorReclaimResult.reclaimed,
+            "wave actor reclamation");
+    }
+    check(actors.live == 0 && actors.ready == 0,
+        "wave actor runtime drained");
+    actors.destroy();
+    check(counts.allocations == counts.deallocations,
+        "wave actor allocator pairing");
+
+    printf("testActorWave OK\n"); fflush(stdout);
+}
+
 void testActorPayload()
 {
     enum consumerCount = 4;
@@ -1775,6 +2002,7 @@ void main()
     testSpannedTables();
     testSmallTableChurn();
     testMultiSmallProducers();
+    testActorWave();
     testActorPayload();
     testActorErasedAdapter();
     testActorInbox();

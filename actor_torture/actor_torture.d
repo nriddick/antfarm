@@ -1,15 +1,15 @@
 /++
  + Deterministic interleaving and sustained-contention tests for
- + antfarm_actor. Build with AntfarmActorTestHooks and, for the allocator
+ + antfarm_actors.actor. Build with AntfarmActorTestHooks and, for the allocator
  + contract test, AntfarmMimallocV3.
  +/
 module actor_torture;
 
 import antfarm;
-import antfarm_actor;
+import antfarm_actors;
 import antfarm_allocation : allocateAligned64, freeAligned64;
 version (AntfarmMimallocV3)
-    import antfarm_actor_mimalloc : mimallocV3ActorAllocator;
+    import antfarm_actors.mimalloc : mimallocV3ActorAllocator;
 import core.atomic;
 import core.memory : GC;
 import core.stdc.stdio : fflush, fprintf, printf, stderr, stdout;
@@ -485,7 +485,7 @@ private void testDeterministicInterleavings()
 // -------------------------------------------------------------------------
 
 /// Test-side model of the fence an engine module-generation owner needs.
-/// `antfarm_actor` deliberately does not own this hierarchy: the resident
+/// `antfarm_actors` deliberately does not own this hierarchy: the resident
 /// registry combines erased actor owners with admissions for module code
 /// frames and ownership which has escaped an actor callback.
 private enum GenerationClaimKind : size_t

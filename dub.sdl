@@ -4,7 +4,9 @@ authors "Nathan Riddick"
 license "BSL-1.0"
 targetType "library"
 importPaths "."
-sourceFiles "antfarm.d" "antfarm_allocation.d" "antfarm_templates.d" "antfarm_actor.d" "antfarm_actor_mimalloc.d"
+sourceFiles "antfarm.d" "antfarm_allocation.d" "antfarm_templates.d" \
+    "antfarm_actors/package.d" "antfarm_actors/actor.d" \
+    "antfarm_actors/wave.d" "antfarm_actors/mimalloc.d"
 
 toolchainRequirements {
 	dmd ">=2.112.0"

@@ -75,8 +75,9 @@ Verified on 2026-08-29 on the current Linux/Ryzen 5 5500 host:
   republish ordering, stale-handle behavior, and interaction with thread-safe
   mailboxes. A non-GC A1/A2 evaluation spike now covers the exclusive borrow,
   intrusive inbox admission, close-before-drain retirement, deterministic
-  interleaving torture, and a pinned mimalloc v3.5.0 adapter with cross-thread
-  reclamation tests; its remaining
+  interleaving torture, a pinned mimalloc v3.5.0 adapter with cross-thread
+  reclamation tests, and sealed multi-table actor waves with dependent-phase
+  visibility; its remaining
   promotion gates are in [ACTOR_ROADMAP.md](ACTOR_ROADMAP.md).
 - Reconsider bounded parallel work from first principles, with explicit
   lifetime, completion, cancellation, error, and allocation contracts.

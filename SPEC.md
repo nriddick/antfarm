@@ -35,7 +35,7 @@ The implementation of this idea: a circular buffer using the "magic buffer" memo
 
 Pains are taken to *eliminate* CAS operations from the hot paths of the module. Hot-path synchronization is fetch-add / fetch-sub plus acquire/release load/store. The CAS sites are cold: producer-ticket claim, the last-releaser pulse on unsubscribe, and `plantIfUnprotected`'s plant / retract. They are not open retry loops. A failed CAS means some other thread changed the word, and that change often invalidates the reason to plant — count or pulse already present, so the loop bails or takes a different action against the new snapshot. The last-releaser still has to land its decrement, but each retry is against a freshly observed `Rt`, not a spin on the same snapshot. We use a *strong* CAS (D's `cas` does not fail spuriously). Whether a weak CAS would suffice is not settled: a spurious fail would only extra-retry on the looping sites, and the one-shot retract already treats failure as harmless because a later 0→1 clears the pulse. The reference implementation is in D and the Farm should be allocated into 64-byte-aligned memory with manual lifetime; at the time of writing D's garbage collector only guarantees alignment to 16 bytes. Another caveat: this system is designed such that most errors are fatal with very few exceptions. Just about every interface to the Farm is `@nogc nothrow @system` code.
 
-Atomic memory orders, in one place: root-tally RMWs are release, root-tally loads are acquire; write tail RMWs are release and producers' probes are acquire. Leaf-tally RMWs are acq_rel: a non-edge consumer never touches `Rt`, so the last-on-leaf's `Rt` release has to carry that consumer's ring reads through the leaf's release sequence. `Es` and `Tsent` follow a store-released-last pattern against acquire-loads. A matching acquire of `Es` (or of the table sentinel) therefore also orders the subsequent raw header reads. Other orders are raw. Table contents other than `Tsent` (Thead words 1–7, Tindex, Tcount, Phead, Pbody) are stored raw so they are the same atomic objects consumers load-raw; wrap reuse of a physical word is atomic vs atomic, not a plain store racing an atomic load.
+Atomic memory orders, in one place: root-tally RMWs are release, root-tally loads are acquire; write tail RMWs are release and producers' probes are acquire. Leaf-tally RMWs are acq_rel: a non-edge consumer never touches `Rt`, so the last-on-leaf's `Rt` release has to carry that consumer's ring reads through the leaf's release sequence. `Tprogress` RMWs are acq_rel so its final transition can join callback writes before an optional table-completion notification. `Es` and `Tsent` follow a store-released-last pattern against acquire-loads. A matching acquire of `Es` (or of the table sentinel) therefore also orders the subsequent raw header reads. Other orders are raw. Table contents other than `Tsent` (Thead words 1–7, Tindex, Tcount, Phead, Pbody) are stored raw so they are the same atomic objects consumers load-raw; wrap reuse of a physical word is atomic vs atomic, not a plain store racing an atomic load.
 
 Safety argument in one paragraph, since later sections rely on it: producers only ever write within quota verified by sweeps of contiguously-forward zero Rts, and total maximum quota `Exmax` is bounded by K-1 segments' capacities, strictly less than a lap. A consumer holding any tally therefore protects not just that segment but everything ahead of it within one lap: any sweep far enough ahead to threaten the consumer's unread data must pass contiguously through the held segment and break. Conversely, a producer cannot jump a lap on blind quota alone, so the protection cannot be outflanked. An incomplete segment is never visible as `Rt == 0`: the last releaser of an unconfirmed segment leaves a Sub0 pin (5b), so a producer cannot treat abandoned incomplete work as free space. `plantIfUnprotected`'s post-CAS retract keeps a confirmed segment from carrying Sub0, so the "incomplete segments are never `Rt == 0`" invariant is not paid for with the mirror-image leak of "confirmed segments are `Rt != 0`". Idle consumers that have caught `Wt` keep a live pin on the frontier segment (5c), so the system never drops to zero pins while anyone is still subscribed. Consumers retain references until segments are *confirmed complete* (5j). Consumers' unread data is always protected, and the system never overwrites unexecuted work.
 
@@ -171,10 +171,10 @@ Producers commit a table `Ti` of Payloads up to `Exi` in total size, with sectio
 
 | Offset (ulongs from table start) | Contents |
 | --- | --- |
-| `[0 .. 8)` | Thead. Word 0 is `Tsent` (store-released last). 1 `Tnext`. 2 `Tmt<<32 \| Tlen`. 3 `Cs`. 4 `SqCs`. 5 `Tsize`. 6 `AvgCost`. 7 spare. |
+| `[0 .. 8)` | Thead. Word 0 is `Tsent` (store-released last). 1 `Tnext`. 2 `Tmt<<32 \| Tlen`. 3 `Cs`. 4 `SqCs`. 5 `Tsize`. 6 `AvgCost`. 7 an optional stable `TableCompletionHook*` (zero for ordinary writes). |
 | `[8 .. 8+Tlen+Tmt)` | Tindex: dense index of where each Payload sits. Total index first, MT index second. `Tmt` is the number of multithreaded payloads actually written; `Tlen` the total. |
 | + 7 | padding |
-| + 1 | `Tprogress`. When a `Ci` identifies itself adding the final completion sum for its shard, it increments `Tprogress` by the shard length. |
+| + 1 | `Tprogress`. When a `Ci` identifies itself adding the final completion sum for its shard, it increments `Tprogress` by the shard length with acquire/release ordering. |
 | + 7 | padding |
 | then | `Tcount`: combination claims/completions counters. Consumers fetch_add the 32 most significant bits as claims and 32 LSB as completions. There are `SqCs` such counters, each followed by 7 ulongs of padding. After any packed increment, if the field just incremented has wrapped to 0 the process fatals rather than continue with a corrupted counter. Under the 512 caps below, 32-bit claim wrap requires pathological visitor accumulation on one shard. |
 | then | the Payloads laid sequentially. |
@@ -187,6 +187,15 @@ Size arithmetic is overflow-checked before any compare to quota. If `body.length
 A payload that cannot fit in the *caller tier* maximum `Exi` is a caller error, not backpressure. If a singleton table containing only that payload — Thead, index slots, pads, Tcount words for the current `SqCs`, the payload, and the end pad — exceeds the caller's tier quota, `write()` fatals. The check is by caller tier, not `max(quotaBulk, quotaSmall)`, because a payload that only the other tier could ever publish would remain in a small producer's input range on future calls. Thus it's a contract failure that must be wrangled upstream, and `write() == 0` strictly means the farm is full for `Pi`'s purposes. Multi-payload truncation to the caller's current `Exi` stays legal: if `Ti`'s size exceeds a depleted `Exi`, `Pi` attempts to refresh it, then keeps however many Payloads fit.
 
 At this level producers do nothing else to resolve fullness, they merely return commit lengths dwindling to 0. A stalled producer may subscribe a ConsumerView, drain, and retry — that is the supported escape hatch (3a).
+
+`writeTracked` is the narrow completion-notification variant used by actor
+waves. It accepts only a uniform single-threaded, single-shot header
+(`MaxCs=1`, `Done=1`) and stores a caller-owned `TableCompletionHook*` in
+Thead word 7. The hook is invoked exactly once by the `Tprogress == Tlen`
+finisher, after every Call in that table has returned. Its storage and context
+must remain stable until invocation returns. An aggregate producer must count
+the table before calling `writeTracked`, because consumers may finish it before
+the write call returns; a zero write admits no table and requires rollback.
 
 ### 4b. After fetch_add() to the Write Tail
 
@@ -292,7 +301,7 @@ Finding a table, `Ci` can use a combination of header values and local stats to 
 
 **j.** If `X < Shiter` it maps to a run of Tindex of Chunk length at `Shstart + X * Chunk`. If `X == Shiter-1`, `Ci` truncates the run to the remainder (`Shlen & (Chunk-1)`) if it's nonzero.
 
-**k.** When a `Ci` finishes a run do `Y = fetch_add(Shc, run_length)`; if `Y << 32 == (Shlen - run_length) << 32` then `Ci` completed the shard and adds `Shlen` to `Tprogress`. This bounds the number of mutations to `Tprogress` to `SqCs`. The completer additionally gains the *sweeper role* for this table (5i), and if its `Tprogress` add lands exactly on `Tlen` it is the table's finisher and performs the Sd accounting (5j).
+**k.** When a `Ci` finishes a run do `Y = fetch_add(Shc, run_length)`; if `Y << 32 == (Shlen - run_length) << 32` then `Ci` completed the shard and adds `Shlen` to `Tprogress` with acquire/release ordering. This bounds the number of mutations to `Tprogress` to `SqCs` and makes the final RMW a join over preceding shard callback writes. The completer additionally gains the *sweeper role* for this table (5i), and if its `Tprogress` add lands exactly on `Tlen` it is the table's finisher and performs the Sd accounting (5j).
 
 **l.** Then `Ci` returns to step i; or if `X >= Shiter` it enters the secondary pathway.
 
@@ -350,7 +359,7 @@ The carried role and small tables. Small tables concentrate all claims on shard 
 
 ### 5j. Segment Completion Tracking and Reference Retention
 
-Consumers retain references until completion is *confirmed*, using the consumed-size accumulator `Sd` (2b): the table's finisher (the `Ci` whose `Tprogress` add lands on `Tlen`) adds `Tsize` to `Sd` of the table's starting segment. `Sd` is zeroed by the producer when its reservation crosses into the segment for a new epoch, before the release-store of `Es`. The finisher provably still holds a reference on the segment (it was unconfirmed until this moment), so its accounting can never race a producer's re-zeroing.
+Consumers retain references until completion is *confirmed*, using the consumed-size accumulator `Sd` (2b): the table's finisher (the `Ci` whose `Tprogress` add lands on `Tlen`) adds `Tsize` to `Sd` of the table's starting segment, then invokes a nonzero table-completion hook. `Sd` is zeroed by the producer when its reservation crosses into the segment for a new epoch, before the release-store of `Es`. The finisher provably still holds a reference on the segment (it was unconfirmed until this moment), so its accounting can never race a producer's re-zeroing.
 
 A held epoch `Ei` (physical `Ki`) is released from the old end of the range when:
 
