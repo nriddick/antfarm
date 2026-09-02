@@ -29,7 +29,7 @@ ANTFARM_HUGE_PAGES=0 dub test --compiler=ldc2
 
 Ordinary 4 KiB backing is the default. The environment override makes that
 choice explicit for tests even if the calling shell is configured otherwise.
-The experimental `antfarm_actors` package contains autonomous actors and
+The experimental `actors` package contains autonomous actors and
 multi-table, phase-oriented actor waves. Its actor runtime has a separate
 deterministic-interleaving and sustained-contention suite:
 
@@ -40,7 +40,7 @@ make -C actor_torture run-tsan
 ```
 
 Its optional mimalloc v3 adapter is documented in
-[ACTOR_ROADMAP.md](ACTOR_ROADMAP.md); ordinary builds retain the C-runtime
+[ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md); ordinary builds retain the C-runtime
 default and do not link mimalloc. The real allocator lane uses the pinned
 submodule:
 

@@ -20,7 +20,7 @@ an engine can aggregate before unloading code or reclaiming an arena.
 ## Current actor and wave spike
 
 As of 2026-08-31, the actor code is deliberately split into
-`antfarm_actors/actor.d` and `antfarm_actors/wave.d`. The former contains the
+`actors/actor.d` and `actors/wave.d`. The former contains the
 autonomous actor runtime and inbox; the latter contains phase-oriented bulk
 dispatch:
 
@@ -249,7 +249,7 @@ a GC or allocation policy to the actor runtime.
 
 ## First third-party allocator candidate: mimalloc v3
 
-`antfarm_actors/mimalloc.d` is a deliberately thin, optional mimalloc v3
+`actors/mimalloc.d` is a deliberately thin, optional mimalloc v3
 adapter. It calls the public C ABI
 [`mi_malloc_aligned(size, alignment)`](https://microsoft.github.io/mimalloc/group__aligned.html)
 and
@@ -264,7 +264,7 @@ change the default allocator. Compile with `AntfarmMimallocV3` and link
 mimalloc, or select Dub's opt-in `mimalloc-v3` configuration:
 
 ```d
-import antfarm_actors.mimalloc;
+import actors.mimalloc;
 
 auto runtime = ActorRuntime.create(farm, capacity,
     mimallocV3ActorAllocator());
@@ -400,7 +400,7 @@ distinct ready actors may justify waking more of the eligible set.
 
 ## Engine-owned module generations
 
-Module-generation retirement is deliberately not an `antfarm_actors` hierarchy.
+Module-generation retirement is deliberately not an `actors` hierarchy.
 An engine-level owner should aggregate actor retirement fences with every other
 reference to reloadable code: systems, event subscriptions, jobs, resources,
 and message destructors. A safe unload sequence is:
@@ -427,7 +427,7 @@ transferred out of the actor callback. In both cases the actor retires and is
 reclaimed first, proving that actor quiescence alone cannot authorize unload.
 
 This harness validates the shape of the engine contract without promoting it
-into `antfarm_actors`. Its actor registry is coordinator-driven, it simulates
+into `actors`. Its actor registry is coordinator-driven, it simulates
 rather than performs a dynamic-library unload, and its destructor claim is
 non-actor module work. It does not settle non-POD actor-state construction or
 destruction.
@@ -586,7 +586,7 @@ only a frozen committed public generation, and expose the next generation only
 through successful aggregate wave completion.
 
 The executable characterization in
-[`fibers/benchmarks/actor_wave.d`](fibers/benchmarks/actor_wave.d) models two
+[`fibers/benchmarks/actor_wave.d`](../fibers/benchmarks/actor_wave.d) models two
 independent actor sets with one private and two public cache lines per actor.
 It compares one Fiber publishing both waves against two Fibers publishing one
 wave each; the latter have distinct Farm producer tokens and rendezvous only

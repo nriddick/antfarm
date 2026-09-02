@@ -30,10 +30,8 @@ else version (Posix)
     }
 }
 
-enum Arm : int { stock, yield16, claim1 }
 enum Scene : int { idle, mid, burst, near, mbox }
 
-immutable string[3] armName = ["stock", "yield16", "claim1"];
 immutable string[5] sceneName = ["idle", "mid-drain", "burst", "near-full", "mailbox"];
 
 struct Cfg
@@ -56,8 +54,6 @@ struct Cfg
     bool runOversub = true;
     bool runAttr = false;
     bool runMailbox = false;
-    bool allArms = false; // default suite picks arms per scene
-    Arm oneArm = Arm.stock;
     uint avgCost = 1;  // chunk hint for dump writes
     uint small = 64;   // small-table threshold; 0 = auto
     bool huge;         // --huge: MADV_HUGEPAGE on the magic-buffer mapping
@@ -232,7 +228,6 @@ Pct pctOf(long* buf, size_t n)
 struct Row
 {
     Scene scene;
-    Arm arm;
     uint nc;
     uint tlen;
     ulong spinNs;
@@ -250,7 +245,6 @@ struct Row
 struct ConsCtx
 {
     AntFarm* f;
-    Arm arm;
     uint cpu;
     bool doPin;
 }
@@ -282,17 +276,6 @@ void consumerMain(ConsCtx* c)
     ConsumerView v;
     if (v.subscribe(c.f) < 0)
         fatal("subscribe failed");
-    // Yield/claim-1 abandon a table after one run. One stock worker must
-    // stay behind so same-segment leftovers still drain (idle re-walk only
-    // covers trailing segments). The yielders are who can see the sentinel
-    // after a single chunk.
-    // Mixed chunk sizes on one table share Tcount and deadlock. All
-    // claim-1 workers, including the stock-length drainer, use chunk=1.
-    if (c.arm == Arm.claim1)
-        v.benchChunk = 1;
-    immutable yielder = (c.arm == Arm.yield16 || c.arm == Arm.claim1) && c.cpu != 0;
-    if (yielder)
-        v.benchMaxRuns = 1;
     atomicFetchAdd(g_ready, 1);
     while (atomicLoad!(MemoryOrder.acq)(g_go) == 0) {}
     while (atomicLoad!(MemoryOrder.acq)(g_go) == 1)
@@ -335,7 +318,7 @@ bool waitUntil(ref shared(long) c, long want, MonoTime deadline)
     return true;
 }
 
-FarmSet startFarm(Cfg cfg, Arm arm, uint nc)
+FarmSet startFarm(Cfg cfg, uint nc)
 {
     FarmSet s;
     s.nc = nc;
@@ -379,7 +362,7 @@ FarmSet startFarm(Cfg cfg, Arm arm, uint nc)
 
     foreach (i; 0 .. nc)
     {
-        s.jobs[i] = new ConsJob(ConsCtx(s.f, arm, i, cfg.pin));
+        s.jobs[i] = new ConsJob(ConsCtx(s.f, i, cfg.pin));
         s.consumers[i] = new Thread(&s.jobs[i].run);
         s.consumers[i].start();
     }
@@ -426,18 +409,17 @@ ulong writeSent(ref FarmSet s, long t0ticks, ulong slot)
     return s.f.write((&e)[0 .. 1], s.small, g_avgCost);
 }
 
-Row runIdle(Cfg cfg, Arm arm, uint nc)
+Row runIdle(Cfg cfg, uint nc)
 {
     Row r;
     r.scene = Scene.idle;
-    r.arm = arm;
     r.nc = nc;
     r.tlen = 0;
     r.spinNs = 0;
     g_spinNs = 0;
     g_burstN = 0;
     resetHist();
-    auto s = startFarm(cfg, arm, nc);
+    auto s = startFarm(cfg, nc);
     GC.collect();
     GC.disable();
     atomicStore!(MemoryOrder.rel)(g_go, 1);
@@ -491,18 +473,17 @@ Row runIdle(Cfg cfg, Arm arm, uint nc)
     return r;
 }
 
-Row runMid(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
+Row runMid(Cfg cfg, uint nc, uint tlen, ulong spinNs)
 {
     Row r;
     r.scene = Scene.mid;
-    r.arm = arm;
     r.nc = nc;
     r.tlen = tlen;
     r.spinNs = spinNs;
     g_spinNs = spinNs;
     g_burstN = 0;
     resetHist();
-    auto s = startFarm(cfg, arm, nc);
+    auto s = startFarm(cfg, nc);
     GC.collect();
     GC.disable();
     atomicStore!(MemoryOrder.rel)(g_go, 1);
@@ -617,7 +598,6 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
 {
     Row r;
     r.scene = Scene.mbox;
-    r.arm = Arm.stock;
     r.nc = nc;
     r.tlen = tlen;
     r.spinNs = spinNs;
@@ -625,7 +605,7 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
     g_burstN = 0;
     resetHist();
     // Farm workers drain the dump; a dedicated poller is the OOB channel.
-    auto s = startFarm(cfg, Arm.stock, nc);
+    auto s = startFarm(cfg, nc);
     immutable ncpu = onlineCpus();
     immutable mcpu = (nc + 1 < ncpu) ? nc + 1 : (ncpu ? ncpu - 1 : 0);
     auto mj = new MboxJob(mcpu, cfg.pin);
@@ -715,18 +695,17 @@ Row medMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
     return pickMedianP99(rs);
 }
 
-Row runBurst(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
+Row runBurst(Cfg cfg, uint nc, uint tlen, ulong spinNs)
 {
     Row r;
     r.scene = Scene.burst;
-    r.arm = arm;
     r.nc = nc;
     r.tlen = tlen;
     r.spinNs = spinNs;
     g_spinNs = spinNs;
     g_burstN = cfg.burstN;
     resetHist();
-    auto s = startFarm(cfg, arm, nc);
+    auto s = startFarm(cfg, nc);
     GC.collect();
     GC.disable();
     atomicStore!(MemoryOrder.rel)(g_go, 1);
@@ -830,14 +809,13 @@ Row runNear(Cfg cfg, uint nc)
 {
     Row r;
     r.scene = Scene.near;
-    r.arm = Arm.stock;
     r.nc = nc;
     r.tlen = cfg.tlen;
     r.spinNs = 0;
     g_spinNs = 0;
     g_burstN = 0;
     resetHist();
-    auto s = startFarm(cfg, Arm.stock, nc);
+    auto s = startFarm(cfg, nc);
 
     // Parked fill: consumers subscribed but not consuming. Probe with a
     // no-op header so a successful probe is not a timed sentinel.
@@ -933,8 +911,8 @@ void fmtNs(char* buf, size_t n, long ns)
 
 void printHeader()
 {
-    printf("%-10s %-8s %3s %5s %6s %6s %8s %8s %8s %8s %6s %6s  %s\n",
-           "scene".ptr, "arm".ptr, "nc".ptr, "tlen".ptr, "spin".ptr, "n".ptr,
+    printf("%-10s %3s %5s %6s %6s %8s %8s %8s %8s %6s %6s  %s\n",
+           "scene".ptr, "nc".ptr, "tlen".ptr, "spin".ptr, "n".ptr,
            "p50".ptr, "p99".ptr, "p99.9".ptr, "max".ptr, "miss".ptr, "zero".ptr,
            "note".ptr);
 }
@@ -956,8 +934,8 @@ void printRow(ref const Row r)
 
     if (!r.ok)
     {
-        printf("%-10s %-8s %3u %5u %6s %6s %8s %8s %8s %8s %6lld %6lld  %.*s\n",
-               sceneName[r.scene].ptr, armName[r.arm].ptr, r.nc, r.tlen, spin.ptr,
+        printf("%-10s %3u %5u %6s %6s %8s %8s %8s %8s %6lld %6lld  %.*s\n",
+               sceneName[r.scene].ptr, r.nc, r.tlen, spin.ptr,
                "-".ptr, "-".ptr, "-".ptr, "-".ptr, "-".ptr,
                cast(long) r.miss, cast(long) r.zeros, cast(int) r.err.length, r.err.ptr);
         return;
@@ -982,8 +960,8 @@ void printRow(ref const Row r)
         snprintf(note.ptr, note.length, "admit %s/%s  parked=%lld",
                  w50.ptr, w99.ptr, cast(long) r.parked);
     }
-    printf("%-10s %-8s %3u %5u %6s %6zu %8s %8s %8s %8s %6lld %6lld  %s\n",
-           sceneName[r.scene].ptr, armName[r.arm].ptr, r.nc, r.tlen, spin.ptr,
+    printf("%-10s %3u %5u %6s %6zu %8s %8s %8s %8s %6lld %6lld  %s\n",
+           sceneName[r.scene].ptr, r.nc, r.tlen, spin.ptr,
            r.lat.n, b[0].ptr, b[1].ptr, b[2].ptr, b[3].ptr,
            cast(long) r.miss, cast(long) r.zeros, note.ptr);
 }
@@ -1016,15 +994,6 @@ Cfg parse(string[] args)
         {
             c.runIdle = c.runMid = c.runBurst = c.runNear = c.runOversub = false;
             c.runMailbox = true;
-            continue;
-        }
-        if (a == "--arm" && i + 1 < args.length)
-        {
-            auto v = args[++i];
-            c.allArms = false;
-            if (v == "stock") c.oneArm = Arm.stock;
-            else if (v == "yield16") c.oneArm = Arm.yield16;
-            else if (v == "claim1") c.oneArm = Arm.claim1;
             continue;
         }
         if (i + 1 >= args.length) break;
@@ -1060,27 +1029,27 @@ Row pickMedianP99(Row[] rs)
     return rs[rs.length / 2];
 }
 
-Row medIdle(Cfg cfg, Arm arm, uint nc)
+Row medIdle(Cfg cfg, uint nc)
 {
     auto rs = new Row[cfg.repeats];
     foreach (i; 0 .. cfg.repeats)
-        rs[i] = runIdle(cfg, arm, nc);
+        rs[i] = runIdle(cfg, nc);
     return pickMedianP99(rs);
 }
 
-Row medMid(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
+Row medMid(Cfg cfg, uint nc, uint tlen, ulong spinNs)
 {
     auto rs = new Row[cfg.repeats];
     foreach (i; 0 .. cfg.repeats)
-        rs[i] = runMid(cfg, arm, nc, tlen, spinNs);
+        rs[i] = runMid(cfg, nc, tlen, spinNs);
     return pickMedianP99(rs);
 }
 
-Row medBurst(Cfg cfg, Arm arm, uint nc, uint tlen, ulong spinNs)
+Row medBurst(Cfg cfg, uint nc, uint tlen, ulong spinNs)
 {
     auto rs = new Row[cfg.repeats];
     foreach (i; 0 .. cfg.repeats)
-        rs[i] = runBurst(cfg, arm, nc, tlen, spinNs);
+        rs[i] = runBurst(cfg, nc, tlen, spinNs);
     return pickMedianP99(rs);
 }
 
@@ -1118,33 +1087,31 @@ void main(string[] args)
     }
 
     if (cfg.runIdle)
-        emit(medIdle(cfg, Arm.stock, cfg.nc));
+        emit(medIdle(cfg, cfg.nc));
 
     if (cfg.runMid)
     {
-        emit(medMid(cfg, Arm.stock, cfg.nc, 256, 0));
-        emit(medMid(cfg, Arm.stock, cfg.nc, 256, 1000));
-        emit(medMid(cfg, Arm.stock, cfg.nc, 256, 10_000));
-        emit(medMid(cfg, Arm.stock, cfg.nc, 2048, 1000));
-        emit(medMid(cfg, Arm.stock, cfg.nc, 8192, 1000));
-        emit(medMid(cfg, Arm.yield16, cfg.nc, 256, 1000));
-        emit(medMid(cfg, Arm.claim1, cfg.nc, 256, 1000));
-        emit(medMid(cfg, Arm.stock, cfg.nc, 32, 1000));
+        emit(medMid(cfg, cfg.nc, 256, 0));
+        emit(medMid(cfg, cfg.nc, 256, 1000));
+        emit(medMid(cfg, cfg.nc, 256, 10_000));
+        emit(medMid(cfg, cfg.nc, 2048, 1000));
+        emit(medMid(cfg, cfg.nc, 8192, 1000));
+        emit(medMid(cfg, cfg.nc, 32, 1000));
         emit(medMailbox(cfg, cfg.nc, 256, 1000));
         emit(medMailbox(cfg, cfg.nc, 8192, 1000));
     }
 
     if (cfg.runBurst)
-        emit(medBurst(cfg, Arm.stock, cfg.nc, 256, 1000));
+        emit(medBurst(cfg, cfg.nc, 256, 1000));
 
     if (cfg.runNear)
         emit(runNear(cfg, cfg.nc));
 
     if (cfg.runAttr)
     {
-        printf("attribution (1 stock drainer + yielders) and OOB mailbox:\n");
-        emit(medMid(cfg, Arm.yield16, cfg.nc, 256, 1000));
-        emit(medMid(cfg, Arm.claim1, cfg.nc, 256, 1000));
+        printf("attribution (Farm table path and OOB mailbox):\n");
+        emit(medMid(cfg, cfg.nc, 32, 1000));
+        emit(medMid(cfg, cfg.nc, 256, 1000));
         emit(medMailbox(cfg, cfg.nc, 256, 1000));
         emit(medMailbox(cfg, cfg.nc, 8192, 1000));
     }
@@ -1155,8 +1122,8 @@ void main(string[] args)
     if (cfg.runOversub && cfg.nc != 8)
     {
         printf("oversub check (nc=8 on this host):\n");
-        emit(medIdle(cfg, Arm.stock, 8));
-        emit(medMid(cfg, Arm.stock, 8, 256, 1000));
+        emit(medIdle(cfg, 8));
+        emit(medMid(cfg, 8, 256, 1000));
     }
 
     free(g_lat);

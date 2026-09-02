@@ -13,7 +13,7 @@
  + inboxes and submission reservations. Adopted storage, general placement
  + construction, and aggregate retirement fences remain follow-on work.
  +/
-module antfarm_actors.actor;
+module actors.actor;
 
 public import antfarm : AntFarm, PayloadBody, PayloadHeader, Tier, Token;
 

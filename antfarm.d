@@ -1596,14 +1596,6 @@ struct ConsumerView
     /// instead of after every table. Default N = 1 (eager).
     uint sdCheckCounter;
 
-    /// Bench-only (perftest/tail). 0 = production: drain the shard, use
-    /// the table's chunk from its published AvgCost (spec 5e-g). Nonzero
-    /// max-runs ends the visit after that many claimed runs and still
-    /// advances nextSeq (leftovers: idle re-walk). Nonzero chunk replaces
-    /// the published chunk size.
-    uint benchMaxRuns;
-    uint benchChunk;
-
     uint posKi() nothrow @nogc @system
     {
         return cast(uint)(newestEi & F.kMask);
@@ -1775,12 +1767,6 @@ struct ConsumerView
                 if (!sweeper && sweeperNext && tlen < smallThresh(sq, bp, idx) && myShi != 0)
                     sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
                                             progOff, tlen, sq, 0, true, false) & 1) != 0;
-                // Bench yielders (benchMaxRuns != 0) also try shard 0 on a
-                // small next table, so a mid-tick sentinel is visible after
-                // one run instead of waiting for a native Shi==0 visitor.
-                if (!sweeper && benchMaxRuns != 0 && tlen < smallThresh(sq, bp, idx) && myShi != 0)
-                    sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
-                                            progOff, tlen, sq, 0, true, false) & 1) != 0;
                 if (sweeper)
                 {
                     immutable nshards = tlen < smallThresh(sq, bp, idx) ? 1 : sq;
@@ -1809,60 +1795,6 @@ struct ConsumerView
                 // across already-complete tables (spec 5i).
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
-        }
-
-        nextSeq = tnext;
-        migrateToFrontier();
-        if (++sdCheckCounter >= SD_CHECK_EVERY_N)
-        {
-            sdCheckCounter = 0;
-            tryReleaseOldest();
-        }
-        return true;
-    }
-
-    /// Consume at most one primary payload chunk from the next published
-    /// table, then advance to the following table.  Unclaimed chunks remain
-    /// available to other consumers and to the existing idle re-walk.  This
-    /// bounds a scheduler visit without changing the table format.
-    bool consumeQuantum() nothrow @nogc @system
-    {
-        if (!hasRef) return false;
-        auto f = F;
-        auto bp = f.buf;
-        immutable idx = nextSeq & f.Lmask;
-        if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(nextSeq))
-        {
-            migrateToFrontier();
-            sweepOldestTrailing();
-            sweepCurrentPosition();
-            return false;
-        }
-
-        immutable ei = nextSeq >> f.segShift;
-        immutable ki = cast(uint)(ei & f.kMask);
-        if (ei != newestEi)
-            moveRef(ki, ei);
-
-        immutable tnext = atomicLoad!(MemoryOrder.raw)(bp[idx + 1]);
-        immutable w2 = atomicLoad!(MemoryOrder.raw)(bp[idx + 2]);
-        immutable tlen = cast(uint) w2;
-        immutable tmt = cast(uint)(w2 >> 32);
-        immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(bp[idx + 4]);
-        immutable tindexOff = idx + THEAD_LEN;
-        immutable progOff = tindexOff + tlen + tmt + PROG_PAD;
-        immutable tcountOff = progOff + 8;
-
-        if (tlen > 0 && atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
-        {
-            auto shi = cast(uint)((cast(ulong) IDc + nextSeq) % sq);
-            if (tlen < smallThresh(sq, bp, idx))
-                shi = 0;
-            immutable savedMaxRuns = benchMaxRuns;
-            benchMaxRuns = 1;
-            processShard(bp, nextSeq, idx, tindexOff, tcountOff,
-                         progOff, tlen, sq, shi, false, false);
-            benchMaxRuns = savedMaxRuns;
         }
 
         nextSeq = tnext;
@@ -2308,11 +2240,9 @@ private:
         }
         if (shlen == 0)
             return 0;
-        // Spec 5e-g/h. benchChunk / benchMaxRuns are 0 in production.
-        immutable specChunk = chunkOf(bp, tseqIdx);
-        immutable chunk = benchChunk != 0 ? benchChunk : specChunk;
+        // Spec 5e-g/h. The table's published AvgCost determines chunk size.
+        immutable chunk = chunkOf(bp, tseqIdx);
         immutable shiter = (shlen + chunk - 1) / chunk;
-        uint runsDone;
         uint ownClaims = 0;
         bool firstClaimant = false;
         auto shc = &bp[tcountOff + shi * 8];
@@ -2398,9 +2328,6 @@ private:
                 }
                 return 1;
             }
-            ++runsDone;
-            if (benchMaxRuns != 0 && runsDone >= benchMaxRuns)
-                return 0;
             // Spec 5e-m: first-claimant mid-tick yield. After a run that
             // did not complete the shard, the X==0 claimant may leave if
             // the shard is shared (claimsNow > ownClaims) and Tnext's

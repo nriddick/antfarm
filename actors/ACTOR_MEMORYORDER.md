@@ -3,9 +3,9 @@
 ## Scope
 
 This document describes the implemented autonomous activation and intrusive-
-inbox protocols in `antfarm_actors/actor.d`, plus the phase-oriented aggregate
-protocol in `antfarm_actors/wave.d`. It supplements
-[SPEC.md](SPEC.md), whose Farm sentinel and segment-lifetime rules remain
+inbox protocols in `actors/actor.d`, plus the phase-oriented aggregate protocol
+in `actors/wave.d`. It supplements
+[SPEC.md](../SPEC.md), whose Farm sentinel and segment-lifetime rules remain
 unchanged.
 
 The central safety claim is narrow: plain mutable actor state may migrate
@@ -374,7 +374,7 @@ destructors before unloading code or resetting an arena.
 ## Engine aggregate unload fence
 
 The actor torture suite makes the higher-level contract executable with a
-test-side engine generation owner. This is not an `antfarm_actors` object. It
+test-side engine generation owner. This is not an `actors` object. It
 combines resident type-erased actor owners with an admission gate for module
 code frames and ownership transferred out of callbacks:
 

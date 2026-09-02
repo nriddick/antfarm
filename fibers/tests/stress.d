@@ -1,10 +1,12 @@
 module stress;
 
 import antfarm;
+import actors;
 import antfarm_fibers;
 import core.atomic;
 import core.thread : Thread;
 import core.time : MonoTime, hours, seconds;
+import std.exception : enforce;
 
 enum taskCount = 256;
 shared int subscribed;
@@ -61,8 +63,8 @@ void handleReuseStress()
     auto first = backend.spawn({});
     auto flushed = backend.flush(token);
     assert(flushed == 1);
-    // One resume per call: test artifact, not the worker visit.
-    auto consumed = view.consumeQuantum();
+    // This table contains exactly one Fiber activation.
+    auto consumed = view.consumeNext();
     assert(consumed);
     auto completed = backend.takeCompletions();
     assert(completed.length == 1);
@@ -94,7 +96,7 @@ void handleReuseStress()
         assert(task is first);
         flushed = backend.flush(token);
         assert(flushed == 1);
-        consumed = view.consumeQuantum();
+        consumed = view.consumeNext();
         assert(consumed);
         completed = backend.takeCompletions();
         assert(completed.length == 1 && completed[0] is task);
@@ -445,7 +447,7 @@ void timerCancellationRaceStress()
         auto task = backend.spawn({ FiberBackend.sleepFor(hours(1)); });
         auto flushed = backend.flush(token);
         assert(flushed == 1);
-        auto consumed = view.consumeQuantum();
+        auto consumed = view.consumeNext();
         assert(consumed && backend.waiting == 1 && backend.ready == 0);
 
         context.handle = cast(shared TaskHandle) task.handle;
@@ -477,7 +479,7 @@ void timerCancellationRaceStress()
 
         flushed = backend.flush(token);
         assert(flushed == 1);
-        consumed = view.consumeQuantum();
+        consumed = view.consumeNext();
         assert(consumed && task.terminated && backend.drained);
         assert(task.outcome == FiberOutcome.cancelled);
         assert(task.cancellationDisposition
@@ -783,6 +785,262 @@ void remoteSweeperStress()
     domain.releaseAll(completed);
 }
 
+private struct ActorWaveStressResult
+{
+    ulong visits;
+    ulong checksum;
+}
+
+private struct ActorWaveStressState
+{
+    size_t actorId;
+    ulong visits;
+    ActorWaveStressResult* result;
+}
+
+private ulong actorWaveStressChecksum(size_t actorId, ulong visits)
+    pure nothrow @nogc @safe
+{
+    return (cast(ulong) actorId + 1) * 0x9e37_79b9_7f4a_7c15UL
+        ^ visits * 0xbf58_476d_1ce4_e5b9UL;
+}
+
+private void actorWaveStressDormant(scope ref ActorBorrow!ActorWaveStressState,
+        scope ref ActorContext) nothrow @nogc @system
+{
+}
+
+private void actorWaveStressOperation(
+        scope ref ActorBorrow!ActorWaveStressState actor)
+    nothrow @nogc @system
+{
+    ++actor.value.visits;
+    actor.value.result.visits = actor.value.visits;
+    actor.value.result.checksum = actorWaveStressChecksum(
+        actor.value.actorId, actor.value.visits);
+}
+
+private final class ActorWaveStressProducer
+{
+    enum size_t actorsPerPublication = 127;
+
+    AntFarm* farm;
+    Token producer;
+    ActorHandle!ActorWaveStressState[] actors;
+    ActorWave wave;
+    ActorWaveTrigger trigger;
+    size_t generations;
+    ulong tables;
+
+    this(FiberDomain domain, AntFarm* farm, Token producer,
+            ActorHandle!ActorWaveStressState[] actors, size_t generations)
+    {
+        this.farm = farm;
+        this.producer = producer;
+        this.actors = actors;
+        this.generations = generations;
+        trigger = new ActorWaveTrigger(domain);
+    }
+
+    void run()
+    {
+        foreach (generation; 1 .. generations + 1)
+        {
+            if (generation == 1)
+                enforce(!wave.handle.valid,
+                    "actor-wave stress wave began initialized");
+            else
+                enforce(wave.handle.finished,
+                    "actor-wave stress reused an unfinished wave");
+            wave.begin(farm, trigger.hook);
+            size_t offset;
+            while (offset != actors.length)
+            {
+                immutable candidateEnd = offset + actorsPerPublication;
+                immutable end = candidateEnd < actors.length
+                    ? candidateEnd : actors.length;
+                immutable written = wave.publish!actorWaveStressOperation(
+                    actors[offset .. end], producer, 0);
+                enforce(!wave.handle.failed,
+                    "actor-wave stress publication failed");
+                if (written == 0)
+                    FiberDomain.yieldReady();
+                else
+                    offset += written;
+            }
+
+            auto completion = wave.seal();
+            trigger.waitNext();
+            enforce(completion.finished && !completion.failed,
+                "actor-wave stress completion failed");
+            enforce(completion.progress == completion.length,
+                "actor-wave stress table completion mismatch");
+            enforce(trigger.completed == generation,
+                "actor-wave stress trigger generation mismatch");
+            tables += completion.length;
+
+            // Change which streams tend to publish and finish together.
+            if ((generation & 7) == 0)
+                FiberDomain.yieldReady();
+        }
+    }
+}
+
+/// Exercise the complete actor-wave completion bridge rather than its pieces:
+/// multi-table wave completion, concurrent deferred-trigger publication,
+/// parked Fiber wakeup, and reuse of both wave and trigger generations.
+void actorWaveGenerationStress()
+{
+    enum streamCount = 2;
+    enum actorsPerStream = 1_024;
+    enum generations = 512;
+    enum consumerCount = 4;
+    enum totalActors = streamCount * actorsPerStream;
+
+    auto farm = AntFarm.create(1 << 20, 8, consumerCount, 0, 0,
+        streamCount + 1, 16_384, DEFAULT_SMALL_TABLE_THRESHOLD, false);
+    enforce(farm !is null, "actor-wave stress Farm allocation failed");
+    scope (exit) farm.destroy();
+
+    auto runtime = ActorRuntime.create(farm, totalActors);
+    enforce(runtime !is null,
+        "actor-wave stress runtime allocation failed");
+    auto backend = new FiberBackend(farm);
+
+    auto results = new ActorWaveStressResult[totalActors];
+    auto owners = new ActorOwner!ActorWaveStressState[totalActors];
+    auto sets = new ActorHandle!ActorWaveStressState[][streamCount];
+    foreach (stream; 0 .. streamCount)
+        sets[stream] = new ActorHandle!ActorWaveStressState[actorsPerStream];
+    foreach (i; 0 .. totalActors)
+    {
+        ActorWaveStressState initial;
+        initial.actorId = i;
+        initial.result = &results[i];
+        owners[i] = runtime.createActor!(ActorWaveStressState,
+            actorWaveStressDormant)(initial);
+        enforce(owners[i].valid,
+            "actor-wave stress actor allocation failed");
+        sets[i / actorsPerStream][i % actorsPerStream] = owners[i].handle;
+    }
+
+    auto schedulerProducer = farm.registerProducer(Tier.small);
+    enforce(schedulerProducer.valid,
+        "actor-wave stress scheduler producer registration failed");
+    ActorWaveStressProducer[streamCount] jobs;
+    FiberTask[streamCount] tasks;
+    foreach (stream; 0 .. streamCount)
+    {
+        auto producer = farm.registerProducer(Tier.small);
+        enforce(producer.valid,
+            "actor-wave stress wave producer registration failed");
+        jobs[stream] = new ActorWaveStressProducer(backend, farm,
+            producer, sets[stream], generations);
+        tasks[stream] = backend.spawn(&jobs[stream].run);
+    }
+
+    // Publish the initial Fiber activation table before starting consumers.
+    // Its Fibers each publish and seal a wave before the director begins
+    // polling deferred completion edges. Subsequent generations naturally
+    // mix parked wakeups with valid preposted completions.
+    immutable initiallyFlushed = backend.flush(
+        schedulerProducer, streamCount, 0);
+    enforce(initiallyFlushed == streamCount,
+        "actor-wave stress initial Fiber publication failed");
+
+    shared uint consumersSubscribed;
+    shared int stopConsumers;
+    Thread[consumerCount] consumers;
+    foreach (ref consumer; consumers)
+    {
+        consumer = new Thread({
+            ConsumerView view;
+            subscribeOrThrow(view, farm);
+            atomicFetchAdd(consumersSubscribed, 1u);
+            while (atomicLoad!(MemoryOrder.acq)(stopConsumers) == 0)
+            {
+                if (!view.consumeNext()) Thread.yield();
+            }
+            view.unsubscribe();
+        });
+        consumer.start();
+    }
+    while (atomicLoad!(MemoryOrder.acq)(consumersSubscribed) != consumerCount)
+        Thread.yield();
+    bool consumersJoined;
+    scope (exit)
+    {
+        if (!consumersJoined)
+        {
+            atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
+            foreach (consumer; consumers) consumer.join();
+        }
+    }
+
+    auto deadline = MonoTime.currTime + 20.seconds;
+    while (!backend.drained)
+    {
+        backend.pollGenerationTriggers();
+        if (backend.ready != 0)
+        {
+            if (backend.flush(schedulerProducer, 32, 0) == 0)
+                Thread.yield();
+        }
+        else
+            Thread.yield();
+        if (MonoTime.currTime >= deadline)
+            enforce(false, "actorWaveGenerationStress: drain stalled");
+    }
+    backend.pollGenerationTriggers();
+    atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
+    foreach (consumer; consumers) consumer.join();
+    consumersJoined = true;
+
+    foreach (stream; 0 .. streamCount)
+    {
+        if (tasks[stream].outcome != FiberOutcome.completed)
+        {
+            import std.stdio : stderr;
+            stderr.writefln("actor-wave stress stream %s: outcome=%s error=%s",
+                stream, tasks[stream].outcome, tasks[stream].exception);
+        }
+    }
+    foreach (stream; 0 .. streamCount)
+    {
+        enforce(tasks[stream].outcome == FiberOutcome.completed,
+            "actor-wave stress orchestration Fiber failed");
+        enforce(jobs[stream].trigger.completed == generations,
+            "actor-wave stress final trigger generation mismatch");
+        enforce(jobs[stream].tables
+            >= generations * ((actorsPerStream
+                + ActorWaveStressProducer.actorsPerPublication - 1)
+                / ActorWaveStressProducer.actorsPerPublication),
+            "actor-wave stress did not produce the expected physical tables");
+        farm.unregisterProducer(jobs[stream].producer);
+    }
+    backend.releaseAll(backend.takeCompletions());
+    farm.unregisterProducer(schedulerProducer);
+
+    foreach (i; 0 .. totalActors)
+    {
+        enforce(results[i].visits == generations,
+            "actor-wave stress actor visit count mismatch");
+        enforce(results[i].checksum == actorWaveStressChecksum(i, generations),
+            "actor-wave stress actor checksum mismatch");
+        immutable retirement = owners[i].requestRetire();
+        enforce(retirement == ActorRetireResult.requested,
+            "actor-wave stress retirement failed");
+        enforce(owners[i].retired,
+            "actor-wave stress idle actor did not retire synchronously");
+        immutable reclamation = owners[i].reclaim();
+        enforce(reclamation == ActorReclaimResult.reclaimed,
+            "actor-wave stress reclamation failed");
+    }
+    enforce(runtime.live == 0 && runtime.ready == 0,
+        "actor-wave stress runtime did not quiesce");
+    runtime.destroy();
+}
+
 void syncPrimitiveStress()
 {
     enum waiters = 32;
@@ -957,5 +1215,6 @@ void main()
     lifecycleRetentionStress();
     sharedDomainLaneStress();
     remoteSweeperStress();
+    actorWaveGenerationStress();
     syncPrimitiveStress();
 }

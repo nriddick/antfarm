@@ -13,8 +13,6 @@ mid-drain  stock      5   256    1us  10000    3.3us   20.8us   23.3us   28.8us 
 mid-drain  stock      5   256   10us  10000   30.4us  192.9us  194.6us  199.1us      0      0
 mid-drain  stock      5  2048    1us  10000   25.9us   28.6us   32.2us   43.7us      0      0
 mid-drain  stock      5  8192    1us  10000   19.5us   24.8us   26.6us   31.9us      0      0
-mid-drain  yield16    5   256    1us  10000    3.0us    3.3us   34.7us   40.5us      0      0
-mid-drain  claim1     5   256    1us  10000    281ns    431ns    541ns    2.8us      0      0
 mid-drain  stock      5    32    1us  10001    230ns    1.2us    4.0us    6.0us      1     43
 mailbox    stock      5   256    1us  10000     70ns    110ns    120ns   37.3us      0      0
 mailbox    stock      5  8192    1us  10000     90ns    121ns    141ns    180ns      0      0
@@ -36,8 +34,6 @@ mid-drain  stock      5   256    1us  10000   11.6us   12.3us   15.2us   16.9us 
 mid-drain  stock      5   256   10us  10000  110.8us  112.8us  114.7us  140.9us      0      0
 mid-drain  stock      5  2048    1us  10000    9.2us   10.8us   13.2us   16.5us      0      0
 mid-drain  stock      5  8192    1us  10000   11.9us   15.8us   17.1us   17.9us      0      0
-mid-drain  yield16    5   256    1us  10000   20.2us   21.8us   22.6us   24.0us      0      0
-mid-drain  claim1     5   256    1us  10000    281ns    430ns    912ns    2.7us      0      0
 mid-drain  stock      5    32    1us  10000    220ns    301ns    4.3us    4.6us      0     43
 mailbox    stock      5   256    1us  10000     71ns   22.2us  229.6us  410.0us      0      0
 mailbox    stock      5  8192    1us  10000     91ns   92.7us  257.7us  402.3us      0      0
@@ -59,8 +55,6 @@ mid-drain  stock      5   256    1us  10000    3.3us    7.7us    9.1us   17.7us 
 mid-drain  stock      5   256   10us  10000   70.5us   71.7us   72.9us   78.8us      0      0
 mid-drain  stock      5  2048    1us  10000    4.4us    5.7us    8.1us    9.2us      0      0
 mid-drain  stock      5  8192    1us  10000    4.2us    7.9us    9.2us   13.2us      0      0
-mid-drain  yield16    5   256    1us  10000    3.0us    3.3us    4.8us    6.3us      0      0
-mid-drain  claim1     5   256    1us  10000    281ns    440ns    741ns    4.1us      0      0
 mid-drain  stock      5    32    1us  10000    761ns    1.5us    3.4us    5.5us      0     43
 mailbox    stock      5   256    1us  10000     70ns    110ns    120ns    331ns      0      0
 mailbox    stock      5  8192    1us  10000     81ns    121ns    141ns    200ns      0      0
@@ -84,8 +78,6 @@ mid-drain  stock      6   256    1us  10003    5.0us   21.4us   27.7us   41.3us 
 mid-drain  stock      6   256   10us  10001   50.0us  210.6us  229.6us  420.8us      1      0
 mid-drain  stock      6  2048    1us  10001   25.2us   27.9us   85.2us  345.1us      1      0
 mid-drain  stock      6  8192    1us  10002   13.2us   27.6us  129.3us   1.23ms      2      0
-mid-drain  yield16    6   256    1us  10008    4.8us    5.2us    6.0us  102.3us      8      0
-mid-drain  claim1     6   256    1us  10000    400ns    700ns    1.4us  139.2us      0      0
 mid-drain  stock      6    32    1us  10010    500ns    1.5us    5.6us   15.6us     10     43
 mailbox    stock      6   256    1us  10000    100ns    200ns    3.9us   74.9us      0      0
 mailbox    stock      6  8192    1us  10000    100ns    500ns   47.0us   1.11ms      0      0
@@ -105,8 +97,6 @@ mid-drain  stock     12   256    1us  10000   10.2us   10.8us   11.3us   25.8us 
 mid-drain  stock     12   256   10us  10000  100.1us  100.8us  107.5us  117.7us      0      0
 mid-drain  stock     12  2048    1us  10001    4.8us  103.7us  106.2us  161.4us      1      0
 mid-drain  stock     12  8192    1us  10000    4.9us  308.2us  358.1us  428.9us      0      0
-mid-drain  yield16   12   256    1us  10000    9.9us   10.4us   10.7us   14.0us      0      0
-mid-drain  claim1    12   256    1us  10000    500ns    800ns    2.0us   16.9us      0      0
 mid-drain  stock     12    32    1us  10021    400ns    1.6us    2.0us   11.4us     21     43
 mailbox    stock     12   256    1us  10006    100ns    300ns    3.2us   25.3us      6      0
 mailbox    stock     12  8192    1us  10000    200ns    800ns   55.8us  46.52ms      0      0
@@ -126,8 +116,6 @@ mid-drain  stock     20   256    1us  10000    400ns    3.1us    7.5us  124.9us 
 mid-drain  stock     20   256   10us  10014    400ns    4.5us   30.4us   61.1us     14     41
 mid-drain  stock     20  2048    1us  10000    4.5us   56.8us   86.7us  204.8us      0    565
 mid-drain  stock     20  8192    1us  10000    6.3us  264.3us  302.1us  367.6us      0   1704
-mid-drain  yield16   20   256    1us  10001    400ns   10.9us   11.8us   12.2us      1    417
-mid-drain  claim1    20   256    1us  10001    2.0us    2.6us    2.9us    4.7us      1      0
 mid-drain  stock     20    32    1us  10005    600ns    1.9us    4.5us   10.0us      5    936
 mailbox    stock     20   256    1us      -        -        -        -        -      1      0  mbox timeout
 PS D:\proj\grok\antfarm> .\tail --nc 1
@@ -141,8 +129,6 @@ mid-drain  stock      1   256    1us  10000  192.1us  292.2us  734.1us   2.97ms 
 mid-drain  stock      1   256   10us  10000   1.92ms   2.45ms   3.98ms   7.55ms      0      0
 mid-drain  stock      1  2048    1us  10001   1.54ms   2.02ms   3.57ms   5.07ms      1      0
 mid-drain  stock      1  8192    1us  10000   6.03ms   7.49ms   9.49ms  12.22ms      0      0
-mid-drain  yield16    1   256    1us  10001  192.1us  275.3us  628.4us   2.80ms      1      0
-mid-drain  claim1     1   256    1us  10003  192.1us  277.6us  611.3us   1.20ms      3      0
 mid-drain  stock      1    32    1us  10016   16.0us   20.1us   86.3us  723.7us     16      0
 mailbox    stock      1   256    1us  10003    200ns    2.9us  216.2us   1.25ms      3      0
 mailbox    stock      1  8192    1us  10000    600ns   11.0us   1.48ms  18.05ms      0      0

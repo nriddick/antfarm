@@ -147,9 +147,9 @@ that never reaches a scheduler boundary.
   synchronization invariants.
 - [fibers/PERFORMANCE.md](fibers/PERFORMANCE.md): Fiber benchmark evidence and
   tuning guidance.
-- [ACTOR_ROADMAP.md](ACTOR_ROADMAP.md): experimental non-GC actor ownership,
+- [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md): experimental non-GC actor ownership,
   retirement, and phase-oriented wave plan.
-- [ACTOR_MEMORYORDER.md](ACTOR_MEMORYORDER.md): actor lifecycle, ready-queue,
+- [ACTOR_MEMORYORDER.md](actors/ACTOR_MEMORYORDER.md): actor lifecycle, ready-queue,
   Farm, wave completion, inbox, retirement, and handoff edges.
 - [actor_torture/README.md](actor_torture/README.md): forced actor
   interleavings, sustained generation churn, and allocator-adapter checks.

@@ -78,7 +78,7 @@ Verified on 2026-08-29 on the current Linux/Ryzen 5 5500 host:
   interleaving torture, a pinned mimalloc v3.5.0 adapter with cross-thread
   reclamation tests, and sealed multi-table actor waves with dependent-phase
   visibility; its remaining
-  promotion gates are in [ACTOR_ROADMAP.md](ACTOR_ROADMAP.md).
+  promotion gates are in [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md).
 - Reconsider bounded parallel work from first principles, with explicit
   lifetime, completion, cancellation, error, and allocation contracts.
 

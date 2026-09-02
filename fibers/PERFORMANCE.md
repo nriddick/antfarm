@@ -175,8 +175,9 @@ but helped the oversubscribed SMT case by removing idle contenders.
   predict a body that sleeps, waits, allocates, or performs substantial work.
 - Keep bare payloads as the default for short serial compute. Use Fibers for
   work that actually needs suspension or structured D control flow.
-- `flushBatch` and `avgCost` size a Farm table. They are not a resume quantum.
-  Production pumps use `consumeNext` and finish or yield the claimed table.
+- `flushBatch` and `avgCost` size a Farm table. Production pumps use
+  `consumeNext` and finish or yield the claimed table; use shorter tables when
+  a scheduler visit must be shorter.
 - Lower `flushBatch` when a responder must return to timer polling more often.
 - Size Farm consumer and producer capacity for native workers, covering
   sweepers, and every control producer that can hold a registration.
@@ -213,8 +214,8 @@ dub run -c benchmark --build=release --compiler=ldc2 -- 200000 256 0
 dub run -c benchmark_mt --build=release --compiler=ldc2 -- 100000
 dub run -c benchmark_vs_druntime --build=release --compiler=ldc2 -- 100000
 dub run -c benchmark_farm_embed --build=release --compiler=ldc2 -- 2000000
-dub run -c benchmark_actor_wave --build=release --compiler=ldc2 -- 32768 200 6 10 0 8
-dub run -c benchmark_actor_wave --build=release --compiler=ldc2 -- 32768 200 0 10 0 8 --smt --sweep
+dub run -c benchmark_actor_wave --build=release --compiler=ldc2 -- 32768 200 6 20 0 8
+dub run -c benchmark_actor_wave --build=release --compiler=ldc2 -- 32768 200 0 20 0 8 --smt --sweep
 ```
 
 - `benchmark` characterizes cold/warm creation and single-thread drain.
@@ -269,6 +270,56 @@ fell from hundreds per generation to roughly 4--12, depending on run timing.
 The completion callback itself remains `nothrow @nogc`: it advances a counter
 and enqueues one preallocated deferred node, which a managed worker converts
 to a normal cancellable FiberEvent wake after payload dispatch.
+
+### Actor-wave worker scaling
+
+A full worker-prefix sweep on 2026-09-02 used the same Ryzen 5 5500, an LDC
+release build, ordinary 4 KiB pages, the 8 MiB Farm ring, 32,768 actors per
+set, 200 measured generations after 20 warm-ups, and `avgCost=0`. The first
+six workers select one logical processor from each physical core; workers
+7--12 add those cores' SMT siblings. This was one ordered characterization
+sweep rather than a median of independent runs:
+
+| Workers | SMT siblings | One Fiber Mactor/s | Two Fibers Mactor/s | Two / one |
+|---:|---:|---:|---:|---:|
+| 1 | 0 | 16.49 | 16.22 | 0.984x |
+| 2 | 0 | **24.56** | 23.73 | 0.966x |
+| 3 | 0 | 24.44 | 28.50 | 1.166x |
+| 4 | 0 | 24.55 | **30.96** | 1.261x |
+| 5 | 0 | 23.84 | 30.84 | 1.294x |
+| 6 | 0 | 23.30 | 30.87 | 1.325x |
+| 7 | 1 | 22.34 | 28.04 | 1.255x |
+| 8 | 2 | 22.08 | 27.35 | 1.238x |
+| 9 | 3 | 21.27 | 27.18 | 1.278x |
+| 10 | 4 | 20.88 | 26.50 | 1.269x |
+| 11 | 5 | 20.54 | 26.68 | 1.299x |
+| 12 | 6 | 17.37 | 23.37 | 1.345x |
+
+One orchestration Fiber gets nearly all of its scaling from the second
+physical worker: throughput rises 49% from one to two workers, remains around
+24.5 Mactor/s through four, and then declines. Two independent producer
+Fibers are slightly slower at one and two workers, where their rendezvous and
+publication overhead have no spare execution capacity. They overtake the
+single producer at three workers, peak at four, and hold approximately 30.8
+Mactor/s through all six physical cores. At six workers the two-Fiber workflow
+is 1.33x as fast as one Fiber, but neither workflow scales linearly with core
+count.
+
+Adding SMT siblings is uniformly detrimental to absolute throughput in this
+sweep. From six physical workers to all twelve logical workers, the one-Fiber
+case falls 25% and the two-Fiber case falls 24%. The apparent two/one ratio at
+twelve therefore reflects the single-producer path degrading more, not an SMT
+throughput win. Full SMT also raised publication-backpressure churn sharply in
+this run, to 116 cooperative yields per generation for one Fiber and 151 for
+two, compared with 8 and 10 respectively at six physical workers.
+
+This benchmark performs only the identity projection through each actor's
+private and double-buffered public cache lines. Its useful conclusion is that
+the wave transport has enough independent work to benefit from a few physical
+workers and from two producers, while its empty behavior becomes limited by
+Farm publication, cache traffic, and orchestration before all physical cores
+are saturated. Actor behaviors with more computation may move that knee and
+should repeat the sweep rather than adopting four workers as policy.
 
 ### Actor-wave Farm ring size
 

@@ -17,7 +17,7 @@
 module actor_wave;
 
 import antfarm;
-import antfarm_actors;
+import actors;
 import antfarm_fibers;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad, atomicStore;
 import core.time : MonoTime, minutes;

@@ -1,7 +1,7 @@
 /++ Scheduler bridge for actor-wave completion. +/
 module antfarm_fibers.actor_wave;
 
-import antfarm_actors : ActorWaveCompletionHook;
+import actors : ActorWaveCompletionHook;
 import antfarm_fibers.scheduler : FiberDomain, FiberGenerationTrigger;
 
 /// One serialized actor-wave stream observed by one orchestration Fiber.

@@ -3,22 +3,23 @@
 ROOT := ..
 DC ?= ldc2
 DFLAGS ?= -O2 -release
+FARM_SOURCES := $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
 
 .PHONY: all run run-once run-once-constant-header run-once-constant-callandlength dual-run dual-grid-run dual-run-constant-header dual-run-constant-callandlength digest-run tail-run grid-run run-grid run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
 
-all: throughput dual digest tail tail
+all: throughput dual digest tail
 
-throughput: throughput.d $(ROOT)/antfarm.d
-	$(DC) $(DFLAGS) throughput.d $(ROOT)/antfarm.d -of=$@
+throughput: throughput.d $(FARM_SOURCES)
+	$(DC) $(DFLAGS) throughput.d $(FARM_SOURCES) -of=$@
 
-digest: digest.d $(ROOT)/antfarm.d
-	$(DC) $(DFLAGS) digest.d $(ROOT)/antfarm.d -of=$@
+digest: digest.d $(FARM_SOURCES)
+	$(DC) $(DFLAGS) digest.d $(FARM_SOURCES) -of=$@
 
-tail: tail.d $(ROOT)/antfarm.d
-	$(DC) $(DFLAGS) tail.d $(ROOT)/antfarm.d -of=$@
+tail: tail.d $(FARM_SOURCES)
+	$(DC) $(DFLAGS) tail.d $(FARM_SOURCES) -of=$@
 
-dual: dual.d $(ROOT)/antfarm.d
-	$(DC) $(DFLAGS) dual.d $(ROOT)/antfarm.d -of=$@
+dual: dual.d $(FARM_SOURCES)
+	$(DC) $(DFLAGS) dual.d $(FARM_SOURCES) -of=$@
 
 run: throughput
 	./throughput

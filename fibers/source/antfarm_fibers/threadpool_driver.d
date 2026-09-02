@@ -642,7 +642,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     // consumeNext() is false at a hole or at Wt. Neither means the farm is
     // empty while published-but-not-entered activations remain, or while a
     // covered remote lane still has transport. Table size (flushBatch) bounds
-    // a visit; do not skip the rest of a table with consumeQuantum.
+    // a visit; a claimed table is consumed according to the Farm contract.
     if (timersWoken != 0 || triggersDelivered != 0
         || consumed || flushed != 0 || remoteWork
         || state.lane.ready != 0 || state.lane.published != 0)

@@ -4,7 +4,7 @@
 module antfarm_test;
 
 import antfarm_templates;
-import antfarm_actors;
+import actors;
 import antfarm_allocation : allocateAligned64, freeAligned64;
 import core.atomic;
 import core.memory : GC;
@@ -551,7 +551,7 @@ void testInputRangeWrite()
     printf("testInputRangeWrite OK\n"); fflush(stdout);
 }
 
-void testSeparateRangesAndQuantum()
+void testSeparateRanges()
 {
     auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
     scope (exit) f.destroy();
@@ -575,16 +575,13 @@ void testSeparateRangesAndQuantum()
     check(f.write(headers[], bodies[], tok, 1) == N,
           "write separate header/body ranges");
 
-    check(v.consumeQuantum(), "quantum saw table");
-    immutable afterOne = atomicLoad!(MemoryOrder.raw)(g_totalCalls);
-    check(afterOne > 0 && afterOne <= 16, "quantum consumed one chunk");
-    while (v.consumeNext()) {}
+    check(v.consumeNext(), "consume separate-range table");
     check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N,
-          "idle sweep completed quantum leftovers");
+          "separate-range table completed");
 
     v.unsubscribe();
     f.unregisterProducer(tok);
-    printf("testSeparateRangesAndQuantum OK\n"); fflush(stdout);
+    printf("testSeparateRanges OK\n"); fflush(stdout);
 }
 
 void testPayloadRange()
@@ -2085,7 +2082,7 @@ void main()
     testInputRangeWrite();
     testPayloadRange();
     testUniformRanges();
-    testSeparateRangesAndQuantum();
+    testSeparateRanges();
     testConcurrent();
     testWraparound();
     testSubscriptionCap();

@@ -7,13 +7,13 @@
  + are phase-specific and receive only a callback-local ActorBorrow, so they
  + cannot republish or retire themselves through ActorContext.
  +/
-module antfarm_actors.wave;
+module actors.wave;
 
-public import antfarm_actors.actor : ActorBorrow, ActorHandle;
+public import actors.actor : ActorBorrow, ActorHandle;
 
 import antfarm : AntFarm, PayloadBody, PayloadHeader, TableCompletionHook,
     Tier, Token, fatal;
-import antfarm_actors.actor : ActorSlot, cancelActorWavePayload,
+import actors.actor : ActorSlot, cancelActorWavePayload,
     dispatchActorWavePayload, releaseActorWaveMembership,
     reserveActorWavePayload;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicFetchSub, atomicLoad,

@@ -118,9 +118,10 @@ again and reuse its intrusive queue word while the flushing thread still owns
 the unpublished suffix. A partial Farm write reconstructs and republishes the
 entire unwritten suffix, so backpressure never drops an activation.
 
-Production pumps use `consumeNext()`. It finishes a table unless the Farm's
-first-claimant rule yields it. `consumeQuantum()` is retained only as a
-one-resume test probe; it is not a production latency control.
+Production pumps use `consumeNext()`. It finishes a claimed table unless the
+Farm's first-claimant rule yields it. Latency and scheduler visit size are
+publication concerns: producers should emit shorter tables instead of asking
+consumers to abandon partially processed tables.
 
 ## Waits, timers, joins, and cancellation
 

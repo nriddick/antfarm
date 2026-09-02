@@ -186,20 +186,20 @@ void manualSmoke()
 
     auto flushed = backend.flush(token);
     assert(flushed == 1);
-    // One resume per call: test artifact, not the worker visit.
-    auto consumed = view.consumeQuantum();
+    // This table contains exactly one Fiber activation.
+    auto consumed = view.consumeNext();
     assert(consumed);
     assert(atomicLoad(steps) == 1 && backend.waiting == 1);
     auto signalled = backend.signal(42);
     assert(signalled == 1);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     assert(atomicLoad(steps) == 2 && backend.ready == 1);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     assert(atomicLoad(steps) == 3 && task.terminated);
     auto completed = backend.takeCompletions();
@@ -251,7 +251,7 @@ void recycleSmoke()
     assert(firstHandle.current && firstHandle.generation != 0);
     auto flushed = backend.flush(token);
     assert(flushed == 1);
-    auto consumed = view.consumeQuantum();
+    auto consumed = view.consumeNext();
     assert(consumed);
     assert(task.terminated && task.outcome == FiberOutcome.completed);
     auto done = backend.takeCompletions();
@@ -277,7 +277,7 @@ void recycleSmoke()
     assert(recycled.exception is null && !recycled.cancellationRequested);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     assert(recycled.terminated && recycled.outcome == FiberOutcome.completed);
     assert(atomicLoad(runs) == 2);
@@ -297,7 +297,7 @@ void recycleSmoke()
     assert(cancelledTask.cancellationRequested);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     assert(cancelledTask.outcome == FiberOutcome.cancelled);
     assert(atomicLoad(runs) == 2); // cancellation won before user-body entry
@@ -340,7 +340,7 @@ void externalJoinSmoke()
 
     auto flushed = backend.flush(token);
     assert(flushed == 1);
-    auto consumed = view.consumeQuantum();
+    auto consumed = view.consumeNext();
     assert(consumed && backend.drained);
     auto completed = backend.takeCompletions();
     assert(completed.length == 1 && completed[0] is task);
@@ -364,7 +364,7 @@ void externalJoinSmoke()
     assert(staleJoin.status == FiberJoinStatus.staleHandle);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && backend.drained);
     completed = backend.takeCompletions();
     assert(completed.length == 1 && completed[0] is recycled);
@@ -393,20 +393,20 @@ void fiberJoinSmoke()
     auto joiner = backend.spawn({ joined = targetHandle.joinFiber(); });
     auto flushed = backend.flush(token);
     assert(flushed == 2);
-    auto consumed = view.consumeQuantum();
+    auto consumed = view.consumeNext();
     assert(consumed);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(backend.waiting == 2 && !joiner.terminated);
 
     auto signalled = backend.signal(0x4A01);
     assert(signalled == 1);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && target.terminated && backend.ready == 1);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && joiner.terminated && backend.drained);
     assert(joined.status == FiberJoinStatus.completed && joined.terminal);
     auto completed = backend.takeCompletions();
@@ -421,23 +421,23 @@ void fiberJoinSmoke()
     });
     flushed = backend.flush(token);
     assert(flushed == 2);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(backend.waiting == 2 && !timedJoiner.terminated);
     Thread.sleep(msecs(2));
     auto expired = backend.pollTimers();
     assert(expired == 1);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && timedJoiner.terminated);
     assert(timedJoin.status == FiberJoinStatus.timedOut);
     signalled = backend.signal(0x4A02);
     assert(signalled == 1);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && timedTarget.terminated && backend.drained);
     completed = backend.takeCompletions();
     assert(completed.length == 2);
@@ -451,19 +451,19 @@ void fiberJoinSmoke()
     });
     flushed = backend.flush(token);
     assert(flushed == 2);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(backend.waiting == 2 && !earlyJoiner.terminated);
     signalled = backend.signal(0x4A04);
     assert(signalled == 1);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && earlyTarget.terminated && backend.ready == 1);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && earlyJoiner.terminated && backend.drained);
     assert(timerCancelledJoin.status == FiberJoinStatus.completed);
     long unusedDeadline;
@@ -482,15 +482,15 @@ void fiberJoinSmoke()
     });
     flushed = backend.flush(token);
     assert(flushed == 2);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(backend.waiting == 2 && !cancelledJoiner.terminated);
     auto cancellation = backend.directorCancelDetailed(cancelledJoiner.handle);
     assert(cancellation == CancellationResult.requestedWaiting);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && cancelledJoiner.terminated);
     assert(cancelledJoiner.outcome == FiberOutcome.cancelled);
     assert(atomicLoad(joinCleanup) == 1);
@@ -498,7 +498,7 @@ void fiberJoinSmoke()
     assert(signalled == 1);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && cancelTarget.terminated && backend.drained);
     completed = backend.takeCompletions();
     assert(completed.length == 2);
@@ -510,7 +510,7 @@ void fiberJoinSmoke()
     selfHandle = self.handle;
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && self.terminated && backend.drained);
     assert(selfStatus == FiberJoinStatus.wouldBlock);
     completed = backend.takeCompletions();
@@ -526,7 +526,7 @@ void fiberJoinSmoke()
     });
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && foreignProbe.terminated && backend.drained);
     assert(foreignStatus == FiberJoinStatus.wrongBackend);
     completed = backend.takeCompletions();
@@ -537,7 +537,7 @@ void fiberJoinSmoke()
     assert(cancellation == CancellationResult.wonBeforeEntry);
     flushed = otherBackend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && foreignTarget.terminated && otherBackend.drained);
     completed = otherBackend.takeCompletions();
     assert(completed.length == 1 && completed[0] is foreignTarget);
@@ -562,7 +562,7 @@ void cancellationSemanticsSmoke()
     assert(cancellation == CancellationResult.wonBeforeEntry);
     auto flushed = backend.flush(token);
     assert(flushed == 1);
-    auto consumed = view.consumeQuantum();
+    auto consumed = view.consumeNext();
     assert(consumed);
     assert(preEntry.outcome == FiberOutcome.cancelled);
     assert(preEntry.cancellationDisposition
@@ -578,7 +578,7 @@ void cancellationSemanticsSmoke()
     assert(replacement is preEntry);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     assert(replacement.outcome == FiberOutcome.completed);
     assert(replacement.cancellationDisposition == CancellationDisposition.none);
@@ -589,13 +589,13 @@ void cancellationSemanticsSmoke()
     auto ready = backend.spawn({ FiberBackend.yieldReady(); });
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     cancellation = backend.directorCancelDetailed(ready.handle);
     assert(cancellation == CancellationResult.requestedReady);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     assert(ready.outcome == FiberOutcome.cancelled);
     assert(ready.cancellationDisposition
@@ -644,13 +644,13 @@ void cancellationSemanticsSmoke()
     });
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     cancellation = backend.directorCancelDetailed(cleanupFailure.handle);
     assert(cancellation == CancellationResult.requestedWaiting);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     assert(cleanupFailure.cancellationRequested);
     assert(cleanupFailure.outcome == FiberOutcome.failed);
@@ -683,7 +683,7 @@ void lifecycleEventSmoke()
     immutable firstSequence = events[0].sequence;
     auto flushed = backend.flush(token);
     assert(flushed == 1);
-    auto consumed = view.consumeQuantum();
+    auto consumed = view.consumeNext();
     assert(consumed);
     auto completions = backend.takeCompletions();
     assert(completions.length == 1);
@@ -702,13 +702,13 @@ void lifecycleEventSmoke()
     });
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     auto cancellation = backend.directorCancelDetailed(failed.handle);
     assert(cancellation == CancellationResult.requestedWaiting);
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     assert(failed.outcome == FiberOutcome.failed);
     completions = backend.takeCompletions();
@@ -741,7 +741,7 @@ void lifecycleEventSmoke()
     // Drain the reused generation fully to leave no explicit backend root.
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
     completions = backend.takeCompletions();
     events = backend.takeLifecycleEvents();
@@ -751,7 +751,7 @@ void lifecycleEventSmoke()
     auto fatalTask = backend.spawn({ throw new Error("fatal event"); });
     flushed = backend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed); // Error never unwinds through the Farm callback
     assert(backend.fatal);
     assert(backend.fatalException !is null
@@ -808,7 +808,7 @@ void lifecycleRetentionSmoke()
 
     auto flushed = backend.flush(token, 1);
     assert(flushed == 1);
-    auto consumed = view.consumeQuantum();
+    auto consumed = view.consumeNext();
     assert(consumed && first.terminated);
     assert(backend.lifecycleReserved == 6 && backend.pendingEvents == 3);
 
@@ -829,9 +829,9 @@ void lifecycleRetentionSmoke()
 
     flushed = backend.flush(token);
     assert(flushed == 2);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(second.terminated && third.terminated && backend.drained);
     assert(backend.lifecycleReserved == 4);
     FiberLifecycleEvent[] remainder;
@@ -849,7 +849,7 @@ void lifecycleRetentionSmoke()
     auto handledTask = handlerBackend.spawn({});
     flushed = handlerBackend.flush(token);
     assert(flushed == 1);
-    consumed = view.consumeQuantum();
+    consumed = view.consumeNext();
     assert(consumed && handledTask.terminated && handlerBackend.drained);
     completed = handlerBackend.takeCompletions();
     assert(completed.length == 1 && completed[0] is handledTask);
@@ -940,12 +940,12 @@ void sharedDomainLaneSmoke()
 
     auto flushed = laneA.flush(tokenA);
     assert(flushed == 1);
-    auto consumed = viewA.consumeQuantum();
+    auto consumed = viewA.consumeNext();
     assert(consumed);
     assert(domain.waiting == 1 && laneA.ready == 0 && laneB.ready == 1);
     flushed = laneB.flush(tokenB);
     assert(flushed == 1);
-    consumed = viewB.consumeQuantum();
+    consumed = viewB.consumeNext();
     assert(consumed);
     assert(domain.waiting == 2 && laneA.ready == 0 && laneB.ready == 0);
 
@@ -958,14 +958,14 @@ void sharedDomainLaneSmoke()
     assert(wakeB == FiberWakeEvent.none);
     flushed = laneA.flush(tokenA);
     assert(flushed == 1);
-    consumed = viewA.consumeQuantum();
+    consumed = viewA.consumeNext();
     assert(consumed);
     assert(target.terminated && laneA.ready == 0 && laneB.ready == 1);
     wakeB = laneB.takeWakeEvents();
     assert(wakeB == FiberWakeEvent.signalled);
     flushed = laneB.flush(tokenB);
     assert(flushed == 1);
-    consumed = viewB.consumeQuantum();
+    consumed = viewB.consumeNext();
     assert(consumed);
     assert(joiner.terminated && domain.drained);
     assert(joined.status == FiberJoinStatus.completed
@@ -1064,10 +1064,10 @@ void remoteSweeperSmoke()
     domain.releaseAll(completed);
 }
 
-/// Consume exactly one newly-published resume from a fresh OS thread. Using a
-/// new sole consumer for every step makes migration deterministic rather than
-/// relying on the threadpool race to happen to choose another worker.
-/// `consumeQuantum` is a test artifact here: the worker path uses `consumeNext`.
+/// Consume the next single-activation table from a fresh OS thread. Publishing
+/// one resume per table and using a new sole consumer for every step makes
+/// migration deterministic rather than relying on the threadpool race to
+/// happen to choose another worker.
 void consumeOnFreshThread(AntFarm* farm, FiberTask task, ulong expectedResumes,
                           ref Thread[] retainedThreads)
 {
@@ -1082,7 +1082,7 @@ void consumeOnFreshThread(AntFarm* farm, FiberTask task, ulong expectedResumes,
             scope (exit) view.unsubscribe();
             foreach (_; 0 .. 100_000)
             {
-                view.consumeQuantum();
+                view.consumeNext();
                 if (task.resumeCount >= expectedResumes) return;
                 Thread.yield();
             }
@@ -1237,7 +1237,7 @@ void wakePolicySmoke()
     scope (exit) view.unsubscribe();
     auto flushed = lane.backend.flush(token);
     assert(flushed == 1);
-    auto consumed = view.consumeQuantum();
+    auto consumed = view.consumeNext();
     assert(consumed);
     auto completions = lane.backend.takeCompletions();
     assert(completions.length == 1);
@@ -1696,13 +1696,13 @@ void threadpoolSmoke()
     });
     auto cancelFlushed = cancelLane.backend.flush(cancelToken);
     assert(cancelFlushed == 1);
-    auto cancelConsumed = cancelView.consumeQuantum();
+    auto cancelConsumed = cancelView.consumeNext();
     assert(cancelConsumed);
     assert(cancelLane.backend.waiting == 1);
     cancelLane.beginShutdown(true);
     cancelFlushed = cancelLane.backend.flush(cancelToken);
     assert(cancelFlushed == 1);
-    cancelConsumed = cancelView.consumeQuantum();
+    cancelConsumed = cancelView.consumeNext();
     assert(cancelConsumed);
     assert(cancelled.outcome == FiberOutcome.cancelled && cleaned);
     assert(cancelLane.drained);
