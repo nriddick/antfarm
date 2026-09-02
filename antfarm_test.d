@@ -195,6 +195,12 @@ struct ActorWaveState
 
 __gshared shared(long) g_waveAutonomousCalls;
 
+void actorWaveCompletion(void* context) nothrow @nogc @system
+{
+    auto completions = cast(shared(long)*) context;
+    atomicFetchAdd!(MemoryOrder.rel)(*completions, 1L);
+}
+
 void actorWaveDormant(scope ref ActorBorrow!ActorWaveState,
         scope ref ActorContext) nothrow @nogc @system
 {
@@ -468,6 +474,37 @@ struct CountingBodyRange
     @property size_t length() const pure nothrow @nogc @safe { return n - i; }
 }
 
+struct PreparingBodyRange
+{
+    ulong* words;
+    size_t i;
+    size_t n;
+    size_t* frontCalls;
+    size_t* prepareCalls;
+    size_t* prepared;
+    bool* permit;
+
+    @property bool empty() const pure nothrow @nogc @safe { return i >= n; }
+    @property PayloadBody front() nothrow @nogc @system
+    {
+        ++*frontCalls;
+        return words[i .. i + 1];
+    }
+    void popFront() pure nothrow @nogc @safe { ++i; }
+    @property PreparingBodyRange save() pure nothrow @nogc @safe
+    {
+        return this;
+    }
+    @property size_t length() const pure nothrow @nogc @safe { return n - i; }
+    bool prepareTableFrontN(size_t count) nothrow @nogc @system
+    {
+        if (count > length) return false;
+        ++*prepareCalls;
+        if (*permit) *prepared += count;
+        return *permit;
+    }
+}
+
 void testInputRangeWrite()
 {
     auto f = AntFarm.create(1 << 18, 8, 2, 1, 8192, 4, 2048);
@@ -605,7 +642,8 @@ void testUniformRanges()
     enum M = 24;
     enum F = 24;
     enum K = 8;
-    allocCalls(N + M + F + K);
+    enum P = 300;
+    allocCalls(N + M + F + K + P);
     scope (exit) freeCalls();
 
     auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
@@ -672,6 +710,50 @@ void testUniformRanges()
         "fixed-length sizing never evaluates body front");
     while (v.consumeNext()) {}
 
+    // A transactional source is prepared only for the exact prefix which
+    // fits the physical table, after sizing and before ring reservation.
+    ulong[P] preparingWords;
+    foreach (i; 0 .. P)
+        preparingWords[i] = N + M + F + K + i;
+    size_t preparingFrontCalls;
+    size_t prepareCalls;
+    size_t prepared;
+    bool permitPreparation = true;
+    auto preparing = PreparingBodyRange(preparingWords.ptr, 0, P,
+        &preparingFrontCalls, &prepareCalls, &prepared,
+        &permitPreparation);
+    size_t preparingTables;
+    while (!preparing.empty)
+    {
+        immutable count = cast(size_t) f.write(commonHeader, preparing,
+            1, tok);
+        check(count != 0, "transactional range write progress");
+        check(preparing.popFrontN(count) == count,
+            "transactional range popFrontN");
+        ++preparingTables;
+        while (v.consumeNext()) {}
+    }
+    check(preparingTables > 1 && prepareCalls == preparingTables,
+        "transactional range prepared once per physical table");
+    check(prepared == P && preparingFrontCalls == P,
+        "transactional range prepared only emitted payloads");
+
+    ulong rejectedWord;
+    size_t rejectedFrontCalls;
+    size_t rejectedPrepareCalls;
+    size_t rejectedPrepared;
+    bool rejectPreparation;
+    auto rejected = PreparingBodyRange(&rejectedWord, 0, 1,
+        &rejectedFrontCalls, &rejectedPrepareCalls, &rejectedPrepared,
+        &rejectPreparation);
+    immutable tailBeforeReject = atomicLoad!(MemoryOrder.acq)(f.Wt);
+    check(f.write(commonHeader, rejected, 1, tok) == 0,
+        "transactional range may reject before publication");
+    check(atomicLoad!(MemoryOrder.acq)(f.Wt) == tailBeforeReject
+            && rejectedPrepareCalls == 1 && rejectedPrepared == 0
+            && rejectedFrontCalls == 0,
+        "rejected transactional range leaves Farm untouched");
+
     Tuple!(size_t, ulong)[K] mtArgs;
     foreach (i; 0 .. K)
         mtArgs[i] = tuple(cast(size_t)(N + M + F + i), 2UL);
@@ -684,7 +766,10 @@ void testUniformRanges()
         check(g_calls[i] == 1, "uniform exact call count");
     foreach (i; N + M + F .. N + M + F + K)
         check(g_calls[i] == 2, "uniform MT exact call count");
-    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N + M + F + 2 * K,
+    foreach (i; N + M + F + K .. N + M + F + K + P)
+        check(g_calls[i] == 1, "transactional range exact call count");
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls)
+            == N + M + F + 2 * K + P,
         "uniform total");
 
     v.unsubscribe();
@@ -1412,6 +1497,7 @@ void testActorWave()
     auto token = farm.registerProducer(Tier.small);
     check(token.valid, "wave producer registration");
     ActorWave wave;
+    shared long waveCompletions;
 
     // Membership outlives an individual table callback. Even after this
     // actor has returned to idle, it cannot be admitted a second time while
@@ -1442,7 +1528,8 @@ void testActorWave()
     check(overlapRejected.failed && overlapRejected.length == 1,
         "overlap rejection preserves prior table completion");
 
-    wave.begin(farm);
+    wave.begin(farm, ActorWaveCompletionHook(
+        cast(void*) &waveCompletions, &actorWaveCompletion));
     size_t offset;
     ulong firstTableCount;
     while (offset < actorCount)
@@ -1473,6 +1560,12 @@ void testActorWave()
         Thread.yield();
     }
     check(!first.failed, "first actor wave completes cleanly");
+    while (atomicLoad!(MemoryOrder.acq)(waveCompletions) != 1)
+    {
+        if (MonoTime.currTime >= deadline)
+            fatal("actor wave completion hook timeout");
+        Thread.yield();
+    }
     check(first.progress == first.length
             && first.length == firstTableCount,
         "wave aggregates exact physical table count");

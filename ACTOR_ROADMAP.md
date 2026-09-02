@@ -584,3 +584,21 @@ reader pinning, and the direct Fiber completion adapter. None of those should
 weaken the core rule: actors mutate only private state during a wave, observe
 only a frozen committed public generation, and expose the next generation only
 through successful aggregate wave completion.
+
+The executable characterization in
+[`fibers/benchmarks/actor_wave.d`](fibers/benchmarks/actor_wave.d) models two
+independent actor sets with one private and two public cache lines per actor.
+It compares one Fiber publishing both waves against two Fibers publishing one
+wave each; the latter have distinct Farm producer tokens and rendezvous only
+to release-publish the shared top-down generation. Wave finish now advances a
+preallocated, counted Fiber-generation trigger. The payload callback performs
+only atomics and an intrusive deferred enqueue; a managed worker converts that
+edge into an ordinary cancellable Fiber wake after leaving `nothrow @nogc`
+payload dispatch. This replaces handle polling without admitting locks or
+allocation into actor execution, and coalesced or early completions retain
+their generation count.
+The first optimization pass established that wave publication must reserve only
+the exact prefix a physical Farm table will accept. Reserving the caller's full
+remaining slice and cancelling its tail on every partial write was quadratic;
+the fixed-width Farm path now offers a pre-publication transactional range hook
+which lets actor membership acquire only the already-sized table prefix.

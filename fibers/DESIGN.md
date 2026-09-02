@@ -127,7 +127,12 @@ one-resume test probe; it is not a production latency control.
 `WaitSet` uses mutex-striped signal maps with intrusive doubly linked waiter
 chains. Individual removal and whole-signal detach are O(1). `FiberEvent` and
 `FiberSemaphore` register and then recheck their state so a signal cannot be
-lost between observing it and parking.
+lost between observing it and parking. A reusable `FiberGenerationTrigger`
+retains one empty map bucket after first use, avoiding delete/reinsert
+allocation on every generation; ordinary events, semaphores, arbitrary
+application signals, and one-shot timer keys are removed normally. Trigger
+instances are intended to be stable streams because the retained bucket lives
+until its domain does.
 
 `TimerSet` assigns private signals and stores them in an indexed binary
 min-heap ordered by `(deadline, sequence)`. Nearest-deadline lookup is O(1),

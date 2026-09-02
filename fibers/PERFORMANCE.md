@@ -213,6 +213,8 @@ dub run -c benchmark --build=release --compiler=ldc2 -- 200000 256 0
 dub run -c benchmark_mt --build=release --compiler=ldc2 -- 100000
 dub run -c benchmark_vs_druntime --build=release --compiler=ldc2 -- 100000
 dub run -c benchmark_farm_embed --build=release --compiler=ldc2 -- 2000000
+dub run -c benchmark_actor_wave --build=release --compiler=ldc2 -- 32768 200 6 10 0 8
+dub run -c benchmark_actor_wave --build=release --compiler=ldc2 -- 32768 200 0 10 0 8 --smt --sweep
 ```
 
 - `benchmark` characterizes cold/warm creation and single-thread drain.
@@ -221,6 +223,72 @@ dub run -c benchmark_farm_embed --build=release --compiler=ldc2 -- 2000000
   worker topologies.
 - `benchmark_farm_embed` isolates direct Farm, threadpool, and Fiber-pump
   embedding cost on the same payload.
+- `benchmark_actor_wave` compares one Fiber producing two actor waves against
+  two Fibers producing one independent wave each. Both cases commit one shared
+  top-down generation only after both sets finish. Each actor contains one
+  cache-padded private word and two cache-padded public words; its operation is
+  only an identity projection through those lines. Arguments are actors per
+  set, measured generations, maximum selected workers (`0` means all), warm-up
+  generations, `avgCost`, and Farm ring size in MiB (default 8, power of two).
+  `--smt` includes sibling logical processors after selecting one worker per
+  physical core. `--sweep` recreates the Farm and worker pool for every prefix
+  from one worker through that selected set, then prints a compact Mactor/s
+  summary. The positional worker maximum caps the sweep; zero uses every
+  available physical worker, or every logical processor with `--smt`.
+
+### Actor-wave optimization checkpoint
+
+The first guided pass used a Ryzen 5 5500, six non-SMT workers, ordinary 4 KiB
+pages, LDC release mode, 32,768 actors per set, 200 measured generations, and
+the median of three runs. Costs are nanoseconds per actor dispatch:
+
+| implementation | one Fiber | two Fibers |
+|---|---:|---:|
+| initial wave path | 286.50 | 211.63 |
+| omit redundant wave `scheduled -> running` RMW | 268.98 | 193.78 |
+| reserve only the exact Farm-accepted prefix | 40.99 | 36.94 |
+| remove redundant per-member submission pins | 39.51 | 36.38 |
+
+The accepted changes reduce median cost by 7.25x and 5.82x respectively.
+Exact-prefix reservation is the decisive change: the old path reserved the
+entire remaining slice and cancelled its unwritten tail for every physical
+table, creating a shrinking-tail quadratic scan. Packing wave generation and
+status into one atomic word and removing a duplicate admission load were also
+measured. Neither improvement survived repeated sampling, so both were
+reverted rather than paying semantic or maintenance costs without evidence.
+
+Replacing completion and two-producer rendezvous polling with counted Fiber
+generation triggers was measured separately with the 8 MiB ring. At 500
+generations after 20 warm-ups, median cost was 36.34 ns/actor for one Fiber and
+29.27 ns/actor for two. Retaining scheduler-created wait keys made the final
+medians 36.25 and 29.22 ns/actor respectively, within ordinary run variance,
+while removing repeated wait-bucket allocation. Only Farm publication
+backpressure now uses cooperative
+yields; completion parks on the scheduler wait path. Typical measured yields
+fell from hundreds per generation to roughly 4--12, depending on run timing.
+The completion callback itself remains `nothrow @nogc`: it advances a counter
+and enqueues one preallocated deferred node, which a managed worker converts
+to a normal cancellable FiberEvent wake after payload dispatch.
+
+### Actor-wave Farm ring size
+
+This host has one 16 MiB L3. After installing counted Fiber triggers, a
+follow-up comparison used the same six physical workers, 32,768 actors per
+set, 500 measured generations, and 20 warm-up generations. Each value is the
+median of three runs with ordinary 4 KiB pages:
+
+| Farm ring | one Fiber | two Fibers |
+|---|---:|---:|
+| 16 MiB | 39.75 ns/actor | 36.54 ns/actor |
+| 8 MiB | 36.82 ns/actor | 29.90 ns/actor |
+
+The 8 MiB ring improves the one-Fiber case by 7.4% and the two-independent-
+Fiber case by 18.2%, despite incurring a few publication-backpressure yields
+where 16 MiB incurred almost none. Cache footprint outweighs extra producer
+slack for this workload, so 8 MiB is the characterization-host default. This
+is not evidence for changing the general Farm default: the actor state alone
+is 12 MiB, and the result may depend on this LLC, concurrent producer pattern,
+table geometry, and state footprint.
 
 Record compiler version, build mode, CPU topology, huge-page setting, task
 count, warm/cold state, and batch parameters with any published result.

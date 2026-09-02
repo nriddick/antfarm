@@ -46,3 +46,8 @@ configuration "benchmark_farm_embed" {
     targetType "executable"
     mainSourceFile "benchmarks/benchmark_farm_embed.d"
 }
+
+configuration "benchmark_actor_wave" {
+    targetType "executable"
+    mainSourceFile "benchmarks/actor_wave.d"
+}

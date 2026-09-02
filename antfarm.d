@@ -659,6 +659,18 @@ struct PayloadBroadcastRange(BR, bool fixedLength = false)
     {
         return bodies.popFrontN(n);
     }
+
+    // Optional transactional-source protocol. The Farm has computed the
+    // exact prefix that fits but has not reserved ring space yet. A source
+    // may use this point to acquire external resources for only that prefix;
+    // false abandons the write without making a table visible.
+    static if (__traits(hasMember, BR, "prepareTableFrontN"))
+    {
+        bool prepareTableFrontN(size_t n) nothrow @nogc @system
+        {
+            return bodies.prepareTableFrontN(n);
+        }
+    }
 }
 
 /// Broadcast one common payload header over every body in `bodies`.
@@ -1433,6 +1445,9 @@ struct AntFarm
                 syncQuota(tok);
             }
         }
+
+        static if (__traits(hasMember, R, "prepareTableFrontN"))
+            if (!payloads.prepareTableFrontN(n)) return 0;
 
         // Reserve space on the write tail (spec 3a, 4b).
         immutable wret = atomicFetchAdd!(MemoryOrder.rel)(Wt, size);

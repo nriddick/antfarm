@@ -1304,6 +1304,7 @@ void drainUntil(FiberBackend backend, ref Token token, ref ConsumerView view,
 {
     foreach (spin; 0 .. 200_000)
     {
+        backend.pollGenerationTriggers();
         backend.flush(token);
         view.consumeNext();
         if (waitFor == 0)
@@ -1340,6 +1341,59 @@ void syncPrimitiveSmoke()
     posted.set();
     drainUntil(backend, token, view);
     assert(atomicLoad(ran) == 1);
+    backend.releaseAll(backend.takeCompletions());
+
+    auto generations = new FiberGenerationTrigger(backend);
+    shared uint generationsSeen;
+    backend.spawn({
+        generations.waitNext();
+        atomicFetchAdd(generationsSeen, 1u);
+        generations.waitNext();
+        atomicFetchAdd(generationsSeen, 1u);
+    });
+    drainUntil(backend, token, view, 1);
+    generations.advance();
+    drainUntil(backend, token, view, 1);
+    assert(atomicLoad(generationsSeen) == 1);
+    generations.advance();
+    drainUntil(backend, token, view);
+    assert(atomicLoad(generationsSeen) == 2
+        && generations.completed == 2);
+    backend.releaseAll(backend.takeCompletions());
+
+    // Advances may coalesce before the consumer Fiber begins waiting.
+    auto prepostedGenerations = new FiberGenerationTrigger(backend);
+    prepostedGenerations.advance();
+    prepostedGenerations.advance();
+    atomicStore(generationsSeen, 0u);
+    backend.spawn({
+        prepostedGenerations.waitNext();
+        prepostedGenerations.waitNext();
+        atomicFetchAdd(generationsSeen, 2u);
+    });
+    drainUntil(backend, token, view);
+    assert(atomicLoad(generationsSeen) == 2
+        && prepostedGenerations.completed == 2);
+    backend.releaseAll(backend.takeCompletions());
+
+    // Cancellation removes a waiter but retains the trigger's empty bucket;
+    // a later serialized consumer can register on that same key again.
+    auto cancelledGenerations = new FiberGenerationTrigger(backend);
+    auto cancelledWaiter = backend.spawn({ cancelledGenerations.waitNext(); });
+    drainUntil(backend, token, view, 1);
+    assert(backend.directorCancel(cancelledWaiter));
+    drainUntil(backend, token, view);
+    assert(cancelledWaiter.outcome == FiberOutcome.cancelled);
+    backend.releaseAll(backend.takeCompletions());
+    atomicStore(generationsSeen, 0u);
+    backend.spawn({
+        cancelledGenerations.waitNext();
+        atomicFetchAdd(generationsSeen, 1u);
+    });
+    drainUntil(backend, token, view, 1);
+    cancelledGenerations.advance();
+    drainUntil(backend, token, view);
+    assert(atomicLoad(generationsSeen) == 1);
     backend.releaseAll(backend.takeCompletions());
 
     auto ready = new FiberEvent(backend);

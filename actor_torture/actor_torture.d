@@ -121,6 +121,8 @@ private __gshared ActorInboxNode* g_hookNode;
 private __gshared shared(int) g_raceArrived;
 private __gshared shared(int) g_raceRelease;
 private __gshared ActorInboxNode* g_raceNode;
+private __gshared shared(int) g_waveReserveArrived;
+private __gshared shared(int) g_waveReserveRelease;
 
 private void blockingActorHook(ActorTestPoint point, ActorInboxNode* node)
     nothrow @nogc @system
@@ -139,6 +141,14 @@ private void claimRaceHook(ActorTestPoint point, ActorInboxNode* node)
         return;
     atomicFetchAdd!(MemoryOrder.acq_rel)(g_raceArrived, 1);
     while (atomicLoad!(MemoryOrder.acq)(g_raceRelease) == 0) {}
+}
+
+private void waveReserveHook(ActorTestPoint point, ActorInboxNode*)
+    nothrow @nogc @system
+{
+    if (point != ActorTestPoint.waveLifecycleReserved) return;
+    atomicStore!(MemoryOrder.rel)(g_waveReserveArrived, 1);
+    while (atomicLoad!(MemoryOrder.acq)(g_waveReserveRelease) == 0) {}
 }
 
 private class BoundarySender
@@ -467,6 +477,144 @@ private void testContendedNodeClaimDuringClose()
     runtime.destroy();
 }
 
+private struct WavePinResult
+{
+    ulong waveCalls;
+    ulong autonomousCalls;
+}
+
+private struct WavePinState
+{
+    WavePinResult* result;
+}
+
+private void wavePinDormant(scope ref ActorBorrow!WavePinState actor,
+        scope ref ActorContext) nothrow @nogc @system
+{
+    ++actor.value.result.autonomousCalls;
+}
+
+private void wavePinOperation(scope ref ActorBorrow!WavePinState actor)
+    nothrow @nogc @system
+{
+    ++actor.value.result.waveCalls;
+}
+
+private final class WaveRacePublisher
+{
+    AntFarm* farm;
+    ActorHandle!WavePinState actor;
+    ActorWave wave;
+    size_t written;
+    ActorWaveHandle completion;
+    shared int published;
+    shared int sealRequested;
+    shared int done;
+
+    this(AntFarm* initialFarm, ActorHandle!WavePinState initialActor)
+    {
+        farm = initialFarm;
+        actor = initialActor;
+    }
+
+    void run()
+    {
+        auto token = farm.registerProducer(Tier.small);
+        check(token.valid, "wave-race publisher token");
+        wave.begin(farm);
+        ActorHandle!WavePinState[1] members;
+        members[0] = actor;
+        written = cast(size_t) wave.publish!wavePinOperation(
+            members[], token, 0);
+        atomicStore!(MemoryOrder.rel)(published, 1);
+        while (atomicLoad!(MemoryOrder.acq)(sealRequested) == 0)
+            Thread.yield();
+        completion = wave.seal();
+        farm.unregisterProducer(token);
+        atomicStore!(MemoryOrder.rel)(done, 1);
+    }
+}
+
+private void testWaveMembershipPinsRetiredActor()
+{
+    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 2, 256);
+    check(farm !is null, "wave-race Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "wave-race runtime allocation");
+    WavePinResult output;
+    auto owner = runtime.createActor!(WavePinState, wavePinDormant)(
+        WavePinState(&output));
+    check(owner.valid, "wave-race actor allocation");
+
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "wave-race consumer subscribe");
+    auto retirementToken = farm.registerProducer(Tier.small);
+    check(retirementToken.valid, "wave-race retirement token");
+
+    atomicStore!(MemoryOrder.rel)(g_waveReserveArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 0);
+    setActorTestHook(&waveReserveHook);
+    auto publisher = new WaveRacePublisher(farm, owner.handle);
+    auto thread = new Thread(&publisher.run);
+    thread.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(g_waveReserveArrived, deadline,
+        "wave publisher did not pause after lifecycle reservation");
+
+    // The lifecycle reservation won, but waveOwner is deliberately not yet
+    // visible. Retirement may therefore close this actor and must be joined
+    // through the wave callback's pending path.
+    check(owner.requestRetire() == ActorRetireResult.requested,
+        "wave-race retirement wins before membership publication");
+    check(!owner.retired,
+        "reserved wave payload prevents immediate retirement");
+
+    atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 1);
+    waitFlag(publisher.published, deadline,
+        "wave-race table publication timeout");
+    setActorTestHook(null);
+    check(publisher.written == 1,
+        "retirement race preserves reserved wave payload");
+
+    while (publisher.wave.handle.progress != 1)
+    {
+        while (view.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            check(false, "wave-race payload completion timeout");
+        Thread.yield();
+    }
+    while (!owner.retired)
+    {
+        runtime.flush(retirementToken, 1, 0);
+        while (view.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            check(false, "wave-race retirement drain timeout");
+        Thread.yield();
+    }
+
+    check(output.waveCalls == 1 && output.autonomousCalls == 0,
+        "wave-race operation executes before retirement without overlap");
+    check(!publisher.wave.handle.finished,
+        "open aggregate retains completed actor membership");
+    check(owner.reclaim() == ActorReclaimResult.busy,
+        "wave membership pins retired actor state and runtime");
+
+    atomicStore!(MemoryOrder.rel)(publisher.sealRequested, 1);
+    waitFlag(publisher.done, deadline, "wave-race seal timeout");
+    thread.join();
+    check(publisher.completion.finished && publisher.completion.failed,
+        "raced retirement finishes the sealed wave as failed");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed,
+        "aggregate release permits raced actor reclamation");
+
+    view.unsubscribe();
+    farm.unregisterProducer(retirementToken);
+    check(runtime.live == 0 && runtime.ready == 0,
+        "wave-race runtime drained");
+    runtime.destroy();
+}
+
 private void testDeterministicInterleavings()
 {
     testClaimIsNotPublication();
@@ -476,6 +624,7 @@ private void testDeterministicInterleavings()
     testCloseBoundary(ActorTestPoint.activationSignalled);
     testContendedNodeClaimDuringClose();
     testReleasedReservationIsQuiescent();
+    testWaveMembershipPinsRetiredActor();
     printf("actor deterministic interleavings OK\n");
     fflush(stdout);
 }

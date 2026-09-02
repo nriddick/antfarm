@@ -19,8 +19,15 @@ import core.time : Duration, MonoTime;
 
 alias Signal = ulong;
 private enum Signal timerSignalBit = 1UL << 63;
+private enum Signal persistentSignalBit = 1UL << 62;
+private enum Signal internalSignalMask = timerSignalBit | persistentSignalBit;
 enum size_t defaultLifecycleRetention = 65_536;
 private enum uint lifecycleRecordsPerTask = 4;
+
+private bool persistentSignal(Signal signal) pure nothrow @nogc
+{
+    return (signal & internalSignalMask) == internalSignalMask;
+}
 
 enum FiberOutcome : ubyte
 {
@@ -1047,7 +1054,8 @@ final class WaitSet
             {
                 task.waitNext = p.head;
                 task.waitPrev = null;
-                p.head.waitPrev = task;
+                if (p.head !is null)
+                    p.head.waitPrev = task;
                 p.head = task;
                 ++p.count;
             }
@@ -1073,7 +1081,13 @@ final class WaitSet
             if (auto p = signal in buckets[s])
             {
                 auto bucket = *p;
-                buckets[s].remove(signal);
+                if (persistentSignal(signal))
+                {
+                    p.head = null;
+                    p.count = 0;
+                }
+                else
+                    buckets[s].remove(signal);
                 atomicFetchSub!(MemoryOrder.rel)(waiterCount, cast(long) bucket.count);
                 count = bucket.count;
                 return bucket.head;
@@ -1112,7 +1126,8 @@ final class WaitSet
             task.waitNext = null;
             task.waitPrev = null;
             task.waitGeneration = 0;
-            if (--p.count == 0) buckets[s].remove(signal);
+            if (--p.count == 0 && !persistentSignal(signal))
+                buckets[s].remove(signal);
             atomicFetchSub!(MemoryOrder.rel)(waiterCount, 1L);
             return true;
         }
@@ -1575,6 +1590,7 @@ final class FiberDomain
     private TimerSet timers;
     private FiberReadyLane[] readyLanes;
     private FiberReadyLane defaultReadyLane;
+    private shared(FiberGenerationTrigger) deferredTriggerHead;
     private PublishAccumulator completions;
     private LifecycleEventQueue lifecycleQueue;
     private LifecycleEventNode lifecycleBacklog;
@@ -2097,7 +2113,7 @@ final class FiberDomain
             throw new FiberCancelled;
         auto backend = task.backend;
         immutable seq = atomicFetchAdd(backend.timerSequence, 1UL);
-        immutable key = timerSignalBit | (seq & ~timerSignalBit);
+        immutable key = timerSignalBit | (seq & ~internalSignalMask);
         task.waitSignal = key;
         if (!backend.waits.insert(task, key))
             throw new FiberCancelled;
@@ -2138,10 +2154,64 @@ final class FiberDomain
         return wakeWaiters(signal);
     }
 
+    /// Deliver generation advances which originated inside `nothrow @nogc`
+    /// payload callbacks. Managed threadpool workers call this after payload
+    /// consumption; custom pumps must call it as part of their service loop.
+    size_t pollGenerationTriggers()
+    {
+        if (atomicLoad!(MemoryOrder.acq)(deferredTriggerHead) is null)
+            return 0;
+        auto trigger = cast(FiberGenerationTrigger) atomicExchange!(
+            MemoryOrder.acq_rel)(&deferredTriggerHead,
+                cast(shared(FiberGenerationTrigger)) null);
+        size_t delivered;
+        while (trigger !is null)
+        {
+            auto next = cast(FiberGenerationTrigger) atomicLoad!(
+                MemoryOrder.acq)(trigger.queueNext_);
+            atomicStore!(MemoryOrder.raw)(trigger.queueNext_,
+                cast(shared(FiberGenerationTrigger)) null);
+            // Permit a concurrent later generation to enqueue this node
+            // before delivering the generation(s) already represented here.
+            atomicStore!(MemoryOrder.rel)(trigger.queued_, 0);
+            trigger.deliver();
+            trigger = next;
+            ++delivered;
+        }
+        return delivered;
+    }
+
+    package void enqueueGenerationTrigger(FiberGenerationTrigger trigger)
+        nothrow @nogc
+    {
+        auto observed = atomicLoad!(MemoryOrder.acq)(deferredTriggerHead);
+        while (true)
+        {
+            atomicStore!(MemoryOrder.raw)(trigger.queueNext_, observed);
+            auto expected = observed;
+            if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
+                    &deferredTriggerHead, expected,
+                    cast(shared(FiberGenerationTrigger)) trigger))
+                break;
+            observed = expected;
+        }
+        // The worker currently dispatching a payload will observe the queue
+        // on return. This edge also wakes a responder if delivery originated
+        // elsewhere or the worker is about to park.
+        foreach (lane; readyLanes)
+            lane.noteExternalReady();
+    }
+
     package Signal allocateWaitKey() nothrow @nogc
     {
         immutable seq = atomicFetchAdd(timerSequence, 1UL);
-        return timerSignalBit | (seq & ~timerSignalBit);
+        return timerSignalBit | (seq & ~internalSignalMask);
+    }
+
+    package Signal allocatePersistentWaitKey() nothrow @nogc
+    {
+        immutable seq = atomicFetchAdd(timerSequence, 1UL);
+        return internalSignalMask | (seq & ~internalSignalMask);
     }
 
     package size_t wakeWaiters(Signal signal)
@@ -2711,11 +2781,24 @@ final class FiberEvent
 
     this(FiberDomain domain, FiberEventMode mode = FiberEventMode.autoReset)
     {
+        initialize(domain, mode, false);
+    }
+
+    package this(FiberDomain domain, FiberEventMode mode, bool retainWaitKey)
+    {
+        initialize(domain, mode, retainWaitKey);
+    }
+
+    private void initialize(FiberDomain domain, FiberEventMode mode,
+            bool retainWaitKey)
+    {
         if (domain is null)
             throw new Exception("antfarm_fibers: FiberEvent requires a domain");
         this.domain = domain;
         this.mode = mode;
-        this.key = domain.allocateWaitKey();
+        this.key = retainWaitKey
+            ? domain.allocatePersistentWaitKey()
+            : domain.allocateWaitKey();
     }
 
     @property bool isSet() const nothrow @nogc
@@ -2771,6 +2854,68 @@ final class FiberEvent
             return atomicLoad!(MemoryOrder.acq)(posted) != 0;
         int expected = 1;
         return cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(&posted, expected, 0);
+    }
+}
+
+/// Single-consumer, monotonically counted trigger for completions originating
+/// in an allocation-free payload callback. `advance` only performs atomics and
+/// enqueues this preallocated node. A scheduler pump later converts that edge
+/// into an ordinary FiberEvent wake outside the payload callback.
+///
+/// Calls to `waitNext` must be serialized by one managed Fiber. Advances may
+/// precede waits and may coalesce in the deferred queue without being lost.
+final class FiberGenerationTrigger
+{
+    private FiberDomain domain_;
+    private FiberEvent event_;
+    private shared ulong completed_;
+    private ulong awaited_;
+    package shared int queued_;
+    package shared(FiberGenerationTrigger) queueNext_;
+
+    this(FiberDomain domain)
+    {
+        if (domain is null)
+            throw new Exception(
+                "antfarm_fibers: generation trigger requires a domain");
+        domain_ = domain;
+        event_ = new FiberEvent(domain, FiberEventMode.autoReset, true);
+    }
+
+    @property ulong completed() const nothrow @nogc
+    {
+        return atomicLoad!(MemoryOrder.acq)(completed_);
+    }
+
+    /// Record one completion from any thread or payload callback.
+    void advance() nothrow @nogc
+    {
+        immutable before = atomicFetchAdd!(MemoryOrder.acq_rel)(completed_, 1UL);
+        if (before == ulong.max)
+            fatal("antfarm_fibers: generation trigger counter wrapped");
+        if (atomicExchange!(MemoryOrder.acq_rel)(&queued_, 1) == 0)
+            domain_.enqueueGenerationTrigger(this);
+    }
+
+    /// Wait for exactly the next generation assigned to this consumer.
+    void waitNext()
+    {
+        auto task = FiberDomain.currentTask;
+        if (task is null || task.backend !is domain_)
+            throw new Exception(
+                "antfarm_fibers: generation trigger requires a managed fiber of this domain");
+        immutable target = awaited_ + 1;
+        if (target == 0)
+            throw new Exception(
+                "antfarm_fibers: generation trigger waiter wrapped");
+        while (completed < target)
+            event_.wait();
+        awaited_ = target;
+    }
+
+    package void deliver()
+    {
+        event_.set();
     }
 }
 
@@ -2881,6 +3026,7 @@ void drainUntilEmpty(FiberDomain domain, ref Token token,
     {
         if (domain.pendingCancellationRequests != 0)
             cast(void) domain.drainCancellationRequests();
+        domain.pollGenerationTriggers();
         domain.pollTimers();
         immutable flushed = domain.flush(token, flushBatch, avgCost);
         immutable consumed = consumer.consumeNext();

@@ -24,6 +24,18 @@ private enum uint waveFinishedBit = 1U << 1;
 private enum uint waveFailedBit = 1U << 2;
 private enum uint waveFinishingBit = 1U << 3;
 
+alias ActorWaveCompletionCallback = void function(void* context)
+    nothrow @nogc @system;
+
+/// Optional exactly-once notification issued after a wave has release-
+/// published `finished`. The callback may make external scheduler work ready;
+/// it must not destroy the wave storage before the callback returns.
+struct ActorWaveCompletionHook
+{
+    void* context;
+    ActorWaveCompletionCallback call;
+}
+
 /// Copyable observation capability for a stable ActorWave. An acquire load
 /// that observes `finished` also observes every actor operation in the wave.
 /// The owning ActorWave storage must outlive all of its handles.
@@ -108,13 +120,16 @@ private:
     uint padding_;
     AntFarm* farm_;
     TableCompletionHook tableCompletion_;
+    ActorWaveCompletionHook completion_;
     ActorSlot* membersHead_;
     ulong padding2_;
 
 public:
     /// Start the first generation, or reuse this storage after its previous
     /// generation finished. Reuse invalidates every older handle.
-    void begin(AntFarm* farm) nothrow @nogc @system
+    void begin(AntFarm* farm,
+            ActorWaveCompletionHook completion = ActorWaveCompletionHook.init)
+        nothrow @nogc @system
     {
         if (farm is null) fatal("actor wave requires a Farm");
         immutable previous = atomicLoad!(MemoryOrder.acq)(generation_);
@@ -131,6 +146,7 @@ public:
         atomicStore!(MemoryOrder.raw)(tablesCompleted_, 0UL);
         atomicStore!(MemoryOrder.raw)(status_, 0U);
         farm_ = farm;
+        completion_ = completion;
         membersHead_ = null;
         tableCompletion_.context = cast(void*) &this;
         tableCompletion_.call = &actorWaveTableCompleted;
@@ -165,27 +181,6 @@ public:
         if ((atomicLoad!(MemoryOrder.acq)(status_) & waveSealedBit) != 0)
             fatal("publish sealed actor wave");
 
-        size_t reserved;
-        foreach (i, actor; actors)
-        {
-            if (!reserveActorWavePayload(actor.slot_, actor.generation_,
-                    farm_, T.sizeof, T.alignof, cast(void*) &this,
-                    membersHead_))
-            {
-                foreach_reverse (j; 0 .. reserved)
-                {
-                    if (membersHead_ !is actors[j].slot_)
-                        fatal("actor wave member list corrupt");
-                    membersHead_ = membersHead_.waveNext;
-                    cancelActorWavePayload(actors[j].slot_,
-                        actors[j].generation_, cast(void*) &this);
-                }
-                setStatusBits(waveFailedBit);
-                return 0;
-            }
-            reserved = i + 1;
-        }
-
         immutable oldLength = atomicFetchAdd!(MemoryOrder.acq_rel)(
             tablesPublished_, 1UL);
         if (oldLength == ulong.max) fatal("actor wave table count wrap");
@@ -198,15 +193,6 @@ public:
         auto bodies = ActorWaveBodyRange!T(actors, &this);
         immutable written = cast(size_t) farm_.writeTracked(header, bodies,
             3, &tableCompletion_, token, avgCost);
-
-        foreach_reverse (i; written .. reserved)
-        {
-            if (membersHead_ !is actors[i].slot_)
-                fatal("actor wave member list corrupt");
-            membersHead_ = membersHead_.waveNext;
-            cancelActorWavePayload(actors[i].slot_, actors[i].generation_,
-                cast(void*) &this);
-        }
         if (written == 0)
         {
             immutable before = atomicFetchSub!(MemoryOrder.acq_rel)(
@@ -275,8 +261,11 @@ private:
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
                     &status_, observed, replacement))
             {
+                auto completion = completion_;
                 releaseMembers();
                 setStatusBits(waveFinishedBit);
+                if (completion.call !is null)
+                    completion.call(completion.context);
                 return;
             }
             observed = atomicLoad!(MemoryOrder.acq)(status_);
@@ -331,6 +320,37 @@ private struct ActorWaveBodyRange(T)
     @property size_t length() const pure nothrow @nogc @safe
     {
         return actors_.length;
+    }
+
+    /// Called by the Farm after it has computed the exact physical-table
+    /// prefix but before it reserves ring space. This avoids reserving and
+    /// then cancelling every actor in the caller's unwritten tail.
+    bool prepareTableFrontN(size_t count) nothrow @nogc @system
+    {
+        if (count > actors_.length)
+            fatal("actor wave preparation exceeds member range");
+        size_t reserved;
+        foreach (i; 0 .. count)
+        {
+            auto actor = actors_[i];
+            if (!reserveActorWavePayload(actor.slot_, actor.generation_,
+                    wave_.farm_, T.sizeof, T.alignof, cast(void*) wave_,
+                    wave_.membersHead_))
+            {
+                foreach_reverse (j; 0 .. reserved)
+                {
+                    if (wave_.membersHead_ !is actors_[j].slot_)
+                        fatal("actor wave member list corrupt");
+                    wave_.membersHead_ = wave_.membersHead_.waveNext;
+                    cancelActorWavePayload(actors_[j].slot_,
+                        actors_[j].generation_, cast(void*) wave_);
+                }
+                wave_.failActor();
+                return false;
+            }
+            reserved = i + 1;
+        }
+        return true;
     }
 }
 

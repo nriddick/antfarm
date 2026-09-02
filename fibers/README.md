@@ -96,10 +96,29 @@ void fiberBody()
 - `FiberDomain.yieldReady()` republishes the task.
 - `await`, `FiberEvent.wait`, `FiberSemaphore.wait`, `sleep*`, and
   `TaskHandle.joinFiber` park without blocking the worker.
+- `ActorWaveTrigger.waitNext` parks until the next wave using a counted edge,
+  so completion which precedes the wait or coalesces in the worker handoff is
+  not lost.
 
 Do not use `core.thread.Fiber.yield()` as a scheduler operation. A body that
 does so is failed rather than left stranded. `Thread.sleep` blocks the entire
 worker; use `FiberDomain.sleepFor` or `sleepUntil`.
+
+An actor wave can wake its dependent orchestration Fiber without calling the
+locked wait machinery from its `nothrow @nogc` completion callback:
+
+```d
+auto trigger = new ActorWaveTrigger(domain);
+wave.begin(farm, trigger.hook);
+// Publish all actor tables, then close the wave.
+auto completion = wave.seal();
+trigger.waitNext();
+assert(completion.finished);
+```
+
+The managed threadpool driver and `drainUntilEmpty` deliver these deferred
+edges automatically. A custom scheduler pump must call
+`domain.pollGenerationTriggers()` in its service loop.
 
 ## Bind lanes to the cache-aware pool
 

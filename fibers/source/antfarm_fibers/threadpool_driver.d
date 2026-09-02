@@ -598,6 +598,8 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     immutable timersWoken = state.responder
         ? state.lane.backend.pollTimers() : 0;
     bool consumed = state.consumer.consumeNext();
+    immutable triggersDelivered =
+        state.lane.backend.pollGenerationTriggers();
     if (state.lane.backend.pendingEvents != 0)
         state.lane.noteWake(FiberWakeEvent.lifecycle);
     if (state.lane.backend.fatal)
@@ -641,7 +643,8 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     // empty while published-but-not-entered activations remain, or while a
     // covered remote lane still has transport. Table size (flushBatch) bounds
     // a visit; do not skip the rest of a table with consumeQuantum.
-    if (timersWoken != 0 || consumed || flushed != 0 || remoteWork
+    if (timersWoken != 0 || triggersDelivered != 0
+        || consumed || flushed != 0 || remoteWork
         || state.lane.ready != 0 || state.lane.published != 0)
         return ManagedPumpResult.again;
     long deadline;

@@ -108,6 +108,7 @@ version (AntfarmActorTestHooks)
         inboxPublished,
         activationSignalled,
         submissionReleased,
+        waveLifecycleReserved,
     }
 
     alias ActorTestHook = void function(ActorTestPoint point,
@@ -950,13 +951,17 @@ private ActorReclaimResult reclaimActor(ref ActorSlot* slot,
         return ActorReclaimResult.staleOwner;
     if (wordPhase(word) != phaseRetired)
         return ActorReclaimResult.busy;
+    // A wave may retain aggregate membership after this actor's own work and
+    // a racing retirement have completed. Membership pins the stable slot,
+    // state, live count, and therefore runtime until aggregate release.
+    if (atomicLoad!(MemoryOrder.acq)(slot.waveOwnerWord) != 0)
+        return ActorReclaimResult.busy;
     immutable gate = atomicLoad!(MemoryOrder.acq)(slot.submissionGate);
     if ((gate & submissionClosedBit) == 0
             || (gate & submissionCountMask) != 0
             || atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) != 0
-            || slot.inboxCarryWord != 0
-            || atomicLoad!(MemoryOrder.acq)(slot.waveOwnerWord) != 0)
-        fatal("reclaim actor with live inbox or wave ownership");
+            || slot.inboxCarryWord != 0)
+        fatal("reclaim actor with live inbox or submission");
 
     auto runtime = slot.runtime;
     auto state = slot.state;
@@ -1287,9 +1292,9 @@ private ActorInboxNode* popInboxNode(ActorSlot* slot,
 }
 
 /// Reserve one idle actor for a wave without publishing it to the autonomous
-/// ready queue. The submission reservation pins its state and runtime while
-/// the Farm owns the eventual table payload. Cancellation releases it
-/// immediately; a dispatched actor retains it until aggregate wave finish.
+/// ready queue. The scheduled lifecycle pins state through payload execution;
+/// aggregate membership then prevents reclamation until the whole wave has
+/// finished. Cancellation restores the lifecycle immediately.
 package bool reserveActorWavePayload(ActorSlot* slot, ulong generation,
         AntFarm* expectedFarm, size_t stateSize, size_t stateAlignment,
         void* waveOwner, ref ActorSlot* memberHead)
@@ -1302,18 +1307,14 @@ package bool reserveActorWavePayload(ActorSlot* slot, ulong generation,
             || slot.stateAlignment != stateAlignment)
         return false;
 
-    ActorSendResult failure;
-    if (!reserveSubmission(slot, generation, failure))
-        return false;
-
     ulong expected = lifecycleWord(generation, phaseIdle);
     immutable replacement = lifecycleWord(generation, phaseScheduled);
     if (!cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
             &slot.lifecycle, expected, replacement))
-    {
-        releaseSubmission(slot);
         return false;
-    }
+
+    version (AntfarmActorTestHooks)
+        actorTestPoint(ActorTestPoint.waveLifecycleReserved, null);
 
     if (atomicLoad!(MemoryOrder.acq)(slot.waveOwnerWord) != 0)
     {
@@ -1362,14 +1363,12 @@ package void cancelActorWavePayload(ActorSlot* slot, ulong generation,
         }
         observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     }
-    releaseSubmission(slot);
     if (queue) slot.runtime.pushReady(slot);
 }
 
 /// Release membership after the aggregate wave has joined every table. This
-/// is the final slot access made by the wave; dropping the submission
-/// reservation may allow retirement, reclamation, and eventual runtime
-/// destruction to proceed immediately.
+/// is the final slot access made by the wave; clearing the owner may allow
+/// reclamation and eventual runtime destruction to proceed immediately.
 package void releaseActorWaveMembership(ActorSlot* slot, void* waveOwner)
     nothrow @nogc @system
 {
@@ -1378,31 +1377,27 @@ package void releaseActorWaveMembership(ActorSlot* slot, void* waveOwner)
         fatal("actor wave completion lost membership");
     atomicStore!(MemoryOrder.rel)(slot.waveOwnerWord, size_t.init);
     slot.waveNext = null;
-    releaseSubmission(slot);
 }
 
 /// Execute a wave's phase-specific operation under the reservation made
 /// before table publication. False means another actor control path requested
 /// wake/send/retirement during the operation; the operation still completed,
 /// and that request is handed back to the autonomous ready queue.
+///
+/// Unlike autonomous dispatch, the wave keeps the lifecycle in `scheduled`
+/// while the callback runs. The wave reservation is the unique source of a
+/// payload for that state, and `waveOwnerWord` prevents later autonomous
+/// publication. The acquire verification below joins the prior actor release;
+/// the exit CAS both publishes this operation and detects a racing pending or
+/// retirement request. A second scheduled-to-running RMW would add no owner.
 package bool dispatchActorWavePayload(T, alias operation)(ActorSlot* slot,
         ulong generation) nothrow @nogc @system
 {
     auto observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
+    if (wordGeneration(observed) != generation
+            || wordPhase(observed) != phaseScheduled)
+        fatal("actor wave dispatch lost reservation");
     bool clean = (observed & (retireBit | pendingBit)) == 0;
-    while (true)
-    {
-        if (wordGeneration(observed) != generation
-                || wordPhase(observed) != phaseScheduled)
-            fatal("actor wave dispatch lost reservation");
-        immutable replacement = lifecycleWord(generation, phaseRunning)
-            | (observed & (retireBit | pendingBit));
-        if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
-                &slot.lifecycle, observed, replacement))
-            break;
-        observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
-        clean = clean && (observed & (retireBit | pendingBit)) == 0;
-    }
 
     ActorBorrow!T borrow;
     borrow.state_ = cast(T*) slot.state;
@@ -1413,7 +1408,7 @@ package bool dispatchActorWavePayload(T, alias operation)(ActorSlot* slot,
     while (true)
     {
         if (wordGeneration(observed) != generation
-                || wordPhase(observed) != phaseRunning)
+                || wordPhase(observed) != phaseScheduled)
             fatal("actor wave operation lost reservation");
         immutable interrupted = (observed & (retireBit | pendingBit)) != 0;
         clean = clean && !interrupted;

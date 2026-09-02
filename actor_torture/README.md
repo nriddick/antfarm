@@ -19,6 +19,8 @@ Coverage includes:
   released, and a popped-but-uncompleted inbox node;
 - proof in the sender and popped-node cases that the actor can be reclaimed
   first while the remaining engine claim still forbids the simulated unload;
+- a wave-reservation/retirement race proving that aggregate membership pins a
+  retired actor and its runtime until the open wave is sealed;
 - multi-actor ready-queue contention with six producers and six consumers;
 - FIFO order per producer, exact-once delivery, payload checksums, bounded
   carry republishing, 32 rounds of generation reuse, and a disabled GC;
