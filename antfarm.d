@@ -1318,9 +1318,12 @@ struct AntFarm
         immutable cs = csl > 0 ? cast(uint) csl : 1;
         immutable sq = sqcsOf(cs);
 
-        // Fit as many payloads as the quota allows (spec 4a truncation).
+        // Fit as many payloads as the quota and the table payload cap
+        // allow (spec 4a truncation, 2e).
         // Base size of every table: Thead + progress pads + Tcount + end pad.
         immutable base = THEAD_LEN + PROG_PAD + 1 + 7 + 8UL * sq + END_PAD;
+        // Spec 2e: a committed table carries fewer than 2^31 payloads.
+        immutable size_t maxTablePayloads = 2_147_483_647; // 2^31 - 1
         size_t n;
         uint m;
         ulong psum;
@@ -1357,7 +1360,7 @@ struct AntFarm
                     n = available;
                     if (cast(ulong) n > maxFit)
                         n = cast(size_t) maxFit;
-                    if (n > uint.max) fatal("too many payloads in table");
+                    if (n > maxTablePayloads) n = maxTablePayloads;
                     m = oneMt != 0 ? cast(uint) n : 0;
                     psum = mulChecked(cast(ulong) n, psz,
                         "payload sum overflow");
@@ -1367,6 +1370,7 @@ struct AntFarm
                     auto scan = payloads.save;
                     while (!scan.empty)
                     {
+                        if (n >= maxTablePayloads) break;
                         immutable nextN = cast(ulong) n + 1;
                         immutable cand = addChecked(base,
                             mulChecked(nextN, unit, "table size overflow"),
@@ -1375,7 +1379,7 @@ struct AntFarm
                         ++n;
                         scan.popFront();
                     }
-                    if (n > uint.max) fatal("too many payloads in table");
+                    if (n > maxTablePayloads) fatal("too many payloads in table");
                     m = oneMt != 0 ? cast(uint) n : 0;
                     psum = mulChecked(cast(ulong) n, psz,
                         "payload sum overflow");
@@ -1387,6 +1391,7 @@ struct AntFarm
                 auto scan = payloads.save;
                 foreach (ref pe; scan)
                 {
+                    if (i >= maxTablePayloads) break;
                     static if (hasCommonPayloadHeader!R)
                         auto hp = commonHeader;
                     else
