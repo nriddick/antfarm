@@ -2,7 +2,7 @@
  + Tail latency of a mid-tick 1-payload write against production consumeNext.
  +
  +   make -C perftest tail && ./perftest/tail
- +   ldc2 -O2 -release tail.d ../antfarm.d -of=tail.exe
+ +   ldc2 -O2 -release -i -I../threadpool/source tail.d ../antfarm.d ../antfarm_allocation.d -of=tail.exe
  +
  + t0 is taken just before write() of the sentinel; Call records now-t0.
  + Background jobs spin; the sentinel only timestamps.
@@ -10,6 +10,8 @@
 module tail;
 
 import antfarm;
+import placement;
+import threadpool.topology : discover;
 import core.atomic;
 import core.memory : GC;
 import core.thread;
@@ -19,15 +21,11 @@ import core.stdc.stdlib : malloc, free, abort, atoi, strtoull;
 
 version (Windows)
 {
-    import core.sys.windows.winbase : GetCurrentThread, GetSystemInfo, SetThreadAffinityMask, SYSTEM_INFO;
+    import core.sys.windows.winbase : GetSystemInfo, SYSTEM_INFO;
 }
 else version (Posix)
 {
     import core.sys.posix.unistd : sysconf, _SC_NPROCESSORS_ONLN;
-    version (linux)
-    {
-        extern (C) int sched_setaffinity(int pid, size_t cpusetsize, const(void)* mask) nothrow @nogc;
-    }
 }
 
 enum Scene : int { idle, mid, burst, near, mbox }
@@ -157,28 +155,6 @@ uint onlineCpus() nothrow @nogc @system
         return 0;
 }
 
-bool pinTo(uint cpu) nothrow @nogc @system
-{
-    version (Windows)
-    {
-        // SetThreadAffinityMask is one 64-bit group-0 mask. Fail rather than
-        // wrapping the shift (D masks shift counts), which would pin the wrong LP.
-        if (cpu >= size_t.sizeof * 8)
-            return false;
-        return SetThreadAffinityMask(GetCurrentThread(), cast(size_t)(1UL << cpu)) != 0;
-    }
-    else version (linux)
-    {
-        ulong[16] mask;
-        if (cpu >= mask.length * 64)
-            return false;
-        mask[cpu / 64] = 1UL << (cpu % 64);
-        return sched_setaffinity(0, mask.sizeof, mask.ptr) == 0;
-    }
-    else
-        return false;
-}
-
 void resetHist()
 {
     atomicStore(g_nlat, 0);
@@ -245,7 +221,7 @@ struct Row
 struct ConsCtx
 {
     AntFarm* f;
-    uint cpu;
+    PinTarget cpu;
     bool doPin;
 }
 
@@ -263,15 +239,15 @@ final class ConsJob
 
 final class MboxJob
 {
-    uint cpu;
+    PinTarget cpu;
     bool doPin;
-    this(uint cpu, bool doPin) { this.cpu = cpu; this.doPin = doPin; }
+    this(PinTarget cpu, bool doPin) { this.cpu = cpu; this.doPin = doPin; }
     void run() { mailboxMain(cpu, doPin); }
 }
 
 void consumerMain(ConsCtx* c)
 {
-    if (c.doPin && !pinTo(c.cpu))
+    if (c.doPin && !pinToLogicalProcessor(c.cpu))
         atomicStore(g_pinOk, 0);
     ConsumerView v;
     if (v.subscribe(c.f) < 0)
@@ -320,6 +296,8 @@ bool waitUntil(ref shared(long) c, long want, MonoTime deadline)
 
 FarmSet startFarm(Cfg cfg, uint nc)
 {
+    auto topology = discover();
+    auto placement = choosePlacement(topology, nc);
     FarmSet s;
     s.nc = nc;
     s.f = AntFarm.create(cfg.ln, cfg.k, nc, 1, 0, 1, 4096, cfg.small, cfg.huge);
@@ -362,16 +340,14 @@ FarmSet startFarm(Cfg cfg, uint nc)
 
     foreach (i; 0 .. nc)
     {
-        s.jobs[i] = new ConsJob(ConsCtx(s.f, i, cfg.pin));
+        s.jobs[i] = new ConsJob(ConsCtx(s.f, placement.consumers[i], cfg.pin));
         s.consumers[i] = new Thread(&s.jobs[i].run);
         s.consumers[i].start();
     }
     waitReady(nc, MonoTime.currTime + 5.seconds);
     if (cfg.pin)
     {
-        immutable ncpu = onlineCpus();
-        immutable pc = nc < ncpu ? nc : (ncpu ? ncpu - 1 : 0);
-        if (!pinTo(pc))
+        if (!pinToLogicalProcessor(placement.producer))
             atomicStore(g_pinOk, 0);
     }
     return s;
@@ -526,9 +502,7 @@ Row runMid(Cfg cfg, uint nc, uint tlen, ulong spinNs)
         if (progressed >= dumped)
         {
             ++r.miss;
-            // still publish a sentinel so the ring stays well-formed, untimed
-            writeSent(s, nowTicks(), 0);
-            waitUntil(g_sent, sentSeen + r.miss, MonoTime.currTime + 2.seconds);
+            // The target window has passed. Drain and retry without sampling.
             waitUntil(g_bg, bg0 + dumped, MonoTime.currTime + 10.seconds);
             continue;
         }
@@ -545,7 +519,7 @@ Row runMid(Cfg cfg, uint nc, uint tlen, ulong spinNs)
         if (n != 1)
             fatal("mid short write");
         ++sentSeen;
-        if (!waitUntil(g_sent, sentSeen + r.miss, MonoTime.currTime + 2.seconds))
+        if (!waitUntil(g_sent, sentSeen, MonoTime.currTime + 2.seconds))
         {
             r.err = "mid sentinel stuck";
             break;
@@ -576,9 +550,9 @@ Row runMid(Cfg cfg, uint nc, uint tlen, ulong spinNs)
     return r;
 }
 
-void mailboxMain(uint cpu, bool doPin)
+void mailboxMain(PinTarget cpu, bool doPin)
 {
-    if (doPin && !pinTo(cpu))
+    if (doPin && !pinToLogicalProcessor(cpu))
         atomicStore(g_pinOk, 0);
     atomicFetchAdd(g_ready, 1);
     while (atomicLoad!(MemoryOrder.acq)(g_go) == 0) {}
@@ -606,9 +580,9 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
     resetHist();
     // Farm workers drain the dump; a dedicated poller is the OOB channel.
     auto s = startFarm(cfg, nc);
-    immutable ncpu = onlineCpus();
-    immutable mcpu = (nc + 1 < ncpu) ? nc + 1 : (ncpu ? ncpu - 1 : 0);
-    auto mj = new MboxJob(mcpu, cfg.pin);
+    auto topology = discover();
+    auto placement = choosePlacement(topology, nc);
+    auto mj = new MboxJob(placement.mailbox, cfg.pin);
     auto mth = new Thread(&mj.run);
     mth.start();
     waitReady(nc + 1, MonoTime.currTime + 5.seconds);
@@ -645,15 +619,14 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
         if (atomicLoad(g_bg) - bg0 >= dumped)
         {
             ++r.miss;
-            atomicStore!(MemoryOrder.rel)(g_mbox, nowTicks());
-            waitUntil(g_sent, sentSeen + r.miss, MonoTime.currTime + 2.seconds);
+            // No mailbox sample when the backlog has already drained.
             waitUntil(g_bg, bg0 + dumped, MonoTime.currTime + 10.seconds);
             continue;
         }
         immutable t0 = nowTicks();
         atomicStore!(MemoryOrder.rel)(g_mbox, t0 == 0 ? 1 : t0);
         ++sentSeen;
-        if (!waitUntil(g_sent, sentSeen + r.miss, MonoTime.currTime + 2.seconds))
+        if (!waitUntil(g_sent, sentSeen, MonoTime.currTime + 2.seconds))
         {
             r.err = "mbox sentinel stuck";
             break;
@@ -739,10 +712,7 @@ Row runBurst(Cfg cfg, uint nc, uint tlen, ulong spinNs)
         if (atomicLoad(g_bg) - bg0 >= dumped)
         {
             ++r.miss;
-            foreach (k; 0 .. cfg.burstN)
-                writeSent(s, nowTicks(), k);
-            sentSeen += cfg.burstN;
-            waitUntil(g_sent, sentSeen, MonoTime.currTime + 2.seconds);
+            // Missed bursts neither publish sentinels nor enter histograms.
             waitUntil(g_bg, bg0 + dumped, MonoTime.currTime + 10.seconds);
             continue;
         }
@@ -1074,7 +1044,19 @@ void main(string[] args)
            cfg.nc, cfg.samples, cfg.warmup, ncpu,
            cfg.pin ? "yes".ptr : "no".ptr, cfg.repeats, cfg.huge ? "yes".ptr : "no".ptr);
     printf("metric: ticks before write() of 1-payload sentinel → first insn of its Call\n");
-    printf("100us is fine at 60Hz; 1ms is a real slice; p99 that grows with tlen is shard coupling\n");
+    if (cfg.pin)
+    {
+        auto topology = discover();
+        auto placement = choosePlacement(topology, cfg.nc);
+        printPlacement(placement);
+        printf("placement uses physical cores before SMT siblings; faster classes first\n");
+        if (cfg.runOversub && cfg.nc != 8)
+        {
+            auto extra = choosePlacement(topology, 8);
+            printPlacement(extra);
+        }
+    }
+    printf("missed windows are excluded; tails depend on workload, placement and scheduling\n");
     printHeader();
     fflush(stdout);
 
@@ -1121,7 +1103,7 @@ void main(string[] args)
 
     if (cfg.runOversub && cfg.nc != 8)
     {
-        printf("oversub check (nc=8 on this host):\n");
+        printf("additional consumer-count check (nc=8):\n");
         emit(medIdle(cfg, 8));
         emit(medMid(cfg, 8, 256, 1000));
     }

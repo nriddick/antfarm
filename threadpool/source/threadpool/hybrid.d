@@ -13,12 +13,12 @@ version (linux)
 
 version (Windows)
 {
-    import threadpool.sys.win_wait : parkWorker;
+    import threadpool.sys.win_wait : parkWorker, prepareWorkerWait, cancelWorkerWait;
     enum uint kWaitForever = 0xFFFF_FFFF;
 }
 else version (linux)
 {
-    import threadpool.sys.linux_wait : parkWorker;
+    import threadpool.sys.linux_wait : parkWorker, prepareWorkerWait, cancelWorkerWait;
     enum uint kWaitForever = uint.max;
 }
 
@@ -417,6 +417,10 @@ private void workerLoop(ref WorkerSelf self, ref shared(int) runFlag) @nogc noth
         {
             if (body_(&self))
                 continue;
+            if (!prepareWorkerWait(self.workerIndex)) break;
+            scope (exit) cancelWorkerWait(self.workerIndex);
+            if (!atomicLoad!(MemoryOrder.acq)(runFlag)) break;
+            if (body_(&self)) continue;
             applyIdlePolicy(self, runFlag);
         }
     }

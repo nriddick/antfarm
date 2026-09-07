@@ -4,7 +4,7 @@ Ant Farm is a concurrent M:N mixed-type jobs distributor on a fixed-length ring 
 
 Jobs dispatch to exactly one consumer (serial) or to many (parallel). A simple iteration counter gives a parallel job its fraction of granular completion. The tables carry cache-padded shard counters so a group of about √consumers claim jobs in discrete chunks; chunk size is the producer’s declared average cost of a Call. Some consumers ensure a table finishes, some look ahead, some rebalance shards, some pile onto parallel items. Hot-path work has no contended compare-and-swap: producers and consumers `fetch_add`. The CAS sites are cold — producer-ticket claim, last-releaser pulse, plant and retract of an incomplete-segment mark — and they are not open retry loops.
 
-The end result is high throughput with synthetic figures comfortably between moodycamel’s no-token and token-pinned numbers, tail latency that generally crushes FIFO designs, and a concurrency shape that wants more workers, not fewer.
+The historical runs below show high synthetic throughput and low publish-to-Call latency while other tables drain. The figures describe specific workloads and placements; they do not establish a universal advantage over concurrent queues.
 
 Picture a farmer walking along a path placing down objects which a swarm of ants are picking up and taking away. He can't see the ants. He doesn't know how many there are. How can he avoid stepping on the ants? The answer: the ants maintain signage at regular intervals tallying how many ants are in the area. If it's higher than zero, the farmer waits. The last ant to leave a *confirmed-complete* area changes the tally (a reference counter) to zero. The last ant to leave an *incomplete* area instead leaves a pulse mark, so the farmer still sees a nonzero tally and will not step there. Thus the farmer only needs to watch for one signal to change, and doesn't need to try and communicate directly with any ants. And the ants have a panoply of strategies to break down and haul away their work pieces. Really the Ant Farm is a combination of known techniques and a disregard of FIFO guarantees; towards objectives of minimal synchronization upkeep, enhanced cache performance, and flexible role switching and load balancing.
 
@@ -13,6 +13,8 @@ A job is a callback and a set of read-only parameters. The callback decodes the 
 Figures below are a 16 MiB farm on an Intel 12700H (6P+8E, 20 threads) unless noted. They move with boost; treat them as a recent run, not a plateau.
 
 Producer registration and deregistration now use a Farm-local mutex. Publishing and consuming do not acquire it. Tickets start with zero quota, and every grant requires a write-tail probe and a forward-segment sweep; successful writes do not automatically renew quota. The figures below are historical measurements, preceding this policy change.
+
+The historical tail harness pinned six consumers to LPs 0–5, which are three physical P-cores with SMT on this 12700H. It also included missed-window sentinels in its histograms. The current harness discovers physical cores, prints placement, and excludes missed windows. These historical results have not been regenerated under that corrected methodology. The external `queuebenches` harness and pinned competitor revisions are not included in this repository, so those comparisons cannot yet be independently reproduced here.
 
 ---
 
@@ -49,7 +51,7 @@ moodycamel::ConcurrentQueue on the same host (bounded-style matrix, `uint64_t` i
 | With tokens, bulk | hundreds of M/s; **~1.07 billion/s** at 8–10 paired threads |
 | With tokens, 6×6 | **807 M/s** |
 
-Tokens pin pipelines: a consumer tends to drain the producer it is paired with. Ant Farm is a distributor, not a set of SPSC pipes, and each payload still carries a 128-byte header. Even so, **397 M (peak) and ~316 M at 6×6 sit comfortably between no-token bulk and token-pinned bulk** — above the unpinned transport, below the paired-token peak — while doing the other job (claim, shard, mix serial and parallel, let anyone publish).
+Ordinary moodycamel consumer tokens retain per-consumer bookkeeping; they do not bind a consumer to one producer. Producer-specific dequeue is a separate API. The token figures above describe the historical harness configuration, not an inherent set of paired SPSC pipelines. Ant Farm's callbacks, headers and serial/parallel work claims also differ from transporting `uint64_t` items. See the [ConcurrentQueue token documentation](https://github.com/cameron314/concurrentqueue#tokens).
 
 A 6-core Ryzen 5 5500 showed the same shape at a lower ceiling (best mixed ~168 M, huge pages ~243–246 M at `body=2`).
 
@@ -66,9 +68,9 @@ Publish-to-first-Call on six pinned consumers, 1 µs of simulated work per Call.
 | Mid-drain 2048 | **25.2 µs / 27.9 µs** | 378 µs / 419 µs | 379 µs / 416 µs |
 | Mid-drain 8192 | **13.2 µs / 27.6 µs** | **1.52 ms / 1.57 ms** | 1.52 ms / 1.60 ms |
 
-boost::lockfree is the same FIFO drain (1.61 ms p50 at 8192). **Ant Farm p99 does not grow with dump size.** A one-job write that arrives while an 8192-job table is draining still reaches a worker in tens of microseconds. The queues grow linearly with the backlog, as a FIFO must.
+The historical boost::lockfree result was 1.61 ms p50 at 8192. In these particular Ant Farm runs, p99 stayed near 21–28 µs across the listed backlog sizes. This is a measured configuration, not a guarantee that p99 is independent of backlog. The queue rows measure a one-producer FIFO-backlog case and do not establish general M:N tail behavior.
 
-Idle, the queues are a little quicker. Occupied, Ant Farm is a different machine: it will overtake. One consumer is not that machine — `nc=1` mid-drain 8192 is ~6 ms p50, FIFO-shaped. Twelve consumers on this 6P+8E part keep p50 in the single-digit microseconds but p99 at 8192 stretches to ~300 µs; the product number is the six performance cores.
+The historical idle queue results are quicker. Ant Farm can overtake earlier tables when several consumers are active; with `nc=1`, mid-drain 8192 was about 6 ms p50. Twelve consumers on this 6P+8E part kept p50 in single-digit microseconds but p99 at 8192 stretched to about 300 µs. The six-consumer results above used three physical P-cores with SMT, not six physical P-cores.
 
 `write() == 0` is rare while anyone is draining. When consumers are parked the ring fills to a hard wall and stops. It will not pretend to be unbounded.
 
@@ -86,7 +88,7 @@ Work can originate from anywhere in the pool and dispatch at the same time.
 
 Any registered producer may `write()` — the main thread dumping a frame, a worker that just discovered more work, a mid-tick “do this now” from some other subsystem. A stalled producer may itself subscribe, drain, and retry; that is the supported escape hatch. A table is a simultaneous dispatch: every live consumer may claim into it at once, serial jobs going to one claimant each, parallel jobs admitting up to `MaxCs`. The next table can be published before the current one has drained, and the first claimant will step over to it. There is no “the producer” and “the workers” as a pipeline. There is a ring, tickets, and a swarm.
 
-That is the difference from a token-pinned concurrent queue (fast, but the work stays in lanes) and from a Disruptor worker pool (distributed, but one CAS per job on one sequence). Ant Farm is for the case where the next job may be born on any thread, must reach some thread quickly, and may be one Call or a thousand.
+Ant Farm targets work which may originate on any thread and dispatch as one Call or many parallel iterations. Its chunked claims and ability to overtake tables should be compared with each queue or worker-pool API under matching workloads, rather than inferred from token use alone.
 
 ---
 

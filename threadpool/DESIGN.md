@@ -166,6 +166,21 @@ thread-safe, non-owning notification which leaves each worker's idle policy
 unchanged. Work publication must occur before the wake in the application's
 own queue or Farm synchronization protocol.
 
+Each worker owns one atomic ACTIVE/ARMED wait slot. After an idle pump it
+exchanges ACTIVE to ARMED with acquire/release ordering, checks stop, and
+pumps again. Only a second idle result may enter the OS wait, comparing against
+ARMED. A scope guard exchanges back to ACTIVE on every path, including a
+managed exception. The final managed result supplies the park deadline.
+
+Every notification performs an acquire/release exchange to ACTIVE, including
+ACTIVE-to-ACTIVE notifications; the previous value decides whether an OS wake
+is necessary. A notification before arming publishes into the next arming
+RMW's acquire chain. A notification after arming either prevents the conditional
+wait or wakes it. Shutdown publishes stop and follows the same protocol.
+Windows' event fallback retains a signal delivered before the wait; stale
+signals can cause harmless extra pump visits. Linux waits on the same fixed
+ARMED value with futex. Spurious returns always lead back to a work check.
+
 ## Installed LLC state
 
 The bin registry is parameterized by the installed type, so unrelated

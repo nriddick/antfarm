@@ -230,6 +230,10 @@ the live mapping when page size is material to the result.
 
 Producer registration and deregistration use a Farm-local mutex; payload publication and consumption do not. Tickets start at zero quota. Every quota grant probes the write tail and scans forward segments, and publication never automatically refills the balance.
 
+Distinct Farms may be created concurrently. Windows mapping API initialization
+uses a process-wide lock; POSIX mapping names use an atomic counter. Teardown
+still requires exclusive ownership and no live consumers or producer tickets.
+
 `write() == 0` is backpressure, not failure. `consumeNext() == false` may be a
 ring hole rather than global emptiness. Ant Farm does not promise FIFO order.
 

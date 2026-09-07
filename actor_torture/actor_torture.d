@@ -65,6 +65,32 @@ private ActorAllocator countedPolicy(ref CountedAllocator counts)
     return ActorAllocator(&counts, &countedAllocate, &countedDeallocate);
 }
 
+// Keep released storage mapped and poisoned until the paused wave returns.
+// A trailing access after dropping membership is then deterministic, without
+// relying on the system allocator to reuse or unmap the freed slot array.
+private struct Quarantine
+{
+    void*[8] pointers;
+    size_t[8] sizes;
+    size_t count;
+}
+
+private void* quarantineAllocate(void*, size_t bytes, size_t alignment)
+    nothrow @nogc @system
+{
+    return alignment <= 64 ? allocateAligned64(bytes) : null;
+}
+
+private void quarantineFree(void* context, void* memory, size_t bytes, size_t)
+    nothrow @nogc @system
+{
+    auto q = cast(Quarantine*) context;
+    if (q.count >= q.pointers.length) abort();
+    q.pointers[q.count] = memory;
+    q.sizes[q.count++] = bytes;
+    memset(memory, 0xDD, bytes);
+}
+
 // -------------------------------------------------------------------------
 // Deterministic send/retire interleavings
 // -------------------------------------------------------------------------
@@ -540,7 +566,9 @@ private void testWaveMembershipPinsRetiredActor()
     auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 2, 256);
     check(farm !is null, "wave-race Farm allocation");
     scope (exit) farm.destroy();
-    auto runtime = ActorRuntime.create(farm, 1);
+    Quarantine quarantine;
+    auto runtime = ActorRuntime.create(farm, 1,
+        ActorAllocator(&quarantine, &quarantineAllocate, &quarantineFree));
     check(runtime !is null, "wave-race runtime allocation");
     WavePinResult output;
     auto owner = runtime.createActor!(WavePinState, wavePinDormant)(
@@ -600,19 +628,34 @@ private void testWaveMembershipPinsRetiredActor()
     check(owner.reclaim() == ActorReclaimResult.busy,
         "wave membership pins retired actor state and runtime");
 
+    g_hookNode = null;
+    atomicStore(g_hookTarget, cast(int) ActorTestPoint.waveMembershipReleased);
+    atomicStore(g_hookArrived, 0);
+    atomicStore(g_hookRelease, 0);
+    setActorTestHook(&blockingActorHook);
     atomicStore!(MemoryOrder.rel)(publisher.sealRequested, 1);
-    waitFlag(publisher.done, deadline, "wave-race seal timeout");
-    thread.join();
-    check(publisher.completion.finished && publisher.completion.failed,
-        "raced retirement finishes the sealed wave as failed");
+    waitFlag(g_hookArrived, deadline, "wave membership release boundary timeout");
     check(owner.reclaim() == ActorReclaimResult.reclaimed,
-        "aggregate release permits raced actor reclamation");
-
-    view.unsubscribe();
-    farm.unregisterProducer(retirementToken);
+        "owner release immediately permits actor reclamation");
     check(runtime.live == 0 && runtime.ready == 0,
         "wave-race runtime drained");
     runtime.destroy();
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    waitFlag(publisher.done, deadline, "wave-race seal timeout");
+    thread.join();
+    setActorTestHook(null);
+    check(publisher.completion.finished && publisher.completion.failed,
+        "raced retirement finishes the sealed wave as failed");
+    check(quarantine.count == 3, "actor state, slots and runtime quarantined");
+    foreach (i; 0 .. quarantine.count)
+    {
+        foreach (byte_; (cast(ubyte*) quarantine.pointers[i])[0 .. quarantine.sizes[i]])
+            check(byte_ == 0xDD, "wave touched reclaimed runtime storage");
+        freeAligned64(quarantine.pointers[i]);
+    }
+
+    view.unsubscribe();
+    farm.unregisterProducer(retirementToken);
 }
 
 private void testDeterministicInterleavings()

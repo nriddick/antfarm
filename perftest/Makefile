@@ -15,8 +15,8 @@ throughput: throughput.d $(FARM_SOURCES)
 digest: digest.d $(FARM_SOURCES)
 	$(DC) $(DFLAGS) digest.d $(FARM_SOURCES) -of=$@
 
-tail: tail.d $(FARM_SOURCES)
-	$(DC) $(DFLAGS) tail.d $(FARM_SOURCES) -of=$@
+tail: tail.d placement.d $(FARM_SOURCES) $(wildcard $(ROOT)/threadpool/source/threadpool/*.d) $(wildcard $(ROOT)/threadpool/source/threadpool/sys/*.d)
+	$(DC) $(DFLAGS) -i -I$(ROOT)/threadpool/source tail.d $(FARM_SOURCES) -of=$@
 
 dual: dual.d $(FARM_SOURCES)
 	$(DC) $(DFLAGS) dual.d $(FARM_SOURCES) -of=$@

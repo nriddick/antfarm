@@ -109,6 +109,7 @@ version (AntfarmActorTestHooks)
         activationSignalled,
         submissionReleased,
         waveLifecycleReserved,
+        waveMembershipReleased,
     }
 
     alias ActorTestHook = void function(ActorTestPoint point,
@@ -1341,8 +1342,8 @@ package void cancelActorWavePayload(ActorSlot* slot, ulong generation,
             slot.waveOwnerWord);
         if (ownerWord != cast(size_t) waveOwner)
             fatal("cancel actor wave payload lost membership");
-        atomicStore!(MemoryOrder.rel)(slot.waveOwnerWord, size_t.init);
         slot.waveNext = null;
+        atomicStore!(MemoryOrder.rel)(slot.waveOwnerWord, size_t.init);
     }
     auto observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     bool queue;
@@ -1375,8 +1376,10 @@ package void releaseActorWaveMembership(ActorSlot* slot, void* waveOwner)
     immutable ownerWord = atomicLoad!(MemoryOrder.acq)(slot.waveOwnerWord);
     if (ownerWord != cast(size_t) waveOwner)
         fatal("actor wave completion lost membership");
-    atomicStore!(MemoryOrder.rel)(slot.waveOwnerWord, size_t.init);
     slot.waveNext = null;
+    atomicStore!(MemoryOrder.rel)(slot.waveOwnerWord, size_t.init);
+    version (AntfarmActorTestHooks)
+        actorTestPoint(ActorTestPoint.waveMembershipReleased, null);
 }
 
 /// Execute a wave's phase-specific operation under the reservation made

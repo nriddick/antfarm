@@ -3,6 +3,9 @@
  +/
 module antfarm_test;
 
+// Run the main correctness suite after imported module unittests as well.
+extern(C) __gshared string[] rt_options = ["testmode=run-main"];
+
 import antfarm_templates;
 import actors;
 import antfarm_allocation : allocateAligned64, freeAligned64;

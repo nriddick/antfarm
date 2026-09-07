@@ -1,5 +1,8 @@
 module smoke;
 
+// This executable has a substantial main() suite as well as imported unittests.
+extern(C) __gshared string[] rt_options = ["testmode=run-main"];
+
 import antfarm_fibers;
 import antfarm;
 import core.atomic;
@@ -1318,6 +1321,25 @@ void drainUntil(FiberBackend backend, ref Token token, ref ConsumerView view,
     assert(false, "fiber drain stalled");
 }
 
+final class GenerationProducer
+{
+    FiberGenerationTrigger trigger;
+    shared(uint)* ready;
+    shared(uint)* released;
+    this(FiberGenerationTrigger trigger, shared(uint)* ready, shared(uint)* released)
+    {
+        this.trigger = trigger;
+        this.ready = ready;
+        this.released = released;
+    }
+    void run()
+    {
+        atomicFetchAdd(*ready, 1u);
+        while (atomicLoad!(MemoryOrder.acq)(*released) == 0) Thread.yield();
+        trigger.advance();
+    }
+}
+
 void syncPrimitiveSmoke()
 {
     auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
@@ -1387,13 +1409,9 @@ void syncPrimitiveSmoke()
     foreach (i; 0 .. triggerCount)
     {
         concurrentGenerations[i] = new FiberGenerationTrigger(backend);
-        immutable index = i;
-        triggerProducers ~= new Thread({
-            atomicFetchAdd(triggerProducersReady, 1u);
-            while (atomicLoad!(MemoryOrder.acq)(releaseTriggerProducers) == 0)
-                Thread.yield();
-            concurrentGenerations[index].advance();
-        });
+        auto job = new GenerationProducer(concurrentGenerations[i],
+            &triggerProducersReady, &releaseTriggerProducers);
+        triggerProducers ~= new Thread(&job.run);
         triggerProducers[$ - 1].start();
     }
     while (atomicLoad!(MemoryOrder.acq)(triggerProducersReady) != triggerCount)

@@ -17,11 +17,11 @@ version (ThreadpoolOs)
 
 version (Windows)
 {
-    import threadpool.sys.win_wait : wakeAllForStop;
+    import threadpool.sys.win_wait : wakeAllForStop, prepareWorkerWait, cancelWorkerWait;
 }
 else version (linux)
 {
-    import threadpool.sys.linux_wait : wakeAllForStop;
+    import threadpool.sys.linux_wait : wakeAllForStop, prepareWorkerWait, cancelWorkerWait;
 }
 
 shared int gRunFlag;
@@ -125,8 +125,19 @@ private void managedWorkerLoop(ref WorkerSelf self)
             auto result = hooks.pump(&self);
             if (result.retry)
                 continue;
-            applyIdlePolicy(self, gRunFlag, result.hasDeadline,
-                            result.deadlineTicks);
+            version (ThreadpoolOs)
+            {
+                if (!prepareWorkerWait(self.workerIndex)) break;
+                scope (exit) cancelWorkerWait(self.workerIndex);
+                if (!atomicLoad!(MemoryOrder.acq)(gRunFlag)) break;
+                result = hooks.pump(&self);
+                if (result.retry) continue;
+                applyIdlePolicy(self, gRunFlag, result.hasDeadline,
+                                result.deadlineTicks);
+            }
+            else
+                applyIdlePolicy(self, gRunFlag, result.hasDeadline,
+                                result.deadlineTicks);
         }
     }
     catch (Throwable t)

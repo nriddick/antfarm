@@ -16,6 +16,22 @@ struct WaitSlot
 __gshared WaitSlot[] gWait;
 __gshared HANDLE     gStopEvent;
 
+private enum uint ACTIVE = 0, ARMED = 1;
+
+/// One owning worker per slot. Arm before the final work/stop check.
+bool prepareWorkerWait(uint workerIndex) @nogc nothrow
+{
+    if (workerIndex >= gWait.length) return false;
+    atomicExchange!(MemoryOrder.acq_rel)(&gWait[workerIndex].wakeWord, ARMED);
+    return true;
+}
+
+void cancelWorkerWait(uint workerIndex) @nogc nothrow
+{
+    if (workerIndex < gWait.length)
+        atomicExchange!(MemoryOrder.acq_rel)(&gWait[workerIndex].wakeWord, ACTIVE);
+}
+
 void createWaitSlots(uint n)
 {
     resolveOptionalApis();
@@ -56,7 +72,9 @@ void destroyWaitSlots()
 void wakeWorker(uint workerIndex) @nogc nothrow
 {
     if (gWait.length == 0 || workerIndex >= gWait.length) return;
-    atomicFetchAdd(gWait[workerIndex].wakeWord, 1);
+    // Even ACTIVE -> ACTIVE publishes into the worker's next arming RMW.
+    if (atomicExchange!(MemoryOrder.acq_rel)(
+            &gWait[workerIndex].wakeWord, ACTIVE) != ARMED) return;
     if (pWakeByAddressSingle !is null)
         pWakeByAddressSingle(cast(void*)&gWait[workerIndex].wakeWord);
     else if (gWait[workerIndex].workEvent !is null)
@@ -67,7 +85,8 @@ void wakeAllForStop() @nogc nothrow
 {
     foreach (ref slot; gWait)
     {
-        atomicFetchAdd(slot.wakeWord, 1);
+        if (atomicExchange!(MemoryOrder.acq_rel)(&slot.wakeWord, ACTIVE) != ARMED)
+            continue;
         if (pWakeByAddressAll !is null)
             pWakeByAddressAll(cast(void*)&slot.wakeWord);
         else if (slot.workEvent !is null)
@@ -77,17 +96,18 @@ void wakeAllForStop() @nogc nothrow
         SetEvent(gStopEvent);
 }
 
-/// Park this worker until `signal`, stop, or `timeoutMs` (INFINITE = forever).
+/// Requires prepareWorkerWait followed by a final empty work/stop check.
+/// The caller cancels the armed state on every exit, including exceptions.
 /// Returns false if the pool is stopping.
 bool parkWorker(uint workerIndex, ref shared(int) runFlag, uint timeoutMs) @nogc nothrow
 {
     if (!atomicLoad!(MemoryOrder.acq)(runFlag)) return false;
     if (workerIndex >= gWait.length) return false;
-    auto observed = atomicLoad!(MemoryOrder.acq)(gWait[workerIndex].wakeWord);
-    if (!atomicLoad!(MemoryOrder.acq)(runFlag)) return false;
+    if (atomicLoad!(MemoryOrder.acq)(gWait[workerIndex].wakeWord) != ARMED)
+        return atomicLoad!(MemoryOrder.acq)(runFlag) != 0;
     if (pWaitOnAddress !is null)
     {
-        uint cmp = observed;
+        uint cmp = ARMED;
         pWaitOnAddress(cast(void*)&gWait[workerIndex].wakeWord, &cmp, 4, timeoutMs);
     }
     else

@@ -53,6 +53,13 @@ make -C review_torture baseline   # existing antfarm_test.d
 Run T19 on its own: `make -C review_torture run-t19` (LDC),
 `run-t19-dmd`, or `run-t19-tsan`.
 
+`concurrent_create.d` is a separate process test so eight threads race the
+first mapping initialization. It creates 800 Farms and verifies both aliases
+of each ring. Build from the repository root with
+`ldc2 -g -O1 review_torture/concurrent_create.d antfarm.d antfarm_allocation.d -of=concurrent_create`.
+Use `ANTFARM_HUGE_PAGES=0` for ordinary-page coverage; on a configured Windows
+host, `=1` also exercises concurrent large-page creation.
+
 ## Notes
 
 Shared test counters must be `__gshared shared(T)` (see comments). Plain

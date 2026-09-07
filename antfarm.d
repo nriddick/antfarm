@@ -96,6 +96,7 @@ version (Windows)
     private __gshared FnMapViewOfFile3 pMapViewOfFile3;
     private __gshared FnGetLargePageMinimum pGetLargePageMinimum;
     private __gshared bool winApisResolved;
+    private __gshared void* winMapApiLock; // SRWLOCK_INIT
 
     private T winLoad(T)(const(char)* dll, const(char)* name) nothrow @nogc @system
     {
@@ -108,6 +109,8 @@ version (Windows)
 
     private void resolveWinMapApis() nothrow @nogc @system
     {
+        AcquireSRWLockExclusive(&winMapApiLock);
+        scope (exit) ReleaseSRWLockExclusive(&winMapApiLock);
         if (winApisResolved) return;
         pVirtualAlloc2 = winLoad!FnVirtualAlloc2("kernelbase.dll", "VirtualAlloc2");
         if (pVirtualAlloc2 is null)
@@ -950,6 +953,8 @@ struct AntFarm
 
     /// Ordinary 4 KiB backing is the default. Pass `hugePages=true` or set
     /// `ANTFARM_HUGE_PAGES=1` to opt into the platform huge-page path.
+    /// Distinct Farms may be created concurrently. Windows mapping API
+    /// initialization is process-locked; the mapping/allocation work is local.
     static AntFarm* create(ulong ln = 1 << 20, uint k = 8, uint expectedConsumers = 4,
                            uint maxBulk = 2, ulong quotaBulk = 0,
                            uint maxSmall = 16, ulong quotaSmall = 4096,
