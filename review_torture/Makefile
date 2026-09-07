@@ -5,9 +5,22 @@ DC ?= ldc2
 # Default for the TSan binaries; also baked into __tsan_default_options.
 TSAN_OPTIONS ?= history_size=7 halt_on_error=1
 
-.PHONY: all run run-tsan run-dmd run-t19 clean baseline
+.PHONY: all run run-tsan run-dmd run-t19 clean baseline allwrite run-allwrite
 
 all: torture_tests t19
+
+allwrite: write_protection_allwrite boundary_runoff_allwrite
+
+write_protection_allwrite: write_protection.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
+	$(DC) $(DFLAGS) -d-version=allWriteCheck -d-version=AntfarmWriteAuditHooks $^ -of=$@
+
+boundary_runoff_allwrite: boundary_runoff.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
+	$(DC) $(DFLAGS) -d-version=allWriteCheck $^ -of=$@
+
+run-allwrite: allwrite
+	./boundary_runoff_allwrite
+	./boundary_runoff_allwrite pulse
+	./write_protection_allwrite
 
 torture_tests: torture_common.d torture_tests.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d
 	$(DC) $(DFLAGS) torture_common.d torture_tests.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=$@
@@ -42,4 +55,4 @@ baseline:
 	../antfarm_test_review
 
 clean:
-	rm -f torture_tests torture_tests_tsan torture_tests_dmd t19 t19_tsan t19_dmd *.o
+	rm -f torture_tests torture_tests_tsan torture_tests_dmd t19 t19_tsan t19_dmd write_protection_allwrite boundary_runoff_allwrite *.o

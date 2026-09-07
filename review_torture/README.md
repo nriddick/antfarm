@@ -62,6 +62,65 @@ host, `=1` also exercises concurrent large-page creation.
 
 ## Notes
 
+### Consumer protection audit: allWriteCheck
+
+`-d-version=allWriteCheck` (LDC) or `-version=allWriteCheck` (DMD) checks every
+new segment entered by a write reservation, **including an exact boundary
+landing**, for `(Rt & LOWMASK) == 0`. It runs after the `Wt` fetch-add and before this
+reservation changes any segment metadata or table body, and remains active
+with `-release`. A failure prints the reserved interval, target epoch, full
+root tally, decoded roots/Sub0/Sub fields, and a best-effort metadata/leaf
+snapshot before `fatal`. Epoch zero and writes staying in the current segment
+are not fresh-segment transitions.
+
+This is diagnostic instrumentation, not an atomic check-and-reserve protocol.
+A subscriber can provisionally pin a free slot after a producer's sweep, so
+the check ignores the high `SUB` half. Both active root counts and `Sub0`
+pulses in the low half remain fatal, with distinct diagnostic labels.
+The quota sweep itself still checks the full `Rt == 0` word.
+
+From the repository root:
+
+```
+ldc2 -g -O2 -d-version=allWriteCheck -d-version=AntfarmWriteAuditHooks review_torture/write_protection.d antfarm.d antfarm_allocation.d -of=write_protection_allwrite
+ldc2 -g -O2 -d-version=allWriteCheck review_torture/boundary_runoff.d antfarm.d antfarm_allocation.d -of=boundary_runoff_allwrite
+./boundary_runoff_allwrite
+./write_protection_allwrite
+python3 review_torture/quota_model.py
+```
+
+Or use `make -C review_torture run-allwrite` with LDC. DUB library consumers
+can select `-c all-write-check`; define the version in the consuming build
+too so all instantiations of the templated write path receive the check.
+
+- `boundary_runoff.d`: one producer with quota 512, one consumer parked at
+  epoch zero, and 512-word tables. The pre-`d6b2eff` automatic-renewal code
+  admits an unchecked exact-boundary reservation and laps the live pin.
+  Current code stops at `Wt=229376` and rejects 10,000 further attempts.
+  The `pulse` argument keeps epoch zero's initial `Sub0` with no consumers;
+  it tests the same protection for unexecuted work.
+- `write_protection.d`: exact boundaries and multi-segment tables at
+  `K=2,4,8,16`; a callback repeatedly checks its spanning body under write
+  pressure; forced delays after probing, sweeping, and reserving. Delayed
+  probe/sweep cases allow another producer and consumer to make two laps,
+  then retain a real lagging consumer pin before resuming the writer.
+- `inject-root`, `inject-sub0`, `inject-both`, and `inject-second` arguments deliberately
+  plant nonzero tallies after a successful sweep. Each must abort through
+  the allWriteCheck diagnostic, including the second fresh segment of a
+  spanning reservation. These are instrumentation negative controls.
+- `subscription-race` forces a real provisional-SUB race with an already
+  granted producer. The masked check must permit this controlled schedule
+  and deliver all ten intact payloads. It also runs in the default suite.
+- `quota_model.py`: exhaustive exploration within a two-lap bound of a
+  small sequentially consistent quota model. Probe, each scan load, grant,
+  reservation, and consumer pin movement can interleave. It omits the
+  implementation's publication, subscription, pulse, leaf propagation,
+  and weak-memory details; a pass is not a proof of the full implementation.
+  Its automatic-refill negative control is intentionally simplified.
+
+The audit scheduling hooks are compiled only with `AntfarmWriteAuditHooks`.
+Ordinary and allWriteCheck-only builds contain no scheduling hook calls.
+
 Shared test counters must be `__gshared shared(T)` (see comments). Plain
 `shared T` module globals are TLS and will silently break multi-threaded
 accounting under LDC.

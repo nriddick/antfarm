@@ -389,6 +389,15 @@ enum ulong COUNTMASK = SUB0 - 1;
 /// through write().
 enum uint MAX_PAYLOAD_ITERS = 512;
 
+// Audit-only scheduling points. Tests may pause a producer here without
+// changing quota or tally state; ordinary builds contain neither hook nor call.
+version (AntfarmWriteAuditHooks)
+{
+    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned }
+    __gshared void function(AntFarm*, WriteAuditPhase, ulong, ulong)
+        nothrow @nogc @system writeAuditHook;
+}
+
 private enum ulong SENTINEL_XOR = 0x9E37_79B9_7F4A_7C15UL;
 
 /// Sentinel stored (release) as the first word of a table; computed from the
@@ -1257,6 +1266,9 @@ struct AntFarm
     /// Wt are release, so the load synchronizes with a published tail.
     private bool refreshQuota(ref ulong exi, ulong quota, ulong anchor) nothrow @nogc @system
     {
+        version (AntfarmWriteAuditHooks)
+            if (writeAuditHook !is null)
+                writeAuditHook(&this, WriteAuditPhase.anchorProbed, anchor, quota);
         immutable ea = anchor >> segShift;
         ulong freeSp = 0;
         foreach (j; 1 .. K)
@@ -1274,10 +1286,63 @@ struct AntFarm
         }
         if (freeSp >= exmax)
         {
+            version (AntfarmWriteAuditHooks)
+                if (writeAuditHook !is null)
+                    writeAuditHook(&this, WriteAuditPhase.quotaSwept, anchor, quota);
             exi = quota;
             return true;
         }
         return false;
+    }
+
+    version (allWriteCheck)
+    {
+        /// Diagnostic tripwire, not a reservation protocol. Wt has already
+        /// advanced, but no metadata or body from this reservation is written.
+        /// Check the exact metadata-transition range, including a tail landing
+        /// exactly on a boundary. Epoch zero is not fresh (it starts with Sub0).
+        /// Do not use wtprime-1 here: an exact landing initializes the next
+        /// segment's metadata even though its body storage is not written yet.
+        /// A concurrent subscription can add a provisional SUB after the sweep.
+        /// Ignore that high half, but both active roots and Sub0 remain fatal.
+        private void checkFreshWriteSegments(ulong wret, ulong wtprime)
+            nothrow @nogc @system
+        {
+            foreach (e; (wret >> segShift) + 1 .. (wtprime >> segShift) + 1)
+            {
+                immutable ki = e & kMask;
+                immutable rt = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
+                immutable low = rt & LOWMASK;
+                if (low == 0) continue;
+                immutable roots = low & COUNTMASK;
+                immutable pulses = (low & SUB0MASK) / SUB0;
+                immutable kind = roots != 0
+                    ? (pulses != 0 ? "roots+Sub0" : "roots") : "Sub0";
+                fprintf(stderr,
+                    "allWriteCheck: protected fresh segment kind=%s wret=%llu wtprime=%llu size=%llu e=%llu ki=%llu Rt=%llx roots=%llu Sub0=%llu Sub=%llu Wt=%llu Exmax=%llu K=%u\n",
+                    kind.ptr, wret, wtprime, wtprime - wret, e, ki, rt,
+                    roots, pulses, rt / SUB,
+                    atomicLoad!(MemoryOrder.raw)(Wt), exmax, K);
+                // This is a best-effort concurrent snapshot, not an atomic one.
+                foreach (uint s; 0 .. K)
+                {
+                    fprintf(stderr, "  ki=%u rt=%llx es=%lld seqt=%llu sd=%llu leaves=",
+                        s, atomicLoad!(MemoryOrder.raw)(Rt[s][0]),
+                        atomicLoad!(MemoryOrder.raw)(stats[s].es),
+                        atomicLoad!(MemoryOrder.raw)(stats[s].seqt),
+                        atomicLoad!(MemoryOrder.raw)(stats[s].sd));
+                    foreach (uint l; 0 .. MAX_LEAVES)
+                        fprintf(stderr, "%s%lld", (l == 0 ? "" : ",").ptr,
+                            atomicLoad!(MemoryOrder.raw)(Lt[s * MAX_LEAVES + l][0]));
+                    fprintf(stderr, "\n");
+                }
+                if (roots != 0 && pulses != 0)
+                    fatal("allWriteCheck: fresh segment has live roots and Sub0 pulses");
+                if (roots != 0)
+                    fatal("allWriteCheck: fresh segment has live roots");
+                fatal("allWriteCheck: fresh segment has Sub0 pulses");
+            }
+        }
     }
 
     /// Spec 4. Writes as many of `payloads` as fit the caller's remaining
@@ -1488,6 +1553,11 @@ struct AntFarm
         // Reserve space on the write tail (spec 3a, 4b).
         immutable wret = atomicFetchAdd!(MemoryOrder.rel)(Wt, size);
         immutable wtprime = wret + size;
+        version (AntfarmWriteAuditHooks)
+            if (writeAuditHook !is null)
+                writeAuditHook(&this, WriteAuditPhase.tailReserved, wret, wtprime);
+        version (allWriteCheck)
+            checkFreshWriteSegments(wret, wtprime);
         tok.quotaLeft -= size;
         syncQuota(tok);
 
@@ -1656,6 +1726,9 @@ struct ConsumerView
             if (d > eg) break;
             immutable ki = cast(uint)((eg - d) & f.kMask);
             atomicFetchAdd!(MemoryOrder.rel)(f.Rt[ki][0], SUB);
+            version (AntfarmWriteAuditHooks)
+                if (writeAuditHook !is null)
+                    writeAuditHook(f, WriteAuditPhase.subscriberPinned, ki, eg);
             pinned[nPinned++] = ki;
             immutable rt = atomicLoad!(MemoryOrder.acq)(f.Rt[ki][0]);
             if ((rt & LOWMASK) != 0)

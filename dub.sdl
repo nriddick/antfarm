@@ -20,6 +20,11 @@ configuration "library" {
 	targetType "library"
 }
 
+configuration "all-write-check" {
+	targetType "library"
+	versions "allWriteCheck"
+}
+
 configuration "unittest" {
 	targetType "executable"
 	mainSourceFile "antfarm_test.d"
