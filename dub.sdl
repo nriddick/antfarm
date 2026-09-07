@@ -21,8 +21,8 @@ configuration "library" {
 }
 
 configuration "all-write-check" {
+	// Compatibility alias: fresh-segment protection checks are unconditional.
 	targetType "library"
-	versions "allWriteCheck"
 }
 
 configuration "unittest" {

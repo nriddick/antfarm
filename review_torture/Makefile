@@ -12,10 +12,10 @@ all: torture_tests t19
 allwrite: write_protection_allwrite boundary_runoff_allwrite
 
 write_protection_allwrite: write_protection.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
-	$(DC) $(DFLAGS) -d-version=allWriteCheck -d-version=AntfarmWriteAuditHooks $^ -of=$@
+	$(DC) $(DFLAGS) -d-version=AntfarmWriteAuditHooks $^ -of=$@
 
 boundary_runoff_allwrite: boundary_runoff.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
-	$(DC) $(DFLAGS) -d-version=allWriteCheck $^ -of=$@
+	$(DC) $(DFLAGS) $^ -of=$@
 
 run-allwrite: allwrite
 	./boundary_runoff_allwrite

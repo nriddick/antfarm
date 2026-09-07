@@ -1295,53 +1295,50 @@ struct AntFarm
         return false;
     }
 
-    version (allWriteCheck)
+    /// Diagnostic tripwire, not a reservation protocol. Wt has already
+    /// advanced, but no metadata or body from this reservation is written.
+    /// Check the exact metadata-transition range, including a tail landing
+    /// exactly on a boundary. Epoch zero is not fresh (it starts with Sub0).
+    /// Do not use wtprime-1 here: an exact landing initializes the next
+    /// segment's metadata even though its body storage is not written yet.
+    /// A concurrent subscription can add a provisional SUB after the sweep.
+    /// Ignore that high half, but both active roots and Sub0 remain fatal.
+    private void checkFreshWriteSegments(ulong wret, ulong wtprime)
+        nothrow @nogc @system
     {
-        /// Diagnostic tripwire, not a reservation protocol. Wt has already
-        /// advanced, but no metadata or body from this reservation is written.
-        /// Check the exact metadata-transition range, including a tail landing
-        /// exactly on a boundary. Epoch zero is not fresh (it starts with Sub0).
-        /// Do not use wtprime-1 here: an exact landing initializes the next
-        /// segment's metadata even though its body storage is not written yet.
-        /// A concurrent subscription can add a provisional SUB after the sweep.
-        /// Ignore that high half, but both active roots and Sub0 remain fatal.
-        private void checkFreshWriteSegments(ulong wret, ulong wtprime)
-            nothrow @nogc @system
+        foreach (e; (wret >> segShift) + 1 .. (wtprime >> segShift) + 1)
         {
-            foreach (e; (wret >> segShift) + 1 .. (wtprime >> segShift) + 1)
+            immutable ki = e & kMask;
+            immutable rt = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
+            immutable low = rt & LOWMASK;
+            if (low == 0) continue;
+            immutable roots = low & COUNTMASK;
+            immutable pulses = (low & SUB0MASK) / SUB0;
+            immutable kind = roots != 0
+                ? (pulses != 0 ? "roots+Sub0" : "roots") : "Sub0";
+            fprintf(stderr,
+                "allWriteCheck: protected fresh segment kind=%s wret=%llu wtprime=%llu size=%llu e=%llu ki=%llu Rt=%llx roots=%llu Sub0=%llu Sub=%llu Wt=%llu Exmax=%llu K=%u\n",
+                kind.ptr, wret, wtprime, wtprime - wret, e, ki, rt,
+                roots, pulses, rt / SUB,
+                atomicLoad!(MemoryOrder.raw)(Wt), exmax, K);
+            // This is a best-effort concurrent snapshot, not an atomic one.
+            foreach (uint s; 0 .. K)
             {
-                immutable ki = e & kMask;
-                immutable rt = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
-                immutable low = rt & LOWMASK;
-                if (low == 0) continue;
-                immutable roots = low & COUNTMASK;
-                immutable pulses = (low & SUB0MASK) / SUB0;
-                immutable kind = roots != 0
-                    ? (pulses != 0 ? "roots+Sub0" : "roots") : "Sub0";
-                fprintf(stderr,
-                    "allWriteCheck: protected fresh segment kind=%s wret=%llu wtprime=%llu size=%llu e=%llu ki=%llu Rt=%llx roots=%llu Sub0=%llu Sub=%llu Wt=%llu Exmax=%llu K=%u\n",
-                    kind.ptr, wret, wtprime, wtprime - wret, e, ki, rt,
-                    roots, pulses, rt / SUB,
-                    atomicLoad!(MemoryOrder.raw)(Wt), exmax, K);
-                // This is a best-effort concurrent snapshot, not an atomic one.
-                foreach (uint s; 0 .. K)
-                {
-                    fprintf(stderr, "  ki=%u rt=%llx es=%lld seqt=%llu sd=%llu leaves=",
-                        s, atomicLoad!(MemoryOrder.raw)(Rt[s][0]),
-                        atomicLoad!(MemoryOrder.raw)(stats[s].es),
-                        atomicLoad!(MemoryOrder.raw)(stats[s].seqt),
-                        atomicLoad!(MemoryOrder.raw)(stats[s].sd));
-                    foreach (uint l; 0 .. MAX_LEAVES)
-                        fprintf(stderr, "%s%lld", (l == 0 ? "" : ",").ptr,
-                            atomicLoad!(MemoryOrder.raw)(Lt[s * MAX_LEAVES + l][0]));
-                    fprintf(stderr, "\n");
-                }
-                if (roots != 0 && pulses != 0)
-                    fatal("allWriteCheck: fresh segment has live roots and Sub0 pulses");
-                if (roots != 0)
-                    fatal("allWriteCheck: fresh segment has live roots");
-                fatal("allWriteCheck: fresh segment has Sub0 pulses");
+                fprintf(stderr, "  ki=%u rt=%llx es=%lld seqt=%llu sd=%llu leaves=",
+                    s, atomicLoad!(MemoryOrder.raw)(Rt[s][0]),
+                    atomicLoad!(MemoryOrder.raw)(stats[s].es),
+                    atomicLoad!(MemoryOrder.raw)(stats[s].seqt),
+                    atomicLoad!(MemoryOrder.raw)(stats[s].sd));
+                foreach (uint l; 0 .. MAX_LEAVES)
+                    fprintf(stderr, "%s%lld", (l == 0 ? "" : ",").ptr,
+                        atomicLoad!(MemoryOrder.raw)(Lt[s * MAX_LEAVES + l][0]));
+                fprintf(stderr, "\n");
             }
+            if (roots != 0 && pulses != 0)
+                fatal("allWriteCheck: fresh segment has live roots and Sub0 pulses");
+            if (roots != 0)
+                fatal("allWriteCheck: fresh segment has live roots");
+            fatal("allWriteCheck: fresh segment has Sub0 pulses");
         }
     }
 
@@ -1553,18 +1550,18 @@ struct AntFarm
         // Reserve space on the write tail (spec 3a, 4b).
         immutable wret = atomicFetchAdd!(MemoryOrder.rel)(Wt, size);
         immutable wtprime = wret + size;
+        immutable eold = wret >> segShift;
+        immutable enew = wtprime >> segShift;
         version (AntfarmWriteAuditHooks)
             if (writeAuditHook !is null)
                 writeAuditHook(&this, WriteAuditPhase.tailReserved, wret, wtprime);
-        version (allWriteCheck)
+        if (eold != enew)
             checkFreshWriteSegments(wret, wtprime);
         tok.quotaLeft -= size;
         syncQuota(tok);
 
         // Segment/epoch transitions (spec 4b): initialize metadata for each
         // crossed segment, release-storing Es last.
-        immutable eold = wret >> segShift;
-        immutable enew = wtprime >> segShift;
         foreach (e; eold + 1 .. enew + 1)
         {
             immutable ki = e & kMask;

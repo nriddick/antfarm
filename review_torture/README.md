@@ -64,8 +64,8 @@ host, `=1` also exercises concurrent large-page creation.
 
 ### Consumer protection audit: allWriteCheck
 
-`-d-version=allWriteCheck` (LDC) or `-version=allWriteCheck` (DMD) checks every
-new segment entered by a write reservation, **including an exact boundary
+Every build checks each new segment entered by a write reservation,
+**including an exact boundary
 landing**, for `(Rt & LOWMASK) == 0`. It runs after the `Wt` fetch-add and before this
 reservation changes any segment metadata or table body, and remains active
 with `-release`. A failure prints the reserved interval, target epoch, full
@@ -82,16 +82,24 @@ The quota sweep itself still checks the full `Rt == 0` word.
 From the repository root:
 
 ```
-ldc2 -g -O2 -d-version=allWriteCheck -d-version=AntfarmWriteAuditHooks review_torture/write_protection.d antfarm.d antfarm_allocation.d -of=write_protection_allwrite
-ldc2 -g -O2 -d-version=allWriteCheck review_torture/boundary_runoff.d antfarm.d antfarm_allocation.d -of=boundary_runoff_allwrite
+ldc2 -g -O2 -d-version=AntfarmWriteAuditHooks review_torture/write_protection.d antfarm.d antfarm_allocation.d -of=write_protection_allwrite
+ldc2 -g -O2 review_torture/boundary_runoff.d antfarm.d antfarm_allocation.d -of=boundary_runoff_allwrite
 ./boundary_runoff_allwrite
 ./write_protection_allwrite
 python3 review_torture/quota_model.py
 ```
 
-Or use `make -C review_torture run-allwrite` with LDC. DUB library consumers
-can select `-c all-write-check`; define the version in the consuming build
-too so all instantiations of the templated write path receive the check.
+Or use `make -C review_torture run-allwrite` with LDC. The DUB configuration
+`-c all-write-check` remains a compatibility alias for the normal library.
+No version flag is needed, including in clients instantiating templated writes.
+The helper is called only when a reservation crosses a segment boundary.
+
+The default was selected after paired Windows x64/LDC 1.42 release benchmarks
+with huge pages enabled. In the final four-pair comparison, ten raw/dual
+throughput cases had median changes from -1.57% to +2.08%. Six focused latency
+pairs showed no repeated busy-workload p99 regression. Extreme tails and
+saturated near-full behavior remained noisy, including in an identical-binary
+control. These measurements do not establish a hard latency bound.
 
 - `boundary_runoff.d`: one producer with quota 512, one consumer parked at
   epoch zero, and 512-word tables. The pre-`d6b2eff` automatic-renewal code
@@ -119,7 +127,7 @@ too so all instantiations of the templated write path receive the check.
   Its automatic-refill negative control is intentionally simplified.
 
 The audit scheduling hooks are compiled only with `AntfarmWriteAuditHooks`.
-Ordinary and allWriteCheck-only builds contain no scheduling hook calls.
+Ordinary builds contain no scheduling hook calls.
 
 Shared test counters must be `__gshared shared(T)` (see comments). Plain
 `shared T` module globals are TLS and will silently break multi-threaded

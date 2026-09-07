@@ -315,8 +315,7 @@ void injection(string mode)
 void main(string[] args)
 {
     setvbuf(stdout, null, _IONBF, 0);
-    version (allWriteCheck) printf("allWriteCheck ENABLED\n");
-    else printf("allWriteCheck disabled (diagnostic comparison)\n");
+    printf("allWriteCheck ENABLED (unconditional)\n");
     if (args.length > 1 && args[1] == "subscription-race")
         return subscriptionRace();
     if (args.length > 1 && args[1].length >= 7 && args[1][0 .. 7] == "inject-")
