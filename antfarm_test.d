@@ -2074,10 +2074,137 @@ void testActorInbox()
     printf("testActorInbox OK\n"); fflush(stdout);
 }
 
+private long quotaProbeCallback(PayloadHeader*, PayloadBody, ulong)
+    nothrow @nogc @system
+{
+    return 1;
+}
+
+void testSweptQuotaBalance()
+{
+    enum ulong quota = 512;
+    auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, quota);
+    scope (exit) f.destroy();
+    ConsumerView view;
+    check(view.subscribe(f) >= 0, "quota balance subscription");
+    scope (exit) view.unsubscribe();
+    auto token = f.registerProducer(Tier.small);
+    scope (exit) f.unregisterProducer(token);
+
+    // The documented producer-slot layout exposes the authoritative ledger.
+    // A fresh registration does not authorize an unchecked write excursion.
+    auto ledger = f.prodHashSmall + token.slot * 8 + 1;
+    check(atomicLoad(*ledger) == 0, "registration waits for a checked grant");
+    PayloadHeader header;
+    header.maxCs = header.done = 1;
+    header.call = &quotaProbeCallback;
+    PayloadEntry[1] entries = [PayloadEntry(&header, null)];
+    ulong spent;
+    foreach (i; 0 .. 6)
+    {
+        immutable before = atomicLoad(f.Wt);
+        check(f.write(entries[], token) == 1, "quota balance publication");
+        spent += atomicLoad(f.Wt) - before;
+        check(spent < quota, "probe remains within the first grant");
+        check(atomicLoad(*ledger) == quota - spent,
+            "publication spends quota without automatic renewal");
+    }
+    while (view.consumeNext()) {}
+    printf("testSweptQuotaBalance OK\n"); fflush(stdout);
+}
+
+__gshared shared(int) g_producerLifecycleReady;
+__gshared shared(int) g_producerLifecycleStop;
+
+private final class ProducerLifecycleConsumer
+{
+    AntFarm* farm;
+    this(AntFarm* farm) { this.farm = farm; }
+    void run()
+    {
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0, "producer lifecycle subscription");
+        atomicFetchAdd(g_producerLifecycleReady, 1);
+        while (atomicLoad(g_producerLifecycleStop) == 0)
+            if (!view.consumeNext()) Thread.yield();
+        while (view.consumeNext()) {}
+        view.unsubscribe();
+    }
+}
+
+private final class ProducerLifecycleJob
+{
+    AntFarm* farm;
+    Tier tier;
+    this(AntFarm* farm, Tier tier) { this.farm = farm; this.tier = tier; }
+    void run()
+    {
+        PayloadEntry[] emptyBatch;
+        PayloadHeader header;
+        header.maxCs = header.done = 1;
+        header.call = &quotaProbeCallback;
+        PayloadEntry[1] entries = [PayloadEntry(&header, null)];
+        auto deadline = MonoTime.currTime + 30.seconds;
+        foreach (i; 0 .. 10_000)
+        {
+            auto token = farm.registerProducer(tier);
+            check(token.valid, "producer lifecycle has spare capacity");
+            while (farm.write(entries[], token) == 0)
+            {
+                check(MonoTime.currTime < deadline,
+                    "producer lifecycle publication timeout");
+                Thread.yield();
+            }
+            // Even an empty write validates the authoritative quota ledger.
+            // Reusing a released hash must not let the departing producer
+            // clear the new registration's ledger after this call starts.
+            check(farm.write(emptyBatch, token) == 0,
+                "fresh producer ticket remains valid under churn");
+            farm.unregisterProducer(token);
+        }
+    }
+}
+
+void testProducerLifecycleChurn()
+{
+    auto f = AntFarm.create(1 << 18, 8, 4, 8, 4096, 8, 4096);
+    scope (exit) f.destroy();
+    atomicStore(g_producerLifecycleReady, 0);
+    atomicStore(g_producerLifecycleStop, 0);
+    ProducerLifecycleConsumer[4] consumers;
+    Thread[4] consumerThreads;
+    foreach (i; 0 .. consumerThreads.length)
+    {
+        consumers[i] = new ProducerLifecycleConsumer(f);
+        consumerThreads[i] = new Thread(&consumers[i].run);
+        consumerThreads[i].start();
+    }
+    auto deadline = MonoTime.currTime + 5.seconds;
+    while (atomicLoad(g_producerLifecycleReady) != consumerThreads.length)
+    {
+        check(MonoTime.currTime < deadline, "producer lifecycle startup timeout");
+        Thread.yield();
+    }
+    ProducerLifecycleJob[8] jobs;
+    Thread[8] threads;
+    foreach (i; 0 .. threads.length)
+    {
+        jobs[i] = new ProducerLifecycleJob(f, i < 4 ? Tier.small : Tier.bulk);
+        threads[i] = new Thread(&jobs[i].run);
+    }
+    foreach (thread; threads) thread.start();
+    foreach (thread; threads) thread.join();
+    atomicStore(g_producerLifecycleStop, 1);
+    foreach (thread; consumerThreads) thread.join();
+    printf("testProducerLifecycleChurn OK\n"); fflush(stdout);
+}
+
 void main()
 {
     testMagicWrap();
     testArithmetic();
+    testSweptQuotaBalance();
+    testProducerLifecycleChurn();
     testSingleThreaded();
     testInputRangeWrite();
     testPayloadRange();

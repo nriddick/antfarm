@@ -12,6 +12,8 @@ A job is a callback and a set of read-only parameters. The callback decodes the 
 
 Figures below are a 16 MiB farm on an Intel 12700H (6P+8E, 20 threads) unless noted. They move with boost; treat them as a recent run, not a plateau.
 
+Producer registration and deregistration now use a Farm-local mutex. Publishing and consuming do not acquire it. Tickets start with zero quota, and every grant requires a write-tail probe and a forward-segment sweep; successful writes do not automatically renew quota. The figures below are historical measurements, preceding this policy change.
+
 ---
 
 ## What you actually publish

@@ -9,6 +9,8 @@
  + plant/retract (SPEC.md 2a, 3b, 5b). Retry loops reload fresh state;
  + their retries are bounded by the low-half/confirmation state settling,
  + not by back-and-forth noise. Strong CAS (spec 1).
+ + Producer registration/deregistration uses a Farm-local blocking mutex;
+ + publishing and consuming never acquire it.
  +
  + Errors are fatal (process abort) rather than exceptional, per spec.
  + Interfaces are @nogc nothrow @system.
@@ -35,6 +37,9 @@ version (Windows)
     import core.sys.windows.windef;
     import core.sys.windows.winnt;
     pragma(lib, "advapi32");
+
+    private extern (Windows) void AcquireSRWLockExclusive(void**) nothrow @nogc;
+    private extern (Windows) void ReleaseSRWLockExclusive(void**) nothrow @nogc;
 }
 else version (Posix)
 {
@@ -43,6 +48,8 @@ else version (Posix)
     import core.sys.posix.sys.types;
     import core.sys.posix.fcntl;
     import core.sys.posix.unistd;
+    import core.sys.posix.pthread : pthread_mutex_t, pthread_mutex_init,
+        pthread_mutex_destroy, pthread_mutex_lock, pthread_mutex_unlock;
     version (linux)
         import core.sys.linux.sys.mman : madvise, MADV_HUGEPAGE;
 }
@@ -197,6 +204,45 @@ version (Windows)
         CloseHandle(section);
         fatalWin("antfarm: MapViewOfFileEx large-page dual map failed");
         return null;
+    }
+}
+
+/// Farm-local blocking mutex for producer slot lifetime transitions only.
+/// Publication and consumption never acquire this lock.
+private struct ProducerMutex
+{
+    version (Windows)
+    {
+        // An SRW lock is pointer-sized and initialized to zero (SRWLOCK_INIT).
+        private void* state;
+        void initialize() nothrow @nogc @system {}
+        void destroy() nothrow @nogc @system {}
+        void lock() nothrow @nogc @system { AcquireSRWLockExclusive(&state); }
+        void unlock() nothrow @nogc @system { ReleaseSRWLockExclusive(&state); }
+    }
+    else version (Posix)
+    {
+        private pthread_mutex_t state;
+        void initialize() nothrow @nogc @system
+        {
+            if (pthread_mutex_init(&state, null) != 0)
+                fatal("producer mutex initialization failed");
+        }
+        void destroy() nothrow @nogc @system
+        {
+            if (pthread_mutex_destroy(&state) != 0)
+                fatal("producer mutex destruction failed");
+        }
+        void lock() nothrow @nogc @system
+        {
+            if (pthread_mutex_lock(&state) != 0)
+                fatal("producer mutex lock failed");
+        }
+        void unlock() nothrow @nogc @system
+        {
+            if (pthread_mutex_unlock(&state) != 0)
+                fatal("producer mutex unlock failed");
+        }
     }
 }
 
@@ -700,12 +746,11 @@ enum Tier : ubyte { small, bulk }
 /// the caller passes the Token by reference and never reads or writes it;
 /// write() validates the mirror against the ledger on every call.
 ///
-/// `quotaSwept` (spec 3a) is whether the current leftover was filled by
-/// refreshQuota (Rt verified) rather than opportunistic renewal
-/// (in-segment only). Construction's initial grant is not a sweep.
+/// Tickets start with no quota. Every grant follows an acquire probe of Wt
+/// and a successful forward-segment sweep; writes only spend that grant.
 ///
 /// Tokens are single-owner: copying is a *transfer*. The copy constructor
-/// copies tier/slot/quotaLeft/quotaSwept, release-stores the valid hash
+/// copies tier/slot/quotaLeft, release-stores the valid hash
 /// *last* (so a reader that acquire-loads a valid hash is guaranteed to
 /// see the other fields), then clears the source's hash so at most one
 /// live token exists per slot and a stale copy fails requireToken.
@@ -717,7 +762,6 @@ struct Token
     uint slot;
     ulong hash;
     private ulong quotaLeft;
-    private bool quotaSwept;
 
     bool valid() const pure nothrow @nogc @safe { return hash != 0; }
 
@@ -727,14 +771,12 @@ struct Token
         slot = s;
         hash = h;
         quotaLeft = grant;
-        quotaSwept = false;
     }
 
     private void invalidate() nothrow @nogc @system
     {
         hash = 0;
         quotaLeft = 0;
-        quotaSwept = false;
     }
 
     /// Transfer-only copy: the source is consumed. The destination's valid
@@ -745,7 +787,6 @@ struct Token
         tier = src.tier;
         slot = src.slot;
         quotaLeft = src.quotaLeft;
-        quotaSwept = src.quotaSwept;
         atomicStore!(MemoryOrder.rel)(*cast(shared ulong*) &hash, src.hash);
         atomicStore!(MemoryOrder.raw)(*cast(shared ulong*) &src.hash, 0UL);
     }
@@ -757,7 +798,6 @@ struct Token
         tier = src.tier;
         slot = src.slot;
         quotaLeft = src.quotaLeft;
-        quotaSwept = src.quotaSwept;
         atomicStore!(MemoryOrder.raw)(*cast(shared ulong*) &hash, src.hash);
         return this;
     }
@@ -897,6 +937,7 @@ struct AntFarm
     // ---- producer tickets (spec 3b); 0 = free slot ----
     shared(ulong)* prodHashBulk;
     shared(ulong)* prodHashSmall;
+    private ProducerMutex producerMutex;
 
     // ---- segment metadata (spec 2a/2b) ----
     align(64) shared ulong[8][KMAX] Rt;              /// root tallies, one per segment
@@ -956,6 +997,7 @@ struct AntFarm
         if (mem is null) fatal("alloc failed");
         auto f = cast(AntFarm*) mem;
         *f = AntFarm.init;
+        f.producerMutex.initialize();
         f.Ln = ln;
         f.Lmask = ln - 1;
         f.K = k;
@@ -1018,6 +1060,7 @@ struct AntFarm
         if (prodHashSmall !is null)
             afAlignedFree(cast(void*) prodHashSmall);
         unmapMagicBuffer(cast(void*) buf, bufBytes);
+        producerMutex.destroy();
         afAlignedFree(cast(void*) &this);
     }
 
@@ -1050,6 +1093,8 @@ struct AntFarm
     /// Spec 3b: allocate a ticketed slot. An invalid Token means the tier is full.
     Token registerProducer(Tier t) nothrow @nogc @system
     {
+        producerMutex.lock();
+        scope (exit) producerMutex.unlock();
         immutable cap = t == Tier.bulk ? maxBulk : maxSmall;
         auto pr = t == Tier.bulk ? &Prbulk : &Prsm;
         auto hashes = t == Tier.bulk ? prodHashBulk : prodHashSmall;
@@ -1067,9 +1112,8 @@ struct AntFarm
             immutable h = mixToken(cast(uint) i, reqs);
             if (cas!(MemoryOrder.raw, MemoryOrder.raw)(prodSlot(hashes, i), 0UL, h))
             {
-                immutable grant = t == Tier.bulk ? quotaBulk : quotaSmall;
-                auto tok = Token(t, cast(uint) i, h, grant);
-                atomicStore!(MemoryOrder.raw)(*prodSlotQuota(hashes, i), grant);
+                auto tok = Token(t, cast(uint) i, h, 0);
+                atomicStore!(MemoryOrder.raw)(*prodSlotQuota(hashes, i), 0UL);
                 return tok;
             }
         }
@@ -1080,6 +1124,8 @@ struct AntFarm
     /// Spec 3b: a Token that does not match the live slot is fatal.
     void unregisterProducer(ref Token tok) nothrow @nogc @system
     {
+        producerMutex.lock();
+        scope (exit) producerMutex.unlock();
         if (!tok.valid) fatal("unregister invalid token");
         immutable cap = tok.tier == Tier.bulk ? maxBulk : maxSmall;
         auto hashes = tok.tier == Tier.bulk ? prodHashBulk : prodHashSmall;
@@ -1117,8 +1163,8 @@ struct AntFarm
     }
 
     /// Push the token's quota mirror into the authoritative ledger. Called
-    /// after every quota mutation in write() (refresh, reservation, and the
-    /// opportunistic renewal) so the next call's requireToken stays valid.
+    /// after every quota mutation in write() (swept grant and reservation)
+    /// so the next call's requireToken stays valid.
     private void syncQuota(ref Token tok) nothrow @nogc @system
     {
         auto hashes = tok.tier == Tier.bulk ? prodHashBulk : prodHashSmall;
@@ -1202,8 +1248,7 @@ struct AntFarm
     // ------------------------------------------------------------------
 
     /// Spec 3a: sweep contiguously-forward zero Rts from `anchor`.
-    /// `anchor` is an acquire-load of Wt (the leftover-gate probe when
-    /// write() already took one, otherwise a fresh one). Reservations of
+    /// `anchor` is a fresh acquire-load of Wt for this grant. Reservations of
     /// Wt are release, so the load synchronizes with a published tail.
     private bool refreshQuota(ref ulong exi, ulong quota, ulong anchor) nothrow @nogc @system
     {
@@ -1427,29 +1472,10 @@ struct AntFarm
             if (n > 0) break;
             if (!refreshQuota(tok.quotaLeft, quota,
                     atomicLoad!(MemoryOrder.acq)(Wt))) return 0;
-            tok.quotaSwept = true;
             syncQuota(tok); // ledger follows a successful refresh
         }
 
         immutable size = tableSizeChecked(n, m, sq, psum);
-
-        // Spec 3a: opportunistic leftover is not an Rt check. Only
-        // sweep-verified leftover may blindly produce or breach segments.
-        // Others acquire-load Wt and must sweep if remaining space in the
-        // segment is < Exmax (concurrent leftovers could sum past the
-        // boundary). The probe is reused as refreshQuota's anchor.
-        if (!tok.quotaSwept)
-        {
-            immutable probe = atomicLoad!(MemoryOrder.acq)(Wt);
-            immutable space = (((probe >> segShift) + 1) << segShift) - probe;
-            if (space < exmax)
-            {
-                if (!refreshQuota(tok.quotaLeft, quota, probe))
-                    return 0;
-                tok.quotaSwept = true;
-                syncQuota(tok);
-            }
-        }
 
         static if (__traits(hasMember, R, "prepareTableFrontN"))
             if (!payloads.prepareTableFrontN(n)) return 0;
@@ -1459,16 +1485,6 @@ struct AntFarm
         immutable wtprime = wret + size;
         tok.quotaLeft -= size;
         syncQuota(tok);
-
-        // Spec 3a/4b: Seqb - Wt' >= Exmax, leftover refilled and tagged
-        // not-swept. Wt' is the next write tail (not Rtlow).
-        immutable seqb = ((wtprime >> segShift) + 1) << segShift;
-        if (seqb - wtprime >= exmax)
-        {
-            tok.quotaLeft = quota;
-            tok.quotaSwept = false;
-            syncQuota(tok);
-        }
 
         // Segment/epoch transitions (spec 4b): initialize metadata for each
         // crossed segment, release-storing Es last.

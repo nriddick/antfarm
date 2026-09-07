@@ -228,6 +228,8 @@ the live mapping when page size is material to the result.
 5. Consume with `consumeNext()` until application completion.
 6. Unsubscribe consumers, unregister producers, then destroy the Farm.
 
+Producer registration and deregistration use a Farm-local mutex; payload publication and consumption do not. Tickets start at zero quota. Every quota grant probes the write tail and scans forward segments, and publication never automatically refills the balance.
+
 `write() == 0` is backpressure, not failure. `consumeNext() == false` may be a
 ring hole rather than global emptiness. Ant Farm does not promise FIFO order.
 
