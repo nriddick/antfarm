@@ -43,8 +43,10 @@ ANTFARM_HUGE_PAGES=0 dub run -c stress --compiler=ldc2 --build=release
 ```
 
 `dub test` runs module unit tests. The `unittest` configuration runs the
-separate smoke executable, including lifecycle backlog, cancellation,
-generation-trigger contention, and worker integration checks.
+smoke executable, including lifecycle backlog, cancellation, generation-trigger
+contention, and worker integration checks. That executable sets
+`testmode=run-main` so building it with imported module unittests also runs
+its main suite.
 
 ## Run one lane on the current thread
 

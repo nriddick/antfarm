@@ -27,7 +27,10 @@ the later Fiber, wave, and lifecycle characterization. The raw transport logs
 identify both an Intel i7-12700H and a Ryzen 5 5500; each series is identified
 where used. Historical revisions, page modes, timing boundaries, and worker
 placements matter. A payload/s, an actor invocation/s, and a complete actor
-lifetime/s count different amounts of work.
+lifetime/s count different amounts of work. The throughput and lifecycle
+figures also predate the later quota-protection and worker-wake audit fixes;
+they are historical evidence for their named configurations, not fresh
+measurements of the combined implementation.
 
 ## How the transport works
 
@@ -39,6 +42,15 @@ segments as they progress; completed, unreferenced segments can be reused.
 An incomplete segment retains a protection mark even after its last active
 consumer leaves. The producer therefore cannot mistake temporary inactivity
 for permission to overwrite unfinished work.
+
+Producer registration and deregistration now use a Farm-local mutex; publishing
+and consuming do not acquire it. Tokens start with zero quota. Each grant
+requires an acquire probe of the write tail and a forward-segment sweep; writes
+spend the finite grant without automatically replenishing it. This closes an
+exact-boundary runoff defect in the earlier quota-renewal policy. Every build
+also checks newly entered segments for active roots or incomplete-work pulses
+before changing their metadata or payloads. That check is a diagnostic tripwire,
+not an atomic reservation protocol; the sweep remains the admission mechanism.
 
 A publication consists of a table header, indexes, padded shard counters, and
 payloads. Each payload has a 128-byte header and a body of packed words.
@@ -148,7 +160,12 @@ behind an existing dump, with 1 µs of simulated work per callback. Ant Farm's
 `tail` benchmark measures from immediately before `write()` to the first
 instruction of the sentinel callback, including admission retries. The
 same-host queue runs used sentinel round-trip timing after a pre-placed chunk.
-These are workload comparisons, not isolated instruction-cost measurements.
+The historical Intel harness assigned consumers to LPs 0–5: three physical
+P-cores with SMT on that machine. It also admitted missed-window samples into
+its histograms. The current harness discovers physical cores, prints placement,
+and excludes those missed attempts. The numbers below are retained historical
+measurements; they have not been regenerated with that corrected harness.
+See [the harness notes](perftest/README.md#tail-latency-harness).
 
 | Existing dump | Ant Farm p50 / p99 | moodycamel p50 / p99 | TBB p50 / p99 |
 | --- | ---: | ---: | ---: |
@@ -180,7 +197,11 @@ The threadpool discovers cores, SMT siblings, LLCs, NUMA nodes, and available
 processor efficiency classes. It pins persistent workers and locates
 application-owned state by topology. Worker bodies choose what to pump. A
 single Director owner controls spin, wait, sleep, and cadence policies;
-ordinary producers can notify workers through `wakeAll()`.
+ordinary producers can notify workers through `wakeAll()`. The audited wait
+protocol arms a worker's wait slot, rechecks work and stop state, and only then
+permits parking. Notification exchanges the slot back to active, including
+when the worker was already active; managed workers use the recheck's deadline.
+Forced wait-race tests cover publication, stop, deadline, and exception edges.
 
 Managed Fibers use these workers while retaining DRuntime's Fiber backend.
 A runnable activation becomes one serial Farm payload with a shared callback
@@ -462,12 +483,22 @@ producer slack must be measured together.
 
 ## Correctness evidence and remaining scope
 
-The September 24 integration checks passed root unit and integration tests,
-actor torture, Farm torture, and Fiber unit/smoke suites with LDC and DMD.
+Before merging the host-audit changes, the September 24 integration checks
+passed root unit and integration tests, actor torture, Farm torture, and Fiber
+unit/smoke suites with LDC and DMD.
 Actor and Farm ThreadSanitizer lanes, real mimalloc full-debug checks, LDC
-release Fiber stress, and 42 churn smoke/argument checks also passed. The full
-Fiber smoke executable is a separate command from module unit tests; both are
-listed in the [Fiber test instructions](fibers/README.md#build-and-test).
+release Fiber stress, and 42 churn smoke/argument checks also passed. The root
+and Fiber test executables now request `testmode=run-main`, so their selected
+main suites also execute after imported module unittests. Explicit smoke
+commands are listed in the [Fiber test instructions](fibers/README.md#build-and-test).
+
+After merging the host-audit changes, Linux checks passed root, actor, Farm,
+Fiber, and threadpool suites under both compilers, including the armed-wait
+race tests. Actor and Farm TSan, mimalloc debug, LDC release Fiber stress,
+fresh-segment protection tests, 800 concurrent Farm creations, the bounded
+quota model with its expected negative control, and 12 actor/wave lifecycle
+smoke runs also passed. These checks validate the integration; the short
+smoke runs do not replace the throughput measurements above.
 
 Coverage includes ring reuse and partial publication, exact ST/MT execution,
 concurrent creation and reclamation, late accepted sends during retirement,
@@ -480,7 +511,20 @@ Migrating DRuntime Fibers have a known sanitizer/runtime boundary, so Farm and
 actor TSan success is not evidence that stack-switching Fiber execution is
 TSan-verified. Earlier Windows x64 DMD/LDC integration and stress runs are
 recorded in [ROADMAP.md](ROADMAP.md); they should not be mistaken for a Windows
-rerun of every subsequent optimization.
+rerun of every subsequent optimization. The separate Windows host audit in
+`f63b6ab` recorded one broader Fiber stress stall despite passing isolated
+reruns; that observation remains unresolved.
+
+The quota audit adds exact-boundary and spanning-table protection tests,
+forced probe/sweep/reservation delays, provisional subscription races, and
+negative controls which deliberately plant live roots or pulses. A bounded
+sequentially consistent model explores quota interleavings but does not model
+the full weak-memory implementation. The unconditional tripwire was retained
+after four-pair Windows release measurements across ten raw/dual throughput
+cases showed median changes from -1.57% to +2.08%, with no repeated busy-workload
+p99 regression in six focused latency pairs. Those results measure the
+tripwire's cost, not the combined optimization branch's throughput. Details
+are in [the consumer-protection audit](review_torture/README.md#consumer-protection-audit-allwritecheck).
 
 The supported use case is bounded, unordered work with explicit completion and
 lifetime ownership. An engine can mix short payloads, persistent actors,

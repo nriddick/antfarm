@@ -31,6 +31,11 @@ configuration "hello" {
 	versions "threadpool_hello"
 }
 
+configuration "wait-races" {
+    targetType "executable"
+    mainSourceFile "tests/wait_races.d"
+}
+
 // Live hardware binary: `dub run -c live-test` (not `dub test`).
 configuration "live-test" {
 	targetType "executable"

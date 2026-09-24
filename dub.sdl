@@ -20,6 +20,11 @@ configuration "library" {
 	targetType "library"
 }
 
+configuration "all-write-check" {
+	// Compatibility alias: fresh-segment protection checks are unconditional.
+	targetType "library"
+}
+
 configuration "unittest" {
 	targetType "executable"
 	mainSourceFile "antfarm_test.d"

@@ -1,5 +1,8 @@
 module smoke;
 
+// This executable has a substantial main() suite as well as imported unittests.
+extern(C) __gshared string[] rt_options = ["testmode=run-main"];
+
 import antfarm_fibers;
 import antfarm;
 import core.atomic;
@@ -1397,6 +1400,25 @@ void drainUntil(FiberBackend backend, ref Token token, ref ConsumerView view,
     assert(false, "fiber drain stalled");
 }
 
+final class GenerationProducer
+{
+    FiberGenerationTrigger trigger;
+    shared(uint)* ready;
+    shared(uint)* released;
+    this(FiberGenerationTrigger trigger, shared(uint)* ready, shared(uint)* released)
+    {
+        this.trigger = trigger;
+        this.ready = ready;
+        this.released = released;
+    }
+    void run()
+    {
+        atomicFetchAdd(*ready, 1u);
+        while (atomicLoad!(MemoryOrder.acq)(*released) == 0) Thread.yield();
+        trigger.advance();
+    }
+}
+
 void syncPrimitiveSmoke()
 {
     auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
@@ -1463,21 +1485,13 @@ void syncPrimitiveSmoke()
     Thread[] triggerProducers;
     shared uint triggerProducersReady;
     shared uint releaseTriggerProducers;
-    // Bind each trigger in a separate invocation's closure. Capturing a loop
-    // local here would make every producer use the final iteration's index.
-    Thread makeTriggerProducer(FiberGenerationTrigger trigger)
-    {
-        return new Thread({
-            atomicFetchAdd(triggerProducersReady, 1u);
-            while (atomicLoad!(MemoryOrder.acq)(releaseTriggerProducers) == 0)
-                Thread.yield();
-            trigger.advance();
-        });
-    }
+    // A separate context keeps each producer bound to its own trigger.
     foreach (i; 0 .. triggerCount)
     {
         concurrentGenerations[i] = new FiberGenerationTrigger(backend);
-        triggerProducers ~= makeTriggerProducer(concurrentGenerations[i]);
+        auto job = new GenerationProducer(concurrentGenerations[i],
+            &triggerProducersReady, &releaseTriggerProducers);
+        triggerProducers ~= new Thread(&job.run);
         triggerProducers[$ - 1].start();
     }
     while (atomicLoad!(MemoryOrder.acq)(triggerProducersReady) != triggerCount)

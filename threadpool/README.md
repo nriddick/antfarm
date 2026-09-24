@@ -77,6 +77,11 @@ Director and may select workers by LLC, P/E class, or application label before
 choosing `spin`, `wait`, `sleep`, `sleepUntil`, or `cadence`. Other producer
 threads use `pool.wakeAll()` rather than acquiring Director ownership.
 
+After an idle result, a worker arms its wait slot and pumps again before it
+can sleep. Both worker lanes use this protocol; managed workers use the final
+pump's deadline. Publish work before calling `wakeAll()`. Notification exchanges
+the slot to active and only calls the OS wake primitive if it was armed.
+
 ## Install LLC-local state
 
 Install one value per LLC before starting the pool. Workers use `home!T()` to
@@ -156,6 +161,7 @@ dub test --compiler=dmd
 dub test --compiler=ldc2
 dub run -c hello
 dub run -c live-test
+dub run -c wait-races
 ```
 
 - [examples/hello_topology.d](examples/hello_topology.d): topology only.

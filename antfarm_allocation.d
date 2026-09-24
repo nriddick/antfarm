@@ -9,12 +9,15 @@ else
 /// Allocate `bytes` on a 64-byte boundary. The matching free function must be
 /// used because the Microsoft C runtime path retains the original allocation
 /// immediately before the aligned address.
+/// Returns null if rounding or allocator overhead would overflow size_t.
 void* allocateAligned64(size_t bytes) nothrow @nogc @system
 {
+    if (bytes > size_t.max - 63) return null;
     immutable n = (bytes + 63) & ~cast(size_t) 63;
     version (CRuntime_Microsoft)
     {
         // Avoid _aligned_malloc dllimport differences between D toolchains.
+        if (n > size_t.max - 64 - (void*).sizeof) return null;
         auto raw = malloc(n + 64 + (void*).sizeof);
         if (raw is null) return null;
         auto aligned = (cast(size_t) raw + (void*).sizeof + 63) & ~cast(size_t) 63;
@@ -23,6 +26,22 @@ void* allocateAligned64(size_t bytes) nothrow @nogc @system
     }
     else
         return aligned_alloc(64, n);
+}
+
+unittest
+{
+    // Exercise both the rounding boundary and Microsoft's separate overhead.
+    foreach (n; [size_t.max, size_t.max - 62, size_t.max - 63])
+        assert(allocateAligned64(n) is null);
+    version (CRuntime_Microsoft)
+        assert(allocateAligned64(size_t.max - 127) is null);
+    foreach (n; [size_t(1), 63, 64, 65, 4096])
+    {
+        auto p = allocateAligned64(n);
+        assert(p !is null && (cast(size_t) p & 63) == 0);
+        (cast(ubyte*) p)[0 .. n] = 0xA5;
+        freeAligned64(p);
+    }
 }
 
 /// Free memory returned by `allocateAligned64`.

@@ -34,8 +34,9 @@ ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=dmd
 ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=ldc2
 ```
 
-`dub test` runs module unit tests; `dub run -c unittest` runs the root
-integration-test executable. See [fibers/README.md](fibers/README.md#build-and-test)
+`dub test` runs module unit tests. `dub run -c unittest` selects the root
+integration-test executable, which also runs its main suite when built with
+imported module unittests. See [fibers/README.md](fibers/README.md#build-and-test)
 for the separate Fiber smoke and stress suites.
 
 Ordinary 4 KiB backing is the default. The environment override makes that
@@ -242,6 +243,12 @@ the live mapping when page size is material to the result.
 4. Publish useful batches and pop the returned count from the source.
 5. Consume with `consumeNext()` until application completion.
 6. Unsubscribe consumers, unregister producers, then destroy the Farm.
+
+Producer registration and deregistration use a Farm-local mutex; payload publication and consumption do not. Tickets start at zero quota. Every quota grant probes the write tail and scans forward segments, and publication never automatically refills the balance.
+
+Distinct Farms may be created concurrently. Windows mapping API initialization
+uses a process-wide lock; POSIX mapping names use an atomic counter. Teardown
+still requires exclusive ownership and no live consumers or producer tickets.
 
 `write() == 0` is backpressure, not failure. `consumeNext() == false` may be a
 ring hole rather than global emptiness. Ant Farm does not promise FIFO order.
