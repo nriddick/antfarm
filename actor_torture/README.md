@@ -21,6 +21,8 @@ Coverage includes:
   first while the remaining engine claim still forbids the simulated unload;
 - a wave-reservation/retirement race proving that aggregate membership pins a
   retired actor and its runtime until the open wave is sealed;
+- immediate reuse of a released wave member as another wave's head, proving
+  that the old wave finishes its link writes before releasing the lifetime pin;
 - a late accepted sender queuing work between retirement's initial idle
   observation and its submission-gate join, proving the lifecycle is rechecked
   before using the idle retirement store;

@@ -1,9 +1,5 @@
 # Actor lifetime churn with mimalloc
 
-For the later native-malloc, arena, jemalloc, tcmalloc, and oneTBB comparison,
-see [ALLOCATORS.md](ALLOCATORS.md). It includes an ordinary `malloc(16)`
-control as well as the 64-byte-aligned C policy measured here.
-
 The sustained benchmark allocates and frees actor state on **every** cycle.
 It does not use D `new` for those state allocations. D allocations create
 the owner/handle/completion arrays and consumer machinery once, outside the
@@ -29,9 +25,11 @@ export ANTFARM_HUGE_PAGES=0
 
 Use `wave` instead of `actor` for one wave per cohort, and `6` instead of
 `0` for six background consumers. Zero means the producer also consumes.
-The last argument selects the allocator. Omitting it selects mimalloc in
-this optional build, or C runtime in the ordinary `actor_churn` build.
-The ordinary build rejects the mimalloc choices.
+The argument after warm-up count selects the allocator. Omitting it selects
+mimalloc in this optional build, or C runtime in the ordinary `actor_churn`
+build. The ordinary build rejects the mimalloc choices. An optional final
+CPU list pins the controller followed by each consumer; see
+[LIFECYCLE.md](LIFECYCLE.md) for placement and larger wave-offer examples.
 
 `mimalloc64` is a benchmark-only diagnostic wrapper around the same adapter:
 it rounds byte counts to multiples of 64 and requests 64-byte alignment,
@@ -47,7 +45,11 @@ removes the benchmark executable but leaves that shared library build intact.
 For DMD, set `DC=dmd DFLAGS='-O -release'
 MIMALLOC_VERSION=-version=AntfarmMimallocV3` on the make command.
 
-## Measurement protocol
+## Historical measurement protocol
+
+These measurements isolate the first algorithm improvements at `e6ce4d1`.
+Subsequent retirement and payload-admission changes, with fixed CPU placement,
+are measured separately in [LIFECYCLE.md](LIFECYCLE.md).
 
 Measured on 2026-09-24 using the same Ryzen 5 5500 host, LDC 1.43.0 / LLVM 22.1.8,
 `-O2 -release`, ordinary pages, and cohort workload as [README.md](README.md).
@@ -107,8 +109,10 @@ Optimized runtime, 16,384 actors per cycle, controlling thread also consuming:
 | Wave, million lifetimes/s | 8.577 | 20.788 | 20.101 |
 
 Even with matching size/alignment requests, the observed speedups are
-2.13× and 2.34× respectively. Smaller allocations contribute only a small
-part of the gain in this workload.
+2.13× and 2.34× respectively. This shows that mimalloc still wins with the
+C policy's allocation requests. It does not isolate the cost of forcing the
+C allocator to use 64-byte alignment: these are comparisons against the
+project's aligned C policy, not a general claim about ordinary `malloc(16)`.
 
 Autonomous-mode phase medians at that same cohort size, in ns/actor:
 

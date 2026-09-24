@@ -53,194 +53,6 @@ private struct State
     ulong cycle;
 }
 
-// Native malloc control: avoid forcing 64-byte alignment on the small state.
-// Runtime and slot allocations retain the ordinary aligned policy. On Linux,
-// LD_PRELOAD can replace these C allocation functions process-wide.
-private void* mallocAllocate(void*, size_t bytes, size_t alignment)
-    nothrow @nogc @system
-{
-    import core.stdc.stdlib : malloc;
-    if (bytes == State.sizeof && alignment == State.alignof)
-        return malloc(bytes);
-    return ActorAllocator.cRuntime().allocate(null, bytes, alignment);
-}
-
-private void mallocDeallocate(void*, void* memory, size_t bytes,
-        size_t alignment) nothrow @nogc @system
-{
-    import core.stdc.stdlib : free;
-    if (bytes == State.sizeof && alignment == State.alignof)
-        free(memory);
-    else
-        ActorAllocator.cRuntime().deallocate(null, memory, bytes, alignment);
-}
-
-// A controller-owned bump arena for one cohort. Individual state frees do
-// nothing; reset is legal only after every owner has been reclaimed. The
-// runtime and stable slots outlive the reset and use the C-runtime policy.
-private struct StateArena
-{
-    void* memory;
-    size_t capacity;
-    size_t used;
-
-    bool initialize(size_t count) nothrow @nogc @system
-    {
-        if (count == 0 || count > size_t.max / State.sizeof) return false;
-        capacity = count * State.sizeof;
-        memory = ActorAllocator.cRuntime().allocate(null, capacity, State.alignof);
-        return memory !is null;
-    }
-
-    void reset() nothrow @nogc @safe { used = 0; }
-
-    void destroy() nothrow @nogc @system
-    {
-        if (memory !is null)
-            ActorAllocator.cRuntime().deallocate(null, memory,
-                capacity, State.alignof);
-    }
-}
-
-private void* arenaAllocate(void* context, size_t bytes, size_t alignment)
-    nothrow @nogc @system
-{
-    if (bytes != State.sizeof || alignment != State.alignof)
-        return ActorAllocator.cRuntime().allocate(null, bytes, alignment);
-    auto arena = cast(StateArena*) context;
-    // The backing block and State stride already satisfy State.alignof.
-    if (bytes > arena.capacity - arena.used) return null;
-    auto block = cast(ubyte*) arena.memory + arena.used;
-    arena.used += bytes;
-    return block;
-}
-
-private void arenaDeallocate(void* context, void* memory, size_t bytes,
-        size_t alignment) nothrow @nogc @system
-{
-    if (bytes != State.sizeof || alignment != State.alignof)
-        ActorAllocator.cRuntime().deallocate(null, memory, bytes, alignment);
-    else
-    {
-        auto arena = cast(StateArena*) context;
-        immutable offset = cast(size_t) memory - cast(size_t) arena.memory;
-        assert(offset < arena.used && offset % State.sizeof == 0);
-    }
-}
-
-unittest
-{
-    StateArena arena;
-    assert(!arena.initialize(0));
-    assert(!arena.initialize(size_t.max / State.sizeof + 1));
-    assert(arena.initialize(3));
-    scope (exit) arena.destroy();
-    void*[3] blocks;
-    foreach (i; 0 .. blocks.length)
-    {
-        blocks[i] = arenaAllocate(&arena, State.sizeof, State.alignof);
-        assert(blocks[i] !is null
-            && cast(size_t) blocks[i] % State.alignof == 0);
-        (cast(State*) blocks[i]).cycle = i + 1;
-    }
-    assert(arenaAllocate(&arena, State.sizeof, State.alignof) is null);
-    foreach (i; 0 .. blocks.length)
-    {
-        assert((cast(State*) blocks[i]).cycle == i + 1);
-        arenaDeallocate(&arena, blocks[i], State.sizeof, State.alignof);
-    }
-    // Individual frees cannot recycle storage before the cohort reset.
-    assert(arenaAllocate(&arena, State.sizeof, State.alignof) is null);
-    arena.reset();
-    assert(arenaAllocate(&arena, State.sizeof, State.alignof) == blocks[0]);
-    arenaDeallocate(&arena, blocks[0], State.sizeof, State.alignof);
-    // Stable runtime metadata must survive state-arena resets.
-    auto stable = arenaAllocate(&arena, 128, 64);
-    assert(stable !is null && cast(size_t) stable % 64 == 0);
-    *cast(ulong*) stable = 1234;
-    arena.reset();
-    assert(*cast(ulong*) stable == 1234);
-    arenaDeallocate(&arena, stable, 128, 64);
-}
-
-version (linux)
-private string allocationProvider(const(char)* symbol)
-{
-    import core.sys.posix.dlfcn : Dl_info, dladdr, dlsym;
-    import core.sys.linux.dlfcn : RTLD_DEFAULT;
-    import std.string : fromStringz;
-    Dl_info info;
-    auto address = dlsym(RTLD_DEFAULT, symbol);
-    enforce(address !is null && dladdr(address, &info) != 0,
-        "cannot identify C allocator provider");
-    return fromStringz(info.dli_fname).idup;
-}
-
-// Caller-side policy example, not a runtime optimization. The benchmark's
-// controller owns all allocation/free calls, so this fixed-size pool needs
-// no locks. Runtime/slot allocations still use the C-runtime policy.
-private struct StatePool
-{
-    void* memory;
-    void* freeHead;
-    size_t capacity;
-    size_t available;
-
-    bool initialize(size_t count) nothrow @nogc @system
-    {
-        if (count > size_t.max / State.sizeof) return false;
-        memory = ActorAllocator.cRuntime().allocate(null,
-            count * State.sizeof, State.alignof);
-        if (memory is null) return false;
-        capacity = available = count;
-        foreach_reverse (i; 0 .. count)
-        {
-            auto block = cast(ubyte*) memory + i * State.sizeof;
-            *cast(void**) block = freeHead;
-            freeHead = block;
-        }
-        return true;
-    }
-
-    void destroy() nothrow @nogc @system
-    {
-        if (memory !is null)
-            ActorAllocator.cRuntime().deallocate(null, memory,
-                capacity * State.sizeof, State.alignof);
-    }
-}
-
-private void* pooledAllocate(void* context, size_t bytes, size_t alignment)
-    nothrow @nogc @system
-{
-    if (bytes != State.sizeof || alignment != State.alignof)
-        return ActorAllocator.cRuntime().allocate(null, bytes, alignment);
-    auto pool = cast(StatePool*) context;
-    auto block = pool.freeHead;
-    if (block is null) return null;
-    pool.freeHead = *cast(void**) block;
-    --pool.available;
-    return block;
-}
-
-private void pooledDeallocate(void* context, void* memory, size_t bytes,
-        size_t alignment) nothrow @nogc @system
-{
-    auto pool = cast(StatePool*) context;
-    immutable address = cast(size_t) memory;
-    immutable base = cast(size_t) pool.memory;
-    if (address >= base && address - base < pool.capacity * State.sizeof)
-    {
-        assert(bytes == State.sizeof && alignment == State.alignof
-            && (address - base) % State.sizeof == 0);
-        *cast(void**) memory = pool.freeHead;
-        pool.freeHead = memory;
-        ++pool.available;
-    }
-    else
-        ActorAllocator.cRuntime().deallocate(null, memory, bytes, alignment);
-}
-
 private void operate(scope ref ActorBorrow!State actor) nothrow @nogc @system
 {
     auto completion = actor.value.completion;
@@ -293,7 +105,7 @@ void main(string[] args)
 {
     enforce(args.length >= 2 && args.length <= 9
             && (args[1] == "actor" || args[1] == "wave"),
-        "usage: actor_churn actor|wave [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|malloc|mimalloc|mimalloc64|pool|arena] [controller-cpu,consumer-cpus|-]");
+        "usage: actor_churn actor|wave [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-]");
     immutable waveMode = args[1] == "wave";
     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;
     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;
@@ -316,27 +128,11 @@ void main(string[] args)
         enforce(pinToLogicalProcessor(PinTarget(0, 0, cpus[0])),
             "controller CPU pin failed");
     }
-    StatePool pool;
-    scope (exit) pool.destroy();
-    StateArena arena;
-    scope (exit) arena.destroy();
     auto allocator = ActorAllocator.cRuntime();
-    if (allocatorName == "arena")
-    {
-        enforce(arena.initialize(count), "state-arena allocation failed");
-        allocator = ActorAllocator(&arena, &arenaAllocate, &arenaDeallocate);
-    }
-    else if (allocatorName == "malloc")
-        allocator = ActorAllocator(null, &mallocAllocate, &mallocDeallocate);
-    else if (allocatorName == "pool")
-    {
-        enforce(pool.initialize(count), "state-pool allocation failed");
-        allocator = ActorAllocator(&pool, &pooledAllocate, &pooledDeallocate);
-    }
-    else if (allocatorName != "crt")
+    if (allocatorName != "crt")
     {
         enforce(allocatorName == "mimalloc" || allocatorName == "mimalloc64",
-            "allocator must be crt, malloc, mimalloc, mimalloc64, pool, or arena");
+            "allocator must be crt, mimalloc, or mimalloc64");
         version (AntfarmMimallocV3)
             allocator = allocatorName == "mimalloc"
                 ? mimallocV3ActorAllocator()
@@ -468,16 +264,6 @@ void main(string[] args)
         enforce(runtime.live == 0 && runtime.ready == 0
                 && runtime.staleActivations == 0,
             "cycle left live, queued, or stale actors");
-        enforce(allocatorName != "pool" || pool.available == count,
-            "cycle did not return all pooled actor state");
-        if (allocatorName == "arena")
-        {
-            enforce(arena.used == arena.capacity,
-                "cycle did not allocate exactly one arena cohort");
-            // Every owner is reclaimed and runtime.live is zero above. This
-            // bulk reuse belongs to the timed retirement/reclamation phase.
-            arena.reset();
-        }
         immutable retired = MonoTime.currTime;
         if (measured)
         {
@@ -507,8 +293,4 @@ void main(string[] args)
     writefln("create_s=%.6f dispatch_s=%.6f retire_reclaim_verify_s=%.6f verified_actor_cycles=%s",
         elapsedSeconds(createTicks), elapsedSeconds(dispatchTicks),
         elapsedSeconds(retireTicks), cycle * count);
-    version (linux)
-        writefln("malloc_provider=%s free_provider=%s aligned_alloc_provider=%s",
-            allocationProvider("malloc"), allocationProvider("free"),
-            allocationProvider("aligned_alloc"));
 }

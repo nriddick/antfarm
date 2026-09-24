@@ -1463,16 +1463,21 @@ void syncPrimitiveSmoke()
     Thread[] triggerProducers;
     shared uint triggerProducersReady;
     shared uint releaseTriggerProducers;
-    foreach (i; 0 .. triggerCount)
+    // Bind each trigger in a separate invocation's closure. Capturing a loop
+    // local here would make every producer use the final iteration's index.
+    Thread makeTriggerProducer(FiberGenerationTrigger trigger)
     {
-        concurrentGenerations[i] = new FiberGenerationTrigger(backend);
-        immutable index = i;
-        triggerProducers ~= new Thread({
+        return new Thread({
             atomicFetchAdd(triggerProducersReady, 1u);
             while (atomicLoad!(MemoryOrder.acq)(releaseTriggerProducers) == 0)
                 Thread.yield();
-            concurrentGenerations[index].advance();
+            trigger.advance();
         });
+    }
+    foreach (i; 0 .. triggerCount)
+    {
+        concurrentGenerations[i] = new FiberGenerationTrigger(backend);
+        triggerProducers ~= makeTriggerProducer(concurrentGenerations[i]);
         triggerProducers[$ - 1].start();
     }
     while (atomicLoad!(MemoryOrder.acq)(triggerProducersReady) != triggerCount)

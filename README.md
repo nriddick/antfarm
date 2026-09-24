@@ -27,7 +27,13 @@ DMD 2.112+ and LDC 1.42+ are supported on Windows x64 and Linux x86-64.
 dub build
 ANTFARM_HUGE_PAGES=0 dub test --compiler=dmd
 ANTFARM_HUGE_PAGES=0 dub test --compiler=ldc2
+ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=dmd
+ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=ldc2
 ```
+
+`dub test` runs module unit tests; `dub run -c unittest` runs the root
+integration-test executable. See [fibers/README.md](fibers/README.md#build-and-test)
+for the separate Fiber smoke and stress suites.
 
 Ordinary 4 KiB backing is the default. The environment override makes that
 choice explicit for tests even if the calling shell is configured otherwise.
@@ -40,8 +46,11 @@ make -C actor_torture run-dmd
 make -C actor_torture run-tsan
 ```
 
-The [actor backlog benchmark](perftest/README.md) measures bounded-batch
-dispatch and records reproducible before/after results.
+The [performance benchmarks](perftest/README.md) cover payload throughput,
+actor dispatch, and Fiber lifecycle bookkeeping. The
+[complete actor lifecycle benchmark](perftest/LIFECYCLE.md) measures repeated
+creation, dispatch, retirement, and reclamation with the C-runtime and optional
+mimalloc policies, including wave batching and consumer placement.
 
 The actor runtime's optional mimalloc v3 adapter is documented in
 [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md); ordinary builds retain the C-runtime

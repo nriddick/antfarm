@@ -4,7 +4,9 @@ Measured on 2026-09-24: original checkout `8e988f6` versus optimized runtime
 `e6ce4d1` on branch `codex/optimize-batched-dispatch`. Host: Ryzen 5 5500,
 six physical cores / twelve logical processors, one LLC; Linux x86-64;
 LDC 1.43.0 / LLVM 22.1.8. Both revisions used `-O2 -release` and
-`ANTFARM_HUGE_PAGES=0`. Benchmark sources were unchanged between revisions.
+`ANTFARM_HUGE_PAGES=0`. Benchmark sources were unchanged between revisions. These measurements
+predate the retirement and single-shot payload changes recorded in
+[LIFECYCLE.md](LIFECYCLE.md).
 
 Each number below is the median of five runs per revision. Runs were serial,
 alternating old/new order between pairs. Small changes with overlapping
@@ -28,7 +30,7 @@ be compared with one another as interchangeable units.
 The payload executables were byte-identical (SHA-256
 `2b31f11f52b6d2a5276176198a47e8754356cce510d05c184efa759ef4c2bf30`),
 so their differences are measurement variation. The core payload path was
-unchanged.
+unchanged between these two revisions.
 
 The single-thread Fiber execution decline reproduced in seven additional
 alternating pairs pinned to CPU 2: warm execution was 4.482 → 4.260 million/s

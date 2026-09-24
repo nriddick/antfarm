@@ -37,8 +37,14 @@ From this directory:
 ```text
 ANTFARM_HUGE_PAGES=0 dub test --compiler=dmd
 ANTFARM_HUGE_PAGES=0 dub test --compiler=ldc2
+ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=dmd
+ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=ldc2
 ANTFARM_HUGE_PAGES=0 dub run -c stress --compiler=ldc2 --build=release
 ```
+
+`dub test` runs module unit tests. The `unittest` configuration runs the
+separate smoke executable, including lifecycle backlog, cancellation,
+generation-trigger contention, and worker integration checks.
 
 ## Run one lane on the current thread
 
