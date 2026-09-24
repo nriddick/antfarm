@@ -19,6 +19,9 @@ For the complete relationship and sizing rules, see
 [ARCHITECTURE.md](ARCHITECTURE.md). Current release work is tracked in
 [ROADMAP.md](ROADMAP.md).
 
+The [project writeup](writeup.md) connects the design, optimization history,
+and measured payload, Fiber, actor-wave, and complete-lifecycle results.
+
 ## Build and test
 
 DMD 2.112+ and LDC 1.42+ are supported on Windows x64 and Linux x86-64.

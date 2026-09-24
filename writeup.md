@@ -1,115 +1,498 @@
-# Ant Farm
+# Ant Farm: unordered work, actors, and D Fibers
 
-Ant Farm is a concurrent M:N mixed-type jobs distributor on a fixed-length ring buffer. The ring is divided into discrete segments. Subscribed consumers gain references as they move across it and release them as work is completed; segments with zero references can be reclaimed. Producers hold a size quota in 64-bit ulongs and publish sets of jobs in tables — one job or arbitrarily many, within quota. The sum of all quotas is the maximum simultaneous excursion *Exmax*. When a producer needs to refresh, it checks the current and following segments for at least Exmax of free space.
+Ant Farm is a D runtime for distributing work among producers and consumers
+without requiring FIFO execution. It began as a fixed-memory payload ring and
+now includes topology-aware workers, actors with explicit state lifetime,
+phase-oriented actor waves, and suspendable tasks built on DRuntime Fibers.
+Actor and Fiber activations use the Farm transport; applications can use only
+the layers they need.
 
-Jobs dispatch to exactly one consumer (serial) or to many (parallel). A simple iteration counter gives a parallel job its fraction of granular completion. The tables carry cache-padded shard counters so a group of about √consumers claim jobs in discrete chunks; chunk size is the producer’s declared average cost of a Call. Some consumers ensure a table finishes, some look ahead, some rebalance shards, some pile onto parallel items. Hot-path work has no contended compare-and-swap: producers and consumers `fetch_add`. The CAS sites are cold — producer-ticket claim, last-releaser pulse, plant and retract of an incomplete-segment mark — and they are not open retry loops.
+The strongest measured improvements have come from batching, avoiding repeated
+backlog scans, and matching allocation and worker placement to the workload.
+Scaling depends on the workload: some payload configurations benefit from
+more producers and consumers, while tiny actor lifetimes and wave
+operations often peak with fewer workers. Managed Fibers provide ordinary D
+control flow at a measurable cost over bare payloads and direct Fiber calls.
 
-The end result is high throughput with synthetic figures comfortably between moodycamel’s no-token and token-pinned numbers, tail latency that generally crushes FIFO designs, and a concurrency shape that wants more workers, not fewer.
-
-Picture a farmer walking along a path placing down objects which a swarm of ants are picking up and taking away. He can't see the ants. He doesn't know how many there are. How can he avoid stepping on the ants? The answer: the ants maintain signage at regular intervals tallying how many ants are in the area. If it's higher than zero, the farmer waits. The last ant to leave a *confirmed-complete* area changes the tally (a reference counter) to zero. The last ant to leave an *incomplete* area instead leaves a pulse mark, so the farmer still sees a nonzero tally and will not step there. Thus the farmer only needs to watch for one signal to change, and doesn't need to try and communicate directly with any ants. And the ants have a panoply of strategies to break down and haul away their work pieces. Really the Ant Farm is a combination of known techniques and a disregard of FIFO guarantees; towards objectives of minimal synchronization upkeep, enhanced cache performance, and flexible role switching and load balancing.
-
-A job is a callback and a set of read-only parameters. The callback decodes the payload body, takes a pointer to the payload header, and an iteration index for parallel work. Templates generate the callbacks and payload descriptions. The implementation is D: `@nogc nothrow @system`, a magic-buffer dual mapping of one physical ring, preallocated metadata, fatal on invariant violation. There is no per-job allocation. There is no FIFO.
-
-Figures below are a 16 MiB farm on an Intel 12700H (6P+8E, 20 threads) unless noted. They move with boost; treat them as a recent run, not a plateau.
-
----
-
-## What you actually publish
-
-Producers register for a *bulk* or *small* tier and receive a single-owner ticket. A `write()` publishes a table: header, index, sharded claim counters, then the payloads laid out in the ring. A payload is a 128-byte header plus a type-erased body. `MaxCs = 1` is a single-threaded job; `MaxCs`/`Done` up to 512 is a mini-parallel task that several consumers may enter.
-
-Consumers subscribe, pin a contiguous range of epochs, and `consumeNext()` through live tables. They claim a run of a shard with one `fetch_add` — commonly one claim per 16 Calls — execute, and move on. The first claimant of a shared shard may yield when the next table is already published, so a mid-tick one-job write does not wait behind an 8192-job dump. Completers sweep foreign shards and leftover parallel work. Idle consumers re-walk only the new tables, not the whole segment.
-
-The only producer–consumer coupling is the per-segment tally. Producers never name a consumer. Consumers never wait on a producer beyond the table sentinel.
-
----
-
-## Throughput, between two moodys
-
-Small-producer grid, `K=8`, `body=1`, `batch=256`, every `ns`/`nc` pair from 1 through 14 (196 topologies):
-
-| Shape | Result |
+| Layer or work representation | What it supplies |
 | --- | --- |
-| Best | **397 M payloads/s** (`nc=13`, `ns=9`) |
-| Grid median / mean | **282 / 255 M payloads/s** |
-| Matched 4×4 / 6×6 / 8×8 | 289 / 316 / 341 M payloads/s |
-| One producer, any `nc` | ~70–100 M payloads/s |
-| Same grid, `batch=1` | ~10–15 M payloads/s |
+| Bare payload | A short `nothrow @nogc` callback, with optional independent iterations |
+| Autonomous actor | Stable identity, owned POD state, coalesced wakes, an intrusive inbox, and explicit retirement |
+| Actor wave | One phase operation across a set of actors, with aggregate completion before a dependent phase |
+| Managed Fiber | D exceptions and cleanup, suspension, signals, timers, joins, cooperative cancellation, and stack reuse |
+| Threadpool | Persistent pinned workers, topology lookup, and application-controlled idle/wake policy |
 
-Batching is still the first-order effect. One producer is a cap no matter how many consumers you add. Adding producers *and* consumers together keeps paying well past the six performance cores.
+The measurements below retain the earlier same-host queue comparisons and add
+the later Fiber, wave, and lifecycle characterization. The raw transport logs
+identify both an Intel i7-12700H and a Ryzen 5 5500; each series is identified
+where used. Historical revisions, page modes, timing boundaries, and worker
+placements matter. A payload/s, an actor invocation/s, and a complete actor
+lifetime/s count different amounts of work.
 
-moodycamel::ConcurrentQueue on the same host (bounded-style matrix, `uint64_t` items):
+## How the transport works
 
-| Mode | Typical / peak |
+A Farm owns a fixed-size ring, virtually mapped twice so a table can cross the
+physical end without a split copy. Producers register single-owner tokens in
+bulk or small tiers and receive quotas measured in 64-bit words. Their combined
+quotas bound simultaneous reservation excursion. Consumers hold references to
+segments as they progress; completed, unreferenced segments can be reused.
+An incomplete segment retains a protection mark even after its last active
+consumer leaves. The producer therefore cannot mistake temporary inactivity
+for permission to overwrite unfinished work.
+
+A publication consists of a table header, indexes, padded shard counters, and
+payloads. Each payload has a 128-byte header and a body of packed words.
+`MaxCs = 1, Done = 1` describes a single-shot callback; multiconsumer payloads
+expose numbered iterations with admission and completion accounting, bounded
+by the implementation's 512 caps. Tables may contain different callbacks and
+body lengths. Ring transport itself requires no per-payload heap allocation.
+
+Consumers claim chunks from approximately square-root-many shards rather than
+arbitrating on one global per-job sequence. `avgCost` selects a chunk size from
+32 down to one. A first claimant can move ahead when later tables are available;
+completers sweep unfinished shards and multiconsumer work. Idle re-walks retain
+a cursor so they visit newly encountered tables instead of repeatedly scanning
+the whole segment.
+
+Synchronization is still present. Publication reserves ring space, chunk claims
+update shared counters, and segment reuse has CAS retry paths. Actor ownership
+adds its own atomic transitions and short gates. The current single-shot
+payload path reuses the shard's unique ownership and records its payload claim
+with an atomic store, eliminating a redundant fetch-add. The project does not
+claim that the whole stack is contention-free or wait-free.
+
+The transport API is `@nogc nothrow @system`. Callbacks receive read-only ring
+body words; manually encoded identities can still refer to mutable external
+objects with a separate ownership contract. Generated shims reject unshared
+mutable aliases. Common-header and fixed-width write forms avoid repeated
+validation or sizing passes, and generic sources must be forward ranges so
+sizing and emission can use independent checkpoints.
+
+`write()` returns the accepted prefix; the caller advances its source and
+retries the remainder. Zero means backpressure. A false `consumeNext()` can
+mean a publication hole rather than global emptiness. Neither call supplies a
+FIFO completion guarantee. The detailed contract is in [SPEC.md](SPEC.md).
+
+## Payload throughput and the existing queue comparisons
+
+The earlier Intel i7-12700H grid used a 16 MiB Farm, eight segments, one-word
+bodies, and batches of 256. Small-producer and consumer counts each ranged from
+one through fourteen, giving 196 configurations:
+
+| Configuration or summary | Million payloads/s |
+| --- | ---: |
+| 4 producers / 4 consumers | 289 |
+| 6 producers / 6 consumers | 316 |
+| 8 producers / 8 consumers | 341 |
+| Best: 9 producers / 13 consumers | 397 |
+| Median / mean across the grid | 282 / 255 |
+| One producer, varying consumers | About 66–101 |
+| Single-item publication, grid median / peak | 10.26 / 21.51 |
+
+The grid median is a summary across different topologies, not a repeated-run
+confidence estimate. It shows a substantial batching benefit and several
+configurations that use additional producers and consumers effectively. It
+does not establish monotonic scaling or a preferred worker count for other
+workloads. The raw runs are in [throughput.txt](throughput.txt).
+
+The existing same-host `moodycamel::ConcurrentQueue` measurements used
+`uint64_t` items and a bounded-style matrix:
+
+| Queue benchmark mode | Typical or peak result |
 | --- | --- |
-| No tokens, bulk | ~110–180 M/s in the middle of the matrix; **187 M/s** peak (1P→1C) |
-| No tokens, 6×6 | **115 M/s** |
-| With tokens, bulk | hundreds of M/s; **~1.07 billion/s** at 8–10 paired threads |
-| With tokens, 6×6 | **807 M/s** |
+| No tokens, bulk | About 110–180 M/s in the middle of the matrix; 187 M/s peak at 1P→1C |
+| No tokens, bulk, 6×6 | 115 M/s |
+| With tokens, bulk | About 1.07 billion/s at 8–10 paired threads |
+| With tokens, bulk, 6×6 | 807 M/s |
 
-Tokens pin pipelines: a consumer tends to drain the producer it is paired with. Ant Farm is a distributor, not a set of SPSC pipes, and each payload still carries a 128-byte header. Even so, **397 M (peak) and ~316 M at 6×6 sit comfortably between no-token bulk and token-pinned bulk** — above the unpinned transport, below the paired-token peak — while doing the other job (claim, shard, mix serial and parallel, let anyone publish).
+Ant Farm's 316 M payloads/s at 6×6 lies between those two measured queue modes.
+The comparison is useful context for transport overhead, but the operations
+are different: an Ant Farm payload carries callback metadata, sharding, and
+iteration/completion semantics. The token and no-token results also show how
+strongly the queue benchmark depends on its usage mode. They do not support a
+blanket claim that either implementation is faster for arbitrary applications.
 
-A 6-core Ryzen 5 5500 showed the same shape at a lower ceiling (best mixed ~168 M, huge pages ~243–246 M at `body=2`).
+## Uniform publication and workers that also produce
 
----
+The later Ryzen 5 5500 logs include common-header/fixed-width publication,
+which sizes a homogeneous batch arithmetically instead of inspecting every
+body before emission. These grids used a 16 MiB Farm, one-word bodies,
+`avgCost=0`, huge pages requested, and three reported repeats per configuration.
+Producer and consumer counts each ranged from one through ten:
 
-## Tail, which is the product
+| Publication path, batch 256 | Mean across the grid, M payloads/s | Peak, M payloads/s |
+| --- | ---: | ---: |
+| General `PayloadEntry` path | 209.262 | 333.877 at 6 producers / 5 consumers |
+| Common header and fixed body width | 234.413 | 340.263 at 3 producers / 4 consumers |
 
-Publish-to-first-Call on six pinned consumers, 1 µs of simulated work per Call. Ant Farm numbers are `tail`; the others are `queuebenches` on the same machine, 1 producer / 6 consumers, same 1 µs spin, sentinel round-trip after a pre-placed chunk.
+The specialized grid has a higher mean, while the peaks are closer and occur
+at different topologies. These logged sweeps characterize the two paths;
+they do not establish a uniform percentage improvement. With the fixed-width
+path, batch 63 peaked at 320.810 M/s, batch 32 at 266.312 M/s, and batch one
+at 20.031 M/s.
 
-| Scene (dump size) | Ant Farm p50 / p99 | moodycamel p50 / p99 | TBB p50 / p99 |
+Workers can hold both a producer token and a consumer view. A worker that
+creates more work can publish it, consume, and retry on backpressure without
+routing through a dedicated producer thread. The logged dual-role sweep used
+one to eight such threads, fixed-width one-word payloads, and batches of 256.
+It reached 305.064 M payloads/s at six threads and 276.505 M/s at eight.
+Changing batch size to 32 reduced the peak to 162.357 M/s; single-item writes
+peaked at 12.579 M/s with one thread. This exercises the shared producer/worker
+role and shows its dependence on batching. The grids are retained in
+[throughput.txt](throughput.txt).
+
+## What overtaking does for latency
+
+The earlier six-consumer Intel comparison measured a one-job sentinel arriving
+behind an existing dump, with 1 µs of simulated work per callback. Ant Farm's
+`tail` benchmark measures from immediately before `write()` to the first
+instruction of the sentinel callback, including admission retries. The
+same-host queue runs used sentinel round-trip timing after a pre-placed chunk.
+These are workload comparisons, not isolated instruction-cost measurements.
+
+| Existing dump | Ant Farm p50 / p99 | moodycamel p50 / p99 | TBB p50 / p99 |
 | --- | ---: | ---: | ---: |
-| Idle | **500 ns / 3.3 µs** | 0.70 µs / 1.10 µs | 0.70 µs / 1.10 µs |
-| Mid-drain 256 | **5.0 µs / 21.4 µs** | 48 µs / 56 µs | 47 µs / 61 µs |
-| Mid-drain 2048 | **25.2 µs / 27.9 µs** | 378 µs / 419 µs | 379 µs / 416 µs |
-| Mid-drain 8192 | **13.2 µs / 27.6 µs** | **1.52 ms / 1.57 ms** | 1.52 ms / 1.60 ms |
+| Idle | 0.50 / 3.3 µs | 0.70 / 1.10 µs | 0.70 / 1.10 µs |
+| 256 jobs | 5.0 / 21.4 µs | 48 / 56 µs | 47 / 61 µs |
+| 2,048 jobs | 25.2 / 27.9 µs | 378 / 419 µs | 379 / 416 µs |
+| 8,192 jobs | 13.2 / 27.6 µs | 1.52 / 1.57 ms | 1.52 / 1.60 ms |
 
-boost::lockfree is the same FIFO drain (1.61 ms p50 at 8192). **Ant Farm p99 does not grow with dump size.** A one-job write that arrives while an 8192-job table is draining still reaches a worker in tens of microseconds. The queues grow linearly with the backlog, as a FIFO must.
+The recorded Boost.Lockfree result at 8,192 jobs was 1.61 ms p50. In these
+occupied cases, Ant Farm's ability to overtake unfinished tables kept sentinel
+p99 around 21–28 µs while the queue workloads drained their backlog first.
+Idle p50 favored Ant Farm, but idle p99 favored the queues.
 
-Idle, the queues are a little quicker. Occupied, Ant Farm is a different machine: it will overtake. One consumer is not that machine — `nc=1` mid-drain 8192 is ~6 ms p50, FIFO-shaped. Twelve consumers on this 6P+8E part keep p50 in the single-digit microseconds but p99 at 8192 stretches to ~300 µs; the product number is the six performance cores.
+That is evidence for useful mid-drain overtaking, not a latency bound.
+At 8,192 jobs, the same Ant Farm run recorded 129.3 µs p99.9 and a 1.23 ms
+maximum. Twelve consumers raised p99 to 308.2 µs; one consumer gave roughly
+6 ms p50. The near-full case also reached 1.23 ms p99. A finite ring can stop
+admitting work, and additional consumers can make the tail worse.
 
-`write() == 0` is rare while anyone is draining. When consumers are parked the ring fills to a hard wall and stops. It will not pretend to be unbounded.
+Chunk sizing changes the result materially. On the Ryzen host, five pinned
+consumers with huge pages and an 8,192-job dump gave 24.8 µs p99 at chunk 16,
+15.8 µs at chunk 8, and 7.9 µs at chunk 4. Those samples support tuning the cost
+hint to the actual callbacks; they do not show that smaller chunks are free.
+The complete distributions and conditions are in [latency.txt](latency.txt).
 
----
+## Persistent workers and ordinary D control flow
 
-## A shape that wants more concurrency
+The threadpool discovers cores, SMT siblings, LLCs, NUMA nodes, and available
+processor efficiency classes. It pins persistent workers and locates
+application-owned state by topology. Worker bodies choose what to pump. A
+single Director owner controls spin, wait, sleep, and cadence policies;
+ordinary producers can notify workers through `wakeAll()`.
 
-The design bets are visible and they all point the same way.
+Managed Fibers use these workers while retaining DRuntime's Fiber backend.
+A runnable activation becomes one serial Farm payload with a shared callback
+header and one-word body. The scheduler supplies generation tracking, waits,
+timers, joins, cancellation, completion records, GC rooting, and recycling.
+D exceptions and `scope(exit)` remain available. Cancellation is cooperative;
+user code that never reaches a scheduler boundary can delay shutdown. Fibers
+may resume on another eligible worker, so TLS-derived state cannot be retained
+across suspension as though it were Fiber-local.
 
-Consumers are sharded by √Cs, not lined up on one sequence. Leaf tallies split the segment signal the same way. A claim is a chunk, not an item. Completers sweep holes left by a pre-empted or unsubscribed peer; oversaturated visitors nudge themselves into another bucket on the next table. Small tables, which would otherwise starve if nobody mapped to shard 0, carry a sweeper role forward. None of that is a single contended CAS.
+Earlier Ryzen characterization illustrates the cost of those facilities:
 
-On this host the small-producer grid keeps climbing as `ns` and `nc` rise together: ~186 M at 2×2, ~289 at 4×4, ~316 at 6×6, ~341 at 8×8, **397 M at 13 consumers / 9 producers**. No-token moodycamel bulk, over the same range, sits around 110 M and does not get a second wind. The intent is not “it is fast at nc=4.” The intent is that adding workers should keep paying, because the hot path never funnels through one word. NUMA is still unmeasured.
+| Same-thread path | Representative rate |
+| --- | ---: |
+| DRuntime warm reset and run | About 7.3 M/s |
+| One DRuntime Fiber repeatedly reset and run | About 27 M/s |
+| Managed Fiber warm run | About 4.1 M/s |
+| Managed Fiber with one yield | About 1.8 M Fibers/s |
+| Bare payload run | About 55 M/s |
+| Cold Fiber creation, either Fiber path | About 150–175 k/s |
 
-Work can originate from anywhere in the pool and dispatch at the same time.
+These are different execution patterns, particularly the single recycled
+Fiber versus many live stacks. They establish why short, non-suspending work
+belongs on the payload path, while Fibers are useful for code that benefits
+from suspension and ordinary D semantics. Cold stack creation is expensive;
+recycling removes much of that cost. Reserving task metadata does not pre-map
+DRuntime stacks.
 
-Any registered producer may `write()` — the main thread dumping a frame, a worker that just discovered more work, a mid-tick “do this now” from some other subsystem. A stalled producer may itself subscribe, drain, and retry; that is the supported escape hatch. A table is a simultaneous dispatch: every live consumer may claim into it at once, serial jobs going to one claimant each, parallel jobs admitting up to `MaxCs`. The next table can be published before the current one has drained, and the first claimant will step over to it. There is no “the producer” and “the workers” as a pipeline. There is a ring, tickets, and a swarm.
+A separate two-million-payload embedding test on six physical Ryzen cores
+measured 54.5 M/s with direct pinned consumers, 54.9 M/s through the spinning
+threadpool pump, and 51.0 M/s through managed Fiber worker hooks. Parking and
+waking the bare pool gave 47.2 M/s. Worker integration therefore had modest
+cost in that configuration, but the idle policy was consequential. These are
+throughput results, not parked-worker wake-latency guarantees.
 
-That is the difference from a token-pinned concurrent queue (fast, but the work stays in lanes) and from a Disruptor worker pool (distributed, but one CAS per job on one sequence). Ant Farm is for the case where the next job may be born on any thread, must reach some thread quickly, and may be one Call or a thousand.
+After warm-up, ready/completion publication, established waits, timer expiry,
+and stack reuse avoid allocation. Cold tasks, growing containers, new wait
+keys, returned result arrays, exceptions, and user code can still allocate.
+The broader same-thread, worker-count, embedding, and allocation evidence is
+in [fibers/PERFORMANCE.md](fibers/PERFORMANCE.md).
 
----
+## Actors, inboxes, and dependent waves
 
-## Flexible on purpose
+An actor runtime owns a fixed-capacity array of stable control slots and
+separately allocated POD state. A move-only `ActorOwner` controls retirement and
+reclamation; a copyable generation-tagged handle supplies identity without
+keeping that state alive. A callback receives an exclusive scoped borrow.
+Wakes coalesce, and the intrusive inbox admits messages through a per-generation
+submission gate. Retirement closes admission, lets accepted work finish, and
+permits reclamation only after the remaining uses have drained. Inbox nodes
+are explicitly completed before reuse. Actor callbacks cannot suspend; Fibers
+can coordinate the waits around them.
 
-Construction picks a ring size, a segment count `K` (4 or 8 are tied), expected consumers, and two producer tiers with their quotas. An unused tier takes no part in Exmax. `avgCost` on each write sets chunk size (`MAX_CHUNK >> avgCost`): cheap Calls take chunk 32, expensive Calls take 8 or 4, and the tail of a large dump shrinks without a throughput tax. A farm-level small-table threshold decides when a table is claimed wholesale by shard 0. Huge pages are a switch. Consumers subscribe and unsubscribe. Tickets transfer; they do not copy.
+Actors use non-GC storage. The stable slots remain until runtime destruction;
+state allocations have shorter lifetimes. The API remains `@system`, and raw
+pointer escapes can violate its ownership rules. Non-POD destruction, automatic
+GC retention of referenced objects, and region-wide retirement are not supplied
+by the current actor implementation.
 
-What you put in a table is mixed by design: a bulk dump of single-threaded jobs, a handful of multithreaded ones, a later one-payload write from a worker. The same consume path covers all of it. You do not configure a separate “urgent queue.”
+A wave reserves a phase operation across a set of actors, publishes the accepted
+prefix into one or more Farm tables, and seals one aggregate completion.
+Membership rejects duplicate or overlapping unfinished waves. Successful
+completion is the visibility boundary for a dependent phase. Actors within a
+wave remain parallel: an application needing cross-actor reads can maintain
+private mutable state and double-buffered public projections, selecting the
+new public generation only after completion.
 
-Recommended production-ish shape from the 12700H sweeps: `K = 8`, ring in L3, `batch` 256, several small producers with a matching consumer count, consumers pinned to the performance cores. Declare `avgCost` per Call family. Leave `fatal()` on — the wrap checks measured ~free. Do not run `batch=1` and expect the Mpps story.
+A Fiber can orchestrate those phases through counted generation triggers.
+Each completed table advances wave progress. When the sealed wave finishes,
+its hook advances a generation trigger and publishes a preallocated deferred
+notification; managed worker code performs the wake after payload dispatch.
+This replaced completion polling while keeping the completion callback
+`nothrow @nogc`. Publication backpressure can still require cooperative yields.
 
----
+The type-erased actor interface also permits an engine-owned registry of module
+generations. Tests exercise an aggregate unload fence, including callbacks,
+senders, and message/resource destruction that can outlive actor reclamation.
+That is a tested ownership model, not an implemented dynamic loader or automatic
+hot-reload system. The actor API is still an evaluation surface; its remaining
+contracts are tracked in [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md).
 
-## Where it belongs
+## What made actor waves faster
 
-It fits a **game frame tick**, or anything with the same silhouette:
+The early wave path repeatedly reserved the entire remaining actor slice and
+cancelled the part the Farm could not accept. Splitting a large wave into small
+tables therefore repeated work over a shrinking tail. Reserving only the exact
+accepted prefix removed that quadratic behavior. Additional changes eliminated
+ownership operations already supplied by the wave reservation.
 
-1. Something dumps a large table of work.
-2. A pool of spinning workers claims chunks and runs them.
-3. Mid-tick, any thread may publish an urgent job and have it reach a worker in tens of microseconds while the dump is still draining.
-4. The working set is bounded; the ring should sit in cache.
-5. Completion order is not FIFO, and that is acceptable — accumulating work, tiles, islands, callbacks — not a strict pipeline.
+On the Ryzen 5 5500, six physical workers, ordinary pages, LDC release builds,
+32,768 actors per set, 200 measured generations, and three-run medians,
+dispatch cost changed as follows:
 
-It is the wrong tool for ordered streams, for 1P→1W peak transport, for sleeping workers (futex wake is unmeasured), and for an elastic unbounded backlog. You can buy a never-full ring at 32 MiB and up; you pay for it in throughput unless NUMA is addressed, and it has not been.
+| Wave implementation | One orchestration Fiber, ns/actor | Two independent orchestration Fibers, ns/actor |
+| --- | ---: | ---: |
+| Initial path | 286.50 | 211.63 |
+| Remove redundant running-state RMW | 268.98 | 193.78 |
+| Reserve only the accepted prefix | 40.99 | 36.94 |
+| Remove redundant per-member submission pins | 39.51 | 36.38 |
 
----
+Those are 7.25× and 5.82× improvements for this dispatch workload. The large
+change came from avoiding repeated reservation/cancellation, not from changing
+Fiber implementation. Other tested changes, including packed wave status and
+a removed admission load, did not survive repeated sampling and were reverted.
 
-The living spec is `SPEC.md`. Tests are `antfarm_test.d` and `review_torture/`. Throughput and tail live under `perftest/`; raw grids in `throughput.txt` and `latency.txt`.
+Later trigger-based measurements reached about 36.25 and 29.22 ns/actor in
+the one- and two-Fiber workflows. Ring footprint mattered too: a separate
+three-run comparison reduced two-Fiber cost from 36.54 to 29.90 ns/actor by
+using an 8 MiB rather than 16 MiB Farm. These are separate experiments;
+their gains should not be multiplied together.
+
+Worker scaling also had a clear limit. In one ordered prefix sweep, two
+orchestration Fibers reached 30.96 M actor invocations/s at four physical
+workers, 30.87 M/s at six, and 23.37 M/s with all twelve SMT workers. One
+orchestration Fiber peaked near 24.56 M/s at two workers. The callbacks only
+performed identity projections through actor cache lines; substantial behavior
+could move that peak. The full protocols are in
+[the wave characterization](fibers/PERFORMANCE.md#actor-wave-optimization-checkpoint).
+
+## Removing repeated bookkeeping scans
+
+The next optimization pass targeted actor creation, autonomous ready queues,
+and Fiber lifecycle reporting. All three had costs that increased with backlog
+size even when each callback did almost nothing:
+
+- Actor creation restarted a vacant-slot search for each new actor. A gated
+  intrusive free list now supplies constant-size slot operations, with allocator
+  calls outside the gate.
+- Each bounded actor flush detached the whole ready backlog and requeued its
+  unused suffix. The runtime now retains that suffix and removes only the next
+  batch, reducing a complete drain from approximately `O(N²/B)` to `O(N)`
+  queue work for `N` actors and batch size `B`.
+- Fiber lifecycle delivery recounted the retained suffix on every bounded
+  drain. Its count now travels with the suffix, including handler-failure
+  retries. Total traversal is linear; the initial detached-list reversal still
+  visits the whole batch once.
+
+Selected Ryzen/LDC `-O2 -release`, ordinary-page measurements, using matched
+benchmark sources and three-run medians:
+
+| Isolated operation | Before | After | Ratio |
+| --- | ---: | ---: | ---: |
+| Ready dispatch, 16,384 actors, batch 32 | 1,873.62 ns/actor | 23.50 ns/actor | 79.73× |
+| Initial creation, 32,768 actors | 581.081 ms | 2.489 ms | 233.46× |
+| Lifecycle handler, 16,384 records, batch 32 | 20.200 ms | 1.047 ms | 19.29× |
+| Lifecycle array drain, same count/batch | 20.332 ms | 1.452 ms | 14.00× |
+
+These ratios isolate the old scans. They are not application-wide speedups,
+and the free-list gate does not guarantee contention-free concurrent creation.
+Revision pairs, timing exclusions, and reproducing commands are recorded in
+[perftest/README.md](perftest/README.md).
+
+The unchanged synthetic workloads provide a useful check on that distinction.
+Comparing `8e988f6` with `e6ce4d1`, payload throughput stayed around 83 M/s with
+one consumer and 87–88 M/s with six; those payload executables were byte-identical.
+Steady actor-wave medians moved from 26.190 to 26.828 M/s for one orchestration
+Fiber and 31.977 to 32.170 M/s for two, with overlapping sample ranges.
+Whole wave-benchmark process time fell from 4.742 to 2.355 seconds, consistent
+with faster actor setup outside the steady dispatch timing.
+
+There was also a regression: same-thread warm Fiber execution fell from 4.555
+to 4.296 M/s. Seven additional pinned pairs reproduced about a 5% decline,
+while warm creation and combined creation/execution improved. Its cause remains
+unresolved. Twelve-worker warm spawn-through-completion changed from 1.730 to
+1.759 M Fibers/s; higher drain-only figures exclude concurrent spawning time
+and should not be presented as full lifecycle rates. See
+[THROUGHPUT.md](perftest/THROUGHPUT.md) for the complete comparison.
+
+## Complete actor lifetimes: the current optimization target
+
+The sustained churn benchmark repeatedly creates a cohort, dispatches each
+actor once, waits for completion, retires it, and reclaims its state. Every
+cycle checks the exact callback count and generation, plus zero live, ready,
+or stale actors. Farm storage, control slots, metadata arrays, and consumer
+threads survive across cycles; their setup and shutdown are excluded. The
+callback updates a private completion line. The benchmark isolates cohort
+lifetimes with minimal work; it does not model substantial actor behavior or
+concurrent creators and reclaimers.
+
+This is a stricter timing boundary than dispatch-only throughput. In the first
+matched comparison, using the C-runtime allocator, batch 256, one thread, and
+three-run medians:
+
+| Cohort and mode | Original `8e988f6`, M lifetimes/s | Optimized `e6ce4d1`, M lifetimes/s |
+| --- | ---: | ---: |
+| 4,096 autonomous actors | 0.777 | 9.018 |
+| 4,096 actors in a wave | 0.811 | 9.809 |
+| 16,384 autonomous actors | 0.115 | 8.003 |
+| 16,384 actors in a wave | 0.117 | 8.670 |
+
+The large-cohort gains mainly reflect eliminating the repeated slot search.
+With those scans gone, allocation and smaller synchronization costs become
+visible. The subsequent retirement change joins the closed submission gate,
+rechecks the lifecycle, and uses a release store when the retiring owner is the
+unique remaining writer. Matching mimalloc runs improved same-thread complete
+lifetimes by 3.47% for autonomous actors and 4.39% for waves. Reusing the Farm's
+single-shot ownership then improved wave lifetimes by another measured 3.24%
+in its own matched comparison; the autonomous change was smaller and sample
+ranges overlapped.
+
+The same review fixed a wave-membership race: the old wave must finish clearing
+its intrusive link before releasing the membership pin, because the actor can
+immediately enter another wave or become reclaimable. A forced-interleaving
+regression test exercises that reuse. This is a correctness fix, not an assigned
+throughput gain.
+
+## Mimalloc, batching, and placement
+
+Actor state in the churn benchmark is allocated and freed on every cycle.
+It is not repeatedly allocated with D `new`; D allocation supplies persistent
+benchmark setup. The existing C-runtime default uses 64-byte-aligned, rounded
+allocations. The optional pinned mimalloc v3.5.0 adapter uses the requested
+size and alignment, with matching sized/aligned frees. The benchmark state is
+16 bytes with 8-byte alignment. Mimalloc is linked with process-wide allocator
+override disabled.
+
+The later `cf768cf` measurements used the Ryzen 5 5500, LDC 1.43.0 / LLVM
+22.1.8, `-O2 -release`, ordinary pages, 16,384 actors, batch 256, five warm-ups,
+and medians of five runs of at least two measured seconds per configuration:
+
+| Execution | Mode | C runtime, M lifetimes/s | Mimalloc, M lifetimes/s |
+| --- | --- | ---: | ---: |
+| Controller also consumes, CPU 2 | Autonomous | 8.426 | 18.247 |
+| Controller also consumes, CPU 2 | Wave | 9.180 | 22.346 |
+| Controller CPU 6; consumers 0–5 | Autonomous | 5.959 | 14.992 |
+| Controller CPU 6; consumers 0–5 | Wave | 6.013 | 15.450 |
+
+These compare the project's two allocation policies. They do not establish a
+universal advantage over ordinary `malloc(16)`, because the default C policy
+also requests stronger alignment. An earlier matching-64-byte mimalloc control
+still improved lifetime throughput by 2.13× for autonomous actors and 2.34× for
+waves. All creation and freeing in these timing runs occur on the controller;
+foreign-thread reclamation is tested separately for correctness.
+
+Offering an entire wave cohort at once raised same-thread mimalloc throughput
+from 22.346 to 22.713 M lifetimes/s. A separate three-run placement measurement,
+with controller CPU 6 and one consumer on CPU 1, a different physical core, reached
+20.643 M autonomous lifetimes/s and 25.192 M wave lifetimes/s. Autonomous
+publication used batch 256; wave publication offered all 16,384 actors.
+
+Six continuously polling consumers did less well for these tiny callbacks.
+The six-consumer placement also shares the controller's physical core with
+one consumer, so worker count and topology are coupled in that comparison.
+Creation and reclamation remain serial. This is why the earlier payload grid's
+scaling result should not become a general recommendation to add workers.
+
+The retained benchmark supports the C-runtime baseline, mimalloc, and a
+matching-alignment mimalloc diagnostic. Experimental arena, pool, and other
+malloc policies were removed. Historical measurements precede that harness
+cleanup; they are reference results, not fresh timings of the cleaned binary.
+Long-running memory retention, fragmentation, and application workloads remain
+separate questions. See [MIMALLOC.md](perftest/MIMALLOC.md) and
+[LIFECYCLE.md](perftest/LIFECYCLE.md).
+
+## Memory and topology are workload choices
+
+Ordinary 4 KiB Farm backing is the default. Huge pages remain an explicit option
+because long payload walks can benefit while Fiber scheduling does not
+necessarily do so. In the verified Ryzen page comparison, three-run medians
+for 500,000 Fibers gave:
+
+| Fiber drain | 4 KiB pages | Huge pages |
+| --- | ---: | ---: |
+| Single-thread recycled | 4.39 M/s | 4.37 M/s |
+| Twelve-worker first drain | 8.85 M/s | 7.66 M/s |
+| Twelve-worker recycled | 8.30 M/s | 8.10 M/s |
+
+Live mapping inspection confirmed actual Linux huge-page promotion in that
+experiment. Requesting `MADV_HUGEPAGE` alone is not proof of promotion, and the
+Farm's page choice does not change Fiber stack mappings. Windows uses the
+large-page mapping path and requires the corresponding privilege.
+
+The pool and Fiber domain model support LLC-local lanes and covering workers,
+and topology parsing has captured and synthetic tests. Current Ryzen
+characterization has one LLC. Multi-LLC/NUMA throughput and worker-group
+failover still need hardware validation. There is also no ring size that makes
+a bounded Farm unconditionally immune to backpressure: cache footprint and
+producer slack must be measured together.
+
+## Correctness evidence and remaining scope
+
+The September 24 integration checks passed root unit and integration tests,
+actor torture, Farm torture, and Fiber unit/smoke suites with LDC and DMD.
+Actor and Farm ThreadSanitizer lanes, real mimalloc full-debug checks, LDC
+release Fiber stress, and 42 churn smoke/argument checks also passed. The full
+Fiber smoke executable is a separate command from module unit tests; both are
+listed in the [Fiber test instructions](fibers/README.md#build-and-test).
+
+Coverage includes ring reuse and partial publication, exact ST/MT execution,
+concurrent creation and reclamation, late accepted sends during retirement,
+ready-backlog handoff under backpressure, immediate wave-member reuse, dependent
+phase visibility, lifecycle handler retries, and migration/cancellation/GC
+retention for Fibers. The mimalloc suite additionally frees 8,192 actor states
+from threads other than their allocation threads.
+
+Migrating DRuntime Fibers have a known sanitizer/runtime boundary, so Farm and
+actor TSan success is not evidence that stack-switching Fiber execution is
+TSan-verified. Earlier Windows x64 DMD/LDC integration and stress runs are
+recorded in [ROADMAP.md](ROADMAP.md); they should not be mistaken for a Windows
+rerun of every subsequent optimization.
+
+The supported use case is bounded, unordered work with explicit completion and
+lifetime ownership. An engine can mix short payloads, persistent actors,
+phase-oriented waves, and Fibers that coordinate waits on the same workers.
+Ordered streams, unbounded backlogs, hard latency guarantees, and arbitrary
+preemption require additional contracts. Non-POD actor lifetime, adopted state,
+retirement groups, integrated actor wake targeting, and multi-LLC validation
+remain open work. DRuntime Fibers remain the implemented control-flow model.
+
+For onboarding, use [README.md](README.md) and the compiled examples. For the
+layer relationships and shutdown order, use [ARCHITECTURE.md](ARCHITECTURE.md).
+The detailed evidence lives in [the performance benchmarks](perftest/README.md),
+[the Fiber report](fibers/PERFORMANCE.md),
+[the actor ordering contract](actors/ACTOR_MEMORYORDER.md), and the
+[Farm](review_torture/README.md) and [actor](actor_torture/README.md) torture suites.
