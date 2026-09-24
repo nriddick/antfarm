@@ -1,5 +1,8 @@
 # Performance characterization
 
+For the original checkout versus optimized branch on the existing payload,
+Fiber, and actor-wave benchmarks, see [THROUGHPUT.md](THROUGHPUT.md).
+
 ## Actor ready backlog
 
 `actor_ready.d` measures autonomous actor dispatch from a prequeued burst.
