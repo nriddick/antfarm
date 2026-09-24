@@ -1,5 +1,9 @@
 # Actor lifetime churn with mimalloc
 
+For the later native-malloc, arena, jemalloc, tcmalloc, and oneTBB comparison,
+see [ALLOCATORS.md](ALLOCATORS.md). It includes an ordinary `malloc(16)`
+control as well as the 64-byte-aligned C policy measured here.
+
 The sustained benchmark allocates and frees actor state on **every** cycle.
 It does not use D `new` for those state allocations. D allocations create
 the owner/handle/completion arrays and consumer machinery once, outside the

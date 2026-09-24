@@ -7,7 +7,8 @@ Fiber, and actor-wave benchmarks, see [THROUGHPUT.md](THROUGHPUT.md).
 
 `actor_churn.d` repeatedly creates a full cohort of actors, dispatches each
 exactly once, requests retirement, and reclaims every actor before the next
-cycle. Actor state is allocated and freed on every cycle. The Farm, runtime,
+cycle. Actor state is allocated and passed back to its allocator on every
+cycle; pool and arena policies retain their backing storage. The Farm, runtime,
 owner/handle arrays, completion counters, wave descriptor, and consumer
 threads persist across cycles, so stable actor slots and wave generations
 are reused. There are no Fibers in this benchmark: it isolates the actor
@@ -23,7 +24,8 @@ ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn wave 4096 3 6 256 5
 
 Arguments are mode (`actor` or `wave`), actors per cohort, minimum measured
 seconds, background consumers, publication batch, warm-up cycles,
-and optional allocator (`crt`, `mimalloc`, `mimalloc64`, or `pool`). Autonomous
+and optional allocator (`crt`, `malloc`, `mimalloc`, `mimalloc64`, `pool`, or
+`arena`). Autonomous
 publication batches are 1–256; wave publication accepts any positive batch,
 with the Farm splitting larger offered slices into physical tables.
 An optional final comma-separated CPU list pins the controller followed by
@@ -36,8 +38,8 @@ created or joined inside the timed loop.
 
 The primary rate, `Mactor_cycles/s`, counts **complete actor lifetimes** in
 millions per second, including creation, dispatch, completion waiting,
-retirement, freeing, and verification. In wave mode, `cycles/s` also gives
-completed cohort waves per second. Every cycle ends with an exact callback
+retirement, allocator reclamation/reset, and verification. In wave mode,
+`cycles/s` also gives completed cohort waves per second. Every cycle ends with an exact callback
 count/generation check and zero live, ready, or stale actors. The benchmark
 also reports aggregate creation, dispatch, and retirement/reclamation/check
 times for the measured cycles. Warm-up, runtime setup, and final thread
@@ -67,6 +69,17 @@ and defaults to the existing `actors.mimalloc` adapter. It can also select
 [MIMALLOC.md](MIMALLOC.md) for commands, alignment controls, and results.
 For the next runtime improvement and caller-side pooling/batching choices,
 see [LIFECYCLE.md](LIFECYCLE.md).
+For a bump arena, native `malloc` requests, and locally installed jemalloc,
+tcmalloc, and oneTBB replacements, see [ALLOCATORS.md](ALLOCATORS.md).
+
+`malloc` requests the exact state size through ordinary C `malloc`/`free`;
+runtime and stable-slot allocations retain the 64-byte-aligned policy.
+`arena` preallocates one cohort's state storage, bumps through it on creation,
+and does nothing on individual state frees. After every actor is reclaimed
+and the runtime is empty, the controlling thread resets the arena inside the
+timed cycle. Runtime/slot allocations remain outside that arena. Like `pool`,
+this is a bounded, controller-owned benchmark policy, not a general allocator
+for unrelated or overlapping lifetimes.
 
 ### Sustained comparison
 
