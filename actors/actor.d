@@ -20,7 +20,7 @@ public import antfarm : AntFarm, PayloadBody, PayloadHeader, Tier, Token;
 import antfarm_allocation : allocateAligned64, freeAligned64;
 import antfarm : fatal;
 import core.atomic : MemoryOrder, atomicExchange, atomicFetchAdd,
-    atomicFetchSub, atomicLoad, atomicStore, cas;
+    atomicFetchSub, atomicLoad, atomicStore, cas, pause;
 import core.stdc.string : memcpy, memset;
 
 /// Non-GC allocation policy used for the runtime, stable slots, and actor
@@ -310,7 +310,8 @@ package align(64) struct ActorSlot
     shared ulong submissionGate; // closed bit | in-flight send reservations
     shared size_t waveOwnerWord; // stable ActorWave address while a member
     ActorSlot* waveNext;         // orchestrator-owned intrusive member list
-    ulong[2] inboxPadding;
+    ActorSlot* freeNext;         // runtime free-slot gate held; vacant only
+    ulong inboxPadding;
 }
 static assert(ActorSlot.sizeof == 128);
 static assert(ActorSlot.alignof == 64);
@@ -582,6 +583,8 @@ align(64) struct ActorRuntime
     private shared ulong staleActivations_;
     private size_t readyCarryWord; // detached backlog; readyDrainGate held
     private shared uint readyDrainGate;
+    private shared uint freeSlotGate;
+    private ActorSlot* freeSlots;
     private PayloadHeader actorHeader;
 
     static ActorRuntime* create(AntFarm* farm, size_t capacity,
@@ -615,7 +618,12 @@ align(64) struct ActorRuntime
         runtime.actorHeader.plen = 2;
         runtime.actorHeader.call = &actorPayloadCallback;
         foreach (i; 0 .. capacity)
+        {
             runtime.slots[i].runtime = runtime;
+            runtime.slots[i].freeNext = i + 1 < capacity
+                ? &runtime.slots[i + 1] : null;
+        }
+        runtime.freeSlots = runtime.slots;
         return runtime;
     }
 
@@ -682,33 +690,21 @@ private:
                 || (stateAlignment & (stateAlignment - 1)) != 0)
             return ActorErasedOwner.init;
 
-        ActorSlot* slot;
-        ulong generation;
-        foreach (i; 0 .. capacity_)
-        {
-            auto candidate = &slots[i];
-            auto observed = atomicLoad!(MemoryOrder.acq)(candidate.lifecycle);
-            if (wordPhase(observed) != phaseVacant) continue;
-            generation = wordGeneration(observed) + 1;
-            if (generation == 0 || generation > maxGeneration)
-                fatal("actor generation wrap");
-            immutable replacement = lifecycleWord(
-                generation, phaseConstructing);
-            if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
-                    &candidate.lifecycle, observed, replacement))
-            {
-                slot = candidate;
-                break;
-            }
-        }
+        auto slot = takeFreeSlot();
         if (slot is null) return ActorErasedOwner.init;
+        immutable observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
+        assert(wordPhase(observed) == phaseVacant);
+        immutable generation = wordGeneration(observed) + 1;
+        if (generation == 0 || generation > maxGeneration)
+            fatal("actor generation wrap");
+        atomicStore!(MemoryOrder.rel)(slot.lifecycle,
+            lifecycleWord(generation, phaseConstructing));
 
         auto state = allocator.allocate(allocator.context,
             stateSize, stateAlignment);
         if (state is null)
         {
-            atomicStore!(MemoryOrder.rel)(slot.lifecycle,
-                lifecycleWord(generation, phaseVacant));
+            returnFreeSlot(slot, generation);
             return ActorErasedOwner.init;
         }
         memcpy(state, initialState, stateSize);
@@ -778,6 +774,40 @@ public:
     }
 
 private:
+    // Only constant-size list operations run under this gate. Allocation,
+    // deallocation, and all actor callbacks execute after it is released.
+    // Serializing the list avoids ABA on concurrently recycled slot pointers.
+    void lockFreeSlots() nothrow @nogc @system
+    {
+        while (!cas!(MemoryOrder.acq, MemoryOrder.raw)(
+                &freeSlotGate, 0U, 1U))
+            while (atomicLoad!(MemoryOrder.raw)(freeSlotGate) != 0) pause();
+    }
+
+    ActorSlot* takeFreeSlot() nothrow @nogc @system
+    {
+        lockFreeSlots();
+        scope (exit) atomicStore!(MemoryOrder.rel)(freeSlotGate, 0U);
+        auto slot = freeSlots;
+        if (slot !is null)
+        {
+            freeSlots = slot.freeNext;
+            slot.freeNext = null;
+        }
+        return slot;
+    }
+
+    void returnFreeSlot(ActorSlot* slot, ulong generation)
+        nothrow @nogc @system
+    {
+        lockFreeSlots();
+        scope (exit) atomicStore!(MemoryOrder.rel)(freeSlotGate, 0U);
+        atomicStore!(MemoryOrder.rel)(slot.lifecycle,
+            lifecycleWord(generation, phaseVacant));
+        slot.freeNext = freeSlots;
+        freeSlots = slot;
+    }
+
     size_t takeReady(scope ActorSlot*[] snapshot)
         nothrow @nogc @system
     {
@@ -993,8 +1023,7 @@ private ActorReclaimResult reclaimActor(ref ActorSlot* slot,
     runtime.allocator.deallocate(runtime.allocator.context, state,
         stateSize, stateAlignment);
     atomicFetchSub!(MemoryOrder.acq_rel)(runtime.liveCount, 1UL);
-    atomicStore!(MemoryOrder.rel)(slot.lifecycle,
-        lifecycleWord(generation, phaseVacant));
+    runtime.returnFreeSlot(slot, generation);
     slot = null;
     generation = 0;
     return ActorReclaimResult.reclaimed;

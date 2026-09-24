@@ -271,6 +271,13 @@ throwing Director handler preserves its untouched suffix for retry. Lifecycle
 records and completions must both be retired before the final task root is
 removed.
 
+The lifecycle queue counts nodes during its one-time detached-list reversal.
+The Director carries that count with any retained suffix, including handler
+failure retries. Bounded `takeLifecycleEvents` and `handleLifecycleEvents`
+therefore drain a backlog in linear total work instead of recounting the
+shrinking list on every call. The initial reversal still visits the complete
+detached batch; `maximum` bounds returned/handled records, not that first walk.
+
 `beginShutdown(false)` closes admission and drains cooperative work.
 `beginShutdown(true)` also requests cancellation and wakes indefinite waiters.
 The application must still bound or otherwise control user code that never

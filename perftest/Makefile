@@ -6,10 +6,17 @@ DFLAGS ?= -O2 -release
 FARM_SOURCES := $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
 ACTOR_SOURCES := $(ROOT)/actors/package.d $(ROOT)/actors/actor.d \
 	$(ROOT)/actors/wave.d $(ROOT)/actors/mimalloc.d
+FIBER_SOURCES := $(wildcard $(ROOT)/fibers/source/antfarm_fibers/*.d)
+THREADPOOL_SOURCES := $(wildcard $(ROOT)/threadpool/source/threadpool/*.d) \
+	$(wildcard $(ROOT)/threadpool/source/threadpool/sys/*.d)
 
 .PHONY: all run run-once run-once-constant-header run-once-constant-callandlength dual-run dual-grid-run dual-run-constant-header dual-run-constant-callandlength digest-run tail-run grid-run run-grid run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
 
-all: throughput dual digest tail actor_ready
+all: throughput dual digest tail actor_ready scaling
+
+scaling: scaling.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(FIBER_SOURCES) $(THREADPOOL_SOURCES)
+	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/fibers/source \
+		-I$(ROOT)/threadpool/source scaling.d -of=$@
 
 actor_ready: actor_ready.d $(FARM_SOURCES) $(ACTOR_SOURCES)
 	$(DC) $(DFLAGS) -I$(ROOT) actor_ready.d $(FARM_SOURCES) $(ACTOR_SOURCES) -of=$@
@@ -77,4 +84,4 @@ tail-run-huge: tail
 	./tail --huge | tee last_tail_huge.txt
 
 clean:
-	rm -f throughput digest tail dual actor_ready *.o
+	rm -f throughput digest tail dual actor_ready scaling *.o

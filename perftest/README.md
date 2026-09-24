@@ -1,4 +1,6 @@
-# Actor ready-backlog benchmark
+# Performance characterization
+
+## Actor ready backlog
 
 `actor_ready.d` measures autonomous actor dispatch from a prequeued burst.
 One thread flushes batches and consumes the resulting Farm tables. Every
@@ -51,3 +53,57 @@ forced drain handoff, concurrent wakes, partial publication, repeated full-Farm
 retries, four flushers, and two consumers. See
 [actor_torture/README.md](../actor_torture/README.md) and the
 [ready-queue ordering contract](../actors/ACTOR_MEMORYORDER.md#ready-queue-ownership).
+
+## Actor creation and Fiber lifecycle drains
+
+`scaling.d` isolates two bookkeeping costs without changing the DRuntime Fiber
+backend or its exception, suspension, and cleanup behavior:
+
+```sh
+make -C perftest scaling
+ANTFARM_HUGE_PAGES=0 ./perftest/scaling create 32768
+ANTFARM_HUGE_PAGES=0 ./perftest/scaling lifecycle 16384 32 handle
+ANTFARM_HUGE_PAGES=0 ./perftest/scaling lifecycle 16384 32 take
+```
+
+The creation mode times actor slot reservation and C-runtime state allocation
+for an initially empty runtime. Farm/runtime setup, owner-array allocation,
+and retirement/reclamation are outside the timed interval. Lifecycle modes
+precreate Fibers with 4 KiB stacks, then time only draining their admitted
+records. `handle` invokes a counting delegate; `take` also allocates the arrays
+returned by `takeLifecycleEvents`. Fiber creation, execution, terminal-record
+draining, and recycling are outside that interval.
+
+The following results were collected on the same host and compiler described
+above, with ordinary pages and LDC `-O2 -release`. Both binaries use the same
+`scaling.d` source; the baseline is `1615d31`. Values are median milliseconds
+from three alternating runs of each binary. Lifecycle batch size is 32.
+
+| Operation | Count | Before ms | After ms | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| Actor creation | 8,192 | 25.677 | 0.599 | 42.87× |
+| Actor creation | 16,384 | 140.206 | 1.202 | 116.64× |
+| Actor creation | 32,768 | 581.081 | 2.489 | 233.46× |
+| Lifecycle handler | 4,096 | 1.116 | 0.251 | 4.45× |
+| Lifecycle handler | 8,192 | 4.907 | 0.505 | 9.72× |
+| Lifecycle handler | 16,384 | 20.200 | 1.047 | 19.29× |
+| Lifecycle array drain | 16,384 | 20.332 | 1.452 | 14.00× |
+
+Actor creation previously restarted its vacant-slot search at zero, making
+initial population quadratic. Slots now come from an intrusive free list:
+slot bookkeeping is constant work per actor, with a short gate protecting
+concurrent list access. Allocator calls run outside that gate. Slot size stays
+128 bytes; the link occupies former padding. Allocation failures and foreign-
+thread reclamation return slots through the same list.
+
+Lifecycle drains previously walked the entire remaining list to obtain its
+length on every batch. The queue already counted its nodes while reversing
+the detached stack; that count now travels with the retained suffix. Draining
+`N` events in batches of `B` changes from `O(N²/B)` traversal to `O(N)` total
+traversal. The first detach still reverses the whole batch once. Handler
+failure retries retain the remaining count and assigned sequence numbers.
+
+Focused `perf` samples before the changes attributed 99.65% of user cycles to
+actor creation's search path at 32,768 actors, and 93.22% to lifecycle handling
+at 16,384 events with batch size 1. These probes characterize those operations,
+not overall application performance or concurrent allocator scalability.

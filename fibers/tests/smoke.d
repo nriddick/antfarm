@@ -900,6 +900,85 @@ void lifecycleRetentionSmoke()
     handlerBackend.release(handledTask);
 }
 
+void lifecycleBacklogSmoke()
+{
+    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
+    scope (exit) farm.destroy();
+    auto domain = new FiberDomain(farm);
+    domain.enableLifecycleEvents(4 * 128);
+    auto token = farm.registerProducer(Tier.small);
+    scope (exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    subscribeOrThrow(view, farm);
+    scope (exit) view.unsubscribe();
+
+    FiberTask[] tasks;
+    foreach (_; 0 .. 96) tasks ~= domain.spawn({});
+    size_t seen;
+    ulong sequence;
+    FiberLifecycleHandler checkAdmitted = (ref const FiberLifecycleEvent event)
+    {
+        assert(event.kind == FiberLifecycleKind.admitted);
+        assert(event.task == tasks[seen].handle);
+        assert(event.sequence == sequence + 1);
+        sequence = event.sequence;
+        ++seen;
+    };
+    foreach (ref event; domain.takeLifecycleEvents(3)) checkAdmitted(event);
+    // New head entries must remain behind the already detached backlog.
+    foreach (_; 0 .. 17) tasks ~= domain.spawn({});
+    assert(domain.pendingEvents == tasks.length - seen);
+    assert(domain.takeLifecycleEvents(0).length == 0);
+    assert(domain.handleLifecycleEvents(checkAdmitted, 0) == 0);
+    bool failed;
+    ulong failedSequence;
+    FiberLifecycleHandler failing = (ref const FiberLifecycleEvent event)
+    {
+        if (seen == 19)
+        {
+            failedSequence = event.sequence;
+            throw new Exception("retry in a partially acknowledged backlog");
+        }
+        checkAdmitted(event);
+    };
+    try domain.handleLifecycleEvents(failing, 32);
+    catch (Exception) failed = true;
+    assert(failed && seen == 19 && failedSequence == sequence + 1);
+    assert(domain.pendingEvents == tasks.length - seen);
+    while (domain.pendingEvents != 0)
+    {
+        auto batch = domain.takeLifecycleEvents(5);
+        assert(batch.length <= 5);
+        foreach (ref event; batch) checkAdmitted(event);
+        assert(domain.pendingEvents == tasks.length - seen);
+        auto handled = domain.handleLifecycleEvents(checkAdmitted, 11);
+        assert(handled <= 11);
+        assert(domain.pendingEvents == tasks.length - seen);
+    }
+    assert(seen == tasks.length);
+    assert(domain.takeLifecycleEvents(1).length == 0);
+    assert(domain.handleLifecycleEvents(checkAdmitted, 1) == 0);
+
+    drainUntilEmpty(domain, token, view);
+    auto completions = domain.takeCompletions();
+    assert(completions.length == tasks.length);
+    size_t terminals;
+    while (domain.pendingEvents != 0)
+    {
+        foreach (ref event; domain.takeLifecycleEvents(7))
+        {
+            assert(event.kind == FiberLifecycleKind.terminal);
+            assert(event.outcome == FiberOutcome.completed);
+            ++sequence;
+            assert(event.sequence == sequence);
+            ++terminals;
+        }
+        assert(domain.pendingEvents == tasks.length - terminals);
+    }
+    assert(terminals == tasks.length && domain.lifecycleReserved == 0);
+    domain.releaseAll(completions);
+}
+
 void sharedDomainLaneSmoke()
 {
     auto farmA = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
@@ -1842,6 +1921,7 @@ void main()
     cancellationSemanticsSmoke();
     lifecycleEventSmoke();
     lifecycleRetentionSmoke();
+    lifecycleBacklogSmoke();
     sharedDomainLaneSmoke();
     remoteCoverageRingSmoke();
     remoteSweeperSmoke();

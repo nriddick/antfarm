@@ -15,6 +15,7 @@ import core.memory : GC;
 import core.stdc.stdio : fflush, fprintf, printf, stderr, stdout;
 import core.stdc.stdlib : abort, free, malloc;
 import core.stdc.string : memset;
+import core.sync.barrier : Barrier;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;
 
@@ -1714,6 +1715,156 @@ private void testReadyBacklog()
 }
 
 // -------------------------------------------------------------------------
+// Free-slot allocation failure and concurrent cross-thread reuse
+// -------------------------------------------------------------------------
+
+private struct SlotState { ulong marker; }
+
+private void slotActor(scope ref ActorBorrow!SlotState,
+        scope ref ActorContext) nothrow @nogc @system {}
+
+private struct FailingSlotAllocator
+{
+    CountedAllocator counts;
+    bool failNext;
+}
+
+private void* failingSlotAllocate(void* context, size_t bytes, size_t alignment)
+    nothrow @nogc @system
+{
+    auto state = cast(FailingSlotAllocator*) context;
+    if (state.failNext)
+    {
+        state.failNext = false;
+        return null;
+    }
+    return countedAllocate(&state.counts, bytes, alignment);
+}
+
+private void failingSlotDeallocate(void* context, void* memory,
+        size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    auto state = cast(FailingSlotAllocator*) context;
+    countedDeallocate(&state.counts, memory, bytes, alignment);
+}
+
+private void testSlotAllocationFailure()
+{
+    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    scope (exit) farm.destroy();
+    FailingSlotAllocator state;
+    auto runtime = ActorRuntime.create(farm, 4,
+        ActorAllocator(&state, &failingSlotAllocate, &failingSlotDeallocate));
+    check(runtime !is null, "free-slot runtime creation");
+    ActorOwner!SlotState[4] owners;
+    ActorHandle!SlotState[4] stale;
+    foreach (_; 0 .. 8)
+    {
+        foreach (i; 0 .. owners.length)
+        {
+            // Repeated failure must return its reserved slot every time.
+            foreach (attempt; 0 .. 3)
+            {
+                state.failNext = true;
+                auto failed = runtime.createActor!(SlotState, slotActor)(SlotState.init);
+                check(!failed.valid && runtime.live == i,
+                    "failed state allocation returns slot without a live actor");
+            }
+            owners[i] = runtime.createActor!(SlotState, slotActor)(SlotState(i));
+            check(owners[i].valid, "free-slot allocation recovers after failure");
+        }
+        auto extra = runtime.createActor!(SlotState, slotActor)(SlotState.init);
+        check(!extra.valid, "free-slot exhaustion is exact");
+        foreach (handle; stale)
+            check(handle.wake() == ActorWakeResult.staleHandle,
+                "failed allocations and reuse preserve stale generations");
+        foreach (i, ref owner; owners)
+        {
+            stale[i] = owner.handle;
+            check(owner.requestRetire() == ActorRetireResult.requested,
+                "free-slot actor retires");
+            check(owner.reclaim() == ActorReclaimResult.reclaimed,
+                "free-slot actor reclaimed");
+        }
+        check(runtime.live == 0, "free-slot generation drained");
+    }
+    runtime.destroy();
+    check(state.counts.allocations == state.counts.deallocations,
+        "free-slot failure allocator balance");
+}
+
+private class SlotReuseJob
+{
+    enum batch = 16;
+    ActorRuntime* runtime;
+    Barrier barrier;
+    SlotReuseJob next;
+    ActorOwner!SlotState[batch] owners;
+    ActorHandle!SlotState[batch] stale;
+
+    void run()
+    {
+        foreach (round; 0 .. 64)
+        {
+            foreach (ref owner; owners)
+            {
+                owner = runtime.createActor!(SlotState, slotActor)(SlotState(round));
+                check(owner.valid, "concurrent free-slot allocation");
+            }
+            barrier.wait();
+            auto extra = runtime.createActor!(SlotState, slotActor)(SlotState.init);
+            check(!extra.valid, "concurrent free-slot capacity exhaustion");
+            foreach (handle; stale)
+                check(handle.wake() == ActorWakeResult.staleHandle,
+                    "concurrent free-slot stale handle after reuse");
+            // Every owner moves to the next thread through the barrier.
+            barrier.wait();
+            foreach (i, ref owner; next.owners)
+            {
+                stale[i] = owner.handle;
+                check(owner.requestRetire() == ActorRetireResult.requested,
+                    "foreign-thread slot retirement");
+                check(owner.reclaim() == ActorReclaimResult.reclaimed,
+                    "foreign-thread slot reclaim");
+            }
+            barrier.wait();
+            check(runtime.live == 0, "all concurrent slots returned");
+            barrier.wait();
+        }
+    }
+}
+
+private void testConcurrentSlotReuse()
+{
+    enum workers = 8;
+    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, workers * SlotReuseJob.batch);
+    check(runtime !is null, "concurrent free-slot runtime creation");
+    auto barrier = new Barrier(workers);
+    SlotReuseJob[workers] jobs;
+    Thread[workers] threads;
+    foreach (ref job; jobs)
+    {
+        job = new SlotReuseJob;
+        job.runtime = runtime;
+        job.barrier = barrier;
+    }
+    foreach (i, job; jobs)
+    {
+        job.next = jobs[(i + 1) % workers];
+        threads[i] = new Thread(&job.run);
+    }
+    foreach (thread; threads) thread.start();
+    foreach (thread; threads) thread.join();
+    check(runtime.live == 0 && runtime.ready == 0,
+        "concurrent free-slot runtime drained");
+    runtime.destroy();
+    printf("actor free-slot failure and concurrent cross-thread reuse OK\n");
+    fflush(stdout);
+}
+
+// -------------------------------------------------------------------------
 // mimalloc v3 adapter contracts: local ABI stub and pinned real library
 // -------------------------------------------------------------------------
 
@@ -1963,6 +2114,8 @@ void main()
     testSustainedContention();
     testReadyDrainHandoff();
     testReadyBacklog();
+    testSlotAllocationFailure();
+    testConcurrentSlotReuse();
     version (AntfarmMimallocStub)
         testMimallocV3AdapterContract();
     version (AntfarmMimallocReal)

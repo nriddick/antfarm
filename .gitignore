@@ -36,5 +36,6 @@ perftest/digest
 perftest/tail
 perftest/dual
 perftest/actor_ready
+perftest/scaling
 perftest/throughput_eager
 perftest/throughput_sd64

@@ -35,6 +35,8 @@ caller-observed quiescence described below.
 | `H` | `ActorRuntime.readyHeadWord` | Intrusive MPSC ready-stack head. |
 | `D` | `ActorRuntime.readyDrainGate` | Nonblocking exclusive ownership of ready-list snapshot extraction. |
 | `Rcarry` | `ActorRuntime.readyCarryWord` | Plain detached backlog, accessed only while holding `D`. |
+| `Fgate` | `ActorRuntime.freeSlotGate` | Acquire/release gate protecting the plain free-slot head and links. |
+| `Fhead` / `Fnext` | `ActorRuntime.freeSlots` / `ActorSlot.freeNext` | Vacant slots available for construction; no allocated state is on this list. |
 | `Qnext` | `ActorSlot.queueNextWord` | Link owned by the ready queue while that slot is queued. |
 | `Rc` | `ActorRuntime.readyCount` | Diagnostic/shutdown accounting; not a publication edge. |
 | `Lc` | `ActorRuntime.liveCount` | Allocated-generation accounting; not sufficient by itself for runtime destruction. |
@@ -203,7 +205,7 @@ later batch. The actor is the sole consumer and sole owner of `C`.
 ## Lifecycle states
 
 ```text
-VACANT --CAS(acq_rel), generation++--> CONSTRUCTING
+VACANT --exclusive free-list pop, generation++--> CONSTRUCTING
                                           |
                            plain initialization,
                            then store-release IDLE
@@ -240,7 +242,7 @@ empty.
 
 | Handoff | Publication side | Acquisition side | What becomes visible |
 | --- | --- | --- | --- |
-| Slot reuse to construction | Reclaimer clears/deallocates the old state and release-stores `VACANT`. | Creator uses an `acq_rel` CAS for `VACANT -> CONSTRUCTING` while incrementing the generation. | Completion of old-generation teardown before the slot is initialized again. |
+| Slot reuse to construction | Reclaimer clears/deallocates the old state, release-stores `VACANT`, links the slot into `Fhead`, then release-stores `Fgate`. | Creator acquire-locks `Fgate` and exclusively removes the slot, then acquire-loads `L` and release-stores `CONSTRUCTING` with the next generation. | Completion of old-generation teardown and unique construction ownership before the slot is initialized again. |
 | Construction to first wake | Typed creation or the erased adapter initializes state bytes and plain slot fields, including recorded size/alignment, then `L.store(rel, IDLE)`. | The first successful wake CAS/RMW on `L` is `acq_rel`. | State bytes, state metadata, `state`, `dispatch`, runtime pointer, and payload identity. |
 | Idle actor to ready queue | `L.CAS(acq_rel, IDLE -> SCHEDULED)`, then raw `Qnext`, then `H.CAS(acq_rel, slot)`. | Flusher takes `H` with `atomicExchange(acq_rel)`. | The scheduled phase and initialized queue link/slot fields. |
 | Republished actor to ready queue | Callback first release-publishes `RUNNING -> SCHEDULED`; `pushReady` then release-publishes the link through `H`. | Flusher's acquire exchange of `H`. | Completed actor mutations and the new queue membership. |
@@ -259,7 +261,7 @@ empty.
 | Submission release to closing actor | An accepted sender enqueues and signals before release-decrementing the reservation count in `G`. | Closing entry/exit acquire-loads `G`; it may publish `RETIRED` only after observing `CLOSED`, count zero, `I` empty, and `C` empty. | All accepted send publication and signalling happens before final retirement. |
 | External retirement to callback | `requestRetire` uses an `acq_rel` CAS to set `RETIRE` on `L` and closes `G`. | Entry or exit reloads/acquires `L`; `ActorContext.closing` also acquire-loads it. | Ordinary admission is closed; callbacks may still run to drain previously accepted inbox nodes. |
 | Callback retirement to owner | Self-retirement or an observed external close ends with `L.CAS(acq_rel, ... -> RETIRED)`. | `ActorOwner.retired` and `reclaim` acquire-load `L`. | Completion of the user dispatch and all actor-state writes. |
-| Reclamation to slot reuse | Reclaimer clears slot fields, deallocates state, then release-stores `VACANT` for the old generation. | A creator CAS-acquires `VACANT -> CONSTRUCTING` while incrementing the generation in the same word. | Completion of old-state teardown before new slot initialization. |
+| Reclamation to slot reuse | Reclaimer clears slot fields, deallocates state, then publishes `VACANT` and returns the slot through `Fgate`. | Creator acquires the free-slot gate and the `VACANT` lifecycle before incrementing the generation. | Completion of old-state teardown before new slot initialization. |
 | Stale handle to reused slot | Every handle RMW compares the generation as part of the same `L` value it would modify. | A mismatch returns `staleHandle`; there is no state acquisition. | Nothing: an old generation cannot schedule or borrow the new state. |
 
 ## Actor-state handoff proof
@@ -369,6 +371,16 @@ clears the external-state pointer, dispatch pointer, and metadata before
 publishing `VACANT`. Slot allocation for a new generation must acquire that
 `VACANT` publication. Encoding generation and phase in the same atomic word
 prevents a stale check-then-CAS from scheduling a reused slot.
+
+Vacant slots form an intrusive free list initialized with the slab. Taking or
+returning a slot performs constant-size pointer work under `Fgate`; there is
+no scan of occupied slots. The gate uses an acquire CAS and release store,
+with `pause` while contended, and avoids pointer ABA across concurrent reuse.
+The creator owns a popped slot exclusively, so it can publish the next
+`CONSTRUCTING` generation with a store. Allocation failure returns that slot
+with the incremented generation intact. Allocator callbacks and actor code
+execute outside the gate. This is constant-time slot bookkeeping, not a
+lock-free allocation guarantee; allocator cost and contention remain separate.
 
 The per-generation gate now protects built-in inbox submission, but
 `ActorRuntime.destroy` still requires external quiescence: the engine must

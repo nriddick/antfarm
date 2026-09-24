@@ -1442,13 +1442,12 @@ private final class LifecycleEventQueue
         }
     }
 
-    LifecycleEventNode takeAll() nothrow @nogc
+    LifecycleEventNode takeAll(out size_t count) nothrow @nogc
     {
         auto word = atomicExchange!(MemoryOrder.acq_rel)(
             &control.headWord, size_t.init);
         auto node = cast(LifecycleEventNode) cast(void*) word;
         LifecycleEventNode ordered;
-        size_t count;
         while (node !is null)
         {
             auto next = node.next;
@@ -1763,10 +1762,9 @@ final class FiberDomain
     FiberLifecycleEvent[] takeLifecycleEvents(size_t maximum = size_t.max)
     {
         if (lifecycleQueue is null || maximum == 0) return null;
-        auto chain = takeLifecycleChain();
-        if (chain is null) return null;
         size_t available;
-        for (auto node = chain; node !is null; node = node.next) ++available;
+        auto chain = takeLifecycleChain(available);
+        if (chain is null) return null;
         immutable count = available < maximum ? available : maximum;
         auto result = new FiberLifecycleEvent[count];
         size_t i;
@@ -1793,10 +1791,9 @@ final class FiberDomain
         if (handler is null)
             throw new Exception("antfarm_fibers: null lifecycle handler");
         if (lifecycleQueue is null || maximum == 0) return 0;
-        auto chain = takeLifecycleChain();
-        if (chain is null) return 0;
         size_t available;
-        for (auto node = chain; node !is null; node = node.next) ++available;
+        auto chain = takeLifecycleChain(available);
+        if (chain is null) return 0;
         size_t handled;
         while (chain !is null && handled != maximum)
         {
@@ -1817,16 +1814,19 @@ final class FiberDomain
         return handled;
     }
 
-    private LifecycleEventNode takeLifecycleChain() nothrow @nogc
+    private LifecycleEventNode takeLifecycleChain(out size_t count) nothrow @nogc
     {
         if (lifecycleBacklog !is null)
         {
             auto chain = lifecycleBacklog;
+            count = lifecycleBacklogCount;
             lifecycleBacklog = null;
             lifecycleBacklogCount = 0;
             return chain;
         }
-        return lifecycleQueue.takeAll();
+        // takeAll already counts while reversing its detached stack. Keep
+        // that count with the backlog so bounded drains never rescan it.
+        return lifecycleQueue.takeAll(count);
     }
 
     private void retainLifecycleBacklog(LifecycleEventNode chain, size_t count)

@@ -29,6 +29,8 @@ Coverage includes:
 - FIFO order per producer, exact-once delivery, payload checksums, bounded
   carry republishing, 32 rounds of generation reuse, and a disabled GC;
 - balanced cold-path allocation and a flat warm-path allocation count;
+- free-slot recovery after repeated state-allocation failures, exact capacity
+  exhaustion, and eight-thread creation/reclamation through 64 generations;
 - the optional mimalloc v3 adapter's exact pointer/size/alignment forwarding
   and 128-byte-aligned actor state, using a local ABI stub rather than
   requiring mimalloc for the core suite;
