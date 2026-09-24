@@ -39,12 +39,14 @@ make -C review_torture baseline   # existing antfarm_test.d
 ## Layout
 
 - `torture_common.d` — counters, batch builder, producer/consumer helpers
-- `torture_tests.d` — T01–T18, T20–T24. T20 exercises the D2
+- `torture_tests.d` — T01–T18, T20–T25. T20 exercises the D2
   confirmed-segment pulse invariant under write crossings and churn, with
   small bodies so the arm stays an invariant scan rather than a memcpy
   bench. T21 laps the ring several times and verifies payload body contents
   word-for-word (a run of numbers summed into a global counter, plus
-  per-payload call counts).
+  per-payload call counts). T25 checks single-shot callback counter values
+  and exact execution in mixed ST/MT tables with two producers, eight
+  consumers, ring reuse, and chunk sizes 32 and one.
 - `t19_flood_lap.d` — T19: interleaved bulk dump + mid-tick small writes +
   subscription churn (four arms: no mid-tick, pure churn, consuming churn,
   steady consumer) plus a forged-token quota test

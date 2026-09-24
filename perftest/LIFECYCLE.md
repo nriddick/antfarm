@@ -136,3 +136,116 @@ ThreadSanitizer and the real mimalloc `MI_DEBUG=FULL` lane pass. The 72 pinned
 timed comparisons all pass exact per-cycle execution/reclamation checks.
 Pool/large-wave/affinity smoke checks also pass in LDC release and DMD debug
 builds. Invalid CPU-list length and unavailable CPUs fail explicitly.
+
+## Follow-up: use the table's unique single-shot claim
+
+The next pass starts at `0425226`. Fresh profiles still put publication,
+dispatch, creation, and reclamation at the top; no new repeated backlog scan
+appears. With mimalloc and same-thread consumption, Farm publication accounts
+for about 13–15% of sampled cycles and consumer shard processing for 6–8%.
+
+A single-shot payload already belongs to exactly one table shard and one
+successfully claimed run. Primary consumers, sweepers, and re-walkers all
+claim runs through the same counter. The MT index excludes these payloads.
+Their additional Pcount fetch-add therefore performs no arbitration. Replace
+it with a raw atomic store recording the unique claim. Callbacks still observe
+one claim, zero calls/completions, and iteration zero. Ring layout, table
+completion, and all MT admission counters retain their existing contracts;
+`MaxCs > 1, Done == 1` still takes the MT path. The ordering argument is in
+[SPEC.md, section 7c](../SPEC.md#7c-secondary-work-claims).
+
+This is a constant-factor improvement to the existing O(N) dispatch path.
+It needs no allocator change, application API change, or Fiber replacement.
+
+The same review found a wave-membership race, fixed separately in `8c36506`.
+Clearing the intrusive link after releasing the lifetime pin could overwrite
+the next wave's newly installed link. A deterministic test pauses immediately
+after unpinning, reuses the actor as another wave's head, then resumes the
+original wave. The old ordering loses a member and fails retirement; clearing
+the link before unpinning passes. This is a correctness fix, not a claimed
+throughput improvement.
+
+The new Farm regression test mixes single-shot ST, single-shot MT, and
+multi-iteration MT payloads across ring laps, two producers, eight consumers,
+and chunk sizes 32 and one. It checks exact per-payload execution, no execution
+on resubscription, and the callback-visible ST claim/iteration values.
+Root and actor suites pass with LDC and DMD; the Farm `torture_tests` suite passes
+with LDC, DMD, and ThreadSanitizer. Actor ThreadSanitizer, real mimalloc
+`MI_DEBUG=FULL`, Fiber unit tests with both compilers, and the LDC release Fiber
+stress run also pass.
+
+### Follow-up measurements
+
+The same unchanged churn harness compares `0425226` with this pass, using
+five runs per configuration, two measured seconds per run, 16,384 actors,
+batch 256, and the pinned placements from the earlier comparison. Builds and
+correctness tests finish before timing starts. Medians below are millions of
+complete lifetimes/second; all 120 timed runs pass the lifecycle checks.
+
+| Execution | Mode | Allocator | Before | After | Change |
+| --- | --- | --- | ---: | ---: | ---: |
+| Same thread | Autonomous | C runtime | 8.364 | 8.426 | +0.74% |
+| Same thread | Wave | C runtime | 9.049 | 9.180 | +1.45% |
+| Same thread | Autonomous | mimalloc | 18.098 | 18.247 | +0.82% |
+| Same thread | Wave | mimalloc | 21.646 | 22.346 | +3.24% |
+| Six consumers | Autonomous | C runtime | 5.896 | 5.959 | +1.07% |
+| Six consumers | Wave | C runtime | 5.991 | 6.013 | +0.38% |
+| Six consumers | Autonomous | mimalloc | 14.822 | 14.992 | +1.15% |
+| Six consumers | Wave | mimalloc | 15.319 | 15.450 | +0.86% |
+
+Same-thread mimalloc wave samples are 21.411–21.733 before and
+22.271–22.415 after. Dispatch falls from 20.61 to 18.87 ns/actor; creation and
+retirement/reclamation remain close. Autonomous dispatch falls from 29.54
+to 28.86 ns/actor, but its full-lifetime gain is smaller and sample ranges
+overlap. Six-consumer mimalloc ranges separate by a small amount; both C
+allocator ranges overlap. Treat the latter as effectively flat, rather than
+evidence of a dependable one-percent improvement.
+
+Caller policies on this pass, with the same placements:
+
+| Execution | Mode | mimalloc, batch 256 | Pool, batch 256 | mimalloc, whole-wave offer | Pool, whole-wave offer |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Same thread | Autonomous | 18.247 | 18.948 | — | — |
+| Same thread | Wave | 22.346 | 22.784 | 22.713 | 23.338 |
+| Six consumers | Autonomous | 14.992 | 15.483 | — | — |
+| Six consumers | Wave | 15.450 | 16.289 | 15.940 | 16.616 |
+
+Pooling and larger wave offers remain useful, modest caller choices. These
+are new measurements, not a sum of percentage gains from earlier runs.
+
+### Caller placement and consumer count
+
+A separate three-run sweep keeps the controller on logical CPU 6. Consumers
+first occupy separate physical cores (CPUs 1–5); the sixth consumer adds CPU
+0, the controller's SMT sibling. Thus five versus six consumers directly
+tests adding a poller on the controller's core. Zero consumers means the
+controller also dispatches. These runs use the pool, autonomous batch 256,
+and whole-wave offers of 16,384; all 24 runs pass lifecycle checks.
+
+| Separate consumers | CPU list | Autonomous M lifetimes/s | Wave M lifetimes/s |
+| ---: | --- | ---: | ---: |
+| 0 | `6` | 18.864 | 23.059 |
+| 1 | `6,1` | 21.786 | 26.276 |
+| 5 | `6,1,2,3,4,5` | 19.970 | 21.616 |
+| 6 | `6,1,2,3,4,5,0` | 15.469 | 16.728 |
+
+For this trivial-callback workload, one separate consumer is best among
+these placements: roughly 15% above same-thread execution for autonomous
+actors and 14% for waves. The controller does every creation and reclamation,
+so giving it its own physical core matters. Removing the sibling poller
+improves five-consumer throughput by about 29% over six consumers. Additional
+consumers do not automatically help a lifecycle-heavy application with tiny
+callbacks; applications doing substantial callback work should measure their
+own worker counts and placements.
+
+```sh
+./perftest/actor_churn_mimalloc actor 16384 2 1 256 5 pool 6,1
+./perftest/actor_churn_mimalloc wave 16384 2 1 16384 5 pool 6,1
+```
+
+The one-consumer placement also helps without a custom pool. Three additional
+runs with native mimalloc give **20.643 M autonomous lifetimes/s** (batch 256)
+and **25.192 M wave lifetimes/s** (whole-wave offer), with all six runs passing
+the lifecycle checks. The corresponding pooled values above add about 5.5%
+and 4.3%. Replace `pool` with `mimalloc` in the commands to reproduce this
+simpler caller configuration.

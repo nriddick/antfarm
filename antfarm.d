@@ -2174,14 +2174,12 @@ private:
 
         // Spec 5f: ST single-shot (MaxCs=1, Done=1). The shard Tcount claim
         // already assigned this index to one consumer; sweeper/re-walk use
-        // the same counter, MT paths never walk ST payloads. Pcount claims
-        // is still the entry gate; calls/completions stay untouched.
+        // the same counter, MT paths never walk ST payloads. Record that
+        // unique claim without a second RMW. Keep the callback-visible
+        // claims field at one and calls/completions at zero, as before.
         if (maxCs == 1 && done == 1 && !loopAll)
         {
-            immutable c = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 32);
-            if ((c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
-            if ((c >> 32) >= maxCs)
-                return; // overallocated
+            atomicStore!(MemoryOrder.raw)(head.pcount, 1UL << 32);
             // Table completion is Tcount/Tprogress; just do the Call.
             auto body_ = (cast(const(ulong)*)(bp + absIdx + PHEAD_LEN))[0 .. plen];
             fn(head, body_, 0);

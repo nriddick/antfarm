@@ -141,7 +141,7 @@ A Payload's physical layout:
   - `Done` (uint) — number of iterations to complete; 1 for single threaded, 2..512 granularity steps for multithreaded. `write()` fatals on `Done == 0` or `Done > 512`.
   - `Plen` — payload body length in ulongs.
   - 6 ulongs filler.
-  - `Pcount` — 32 MSB claims like Tcount; next 16 MSB are `calls` (iterations issued); 16 LSB are `completions` (iterations returned). After any packed fetch_add, if the field just incremented has wrapped to 0 the process fatals. Under the 512 caps, worst-case call increments are about `Done + MaxCs`, far below `2^16`; 32-bit claim wrap still requires pathological visitor accumulation. The hot path stays fetch_add (no CAS saturating loop).
+  - `Pcount` — 32 MSB claims like Tcount; next 16 MSB are `calls` (iterations issued); 16 LSB are `completions` (iterations returned). After any packed fetch_add, if the field just incremented has wrapped to 0 the process fatals. Under the 512 caps, worst-case call increments are about `Done + MaxCs`, far below `2^16`; 32-bit claim wrap still requires pathological visitor accumulation. MT admission uses fetch_add (no CAS saturating loop); the unique ST visitor records its claim with a raw store (7c).
   - `Call` — callback function pointer which decodes Pbody and executes an iteration of work; `alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration)`. `Call` sits immediately after `Pcount` so the two share one cache line; safe because `Call` is dereferenced only by a consumer holding a valid claim — the same thread that just wrote `Pcount` — so no cross-thread coherence traffic is added. The 6 filler ulongs after `Call` complete the line in every buffer phase.
 - `Pbody` — `PayloadBody` (`const(ulong)[]`); read-only type-erased transport words for Call's work. Constness prohibits mutation of the ring body itself; it does not imply transitive immutability of an object reached through an explicitly encoded handle. Generated shims currently impose the separate, stricter rule that packed parameters contain no unshared mutable aliases.
 
@@ -424,7 +424,7 @@ The baseline loop:
 
 **f.** Then `Ci` returns to step c; or if `X >= Shiter` it enters the secondary pathway.
 
-Each Tindex entry produces exactly one primary Pcount claim: each payload index lives in exactly one shard's runs. That is the fact the secondary/tertiary admission argument relies on (7c, 7e).
+Each Tindex entry produces exactly one primary Pcount claim: each payload index lives in exactly one shard's runs. ST records this unique claim with a raw store; MT uses fetch_add to arbitrate against secondary/tertiary visitors. That is the fact the secondary/tertiary admission argument relies on (7c, 7e).
 
 ### 7b. First-Claimant Mid-tick Yield
 
@@ -446,7 +446,7 @@ The general MT entry order is the callback ordering that makes the accounting pr
 
 Callback return values are presently ignored by Farm accounting.
 
-The ST fast path is exactly `MaxCs == 1 && Done == 1`. The shard counter already assigns the payload to exactly one consumer, so that consumer keeps only the Pcount claims fetch_add as an entry gate, executes the `Call`, and leaves the calls/completions fields untouched. Nothing reads the calls/completions fields for ST payloads, and table completion is tracked by Tcount/`Tprogress`, so those fields stay zero. Multi-threaded payloads keep the full packed fetch_add path.
+The ST fast path is exactly `MaxCs == 1 && Done == 1` on a primary visit. The shard counter already assigns the payload to exactly one consumer: shard slices and their claimed runs are disjoint, and sweepers/re-walkers claim runs through the same counters. ST payloads never appear in the MT index, so secondary/tertiary visitors cannot enter them. The unique consumer therefore raw-stores `1UL << 32` to Pcount and executes `Call` without another admission RMW. This preserves the callback-visible claims value of one and calls/completions values of zero. The store remains atomic because later ring laps reuse the same words. Table completion is tracked by Tcount/`Tprogress`; no ST completion depends on Pcount. Multi-threaded payloads, including `MaxCs > 1 && Done == 1`, keep the full packed fetch_add path.
 
 This structures the consumer strategy such that exactly 1 consumer normally enters a single-threaded Payload, and ~`SqCs` consumers normally enter an MT payload. "Normally" is performance intuition, not a guarantee: `MaxCs`, races, and repeated visitors to the same shard determine actual admissions. Tertiary behavior is the sweeper role in 7e.
 

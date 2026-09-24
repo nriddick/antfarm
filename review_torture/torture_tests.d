@@ -22,6 +22,18 @@ __gshared shared(int) g_defects;
 // Shared counters must be __gshared shared(T) (see torture_common.d).
 __gshared shared(long) g_contentSum;
 __gshared shared(long) g_contentBad;
+__gshared shared(long) g_claimContractBad;
+
+private long claimContractCb(PayloadHeader* head, PayloadBody body,
+        ulong iteration) nothrow @nogc @system
+{
+    if (head.maxCs == 1 && (head.done != 1 || iteration != 0
+            || atomicLoad!(MemoryOrder.raw)(head.pcount) != (1UL << 32)))
+        atomicFetchAdd!(MemoryOrder.raw)(g_claimContractBad, 1L);
+    if (iteration >= head.done)
+        atomicFetchAdd!(MemoryOrder.raw)(g_claimContractBad, 1L);
+    return countingCb(cast(size_t) body[0]);
+}
 
 private enum size_t T21_BODY_LEN = 32;
 private enum size_t T21_N = 30000;
@@ -1374,6 +1386,67 @@ void t22_avgcost_sharding()
     say("T22 avgCost sharding exact OK");
 }
 
+void t25_single_shot_claim_contract()
+{
+    // Mix ST, MT with one iteration, and MT with several iterations. All
+    // primary/sweeper visits compete for the same table shard claims. Check
+    // exact execution across ring reuse and the ST callback-visible Pcount,
+    // including chunk size one where claim contention is greatest.
+    foreach (avgCost; [0U, 5U])
+    {
+        auto f = AntFarm.create(1 << 18, 8, 8, 1, 16384, 1, 4096, 0);
+        scope (exit) f.destroy();
+        enum N = 12000;
+        allocCalls(N);
+        scope (exit) freeCalls();
+        atomicStore!(MemoryOrder.raw)(g_claimContractBad, 0L);
+        auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+            h.maxCs = i % 3 == 0 ? 1 : 4;
+            h.done = i % 3 == 2 ? 3 : 1;
+            plen = 2;
+        });
+        scope (exit) freeBatch(batch);
+        foreach (i; 0 .. N) batch.headers[i].call = &claimContractCb;
+
+        enum NC = 8;
+        Thread[NC] consumers;
+        ConsCtx[NC] contexts;
+        auto deadline = MonoTime.currTime + 90.seconds;
+        foreach (i; 0 .. NC)
+        {
+            contexts[i] = ConsCtx(f, batch.expectedCalls, deadline);
+            auto context = &contexts[i];
+            consumers[i] = new Thread({ consumerMain(context); });
+        }
+        ProdCtx first = ProdCtx(f, batch.entries, N / 2, Tier.bulk);
+        ProdCtx second = ProdCtx(f, batch.entries + N / 2, N / 2, Tier.small);
+        first.avgCost = second.avgCost = avgCost;
+        auto p1 = new Thread({ producerMain(&first); });
+        auto p2 = new Thread({ producerMain(&second); });
+        foreach (thread; consumers) thread.start();
+        while (atomicLoad!(MemoryOrder.acq)(f.Cf) != NC)
+        {
+            check(MonoTime.currTime < deadline, "T25 subscription timeout");
+            Thread.yield();
+        }
+        p1.start();
+        p2.start();
+        p1.join();
+        p2.join();
+        foreach (thread; consumers) thread.join();
+
+        ConsumerView revisit;
+        check(revisit.subscribe(f) >= 0, "T25 resubscribe");
+        while (revisit.consumeNext()) {}
+        revisit.unsubscribe();
+        expectExactCalls(&batch, "T25");
+        check(atomicLoad!(MemoryOrder.raw)(g_claimContractBad) == 0,
+            "T25 callback claim and iteration contract");
+        expectNoLiveConsumerRefs(f, "T25");
+    }
+    say("T25 single-shot claim contract and mixed-table exact execution OK");
+}
+
 void t23_late_attach_under_wrap()
 {
     // Protocol hole T11/T06/T18 miss: attach once, no retry, while the ring
@@ -1565,6 +1638,8 @@ void main(string[] args)
         t23_late_attach_under_wrap();
     if (want("T24"))
         t24_topology_hang_canary();
+    if (want("T25"))
+        t25_single_shot_claim_contract();
 
     if (want("T03"))
         t03_concurrent_exact();
