@@ -33,6 +33,8 @@ caller-observed quiescence described below.
 | --- | --- | --- |
 | `L` | `ActorSlot.lifecycle` | Generation, phase, `RETIRE`, and `PENDING` in one atomic word. |
 | `H` | `ActorRuntime.readyHeadWord` | Intrusive MPSC ready-stack head. |
+| `D` | `ActorRuntime.readyDrainGate` | Nonblocking exclusive ownership of ready-list snapshot extraction. |
+| `Rcarry` | `ActorRuntime.readyCarryWord` | Plain detached backlog, accessed only while holding `D`. |
 | `Qnext` | `ActorSlot.queueNextWord` | Link owned by the ready queue while that slot is queued. |
 | `Rc` | `ActorRuntime.readyCount` | Diagnostic/shutdown accounting; not a publication edge. |
 | `Lc` | `ActorRuntime.liveCount` | Allocated-generation accounting; not sufficient by itself for runtime destruction. |
@@ -242,7 +244,7 @@ empty.
 | Construction to first wake | Typed creation or the erased adapter initializes state bytes and plain slot fields, including recorded size/alignment, then `L.store(rel, IDLE)`. | The first successful wake CAS/RMW on `L` is `acq_rel`. | State bytes, state metadata, `state`, `dispatch`, runtime pointer, and payload identity. |
 | Idle actor to ready queue | `L.CAS(acq_rel, IDLE -> SCHEDULED)`, then raw `Qnext`, then `H.CAS(acq_rel, slot)`. | Flusher takes `H` with `atomicExchange(acq_rel)`. | The scheduled phase and initialized queue link/slot fields. |
 | Republished actor to ready queue | Callback first release-publishes `RUNNING -> SCHEDULED`; `pushReady` then release-publishes the link through `H`. | Flusher's acquire exchange of `H`. | Completed actor mutations and the new queue membership. |
-| Ready queue to Farm producer | `H` release CAS publishes `Qnext`; each selected node is detached before `write`. | Flusher's acquire exchange, followed by raw link loads. | A private snapshot of distinct scheduled slots. |
+| Ready queue to Farm producer | `H` release CAS publishes `Qnext`; each selected node is detached before `write`. | Flusher's acquire exchange, or acquire CAS on `D` after a prior flusher release-stored `D`. | A private snapshot of distinct scheduled slots, including a saved remainder from another flusher. |
 | Farm producer to ring consumer | `write` raw-stores header/body words and release-stores `Tsent` last. | Consumer acquire-loads and validates `Tsent`; callback raw-loads `Pbody` afterward. | Stable slot address and generation copied into the ring. |
 | Ring activation to exclusive borrow | Consumer already acquired `Tsent`; trampoline then CASes `L` from the matching generation's `SCHEDULED` to `RUNNING` with `acq_rel`. | Successful CAS is the acquisition; borrow construction follows it. | Prior initialization or prior activation's actor-state writes. |
 | One activation to the next | User mutation is sequenced before trampoline's `L.CAS(acq_rel, RUNNING -> SCHEDULED/IDLE)`. | A later wake and/or `SCHEDULED -> RUNNING` CAS acquires the lifecycle modification chain. | All plain writes made through the previous `ActorBorrow`. |
@@ -320,11 +322,21 @@ pending wake.
 `Qnext` is raw because only these owners may touch it:
 
 - Before publication, the one thread pushing that scheduled slot writes it.
-- After an acquire exchange detaches the list, the flusher owns those links.
+- After an acquire exchange detaches the list into `Rcarry`, the holder of `D`
+  owns those links. A release-store of `D` hands the untouched remainder to
+  the next successful acquire CAS on `D`.
 - Before `AntFarm.write`, selected snapshot nodes have their links cleared.
 - Written nodes are no longer queue members. An immediately consumed node may
   therefore republish and reuse its own `Qnext` without racing the flusher.
 - Only the distinct unwritten suffix is returned to the ready queue.
+
+Each flush tries `D` once and returns zero on contention. It removes at most
+`min(maximum, 256)` nodes, fetching a new `H` only when `Rcarry` is empty.
+The remaining chain stays detached and counted; it is neither traversed nor
+republished. `Rc` is decremented once for the extracted snapshot. The gate is
+released before Farm publication, allowing independent snapshots to publish
+concurrently and callbacks to republish while another flusher extracts work.
+`maximum == 0` leaves both lists untouched. As before, ordering is unspecified.
 
 `Rc` is incremented before a node becomes visible so a fast flusher cannot
 detach it and decrement an unincremented count. This permits a transient

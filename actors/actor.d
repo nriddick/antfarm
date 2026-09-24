@@ -109,6 +109,7 @@ version (AntfarmActorTestHooks)
         activationSignalled,
         submissionReleased,
         waveLifecycleReserved,
+        readyDetached,
     }
 
     alias ActorTestHook = void function(ActorTestPoint point,
@@ -579,6 +580,8 @@ align(64) struct ActorRuntime
     private shared ulong readyCount;
     private shared ulong liveCount;
     private shared ulong staleActivations_;
+    private size_t readyCarryWord; // detached backlog; readyDrainGate held
+    private shared uint readyDrainGate;
     private PayloadHeader actorHeader;
 
     static ActorRuntime* create(AntFarm* farm, size_t capacity,
@@ -732,8 +735,10 @@ private:
 
 public:
 
-    /// Publish up to 256 queued actors. Unwritten activations are returned to
-    /// the intrusive queue, so Farm backpressure cannot drop an actor.
+    /// Publish up to 256 queued actors. Snapshot work is bounded by `maximum`,
+    /// regardless of the backlog. A concurrent snapshot returns zero rather
+    /// than waiting; callers retry as for Farm backpressure. Unwritten
+    /// activations are returned to the intrusive queue.
     size_t flush(ref Token token, size_t maximum = 32, uint avgCost = 2)
         nothrow @nogc @system
     {
@@ -741,30 +746,9 @@ public:
         if (maximum > snapshotCapacity) maximum = snapshotCapacity;
         if (maximum == 0) return 0;
 
-        auto word = atomicExchange!(MemoryOrder.acq_rel)(
-            &readyHeadWord, size_t.init);
-        if (word == 0) return 0;
-
-        ActorSlot*[snapshotCapacity] snapshot;
-        size_t count;
-        while (word != 0 && count < maximum)
-        {
-            auto slot = cast(ActorSlot*) cast(void*) word;
-            word = atomicLoad!(MemoryOrder.raw)(slot.queueNextWord);
-            atomicStore!(MemoryOrder.raw)(slot.queueNextWord, size_t.init);
-            snapshot[count++] = slot;
-            atomicFetchSub!(MemoryOrder.rel)(readyCount, 1UL);
-        }
-        // The detached remainder was removed from readyHead but not from the
-        // count. Remove and requeue each node so accounting stays exact.
-        while (word != 0)
-        {
-            auto slot = cast(ActorSlot*) cast(void*) word;
-            word = atomicLoad!(MemoryOrder.raw)(slot.queueNextWord);
-            atomicStore!(MemoryOrder.raw)(slot.queueNextWord, size_t.init);
-            atomicFetchSub!(MemoryOrder.rel)(readyCount, 1UL);
-            pushReady(slot);
-        }
+        ActorSlot*[snapshotCapacity] snapshot = void;
+        immutable count = takeReady(snapshot[0 .. maximum]);
+        if (count == 0) return 0;
 
         auto bodies = ActorBodyRange(snapshot[0 .. count]);
         immutable written = cast(size_t) farm.write(
@@ -781,7 +765,8 @@ public:
         if (atomicLoad!(MemoryOrder.acq)(liveCount) != 0)
             fatal("destroy actor runtime with live actors");
         if (atomicLoad!(MemoryOrder.acq)(readyCount) != 0
-            || atomicLoad!(MemoryOrder.acq)(readyHeadWord) != 0)
+            || atomicLoad!(MemoryOrder.acq)(readyHeadWord) != 0
+            || readyCarryWord != 0)
             fatal("destroy actor runtime with queued actors");
         auto savedAllocator = allocator;
         auto savedSlots = slots;
@@ -793,6 +778,38 @@ public:
     }
 
 private:
+    size_t takeReady(scope ActorSlot*[] snapshot)
+        nothrow @nogc @system
+    {
+        if (!cas!(MemoryOrder.acq, MemoryOrder.raw)(
+                &readyDrainGate, 0U, 1U))
+            return 0;
+        scope (exit) atomicStore!(MemoryOrder.rel)(readyDrainGate, 0U);
+
+        size_t count;
+        while (count < snapshot.length)
+        {
+            if (readyCarryWord == 0)
+            {
+                readyCarryWord = atomicExchange!(MemoryOrder.acq_rel)(
+                    &readyHeadWord, size_t.init);
+                if (readyCarryWord == 0) break;
+                version (AntfarmActorTestHooks)
+                    actorTestPoint(ActorTestPoint.readyDetached, null);
+            }
+            auto slot = cast(ActorSlot*) cast(void*) readyCarryWord;
+            readyCarryWord = atomicLoad!(MemoryOrder.raw)(slot.queueNextWord);
+            atomicStore!(MemoryOrder.raw)(slot.queueNextWord, size_t.init);
+            snapshot[count++] = slot;
+        }
+        // The untouched carry stays counted and exclusively owned by the
+        // next drain-gate holder. Release the gate before Farm publication:
+        // other flushers may publish their disjoint snapshots concurrently.
+        if (count != 0)
+            atomicFetchSub!(MemoryOrder.rel)(readyCount, cast(ulong) count);
+        return count;
+    }
+
     void pushReady(ActorSlot* slot) nothrow @nogc @system
     {
         immutable replacement = cast(size_t) cast(void*) slot;

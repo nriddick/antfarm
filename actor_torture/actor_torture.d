@@ -1483,6 +1483,237 @@ private void testSustainedContention()
 }
 
 // -------------------------------------------------------------------------
+// Bounded ready snapshots, concurrent drainers, and Farm backpressure
+// -------------------------------------------------------------------------
+
+private struct ReadyState
+{
+    ulong remaining;
+    ulong* calls;
+}
+
+private void readyActor(scope ref ActorBorrow!ReadyState actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    ++*actor.value.calls;
+    if (--actor.value.remaining == 0)
+        context.retire();
+    else
+        context.republish();
+}
+
+private class ReadyFlusher
+{
+    AntFarm* farm;
+    ActorRuntime* runtime;
+    shared int* stop;
+    size_t batch;
+    size_t published;
+
+    void run()
+    {
+        auto token = farm.registerProducer(Tier.small);
+        check(token.valid, "ready flusher producer registration");
+        scope (exit) farm.unregisterProducer(token);
+        do
+        {
+            published += runtime.flush(token, batch, 0);
+            if (stop is null) break;
+            Thread.yield();
+        }
+        while (atomicLoad!(MemoryOrder.acq)(*stop) == 0);
+    }
+}
+
+private long readyPadding(PayloadHeader*, PayloadBody, ulong)
+    nothrow @nogc @system { return 1; }
+
+private void testReadyDrainHandoff()
+{
+    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 2, 256);
+    check(farm !is null, "ready handoff Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 3);
+    check(runtime !is null, "ready handoff runtime allocation");
+    ActorOwner!ReadyState[3] owners;
+    ulong[3] calls;
+    foreach (i; 0 .. owners.length)
+    {
+        owners[i] = runtime.createActor!(ReadyState, readyActor)(
+            ReadyState(1, &calls[i]));
+        check(owners[i].valid, "ready handoff actor creation");
+    }
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "ready handoff producer registration");
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "ready handoff subscribe");
+
+    foreach (i; 0 .. 2)
+        check(owners[i].handle.wake() == ActorWakeResult.queued,
+            "ready handoff wake");
+    g_hookNode = null;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.readyDetached);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    setActorTestHook(&blockingActorHook);
+    auto flusher = new ReadyFlusher;
+    flusher.farm = farm;
+    flusher.runtime = runtime;
+    flusher.batch = 1;
+    auto thread = new Thread(&flusher.run);
+    thread.start();
+    waitFlag(g_hookArrived, MonoTime.currTime + 15.seconds,
+        "ready flusher did not pause after detach");
+    check(runtime.ready == 2, "detached backlog remains counted");
+    check(runtime.flush(token, 1, 0) == 0,
+        "contended ready drain does not wait");
+    check(owners[2].handle.wake() == ActorWakeResult.queued,
+        "producer publishes while ready drain is held");
+    check(runtime.ready == 3, "concurrent wake counted with detached backlog");
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    thread.join();
+    setActorTestHook(null);
+    check(flusher.published == 1 && runtime.ready == 2,
+        "bounded snapshot leaves carry");
+    check(runtime.flush(token, 0, 0) == 0 && runtime.ready == 2,
+        "zero maximum preserves carry");
+    // The next holder must see both the prior thread's carry and the newer
+    // head, and fill one snapshot across that boundary.
+    check(runtime.flush(token, 2, 0) == 2 && runtime.ready == 0,
+        "ready carry transfers between threads and joins new head");
+    auto deadline = MonoTime.currTime + 15.seconds;
+    foreach (ref owner; owners)
+    {
+        while (!owner.retired)
+        {
+            view.consumeNext();
+            check(MonoTime.currTime < deadline,
+                "ready handoff consumption timeout");
+        }
+        check(owner.reclaim() == ActorReclaimResult.reclaimed,
+            "ready handoff reclaim");
+    }
+    foreach (n; calls) check(n == 1, "ready handoff exact callback count");
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    runtime.destroy();
+}
+
+private void testReadyBacklog()
+{
+    enum actorCount = 1024;
+    enum flusherCount = 4;
+    enum repetitions = 7;
+    auto farm = AntFarm.create(1 << 18, 4, 2, 0, 0, flusherCount + 1, 512);
+    check(farm !is null, "ready backlog Farm allocation");
+    scope (exit) farm.destroy();
+    CountedAllocator counts;
+    auto runtime = ActorRuntime.create(farm, actorCount, countedPolicy(counts));
+    check(runtime !is null, "ready backlog runtime allocation");
+    ActorOwner!ReadyState[actorCount] owners;
+    ulong[actorCount] calls;
+    foreach (i; 0 .. actorCount)
+    {
+        owners[i] = runtime.createActor!(ReadyState, readyActor)(
+            ReadyState(repetitions, &calls[i]));
+        check(owners[i].valid, "ready backlog actor creation");
+        check(owners[i].handle.wake() == ActorWakeResult.queued,
+            "ready backlog wake");
+    }
+    immutable warmAllocations = counts.allocations;
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "ready backlog producer registration");
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "ready backlog subscribe");
+    check(runtime.flush(token, 0, 0) == 0 && runtime.ready == actorCount,
+        "zero maximum preserves head");
+
+    // Withhold consumers until the Farm is full. A deliberately oversized
+    // request exercises snapshot clamping and partial table acceptance.
+    size_t published = runtime.flush(token, size_t.max, 0);
+    check(published > 0 && published < 256
+            && runtime.ready == actorCount - published,
+        "partial table acceptance returns unwritten actors");
+    auto deadline = MonoTime.currTime + 30.seconds;
+    PayloadHeader paddingHeader;
+    paddingHeader.maxCs = paddingHeader.done = 1;
+    paddingHeader.call = &readyPadding;
+    ulong[400] paddingBody;
+    PayloadEntry[1] padding = [PayloadEntry(&paddingHeader, paddingBody[])];
+    while (farm.write(padding[], token, 0) != 0)
+        check(MonoTime.currTime < deadline, "ready backlog padding timeout");
+    while (true)
+    {
+        immutable before = runtime.ready;
+        immutable n = runtime.flush(token, size_t.max, 0);
+        check(n <= 256 && runtime.ready == before - n,
+            "partial flush preserves exact ready count");
+        published += n;
+        if (n == 0) break;
+        check(MonoTime.currTime < deadline, "ready backlog fill timeout");
+    }
+    check(published > 0 && published < actorCount,
+        "ready backlog reaches backpressure");
+    foreach (_; 0 .. 3)
+    {
+        immutable before = runtime.ready;
+        check(runtime.flush(token, 1, 0) == 0 && runtime.ready == before,
+            "backpressured snapshot is requeued without loss");
+    }
+
+    shared int stop;
+    ReadyFlusher[flusherCount] jobs;
+    Thread[flusherCount] threads;
+    foreach (i; 0 .. flusherCount)
+    {
+        jobs[i] = new ReadyFlusher;
+        jobs[i].farm = farm;
+        jobs[i].runtime = runtime;
+        jobs[i].stop = &stop;
+        jobs[i].batch = i == 0 ? 1 : 256 / i;
+        threads[i] = new Thread(&jobs[i].run);
+    }
+    auto consumer = new StressConsumer(farm, &stop);
+    auto consumerThread = new Thread(&consumer.run);
+    GC.disable();
+    foreach (thread; threads) thread.start();
+    consumerThread.start();
+    foreach (ref owner; owners)
+    {
+        while (!owner.retired)
+        {
+            if (!view.consumeNext()) Thread.yield();
+            check(MonoTime.currTime < deadline,
+                "concurrent ready backlog drain timeout");
+        }
+    }
+    atomicStore!(MemoryOrder.rel)(stop, 1);
+    foreach (thread; threads) thread.join();
+    consumerThread.join();
+    GC.enable();
+    foreach (job; jobs) published += job.published;
+    check(published == actorCount * repetitions,
+        "concurrent flush exact publication count");
+    foreach (n; calls)
+        check(n == repetitions, "concurrent ready exact callback count");
+    check(runtime.ready == 0 && runtime.staleActivations == 0,
+        "concurrent ready backlog drained without duplicate activations");
+    check(counts.allocations == warmAllocations,
+        "bounded ready path allocates nothing");
+    foreach (ref owner; owners)
+        check(owner.reclaim() == ActorReclaimResult.reclaimed,
+            "ready backlog reclaim");
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    runtime.destroy();
+    check(counts.allocations == counts.deallocations,
+        "ready backlog allocator balance");
+    printf("actor ready handoff, backlog, and concurrent flushers OK\n");
+    fflush(stdout);
+}
+
+// -------------------------------------------------------------------------
 // mimalloc v3 adapter contracts: local ABI stub and pinned real library
 // -------------------------------------------------------------------------
 
@@ -1730,6 +1961,8 @@ void main()
     testDeterministicInterleavings();
     testAggregateModuleUnloadFence();
     testSustainedContention();
+    testReadyDrainHandoff();
+    testReadyBacklog();
     version (AntfarmMimallocStub)
         testMimallocV3AdapterContract();
     version (AntfarmMimallocReal)

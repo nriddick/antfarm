@@ -40,7 +40,10 @@ make -C actor_torture run-dmd
 make -C actor_torture run-tsan
 ```
 
-Its optional mimalloc v3 adapter is documented in
+The [actor backlog benchmark](perftest/README.md) measures bounded-batch
+dispatch and records reproducible before/after results.
+
+The actor runtime's optional mimalloc v3 adapter is documented in
 [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md); ordinary builds retain the C-runtime
 default and do not link mimalloc. The real allocator lane uses the pinned
 submodule:

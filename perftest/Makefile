@@ -1,13 +1,18 @@
-# Synthetic throughput sweep for a 16 MiB farm.
+# Synthetic payload throughput and autonomous actor benchmarks.
 # Release flags on purpose: this is a perf tool, not a correctness suite.
 ROOT := ..
 DC ?= ldc2
 DFLAGS ?= -O2 -release
 FARM_SOURCES := $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
+ACTOR_SOURCES := $(ROOT)/actors/package.d $(ROOT)/actors/actor.d \
+	$(ROOT)/actors/wave.d $(ROOT)/actors/mimalloc.d
 
 .PHONY: all run run-once run-once-constant-header run-once-constant-callandlength dual-run dual-grid-run dual-run-constant-header dual-run-constant-callandlength digest-run tail-run grid-run run-grid run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
 
-all: throughput dual digest tail
+all: throughput dual digest tail actor_ready
+
+actor_ready: actor_ready.d $(FARM_SOURCES) $(ACTOR_SOURCES)
+	$(DC) $(DFLAGS) -I$(ROOT) actor_ready.d $(FARM_SOURCES) $(ACTOR_SOURCES) -of=$@
 
 throughput: throughput.d $(FARM_SOURCES)
 	$(DC) $(DFLAGS) throughput.d $(FARM_SOURCES) -of=$@
@@ -72,4 +77,4 @@ tail-run-huge: tail
 	./tail --huge | tee last_tail_huge.txt
 
 clean:
-	rm -f throughput digest tail dual *.o
+	rm -f throughput digest tail dual actor_ready *.o

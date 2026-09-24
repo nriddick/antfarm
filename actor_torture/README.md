@@ -22,6 +22,10 @@ Coverage includes:
 - a wave-reservation/retirement race proving that aggregate membership pins a
   retired actor and its runtime until the open wave is sealed;
 - multi-actor ready-queue contention with six producers and six consumers;
+- a paused ready-list detach proving concurrent flushers return promptly,
+  wakes remain publishable, and the next drainer acquires the saved backlog;
+- a 1,024-actor backlog with partial writes, repeated Farm backpressure,
+  four concurrent flushers, two consumers, and exact self-republication counts;
 - FIFO order per producer, exact-once delivery, payload checksums, bounded
   carry republishing, 32 rounds of generation reuse, and a disabled GC;
 - balanced cold-path allocation and a flat warm-path allocation count;
