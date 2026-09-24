@@ -165,6 +165,14 @@ private void retirementJoinHook(ActorTestPoint point, ActorInboxNode* node)
     else blockingActorHook(point, node);
 }
 
+private void waveReleaseHook(ActorTestPoint point, ActorInboxNode*)
+    nothrow @nogc @system
+{
+    if (point != ActorTestPoint.waveMembershipReleased) return;
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 1);
+    while (atomicLoad!(MemoryOrder.acq)(g_hookRelease) == 0) {}
+}
+
 private class BoundarySender
 {
     ActorHandle!BoundaryState handle;
@@ -629,6 +637,79 @@ private void testWaveMembershipPinsRetiredActor()
     runtime.destroy();
 }
 
+private void testWaveReleaseAllowsImmediateReuse()
+{
+    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 2, 256);
+    check(farm !is null, "wave release Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 2);
+    check(runtime !is null, "wave release runtime allocation");
+    scope (exit) runtime.destroy();
+    WavePinResult[2] outputs;
+    ActorOwner!WavePinState[2] owners;
+    foreach (i; 0 .. owners.length)
+    {
+        owners[i] = runtime.createActor!(WavePinState, wavePinDormant)(
+            WavePinState(&outputs[i]));
+        check(owners[i].valid, "wave release actor allocation");
+    }
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "wave release consumer subscribe");
+    scope (exit) view.unsubscribe();
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "wave release producer token");
+    scope (exit) farm.unregisterProducer(token);
+
+    auto publisher = new WaveRacePublisher(farm, owners[0].handle);
+    auto thread = new Thread(&publisher.run);
+    thread.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(publisher.published, deadline, "wave release publication timeout");
+    while (publisher.wave.handle.progress != 1)
+    {
+        while (view.consumeNext()) {}
+        check(MonoTime.currTime < deadline, "wave release completion timeout");
+    }
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    setActorTestHook(&waveReleaseHook);
+    atomicStore!(MemoryOrder.rel)(publisher.sealRequested, 1);
+    waitFlag(g_hookArrived, deadline, "wave release did not pause after unpin");
+
+    // Releasing the pin permits immediate reuse, even before the previous
+    // wave has published aggregate completion. Make the reused slot the new
+    // list head, with another member behind it: any late clearing of its
+    // waveNext would lose that member and leave its lifetime pin stuck.
+    ActorWave next;
+    next.begin(farm);
+    ActorHandle!WavePinState[2] members =
+        [owners[1].handle, owners[0].handle];
+    check(next.publish!wavePinOperation(members[], token, 0) == 2,
+        "released actor accepts a new wave immediately");
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    thread.join();
+    setActorTestHook(null);
+    check(publisher.completion.finished && !publisher.completion.failed,
+        "previous wave completes after actor reuse");
+
+    auto completion = next.seal();
+    while (!completion.finished)
+    {
+        while (view.consumeNext()) {}
+        check(MonoTime.currTime < deadline, "replacement wave completion timeout");
+    }
+    check(!completion.failed && outputs[0].waveCalls == 2
+            && outputs[1].waveCalls == 1,
+        "both generations of wave operations run exactly once");
+    foreach (ref owner; owners)
+    {
+        check(owner.requestRetire() == ActorRetireResult.requested,
+            "replacement wave releases every actor membership");
+        check(owner.reclaim() == ActorReclaimResult.reclaimed,
+            "replacement wave permits actor reclamation");
+    }
+}
+
 private void testRetirementJoinsLateSignal()
 {
     auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
@@ -700,6 +781,7 @@ private void testDeterministicInterleavings()
     testContendedNodeClaimDuringClose();
     testReleasedReservationIsQuiescent();
     testWaveMembershipPinsRetiredActor();
+    testWaveReleaseAllowsImmediateReuse();
     testRetirementJoinsLateSignal();
     printf("actor deterministic interleavings OK\n");
     fflush(stdout);

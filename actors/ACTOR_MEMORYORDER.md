@@ -112,16 +112,15 @@ authority to touch mutable state. Possessing a ring handle without winning
 orchestrator                 Farm table consumers                 observer
 ------------                 --------------------                 --------
 
-G.CAS(acq_rel, count++)
+Wlen.fetchAdd(acq_rel)
 L.CAS(acq_rel,
   IDLE -> SCHEDULED)
-Wlen.fetchAdd(acq_rel)
+link member; Wowner.store(rel)
 writeTracked(...)
 Tsent.store(rel)       ---> Tsent.load(acq)
-                            L.CAS(acq_rel,
-                              SCHEDULED -> RUNNING)
+                            L.load(acq, SCHEDULED)
                             phase-specific ActorBorrow mutation
-                            L.CAS(acq_rel, RUNNING -> IDLE)
+                            L.CAS(acq_rel, SCHEDULED -> IDLE)
                             Tprogress.fetchAdd(acq_rel)
                               last shard: table hook
                             Wprogress.fetchAdd(acq_rel)
@@ -132,7 +131,7 @@ sealer or last hook:
 Wstatus.CAS(acq_rel,
   SEALED -> FINISHING)
 clear intrusive members
-G.fetchSub(acq_rel) for each
+Wowner.store(rel, 0) for each
 Wstatus.CAS(acq_rel,
   FINISHING -> FINISHED) --------------------------------------> load(acq)
 ```
@@ -144,6 +143,12 @@ producer is still publishing, so only `SEALED && Wprogress == Wlen` permits
 the exactly-once `FINISHED` transition. Publishing a dependent wave after an
 acquire observation of `FINISHED` carries all predecessor actor writes into
 the new Farm publication.
+
+Membership release reads the next intrusive link and clears the old link
+before release-storing `Wowner = 0`. That store is the wave's final access to
+the slot: another orchestrator may immediately reuse an idle actor in a new
+wave, or its owner may reclaim a retired actor. Clearing the link after
+unpinning could overwrite the new wave's list or access reclaimed storage.
 
 While `waveOwnerWord` is nonzero, ordinary `wake`, `send`, and retirement
 requests return `waveOwned`; a rejected send never claims its inbox node. A
