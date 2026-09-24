@@ -22,12 +22,16 @@ ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn wave 4096 3 6 256 5
 ```
 
 Arguments are mode (`actor` or `wave`), actors per cohort, minimum measured
-seconds, background consumers, publication batch (1–256), warm-up cycles,
-and optional allocator (`crt`, `mimalloc`, or `mimalloc64`).
+seconds, background consumers, publication batch, warm-up cycles,
+and optional allocator (`crt`, `mimalloc`, `mimalloc64`, or `pool`). Autonomous
+publication batches are 1–256; wave publication accepts any positive batch,
+with the Farm splitting larger offered slices into physical tables.
+An optional final comma-separated CPU list pins the controller followed by
+each consumer; omit it or pass `-` to leave placement to the OS.
 These examples also show the defaults except that `actor`/`wave` is required.
 Zero background consumers means the controlling thread also consumes;
 otherwise there is one controlling producer plus the requested number of
-un-pinned native consumer threads, continuously polling. No threads are
+native consumer threads, continuously polling. No threads are
 created or joined inside the timed loop.
 
 The primary rate, `Mactor_cycles/s`, counts **complete actor lifetimes** in
@@ -61,6 +65,8 @@ is used only for persistent setup outside the timed loop. The optional
 and defaults to the existing `actors.mimalloc` adapter. It can also select
 `crt` at runtime for a comparison within the same executable. See
 [MIMALLOC.md](MIMALLOC.md) for commands, alignment controls, and results.
+For the next runtime improvement and caller-side pooling/batching choices,
+see [LIFECYCLE.md](LIFECYCLE.md).
 
 ### Sustained comparison
 

@@ -110,6 +110,7 @@ version (AntfarmActorTestHooks)
         submissionReleased,
         waveLifecycleReserved,
         readyDetached,
+        retirementIdleObserved,
     }
 
     alias ActorTestHook = void function(ActorTestPoint point,
@@ -118,7 +119,7 @@ version (AntfarmActorTestHooks)
     private __gshared ActorTestHook actorTestHook_;
 
     /// Install a process-wide test hook. The caller must change it only while
-    /// no actor send can be executing it.
+    /// no actor operation can be executing it.
     void setActorTestHook(ActorTestHook hook) nothrow @nogc @system
     {
         actorTestHook_ = hook;
@@ -1142,19 +1143,36 @@ private void driveActorRetirement(ActorSlot* slot, ulong generation)
             return;
         if (phase == phaseIdle)
         {
+            version (AntfarmActorTestHooks)
+                actorTestPoint(ActorTestPoint.retirementIdleObserved, null);
             immutable gate = atomicLoad!(MemoryOrder.acq)(
                 slot.submissionGate);
-            immutable empty = (gate & submissionClosedBit) != 0
-                && (gate & submissionCountMask) == 0
-                && atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) == 0
-                && slot.inboxCarryWord == 0;
-            immutable nextPhase = empty ? phaseRetired : phaseScheduled;
-            immutable replacement = lifecycleWord(generation, nextPhase)
-                | (empty ? 0 : retireBit);
+            if (gate == submissionClosedBit)
+            {
+                // The closed, zero-count gate joins every accepted sender's
+                // final signal. Recheck L *after* that acquire: an earlier
+                // idle observation may predate a sender's queued activation.
+                auto joined = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
+                if (joined != observed)
+                {
+                    observed = joined;
+                    continue;
+                }
+                // RETIRE blocks ordinary wakes and wave reservations. With
+                // no sender left and L still idle, no callback or other
+                // lifecycle writer can exist. A release store suffices.
+                assert(atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) == 0
+                    && slot.inboxCarryWord == 0);
+                atomicStore!(MemoryOrder.rel)(slot.lifecycle,
+                    lifecycleWord(generation, phaseRetired));
+                return;
+            }
+            immutable replacement = lifecycleWord(generation, phaseScheduled)
+                | retireBit;
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
                     &slot.lifecycle, observed, replacement))
             {
-                if (!empty) slot.runtime.pushReady(slot);
+                slot.runtime.pushReady(slot);
                 return;
             }
         }

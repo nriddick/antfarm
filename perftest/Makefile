@@ -17,14 +17,15 @@ MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
 all: throughput dual digest tail actor_ready actor_churn scaling
 
-actor_churn: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES)
-	$(DC) $(DFLAGS) -I$(ROOT) actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) -of=$@
+actor_churn: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOOL_SOURCES)
+	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source \
+		actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) -of=$@
 
 $(MIMALLOC_LIBRARY): $(ROOT)/third_party/mimalloc/CMakeLists.txt
 	$(MAKE) -C $(ROOT)/actor_torture .build/mimalloc-v3.5.0/libmimalloc.a
 
-actor_churn_mimalloc: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(MIMALLOC_LIBRARY)
-	$(DC) $(DFLAGS) $(MIMALLOC_VERSION) -I$(ROOT) actor_churn.d \
+actor_churn_mimalloc: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOOL_SOURCES) $(MIMALLOC_LIBRARY)
+	$(DC) $(DFLAGS) $(MIMALLOC_VERSION) -i -I$(ROOT) -I$(ROOT)/threadpool/source actor_churn.d \
 		$(FARM_SOURCES) $(ACTOR_SOURCES) $(MIMALLOC_LIBRARY) \
 		$(MIMALLOC_SYSTEM_LIBS) -of=$@
 

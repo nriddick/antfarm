@@ -21,6 +21,9 @@ Coverage includes:
   first while the remaining engine claim still forbids the simulated unload;
 - a wave-reservation/retirement race proving that aggregate membership pins a
   retired actor and its runtime until the open wave is sealed;
+- a late accepted sender queuing work between retirement's initial idle
+  observation and its submission-gate join, proving the lifecycle is rechecked
+  before using the idle retirement store;
 - multi-actor ready-queue contention with six producers and six consumers;
 - a paused ready-list detach proving concurrent flushers return promptly,
   wakes remain publishable, and the next drainer acquires the saved backlog;

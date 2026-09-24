@@ -124,6 +124,8 @@ private __gshared shared(int) g_raceRelease;
 private __gshared ActorInboxNode* g_raceNode;
 private __gshared shared(int) g_waveReserveArrived;
 private __gshared shared(int) g_waveReserveRelease;
+private __gshared shared(int) g_retirementIdleArrived;
+private __gshared shared(int) g_retirementIdleRelease;
 
 private void blockingActorHook(ActorTestPoint point, ActorInboxNode* node)
     nothrow @nogc @system
@@ -150,6 +152,17 @@ private void waveReserveHook(ActorTestPoint point, ActorInboxNode*)
     if (point != ActorTestPoint.waveLifecycleReserved) return;
     atomicStore!(MemoryOrder.rel)(g_waveReserveArrived, 1);
     while (atomicLoad!(MemoryOrder.acq)(g_waveReserveRelease) == 0) {}
+}
+
+private void retirementJoinHook(ActorTestPoint point, ActorInboxNode* node)
+    nothrow @nogc @system
+{
+    if (point == ActorTestPoint.retirementIdleObserved)
+    {
+        atomicStore!(MemoryOrder.rel)(g_retirementIdleArrived, 1);
+        while (atomicLoad!(MemoryOrder.acq)(g_retirementIdleRelease) == 0) {}
+    }
+    else blockingActorHook(point, node);
 }
 
 private class BoundarySender
@@ -616,6 +629,67 @@ private void testWaveMembershipPinsRetiredActor()
     runtime.destroy();
 }
 
+private void testRetirementJoinsLateSignal()
+{
+    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    check(farm !is null, "retirement join Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "retirement join runtime allocation");
+    scope (exit) runtime.destroy();
+    BoundaryResult output;
+    auto owner = runtime.createActor!(BoundaryState, boundaryActor)(
+        BoundaryState(&output));
+    check(owner.valid, "retirement join actor allocation");
+    BoundaryMessage message;
+    initializeBoundaryMessage(message);
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "retirement join producer");
+    scope (exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "retirement join consumer");
+    scope (exit) view.unsubscribe();
+
+    g_hookNode = &message.node;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.submissionReserved);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    atomicStore!(MemoryOrder.rel)(g_retirementIdleArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_retirementIdleRelease, 0);
+    setActorTestHook(&retirementJoinHook);
+    auto sender = new BoundarySender(owner.handle, &message.node);
+    auto senderThread = new Thread(&sender.run);
+    senderThread.start();
+    immutable deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(g_hookArrived, deadline, "retirement join sender reservation");
+
+    ActorRetireResult result;
+    auto retireThread = new Thread({ result = owner.requestRetire(); });
+    retireThread.start();
+    waitFlag(g_retirementIdleArrived, deadline,
+        "retirement did not sample idle before joining submissions");
+
+    // L was sampled idle, but this accepted sender queues an activation and
+    // drops the last reservation before retirement reads the closed gate.
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    senderThread.join();
+    check(accepted(sender.result), "retirement join accepted sender");
+    check(runtime.ready == 1 && !owner.retired,
+        "late signal remains queued before retirement resumes");
+    atomicStore!(MemoryOrder.rel)(g_retirementIdleRelease, 1);
+    retireThread.join();
+    setActorTestHook(null);
+    g_hookNode = null;
+    check(result == ActorRetireResult.requested && !owner.retired,
+        "idle sample must be refreshed after the submission join");
+    drainBoundary(runtime, token, view, owner, deadline);
+    check(output.consumed == 1 && output.bad == 0 && message.node.available,
+        "retirement join preserves the accepted message");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed,
+        "retirement join reclamation");
+}
+
 private void testDeterministicInterleavings()
 {
     testClaimIsNotPublication();
@@ -626,6 +700,7 @@ private void testDeterministicInterleavings()
     testContendedNodeClaimDuringClose();
     testReleasedReservationIsQuiescent();
     testWaveMembershipPinsRetiredActor();
+    testRetirementJoinsLateSignal();
     printf("actor deterministic interleavings OK\n");
     fflush(stdout);
 }

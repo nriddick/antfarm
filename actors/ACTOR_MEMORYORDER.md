@@ -260,7 +260,7 @@ empty.
 | Close against new send | Retirement first marks `RETIRE` on `L`, then sets `CLOSED` in `G` with an `acq_rel` CAS. | A sender's reservation CAS is totally ordered before or after the close CAS on `G`; post-close senders acquire-observe `CLOSED`. | Deterministic admission: earlier reservations finish, later attempts return `closed`. |
 | Submission release to closing actor | An accepted sender enqueues and signals before release-decrementing the reservation count in `G`. | Closing entry/exit acquire-loads `G`; it may publish `RETIRED` only after observing `CLOSED`, count zero, `I` empty, and `C` empty. | All accepted send publication and signalling happens before final retirement. |
 | External retirement to callback | `requestRetire` uses an `acq_rel` CAS to set `RETIRE` on `L` and closes `G`. | Entry or exit reloads/acquires `L`; `ActorContext.closing` also acquire-loads it. | Ordinary admission is closed; callbacks may still run to drain previously accepted inbox nodes. |
-| Callback retirement to owner | Self-retirement or an observed external close ends with `L.CAS(acq_rel, ... -> RETIRED)`. | `ActorOwner.retired` and `reclaim` acquire-load `L`. | Completion of the user dispatch and all actor-state writes. |
+| Retirement publication to owner | Callback retirement uses `L.CAS(acq_rel, ... -> RETIRED)`; an idle external close may release-store `RETIRED` after joining the closed submission gate and rechecking `L`. | `ActorOwner.retired` and `reclaim` acquire-load `L`. | Completion of the user dispatch and all actor-state writes. |
 | Reclamation to slot reuse | Reclaimer clears slot fields, deallocates state, then publishes `VACANT` and returns the slot through `Fgate`. | Creator acquires the free-slot gate and the `VACANT` lifecycle before incrementing the generation. | Completion of old-state teardown before new slot initialization. |
 | Stale handle to reused slot | Every handle RMW compares the generation as part of the same `L` value it would modify. | A mismatch returns `staleHandle`; there is no state acquisition. | Nothing: an old generation cannot schedule or borrow the new state. |
 
@@ -364,6 +364,18 @@ The ring body itself is never cast to mutable actor state.
 `RETIRED` means the application dispatch has returned, no `ActorBorrow` exists,
 and no later activation for that generation will be admitted. It does not mean
 that the surrounding Farm consumer has finished all table accounting.
+
+External retirement still marks `RETIRE` before closing the submission gate.
+For an idle actor, the owner acquire-loads the closed gate with zero accepted
+senders, then acquire-loads `L` again. That second lifecycle load is essential:
+an accepted sender may have queued an activation after the initial idle
+observation but before dropping the last reservation. If the joined load
+still observes the same `IDLE | RETIRE` word, no lifecycle writer remains:
+accepted senders have completed their signals, no callback is running, and
+ordinary wakes and wave reservations reject `RETIRE`. The unique owner can
+therefore finish with a release store of `RETIRED`, avoiding a redundant CAS.
+If `L` changed, retirement retries from the joined value. Outstanding senders
+and scheduled/running actors retain the existing RMW and drain protocol.
 
 After an acquire observation of `RETIRED`, the unique typed or erased owner may
 deallocate the POD state using the size and alignment recorded at creation. It

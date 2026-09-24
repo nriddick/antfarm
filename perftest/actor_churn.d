@@ -11,9 +11,11 @@ import core.atomic : MemoryOrder, atomicLoad, atomicStore, pause;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;
 import std.conv : to;
+import std.array : split;
 import std.exception : enforce;
 import std.math : isFinite;
 import std.stdio : writefln;
+import threadpool.pin : PinTarget, pinToLogicalProcessor;
 
 version (AntfarmMimallocV3)
 {
@@ -51,6 +53,71 @@ private struct State
     ulong cycle;
 }
 
+// Caller-side policy example, not a runtime optimization. The benchmark's
+// controller owns all allocation/free calls, so this fixed-size pool needs
+// no locks. Runtime/slot allocations still use the C-runtime policy.
+private struct StatePool
+{
+    void* memory;
+    void* freeHead;
+    size_t capacity;
+    size_t available;
+
+    bool initialize(size_t count) nothrow @nogc @system
+    {
+        if (count > size_t.max / State.sizeof) return false;
+        memory = ActorAllocator.cRuntime().allocate(null,
+            count * State.sizeof, State.alignof);
+        if (memory is null) return false;
+        capacity = available = count;
+        foreach_reverse (i; 0 .. count)
+        {
+            auto block = cast(ubyte*) memory + i * State.sizeof;
+            *cast(void**) block = freeHead;
+            freeHead = block;
+        }
+        return true;
+    }
+
+    void destroy() nothrow @nogc @system
+    {
+        if (memory !is null)
+            ActorAllocator.cRuntime().deallocate(null, memory,
+                capacity * State.sizeof, State.alignof);
+    }
+}
+
+private void* pooledAllocate(void* context, size_t bytes, size_t alignment)
+    nothrow @nogc @system
+{
+    if (bytes != State.sizeof || alignment != State.alignof)
+        return ActorAllocator.cRuntime().allocate(null, bytes, alignment);
+    auto pool = cast(StatePool*) context;
+    auto block = pool.freeHead;
+    if (block is null) return null;
+    pool.freeHead = *cast(void**) block;
+    --pool.available;
+    return block;
+}
+
+private void pooledDeallocate(void* context, void* memory, size_t bytes,
+        size_t alignment) nothrow @nogc @system
+{
+    auto pool = cast(StatePool*) context;
+    immutable address = cast(size_t) memory;
+    immutable base = cast(size_t) pool.memory;
+    if (address >= base && address - base < pool.capacity * State.sizeof)
+    {
+        assert(bytes == State.sizeof && alignment == State.alignof
+            && (address - base) % State.sizeof == 0);
+        *cast(void**) memory = pool.freeHead;
+        pool.freeHead = memory;
+        ++pool.available;
+    }
+    else
+        ActorAllocator.cRuntime().deallocate(null, memory, bytes, alignment);
+}
+
 private void operate(scope ref ActorBorrow!State actor) nothrow @nogc @system
 {
     auto completion = actor.value.completion;
@@ -69,11 +136,17 @@ private class Consumer
     AntFarm* farm;
     shared int started;
     shared int stop;
+    int cpu;
 
-    this(AntFarm* farm) { this.farm = farm; }
+    this(AntFarm* farm, int cpu) { this.farm = farm; this.cpu = cpu; }
 
     void run()
     {
+        if (cpu >= 0 && !pinToLogicalProcessor(PinTarget(0, 0, cast(ushort) cpu)))
+        {
+            atomicStore!(MemoryOrder.rel)(started, -1);
+            return;
+        }
         ConsumerView view;
         if (view.subscribe(farm) < 0)
         {
@@ -95,9 +168,9 @@ private double elapsedSeconds(long ticks)
 
 void main(string[] args)
 {
-    enforce(args.length >= 2 && args.length <= 8
+    enforce(args.length >= 2 && args.length <= 9
             && (args[1] == "actor" || args[1] == "wave"),
-        "usage: actor_churn actor|wave [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64]");
+        "usage: actor_churn actor|wave [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64|pool] [controller-cpu,consumer-cpus|-]");
     immutable waveMode = args[1] == "wave";
     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;
     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;
@@ -108,13 +181,30 @@ void main(string[] args)
     else enum defaultAllocator = "crt";
     immutable allocatorName = args.length > 7 ? args[7] : defaultAllocator;
     enforce(count > 0 && count <= uint.max && isFinite(duration)
-            && duration > 0 && consumers <= 64 && batch > 0 && batch <= 256,
-        "actors and seconds must be positive; consumers must be 0..64; batch must be 1..256");
+            && duration > 0 && consumers <= 64 && batch > 0
+            && (waveMode || batch <= 256),
+        "actors/seconds/batch must be positive; consumers must be 0..64; actor batch must be <=256");
+    ushort[] cpus;
+    if (args.length > 8 && args[8] != "-")
+    {
+        foreach (cpu; args[8].split(",")) cpus ~= cpu.to!ushort;
+        enforce(cpus.length == consumers + 1,
+            "CPU list must name the controller followed by each consumer");
+        enforce(pinToLogicalProcessor(PinTarget(0, 0, cpus[0])),
+            "controller CPU pin failed");
+    }
+    StatePool pool;
+    scope (exit) pool.destroy();
     auto allocator = ActorAllocator.cRuntime();
-    if (allocatorName != "crt")
+    if (allocatorName == "pool")
+    {
+        enforce(pool.initialize(count), "state-pool allocation failed");
+        allocator = ActorAllocator(&pool, &pooledAllocate, &pooledDeallocate);
+    }
+    else if (allocatorName != "crt")
     {
         enforce(allocatorName == "mimalloc" || allocatorName == "mimalloc64",
-            "allocator must be crt, mimalloc, or mimalloc64");
+            "allocator must be crt, mimalloc, mimalloc64, or pool");
         version (AntfarmMimallocV3)
             allocator = allocatorName == "mimalloc"
                 ? mimallocV3ActorAllocator()
@@ -151,13 +241,13 @@ void main(string[] args)
     }
     foreach (i; 0 .. consumers)
     {
-        jobs[i] = new Consumer(farm);
+        jobs[i] = new Consumer(farm, cpus.length == 0 ? -1 : cast(int) cpus[i + 1]);
         threads[i] = new Thread(&jobs[i].run);
         threads[i].start();
         while (atomicLoad!(MemoryOrder.acq)(jobs[i].started) == 0)
             Thread.yield();
         enforce(atomicLoad!(MemoryOrder.acq)(jobs[i].started) == 1,
-            "worker subscription failed");
+            "worker pin or subscription failed");
     }
 
     ActorWave wave;
@@ -246,6 +336,8 @@ void main(string[] args)
         enforce(runtime.live == 0 && runtime.ready == 0
                 && runtime.staleActivations == 0,
             "cycle left live, queued, or stale actors");
+        enforce(allocatorName != "pool" || pool.available == count,
+            "cycle did not return all pooled actor state");
         immutable retired = MonoTime.currTime;
         if (measured)
         {
@@ -266,9 +358,9 @@ void main(string[] args)
         elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
     } while (elapsed < duration);
     immutable actorCycles = cast(double) count * rounds;
-    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s state=%s stateAlign=%s allocator=%s ringMiB=8 hugePages=%s",
+    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s state=%s stateAlign=%s allocator=%s ringMiB=8 hugePages=%s cpus=%s",
         args[1], count, consumers, batch, warmups, State.sizeof, State.alignof,
-        allocatorName, farm.usedLargePages);
+        allocatorName, farm.usedLargePages, cpus);
     writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f cycles/s=%.2f",
         rounds, elapsed, actorCycles / elapsed / 1e6,
         elapsed * 1e9 / actorCycles, rounds / elapsed);
