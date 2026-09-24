@@ -37,6 +37,7 @@ perftest/tail
 perftest/dual
 perftest/actor_ready
 perftest/actor_churn
+perftest/actor_churn_mimalloc
 perftest/scaling
 perftest/throughput_eager
 perftest/throughput_sd64

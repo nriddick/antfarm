@@ -49,8 +49,9 @@ dispatch:
   visibility tests.
 
 This is evaluation code, not a stable public contract. Adopted/arena-owned
-state, non-POD destruction, retirement groups, custom inbox adapters, real
-mimalloc benchmarking, and engine wake integration remain open below.
+state, non-POD destruction, retirement groups, custom inbox adapters,
+long-running allocator memory characterization, and engine wake integration
+remain open below.
 
 ## Invariants
 
@@ -350,8 +351,9 @@ future adapter surface without weakening generation admission or retirement.
 - [x] Pin a real mimalloc v3 release and test cross-thread frees through the
   global actor allocator adapter.
 - [ ] Characterize long-running resident-memory behavior.
-- [ ] Benchmark the global adapter before evaluating explicit mimalloc
-  heap/arena owners.
+- [x] Benchmark the global adapter with sustained actor/wave churn before
+  evaluating explicit mimalloc heap/arena owners. See the
+  [allocator comparison](../perftest/MIMALLOC.md).
 
 ### A4: integration and characterization
 

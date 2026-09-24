@@ -15,6 +15,28 @@ import std.exception : enforce;
 import std.math : isFinite;
 import std.stdio : writefln;
 
+version (AntfarmMimallocV3)
+{
+    import actors.mimalloc : mimallocV3ActorAllocator;
+
+    // Diagnostic control: match cRuntime's rounded size and 64-byte alignment.
+    // The ordinary mimalloc mode uses the adapter's exact size/alignment.
+    private void* mimalloc64Allocate(void*, size_t bytes, size_t alignment)
+        nothrow @nogc @system
+    {
+        if (alignment > 64) return null;
+        immutable rounded = (bytes + 63) & ~cast(size_t) 63;
+        return mimallocV3ActorAllocator().allocate(null, rounded, 64);
+    }
+
+    private void mimalloc64Deallocate(void*, void* memory, size_t bytes,
+            size_t alignment) nothrow @nogc @system
+    {
+        immutable rounded = (bytes + 63) & ~cast(size_t) 63;
+        mimallocV3ActorAllocator().deallocate(null, memory, rounded, 64);
+    }
+}
+
 // Separate completion lines avoid one contended global callback counter.
 align(64) private struct Completion
 {
@@ -73,24 +95,39 @@ private double elapsedSeconds(long ticks)
 
 void main(string[] args)
 {
-    enforce(args.length >= 2 && args.length <= 7
+    enforce(args.length >= 2 && args.length <= 8
             && (args[1] == "actor" || args[1] == "wave"),
-        "usage: actor_churn actor|wave [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5]");
+        "usage: actor_churn actor|wave [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64]");
     immutable waveMode = args[1] == "wave";
     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;
     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;
     immutable consumers = args.length > 4 ? to!uint(args[4]) : 0;
     immutable batch = args.length > 5 ? to!size_t(args[5]) : 256;
     immutable warmups = args.length > 6 ? to!size_t(args[6]) : 5;
+    version (AntfarmMimallocV3) enum defaultAllocator = "mimalloc";
+    else enum defaultAllocator = "crt";
+    immutable allocatorName = args.length > 7 ? args[7] : defaultAllocator;
     enforce(count > 0 && count <= uint.max && isFinite(duration)
             && duration > 0 && consumers <= 64 && batch > 0 && batch <= 256,
         "actors and seconds must be positive; consumers must be 0..64; batch must be 1..256");
+    auto allocator = ActorAllocator.cRuntime();
+    if (allocatorName != "crt")
+    {
+        enforce(allocatorName == "mimalloc" || allocatorName == "mimalloc64",
+            "allocator must be crt, mimalloc, or mimalloc64");
+        version (AntfarmMimallocV3)
+            allocator = allocatorName == "mimalloc"
+                ? mimallocV3ActorAllocator()
+                : ActorAllocator(null, &mimalloc64Allocate, &mimalloc64Deallocate);
+        else
+            enforce(false, "mimalloc requires the actor_churn_mimalloc build");
+    }
 
     auto farm = AntFarm.create(1 << 20, 8, consumers ? consumers : 1,
         0, 0, 1, 16384);
     enforce(farm !is null, "Farm allocation failed");
     scope (exit) farm.destroy();
-    auto runtime = ActorRuntime.create(farm, count);
+    auto runtime = ActorRuntime.create(farm, count, allocator);
     enforce(runtime !is null, "actor runtime allocation failed");
     scope (exit) runtime.destroy();
     auto owners = new ActorOwner!State[count];
@@ -229,8 +266,9 @@ void main(string[] args)
         elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
     } while (elapsed < duration);
     immutable actorCycles = cast(double) count * rounds;
-    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s state=%s ringMiB=8 hugePages=%s",
-        args[1], count, consumers, batch, warmups, State.sizeof, farm.usedLargePages);
+    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s state=%s stateAlign=%s allocator=%s ringMiB=8 hugePages=%s",
+        args[1], count, consumers, batch, warmups, State.sizeof, State.alignof,
+        allocatorName, farm.usedLargePages);
     writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f cycles/s=%.2f",
         rounds, elapsed, actorCycles / elapsed / 1e6,
         elapsed * 1e9 / actorCycles, rounds / elapsed);

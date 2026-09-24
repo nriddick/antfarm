@@ -22,7 +22,8 @@ ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn wave 4096 3 6 256 5
 ```
 
 Arguments are mode (`actor` or `wave`), actors per cohort, minimum measured
-seconds, background consumers, publication batch (1–256), and warm-up cycles.
+seconds, background consumers, publication batch (1–256), warm-up cycles,
+and optional allocator (`crt`, `mimalloc`, or `mimalloc64`).
 These examples also show the defaults except that `actor`/`wave` is required.
 Zero background consumers means the controlling thread also consumes;
 otherwise there is one controlling producer plus the requested number of
@@ -52,6 +53,14 @@ creators/reclaimers, or substantial application work.
 The Farm uses an 8 MiB ring, eight segments, one small producer, a
 16,384-word quota, and `avgCost=0`. Builds default to LDC `-O2 -release`.
 Correctness checks use `enforce` and remain enabled in release builds.
+
+The normal build uses the C-runtime allocator: on Linux, each actor creation
+calls `aligned_alloc(64, roundedSize)` and reclamation calls `free`. D `new`
+is used only for persistent setup outside the timed loop. The optional
+`actor_churn_mimalloc` target links the pinned real mimalloc v3.5.0 library
+and defaults to the existing `actors.mimalloc` adapter. It can also select
+`crt` at runtime for a comparison within the same executable. See
+[MIMALLOC.md](MIMALLOC.md) for commands, alignment controls, and results.
 
 ### Sustained comparison
 
