@@ -12,7 +12,10 @@ THREADPOOL_SOURCES := $(wildcard $(ROOT)/threadpool/source/threadpool/*.d) \
 
 .PHONY: all run run-once run-once-constant-header run-once-constant-callandlength dual-run dual-grid-run dual-run-constant-header dual-run-constant-callandlength digest-run tail-run grid-run run-grid run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
 
-all: throughput dual digest tail actor_ready scaling
+all: throughput dual digest tail actor_ready actor_churn scaling
+
+actor_churn: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES)
+	$(DC) $(DFLAGS) -I$(ROOT) actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) -of=$@
 
 scaling: scaling.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(FIBER_SOURCES) $(THREADPOOL_SOURCES)
 	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/fibers/source \
@@ -84,4 +87,4 @@ tail-run-huge: tail
 	./tail --huge | tee last_tail_huge.txt
 
 clean:
-	rm -f throughput digest tail dual actor_ready scaling *.o
+	rm -f throughput digest tail dual actor_ready actor_churn scaling *.o

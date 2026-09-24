@@ -3,6 +3,100 @@
 For the original checkout versus optimized branch on the existing payload,
 Fiber, and actor-wave benchmarks, see [THROUGHPUT.md](THROUGHPUT.md).
 
+## Sustained actor and wave churn
+
+`actor_churn.d` repeatedly creates a full cohort of actors, dispatches each
+exactly once, requests retirement, and reclaims every actor before the next
+cycle. Actor state is allocated and freed on every cycle. The Farm, runtime,
+owner/handle arrays, completion counters, wave descriptor, and consumer
+threads persist across cycles, so stable actor slots and wave generations
+are reused. There are no Fibers in this benchmark: it isolates the actor
+and wave lifecycle rather than Fiber orchestration.
+
+```sh
+make -C perftest actor_churn
+ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn actor 4096 3 0 256 5
+ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn wave 4096 3 0 256 5
+ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn actor 4096 3 6 256 5
+ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn wave 4096 3 6 256 5
+```
+
+Arguments are mode (`actor` or `wave`), actors per cohort, minimum measured
+seconds, background consumers, publication batch (1–256), and warm-up cycles.
+These examples also show the defaults except that `actor`/`wave` is required.
+Zero background consumers means the controlling thread also consumes;
+otherwise there is one controlling producer plus the requested number of
+un-pinned native consumer threads, continuously polling. No threads are
+created or joined inside the timed loop.
+
+The primary rate, `Mactor_cycles/s`, counts **complete actor lifetimes** in
+millions per second, including creation, dispatch, completion waiting,
+retirement, freeing, and verification. In wave mode, `cycles/s` also gives
+completed cohort waves per second. Every cycle ends with an exact callback
+count/generation check and zero live, ready, or stale actors. The benchmark
+also reports aggregate creation, dispatch, and retirement/reclamation/check
+times for the measured cycles. Warm-up, runtime setup, and final thread
+shutdown are excluded; the final measured cycle always completes, even if
+the requested duration has elapsed.
+
+Each actor has 16 bytes of state on x86-64. Its callback increments a private
+completion counter and release-publishes the cycle number on a separate
+64-byte completion line. There is no contended global callback counter.
+Autonomous mode wakes the whole cohort, flushes batches, and waits for all
+callbacks. Wave mode starts one wave per cohort, publishes batches, seals
+the wave, and waits for aggregate completion and membership release. Both
+then retire and reclaim all actors. This is a minimal-work, cohort-based
+allocation/reuse test; it does not model staggered lifetimes, simultaneous
+creators/reclaimers, or substantial application work.
+
+The Farm uses an 8 MiB ring, eight segments, one small producer, a
+16,384-word quota, and `avgCost=0`. Builds default to LDC `-O2 -release`.
+Correctness checks use `enforce` and remain enabled in release builds.
+
+### Sustained comparison
+
+Measured on 2026-09-24 on the Ryzen 5 5500 host described below, with LDC
+1.43.0 / LLVM 22.1.8, `-O2 -release`, and `ANTFARM_HUGE_PAGES=0`. The same
+`actor_churn.d` source was compiled against original checkout `8e988f6` and
+optimized runtime `e6ce4d1`. Each value is the median of three serial runs
+per revision, alternating revision order. Every run uses five warm-up
+cycles, at least three measured seconds, and publication batch 256.
+
+| Actors/cycle | Background consumers | Mode | Original million lifetimes/s | Optimized million lifetimes/s | Speedup |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 4,096 | 0 | Autonomous | 0.777 | 9.018 | 11.60× |
+| 4,096 | 0 | Wave | 0.811 | 9.809 | 12.10× |
+| 4,096 | 6 | Autonomous | 0.611 | 6.366 | 10.43× |
+| 4,096 | 6 | Wave | 0.626 | 7.931 | 12.68× |
+| 16,384 | 0 | Autonomous | 0.115 | 8.003 | 69.69× |
+| 16,384 | 0 | Wave | 0.117 | 8.670 | 73.86× |
+| 16,384 | 6 | Autonomous | 0.108 | 7.942 | 73.85× |
+| 16,384 | 6 | Wave | 0.109 | 8.243 | 75.75× |
+
+At 16,384 actors on one thread, autonomous-mode phase costs were:
+
+| Phase | Original ns/actor | Optimized ns/actor |
+| --- | ---: | ---: |
+| Creation | 8,408.86 | 61.94 |
+| Wake, publish, execute, await completion | 265.23 | 33.16 |
+| Retire, reclaim, verify | 33.69 | 29.63 |
+
+Creation no longer repeats the quadratic slot search on every refill.
+The autonomous dispatch phase also benefits from bounded ready snapshots.
+Wave mode bypasses that ready backlog for its work; its primary improvement
+here is actor creation. These are gains across repeated reuse, rather than
+just first-time initialization.
+
+The tiny callback and single creating/reclaiming thread do not benefit from
+adding six consumers. Those un-pinned runs were also noisier: optimized
+wave throughput at 16,384 actors ranged from 5.974 to 8.317 million lifetimes/s
+across the three samples, versus 8.645–8.695 on one thread. The median is not
+a latency guarantee or a claim about more substantial parallel actor work.
+
+All 48 timed comparison runs passed the per-cycle checks. Additional smoke
+runs passed with LDC debug, LDC release, and DMD release builds, including
+single-actor batches, non-divisible 257-actor cohorts, and six consumers.
+
 ## Actor ready backlog
 
 `actor_ready.d` measures autonomous actor dispatch from a prequeued burst.
