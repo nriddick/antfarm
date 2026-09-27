@@ -38,8 +38,8 @@ arguments. This controls for the smaller, denser state allocation available
 with the ordinary adapter. It does not change the production allocator.
 
 The target reuses the release static-library build in `actor_torture/.build`
-and builds it if needed. The source is the pinned v3.5.0 submodule at
-`18b08671c9302247bfb682286e6bf3cc1773f801`; `MI_OVERRIDE=OFF` leaves ordinary
+and builds it if needed. The source is the pinned v3.5.3 submodule at
+`d4881d338125e1cb7c47ba4cfb398d6f7c0c8d45`; `MI_OVERRIDE=OFF` leaves ordinary
 process allocation and the D runtime unchanged. `make -C perftest clean`
 removes the benchmark executable but leaves that shared library build intact.
 For DMD, set `DC=dmd DFLAGS='-O -release'
@@ -48,6 +48,7 @@ MIMALLOC_VERSION=-version=AntfarmMimallocV3` on the make command.
 ## Historical measurement protocol
 
 These measurements isolate the first algorithm improvements at `e6ce4d1`.
+They used the then-pinned mimalloc v3.5.0; the build instructions above now use v3.5.3.
 Subsequent retirement and payload-admission changes, with fixed CPU placement,
 are measured separately in [LIFECYCLE.md](LIFECYCLE.md).
 

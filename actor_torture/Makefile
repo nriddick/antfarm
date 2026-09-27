@@ -16,11 +16,11 @@ LDC_REAL_VERSIONS := -d-version=AntfarmActorTestHooks \
 DMD_REAL_VERSIONS := -version=AntfarmActorTestHooks \
 	-version=AntfarmMimallocV3 -version=AntfarmMimallocReal
 MIMALLOC_SOURCE := $(ROOT)/third_party/mimalloc
-MIMALLOC_BUILD := .build/mimalloc-v3.5.0
+MIMALLOC_BUILD := .build/mimalloc-v3.5.3
 MIMALLOC_LIBRARY := $(MIMALLOC_BUILD)/libmimalloc.a
-MIMALLOC_DEBUG_BUILD := .build/mimalloc-v3.5.0-debug
+MIMALLOC_DEBUG_BUILD := .build/mimalloc-v3.5.3-debug
 MIMALLOC_DEBUG_LIBRARY := $(MIMALLOC_DEBUG_BUILD)/libmimalloc-debug.a
-MIMALLOC_TSAN_BUILD := .build/mimalloc-v3.5.0-tsan
+MIMALLOC_TSAN_BUILD := .build/mimalloc-v3.5.3-tsan
 MIMALLOC_TSAN_LIBRARY := $(MIMALLOC_TSAN_BUILD)/libmimalloc-debug.a
 MIMALLOC_TSAN_CC ?= clang
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic

@@ -64,7 +64,7 @@ Correctness checks use `enforce` and remain enabled in release builds.
 The normal build uses the C-runtime allocator: on Linux, each actor creation
 calls `aligned_alloc(64, roundedSize)` and reclamation calls `free`. D `new`
 is used only for persistent setup outside the timed loop. The optional
-`actor_churn_mimalloc` target links the pinned real mimalloc v3.5.0 library
+`actor_churn_mimalloc` target links the pinned real mimalloc v3.5.3 library
 and defaults to the existing `actors.mimalloc` adapter. It can also select
 `crt` at runtime for a comparison within the same executable. See
 [MIMALLOC.md](MIMALLOC.md) for commands, alignment controls, and results.

@@ -542,7 +542,7 @@ inbox node. Every premature unload probe is rejected. The sender and detached-
 node arms additionally reach actor reclamation before releasing their engine
 claims, so the test would fail if unload were based on actor retirement alone.
 
-Allocator lifetime has a separate pinned mimalloc v3.5.0 lane. Actor state,
+Allocator lifetime has a separate pinned mimalloc v3.5.3 lane. Actor state,
 runtime, and stable-slot storage are allocated on one thread only after normal
 construction publication. Idle retirement establishes `RETIRED`; eight other
 threads then call `reclaim` on disjoint owners, and a ninth calls
