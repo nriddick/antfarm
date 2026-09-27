@@ -67,6 +67,9 @@ make -C actor_torture run-mimalloc
 make -C actor_torture run-mimalloc-debug
 ```
 
+Dub's `mimalloc-v3` configuration also builds and links this pinned release
+archive; it does not require a system mimalloc installation.
+
 ## First payload
 
 Application functions can be adapted into Ant Farm payloads with

@@ -413,10 +413,13 @@ throughput gain.
 Actor state in the churn benchmark is allocated and freed on every cycle.
 It is not repeatedly allocated with D `new`; D allocation supplies persistent
 benchmark setup. The existing C-runtime default uses 64-byte-aligned, rounded
-allocations. The optional pinned mimalloc v3.5.0 adapter uses the requested
+allocations. The optional pinned mimalloc v3.5.3 adapter uses the requested
 size and alignment, with matching sized/aligned frees. The benchmark state is
 16 bytes with 8-byte alignment. Mimalloc is linked with process-wide allocator
 override disabled.
+
+The current dependency pin is 3.5.3. The measurements in this section used
+the then-pinned 3.5.0 and have not been relabeled as 3.5.3 results.
 
 The later `cf768cf` measurements used the Ryzen 5 5500, LDC 1.43.0 / LLVM
 22.1.8, `-O2 -release`, ordinary pages, 16,384 actors, batch 256, five warm-ups,

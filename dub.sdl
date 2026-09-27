@@ -33,5 +33,12 @@ configuration "unittest" {
 configuration "mimalloc-v3" {
 	targetType "library"
 	versions "AntfarmMimallocV3"
-	libs "mimalloc"
+	// Build before Dub checks whether a dependent target needs relinking.
+	preGenerateCommands "make -C \"$PACKAGE_DIR/actor_torture\" .build/mimalloc-v3.5.3/libmimalloc.a" platform="linux"
+	extraDependencyFiles "actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a" platform="linux"
+	lflags "$PACKAGE_DIR/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a" "-lpthread" "-lrt" "-latomic" platform="linux"
+	preGenerateCommands "cmake -S \"$PACKAGE_DIR/third_party/mimalloc\" -B \"$PACKAGE_DIR/actor_torture/.build/mimalloc-v3.5.3-windows\" -DCMAKE_BUILD_TYPE=Release -DMI_OVERRIDE=OFF -DMI_BUILD_SHARED=OFF -DMI_BUILD_STATIC=ON -DMI_BUILD_OBJECT=OFF -DMI_BUILD_TESTS=OFF -DMI_OPT_ARCH=OFF -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=\"$PACKAGE_DIR/actor_torture/.build/mimalloc-v3.5.3-windows/lib\" -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE=\"$PACKAGE_DIR/actor_torture/.build/mimalloc-v3.5.3-windows/lib\"" platform="windows-x86_64"
+	preGenerateCommands "cmake --build \"$PACKAGE_DIR/actor_torture/.build/mimalloc-v3.5.3-windows\" --config Release --target mimalloc-static --parallel" platform="windows-x86_64"
+	extraDependencyFiles "actor_torture/.build/mimalloc-v3.5.3-windows/lib/mimalloc.lib" platform="windows-x86_64"
+	lflags "$PACKAGE_DIR/actor_torture/.build/mimalloc-v3.5.3-windows/lib/mimalloc.lib" platform="windows-x86_64"
 }

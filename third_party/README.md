@@ -2,8 +2,8 @@
 
 ## mimalloc
 
-The `mimalloc` submodule is pinned to upstream release **v3.5.0**, commit
-`18b08671c9302247bfb682286e6bf3cc1773f801`.
+The `mimalloc` submodule is pinned to upstream release **v3.5.3**, commit
+`d4881d338125e1cb7c47ba4cfb398d6f7c0c8d45`.
 
 Initialize it after cloning Ant Farm:
 
@@ -16,6 +16,13 @@ The actor correctness lane builds the pinned source as a static library with
 `MI_DEBUG=FULL`, and mimalloc-instrumented ThreadSanitizer builds are exercised by
 `actor_torture/Makefile`. The ordinary Ant Farm library and unit-test builds do
 not build or link mimalloc.
+
+Dub's `mimalloc-v3` configuration builds the pinned release archive and passes
+its exact path to the linker. It needs CMake and a C compiler, plus Make on
+Linux. It does not resolve `-lmimalloc` from the host. A checkout without the
+initialized submodule fails the build instead of selecting a system library.
+Select it directly with `dub build --config=mimalloc-v3`, or from a dependent
+package with `subConfiguration "antfarm" "mimalloc-v3"` in its `dub.sdl`.
 
 To update the pin deliberately:
 
