@@ -274,5 +274,7 @@ ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn_mimalloc tree 16384 2 5 256 5 mimall
 python3 perftest/private_lifecycle_matrix.py --binary perftest/actor_churn_mimalloc --output /tmp/private-matrix
 ```
 
-The recorded matrix pins mimalloc 3.5.0 and this host's 0..11 CPU layout.
-Adapt those checks when intentionally benchmarking another dependency or host.
+The recorded September 25 matrix used mimalloc 3.5.0. New builds and the
+matrix script default to the current 3.5.3 pin; `--mimalloc-version 30500`
+checks a deliberately linked historical build. The script assumes this
+host's 0..11 CPU layout; adapt placement when changing hosts.

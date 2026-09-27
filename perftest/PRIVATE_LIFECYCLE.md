@@ -24,8 +24,9 @@ CPUs. Thus **six threads means 1 + 5**, not six consumers plus a controller.
 CPUs 0..5 occupy distinct physical cores; 0/6, 1/7, … are SMT siblings.
 
 All controls use the same binary and the corrected Farm/public-wave completion
-protocols. The committed base is `1809f0b`; this isolated experiment uses its
-mimalloc 3.5.0 dependency, not the separate checkout's pending 3.5.3 upgrade.
+protocols. The experiment started from `1809f0b` and used its mimalloc 3.5.0
+dependency. The current build pin is 3.5.3; the recorded numbers below remain
+3.5.0 results.
 Farm, root/public runtime metadata, result buffers, and threads persist;
 counted actor state is freshly allocated and freed every cycle. Startup and
 persistent-runtime teardown are outside the timer.
@@ -130,15 +131,22 @@ python3 perftest/private_lifecycle_matrix.py \
   --binary perftest/actor_churn_mimalloc --output /tmp/private-lifecycle
 ```
 
-This worktree used the already-built matching 3.5.0 static archive from the
-original checkout, with `MI_OVERRIDE=OFF`, rather than reinitializing its
+These commands now build and check mimalloc 3.5.3. To repeat the historical
+allocator comparison, link the 3.5.0 archive at commit
+`18b08671c9302247bfb682286e6bf3cc1773f801` and pass
+`--mimalloc-version 30500` to the matrix script. Record those new runs in a
+separate output directory.
+
+The recorded experiment used the already-built matching 3.5.0 static archive
+from the original checkout, with `MI_OVERRIDE=OFF`, rather than reinitializing its
 submodule. The compiler flags, binary/archive hashes, complete command lines,
 and raw output are retained in
 [metadata](results/private-lifecycle-2026-09-25/metadata.json),
 [runs](results/private-lifecycle-2026-09-25/runs.jsonl), and
 [summary](results/private-lifecycle-2026-09-25/summary.json).
-The matrix script assumes this host's CPU layout and checks version 30500;
-adapt those deliberately when changing host or allocator version.
+The matrix script assumes this host's CPU layout and defaults to checking
+version 30503. It records the expected version in metadata and the reported
+version with each run; adapt placement deliberately when changing hosts.
 
 See [PRIVATE_ACTORS.md](../actors/PRIVATE_ACTORS.md) for API usage and limits:
 POD state, callback-scoped `@system` borrowing, whole-cohort child waves, and

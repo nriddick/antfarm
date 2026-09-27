@@ -14,6 +14,8 @@ p.add_argument('--binary', default='./actor_churn_mimalloc')
 p.add_argument('--output', type=Path, required=True)
 p.add_argument('--seconds', type=float, default=2)
 p.add_argument('--repeats', type=int, default=5)
+p.add_argument('--mimalloc-version', type=int, default=30503,
+               help='expected mi_version() value (default: 30503 for 3.5.3)')
 a = p.parse_args()
 a.output.mkdir(parents=True, exist_ok=True)
 binary = Path(a.binary).resolve()
@@ -22,7 +24,7 @@ profiles = [(0, '0'), (1, '0,1'), (5, '0,1,2,3,4,5'),
 cases = [('actor', 256), ('wave', 256), ('wave', 16384), ('private', 256), ('private-remote', 256), ('tree', 256)]
 metadata = dict(binary=str(binary), sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                 seconds=a.seconds, repeats=a.repeats, actors=16384, warmups=5,
-                profiles=profiles, cases=cases,
+                profiles=profiles, cases=cases, expected_mimalloc_version=a.mimalloc_version,
                 compiler=subprocess.check_output(['ldc2', '--version'], text=True),
                 base=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
 (a.output / 'metadata.json').write_text(json.dumps(metadata, indent=2))
@@ -44,11 +46,14 @@ with (a.output / 'runs.jsonl').open('w') as out:
                     match = re.search(r'Mactor_cycles/s=([0-9.]+)', run.stdout)
                     if not match or 'hugePages=false' not in run.stdout:
                         raise RuntimeError(run.stdout + run.stderr)
-                    if allocator == 'mimalloc' and 'mimalloc_version=30500' not in run.stdout:
-                        raise RuntimeError('This recorded matrix requires mimalloc 3.5.0')
+                    version_match = re.search(r'\bmimalloc_version=(\d+)\b', run.stdout)
+                    mimalloc_version = int(version_match[1]) if version_match else None
+                    if allocator == 'mimalloc' and mimalloc_version != a.mimalloc_version:
+                        raise RuntimeError(f'Expected mi_version()={a.mimalloc_version}, '
+                                           f'got {mimalloc_version}')
                     row = dict(allocator=allocator, consumers=consumers, cpus=cpus,
                                repeat=repeat, mode=mode, batch=batch,
-                               rate=float(match[1]), command=cmd,
+                               rate=float(match[1]), mimalloc_version=mimalloc_version, command=cmd,
                                stdout=run.stdout, stderr=run.stderr)
                     rows.append(row)
                     out.write(json.dumps(row) + '\n'); out.flush()
