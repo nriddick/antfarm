@@ -251,3 +251,28 @@ fixes. They must not be relabeled as measurements from the corrected harness.
 Raw throughput uses a synthetic callback with batched counting, not useful
 payload processing. For Windows huge-page comparisons set `ANTFARM_HUGE_PAGES=1`
 and pass `--huge` from an account with the existing large-page privilege.
+
+## Private actor lifecycle experiment
+
+`actor_churn private` measures fresh allocation, one private root dispatch,
+terminal dispatch, and emitter-side free/recycling. `private-remote` instead
+frees root state on consumers as a diagnostic allocation-locality control.
+`actor_churn tree` creates private parents, each of which creates up to `batch`
+children inside its own dispatch and authorizes their terminal wave. The
+reported rate counts children; parent and cohort creation/free are included
+in elapsed time and reported separately as extra parents per cycle. This
+mode distributes creation across workers and changes allocation locality.
+
+See [PRIVATE_LIFECYCLE.md](PRIVATE_LIFECYCLE.md) for paired measurements and
+[the ownership contract](../actors/PRIVATE_ACTORS.md). All modes can run
+in one binary with the same Farm and allocator. For example:
+
+```sh
+make -C perftest actor_churn_mimalloc
+ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn_mimalloc private 16384 2 5 256 5 mimalloc 0,1,2,3,4,5
+ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn_mimalloc tree 16384 2 5 256 5 mimalloc 0,1,2,3,4,5
+python3 perftest/private_lifecycle_matrix.py --binary perftest/actor_churn_mimalloc --output /tmp/private-matrix
+```
+
+The recorded matrix pins mimalloc 3.5.0 and this host's 0..11 CPU layout.
+Adapt those checks when intentionally benchmarking another dependency or host.

@@ -6,7 +6,7 @@
 module actor_churn;
 
 import actors;
-import antfarm : ConsumerView;
+import antfarm : ConsumerView, fatal;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore, pause;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;
@@ -20,6 +20,7 @@ import threadpool.pin : PinTarget, pinToLogicalProcessor;
 version (AntfarmMimallocV3)
 {
     import actors.mimalloc : mimallocV3ActorAllocator;
+    private extern(C) int mi_version() nothrow @nogc @system;
 
     // Diagnostic control: match cRuntime's rounded size and 64-byte alignment.
     // The ordinary mimalloc mode uses the adapter's exact size/alignment.
@@ -66,6 +67,48 @@ private void activate(scope ref ActorBorrow!State actor,
     operate(actor);
 }
 
+private PrivateDisposition privateActivate(scope ref PrivateBorrow!State actor,
+        scope ref PrivateContext) nothrow @nogc @system
+{
+    auto completion = actor.value.completion;
+    ++completion.calls;
+    atomicStore!(MemoryOrder.rel)(completion.stamp, actor.value.cycle);
+    return PrivateDisposition.finish;
+}
+
+private void privateOperate(scope ref PrivateBorrow!State actor,
+        scope ref PrivateContext context) nothrow @nogc @system
+{
+    privateActivate(actor, context);
+}
+
+private struct TreeState
+{
+    Completion* completions;
+    size_t count;
+    ulong cycle;
+    PrivateChildPark!State* children;
+}
+
+private PrivateDisposition treeActivate(scope ref PrivateBorrow!TreeState actor,
+        scope ref PrivateContext context) nothrow @nogc @system
+{
+    if (actor.value.children is null)
+    {
+        actor.value.children = context.createChildren!State(actor.value.count);
+        if (actor.value.children is null) fatal("child park allocation failed");
+        foreach (i; 0 .. actor.value.count)
+            if (!actor.value.children.spawn(context,
+                    State(actor.value.completions + i, actor.value.cycle)))
+                fatal("private child allocation failed");
+        if (!actor.value.children.start!privateOperate(context, true))
+            fatal("private child wave failed");
+        return PrivateDisposition.again;
+    }
+    return actor.value.children.finished(context)
+        ? PrivateDisposition.finish : PrivateDisposition.again;
+}
+
 private class Consumer
 {
     AntFarm* farm;
@@ -104,9 +147,12 @@ private double elapsedSeconds(long ticks)
 void main(string[] args)
 {
     enforce(args.length >= 2 && args.length <= 9
-            && (args[1] == "actor" || args[1] == "wave"),
-        "usage: actor_churn actor|wave [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-]");
+            && (args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree"),
+        "usage: actor_churn actor|wave|private|private-remote|tree [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-]");
     immutable waveMode = args[1] == "wave";
+    immutable remoteMode = args[1] == "private-remote";
+    immutable privateMode = args[1] == "private" || remoteMode;
+    immutable treeMode = args[1] == "tree";
     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;
     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;
     immutable consumers = args.length > 4 ? to!uint(args[4]) : 0;
@@ -144,10 +190,22 @@ void main(string[] args)
     auto farm = AntFarm.create(1 << 20, 8, consumers ? consumers : 1,
         0, 0, 1, 16384);
     enforce(farm !is null, "Farm allocation failed");
+    version (AntfarmMimallocV3)
+        if (allocatorName != "crt") writefln("mimalloc_version=%s", mi_version());
     scope (exit) farm.destroy();
-    auto runtime = ActorRuntime.create(farm, count, allocator);
-    enforce(runtime !is null, "actor runtime allocation failed");
-    scope (exit) runtime.destroy();
+    auto runtime = privateMode || treeMode ? null : ActorRuntime.create(farm, count, allocator);
+    enforce(privateMode || treeMode || runtime !is null, "actor runtime allocation failed");
+    scope (exit) if (runtime !is null) runtime.destroy();
+    auto park = privateMode && !remoteMode ? PrivateRootPark!(State, privateActivate).create(farm, count, allocator) : null;
+    enforce(!privateMode || remoteMode || park !is null, "private park allocation failed");
+    auto remotePark = remoteMode ? PrivateRootPark!(State, privateActivate, PrivateRootReclamation.consumer).create(farm, count, allocator) : null;
+    enforce(!remoteMode || remotePark !is null, "remote private park allocation failed");
+    scope(exit) if (remotePark !is null) remotePark.destroy();
+    scope (exit) if (park !is null) park.destroy();
+    immutable parents = (count + batch - 1) / batch;
+    auto trees = treeMode ? PrivateRootPark!(TreeState, treeActivate).create(farm, parents, allocator) : null;
+    enforce(!treeMode || trees !is null, "private tree park allocation failed");
+    scope (exit) if (trees !is null) trees.destroy();
     auto owners = new ActorOwner!State[count];
     auto handles = new ActorHandle!State[count];
     auto completions = new Completion[count];
@@ -194,6 +252,32 @@ void main(string[] args)
         ++cycle;
         immutable start = MonoTime.currTime;
         immutable deadline = start + 60.seconds;
+        if (privateMode || treeMode)
+        {
+            if (privateMode)
+                foreach (i; 0 .. count)
+                    enforce(remoteMode ? remotePark.spawn(State(&completions[i], cycle))
+                        : park.spawn(State(&completions[i], cycle)), "private creation failed");
+            else
+                foreach (i; 0 .. parents)
+                {
+                    immutable offset = i * batch;
+                    immutable children = count - offset < batch ? count - offset : batch;
+                    enforce(trees.spawn(TreeState(completions.ptr + offset, children, cycle, null)),
+                        "private parent creation failed");
+                }
+            while (privateMode ? (remoteMode ? remotePark.live != 0 : park.live != 0) : trees.live != 0)
+            {
+                if (privateMode) { if (remoteMode) remotePark.pump(token, batch); else park.pump(token, batch); }
+                else trees.pump(token, 256);
+                consume();
+                enforce(MonoTime.currTime < deadline, "private lifecycle timed out");
+            }
+            foreach (ref completion; completions)
+                enforce(atomicLoad!(MemoryOrder.acq)(completion.stamp) == cycle
+                    && completion.calls == cycle, "private count mismatch");
+            return;
+        }
         foreach (i; 0 .. count)
         {
             owners[i] = runtime.createActor!(State, activate)(
@@ -290,6 +374,13 @@ void main(string[] args)
     writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f cycles/s=%.2f",
         rounds, elapsed, actorCycles / elapsed / 1e6,
         elapsed * 1e9 / actorCycles, rounds / elapsed);
+    if (privateMode || treeMode)
+    {
+        writefln("verified_actor_cycles=%s extra_parents_per_cycle=%s retirement=%s phases=overlap",
+            cycle * count, treeMode ? parents : 0,
+            treeMode ? "children_consumer_free" : remoteMode ? "consumer_free" : "emitter_free");
+        return;
+    }
     writefln("create_s=%.6f dispatch_s=%.6f retire_reclaim_verify_s=%.6f verified_actor_cycles=%s",
         elapsedSeconds(createTicks), elapsedSeconds(dispatchTicks),
         elapsedSeconds(retireTicks), cycle * count);

@@ -111,6 +111,12 @@ dmd -g -i examples/iota_sum.d antfarm.d antfarm_templates.d \
 ANTFARM_HUGE_PAGES=0 ./iota_sum
 ```
 
+The experimental [private actor model](actors/PRIVATE_ACTORS.md) adds self-owned
+roots and exclusively parent-owned child cohorts. Blind parks emit dispatches;
+state is visible only inside the actor's authorized callback. See its
+[full-lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md) and ownership limits
+before choosing it over the public actor API.
+
 ## First actor and wave
 
 The `actors` package adds explicit state lifetime and exclusive callback-local

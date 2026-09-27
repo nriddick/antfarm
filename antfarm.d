@@ -393,7 +393,7 @@ enum uint MAX_PAYLOAD_ITERS = 512;
 // changing quota or tally state; ordinary builds contain neither hook nor call.
 version (AntfarmWriteAuditHooks)
 {
-    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned }
+    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned, tablePublished }
     __gshared void function(AntFarm*, WriteAuditPhase, ulong, ulong)
         nothrow @nogc @system writeAuditHook;
 }
@@ -488,7 +488,10 @@ alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iter
 /// Low-level notification attached to one physical payload table. The Farm
 /// invokes `call(context)` exactly once, on the consumer that advances that
 /// table's primary Tprogress to Tlen. The pointed-to hook and its context
-/// must remain stable until notification returns.
+/// must remain stable until invocation. The Farm snapshots both fields before
+/// calling and never accesses the hook/context afterward, so a notification
+/// may release its own storage or transfer it as its final access. Otherwise
+/// the caller must keep it stable until the notification returns.
 alias TableCompletionCallback = void function(void* context)
     nothrow @nogc @system;
 
@@ -1637,6 +1640,9 @@ struct AntFarm
         // consumers validating the expected sequence also validate the table
         // contents (spec 4b).
         atomicStore!(MemoryOrder.rel)(buf[wret & Lmask], sentinelOf(wret));
+        version (AntfarmWriteAuditHooks)
+            if (writeAuditHook !is null)
+                writeAuditHook(&this, WriteAuditPhase.tablePublished, wret, wtprime);
         return n;
     }
 }
@@ -2388,7 +2394,10 @@ private:
             // Spec 5e-k: the consumer adding the final completion sum for
             // the shard increments Tprogress by the shard length, whichever
             // consumer (owner, sweeper, or re-walker) that happens to be.
-            immutable y = atomicFetchAdd!(MemoryOrder.raw)(*shc, cast(ulong) runlen);
+            // Join every chunk's callback writes before the final chunk
+            // forwards this shard's completion into Tprogress. A relaxed
+            // completion sum would join only the shard finisher's writes.
+            immutable y = atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, cast(ulong) runlen);
             if ((y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
             if ((y & 0xFFFF_FFFFUL) == shlen - runlen)
             {

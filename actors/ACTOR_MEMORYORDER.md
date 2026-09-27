@@ -4,7 +4,9 @@
 
 This document describes the implemented autonomous activation and intrusive-
 inbox protocols in `actors/actor.d`, plus the phase-oriented aggregate protocol
-in `actors/wave.d`. It supplements
+in `actors/wave.d`. The separate private path's publication, nested-credit,
+and final-access reclamation protocol is described in
+[PRIVATE_ACTORS.md](PRIVATE_ACTORS.md). It supplements
 [SPEC.md](../SPEC.md), whose Farm sentinel and segment-lifetime rules remain
 unchanged.
 
@@ -50,8 +52,9 @@ caller-observed quiescence described below.
 | `Pbody` | Two or three const ring words | Stable slot address and generation; wave payloads add the stable wave address. Raw-stored before `Tsent` and raw-loaded after its acquire. |
 | `Tprogress` | Farm table completion counter | Each shard publishes callback writes with an acquire/release increment; the increment reaching `Tlen` invokes the table hook. |
 | `Wlen` | `ActorWave.tablesPublished_` | Number of physical tables admitted into the open wave. |
-| `Wprogress` | `ActorWave.tablesCompleted_` | Number of table hooks which have joined their table and returned it to the wave. |
-| `Wstatus` | `ActorWave.status_` | `SEALED`, `FINISHING`, `FINISHED`, and `FAILED`; acquire observation of `FINISHED` joins the wave. |
+| `Wprogress` | `ActorWave.tablesCompleted_` | Number of table hooks which have recorded table completion; diagnostic, not a callback-lifetime fence. |
+| `Wstatus` | `ActorWave.status_` | `SEALED`, `FINISHED`, and `FAILED`; acquire observation of `FINISHED` joins the wave. |
+| `Wcredits` | `ActorWave.pendingCredits_` | Producer hold plus one credit per admitted physical table; final decrement owns completion. |
 
 `raw` means an atomic operation with no ordering semantics. It prevents an
 atomic/plain data race on reused storage but does not itself publish preceding
@@ -111,8 +114,9 @@ authority to touch mutable state. Possessing a ring handle without winning
 ```text
 orchestrator                 Farm table consumers                 observer
 ------------                 --------------------                 --------
-
+begin: Wcredits = 1
 Wlen.fetchAdd(acq_rel)
+Wcredits.fetchAdd(acq_rel)
 L.CAS(acq_rel,
   IDLE -> SCHEDULED)
 link member; Wowner.store(rel)
@@ -121,28 +125,44 @@ Tsent.store(rel)       ---> Tsent.load(acq)
                             L.load(acq, SCHEDULED)
                             phase-specific ActorBorrow mutation
                             L.CAS(acq_rel, SCHEDULED -> IDLE)
+                            Shc completion.fetchAdd(acq_rel)
                             Tprogress.fetchAdd(acq_rel)
                               last shard: table hook
                             Wprogress.fetchAdd(acq_rel)
-
+                            Wcredits.fetchSub(acq_rel) [final access]
 seal: Wstatus.CAS(acq_rel,
   OPEN -> SEALED)
-sealer or last hook:
-Wstatus.CAS(acq_rel,
-  SEALED -> FINISHING)
+cache observation handle
+Wcredits.fetchSub(acq_rel) [final access]
+
+sole final-credit owner:
+cache completion callback/context
 clear intrusive members
 Wowner.store(rel, 0) for each
-Wstatus.CAS(acq_rel,
-  FINISHING -> FINISHED) --------------------------------------> load(acq)
+Wstatus.store(rel, FINISHED) [last descriptor access] -----------> load(acq)
+invoke cached optional completion
 ```
 
-The wave may have several tables and several Tprogress shards per table.
-Acquire/release RMW modification order joins each shard into its table, then
-each table into Wprogress. `Wprogress == Wlen` may be transient while the
-producer is still publishing, so only `SEALED && Wprogress == Wlen` permits
-the exactly-once `FINISHED` transition. Publishing a dependent wave after an
-acquire observation of `FINISHED` carries all predecessor actor writes into
-the new Farm publication.
+The producer hold prevents completion while more tables can be published or
+while the writer still uses the descriptor after `writeTracked` returns.
+A zero write rolls back both Wlen and its reserved table credit. Each hook
+records diagnostic progress, completes its remaining descriptor accesses,
+then drops its credit. The final acquire/release decrement joins all prior
+participants and uniquely owns membership release and the `FINISHED` store.
+`seal` caches its returned handle before dropping the producer hold.
+
+`Wprogress == Wlen` is not a sufficient finish condition, even after sealing.
+A hook can increment progress and still be accessing the descriptor. Also,
+separately reading equality and then SEALED can use equality from an earlier
+open publication state. The former equality/election implementation allowed
+both races. The deterministic torture tests pause a hook after its progress
+increment and verify that neither the sealer nor another completing table can
+finish until that hook releases its credit; they then immediately reuse the
+descriptor before joining the paused consumer's thread.
+
+The release/acquire chain joins consumers within each shard, shards within a
+table, and table hooks into the final wave credit. Acquiring `FINISHED` carries
+all predecessor actor writes into a dependent wave's Farm publication.
 
 Membership release reads the next intrusive link and clears the old link
 before release-storing `Wowner = 0`. That store is the wave's final access to
@@ -531,3 +551,13 @@ threads then call `reclaim` on disjoint owners, and a ninth calls
 and a Clang-instrumented mimalloc plus LDC-instrumented actor binary passes one
 ThreadSanitizer runtime. This tests allocator thread migration; it does not
 weaken or replace any actor lifecycle handoff edge.
+
+## Within-shard completion join
+
+The Farm's chunk **completion** RMW on `Shc` uses acquire/release ordering, as
+does the shard finisher's RMW on `Tprogress`. Both are needed when a tracked
+ST table's hook observes plain writes from every callback: the first joins
+consumers within a shard, and the second joins shards. Work-claim increments
+on `Shc` remain relaxed. The private actor tests include a two-consumer, one-
+shard ThreadSanitizer regression that fails with the former relaxed completion
+RMW and passes with acquire/release.
