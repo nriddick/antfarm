@@ -1,15 +1,22 @@
 # Ant Farm roadmap
 
-## Unreleased usability fixes
+## Next: 1.7.1-rc.1 private actors
 
-Behavior changes after 1.7.0-rc.3:
+Private actor hierarchies (self-owned roots, parent-owned child cohorts, and
+joined descendant lifetimes) are developed separately, together with their
+Farm shard-completion and public actor-wave completion fixes, for
+1.7.1-rc.1. That work must convert its `AntFarm.create` calls to the rc.4
+`ringMiB` parameter.
+
+## 1.7.0-rc.4 usability and shutdown fixes
+
+Behavior changes since 1.7.0-rc.3:
 
 - `AntFarm.create`'s first parameter is now `ringMiB`, the ring size in MiB
   (a power of two in `[2, MAX_RING_MIB]`), instead of `ln` in ulongs. Divide a
   former length by 131072, or use `ringMiBFromUlongs`. A leftover ulong
   length such as `1 << 18` exceeds `MAX_RING_MIB` and is fatal rather than
   mapping 256 GiB.
-
 - `ConsumerView.subscribe` failures are distinguishable: `SUBSCRIBE_FULL`
   (-1, 128 views already subscribed), `SUBSCRIBE_RETRY` (-2, transient
   frontier), and `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed).
