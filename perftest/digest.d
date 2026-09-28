@@ -315,7 +315,7 @@ Trial runOnce(Cfg cfg, Arm arm)
     immutable nTables = (cfg.jobs + cfg.tlen - 1) / cfg.tlen;
     immutable total = nTables * cfg.tlen;
 
-    auto f = AntFarm.create(cfg.ln, cfg.k, cfg.nc, cfg.nb, 0, 0, 4096, DEFAULT_SMALL_TABLE_THRESHOLD, cfg.huge);
+    auto f = AntFarm.create(ringMiBFromUlongs(cfg.ln), cfg.k, cfg.nc, cfg.nb, 0, 0, 4096, DEFAULT_SMALL_TABLE_THRESHOLD, cfg.huge);
     auto headers = cast(PayloadHeader*) malloc(cfg.tlen * PayloadHeader.sizeof);
     auto body = cast(ulong*) malloc(cfg.body * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(cfg.tlen * PayloadEntry.sizeof);

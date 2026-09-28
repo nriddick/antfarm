@@ -19,7 +19,7 @@ void main(string[] args)
     // so Farm write overlaps the burst; still drains after.
     immutable pipeline = args.length > 5 ? args[5].to!int : 0;
 
-    auto farm = AntFarm.create(1 << 20, 8, 1, 0, 0, 1, 16_384);
+    auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 16_384);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
     backend.reserve(taskCount);

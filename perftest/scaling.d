@@ -28,7 +28,7 @@ void main(string[] args)
     immutable n = to!size_t(args[2]);
     if (n == 0 || n > cast(size_t) long.max / 4)
         throw new Exception("count must be positive and fit lifecycle reservation accounting");
-    auto farm = AntFarm.create(1 << 20, 8, 1, 0, 0, 1, 16384);
+    auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 16384);
     if (farm is null) throw new Exception("Farm allocation failed");
     scope (exit) farm.destroy();
     if (args[1] == "create")

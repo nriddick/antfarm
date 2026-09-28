@@ -3,7 +3,10 @@
  + `home!FarmBin()` both publishes and drains a few payloads.
  +
  + From the threadpool directory:
- +   dmd -g -i examples/hello_antfarm.d ../antfarm.d -Isource "-ofhello_antfarm.exe"
+ +   dmd -g -i -I.. -Isource examples/hello_antfarm.d -of=hello_antfarm
+ +   ANTFARM_HUGE_PAGES=0 ./hello_antfarm
+ +
+ + (`ldc2` accepts the same arguments; add `.exe` to the output on Windows.)
  +/
 module hello_antfarm;
 
@@ -22,8 +25,11 @@ struct FarmBin
 __gshared shared(long) g_calls;
 __gshared shared(long) g_sum;
 __gshared shared(int) g_didProduce;
-__gshared shared(int) g_stop;
 __gshared uint g_expect;
+
+// Thread-local: each pinned worker owns one persistent consumer cursor.
+ConsumerView t_view;
+bool t_subscribed;
 
 long helloCb(PayloadHeader*, PayloadBody b, ulong) nothrow @nogc @system
 {
@@ -35,28 +41,15 @@ long helloCb(PayloadHeader*, PayloadBody b, ulong) nothrow @nogc @system
 
 bool pump(WorkerSelf* w) nothrow @nogc @system
 {
-    static ConsumerView view;
-    static bool subscribed;
-
-    if (atomicLoad(g_stop))
-    {
-        if (subscribed)
-        {
-            view.unsubscribe();
-            subscribed = false;
-        }
-        return false;
-    }
-
     auto slot = home!FarmBin();
     if (slot is null || slot.farm is null)
         return false;
 
-    if (!subscribed)
+    if (!t_subscribed)
     {
-        if (view.subscribe(slot.farm) < 0)
+        if (t_view.subscribe(slot.farm) < 0)
             return false;
-        subscribed = true;
+        t_subscribed = true;
     }
 
     if (cas(&g_didProduce, 0, 1))
@@ -86,10 +79,20 @@ bool pump(WorkerSelf* w) nothrow @nogc @system
         }
     }
 
-    return view.consumeNext();
+    return t_view.consumeNext();
 }
 
-void main()
+// Runs once on each worker during pool shutdown, after its last pump.
+void stopWorker(WorkerSelf* w) nothrow @nogc @system
+{
+    if (t_subscribed)
+    {
+        t_view.unsubscribe();
+        t_subscribed = false;
+    }
+}
+
+int main()
 {
     auto topo = CacheAwarePool.topology();
     printf("hello_antfarm  os=%.*s  llc=%u  lps=%u\n",
@@ -99,6 +102,7 @@ void main()
     PoolOptions opt;
     opt.skipSmtSiblings = true;
     opt.workerBody = &pump;
+    opt.workerStop = &stopWorker;
 
     auto bins = new FarmBin[](topo.llcCount);
     foreach (i, ref b; bins)
@@ -112,7 +116,7 @@ void main()
         }
         if (ncons == 0)
             ncons = 1;
-        b.farm = AntFarm.create(1UL << 21, 8, ncons, 0, 0, 8, 4096,
+        b.farm = AntFarm.create(16, 8, ncons, 0, 0, 8, 4096,
             DEFAULT_SMALL_TABLE_THRESHOLD, false);
     }
     install(bins);
@@ -128,7 +132,7 @@ void main()
     g_expect = 4;
     auto pool = new CacheAwarePool(opt);
     pool.start();
-    scope (exit) pool.shutdown(true);
+    scope (exit) pool.shutdown();
 
     {
         auto d = pool.director();
@@ -139,11 +143,10 @@ void main()
                 break;
             Thread.sleep(msecs(5));
         }
-        atomicStore(g_stop, 1);
-        pool.wakeAll();
-        d.spin();
-        Thread.sleep(msecs(20));
     }
+    // Workers unsubscribe in stopWorker before shutdown returns, so the
+    // scope(exit) blocks can then uninstall the bins and destroy the Farms.
+    pool.shutdown();
 
     printf("received %lld payloads  sum=%lld (want %u x 42 = %lld)\n",
         atomicLoad(g_calls), atomicLoad(g_sum),
@@ -151,7 +154,8 @@ void main()
     if (atomicLoad(g_calls) != g_expect || atomicLoad(g_sum) != g_expect * 42)
     {
         fprintf(stderr, "hello_antfarm: unexpected counts\n");
-        return;
+        return 1;
     }
     printf("hello_antfarm: ok\n");
+    return 0;
 }

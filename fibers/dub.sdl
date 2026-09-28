@@ -14,11 +14,15 @@ configuration "library" {
 
 configuration "unittest" {
     targetType "executable"
+    // Correctness suites: keep assert checks in release builds too.
+    buildRequirements "requireContracts"
     mainSourceFile "tests/smoke.d"
 }
 
 configuration "stress" {
     targetType "executable"
+    // Correctness suites: keep assert checks in release builds too.
+    buildRequirements "requireContracts"
     mainSourceFile "tests/stress.d"
 }
 

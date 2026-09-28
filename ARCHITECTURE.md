@@ -1,6 +1,6 @@
 # Ant Farm architecture
 
-Ant Farm 1.7.0-rc.1 is one repository with four cooperating packages. They
+Ant Farm 1.7.0-rc.4 is one repository with four cooperating packages. They
 separate transport, worker placement, stateful identities, and suspendable
 control flow so an application can choose the narrowest representation for
 each kind of work.
@@ -111,12 +111,14 @@ example. It exercises the complete non-Fiber path:
 2. Create one Farm sized for the selected worker count.
 3. Install a `FarmBin` so every pinned worker can locate that Farm.
 4. Start a `CacheAwarePool` whose worker body subscribes one persistent
-   `ConsumerView` and calls `consumeNext()`.
+   thread-local `ConsumerView` and calls `consumeNext()`, and whose
+   `workerStop` hook unsubscribes that view.
 5. Adapt `iota(1, n + 1)` with `payloadRange!sumJob`. The generated range has
    one common callback and a compile-time fixed packed width.
 6. Publish a prefix, pop exactly the returned count, and retry on backpressure.
-7. Wait for application completion, then unwind pool, consumer, token, and Farm
-   ownership in that order.
+7. Wait for application completion (a callback-maintained counter), then shut
+   down the pool, which runs every worker's `workerStop` and joins it, and only
+   then uninstall the bins and destroy the Farm.
 
 The source remains a real example rather than a README-only snippet so release
 checks can compile and execute the exact onboarding program.
@@ -146,14 +148,39 @@ happens-before edges are in
 
 ## Sizing one Farm
 
-`AntFarm.create` needs a ring length, segment count, expected consumer count,
-and capacity/quota for bulk and small producer tiers.
+`AntFarm.create` takes nine parameters, all defaulted. Pass them by name:
 
-- Ring length is in ulongs, is a power of two, and should generally fit the
-  intended LLC working set.
+```d
+auto farm = AntFarm.create(ringMiB: 8, k: 8, expectedConsumers: workers,
+                           maxBulk: 0, maxSmall: producers, quotaSmall: 4096);
+```
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `ringMiB` | `8` | ring size in MiB; power of two, `>= 2` (at most `MAX_RING_MIB`, 64 GiB) |
+| `k` | `8` | segment count; power of two in `[2, 16]` |
+| `expectedConsumers` | `4` | initial sharding hint, not a cap |
+| `maxBulk` | `2` | simultaneous bulk-tier tokens; `0` disables the tier |
+| `quotaBulk` | `0` | per-token bulk quota in ulongs; `0` means one segment |
+| `maxSmall` | `16` | simultaneous small-tier tokens; `0` disables the tier |
+| `quotaSmall` | `4096` | per-token small quota in ulongs; must be `> 0` if enabled |
+| `smallThreshold` | `64` | tables shorter than this are not sharded; `0` selects the auto rule |
+| `hugePages` | `false` | request the platform huge-page path |
+
+Invalid combinations are fatal at construction. In particular the sum of all
+quotas, `maxBulk * quotaBulk + maxSmall * quotaSmall`, must not exceed `k - 1`
+segments. The ring holds `ringMiB * 131072` ulongs, so that limit is
+`(k - 1) * ringMiB * 131072 / k` ulongs, and every payload must fit one table
+within its producer's quota.
+
+- The ring should generally fit the intended LLC working set. Quotas and
+  payload sizes remain in ulongs (8 bytes); only the ring size is in MiB.
+  `ringMiBFromUlongs` converts a former ulong length exactly.
 - Four or eight segments are the characterized choices.
-- Consumer capacity must cover every simultaneously subscribed view, including
-  any remote covering sweeper.
+- `expectedConsumers` seeds the first epoch's leaf sharding; later epochs use
+  the live count. The hard limit is `MAX_CONSUMERS_LIMIT` (128) simultaneously
+  subscribed views, beyond which `subscribe()` returns `SUBSCRIBE_FULL`. A
+  count far from reality costs performance, never safety.
 - Producer capacity must cover every worker/control producer that can hold a
   token simultaneously.
 - Publish useful batches. Single-item writes pay table overhead every time.
@@ -189,7 +216,8 @@ For a full stack:
 4. Signal or cooperatively cancel other indefinite Fiber waiters.
 5. Drain runnable work and completion/lifecycle records.
 6. Release completed Fiber tasks.
-7. Shut down and join the worker pool.
+7. Shut down and join the worker pool. Its `workerStop` hooks unsubscribe
+   worker-owned consumers before `shutdown()` returns.
 8. Uninstall lane/bin mappings.
 9. Unsubscribe any control-thread consumers and unregister tokens.
 10. Destroy Farms only after no consumer or producer can touch them.

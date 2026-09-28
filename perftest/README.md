@@ -225,8 +225,8 @@ not overall application performance or concurrent allocator scalability.
 
 ## Tail latency harness
 
-Build with `make -C perftest`. For a standalone Windows tail build from the
-repository root:
+Build with `make -C perftest`. For a standalone tail build from the
+repository root (use `-of=tail` instead of `-of=tail.exe` outside Windows):
 
 ```text
 ldc2 -O2 -release -i -Ithreadpool/source -Iperftest perftest/tail.d antfarm.d antfarm_allocation.d -of=tail.exe
@@ -246,7 +246,7 @@ misses the window may time out instead of reporting idle samples as backlog
 latency. This does not guarantee that the backlog remains nonempty throughout
 the subsequent timestamp and publication operations.
 
-Historical `latency.txt` results predate these placement and sample-accounting
+Historical [`results/latency.txt`](results/latency.txt) results predate these placement and sample-accounting
 fixes. They must not be relabeled as measurements from the corrected harness.
 Raw throughput uses a synthetic callback with batched counting, not useful
 payload processing. For Windows huge-page comparisons set `ANTFARM_HUGE_PAGES=1`

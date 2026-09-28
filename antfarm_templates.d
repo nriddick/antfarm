@@ -20,6 +20,9 @@
  +     `immutable(int)*` are allowed and copied by reference), and with
  +     alignment <= 8.
  +   - The function must return void or a type implicitly convertible to long.
+ +   - Each argument must implicitly convert to its parameter type. No cast
+ +     is applied, so narrowing (`int` to `ubyte`) and mutable-to-immutable
+ +     pointer conversions are compile errors.
  +
  + `antfarm_templates` publicly imports `antfarm`, so importing this
  + module also brings in `AntFarm`, `ConsumerView`, `PayloadHeader`,
@@ -105,7 +108,8 @@ void initPayloadHeader(alias fn, bool withIteration = false)(
 PayloadEntry payloadEntry(alias fn, uint maxCs = 1, uint done = 1,
         bool withIteration = false, Args...)(
     PayloadHeader* header, ulong[] buf, Args args) nothrow @nogc @system
-    if (Args.length == packedParams!(fn, withIteration).length)
+    if (Args.length == packedParams!(fn, withIteration).length
+        && argsConvert!(fn, withIteration, Args))
 {
     static assert(validSignature!(fn, withIteration),
         "antfarm_templates: unsupported function signature");
@@ -122,7 +126,8 @@ PayloadEntry payloadEntry(alias fn, uint maxCs = 1, uint done = 1,
 PayloadEntry payloadEntryRuntime(alias fn, bool withIteration = false, Args...)(
     PayloadHeader* header, ulong[] buf, uint maxCs, uint done, Args args)
         nothrow @nogc @system
-    if (Args.length == packedParams!(fn, withIteration).length)
+    if (Args.length == packedParams!(fn, withIteration).length
+        && argsConvert!(fn, withIteration, Args))
 {
     static assert(validSignature!(fn, withIteration),
         "antfarm_templates: unsupported function signature");
@@ -265,6 +270,27 @@ private template packedParams(alias fn, bool withIteration)
         alias packedParams = Parameters!fn;
 }
 
+/// True when every argument implicitly converts to the matching packed
+/// parameter. Explicit casts are never applied: they would silently narrow
+/// values or launder a mutable pointer into an `immutable` parameter.
+template argsConvert(alias fn, bool withIteration, Args...)
+{
+    alias P = packedParams!(fn, withIteration);
+    static if (Args.length != P.length)
+        enum bool argsConvert = false;
+    else
+        enum bool argsConvert = argsConvertImpl!(0, P.length, P, Args);
+}
+
+private template argsConvertImpl(size_t i, size_t n, T...)
+{
+    static if (i == n)
+        enum bool argsConvertImpl = true;
+    else
+        enum bool argsConvertImpl = is(T[n + i] : T[i])
+            && argsConvertImpl!(i + 1, n, T);
+}
+
 private template validSignature(alias fn, bool withIteration)
 {
     static if (withIteration)
@@ -372,7 +398,13 @@ private void packArgsImpl(alias fn, bool withIteration = false, size_t i = 0,
     static if (i < P.length)
     {
         alias T = P[i];
-        T arg = cast(T) args[i];
+        static assert(is(Args[i] : T),
+            "antfarm_templates: argument " ~ i.stringof ~ " of type "
+            ~ Args[i].stringof ~ " does not implicitly convert to "
+            ~ fullyQualifiedName!fn ~ "'s parameter type " ~ T.stringof
+            ~ " (no narrowing, and no mutable aliases into immutable/shared"
+            ~ " parameters)");
+        T arg = args[i];
         enum size_t off = paramOffset!(fn, i, withIteration);
         enum size_t bytes = ((T.sizeof + 7) / 8) * ulong.sizeof;
         memset(&buf[off], 0, bytes);

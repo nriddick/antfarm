@@ -47,7 +47,7 @@ void main(string[] args)
         immutable slots = perLlc[i] == 0 ? 1 : perLlc[i];
         immutable quotaHeadroom = (k - 1) * segCap / slots;
         immutable quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
-        auto farm = AntFarm.create(ln, k, cast(uint) slots, 0, 0,
+        auto farm = AntFarm.create(ringMiBFromUlongs(ln), k, cast(uint) slots, 0, 0,
                                    cast(uint) slots, quotaSmall);
         farms ~= farm;
         lanes ~= new FiberLane(farm);

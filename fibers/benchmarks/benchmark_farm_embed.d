@@ -76,7 +76,7 @@ AntFarm* makeFarm(uint consumers)
     immutable slots = consumers + 1;
     immutable quotaHeadroom = (k - 1) * segCap / slots;
     immutable quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
-    return AntFarm.create(ln, k, consumers, 0, 0, slots, quotaSmall);
+    return AntFarm.create(ringMiBFromUlongs(ln), k, consumers, 0, 0, slots, quotaSmall);
 }
 
 void fillChunk(ref PayloadHeader header, ref ulong word, PayloadEntry[] chunk)

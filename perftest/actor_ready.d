@@ -31,7 +31,7 @@ void main(string[] args)
     if (count == 0 || rounds == 0 || batch == 0 || batch > 256)
         throw new Exception("actors/rounds must be positive; batch must be 1..256");
 
-    auto farm = AntFarm.create(1 << 20, 8, 1, 0, 0, 1, 8192);
+    auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 8192);
     if (farm is null) throw new Exception("Farm allocation failed");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, count);

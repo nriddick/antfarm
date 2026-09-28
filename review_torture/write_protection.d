@@ -101,7 +101,7 @@ void geometry()
     foreach (uint k; [2u, 4u, 8u, 16u])
     {
         reset();
-        auto f = AntFarm.create(1 << 18, k, 1, 1, (k - 1) * ((1 << 18) / k), 0, 0);
+        auto f = AntFarm.create(2, k, 1, 1, (k - 1) * ((1 << 18) / k), 0, 0);
         ConsumerView c;
         require(c.subscribe(f) >= 0, "geometry subscribe");
         auto tok = f.registerProducer(Tier.bulk);
@@ -135,7 +135,7 @@ void geometry()
 void heldBody()
 {
     reset();
-    auto f = AntFarm.create(1 << 18, 8, 1, 1, 110_000, 1, 4096);
+    auto f = AntFarm.create(2, 8, 1, 1, 110_000, 1, 4096);
     auto big = f.registerProducer(Tier.bulk);
     auto small = f.registerProducer(Tier.small);
     ConsumerView c;
@@ -225,7 +225,7 @@ void delays()
         foreach (ulong qa; [cast(ulong) seg / 2, cast(ulong)(k - 1) * seg - 1024])
         {
             reset();
-            auto f = AntFarm.create(1 << 18, k, 2, 1, qa, 1, 1024);
+            auto f = AntFarm.create(2, k, 2, 1, qa, 1, 1024);
             ConsumerView c;
             require(c.subscribe(f) >= 0, "delay subscribe");
             auto a = f.registerProducer(Tier.bulk);
@@ -269,7 +269,7 @@ void subHook(AntFarm* f, WriteAuditPhase phase, ulong ki, ulong)
 void subscriptionRace()
 {
     reset();
-    auto f = AntFarm.create(1 << 18, 8, 2, 1, 65536, 0, 0);
+    auto f = AntFarm.create(2, 8, 2, 1, 65536, 0, 0);
     ConsumerView c, late;
     require(c.subscribe(f) >= 0, "subscriber race initial subscribe");
     auto tok = f.registerProducer(Tier.bulk);
@@ -302,7 +302,7 @@ void injectionHook(AntFarm* f, WriteAuditPhase phase, ulong, ulong)
 void injection(string mode)
 {
     reset();
-    auto f = AntFarm.create(1 << 18, 8, 1, 1, 110_000, 0, 0);
+    auto f = AntFarm.create(2, 8, 1, 1, 110_000, 0, 0);
     auto tok = f.registerProducer(Tier.bulk);
     injectSegment = mode == "inject-second" ? 2 : 1;
     injectValue = mode == "inject-sub0" ? SUB0 : mode == "inject-both" ? SUB0 + 1 : 1;
