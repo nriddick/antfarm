@@ -187,7 +187,7 @@ void main(string[] args)
             enforce(false, "mimalloc requires the actor_churn_mimalloc build");
     }
 
-    auto farm = AntFarm.create(1 << 20, 8, consumers ? consumers : 1,
+    auto farm = AntFarm.create(8, 8, consumers ? consumers : 1,
         0, 0, 1, 16384);
     enforce(farm !is null, "Farm allocation failed");
     version (AntfarmMimallocV3)

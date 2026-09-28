@@ -17,7 +17,7 @@ long unusedCallback(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
 void main(string[] args)
 {
     setvbuf(stdout, null, _IONBF, 0);
-    auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 512);
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, 512);
     ConsumerView held;
     immutable pulse = args.length > 1 && args[1] == "pulse";
     if (!pulse && held.subscribe(f) < 0) fatal("boundary test subscribe");

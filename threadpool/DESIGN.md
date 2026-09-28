@@ -103,6 +103,12 @@ The body locates application state, attempts useful work, and returns:
 This path cannot allocate or throw through the worker loop. It is appropriate
 for a bare Ant Farm pump or another hot, non-throwing source.
 
+An optional `WorkerStop` (`void function(WorkerSelf*) nothrow @nogc @system`)
+runs once on each worker after its body loop exits during shutdown. It is the
+place to release thread-local state the body created, such as a subscribed
+`ConsumerView`; relying on a final body visit is racy because a stopped worker
+does not call its body again.
+
 ### Managed worker hooks
 
 `ManagedWorkerHooks` provides `start`, `pump`, and `stop` callbacks on the
@@ -136,10 +142,13 @@ Failure during setup requests stop, joins created workers, destroys wait
 state, and releases the process-wide slot.
 
 `shutdown()` requests stop and joins all workers, then captures failures and
-clears process-wide worker state. The pool cannot generically drain because it
-does not own application work. Applications must close admission and drain
-their queue, Farm, or Fiber domain before shutting the pool down. The retained
-`drain` argument does not create a queue-drain contract.
+clears process-wide worker state. Each `WorkerBody` worker finishes its current
+visit and then runs the optional `WorkerStop` hook on its own thread, so
+thread-local resources such as a Farm `ConsumerView` are released before
+`shutdown()` returns. The pool cannot generically drain because it does not own
+application work. Applications must close admission and drain their queue,
+Farm, or Fiber domain before shutting the pool down. The old
+`shutdown(bool drain)` overload is deprecated; it never drained anything.
 
 ## Idle policy and the Director
 

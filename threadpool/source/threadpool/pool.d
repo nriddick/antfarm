@@ -61,6 +61,10 @@ struct PoolOptions
     const(ProcessorId)[] onlyProcessors;
     /// Called on the pinned worker. `true` = more work, `false` = idle.
     WorkerBody workerBody;
+    /// Optional; called once on each pinned worker after its `workerBody`
+    /// loop exits during `shutdown`. Release per-worker state here, for
+    /// example by unsubscribing a thread-local `ConsumerView`.
+    WorkerStop workerStop;
     /// Optional GC-enabled/throwing lifecycle lane. Mutually exclusive with
     /// `workerBody`; `pump` must be non-null when this lane is selected.
     ManagedWorkerHooks managedWorker;
@@ -381,8 +385,9 @@ final class CacheAwarePool
             enforce(atomicLoad(gRunning) == 0, "threadpool: a pool is already running");
             enforce(options.pinScope == PinScope.logicalProcessor,
                 "threadpool: v1 only implements PinScope.logicalProcessor");
-            enforce(options.workerBody is null || options.managedWorker.pump is null,
-                "threadpool: workerBody and managedWorker are mutually exclusive");
+            enforce((options.workerBody is null && options.workerStop is null)
+                    || options.managedWorker.pump is null,
+                "threadpool: workerBody/workerStop and managedWorker are mutually exclusive");
             enforce((options.managedWorker.start is null && options.managedWorker.stop is null)
                     || options.managedWorker.pump !is null,
                 "threadpool: managedWorker start/stop require a pump");
@@ -400,6 +405,7 @@ final class CacheAwarePool
 
             resetStats();
             gWorkerBody = options.workerBody;
+            gWorkerStop = options.workerStop;
             gManagedWorkerHooks = options.managedWorker;
             failures = null;
             gWorkers = new WorkerRec[](selected.length);
@@ -464,14 +470,17 @@ final class CacheAwarePool
         }
     }
 
-    /// Not thread-safe vs `start` or a second `shutdown` on another thread.
-    void shutdown(bool drain = true)
+    /// Stop every worker and join it. Each worker finishes its current
+    /// `workerBody` call and then runs `workerStop`, if set; the pool has no
+    /// queue of its own, so any draining of application work must happen
+    /// before this call. Not thread-safe vs `start` or a second `shutdown`
+    /// on another thread.
+    void shutdown()
     {
         version (ThreadpoolOs)
         {
             if (atomicLoad(gRunning) == 0)
                 return;
-            cast(void) drain;
             requestStop();
             joinAll();
             foreach (ref rec; gWorkers)
@@ -480,6 +489,7 @@ final class CacheAwarePool
             destroyWaitSlots();
             gWorkers = null;
             gWorkerBody = null;
+            gWorkerStop = null;
             gManagedWorkerHooks = ManagedWorkerHooks.init;
             directorHeld = false;
             threads.length = 0;
@@ -489,10 +499,18 @@ final class CacheAwarePool
         }
     }
 
-    /// Not thread-safe vs `start`. See `shutdown`.
+    /// The pool owns no queue, so there is nothing to drain or discard.
+    deprecated("CacheAwarePool owns no queue to drain; call shutdown()")
+    void shutdown(bool drain)
+    {
+        cast(void) drain;
+        shutdown();
+    }
+
+    /// Equivalent to `shutdown`; retained for compatibility.
     void shutdownNow()
     {
-        shutdown(false);
+        shutdown();
     }
 
     /// Exclusive idle-policy token. One live director per running pool.
@@ -610,6 +628,7 @@ private:
             destroyWaitSlots();
             gWorkers = null;
             gWorkerBody = null;
+            gWorkerStop = null;
             gManagedWorkerHooks = ManagedWorkerHooks.init;
             directorHeld = false;
             threads.length = 0;
@@ -733,7 +752,7 @@ unittest
     opt.onlyLps = [ushort(0)];
     auto pool = new CacheAwarePool(opt);
     pool.start();
-    scope (exit) pool.shutdown(true);
+    scope (exit) pool.shutdown();
     assert(pool.workerCount >= 1);
 
     auto d = pool.director();

@@ -500,7 +500,7 @@ unittest
     opt.workerBody = &liveBody;
     auto pool = new CacheAwarePool(opt);
     pool.start();
-    scope (exit) pool.shutdown(true);
+    scope (exit) pool.shutdown();
     assert(pool.workerCount > 0);
     foreach (_; 0 .. 400)
     {

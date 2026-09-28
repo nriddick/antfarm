@@ -302,7 +302,7 @@ Trial runOnce(Cfg c)
     // in use (nb > 0), so an unused bulk tier cannot inject a segCap quota
     // into the Exmax check; pass the configured value straight through.
     immutable qb = c.qb;
-    auto f = AntFarm.create(c.ln, c.k, c.nc, c.nb, qb, c.ns, c.qs, c.small, c.huge);
+    auto f = AntFarm.create(ringMiBFromUlongs(c.ln), c.k, c.nc, c.nb, qb, c.ns, c.qs, c.small, c.huge);
 
     immutable poolN = c.batch < 256 ? 256 : c.batch;
     auto headers = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);

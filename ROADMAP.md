@@ -1,5 +1,65 @@
 # Ant Farm roadmap
 
+## 1.7.1-rc.1 private actors
+
+Adds experimental private actor hierarchies: self-owned roots, parent-owned
+child cohorts, and joined descendant lifetimes. Includes Farm shard-completion
+ordering and public actor-wave completion credits, with deterministic reuse
+tests. All new `AntFarm.create` calls use the rc.4 `ringMiB` parameter, preserving
+their original buffer sizes. A compile-time assertion guards the child park
+layout required by `PrivateChildPark.fromWave`.
+
+See [the ownership contract](actors/PRIVATE_ACTORS.md) and
+[the lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md). Follow-up work
+remains on root polling while children run, batch-pool sizing for small
+`batchLimit` values, and handling a root that finishes with an active child
+wave. These behaviors are unchanged in this release candidate.
+
+## 1.7.0-rc.4 usability and shutdown fixes
+
+Behavior changes since 1.7.0-rc.3:
+
+- `AntFarm.create`'s first parameter is now `ringMiB`, the ring size in MiB
+  (a power of two in `[2, MAX_RING_MIB]`), instead of `ln` in ulongs. Divide a
+  former length by 131072, or use `ringMiBFromUlongs`. A leftover ulong
+  length such as `1 << 18` exceeds `MAX_RING_MIB` and is fatal rather than
+  mapping 256 GiB.
+- `ConsumerView.subscribe` failures are distinguishable: `SUBSCRIBE_FULL`
+  (-1, 128 views already subscribed), `SUBSCRIBE_RETRY` (-2, transient
+  frontier), and `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed).
+- `PoolOptions.workerStop` runs once on each `workerBody` worker during
+  shutdown so worker-owned consumers can unsubscribe deterministically. The
+  examples previously relied on a final pump visit and could abort with
+  "destroy with live consumers" under load.
+- `CacheAwarePool.shutdown(bool drain)` is deprecated; it never drained. Use
+  `shutdown()`.
+- Assigning over a still-valid producer `Token` is fatal instead of silently
+  leaking its slot.
+- Generated payload shims require implicit argument conversion. Narrowing or
+  mutable-to-`immutable` pointer arguments no longer compile.
+- An `ANTFARM_HUGE_PAGES` value other than `0` or `1` is fatal.
+- The Fiber `unittest` and `stress` configurations keep `assert` checks in
+  `--build=release`.
+- Fixed a Fiber ready-lane accounting race that the release-stripped asserts
+  had hidden: `flush` counted published activations only after `write()`
+  returned, so a consumer could enter one first and drive `published`
+  negative. With asserts enabled, release stress hung in about a third of
+  runs; it now counts before publishing and retracts the unwritten tail.
+
+## 1.7.0-rc.3 lifecycle performance
+
+Consolidates the host-audit fixes (swept quota grants, serialized producer
+registration, armed waits, fresh-segment protection checks in every build)
+with actor lifecycle optimizations: bounded ready-queue snapshots, linear actor
+creation and backlog scans, reused table ownership for single-shot payload
+admission, and optional pinned mimalloc v3.5.3 linking through Dub. Measured
+results are in [writeup.md](writeup.md) and [perftest/](perftest/README.md).
+
+## 1.7.0-rc.2 specification
+
+[SPEC.md](SPEC.md) was rewritten as one synthesized living specification of
+the current algorithm, replacing the separate edit notes.
+
 ## 1.7.0-rc.1 actor waves
 
 Make `actors` a directly onboarded work representation alongside bare

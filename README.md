@@ -1,4 +1,4 @@
-# Ant Farm 1.7.0-rc.3
+# Ant Farm 1.7.1-rc.1
 
 Ant Farm is a fixed-memory M:N job distributor for D. Producers publish
 tables of work into a shared ring; any subscribed consumer may claim them.
@@ -34,9 +34,9 @@ ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=dmd
 ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=ldc2
 ```
 
-`dub test` runs module unit tests. `dub run -c unittest` selects the root
-integration-test executable, which also runs its main suite when built with
-imported module unittests. See [fibers/README.md](fibers/README.md#build-and-test)
+Both commands run the root integration suite in `antfarm_test.d`. `dub test`
+also compiles and runs module `unittest` blocks; `dub run -c unittest` runs
+the suite alone. See [fibers/README.md](fibers/README.md#build-and-test)
 for the separate Fiber smoke and stress suites.
 
 Ordinary 4 KiB backing is the default. The environment override makes that
@@ -74,45 +74,90 @@ archive; it does not require a system mimalloc installation.
 
 Application functions can be adapted into Ant Farm payloads with
 `payloadRange`. The callback must be `nothrow @nogc`; its arguments are packed
-into the ring and reconstructed on a consumer.
+into the ring and reconstructed on a consumer. This complete single-threaded
+program produces and consumes on one thread:
 
 ```d
 import antfarm_templates;
-import core.atomic : MemoryOrder, atomicFetchAdd;
+import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad;
 import std.range : iota;
 
 __gshared shared(ulong) squareSum;
+__gshared shared(ulong) completed;
 
 void addSquare(ulong value) nothrow @nogc @system
 {
     atomicFetchAdd!(MemoryOrder.raw)(squareSum, value * value);
+    atomicFetchAdd!(MemoryOrder.rel)(completed, 1UL);
 }
 
-auto jobs = payloadRange!addSquare(iota(1UL, 257UL));
-auto token = farm.registerProducer(Tier.small);
-while (!jobs.empty)
+void main()
 {
-    immutable written = farm.write(jobs, token);
-    if (written != 0)
-        jobs.popFrontN(written);
-    else
-        drainOrYield();
+    // One consumer, no bulk producers, one small producer with 4096 words of quota.
+    auto farm = AntFarm.create(ringMiB: 2, k: 8, expectedConsumers: 1,
+                               maxBulk: 0, maxSmall: 1, quotaSmall: 4096);
+    scope (exit) farm.destroy();
+
+    ConsumerView view;               // one persistent cursor per consuming thread
+    long subscribed;
+    do
+        subscribed = view.subscribe(farm);
+    while (subscribed == SUBSCRIBE_RETRY);
+    if (subscribed < 0) assert(0, "Farm full or view already subscribed");
+    scope (exit) view.unsubscribe();
+
+    auto token = farm.registerProducer(Tier.small);
+    scope (exit) farm.unregisterProducer(token);
+
+    auto jobs = payloadRange!addSquare(iota(1UL, 257UL));
+    while (!jobs.empty)
+    {
+        immutable written = farm.write(jobs, token);
+        if (written != 0)
+            jobs.popFrontN(written); // write() never advances the caller's range
+        else
+            view.consumeNext();      // backpressure: help drain, then retry
+    }
+
+    // The Farm has no "all done" signal; count completions yourself.
+    while (atomicLoad!(MemoryOrder.acq)(completed) < 256)
+        view.consumeNext();
 }
-farm.unregisterProducer(token);
 ```
 
-`write()` does not advance the caller's range. Pop exactly the number it
-returns, then retry. A generic source passed to `write()` must be a forward
-range because the Farm checkpoints it for sizing and emission.
+Things the example relies on:
 
-For a complete program using a cache-aware worker pool, build and run
-[examples/iota_sum.d](examples/iota_sum.d):
+- `AntFarm.create` has nine parameters. Named arguments, as above, keep the
+  call readable; omitted ones take their defaults. `ringMiB` is the ring size
+  in MiB (a power of two, at least 2); quotas are in ulongs. See
+  [Sizing one Farm](ARCHITECTURE.md#sizing-one-farm).
+- `write()` returns how many payloads it published. Pop exactly that many and
+  retry; `0` is backpressure, not failure. A generic source passed to
+  `write()` must be a forward range because the Farm checkpoints it for
+  sizing and emission.
+- `consumeNext() == false` means nothing is ready at this cursor right now. It
+  may be a temporary hole, not global emptiness, and there is no FIFO
+  guarantee. Completion is the application's to track, e.g. with a counter
+  incremented by the callback.
+- `subscribe()` returns the starting epoch (`>= 0`) or a negative code:
+  `SUBSCRIBE_RETRY` is transient, so call again; `SUBSCRIBE_FULL` means the
+  Farm already has `MAX_CONSUMERS_LIMIT` (128) views; `SUBSCRIBE_INVALID` is a
+  null Farm or an already subscribed view.
+- Teardown order is unsubscribe consumers, unregister producers, then destroy
+  the Farm. The `scope (exit)` blocks above run in that order.
+
+For the multi-threaded version, with one consumer per pinned worker, build and
+run [examples/iota_sum.d](examples/iota_sum.d):
 
 ```text
 dmd -g -i examples/iota_sum.d antfarm.d antfarm_templates.d \
     -Ithreadpool/source -of=iota_sum
 ANTFARM_HUGE_PAGES=0 ./iota_sum
 ```
+
+Each worker subscribes a thread-local `ConsumerView` in its `workerBody` and
+unsubscribes it in the pool's `workerStop` hook, which runs on every worker
+before `pool.shutdown()` returns. Only after that may the Farm be destroyed.
 
 The experimental [private actor model](actors/PRIVATE_ACTORS.md) adds self-owned
 roots and exclusively parent-owned child cohorts. Blind parks emit dispatches;
@@ -126,8 +171,9 @@ The `actors` package adds explicit state lifetime and exclusive callback-local
 borrowing without changing the worker side: ordinary Farm consumers execute
 actor activations and wave tables. An `ActorOwner` controls retirement and
 reclamation, while its copyable `ActorHandle` is the identity used to wake,
-send to, or phase-dispatch the actor. The examples below assume an existing
-Farm, producer token, and active consumer pump.
+send to, or phase-dispatch the actor. The examples below assume the `farm`,
+`token`, and consuming `view` from [First payload](#first-payload);
+`drainOrYield()` stands for `view.consumeNext()` or a pool worker's pump.
 
 ```d
 import actors;
@@ -212,7 +258,10 @@ the ring representation; it does not assert that an object named by a manually
 encoded handle is transitively immutable. Generated shims apply a separate,
 stricter policy: packed arguments may not contain unshared mutable aliases.
 Immutable references and explicitly shared/thread-safe interfaces are allowed,
-and any referenced storage must remain alive until execution.
+and any referenced storage must remain alive until execution. Each argument must
+implicitly convert to its parameter type; the shim applies no cast, so a
+narrowing conversion or a mutable pointer passed as `immutable` is a compile
+error.
 
 ## Memory backing
 
@@ -226,14 +275,17 @@ Opt in per Farm with the final construction argument or for a complete process
 with the environment override:
 
 ```d
-auto farm = AntFarm.create(1 << 22, 8, consumers,
-                           0, 0, producers, quota,
-                           DEFAULT_SMALL_TABLE_THRESHOLD, true);
+auto farm = AntFarm.create(ringMiB: 32, k: 8, expectedConsumers: consumers,
+                           maxBulk: 0, maxSmall: producers, quotaSmall: quota,
+                           hugePages: true);
 ```
 
 ```text
 ANTFARM_HUGE_PAGES=1 ./payload_benchmark
 ```
+
+`ANTFARM_HUGE_PAGES` accepts `0` (force 4 KiB) or `1` (force huge pages); any
+other non-empty value is a fatal error rather than being silently ignored.
 
 On Linux this requests `MADV_HUGEPAGE`; the kernel still decides whether to
 promote the shared mapping. On Windows it uses `SEC_LARGE_PAGES` and requires
@@ -244,23 +296,25 @@ the live mapping when page size is material to the result.
 
 ## Core lifecycle
 
-1. Create an `AntFarm` with ring size, segment count, consumer capacity, and
-   producer-tier limits.
+1. Create an `AntFarm` with ring size, segment count, expected consumer
+   count (a sharding hint; the hard cap is 128 views), and producer-tier
+   limits.
 2. Subscribe one persistent `ConsumerView` per active consumer. It is a unique
    cursor and must not be copied.
-3. Register one producer `Token` per active producer. Copying transfers it.
+3. Register one producer `Token` per active producer. Copying transfers it;
+   assigning over a still-registered token is fatal, so unregister first.
 4. Publish useful batches and pop the returned count from the source.
 5. Consume with `consumeNext()` until application completion.
 6. Unsubscribe consumers, unregister producers, then destroy the Farm.
 
-Producer registration and deregistration use a Farm-local mutex; payload publication and consumption do not. Tickets start at zero quota. Every quota grant probes the write tail and scans forward segments, and publication never automatically refills the balance.
+Producer registration and deregistration take a Farm-local mutex; publishing
+and consuming never lock. Quota mechanics are specified in
+[SPEC.md](SPEC.md#5-producer-protocol).
 
 Distinct Farms may be created concurrently. Windows mapping API initialization
 uses a process-wide lock; POSIX mapping names use an atomic counter. Teardown
 still requires exclusive ownership and no live consumers or producer tickets.
 
-`write() == 0` is backpressure, not failure. `consumeNext() == false` may be a
-ring hole rather than global emptiness. Ant Farm does not promise FIFO order.
 
 ## Next layers
 

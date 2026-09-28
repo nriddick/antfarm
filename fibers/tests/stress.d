@@ -50,7 +50,7 @@ Thread notifierThread(NotifierContext* context)
 
 void handleReuseStress()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
@@ -109,7 +109,7 @@ void handleReuseStress()
 
 void shutdownAdmissionStress()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 4, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 4, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
@@ -161,7 +161,7 @@ void shutdownAdmissionStress()
 void cancellationReturnRaceStress()
 {
     enum rounds = 2_000;
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
@@ -229,7 +229,7 @@ void cancellationReturnRaceStress()
 void managedJoinCompletionRaceStress()
 {
     enum rounds = 2_000;
-    auto farm = AntFarm.create(1 << 18, 8, 2, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
@@ -295,7 +295,7 @@ void managedJoinFanoutCancellationStress()
 {
     enum rounds = 100;
     enum width = 32;
-    auto farm = AntFarm.create(1 << 19, 8, 4, 0, 0, 1, 16_384,
+    auto farm = AntFarm.create(4, 8, 4, 0, 0, 1, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
@@ -373,7 +373,7 @@ void managedJoinFanoutCancellationStress()
 void timerCancellationRaceStress()
 {
     enum rounds = 2_000;
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
@@ -497,7 +497,7 @@ void lifecycleRetentionStress()
     enum tasksPerProducer = 250;
     enum totalTasks = producerCount * tasksPerProducer;
     enum retentionLimit = 256;
-    auto farm = AntFarm.create(1 << 19, 8, 1, 0, 0, 1, 16_384,
+    auto farm = AntFarm.create(4, 8, 1, 0, 0, 1, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
@@ -571,10 +571,10 @@ void lifecycleRetentionStress()
 void sharedDomainLaneStress()
 {
     enum tasksPerLane = 500;
-    auto farmA = AntFarm.create(1 << 19, 8, 2, 0, 0, 1, 16_384,
+    auto farmA = AntFarm.create(4, 8, 2, 0, 0, 1, 16_384,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmA.destroy();
-    auto farmB = AntFarm.create(1 << 19, 8, 2, 0, 0, 1, 16_384,
+    auto farmB = AntFarm.create(4, 8, 2, 0, 0, 1, 16_384,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmB.destroy();
     auto domain = new FiberDomain;
@@ -684,10 +684,10 @@ void sharedDomainLaneStress()
 void remoteSweeperStress()
 {
     enum tasksPerLane = 400;
-    auto farmA = AntFarm.create(1 << 19, 8, 2, 0, 0, 2, 16_384,
+    auto farmA = AntFarm.create(4, 8, 2, 0, 0, 2, 16_384,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmA.destroy();
-    auto farmB = AntFarm.create(1 << 19, 8, 2, 0, 0, 2, 16_384,
+    auto farmB = AntFarm.create(4, 8, 2, 0, 0, 2, 16_384,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmB.destroy();
     auto domain = new FiberDomain;
@@ -897,7 +897,7 @@ void actorWaveGenerationStress()
     enum consumerCount = 4;
     enum totalActors = streamCount * actorsPerStream;
 
-    auto farm = AntFarm.create(1 << 20, 8, consumerCount, 0, 0,
+    auto farm = AntFarm.create(8, 8, consumerCount, 0, 0,
         streamCount + 1, 16_384, DEFAULT_SMALL_TABLE_THRESHOLD, false);
     enforce(farm !is null, "actor-wave stress Farm allocation failed");
     scope (exit) farm.destroy();
@@ -1044,7 +1044,7 @@ void actorWaveGenerationStress()
 void syncPrimitiveStress()
 {
     enum waiters = 32;
-    auto farm = AntFarm.create(1 << 19, 8, 2, 0, 0, 1, 16_384,
+    auto farm = AntFarm.create(4, 8, 2, 0, 0, 1, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -1091,7 +1091,7 @@ void syncPrimitiveStress()
 
 void main()
 {
-    auto farm = AntFarm.create(1 << 19, 8, 4, 0, 0, 1, 16_384,
+    auto farm = AntFarm.create(4, 8, 4, 0, 0, 1, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -1217,4 +1217,7 @@ void main()
     remoteSweeperStress();
     actorWaveGenerationStress();
     syncPrimitiveStress();
+
+    import core.stdc.stdio : printf;
+    printf("fiber stress passed\n");
 }

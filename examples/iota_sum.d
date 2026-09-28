@@ -23,30 +23,32 @@ struct FarmBin
     AntFarm* farm;
 }
 
+// Thread-local: each pinned worker owns one persistent consumer cursor.
+ConsumerView t_view;
+bool t_subscribed;
+
 bool pump(WorkerSelf* w) nothrow @nogc @system
 {
-    static ConsumerView v;
-    static bool subscribed;
-
-    if (atomicLoad!(MemoryOrder.acq)(g_done) >= nTotal)
-    {
-        if (subscribed)
-        {
-            v.unsubscribe();
-            subscribed = false;
-        }
-        return false;
-    }
-
     auto slot = home!FarmBin();
     if (slot is null)
         return false;
-    if (!subscribed)
-        subscribed = v.subscribe(slot.farm) >= 0;
-    if (!subscribed)
+    if (!t_subscribed)
+        t_subscribed = t_view.subscribe(slot.farm) >= 0;
+    if (!t_subscribed)
         return false;
 
-    return v.consumeNext();
+    return t_view.consumeNext();
+}
+
+// Runs once on each worker during pool shutdown, after its last pump. The
+// Farm may be destroyed only after every worker has unsubscribed here.
+void stopWorker(WorkerSelf* w) nothrow @nogc @system
+{
+    if (t_subscribed)
+    {
+        t_view.unsubscribe();
+        t_subscribed = false;
+    }
 }
 
 void main()
@@ -56,6 +58,7 @@ void main()
     PoolOptions opt;
     opt.skipSmtSiblings = true;
     opt.workerBody = &pump;
+    opt.workerStop = &stopWorker;
 
     uint ncons;
     foreach (ref p; topo.processors)
@@ -64,7 +67,7 @@ void main()
         ++ncons;
     }
 
-    auto f = AntFarm.create(1UL << 18, 8, ncons, 0, 0, 1, 4096);
+    auto f = AntFarm.create(2, 8, ncons, 0, 0, 1, 4096);
     scope (exit) f.destroy();
 
     auto bins = new FarmBin[](topo.llcCount);
@@ -75,7 +78,7 @@ void main()
 
     auto pool = new CacheAwarePool(opt);
     pool.start();
-    scope (exit) pool.shutdown(true);
+    scope (exit) pool.shutdown();
     pool.director().spin();
 
     auto tok = f.registerProducer(Tier.small);

@@ -695,7 +695,7 @@ version (unittest)
         import core.thread : Thread;
 
         enum rounds = 10_000;
-        auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 128,
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 128,
                                    DEFAULT_SMALL_TABLE_THRESHOLD, false);
         scope (exit) farm.destroy();
         auto lane = new FiberLane(farm);

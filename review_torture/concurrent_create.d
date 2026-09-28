@@ -13,7 +13,7 @@ void construct()
     while (!atomicLoad(go)) Thread.yield();
     foreach (_; 0 .. 100)
     {
-        auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 256);
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 256);
         auto memory = cast(ulong*) farm.buf;
         auto words = farm.bufBytes / ulong.sizeof;
         memory[0] = 0x123456789ABCDEF0UL;

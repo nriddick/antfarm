@@ -15,7 +15,7 @@ public import threadpool.topology : TopologySnapshot, LogicalProcessor, LlcDomai
 public import threadpool.pool : CacheAwarePool, PoolOptions, PinScope, ProcessorId,
     Director, Selection, Cadence;
 public import threadpool.hybrid : WorkerSelf, currentWorker, bindNumaNeighborhood,
-    WorkerBody, ManagedWorkerHooks, ManagedPumpResult, IdleKind;
+    WorkerBody, WorkerStop, ManagedWorkerHooks, ManagedPumpResult, IdleKind;
 public import threadpool.bins : BinAxis, install, uninstall, setLabel, home, search, at;
 public import threadpool.exchange : installExchange, uninstallExchange, exchangeHome,
     exchangeTo, exchangeCount, atExchange, setExchangeLabel, exchangeSearch,

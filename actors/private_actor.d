@@ -431,6 +431,8 @@ private:
     size_t capacity_, count_, cursor_;
     bool retire_;
     PayloadHeader header_;
+    static assert(base_.offsetof == 0,
+        "PrivateChildPark.fromWave requires base_ at offset zero");
     @disable this(this);
 
     static PrivateChildPark* create(Entry* parent, size_t capacity)

@@ -256,7 +256,7 @@ private void drainBoundary(ActorRuntime* runtime, ref Token token,
 
 private void testCloseBoundary(ActorTestPoint point)
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     check(farm !is null, "boundary Farm allocation");
     scope (exit) farm.destroy();
 
@@ -338,7 +338,7 @@ private void testCloseBoundary(ActorTestPoint point)
 
 private void testClaimIsNotPublication()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     check(farm !is null, "claim/publication Farm allocation");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 1);
@@ -397,7 +397,7 @@ private void testClaimIsNotPublication()
 
 private void testReleasedReservationIsQuiescent()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     check(farm !is null, "released-reservation Farm allocation");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 1);
@@ -462,7 +462,7 @@ private void testReleasedReservationIsQuiescent()
 private void testContendedNodeClaimDuringClose()
 {
     enum senderCount = 8;
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     check(farm !is null, "claim-race Farm allocation");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 1);
@@ -585,7 +585,7 @@ private final class WaveRacePublisher
 
 private void testWaveMembershipPinsRetiredActor()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 2, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 2, 256);
     check(farm !is null, "wave-race Farm allocation");
     scope (exit) farm.destroy();
     Quarantine quarantine;
@@ -682,7 +682,7 @@ private void testWaveMembershipPinsRetiredActor()
 
 private void testWaveReleaseAllowsImmediateReuse()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 2, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 2, 256);
     check(farm !is null, "wave release Farm allocation");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 2);
@@ -755,7 +755,7 @@ private void testWaveReleaseAllowsImmediateReuse()
 
 private void testRetirementJoinsLateSignal()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     check(farm !is null, "retirement join Farm allocation");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 1);
@@ -823,7 +823,7 @@ private void waveCreditHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc
 
 private void testWaveCompletionCreditPinsDescriptor(bool twoTables)
 {
-    auto farm = AntFarm.create(1 << 18, 4, 2, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 2, 0, 0, 1, 256);
     scope(exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 2);
     scope(exit) runtime.destroy();
@@ -1117,7 +1117,7 @@ private void adoptActor(T)(TestModuleGeneration generation,
 
 private void testCallbackBlocksAggregateUnload()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     check(farm !is null, "callback-fence Farm allocation");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 1);
@@ -1247,7 +1247,7 @@ private class ModuleSenderJob
 
 private void testSenderBlocksAggregateUnload()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     check(farm !is null, "sender-fence Farm allocation");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 1);
@@ -1367,7 +1367,7 @@ private class DetachedNodeCompletionJob
 
 private void testDetachedNodeBlocksAggregateUnload()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     check(farm !is null, "detached-node-fence Farm allocation");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 1);
@@ -1613,7 +1613,7 @@ private class StressConsumer
 private void testSustainedContention()
 {
     enum consumerCount = 6;
-    auto farm = AntFarm.create(1 << 19, 8, consumerCount,
+    auto farm = AntFarm.create(4, 8, consumerCount,
         0, 0, 1, 8192);
     check(farm !is null, "stress Farm allocation");
     scope (exit) farm.destroy();
@@ -1811,7 +1811,7 @@ private long readyPadding(PayloadHeader*, PayloadBody, ulong)
 
 private void testReadyDrainHandoff()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 2, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 2, 256);
     check(farm !is null, "ready handoff Farm allocation");
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, 3);
@@ -1886,7 +1886,7 @@ private void testReadyBacklog()
     enum actorCount = 1024;
     enum flusherCount = 4;
     enum repetitions = 7;
-    auto farm = AntFarm.create(1 << 18, 4, 2, 0, 0, flusherCount + 1, 512);
+    auto farm = AntFarm.create(2, 4, 2, 0, 0, flusherCount + 1, 512);
     check(farm !is null, "ready backlog Farm allocation");
     scope (exit) farm.destroy();
     CountedAllocator counts;
@@ -2030,7 +2030,7 @@ private void failingSlotDeallocate(void* context, void* memory,
 
 private void testSlotAllocationFailure()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     scope (exit) farm.destroy();
     FailingSlotAllocator state;
     auto runtime = ActorRuntime.create(farm, 4,
@@ -2117,7 +2117,7 @@ private class SlotReuseJob
 private void testConcurrentSlotReuse()
 {
     enum workers = 8;
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     scope (exit) farm.destroy();
     auto runtime = ActorRuntime.create(farm, workers * SlotReuseJob.batch);
     check(runtime !is null, "concurrent free-slot runtime creation");
@@ -2213,7 +2213,7 @@ version (AntfarmMimallocStub)
     {
         g_miAllocationCount = 0;
         g_miDeallocationCount = 0;
-        auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+        auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
         check(farm !is null, "mimalloc contract Farm allocation");
         scope (exit) farm.destroy();
         auto policy = mimallocV3ActorAllocator();
@@ -2322,7 +2322,7 @@ version (AntfarmMimallocReal)
     {
         check(mi_version() == pinnedMimallocVersion,
             "real actor lane linked pinned mimalloc v3.5.3");
-        auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+        auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
         check(farm !is null, "real mimalloc Farm allocation");
         scope (exit) farm.destroy();
         auto policy = mimallocV3ActorAllocator();

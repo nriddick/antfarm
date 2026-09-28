@@ -98,7 +98,7 @@ void roots(PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
     (uint consumers, size_t count, size_t iterations, size_t batch)
 {
     Counts counts;
-    auto farm = AntFarm.create(1 << 18, 8, consumers ? consumers : 1, 0, 0, 1, 8192);
+    auto farm = AntFarm.create(2, 8, consumers ? consumers : 1, 0, 0, 1, 8192);
     scope(exit) farm.destroy();
     auto park = PrivateRootPark!(State, repeat, reclamation).create(farm, count, policy(counts));
     check(park !is null);
@@ -190,7 +190,7 @@ PrivateDisposition parentStep(scope ref PrivateBorrow!Parent b, scope ref Privat
 void trees(uint consumers = 6)
 {
     Counts counts;
-    auto farm = AntFarm.create(1 << 18, 8, 6, 0, 0, 1, 8192);
+    auto farm = AntFarm.create(2, 8, 6, 0, 0, 1, 8192);
     scope(exit) farm.destroy();
     auto park = PrivateRootPark!(Parent, parentStep).create(farm, 48, policy(counts));
     check(park !is null);
@@ -281,7 +281,7 @@ void failures()
 void backpressure()
 {
     enum count = 20000;
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 8192);
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 8192);
     scope(exit) farm.destroy();
     auto park = Park.create(farm, count);
     auto token = farm.registerProducer(Tier.small);
@@ -316,7 +316,7 @@ void backpressure()
 void shardedCreators()
 {
     Counts counts;
-    auto farm = AntFarm.create(1 << 20, 8, 6, 0, 0, 4, 8192);
+    auto farm = AntFarm.create(8, 8, 6, 0, 0, 4, 8192);
     scope(exit) farm.destroy();
     auto workers = new Workers(farm, 6);
     scope(exit) workers.join();
@@ -380,7 +380,7 @@ void joined(void* p) nothrow @nogc @system
 void sameShardJoin()
 {
     // Both consumers must claim different 1-payload runs of the SAME shard.
-    auto farm = AntFarm.create(1 << 18, 8, 2, 0, 0, 1, 8192, uint.max);
+    auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 8192, uint.max);
     scope(exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope(exit) farm.unregisterProducer(token);

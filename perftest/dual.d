@@ -301,7 +301,7 @@ Trial runDual(Cfg c)
         return t;
     }
 
-    auto f = AntFarm.create(c.ln, c.k, c.nd, maxBulk, qb, maxSmall, qs, c.small, c.huge);
+    auto f = AntFarm.create(ringMiBFromUlongs(c.ln), c.k, c.nd, maxBulk, qb, maxSmall, qs, c.small, c.huge);
 
     immutable poolN = c.batch < 256 ? 256 : c.batch;
     auto headers = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);

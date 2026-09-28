@@ -300,7 +300,7 @@ FarmSet startFarm(Cfg cfg, uint nc)
     auto placement = choosePlacement(topology, nc);
     FarmSet s;
     s.nc = nc;
-    s.f = AntFarm.create(cfg.ln, cfg.k, nc, 1, 0, 1, 4096, cfg.small, cfg.huge);
+    s.f = AntFarm.create(ringMiBFromUlongs(cfg.ln), cfg.k, nc, 1, 0, 1, 4096, cfg.small, cfg.huge);
     s.bulk = s.f.registerProducer(Tier.bulk);
     s.small = s.f.registerProducer(Tier.small);
     if (!s.bulk.valid || !s.small.valid)

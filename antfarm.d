@@ -259,13 +259,19 @@ private void afAlignedFree(void* p) nothrow @nogc @system
     freeAligned64(p);
 }
 
-/// `ANTFARM_HUGE_PAGES=0` forces 4K; `=1` forces huge pages. Unset keeps `requested`.
+/// `ANTFARM_HUGE_PAGES=0` forces 4K; `=1` forces huge pages. Unset or empty
+/// keeps `requested`. Any other value is fatal so a typo cannot silently
+/// select the wrong backing.
 private bool wantHugePages(bool requested) nothrow @nogc @system
 {
     auto e = getenv("ANTFARM_HUGE_PAGES");
     if (e is null || e[0] == 0) return requested;
-    if (e[0] == '0') return false;
-    if (e[0] == '1') return true;
+    if (e[1] == 0)
+    {
+        if (e[0] == '0') return false;
+        if (e[0] == '1') return true;
+    }
+    fatal("ANTFARM_HUGE_PAGES must be 0 or 1");
     return requested;
 }
 
@@ -355,6 +361,16 @@ private void unmapMagicBuffer(void* p, size_t bytes) nothrow @nogc @system
 
 /// Spec 2a/5a: maximum number of simultaneous subscribed consumers.
 enum MAX_CONSUMERS_LIMIT = 128;
+/// Negative `ConsumerView.subscribe` results (spec 4c, 6b). Every failure
+/// has already unwound its temporary pins; the view stays unsubscribed.
+/// The Farm already has MAX_CONSUMERS_LIMIT subscribed views. Retry only
+/// after another view unsubscribes.
+enum long SUBSCRIBE_FULL = -1;
+/// The frontier was uninitialized or moved during the attach walk. This is
+/// transient; retry the same call.
+enum long SUBSCRIBE_RETRY = -2;
+/// Caller error: a null Farm, or a view that is already subscribed.
+enum long SUBSCRIBE_INVALID = -3;
 /// Spec 2a: preallocated leaf tallies per segment: ceiling square root of 128.
 enum MAX_LEAVES = 12;
 /// Spec 5e-d default small-table threshold. 0 at construction selects the
@@ -368,6 +384,23 @@ enum bool DEFAULT_HUGE_PAGES = false;
 enum uint MAX_CHUNK = 32;
 /// log2(MAX_CHUNK); avgCost outside 0 .. MAX_AVG_COST is a caller error.
 enum uint MAX_AVG_COST = 5;
+/// Smallest ring accepted by `AntFarm.create`, in MiB (2^18 ulongs).
+enum uint MIN_RING_MIB = 2;
+/// Largest ring accepted by `AntFarm.create`, in MiB (64 GiB). Far beyond any
+/// characterized size; it mainly rejects a length accidentally given in ulongs.
+enum uint MAX_RING_MIB = 1 << 16;
+/// log2 of the ulongs in one MiB: `Ln = ringMiB << ULONGS_PER_MIB_SHIFT`.
+enum uint ULONGS_PER_MIB_SHIFT = 17;
+/// Convert a ring length in ulongs to `AntFarm.create`'s `ringMiB`
+/// argument. Fatal unless the length is a whole number of MiB, so a
+/// migration from the former ulong parameter cannot silently truncate.
+uint ringMiBFromUlongs(ulong ringUlongs) nothrow @nogc @system
+{
+    immutable mask = (1UL << ULONGS_PER_MIB_SHIFT) - 1;
+    if ((ringUlongs & mask) != 0 || (ringUlongs >> ULONGS_PER_MIB_SHIFT) > uint.max)
+        fatal("ring length in ulongs is not a whole number of MiB");
+    return cast(uint)(ringUlongs >> ULONGS_PER_MIB_SHIFT);
+}
 /// Maximum supported number of segments K. Default create()/perftest K is 8.
 enum KMAX = 16;
 
@@ -770,7 +803,8 @@ enum Tier : ubyte { small, bulk }
 /// see the other fields), then clears the source's hash so at most one
 /// live token exists per slot and a stale copy fails requireToken.
 /// Assignment takes the argument by value, which routes through the same
-/// transfer copy.
+/// transfer copy. Assigning over a still-valid token is fatal: it would lose
+/// the only handle to a registered slot. Unregister the old token first.
 struct Token
 {
     Tier tier;
@@ -807,9 +841,12 @@ struct Token
     }
 
     /// Transfer-only assignment: the by-value argument was already moved
-    /// into this temporary by the copy constructor above.
+    /// into this temporary by the copy constructor above. The destination
+    /// must be invalid (default or unregistered).
     ref Token opAssign(Token src) nothrow @nogc @system
     {
+        if (valid)
+            fatal("overwrite live producer Token; unregister it first");
         tier = src.tier;
         slot = src.slot;
         quotaLeft = src.quotaLeft;
@@ -963,11 +1000,14 @@ struct AntFarm
     // Construction / destruction
     // ------------------------------------------------------------------
 
+    /// `ringMiB` is the ring size in MiB: a power of two, at least
+    /// MIN_RING_MIB (2) and at most MAX_RING_MIB. The Farm's internal length
+    /// `Ln` is that size in ulongs (`ringMiB << 17`); quotas stay in ulongs.
     /// Ordinary 4 KiB backing is the default. Pass `hugePages=true` or set
     /// `ANTFARM_HUGE_PAGES=1` to opt into the platform huge-page path.
     /// Distinct Farms may be created concurrently. Windows mapping API
     /// initialization is process-locked; the mapping/allocation work is local.
-    static AntFarm* create(ulong ln = 1 << 20, uint k = 8, uint expectedConsumers = 4,
+    static AntFarm* create(uint ringMiB = 8, uint k = 8, uint expectedConsumers = 4,
                            uint maxBulk = 2, ulong quotaBulk = 0,
                            uint maxSmall = 16, ulong quotaSmall = 4096,
                            uint smallThreshold = DEFAULT_SMALL_TABLE_THRESHOLD,
@@ -975,8 +1015,9 @@ struct AntFarm
     {
         // Construction constraints (spec 1/3b):
         //  - K is the useful power-of-two range [2, KMAX=16].
-        //  - Ln >= 2^18 (2 MiB with the ulong base unit); smaller rings were
-        //    never studied and per-table header overhead would dominate.
+        //  - ringMiB >= 2 (Ln >= 2^18 ulongs); smaller rings were never
+        //    studied and per-table header overhead would dominate. The upper
+        //    bound mainly catches a legacy caller passing a length in ulongs.
         //  - segCap = Ln/K has a floor so header/pad space never dominates a
         //    segment's capacity (subsumed by Ln >= 2^18 with K <= 16).
         //  - Exmax <= (K-1)*segCap so a full quota excursion is strictly
@@ -985,7 +1026,11 @@ struct AntFarm
         //    positive quota; a disabled role's quota is normalized to 0 and
         //    takes no part in Exmax.
         if (k < 2 || k > KMAX || (k & (k - 1)) != 0) fatal("K must be a power of 2 in [2, KMAX]");
-        if (ln < (1 << 18) || (ln & (ln - 1)) != 0) fatal("Ln must be a power of 2 >= 2^18");
+        if (ringMiB < MIN_RING_MIB || (ringMiB & (ringMiB - 1)) != 0)
+            fatal("ringMiB must be a power of 2 >= 2 (the ring size is in MiB, not ulongs)");
+        if (ringMiB > MAX_RING_MIB)
+            fatal("ringMiB exceeds MAX_RING_MIB (the ring size is in MiB, not ulongs)");
+        immutable ln = cast(ulong) ringMiB << ULONGS_PER_MIB_SHIFT;
         immutable segCap = ln / k;
         if (segCap < 2048) fatal("segment capacity too small");
         if (expectedConsumers == 0) fatal("expected consumers must be > 0");
@@ -1086,14 +1131,14 @@ struct AntFarm
     // ------------------------------------------------------------------
 
     /// fetch-inc Cf; on success fetch-inc Reqs_c and return it (the IDc).
-    /// Returns a negative value if oversubscribed.
+    /// Returns SUBSCRIBE_FULL if oversubscribed.
     long add_consumer() nothrow @nogc @system
     {
         immutable prev = atomicFetchAdd!(MemoryOrder.raw)(Cf, 1);
         if (prev >= MAX_CONSUMERS_LIMIT)
         {
             atomicFetchSub!(MemoryOrder.raw)(Cf, 1);
-            return -1;
+            return SUBSCRIBE_FULL;
         }
         return cast(long) atomicFetchAdd!(MemoryOrder.raw)(Reqs_c, 1);
     }
@@ -1705,11 +1750,11 @@ struct ConsumerView
         return ltiRing[cast(uint)(ei & F.kMask)];
     }
 
-    /// Spec 5a. Returns the (non-negative) starting epoch on success, or a
-    /// negative value on failure.
+    /// Spec 5a. Returns the (non-negative) starting epoch on success, or
+    /// SUBSCRIBE_FULL, SUBSCRIBE_RETRY, or SUBSCRIBE_INVALID on failure.
     long subscribe(AntFarm* f) nothrow @nogc @system
     {
-        if (f is null || hasRef) return -1;
+        if (f is null || hasRef) return SUBSCRIBE_INVALID;
         immutable idc = f.add_consumer();
         if (idc < 0) return idc;
 
@@ -1755,7 +1800,7 @@ struct ConsumerView
             foreach (i; 0 .. nPinned)
                 atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
             f.sub_consumer();
-            return -1;
+            return SUBSCRIBE_RETRY;
         }
 
         // Re-read the write tail now that every slot is pinned. The first
@@ -1772,7 +1817,7 @@ struct ConsumerView
             foreach (i; 0 .. nPinned)
                 atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
             f.sub_consumer();
-            return -1;
+            return SUBSCRIBE_RETRY;
         }
         F = f;
         IDc = cast(ulong) idc;
