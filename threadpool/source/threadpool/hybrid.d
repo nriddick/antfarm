@@ -77,6 +77,14 @@ alias WorkerBody = bool function(WorkerSelf* w) @nogc nothrow;
 
 __gshared WorkerBody gWorkerBody;
 
+/// Called once on each pinned worker after its `WorkerBody` loop exits and
+/// before the worker thread ends. Use it to release per-worker resources such
+/// as a thread-local Farm `ConsumerView`; `shutdown` joins every worker, so
+/// all stop hooks have returned when `shutdown` returns.
+alias WorkerStop = void function(WorkerSelf* w) @nogc nothrow;
+
+__gshared WorkerStop gWorkerStop;
+
 /// GC-enabled, throwing lifecycle lane. A completed `start` is paired with
 /// exactly one `stop` on the same pinned worker. `pump` has the same retry/idle
 /// result convention as `WorkerBody`.
@@ -423,6 +431,8 @@ private void workerLoop(ref WorkerSelf self, ref shared(int) runFlag) @nogc noth
             if (body_(&self)) continue;
             applyIdlePolicy(self, runFlag);
         }
+        if (auto stop = gWorkerStop)
+            stop(&self);
     }
 }
 

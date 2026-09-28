@@ -1217,4 +1217,7 @@ void main()
     remoteSweeperStress();
     actorWaveGenerationStress();
     syncPrimitiveStress();
+
+    import core.stdc.stdio : printf;
+    printf("fiber stress passed\n");
 }

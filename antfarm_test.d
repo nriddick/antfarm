@@ -587,6 +587,26 @@ void testSeparateRanges()
     printf("testSeparateRanges OK\n"); fflush(stdout);
 }
 
+void readImmutableInt(immutable(int)* p) nothrow @nogc @system {}
+void takeUbyte(ubyte b) nothrow @nogc @system {}
+void takeUlong(ulong v) nothrow @nogc @system {}
+
+// Packed arguments convert implicitly or not at all: no silent narrowing and
+// no mutable pointer laundered into an immutable parameter.
+static assert(!argsConvert!(readImmutableInt, false, int*));
+static assert(argsConvert!(readImmutableInt, false, immutable(int)*));
+static assert(!argsConvert!(takeUbyte, false, int));
+static assert(argsConvert!(takeUbyte, false, ubyte));
+static assert(argsConvert!(takeUlong, false, uint));
+static assert(!__traits(compiles, {
+    PayloadHeader h; ulong[1] buf; int x;
+    cast(void) payloadEntry!readImmutableInt(&h, buf[], &x);
+}));
+static assert(!__traits(compiles, {
+    PayloadHeader h; ulong[1] buf;
+    cast(void) payloadEntryRuntime!takeUbyte(&h, buf[], 1, 1, 1000);
+}));
+
 void testPayloadRange()
 {
     auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
@@ -971,7 +991,9 @@ void testSubscriptionCap()
         check(views[i].subscribe(f) >= 0, "subscribe within cap");
     }
     ConsumerView extra;
-    check(extra.subscribe(f) < 0, "oversubscription fails");
+    check(extra.subscribe(f) == SUBSCRIBE_FULL, "oversubscription reports full");
+    check(views[0].subscribe(f) == SUBSCRIBE_INVALID,
+        "resubscribing a live view reports invalid");
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == MAX_CONSUMERS_LIMIT, "Cf at cap");
     foreach (i; 0 .. MAX_CONSUMERS_LIMIT)
         views[i].unsubscribe();

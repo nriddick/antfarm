@@ -210,13 +210,13 @@ An enabled tier must declare a positive quota. Bulk auto-defaults to `segCap` wh
 
 ### 4b. Epoch 0
 
-At Farm creation we prevent a state where all segments have no references and producers might happily loop through the buffer with no one to block them. There are also zero known subscribers and no leaves or shards in which to distribute them. Thus we construct epoch 0's `Rt` with a dummy Sub0 value, blocking producers from overwriting Seq 0 until consumers digest it. The first subscriber's leaf 0→1 on `Rt` (6c) subtracts that dummy Sub0. On a fresh farm the first subscription should succeed — the construction guarantees it — and a failure (oversubscription or an uninitialized frontier) returns a negative value per 6b; it is not itself fatal.
+At Farm creation we prevent a state where all segments have no references and producers might happily loop through the buffer with no one to block them. There are also zero known subscribers and no leaves or shards in which to distribute them. Thus we construct epoch 0's `Rt` with a dummy Sub0 value, blocking producers from overwriting Seq 0 until consumers digest it. The first subscriber's leaf 0→1 on `Rt` (6c) subtracts that dummy Sub0. On a fresh farm the first subscription should succeed — the construction guarantees it — and a failure (oversubscription or an uninitialized frontier) returns a negative code per 6b; it is not itself fatal.
 
 Note that Sub0 does not block producers from writing to epoch 0. The segment where a write tail resides is not breached if there are consumers ahead of it, and epoch 0 begins with a full segment length ahead of the write tail and consumers bounded behind it.
 
 ### 4c. Consumer Capacity
 
-A subscriber `Si` calls `F.add_consumer()`, which fetch_incs `Cf`. If a slot is available, it fetch-incs `Reqs_c` and returns that result as `IDc`. If not, `F` is oversubscribed and `Si` fetch-decs `Cf` and returns a negative value. Every subsequent subscription failure path also unwinds `Cf` (6b).
+A subscriber `Si` calls `F.add_consumer()`, which fetch_incs `Cf`. If a slot is available, it fetch-incs `Reqs_c` and returns that result as `IDc`. If not, `F` is oversubscribed and `Si` fetch-decs `Cf` and returns `SUBSCRIBE_FULL`. Every subsequent subscription failure path also unwinds `Cf` (6b).
 
 ### 4d. Producer Tiers and Tickets
 
@@ -304,11 +304,11 @@ Then derived and tracked stats as are convenient.
 
 ConsumerView is initialized with `subscribe(AntFarm F)`.
 
-**Returns:** the non-negative starting epoch on success, or a negative value on failure. Epoch 0 is a valid success.
+**Returns:** the non-negative starting epoch on success. Failures are negative: `SUBSCRIBE_FULL` (-1, capacity), `SUBSCRIBE_RETRY` (-2, transient frontier inconsistency), or `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed view). Epoch 0 is a valid success.
 
 The subscription protocol:
 
-**a.** The subscriber `Si` calls `F.add_consumer()` (4c). If `Cf` is full, `F` is oversubscribed and `Si` returns a negative value. Every subsequent failure path unwinds `Cf` too.
+**a.** The subscriber `Si` calls `F.add_consumer()` (4c). If `Cf` is full, `F` is oversubscribed and `Si` returns `SUBSCRIBE_FULL`. Every subsequent failure path unwinds `Cf` too.
 
 **b.** Acquire-load `F.Wt` — the only unpinned read — and use `Wt >> segShift` as the walk range. Walk backwards through the corresponding segments (at most `K`, stopping at epoch 0). On each step, *before* inspecting that slot's metadata, fetch_add-release a `Sub` onto its `Rt`. The `d=0` step is the heuristic pin on the frontier slot `(Wt >> segShift) & (K-1)`: a held Sub is visible to producers as `Rt != 0`, so it blocks a full lap through the current view and segments ahead of it (5a contiguous-forward sweep). Older slots sit first in that sweep, so each older step pins before reading. After the pin, acquire-load `Rtlow` and acquire-load `Es`, and rank by earliest `Es` among `Rtlow != 0`. The pulse invariant (6c) guarantees a candidate exists. Several segments may hold Sub0 at once (one per abandoned unconfirmed segment); the walk picks the earliest, which is the frontier of unconsumed work.
 
@@ -316,7 +316,7 @@ Groping an unpinned slot's `Rtlow`/`Es` is incorrect: those reads are not protec
 
 Race note: the one case where the walk finds no `Rtlow != 0` candidate is a transient race with a *not-last* unsubscribe of a *confirmed* pin, in which case `Si` stands at the frontier. The second `Wt` read and the bounds below still validate that frontier before attach.
 
-**c.** After the attach candidate is read, and while all Sub pins are still held, `Si` re-reads `F.Wt` and validates two bounds, both compared as epoch numbers after shifting by `segShift`. `Seqt >> segShift` must lie in `[Es, Es + K - 1]`; this rejects a mixed snapshot where `Es` is still the previous lap's value while `Seqt` has already been advanced. `Wt >> segShift` must be `< Es + K`; this rejects a slot whose next lap was already reserved before the pin. If either bound fails, `Si` unwinds every Sub and `Cf` and returns a negative value.
+**c.** After the attach candidate is read, and while all Sub pins are still held, `Si` re-reads `F.Wt` and validates two bounds, both compared as epoch numbers after shifting by `segShift`. `Seqt >> segShift` must lie in `[Es, Es + K - 1]`; this rejects a mixed snapshot where `Es` is still the previous lap's value while `Seqt` has already been advanced. `Wt >> segShift` must be `< Es + K`; this rejects a slot whose next lap was already reserved before the pin. If either bound fails, `Si` unwinds every Sub and `Cf` and returns `SUBSCRIBE_RETRY`.
 
 **d.** `Sub` is `2^32` such that it tracks subscribers in the most significant half, apart from normal consumers incrementing in `Rtlow`. The walk of 6b-b already holds one Sub on every inspected slot, including the attach candidate. The number of unique subscribers (and thus Sub units per segment) is bounded by `MAX_CONSUMERS_LIMIT = 128`; one `Si` pins each physical segment at most once, so `K × 128` is well under `2^32`. Sub is only the establish-leaf window; it does not plant or clear Sub0.
 
@@ -324,7 +324,7 @@ Race note: the one case where the walk finds no `Rtlow != 0` candidate is a tran
 
 **f.** `Si` fetch_sub-releases every Sub deposited in 6b-b, including the attach slot. The 0→1 of 6b-e already retracted Sub0 if present.
 
-Failure reasons — capacity, mixed/wrapped snapshot, or uninitialized frontier — all unwind `Cf` and every deposited Sub before returning a negative value.
+Failure reasons — capacity, mixed/wrapped snapshot, or uninitialized frontier — all unwind `Cf` and every deposited Sub before returning `SUBSCRIBE_FULL` or `SUBSCRIBE_RETRY`.
 
 ### 6c. The Sub0 State Machine
 
@@ -537,8 +537,10 @@ The raw ring-read rule: acquire-validate `Es` or `Tsent` first, then raw-load th
 | Situation | Result |
 | --- | --- |
 | producer tier has no registration slot | invalid Token; recoverable |
-| consumer capacity exceeded | negative `subscribe()` result; recoverable |
-| subscribe sees an uninitialized or generation-inconsistent frontier | negative result after unwinding temporary pins; recoverable |
+| consumer capacity exceeded | `subscribe()` returns `SUBSCRIBE_FULL` (-1); recoverable after another view unsubscribes |
+| subscribe sees an uninitialized or generation-inconsistent frontier | `SUBSCRIBE_RETRY` (-2) after unwinding temporary pins; retry immediately |
+| subscribe with a null Farm or an already subscribed view | `SUBSCRIBE_INVALID` (-3); caller error |
+| assigning over a still-valid Token | fatal |
 | `write()` has no safe quota at present | returns 0; backpressure |
 | only a prefix fits current quota | returns the prefix count; caller advances its own range |
 | bad/stale/forged Token | fatal |

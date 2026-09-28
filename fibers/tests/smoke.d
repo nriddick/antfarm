@@ -1950,4 +1950,7 @@ void main()
     syncPrimitiveSmoke();
     sharedSignalAndTimerCancellationSmoke();
     threadpoolSmoke();
+
+    import core.stdc.stdio : printf;
+    printf("fiber smoke passed\n");
 }

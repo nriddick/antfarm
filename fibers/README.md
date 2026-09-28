@@ -42,11 +42,13 @@ ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=ldc2
 ANTFARM_HUGE_PAGES=0 dub run -c stress --compiler=ldc2 --build=release
 ```
 
-`dub test` runs module unit tests. The `unittest` configuration runs the
-smoke executable, including lifecycle backlog, cancellation, generation-trigger
-contention, and worker integration checks. That executable sets
-`testmode=run-main` so building it with imported module unittests also runs
-its main suite.
+Both `dub test` and `dub run -c unittest` run the smoke executable
+(`tests/smoke.d`), covering lifecycle backlog, cancellation,
+generation-trigger contention, and worker integration; `dub test` also runs
+module `unittest` blocks first. The `stress` configuration runs
+`tests/stress.d`. Each suite prints a final `passed` line. Both configurations
+require contracts, so their `assert` checks stay enabled even with
+`--build=release`.
 
 ## Run one lane on the current thread
 
@@ -155,7 +157,7 @@ auto pool = new CacheAwarePool(options);
 installFiberLanes(lanes, pool);
 scope (exit) uninstallFiberLanes();
 pool.start();
-scope (exit) pool.shutdown(true);
+scope (exit) pool.shutdown();
 
 lanes[0].spawn(&fiberBody);
 ```

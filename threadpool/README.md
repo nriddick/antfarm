@@ -56,21 +56,31 @@ bool pump(WorkerSelf* worker) nothrow @nogc @system
     return false;
 }
 
+void stop(WorkerSelf* worker) nothrow @nogc @system
+{
+    // Release per-worker state, e.g. unsubscribe a thread-local ConsumerView.
+}
+
 void main()
 {
     PoolOptions options;
     options.workerBody = &pump;
+    options.workerStop = &stop;
     options.skipSmtSiblings = true;
 
     auto pool = new CacheAwarePool(options);
     pool.start();
-    scope (exit) pool.shutdown(true);
+    scope (exit) pool.shutdown();
 
     pool.director().spin();
     // Publish application work here.
     pool.wakeAll();
 }
 ```
+
+`shutdown()` stops every worker after its current `pump` call, runs
+`workerStop` once on each worker thread, and joins them. The pool owns no
+queue, so finish or cancel application work before calling it.
 
 The default policy after `start()` is `wait`. One owner thread controls the
 Director and may select workers by LLC, P/E class, or application label before

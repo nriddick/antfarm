@@ -1,5 +1,40 @@
 # Ant Farm roadmap
 
+## Unreleased usability fixes
+
+Behavior changes after 1.7.0-rc.3:
+
+- `ConsumerView.subscribe` failures are distinguishable: `SUBSCRIBE_FULL`
+  (-1, 128 views already subscribed), `SUBSCRIBE_RETRY` (-2, transient
+  frontier), and `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed).
+- `PoolOptions.workerStop` runs once on each `workerBody` worker during
+  shutdown so worker-owned consumers can unsubscribe deterministically. The
+  examples previously relied on a final pump visit and could abort with
+  "destroy with live consumers" under load.
+- `CacheAwarePool.shutdown(bool drain)` is deprecated; it never drained. Use
+  `shutdown()`.
+- Assigning over a still-valid producer `Token` is fatal instead of silently
+  leaking its slot.
+- Generated payload shims require implicit argument conversion. Narrowing or
+  mutable-to-`immutable` pointer arguments no longer compile.
+- An `ANTFARM_HUGE_PAGES` value other than `0` or `1` is fatal.
+- The Fiber `unittest` and `stress` configurations keep `assert` checks in
+  `--build=release`.
+
+## 1.7.0-rc.3 lifecycle performance
+
+Consolidates the host-audit fixes (swept quota grants, serialized producer
+registration, armed waits, fresh-segment protection checks in every build)
+with actor lifecycle optimizations: bounded ready-queue snapshots, linear actor
+creation and backlog scans, reused table ownership for single-shot payload
+admission, and optional pinned mimalloc v3.5.3 linking through Dub. Measured
+results are in [writeup.md](writeup.md) and [perftest/](perftest/README.md).
+
+## 1.7.0-rc.2 specification
+
+[SPEC.md](SPEC.md) was rewritten as one synthesized living specification of
+the current algorithm, replacing the separate edit notes.
+
 ## 1.7.0-rc.1 actor waves
 
 Make `actors` a directly onboarded work representation alongside bare

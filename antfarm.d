@@ -259,13 +259,19 @@ private void afAlignedFree(void* p) nothrow @nogc @system
     freeAligned64(p);
 }
 
-/// `ANTFARM_HUGE_PAGES=0` forces 4K; `=1` forces huge pages. Unset keeps `requested`.
+/// `ANTFARM_HUGE_PAGES=0` forces 4K; `=1` forces huge pages. Unset or empty
+/// keeps `requested`. Any other value is fatal so a typo cannot silently
+/// select the wrong backing.
 private bool wantHugePages(bool requested) nothrow @nogc @system
 {
     auto e = getenv("ANTFARM_HUGE_PAGES");
     if (e is null || e[0] == 0) return requested;
-    if (e[0] == '0') return false;
-    if (e[0] == '1') return true;
+    if (e[1] == 0)
+    {
+        if (e[0] == '0') return false;
+        if (e[0] == '1') return true;
+    }
+    fatal("ANTFARM_HUGE_PAGES must be 0 or 1");
     return requested;
 }
 
@@ -355,6 +361,16 @@ private void unmapMagicBuffer(void* p, size_t bytes) nothrow @nogc @system
 
 /// Spec 2a/5a: maximum number of simultaneous subscribed consumers.
 enum MAX_CONSUMERS_LIMIT = 128;
+/// Negative `ConsumerView.subscribe` results (spec 4c, 6b). Every failure
+/// has already unwound its temporary pins; the view stays unsubscribed.
+/// The Farm already has MAX_CONSUMERS_LIMIT subscribed views. Retry only
+/// after another view unsubscribes.
+enum long SUBSCRIBE_FULL = -1;
+/// The frontier was uninitialized or moved during the attach walk. This is
+/// transient; retry the same call.
+enum long SUBSCRIBE_RETRY = -2;
+/// Caller error: a null Farm, or a view that is already subscribed.
+enum long SUBSCRIBE_INVALID = -3;
 /// Spec 2a: preallocated leaf tallies per segment: ceiling square root of 128.
 enum MAX_LEAVES = 12;
 /// Spec 5e-d default small-table threshold. 0 at construction selects the
@@ -767,7 +783,8 @@ enum Tier : ubyte { small, bulk }
 /// see the other fields), then clears the source's hash so at most one
 /// live token exists per slot and a stale copy fails requireToken.
 /// Assignment takes the argument by value, which routes through the same
-/// transfer copy.
+/// transfer copy. Assigning over a still-valid token is fatal: it would lose
+/// the only handle to a registered slot. Unregister the old token first.
 struct Token
 {
     Tier tier;
@@ -804,9 +821,12 @@ struct Token
     }
 
     /// Transfer-only assignment: the by-value argument was already moved
-    /// into this temporary by the copy constructor above.
+    /// into this temporary by the copy constructor above. The destination
+    /// must be invalid (default or unregistered).
     ref Token opAssign(Token src) nothrow @nogc @system
     {
+        if (valid)
+            fatal("overwrite live producer Token; unregister it first");
         tier = src.tier;
         slot = src.slot;
         quotaLeft = src.quotaLeft;
@@ -1083,14 +1103,14 @@ struct AntFarm
     // ------------------------------------------------------------------
 
     /// fetch-inc Cf; on success fetch-inc Reqs_c and return it (the IDc).
-    /// Returns a negative value if oversubscribed.
+    /// Returns SUBSCRIBE_FULL if oversubscribed.
     long add_consumer() nothrow @nogc @system
     {
         immutable prev = atomicFetchAdd!(MemoryOrder.raw)(Cf, 1);
         if (prev >= MAX_CONSUMERS_LIMIT)
         {
             atomicFetchSub!(MemoryOrder.raw)(Cf, 1);
-            return -1;
+            return SUBSCRIBE_FULL;
         }
         return cast(long) atomicFetchAdd!(MemoryOrder.raw)(Reqs_c, 1);
     }
@@ -1699,11 +1719,11 @@ struct ConsumerView
         return ltiRing[cast(uint)(ei & F.kMask)];
     }
 
-    /// Spec 5a. Returns the (non-negative) starting epoch on success, or a
-    /// negative value on failure.
+    /// Spec 5a. Returns the (non-negative) starting epoch on success, or
+    /// SUBSCRIBE_FULL, SUBSCRIBE_RETRY, or SUBSCRIBE_INVALID on failure.
     long subscribe(AntFarm* f) nothrow @nogc @system
     {
-        if (f is null || hasRef) return -1;
+        if (f is null || hasRef) return SUBSCRIBE_INVALID;
         immutable idc = f.add_consumer();
         if (idc < 0) return idc;
 
@@ -1749,7 +1769,7 @@ struct ConsumerView
             foreach (i; 0 .. nPinned)
                 atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
             f.sub_consumer();
-            return -1;
+            return SUBSCRIBE_RETRY;
         }
 
         // Re-read the write tail now that every slot is pinned. The first
@@ -1766,7 +1786,7 @@ struct ConsumerView
             foreach (i; 0 .. nPinned)
                 atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
             f.sub_consumer();
-            return -1;
+            return SUBSCRIBE_RETRY;
         }
         F = f;
         IDc = cast(ulong) idc;

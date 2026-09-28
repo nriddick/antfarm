@@ -105,7 +105,7 @@ The grid median is a summary across different topologies, not a repeated-run
 confidence estimate. It shows a substantial batching benefit and several
 configurations that use additional producers and consumers effectively. It
 does not establish monotonic scaling or a preferred worker count for other
-workloads. The raw runs are in [throughput.txt](throughput.txt).
+workloads. The raw runs are in [perftest/results/throughput.txt](perftest/results/throughput.txt).
 
 The existing same-host `moodycamel::ConcurrentQueue` measurements used
 `uint64_t` items and a bounded-style matrix:
@@ -151,7 +151,7 @@ It reached 305.064 M payloads/s at six threads and 276.505 M/s at eight.
 Changing batch size to 32 reduced the peak to 162.357 M/s; single-item writes
 peaked at 12.579 M/s with one thread. This exercises the shared producer/worker
 role and shows its dependence on batching. The grids are retained in
-[throughput.txt](throughput.txt).
+[perftest/results/throughput.txt](perftest/results/throughput.txt).
 
 ## What overtaking does for latency
 
@@ -189,7 +189,7 @@ Chunk sizing changes the result materially. On the Ryzen host, five pinned
 consumers with huge pages and an 8,192-job dump gave 24.8 µs p99 at chunk 16,
 15.8 µs at chunk 8, and 7.9 µs at chunk 4. Those samples support tuning the cost
 hint to the actual callbacks; they do not show that smaller chunks are free.
-The complete distributions and conditions are in [latency.txt](latency.txt).
+The complete distributions and conditions are in [perftest/results/latency.txt](perftest/results/latency.txt).
 
 ## Persistent workers and ordinary D control flow
 

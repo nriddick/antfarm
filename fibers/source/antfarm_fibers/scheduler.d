@@ -3002,9 +3002,15 @@ alias FiberBackend = FiberDomain;
 /// builds. The caller must unsubscribe the same instance.
 long subscribeOrThrow(ref ConsumerView consumer, AntFarm* farm)
 {
-    immutable subscription = consumer.subscribe(farm);
+    long subscription;
+    // A moving frontier is transient; capacity and misuse are not.
+    do
+        subscription = consumer.subscribe(farm);
+    while (subscription == SUBSCRIBE_RETRY);
+    if (subscription == SUBSCRIBE_FULL)
+        throw new Exception("antfarm_fibers: Farm already has MAX_CONSUMERS_LIMIT subscribers");
     if (subscription < 0)
-        throw new Exception("antfarm_fibers: consumer subscription failed");
+        throw new Exception("antfarm_fibers: invalid consumer subscription (null Farm or view already subscribed)");
     return subscription;
 }
 

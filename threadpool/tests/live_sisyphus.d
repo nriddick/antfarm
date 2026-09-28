@@ -159,7 +159,7 @@ int main()
         opt.workerBody = &liveBody;
         auto pool = new CacheAwarePool(opt);
         pool.start();
-        scope (exit) pool.shutdown(true);
+        scope (exit) pool.shutdown();
         assert(pool.workerCount == 20);
         auto d = pool.director();
         d.spin();
@@ -184,7 +184,7 @@ int main()
         opt.workerBody = &tickBody;
         auto pool = new CacheAwarePool(opt);
         pool.start();
-        pool.shutdown(true);
+        pool.shutdown();
         pool.start();
         assert(pool.workerCount == 20);
         {
@@ -197,7 +197,7 @@ int main()
                 Thread.sleep(msecs(5));
             }
         }
-        pool.shutdown(true);
+        pool.shutdown();
         assert(atomicLoad(gBodyTicks) > 0, "restarted pool did not run the worker body");
         writeln("restart ok");
     }
@@ -208,9 +208,9 @@ int main()
         opt.workerBody = &tickBody;
         auto pool = new CacheAwarePool(opt);
         pool.start();
-        scope (exit) pool.shutdown(true);
+        scope (exit) pool.shutdown();
         assert(pool.workerCount == 12, "P-only pool should be 12 SMT P LPs");
-        writeln("enableECores=false has no E workers; shutdown(true) returned");
+        writeln("enableECores=false has no E workers; shutdown() returned");
     }
 
     writeln("live-sisyphus: pass");

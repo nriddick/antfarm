@@ -733,8 +733,9 @@ private:
 
 public:
 
-    /// Publish up to 256 queued actors. Snapshot work is bounded by `maximum`,
-    /// regardless of the backlog. A concurrent snapshot returns zero rather
+    /// Publish up to `maximum` queued actors (default 32, clamped to 256)
+    /// and return how many were written. Snapshot work is bounded by
+    /// `maximum`, regardless of the backlog. A concurrent snapshot returns zero rather
     /// than waiting; callers retry as for Farm backpressure. Unwritten
     /// activations are returned to the intrusive queue.
     size_t flush(ref Token token, size_t maximum = 32, uint avgCost = 2)
