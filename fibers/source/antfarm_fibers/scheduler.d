@@ -1528,6 +1528,11 @@ class FiberReadyLane
                 task = next;
             }
             auto bodies = TaskBodySnapshotRange(nodes[0 .. n]);
+            // Count before publishing: a consumer may enter an activation
+            // (noteEntered) before write() returns. Counting afterwards let
+            // that decrement run first and drive the count negative. A
+            // transient overcount only makes `published` conservative.
+            notePublished(n);
             written = cast(size_t) farm.write(
                 resumeHeader, bodies, 1, token, avgCost);
             if (written < n)
@@ -1536,8 +1541,8 @@ class FiberReadyLane
                     atomicStore!(MemoryOrder.raw)(nodes[i].queueNext,
                         cast(shared(FiberTask)) nodes[i + 1]);
                 publishable.putBackChain(nodes[written], nodes[n - 1], n - written);
+                retractPublished(n - written);
             }
-            if (written != 0) notePublished(written);
         }
         return written;
     }
@@ -1556,6 +1561,13 @@ class FiberReadyLane
     {
         atomicFetchAdd!(MemoryOrder.rel)(
             readyControl.publishedCount, cast(long) count);
+    }
+
+    private void retractPublished(size_t count) nothrow @nogc
+    {
+        immutable previous = atomicFetchSub!(MemoryOrder.acq_rel)(
+            readyControl.publishedCount, cast(long) count);
+        assert(previous >= cast(long) count);
     }
 
     package void noteEntered() nothrow @nogc

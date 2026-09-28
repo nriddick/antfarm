@@ -20,6 +20,11 @@ Behavior changes after 1.7.0-rc.3:
 - An `ANTFARM_HUGE_PAGES` value other than `0` or `1` is fatal.
 - The Fiber `unittest` and `stress` configurations keep `assert` checks in
   `--build=release`.
+- Fixed a Fiber ready-lane accounting race that the release-stripped asserts
+  had hidden: `flush` counted published activations only after `write()`
+  returned, so a consumer could enter one first and drive `published`
+  negative. With asserts enabled, release stress hung in about a third of
+  runs; it now counts before publishing and retracts the unwritten tail.
 
 ## 1.7.0-rc.3 lifecycle performance
 
