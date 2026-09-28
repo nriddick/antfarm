@@ -44,7 +44,7 @@ void uxHelpersSmoke()
 {
     import threadpool : PoolOptions;
 
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto lane = new FiberLane(farm);
@@ -79,7 +79,7 @@ void uxHelpersSmoke()
 
 void cancellationOwnershipSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -169,7 +169,7 @@ void cancellationOwnershipSmoke()
 
 void manualSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -213,7 +213,7 @@ void manualSmoke()
 void defaultBatchSmoke()
 {
     enum count = 40;
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -238,7 +238,7 @@ void defaultBatchSmoke()
 
 void recycleSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -310,7 +310,7 @@ void recycleSmoke()
 
 void externalJoinSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -380,7 +380,7 @@ void externalJoinSmoke()
 
 void fiberJoinSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -549,7 +549,7 @@ void fiberJoinSmoke()
 
 void cancellationSemanticsSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -667,7 +667,7 @@ void cancellationSemanticsSmoke()
 
 void lifecycleEventSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -777,7 +777,7 @@ void lifecycleEventSmoke()
 
 void lifecycleRetentionSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -905,7 +905,7 @@ void lifecycleRetentionSmoke()
 
 void lifecycleBacklogSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
     scope (exit) farm.destroy();
     auto domain = new FiberDomain(farm);
     domain.enableLifecycleEvents(4 * 128);
@@ -984,10 +984,10 @@ void lifecycleBacklogSmoke()
 
 void sharedDomainLaneSmoke()
 {
-    auto farmA = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farmA = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmA.destroy();
-    auto farmB = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farmB = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmB.destroy();
     auto domain = new FiberDomain;
@@ -1060,13 +1060,13 @@ void sharedDomainLaneSmoke()
 
 void remoteCoverageRingSmoke()
 {
-    auto farmA = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farmA = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmA.destroy();
-    auto farmB = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farmB = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmB.destroy();
-    auto farmC = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farmC = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmC.destroy();
     auto domain = new FiberDomain;
@@ -1083,10 +1083,10 @@ void remoteCoverageRingSmoke()
 
 void remoteSweeperSmoke()
 {
-    auto farmA = AntFarm.create(1 << 18, 8, 1, 0, 0, 2, 4096,
+    auto farmA = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmA.destroy();
-    auto farmB = AntFarm.create(1 << 18, 8, 1, 0, 0, 2, 4096,
+    auto farmB = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmB.destroy();
     auto domain = new FiberDomain;
@@ -1188,7 +1188,7 @@ void migrationSmoke()
     import core.thread : Thread;
     import core.time : msecs;
 
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -1283,7 +1283,7 @@ void migrationSmoke()
 
 void wakePolicySmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto lane = new FiberLane(farm);
@@ -1328,7 +1328,7 @@ void wakePolicySmoke()
 void mixedPayloadSmoke()
 {
     enum count = 96;
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -1421,7 +1421,7 @@ final class GenerationProducer
 
 void syncPrimitiveSmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -1585,7 +1585,7 @@ void sharedSignalAndTimerCancellationSmoke()
     import core.time : hours;
 
     enum count = 64;
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
@@ -1652,7 +1652,7 @@ void threadpoolSmoke()
     FiberLane[] lanes;
     foreach (_; 0 .. topology.llcCount)
     {
-        auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 2, 4096,
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
                                    DEFAULT_SMALL_TABLE_THRESHOLD, false);
         farms ~= farm;
         lanes ~= new FiberLane(farm);
@@ -1838,7 +1838,7 @@ void threadpoolSmoke()
 
 void fiberParitySmoke()
 {
-    auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);

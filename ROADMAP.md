@@ -4,6 +4,12 @@
 
 Behavior changes after 1.7.0-rc.3:
 
+- `AntFarm.create`'s first parameter is now `ringMiB`, the ring size in MiB
+  (a power of two in `[2, MAX_RING_MIB]`), instead of `ln` in ulongs. Divide a
+  former length by 131072, or use `ringMiBFromUlongs`. A leftover ulong
+  length such as `1 << 18` exceeds `MAX_RING_MIB` and is fatal rather than
+  mapping 256 GiB.
+
 - `ConsumerView.subscribe` failures are distinguishable: `SUBSCRIBE_FULL`
   (-1, 128 views already subscribed), `SUBSCRIBE_RETRY` (-2, transient
   frontier), and `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed).

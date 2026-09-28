@@ -384,6 +384,23 @@ enum bool DEFAULT_HUGE_PAGES = false;
 enum uint MAX_CHUNK = 32;
 /// log2(MAX_CHUNK); avgCost outside 0 .. MAX_AVG_COST is a caller error.
 enum uint MAX_AVG_COST = 5;
+/// Smallest ring accepted by `AntFarm.create`, in MiB (2^18 ulongs).
+enum uint MIN_RING_MIB = 2;
+/// Largest ring accepted by `AntFarm.create`, in MiB (64 GiB). Far beyond any
+/// characterized size; it mainly rejects a length accidentally given in ulongs.
+enum uint MAX_RING_MIB = 1 << 16;
+/// log2 of the ulongs in one MiB: `Ln = ringMiB << ULONGS_PER_MIB_SHIFT`.
+enum uint ULONGS_PER_MIB_SHIFT = 17;
+/// Convert a ring length in ulongs to `AntFarm.create`'s `ringMiB`
+/// argument. Fatal unless the length is a whole number of MiB, so a
+/// migration from the former ulong parameter cannot silently truncate.
+uint ringMiBFromUlongs(ulong ringUlongs) nothrow @nogc @system
+{
+    immutable mask = (1UL << ULONGS_PER_MIB_SHIFT) - 1;
+    if ((ringUlongs & mask) != 0 || (ringUlongs >> ULONGS_PER_MIB_SHIFT) > uint.max)
+        fatal("ring length in ulongs is not a whole number of MiB");
+    return cast(uint)(ringUlongs >> ULONGS_PER_MIB_SHIFT);
+}
 /// Maximum supported number of segments K. Default create()/perftest K is 8.
 enum KMAX = 16;
 
@@ -980,11 +997,14 @@ struct AntFarm
     // Construction / destruction
     // ------------------------------------------------------------------
 
+    /// `ringMiB` is the ring size in MiB: a power of two, at least
+    /// MIN_RING_MIB (2) and at most MAX_RING_MIB. The Farm's internal length
+    /// `Ln` is that size in ulongs (`ringMiB << 17`); quotas stay in ulongs.
     /// Ordinary 4 KiB backing is the default. Pass `hugePages=true` or set
     /// `ANTFARM_HUGE_PAGES=1` to opt into the platform huge-page path.
     /// Distinct Farms may be created concurrently. Windows mapping API
     /// initialization is process-locked; the mapping/allocation work is local.
-    static AntFarm* create(ulong ln = 1 << 20, uint k = 8, uint expectedConsumers = 4,
+    static AntFarm* create(uint ringMiB = 8, uint k = 8, uint expectedConsumers = 4,
                            uint maxBulk = 2, ulong quotaBulk = 0,
                            uint maxSmall = 16, ulong quotaSmall = 4096,
                            uint smallThreshold = DEFAULT_SMALL_TABLE_THRESHOLD,
@@ -992,8 +1012,9 @@ struct AntFarm
     {
         // Construction constraints (spec 1/3b):
         //  - K is the useful power-of-two range [2, KMAX=16].
-        //  - Ln >= 2^18 (2 MiB with the ulong base unit); smaller rings were
-        //    never studied and per-table header overhead would dominate.
+        //  - ringMiB >= 2 (Ln >= 2^18 ulongs); smaller rings were never
+        //    studied and per-table header overhead would dominate. The upper
+        //    bound mainly catches a legacy caller passing a length in ulongs.
         //  - segCap = Ln/K has a floor so header/pad space never dominates a
         //    segment's capacity (subsumed by Ln >= 2^18 with K <= 16).
         //  - Exmax <= (K-1)*segCap so a full quota excursion is strictly
@@ -1002,7 +1023,11 @@ struct AntFarm
         //    positive quota; a disabled role's quota is normalized to 0 and
         //    takes no part in Exmax.
         if (k < 2 || k > KMAX || (k & (k - 1)) != 0) fatal("K must be a power of 2 in [2, KMAX]");
-        if (ln < (1 << 18) || (ln & (ln - 1)) != 0) fatal("Ln must be a power of 2 >= 2^18");
+        if (ringMiB < MIN_RING_MIB || (ringMiB & (ringMiB - 1)) != 0)
+            fatal("ringMiB must be a power of 2 >= 2 (the ring size is in MiB, not ulongs)");
+        if (ringMiB > MAX_RING_MIB)
+            fatal("ringMiB exceeds MAX_RING_MIB (the ring size is in MiB, not ulongs)");
+        immutable ln = cast(ulong) ringMiB << ULONGS_PER_MIB_SHIFT;
         immutable segCap = ln / k;
         if (segCap < 2048) fatal("segment capacity too small");
         if (expectedConsumers == 0) fatal("expected consumers must be > 0");

@@ -289,7 +289,7 @@ void testMagicWrap()
 {
     void probe(bool huge, const(char)[] label)
     {
-        auto f = AntFarm.create(1 << 18, 8, 1, 1, 2048, 1, 512,
+        auto f = AntFarm.create(2, 8, 1, 1, 2048, 1, 512,
             DEFAULT_SMALL_TABLE_THRESHOLD, huge);
         scope (exit) f.destroy();
         if (huge && !f.usedLargePages)
@@ -305,6 +305,22 @@ void testMagicWrap()
     probe(false, "wrap 4K");
     probe(true, "wrap large pages");
     printf("testMagicWrap OK\n"); fflush(stdout);
+}
+
+void testRingSizeUnits()
+{
+    foreach (mib; [2u, 4u, 8u])
+    {
+        auto f = AntFarm.create(ringMiB: mib, k: 8, expectedConsumers: 1,
+                                maxBulk: 0, maxSmall: 1, quotaSmall: 512);
+        check(f.Ln == cast(ulong) mib << ULONGS_PER_MIB_SHIFT,
+            "ringMiB maps to Ln ulongs");
+        check(f.bufBytes == cast(ulong) mib * 1024 * 1024, "ring bytes");
+        f.destroy();
+    }
+    check(ringMiBFromUlongs(1UL << 18) == 2, "2^18 ulongs is 2 MiB");
+    check(ringMiBFromUlongs(1UL << 20) == 8, "2^20 ulongs is 8 MiB");
+    printf("testRingSizeUnits OK\n"); fflush(stdout);
 }
 
 void testArithmetic()
@@ -337,7 +353,7 @@ void testArithmetic()
 
 void testSingleThreaded()
 {
-    auto f = AntFarm.create(1 << 18, 8, 2, 1, 8192, 4, 2048);
+    auto f = AntFarm.create(2, 8, 2, 1, 8192, 4, 2048);
     scope (exit) f.destroy();
 
     // Epoch 0: Sub0 pulse present, blocking reclamation of segment 0.
@@ -510,7 +526,7 @@ struct PreparingBodyRange
 
 void testInputRangeWrite()
 {
-    auto f = AntFarm.create(1 << 18, 8, 2, 1, 8192, 4, 2048);
+    auto f = AntFarm.create(2, 8, 2, 1, 8192, 4, 2048);
     scope (exit) f.destroy();
 
     enum N = 20;
@@ -556,7 +572,7 @@ void testInputRangeWrite()
 
 void testSeparateRanges()
 {
-    auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
     scope (exit) f.destroy();
 
     enum N = 40;
@@ -609,7 +625,7 @@ static assert(!__traits(compiles, {
 
 void testPayloadRange()
 {
-    auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
     scope (exit) f.destroy();
 
     enum N = 40;
@@ -666,7 +682,7 @@ void testUniformRanges()
     allocCalls(N + M + F + K + P);
     scope (exit) freeCalls();
 
-    auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096);
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
     scope (exit) f.destroy();
     ConsumerView v;
     check(v.subscribe(f) == 0, "subscribe before uniform writes");
@@ -859,7 +875,7 @@ void consumerMain(ConsCtx* c)
 
 void testConcurrent()
 {
-    auto f = AntFarm.create(1 << 18, 8, 4, 1, 16384, 8, 4096);
+    auto f = AntFarm.create(2, 8, 4, 1, 16384, 8, 4096);
     scope (exit) f.destroy();
 
     enum N = 6000;
@@ -922,7 +938,7 @@ __gshared ProdCtx p1ctx, p2ctx;
 
 void testWraparound()
 {
-    auto f = AntFarm.create(1 << 18, 8, 1, 1, 2048, 2, 1024);
+    auto f = AntFarm.create(2, 8, 1, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
 
     // ~20 ulongs/payload (tiny bodies pack ~17/table); 40000 payloads
@@ -980,7 +996,7 @@ void testWraparound()
 
 void testSubscriptionCap()
 {
-    auto f = AntFarm.create(1 << 18, 8, 4, 1, 2048, 2, 1024);
+    auto f = AntFarm.create(2, 8, 4, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
 
     auto views = cast(ConsumerView*) malloc(MAX_CONSUMERS_LIMIT * ConsumerView.sizeof);
@@ -1043,7 +1059,7 @@ void churnerMain(ChurnCtx* c)
 
 void testChurn(size_t nsteady)
 {
-    auto f = AntFarm.create(1 << 18, 8, 6, 1, 4096, 4, 2048);
+    auto f = AntFarm.create(2, 8, 6, 1, 4096, 4, 2048);
     scope (exit) f.destroy();
 
     enum N = 4000;
@@ -1118,7 +1134,7 @@ void testChurn(size_t nsteady)
 
 void testBacklog()
 {
-    auto f = AntFarm.create(1 << 18, 8, 2, 1, 2048, 2, 1024);
+    auto f = AntFarm.create(2, 8, 2, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
 
     enum N = 3000;
@@ -1195,7 +1211,7 @@ void testSpannedTables()
 {
     // segCap = 2^18/8 = 32768; bulk quota 110000 allows a 100k table to
     // span ~3 segments and a 34k table to span a boundary.
-    auto f = AntFarm.create(1 << 18, 8, 2, 1, 110000, 2, 1024);
+    auto f = AntFarm.create(2, 8, 2, 1, 110000, 2, 1024);
     scope (exit) f.destroy();
 
     enum N = 64;
@@ -1276,7 +1292,7 @@ void smallProducerMain(ProdCtx* c)
 // by the carried sweeper role (and the idle re-walk backstop).
 void testSmallTableChurn()
 {
-    auto f = AntFarm.create(1 << 18, 8, 6, 1, 4096, 4, 2048);
+    auto f = AntFarm.create(2, 8, 6, 1, 4096, 4, 2048);
     scope (exit) f.destroy();
 
     enum N = 4000;
@@ -1341,7 +1357,7 @@ void testSmallTableChurn()
 // position pin on a spanning table's start starved refreshQuota.
 void testMultiSmallProducers()
 {
-    auto f = AntFarm.create(1 << 18, 8, 2, 1, 8192, 2, 4096);
+    auto f = AntFarm.create(2, 8, 2, 1, 8192, 2, 4096);
     scope (exit) f.destroy();
 
     enum N = 2000;
@@ -1479,7 +1495,7 @@ void testActorWave()
     enum actorCount = 64;
     enum tableActors = 7;
     enum consumerCount = 4;
-    auto farm = AntFarm.create(1 << 18, 8, consumerCount,
+    auto farm = AntFarm.create(2, 8, consumerCount,
         0, 0, 1, 4096);
     scope (exit) farm.destroy();
 
@@ -1673,7 +1689,7 @@ void testActorPayload()
 {
     enum consumerCount = 4;
     enum target = 500;
-    auto farm = AntFarm.create(1 << 18, 8, consumerCount,
+    auto farm = AntFarm.create(2, 8, consumerCount,
         0, 0, 1, 4096);
     scope (exit) farm.destroy();
 
@@ -1811,7 +1827,7 @@ void testActorPayload()
 
 void testActorErasedAdapter()
 {
-    auto farm = AntFarm.create(1 << 18, 4, 1, 0, 0, 1, 256);
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     scope (exit) farm.destroy();
 
     ActorAllocCounts counts;
@@ -1914,7 +1930,7 @@ void testActorInbox()
     enum messagesPerProducer = acceptedPerProducer + closedPerProducer;
     enum messageCount = producerCount * messagesPerProducer;
 
-    auto farm = AntFarm.create(1 << 18, 8, consumerCount,
+    auto farm = AntFarm.create(2, 8, consumerCount,
         0, 0, 1, 4096);
     scope (exit) farm.destroy();
 
@@ -2108,7 +2124,7 @@ private long quotaProbeCallback(PayloadHeader*, PayloadBody, ulong)
 void testSweptQuotaBalance()
 {
     enum ulong quota = 512;
-    auto f = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, quota);
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, quota);
     scope (exit) f.destroy();
     ConsumerView view;
     check(view.subscribe(f) >= 0, "quota balance subscription");
@@ -2192,7 +2208,7 @@ private final class ProducerLifecycleJob
 
 void testProducerLifecycleChurn()
 {
-    auto f = AntFarm.create(1 << 18, 8, 4, 8, 4096, 8, 4096);
+    auto f = AntFarm.create(2, 8, 4, 8, 4096, 8, 4096);
     scope (exit) f.destroy();
     atomicStore(g_producerLifecycleReady, 0);
     atomicStore(g_producerLifecycleStop, 0);
@@ -2227,6 +2243,7 @@ void testProducerLifecycleChurn()
 void main()
 {
     testMagicWrap();
+    testRingSizeUnits();
     testArithmetic();
     testSweptQuotaBalance();
     testProducerLifecycleChurn();

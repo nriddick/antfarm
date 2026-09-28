@@ -63,7 +63,7 @@ double runScene(const(TopologySnapshot) snap, bool includeE, ulong nPay)
     if (lps.length == 0)
         return 0;
 
-    auto f = AntFarm.create(1UL << 21, 8, cast(uint) lps.length, 1, 0, 0, 4096);
+    auto f = AntFarm.create(16, 8, cast(uint) lps.length, 1, 0, 0, 4096);
     scope (exit) f.destroy();
     printf("  usedLargePages=%d consumers=%u includeE=%d\n",
         cast(int) f.usedLargePages, cast(uint) lps.length, cast(int) includeE);

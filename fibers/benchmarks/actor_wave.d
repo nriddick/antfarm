@@ -404,7 +404,7 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     immutable quotaSmall = quotaHeadroom > 16_384
         ? 16_384 : quotaHeadroom;
 
-    auto farm = AntFarm.create(ringLength, segmentCount,
+    auto farm = AntFarm.create(ringMiBFromUlongs(ringLength), segmentCount,
         cast(uint) workerLps.length, 0, 0, cast(uint) producerSlots,
         quotaSmall);
     scope (exit) farm.destroy();

@@ -94,7 +94,7 @@ void addSquare(ulong value) nothrow @nogc @system
 void main()
 {
     // One consumer, no bulk producers, one small producer with 4096 words of quota.
-    auto farm = AntFarm.create(ln: 1UL << 18, k: 8, expectedConsumers: 1,
+    auto farm = AntFarm.create(ringMiB: 2, k: 8, expectedConsumers: 1,
                                maxBulk: 0, maxSmall: 1, quotaSmall: 4096);
     scope (exit) farm.destroy();
 
@@ -128,7 +128,8 @@ void main()
 Things the example relies on:
 
 - `AntFarm.create` has nine parameters. Named arguments, as above, keep the
-  call readable; omitted ones take their defaults. See
+  call readable; omitted ones take their defaults. `ringMiB` is the ring size
+  in MiB (a power of two, at least 2); quotas are in ulongs. See
   [Sizing one Farm](ARCHITECTURE.md#sizing-one-farm).
 - `write()` returns how many payloads it published. Pop exactly that many and
   retry; `0` is backpressure, not failure. A generic source passed to
@@ -268,7 +269,7 @@ Opt in per Farm with the final construction argument or for a complete process
 with the environment override:
 
 ```d
-auto farm = AntFarm.create(ln: 1UL << 22, k: 8, expectedConsumers: consumers,
+auto farm = AntFarm.create(ringMiB: 32, k: 8, expectedConsumers: consumers,
                            maxBulk: 0, maxSmall: producers, quotaSmall: quota,
                            hugePages: true);
 ```

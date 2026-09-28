@@ -67,7 +67,7 @@ void main()
         ++ncons;
     }
 
-    auto f = AntFarm.create(1UL << 18, 8, ncons, 0, 0, 1, 4096);
+    auto f = AntFarm.create(2, 8, ncons, 0, 0, 1, 4096);
     scope (exit) f.destroy();
 
     auto bins = new FarmBin[](topo.llcCount);

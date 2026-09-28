@@ -100,7 +100,7 @@ Rate[2] runMtTopo(size_t n, Topo topo, ushort[] lps)
     immutable slots = cast(uint)(lps.length + 1); // workers + control payload producer
     immutable quotaHeadroom = (k - 1) * segCap / slots;
     immutable quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
-    auto farm = AntFarm.create(ln, k, cast(uint) lps.length, 0, 0, slots, quotaSmall);
+    auto farm = AntFarm.create(ringMiBFromUlongs(ln), k, cast(uint) lps.length, 0, 0, slots, quotaSmall);
     scope (exit) farm.destroy();
     auto lane = new FiberLane(farm);
     lane.flushBatch = topo.flushBatch;
@@ -196,7 +196,7 @@ void main(string[] args)
     immutable n = args.length > 1 ? args[1].to!size_t : 100_000;
     immutable flushMax = args.length > 2 ? args[2].to!size_t : 256;
 
-    auto farm = AntFarm.create(1 << 20, 8, 1, 0, 0, 1, 16_384);
+    auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 16_384);
     scope (exit) farm.destroy();
     auto backend = new FiberBackend(farm);
     backend.reserve(n);

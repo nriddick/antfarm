@@ -56,7 +56,7 @@ require contracts, so their `assert` checks stay enabled even with
 program. Its essential lifecycle is:
 
 ```d
-auto farm = AntFarm.create(1 << 18, 8, 1, 0, 0, 1, 4096,
+auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                            DEFAULT_SMALL_TABLE_THRESHOLD, false);
 scope (exit) farm.destroy();
 

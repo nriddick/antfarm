@@ -116,7 +116,7 @@ int main()
         }
         if (ncons == 0)
             ncons = 1;
-        b.farm = AntFarm.create(1UL << 21, 8, ncons, 0, 0, 8, 4096,
+        b.farm = AntFarm.create(16, 8, ncons, 0, 0, 8, 4096,
             DEFAULT_SMALL_TABLE_THRESHOLD, false);
     }
     install(bins);

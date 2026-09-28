@@ -194,12 +194,12 @@ Safety argument in one paragraph: producers only ever write within quota verifie
 
 ### 4a. Geometry and Quota Constraints
 
-`create` enforces:
+`create` takes the ring size as `ringMiB` and derives `Ln = ringMiB << 17` ulongs. It enforces:
 
 | Constraint | Current value | Kind |
 | --- | --- | --- |
 | `K` in `[2, KMAX]` | `KMAX = 16` (section 1 suggests 4 or 8) | implementation limit, power-of-two |
-| `Ln` power of two `>= 2^18` | 2 MiB in the ulong base unit | implementation limit; smaller rings were never studied |
+| `ringMiB` power of two in `[2, MAX_RING_MIB]` | `Ln >= 2^18` ulongs (2 MiB); `MAX_RING_MIB = 65536` (64 GiB) | implementation limit; smaller rings were never studied, and the upper bound rejects a length mistakenly given in ulongs |
 | `segCap` floor | 2048, subsumed by `Ln >= 2^18` with `K <= 16` | keeps per-table header/pad space from dominating a segment |
 | `Exmax <= (K-1)*segCap` | enforced | algorithmic invariant (I1) |
 | quota role | `quotaRole > 0` iff `maxRole > 0` | algorithmic invariant |
@@ -555,7 +555,7 @@ Operational sections still mention a fatal guard at the point where it matters t
 ### Current implementation profile
 
 - `MAX_CONSUMERS_LIMIT = 128`, `MAX_LEAVES = 12`.
-- `KMAX = 16`; `Ln` must be a power of two `>= 2^18`; `segCap` floor 2048. These last two are characterized rather than tuned (11).
+- `KMAX = 16`; `ringMiB` must be a power of two `>= 2` (so `Ln >= 2^18` ulongs) and `<= MAX_RING_MIB`; `segCap` floor 2048. These last two are characterized rather than tuned (11).
 - `MAX_CHUNK = 32`; small-table threshold default 64, auto rule `clamp(SqCs * Chunk, 16, 256)`.
 - Payload `Done` and `MaxCs` bounds: 1..512. `AvgCost` in `0 .. log2(MAX_CHUNK)`.
 - Bulk quota auto-defaults to `segCap`; small quota fatals on 0.

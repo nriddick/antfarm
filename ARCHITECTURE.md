@@ -151,13 +151,13 @@ happens-before edges are in
 `AntFarm.create` takes nine parameters, all defaulted. Pass them by name:
 
 ```d
-auto farm = AntFarm.create(ln: 1UL << 20, k: 8, expectedConsumers: workers,
+auto farm = AntFarm.create(ringMiB: 8, k: 8, expectedConsumers: workers,
                            maxBulk: 0, maxSmall: producers, quotaSmall: 4096);
 ```
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `ln` | `1 << 20` | ring length in ulongs; power of two, `>= 2^18` |
+| `ringMiB` | `8` | ring size in MiB; power of two, `>= 2` (at most `MAX_RING_MIB`, 64 GiB) |
 | `k` | `8` | segment count; power of two in `[2, 16]` |
 | `expectedConsumers` | `4` | initial sharding hint, not a cap |
 | `maxBulk` | `2` | simultaneous bulk-tier tokens; `0` disables the tier |
@@ -169,10 +169,13 @@ auto farm = AntFarm.create(ln: 1UL << 20, k: 8, expectedConsumers: workers,
 
 Invalid combinations are fatal at construction. In particular the sum of all
 quotas, `maxBulk * quotaBulk + maxSmall * quotaSmall`, must not exceed `k - 1`
-segments (`(k - 1) * ln / k` ulongs), and every payload must fit one table
+segments. The ring holds `ringMiB * 131072` ulongs, so that limit is
+`(k - 1) * ringMiB * 131072 / k` ulongs, and every payload must fit one table
 within its producer's quota.
 
-- Ring length should generally fit the intended LLC working set.
+- The ring should generally fit the intended LLC working set. Quotas and
+  payload sizes remain in ulongs (8 bytes); only the ring size is in MiB.
+  `ringMiBFromUlongs` converts a former ulong length exactly.
 - Four or eight segments are the characterized choices.
 - `expectedConsumers` seeds the first epoch's leaf sharding; later epochs use
   the live count. The hard limit is `MAX_CONSUMERS_LIMIT` (128) simultaneously
