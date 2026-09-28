@@ -1,6 +1,6 @@
 # Ant Farm architecture
 
-Ant Farm 1.7.0-rc.4 is one repository with four cooperating packages. They
+Ant Farm 1.7.1-rc.1 is one repository with four cooperating packages. They
 separate transport, worker placement, stateful identities, and suspendable
 control flow so an application can choose the narrowest representation for
 each kind of work.

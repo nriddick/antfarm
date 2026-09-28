@@ -814,6 +814,84 @@ private void testRetirementJoinsLateSignal()
         "retirement join reclamation");
 }
 
+private void waveCreditHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+{
+    if (point != ActorTestPoint.waveTableProgressRecorded) return;
+    if (cas(&g_hookArrived, 0, 1))
+        while (atomicLoad!(MemoryOrder.acq)(g_hookRelease) == 0) {}
+}
+
+private void testWaveCompletionCreditPinsDescriptor(bool twoTables)
+{
+    auto farm = AntFarm.create(2, 4, 2, 0, 0, 1, 256);
+    scope(exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 2);
+    scope(exit) runtime.destroy();
+    WavePinResult[2] outputs;
+    ActorOwner!WavePinState[2] owners;
+    foreach (i; 0 .. 2)
+        owners[i] = runtime.createActor!(WavePinState, wavePinDormant)(WavePinState(&outputs[i]));
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ActorWave wave;
+    wave.begin(farm);
+    ActorHandle!WavePinState[2] members = [owners[0].handle, owners[1].handle];
+    atomicStore(g_hookArrived, 0);
+    atomicStore(g_hookRelease, 0);
+    setActorTestHook(&waveCreditHook);
+    shared int started;
+    auto worker = new Thread({
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0, "credit regression subscribe");
+        scope(exit) view.unsubscribe();
+        atomicStore(started, 1);
+        while (!view.consumeNext()) Thread.yield();
+    });
+    worker.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(started, deadline, "credit regression worker start");
+    check(wave.publish!wavePinOperation(members[0 .. 1], token, 0) == 1, "credit regression publish");
+    waitFlag(g_hookArrived, deadline, "credit regression notification pause");
+    check(wave.handle.progress == 1 && wave.handle.length == 1, "credit regression progress recorded");
+    if (twoTables)
+        check(wave.publish!wavePinOperation(members[1 .. 2], token, 0) == 1, "credit regression second table");
+    auto old = wave.seal();
+    check(!old.finished, "progress equality must not release active table notification");
+    if (twoTables)
+    {
+        auto other = new Thread({
+            ConsumerView view;
+            check(view.subscribe(farm) >= 0, "credit regression second subscribe");
+            scope(exit) view.unsubscribe();
+            while (wave.handle.progress != 2)
+            {
+                view.consumeNext();
+                check(MonoTime.currTime < deadline, "credit regression second consumer timeout");
+            }
+        });
+        other.start();
+        other.join(); // the second hook has returned, the first is still paused
+        check(old.progress == 2 && old.length == 2 && !old.finished,
+            "another hook must not finish while a peer still holds credit");
+    }
+    check(owners[0].handle.wake() == ActorWakeResult.waveOwned, "active notification retains membership");
+    atomicStore(g_hookRelease, 1);
+    while (!old.finished) check(MonoTime.currTime < deadline, "credit regression finish timeout");
+    // Reuse before joining the old notification's thread: dropping the final
+    // credit must really be its last descriptor access.
+    wave.begin(farm);
+    check(wave.seal().finished && !old.valid, "credit regression immediate descriptor reuse");
+    worker.join();
+    setActorTestHook(null);
+    check(outputs[0].waveCalls == 1 && outputs[1].waveCalls == (twoTables ? 1 : 0),
+        "credit regression exactly once");
+    foreach (ref owner; owners)
+    {
+        check(owner.requestRetire() == ActorRetireResult.requested, "credit regression retire");
+        check(owner.reclaim() == ActorReclaimResult.reclaimed, "credit regression reclaim");
+    }
+}
+
 private void testDeterministicInterleavings()
 {
     testClaimIsNotPublication();
@@ -823,6 +901,8 @@ private void testDeterministicInterleavings()
     testCloseBoundary(ActorTestPoint.activationSignalled);
     testContendedNodeClaimDuringClose();
     testReleasedReservationIsQuiescent();
+    testWaveCompletionCreditPinsDescriptor(false);
+    testWaveCompletionCreditPinsDescriptor(true);
     testWaveMembershipPinsRetiredActor();
     testWaveReleaseAllowsImmediateReuse();
     testRetirementJoinsLateSignal();

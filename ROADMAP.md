@@ -1,12 +1,19 @@
 # Ant Farm roadmap
 
-## Next: 1.7.1-rc.1 private actors
+## 1.7.1-rc.1 private actors
 
-Private actor hierarchies (self-owned roots, parent-owned child cohorts, and
-joined descendant lifetimes) are developed separately, together with their
-Farm shard-completion and public actor-wave completion fixes, for
-1.7.1-rc.1. That work must convert its `AntFarm.create` calls to the rc.4
-`ringMiB` parameter.
+Adds experimental private actor hierarchies: self-owned roots, parent-owned
+child cohorts, and joined descendant lifetimes. Includes Farm shard-completion
+ordering and public actor-wave completion credits, with deterministic reuse
+tests. All new `AntFarm.create` calls use the rc.4 `ringMiB` parameter, preserving
+their original buffer sizes. A compile-time assertion guards the child park
+layout required by `PrivateChildPark.fromWave`.
+
+See [the ownership contract](actors/PRIVATE_ACTORS.md) and
+[the lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md). Follow-up work
+remains on root polling while children run, batch-pool sizing for small
+`batchLimit` values, and handling a root that finishes with an active child
+wave. These behaviors are unchanged in this release candidate.
 
 ## 1.7.0-rc.4 usability and shutdown fixes
 

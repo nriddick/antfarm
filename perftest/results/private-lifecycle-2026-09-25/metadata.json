@@ -1,0 +1,64 @@
+{
+  "binary": "/tmp/antfarm-private-actors/perftest/actor_churn_mimalloc",
+  "sha256": "7d5681f041fa1b1fe6ea14e6975843b90e046e4f256d5ca336293eaa64b99352",
+  "seconds": 2,
+  "repeats": 5,
+  "actors": 16384,
+  "warmups": 5,
+  "profiles": [
+    [
+      0,
+      "0"
+    ],
+    [
+      1,
+      "0,1"
+    ],
+    [
+      5,
+      "0,1,2,3,4,5"
+    ],
+    [
+      11,
+      "0,1,2,3,4,5,6,7,8,9,10,11"
+    ]
+  ],
+  "cases": [
+    [
+      "actor",
+      256
+    ],
+    [
+      "wave",
+      256
+    ],
+    [
+      "wave",
+      16384
+    ],
+    [
+      "private",
+      256
+    ],
+    [
+      "private-remote",
+      256
+    ],
+    [
+      "tree",
+      256
+    ]
+  ],
+  "compiler": "LDC - the LLVM D compiler (1.43.0):\n  based on DMD v2.113.0 and LLVM 22.1.8\n  built with LDC - the LLVM D compiler (1.43.0)\n  Default target: x86_64-pc-linux-gnu\n  Host CPU: znver3\n  https://dlang.org - https://wiki.dlang.org/LDC\n\n\n  Registered Targets:\n    aarch64     - AArch64 (little endian)\n    aarch64_32  - AArch64 (little endian ILP32)\n    aarch64_be  - AArch64 (big endian)\n    amdgcn      - AMD GCN GPUs\n    arm         - ARM\n    arm64       - ARM64 (little endian)\n    arm64_32    - ARM64 (little endian ILP32)\n    armeb       - ARM (big endian)\n    avr         - Atmel AVR Microcontroller\n    bpf         - BPF (host endian)\n    bpfeb       - BPF (big endian)\n    bpfel       - BPF (little endian)\n    hexagon     - Hexagon\n    lanai       - Lanai\n    loongarch32 - 32-bit LoongArch\n    loongarch64 - 64-bit LoongArch\n    mips        - MIPS (32-bit big endian)\n    mips64      - MIPS (64-bit big endian)\n    mips64el    - MIPS (64-bit little endian)\n    mipsel      - MIPS (32-bit little endian)\n    msp430      - MSP430 [experimental]\n    nvptx       - NVIDIA PTX 32-bit\n    nvptx64     - NVIDIA PTX 64-bit\n    ppc32       - PowerPC 32\n    ppc32le     - PowerPC 32 LE\n    ppc64       - PowerPC 64\n    ppc64le     - PowerPC 64 LE\n    r600        - AMD GPUs HD2XXX-HD6XXX\n    riscv32     - 32-bit RISC-V\n    riscv32be   - 32-bit big endian RISC-V\n    riscv64     - 64-bit RISC-V\n    riscv64be   - 64-bit big endian RISC-V\n    sparc       - Sparc\n    sparcel     - Sparc LE\n    sparcv9     - Sparc V9\n    spirv       - SPIR-V Logical\n    spirv32     - SPIR-V 32-bit\n    spirv64     - SPIR-V 64-bit\n    systemz     - SystemZ\n    thumb       - Thumb\n    thumbeb     - Thumb (big endian)\n    ve          - VE\n    wasm32      - WebAssembly 32-bit\n    wasm64      - WebAssembly 64-bit\n    x86         - 32-bit X86: Pentium-Pro and above\n    x86-64      - 64-bit X86: EM64T and AMD64\n    xcore       - XCore\n",
+  "base": "1809f0bc47ded85347cf6d492f039d2b619b2fd2",
+  "date": "2026-09-25",
+  "host": "AMD Ryzen 5 5500, 6 cores / 12 SMT threads",
+  "farm_bytes": 8388608,
+  "huge_pages": false,
+  "state_bytes": 16,
+  "mimalloc_version": 30500,
+  "mimalloc_archive_sha256": "a7661e2ca340e72f16f747501b0c37b53feca41f98f9f1c98bbf43adf6f97341",
+  "mimalloc_gitlink": "18b08671c9302247bfb682286e6bf3cc1773f801",
+  "flags": "-O2 -release -d-version=AntfarmMimallocV3 -i -I. -Ithreadpool/source",
+  "note": "Includes the shard join and public-wave pending-credit fixes. This is the completed replacement matrix, not the aborted exploratory matrix."
+}

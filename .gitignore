@@ -39,6 +39,9 @@ perftest/actor_ready
 perftest/actor_churn
 perftest/actor_churn_mimalloc
 perftest/scaling
+private_actor_tests/private_actor_tests
+private_actor_tests/private_actor_tests_dmd
+private_actor_tests/private_actor_tests_tsan
 perftest/throughput_eager
 perftest/throughput_sd64
 review_torture/write_protection_allwrite

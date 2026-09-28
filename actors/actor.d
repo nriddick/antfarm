@@ -110,6 +110,7 @@ version (AntfarmActorTestHooks)
         submissionReleased,
         waveLifecycleReserved,
         waveMembershipReleased,
+        waveTableProgressRecorded,
         readyDetached,
         retirementIdleObserved,
     }
@@ -126,7 +127,7 @@ version (AntfarmActorTestHooks)
         actorTestHook_ = hook;
     }
 
-    private void actorTestPoint(ActorTestPoint point, ActorInboxNode* node)
+    package void actorTestPoint(ActorTestPoint point, ActorInboxNode* node)
         nothrow @nogc @system
     {
         auto hook = actorTestHook_;

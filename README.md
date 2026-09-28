@@ -1,4 +1,4 @@
-# Ant Farm 1.7.0-rc.4
+# Ant Farm 1.7.1-rc.1
 
 Ant Farm is a fixed-memory M:N job distributor for D. Producers publish
 tables of work into a shared ring; any subscribed consumer may claim them.
@@ -158,6 +158,12 @@ ANTFARM_HUGE_PAGES=0 ./iota_sum
 Each worker subscribes a thread-local `ConsumerView` in its `workerBody` and
 unsubscribes it in the pool's `workerStop` hook, which runs on every worker
 before `pool.shutdown()` returns. Only after that may the Farm be destroyed.
+
+The experimental [private actor model](actors/PRIVATE_ACTORS.md) adds self-owned
+roots and exclusively parent-owned child cohorts. Blind parks emit dispatches;
+state is visible only inside the actor's authorized callback. See its
+[full-lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md) and ownership limits
+before choosing it over the public actor API.
 
 ## First actor and wave
 
