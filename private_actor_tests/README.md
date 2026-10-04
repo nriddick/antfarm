@@ -4,6 +4,8 @@
 make -C private_actor_tests run
 make -C private_actor_tests run-dmd
 make -C private_actor_tests run-tsan
+make -C private_actor_tests run-death
+make -C private_actor_tests run-death-dmd
 ```
 
 Tests force ordinary pages and a 2 MiB Farm for ring reuse and backpressure;
@@ -35,3 +37,19 @@ another table must leave the wave unfinished until the paused hook drops its
 credit. Reuse begins immediately after `finished`, before joining the old
 consumer. The former equality-based implementation deterministically fails
 `progress equality must not release active table notification`.
+
+## Fatal-death harness
+
+`run-death` (LDC) and `run-death-dmd` (DMD) build both a debug and a
+`-release` binary and run the `death` and `death-negative-control` CLI modes
+on each, so the checks cannot be removed by `-release`'s disabled asserts.
+`death` re-executes `/proc/self/exe` with the `fatal-sample:` child mode,
+which calls `fatal("private death harness sample")`. It requires both a
+nonzero death status (exit code or terminating signal) and the exact
+`antfarm fatal: private death harness sample` text drained from a stderr pipe
+kept separate from stdout. `death-negative-control` reuses the same predicate
+and fails if it accepts either a child that exits zero or a nonzero death with
+the wrong stderr text. Non-Linux hosts print an explicit skip; `/proc/self/exe`
+re-exec is Linux-only. Add contract scenarios as child modes in `main` and
+check them with `diedWithMessage` in `deathHarness`. `make death` runs both
+compiler lanes.

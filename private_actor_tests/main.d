@@ -7,6 +7,8 @@ import core.thread : Thread;
 import core.time : MonoTime, seconds;
 import core.stdc.stdlib : abort;
 import core.stdc.stdio : fprintf, stderr;
+import std.algorithm.searching : canFind;
+import std.process : Redirect, pipeProcess, wait;
 import std.stdio : writeln;
 import std.exception : enforce;
 
@@ -420,9 +422,67 @@ void sameShardJoin()
             enforce(MonoTime.currTime < deadline, "join timeout");
     }
 }
-void main(string[] args)
+enum fatalSamplePrefix = "fatal-sample:";
+enum deathSampleText = "private death harness sample";
+
+version (linux)
 {
-    if (args.length > 1 && args[1] == "join-only") { sameShardJoin(); return; }
+    struct DeathProbe
+    {
+        int status;       // exit code, or -signal when the child was killed
+        string stderrText;
+    }
+
+    // Keep stderr separate: stdout cannot satisfy the fatal-message check.
+    DeathProbe probeDeath(string mode)
+    {
+        auto pipes = pipeProcess(["/proc/self/exe", mode], Redirect.stderr);
+        string text;
+        foreach (line; pipes.stderr.byLine)
+            text ~= line ~ "\n";
+        auto status = wait(pipes.pid);
+        return DeathProbe(status, text);
+    }
+
+    bool diedWithMessage(string mode, string expected)
+    {
+        auto probe = probeDeath(mode);
+        return probe.status != 0 && probe.stderrText.canFind(expected);
+    }
+
+
+}
+
+void deathHarness()
+{
+    version (linux)
+    {
+        auto mode = fatalSamplePrefix ~ deathSampleText;
+        auto expected = "antfarm fatal: " ~ deathSampleText;
+        check(diedWithMessage(mode, expected));
+        writeln("PASS fatal sample dies nonzero with expected stderr message");
+    }
+    else
+        writeln("SKIP death harness: /proc/self/exe re-exec requires Linux");
+}
+
+void deathNegativeControl()
+{
+    version (linux)
+    {
+        auto expected = "antfarm fatal: " ~ deathSampleText;
+        // The same predicate the positive harness relies on must reject a
+        // survivor (exit zero) and a nonzero death with the wrong message.
+        check(!diedWithMessage("death-exits-zero", expected));
+        check(!diedWithMessage(fatalSamplePrefix ~ "private death harness wrong text", expected));
+        writeln("PASS death negative control: survivor and wrong-message child rejected");
+    }
+    else
+        writeln("SKIP death negative control: /proc/self/exe re-exec requires Linux");
+}
+
+void runSuite()
+{
     fifoProgress(); writeln("PASS bounded FIFO progress");
     version (AntfarmWriteAuditHooks)
     {
@@ -440,4 +500,26 @@ void main(string[] args)
     writeln("PASS optional consumer-side root reclamation");
     trees(); writeln("PASS nested waves, authority, retirement, allocation balance");
     shardedCreators(); writeln("PASS four independent creators sharing the Farm");
+}
+
+void main(string[] args)
+{
+    auto mode = args.length > 1 ? args[1] : "";
+    switch (mode)
+    {
+        case "join-only": sameShardJoin(); return;
+        case "death": deathHarness(); return;
+        case "death-negative-control": deathNegativeControl(); return;
+        case "death-exits-zero":
+            fprintf(stderr, "antfarm fatal: private death harness sample\n");
+            return; // right message, wrong exit status
+        default: break;
+    }
+    if (mode.length >= fatalSamplePrefix.length
+        && mode[0 .. fatalSamplePrefix.length] == fatalSamplePrefix)
+    {
+        fatal(mode[fatalSamplePrefix.length .. $]);
+        return;
+    }
+    runSuite();
 }
