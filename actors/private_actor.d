@@ -17,7 +17,7 @@ import core.stdc.string : memcpy, memset;
 
 enum defaultPrivateBatchLimit = 256;
 
-enum PrivateRootDisposition : ubyte { again, finish }
+enum PrivateRootDisposition : ubyte { again, finish, waitChildren, finishAfterChildren }
 enum PrivateSpawnResult : ubyte { spawned, capacityFull, allocationFailed, waveActive, retiring }
 enum PrivateStartResult : ubyte { started, empty, waveActive, retiring }
 enum PrivateRootReclamation : ubyte { emitter, consumer }
@@ -77,17 +77,17 @@ private struct Entry
         Wave* enclosing;
         struct
         {
-            bool rootTerminal;
-            bool hasJoinCredits;
-            bool cleanup;
-            shared uint pending;
+            PrivateRootDisposition disposition;
+            bool hasJoinCredits; // dispatch writes; collection reads after table join
+            bool cleanup; // emitter sets after all credits join
+            shared uint pending; // custody + direct-wave notification tails
         }
     }
 }
 static assert(Entry.sizeof == 40 && Entry.alignof == 8);
 static assert(Entry.state.offsetof == 0 && Entry.children.offsetof == 8
     && Entry.service.offsetof == 16 && Entry.next.offsetof == 24);
-static assert(Entry.enclosing.offsetof == 32 && Entry.rootTerminal.offsetof == 32
+static assert(Entry.enclosing.offsetof == 32 && Entry.disposition.offsetof == 32
     && Entry.hasJoinCredits.offsetof == 33 && Entry.cleanup.offsetof == 34
     && Entry.pending.offsetof == 36);
 
@@ -109,6 +109,36 @@ private struct Wave
     // Returns true only when publication is sealed; can destroy w on return.
     bool function(Wave*, ref Token) nothrow @nogc @system emit;
     void function(Wave*) nothrow @nogc @system finish;
+}
+
+// Increment under an existing hold; reject overflow before changing the counter.
+private void retainRootCredit(ref shared uint pending) nothrow @nogc @system
+{
+    auto old = atomicLoad!(MemoryOrder.raw)(pending);
+    while (true)
+    {
+        if (old == uint.max) fatal("private join credit overflow");
+        if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&pending, old, old + 1)) return;
+        old = atomicLoad!(MemoryOrder.raw)(pending);
+    }
+}
+
+private void releaseRoot(Entry* entry) nothrow @nogc @system
+{
+    version (AntfarmActorTestHooks)
+        actorTestPoint(ActorTestPoint.privateRootCreditBeforeRelease, null);
+    immutable old = atomicFetchSub!(MemoryOrder.acq_rel)(entry.pending, 1u);
+    if (old == 0) fatal("private root credit underflow");
+    if (old != 1) return; // no entry access after relinquishing a nonfinal credit
+    auto returns = &entry.service.rootReturns;
+    auto head = atomicLoad!(MemoryOrder.raw)(*returns);
+    while (true)
+    {
+        entry.next = cast(Entry*) head;
+        if (cas!(MemoryOrder.rel, MemoryOrder.raw)(returns, head, cast(shared(Entry)*) entry))
+            return; // final entry AND service access
+        head = atomicLoad!(MemoryOrder.raw)(*returns);
+    }
 }
 
 private void releaseWave(Wave* wave) nothrow @nogc @system
@@ -133,6 +163,7 @@ private struct Service
     size_t batchLimit;
     shared(Wave*) incoming;
     Wave* waiting;
+    shared(Entry*) rootReturns;
 
     void enqueue(Wave* wave) nothrow @nogc @system
     {
@@ -259,7 +290,9 @@ private struct RootBodies
 /// copies POD initializer bytes; it returns no actor handle. All methods on the
 /// park must be called by one emitter at a time (including live and destroy), without
 /// re-entry from callbacks or allocator hooks. Returning finish while a child
-/// wave is active is a fatal contract error; return again until it joins.
+/// wave is active is a fatal contract error. waitChildren joins all direct waves
+/// and their descendants before exactly one later user callback; finishAfterChildren
+/// joins them before an internal consumer cleanup dispatch with no further user call.
 struct PrivateRootPark(T, alias step,
     PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
 {
@@ -344,7 +377,10 @@ public:
         auto entry = free_;
         free_ = entry.next;
         entry.state = state;
-        entry.rootTerminal = false;
+        entry.disposition = PrivateRootDisposition.again;
+        entry.hasJoinCredits = false;
+        entry.cleanup = false;
+        atomicStore!(MemoryOrder.raw)(entry.pending, 1u);
         appendReady(entry);
         ++live_;
         return PrivateSpawnResult.spawned;
@@ -370,24 +406,59 @@ private:
             auto next = batch.next;
             foreach (entry; batch.entries[0 .. batch.accepted])
             {
-                if (entry.rootTerminal)
+                if (entry.disposition == PrivateRootDisposition.again)
+                    appendReady(entry); // custody retained across again
+                else if (entry.hasJoinCredits || entry.disposition != PrivateRootDisposition.finish)
                 {
-                    static if (reclamation == PrivateRootReclamation.emitter)
-                        freeMemory(&service_, entry.state, T.sizeof, T.alignof);
-                    entry.state = null;
-                    entry.next = free_;
-                    free_ = entry;
-                    --live_;
+                    version (AntfarmActorTestHooks)
+                        actorTestPoint(ActorTestPoint.privateRootCustodyBeforeRelease, null);
+                    releaseRoot(entry); // final collector Entry access; Batch is independent
                 }
-                else
-                {
-                    appendReady(entry);
-                }
+                else reclaim(entry); // leaf finish avoids atomic RMW
             }
             batch.next = spare_;
             spare_ = batch;
             batch = next;
         }
+        // Acquire and reverse the MPSC handoff into FIFO. No producer uses
+        // an Entry/service after its successful publication CAS.
+        // Empty hint avoids an extra atomic RMW in parks not using joins.
+        // A concurrent push after the hint stays queued for the next collect.
+        Entry* fresh;
+        if (atomicLoad!(MemoryOrder.raw)(service_.rootReturns) !is null)
+            fresh = cast(Entry*) atomicExchange!(MemoryOrder.acq_rel)(
+                &service_.rootReturns, cast(shared(Entry)*) null);
+        Entry* fifo;
+        while (fresh !is null)
+        {
+            auto next = fresh.next;
+            fresh.next = fifo;
+            fifo = fresh;
+            fresh = next;
+        }
+        while (fifo !is null)
+        {
+            auto entry = fifo;
+            fifo = entry.next;
+            if (entry.disposition == PrivateRootDisposition.finish) reclaim(entry);
+            else
+            {
+                atomicStore!(MemoryOrder.raw)(entry.pending, 1u);
+                entry.hasJoinCredits = false;
+                entry.cleanup = entry.disposition == PrivateRootDisposition.finishAfterChildren;
+                appendReady(entry);
+            }
+        }
+    }
+
+    void reclaim(Entry* entry) nothrow @nogc @system
+    {
+        static if (reclamation == PrivateRootReclamation.emitter)
+            freeMemory(&service_, entry.state, T.sizeof, T.alignof);
+        entry.state = null;
+        entry.next = free_;
+        free_ = entry;
+        --live_;
     }
 
 public:
@@ -484,12 +555,13 @@ private:
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         auto borrow = PrivateBorrow!T(cast(T*) entry.state);
         auto context = PrivateContext(entry, null, false, entry.service.batchLimit);
-        if (step(borrow, context) == PrivateRootDisposition.finish)
+        auto disposition = entry.cleanup ? PrivateRootDisposition.finish : step(borrow, context);
+        entry.disposition = disposition;
+        if (disposition == PrivateRootDisposition.finish)
         {
             disposeChildren(entry);
             static if (reclamation == PrivateRootReclamation.consumer)
                 freeMemory(entry.service, entry.state, T.sizeof, T.alignof);
-            entry.rootTerminal = true;
         }
         return 1;
     }
@@ -607,6 +679,11 @@ public:
         atomicStore!(MemoryOrder.raw)(wave.active, 1u);
         if (wave.upstream !is null)
             atomicFetchAdd!(MemoryOrder.acq_rel)(wave.upstream.pending, 1UL);
+        else
+        {
+            retainRootCredit(base_.parent.pending); // BEFORE enqueue / visibility
+            base_.parent.hasJoinCredits = true;
+        }
         base_.parent.service.enqueue(wave);
         return PrivateStartResult.started;
     }
@@ -639,11 +716,18 @@ private:
     {
         auto park = fromWave(wave);
         auto upstream = wave.upstream;
+        auto parent = park.base_.parent; // snapshot before final cohort access
         if (park.retire_) park.count_ = 0;
         version (AntfarmActorTestHooks)
             actorTestPoint(ActorTestPoint.privateWaveBeforeIdlePublish, null);
         atomicStore!(MemoryOrder.rel)(wave.active, 0u); // last park access
         if (upstream !is null) releaseWave(upstream);
+        else
+        {
+            version (AntfarmActorTestHooks)
+                actorTestPoint(ActorTestPoint.privateRootAfterIdleBeforeCredit, null);
+            releaseRoot(parent); // final parent access; idle alone does not pin Entry
+        }
     }
     static long runChild(alias operation)(PayloadHeader*, PayloadBody body, ulong)
         nothrow @nogc @system

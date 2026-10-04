@@ -1634,8 +1634,362 @@ void phaseD()
     depth64(); writeln("PASS depth64 transitive joins, retirement and allocation balance");
 }
 
+// E1 raw barriers are scheduling controls only: result visibility must come
+// from library credit/table/ready handoffs, never a test-side release edge.
+struct E1Control
+{
+    ulong[2] result;
+    uint calls;
+    shared uint inCall, childArrived, childGo, rootArrived, rootGo;
+    uint rounds = 1;
+    bool empty, terminal, holdRoot, holdChild, polling, instant;
+}
+struct E1Child { E1Control* c; size_t index; }
+struct E1Nested { E1Control* c; }
+void e1Leaf(scope ref PrivateBorrow!E1Child b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto c = b.value.c;
+    if (c.holdChild)
+    {
+        atomicStore!(MemoryOrder.raw)(c.childArrived, 1u);
+        awaitRaw(c.childGo, 1u, "E1 child barrier");
+    }
+    ++c.result[b.value.index];
+}
+void e1Nested(scope ref PrivateBorrow!E1Nested b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto p = ctx.createChildren!E1Child(1);
+    namedCheck(p !is null, "E1 descendant create");
+    namedCheck(p.spawn(ctx, E1Child(b.value.c, 1)) == PrivateSpawnResult.spawned, "E1 descendant spawn");
+    namedCheck(p.start!e1Leaf(ctx) == PrivateStartResult.started, "E1 descendant start");
+}
+struct E1Root
+{
+    E1Control* c;
+    PrivateChildPark!E1Child* first;
+    PrivateChildPark!E1Nested* second;
+    uint generation;
+    bool peer;
+    bool extraWait;
+}
+PrivateRootDisposition e1Step(scope ref PrivateBorrow!E1Root b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto c = b.value.c;
+    if (b.value.peer)
+    {
+        atomicStore!(MemoryOrder.raw)(c.rootArrived, 1u);
+        awaitRaw(c.rootGo, 1u, "E1 table peer barrier");
+        return PrivateRootDisposition.finish;
+    }
+    namedCheck(atomicFetchAdd!(MemoryOrder.raw)(c.inCall, 1u) == 0, "E1 no concurrent root dispatch");
+    scope(exit) atomicFetchSub!(MemoryOrder.raw)(c.inCall, 1u);
+    ++c.calls;
+    if (c.instant) return PrivateRootDisposition.finish;
+    if (b.value.generation && c.polling
+        && (!b.value.first.finished(ctx) || !b.value.second.finished(ctx)))
+        return PrivateRootDisposition.again;
+    if (b.value.generation)
+    {
+        namedCheck(c.result[0] == (c.empty ? 0 : b.value.generation), "E1 joined plain result zero");
+        namedCheck(c.result[1] == (c.empty ? 0 : b.value.generation), "E1 descendant plain result one");
+        if (b.value.generation == c.rounds) return PrivateRootDisposition.finish;
+    }
+    if (b.value.first is null)
+    {
+        b.value.first = ctx.createChildren!E1Child(1);
+        b.value.second = ctx.createChildren!E1Nested(1);
+        namedCheck(b.value.first !is null && b.value.second !is null, "E1 two cohorts");
+        if (!c.empty)
+        {
+            namedCheck(b.value.first.spawn(ctx, E1Child(c, 0)) == PrivateSpawnResult.spawned, "E1 direct spawn");
+            namedCheck(b.value.second.spawn(ctx, E1Nested(c)) == PrivateSpawnResult.spawned, "E1 nested spawn");
+        }
+    }
+    auto a = b.value.first.start!e1Leaf(ctx);
+    auto z = b.value.second.start!e1Nested(ctx);
+    namedCheck(a == (c.empty ? PrivateStartResult.empty : PrivateStartResult.started), "E1 first wave");
+    namedCheck(z == a, "E1 second wave");
+    ++b.value.generation;
+    if (c.holdRoot)
+    {
+        atomicStore!(MemoryOrder.raw)(c.rootArrived, 1u);
+        awaitRaw(c.rootGo, 1u, "E1 callback barrier");
+    }
+    return c.terminal ? PrivateRootDisposition.finishAfterChildren
+        : c.polling ? PrivateRootDisposition.again : PrivateRootDisposition.waitChildren;
+}
+
+// Omit collector releaseRoot(entry): this bounded test fails deterministically
+// at "E1 completion deadline" instead of silently hanging the test runner.
+void e1Basic(PrivateRootReclamation reclaim)()
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(E1Root, e1Step, reclaim).create(farm, 4, 4, policy(counts));
+    E1Control c;
+    foreach (kind; 0 .. 4)
+    {
+        c = E1Control.init;
+        c.empty = kind == 1;
+        c.terminal = kind == 2;
+        c.rounds = kind == 3 ? 7 : 1;
+        check(park.spawn(E1Root(&c)) == PrivateSpawnResult.spawned);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "E1 completion deadline");
+        }
+        namedCheck(c.calls == (c.terminal ? 1 : c.rounds + 1), "E1 exact user call count");
+        namedCheck(c.result[0] == (c.empty ? 0 : c.rounds), "E1 final direct result");
+        namedCheck(c.result[1] == (c.empty ? 0 : c.rounds), "E1 final descendant result");
+    }
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "E1 allocation balance");
+}
+
+// Child join BEFORE root table custody release, including callback still in
+// flight and table peer still in flight. Early release/enqueue mutations fail
+// the zero-admission checks while the root physical table remains pinned.
+void e1BeforeCustody(bool peer)
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    E1Control c; c.holdRoot = !peer;
+    auto park = PrivateRootPark!(E1Root, e1Step).create(farm, 2, 2);
+    check(park.spawn(E1Root(&c)) == PrivateSpawnResult.spawned);
+    if (peer) check(park.spawn(E1Root(&c, null, null, 0, true)) == PrivateSpawnResult.spawned);
+    version (AntfarmActorTestHooks)
+    {
+        PrivateHookControl hook;
+        hook.point = ActorTestPoint.privateRootCreditBeforeRelease;
+        privateControl = &hook; setActorTestHook(&privateHook);
+        scope(exit) { setActorTestHook(null); privateControl = null; }
+    }
+    shared uint ready, go, leave;
+    auto worker = new Thread({
+        ConsumerView other;
+        check(other.subscribe(farm) >= 0);
+        scope(exit) other.unsubscribe();
+        atomicStore!(MemoryOrder.raw)(ready, 1u);
+        awaitRaw(go, 1u, "E1 custody worker go");
+        while (atomicLoad!(MemoryOrder.raw)(leave) == 0) other.consumeNext();
+    });
+    worker.start(); awaitRaw(ready, 1u, "E1 custody worker ready");
+    check(park.pump(token) == (peer ? 2 : 1));
+    atomicStore!(MemoryOrder.raw)(go, 1u);
+    awaitRaw(c.rootArrived, 1u, "E1 root/peer blocked");
+    // The root callback has enqueued both cohorts, but its table has no return.
+    // Drive children, including descendants, from the second consumer.
+    foreach (_; 0 .. 6)
+    {
+        namedCheck(park.pump(token) == 0, "E1 no early requeue before table join");
+        while (view.consumeNext()) {}
+    }
+    version (AntfarmActorTestHooks)
+        awaitRaw(hook.calls, 2u, "E1 both direct notifications before custody");
+    atomicStore!(MemoryOrder.raw)(c.rootGo, 1u);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live)
+    {
+        park.pump(token); while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "E1 before custody completion");
+    }
+    namedCheck(c.calls == 2, "E1 before custody exactly two calls");
+    park.destroy();
+    atomicStore!(MemoryOrder.raw)(leave, 1u); worker.join();
+}
+
+// AFTER collector release, hold the last descendant notification after idle.
+// poll must not publish work, and the sleeper must not retain its only Batch.
+void e1AfterCustody()
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    E1Control c; c.holdChild = true;
+    auto park = PrivateRootPark!(E1Root, e1Step).create(farm, 2, 2);
+    check(park.spawn(E1Root(&c)) == PrivateSpawnResult.spawned);
+    check(park.pump(token) == 1); while (view.consumeNext()) {}
+    // Explicitly park before publishing children.
+    park.poll();
+    shared uint ready, go, leave;
+    auto worker = new Thread({
+        ConsumerView other; check(other.subscribe(farm) >= 0);
+        scope(exit) other.unsubscribe();
+        atomicStore!(MemoryOrder.raw)(ready, 1u);
+        awaitRaw(go, 1u, "E1 after worker go");
+        while (atomicLoad!(MemoryOrder.raw)(leave) == 0) other.consumeNext();
+    });
+    worker.start(); awaitRaw(ready, 1u, "E1 after ready");
+    namedCheck(park.pump(token) == 0, "E1 wait not published");
+    atomicStore!(MemoryOrder.raw)(go, 1u);
+    awaitRaw(c.childArrived, 1u, "E1 after child blocked");
+    // Capacity=2/batch=2 => one physical Batch. It must be available to a
+    // newly spawned root while the first root sleeps with active children.
+    E1Control empty; empty.empty = true;
+    check(park.spawn(E1Root(&empty)) == PrivateSpawnResult.spawned);
+    namedCheck(park.pump(token) == 1, "E1 sleeping root recycled only Batch");
+    atomicStore!(MemoryOrder.raw)(c.childGo, 1u);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live)
+    {
+        park.pump(token); while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "E1 after custody completion");
+    }
+    namedCheck(c.calls == 2 && empty.calls == 2, "E1 after custody exactly two calls");
+    park.destroy(); atomicStore!(MemoryOrder.raw)(leave, 1u); worker.join();
+}
+
+struct E1StrictRoot { E1Control* c; PrivateChildPark!E1Child* child; }
+PrivateRootDisposition e1StrictStep(scope ref PrivateBorrow!E1StrictRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    ++b.value.c.calls;
+    if (b.value.child is null)
+    {
+        b.value.child = ctx.createChildren!E1Child(1);
+        namedCheck(b.value.child.spawn(ctx, E1Child(b.value.c, 0)) == PrivateSpawnResult.spawned, "E1 strict child spawn");
+        namedCheck(b.value.child.start!e1Leaf(ctx) == PrivateStartResult.started, "E1 strict child start");
+        return PrivateRootDisposition.again;
+    }
+    if (!b.value.child.finished(ctx)) return PrivateRootDisposition.again;
+    namedCheck(b.value.c.result[0] == 1, "E1 strict idle acquire joins result");
+    return PrivateRootDisposition.finish;
+}
+version (AntfarmActorTestHooks)
+void e1LateStrict(PrivateRootReclamation reclaim)()
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view; check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    E1Control c;
+    auto park = PrivateRootPark!(E1StrictRoot, e1StrictStep, reclaim).create(farm, 1, 1, policy(counts));
+    check(park.spawn(E1StrictRoot(&c)) == PrivateSpawnResult.spawned);
+    check(park.pump(token) == 1); while (view.consumeNext()) {}
+    PrivateHookControl hook;
+    hook.point = ActorTestPoint.privateRootAfterIdleBeforeCredit; hook.armed = 1;
+    privateControl = &hook; setActorTestHook(&privateHook);
+    shared uint ready, go, leave;
+    auto worker = new Thread({
+        ConsumerView other; check(other.subscribe(farm) >= 0);
+        scope(exit) other.unsubscribe();
+        atomicStore!(MemoryOrder.raw)(ready, 1u);
+        awaitRaw(go, 1u, "E1 strict worker go");
+        while (atomicLoad!(MemoryOrder.raw)(leave) == 0) other.consumeNext();
+    });
+    worker.start(); awaitRaw(ready, 1u, "E1 strict worker ready");
+    check(park.pump(token) == 1); // child then polling root
+    atomicStore!(MemoryOrder.raw)(go, 1u);
+    awaitRaw(hook.arrived, 1u, "E1 strict idle tail paused");
+    while (view.consumeNext()) {}
+    park.poll();
+    namedCheck(c.calls == 2, "E1 strict finished callback after idle");
+    namedCheck(park.live == 1, "E1 strict Entry pinned past state cleanup");
+    namedCheck(park.spawn(E1StrictRoot(&c)) == PrivateSpawnResult.capacityFull, "E1 strict no premature reuse");
+    atomicStore!(MemoryOrder.raw)(hook.release, 1u);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live)
+    {
+        park.poll(); namedCheck(MonoTime.currTime < deadline, "E1 strict tail completion");
+    }
+    c.result[0] = 0;
+    // Verify reuse while the notifier thread is still alive.
+    check(park.spawn(E1StrictRoot(&c)) == PrivateSpawnResult.spawned);
+    while (park.live)
+    {
+        park.pump(token); while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "E1 strict reused completion");
+    }
+    park.destroy(); atomicStore!(MemoryOrder.raw)(leave, 1u); worker.join();
+    setActorTestHook(null); privateControl = null;
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "E1 strict allocation balance");
+}
+
+PrivateRootDisposition e1JoinedStep(scope ref PrivateBorrow!E1Root b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto d = e1Step(b, ctx);
+    if (d == PrivateRootDisposition.finish && !b.value.extraWait)
+    {
+        b.value.extraWait = true;
+        return PrivateRootDisposition.waitChildren; // all waves already joined
+    }
+    return d;
+}
+void e1JoinedAndMixed(PrivateRootReclamation reclaim)()
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view; check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto workers = new Workers(farm, 5);
+    E1Control c;
+    auto joined = PrivateRootPark!(E1Root, e1JoinedStep, reclaim).create(farm, 1, 1);
+    check(joined.spawn(E1Root(&c)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (joined.live)
+    {
+        joined.pump(token); while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "E1 already joined wait deadline");
+    }
+    namedCheck(c.calls == 3, "E1 already joined wait exactly one later call");
+    joined.destroy();
+    auto mixed = PrivateRootPark!(E1Root, e1Step, reclaim).create(farm, 4, 4);
+    E1Control[4] controls;
+    controls[1].polling = true; controls[2].instant = true; controls[3].terminal = true;
+    foreach (ref control; controls) check(mixed.spawn(E1Root(&control)) == PrivateSpawnResult.spawned);
+    while (mixed.live)
+    {
+        mixed.pump(token); while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "E1 mixed disposition deadline");
+    }
+    namedCheck(controls[0].calls == 2 && controls[1].calls >= 2
+        && controls[2].calls == 1 && controls[3].calls == 1, "E1 mixed exact calls");
+    mixed.destroy(); workers.join();
+}
+
+void phaseE1()
+{
+    e1Basic!(PrivateRootReclamation.emitter)();
+    e1Basic!(PrivateRootReclamation.consumer)();
+    e1JoinedAndMixed!(PrivateRootReclamation.emitter)();
+    e1JoinedAndMixed!(PrivateRootReclamation.consumer)();
+    e1BeforeCustody(false); e1BeforeCustody(true); e1AfterCustody();
+    version (AntfarmActorTestHooks)
+    {
+        e1LateStrict!(PrivateRootReclamation.emitter)();
+        e1LateStrict!(PrivateRootReclamation.consumer)();
+    }
+    writeln("PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle");
+}
+
 void runSuite()
 {
+    phaseE1();
     phaseD();
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
     version (AntfarmWriteAuditHooks)
@@ -1687,6 +2041,7 @@ void main(string[] args)
             version (AntfarmWriteAuditHooks) inheritedChildLimit();
             return;
         case "join-only": sameShardJoin(); return;
+        case "phase-e1": phaseE1(); return;
         case "phase-d": phaseD(); return;
         case "child-large-cohort": childLargeCohort(257); childLargeCohort(513); return;
         case "mixed-table":
