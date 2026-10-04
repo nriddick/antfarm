@@ -72,6 +72,25 @@ static assert(!__traits(compiles, (Park* p) { return p.entries_; }));
 static assert(!__traits(compiles, (PrivateContext c) { auto copy = c; }));
 static assert(!__traits(compiles, (PrivateBorrow!State b) { auto copy = b; }));
 
+// Reject copying immutable pointees into mutable state through const(T).
+struct ConstInitState { int* data; }
+PrivateDisposition constInitStep(scope ref PrivateBorrow!ConstInitState b, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    ++*b.value.data;
+    return PrivateDisposition.finish;
+}
+alias ConstInitPark = PrivateRootPark!(ConstInitState, constInitStep);
+immutable int constInitNumber = 7;
+immutable(ConstInitState) constInitImmutable = {data: &constInitNumber};
+ConstInitState constInitMutable;
+static assert(!__traits(compiles, (ConstInitPark* p) { p.spawn(constInitImmutable); }));
+static assert(__traits(compiles, (ConstInitPark* p) { p.spawn(constInitMutable); }));
+static assert(!__traits(compiles,
+    (PrivateChildPark!ConstInitState* p, ref PrivateContext c) { p.spawn(c, constInitImmutable); }));
+static assert(__traits(compiles,
+    (PrivateChildPark!ConstInitState* p, ref PrivateContext c) { p.spawn(c, constInitMutable); }));
+
 void fifoProgress()
 {
     auto farm = AntFarm.create();

@@ -279,7 +279,7 @@ public:
         return park;
     }
 
-    bool spawn()(scope auto ref const(T) initial) nothrow @nogc @system
+    bool spawn(T initial) nothrow @nogc @system
     {
         if (free_ is null) return false;
         auto state = service_.allocator.allocate(service_.allocator.context, T.sizeof, T.alignof);
@@ -469,7 +469,7 @@ public:
         return authorized(context) && atomicLoad!(MemoryOrder.acq)(base_.wave.active) == 0;
     }
 
-    bool spawn()(scope ref PrivateContext context, scope auto ref const(T) initial)
+    bool spawn(scope ref PrivateContext context, T initial)
         nothrow @nogc @system
     {
         if (context.retiring_ || !finished(context) || count_ == capacity_) return false;
