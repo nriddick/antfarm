@@ -67,13 +67,13 @@ private void activate(scope ref ActorBorrow!State actor,
     operate(actor);
 }
 
-private PrivateDisposition privateActivate(scope ref PrivateBorrow!State actor,
+private PrivateRootDisposition privateActivate(scope ref PrivateBorrow!State actor,
         scope ref PrivateContext) nothrow @nogc @system
 {
     auto completion = actor.value.completion;
     ++completion.calls;
     atomicStore!(MemoryOrder.rel)(completion.stamp, actor.value.cycle);
-    return PrivateDisposition.finish;
+    return PrivateRootDisposition.finish;
 }
 
 private void privateOperate(scope ref PrivateBorrow!State actor,
@@ -90,7 +90,7 @@ private struct TreeState
     PrivateChildPark!State* children;
 }
 
-private PrivateDisposition treeActivate(scope ref PrivateBorrow!TreeState actor,
+private PrivateRootDisposition treeActivate(scope ref PrivateBorrow!TreeState actor,
         scope ref PrivateContext context) nothrow @nogc @system
 {
     if (actor.value.children is null)
@@ -98,15 +98,15 @@ private PrivateDisposition treeActivate(scope ref PrivateBorrow!TreeState actor,
         actor.value.children = context.createChildren!State(actor.value.count);
         if (actor.value.children is null) fatal("child park allocation failed");
         foreach (i; 0 .. actor.value.count)
-            if (!actor.value.children.spawn(context,
-                    State(actor.value.completions + i, actor.value.cycle)))
+            if (actor.value.children.spawn(context,
+                    State(actor.value.completions + i, actor.value.cycle)) != PrivateSpawnResult.spawned)
                 fatal("private child allocation failed");
-        if (!actor.value.children.start!privateOperate(context, true))
+        if (actor.value.children.startFinal!privateOperate(context) != PrivateStartResult.started)
             fatal("private child wave failed");
-        return PrivateDisposition.again;
+        return PrivateRootDisposition.again;
     }
     return actor.value.children.finished(context)
-        ? PrivateDisposition.finish : PrivateDisposition.again;
+        ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
 }
 
 private class Consumer
@@ -256,14 +256,14 @@ void main(string[] args)
         {
             if (privateMode)
                 foreach (i; 0 .. count)
-                    enforce(remoteMode ? remotePark.spawn(State(&completions[i], cycle))
-                        : park.spawn(State(&completions[i], cycle)), "private creation failed");
+                    enforce(remoteMode ? remotePark.spawn(State(&completions[i], cycle)) == PrivateSpawnResult.spawned
+                        : park.spawn(State(&completions[i], cycle)) == PrivateSpawnResult.spawned, "private creation failed");
             else
                 foreach (i; 0 .. parents)
                 {
                     immutable offset = i * batch;
                     immutable children = count - offset < batch ? count - offset : batch;
-                    enforce(trees.spawn(TreeState(completions.ptr + offset, children, cycle, null)),
+                    enforce(trees.spawn(TreeState(completions.ptr + offset, children, cycle, null)) == PrivateSpawnResult.spawned,
                         "private parent creation failed");
                 }
             while (privateMode ? (remoteMode ? remotePark.live != 0 : park.live != 0) : trees.live != 0)

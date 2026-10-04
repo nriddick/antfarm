@@ -13,7 +13,9 @@ import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
     atomicFetchAdd, atomicFetchSub, cas;
 import core.stdc.string : memcpy, memset;
 
-enum PrivateDisposition : ubyte { again, finish }
+enum PrivateRootDisposition : ubyte { again, finish }
+enum PrivateSpawnResult : ubyte { spawned, capacityFull, allocationFailed, waveActive, retiring }
+enum PrivateStartResult : ubyte { started, empty, waveActive, retiring }
 enum PrivateRootReclamation : ubyte { emitter, consumer }
 
 /// Valid only within the callback. Neither this borrow nor pointers/references
@@ -226,7 +228,7 @@ struct PrivateRootPark(T, alias step,
     PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
 {
     static assert(__traits(isPOD, T), "private actors require POD state");
-    static assert(is(typeof(&step) : PrivateDisposition function(
+    static assert(is(typeof(&step) : PrivateRootDisposition function(
         scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system));
 private:
     Service service_;
@@ -240,6 +242,7 @@ private:
     size_t batchCount_;
     Batch* spare_;
     shared(Batch*) returned_;
+    version (assert) bool entered_;
     @disable this(this);
 public:
     static PrivateRootPark* create(AntFarm* farm, size_t capacity,
@@ -280,11 +283,13 @@ public:
         return park;
     }
 
-    bool spawn(T initial) nothrow @nogc @system
+    PrivateSpawnResult spawn(T initial) nothrow @nogc @system
     {
-        if (free_ is null) return false;
+        enter();
+        scope(exit) { version (assert) entered_ = false; }
+        if (free_ is null) return PrivateSpawnResult.capacityFull;
         auto state = service_.allocator.allocate(service_.allocator.context, T.sizeof, T.alignof);
-        if (state is null) return false;
+        if (state is null) return PrivateSpawnResult.allocationFailed;
         memcpy(state, &initial, T.sizeof);
         auto entry = free_;
         free_ = entry.next;
@@ -292,12 +297,21 @@ public:
         entry.rootTerminal = false;
         appendReady(entry);
         ++live_;
-        return true;
+        return PrivateSpawnResult.spawned;
     }
 
     /// Acquire completed physical tables, recycle terminal roots, and return
     /// continuing roots to the emitter's unpublished list.
-    void poll() nothrow @nogc @system
+    void collectCompleted() nothrow @nogc @system
+    {
+        enter();
+        scope(exit) { version (assert) entered_ = false; }
+        collectCompletedImpl();
+    }
+    alias poll = collectCompleted;
+
+private:
+    void collectCompletedImpl() nothrow @nogc @system
     {
         auto batch = cast(Batch*) atomicExchange!(MemoryOrder.acq_rel)(&returned_, cast(shared(Batch)*) null);
         while (batch !is null)
@@ -325,14 +339,17 @@ public:
         }
     }
 
+public:
     /// Emits at most one root table and one table per pending child wave.
     /// By default terminal root state is freed here on the emitter; the
     /// consumer policy frees it in the callback. Child frees run on consumers.
     size_t pump(ref Token token, size_t batchLimit = 256, uint avgCost = 0)
         nothrow @nogc @system
     {
+        enter();
+        scope(exit) { version (assert) entered_ = false; }
         if (batchLimit == 0 || batchLimit > 256) fatal("invalid private root batch limit");
-        poll();
+        collectCompletedImpl();
         service_.pump(token);
         if (spare_ is null || ready_ is null) return 0;
         auto batch = spare_;
@@ -367,11 +384,13 @@ public:
         return n;
     }
 
-    @property size_t live() const nothrow @nogc { return live_; }
+    @property size_t live() const pure nothrow @nogc @safe { return live_; }
+    @property size_t capacity() const pure nothrow @nogc @safe { return capacity_; }
 
     void destroy() nothrow @nogc @system
     {
-        poll();
+        enter();
+        collectCompletedImpl();
         if (live_ != 0 || service_.waiting !is null
             || atomicLoad!(MemoryOrder.acq)(service_.incoming) !is null)
             fatal("destroy nonempty private root park");
@@ -381,6 +400,15 @@ public:
         allocator.deallocate(allocator.context, &this, PrivateRootPark.sizeof, PrivateRootPark.alignof);
     }
 private:
+    void enter() nothrow @nogc @system
+    {
+        version (assert)
+        {
+            if (entered_) fatal("private root park: reentrant entry");
+            entered_ = true;
+        }
+    }
+
     void appendReady(Entry* entry) nothrow @nogc @system
     {
         entry.next = null;
@@ -394,7 +422,7 @@ private:
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         auto borrow = PrivateBorrow!T(cast(T*) entry.state);
         auto context = PrivateContext(entry, null, false);
-        if (step(borrow, context) == PrivateDisposition.finish)
+        if (step(borrow, context) == PrivateRootDisposition.finish)
         {
             disposeChildren(entry);
             static if (reclamation == PrivateRootReclamation.consumer)
@@ -472,31 +500,36 @@ public:
         return atomicLoad!(MemoryOrder.acq)(base_.wave.active) == 0;
     }
 
-    bool spawn(scope ref PrivateContext context, T initial)
+    PrivateSpawnResult spawn(scope ref PrivateContext context, T initial)
         nothrow @nogc @system
     {
-        if (!finished(context) || context.retiring_ || count_ == capacity_) return false;
+        authorized(context);
+        if (context.retiring_) return PrivateSpawnResult.retiring;
+        if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0) return PrivateSpawnResult.waveActive;
+        if (count_ == capacity_) return PrivateSpawnResult.capacityFull;
         auto service = base_.parent.service;
         auto state = service.allocator.allocate(service.allocator.context, T.sizeof, T.alignof);
-        if (state is null) return false;
+        if (state is null) return PrivateSpawnResult.allocationFailed;
         memcpy(state, &initial, T.sizeof);
         auto entry = &entries_[count_++];
         entry.state = state;
         entry.service = service;
         entry.enclosing = &base_.wave;
-        return true;
+        return PrivateSpawnResult.spawned;
     }
 
     /// Enqueue a wave under the parent's dispatch authority. Completion also
     /// joins descendant waves started by this operation. retire=true frees
     /// members on their final dispatch and forbids launching descendants.
-    bool start(alias operation)(scope ref PrivateContext context, bool retire = false)
+    PrivateStartResult start(alias operation)(scope ref PrivateContext context, bool retire = false)
         nothrow @nogc @system
     {
         static assert(is(typeof(&operation) : void function(
             scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system));
-        if (!finished(context) || context.retiring_) return false;
-        if (count_ == 0) return true;
+        authorized(context);
+        if (context.retiring_) return PrivateStartResult.retiring;
+        if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0) return PrivateStartResult.waveActive;
+        if (count_ == 0) return PrivateStartResult.empty;
         retire_ = retire;
         cursor_ = 0;
         header_ = PayloadHeader.init;
@@ -510,7 +543,12 @@ public:
         if (wave.upstream !is null)
             atomicFetchAdd!(MemoryOrder.acq_rel)(wave.upstream.pending, 1UL);
         base_.parent.service.enqueue(wave);
-        return true;
+        return PrivateStartResult.started;
+    }
+    PrivateStartResult startFinal(alias operation)(scope ref PrivateContext context)
+        nothrow @nogc @system
+    {
+        return start!operation(context, true);
     }
 private:
     static PrivateChildPark* fromWave(Wave* wave) nothrow @nogc @system

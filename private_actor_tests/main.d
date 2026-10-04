@@ -59,15 +59,17 @@ class Workers
 }
 
 struct State { ulong* output; ulong iterations, n; }
-PrivateDisposition repeat(scope ref PrivateBorrow!State b, scope ref PrivateContext)
+PrivateRootDisposition repeat(scope ref PrivateBorrow!State b, scope ref PrivateContext)
     nothrow @nogc @system
 {
     check(*b.value.output == b.value.n);
     ++b.value.n;
     *b.value.output = b.value.n;
-    return b.value.n == b.value.iterations ? PrivateDisposition.finish : PrivateDisposition.again;
+    return b.value.n == b.value.iterations ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
 }
 alias Park = PrivateRootPark!(State, repeat);
+static assert(!__traits(compiles, PrivateDisposition));
+static assert(__traits(compiles, (Park* p) pure nothrow @nogc @safe { return p.live + p.capacity; }));
 static assert(!__traits(compiles, (Park p) { auto copy = p; }));
 static assert(!__traits(compiles, (PrivateBorrow!State b) { return b.state_; }));
 static assert(!__traits(compiles, (Park* p) { return p.entries_; }));
@@ -76,11 +78,11 @@ static assert(!__traits(compiles, (PrivateBorrow!State b) { auto copy = b; }));
 
 // Reject copying immutable pointees into mutable state through const(T).
 struct ConstInitState { int* data; }
-PrivateDisposition constInitStep(scope ref PrivateBorrow!ConstInitState b, scope ref PrivateContext)
+PrivateRootDisposition constInitStep(scope ref PrivateBorrow!ConstInitState b, scope ref PrivateContext)
     nothrow @nogc @system
 {
     ++*b.value.data;
-    return PrivateDisposition.finish;
+    return PrivateRootDisposition.finish;
 }
 alias ConstInitPark = PrivateRootPark!(ConstInitState, constInitStep);
 immutable int constInitNumber = 7;
@@ -104,7 +106,7 @@ void fifoProgress()
     check(view.subscribe(farm) >= 0);
     scope(exit) view.unsubscribe();
     ulong[2] output;
-    foreach (i; 0 .. 2) check(park.spawn(State(&output[i], 2, 0)));
+    foreach (i; 0 .. 2) check((park.spawn(State(&output[i], 2, 0))) == PrivateSpawnResult.spawned);
     foreach (_; 0 .. 2)
     {
         park.pump(token, 1);
@@ -133,8 +135,8 @@ void roots(PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
     foreach (round; 0 .. 8)
     {
         output[] = 0;
-        foreach (i; 0 .. count) check(park.spawn(State(&output[i], iterations, 0)));
-        check(!park.spawn(State.init));
+        foreach (i; 0 .. count) check((park.spawn(State(&output[i], iterations, 0))) == PrivateSpawnResult.spawned);
+        check(park.spawn(State.init) == PrivateSpawnResult.capacityFull);
         auto deadline = MonoTime.currTime + 30.seconds;
         while (park.live)
         {
@@ -166,15 +168,17 @@ void nodeStep(scope ref PrivateBorrow!Node b, scope ref PrivateContext ctx)
     {
         b.value.leaves = ctx.createChildren!Leaf(4);
         check(b.value.leaves !is null);
-        foreach (i; 0 .. 4) check(b.value.leaves.spawn(ctx, Leaf(&b.value.results[i], 0, b.value.gate)));
-        check(!b.value.leaves.spawn(ctx, Leaf.init));
+        check(b.value.leaves.finished(ctx));
+        check(b.value.leaves.start!leafStep(ctx) == PrivateStartResult.empty);
+        foreach (i; 0 .. 4) check((b.value.leaves.spawn(ctx, Leaf(&b.value.results[i], 0, b.value.gate))) == PrivateSpawnResult.spawned);
+        check(b.value.leaves.spawn(ctx, Leaf.init) == PrivateSpawnResult.capacityFull);
     }
     foreach (i; 0 .. 4) check(b.value.results[i] == b.value.generation);
     ++b.value.generation;
     atomicStore!(MemoryOrder.raw)(*b.value.gate, 0u);
-    check(b.value.leaves.start!leafStep(ctx));
-    check(!b.value.leaves.start!leafStep(ctx)); // no overlapping lease
-    check(!b.value.leaves.spawn(ctx, Leaf.init));
+    check((b.value.leaves.start!leafStep(ctx)) == PrivateStartResult.started);
+    check(b.value.leaves.start!leafStep(ctx) == PrivateStartResult.waveActive); // no overlapping lease
+    check(b.value.leaves.spawn(ctx, Leaf.init) == PrivateSpawnResult.waveActive);
     atomicStore!(MemoryOrder.raw)(*b.value.gate, 1u);
 }
 void nodeRetire(scope ref PrivateBorrow!Node b, scope ref PrivateContext ctx)
@@ -183,10 +187,11 @@ void nodeRetire(scope ref PrivateBorrow!Node b, scope ref PrivateContext ctx)
     check(b.value.generation == 3);
     foreach (i; 0 .. 4) check(b.value.results[i] == 3);
     check(ctx.createChildren!Leaf(1) is null);
-    check(!b.value.leaves.start!leafStep(ctx)); // terminal activation
+    check(b.value.leaves.start!leafStep(ctx) == PrivateStartResult.retiring);
+    check(b.value.leaves.spawn(ctx, Leaf.init) == PrivateSpawnResult.retiring);
 }
 struct Parent { PrivateChildPark!Node* nodes; ulong* results; uint phase; shared uint* gates; }
-PrivateDisposition parentStep(scope ref PrivateBorrow!Parent b, scope ref PrivateContext ctx)
+PrivateRootDisposition parentStep(scope ref PrivateBorrow!Parent b, scope ref PrivateContext ctx)
     nothrow @nogc @system
 {
     if (b.value.nodes is null)
@@ -194,15 +199,15 @@ PrivateDisposition parentStep(scope ref PrivateBorrow!Parent b, scope ref Privat
         b.value.nodes = ctx.createChildren!Node(17);
         check(b.value.nodes !is null);
         foreach (i; 0 .. 17)
-            check(b.value.nodes.spawn(ctx, Node(null, b.value.results + i * 4, 0, b.value.gates + i)));
+            check((b.value.nodes.spawn(ctx, Node(null, b.value.results + i * 4, 0, b.value.gates + i))) == PrivateSpawnResult.spawned);
     }
-    if (!b.value.nodes.finished(ctx)) return PrivateDisposition.again;
+    if (!b.value.nodes.finished(ctx)) return PrivateRootDisposition.again;
     foreach (i; 0 .. 68) check(b.value.results[i] == (b.value.phase < 3 ? b.value.phase : 3));
-    if (b.value.phase == 4) return PrivateDisposition.finish;
-    check(b.value.phase == 3 ? b.value.nodes.start!nodeRetire(ctx, true)
-        : b.value.nodes.start!nodeStep(ctx));
+    if (b.value.phase == 4) return PrivateRootDisposition.finish;
+    check((b.value.phase == 3 ? b.value.nodes.startFinal!nodeRetire(ctx)
+        : b.value.nodes.start!nodeStep(ctx)) == PrivateStartResult.started);
     ++b.value.phase;
-    return PrivateDisposition.again;
+    return PrivateRootDisposition.again;
 }
 void trees(uint consumers = 6)
 {
@@ -227,7 +232,7 @@ void trees(uint consumers = 6)
     foreach (round; 0 .. 12)
     {
         output[] = 0;
-        foreach (i; 0 .. 48) check(park.spawn(Parent(null, output.ptr + i * 68, 0, gates.ptr + i * 17)));
+        foreach (i; 0 .. 48) check((park.spawn(Parent(null, output.ptr + i * 68, 0, gates.ptr + i * 17))) == PrivateSpawnResult.spawned);
         auto deadline = MonoTime.currTime + 30.seconds;
         while (park.live)
         {
@@ -266,7 +271,7 @@ version (AntfarmWriteAuditHooks)
         writeAuditHook = &consumeBeforeReturn;
         scope(exit) { writeAuditHook = null; fastView = null; }
         ulong[300] results;
-        foreach (i; 0 .. 300) check(park.spawn(State(&results[i], 1, 0)));
+        foreach (i; 0 .. 300) check((park.spawn(State(&results[i], 1, 0))) == PrivateSpawnResult.spawned);
         while (park.live) park.pump(token);
         foreach (n; results) check(n == 1);
         park.destroy();
@@ -288,8 +293,11 @@ void failures()
     Counts counts;
     auto park = Park.create(farm, 4, policy(counts));
     check(park !is null);
+    check(park.capacity == 4);
+    park.collectCompleted();
+    park.poll();
     atomicStore(counts.budget, 0L);
-    check(!park.spawn(State.init));
+    check(park.spawn(State.init) == PrivateSpawnResult.allocationFailed);
     check(park.live == 0);
     park.destroy();
     check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
@@ -307,7 +315,7 @@ void backpressure()
     check(view.subscribe(farm) >= 0);
     scope(exit) view.unsubscribe();
     auto output = new ulong[count];
-    foreach (i; 0 .. count) check(park.spawn(State(&output[i], 1, 0)));
+    foreach (i; 0 .. count) check((park.spawn(State(&output[i], 1, 0))) == PrivateSpawnResult.spawned);
     size_t submitted;
     bool partial;
     // Keep the subscriber parked until admission returns zero.
@@ -350,7 +358,7 @@ void shardedCreators()
             foreach (round; 0 .. 20)
             {
                 output[] = 0;
-                foreach (i; 0 .. 1024) check(park.spawn(State(&output[i], 3, 0)));
+                foreach (i; 0 .. 1024) check((park.spawn(State(&output[i], 3, 0))) == PrivateSpawnResult.spawned);
                 auto deadline = MonoTime.currTime + 30.seconds;
                 while (park.live)
                 {
@@ -423,7 +431,7 @@ struct AuthorityProbe { PrivateChildPark!State* children; AuthorityMisuse misuse
 struct AuthorityRoot { AuthorityProbe* probe; bool owner; }
 void authorityOperation(scope ref PrivateBorrow!State, scope ref PrivateContext)
     nothrow @nogc @system {}
-PrivateDisposition authorityStep(scope ref PrivateBorrow!AuthorityRoot b, scope ref PrivateContext ctx)
+PrivateRootDisposition authorityStep(scope ref PrivateBorrow!AuthorityRoot b, scope ref PrivateContext ctx)
     nothrow @nogc @system
 {
     auto probe = b.value.probe;
@@ -431,7 +439,7 @@ PrivateDisposition authorityStep(scope ref PrivateBorrow!AuthorityRoot b, scope 
     {
         if (probe.children is null) probe.children = ctx.createChildren!State(1);
         check(probe.children !is null);
-        return PrivateDisposition.again;
+        return PrivateRootDisposition.again;
     }
     check(probe.children !is null);
     PrivateContext empty;
@@ -443,7 +451,7 @@ PrivateDisposition authorityStep(scope ref PrivateBorrow!AuthorityRoot b, scope 
         case AuthorityMisuse.defaultFinished: probe.children.finished(empty); break;
         case AuthorityMisuse.defaultCreate: empty.createChildren!State(1); break;
     }
-    return PrivateDisposition.finish;
+    return PrivateRootDisposition.finish;
 }
 void authorityDeath(AuthorityMisuse misuse)
 {
@@ -458,11 +466,31 @@ void authorityDeath(AuthorityMisuse misuse)
     probe.misuse = misuse;
     auto park = PrivateRootPark!(AuthorityRoot, authorityStep).create(farm, 2);
     check(park !is null);
-    check(park.spawn(AuthorityRoot(&probe, true)));
-    check(park.spawn(AuthorityRoot(&probe, false)));
+    check((park.spawn(AuthorityRoot(&probe, true))) == PrivateSpawnResult.spawned);
+    check((park.spawn(AuthorityRoot(&probe, false))) == PrivateSpawnResult.spawned);
     park.pump(token);
     while (view.consumeNext()) {}
     // Reaching this point means the fatal contract was not enforced.
+}
+
+version (assert)
+{
+    __gshared Park* reentrantPark;
+    void* reentrantAllocate(void*, size_t bytes, size_t alignment) nothrow @nogc @system
+    {
+        if (reentrantPark !is null) reentrantPark.spawn(State.init);
+        return ActorAllocator.cRuntime().allocate(null, bytes, alignment);
+    }
+    void reentrantDeath()
+    {
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto allocator = ActorAllocator.cRuntime();
+        allocator.allocate = &reentrantAllocate;
+        reentrantPark = Park.create(farm, 1, allocator);
+        check(reentrantPark !is null);
+        reentrantPark.spawn(State.init);
+    }
 }
 
 enum fatalSamplePrefix = "fatal-sample:";
@@ -508,6 +536,11 @@ void deathHarness()
             "default-finished", "default-create"])
             check(diedWithMessage(modeName, "antfarm fatal: private child park: unauthorized context"));
         writeln("PASS wrong-parent and default authority are fatal");
+        version (assert)
+        {
+            check(diedWithMessage("reentrant-spawn", "antfarm fatal: private root park: reentrant entry"));
+            writeln("PASS debug reentrancy guard");
+        }
     }
     else
         writeln("SKIP death harness: /proc/self/exe re-exec requires Linux");
@@ -554,6 +587,9 @@ void main(string[] args)
     auto mode = args.length > 1 ? args[1] : "";
     switch (mode)
     {
+        case "reentrant-spawn":
+            version (assert) reentrantDeath();
+            return;
         case "wrong-parent-spawn": authorityDeath(AuthorityMisuse.spawn); return;
         case "wrong-parent-start": authorityDeath(AuthorityMisuse.start); return;
         case "wrong-parent-finished": authorityDeath(AuthorityMisuse.finished); return;

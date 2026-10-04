@@ -48,18 +48,18 @@ import actors;
 
 struct Work { ulong remaining; }
 
-PrivateDisposition step(scope ref PrivateBorrow!Work actor,
+PrivateRootDisposition step(scope ref PrivateBorrow!Work actor,
     scope ref PrivateContext context) nothrow @nogc @system
 {
     // The only application access to this actor's state is here.
     return --actor.value.remaining == 0
-        ? PrivateDisposition.finish : PrivateDisposition.again;
+        ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
 }
 
 // Given an existing Farm and single-emitter producer token:
 auto park = PrivateRootPark!(Work, step).create(farm, 4096, allocator);
 assert(park !is null);
-assert(park.spawn(Work(4))); // transfers initializer; returns no actor handle
+assert(park.spawn(Work(4)) == PrivateSpawnResult.spawned); // transfers initializer; returns no actor handle
 while (park.live != 0)
 {
     park.pump(token);       // one root table + one table per pending child wave
@@ -74,7 +74,7 @@ the resulting opaque `PrivateChildPark!T*` in its own state. The parent may:
 - `children.spawn(context, initializer)` while the cohort is idle;
 - `children.start!operation(context)` to authorize a whole-cohort wave;
 - `children.finished(context)` to acquire its completion;
-- `children.start!operation(context, true)` to execute a terminal wave and
+- `children.startFinal!operation(context)` to execute a terminal wave and
   free every member after its final callback.
 
 An operation accepts `scope ref PrivateBorrow!T` and `scope ref PrivateContext`
