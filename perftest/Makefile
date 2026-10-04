@@ -5,7 +5,7 @@ DC ?= ldc2
 DFLAGS ?= -O2 -release
 FARM_SOURCES := $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
 ACTOR_SOURCES := $(ROOT)/actors/package.d $(ROOT)/actors/actor.d \
-	$(ROOT)/actors/wave.d $(ROOT)/actors/mimalloc.d
+	$(ROOT)/actors/wave.d $(ROOT)/actors/private_actor.d $(ROOT)/actors/mimalloc.d
 FIBER_SOURCES := $(wildcard $(ROOT)/fibers/source/antfarm_fibers/*.d)
 THREADPOOL_SOURCES := $(wildcard $(ROOT)/threadpool/source/threadpool/*.d) \
 	$(wildcard $(ROOT)/threadpool/source/threadpool/sys/*.d)

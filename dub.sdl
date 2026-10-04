@@ -6,7 +6,7 @@ targetType "library"
 importPaths "."
 sourceFiles "antfarm.d" "antfarm_allocation.d" "antfarm_templates.d" \
     "actors/package.d" "actors/actor.d" \
-    "actors/wave.d" "actors/mimalloc.d"
+    "actors/wave.d" "actors/private_actor.d" "actors/mimalloc.d"
 
 toolchainRequirements {
 	dmd ">=2.112.0"

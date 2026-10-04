@@ -18,7 +18,7 @@ check-mimalloc:
 	./scripts/check.sh --mimalloc
 
 FARM_TSAN_SOURCES := antfarm.d antfarm_allocation.d antfarm_templates.d \
-	actors/package.d actors/actor.d actors/wave.d actors/mimalloc.d \
+	actors/package.d actors/actor.d actors/wave.d actors/private_actor.d actors/mimalloc.d \
 	antfarm_test.d
 
 # ThreadSanitizer build of the Farm suite. Part of `make check`.

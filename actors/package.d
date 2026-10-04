@@ -5,3 +5,4 @@ module actors;
 
 public import actors.actor;
 public import actors.wave;
+public import actors.private_actor;

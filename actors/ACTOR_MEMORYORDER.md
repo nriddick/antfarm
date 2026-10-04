@@ -4,7 +4,9 @@
 
 This document describes the implemented autonomous activation and intrusive-
 inbox protocols in `actors/actor.d`, plus the phase-oriented aggregate protocol
-in `actors/wave.d`. It supplements
+in `actors/wave.d`. The separate private path's publication, nested-credit,
+and final-access reclamation protocol is described in
+[PRIVATE_ACTORS.md](PRIVATE_ACTORS.md). It supplements
 [SPEC.md](../SPEC.md), whose Farm sentinel and segment-lifetime rules remain
 unchanged.
 

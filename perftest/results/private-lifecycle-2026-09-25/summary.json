@@ -1,0 +1,272 @@
+[
+  {
+    "allocator": "mimalloc",
+    "consumers": 0,
+    "mode": "actor",
+    "batch": 256,
+    "median": 17.9322,
+    "minimum": 12.752416,
+    "maximum": 18.394718
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 0,
+    "mode": "wave",
+    "batch": 256,
+    "median": 22.945241,
+    "minimum": 15.368375,
+    "maximum": 23.734893
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 0,
+    "mode": "wave",
+    "batch": 16384,
+    "median": 23.588914,
+    "minimum": 15.578183,
+    "maximum": 23.856393
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 0,
+    "mode": "private",
+    "batch": 256,
+    "median": 30.983462,
+    "minimum": 24.922457,
+    "maximum": 31.487218
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 0,
+    "mode": "private-remote",
+    "batch": 256,
+    "median": 30.319477,
+    "minimum": 24.830557,
+    "maximum": 31.385558
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 0,
+    "mode": "tree",
+    "batch": 256,
+    "median": 62.057873,
+    "minimum": 39.547751,
+    "maximum": 62.867302
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 1,
+    "mode": "actor",
+    "batch": 256,
+    "median": 18.70243,
+    "minimum": 15.111671,
+    "maximum": 20.616878
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 1,
+    "mode": "wave",
+    "batch": 256,
+    "median": 24.903375,
+    "minimum": 16.577536,
+    "maximum": 25.418662
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 1,
+    "mode": "wave",
+    "batch": 16384,
+    "median": 17.254325,
+    "minimum": 16.940618,
+    "maximum": 25.475581
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 1,
+    "mode": "private",
+    "batch": 256,
+    "median": 23.888949,
+    "minimum": 23.635211,
+    "maximum": 31.284071
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 1,
+    "mode": "private-remote",
+    "batch": 256,
+    "median": 27.658544,
+    "minimum": 23.177251,
+    "maximum": 30.25801
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 1,
+    "mode": "tree",
+    "batch": 256,
+    "median": 63.846923,
+    "minimum": 31.669192,
+    "maximum": 64.288989
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 5,
+    "mode": "actor",
+    "batch": 256,
+    "median": 13.344737,
+    "minimum": 13.270783,
+    "maximum": 19.096441
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 5,
+    "mode": "wave",
+    "batch": 256,
+    "median": 14.212593,
+    "minimum": 14.179676,
+    "maximum": 20.522245
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 5,
+    "mode": "wave",
+    "batch": 16384,
+    "median": 14.670231,
+    "minimum": 14.582978,
+    "maximum": 20.921321
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 5,
+    "mode": "private",
+    "batch": 256,
+    "median": 22.195704,
+    "minimum": 22.000003,
+    "maximum": 28.484846
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 5,
+    "mode": "private-remote",
+    "batch": 256,
+    "median": 13.441917,
+    "minimum": 13.355428,
+    "maximum": 13.872671
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 5,
+    "mode": "tree",
+    "batch": 256,
+    "median": 45.955553,
+    "minimum": 44.266122,
+    "maximum": 47.269504
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 11,
+    "mode": "actor",
+    "batch": 256,
+    "median": 10.712715,
+    "minimum": 9.063993,
+    "maximum": 13.674453
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 11,
+    "mode": "wave",
+    "batch": 256,
+    "median": 13.898967,
+    "minimum": 13.478809,
+    "maximum": 14.331916
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 11,
+    "mode": "wave",
+    "batch": 16384,
+    "median": 12.599099,
+    "minimum": 11.589546,
+    "maximum": 13.692733
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 11,
+    "mode": "private",
+    "batch": 256,
+    "median": 26.284728,
+    "minimum": 19.747254,
+    "maximum": 29.334847
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 11,
+    "mode": "private-remote",
+    "batch": 256,
+    "median": 6.094844,
+    "minimum": 5.681594,
+    "maximum": 6.436262
+  },
+  {
+    "allocator": "mimalloc",
+    "consumers": 11,
+    "mode": "tree",
+    "batch": 256,
+    "median": 22.858018,
+    "minimum": 13.401152,
+    "maximum": 23.069794
+  },
+  {
+    "allocator": "crt",
+    "consumers": 5,
+    "mode": "actor",
+    "batch": 256,
+    "median": 7.972301,
+    "minimum": 7.302686,
+    "maximum": 8.208103
+  },
+  {
+    "allocator": "crt",
+    "consumers": 5,
+    "mode": "wave",
+    "batch": 256,
+    "median": 8.272339,
+    "minimum": 8.029344,
+    "maximum": 8.494666
+  },
+  {
+    "allocator": "crt",
+    "consumers": 5,
+    "mode": "wave",
+    "batch": 16384,
+    "median": 8.323394,
+    "minimum": 8.268904,
+    "maximum": 8.576965
+  },
+  {
+    "allocator": "crt",
+    "consumers": 5,
+    "mode": "private",
+    "batch": 256,
+    "median": 8.170062,
+    "minimum": 8.107423,
+    "maximum": 8.477982
+  },
+  {
+    "allocator": "crt",
+    "consumers": 5,
+    "mode": "private-remote",
+    "batch": 256,
+    "median": 4.612541,
+    "minimum": 4.583877,
+    "maximum": 4.665842
+  },
+  {
+    "allocator": "crt",
+    "consumers": 5,
+    "mode": "tree",
+    "batch": 256,
+    "median": 10.142818,
+    "minimum": 9.588073,
+    "maximum": 10.192596
+  }
+]

@@ -159,6 +159,12 @@ Each worker subscribes a thread-local `ConsumerView` in its `workerBody` and
 unsubscribes it in the pool's `workerStop` hook, which runs on every worker
 before `pool.shutdown()` returns. Only after that may the Farm be destroyed.
 
+The [private actor model](actors/PRIVATE_ACTORS.md) adds self-owned
+roots and exclusively parent-owned child cohorts. Blind parks emit dispatches;
+state is visible only inside the actor's authorized callback. See its
+[full-lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md) and ownership limits
+before choosing it over the public actor API.
+
 ## First actor and wave
 
 The `actors` package adds explicit state lifetime and exclusive callback-local

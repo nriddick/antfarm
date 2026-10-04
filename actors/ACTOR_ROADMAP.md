@@ -17,6 +17,17 @@ concepts such as module generations, worlds, regions, systems, assets, and hot
 reload remain above it. The package supplies retirement tickets/fences which
 an engine can aggregate before unloading code or reclaiming an arena.
 
+## Private actor experiment (2026-09-25)
+
+[Private roots and parent-owned cohorts](PRIVATE_ACTORS.md) are now a separate
+experimental path in `actors/private_actor.d`. The first slice supports POD
+state, multiple single-emitter parks sharing a Farm, terminal dispatch,
+parent-authorized whole-cohort waves, and nested descendant joins. It removes
+public actor admission/generation/wake machinery from that narrower model.
+Child continuations, subset leases, and a compiler-enforced safe ownership
+front end remain follow-on work. Measurements and limitations are recorded in
+[PRIVATE_LIFECYCLE.md](../perftest/PRIVATE_LIFECYCLE.md).
+
 ## Current actor and wave spike
 
 As of 2026-08-31, the actor code is deliberately split into
@@ -133,12 +144,13 @@ phase/pending word. It either sets pending before the callback chooses its
 exit state or observes idle and elects the next publisher. There is no separate
 check-then-sleep window.
 
-For waves, `Wprogress == Wlen` is authoritative only after the orchestrator
-seals publication. A table may finish before `ActorWave.publish` returns, so
-`Wlen` is incremented before Farm publication and rolled back if backpressure
-accepts no table. The sealer and last table finisher race through one CAS to
-publish exactly one finished state. An acquire observation of that state joins
-the actor writes from every table in the wave.
+For waves, progress equality is diagnostic; a producer hold and one credit per
+physical table protect the descriptor until every participant's final access.
+A table may finish before `ActorWave.publish` returns, so table counts and
+credits are reserved before Farm publication and rolled back on zero
+admission. Sealing drops the producer hold, and the final credit owner
+release-publishes exactly one finished state after releasing membership.
+Acquiring that state joins actor writes from every table in the wave.
 
 ## API direction
 
@@ -474,25 +486,24 @@ surface without making an exclusive borrow storable or transferable.
 ### Aggregate completion
 
 A wave may span several Farm tables. Every table contributes once when its
-`Tprogress` reaches `Tlen`; that event increments `Wprogress`. Once publication
-has been sealed and `Wprogress == Wlen`, one participant claims the transition
-to the finished state. Sealing is necessary because equality while the wave is
-still open only means that all tables published so far have completed, not that
-no more tables will be published. Table publication is counted before it is
-released to consumers, since a small table may finish before `publish()`
-returns; a failed publication must roll that count back.
+`Tprogress` reaches `Tlen`; the hook records diagnostic `Wprogress`, then drops
+its table credit as its final descriptor access. A producer credit holds the
+wave open until sealing, including all post-publication bookkeeping. Counts
+and credits are reserved before Farm publication and rolled back on zero
+admission. Only the final credit owner releases membership and publishes
+`FINISHED`; equality between separately sampled progress/status fields does
+not elect a finisher.
 
-The progress chain is the completion barrier:
+The completion barrier is:
 
 ```text
-actor writes -> table completion -> wave progress -> FINISHED -> waiter
+actor writes -> shard joins -> table hook -> final wave credit -> FINISHED -> waiter
 ```
 
 Release/acquire ordering across that chain makes actor writes visible to a
-waiter that observes the finished wave. The finishing transition is exactly
-once, regardless of whether it is claimed by the sealer or the last table
-finisher. A failed operation marks the wave failed and must prevent publication
-of its prospective shared state.
+waiter that observes the finished wave. The final credit belongs either to the
+sealer or to a table hook. A failed operation marks the wave failed and must
+prevent publication of its prospective shared state.
 
 `ActorWaveHandle` is the authoritative, pollable completion object. A thread or
 Fiber may spin briefly, park, or arrange a notification, then acquire and
