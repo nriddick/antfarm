@@ -35,11 +35,10 @@ external callers identities for its internal actors. Public waves are useful
 when external code selects the actor set; a private conductor instead owns its
 child cohort's membership and scheduling authority.
 
-This first slice permits application-defined result channels; it does not
-provide a typed signal-port API. Nonpolling conductor resumption after a join
-and resumable child continuations are also future work. Roots currently return
-`again` to observe completion on a later dispatch. Those extensions must
-preserve the existing hierarchy's exclusive execution authority.
+Application-defined result channels are supported. A root can return
+`waitChildren` to resume once all its child work joins, without polling in
+repeated callbacks. Typed signal ports and resumable child continuations remain
+future work; children still run one synchronous `void` operation per wave.
 
 ## API
 
@@ -97,10 +96,19 @@ the resulting opaque `PrivateChildPark!T*` in its own state. The parent may:
 An operation accepts `scope ref PrivateBorrow!T` and `scope ref PrivateContext`
 and returns `void`. It may launch descendant waves and return immediately.
 Its enclosing wave remains active until those descendants finish. Parent
-callbacks must not block waiting for child work; roots can return `again` and
-observe completion on a later dispatch. Finishing a root with an active child
-wave is a fatal contract error. Terminal child callbacks cannot launch further
-waves or create children. Retirement also disposes idle descendant parks.
+callbacks must not block waiting for child work. A root returns one of:
+
+| `PrivateRootDisposition` | Next action |
+| --- | --- |
+| `again` | Eligible for another callback when its physical table returns; child work may still be active. |
+| `waitChildren` | Join every direct wave this root started and all their descendants, including notification tails from earlier `again` activations; schedule exactly one later callback. Empty or already-joined work also gets one later callback, never an inline call. |
+| `finish` | Retire now; an active child wave is a fatal contract error. Entry reuse waits for any outstanding notification tails. |
+| `finishAfterChildren` | Make the same join as `waitChildren`, then retire without another user callback. One internal Farm activation disposes child parks on a consumer and applies the root reclamation policy. |
+
+Joined child writes to externally owned result storage are visible on a
+`waitChildren` resumption without calling `finished(context)`. This grants no
+access to child state. Terminal child callbacks cannot launch further waves or
+create children. Retirement also disposes idle descendant parks.
 
 The nested example in [the tests](../private_actor_tests/main.d) runs three
 waves through root → child → grandchild trees, followed by child retirement.
@@ -110,9 +118,10 @@ cohorts with terminal child waves.
 ## A conductor with owned results
 
 Each child writes a distinct slot in application-owned storage. The parent
-reads those slots only after acquiring `finished(context)`. The application
+reads those slots in its single resumption after `waitChildren`. The application
 keeps both the slots and total alive until the root is collected. The parent
-never reads child state, and returning `again` lets the consumer run child work.
+never reads child state. Returning the wait disposition lets consumers run the
+children; no completion-polling callback or extra `finished(context)` is needed.
 
 ```d
 import antfarm;
@@ -144,9 +153,8 @@ PrivateRootDisposition conduct(scope ref PrivateBorrow!Conductor actor,
                 fatal("child spawn failed");
         if (actor.value.children.startFinal!square(context) != PrivateStartResult.started)
             fatal("child wave failed");
-        return PrivateRootDisposition.again;
+        return PrivateRootDisposition.waitChildren;
     }
-    if (!actor.value.children.finished(context)) return PrivateRootDisposition.again;
     foreach (i; 0 .. 4) *actor.value.total += actor.value.outputs[i];
     return PrivateRootDisposition.finish;
 }
@@ -186,11 +194,11 @@ void main()
 | Root `spawn` | `PrivateSpawnResult.spawned`, `capacityFull`, or `allocationFailed`; copies POD bytes and returns no handle. |
 | Child `spawn` | The same outcomes, plus `waveActive` or `retiring`. |
 | `start` / `startFinal` | `PrivateStartResult.started`, `empty`, `waveActive`, or `retiring`. Empty starts are already complete and take no credit. |
-| `finished(context)` | True before the first start and after the current wave joins. Wrong-parent or default authority is fatal, including when the cohort is idle. |
-| `collectCompleted()` / `poll()` | Acquires completed root tables, reclaims terminal roots and requeues continuing roots; never publishes work or runs consumers. |
-| `pump(token)` | Collects completions and emits at most one root table and one table per pending child wave; returns only the number of roots published. Zero does not mean idle. |
-| `live` / `capacity` | Emitter-local root counts; `live` changes when completions are collected, not when consumers merely finish. Neither getter synchronizes another thread. |
-| `destroy()` | Collects once, then requires no live roots or pending work. It does not drain. Use `park.destroy(); park = null;`, because `destroy(park)` resolves to D's pointer destruction and does not free the park. |
+| `finished(context)` | True before the first start and after the current wave joins; a root notification tail may still be pending. Wrong-parent or default authority is fatal, including when the cohort is idle. |
+| `collectCompleted()` / `poll()` | Acquires completed root tables and wake returns, reclaims terminal roots and appends ready roots; never publishes work or runs consumers. |
+| `pump(token)` | Collects completions and emits at most one root table and one table per pending child wave; returns only the number of root activations published, including internal deferred cleanup. Zero does not mean idle. The emitter must keep pumping to resume waiting roots. |
+| `live` / `capacity` | Emitter-local root counts; `live` includes waiting roots and terminal roots with outstanding notification tails. It falls only on collection after the join. Neither getter synchronizes another thread. |
+| `destroy()` | Collects once, then requires no live roots or pending work. It does not drain or cancel waiting roots. Use `park.destroy(); park = null;`, because `destroy(park)` resolves to D's pointer destruction and does not free the park. |
 
 ## Configuring batches and Farm quota
 
@@ -257,7 +265,11 @@ raw pointers or transitive state. In particular:
   run callbacks; the allocating thread need not be the freeing thread. The
   same `ActorAllocator` interface supports C runtime and mimalloc policies.
 - Destroy a root park only after `live == 0` has been reached through `collectCompleted`
-  or `pump`. This includes terminal frees and retirement accounting. Stop/join
+  or `pump`. This includes terminal frees, retirement accounting, and root
+  notification tails. `finished(context)` can become true before a notification
+  releases its root credit. Even strict-finished roots can therefore retain
+  their slot (`spawn` returns `capacityFull`) and `live` count until that tail
+  joins. User callback/result counters alone are not a destruction fence. Stop/join
   consumers and release producer tokens before destroying their Farm.
 
 Hierarchy depth has no fixed limit. Completion and disposal recurse, so the
@@ -289,9 +301,14 @@ the terminal callback instead. This is a measured policy choice: simultaneous
 remote frees substantially hurt the small-allocation workload on this host.
 Child terminal waves still free members on their executing consumers.
 
-The emitter acquires completed batch metadata, recycles terminal entries, and
-appends continuing roots to the FIFO. Returns wait for their physical table,
-not the entire park. A slow callback can therefore delay other roots in its table.
+The emitter acquires completed batch metadata and appends `again` roots to the
+ready FIFO. For a wait or deferred retirement it releases table custody and
+recycles the Batch immediately, even while the root sleeps. Other roots can use
+that Batch. A slow callback still delays peers in its original physical table.
+Joined roots go to the back of the ready FIFO when their wake is collected.
+Each detached wake list preserves FIFO order of successful publication; there
+is no global completion-order guarantee across wake lists, table returns and
+newly spawned roots.
 
 A child cohort has one active wave at a time. The parent's callback sets it
 active before enqueueing its metadata. The emitter holds a producer credit
@@ -301,16 +318,65 @@ on its enclosing wave before becoming visible. Consequently callback return
 alone cannot release an ancestor's execution authority.
 
 Wave completion joins all table and descendant credits with acquire/release
-RMWs. The last finisher snapshots the ancestor pointer, completes metadata
-updates, and release-publishes idle as its final access to the cohort. It then
-releases the saved ancestor credit. This permits immediate parent reclamation
-without a trailing access to reclaimed cohort storage.
+RMWs. The last finisher snapshots the ancestor and parent pointers, completes
+metadata updates, and release-publishes idle as its final cohort access. It then
+releases the saved ancestor-wave credit or, for a direct wave, its root credit.
+The saved credit pins the upstream metadata while the cohort can already be
+reused or disposed. Notifications never borrow actor state or a producer token.
 
 The Farm snapshots a completion hook's function and context before invoking
 it and never dereferences either afterward. A hook may therefore transfer or
 free its storage as its final access. Root return publication and final wave
 release rely on this exact rule; observing a flag earlier in a callback would
 not justify freeing storage that callback still uses.
+
+## Root join state machine and lost-wake argument
+
+Each root owns one scheduling/table-custody credit while ready, running or
+awaiting physical-table collection. Each nonempty direct wave retains one
+additional credit before enqueueing; descendants aggregate through their
+existing enclosing-wave credits:
+
+```text
+pending = custody (0 or 1) + outstanding direct-wave notification credits
+
+FREE -> READY (pending = 1) -> RUNNING -> TABLE_HELD
+TABLE_HELD -- again --> READY (keep custody)
+TABLE_HELD -- waitChildren / finishAfterChildren --> release custody
+    remaining child credits -> WAITING
+    zero credits            -> RETURN_QUEUED
+WAITING -- last child credit --> RETURN_QUEUED
+RETURN_QUEUED -- emitter collection --> READY or CLEANUP_READY (pending = 1)
+CLEANUP_READY -- internal consumer activation --> TABLE_HELD (finish)
+TABLE_HELD (finish) -- collection and any notification tails joined --> FREE
+```
+
+The collector releases custody only after acquiring the physical table, as its
+last Entry access. Every decrement is acquire/release. Only the decrement from
+one to zero publishes the root to the service's MPSC wake list; its successful
+release CAS is its final Entry and Service access. The emitter acquire-detaches
+and reverses the list, restores custody, and publishes through its normal Farm
+path. Strict leaf finish keeps its direct reclamation path without a new RMW.
+
+If children finish first, custody keeps `pending` at one until table collection;
+the collector then owns the wake. If collection happens first, the last child
+notification owns it. Concurrent releases have exactly one old-value-one owner.
+Only a running root with custody can start a direct wave, so no new credit can
+appear after zero. Idle flags alone cannot replace these credits: a wave may
+publish idle and pause before its notification, including across earlier
+`again` generations. The counter pins the root Entry and Service through that
+tail even if the root state has already been freed under consumer reclamation.
+
+The common child Entry remains 40 bytes. Root-only disposition, flags and a
+checked 32-bit counter occupy the child enclosing-pointer union; static asserts
+verify size and offsets under LDC and DMD. Existing 64-bit wave increments retain
+their acquire/release fetch-add operations. No waiting-root scan is required.
+
+The existing emitter pump remains mandatory. Child consumers only hand roots
+back through the wake list; they never publish to the Farm and do not wake a
+sleeping emitter. An empty wake-list hint can postpone a concurrent arrival to
+the next collection. A root with no child work can use `waitChildren` as a yield,
+but repeatedly doing so can still create an application busy loop.
 
 ## Farm completion prerequisite
 
@@ -330,7 +396,11 @@ Run `make check` (or the individual private `run`, `run-dmd`, `run-tsan`,
 progress, immediate completion/free before publication returns, allocation
 failure cleanup, partial-prefix and zero-admission recovery, repeat dispatch,
 three-level joins, authority rejection, terminal waves, allocation balance,
-and four independent creators sharing a Farm. It tests ordinary backing with
+and four independent creators sharing a Farm. E1 adds exactly-once waits,
+empty/already-joined waves, both custody orders, late strict-finish tails,
+root-ready CAS retry, emitter-owned final sealing, and counter-exhaustion death
+tests. [The test comments](../private_actor_tests/main.d)
+identifies the bug each deterministic schedule catches. It tests ordinary backing with
 LDC and DMD; ThreadSanitizer uses LDC.
 
 The Farm suite and public actor torture suite, including its ThreadSanitizer

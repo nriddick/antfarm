@@ -9,11 +9,15 @@ The Farm shard-completion join and public actor-wave completion credits landed
 in 1.7.0-rc.5 and are prerequisites for this release.
 
 See [the ownership contract](actors/PRIVATE_ACTORS.md) and
-[the lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md). Roots still poll by
-returning `again`; returning `finish` with an active child wave remains fatal.
-Nonpolling conductor resumption needs a lost-wake-proof design and is the
-highest-priority follow-up for 1.7.1-rc.2 or 1.7.2. Typed ports, child
-continuations, subset waves and general destructors remain later work.
+[the lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md).
+
+- **E1 done:** root-only `waitChildren` resumes once after all direct waves and
+  descendants join; `finishAfterChildren` retires after the join without another
+  user callback. Strict `finish` with active children remains fatal. Notifications
+  return through the existing emitter pump; child Entries remain 40 bytes.
+- **E2 deferred:** child continuations, typed ports, subset waves, general
+  destructors, and optional emitter wake integration. No version bump accompanies
+  E1; the release remains 1.7.1-rc.1 pending a tag decision.
 
 ## 1.7.0-rc.5 completion joins
 

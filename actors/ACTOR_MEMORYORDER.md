@@ -194,6 +194,53 @@ linearized in the narrow reservation race before membership publication sets
 entry, reports failure, and materializes that pending autonomous activation
 after its borrow ends.
 
+## Private root child-join ordering
+
+Private roots use a different counter from public `Wcredits`: a 32-bit root
+`pending` counts physical-table custody plus direct-wave notification tails.
+The common Entry overlays this root metadata with the child's enclosing pointer;
+size and offset asserts preserve its 40-byte layout.
+
+```text
+child plain result writes
+  -> Shc completion RMW (acq_rel) -> Tprogress RMW (acq_rel)
+  -> wave table/descendant credit releases (acq_rel)
+  -> root.pending final decrement (acq_rel)
+  -> rootReturns successful push CAS (release)
+  -> emitter detach exchange (acq_rel)
+  -> next Farm publication (release) -> consumer acquire
+  -> resumed root reads joined external results
+```
+
+Root state/disposition writes independently join through the original physical
+table and the Batch-return release CAS / emitter acquire exchange before custody
+is released. The unique final root decrement therefore acquires both the root
+callback and all child notifications, whichever arrives last. `again` keeps
+custody; waits release it on collection. The final publisher's successful CAS
+is its last Entry and Service access. Nonfinal decrements perform no subsequent
+Entry access. The acquiring emitter can reset `pending = 1` with a raw store:
+all foreign credits are gone, and ownership has transferred through the queue.
+
+A wave finisher snapshots parent/upstream pointers before release-publishing
+idle as its final cohort access. The saved root credit keeps Entry and Service
+alive through the post-idle tail. `finished(context)` acquires child results and
+permits cohort reuse, but cannot by itself authorize root Entry reuse or park
+destruction. Collection drains `live` only after the notification tails join.
+
+Root retention uses checked CAS because the packed 32-bit counter can exhaust;
+reject `uint.max` before incrementing. An existing custody hold prevents a
+concurrent transition to zero during a legal retain. Existing 64-bit wave
+fetch-adds remain acquire/release as on the base: their outstanding table/wave
+obligations are bounded by simultaneously resident storage and outstanding
+notifications, not lifetime-total starts. E1 does not weaken their ordering or
+replace them with checked CAS. All releases remain acquire/release.
+
+The raw empty-list hint supplies no publication edge; observing empty only
+defers a concurrent wake to a later collection. The acquire exchange, not the
+hint, makes the detached links and joined results visible. Reversing each list
+preserves its successful-push FIFO order; appending at collection gives no global
+completion-order guarantee. See [the state machine and lost-wake proof](PRIVATE_ACTORS.md#root-join-state-machine-and-lost-wake-argument).
+
 ## Inbox and close chart
 
 ```text

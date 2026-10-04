@@ -24,9 +24,26 @@ path in `actors/private_actor.d`. The first slice supports POD
 state, multiple single-emitter parks sharing a Farm, terminal dispatch,
 parent-authorized whole-cohort waves, and nested descendant joins. It removes
 public actor admission/generation/wake machinery from that narrower model.
-Child continuations, subset leases, and a compiler-enforced safe ownership
-front end remain follow-on work. Measurements and limitations are recorded in
+**E1 is done:** root-only `waitChildren` and `finishAfterChildren` use a custody
+and child join, then return through the emitter's ready FIFO. Waiting roots
+release their physical Batch; the common child Entry stays 40 bytes. The emitter
+must continue pumping, and strict `finish` still rejects active child waves.
+Measurements and limitations are recorded in
 [PRIVATE_LIFECYCLE.md](../perftest/PRIVATE_LIFECYCLE.md).
+
+**E2 remains deferred:** resumable child continuations, typed signal/result ports,
+subset waves, general destructors, and optional emitter wake integration. A
+compiler-enforced safe ownership front end also remains future work.
+
+The child-continuation extension must preserve these boundaries: retain a logical
+enclosing-wave hold before the original child callback returns; retain callback
+custody until the last Entry access; choose exactly one immutable completion
+target per descendant wave; reserve opt-in continuation metadata and stable
+resume-table descriptors without growing ordinary child Entries; publish through
+the emitter; and release the logical hold only after the final continuation,
+descendants and table access have joined. Initially forbid suspension combined
+with `startFinal` retirement and omit cancellation. Subset waits need explicit
+generation-scoped join groups rather than reinterpreting the all-children counter.
 
 ## Current actor and wave spike
 

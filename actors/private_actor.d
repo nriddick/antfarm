@@ -400,8 +400,8 @@ public:
         return PrivateSpawnResult.spawned;
     }
 
-    /// Acquire completed physical tables, recycle terminal roots, and return
-    /// continuing roots to the emitter's unpublished list. Never publishes work
+    /// Acquire completed physical tables and root wakes, recycle joined terminal
+    /// roots, and append ready roots to the emitter's unpublished list. Never publishes work
     /// or executes consumers; poll is an alias.
     void collectCompleted() nothrow @nogc @system
     {
@@ -477,7 +477,8 @@ private:
 
 public:
     /// Emits at most one root table and one table per pending child wave.
-    /// Returns a count of roots only; zero does not imply idle. Never runs
+    /// Returns a count of root activations, including deferred cleanup; zero
+    /// does not imply idle. Continue pumping to collect/publish wakes. Never runs
     /// consumers. At most ceil(capacity / configured batchLimit) root tables
     /// can be in flight, including when a call requests a smaller batch.
     /// By default terminal root state is freed here on the emitter; the
@@ -527,7 +528,8 @@ public:
         return n;
     }
 
-    /// Emitter-local roots awaiting collection, including completed callbacks.
+    /// Emitter-local roots, including sleepers and completed callbacks with
+    /// outstanding child-notification tails. Drain through collection to zero.
     @property size_t live() const pure nothrow @nogc @safe { return live_; }
     @property size_t capacity() const pure nothrow @nogc @safe { return capacity_; }
 
@@ -645,6 +647,7 @@ private:
 public:
     /// Acquires the current join; true before the first start. Unauthorized
     /// contexts are fatal. Read externally owned results after this returns true.
+    /// A post-idle root notification may still pin the root Entry and live count.
     bool finished(scope ref PrivateContext context) nothrow @nogc @system
     {
         authorized(context);
