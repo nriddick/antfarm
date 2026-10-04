@@ -892,6 +892,55 @@ private void testWaveCompletionCreditPinsDescriptor(bool twoTables)
     }
 }
 
+// Contract characterization, not a bug reproduction. Public `finished` is
+// stored before the optional user completion callback runs. An owner may
+// observe `finished` and `begin` a new generation while that callback is
+// still executing. The callback's context must outlive the callback; an old
+// callback must not touch a reused descriptor without its own synchronization.
+private struct CompletionContractProbe
+{
+    ActorWave* wave;
+    shared int entered;
+    shared int go;
+    ulong observedGeneration;
+}
+
+private void completionContractCallback(void* p) nothrow @nogc @system
+{
+    auto probe = cast(CompletionContractProbe*) p;
+    atomicStore!(MemoryOrder.rel)(probe.entered, 1);
+    while (atomicLoad!(MemoryOrder.acq)(probe.go) == 0) pause();
+    probe.observedGeneration = probe.wave.handle.generation;
+}
+
+private void testCompletionCallbackRunsAfterFinished()
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    ActorWave wave;
+    CompletionContractProbe probe;
+    probe.wave = &wave;
+    wave.begin(farm, ActorWaveCompletionHook(&probe, &completionContractCallback));
+    auto old = wave.handle;
+    check(old.generation == 1, "completion contract starts at generation 1");
+    auto sealer = new Thread({ wave.seal(); });
+    sealer.start();
+    immutable deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(probe.entered, deadline, "completion contract callback did not start");
+    check(old.finished, "finished is visible before the completion callback returns");
+    wave.begin(farm);
+    check(wave.handle.generation == 2 && wave.handle.generation != old.generation,
+        "begin is allowed while the old completion callback is still running");
+    check(!old.valid, "old handle does not track the new generation");
+    atomicStore!(MemoryOrder.rel)(probe.go, 1);
+    sealer.join();
+    check(probe.observedGeneration == 2,
+        "old completion callback can observe the new generation");
+    check(wave.seal().finished, "completion contract seals the new generation");
+    printf("actor completion-callback contract OK (callback may outlive finished)\n");
+    fflush(stdout);
+}
+
 private void testDeterministicInterleavings()
 {
     testClaimIsNotPublication();
@@ -2390,6 +2439,7 @@ version (AntfarmMimallocReal)
 void main()
 {
     testDeterministicInterleavings();
+    testCompletionCallbackRunsAfterFinished();
     testAggregateModuleUnloadFence();
     testSustainedContention();
     testReadyDrainHandoff();
