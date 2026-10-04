@@ -18,11 +18,12 @@ import actors.actor : ActorSlot, cancelActorWavePayload,
     reserveActorWavePayload;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicFetchSub, atomicLoad,
     atomicStore, cas;
+version (AntfarmActorTestHooks)
+    import actors.actor : ActorTestPoint, actorTestPoint;
 
 private enum uint waveSealedBit = 1U << 0;
 private enum uint waveFinishedBit = 1U << 1;
 private enum uint waveFailedBit = 1U << 2;
-private enum uint waveFinishingBit = 1U << 3;
 
 alias ActorWaveCompletionCallback = void function(void* context)
     nothrow @nogc @system;
@@ -122,7 +123,7 @@ private:
     TableCompletionHook tableCompletion_;
     ActorWaveCompletionHook completion_;
     ActorSlot* membersHead_;
-    ulong padding2_;
+    shared ulong pendingCredits_; // producer hold + physical table hooks
 
 public:
     /// Start the first generation, or reuse this storage after its previous
@@ -145,6 +146,7 @@ public:
         atomicStore!(MemoryOrder.raw)(tablesPublished_, 0UL);
         atomicStore!(MemoryOrder.raw)(tablesCompleted_, 0UL);
         atomicStore!(MemoryOrder.raw)(status_, 0U);
+        atomicStore!(MemoryOrder.raw)(pendingCredits_, 1UL);
         farm_ = farm;
         completion_ = completion;
         membersHead_ = null;
@@ -184,6 +186,7 @@ public:
         immutable oldLength = atomicFetchAdd!(MemoryOrder.acq_rel)(
             tablesPublished_, 1UL);
         if (oldLength == ulong.max) fatal("actor wave table count wrap");
+        atomicFetchAdd!(MemoryOrder.acq_rel)(pendingCredits_, 1UL);
 
         PayloadHeader header;
         header.maxCs = 1;
@@ -198,13 +201,14 @@ public:
             immutable before = atomicFetchSub!(MemoryOrder.acq_rel)(
                 tablesPublished_, 1UL);
             if (before == 0) fatal("actor wave table count underflow");
+            releaseCredit(); // producer hold prevents completion here
         }
         return written;
     }
 
-    /// Close publication. Equality between Wprogress and Wlen becomes a
-    /// completion signal only after this seal; either the sealer or the last
-    /// table consumer may win the exactly-once finished transition.
+    /// Close publication. Equality between Wprogress and Wlen is diagnostic
+    /// only: the producer hold and every table notification must
+    /// release their credits before the exactly-once finished transition.
     ActorWaveHandle seal() nothrow @nogc @system
     {
         if (atomicLoad!(MemoryOrder.acq)(generation_) == 0)
@@ -220,8 +224,9 @@ public:
                 break;
             observed = atomicLoad!(MemoryOrder.acq)(status_);
         }
-        tryFinish();
-        return handle;
+        auto result = handle;
+        releaseCredit(); // final descriptor access; may publish finished
+        return result;
     }
 
 private:
@@ -245,30 +250,26 @@ private:
         immutable length = atomicLoad!(MemoryOrder.acq)(tablesPublished_);
         if (before >= length)
             fatal("actor wave progress exceeds published tables");
-        tryFinish();
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.waveTableProgressRecorded, null);
+        releaseCredit();
     }
 
-    void tryFinish() nothrow @nogc @system
+    // Every participant drops its credit as its final descriptor access.
+    // Equality of public progress counters is not a callback-lifetime fence.
+    void releaseCredit() nothrow @nogc @system
     {
-        if (atomicLoad!(MemoryOrder.acq)(tablesCompleted_)
-                != atomicLoad!(MemoryOrder.acq)(tablesPublished_))
-            return;
-        auto observed = atomicLoad!(MemoryOrder.acq)(status_);
-        while ((observed & waveSealedBit) != 0
-                && (observed & (waveFinishingBit | waveFinishedBit)) == 0)
+        immutable before = atomicFetchSub!(MemoryOrder.acq_rel)(pendingCredits_, 1UL);
+        if (before == 0) fatal("actor wave credit underflow");
+        if (before == 1)
         {
-            immutable replacement = observed | waveFinishingBit;
-            if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
-                    &status_, observed, replacement))
-            {
-                auto completion = completion_;
-                releaseMembers();
-                setStatusBits(waveFinishedBit);
-                if (completion.call !is null)
-                    completion.call(completion.context);
-                return;
-            }
-            observed = atomicLoad!(MemoryOrder.acq)(status_);
+            auto completion = completion_;
+            immutable status = atomicLoad!(MemoryOrder.raw)(status_);
+            if ((status & waveSealedBit) == 0) fatal("finish unsealed actor wave");
+            releaseMembers();
+            atomicStore!(MemoryOrder.rel)(status_, status | waveFinishedBit);
+            if (completion.call !is null)
+                completion.call(completion.context);
         }
     }
 
