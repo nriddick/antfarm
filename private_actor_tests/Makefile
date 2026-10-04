@@ -2,7 +2,7 @@ ROOT := ..
 DC ?= ldc2
 DFLAGS ?= -g -O1
 SOURCES := main.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/actors/actor.d $(ROOT)/actors/wave.d $(ROOT)/actors/private_actor.d
-.PHONY: death run run-dmd run-tsan run-death run-death-dmd clean
+.PHONY: doc-example death run run-dmd run-tsan run-death run-death-dmd clean
 private_actor_tests: $(SOURCES)
 	$(DC) $(DFLAGS) -d-version=AntfarmWriteAuditHooks -I$(ROOT) $(SOURCES) -of=$@
 private_actor_tests_dmd: $(SOURCES)
@@ -40,3 +40,14 @@ run-death-dmd: private_actor_tests_dmd private_actor_tests_dmd_release
 clean:
 	rm -f private_actor_tests private_actor_tests_release private_actor_tests_dmd \
 		private_actor_tests_dmd_release private_actor_tests_tsan *.o
+
+doc-example:
+	python3 extract_doc_examples.py
+	for source in .doc-examples/*.d; do \
+		for compiler in ldc2 dmd; do \
+			for flags in -g -release; do \
+				$$compiler $$flags -I$(ROOT) $$source $(filter-out main.d,$(SOURCES)) -of=.doc-examples/example || exit $$?; \
+				ANTFARM_HUGE_PAGES=0 ./.doc-examples/example || exit $$?; \
+			done; \
+		done; \
+	done

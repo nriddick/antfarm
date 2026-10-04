@@ -43,29 +43,46 @@ preserve the existing hierarchy's exclusive execution authority.
 
 ## API
 
+The complete programs below are compiled and run by `make check`, with LDC
+and DMD in debug and release. Creation and dispatch happen outside assertions.
+
 ```d
+import antfarm;
 import actors;
+import std.stdio : writeln;
 
 struct Work { ulong remaining; }
-
 PrivateRootDisposition step(scope ref PrivateBorrow!Work actor,
     scope ref PrivateContext context) nothrow @nogc @system
 {
-    // The only application access to this actor's state is here.
     return --actor.value.remaining == 0
         ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
 }
 
-// Given an existing Farm and single-emitter producer token:
-auto park = PrivateRootPark!(Work, step).create(farm, 4096, allocator);
-assert(park !is null);
-assert(park.spawn(Work(4)) == PrivateSpawnResult.spawned); // transfers initializer; returns no actor handle
-while (park.live != 0)
+void main()
 {
-    park.pump(token);       // one root table + one table per pending child wave
-    // A same-thread consumer must also call consumeNext() here.
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    if (!token.valid) fatal("producer registration failed");
+    ConsumerView view;
+    if (view.subscribe(farm) < 0) fatal("consumer subscription failed");
+    auto park = PrivateRootPark!(Work, step).create(farm, 4096);
+    if (park is null) fatal("private park allocation failed");
+    auto spawned = park.spawn(Work(4));
+    if (spawned != PrivateSpawnResult.spawned) fatal("private spawn failed");
+    if (park.live != 1) fatal("expected one live root after spawn");
+    writeln("live=1 after spawn");
+    while (park.live != 0)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+    }
+    park.destroy();
+    park = null;
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    farm.destroy();
 }
-park.destroy();
 ```
 
 Only a private callback can call `context.createChildren!T(capacity)`. It stores
@@ -90,6 +107,95 @@ waves through root → child → grandchild trees, followed by child retirement.
 The [lifecycle harness](../perftest/actor_churn.d) demonstrates parent-created
 cohorts with terminal child waves.
 
+## A conductor with owned results
+
+Each child writes a distinct slot in application-owned storage. The parent
+reads those slots only after acquiring `finished(context)`. The application
+keeps both the slots and total alive until the root is collected. The parent
+never reads child state, and returning `again` lets the consumer run child work.
+
+```d
+import antfarm;
+import actors;
+import std.stdio : writeln;
+
+struct Item { ulong input; ulong* output; }
+void square(scope ref PrivateBorrow!Item actor, scope ref PrivateContext context)
+    nothrow @nogc @system
+{
+    *actor.value.output = actor.value.input * actor.value.input;
+}
+struct Conductor
+{
+    PrivateChildPark!Item* children;
+    ulong* outputs;
+    ulong* total;
+}
+PrivateRootDisposition conduct(scope ref PrivateBorrow!Conductor actor,
+    scope ref PrivateContext context) nothrow @nogc @system
+{
+    if (actor.value.children is null)
+    {
+        actor.value.children = context.createChildren!Item(4);
+        if (actor.value.children is null) fatal("child park allocation failed");
+        foreach (i; 0 .. 4)
+            if (actor.value.children.spawn(context,
+                    Item(i + 1, actor.value.outputs + i)) != PrivateSpawnResult.spawned)
+                fatal("child spawn failed");
+        if (actor.value.children.startFinal!square(context) != PrivateStartResult.started)
+            fatal("child wave failed");
+        return PrivateRootDisposition.again;
+    }
+    if (!actor.value.children.finished(context)) return PrivateRootDisposition.again;
+    foreach (i; 0 .. 4) *actor.value.total += actor.value.outputs[i];
+    return PrivateRootDisposition.finish;
+}
+void main()
+{
+    ulong[4] outputs; // Externally owned: each child writes one distinct slot.
+    ulong total;
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    if (!token.valid) fatal("producer registration failed");
+    ConsumerView view;
+    if (view.subscribe(farm) < 0) fatal("consumer subscription failed");
+    auto park = PrivateRootPark!(Conductor, conduct).create(farm, 1);
+    if (park is null) fatal("private park allocation failed");
+    auto spawned = park.spawn(Conductor(null, outputs.ptr, &total));
+    if (spawned != PrivateSpawnResult.spawned) fatal("private spawn failed");
+    if (park.live != 1) fatal("expected one live root after spawn");
+    writeln("live=1 after spawn");
+    while (park.live != 0)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+    }
+    if (total != 30) fatal("joined result mismatch");
+    park.destroy();
+    park = null;
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    farm.destroy();
+}
+```
+
+## Progress and outcomes
+
+| Operation | Result / contract |
+| --- | --- |
+| Root `spawn` | `PrivateSpawnResult.spawned`, `capacityFull`, or `allocationFailed`; copies POD bytes and returns no handle. |
+| Child `spawn` | The same outcomes, plus `waveActive` or `retiring`. |
+| `start` / `startFinal` | `PrivateStartResult.started`, `empty`, `waveActive`, or `retiring`. Empty starts are already complete and take no credit. |
+| `finished(context)` | True before the first start and after the current wave joins. Wrong-parent or default authority is fatal, including when the cohort is idle. |
+| `collectCompleted()` / `poll()` | Acquires completed root tables, reclaims terminal roots and requeues continuing roots; never publishes work or runs consumers. |
+| `pump(token)` | Collects completions and emits at most one root table and one table per pending child wave; returns only the number of roots published. Zero does not mean idle. |
+| `live` / `capacity` | Emitter-local root counts; `live` changes when completions are collected, not when consumers merely finish. Neither getter synchronizes another thread. |
+| `destroy()` | Collects once, then requires no live roots or pending work. It does not drain. Use `park.destroy(); park = null;`, because `destroy(park)` resolves to D's pointer destruction and does not free the park. |
+
+The current root table pool holds `ceil(capacity / 256)` tables in flight;
+small per-call batch limits do not increase that pool. A larger configurable
+pool and batch policy follow in the batching refinement.
+
 ## Ownership contract
 
 This API is `@system`. Private fields and disabled ordinary copying of parks,
@@ -98,19 +204,29 @@ raw pointers or transitive state. In particular:
 
 - Borrows, contexts, and pointers/references into them must not escape their
   callback. A saved context is invalid even if an entry address is reused.
-- An initializer must not leave external mutable aliases to the resulting
+- Spawning copies POD bytes; it is not a language-level move. A failed spawn
+  transfers nothing. An initializer must not leave external mutable aliases to the resulting
   state. No parent, sibling, emitter, or external observer may read or mutate
   private actor state. Result channels need their own ownership/synchronization;
   a pointer back into a child's state is not a result channel.
+- Allocator-managed actor state is not automatically scanned or rooted by the
+  GC. Keep any referenced GC allocations rooted externally for their required
+  lifetime. Descendants inherit the root allocator and its context, which must
+  outlive the hierarchy.
 - Every operation on a root park, including observation and destruction, is
   single-emitter and non-reentrant. Callbacks and allocator hooks must not
-  re-enter that park. An emitter may hand over only after external quiescence.
+  re-enter that park. Debug builds diagnose reentry into operational methods;
+  this does not make concurrent calls safe. An emitter may hand over only after
+  external quiescence.
 - The allocator must support concurrent allocation/free on the threads that
   run callbacks; the allocating thread need not be the freeing thread. The
   same `ActorAllocator` interface supports C runtime and mimalloc policies.
-- Destroy a root park only after `live == 0` has been acquired through `poll`
+- Destroy a root park only after `live == 0` has been reached through `collectCompleted`
   or `pump`. This includes terminal frees and retirement accounting. Stop/join
   consumers and release producer tokens before destroying their Farm.
+
+Hierarchy depth has no fixed limit. Completion and disposal recurse, so the
+available thread stack bounds usable depth; applications must size it accordingly.
 
 General destructors, arbitrary subset waves, external wake/inbox operations,
 reparenting, and resumable child continuations are not implemented. Children
@@ -174,7 +290,8 @@ the corrected implementation passes.
 
 ## Validation and measurements
 
-Run `make -C private_actor_tests run run-dmd run-tsan`. The suite covers FIFO
+Run `make check` (or the individual private `run`, `run-dmd`, `run-tsan`,
+`doc-example`, and `death` targets). Coverage includes, but is not limited to, FIFO
 progress, immediate completion/free before publication returns, allocation
 failure cleanup, partial-prefix and zero-admission recovery, repeat dispatch,
 three-level joins, authority rejection, terminal waves, allocation balance,

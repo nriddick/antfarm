@@ -11,7 +11,7 @@ This repository contains four cooperating packages:
 | --- | --- |
 | `antfarm` | allocation-free `@nogc nothrow` payload distribution |
 | `threadpool` | persistent workers pinned and grouped by cache topology |
-| `actors` | stable identities, owned state, inboxes, and phase-oriented waves |
+| `actors` | public identities, inboxes and waves, or private parent-owned hierarchies |
 | `fibers` | waiting, yielding, and cancellation on those workers |
 
 Use `antfarm` alone, or add only the higher-level packages a workload needs.
@@ -143,8 +143,9 @@ Things the example relies on:
   `SUBSCRIBE_RETRY` is transient, so call again; `SUBSCRIBE_FULL` means the
   Farm already has `MAX_CONSUMERS_LIMIT` (128) views; `SUBSCRIBE_INVALID` is a
   null Farm or an already subscribed view.
-- Teardown order is unsubscribe consumers, unregister producers, then destroy
-  the Farm. The `scope (exit)` blocks above run in that order.
+- The `scope (exit)` blocks above unregister the producer, unsubscribe the
+  same-thread consumer, then destroy the Farm. All producers and consumers
+  must be quiescent before Farm destruction.
 
 For the multi-threaded version, with one consumer per pinned worker, build and
 run [examples/iota_sum.d](examples/iota_sum.d):
@@ -163,7 +164,8 @@ The [private actor model](actors/PRIVATE_ACTORS.md) adds self-owned
 roots and exclusively parent-owned child cohorts. Blind parks emit dispatches;
 state is visible only inside the actor's authorized callback. See its
 [full-lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md) and ownership limits
-before choosing it over the public actor API.
+before choosing it over the public actor API. Its [complete examples](actors/PRIVATE_ACTORS.md#api)
+include same-thread consumption and joined, externally owned results.
 
 ## First actor and wave
 

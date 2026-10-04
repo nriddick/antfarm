@@ -10,6 +10,7 @@ application
     |-- short @nogc work -----------------------------+
     |-- actor wake/inbox --> actors -- ready flush ---+--> antfarm
     |-- actor phase ------> actors -- wave tables ----+    work tables
+    |-- private hierarchy -> root park -- pump -------+
     |-- waiting/yielding Fiber --> fibers -- resume --+       ^
     |                                                        |
     +<-- wave completion --> Fiber trigger                    |
@@ -53,6 +54,14 @@ projection selected at a prior wave boundary, while each actor mutates its
 private state or an inactive projection. The application owns that projection
 layout; `actors` supplies exclusive scoped borrowing and the publication
 boundary.
+
+Private roots and parent-owned cohorts are a separate path in
+[`actors.private_actor`](actors/PRIVATE_ACTORS.md). A single emitter owns a
+root park and publishes root and child tables through `pump`; subscribed
+consumers execute the callbacks. Parents authorize whole-cohort child waves
+and read externally owned results after the join, without public handles or
+access to child state. Use this path for an exclusive hierarchy; use public
+actors for independently addressed services and externally selected waves.
 
 ### Threadpool
 

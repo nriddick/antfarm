@@ -48,3 +48,5 @@ perftest/throughput_eager
 perftest/throughput_sd64
 review_torture/write_protection_allwrite
 review_torture/boundary_runoff_allwrite
+
+private_actor_tests/.doc-examples/

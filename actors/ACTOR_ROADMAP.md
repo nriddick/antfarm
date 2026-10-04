@@ -64,7 +64,7 @@ state, non-POD destruction, retirement groups, custom inbox adapters,
 long-running allocator memory characterization, and engine wake integration
 remain open below.
 
-## Invariants
+## Public actor runtime invariants
 
 ### Ring and shim boundary
 

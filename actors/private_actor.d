@@ -219,9 +219,9 @@ private struct RootBodies
     }
 }
 
-/// Single-emitter scheduling custody for self-owned roots. spawn transfers a
-/// POD initializer; it returns no actor handle. All methods on the park must
-/// be called by one emitter at a time (including live and destroy), without
+/// Single-emitter scheduling custody for self-owned roots. spawn
+/// copies POD initializer bytes; it returns no actor handle. All methods on the
+/// park must be called by one emitter at a time (including live and destroy), without
 /// re-entry from callbacks or allocator hooks. Returning finish while a child
 /// wave is active is a fatal contract error; return again until it joins.
 struct PrivateRootPark(T, alias step,
@@ -301,7 +301,8 @@ public:
     }
 
     /// Acquire completed physical tables, recycle terminal roots, and return
-    /// continuing roots to the emitter's unpublished list.
+    /// continuing roots to the emitter's unpublished list. Never publishes work
+    /// or executes consumers; poll is an alias.
     void collectCompleted() nothrow @nogc @system
     {
         enter();
@@ -341,6 +342,8 @@ private:
 
 public:
     /// Emits at most one root table and one table per pending child wave.
+    /// Returns a count of roots only; zero does not imply idle. Never runs
+    /// consumers. At most ceil(capacity / 256) root tables can be in flight.
     /// By default terminal root state is freed here on the emitter; the
     /// consumer policy frees it in the callback. Child frees run on consumers.
     size_t pump(ref Token token, size_t batchLimit = 256, uint avgCost = 0)
@@ -384,9 +387,12 @@ public:
         return n;
     }
 
+    /// Emitter-local roots awaiting collection, including completed callbacks.
     @property size_t live() const pure nothrow @nogc @safe { return live_; }
     @property size_t capacity() const pure nothrow @nogc @safe { return capacity_; }
 
+    /// Collect once and require no live roots or pending work. This is not a drain.
+    /// Use the member call; object.destroy(park) does not free the park.
     void destroy() nothrow @nogc @system
     {
         enter();
@@ -494,6 +500,8 @@ private:
             fatal("private child park: unauthorized context");
     }
 public:
+    /// Acquires the current join; true before the first start. Unauthorized
+    /// contexts are fatal. Read externally owned results after this returns true.
     bool finished(scope ref PrivateContext context) nothrow @nogc @system
     {
         authorized(context);
