@@ -7,6 +7,8 @@
 module actors.private_actor;
 
 import actors.actor : ActorAllocator;
+version (AntfarmActorTestHooks)
+    import actors.actor : ActorTestPoint, actorTestPoint;
 import antfarm : AntFarm, Token, PayloadHeader, PayloadBody,
     TableCompletionHook, fatal;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
@@ -95,6 +97,8 @@ private struct Wave
 
 private void releaseWave(Wave* wave) nothrow @nogc @system
 {
+    version (AntfarmActorTestHooks)
+        actorTestPoint(ActorTestPoint.privateWaveCreditReleased, null);
     immutable old = atomicFetchSub!(MemoryOrder.acq_rel)(wave.pending, 1UL);
     if (old == 0) fatal("private wave credit underflow");
     if (old == 1) wave.finish(wave);
@@ -206,6 +210,8 @@ private void rootsCompleted(void* context) nothrow @nogc @system
     while (true)
     {
         batch.next = cast(Batch*) head;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateRootReturnBeforeCas, null);
         if (cas!(MemoryOrder.rel, MemoryOrder.raw)(returns, head, cast(shared(Batch)*) batch))
             return; // Publication is the last access to batch AND returns.
         head = atomicLoad!(MemoryOrder.raw)(*returns);
@@ -618,6 +624,8 @@ private:
         auto park = fromWave(wave);
         auto upstream = wave.upstream;
         if (park.retire_) park.count_ = 0;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateWaveBeforeIdlePublish, null);
         atomicStore!(MemoryOrder.rel)(wave.active, 0u); // last park access
         if (upstream !is null) releaseWave(upstream);
     }

@@ -9,10 +9,13 @@
 # `actor_torture`, `antfarm_test`). New tests stay on druntime threads and
 # atomics; this matrix itself is the Linux gate.
 
-.PHONY: check check-mimalloc farm-tsan run-farm-tsan
+.PHONY: check check-soak check-mimalloc farm-tsan run-farm-tsan
 
 check:
 	./scripts/check.sh
+
+check-soak:
+	./scripts/check.sh --soak
 
 check-mimalloc:
 	./scripts/check.sh --mimalloc

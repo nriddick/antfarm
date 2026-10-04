@@ -102,6 +102,47 @@ The script defaults to five repetitions, five warmup cycles and three seconds.
 The independent public-versus-729c961 gate is recorded separately; the
 historical lifecycle comparison is not that gate.
 
+### Public performance gate against 729c961
+
+The final branch and baseline binaries use the same pinned mimalloc archive,
+compiler flags, CPU affinity, five warmups and three-second measurement windows
+described above. Each of six configurations has five runs per binary; paired
+baseline/candidate order alternates between repetitions. The two initially
+flagged zero-consumer configurations were repeated with ten alternating pairs
+each. All 100 runs, including the initial flagged results, are retained.
+
+| Mode | Consumers | Pairs | Baseline median M/s | Branch median M/s | Change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Actor | 0 | 5 | 17.301 | 16.720 | −3.36% |
+| Wave, 256 | 0 | 5 | 20.921 | 20.839 | −0.39% |
+| Wave, whole cohort | 0 | 5 | 20.990 | 19.816 | −5.59% |
+| Actor | 6 | 5 | 14.127 | 14.121 | −0.04% |
+| Wave, 256 | 6 | 5 | 14.926 | 14.987 | +0.41% |
+| Wave, whole cohort | 6 | 5 | 15.475 | 15.575 | +0.65% |
+| Actor, repeat | 0 | 10 | 16.696 | 16.545 | −0.90% |
+| Wave, whole cohort, repeat | 0 | 10 | 20.922 | 21.026 | +0.50% |
+
+The initial actor ranges were separated (17.032–17.514 versus 16.507–16.978),
+while its repeat ranges overlap (12.602–17.450 versus 15.705–17.077).
+Whole-cohort wave ranges overlap in both series; its repeat ranges are
+17.564–21.428 versus 14.209–21.746. The larger repeat series put both flagged
+medians within 3%, so the initial deltas are treated as measurement noise.
+The gate passes on that basis, rather than discarding the original runs.
+
+`antfarm.d`, `antfarm_allocation.d`, `antfarm_templates.d` and `actors/wave.d`
+are byte-identical to 729c961. The only `actors/actor.d` difference adds three
+enum members under `AntfarmActorTestHooks`; release builds omit them. Public
+runtime logic is unchanged, although the private benchmark modes change the
+binary and link layout.
+
+Evidence: [initial metadata](results/public-gate-2026-10-04/metadata.json),
+[raw runs](results/public-gate-2026-10-04/runs.jsonl),
+[initial summary](results/public-gate-2026-10-04/summary.json),
+[actor repeat](results/public-gate-2026-10-04/actor-zero-repeat/summary.json),
+[whole-cohort repeat](results/public-gate-2026-10-04/whole-cohort-repeat/summary.json),
+and [gate assessment](results/public-gate-2026-10-04/assessment.json).
+Each repeat directory also contains its metadata and raw command/output log.
+
 ## Historical lifecycle experiment — 2026-09-25
 
 The private ownership model improves this synthetic lifecycle workload when

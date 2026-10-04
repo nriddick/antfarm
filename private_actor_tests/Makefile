@@ -3,16 +3,17 @@ DC ?= ldc2
 DFLAGS ?= -g -O1
 SOURCES := main.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/actors/actor.d $(ROOT)/actors/wave.d $(ROOT)/actors/private_actor.d
 .PHONY: doc-example death run run-dmd run-tsan run-death run-death-dmd clean
-private_actor_tests: $(SOURCES)
-	$(DC) $(DFLAGS) -d-version=AntfarmWriteAuditHooks -I$(ROOT) $(SOURCES) -of=$@
-private_actor_tests_dmd: $(SOURCES)
-	dmd -g -version=AntfarmWriteAuditHooks -I$(ROOT) $(SOURCES) -of=$@
+private_actor_tests: $(SOURCES) Makefile
+	$(DC) $(DFLAGS) -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I$(ROOT) $(SOURCES) -of=$@
+private_actor_tests_dmd: $(SOURCES) Makefile
+	dmd -g -version=AntfarmWriteAuditHooks -version=AntfarmActorTestHooks -I$(ROOT) $(SOURCES) -of=$@
 run: private_actor_tests
 	ANTFARM_HUGE_PAGES=0 ./private_actor_tests
 run-dmd: private_actor_tests_dmd
 	ANTFARM_HUGE_PAGES=0 ./private_actor_tests_dmd
-run-tsan:
-	ldc2 -g -O1 -fsanitize=thread -d-version=AntfarmWriteAuditHooks -I$(ROOT) $(SOURCES) -of=private_actor_tests_tsan
+private_actor_tests_tsan: $(SOURCES) Makefile
+	ldc2 -g -O1 -fsanitize=thread -d-version=TSan -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I$(ROOT) $(SOURCES) -of=private_actor_tests_tsan
+run-tsan: private_actor_tests_tsan
 	ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 ./private_actor_tests_tsan
 
 # Fatal-death harness, built in both debug and -release so the checks cannot
@@ -20,10 +21,10 @@ run-tsan:
 # /proc/self/exe, requires a nonzero death and the exact "antfarm fatal:"
 # stderr text; `death-negative-control` proves the harness rejects a
 # zero-exit survivor and a nonzero death with the wrong stderr text.
-private_actor_tests_release: $(SOURCES)
-	$(DC) $(DFLAGS) -release -d-version=AntfarmWriteAuditHooks -I$(ROOT) $(SOURCES) -of=$@
-private_actor_tests_dmd_release: $(SOURCES)
-	dmd -g -release -version=AntfarmWriteAuditHooks -I$(ROOT) $(SOURCES) -of=$@
+private_actor_tests_release: $(SOURCES) Makefile
+	$(DC) $(DFLAGS) -release -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I$(ROOT) $(SOURCES) -of=$@
+private_actor_tests_dmd_release: $(SOURCES) Makefile
+	dmd -g -release -version=AntfarmWriteAuditHooks -version=AntfarmActorTestHooks -I$(ROOT) $(SOURCES) -of=$@
 death: run-death run-death-dmd
 
 run-death: private_actor_tests private_actor_tests_release

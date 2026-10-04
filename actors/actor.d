@@ -111,6 +111,9 @@ version (AntfarmActorTestHooks)
         waveLifecycleReserved,
         waveMembershipReleased,
         waveTableProgressRecorded,
+        privateRootReturnBeforeCas,
+        privateWaveCreditReleased,
+        privateWaveBeforeIdlePublish,
         readyDetached,
         retirementIdleObserved,
     }

@@ -23,11 +23,27 @@ run() {
 }
 
 mimalloc=0
+soak=0
 if [[ "${1:-}" == "--mimalloc" ]]; then
     mimalloc=1
+elif [[ "${1:-}" == "--soak" ]]; then
+    soak=1
 elif [[ -n "${1:-}" ]]; then
-    echo "usage: scripts/check.sh [--mimalloc]" >&2
+    echo "usage: scripts/check.sh [--mimalloc|--soak]" >&2
     exit 2
+fi
+
+if [[ "$soak" -eq 1 ]]; then
+    run "${make_cmd[@]}" -C private_actor_tests private_actor_tests_tsan
+    soak_started=$SECONDS
+    soak_runs=0
+    # One extra second keeps the integer clock from shortening the 120s minimum.
+    while (( SECONDS - soak_started < 121 )); do
+        run env TSAN_OPTIONS=history_size=7:halt_on_error=1 ./private_actor_tests/private_actor_tests_tsan
+        soak_runs=$((soak_runs + 1))
+    done
+    echo "PASS private actor TSan soak: $soak_runs loops in $((SECONDS - soak_started)) seconds"
+    exit 0
 fi
 
 run dub test --compiler=ldc2

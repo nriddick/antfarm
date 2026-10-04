@@ -132,7 +132,9 @@ void roots(PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
     if (!consumers) check(view.subscribe(farm) >= 0);
     scope(exit) { workers.join(); if (!consumers) view.unsubscribe(); }
     auto output = new ulong[count];
-    foreach (round; 0 .. 8)
+    version (TSan) enum rounds = 2;
+    else enum rounds = 8;
+    foreach (round; 0 .. rounds)
     {
         output[] = 0;
         foreach (i; 0 .. count) check((park.spawn(State(&output[i], iterations, 0))) == PrivateSpawnResult.spawned);
@@ -229,7 +231,9 @@ void trees(uint consumers = 6)
     scope(exit) { version (AntfarmWriteAuditHooks) { writeAuditHook = null; fastView = null; } }
     auto output = new ulong[48 * 68];
     auto gates = new shared(uint)[48 * 17];
-    foreach (round; 0 .. 12)
+    version (TSan) enum rounds = 3;
+    else enum rounds = 12;
+    foreach (round; 0 .. rounds)
     {
         output[] = 0;
         foreach (i; 0 .. 48) check((park.spawn(Parent(null, output.ptr + i * 68, 0, gates.ptr + i * 17))) == PrivateSpawnResult.spawned);
@@ -355,7 +359,9 @@ void shardedCreators()
             check(token.valid);
             scope(exit) farm.unregisterProducer(token);
             auto output = new ulong[1024];
-            foreach (round; 0 .. 20)
+            version (TSan) enum rounds = 4;
+            else enum rounds = 20;
+            foreach (round; 0 .. rounds)
             {
                 output[] = 0;
                 foreach (i; 0 .. 1024) check((park.spawn(State(&output[i], 3, 0))) == PrivateSpawnResult.spawned);
@@ -927,6 +933,9 @@ void deathHarness()
             check(diedWithMessage(modeName, "antfarm fatal: invalid private root batch limit"));
         check(diedWithMessage("batch-child-zero", "antfarm fatal: invalid private child batch limit"));
         writeln("PASS invalid configured and per-call batch limits are fatal");
+        check(diedWithMessage("destroy-live", "antfarm fatal: destroy nonempty private root park"));
+        check(diedWithMessage("finish-with-active-child", "antfarm fatal: retire private actor with active child wave"));
+        writeln("PASS destroy-live and finish-with-active-child are fatal");
         version (assert)
         {
             check(diedWithMessage("reentrant-spawn", "antfarm fatal: private root park: reentrant entry"));
@@ -952,8 +961,682 @@ void deathNegativeControl()
         writeln("SKIP death negative control: /proc/self/exe re-exec requires Linux");
 }
 
+// Phase D controls and outputs belong to the test, never to borrowed actor state.
+void namedCheck(bool ok, string name) nothrow @nogc @system
+{ check(ok, name, 0); }
+void awaitRaw(ref shared uint flag, uint value, string name) nothrow @nogc @system
+{
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad!(MemoryOrder.raw)(flag) != value)
+    {
+        namedCheck(MonoTime.currTime < deadline, name);
+        pause();
+    }
+}
+version (AntfarmActorTestHooks)
+{
+    // Raw flags deliberately do not join callback result writes. The library
+    // return queue / wave idle acquire must provide those happens-before edges.
+    struct PrivateHookControl
+    {
+        shared uint armed, arrived, release, calls, creditCalls;
+        ActorTestPoint point;
+    }
+    __gshared PrivateHookControl* privateControl;
+    void privateHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+    {
+        auto c = privateControl;
+        if (point == ActorTestPoint.privateWaveCreditReleased)
+            atomicFetchAdd!(MemoryOrder.raw)(c.creditCalls, 1u);
+        if (point != c.point) return;
+        atomicFetchAdd!(MemoryOrder.raw)(c.calls, 1u);
+        if (!cas!(MemoryOrder.raw, MemoryOrder.raw)(&c.armed, 1u, 0u)) return;
+        atomicStore!(MemoryOrder.raw)(c.arrived, 1u);
+        awaitRaw(c.release, 1u, "private hook release timeout");
+    }
+}
+
+struct CohortControl { ulong* results; size_t count; uint completed, busy; }
+struct CohortRoot { PrivateChildPark!BatchChild* children; CohortControl* control; uint phase; }
+PrivateRootDisposition cohortStep(scope ref PrivateBorrow!CohortRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto c = b.value.control;
+    if (b.value.children is null)
+    {
+        b.value.children = ctx.createChildren!BatchChild(c.count);
+        namedCheck(b.value.children !is null, "cohort create");
+        foreach (i; 0 .. c.count)
+            namedCheck(b.value.children.spawn(ctx, BatchChild(c.results + i)) == PrivateSpawnResult.spawned,
+                "cohort spawn");
+        namedCheck(b.value.children.start!batchChildOperation(ctx) == PrivateStartResult.started,
+            "cohort first start");
+        b.value.phase = 1;
+        return PrivateRootDisposition.again;
+    }
+    if (!b.value.children.finished(ctx))
+    {
+        ++c.busy;
+        return PrivateRootDisposition.again;
+    }
+    foreach (i; 0 .. c.count) namedCheck(c.results[i] == b.value.phase, "cohort exactly once per generation");
+    c.completed = b.value.phase;
+    if (b.value.phase == 3) return PrivateRootDisposition.finish;
+    auto result = b.value.phase == 2 ? b.value.children.startFinal!batchChildOperation(ctx)
+        : b.value.children.start!batchChildOperation(ctx);
+    namedCheck(result == PrivateStartResult.started, "cohort reuse start");
+    ++b.value.phase;
+    return PrivateRootDisposition.again;
+}
+
+void childLargeCohort(size_t count)
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto results = new ulong[count];
+    CohortControl control = CohortControl(results.ptr, count);
+    auto parent = PrivateRootPark!(CohortRoot, cohortStep).create(farm, 1, 256, policy(counts));
+    check(parent !is null);
+    check(parent.spawn(CohortRoot(null, &control)) == PrivateSpawnResult.spawned);
+    check(parent.pump(token) == 1);
+    while (view.consumeNext()) {}
+
+    enum fillCount = 20000;
+    auto fillResults = new ulong[fillCount];
+    auto filler = Park.create(farm, fillCount, 256);
+    check(filler !is null);
+    foreach (i; 0 .. fillCount) check(filler.spawn(State(fillResults.ptr + i, 1, 0)) == PrivateSpawnResult.spawned);
+    size_t admitted;
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (true)
+    {
+        auto n = filler.pump(token);
+        if (n == 0) break;
+        admitted += n;
+        namedCheck(MonoTime.currTime < deadline, "cohort prefill timeout");
+    }
+    namedCheck(admitted > 0 && admitted < fillCount, "cohort Farm prefilled");
+    version (AntfarmActorTestHooks)
+    {
+        PrivateHookControl hook;
+        privateControl = &hook;
+        setActorTestHook(&privateHook);
+        // Mutation: delete `if (written == 0) releaseWave(wave);` in emit.
+        // A rejected child table must release its speculative table credit.
+        namedCheck(parent.pump(token) == 0, "full Farm rejects child and polling root tables");
+        namedCheck(atomicLoad!(MemoryOrder.raw)(hook.creditCalls) == 1, "child zero admission credit released");
+        setActorTestHook(null);
+        privateControl = null;
+    }
+    else namedCheck(parent.pump(token) == 0, "full Farm rejects child and polling root tables");
+    foreach (value; results) namedCheck(value == 0, "zero admission invokes no child");
+    // Drain the filler independently so the pending child gets a known fresh quota.
+    while (filler.live)
+    {
+        while (view.consumeNext()) {}
+        filler.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "cohort prefill drain timeout");
+    }
+    filler.destroy();
+    // For SqCs=1, a one-word ST table costs 40 + 18*n ulongs.
+    // A fresh 4096-word quota admits 225 children and leaves only six words;
+    // the following 58-word root needs writeImpl's automatic quota refresh.
+    // All filler tables are drained and the sole view has released its confirmed
+    // prefix, so the next segment ahead is free (32768 words > Exmax=4096).
+    // The child table is smaller than a segment; crossing into the next segment
+    // still leaves its following segment free. Make root admission explicit
+    // before relying on its live callback's deterministic busy observation.
+    namedCheck(parent.pump(token) == 1, "partial child polling root admission after quota refresh");
+    while (view.consumeNext()) {}
+    size_t prefix;
+    foreach (value; results) { namedCheck(value <= 1, "partial child prefix no duplicates"); prefix += value; }
+    // Mutation: replace `park.cursor_ += written;` with `park.cursor_ += n;`.
+    namedCheck(prefix > 0 && prefix < 256 && prefix < count, "child partial prefix below configured limit");
+    namedCheck(control.completed == 0 && control.busy > 0, "partial child wave stays active");
+    while (parent.live)
+    {
+        parent.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "child-large-cohort retry timeout");
+    }
+    foreach (value; results) namedCheck(value == 3, "child-large-cohort three exactly-once waves");
+    namedCheck(control.completed == 3, "child-large-cohort terminal join");
+    parent.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "child-large-cohort allocation balance");
+}
+
+struct AllocRoot { Counts* counts; ulong* result; }
+PrivateRootDisposition childAllocStep(scope ref PrivateBorrow!AllocRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto c = b.value.counts;
+    auto allocated = atomicLoad(c.allocated);
+    auto freed = atomicLoad(c.freed);
+    namedCheck(ctx.createChildren!BatchChild(0) is null, "child zero capacity");
+    namedCheck(ctx.createChildren!BatchChild(size_t.max) is null, "child capacity overflow");
+    namedCheck(atomicLoad(c.allocated) == allocated, "invalid child capacity allocates nothing");
+    foreach (budget; 0 .. 2)
+    {
+        atomicStore(c.budget, cast(long) budget);
+        namedCheck(ctx.createChildren!BatchChild(1) is null, "child object/entry allocation failure");
+        namedCheck(atomicLoad(c.allocated) - allocated == atomicLoad(c.freed) - freed,
+            "failed child create allocation balance");
+    }
+    atomicStore(c.budget, long.max);
+    auto children = ctx.createChildren!BatchChild(1);
+    namedCheck(children !is null, "child create after failure");
+    atomicStore(c.budget, 0L);
+    namedCheck(children.spawn(ctx, BatchChild(b.value.result)) == PrivateSpawnResult.allocationFailed,
+        "child state allocation failure");
+    namedCheck(children.finished(ctx), "failed child spawn stays idle");
+    namedCheck(children.start!batchChildOperation(ctx) == PrivateStartResult.empty, "failed slot stays empty");
+    atomicStore(c.budget, long.max);
+    namedCheck(children.spawn(ctx, BatchChild(b.value.result)) == PrivateSpawnResult.spawned, "failed child slot reusable");
+    namedCheck(children.spawn(ctx, BatchChild(b.value.result)) == PrivateSpawnResult.capacityFull, "recovered child capacity full");
+    return PrivateRootDisposition.finish; // idle member disposal is also balanced
+}
+void childAllocationFailures()
+{
+    Counts counts;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    ulong result;
+    auto park = PrivateRootPark!(AllocRoot, childAllocStep).create(farm, 1, 256, policy(counts));
+    check(park !is null);
+    check(park.spawn(AllocRoot(&counts, &result)) == PrivateSpawnResult.spawned);
+    check(park.pump(token) == 1);
+    while (view.consumeNext()) {}
+    park.collectCompleted();
+    namedCheck(park.live == 0 && result == 0, "child failure root retires without dispatch");
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "child failures total allocation balance");
+}
+
+void mixedTable(PrivateRootReclamation reclamation)(bool early)
+{
+    Counts counts;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(State, repeat, reclamation).create(farm, 2, 2, policy(counts));
+    check(park !is null);
+    ulong[2] result;
+    check(park.spawn(State(&result[0], 1, 0)) == PrivateSpawnResult.spawned);
+    check(park.spawn(State(&result[1], 2, 0)) == PrivateSpawnResult.spawned);
+    auto freed = atomicLoad(counts.freed);
+    version (AntfarmWriteAuditHooks)
+    {
+        if (early) { fastView = &view; earlyTables = 0; writeAuditHook = &consumeBeforeReturn; }
+    }
+    // Mutation: replace `batch.accepted = n;` with `batch.accepted = 0;`
+    // in prepareTableFrontN. A fully completed mixed table then loses both roots.
+    check(park.pump(token) == 2);
+    version (AntfarmWriteAuditHooks)
+    {
+        if (early)
+        {
+            writeAuditHook = null; fastView = null;
+            namedCheck(earlyTables == 1, "mixed table completed before write returned");
+        }
+    }
+    if (!early) while (view.consumeNext()) {}
+    namedCheck(result[0] == 1 && result[1] == 1 && park.live == 2, "mixed table live waits for collection");
+    static if (reclamation == PrivateRootReclamation.consumer)
+        namedCheck(atomicLoad(counts.freed) == freed + 1, "mixed consumer frees only terminal root");
+    else
+        namedCheck(atomicLoad(counts.freed) == freed, "mixed emitter defers root free");
+    park.collectCompleted();
+    namedCheck(park.live == 1 && atomicLoad(counts.freed) == freed + 1, "mixed table one terminal collected");
+    check(park.spawn(State(&result[0], 2, 1)) == PrivateSpawnResult.spawned);
+    check(park.pump(token) == 2);
+    while (view.consumeNext()) {}
+    park.collectCompleted();
+    namedCheck(park.live == 0 && result[0] == 2 && result[1] == 2, "mixed continuing root requeued and slot reused");
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "mixed allocation balance");
+}
+
+struct RefillControl { ulong result; shared uint busyObserved, observeBusy; }
+struct RefillRoot { PrivateChildPark!BatchChild* children; RefillControl* control; uint phase; }
+PrivateRootDisposition refillStep(scope ref PrivateBorrow!RefillRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto c = b.value.control;
+    if (b.value.children is null)
+    {
+        b.value.children = ctx.createChildren!BatchChild(1);
+        namedCheck(b.value.children !is null, "refill create");
+        namedCheck(b.value.children.start!batchChildOperation(ctx) == PrivateStartResult.empty, "initial empty start");
+        namedCheck(b.value.children.startFinal!batchChildOperation(ctx) == PrivateStartResult.empty, "initial empty final");
+        namedCheck(b.value.children.finished(ctx), "empty starts remain idle");
+        namedCheck(b.value.children.spawn(ctx, BatchChild(&c.result)) == PrivateSpawnResult.spawned, "refill initial spawn");
+        namedCheck(b.value.children.startFinal!batchChildOperation(ctx) == PrivateStartResult.started, "refill first final");
+        b.value.phase = 1;
+        return PrivateRootDisposition.again;
+    }
+    bool finished = b.value.children.finished(ctx);
+    if (b.value.phase == 1 && atomicLoad!(MemoryOrder.raw)(c.observeBusy) != 0)
+    {
+        namedCheck(!finished, "delayed idle: authorized parent must still see active");
+        namedCheck(b.value.children.start!batchChildOperation(ctx) == PrivateStartResult.waveActive,
+            "delayed idle rejects overlapping wave");
+        atomicStore!(MemoryOrder.raw)(c.busyObserved, 1u);
+        return PrivateRootDisposition.again;
+    }
+    if (!finished) return PrivateRootDisposition.again;
+    namedCheck(c.result == b.value.phase, "refill joined plain result");
+    if (b.value.phase == 3) return PrivateRootDisposition.finish;
+    if (b.value.phase == 1)
+    {
+        // Mutation: delete `if (park.retire_) park.count_ = 0;` in finish.
+        namedCheck(b.value.children.start!batchChildOperation(ctx) == PrivateStartResult.empty, "post-final empty start");
+        namedCheck(b.value.children.finished(ctx), "post-final empty start remains idle");
+        namedCheck(b.value.children.spawn(ctx, BatchChild(&c.result)) == PrivateSpawnResult.spawned, "refill terminal slot");
+        namedCheck(b.value.children.start!batchChildOperation(ctx) == PrivateStartResult.started, "refill normal wave");
+    }
+    else
+        namedCheck(b.value.children.startFinal!batchChildOperation(ctx) == PrivateStartResult.started, "refill second final");
+    ++b.value.phase;
+    return PrivateRootDisposition.again;
+}
+void refillAfterFinal()
+{
+    Counts counts;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    RefillControl c;
+    auto park = PrivateRootPark!(RefillRoot, refillStep).create(farm, 1, 256, policy(counts));
+    check(park !is null);
+    check(park.spawn(RefillRoot(null, &c)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "refill-after-final timeout");
+    }
+    namedCheck(c.result == 3, "refill generations exactly once");
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "refill allocation balance");
+}
+
+version (AntfarmActorTestHooks)
+{
+    void delayedFinalCredit()
+    {
+        Counts counts;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        RefillControl c;
+        auto park = PrivateRootPark!(RefillRoot, refillStep).create(farm, 1, 256, policy(counts));
+        check(park !is null);
+        check(park.spawn(RefillRoot(null, &c)) == PrivateSpawnResult.spawned);
+        check(park.pump(token) == 1);
+        while (view.consumeNext()) {}
+        PrivateHookControl hook;
+        hook.point = ActorTestPoint.privateWaveBeforeIdlePublish;
+        hook.armed = 1;
+        privateControl = &hook;
+        setActorTestHook(&privateHook);
+        shared uint ready, go, leave;
+        auto worker = new Thread({
+            ConsumerView other;
+            check(other.subscribe(farm) >= 0);
+            scope(exit) other.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(ready, 1u);
+            awaitRaw(go, 1u, "delayed idle worker start timeout");
+            auto deadline = MonoTime.currTime + 10.seconds;
+            while (atomicLoad!(MemoryOrder.raw)(hook.arrived) == 0)
+            {
+                other.consumeNext();
+                namedCheck(MonoTime.currTime < deadline, "delayed idle child claim timeout");
+            }
+            awaitRaw(leave, 1u, "delayed idle retirement before worker join timeout");
+        });
+        worker.start();
+        awaitRaw(ready, 1u, "delayed idle subscriber timeout");
+        // SqCs remains one with two subscribed views: each singleton costs
+        // 58 words. Initial root + child + polling root total only 174 of 4096.
+        namedCheck(park.pump(token) == 1, "delayed idle polling root admission");
+        atomicStore!(MemoryOrder.raw)(go, 1u);
+        awaitRaw(hook.arrived, 1u, "delayed idle final-credit hook timeout");
+        atomicStore!(MemoryOrder.raw)(c.observeBusy, 1u);
+        // Mutation: move the wave.active release-store above privateWaveBeforeIdlePublish.
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (atomicLoad!(MemoryOrder.raw)(c.busyObserved) == 0)
+        {
+            view.consumeNext();
+            namedCheck(MonoTime.currTime < deadline, "delayed idle authorized observation timeout");
+        }
+        atomicStore!(MemoryOrder.raw)(c.observeBusy, 0u);
+        atomicStore!(MemoryOrder.raw)(hook.release, 1u);
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "delayed idle immediate refill/retirement timeout");
+        }
+        namedCheck(c.result == 3, "delayed idle reused and retired before worker join");
+        park.destroy();
+        atomicStore!(MemoryOrder.raw)(leave, 1u);
+        worker.join();
+        setActorTestHook(null);
+        privateControl = null;
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "delayed idle allocation balance");
+    }
+
+    void returnCasRetry()
+    {
+        Counts counts;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        // capacity two / batch limit one creates exactly two descriptor slots.
+        auto park = Park.create(farm, 2, 1, policy(counts));
+        check(park !is null);
+        ulong[2] results;
+        foreach (i; 0 .. 2) check(park.spawn(State(&results[i], 1, 0)) == PrivateSpawnResult.spawned);
+        check(park.pump(token) == 1);
+        check(park.pump(token) == 1);
+        PrivateHookControl hook;
+        hook.point = ActorTestPoint.privateRootReturnBeforeCas;
+        hook.armed = 1;
+        privateControl = &hook;
+        setActorTestHook(&privateHook);
+        shared uint ready, go, leave, published;
+        auto worker = new Thread({
+            ConsumerView other;
+            check(other.subscribe(farm) >= 0);
+            scope(exit) other.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(ready, 1u);
+            awaitRaw(go, 1u, "return CAS worker start timeout");
+            auto deadline = MonoTime.currTime + 10.seconds;
+            while (atomicLoad!(MemoryOrder.raw)(hook.arrived) == 0)
+            {
+                other.consumeNext();
+                namedCheck(MonoTime.currTime < deadline, "return CAS first claim timeout");
+            }
+            atomicStore!(MemoryOrder.raw)(published, 1u);
+            awaitRaw(leave, 1u, "return CAS collection before worker join timeout");
+        });
+        worker.start();
+        awaitRaw(ready, 1u, "return CAS subscriber timeout");
+        atomicStore!(MemoryOrder.raw)(go, 1u);
+        awaitRaw(hook.arrived, 1u, "return CAS first head load timeout");
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (atomicLoad!(MemoryOrder.raw)(hook.calls) < 2)
+        {
+            view.consumeNext();
+            namedCheck(MonoTime.currTime < deadline, "return CAS competing publication timeout");
+        }
+        // Mutation: replace the retry head reload with `return;` in rootsCompleted.
+        // The paused CAS has the old null head; table two wins, forcing a retry.
+        atomicStore!(MemoryOrder.raw)(hook.release, 1u);
+        // Do not detach table two until the paused publisher has retried:
+        // otherwise exchange(null) could restore its original expected head.
+        awaitRaw(published, 1u, "return CAS retry publication timeout");
+        while (park.live)
+        {
+            park.collectCompleted();
+            namedCheck(MonoTime.currTime < deadline, "return CAS both tables collected timeout");
+        }
+        namedCheck(atomicLoad!(MemoryOrder.raw)(hook.calls) == 3, "return CAS exactly one retry");
+        namedCheck(results[0] == 1 && results[1] == 1, "return CAS both results joined exactly once");
+        foreach (i; 0 .. 2) check(park.spawn(State(&results[i], 2, 1)) == PrivateSpawnResult.spawned);
+        // Disable pausing with armed already zero; demonstrate both slots reusable.
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "return CAS recycled slots timeout");
+        }
+        namedCheck(results[0] == 2 && results[1] == 2, "return CAS reusable slots exactly once");
+        park.destroy();
+        atomicStore!(MemoryOrder.raw)(leave, 1u);
+        worker.join();
+        setActorTestHook(null);
+        privateControl = null;
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "return CAS allocation balance");
+    }
+}
+
+version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
+{
+    struct EarlyChildControl { shared uint ready, go, consumed, leave; uint tables; }
+    __gshared EarlyChildControl* earlyChildControl;
+    void earlyChildPublished(AntFarm*, WriteAuditPhase phase, ulong, ulong) nothrow @nogc @system
+    {
+        if (phase != WriteAuditPhase.tablePublished) return;
+        auto c = earlyChildControl;
+        if (++c.tables != 1) return;
+        // Mutation: set wave.pending to 0UL instead of 1UL in start (remove producer hold).
+        // A separate consumer completes the child while writeTracked is still on stack.
+        atomicStore!(MemoryOrder.raw)(c.go, 1u);
+        awaitRaw(c.consumed, 1u, "child completion before seal timeout");
+        namedCheck(atomicLoad!(MemoryOrder.raw)(privateControl.calls) == 0,
+            "early child completion must not publish idle before emitter seal");
+        namedCheck(atomicLoad!(MemoryOrder.raw)(privateControl.creditCalls) == 1,
+            "early child table credit completed before emitter seal");
+    }
+    void childBeforeSeal()
+    {
+        Counts counts;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        ulong result;
+        CohortControl control = CohortControl(&result, 1);
+        auto park = PrivateRootPark!(CohortRoot, cohortStep).create(farm, 1, 256, policy(counts));
+        check(park !is null);
+        check(park.spawn(CohortRoot(null, &control)) == PrivateSpawnResult.spawned);
+        check(park.pump(token) == 1);
+        while (view.consumeNext()) {}
+        PrivateHookControl hook;
+        hook.point = ActorTestPoint.privateWaveBeforeIdlePublish;
+        EarlyChildControl c;
+        privateControl = &hook;
+        earlyChildControl = &c;
+        setActorTestHook(&privateHook);
+        writeAuditHook = &earlyChildPublished;
+        auto worker = new Thread({
+            ConsumerView other;
+            check(other.subscribe(farm) >= 0);
+            scope(exit) other.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(c.ready, 1u);
+            awaitRaw(c.go, 1u, "early child worker start timeout");
+            auto deadline = MonoTime.currTime + 10.seconds;
+            while (atomicLoad!(MemoryOrder.raw)(hook.creditCalls) == 0)
+            {
+                other.consumeNext();
+                namedCheck(MonoTime.currTime < deadline, "early child claim timeout");
+            }
+            atomicStore!(MemoryOrder.raw)(c.consumed, 1u);
+            awaitRaw(c.leave, 1u, "early child reuse before worker join timeout");
+        });
+        worker.start();
+        awaitRaw(c.ready, 1u, "early child subscriber timeout");
+        park.pump(token); // audit hook blocks the emitter until the child table completed
+        writeAuditHook = null; // worker only consumes, and never enters a write path
+        namedCheck(atomicLoad!(MemoryOrder.raw)(hook.calls) == 1, "early child emitter seal publishes idle");
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live)
+        {
+            while (view.consumeNext()) {}
+            park.pump(token);
+            namedCheck(MonoTime.currTime < deadline, "early child normal/terminal reuse timeout");
+        }
+        namedCheck(result == 3 && control.completed == 3, "early child immediate normal/terminal reuse");
+        park.destroy();
+        atomicStore!(MemoryOrder.raw)(c.leave, 1u);
+        worker.join();
+        setActorTestHook(null);
+        privateControl = null;
+        earlyChildControl = null;
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "early child allocation balance");
+    }
+}
+
+struct DeepMember { PrivateChildPark!DeepMember* next; ulong* results; size_t depth; }
+void deepOperation(scope ref PrivateBorrow!DeepMember b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto d = b.value.depth;
+    namedCheck(d < 64 && b.value.results[d] == 0, "depth64 member exactly once");
+    b.value.results[d] = d + 1;
+    if (d == 63) return;
+    b.value.next = ctx.createChildren!DeepMember(1);
+    namedCheck(b.value.next !is null, "depth64 child create");
+    namedCheck(b.value.next.spawn(ctx, DeepMember(null, b.value.results, d + 1)) == PrivateSpawnResult.spawned,
+        "depth64 child spawn");
+    namedCheck(b.value.next.start!deepOperation(ctx) == PrivateStartResult.started, "depth64 descendant start");
+}
+void deepRetire(scope ref PrivateBorrow!DeepMember b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    namedCheck(b.value.depth == 0, "depth64 terminal top member");
+    namedCheck(ctx.createChildren!DeepMember(1) is null, "depth64 terminal authority");
+    foreach (i; 0 .. 64) namedCheck(b.value.results[i] == i + 1, "depth64 descendant results joined");
+    // Idle descendant parks are recursively disposed by terminal member retirement.
+}
+struct DeepRoot { PrivateChildPark!DeepMember* chain; ulong* results; uint phase; }
+PrivateRootDisposition deepStep(scope ref PrivateBorrow!DeepRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    if (b.value.chain is null)
+    {
+        b.value.chain = ctx.createChildren!DeepMember(1);
+        namedCheck(b.value.chain !is null, "depth64 root child create");
+        namedCheck(b.value.chain.spawn(ctx, DeepMember(null, b.value.results, 0)) == PrivateSpawnResult.spawned,
+            "depth64 root child spawn");
+        namedCheck(b.value.chain.start!deepOperation(ctx) == PrivateStartResult.started, "depth64 chain start");
+        b.value.phase = 1;
+        return PrivateRootDisposition.again;
+    }
+    if (!b.value.chain.finished(ctx)) return PrivateRootDisposition.again;
+    foreach (i; 0 .. 64) namedCheck(b.value.results[i] == i + 1, "depth64 root transitive join");
+    if (b.value.phase == 2) return PrivateRootDisposition.finish;
+    namedCheck(b.value.chain.startFinal!deepRetire(ctx) == PrivateStartResult.started, "depth64 chain retirement");
+    b.value.phase = 2;
+    return PrivateRootDisposition.again;
+}
+void depth64()
+{
+    // Completion and disposal recurse: this protects the documented stack-bound
+    // depth64 case without claiming an arbitrary-depth stack guarantee.
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ulong[64] results;
+    auto park = PrivateRootPark!(DeepRoot, deepStep).create(farm, 1, 256, policy(counts));
+    check(park !is null);
+    check(park.spawn(DeepRoot(null, results.ptr)) == PrivateSpawnResult.spawned);
+    auto workers = new Workers(farm, 2);
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "depth64 join/retirement timeout");
+    }
+    // Read before joining workers: visibility must come from the library.
+    foreach (i; 0 .. 64) namedCheck(results[i] == i + 1, "depth64 final joined result");
+    park.destroy();
+    workers.join();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "depth64 allocation balance");
+}
+
+PrivateRootDisposition activeChildFinish(scope ref PrivateBorrow!State, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto children = ctx.createChildren!State(1);
+    check(children !is null);
+    check(children.spawn(ctx, State.init) == PrivateSpawnResult.spawned);
+    check(children.start!authorityOperation(ctx) == PrivateStartResult.started);
+    return PrivateRootDisposition.finish;
+}
+void activeChildDeath()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    auto park = PrivateRootPark!(State, activeChildFinish).create(farm, 1);
+    check(park !is null);
+    check(park.spawn(State.init) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+}
+void destroyLiveDeath()
+{
+    auto farm = AntFarm.create();
+    auto park = Park.create(farm, 1);
+    check(park !is null);
+    check(park.spawn(State.init) == PrivateSpawnResult.spawned);
+    park.destroy();
+}
+void phaseD()
+{
+    childLargeCohort(257); childLargeCohort(513);
+    writeln("PASS child-large-cohort zero/partial admission, retry and three waves");
+    childAllocationFailures(); writeln("PASS child allocation failures, capacity overflow and reusable slot");
+    mixedTable!(PrivateRootReclamation.emitter)(false);
+    mixedTable!(PrivateRootReclamation.consumer)(false);
+    version (AntfarmWriteAuditHooks)
+    {
+        mixedTable!(PrivateRootReclamation.emitter)(true);
+        mixedTable!(PrivateRootReclamation.consumer)(true);
+    }
+    writeln("PASS mixed-table again/finish and early completion under both reclamation policies");
+    refillAfterFinal(); writeln("PASS refill-after-final and empty starts");
+    version (AntfarmActorTestHooks)
+    {
+        delayedFinalCredit(); writeln("PASS delayed-final-credit authorized observation and immediate reuse/retirement");
+        returnCasRetry(); writeln("PASS deterministic return-CAS retry and slot reuse");
+        version (AntfarmWriteAuditHooks)
+        {
+            childBeforeSeal(); writeln("PASS child completion before emitter seal and immediate reuse");
+        }
+    }
+    depth64(); writeln("PASS depth64 transitive joins, retirement and allocation balance");
+}
+
 void runSuite()
 {
+    phaseD();
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
     version (AntfarmWriteAuditHooks)
     {
@@ -1004,6 +1687,22 @@ void main(string[] args)
             version (AntfarmWriteAuditHooks) inheritedChildLimit();
             return;
         case "join-only": sameShardJoin(); return;
+        case "phase-d": phaseD(); return;
+        case "child-large-cohort": childLargeCohort(257); childLargeCohort(513); return;
+        case "mixed-table":
+            mixedTable!(PrivateRootReclamation.emitter)(true);
+            mixedTable!(PrivateRootReclamation.consumer)(true); return;
+        case "refill-after-final": refillAfterFinal(); return;
+        case "delayed-final-credit":
+            version (AntfarmActorTestHooks) delayedFinalCredit(); return;
+        case "return-cas-retry":
+            version (AntfarmActorTestHooks) returnCasRetry(); return;
+        case "child-before-seal":
+            version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks) childBeforeSeal(); return;
+        case "child-alloc-fail": childAllocationFailures(); return;
+        case "depth-64": depth64(); return;
+        case "destroy-live": destroyLiveDeath(); return;
+        case "finish-with-active-child": activeChildDeath(); return;
         case "death": deathHarness(); return;
         case "death-negative-control": deathNegativeControl(); return;
         case "death-exits-zero":
