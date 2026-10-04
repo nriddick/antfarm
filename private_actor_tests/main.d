@@ -936,6 +936,7 @@ void deathHarness()
         check(diedWithMessage("destroy-live", "antfarm fatal: destroy nonempty private root park"));
         check(diedWithMessage("finish-with-active-child", "antfarm fatal: retire private actor with active child wave"));
         writeln("PASS destroy-live and finish-with-active-child are fatal");
+        e1CounterExhaustionDeath();
         version (assert)
         {
             check(diedWithMessage("reentrant-spawn", "antfarm fatal: private root park: reentrant entry"));
@@ -1720,8 +1721,10 @@ PrivateRootDisposition e1Step(scope ref PrivateBorrow!E1Root b, scope ref Privat
         : c.polling ? PrivateRootDisposition.again : PrivateRootDisposition.waitChildren;
 }
 
-// Omit collector releaseRoot(entry): this bounded test fails deterministically
-// at "E1 completion deadline" instead of silently hanging the test runner.
+// Selector: e1-basic.
+// Catching mutation (E1-M1): delete the collector's `releaseRoot(entry);` in
+// collectCompletedImpl (no custody release). Waiting roots never resume; the
+// bounded loop fails "E1 completion deadline" instead of hanging the runner.
 void e1Basic(PrivateRootReclamation reclaim)()
 {
     Counts counts;
@@ -1757,8 +1760,13 @@ void e1Basic(PrivateRootReclamation reclaim)()
 }
 
 // Child join BEFORE root table custody release, including callback still in
-// flight and table peer still in flight. Early release/enqueue mutations fail
-// the zero-admission checks while the root physical table remains pinned.
+// flight and table peer still in flight. The collector is the final credit
+// owner here, and the zero-admission checks pin the root physical table.
+// Selector: e1-before-custody.
+// Catching mutation (E1-M2): in collectCompletedImpl replace `releaseRoot(entry);`
+// with a bare `atomicFetchSub!(MemoryOrder.acq_rel)(entry.pending, 1u);`, i.e.
+// the collector decrement that never enqueues on zero. Both children already
+// joined, so the root is never resumed: "E1 before custody completion".
 void e1BeforeCustody(bool peer)
 {
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
@@ -1815,6 +1823,12 @@ void e1BeforeCustody(bool peer)
 
 // AFTER collector release, hold the last descendant notification after idle.
 // poll must not publish work, and the sleeper must not retain its only Batch.
+// The child wave finisher is the final credit owner and must enqueue the root.
+// Selector: e1-after-custody.
+// Catching mutation (E1-M3): in PrivateChildPark.finish replace the root-wave
+// `releaseRoot(parent);` with a bare `atomicFetchSub!(MemoryOrder.acq_rel)(
+// parent.pending, 1u);` (wave decrement that never enqueues on zero). The
+// sleeping root is never resumed: "E1 after custody completion".
 void e1AfterCustody()
 {
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
@@ -1874,6 +1888,11 @@ PrivateRootDisposition e1StrictStep(scope ref PrivateBorrow!E1StrictRoot b, scop
     namedCheck(b.value.c.result[0] == 1, "E1 strict idle acquire joins result");
     return PrivateRootDisposition.finish;
 }
+// Selector: e1-late-strict.
+// Catching mutation (E1-M4): in collectCompletedImpl delete `entry.hasJoinCredits ||`
+// from the join-credit branch condition, so strict finish reclaims the Entry
+// without waiting for the paused notification tail. Fails
+// "E1 strict Entry pinned past state cleanup".
 version (AntfarmActorTestHooks)
 void e1LateStrict(PrivateRootReclamation reclaim)()
 {
@@ -1938,6 +1957,12 @@ PrivateRootDisposition e1JoinedStep(scope ref PrivateBorrow!E1Root b, scope ref 
     }
     return d;
 }
+// Selector: e1-joined-mixed.
+// Catching mutation (E1-M5): in collectCompletedImpl delete
+// `|| entry.disposition != PrivateRootDisposition.finish` so a waitChildren
+// root with no active waves (hasJoinCredits false) is reclaimed as a leaf finish
+// instead of getting its one later callback. Fails
+// "E1 already joined wait exactly one later call".
 void e1JoinedAndMixed(PrivateRootReclamation reclaim)()
 {
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
@@ -1972,6 +1997,341 @@ void e1JoinedAndMixed(PrivateRootReclamation reclaim)()
     mixed.destroy(); workers.join();
 }
 
+// Minimal waiting root: first callback launches one direct child and waits,
+// second callback checks the joined plain result and finishes.
+struct E1CasControl
+{
+    shared uint arrived, go;
+    ulong result;
+    uint calls, rank;
+    uint* nextRank;
+}
+struct E1CasChild { E1CasControl* c; }
+void e1CasLeaf(scope ref PrivateBorrow!E1CasChild b, scope ref PrivateContext) nothrow @nogc @system
+{
+    auto c = b.value.c;
+    atomicStore!(MemoryOrder.raw)(c.arrived, 1u);
+    awaitRaw(c.go, 1u, "E1 CAS child barrier");
+    ++c.result; // plain write; visible to the resumed root only through library joins
+}
+struct E1CasRoot { E1CasControl* c; PrivateChildPark!E1CasChild* child; }
+PrivateRootDisposition e1CasStep(scope ref PrivateBorrow!E1CasRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto c = b.value.c;
+    if (++c.calls == 2)
+    {
+        namedCheck(c.result == 1, "E1 CAS joined plain result");
+        c.rank = ++*c.nextRank;
+        return PrivateRootDisposition.finish;
+    }
+    namedCheck(c.calls == 1, "E1 CAS exactly two user calls");
+    b.value.child = ctx.createChildren!E1CasChild(1);
+    namedCheck(b.value.child !is null, "E1 CAS child create");
+    namedCheck(b.value.child.spawn(ctx, E1CasChild(c)) == PrivateSpawnResult.spawned, "E1 CAS child spawn");
+    namedCheck(b.value.child.start!e1CasLeaf(ctx) == PrivateStartResult.started, "E1 CAS child start");
+    return PrivateRootDisposition.waitChildren;
+}
+
+version (AntfarmActorTestHooks)
+{
+    struct E1CasWorker { shared uint returns; uint id; }
+    // Thread-local: identifies the consumer a hook callback runs on.
+    E1CasWorker* e1CasSelf;
+    struct E1CasHookControl { shared uint armed, arrived, release, calls; }
+    __gshared E1CasHookControl* e1CasHookControl;
+    void e1CasHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+    {
+        if (point != ActorTestPoint.privateRootReadyBeforeCas) return;
+        auto h = e1CasHookControl;
+        atomicFetchAdd!(MemoryOrder.raw)(h.calls, 1u);
+        if (!cas!(MemoryOrder.raw, MemoryOrder.raw)(&h.armed, 1u, 0u)) return;
+        atomicStore!(MemoryOrder.raw)(h.arrived, e1CasSelf.id); // worker index + 1
+        awaitRaw(h.release, 1u, "E1 CAS hook release timeout");
+    }
+
+    struct E1CasPool { shared uint ready, go, stop, parked, leave; }
+    // A function, not a loop-body delegate: each worker needs its own frame.
+    Thread e1CasWorkerThread(AntFarm* farm, E1CasWorker* me, E1CasPool* pool)
+    {
+        return new Thread({
+            e1CasSelf = me;
+            ConsumerView other; check(other.subscribe(farm) >= 0);
+            scope(exit) other.unsubscribe();
+            atomicFetchAdd!(MemoryOrder.raw)(pool.ready, 1u);
+            awaitRaw(pool.go, 1u, "E1 CAS worker go");
+            while (atomicLoad!(MemoryOrder.raw)(pool.stop) == 0)
+            {
+                other.consumeNext();
+                atomicFetchAdd!(MemoryOrder.raw)(me.returns, 1u);
+            }
+            atomicFetchAdd!(MemoryOrder.raw)(pool.parked, 1u);
+            awaitRaw(pool.leave, 1u, "E1 CAS worker leave");
+        });
+    }
+
+    // Two roots each wait on one child. Their final credits are released by two
+    // different consumers, so both race on the root-ready MPSC stack, distinct
+    // from the Batch return stack. Worker X reads the null head and pauses before
+    // its publication CAS; worker Y publishes its root; X's CAS must fail, reload
+    // and republish. Both roots resume exactly once, in publication order.
+    // Selector: e1-root-ready-cas-retry.
+    // Catching mutation (E1-M6): in releaseRoot replace the failed-CAS reload
+    // `head = atomicLoad!(MemoryOrder.raw)(*returns);` with `return;`. The retry
+    // never happens and the root is dropped: "E1 CAS exactly one retry".
+    void e1RootReadyCasRetry()
+    {
+        Counts counts;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view; check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        uint rank;
+        E1CasControl[2] c;
+        foreach (ref x; c) x.nextRank = &rank;
+        auto park = PrivateRootPark!(E1CasRoot, e1CasStep).create(farm, 2, 2, policy(counts));
+        check(park !is null);
+        foreach (ref x; c) check(park.spawn(E1CasRoot(&x)) == PrivateSpawnResult.spawned);
+        namedCheck(park.pump(token) == 2, "E1 CAS roots published in one table");
+        while (view.consumeNext()) {} // both roots start their wave on this thread
+        namedCheck(c[0].calls == 1 && c[1].calls == 1, "E1 CAS first callbacks");
+        E1CasHookControl hook; hook.armed = 1;
+        e1CasHookControl = &hook; setActorTestHook(&e1CasHook);
+        scope(exit) { setActorTestHook(null); e1CasHookControl = null; }
+        E1CasWorker[2] workers;
+        E1CasPool pool;
+        Thread[2] threads;
+        foreach (i; 0 .. 2)
+        {
+            workers[i].id = cast(uint) i + 1;
+            threads[i] = e1CasWorkerThread(farm, &workers[i], &pool);
+            threads[i].start();
+        }
+        awaitRaw(pool.ready, 2u, "E1 CAS workers ready");
+        // The collector releases custody; each wave tail is then the last credit.
+        namedCheck(park.pump(token) == 0, "E1 CAS waves emitted, no root ready");
+        atomicStore!(MemoryOrder.raw)(pool.go, 1u);
+        awaitRaw(c[0].arrived, 1u, "E1 CAS first child running");
+        awaitRaw(c[1].arrived, 1u, "E1 CAS second child running");
+        // Each worker is blocked inside its child's consumeNext, so its return
+        // counter is frozen until that call (including the root release) returns.
+        atomicStore!(MemoryOrder.raw)(c[0].go, 1u);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (atomicLoad!(MemoryOrder.raw)(hook.arrived) == 0)
+        {
+            namedCheck(MonoTime.currTime < deadline, "E1 CAS first publisher paused");
+            pause();
+        }
+        auto paused = &workers[atomicLoad!(MemoryOrder.raw)(hook.arrived) - 1];
+        auto other = &workers[2 - atomicLoad!(MemoryOrder.raw)(hook.arrived)];
+        immutable pausedBase = atomicLoad!(MemoryOrder.raw)(paused.returns);
+        immutable otherBase = atomicLoad!(MemoryOrder.raw)(other.returns);
+        namedCheck(atomicLoad!(MemoryOrder.raw)(hook.calls) == 1, "E1 CAS one head load before competitor");
+        atomicStore!(MemoryOrder.raw)(c[1].go, 1u);
+        while (atomicLoad!(MemoryOrder.raw)(other.returns) == otherBase)
+        {
+            namedCheck(MonoTime.currTime < deadline, "E1 CAS competing publication timeout");
+            pause();
+        }
+        namedCheck(atomicLoad!(MemoryOrder.raw)(hook.calls) == 2, "E1 CAS competitor published once");
+        atomicStore!(MemoryOrder.raw)(hook.release, 1u);
+        while (atomicLoad!(MemoryOrder.raw)(paused.returns) == pausedBase)
+        {
+            namedCheck(MonoTime.currTime < deadline, "E1 CAS retry publication timeout");
+            pause();
+        }
+        // The collector stayed idle until the retry published, so no exchange
+        // can restore the stale null head.
+        namedCheck(atomicLoad!(MemoryOrder.raw)(hook.calls) == 3, "E1 CAS exactly one retry");
+        atomicStore!(MemoryOrder.raw)(pool.stop, 1u);
+        awaitRaw(pool.parked, 2u, "E1 CAS workers parked");
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "E1 CAS both roots resumed");
+        }
+        namedCheck(c[0].calls == 2 && c[1].calls == 2, "E1 CAS each root resumed exactly once");
+        namedCheck(c[1].rank == 1 && c[0].rank == 2, "E1 CAS FIFO follows publication order");
+        park.destroy();
+        atomicStore!(MemoryOrder.raw)(pool.leave, 1u);
+        foreach (t; threads) t.join();
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "E1 CAS allocation balance");
+    }
+}
+
+version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
+{
+    struct E1SealControl
+    {
+        shared uint ready, go, consumed, leave, creditCalls, creditOnEmitter, readyCalls, readyOnEmitter;
+        uint tables;
+    }
+    __gshared E1SealControl* e1Seal;
+    bool e1OnEmitter; // thread-local
+    void e1SealHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+    {
+        auto s = e1Seal;
+        if (point == ActorTestPoint.privateRootCreditBeforeRelease)
+        {
+            atomicFetchAdd!(MemoryOrder.raw)(s.creditCalls, 1u);
+            if (e1OnEmitter) atomicFetchAdd!(MemoryOrder.raw)(s.creditOnEmitter, 1u);
+        }
+        else if (point == ActorTestPoint.privateRootReadyBeforeCas)
+        {
+            atomicFetchAdd!(MemoryOrder.raw)(s.readyCalls, 1u);
+            if (e1OnEmitter) atomicFetchAdd!(MemoryOrder.raw)(s.readyOnEmitter, 1u);
+        }
+    }
+    void e1SealPublished(AntFarm*, WriteAuditPhase phase, ulong, ulong) nothrow @nogc @system
+    {
+        if (phase != WriteAuditPhase.tablePublished) return;
+        auto s = e1Seal;
+        if (++s.tables != 1) return; // first table after installation is the child's
+        atomicStore!(MemoryOrder.raw)(s.go, 1u);
+        awaitRaw(s.consumed, 1u, "E1 seal child completion before seal timeout");
+        // Child table fully joined, emitter still inside writeTracked: the only
+        // root credit released so far is the collector's custody release, and the
+        // root has not been woken.
+        namedCheck(atomicLoad!(MemoryOrder.raw)(s.creditCalls) == 1, "E1 seal only custody released before seal");
+        namedCheck(atomicLoad!(MemoryOrder.raw)(s.readyCalls) == 0, "E1 seal no root wake before seal");
+    }
+
+    // The child table joins completely while the emitter is still inside the
+    // wave's writeTracked, after the collector released root custody. The only
+    // remaining wave credit is the producer hold, so the emitter's seal in
+    // PrivateChildPark.emit owns the wave's finish, the root's final credit and
+    // the root-ready publication, all on the emitter thread, with no consumer
+    // notification left to wake the root.
+    // Selector: e1-seal-final-owner.
+    // Catching mutation (E1-M7): in PrivateChildPark.emit replace the seal
+    // `releaseWave(wave);` by a bare `atomicFetchSub!(MemoryOrder.acq_rel)(
+    // wave.pending, 1UL);`. The wave never finishes, no wake is published, and the
+    // test fails "E1 seal emitter released the final root credit".
+    void e1SealFinalOwner()
+    {
+        Counts counts;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view; check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        uint rank;
+        E1CasControl c;
+        c.nextRank = &rank;
+        atomicStore!(MemoryOrder.raw)(c.go, 1u); // child never blocks
+        auto park = PrivateRootPark!(E1CasRoot, e1CasStep).create(farm, 1, 1, policy(counts));
+        check(park !is null);
+        check(park.spawn(E1CasRoot(&c)) == PrivateSpawnResult.spawned);
+        namedCheck(park.pump(token) == 1, "E1 seal root published");
+        while (view.consumeNext()) {} // first callback starts the wave on this thread
+        namedCheck(c.calls == 1, "E1 seal first callback");
+        E1SealControl s;
+        e1Seal = &s;
+        setActorTestHook(&e1SealHook);
+        writeAuditHook = &e1SealPublished;
+        e1OnEmitter = true;
+        auto worker = new Thread({
+            ConsumerView other; check(other.subscribe(farm) >= 0);
+            scope(exit) other.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(s.ready, 1u);
+            awaitRaw(s.go, 1u, "E1 seal worker go");
+            do other.consumeNext(); while (atomicLoad!(MemoryOrder.raw)(c.arrived) == 0);
+            atomicStore!(MemoryOrder.raw)(s.consumed, 1u);
+            awaitRaw(s.leave, 1u, "E1 seal worker leave");
+        });
+        worker.start();
+        awaitRaw(s.ready, 1u, "E1 seal worker ready");
+        // Collect (custody release), emit the wave table, run the audit hook.
+        namedCheck(park.pump(token) == 0, "E1 seal wake not published by the same pump");
+        writeAuditHook = null;
+        namedCheck(atomicLoad!(MemoryOrder.raw)(s.creditCalls) == 2
+            && atomicLoad!(MemoryOrder.raw)(s.creditOnEmitter) == 2, "E1 seal emitter released the final root credit");
+        namedCheck(atomicLoad!(MemoryOrder.raw)(s.readyCalls) == 1
+            && atomicLoad!(MemoryOrder.raw)(s.readyOnEmitter) == 1, "E1 seal emitter published the root wake");
+        namedCheck(c.calls == 1 && park.live == 1, "E1 seal root asleep until collected");
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "E1 seal root resumption timeout");
+        }
+        namedCheck(c.calls == 2, "E1 seal exactly one resumed callback");
+        park.destroy();
+        atomicStore!(MemoryOrder.raw)(s.leave, 1u);
+        worker.join();
+        setActorTestHook(null);
+        e1Seal = null;
+        e1OnEmitter = false;
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "E1 seal allocation balance");
+    }
+}
+
+// Counter exhaustion. The root's join counter is a uint at Entry offset 36.
+// The test-only seam forces uint.max - 1 inside the root callback; the first
+// legitimate retain (a direct wave start) must reach uint.max and the next one
+// must die with the checked-retain message instead of wrapping to zero.
+version (AntfarmActorTestHooks)
+{
+    struct E1ExhaustRoot { E1Control* c; PrivateChildPark!E1Child* first, second; }
+    PrivateRootDisposition e1ExhaustStep(scope ref PrivateBorrow!E1ExhaustRoot b, scope ref PrivateContext ctx)
+        nothrow @nogc @system
+    {
+        b.value.first = ctx.createChildren!E1Child(1);
+        b.value.second = ctx.createChildren!E1Child(1);
+        namedCheck(b.value.first !is null && b.value.second !is null, "E1 exhaustion cohorts");
+        namedCheck(b.value.first.spawn(ctx, E1Child(b.value.c, 0)) == PrivateSpawnResult.spawned, "E1 exhaustion spawn one");
+        namedCheck(b.value.second.spawn(ctx, E1Child(b.value.c, 1)) == PrivateSpawnResult.spawned, "E1 exhaustion spawn two");
+        privateTestSetRootCredits(ctx, uint.max - 1);
+        namedCheck(b.value.first.start!e1Leaf(ctx) == PrivateStartResult.started, "E1 exhaustion retain below limit");
+        fprintf(stderr, "e1 exhaustion: retain at uint.max - 1 accepted\n");
+        b.value.second.start!e1Leaf(ctx); // retain at uint.max: must be fatal
+        fprintf(stderr, "e1 exhaustion: retain at uint.max survived\n");
+        return PrivateRootDisposition.waitChildren;
+    }
+    // Child process body for the death harness (mode e1-counter-exhaustion).
+    void e1CounterExhaustion()
+    {
+        auto farm = AntFarm.create();
+        auto token = farm.registerProducer(Tier.small);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        E1Control c;
+        auto park = PrivateRootPark!(E1ExhaustRoot, e1ExhaustStep).create(farm, 1);
+        check(park !is null);
+        check(park.spawn(E1ExhaustRoot(&c)) == PrivateSpawnResult.spawned);
+        check(park.pump(token) == 1);
+        while (view.consumeNext()) {}
+        // Reached only if the checked retain did not kill the callback; collecting
+        // makes a wrapped counter die with a different (underflow) message.
+        park.poll();
+    }
+}
+// Selector: e1-counter-exhaustion-death (parent side; debug and -release binaries
+// via make run-death). Checks the nonzero death, the exact fatal text, and that
+// the retain just below the limit was accepted first.
+// Catching mutation (E1-M8): delete `if (old == uint.max) fatal("private join
+// credit overflow");` from retainRootCredit. The counter wraps to zero, the child
+// dies later with the underflow text (or survives) and the check fails.
+void e1CounterExhaustionDeath()
+{
+    version (linux) version (AntfarmActorTestHooks)
+    {
+        auto probe = probeDeath("e1-counter-exhaustion");
+        check(probe.status != 0);
+        check(probe.stderrText.canFind("e1 exhaustion: retain at uint.max - 1 accepted"));
+        check(probe.stderrText.canFind("antfarm fatal: private join credit overflow"));
+        check(!probe.stderrText.canFind("retain at uint.max survived"));
+        writeln("PASS E1 join counter exhaustion is fatal after the last legal retain");
+        return;
+    }
+    writeln("SKIP E1 counter exhaustion death: requires Linux and AntfarmActorTestHooks");
+}
+
 void phaseE1()
 {
     e1Basic!(PrivateRootReclamation.emitter)();
@@ -1983,6 +2343,8 @@ void phaseE1()
     {
         e1LateStrict!(PrivateRootReclamation.emitter)();
         e1LateStrict!(PrivateRootReclamation.consumer)();
+        e1RootReadyCasRetry();
+        version (AntfarmWriteAuditHooks) e1SealFinalOwner();
     }
     writeln("PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle");
 }
@@ -2042,6 +2404,44 @@ void main(string[] args)
             return;
         case "join-only": sameShardJoin(); return;
         case "phase-e1": phaseE1(); return;
+        case "e1-basic":
+            e1Basic!(PrivateRootReclamation.emitter)();
+            e1Basic!(PrivateRootReclamation.consumer)();
+            writeln("PASS e1-basic"); return;
+        case "e1-before-custody":
+            e1BeforeCustody(false); e1BeforeCustody(true);
+            writeln("PASS e1-before-custody"); return;
+        case "e1-after-custody": e1AfterCustody(); writeln("PASS e1-after-custody"); return;
+        case "e1-late-strict":
+            version (AntfarmActorTestHooks)
+            {
+                e1LateStrict!(PrivateRootReclamation.emitter)();
+                e1LateStrict!(PrivateRootReclamation.consumer)();
+                writeln("PASS e1-late-strict");
+            }
+            return;
+        case "e1-joined-mixed":
+            e1JoinedAndMixed!(PrivateRootReclamation.emitter)();
+            e1JoinedAndMixed!(PrivateRootReclamation.consumer)();
+            writeln("PASS e1-joined-mixed"); return;
+        case "e1-root-ready-cas-retry":
+            version (AntfarmActorTestHooks)
+            {
+                e1RootReadyCasRetry();
+                writeln("PASS e1-root-ready-cas-retry");
+            }
+            return;
+        case "e1-seal-final-owner":
+            version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
+            {
+                e1SealFinalOwner();
+                writeln("PASS e1-seal-final-owner");
+            }
+            return;
+        case "e1-counter-exhaustion":
+            version (AntfarmActorTestHooks) e1CounterExhaustion();
+            return;
+        case "e1-counter-exhaustion-death": e1CounterExhaustionDeath(); return;
         case "phase-d": phaseD(); return;
         case "child-large-cohort": childLargeCohort(257); childLargeCohort(513); return;
         case "mixed-table":

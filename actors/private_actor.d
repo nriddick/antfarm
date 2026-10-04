@@ -123,6 +123,18 @@ private void retainRootCredit(ref shared uint pending) nothrow @nogc @system
     }
 }
 
+version (AntfarmActorTestHooks)
+{
+    /// Test-only seam: overwrite the running root's join counter so a
+    /// legitimate retain can reach the exhaustion check. Never compiled into
+    /// production builds; the caller must be inside that root's callback.
+    void privateTestSetRootCredits(scope ref PrivateContext context, uint credits)
+        nothrow @nogc @system
+    {
+        atomicStore!(MemoryOrder.raw)(context.actor_.pending, credits);
+    }
+}
+
 private void releaseRoot(Entry* entry) nothrow @nogc @system
 {
     version (AntfarmActorTestHooks)
@@ -135,6 +147,8 @@ private void releaseRoot(Entry* entry) nothrow @nogc @system
     while (true)
     {
         entry.next = cast(Entry*) head;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateRootReadyBeforeCas, null);
         if (cas!(MemoryOrder.rel, MemoryOrder.raw)(returns, head, cast(shared(Entry)*) entry))
             return; // final entry AND service access
         head = atomicLoad!(MemoryOrder.raw)(*returns);

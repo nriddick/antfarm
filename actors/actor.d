@@ -117,6 +117,7 @@ version (AntfarmActorTestHooks)
         privateRootCustodyBeforeRelease,
         privateRootCreditBeforeRelease,
         privateRootAfterIdleBeforeCredit,
+        privateRootReadyBeforeCas,
         readyDetached,
         retirementIdleObserved,
     }
