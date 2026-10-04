@@ -929,6 +929,7 @@ void deathHarness()
             "default-finished", "default-create"])
             check(diedWithMessage(modeName, "antfarm fatal: private child park: unauthorized context"));
         writeln("PASS wrong-parent and default authority are fatal");
+        portsDeath();
         foreach (modeName; ["batch-create-zero", "batch-pump-zero", "batch-pump-over"])
             check(diedWithMessage(modeName, "antfarm fatal: invalid private root batch limit"));
         check(diedWithMessage("batch-child-zero", "antfarm fatal: invalid private child batch limit"));
@@ -2349,10 +2350,1234 @@ void phaseE1()
     writeln("PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle");
 }
 
+// ===========================================================================
+// Typed result ports (E2 slice 1), design §8: T1-T8, D1-D2.
+//
+// Every result is generation- and index-tagged: (wave << 32) | spawnIndex,
+// where `wave` is the member's own dispatch count (a void wave also counts)
+// and `spawnIndex` is stored in the member. A slot written by the wrong
+// member, or a member dispatched twice, therefore fails a tag comparison.
+// Raw (relaxed) flags are scheduling controls only: result visibility must
+// come from the library's finished/results acquire and join chain.
+// Each test comment names the mutation it catches (P-M1 .. P-M13) and the
+// concrete outcome observed when that mutation was applied by hand.
+// ===========================================================================
+struct PMember { uint index, wave; }
+ulong portsValue(uint wave, size_t index) pure nothrow @nogc @safe
+{ return (cast(ulong) wave << 32) | index; }
+ulong portsTag(scope ref PrivateBorrow!PMember m, scope ref PrivateContext) nothrow @nogc @system
+{ return portsValue(++m.value.wave, m.value.index); }
+void portsTouch(scope ref PrivateBorrow!PMember m, scope ref PrivateContext) nothrow @nogc @system
+{ ++m.value.wave; }
+
+ubyte portsThreadMarker; // thread-local: its address identifies the running consumer
+ulong portsThreadId() nothrow @nogc @system { return cast(ulong) &portsThreadMarker; }
+
+// ---- T8: compile-time contract and layout ------------------------------------
+// Mutation: any change to the createChildren/start/results template
+// constraints (drop the POD static assert on R, accept any return type, or
+// expose `results` on a void cohort) turns one of these asserts false.
+struct PItem { ulong input; }
+struct PNotPod { int x; this(this) {} }
+struct PWide { ulong[16] words; }
+ulong pSquare(scope ref PrivateBorrow!PItem, scope ref PrivateContext) nothrow @nogc @system { return 0; }
+void pVoidOp(scope ref PrivateBorrow!PItem, scope ref PrivateContext) nothrow @nogc @system {}
+uint pWrongType(scope ref PrivateBorrow!PItem, scope ref PrivateContext) nothrow @nogc @system { return 0; }
+void pVoidNotNothrow(scope ref PrivateBorrow!PItem, scope ref PrivateContext) @nogc @system {}
+void pVoidNotNogc(scope ref PrivateBorrow!PItem, scope ref PrivateContext) nothrow @system {}
+ulong pNotNothrow(scope ref PrivateBorrow!PItem, scope ref PrivateContext) @system { return 0; }
+alias PVoidCohort = PrivateChildPark!PItem;
+alias PUlongCohort = PrivateChildPark!(PItem, ulong);
+static assert(is(PVoidCohort == PrivateChildPark!(PItem, void)));
+static assert(!PVoidCohort.hasResults && PUlongCohort.hasResults);
+static assert(!__traits(compiles, PrivateChildPark!(PItem, const ulong)));
+static assert(!__traits(compiles, PrivateChildPark!(PItem, immutable ulong)));
+static assert(!__traits(compiles, PrivateChildPark!(PItem, shared ulong)));
+static assert(!__traits(compiles, PrivateChildPark!(PItem, shared const ulong)));
+static assert(!__traits(compiles, PrivateChildPark!(PItem, inout ulong)));
+static assert(!__traits(compiles, PrivateChildPark!(PItem, PNotPod)));       // non-POD R
+static assert(!__traits(compiles, PrivateChildPark!(PNotPod, ulong)));       // non-POD T (existing rule)
+static assert(__traits(compiles, PrivateChildPark!(PItem, PWide)));          // POD aggregate R
+static assert(!__traits(hasMember, PVoidCohort, "results"));                 // absent on a void cohort
+static assert(__traits(hasMember, PUlongCohort, "results"));
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c) => p.results(c)));
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c) => p.start!pSquare(c)));      // R op, void cohort
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c) => p.startFinal!pSquare(c)));
+static assert(!__traits(compiles, (PUlongCohort* p, ref PrivateContext c) => p.start!pWrongType(c)));  // wrong return type
+static assert(!__traits(compiles, (PUlongCohort* p, ref PrivateContext c) => p.startFinal!pWrongType(c)));
+static assert(!__traits(compiles, (PUlongCohort* p, ref PrivateContext c) => p.start!pNotNothrow(c)));
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c) => p.start!pVoidNotNothrow(c)));
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c) => p.start!pVoidNotNogc(c)));
+static assert(!__traits(compiles, (PUlongCohort* p, ref PrivateContext c) => p.start!pVoidNotNothrow(c)));
+static assert(!__traits(compiles, (PUlongCohort* p, ref PrivateContext c) => p.start!pVoidNotNogc(c)));
+static assert(!__traits(compiles,
+    (PrivateChildPark!(PItem, uint)* p, ref PrivateContext c) => p.start!pSquare(c)));                  // R mismatch
+static assert(__traits(compiles, (PUlongCohort* p, ref PrivateContext c) => p.start!pVoidOp(c)));      // void op on result cohort
+static assert(__traits(compiles, (PUlongCohort* p, ref PrivateContext c) => p.start!pSquare(c)));
+static assert(__traits(compiles, (PUlongCohort* p, ref PrivateContext c) => p.startFinal!pSquare(c)));
+static assert(__traits(compiles, (PVoidCohort* p, ref PrivateContext c) => p.start!pVoidOp(c)));       // unchanged today
+static assert(is(typeof(PrivateContext.init.createChildren!PItem(1)) == PVoidCohort*));
+static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1)) == PUlongCohort*));
+static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1, 2)) == PUlongCohort*));
+static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNotPod)(1)));
+// Layout: R = void is today's cohort and root park (sizes measured on main
+// 374909c: ChildBase/Wave/payload header and Service are embedded), results
+// add exactly two words and nothing else. Entry's own
+// 40-byte layout is asserted next to its definition and checked through the
+// allocation sizes in portsAllocationFailures.
+static if (size_t.sizeof == 8)
+{
+    static assert(PVoidCohort.sizeof == 264);
+    // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
+    version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 168);
+    else static assert(PrivateRootPark!(State, repeat).sizeof == 160);
+}
+static assert(PUlongCohort.sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
+static assert(PrivateChildPark!(PItem, ubyte).sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
+static assert(PrivateChildPark!(PItem, PWide).sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
+static assert(PrivateChildPark!(PItem, PWide).alignof == PVoidCohort.alignof);
+
+// ---- T1: ports-basic ------------------------------------------------------------
+// Selector: ports-basic. U1-U3: empty before the first wave, waitChildren
+// read, polling (again/finished) read, late spawn keeps length, void wave
+// clears, startFinal results survive member retirement, empty start keeps
+// them, refill then new results, both reclamation policies, allocation balance.
+// Catching mutations (each applied by hand to actors/private_actor.d):
+//   P-M1 result length derived from the live member count instead of the
+//        count stored at start. Applied three ways:
+//        (a) `results` returns results_[0 .. count_]: fails first at
+//            "ports spawn alone produces no results" (spawn raised count_).
+//        (b) finish clears `resultCount_` when it retires members (the
+//            "final length" bug): fails "ports final wave results survive retirement".
+//        (c) start's store deleted and finish sets `resultCount_ = count_`
+//            after the retire zeroing: fails "ports void wave clears results".
+//   P-M2 start sets `resultCount_ = producesResults ? count_ : resultCount_`
+//        (a void wave does not clear): fails "ports void wave clears results".
+//   P-M3 the `resultCount_ = ...` store moved above the `count_ == 0` check
+//        (an empty start clears after startFinal): fails "ports empty start keeps results".
+//   P-M4 dispose omits the `results_` free: fails "ports basic allocation balance".
+struct PBasic { PrivateChildPark!(PMember, ulong)* c; uint phase; size_t n; shared ulong* done; }
+PrivateRootDisposition portsBasicStep(scope ref PrivateBorrow!PBasic b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    switch (s.phase++)
+    {
+        case 0:
+            s.c = ctx.createChildren!(PMember, ulong)(s.n, 64);
+            namedCheck(s.c !is null, "ports basic create");
+            namedCheck(s.c.finished(ctx), "ports basic idle before first wave");
+            namedCheck(s.c.results(ctx).length == 0, "ports results empty before the first wave");
+            namedCheck(s.c.start!portsTag(ctx) == PrivateStartResult.empty, "ports basic empty start");
+            namedCheck(s.c.results(ctx).length == 0, "ports results still empty after empty start");
+            foreach (i; 0 .. s.n - 1)
+                namedCheck(s.c.spawn(ctx, PMember(cast(uint) i)) == PrivateSpawnResult.spawned, "ports basic spawn");
+            namedCheck(s.c.results(ctx).length == 0, "ports spawn alone produces no results");
+            namedCheck(s.c.start!portsTag(ctx) == PrivateStartResult.started, "ports basic wave 1");
+            return PrivateRootDisposition.waitChildren;
+        case 1:
+        {
+            auto r = s.c.results(ctx); // waitChildren resumption read
+            namedCheck(r.length == s.n - 1, "ports wave 1 length");
+            foreach (i, v; r) namedCheck(v == portsValue(1, i), "ports wave 1 tag");
+            // A spawn into the idle cohort leaves the last results untouched.
+            namedCheck(s.c.spawn(ctx, PMember(cast(uint) (s.n - 1), 1)) == PrivateSpawnResult.spawned, "ports late spawn");
+            namedCheck(s.c.spawn(ctx, PMember.init) == PrivateSpawnResult.capacityFull, "ports cohort full");
+            namedCheck(s.c.results(ctx).length == s.n - 1, "ports late spawn keeps result length");
+            namedCheck(s.c.start!portsTag(ctx) == PrivateStartResult.started, "ports basic wave 2");
+            return PrivateRootDisposition.again; // continue on the polling path
+        }
+        case 2:
+        {
+            if (!s.c.finished(ctx)) { --s.phase; return PrivateRootDisposition.again; }
+            auto r = s.c.results(ctx);
+            namedCheck(r.length == s.n, "ports wave 2 length includes the late member");
+            foreach (i, v; r) namedCheck(v == portsValue(2, i), "ports wave 2 tag");
+            namedCheck(s.c.start!portsTouch(ctx) == PrivateStartResult.started, "ports basic void wave");
+            return PrivateRootDisposition.waitChildren;
+        }
+        case 3:
+            namedCheck(s.c.results(ctx).length == 0, "ports void wave clears results");
+            namedCheck(s.c.startFinal!portsTag(ctx) == PrivateStartResult.started, "ports basic final wave");
+            return PrivateRootDisposition.waitChildren;
+        case 4:
+        {
+            auto r = s.c.results(ctx);
+            namedCheck(r.length == s.n, "ports final wave results survive retirement");
+            foreach (i, v; r) namedCheck(v == portsValue(4, i), "ports final wave tag");
+            namedCheck(s.c.start!portsTag(ctx) == PrivateStartResult.empty, "ports start after final is empty");
+            namedCheck(s.c.results(ctx).length == s.n, "ports empty start keeps results");
+            namedCheck(s.c.spawn(ctx, PMember(0)) == PrivateSpawnResult.spawned, "ports refill after final");
+            namedCheck(s.c.results(ctx).length == s.n, "ports refill spawn keeps results");
+            namedCheck(s.c.start!portsTag(ctx) == PrivateStartResult.started, "ports basic refill wave");
+            return PrivateRootDisposition.waitChildren;
+        }
+        case 5:
+        {
+            auto r = s.c.results(ctx);
+            namedCheck(r.length == 1 && r[0] == portsValue(1, 0), "ports refill wave result replaces old results");
+            atomicFetchAdd(*s.done, 1UL); // roots finish on different consumers
+            return PrivateRootDisposition.finish;
+        }
+        default:
+            namedCheck(false, "ports basic phases");
+            return PrivateRootDisposition.finish;
+    }
+}
+void portsBasic(PrivateRootReclamation reclaim)()
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 4, 0, 0, 1, 8192);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto workers = new Workers(farm, 3);
+    scope(exit) workers.join();
+    auto park = PrivateRootPark!(PBasic, portsBasicStep, reclaim).create(farm, 3, 2, policy(counts));
+    check(park !is null);
+    shared ulong done;
+    foreach (n; [2UL, 5, 67]) // 67 > the child limit 64: several tables per wave
+        check(park.spawn(PBasic(null, 0, n, &done)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "ports basic timeout");
+    }
+    namedCheck(atomicLoad(done) == 3, "ports basic all roots completed");
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "ports basic allocation balance");
+}
+
+// ---- shared control for the single-cohort polling tests (T2, T4) -----------------------
+struct PtControl
+{
+    shared uint observeBusy, busySeen;
+    shared ulong writerTid;
+    ulong readerTid;
+    uint calls, reads;
+    bool sameConsumerOk; // set when no consumer is held back, so any consumer may read
+}
+struct PtMember { PtControl* ctl; uint index, wave; }
+ulong ptTag(scope ref PrivateBorrow!PtMember m, scope ref PrivateContext) nothrow @nogc @system
+{
+    atomicStore!(MemoryOrder.raw)(m.value.ctl.writerTid, portsThreadId());
+    return portsValue(++m.value.wave, m.value.index);
+}
+struct PtRoot { PrivateChildPark!(PtMember, ulong)* c; PtControl* ctl; }
+enum ptMembers = 3;
+PrivateRootDisposition ptStep(scope ref PrivateBorrow!PtRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto k = b.value.ctl;
+    ++k.calls;
+    if (b.value.c is null)
+    {
+        b.value.c = ctx.createChildren!(PtMember, ulong)(ptMembers);
+        namedCheck(b.value.c !is null, "ports poll create");
+        foreach (i; 0 .. ptMembers)
+            namedCheck(b.value.c.spawn(ctx, PtMember(k, cast(uint) i)) == PrivateSpawnResult.spawned, "ports poll spawn");
+        namedCheck(b.value.c.start!ptTag(ctx) == PrivateStartResult.started, "ports poll start");
+        return PrivateRootDisposition.again;
+    }
+    if (!b.value.c.finished(ctx))
+    {
+        if (atomicLoad!(MemoryOrder.raw)(k.observeBusy) != 0) atomicStore!(MemoryOrder.raw)(k.busySeen, 1u);
+        return PrivateRootDisposition.again;
+    }
+    // Plain slot reads on this consumer, written on another one.
+    auto r = b.value.c.results(ctx);
+    namedCheck(r.length == ptMembers, "ports poll result length");
+    foreach (i, v; r) namedCheck(v == portsValue(1, i), "ports poll joined tagged slot");
+    immutable writer = atomicLoad!(MemoryOrder.raw)(k.writerTid);
+    namedCheck(writer != 0 && (k.sameConsumerOk || writer != portsThreadId()),
+        "ports poll reader is not the writer's consumer");
+    k.readerTid = portsThreadId();
+    ++k.reads;
+    return PrivateRootDisposition.finish;
+}
+
+version (AntfarmActorTestHooks)
+{
+    // ---- T2: ports-poll-visibility (TSan, deterministic) --------------------------------
+    // Selector: ports-poll-visibility. A polling root runs on this consumer
+    // (A); the cohort's wave runs on consumer B, held at
+    // privateWaveBeforeIdlePublish, i.e. after every slot write and after the
+    // last table credit but before the idle release. The root observes
+    // `finished == false` through raw flags, B is released with a raw flag,
+    // and the root then reads the plain slots. Only the library's
+    // finished/results acquire can order B's slot writes before A's reads.
+    // Catching mutation P-M5: `finished` and `results` loads changed from
+    // MemoryOrder.acq to MemoryOrder.raw. The TSan binary reports a data race
+    // between the slot write in runChild (B) and the plain slot read in ptStep
+    // (A) in 5 of 5 runs (ports-poll-visibility), 3 of 3 in ports-basic and
+    // 3 of 3 in ports-late-tail; the unmutated TSan binary is clean. Non-TSan
+    // builds cannot see it (x86 keeps the order).
+    void portsPollVisibility()
+    {
+        Counts counts;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        PtControl c;
+        auto park = PrivateRootPark!(PtRoot, ptStep).create(farm, 1, 256, policy(counts));
+        check(park !is null);
+        check(park.spawn(PtRoot(null, &c)) == PrivateSpawnResult.spawned);
+        check(park.pump(token) == 1);
+        while (view.consumeNext()) {} // first callback starts the wave on this consumer
+        PrivateHookControl hook;
+        hook.point = ActorTestPoint.privateWaveBeforeIdlePublish;
+        hook.armed = 1;
+        privateControl = &hook;
+        setActorTestHook(&privateHook);
+        shared uint ready, go, leave;
+        auto worker = new Thread({
+            ConsumerView other;
+            check(other.subscribe(farm) >= 0);
+            scope(exit) other.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(ready, 1u);
+            awaitRaw(go, 1u, "ports poll worker go timeout");
+            auto deadline = MonoTime.currTime + 10.seconds;
+            while (atomicLoad!(MemoryOrder.raw)(hook.arrived) == 0)
+            {
+                other.consumeNext();
+                namedCheck(MonoTime.currTime < deadline, "ports poll child claim timeout");
+            }
+            awaitRaw(leave, 1u, "ports poll worker leave timeout");
+        });
+        worker.start();
+        awaitRaw(ready, 1u, "ports poll worker ready");
+        namedCheck(park.pump(token) == 1, "ports poll polling root admission"); // child table, then root table
+        atomicStore!(MemoryOrder.raw)(go, 1u);
+        awaitRaw(hook.arrived, 1u, "ports poll final-credit hook");
+        atomicStore!(MemoryOrder.raw)(c.observeBusy, 1u);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (atomicLoad!(MemoryOrder.raw)(c.busySeen) == 0)
+        {
+            view.consumeNext();
+            namedCheck(MonoTime.currTime < deadline, "ports poll busy observation timeout");
+        }
+        namedCheck(c.reads == 0, "ports poll has not read before release");
+        atomicStore!(MemoryOrder.raw)(c.observeBusy, 0u);
+        atomicStore!(MemoryOrder.raw)(hook.release, 1u);
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "ports poll completion timeout");
+        }
+        namedCheck(c.reads == 1 && c.readerTid == portsThreadId(), "ports poll read on the root's consumer");
+        park.destroy();
+        atomicStore!(MemoryOrder.raw)(leave, 1u);
+        worker.join();
+        setActorTestHook(null);
+        privateControl = null;
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "ports poll allocation balance");
+    }
+}
+
+// ---- T3: ports-wait-visibility (TSan, deterministic) ------------------------------------------
+// Root with two direct result cohorts: `first` (one leaf) and `second` (one
+// member that starts a grandchild result cohort). Phase 1 reads both result
+// slices after waitChildren and starts a final fold wave in which the
+// `second` member reads its grandchild's slot; phase 2 reads the fold.
+struct PwControl
+{
+    uint calls;
+    shared uint inCall, childArrived, childGo, rootArrived, rootGo, ran, workerDone;
+    shared ulong[3] tid; // leaf, nested member, grandchild leaf
+    bool holdRoot, holdLeaf;
+}
+struct PwLeaf { PwControl* c; uint index, wave, tidSlot; bool hold; }
+ulong pwLeaf(scope ref PrivateBorrow!PwLeaf b, scope ref PrivateContext) nothrow @nogc @system
+{
+    auto c = b.value.c;
+    if (b.value.hold)
+    {
+        atomicStore!(MemoryOrder.raw)(c.childArrived, 1u);
+        awaitRaw(c.childGo, 1u, "ports wait child barrier");
+    }
+    atomicStore!(MemoryOrder.raw)(c.tid[b.value.tidSlot], portsThreadId());
+    atomicFetchAdd!(MemoryOrder.raw)(c.ran, 1u);
+    return portsValue(++b.value.wave, b.value.index);
+}
+struct PwNested { PwControl* c; PrivateChildPark!(PwLeaf, ulong)* leaves; uint wave; }
+ulong pwNested(scope ref PrivateBorrow!PwNested b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto c = b.value.c;
+    auto p = ctx.createChildren!(PwLeaf, ulong)(1);
+    namedCheck(p !is null, "ports wait grandchild create");
+    b.value.leaves = p;
+    namedCheck(p.spawn(ctx, PwLeaf(c, 7, 0, 2, false)) == PrivateSpawnResult.spawned, "ports wait grandchild spawn");
+    namedCheck(p.startFinal!pwLeaf(ctx) == PrivateStartResult.started, "ports wait grandchild start");
+    atomicStore!(MemoryOrder.raw)(c.tid[1], portsThreadId());
+    atomicFetchAdd!(MemoryOrder.raw)(c.ran, 1u);
+    return portsValue(++b.value.wave, 5);
+}
+ulong pwFold(scope ref PrivateBorrow!PwNested b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto r = b.value.leaves.results(ctx); // retiring context, grandchild joined by the previous wave
+    namedCheck(r.length == 1 && r[0] == portsValue(1, 7), "ports wait grandchild slot visible to the fold");
+    return portsValue(++b.value.wave, 6);
+}
+struct PwRoot
+{
+    PwControl* c;
+    PrivateChildPark!(PwLeaf, ulong)* first;
+    PrivateChildPark!(PwNested, ulong)* second;
+}
+PrivateRootDisposition pwStep(scope ref PrivateBorrow!PwRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto c = b.value.c;
+    namedCheck(atomicFetchAdd!(MemoryOrder.raw)(c.inCall, 1u) == 0, "ports wait no concurrent root dispatch");
+    scope(exit) atomicFetchSub!(MemoryOrder.raw)(c.inCall, 1u);
+    switch (++c.calls)
+    {
+        case 1:
+            b.value.first = ctx.createChildren!(PwLeaf, ulong)(1);
+            b.value.second = ctx.createChildren!(PwNested, ulong)(1);
+            namedCheck(b.value.first !is null && b.value.second !is null, "ports wait cohorts");
+            namedCheck(b.value.first.spawn(ctx, PwLeaf(c, 0, 0, 0, c.holdLeaf)) == PrivateSpawnResult.spawned, "ports wait leaf spawn");
+            namedCheck(b.value.second.spawn(ctx, PwNested(c)) == PrivateSpawnResult.spawned, "ports wait nested spawn");
+            namedCheck(b.value.first.start!pwLeaf(ctx) == PrivateStartResult.started, "ports wait first start");
+            namedCheck(b.value.second.start!pwNested(ctx) == PrivateStartResult.started, "ports wait second start");
+            if (c.holdRoot)
+            {
+                atomicStore!(MemoryOrder.raw)(c.rootArrived, 1u);
+                awaitRaw(c.rootGo, 1u, "ports wait callback barrier");
+            }
+            return PrivateRootDisposition.waitChildren;
+        case 2:
+        {
+            auto first = b.value.first.results(ctx);
+            auto second = b.value.second.results(ctx);
+            namedCheck(first.length == 1 && first[0] == portsValue(1, 0), "ports wait joined direct result");
+            namedCheck(second.length == 1 && second[0] == portsValue(1, 5), "ports wait joined nested member result");
+            foreach (i; 0 .. 3)
+            {
+                immutable writer = atomicLoad!(MemoryOrder.raw)(c.tid[i]);
+                namedCheck(writer != 0 && writer != portsThreadId(), "ports wait root resumed on a consumer that wrote nothing");
+            }
+            namedCheck(b.value.second.startFinal!pwFold(ctx) == PrivateStartResult.started, "ports wait fold start");
+            return PrivateRootDisposition.waitChildren;
+        }
+        case 3:
+        {
+            auto second = b.value.second.results(ctx);
+            namedCheck(second.length == 1 && second[0] == portsValue(2, 6), "ports wait fold result");
+            auto first = b.value.first.results(ctx);
+            namedCheck(first.length == 1 && first[0] == portsValue(1, 0), "ports wait untouched cohort keeps results");
+            return PrivateRootDisposition.finish;
+        }
+        default:
+            namedCheck(false, "ports wait exactly three root calls");
+            return PrivateRootDisposition.finish;
+    }
+}
+
+version (AntfarmActorTestHooks)
+{
+    // Selector: ports-wait-visibility. Two E1 schedules with result reads.
+    //  BEFORE custody: the root's first callback runs on consumer W and is held
+    //  after both waves were started; every child and grandchild runs on this
+    //  consumer (M) and joins (both direct waves release their root credit)
+    //  before the callback returns. After release only W consumes, so the
+    //  collector's custody release is the final credit and the root resumes
+    //  on W, never on a writer's consumer. The fold also runs on W.
+    //  AFTER custody: the first callback and the custody release happen on M,
+    //  every child and grandchild runs on W (held at a raw barrier first) and
+    //  W's last wave finisher publishes the root wake; once W has run its
+    //  three operations only M consumes, so the root resumes on M.
+    // Catching mutations:
+    //   P-M6 a `memset(results_, 0, count_ * R.sizeof)` added in start after
+    //        `service.enqueue(wave)` (a plausible "clear stale results" bug):
+    //        the TSan binary reports the memset racing the child's slot write
+    //        in runChild in 4 of 4 runs here and 2 of 2 in ports-basic. The
+    //        non-TSan binaries still PASS (the clear finishes microseconds
+    //        before any child can run), so this one is TSan-only evidence.
+    //   E1-M1 (delete the collector's `releaseRoot(entry)`) and E1-M2 (bare
+    //        decrement there) fail "ports wait completion deadline"; E1-M3
+    //        (bare decrement in PrivateChildPark.finish) fails "ports wait
+    //        callback barrier" because the root's both-waves-joined wait
+    //        never completes. All three applied by hand to this selector.
+    void portsWaitVisibility(bool beforeCustody)
+    {
+        Counts counts;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        PwControl c;
+        c.holdRoot = beforeCustody;
+        c.holdLeaf = !beforeCustody;
+        auto park = PrivateRootPark!(PwRoot, pwStep).create(farm, 1, 1, policy(counts));
+        check(park !is null);
+        check(park.spawn(PwRoot(&c)) == PrivateSpawnResult.spawned);
+        PrivateHookControl hook;
+        hook.point = ActorTestPoint.privateRootCreditBeforeRelease;
+        privateControl = &hook;
+        setActorTestHook(&privateHook);
+        scope(exit) { setActorTestHook(null); privateControl = null; }
+        shared uint ready, go, leave;
+        auto worker = new Thread({
+            ConsumerView other;
+            check(other.subscribe(farm) >= 0);
+            scope(exit) other.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(ready, 1u);
+            awaitRaw(go, 1u, "ports wait worker go");
+            auto deadline = MonoTime.currTime + 20.seconds;
+            if (beforeCustody)
+                while (atomicLoad!(MemoryOrder.raw)(leave) == 0) other.consumeNext();
+            else
+            {
+                while (atomicLoad!(MemoryOrder.raw)(c.ran) < 3)
+                {
+                    other.consumeNext();
+                    namedCheck(MonoTime.currTime < deadline, "ports wait worker progress");
+                }
+                atomicStore!(MemoryOrder.raw)(c.workerDone, 1u);
+                awaitRaw(leave, 1u, "ports wait worker leave");
+            }
+        });
+        auto deadline = MonoTime.currTime + 20.seconds;
+        if (beforeCustody)
+        {
+            worker.start(); awaitRaw(ready, 1u, "ports wait worker ready");
+            namedCheck(park.pump(token) == 1, "ports wait root published");
+            atomicStore!(MemoryOrder.raw)(go, 1u); // W claims the root table
+            awaitRaw(c.rootArrived, 1u, "ports wait root callback held");
+            while (atomicLoad!(MemoryOrder.raw)(hook.calls) < 2)
+            {
+                namedCheck(park.pump(token) == 0, "ports wait no root requeue before table join");
+                while (view.consumeNext()) {}
+                namedCheck(MonoTime.currTime < deadline, "ports wait both waves joined before custody");
+            }
+            atomicStore!(MemoryOrder.raw)(c.rootGo, 1u);
+            while (park.live)
+            {
+                park.pump(token); // this consumer never consumes again
+                namedCheck(MonoTime.currTime < deadline, "ports wait completion deadline");
+            }
+        }
+        else
+        {
+            namedCheck(park.pump(token) == 1, "ports wait root published");
+            while (view.consumeNext()) {} // first callback on this consumer
+            namedCheck(c.calls == 1, "ports wait first callback ran here");
+            worker.start(); awaitRaw(ready, 1u, "ports wait worker ready");
+            namedCheck(park.pump(token) == 0, "ports wait custody released, waves published, no root ready");
+            namedCheck(atomicLoad!(MemoryOrder.raw)(hook.calls) == 1, "ports wait only custody released before child join");
+            atomicStore!(MemoryOrder.raw)(go, 1u);
+            awaitRaw(c.childArrived, 1u, "ports wait leaf held on the worker");
+            atomicStore!(MemoryOrder.raw)(c.childGo, 1u);
+            while (atomicLoad!(MemoryOrder.raw)(c.workerDone) == 0)
+            {
+                park.pump(token); // emits the grandchild wave for the worker
+                namedCheck(MonoTime.currTime < deadline, "ports wait worker finished its operations");
+            }
+            while (park.live)
+            {
+                park.pump(token);
+                while (view.consumeNext()) {}
+                namedCheck(MonoTime.currTime < deadline, "ports wait completion deadline");
+            }
+        }
+        namedCheck(c.calls == 3, "ports wait exactly three root calls");
+        park.destroy();
+        atomicStore!(MemoryOrder.raw)(leave, 1u);
+        worker.join();
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "ports wait allocation balance");
+    }
+
+    // ---- T4: ports-late-tail (TSan, deterministic) ----------------------------------------
+    // Selector: ports-late-tail. The wave finisher (consumer W) is paused at
+    // privateRootAfterIdleBeforeCredit: the idle release is out, the root credit
+    // is not. The polling parent (this consumer) sees `finished`, reads the
+    // results and returns strict `finish`, which frees the cohort, its entry
+    // array AND its result slots while W is still inside `finish`. The Entry
+    // stays pinned (`live == 1`, no premature reuse) until W releases. Both
+    // reclamation policies, then a second generation reusing the root slot.
+    // Catching mutation P-M7: result bookkeeping moved into PrivateChildPark.finish
+    // after the idle store (`park.resultCount_ = park.count_;`), applied once
+    // between the store and the hook and once after the hook. The TSan binary
+    // reports (a) a data race between that write and the parent's read of
+    // `resultCount_` in `results` (4 of 4) and (b) a heap-use-after-free of
+    // the cohort the parent already disposed (4 of 4). Non-TSan builds pass.
+    // (A self-assignment `resultCount_ = resultCount_` is optimised away, so it
+    // is not a valid mutant.)
+    void portsLateTail(PrivateRootReclamation reclaim)()
+    {
+        Counts counts;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        PtControl c;
+        auto park = PrivateRootPark!(PtRoot, ptStep, reclaim).create(farm, 1, 256, policy(counts));
+        check(park !is null);
+        check(park.spawn(PtRoot(null, &c)) == PrivateSpawnResult.spawned);
+        check(park.pump(token) == 1);
+        while (view.consumeNext()) {}
+        PrivateHookControl hook;
+        hook.point = ActorTestPoint.privateRootAfterIdleBeforeCredit;
+        hook.armed = 1;
+        privateControl = &hook;
+        setActorTestHook(&privateHook);
+        shared uint ready, go, leave;
+        auto worker = new Thread({
+            ConsumerView other;
+            check(other.subscribe(farm) >= 0);
+            scope(exit) other.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(ready, 1u);
+            awaitRaw(go, 1u, "ports tail worker go");
+            while (atomicLoad!(MemoryOrder.raw)(leave) == 0) other.consumeNext();
+        });
+        worker.start();
+        awaitRaw(ready, 1u, "ports tail worker ready");
+        check(park.pump(token) == 1); // child table, then polling root
+        immutable freedBefore = atomicLoad(counts.freed);
+        atomicStore!(MemoryOrder.raw)(go, 1u);
+        awaitRaw(hook.arrived, 1u, "ports tail idle tail paused");
+        while (view.consumeNext()) {}
+        park.poll();
+        namedCheck(c.reads == 1 && c.calls == 2, "ports tail parent read results after idle");
+        // Three cohort blocks (park, entries, results) plus three member states.
+        namedCheck(atomicLoad(counts.freed) >= freedBefore + 6, "ports tail cohort and slots freed before the tail credit");
+        namedCheck(park.live == 1, "ports tail Entry pinned past cohort disposal");
+        namedCheck(park.spawn(PtRoot(null, &c)) == PrivateSpawnResult.capacityFull, "ports tail no premature reuse");
+        atomicStore!(MemoryOrder.raw)(hook.release, 1u);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live)
+        {
+            park.poll();
+            namedCheck(MonoTime.currTime < deadline, "ports tail completion");
+        }
+        // Second generation through the recycled Entry while W is still alive.
+        PtControl again;
+        again.sameConsumerOk = true;
+        check(park.spawn(PtRoot(null, &again)) == PrivateSpawnResult.spawned);
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "ports tail reused completion");
+        }
+        namedCheck(again.reads == 1, "ports tail reused root read results");
+        park.destroy();
+        atomicStore!(MemoryOrder.raw)(leave, 1u);
+        worker.join();
+        setActorTestHook(null);
+        privateControl = null;
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "ports tail allocation balance");
+    }
+}
+
+// ---- T5: ports-large-cohort ----------------------------------------------------------------------
+struct PlControl { size_t count, limit; ulong* ran; uint completed, busy; }
+struct PlMember { uint index, wave; ulong* ran; }
+ulong plOp(scope ref PrivateBorrow!PlMember m, scope ref PrivateContext) nothrow @nogc @system
+{
+    ++m.value.ran[m.value.index]; // external counter: observable while the wave is active
+    return portsValue(++m.value.wave, m.value.index);
+}
+struct PlRoot { PrivateChildPark!(PlMember, ulong)* c; PlControl* ctl; uint phase; }
+PrivateRootDisposition plStep(scope ref PrivateBorrow!PlRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto k = b.value.ctl;
+    if (b.value.c is null)
+    {
+        b.value.c = ctx.createChildren!(PlMember, ulong)(k.count, k.limit);
+        namedCheck(b.value.c !is null, "ports large create");
+        foreach (i; 0 .. k.count)
+            namedCheck(b.value.c.spawn(ctx, PlMember(cast(uint) i, 0, k.ran)) == PrivateSpawnResult.spawned, "ports large spawn");
+        namedCheck(b.value.c.start!plOp(ctx) == PrivateStartResult.started, "ports large first start");
+        b.value.phase = 1;
+        return PrivateRootDisposition.again;
+    }
+    if (!b.value.c.finished(ctx))
+    {
+        ++k.busy;
+        return PrivateRootDisposition.again;
+    }
+    immutable wave = b.value.phase;
+    auto r = b.value.c.results(ctx);
+    namedCheck(r.length == k.count, "ports large result length");
+    foreach (i, v; r)
+    {
+        // Mutation P-M8 (slot index = cursor_ or position within the table)
+        // and P-M9 (a requeued prefix dispatched twice) both break this tag.
+        namedCheck(v == portsValue(wave, i), "ports large generation/index tag");
+        namedCheck(k.ran[i] == wave, "ports large exactly once per wave");
+    }
+    k.completed = wave;
+    if (wave == 4) return PrivateRootDisposition.finish;
+    auto result = wave == 3 ? b.value.c.startFinal!plOp(ctx) : b.value.c.start!plOp(ctx);
+    namedCheck(result == PrivateStartResult.started, "ports large reuse start");
+    ++b.value.phase;
+    return PrivateRootDisposition.again;
+}
+
+// Selector: ports-large-cohort. Same Farm pre-fill scaffolding as
+// childLargeCohort: a zero-admission emit (credit released, no child runs),
+// then a partial table once quota is refreshed, retry, then three waves plus
+// a final one; every member tag of every wave is checked, at several child
+// batch limits (including 1 and 64) and 257, 513 and 1025 members.
+// Catching mutations:
+//   P-M8 runChild writes `park.results_[park.cursor_]` or
+//        `[(entry - park.entries_) % park.batchLimit_]` (position within the
+//        table): both fail "ports large generation/index tag" on the first
+//        multi-table wave (limit < count); the second also fails
+//        "ports wave 1 tag" in ports-basic (67 members, limit 64).
+//   P-M9 emit advances `cursor_` by `written - 1` for a partial prefix (the
+//        last accepted member is requeued and dispatched twice, so its
+//        own wave counter reads 2): fails "ports large generation/index tag"
+//        in the limit-256 runs, where the quota admits a strict prefix. The
+//        older `cursor_ += n` mutation fails the same check.
+void portsLargeCohort(size_t count, size_t limit)
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto ran = new ulong[count];
+    PlControl control = PlControl(count, limit, ran.ptr);
+    auto parent = PrivateRootPark!(PlRoot, plStep).create(farm, 1, 256, policy(counts));
+    check(parent !is null);
+    check(parent.spawn(PlRoot(null, &control)) == PrivateSpawnResult.spawned);
+    check(parent.pump(token) == 1);
+    while (view.consumeNext()) {}
+
+    enum fillCount = 20000;
+    auto fillResults = new ulong[fillCount];
+    auto filler = Park.create(farm, fillCount, 256);
+    check(filler !is null);
+    foreach (i; 0 .. fillCount) check(filler.spawn(State(fillResults.ptr + i, 1, 0)) == PrivateSpawnResult.spawned);
+    size_t admitted;
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (true)
+    {
+        auto n = filler.pump(token);
+        if (n == 0) break;
+        admitted += n;
+        namedCheck(MonoTime.currTime < deadline, "ports large prefill timeout");
+    }
+    namedCheck(admitted > 0 && admitted < fillCount, "ports large Farm prefilled");
+    version (AntfarmActorTestHooks)
+    {
+        PrivateHookControl hook;
+        privateControl = &hook;
+        setActorTestHook(&privateHook);
+        namedCheck(parent.pump(token) == 0, "ports large full Farm rejects child and polling root tables");
+        namedCheck(atomicLoad!(MemoryOrder.raw)(hook.creditCalls) == 1, "ports large zero admission credit released");
+        setActorTestHook(null);
+        privateControl = null;
+    }
+    else namedCheck(parent.pump(token) == 0, "ports large full Farm rejects child and polling root tables");
+    foreach (v; ran) namedCheck(v == 0, "ports large zero admission invokes no child");
+    while (filler.live)
+    {
+        while (view.consumeNext()) {}
+        filler.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "ports large prefill drain timeout");
+    }
+    filler.destroy();
+    namedCheck(parent.pump(token) == 1, "ports large partial child admission after quota refresh");
+    while (view.consumeNext()) {}
+    size_t prefix;
+    foreach (v; ran) { namedCheck(v <= 1, "ports large partial prefix no duplicates"); prefix += v; }
+    namedCheck(prefix > 0 && prefix < count && prefix <= limit, "ports large first table bounded by the child limit");
+    if (limit == 256) namedCheck(prefix < limit, "ports large quota admits a strict prefix");
+    namedCheck(control.completed == 0 && control.busy > 0, "ports large partial wave stays active");
+    while (parent.live)
+    {
+        parent.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "ports large retry timeout");
+    }
+    namedCheck(control.completed == 4, "ports large three waves plus final");
+    foreach (v; ran) namedCheck(v == 4, "ports large every member dispatched four times");
+    parent.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "ports large allocation balance");
+}
+void portsLargeCohorts()
+{
+    foreach (count; [257UL, 513, 1025])
+        foreach (limit; [1UL, 64, 256])
+        {
+            version (TSan) if (limit == 1 && count > 257) continue; // 4100 tables each: covered by limit 64
+            portsLargeCohort(count, limit);
+        }
+}
+
+// ---- T6: ports-nested ------------------------------------------------------------------------------
+// Depth-3 pipelined reduction (design §7.3, U4) on five workers. L1 members
+// own L2 cohorts which own L3 leaves. Wave 1 builds the tree (each level
+// starts its children). Wave 2 starts the L2 cohort's FINAL fold: each L2
+// member, a retiring context, folds its own leaves' results. Wave 3 is the
+// L1 cohort's FINAL wave: each L1 member, also retiring, folds the L2
+// results written in wave 2 (joined by wave 2). The root reads L1 results
+// after every wave and checks the closed-form sum.
+// Catching mutation P-M10: `results` rejects a retiring context. Applied as
+// a fatal ("private child results: retiring": the wave-2 fold dies) and as an
+// empty slice (fails "ports nested L2 fold length").
+enum n3Top = 3, n3Mid = 4, n3Leaf = 5;
+ulong n3LeafOf(size_t mid, size_t k) pure nothrow @nogc @safe { return mid * n3Leaf + k + 1; }
+ulong n3MidSum(size_t mid) pure nothrow @nogc @safe
+{ ulong s; foreach (k; 0 .. n3Leaf) s += n3LeafOf(mid, k); return s; }
+ulong n3TopSum(size_t top) pure nothrow @nogc @safe
+{ ulong s; foreach (j; 0 .. n3Mid) s += n3MidSum(top * n3Mid + j); return s; }
+struct N3Leaf { ulong value; }
+ulong n3LeafValue(scope ref PrivateBorrow!N3Leaf b, scope ref PrivateContext) nothrow @nogc @system
+{ return b.value.value; }
+struct N3Mid { PrivateChildPark!(N3Leaf, ulong)* leaves; uint id, wave; }
+ulong n3MidLaunch(scope ref PrivateBorrow!N3Mid b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    b.value.leaves = ctx.createChildren!(N3Leaf, ulong)(n3Leaf);
+    namedCheck(b.value.leaves !is null, "ports nested leaf cohort");
+    foreach (k; 0 .. n3Leaf)
+        namedCheck(b.value.leaves.spawn(ctx, N3Leaf(n3LeafOf(b.value.id, k))) == PrivateSpawnResult.spawned, "ports nested leaf spawn");
+    namedCheck(b.value.leaves.startFinal!n3LeafValue(ctx) == PrivateStartResult.started, "ports nested leaf wave");
+    return portsValue(++b.value.wave, b.value.id);
+}
+ulong n3MidFold(scope ref PrivateBorrow!N3Mid b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto r = b.value.leaves.results(ctx); // retiring context folding its own cohort
+    namedCheck(r.length == n3Leaf, "ports nested L2 fold length");
+    ulong sum;
+    foreach (k, v; r) { namedCheck(v == n3LeafOf(b.value.id, k), "ports nested L3 value and order"); sum += v; }
+    return sum;
+}
+struct N3Top { PrivateChildPark!(N3Mid, ulong)* mids; uint id, wave; }
+ulong n3TopLaunch(scope ref PrivateBorrow!N3Top b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    b.value.mids = ctx.createChildren!(N3Mid, ulong)(n3Mid);
+    namedCheck(b.value.mids !is null, "ports nested mid cohort");
+    foreach (j; 0 .. n3Mid)
+        namedCheck(b.value.mids.spawn(ctx, N3Mid(null, cast(uint) (b.value.id * n3Mid + j))) == PrivateSpawnResult.spawned, "ports nested mid spawn");
+    namedCheck(b.value.mids.start!n3MidLaunch(ctx) == PrivateStartResult.started, "ports nested mid wave");
+    return portsValue(++b.value.wave, b.value.id);
+}
+ulong n3TopFoldMids(scope ref PrivateBorrow!N3Top b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto r = b.value.mids.results(ctx); // wave 1 tags, joined transitively by the root's wave 1
+    namedCheck(r.length == n3Mid, "ports nested L2 wave 1 results visible");
+    foreach (j, v; r) namedCheck(v == portsValue(1, b.value.id * n3Mid + j), "ports nested L2 wave 1 tag");
+    namedCheck(b.value.mids.startFinal!n3MidFold(ctx) == PrivateStartResult.started, "ports nested final fold wave");
+    return portsValue(++b.value.wave, b.value.id);
+}
+ulong n3TopRead(scope ref PrivateBorrow!N3Top b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto r = b.value.mids.results(ctx); // final fold results, retiring L1 context
+    namedCheck(r.length == n3Mid, "ports nested L1 read length");
+    ulong sum;
+    foreach (j, v; r) { namedCheck(v == n3MidSum(b.value.id * n3Mid + j), "ports nested L2 fold value"); sum += v; }
+    return sum;
+}
+struct N3Root { PrivateChildPark!(N3Top, ulong)* tops; uint phase; shared ulong* total; }
+PrivateRootDisposition n3Step(scope ref PrivateBorrow!N3Root b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase == 0)
+    {
+        s.tops = ctx.createChildren!(N3Top, ulong)(n3Top);
+        namedCheck(s.tops !is null, "ports nested top cohort");
+        foreach (i; 0 .. n3Top)
+            namedCheck(s.tops.spawn(ctx, N3Top(null, cast(uint) i)) == PrivateSpawnResult.spawned, "ports nested top spawn");
+        namedCheck(s.tops.start!n3TopLaunch(ctx) == PrivateStartResult.started, "ports nested wave 1");
+    }
+    else if (s.phase == 1)
+    {
+        auto r = s.tops.results(ctx);
+        namedCheck(r.length == n3Top, "ports nested wave 1 length");
+        foreach (i, v; r) namedCheck(v == portsValue(1, i), "ports nested wave 1 tag");
+        namedCheck(s.tops.start!n3TopFoldMids(ctx) == PrivateStartResult.started, "ports nested wave 2");
+    }
+    else if (s.phase == 2)
+    {
+        auto r = s.tops.results(ctx);
+        namedCheck(r.length == n3Top, "ports nested wave 2 length");
+        foreach (i, v; r) namedCheck(v == portsValue(2, i), "ports nested wave 2 tag");
+        namedCheck(s.tops.startFinal!n3TopRead(ctx) == PrivateStartResult.started, "ports nested wave 3");
+    }
+    else
+    {
+        auto r = s.tops.results(ctx);
+        namedCheck(r.length == n3Top, "ports nested root read length");
+        ulong sum;
+        foreach (i, v; r) { namedCheck(v == n3TopSum(i), "ports nested pipelined fold"); sum += v; }
+        atomicStore(*s.total, sum);
+        return PrivateRootDisposition.finish;
+    }
+    ++s.phase;
+    return PrivateRootDisposition.waitChildren;
+}
+void portsPipeline()
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 6, 0, 0, 1, 8192);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    auto workers = new Workers(farm, 5);
+    scope(exit) workers.join();
+    auto park = PrivateRootPark!(N3Root, n3Step).create(farm, 4, 4, policy(counts));
+    check(park !is null);
+    ulong expected;
+    foreach (i; 0 .. n3Top) expected += n3TopSum(i);
+    version (TSan) enum rounds = 3;
+    else enum rounds = 20;
+    foreach (round; 0 .. rounds)
+    {
+        shared ulong[4] totals;
+        foreach (ref t; totals) check(park.spawn(N3Root(null, 0, &t)) == PrivateSpawnResult.spawned);
+        auto deadline = MonoTime.currTime + 30.seconds;
+        while (park.live)
+        {
+            park.pump(token);
+            namedCheck(MonoTime.currTime < deadline, "ports nested pipeline timeout");
+        }
+        foreach (ref t; totals) namedCheck(atomicLoad(t) == expected, "ports nested pipeline total");
+    }
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "ports nested allocation balance");
+}
+
+// Depth 64 with R = ulong: every level reads its child's results from the
+// next wave of its own cohort (the child cohort is idle by the transitive
+// join), and the retiring top member reads in the final wave.
+// P-M10 is also caught here by the retiring top-level read in rDeepFinal;
+// the mutation run recorded above stops at the first (L2 fold) failure.
+struct RDeep { PrivateChildPark!(RDeep, ulong)* next; size_t depth; }
+ulong rDeepDown(scope ref PrivateBorrow!RDeep b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto d = b.value.depth;
+    if (d < 63)
+    {
+        b.value.next = ctx.createChildren!(RDeep, ulong)(1);
+        namedCheck(b.value.next !is null, "ports depth64 create");
+        namedCheck(b.value.next.spawn(ctx, RDeep(null, d + 1)) == PrivateSpawnResult.spawned, "ports depth64 spawn");
+        namedCheck(b.value.next.start!rDeepDown(ctx) == PrivateStartResult.started, "ports depth64 descend");
+    }
+    return portsValue(1, d);
+}
+ulong rDeepCheck(scope ref PrivateBorrow!RDeep b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto d = b.value.depth;
+    if (d < 63)
+    {
+        auto r = b.value.next.results(ctx);
+        namedCheck(r.length == 1 && r[0] == portsValue(1, d + 1), "ports depth64 child result joined");
+        namedCheck(b.value.next.start!rDeepCheck(ctx) == PrivateStartResult.started, "ports depth64 verify descend");
+    }
+    return portsValue(2, d);
+}
+ulong rDeepFinal(scope ref PrivateBorrow!RDeep b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto r = b.value.next.results(ctx);
+    namedCheck(b.value.depth == 0 && r.length == 1 && r[0] == portsValue(2, 1), "ports depth64 retiring top reads child");
+    return portsValue(3, 0);
+}
+struct RDeepRoot { PrivateChildPark!(RDeep, ulong)* chain; uint phase; }
+PrivateRootDisposition rDeepStep(scope ref PrivateBorrow!RDeepRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.chain is null)
+    {
+        s.chain = ctx.createChildren!(RDeep, ulong)(1);
+        namedCheck(s.chain !is null && s.chain.spawn(ctx, RDeep(null, 0)) == PrivateSpawnResult.spawned, "ports depth64 root cohort");
+        namedCheck(s.chain.start!rDeepDown(ctx) == PrivateStartResult.started, "ports depth64 first wave");
+        s.phase = 1;
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto r = s.chain.results(ctx);
+    namedCheck(r.length == 1 && r[0] == portsValue(s.phase, 0), "ports depth64 root read");
+    if (s.phase == 1)
+        namedCheck(s.chain.start!rDeepCheck(ctx) == PrivateStartResult.started, "ports depth64 second wave");
+    else if (s.phase == 2)
+        namedCheck(s.chain.startFinal!rDeepFinal(ctx) == PrivateStartResult.started, "ports depth64 final wave");
+    else
+    {
+        namedCheck(s.phase == 3, "ports depth64 phases");
+        return PrivateRootDisposition.finish;
+    }
+    ++s.phase;
+    return PrivateRootDisposition.waitChildren;
+}
+void portsDepth64()
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    auto park = PrivateRootPark!(RDeepRoot, rDeepStep).create(farm, 1, 256, policy(counts));
+    check(park !is null);
+    check(park.spawn(RDeepRoot()) == PrivateSpawnResult.spawned);
+    auto workers = new Workers(farm, 2);
+    scope(exit) workers.join();
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "ports depth64 timeout");
+    }
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "ports depth64 allocation balance");
+}
+
+// ---- T7: ports-alloc-fail ----------------------------------------------------------------------------
+// Fault budget walks the cohort allocations of createChildren!(T, ulong):
+// the park, entries_, then results_. Each failure returns null with a
+// balanced allocator count and the parent retries successfully; overflow of
+// capacity * R.sizeof returns null before any allocation. The request
+// sizes also pin the layout claims: a void cohort makes exactly two
+// requests (park, capacity * 40-byte Entry), a result cohort a third of
+// capacity * R.sizeof.
+// Catching mutation P-M11: in create, the failed `results_` allocation
+// frees `park` but not `entries_` (the inner `freeMemory(... entries_ ...)`
+// deleted): the budget-2 attempt leaves allocated - freed == 1 and fails
+// "ports alloc failed create balance" (observed).
+struct SizeLog
+{
+    Counts counts;
+    shared size_t requests;
+    size_t[6] bytes;
+}
+void* sizeLogAllocate(void* ctx, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    auto log = cast(SizeLog*) ctx;
+    auto i = atomicFetchAdd(log.requests, cast(size_t) 1);
+    if (i < log.bytes.length) log.bytes[i] = bytes;
+    return allocate(&log.counts, bytes, alignment);
+}
+void sizeLogDeallocate(void* ctx, void* ptr, size_t bytes, size_t alignment) nothrow @nogc @system
+{ deallocate(&(cast(SizeLog*) ctx).counts, ptr, bytes, alignment); }
+struct PaRoot { SizeLog* log; PrivateChildPark!(PMember, ulong)* c; uint phase; }
+PrivateRootDisposition paStep(scope ref PrivateBorrow!PaRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto log = b.value.log;
+    auto counts = &log.counts;
+    if (b.value.phase++ == 1)
+    {
+        auto r = b.value.c.results(ctx);
+        namedCheck(r.length == 3, "ports alloc retry result length");
+        foreach (i, v; r) namedCheck(v == portsValue(1, i), "ports alloc retry tag");
+        return PrivateRootDisposition.finish;
+    }
+    // Request sizes.
+    static if (size_t.sizeof == 8)
+    {
+        atomicStore(log.requests, cast(size_t) 0);
+        auto plain = ctx.createChildren!PMember(8);
+        namedCheck(plain !is null && atomicLoad(log.requests) == 2, "ports void cohort makes two allocations");
+        namedCheck(log.bytes[0] == PrivateChildPark!PMember.sizeof && log.bytes[1] == 8 * 40, "ports void cohort allocation sizes");
+        atomicStore(log.requests, cast(size_t) 0);
+        auto typed = ctx.createChildren!(PMember, PWide)(8);
+        namedCheck(typed !is null && atomicLoad(log.requests) == 3, "ports result cohort makes three allocations");
+        namedCheck(log.bytes[0] == PrivateChildPark!(PMember, PWide).sizeof && log.bytes[1] == 8 * 40
+            && log.bytes[2] == 8 * PWide.sizeof, "ports result cohort allocation sizes");
+    }
+    immutable allocated = atomicLoad(counts.allocated);
+    immutable freed = atomicLoad(counts.freed);
+    namedCheck(ctx.createChildren!(PMember, ulong)(0) is null, "ports alloc zero capacity");
+    namedCheck(ctx.createChildren!(PMember, ulong)(size_t.max) is null, "ports alloc entry overflow");
+    // Overflows capacity * PWide.sizeof (128) but not capacity * Entry.sizeof (40).
+    namedCheck(ctx.createChildren!(PMember, PWide)(size_t.max / 64) is null, "ports alloc result overflow");
+    namedCheck(ctx.createChildren!(PMember, PWide)(size_t.max / 64, 3) is null, "ports alloc result overflow explicit limit");
+    namedCheck(atomicLoad(counts.allocated) == allocated, "ports alloc invalid capacity allocates nothing");
+    foreach (budget; 0 .. 3)
+    {
+        atomicStore(counts.budget, cast(long) budget);
+        namedCheck(ctx.createChildren!(PMember, ulong)(4) is null, "ports alloc cohort/entries/results failure");
+        namedCheck(atomicLoad(counts.allocated) - allocated == atomicLoad(counts.freed) - freed,
+            "ports alloc failed create balance");
+    }
+    atomicStore(counts.budget, long.max);
+    auto children = ctx.createChildren!(PMember, ulong)(3);
+    namedCheck(children !is null, "ports alloc retry create");
+    b.value.c = children;
+    atomicStore(counts.budget, 0L);
+    namedCheck(children.spawn(ctx, PMember(0)) == PrivateSpawnResult.allocationFailed, "ports alloc member state failure");
+    namedCheck(children.results(ctx).length == 0, "ports alloc failed spawn leaves no results");
+    namedCheck(children.start!portsTag(ctx) == PrivateStartResult.empty, "ports alloc failed slot stays empty");
+    atomicStore(counts.budget, long.max);
+    foreach (i; 0 .. 3)
+        namedCheck(children.spawn(ctx, PMember(cast(uint) i)) == PrivateSpawnResult.spawned, "ports alloc retry spawn");
+    namedCheck(children.startFinal!portsTag(ctx) == PrivateStartResult.started, "ports alloc retry start");
+    return PrivateRootDisposition.waitChildren;
+}
+void portsAllocationFailures()
+{
+    SizeLog log;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(PaRoot, paStep).create(farm, 1, 256,
+        ActorAllocator(&log, &sizeLogAllocate, &sizeLogDeallocate));
+    check(park !is null);
+    check(park.spawn(PaRoot(&log)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "ports alloc timeout");
+    }
+    park.destroy();
+    namedCheck(atomicLoad(log.counts.allocated) == atomicLoad(log.counts.freed), "ports alloc total allocation balance");
+}
+
+// ---- D1/D2: death modes -----------------------------------------------------------------------------------
+// Selectors ports-read-active, ports-wrong-parent-results,
+// ports-default-results (run through deathHarness: LDC and DMD, debug and
+// -release). The parent harness checks the nonzero death and the exact
+// fatal text; the negative control is unchanged.
+// P-M12 (D1): delete the `wave.active` check from `results`: the callback
+//   survives, prints "read survived" and the harness check fails (observed in
+//   the LDC and DMD, debug and -release binaries: ports-death aborts at the
+//   exit-status/message check for ports-read-active).
+// P-M13 (D2): delete `authorized(context)` from `results`: both a wrong
+//   parent's context and a default context read an idle cohort and survive;
+//   the harness check for ports-wrong-parent-results fails (observed in all
+//   four binaries).
+struct PdRoot { PrivateChildPark!(PMember, ulong)* c; }
+PrivateRootDisposition portsReadActiveStep(scope ref PrivateBorrow!PdRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    b.value.c = ctx.createChildren!(PMember, ulong)(1);
+    namedCheck(b.value.c !is null && b.value.c.spawn(ctx, PMember(0)) == PrivateSpawnResult.spawned, "ports death setup");
+    namedCheck(b.value.c.results(ctx).length == 0, "ports death idle read is legal");
+    // The wave is enqueued but cannot be emitted before this callback returns
+    // (no worker consumers, single emitter), so it is active here.
+    namedCheck(b.value.c.start!portsTag(ctx) == PrivateStartResult.started, "ports death start");
+    fprintf(stderr, "ports read-active: wave started\n");
+    cast(void) b.value.c.results(ctx); // fatal: wave active
+    fprintf(stderr, "ports read-active: read survived\n");
+    return PrivateRootDisposition.waitChildren;
+}
+void portsReadActiveDeath()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    auto park = PrivateRootPark!(PdRoot, portsReadActiveStep).create(farm, 1);
+    check(park !is null);
+    check(park.spawn(PdRoot()) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+}
+struct PdProbe { PrivateChildPark!(PMember, ulong)* children; bool useDefault; }
+struct PdMisuse { PdProbe* probe; bool owner; }
+PrivateRootDisposition portsMisuseStep(scope ref PrivateBorrow!PdMisuse b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto probe = b.value.probe;
+    if (b.value.owner)
+    {
+        if (probe.children is null) probe.children = ctx.createChildren!(PMember, ulong)(1);
+        namedCheck(probe.children !is null, "ports misuse owner cohort");
+        return PrivateRootDisposition.again;
+    }
+    namedCheck(probe.children !is null, "ports misuse cohort exists");
+    PrivateContext empty;
+    if (probe.useDefault) cast(void) probe.children.results(empty);
+    else cast(void) probe.children.results(ctx);
+    fprintf(stderr, "ports misuse: read survived\n");
+    return PrivateRootDisposition.finish;
+}
+void portsMisuseDeath(bool useDefault)
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    PdProbe probe;
+    probe.useDefault = useDefault;
+    auto park = PrivateRootPark!(PdMisuse, portsMisuseStep).create(farm, 2);
+    check(park !is null);
+    check(park.spawn(PdMisuse(&probe, true)) == PrivateSpawnResult.spawned);
+    check(park.spawn(PdMisuse(&probe, false)) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+}
+void portsDeath()
+{
+    version (linux)
+    {
+        auto probe = probeDeath("ports-read-active");
+        check(probe.status != 0);
+        check(probe.stderrText.canFind("ports read-active: wave started"));
+        check(probe.stderrText.canFind("antfarm fatal: private child results: wave active"));
+        check(!probe.stderrText.canFind("read survived"));
+        foreach (modeName; ["ports-wrong-parent-results", "ports-default-results"])
+        {
+            auto misuse = probeDeath(modeName);
+            check(misuse.status != 0);
+            check(misuse.stderrText.canFind("antfarm fatal: private child park: unauthorized context"));
+            check(!misuse.stderrText.canFind("read survived"));
+        }
+        writeln("PASS ports early read, wrong-parent and default-context results are fatal");
+    }
+    else
+        writeln("SKIP ports death modes: /proc/self/exe re-exec requires Linux");
+}
+
+void phasePorts()
+{
+    portsBasic!(PrivateRootReclamation.emitter)();
+    portsBasic!(PrivateRootReclamation.consumer)();
+    writeln("PASS ports-basic results lifecycle under both reclamation policies");
+    version (AntfarmActorTestHooks)
+    {
+        portsPollVisibility(); writeln("PASS ports-poll-visibility deterministic raw-barrier schedule");
+        portsWaitVisibility(true); portsWaitVisibility(false);
+        writeln("PASS ports-wait-visibility before/after custody schedules with result reads");
+        portsLateTail!(PrivateRootReclamation.emitter)();
+        portsLateTail!(PrivateRootReclamation.consumer)();
+        writeln("PASS ports-late-tail results read and freed under a paused idle tail");
+    }
+    portsLargeCohorts(); writeln("PASS ports-large-cohort 257/513/1025 members, child limits 1/64/256");
+    portsPipeline(); writeln("PASS ports-nested depth-3 pipelined reduction");
+    portsDepth64(); writeln("PASS ports-nested depth64 results");
+    portsAllocationFailures(); writeln("PASS ports-alloc-fail cohort/entries/results failures and overflow");
+}
+
 void runSuite()
 {
     phaseE1();
     phaseD();
+    phasePorts();
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
     version (AntfarmWriteAuditHooks)
     {
@@ -2443,6 +3668,36 @@ void main(string[] args)
             return;
         case "e1-counter-exhaustion-death": e1CounterExhaustionDeath(); return;
         case "phase-d": phaseD(); return;
+        case "phase-ports": phasePorts(); return;
+        case "ports-basic":
+            portsBasic!(PrivateRootReclamation.emitter)();
+            portsBasic!(PrivateRootReclamation.consumer)();
+            writeln("PASS ports-basic"); return;
+        case "ports-poll-visibility":
+            version (AntfarmActorTestHooks) { portsPollVisibility(); writeln("PASS ports-poll-visibility"); }
+            return;
+        case "ports-wait-visibility":
+            version (AntfarmActorTestHooks)
+            {
+                portsWaitVisibility(true); portsWaitVisibility(false);
+                writeln("PASS ports-wait-visibility");
+            }
+            return;
+        case "ports-late-tail":
+            version (AntfarmActorTestHooks)
+            {
+                portsLateTail!(PrivateRootReclamation.emitter)();
+                portsLateTail!(PrivateRootReclamation.consumer)();
+                writeln("PASS ports-late-tail");
+            }
+            return;
+        case "ports-large-cohort": portsLargeCohorts(); writeln("PASS ports-large-cohort"); return;
+        case "ports-nested": portsPipeline(); portsDepth64(); writeln("PASS ports-nested"); return;
+        case "ports-alloc-fail": portsAllocationFailures(); writeln("PASS ports-alloc-fail"); return;
+        case "ports-read-active": portsReadActiveDeath(); return;
+        case "ports-wrong-parent-results": portsMisuseDeath(false); return;
+        case "ports-default-results": portsMisuseDeath(true); return;
+        case "ports-death": portsDeath(); return;
         case "child-large-cohort": childLargeCohort(257); childLargeCohort(513); return;
         case "mixed-table":
             mixedTable!(PrivateRootReclamation.emitter)(true);
