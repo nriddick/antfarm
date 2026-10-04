@@ -1,5 +1,5 @@
 /++
- + Experimental private actors. Roots have scheduling custody in a single-
+ + Private actors. Roots have scheduling custody in a single-
  + emitter park; children have one private parent and run only in its waves.
  + The emitter reads metadata, never actor state. See PRIVATE_ACTORS.md for
  + the @system borrowing contract and the deliberately limited first slice.

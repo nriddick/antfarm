@@ -1,4 +1,4 @@
-# Private actors: experimental roots and parent-owned cohorts
+# Private actors: roots and parent-owned cohorts
 
 `actors.private_actor` implements a separate ownership model for actors that
 have no public identity. A root has no external application owner. A child
@@ -10,7 +10,7 @@ parks and emitters can share a Farm. They do not share an actor free-list gate,
 ready-drain gate, or live counter. Each park also emits its parents' requested
 child waves. The emitter inspects scheduling metadata only.
 
-This is a prototype for POD state and synchronous callbacks. The existing
+This API supports POD state and synchronous callbacks. The existing
 `ActorOwner`, `ActorHandle`, inbox, and public `ActorWave` APIs remain available.
 It does not change DRuntime Fibers.
 
@@ -280,7 +280,7 @@ not justify freeing storage that callback still uses.
 ## Farm completion prerequisite
 
 Plain callback writes must join within each shard before the shard finisher
-joins `Tprogress`. This prototype changes the **completion** RMW on `Shc` from
+joins `Tprogress`. The 1.7.0-rc.5 prerequisite changed the **completion** RMW on `Shc` from
 relaxed to acquire/release; claim increments remain relaxed. Acquire/release
 on `Tprogress` alone does not acquire other consumers' writes within the same
 shard. The two-consumer test forces separate runs in a single shard and has

@@ -17,10 +17,10 @@ concepts such as module generations, worlds, regions, systems, assets, and hot
 reload remain above it. The package supplies retirement tickets/fences which
 an engine can aggregate before unloading code or reclaiming an arena.
 
-## Private actor experiment (2026-09-25)
+## Private actor hierarchies
 
 [Private roots and parent-owned cohorts](PRIVATE_ACTORS.md) are now a separate
-experimental path in `actors/private_actor.d`. The first slice supports POD
+path in `actors/private_actor.d`. The first slice supports POD
 state, multiple single-emitter parks sharing a Farm, terminal dispatch,
 parent-authorized whole-cohort waves, and nested descendant joins. It removes
 public actor admission/generation/wake machinery from that narrower model.
