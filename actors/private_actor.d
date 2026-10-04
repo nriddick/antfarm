@@ -48,20 +48,22 @@ private:
     { actor_ = actor; enclosing_ = enclosing; retiring_ = retiring; batchLimit_ = batchLimit; }
     @disable this(this);
 public:
-    PrivateChildPark!T* createChildren(T)(size_t capacity)
+    /// R is the per-member result type; void (the default) creates a
+    /// signal-only cohort with no result storage.
+    PrivateChildPark!(T, R)* createChildren(T, R = void)(size_t capacity)
         nothrow @nogc @system
     {
         if (actor_ is null) fatal("private child park: unauthorized context");
         if (retiring_) return null;
-        return PrivateChildPark!T.create(actor_, capacity, batchLimit_);
+        return PrivateChildPark!(T, R).create(actor_, capacity, batchLimit_);
     }
-    PrivateChildPark!T* createChildren(T)(size_t capacity, size_t childBatchLimit)
+    PrivateChildPark!(T, R)* createChildren(T, R = void)(size_t capacity, size_t childBatchLimit)
         nothrow @nogc @system
     {
         if (actor_ is null) fatal("private child park: unauthorized context");
         if (childBatchLimit == 0) fatal("invalid private child batch limit");
         if (retiring_) return null;
-        return PrivateChildPark!T.create(actor_, capacity, childBatchLimit);
+        return PrivateChildPark!(T, R).create(actor_, capacity, childBatchLimit);
     }
 }
 
@@ -604,15 +606,28 @@ private struct ChildBodies
 /// Opaque homogeneous cohort. The parent may create members and request a
 /// whole-cohort wave, but can never borrow a child's state. No overlapping
 /// waves, external dispatches, removal, or reparenting in this first slice.
-struct PrivateChildPark(T)
+struct PrivateChildPark(T, R = void)
 {
     static assert(__traits(isPOD, T), "private actors require POD state");
+    enum hasResults = !is(R == void);
+    static if (hasResults)
+    {
+        static assert(!is(R == const) && !is(R == immutable)
+            && !is(R == shared) && !is(R == inout),
+            "private child result type must be unqualified (not const/immutable/shared/inout)");
+        static assert(__traits(isPOD, R), "private child results require POD values");
+    }
 private:
     ChildBase base_; // first: erased disposal and wave-to-park conversion
     Entry* entries_;
     size_t capacity_, count_, cursor_, batchLimit_;
     bool retire_;
     PayloadHeader header_;
+    static if (hasResults)
+    {
+        R* results_;         // capacity_ slots; slot i written only by member i
+        size_t resultCount_; // members in the last nonempty wave; parent-only
+    }
     static assert(base_.offsetof == 0,
         "PrivateChildPark.fromWave requires base_ at offset zero");
     @disable this(this);
@@ -621,10 +636,22 @@ private:
         nothrow @nogc @system
     {
         if (capacity == 0 || capacity > size_t.max / Entry.sizeof) return null;
+        static if (hasResults)
+            if (capacity > size_t.max / R.sizeof) return null;
         auto service = parent.service;
         auto park = cast(PrivateChildPark*) allocateZero(service, PrivateChildPark.sizeof, PrivateChildPark.alignof);
         if (park is null) return null;
         park.entries_ = cast(Entry*) allocateZero(service, capacity * Entry.sizeof, Entry.alignof);
+        static if (hasResults)
+            if (park.entries_ !is null)
+            {
+                park.results_ = cast(R*) allocateZero(service, capacity * R.sizeof, R.alignof);
+                if (park.results_ is null)
+                {
+                    freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
+                    park.entries_ = null;
+                }
+            }
         if (park.entries_ is null)
         {
             freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
@@ -649,12 +676,27 @@ private:
     }
 public:
     /// Acquires the current join; true before the first start. Unauthorized
-    /// contexts are fatal. Read externally owned results after this returns true.
+    /// contexts are fatal. Read joined results after this returns true.
     /// A post-idle root notification may still pin the root Entry and live count.
     bool finished(scope ref PrivateContext context) nothrow @nogc @system
     {
         authorized(context);
         return atomicLoad!(MemoryOrder.acq)(base_.wave.active) == 0;
+    }
+
+    static if (hasResults)
+    {
+        /// Results of the last nonempty wave, indexed by member spawn order;
+        /// empty before the first such wave or after a void-operation wave.
+        /// Acquires the join. Calling while a wave is active is fatal. Valid
+        /// only within this callback and until the next start/startFinal.
+        const(R)[] results(scope ref PrivateContext context) nothrow @nogc @system
+        {
+            authorized(context);
+            if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0)
+                fatal("private child results: wave active");
+            return results_[0 .. resultCount_];
+        }
     }
 
     PrivateSpawnResult spawn(scope ref PrivateContext context, T initial)
@@ -681,14 +723,29 @@ public:
     PrivateStartResult start(alias operation)(scope ref PrivateContext context, bool retire = false)
         nothrow @nogc @system
     {
-        static assert(is(typeof(&operation) : void function(
-            scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system));
+        enum producesResults = !is(typeof(&operation) : void function(
+            scope ref PrivateBorrow!T, scope ref PrivateContext) @system);
+        static if (producesResults)
+        {
+            static assert(hasResults && is(typeof(&operation) : R function(
+                scope ref PrivateBorrow!T, scope ref PrivateContext) @system),
+                "operation must return void or the cohort's result type");
+            static assert(is(typeof(&operation) : R function(
+                scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system),
+                "operation must be nothrow @nogc");
+        }
+        else
+            static assert(is(typeof(&operation) : void function(
+                scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system),
+                "operation must be nothrow @nogc");
         authorized(context);
         if (context.retiring_) return PrivateStartResult.retiring;
         if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0) return PrivateStartResult.waveActive;
         if (count_ == 0) return PrivateStartResult.empty;
         retire_ = retire;
         cursor_ = 0;
+        static if (hasResults)
+            resultCount_ = producesResults ? count_ : 0;
         header_ = PayloadHeader.init;
         header_.maxCs = header_.done = 1;
         header_.plen = 1;
@@ -757,7 +814,10 @@ private:
         immutable retiring = park.retire_;
         auto borrow = PrivateBorrow!T(cast(T*) entry.state);
         auto context = PrivateContext(entry, entry.enclosing, retiring, park.batchLimit_);
-        operation(borrow, context);
+        static if (is(typeof(operation(borrow, context)) == void))
+            operation(borrow, context);
+        else
+            park.results_[entry - park.entries_] = operation(borrow, context);
         if (retiring)
         {
             disposeChildren(entry);
@@ -776,6 +836,8 @@ private:
             freeMemory(service, entry.state, T.sizeof, T.alignof);
         }
         freeMemory(service, park.entries_, park.capacity_ * Entry.sizeof, Entry.alignof);
+        static if (hasResults)
+            freeMemory(service, park.results_, park.capacity_ * R.sizeof, R.alignof);
         freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
     }
 }
