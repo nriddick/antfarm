@@ -44,7 +44,8 @@ public:
     PrivateChildPark!T* createChildren(T)(size_t capacity)
         nothrow @nogc @system
     {
-        if (actor_ is null || retiring_) return null;
+        if (actor_ is null) fatal("private child park: unauthorized context");
+        if (retiring_) return null;
         return PrivateChildPark!T.create(actor_, capacity);
     }
 }
@@ -459,20 +460,22 @@ private:
         return park;
     }
 
-    bool authorized(scope ref PrivateContext context) nothrow @nogc @system
+    void authorized(scope ref PrivateContext context) nothrow @nogc @system
     {
-        return context.actor_ !is null && context.actor_ is base_.parent;
+        if (context.actor_ is null || context.actor_ !is base_.parent)
+            fatal("private child park: unauthorized context");
     }
 public:
     bool finished(scope ref PrivateContext context) nothrow @nogc @system
     {
-        return authorized(context) && atomicLoad!(MemoryOrder.acq)(base_.wave.active) == 0;
+        authorized(context);
+        return atomicLoad!(MemoryOrder.acq)(base_.wave.active) == 0;
     }
 
     bool spawn(scope ref PrivateContext context, T initial)
         nothrow @nogc @system
     {
-        if (context.retiring_ || !finished(context) || count_ == capacity_) return false;
+        if (!finished(context) || context.retiring_ || count_ == capacity_) return false;
         auto service = base_.parent.service;
         auto state = service.allocator.allocate(service.allocator.context, T.sizeof, T.alignof);
         if (state is null) return false;
@@ -492,7 +495,7 @@ public:
     {
         static assert(is(typeof(&operation) : void function(
             scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system));
-        if (context.retiring_ || !finished(context)) return false;
+        if (!finished(context) || context.retiring_) return false;
         if (count_ == 0) return true;
         retire_ = retire;
         cursor_ = 0;

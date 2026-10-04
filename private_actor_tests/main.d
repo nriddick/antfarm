@@ -195,10 +195,6 @@ PrivateDisposition parentStep(scope ref PrivateBorrow!Parent b, scope ref Privat
         check(b.value.nodes !is null);
         foreach (i; 0 .. 17)
             check(b.value.nodes.spawn(ctx, Node(null, b.value.results + i * 4, 0, b.value.gates + i)));
-        PrivateContext fake;
-        check(!b.value.nodes.finished(fake));
-        check(!b.value.nodes.spawn(fake, Node.init));
-        check(!b.value.nodes.start!nodeStep(fake));
     }
     if (!b.value.nodes.finished(ctx)) return PrivateDisposition.again;
     foreach (i; 0 .. 68) check(b.value.results[i] == (b.value.phase < 3 ? b.value.phase : 3));
@@ -422,6 +418,53 @@ void sameShardJoin()
             enforce(MonoTime.currTime < deadline, "join timeout");
     }
 }
+enum AuthorityMisuse { spawn, start, finished, defaultFinished, defaultCreate }
+struct AuthorityProbe { PrivateChildPark!State* children; AuthorityMisuse misuse; }
+struct AuthorityRoot { AuthorityProbe* probe; bool owner; }
+void authorityOperation(scope ref PrivateBorrow!State, scope ref PrivateContext)
+    nothrow @nogc @system {}
+PrivateDisposition authorityStep(scope ref PrivateBorrow!AuthorityRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto probe = b.value.probe;
+    if (b.value.owner)
+    {
+        if (probe.children is null) probe.children = ctx.createChildren!State(1);
+        check(probe.children !is null);
+        return PrivateDisposition.again;
+    }
+    check(probe.children !is null);
+    PrivateContext empty;
+    final switch (probe.misuse)
+    {
+        case AuthorityMisuse.spawn: probe.children.spawn(ctx, State.init); break;
+        case AuthorityMisuse.start: probe.children.start!authorityOperation(ctx); break;
+        case AuthorityMisuse.finished: probe.children.finished(ctx); break;
+        case AuthorityMisuse.defaultFinished: probe.children.finished(empty); break;
+        case AuthorityMisuse.defaultCreate: empty.createChildren!State(1); break;
+    }
+    return PrivateDisposition.finish;
+}
+void authorityDeath(AuthorityMisuse misuse)
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    AuthorityProbe probe;
+    probe.misuse = misuse;
+    auto park = PrivateRootPark!(AuthorityRoot, authorityStep).create(farm, 2);
+    check(park !is null);
+    check(park.spawn(AuthorityRoot(&probe, true)));
+    check(park.spawn(AuthorityRoot(&probe, false)));
+    park.pump(token);
+    while (view.consumeNext()) {}
+    // Reaching this point means the fatal contract was not enforced.
+}
+
 enum fatalSamplePrefix = "fatal-sample:";
 enum deathSampleText = "private death harness sample";
 
@@ -461,6 +504,10 @@ void deathHarness()
         auto expected = "antfarm fatal: " ~ deathSampleText;
         check(diedWithMessage(mode, expected));
         writeln("PASS fatal sample dies nonzero with expected stderr message");
+        foreach (modeName; ["wrong-parent-spawn", "wrong-parent-start", "wrong-parent-finished",
+            "default-finished", "default-create"])
+            check(diedWithMessage(modeName, "antfarm fatal: private child park: unauthorized context"));
+        writeln("PASS wrong-parent and default authority are fatal");
     }
     else
         writeln("SKIP death harness: /proc/self/exe re-exec requires Linux");
@@ -507,6 +554,11 @@ void main(string[] args)
     auto mode = args.length > 1 ? args[1] : "";
     switch (mode)
     {
+        case "wrong-parent-spawn": authorityDeath(AuthorityMisuse.spawn); return;
+        case "wrong-parent-start": authorityDeath(AuthorityMisuse.start); return;
+        case "wrong-parent-finished": authorityDeath(AuthorityMisuse.finished); return;
+        case "default-finished": authorityDeath(AuthorityMisuse.defaultFinished); return;
+        case "default-create": authorityDeath(AuthorityMisuse.defaultCreate); return;
         case "join-only": sameShardJoin(); return;
         case "death": deathHarness(); return;
         case "death-negative-control": deathNegativeControl(); return;
