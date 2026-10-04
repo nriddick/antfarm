@@ -29,8 +29,12 @@ alias ActorWaveCompletionCallback = void function(void* context)
     nothrow @nogc @system;
 
 /// Optional exactly-once notification issued after a wave has release-
-/// published `finished`. The callback may make external scheduler work ready;
-/// it must not destroy the wave storage before the callback returns.
+/// published `finished`. `finished` does not mean this callback has returned:
+/// the owner may observe it and `begin` a new generation while the old
+/// callback is still running. The completion context must outlive the
+/// callback's last access. The callback must not destroy the wave storage
+/// before it returns, and an old callback must not touch a reused descriptor
+/// without separate synchronization.
 struct ActorWaveCompletionHook
 {
     void* context;

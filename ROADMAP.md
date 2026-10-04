@@ -3,10 +3,25 @@
 ## Next: 1.7.1-rc.1 private actors
 
 Private actor hierarchies (self-owned roots, parent-owned child cohorts, and
-joined descendant lifetimes) are developed separately, together with their
-Farm shard-completion and public actor-wave completion fixes, for
-1.7.1-rc.1. That work must convert its `AntFarm.create` calls to the rc.4
-`ringMiB` parameter.
+joined descendant lifetimes) are planned for 1.7.1-rc.1. The Farm
+shard-completion join and the public actor-wave completion credits that those
+hierarchies depend on landed in 1.7.0-rc.5 and are not part of this release.
+New `AntFarm.create` calls must use the rc.4 `ringMiB` parameter.
+
+## 1.7.0-rc.5 completion joins
+
+Fixes two public completion bugs that were still on 1.7.0-rc.4:
+
+- Tracked single-shot shard completion uses an acquire/release RMW, so a
+  table hook or wave observer acquires every primary-run callback's plain
+  writes, including chunks the finisher did not run. A relaxed completion
+  sum joined only the finisher's writes. Secondary and tertiary MT callbacks
+  are not part of that join.
+- Public wave completion no longer treats progress equality as a descriptor
+  lifetime fence. A producer hold plus one credit per admitted table keeps
+  the descriptor alive until each holder's last access. `finished` still
+  does not join the optional user completion callback; that context must
+  outlive the callback.
 
 ## 1.7.0-rc.4 usability and shutdown fixes
 

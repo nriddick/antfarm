@@ -9,10 +9,12 @@ in `actors/wave.d`. It supplements
 unchanged.
 
 The central safety claim is narrow: plain mutable actor state may migrate
-between OS threads because only one successful `scheduled -> running`
-transition creates a borrow, and every handoff to a later activation crosses a
-release/acquire chain. `PayloadBody` remains read-only ring storage and carries
-only a stable slot address and generation.
+between OS threads because, for autonomous activation, only one successful
+`scheduled -> running` transition creates a borrow, and every handoff to a
+later activation crosses a release/acquire chain. Wave dispatch is the
+exception: it keeps the actor `scheduled`, verifies the unique wave
+reservation, and borrows without that transition. `PayloadBody` remains
+read-only ring storage and carries only a stable slot address and generation.
 
 The application handler receives `scope ref ActorBorrow!T` and
 `scope ref ActorContext`. Those qualifiers make the dynamic-extent intent part
@@ -48,15 +50,19 @@ caller-observed quiescence described below.
 | `Wowner` | `ActorSlot.waveOwnerWord` | Stable owning wave while aggregate membership and its lifetime pin remain active. |
 | `Tsent` | Farm table sentinel | Release-published last by `AntFarm.write`, acquire-validated by a consumer. |
 | `Pbody` | Two or three const ring words | Stable slot address and generation; wave payloads add the stable wave address. Raw-stored before `Tsent` and raw-loaded after its acquire. |
-| `Tprogress` | Farm table completion counter | Each shard publishes callback writes with an acquire/release increment; the increment reaching `Tlen` invokes the table hook. |
+| `Tprogress` | Farm table completion counter | Shard completion RMWs on `Shc` are acquire/release; the finisher's acquire/release increment reaching `Tlen` invokes the table hook. Primary-run writes join; all callbacks only for tracked ST single-shot tables. |
 | `Wlen` | `ActorWave.tablesPublished_` | Number of physical tables admitted into the open wave. |
-| `Wprogress` | `ActorWave.tablesCompleted_` | Number of table hooks which have joined their table and returned it to the wave. |
-| `Wstatus` | `ActorWave.status_` | `SEALED`, `FINISHING`, `FINISHED`, and `FAILED`; acquire observation of `FINISHED` joins the wave. |
+| `Wprogress` | `ActorWave.tablesCompleted_` | Number of table hooks which have recorded table completion; diagnostic, not a callback-lifetime fence. |
+| `Wstatus` | `ActorWave.status_` | `SEALED`, `FINISHED`, and `FAILED`; acquire observation of `FINISHED` joins the wave's descriptor accesses, not the optional user callback. |
+| `Wcredits` | `ActorWave.pendingCredits_` | Producer hold plus one credit per admitted physical table; final decrement owns completion. |
 
-`raw` means an atomic operation with no ordering semantics. It prevents an
-atomic/plain data race on reused storage but does not itself publish preceding
-writes. `rel`, `acq`, and `acq_rel` have their usual release, acquire, and
-combined meanings. D's `cas` is strong; every retry reloads the changed word.
+`raw` means an atomic operation with no ordering semantics. It does not
+publish preceding writes. It is not a license to race a plain access against
+the atomic object: both sides of a reused ring word are atomic, and a
+release/acquire edge is still required where one publishes data. See the
+memory-order contract in [SPEC.md](../SPEC.md). `rel`, `acq`, and `acq_rel`
+have their usual release, acquire, and combined meanings. D's `cas` is
+strong; every retry reloads the changed word.
 
 ## End-to-end chart
 
@@ -104,15 +110,17 @@ There are three complementary chains in this chart:
 
 The queue and Farm chains deliver an activation. The lifecycle chain is the
 authority to touch mutable state. Possessing a ring handle without winning
-`scheduled -> running` does not grant a borrow.
+`scheduled -> running` does not grant an autonomous borrow. Wave dispatch,
+described below, borrows without that transition.
 
 ## Wave completion chart
 
 ```text
 orchestrator                 Farm table consumers                 observer
 ------------                 --------------------                 --------
-
+begin: Wcredits = 1
 Wlen.fetchAdd(acq_rel)
+Wcredits.fetchAdd(acq_rel)
 L.CAS(acq_rel,
   IDLE -> SCHEDULED)
 link member; Wowner.store(rel)
@@ -121,28 +129,54 @@ Tsent.store(rel)       ---> Tsent.load(acq)
                             L.load(acq, SCHEDULED)
                             phase-specific ActorBorrow mutation
                             L.CAS(acq_rel, SCHEDULED -> IDLE)
+                            Shc completion.fetchAdd(acq_rel)
                             Tprogress.fetchAdd(acq_rel)
                               last shard: table hook
                             Wprogress.fetchAdd(acq_rel)
+                            Wcredits.fetchSub(acq_rel) [final access]
 
 seal: Wstatus.CAS(acq_rel,
   OPEN -> SEALED)
-sealer or last hook:
-Wstatus.CAS(acq_rel,
-  SEALED -> FINISHING)
+cache observation handle
+Wcredits.fetchSub(acq_rel) [final access]
+
+sole final-credit owner:
+cache completion callback/context
 clear intrusive members
 Wowner.store(rel, 0) for each
-Wstatus.CAS(acq_rel,
-  FINISHING -> FINISHED) --------------------------------------> load(acq)
+Wstatus.store(rel, FINISHED) [last descriptor access] -----------> load(acq)
+invoke cached optional completion
 ```
 
-The wave may have several tables and several Tprogress shards per table.
-Acquire/release RMW modification order joins each shard into its table, then
-each table into Wprogress. `Wprogress == Wlen` may be transient while the
-producer is still publishing, so only `SEALED && Wprogress == Wlen` permits
-the exactly-once `FINISHED` transition. Publishing a dependent wave after an
-acquire observation of `FINISHED` carries all predecessor actor writes into
-the new Farm publication.
+The producer hold prevents completion while more tables can be published or
+while the writer still uses the descriptor after `writeTracked` returns.
+A zero write rolls back both Wlen and its reserved table credit. Each hook
+records diagnostic progress, completes its remaining descriptor accesses,
+then drops its credit. The final acquire/release decrement joins all prior
+participants and uniquely owns membership release and the `FINISHED` store.
+`seal` caches its returned handle before dropping the producer hold.
+
+`Wprogress == Wlen` is not a sufficient finish condition, even after sealing.
+A hook can increment progress and still be accessing the descriptor. Also,
+separately reading equality and then SEALED can use equality from an earlier
+open publication state. The former equality/election implementation allowed
+both races. The deterministic torture tests pause a hook after its progress
+increment and verify that neither the sealer nor another completing table can
+finish until that hook releases its credit; they then immediately reuse the
+descriptor before joining the paused consumer's thread.
+
+`FINISHED` is the runtime's last descriptor access, not a join of the optional
+user completion callback. That callback runs after the release store. An owner
+may observe `finished` and `begin` a new generation before the old callback
+returns. The completion context must outlive the callback. An old callback
+must not touch a reused descriptor, or storage the owner reclaimed after
+seeing `finished`, without separate synchronization. `actor_torture`
+characterizes this contract; it is not a bug reproduction.
+
+The release/acquire chain joins consumers within each shard, shards within a
+table, and table hooks into the final wave credit. Acquiring `FINISHED`
+carries all predecessor actor writes into a dependent wave's Farm publication.
+It does not carry writes the user callback has not yet performed.
 
 Membership release reads the next intrusive link and clears the old link
 before release-storing `Wowner = 0`. That store is the wave's final access to
@@ -531,3 +565,14 @@ threads then call `reclaim` on disjoint owners, and a ninth calls
 and a Clang-instrumented mimalloc plus LDC-instrumented actor binary passes one
 ThreadSanitizer runtime. This tests allocator thread migration; it does not
 weaken or replace any actor lifecycle handoff edge.
+
+## Within-shard completion join
+
+The Farm's chunk completion RMW on `Shc` uses acquire/release ordering, as
+does the shard finisher's RMW on `Tprogress`. Both are needed when a tracked
+ST table's hook observes plain writes from every callback: the first joins
+primary-run consumers within a shard, and the second joins shards. That is a
+join of all callbacks only for tracked ST single-shot tables. Work-claim
+increments on `Shc` remain relaxed. `antfarm_test` `join-only` is the
+two-consumer, one-shard ThreadSanitizer regression. It fails with the former
+relaxed completion RMW and passes with acquire/release.
