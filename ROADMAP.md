@@ -15,9 +15,14 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   descendants join; `finishAfterChildren` retires after the join without another
   user callback. Strict `finish` with active children remains fatal. Notifications
   return through the existing emitter pump; child Entries remain 40 bytes.
-- **E2 deferred:** child continuations, typed ports, subset waves, general
-  destructors, and optional emitter wake integration. No version bump accompanies
-  E1; the release remains 1.7.1-rc.1 pending a tag decision.
+- **E2 ports slice 1 done:** POD return values populate cohort-owned per-member
+  slots in spawn order; authorized parents acquire joined results, including
+  after member retirement. Signal-only cohorts retain their layout and dispatch.
+- **Port extensions:** X1 root-to-application outputs; X2 library reductions;
+  X3 bounded append buffers; X4 writer capability / in-place results.
+- **E2 remaining:** child continuations, subset waves, general destructors, and
+  optional emitter wake integration. No version bump accompanies these slices;
+  the release remains 1.7.1-rc.1 pending a tag decision.
 
 ## 1.7.0-rc.5 completion joins
 

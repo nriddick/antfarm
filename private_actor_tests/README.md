@@ -116,3 +116,23 @@ execution is explicitly skipped; Windows smoke testing remains manual.
 
 The restored-source run on 2026-10-04 passed `make check` and completed
 263 TSan soak loops in 121 seconds with no failures.
+
+## Root-wait and result-port selectors
+
+Pass a selector to `private_actor_tests`, `private_actor_tests_dmd`, or
+`private_actor_tests_tsan`. The normal suite includes `phase-e1` and
+`phase-ports`; deterministic schedules require the test-hook build flags
+supplied by the Makefile.
+
+| Group | Selectors |
+| --- | --- |
+| E1 root waits | `phase-e1`, `e1-basic`, `e1-before-custody`, `e1-after-custody`, `e1-late-strict`, `e1-joined-mixed`, `e1-root-ready-cas-retry`, `e1-seal-final-owner` |
+| E1 counter death | `e1-counter-exhaustion-death` runs the harness; `e1-counter-exhaustion` is its fatal child mode. |
+| Result ports | `phase-ports`, `ports-basic`, `ports-poll-visibility`, `ports-wait-visibility`, `ports-late-tail`, `ports-large-cohort`, `ports-nested`, `ports-alloc-fail` |
+| Result-port death | `ports-death` runs the harness; `ports-read-active`, `ports-wrong-parent-results`, and `ports-default-results` are its fatal child modes. |
+
+The port tests cover typed-result lifetime, acquire visibility, notification
+tails, admission retries, pipelined reductions and allocator failures. Compile
+checks reject qualified/non-POD result types and invalid callback signatures.
+`make death` runs the E1 and port death harnesses in both compiler lanes,
+including debug and release.

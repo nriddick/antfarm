@@ -37,8 +37,9 @@ child cohort's membership and scheduling authority.
 
 Application-defined result channels are supported. A root can return
 `waitChildren` to resume once all its child work joins, without polling in
-repeated callbacks. Typed signal ports and resumable child continuations remain
-future work; children still run one synchronous `void` operation per wave.
+repeated callbacks. Child cohorts can carry typed per-member results;
+root-to-application outputs, library reductions and continuations remain future
+work. Children run one synchronous operation per wave.
 
 ## API
 
@@ -84,17 +85,23 @@ void main()
 }
 ```
 
-Only a private callback can call `context.createChildren!T(capacity)`. It stores
-the resulting opaque `PrivateChildPark!T*` in its own state. The parent may:
+Only a private callback can call `context.createChildren!(T, R)(capacity)`. It
+stores the resulting opaque `PrivateChildPark!(T, R)*` in its own state. `R` is
+a POD result type; its default, `void`, creates a signal-only cohort with no
+result storage. `PrivateChildPark!T` is the same type as `PrivateChildPark!(T, void)`. The parent may:
 
 - `children.spawn(context, initializer)` while the cohort is idle;
 - `children.start!operation(context)` to authorize a whole-cohort wave;
 - `children.finished(context)` to acquire its completion;
+- `children.results(context)` to acquire a `const(R)[]` of joined results, when
+  `R` is not `void`;
 - `children.startFinal!operation(context)` to execute a terminal wave and
   free every member after its final callback.
 
 An operation accepts `scope ref PrivateBorrow!T` and `scope ref PrivateContext`
-and returns `void`. It may launch descendant waves and return immediately.
+and returns either `void` or the cohort's result type `R`. The runtime stores
+each return value in that member's slot, indexed by spawn order. It may launch
+descendant waves and return immediately.
 Its enclosing wave remains active until those descendants finish. Parent
 callbacks must not block waiting for child work. A root returns one of:
 
@@ -115,29 +122,27 @@ waves through root → child → grandchild trees, followed by child retirement.
 The [lifecycle harness](../perftest/actor_churn.d) demonstrates parent-created
 cohorts with terminal child waves.
 
-## A conductor with owned results
+## A conductor with child results
 
-Each child writes a distinct slot in application-owned storage. The parent
-reads those slots in its single resumption after `waitChildren`. The application
-keeps both the slots and total alive until the root is collected. The parent
-never reads child state. Returning the wait disposition lets consumers run the
-children; no completion-polling callback or extra `finished(context)` is needed.
+Each child returns its value into cohort-owned storage. The parent reads the
+slots in spawn order on its resumption after `waitChildren`, even after
+`startFinal` has freed member state. Only the root's total remains owned by the
+application, which keeps it alive until the root is collected.
 
 ```d
 import antfarm;
 import actors;
 import std.stdio : writeln;
 
-struct Item { ulong input; ulong* output; }
-void square(scope ref PrivateBorrow!Item actor, scope ref PrivateContext context)
+struct Item { ulong input; }
+ulong square(scope ref PrivateBorrow!Item actor, scope ref PrivateContext context)
     nothrow @nogc @system
 {
-    *actor.value.output = actor.value.input * actor.value.input;
+    return actor.value.input * actor.value.input;
 }
 struct Conductor
 {
-    PrivateChildPark!Item* children;
-    ulong* outputs;
+    PrivateChildPark!(Item, ulong)* children;
     ulong* total;
 }
 PrivateRootDisposition conduct(scope ref PrivateBorrow!Conductor actor,
@@ -145,23 +150,21 @@ PrivateRootDisposition conduct(scope ref PrivateBorrow!Conductor actor,
 {
     if (actor.value.children is null)
     {
-        actor.value.children = context.createChildren!Item(4);
+        actor.value.children = context.createChildren!(Item, ulong)(4);
         if (actor.value.children is null) fatal("child park allocation failed");
         foreach (i; 0 .. 4)
-            if (actor.value.children.spawn(context,
-                    Item(i + 1, actor.value.outputs + i)) != PrivateSpawnResult.spawned)
+            if (actor.value.children.spawn(context, Item(i + 1)) != PrivateSpawnResult.spawned)
                 fatal("child spawn failed");
         if (actor.value.children.startFinal!square(context) != PrivateStartResult.started)
             fatal("child wave failed");
         return PrivateRootDisposition.waitChildren;
     }
-    foreach (i; 0 .. 4) *actor.value.total += actor.value.outputs[i];
+    foreach (r; actor.value.children.results(context)) *actor.value.total += r;
     return PrivateRootDisposition.finish;
 }
 void main()
 {
-    ulong[4] outputs; // Externally owned: each child writes one distinct slot.
-    ulong total;
+    ulong total; // Root-to-application output stays application-owned.
     auto farm = AntFarm.create();
     auto token = farm.registerProducer(Tier.small);
     if (!token.valid) fatal("producer registration failed");
@@ -169,7 +172,7 @@ void main()
     if (view.subscribe(farm) < 0) fatal("consumer subscription failed");
     auto park = PrivateRootPark!(Conductor, conduct).create(farm, 1);
     if (park is null) fatal("private park allocation failed");
-    auto spawned = park.spawn(Conductor(null, outputs.ptr, &total));
+    auto spawned = park.spawn(Conductor(null, &total));
     if (spawned != PrivateSpawnResult.spawned) fatal("private spawn failed");
     if (park.live != 1) fatal("expected one live root after spawn");
     writeln("live=1 after spawn");
@@ -187,6 +190,42 @@ void main()
 }
 ```
 
+### Result lifetime and waves
+
+Slots are allocated eagerly with the cohort through its inherited allocator
+and freed when the cohort is disposed. Results are empty before the first
+nonempty wave. A result-producing wave replaces every member's slot; a `void`
+wave clears the result length. An empty start preserves previous results, as do
+rejected busy or retiring starts. Spawning another member preserves the previous
+slice; the next wave includes that member at its new spawn index.
+
+`results(context)` is fatal while the wave is active. Polling parents retry
+`finished(context)` before reading. Wrong-parent and default contexts are fatal
+in debug and release. The slice is valid only within the authorized parent's
+callback and until the next `start` or `startFinal`; retaining it beyond that
+boundary violates the `@system` contract. Pointers inside a POD result follow
+application ownership rules; any pointer into child state must not be returned
+as a result value.
+
+### Pipelined tree reduction
+
+A child-level parent launches grandchildren in wave g and folds their results
+in wave g+1. The enclosing wave cannot join until the grandchildren join, so
+those results are idle on the next callback. For a root → middle → leaf tree:
+
+1. The root starts a `void` middle operation that creates leaf cohorts and
+   calls `leaves.startFinal!leafValue(context)`, then returns `waitChildren`.
+2. On resumption it calls `mids.startFinal!midFold(context)` and waits again.
+   Each retiring middle callback sums `leaves.results(context)` and returns
+   that sum into its own result slot. Reading in a retiring context is allowed.
+3. The root folds `mids.results(context)` and finishes.
+
+The [ports-nested test](../private_actor_tests/main.d) exercises this three-level
+pipeline on five workers. Each parent reads only its direct children's results.
+External result channels remain the route for root-to-application output and
+application-defined cross-level routing; they require their own ownership and
+synchronization contracts.
+
 ## Progress and outcomes
 
 | Operation | Result / contract |
@@ -194,6 +233,7 @@ void main()
 | Root `spawn` | `PrivateSpawnResult.spawned`, `capacityFull`, or `allocationFailed`; copies POD bytes and returns no handle. |
 | Child `spawn` | The same outcomes, plus `waveActive` or `retiring`. |
 | `start` / `startFinal` | `PrivateStartResult.started`, `empty`, `waveActive`, or `retiring`. Empty starts are already complete and take no credit. |
+| `results(context)` | `const(R)[]` in spawn order, acquired after the join; fatal while active or with wrong/default authority. Available only for non-void `R`. |
 | `finished(context)` | True before the first start and after the current wave joins; a root notification tail may still be pending. Wrong-parent or default authority is fatal, including when the cohort is idle. |
 | `collectCompleted()` / `poll()` | Acquires completed root tables and wake returns, reclaims terminal roots and appends ready roots; never publishes work or runs consumers. |
 | `pump(token)` | Collects completions and emits at most one root table and one table per pending child wave; returns only the number of root activations published, including internal deferred cleanup. Zero does not mean idle. The emitter must keep pumping to resume waiting roots. |
@@ -250,8 +290,9 @@ raw pointers or transitive state. In particular:
 - Spawning copies POD bytes; it is not a language-level move. A failed spawn
   transfers nothing. An initializer must not leave external mutable aliases to the resulting
   state. No parent, sibling, emitter, or external observer may read or mutate
-  private actor state. Result channels need their own ownership/synchronization;
-  a pointer back into a child's state is not a result channel.
+  private actor state. Library result slots belong to the cohort and survive
+  member retirement until cohort disposal. External result channels need their
+  own ownership/synchronization; a pointer into child state is not a result.
 - Allocator-managed actor state is not automatically scanned or rooted by the
   GC. Keep any referenced GC allocations rooted externally for their required
   lifetime. Descendants inherit the root allocator and its context, which must

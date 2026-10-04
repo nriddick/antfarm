@@ -384,3 +384,38 @@ version with each run; adapt placement deliberately when changing hosts.
 See [PRIVATE_ACTORS.md](../actors/PRIVATE_ACTORS.md) for API usage and limits:
 POD state, callback-scoped `@system` borrowing, whole-cohort child waves, and
 synchronous child callbacks. Resumable child continuations are future work.
+
+## Typed result ports: unused-feature gate (2026-10-04)
+
+Compared E2 ports slice 1 against local main `374909c`, retaining `R = void` in
+all benchmark cohorts. CRT allocator was used because the mimalloc submodule
+was unavailable. Both binaries used LDC 1.43.0 `-O2 -release`, huge pages off,
+16384 actors, batch 256 and small quota 16384 words. Five alternating runs per
+binary/configuration used five warmup cycles and three-second windows, pinned
+to CPU 0 (emitter) and CPUs 1–6 (six consumers). No build or test workload ran
+during measurement.
+
+| Mode | 0 consumers base → ports, M/s | Change | 6 consumers base → ports, M/s | Change |
+| --- | ---: | ---: | ---: | ---: |
+| `actor` | 7.793 → 7.678 | -1.47% | 5.906 → 5.932 | +0.44% |
+| `wave` | 8.233 → 8.436 | +2.47% | 6.078 → 6.012 | -1.08% |
+| `private` | 8.727 → 8.931 | +2.34% | 6.512 → 6.492 | -0.31% |
+| `private-remote` | 9.012 → 9.121 | +1.21% | 3.854 → 3.878 | +0.62% |
+| `tree` | 11.133 → 10.980 | -1.38% | 9.736 → 9.844 | +1.11% |
+| `tree-wait` | 10.784 → 10.801 | +0.16% | 10.339 → 10.205 | -1.30% |
+
+All twelve medians pass the −3% regression limit; changes range from −1.47%
+to +2.47%, with no gain above +3%. This is the unused-feature gate, not a
+measurement of result-slot throughput. The optional `tree-results` mode was
+not added; `tree` and `tree-wait` are unchanged.
+
+[Metadata](results/private-result-ports-2026-10-04/metadata.json),
+[raw runs](results/private-result-ports-2026-10-04/runs.jsonl),
+[summary](results/private-result-ports-2026-10-04/summary.json), and
+[validation/mutations](results/private-result-ports-2026-10-04/validation.md)
+retain the evidence. Reproduce with an isolated baseline build:
+
+```sh
+python3 perftest/results/private-result-ports-2026-10-04/measure.py \
+  BASELINE/perftest/actor_churn perftest/actor_churn
+```

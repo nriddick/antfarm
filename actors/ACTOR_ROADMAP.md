@@ -31,9 +31,16 @@ must continue pumping, and strict `finish` still rejects active child waves.
 Measurements and limitations are recorded in
 [PRIVATE_LIFECYCLE.md](../perftest/PRIVATE_LIFECYCLE.md).
 
-**E2 remains deferred:** resumable child continuations, typed signal/result ports,
-subset waves, general destructors, and optional emitter wake integration. A
-compiler-enforced safe ownership front end also remains future work.
+**E2 ports slice 1 is done:** POD return values populate cohort-owned slots in
+spawn order; only the direct parent reads the joined `const(R)[]`. Slots survive
+terminal member callbacks. Default `R = void` retains the existing layout and
+code; ordinary child Entries remain 40 bytes.
+
+Port extensions remain: **X1** root-to-application outputs (next), **X2** library
+reductions, **X3** bounded append buffers, and **X4** writer capability / in-place
+results. Resumable child continuations, subset waves, general destructors and
+optional emitter wake integration remain deferred. A compiler-enforced safe
+ownership front end also remains future work.
 
 The child-continuation extension must preserve these boundaries: retain a logical
 enclosing-wave hold before the original child callback returns; retain callback

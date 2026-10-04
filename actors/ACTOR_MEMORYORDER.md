@@ -241,6 +241,30 @@ hint, makes the detached links and joined results visible. Reversing each list
 preserves its successful-push FIFO order; appending at collection gives no global
 completion-order guarantee. See [the state machine and lost-wake proof](PRIVATE_ACTORS.md#root-join-state-machine-and-lost-wake-argument).
 
+### Private child results
+
+Typed cohorts store each operation's return value in `results_[i]`, where i is
+its Entry index (spawn order). The store precedes callback return and member
+retirement. No new atomics or fences are needed: the plain slot write joins
+through Shc and Tprogress acquire/release RMWs, table and descendant wave
+credits, and the final wave credit's acquire/release decrement. The finisher
+release-stores `active = 0` as its final cohort access.
+
+Polling roots and child-level parents acquire that idle store through
+`finished(context)` or `results(context)` before reading the slots. A root
+resumed through `waitChildren` additionally acquires the root pending decrement,
+rootReturns publication, emitter detach, Farm publication and consumer acquire
+chain above. `results` still acquire-loads active to diagnose an early read.
+
+Parent reads precede the next `start` enqueue release CAS. The emitter's
+acquire/release detach, Farm release publication and consumer acquire order those
+reads before the next wave's slot writes. The idle acquire in `start` also
+orders successive writing generations. `resultCount_` is parent-only and set
+before enqueue; children read neither that count nor any slot. The slot pointer
+is published through enqueue. The finisher never updates result bookkeeping
+after publishing idle, so a polling parent can read and dispose the cohort
+while the saved root notification credit is still in flight.
+
 ## Inbox and close chart
 
 ```text
@@ -547,6 +571,8 @@ remains deliberately undefined.
 
 ## Non-edges and caller obligations
 
+- A result slice used after `start` or `startFinal` is a race with the next
+  wave; it must not escape the authorized callback.
 - `ActorHandle` copies are plain values. Publishing a newly created handle to
   another thread requires ordinary application synchronization.
 - `scope ref` on `ActorBorrow` and `ActorContext` is a callback type contract,
