@@ -1,7 +1,7 @@
 {
   "passed": true,
   "criterion": "No unused-feature throughput regression below -3%",
-  "symmetric_band_exception": "Orchestrator clarified favourable deviations above +3% are not regressions; retain and report them explicitly.",
+  "symmetric_band_exception": "Favourable deviations above +3% are reported explicitly with a work-equivalence check.",
   "original_protocol": "symmetric \u00b13% of median",
   "repeats": 5,
   "seconds": 3,

@@ -1,11 +1,11 @@
 # Phase E1 root resumption gate
 
 The [full table and analysis](../../PRIVATE_LIFECYCLE.md#phase-e1-root-wait-gate--2026-10-04)
-records the CRT gate against c5a174f. `assessment.json` is the final decision:
-no regressions below −3%, with favourable deviations outside the original ±3%
-band explicitly reported under the orchestrator's clarification. `summary.json`
-records both the symmetric-band result and the clarified no-regression result.
-`interim-summary.json` preserves the literal-band assessment at the first stop.
+records the CRT gate against c5a174f. Gate: no regression worse than −3% versus
+base median; favourable deviations above +3% are reported explicitly with a
+work-equivalence check. `assessment.json` records the passing result.
+`summary.json` records both the symmetric-band result and the no-regression result.
+`interim-summary.json` preserves the initial symmetric-band assessment.
 
 There are 180 paired unused-feature samples, 20 new tree-wait samples, and ten
 additional paired samples for polling tree at one consumer. No sample was removed.

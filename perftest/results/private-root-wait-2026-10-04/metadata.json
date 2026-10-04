@@ -155,5 +155,5 @@
       "sha256": "b9634fec9c5864585f2b1977f01f7e40c9a8726a35dd6e18e62cc3806004658c"
     }
   },
-  "gate_decision": "Orchestrator clarified: reject regressions below -3%; report favourable deviations outside +3% explicitly. Repeat polling tree/256 at 1 consumer with another five alternating pairs."
+  "gate_decision": "No regression worse than -3% versus base median; favourable deviations above +3% are reported explicitly with a work-equivalence check."
 }

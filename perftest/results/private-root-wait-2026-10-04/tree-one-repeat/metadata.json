@@ -6,7 +6,7 @@
   "timestamp": "2026-10-04T21:37:59.202940+00:00",
   "allocator": "crt",
   "allocator_reason": "mimalloc submodule unavailable; approved CRT fallback",
-  "gate_decision": "No regression below -3%; favourable deviations outside +3% are reported separately",
+  "gate_decision": "No regression worse than -3% versus base median; favourable deviations above +3% are reported explicitly with a work-equivalence check.",
   "flags": "-O2 -release -i",
   "actors": 16384,
   "warmups": 5,

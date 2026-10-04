@@ -400,7 +400,7 @@ and four independent creators sharing a Farm. E1 adds exactly-once waits,
 empty/already-joined waves, both custody orders, late strict-finish tails,
 root-ready CAS retry, emitter-owned final sealing, and counter-exhaustion death
 tests. [The test comments](../private_actor_tests/main.d)
-identifies the bug each deterministic schedule catches. It tests ordinary backing with
+identify the bug each deterministic schedule catches. It tests ordinary backing with
 LDC and DMD; ThreadSanitizer uses LDC.
 
 The Farm suite and public actor torture suite, including its ThreadSanitizer

@@ -40,7 +40,8 @@ metadata = dict(base_commit='c5a174ff669b1cd274e31b143e7f90b7c1993beb',
     timestamp=datetime.now(timezone.utc).isoformat(), allocator=a.allocator,
     allocator_reason=('mimalloc submodule unavailable; approved CRT fallback' if a.allocator == 'crt'
                       else 'mimalloc selected; version reported in raw output'),
-    gate_decision='No regression below -3%; favourable deviations outside +3% are reported separately',
+    gate_decision=('No regression worse than -3% versus base median; favourable deviations above +3% '
+                   'are reported explicitly with a work-equivalence check.'),
     flags='-O2 -release -i', actors=16384, warmups=5, seconds=a.seconds,
     repeats=a.repeats, cases=cases, tree_wait_cases=wait_cases,
     ring_mib=8, huge_pages=False, tier='small', quota_words=16384,

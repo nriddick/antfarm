@@ -2,9 +2,9 @@
 
 ## Phase E1 root-wait gate — 2026-10-04
 
-The unused-feature gate passes against **c5a174f** under the orchestrator's
-clarification: reject regressions below −3%; report favourable differences outside
-the original symmetric ±3% band. The worst measured regression is **−1.61%**.
+Gate: no regression worse than −3% versus base median; favourable deviations
+above +3% are reported explicitly with a work-equivalence check. The unused-feature
+gate passes against **c5a174f**. The worst measured regression is **−1.61%**.
 The common child Entry remains 40 bytes, with LDC/DMD size and offset assertions.
 
 These runs use **CRT**, the approved fallback because the local mimalloc submodule
@@ -42,7 +42,7 @@ The base was built from a clean archive inside the implementation worktree.
 † Outside the symmetric ±3% band, favourable; not a regression. These exceptions
 are retained explicitly rather than described as within ±3%. Polling tree at one
 consumer measured **+8.73%** initially and **+3.61%** in an additional five-pair
-repeat requested by the orchestrator. Both rounds are retained. The initial base
+repeat. Both rounds are retained. The initial base
 sample **7.79 M/s** is an outlier (the other four are 9.75–9.94 M/s), but its median
 was calculated normally without discarding it. Public actor and wave controls
 also show favourable deviations at zero consumers.

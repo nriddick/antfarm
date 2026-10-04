@@ -84,12 +84,15 @@ private struct Entry
         }
     }
 }
-static assert(Entry.sizeof == 40 && Entry.alignof == 8);
-static assert(Entry.state.offsetof == 0 && Entry.children.offsetof == 8
-    && Entry.service.offsetof == 16 && Entry.next.offsetof == 24);
-static assert(Entry.enclosing.offsetof == 32 && Entry.disposition.offsetof == 32
-    && Entry.hasJoinCredits.offsetof == 33 && Entry.cleanup.offsetof == 34
-    && Entry.pending.offsetof == 36);
+version (D_LP64)
+{
+    static assert(Entry.sizeof == 40 && Entry.alignof == 8);
+    static assert(Entry.state.offsetof == 0 && Entry.children.offsetof == 8
+        && Entry.service.offsetof == 16 && Entry.next.offsetof == 24);
+    static assert(Entry.enclosing.offsetof == 32 && Entry.disposition.offsetof == 32
+        && Entry.hasJoinCredits.offsetof == 33 && Entry.cleanup.offsetof == 34
+        && Entry.pending.offsetof == 36);
+}
 
 private struct ChildBase
 {
