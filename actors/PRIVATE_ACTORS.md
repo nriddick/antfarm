@@ -192,9 +192,44 @@ void main()
 | `live` / `capacity` | Emitter-local root counts; `live` changes when completions are collected, not when consumers merely finish. Neither getter synchronizes another thread. |
 | `destroy()` | Collects once, then requires no live roots or pending work. It does not drain. Use `park.destroy(); park = null;`, because `destroy(park)` resolves to D's pointer destruction and does not free the park. |
 
-The current root table pool holds `ceil(capacity / 256)` tables in flight;
-small per-call batch limits do not increase that pool. A larger configurable
-pool and batch policy follow in the batching refinement.
+## Configuring batches and Farm quota
+
+`PrivateRootPark.create(farm, capacity, batchLimit = defaultPrivateBatchLimit,
+allocator = ActorAllocator.cRuntime())` fixes the maximum root batch size.
+The park allocates each batch's entry storage through its allocator at creation,
+using `storageLimit = min(batchLimit, capacity)` entries per batch. It reserves
+`ceil(capacity / storageLimit)` root table slots, equivalent to
+`ceil(capacity / batchLimit)` for every positive capacity. A configured limit
+larger than capacity therefore does not reserve unusable entry storage.
+Allocation sizes that overflow return null. A zero configured limit is fatal.
+
+`pump(token)` uses that configured limit. `pump(token, limit, avgCost = 0)`
+accepts 1 through the configured maximum; zero or an oversized override is
+fatal. Choosing a smaller per-call limit does not increase the table pool.
+Choose a smaller configured limit when more small tables must be in flight.
+
+`context.createChildren!T(capacity)` inherits the immediate parent's effective
+limit: a root's children use the root park's configured `batchLimit`, while a
+child's children use that child's cohort limit. An explicit override therefore
+propagates down the hierarchy until another override replaces it.
+`context.createChildren!T(capacity, childBatchLimit)` supplies a positive
+override, with no fixed cap. The child's existing member
+array supplies each accepted prefix, so even a large limit does not allocate
+extra child dispatch storage. Zero is fatal; overflowing member capacity
+returns null. Values above 256 are legal for both roots and children.
+
+The Farm producer tier bounds actual admission. Its default small quota is
+4096 ulongs, enough for about 225 one-word private entries in a table with one
+shard. A larger batch is split into accepted prefixes and requeued suffixes.
+To admit larger tables, configure a larger `quotaSmall`, or configure a bulk
+producer (`maxBulk` / `quotaBulk`) and register a `Tier.bulk` token. All quotas
+must still fit the Farm's segment and total producer-quota constraints.
+
+Larger batches amortize table overhead, but more roots wait behind one slow
+callback because a whole physical table returns together. Smaller batches
+limit that delay and reserve more table slots. See the recorded batch/quota/
+consumer sweep and default rationale in
+[PRIVATE_LIFECYCLE.md](../perftest/PRIVATE_LIFECYCLE.md).
 
 ## Ownership contract
 
@@ -237,7 +272,7 @@ continuation and descendant finish.
 ## Publication and reclamation
 
 Root entries have no admission/exit CAS, public generation, or stable public
-handle. The sole emitter consumes entries from a FIFO, snapshots at most 256
+handle. The sole emitter consumes entries from a FIFO, snapshots at most its configured batch limit of
 entry addresses into a detached batch, and publishes one-word single-shot
 Farm payloads. The Farm's primary claims provide exclusive dispatch.
 

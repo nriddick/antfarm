@@ -123,7 +123,7 @@ void roots(PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
     Counts counts;
     auto farm = AntFarm.create(2, 8, consumers ? consumers : 1, 0, 0, 1, 8192);
     scope(exit) farm.destroy();
-    auto park = PrivateRootPark!(State, repeat, reclamation).create(farm, count, policy(counts));
+    auto park = PrivateRootPark!(State, repeat, reclamation).create(farm, count, batch, policy(counts));
     check(park !is null);
     auto token = farm.registerProducer(Tier.small);
     scope(exit) farm.unregisterProducer(token);
@@ -214,7 +214,7 @@ void trees(uint consumers = 6)
     Counts counts;
     auto farm = AntFarm.create(2, 8, 6, 0, 0, 1, 8192);
     scope(exit) farm.destroy();
-    auto park = PrivateRootPark!(Parent, parentStep).create(farm, 48, policy(counts));
+    auto park = PrivateRootPark!(Parent, parentStep).create(farm, 48, defaultPrivateBatchLimit, policy(counts));
     check(park !is null);
     auto token = farm.registerProducer(Tier.small);
     scope(exit) farm.unregisterProducer(token);
@@ -283,15 +283,15 @@ void failures()
 {
     auto farm = AntFarm.create();
     scope(exit) farm.destroy();
-    foreach (budget; 0 .. 3)
+    foreach (budget; 0 .. 4)
     {
         Counts counts;
         atomicStore(counts.budget, cast(long) budget);
-        check(Park.create(farm, 4, policy(counts)) is null);
+        check(Park.create(farm, 4, defaultPrivateBatchLimit, policy(counts)) is null);
         check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
     }
     Counts counts;
-    auto park = Park.create(farm, 4, policy(counts));
+    auto park = Park.create(farm, 4, defaultPrivateBatchLimit, policy(counts));
     check(park !is null);
     check(park.capacity == 4);
     park.collectCompleted();
@@ -308,7 +308,7 @@ void backpressure()
     enum count = 20000;
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 8192);
     scope(exit) farm.destroy();
-    auto park = Park.create(farm, count);
+    auto park = Park.create(farm, count, 256);
     auto token = farm.registerProducer(Tier.small);
     scope(exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -349,7 +349,7 @@ void shardedCreators()
     foreach (_; 0 .. 4)
     {
         auto thread = new Thread({
-            auto park = Park.create(farm, 1024, policy(counts));
+            auto park = Park.create(farm, 1024, defaultPrivateBatchLimit, policy(counts));
             check(park !is null);
             auto token = farm.registerProducer(Tier.small);
             check(token.valid);
@@ -426,6 +426,393 @@ void sameShardJoin()
             enforce(MonoTime.currTime < deadline, "join timeout");
     }
 }
+struct BatchChild { ulong* output; }
+void batchChildOperation(scope ref PrivateBorrow!BatchChild b, scope ref PrivateContext)
+    nothrow @nogc @system { ++*b.value.output; }
+struct BatchParent
+{
+    PrivateChildPark!BatchChild* children;
+    ulong* output;
+    size_t count, limit;
+    uint phase;
+}
+PrivateRootDisposition batchParentStep(scope ref PrivateBorrow!BatchParent b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    if (b.value.children is null)
+    {
+        b.value.children = ctx.createChildren!BatchChild(b.value.count, b.value.limit);
+        check(b.value.children !is null);
+        foreach (i; 0 .. b.value.count)
+            check(b.value.children.spawn(ctx, BatchChild(b.value.output + i)) == PrivateSpawnResult.spawned);
+    }
+    if (!b.value.children.finished(ctx)) return PrivateRootDisposition.again;
+    foreach (i; 0 .. b.value.count) check(b.value.output[i] == b.value.phase);
+    if (b.value.phase == 3) return PrivateRootDisposition.finish;
+    auto result = b.value.phase == 2 ? b.value.children.startFinal!batchChildOperation(ctx)
+        : b.value.children.start!batchChildOperation(ctx);
+    check(result == PrivateStartResult.started);
+    ++b.value.phase;
+    return PrivateRootDisposition.again;
+}
+
+// Private Batch is module-private, so Batch.sizeof is unreachable here.
+// Authorized layout in actors/private_actor.d (locked there by
+// static assert(Batch.sizeof == 6 * size_t.sizeof)):
+//   TableCompletionHook hook; // context + call, two pointers
+//   Batch* next;
+//   shared(Batch*)* returns;
+//   size_t accepted;
+//   Entry** entries;
+enum privateBatchWords = 6;
+static assert(TableCompletionHook.sizeof == 2 * size_t.sizeof);
+static assert((void*).sizeof == size_t.sizeof);
+enum descriptorOverflowCapacity = size_t.max / (privateBatchWords * size_t.sizeof) + 1;
+static assert(descriptorOverflowCapacity > 1);
+static assert(size_t.sizeof == 8); // 1UL<<32 must survive conversion to size_t
+
+// One request above 1MiB fails closed, so a mutated full-limit allocation
+// returns null instead of OOMing. bytesAllocated/bytesFreed balance sizes.
+struct BoundedCounts
+{
+    shared long requests, bytesAllocated, bytesFreed;
+    size_t maxRequest = 1 << 20;
+}
+void* boundedAllocate(void* ctx, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    auto c = cast(BoundedCounts*) ctx;
+    atomicFetchAdd(c.requests, 1L);
+    if (bytes > c.maxRequest || alignment > 64) return null;
+    auto p = allocateAligned64(bytes);
+    if (p is null) return null;
+    atomicFetchAdd(c.bytesAllocated, cast(long) bytes);
+    return p;
+}
+void boundedDeallocate(void* ctx, void* ptr, size_t bytes, size_t) nothrow @nogc @system
+{
+    if (ptr is null) return;
+    atomicFetchAdd((cast(BoundedCounts*) ctx).bytesFreed, cast(long) bytes);
+    freeAligned64(ptr);
+}
+ActorAllocator boundedPolicy(ref BoundedCounts c) nothrow @nogc @system
+{ return ActorAllocator(&c, &boundedAllocate, &boundedDeallocate); }
+void checkBoundedBalance(ref BoundedCounts counts, string label) nothrow @nogc @system
+{
+    check(atomicLoad(counts.bytesAllocated) == atomicLoad(counts.bytesFreed), label, 0);
+}
+
+void hugeConfiguredLimits()
+{
+    BoundedCounts counts;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+
+    // Smallest capacity whose limit-1 descriptor array overflows Batch.sizeof.
+    auto overflowStarted = MonoTime.currTime;
+    check(Park.create(farm, descriptorOverflowCapacity, 1, boundedPolicy(counts)) is null,
+        "descriptor array overflow", 0);
+    check(MonoTime.currTime - overflowStarted < 2.seconds, "descriptor overflow prompt", 0);
+    check(atomicLoad(counts.requests) == 0, "descriptor overflow before allocation", 0);
+    checkBoundedBalance(counts, "descriptor overflow balance");
+
+    static void exercise(size_t capacity, size_t configured, ref BoundedCounts counts,
+        AntFarm* farm, ref Token token, ref ConsumerView view, string label)
+    {
+        auto started = MonoTime.currTime;
+        auto park = Park.create(farm, capacity, configured, boundedPolicy(counts));
+        check(park !is null, label, 0);
+        check(MonoTime.currTime - started < 2.seconds, "huge configured limit prompt", 0);
+        check(park.capacity == capacity);
+        ulong[3] outputs;
+        foreach (i; 0 .. capacity)
+            check(park.spawn(State(&outputs[i], 1, 0)) == PrivateSpawnResult.spawned);
+        // Configured limit may exceed capacity; validation accepts it and copies clamp.
+        check(park.pump(token, configured) == capacity, label, 0);
+        auto deadline = MonoTime.currTime + 5.seconds;
+        while (park.live)
+        {
+            while (view.consumeNext()) {}
+            park.collectCompleted();
+            if (park.live) park.pump(token, configured);
+            check(MonoTime.currTime < deadline, label, 0);
+        }
+        foreach (i; 0 .. capacity) check(outputs[i] == 1, label, 0);
+        // Per-call limit 1 remains valid at the low end of 1..configured.
+        foreach (i; 0 .. capacity)
+        {
+            outputs[i] = 0;
+            check(park.spawn(State(&outputs[i], 1, 0)) == PrivateSpawnResult.spawned);
+        }
+        foreach (i; 0 .. capacity)
+        {
+            check(park.pump(token, 1) == 1, label, 0);
+            while (view.consumeNext()) {}
+            park.collectCompleted();
+        }
+        check(park.live == 0, label, 0);
+        foreach (i; 0 .. capacity) check(outputs[i] == 1, label, 0);
+        park.destroy();
+        checkBoundedBalance(counts, label);
+    }
+    exercise(1, size_t.max, counts, farm, token, view, "size_t.max root limit");
+    exercise(3, 1UL << 32, counts, farm, token, view, "1<<32 root limit");
+    writeln("PASS huge configured root limits and descriptor overflow");
+}
+
+// Same-thread publication hook. Zero-count root and intermediate tables are
+// ignored so only target callbacks contribute to the limit and table count.
+// Controls stay in the test scope; callbacks do not save PrivateContext.
+version (AntfarmWriteAuditHooks)
+{
+    struct TargetTableCount
+    {
+        ulong* slots;
+        size_t count, limit, tables;
+    }
+    __gshared TargetTableCount* targetTableCount;
+    void countTargetPublished(AntFarm*, WriteAuditPhase phase, ulong, ulong)
+        nothrow @nogc @system
+    {
+        if (phase != WriteAuditPhase.tablePublished) return;
+        auto c = targetTableCount;
+        size_t before;
+        foreach (i; 0 .. c.count) before += c.slots[i];
+        while (fastView.consumeNext()) {}
+        size_t after;
+        foreach (i; 0 .. c.count) after += c.slots[i];
+        immutable n = after - before;
+        if (n == 0) return;
+        // Mutations caught on the first oversized table (quota 4096 admits it):
+        //   * `park.batchLimit_ = batchLimit` -> `= 256` in PrivateChildPark.create
+        //     emits 50 explicit-limit callbacks in one table, not ceil(50/7)=8.
+        //   * no-argument createChildren passes actor_.service.batchLimit
+        //     instead of PrivateContext.batchLimit_ (old root-only inheritance).
+        //     Root limit 31 then emits 31 grandchild callbacks, not 10 tables of <=5.
+        check(n <= c.limit, c.limit == 7
+            ? "explicit child table exceeds limit 7"
+            : "grandchild table exceeds immediate parent limit 5", 0);
+        ++c.tables;
+    }
+
+    void drainCounted(Root, alias step)(size_t rootLimit, ulong[] slots, size_t childLimit,
+        size_t expectTables, string label)
+    {
+        Counts counts;
+        // One subscriber, no worker: the hook consumes each table before
+        // writeTracked returns. One fresh 4096 grant covers every table, so
+        // quota cannot split a 5-, 7-, or 256-wide cohort into extra tables.
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        TargetTableCount tally;
+        tally.slots = slots.ptr;
+        tally.count = slots.length;
+        tally.limit = childLimit;
+        targetTableCount = &tally;
+        scope(exit) targetTableCount = null;
+        fastView = &view;
+        writeAuditHook = &countTargetPublished;
+        scope(exit) { writeAuditHook = null; fastView = null; }
+        auto park = PrivateRootPark!(Root, step).create(farm, 1, rootLimit, policy(counts));
+        check(park !is null, label, 0);
+        check(park.spawn(Root(null, slots.ptr)) == PrivateSpawnResult.spawned, label, 0);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live)
+        {
+            park.pump(token);
+            check(MonoTime.currTime < deadline, label, 0);
+        }
+        check(tally.tables == expectTables, label, 0);
+        foreach (slot; slots) check(slot == 1, label, 0);
+        park.destroy();
+        check(atomicLoad(counts.allocated) == atomicLoad(counts.freed), label, 0);
+    }
+
+    struct ExplicitRoot
+    {
+        PrivateChildPark!BatchChild* children;
+        ulong* slots;
+    }
+    PrivateRootDisposition explicitRootStep(scope ref PrivateBorrow!ExplicitRoot b,
+        scope ref PrivateContext ctx) nothrow @nogc @system
+    {
+        enum children = 50;
+        enum limit = 7;
+        if (b.value.children is null)
+        {
+            // Root configured limit is 256; the explicit child limit must win.
+            b.value.children = ctx.createChildren!BatchChild(children, limit);
+            check(b.value.children !is null, "explicit child create", 0);
+            foreach (i; 0 .. children)
+                check(b.value.children.spawn(ctx, BatchChild(b.value.slots + i))
+                    == PrivateSpawnResult.spawned, "explicit child spawn", 0);
+            check(b.value.children.start!batchChildOperation(ctx) == PrivateStartResult.started,
+                "explicit child start", 0);
+            return PrivateRootDisposition.again;
+        }
+        if (!b.value.children.finished(ctx)) return PrivateRootDisposition.again;
+        foreach (i; 0 .. children) check(b.value.slots[i] == 1, "explicit child joined", 0);
+        return PrivateRootDisposition.finish;
+    }
+    void explicitChildLimit()
+    {
+        enum children = 50;
+        enum limit = 7;
+        enum tables = (children + limit - 1) / limit;
+        static assert(tables == 8);
+        ulong[children] slots;
+        drainCounted!(ExplicitRoot, explicitRootStep)(256, slots[], limit, tables,
+            "explicit child table count");
+        writeln("PASS explicit child limit 7 emits 8 tables");
+    }
+
+    struct MiddleActor
+    {
+        PrivateChildPark!BatchChild* children;
+        ulong* slots;
+    }
+    void middleStep(scope ref PrivateBorrow!MiddleActor b, scope ref PrivateContext ctx)
+        nothrow @nogc @system
+    {
+        enum grandchildren = 50;
+        // No explicit limit and no saved context: inherit this cohort's 5,
+        // not the root configuration (31).
+        b.value.children = ctx.createChildren!BatchChild(grandchildren);
+        check(b.value.children !is null, "inherited grandchild create", 0);
+        foreach (i; 0 .. grandchildren)
+            check(b.value.children.spawn(ctx, BatchChild(b.value.slots + i))
+                == PrivateSpawnResult.spawned, "grandchild spawn", 0);
+        check(b.value.children.start!batchChildOperation(ctx) == PrivateStartResult.started,
+            "grandchild start", 0);
+    }
+    struct InheritRoot
+    {
+        PrivateChildPark!MiddleActor* middle;
+        ulong* slots;
+    }
+    PrivateRootDisposition inheritRootStep(scope ref PrivateBorrow!InheritRoot b,
+        scope ref PrivateContext ctx) nothrow @nogc @system
+    {
+        enum grandchildren = 50;
+        if (b.value.middle is null)
+        {
+            b.value.middle = ctx.createChildren!MiddleActor(1, 5);
+            check(b.value.middle !is null, "middle create", 0);
+            check(b.value.middle.spawn(ctx, MiddleActor(null, b.value.slots))
+                == PrivateSpawnResult.spawned, "middle spawn", 0);
+            check(b.value.middle.start!middleStep(ctx) == PrivateStartResult.started,
+                "middle start", 0);
+            return PrivateRootDisposition.again;
+        }
+        if (!b.value.middle.finished(ctx)) return PrivateRootDisposition.again;
+        foreach (i; 0 .. grandchildren)
+            check(b.value.slots[i] == 1, "grandchild joined", 0);
+        return PrivateRootDisposition.finish;
+    }
+    void inheritedChildLimit()
+    {
+        enum grandchildren = 50;
+        enum parentLimit = 5;
+        enum tables = (grandchildren + parentLimit - 1) / parentLimit;
+        static assert(tables == 10);
+        ulong[grandchildren] slots;
+        // Root limit 31 is what old root-only inheritance would emit.
+        drainCounted!(InheritRoot, inheritRootStep)(31, slots[], parentLimit, tables,
+            "inherited grandchild table count");
+        writeln("PASS inherited child limit 5 emits 10 grandchild tables");
+    }
+}
+void configuredBatches()
+{
+    foreach (limit; [1UL, 255, 256, 257, 1024, 4096])
+    {
+        // There is no positive capacity below one; capacity zero is rejected below.
+        roots(0, limit == 1 ? 1 : limit - 1, 2, limit);
+        roots(2, limit + 3, 2, limit);
+    }
+    auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    check(Park.create(farm, 0, 1) is null);
+    check(Park.create(farm, size_t.max, 1) is null);
+    // Root storage is min(configured limit, capacity). A huge configured limit
+    // must create, pump, collect, drain and destroy; see hugeConfiguredLimits.
+    hugeConfiguredLimits();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    enum count = 1025;
+    ulong[count] outputs;
+    auto park = Park.create(farm, count, 4096);
+    check(park !is null);
+    foreach (i; 0 .. count)
+        check(park.spawn(State(&outputs[i], 1, 0)) == PrivateSpawnResult.spawned);
+    auto admitted = park.pump(token);
+    check(admitted > 0 && admitted < count); // Farm quota splits the configured batch.
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (park.live)
+    {
+        while (view.consumeNext()) {}
+        park.pump(token);
+        enforce(MonoTime.currTime < deadline, "configured batch drain timeout");
+    }
+    foreach (value; outputs) check(value == 1);
+    park.destroy();
+
+    // A non-default child limit spans multiple Farm tables, including partial prefixes.
+    enum childCount = 1537;
+    ulong[childCount] childOutputs;
+    auto parent = PrivateRootPark!(BatchParent, batchParentStep).create(farm, 1, 257);
+    check(parent !is null);
+    check(parent.spawn(BatchParent(null, childOutputs.ptr, childCount, 1024, 0)) == PrivateSpawnResult.spawned);
+    auto workers = new Workers(farm, 1);
+    deadline = MonoTime.currTime + 30.seconds;
+    while (parent.live)
+    {
+        parent.pump(token);
+        enforce(MonoTime.currTime < deadline, "large child cohort timeout");
+    }
+    workers.join();
+    foreach (value; childOutputs) check(value == 3);
+    parent.destroy();
+}
+void rootBatchDeath(bool createZero, bool overLimit)
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    auto park = Park.create(farm, 1, createZero ? 0 : 257);
+    check(park !is null);
+    park.pump(token, overLimit ? 258 : 0);
+}
+PrivateRootDisposition childBatchZero(scope ref PrivateBorrow!State, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    ctx.createChildren!State(1, 0);
+    return PrivateRootDisposition.finish;
+}
+void childBatchDeath()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    auto park = PrivateRootPark!(State, childBatchZero).create(farm, 1);
+    check(park !is null);
+    check(park.spawn(State.init) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+}
+
 enum AuthorityMisuse { spawn, start, finished, defaultFinished, defaultCreate }
 struct AuthorityProbe { PrivateChildPark!State* children; AuthorityMisuse misuse; }
 struct AuthorityRoot { AuthorityProbe* probe; bool owner; }
@@ -487,7 +874,7 @@ version (assert)
         scope(exit) farm.destroy();
         auto allocator = ActorAllocator.cRuntime();
         allocator.allocate = &reentrantAllocate;
-        reentrantPark = Park.create(farm, 1, allocator);
+        reentrantPark = Park.create(farm, 1, defaultPrivateBatchLimit, allocator);
         check(reentrantPark !is null);
         reentrantPark.spawn(State.init);
     }
@@ -536,6 +923,10 @@ void deathHarness()
             "default-finished", "default-create"])
             check(diedWithMessage(modeName, "antfarm fatal: private child park: unauthorized context"));
         writeln("PASS wrong-parent and default authority are fatal");
+        foreach (modeName; ["batch-create-zero", "batch-pump-zero", "batch-pump-over"])
+            check(diedWithMessage(modeName, "antfarm fatal: invalid private root batch limit"));
+        check(diedWithMessage("batch-child-zero", "antfarm fatal: invalid private child batch limit"));
+        writeln("PASS invalid configured and per-call batch limits are fatal");
         version (assert)
         {
             check(diedWithMessage("reentrant-spawn", "antfarm fatal: private root park: reentrant entry"));
@@ -563,6 +954,12 @@ void deathNegativeControl()
 
 void runSuite()
 {
+    configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
+    version (AntfarmWriteAuditHooks)
+    {
+        explicitChildLimit();
+        inheritedChildLimit();
+    }
     fifoProgress(); writeln("PASS bounded FIFO progress");
     version (AntfarmWriteAuditHooks)
     {
@@ -587,6 +984,10 @@ void main(string[] args)
     auto mode = args.length > 1 ? args[1] : "";
     switch (mode)
     {
+        case "batch-create-zero": rootBatchDeath(true, false); return;
+        case "batch-pump-zero": rootBatchDeath(false, false); return;
+        case "batch-pump-over": rootBatchDeath(false, true); return;
+        case "batch-child-zero": childBatchDeath(); return;
         case "reentrant-spawn":
             version (assert) reentrantDeath();
             return;
@@ -595,6 +996,13 @@ void main(string[] args)
         case "wrong-parent-finished": authorityDeath(AuthorityMisuse.finished); return;
         case "default-finished": authorityDeath(AuthorityMisuse.defaultFinished); return;
         case "default-create": authorityDeath(AuthorityMisuse.defaultCreate); return;
+        case "huge-root-limit": hugeConfiguredLimits(); return;
+        case "explicit-child-limit":
+            version (AntfarmWriteAuditHooks) explicitChildLimit();
+            return;
+        case "inherited-child-limit":
+            version (AntfarmWriteAuditHooks) inheritedChildLimit();
+            return;
         case "join-only": sameShardJoin(); return;
         case "death": deathHarness(); return;
         case "death-negative-control": deathNegativeControl(); return;

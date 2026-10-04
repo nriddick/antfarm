@@ -146,9 +146,9 @@ private double elapsedSeconds(long ticks)
 
 void main(string[] args)
 {
-    enforce(args.length >= 2 && args.length <= 9
+    enforce(args.length >= 2 && args.length <= 11
             && (args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree"),
-        "usage: actor_churn actor|wave|private|private-remote|tree [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-]");
+        "usage: actor_churn actor|wave|private|private-remote|tree [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384]");
     immutable waveMode = args[1] == "wave";
     immutable remoteMode = args[1] == "private-remote";
     immutable privateMode = args[1] == "private" || remoteMode;
@@ -163,7 +163,7 @@ void main(string[] args)
     immutable allocatorName = args.length > 7 ? args[7] : defaultAllocator;
     enforce(count > 0 && count <= uint.max && isFinite(duration)
             && duration > 0 && consumers <= 64 && batch > 0
-            && (waveMode || batch <= 256),
+            && (waveMode || privateMode || treeMode || batch <= 256),
         "actors/seconds/batch must be positive; consumers must be 0..64; actor batch must be <=256");
     ushort[] cpus;
     if (args.length > 8 && args[8] != "-")
@@ -187,29 +187,36 @@ void main(string[] args)
             enforce(false, "mimalloc requires the actor_churn_mimalloc build");
     }
 
+    immutable tierName = args.length > 9 ? args[9] : "small";
+    enforce(tierName == "small" || tierName == "bulk", "tier must be small or bulk");
+    immutable tier = tierName == "small" ? Tier.small : Tier.bulk;
+    immutable quota = args.length > 10 ? to!ulong(args[10]) : 16384;
+    enforce(quota > 0, "quota must be positive");
     auto farm = AntFarm.create(8, 8, consumers ? consumers : 1,
-        0, 0, 1, 16384);
+        tier == Tier.bulk ? 1 : 0, tier == Tier.bulk ? quota : 0,
+        tier == Tier.small ? 1 : 0, tier == Tier.small ? quota : 0);
     enforce(farm !is null, "Farm allocation failed");
+    writefln("batchLimit=%s tier=%s quota_words=%s", batch, tierName, quota);
     version (AntfarmMimallocV3)
         if (allocatorName != "crt") writefln("mimalloc_version=%s", mi_version());
     scope (exit) farm.destroy();
     auto runtime = privateMode || treeMode ? null : ActorRuntime.create(farm, count, allocator);
     enforce(privateMode || treeMode || runtime !is null, "actor runtime allocation failed");
     scope (exit) if (runtime !is null) runtime.destroy();
-    auto park = privateMode && !remoteMode ? PrivateRootPark!(State, privateActivate).create(farm, count, allocator) : null;
+    auto park = privateMode && !remoteMode ? PrivateRootPark!(State, privateActivate).create(farm, count, batch, allocator) : null;
     enforce(!privateMode || remoteMode || park !is null, "private park allocation failed");
-    auto remotePark = remoteMode ? PrivateRootPark!(State, privateActivate, PrivateRootReclamation.consumer).create(farm, count, allocator) : null;
+    auto remotePark = remoteMode ? PrivateRootPark!(State, privateActivate, PrivateRootReclamation.consumer).create(farm, count, batch, allocator) : null;
     enforce(!remoteMode || remotePark !is null, "remote private park allocation failed");
     scope(exit) if (remotePark !is null) remotePark.destroy();
     scope (exit) if (park !is null) park.destroy();
-    immutable parents = (count + batch - 1) / batch;
-    auto trees = treeMode ? PrivateRootPark!(TreeState, treeActivate).create(farm, parents, allocator) : null;
+    immutable parents = (count - 1) / batch + 1;
+    auto trees = treeMode ? PrivateRootPark!(TreeState, treeActivate).create(farm, parents, batch, allocator) : null;
     enforce(!treeMode || trees !is null, "private tree park allocation failed");
     scope (exit) if (trees !is null) trees.destroy();
     auto owners = new ActorOwner!State[count];
     auto handles = new ActorHandle!State[count];
     auto completions = new Completion[count];
-    auto token = farm.registerProducer(Tier.small);
+    auto token = farm.registerProducer(tier);
     enforce(token.valid, "producer registration failed");
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -269,7 +276,7 @@ void main(string[] args)
             while (privateMode ? (remoteMode ? remotePark.live != 0 : park.live != 0) : trees.live != 0)
             {
                 if (privateMode) { if (remoteMode) remotePark.pump(token, batch); else park.pump(token, batch); }
-                else trees.pump(token, 256);
+                else trees.pump(token);
                 consume();
                 enforce(MonoTime.currTime < deadline, "private lifecycle timed out");
             }

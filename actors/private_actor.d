@@ -13,6 +13,8 @@ import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
     atomicFetchAdd, atomicFetchSub, cas;
 import core.stdc.string : memcpy, memset;
 
+enum defaultPrivateBatchLimit = 256;
+
 enum PrivateRootDisposition : ubyte { again, finish }
 enum PrivateSpawnResult : ubyte { spawned, capacityFull, allocationFailed, waveActive, retiring }
 enum PrivateStartResult : ubyte { started, empty, waveActive, retiring }
@@ -39,8 +41,9 @@ private:
     Entry* actor_;
     Wave* enclosing_;
     bool retiring_;
-    this(Entry* actor, Wave* enclosing, bool retiring) nothrow @nogc @system
-    { actor_ = actor; enclosing_ = enclosing; retiring_ = retiring; }
+    size_t batchLimit_;
+    this(Entry* actor, Wave* enclosing, bool retiring, size_t batchLimit) nothrow @nogc @system
+    { actor_ = actor; enclosing_ = enclosing; retiring_ = retiring; batchLimit_ = batchLimit; }
     @disable this(this);
 public:
     PrivateChildPark!T* createChildren(T)(size_t capacity)
@@ -48,7 +51,15 @@ public:
     {
         if (actor_ is null) fatal("private child park: unauthorized context");
         if (retiring_) return null;
-        return PrivateChildPark!T.create(actor_, capacity);
+        return PrivateChildPark!T.create(actor_, capacity, batchLimit_);
+    }
+    PrivateChildPark!T* createChildren(T)(size_t capacity, size_t childBatchLimit)
+        nothrow @nogc @system
+    {
+        if (actor_ is null) fatal("private child park: unauthorized context");
+        if (childBatchLimit == 0) fatal("invalid private child batch limit");
+        if (retiring_) return null;
+        return PrivateChildPark!T.create(actor_, capacity, childBatchLimit);
     }
 }
 
@@ -99,6 +110,7 @@ private struct Service
 {
     AntFarm* farm;
     ActorAllocator allocator;
+    size_t batchLimit;
     shared(Wave*) incoming;
     Wave* waiting;
 
@@ -181,8 +193,10 @@ private struct Batch
     Batch* next;
     shared(Batch*)* returns;
     size_t accepted;
-    Entry*[256] entries;
+    Entry** entries;
 }
+static assert(Batch.sizeof == 6 * size_t.sizeof,
+    "private actor descriptor-overflow test assumes six machine words per Batch");
 
 private void rootsCompleted(void* context) nothrow @nogc @system
 {
@@ -239,30 +253,43 @@ private:
     Entry* ready_;
     Entry* readyTail_;
     Batch* batches_;
+    Entry** batchEntries_;
     size_t batchCount_;
+    size_t storageLimit_;
     Batch* spare_;
     shared(Batch*) returned_;
     version (assert) bool entered_;
     @disable this(this);
 public:
     static PrivateRootPark* create(AntFarm* farm, size_t capacity,
+        size_t batchLimit = defaultPrivateBatchLimit,
         ActorAllocator allocator = ActorAllocator.cRuntime()) nothrow @nogc @system
     {
+        if (batchLimit == 0) fatal("invalid private root batch limit");
         if (farm is null || !allocator.valid || capacity == 0
             || capacity > size_t.max / Entry.sizeof) return null;
+        immutable storageLimit = batchLimit < capacity ? batchLimit : capacity;
+        immutable batchCount = (capacity - 1) / storageLimit + 1;
+        if (batchCount > size_t.max / Batch.sizeof
+            || storageLimit > size_t.max / batchCount) return null;
+        immutable batchSlots = batchCount * storageLimit;
+        if (batchSlots > size_t.max / (Entry*).sizeof) return null;
         auto park = cast(PrivateRootPark*) allocator.allocate(allocator.context,
             PrivateRootPark.sizeof, PrivateRootPark.alignof);
         if (park is null) return null;
         memset(park, 0, PrivateRootPark.sizeof);
-        park.service_ = Service(farm, allocator);
+        park.service_ = Service(farm, allocator, batchLimit);
         park.capacity_ = capacity;
-        park.batchCount_ = (capacity + 255) / 256;
+        park.batchCount_ = batchCount;
+        park.storageLimit_ = storageLimit;
         park.entries_ = cast(Entry*) allocateZero(&park.service_, capacity * Entry.sizeof, Entry.alignof);
         park.batches_ = cast(Batch*) allocateZero(&park.service_, park.batchCount_ * Batch.sizeof, Batch.alignof);
-        if (park.entries_ is null || park.batches_ is null)
+        park.batchEntries_ = cast(Entry**) allocateZero(&park.service_, batchSlots * (Entry*).sizeof, (Entry*).alignof);
+        if (park.entries_ is null || park.batches_ is null || park.batchEntries_ is null)
         {
             freeMemory(&park.service_, park.entries_, capacity * Entry.sizeof, Entry.alignof);
             freeMemory(&park.service_, park.batches_, park.batchCount_ * Batch.sizeof, Batch.alignof);
+            freeMemory(&park.service_, park.batchEntries_, batchSlots * (Entry*).sizeof, (Entry*).alignof);
             allocator.deallocate(allocator.context, park, PrivateRootPark.sizeof, PrivateRootPark.alignof);
             return null;
         }
@@ -275,6 +302,7 @@ public:
         foreach (i; 0 .. park.batchCount_)
         {
             auto batch = &park.batches_[i];
+            batch.entries = park.batchEntries_ + i * storageLimit;
             batch.hook = TableCompletionHook(batch, &rootsCompleted);
             batch.returns = &park.returned_;
             batch.next = park.spare_;
@@ -343,22 +371,27 @@ private:
 public:
     /// Emits at most one root table and one table per pending child wave.
     /// Returns a count of roots only; zero does not imply idle. Never runs
-    /// consumers. At most ceil(capacity / 256) root tables can be in flight.
+    /// consumers. At most ceil(capacity / configured batchLimit) root tables
+    /// can be in flight, including when a call requests a smaller batch.
     /// By default terminal root state is freed here on the emitter; the
     /// consumer policy frees it in the callback. Child frees run on consumers.
-    size_t pump(ref Token token, size_t batchLimit = 256, uint avgCost = 0)
+    size_t pump(ref Token token) nothrow @nogc @system
+    {
+        return pump(token, service_.batchLimit);
+    }
+    size_t pump(ref Token token, size_t batchLimit, uint avgCost = 0)
         nothrow @nogc @system
     {
         enter();
         scope(exit) { version (assert) entered_ = false; }
-        if (batchLimit == 0 || batchLimit > 256) fatal("invalid private root batch limit");
+        if (batchLimit == 0 || batchLimit > service_.batchLimit) fatal("invalid private root batch limit");
         collectCompletedImpl();
         service_.pump(token);
         if (spare_ is null || ready_ is null) return 0;
         auto batch = spare_;
         spare_ = batch.next;
         size_t count;
-        while (count < batchLimit && ready_ !is null)
+        while (count < batchLimit && count < storageLimit_ && ready_ !is null)
         {
             auto entry = ready_;
             ready_ = entry.next;
@@ -403,6 +436,7 @@ public:
         auto allocator = service_.allocator;
         freeMemory(&service_, entries_, capacity_ * Entry.sizeof, Entry.alignof);
         freeMemory(&service_, batches_, batchCount_ * Batch.sizeof, Batch.alignof);
+        freeMemory(&service_, batchEntries_, batchCount_ * storageLimit_ * (Entry*).sizeof, (Entry*).alignof);
         allocator.deallocate(allocator.context, &this, PrivateRootPark.sizeof, PrivateRootPark.alignof);
     }
 private:
@@ -427,7 +461,7 @@ private:
     {
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         auto borrow = PrivateBorrow!T(cast(T*) entry.state);
-        auto context = PrivateContext(entry, null, false);
+        auto context = PrivateContext(entry, null, false, entry.service.batchLimit);
         if (step(borrow, context) == PrivateRootDisposition.finish)
         {
             disposeChildren(entry);
@@ -463,14 +497,14 @@ struct PrivateChildPark(T)
 private:
     ChildBase base_; // first: erased disposal and wave-to-park conversion
     Entry* entries_;
-    size_t capacity_, count_, cursor_;
+    size_t capacity_, count_, cursor_, batchLimit_;
     bool retire_;
     PayloadHeader header_;
     static assert(base_.offsetof == 0,
         "PrivateChildPark.fromWave requires base_ at offset zero");
     @disable this(this);
 
-    static PrivateChildPark* create(Entry* parent, size_t capacity)
+    static PrivateChildPark* create(Entry* parent, size_t capacity, size_t batchLimit)
         nothrow @nogc @system
     {
         if (capacity == 0 || capacity > size_t.max / Entry.sizeof) return null;
@@ -484,6 +518,7 @@ private:
             return null;
         }
         park.capacity_ = capacity;
+        park.batchLimit_ = batchLimit;
         park.base_.parent = parent;
         park.base_.dispose = &dispose;
         park.base_.wave.hook = TableCompletionHook(&park.base_.wave, &waveCompleted);
@@ -567,7 +602,7 @@ private:
     {
         auto park = fromWave(wave);
         auto remaining = park.count_ - park.cursor_;
-        auto n = remaining > 256 ? 256 : remaining;
+        auto n = remaining > park.batchLimit_ ? park.batchLimit_ : remaining;
         auto bodies = ChildBodies(park.entries_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
         immutable written = cast(size_t) park.base_.parent.service.farm.writeTracked(
@@ -593,7 +628,7 @@ private:
         auto park = fromWave(entry.enclosing);
         immutable retiring = park.retire_;
         auto borrow = PrivateBorrow!T(cast(T*) entry.state);
-        auto context = PrivateContext(entry, entry.enclosing, retiring);
+        auto context = PrivateContext(entry, entry.enclosing, retiring, park.batchLimit_);
         operation(borrow, context);
         if (retiring)
         {

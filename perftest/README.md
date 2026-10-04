@@ -278,3 +278,10 @@ The recorded September 25 matrix used mimalloc 3.5.0. New builds and the
 matrix script default to the current 3.5.3 pin; `--mimalloc-version 30500`
 checks a deliberately linked historical build. The script assumes this
 host's 0..11 CPU layout; adapt placement when changing hosts.
+
+The private modes accept any positive batch size that fits allocation sizing.
+Optional final arguments select the Farm producer tier (`small` or `bulk`) and
+its quota in ulongs (default `small 16384`, preserving the historical setup).
+`private_lifecycle_matrix.py --suite batch` sweeps root batch limit × quota ×
+consumer count; `--suite child` checks inherited child limits. Both use five
+warmup cycles, five repetitions and three-second measurement windows by default.
