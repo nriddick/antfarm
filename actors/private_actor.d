@@ -72,8 +72,24 @@ private struct Entry
     Service* service;
     Entry* next;
     // Mutually exclusive metadata for root versus child entries.
-    union { Wave* enclosing; bool rootTerminal; }
+    union
+    {
+        Wave* enclosing;
+        struct
+        {
+            bool rootTerminal;
+            bool hasJoinCredits;
+            bool cleanup;
+            shared uint pending;
+        }
+    }
 }
+static assert(Entry.sizeof == 40 && Entry.alignof == 8);
+static assert(Entry.state.offsetof == 0 && Entry.children.offsetof == 8
+    && Entry.service.offsetof == 16 && Entry.next.offsetof == 24);
+static assert(Entry.enclosing.offsetof == 32 && Entry.rootTerminal.offsetof == 32
+    && Entry.hasJoinCredits.offsetof == 33 && Entry.cleanup.offsetof == 34
+    && Entry.pending.offsetof == 36);
 
 private struct ChildBase
 {
