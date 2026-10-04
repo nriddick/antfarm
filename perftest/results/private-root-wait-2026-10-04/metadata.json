@@ -147,11 +147,11 @@
   ],
   "binaries": {
     "base": {
-      "path": "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/.e1-evidence/base/perftest/actor_churn",
+      "path": "base-c5a174f/perftest/actor_churn",
       "sha256": "ed457aaa2de69ffa265b10d423ee86abbbf35416576faaaf2d44ead91d611762"
     },
     "new": {
-      "path": "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/perftest/actor_churn",
+      "path": "./perftest/actor_churn",
       "sha256": "b9634fec9c5864585f2b1977f01f7e40c9a8726a35dd6e18e62cc3806004658c"
     }
   },

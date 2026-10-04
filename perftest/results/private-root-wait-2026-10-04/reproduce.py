@@ -48,7 +48,7 @@ metadata = dict(base_commit='c5a174ff669b1cd274e31b143e7f90b7c1993beb',
     cpuinfo=(Path('/proc/cpuinfo').read_text().split('\n\n')[0]
              if Path('/proc/cpuinfo').exists() else platform.processor()),
     affinity=sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else None,
-    binaries={name: dict(path=str(binary), sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
+    binaries={name: dict(path=os.path.relpath(binary), sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
               for name, binary in binaries.items()})
 (a.output / 'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
 rows = []
@@ -66,11 +66,11 @@ with (a.output / 'runs.jsonl').open('w') as out:
                                      text=True, capture_output=True, timeout=90)
                 match = re.search(r'Mactor_cycles/s=([0-9.]+)', run.stdout)
                 if run.returncode or not match or 'hugePages=false' not in run.stdout:
-                    (a.output / 'failure.json').write_text(json.dumps(dict(command=cmd,
+                    (a.output / 'failure.json').write_text(json.dumps(dict(command=[os.path.relpath(binaries[build]), *cmd[1:]],
                         returncode=run.returncode, stdout=run.stdout, stderr=run.stderr), indent=2))
                     raise RuntimeError(run.stdout + run.stderr)
                 row = dict(build=build, mode=mode, batch=batch, consumers=consumers,
-                           repeat=repeat, rate=float(match[1]), command=cmd,
+                           repeat=repeat, rate=float(match[1]), command=[os.path.relpath(binaries[build]), *cmd[1:]],
                            stdout=run.stdout, stderr=run.stderr)
                 rows.append(row)
                 out.write(json.dumps(row) + '\n')

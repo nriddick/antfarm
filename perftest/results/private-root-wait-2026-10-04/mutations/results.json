@@ -1,0 +1,163 @@
+[
+ {
+  "id": "E1-M1",
+  "test": "e1Basic",
+  "selector": "e1-basic",
+  "file": "actors/private_actor.d",
+  "old": "releaseRoot(entry); // final collector Entry access; Batch is independent",
+  "new": "// MUTATION: collector never releases custody",
+  "expect": "FAIL E1 completion deadline:0",
+  "runs": [
+   {
+    "variant": "debug",
+    "exit": -6,
+    "output": [
+     "FAIL E1 completion deadline:0",
+     "timeout: the monitored command dumped core"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "E1-M2",
+  "test": "e1BeforeCustody",
+  "selector": "e1-before-custody",
+  "file": "actors/private_actor.d",
+  "old": "releaseRoot(entry); // final collector Entry access; Batch is independent",
+  "new": "atomicFetchSub!(MemoryOrder.acq_rel)(entry.pending, 1u); // MUTATION: decrement never enqueues on zero",
+  "expect": "FAIL E1 before custody completion:0",
+  "runs": [
+   {
+    "variant": "debug",
+    "exit": -6,
+    "output": [
+     "FAIL E1 before custody completion:0",
+     "timeout: the monitored command dumped core"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "E1-M3",
+  "test": "e1AfterCustody",
+  "selector": "e1-after-custody",
+  "file": "actors/private_actor.d",
+  "old": "releaseRoot(parent); // final parent access; idle alone does not pin Entry",
+  "new": "atomicFetchSub!(MemoryOrder.acq_rel)(parent.pending, 1u); // MUTATION: wave finish never enqueues on zero",
+  "expect": "FAIL E1 after custody completion:0",
+  "runs": [
+   {
+    "variant": "debug",
+    "exit": -6,
+    "output": [
+     "FAIL E1 after custody completion:0",
+     "timeout: the monitored command dumped core"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "E1-M4",
+  "test": "e1LateStrict",
+  "selector": "e1-late-strict",
+  "file": "actors/private_actor.d",
+  "old": "else if (entry.hasJoinCredits || entry.disposition != PrivateRootDisposition.finish)",
+  "new": "else if (entry.disposition != PrivateRootDisposition.finish)",
+  "expect": "FAIL E1 strict Entry pinned past state cleanup:0",
+  "runs": [
+   {
+    "variant": "debug",
+    "exit": -6,
+    "output": [
+     "FAIL E1 strict Entry pinned past state cleanup:0",
+     "timeout: the monitored command dumped core"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "E1-M5",
+  "test": "e1JoinedAndMixed",
+  "selector": "e1-joined-mixed",
+  "file": "actors/private_actor.d",
+  "old": "else if (entry.hasJoinCredits || entry.disposition != PrivateRootDisposition.finish)",
+  "new": "else if (entry.hasJoinCredits)",
+  "expect": "FAIL E1 already joined wait exactly one later call:0",
+  "runs": [
+   {
+    "variant": "debug",
+    "exit": -6,
+    "output": [
+     "FAIL E1 already joined wait exactly one later call:0",
+     "timeout: the monitored command dumped core"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "E1-M6",
+  "test": "e1RootReadyCasRetry",
+  "selector": "e1-root-ready-cas-retry",
+  "file": "actors/private_actor.d",
+  "old": "            return; // final entry AND service access\n        head = atomicLoad!(MemoryOrder.raw)(*returns);\n    }\n}",
+  "new": "            return; // final entry AND service access\n        return; // MUTATION: failed CAS drops the root, no reload/retry\n    }\n}",
+  "expect": "FAIL E1 CAS exactly one retry:0",
+  "runs": [
+   {
+    "variant": "debug",
+    "exit": -6,
+    "output": [
+     "FAIL E1 CAS exactly one retry:0",
+     "timeout: the monitored command dumped core"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "E1-M7",
+  "test": "e1SealFinalOwner",
+  "selector": "e1-seal-final-owner",
+  "file": "actors/private_actor.d",
+  "old": "releaseWave(wave); // seal: last access, including park and its owner",
+  "new": "atomicFetchSub!(MemoryOrder.acq_rel)(wave.pending, 1UL); // MUTATION: seal never finishes the wave",
+  "expect": "FAIL E1 seal emitter released the final root credit:0",
+  "runs": [
+   {
+    "variant": "debug",
+    "exit": -6,
+    "output": [
+     "FAIL E1 seal emitter released the final root credit:0",
+     "timeout: the monitored command dumped core"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "E1-M8",
+  "test": "e1CounterExhaustionDeath",
+  "selector": "e1-counter-exhaustion-death",
+  "file": "actors/private_actor.d",
+  "old": "if (old == uint.max) fatal(\"private join credit overflow\");",
+  "new": "// MUTATION: overflow check removed",
+  "expect": "FAIL main.d:",
+  "release": true,
+  "runs": [
+   {
+    "variant": "debug",
+    "exit": -6,
+    "output": [
+     "FAIL private_actor_tests/main.d:2334",
+     "timeout: the monitored command dumped core"
+    ]
+   },
+   {
+    "variant": "release",
+    "exit": -6,
+    "output": [
+     "FAIL private_actor_tests/main.d:2334",
+     "timeout: the monitored command dumped core"
+    ]
+   }
+  ]
+ }
+]
