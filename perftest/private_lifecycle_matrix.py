@@ -27,7 +27,8 @@ if a.suite == 'lifecycle':
     for allocator, selected in [('mimalloc', profiles), ('crt', [profiles[2]])]:
         for consumers, cpus in selected:
             for mode, batch in [('actor', 256), ('wave', 256), ('wave', 16384),
-                                ('private', 256), ('private-remote', 256), ('tree', 256)]:
+                                ('private', 256), ('private-remote', 256), ('tree', 256),
+                                ('tree-wait', 256)]:
                 cases.append((allocator, consumers, cpus, mode, batch, 'small', 16384))
 elif a.suite == 'batch':
     for consumers, cpus in profiles:
@@ -38,7 +39,8 @@ else:
     for consumers, cpus in [profiles[0], profiles[2]]:
         for tier, quota in [('small', 16384), ('bulk', 131072)]:
             for batch in [256, 1024, 4096]:
-                cases.append(('mimalloc', consumers, cpus, 'tree', batch, tier, quota))
+                for mode in ['tree', 'tree-wait']:
+                    cases.append(('mimalloc', consumers, cpus, mode, batch, tier, quota))
 metadata = dict(binary=str(binary), sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                 seconds=a.seconds, repeats=a.repeats, actors=16384, warmups=5,
                 suite=a.suite, cases=cases, expected_mimalloc_version=a.mimalloc_version,

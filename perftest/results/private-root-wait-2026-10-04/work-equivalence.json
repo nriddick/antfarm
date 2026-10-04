@@ -1,0 +1,1690 @@
+{
+  "runs_checked": 210,
+  "count_equation": "verified_actor_cycles == (rounds + 5 warmups) * 16384",
+  "tree_work": "64 parents, 256 children each, one terminal operation per child; all counts verified by the binary",
+  "tree_polling_callback_identical_after_substituting_false": true,
+  "public_dispatch_retirement_and_count_checks_identical": true,
+  "attribution": "Not established. Benchmark code/link layout changed; no causal attribution from these runs.",
+  "runs": [
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1676,
+      "verified_actor_cycles": 27541504
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1670,
+      "verified_actor_cycles": 27443200
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1674,
+      "verified_actor_cycles": 27508736
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1571,
+      "verified_actor_cycles": 25821184
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1621,
+      "verified_actor_cycles": 26640384
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1545,
+      "verified_actor_cycles": 25395200
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1592,
+      "verified_actor_cycles": 26165248
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1579,
+      "verified_actor_cycles": 25952256
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1602,
+      "verified_actor_cycles": 26329088
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1564,
+      "verified_actor_cycles": 25706496
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 0,
+      "rounds": 1498,
+      "verified_actor_cycles": 24625152
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 0,
+      "rounds": 1518,
+      "verified_actor_cycles": 24952832
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 1,
+      "rounds": 1501,
+      "verified_actor_cycles": 24674304
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 1,
+      "rounds": 1517,
+      "verified_actor_cycles": 24936448
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 2,
+      "rounds": 1497,
+      "verified_actor_cycles": 24608768
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 2,
+      "rounds": 1506,
+      "verified_actor_cycles": 24756224
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 3,
+      "rounds": 1488,
+      "verified_actor_cycles": 24461312
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 3,
+      "rounds": 1462,
+      "verified_actor_cycles": 24035328
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 4,
+      "rounds": 1494,
+      "verified_actor_cycles": 24559616
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 1,
+      "repeat": 4,
+      "rounds": 1509,
+      "verified_actor_cycles": 24805376
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 0,
+      "rounds": 1373,
+      "verified_actor_cycles": 22577152
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 0,
+      "rounds": 1406,
+      "verified_actor_cycles": 23117824
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 1,
+      "rounds": 1403,
+      "verified_actor_cycles": 23068672
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 1,
+      "rounds": 1359,
+      "verified_actor_cycles": 22347776
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 2,
+      "rounds": 1379,
+      "verified_actor_cycles": 22675456
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 2,
+      "rounds": 1376,
+      "verified_actor_cycles": 22626304
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 3,
+      "rounds": 1379,
+      "verified_actor_cycles": 22675456
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 3,
+      "rounds": 1403,
+      "verified_actor_cycles": 23068672
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 4,
+      "rounds": 1371,
+      "verified_actor_cycles": 22544384
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 5,
+      "repeat": 4,
+      "rounds": 1402,
+      "verified_actor_cycles": 23052288
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 0,
+      "rounds": 1291,
+      "verified_actor_cycles": 21233664
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 0,
+      "rounds": 1318,
+      "verified_actor_cycles": 21676032
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 1,
+      "rounds": 1273,
+      "verified_actor_cycles": 20938752
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 1,
+      "rounds": 1177,
+      "verified_actor_cycles": 19365888
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 2,
+      "rounds": 1143,
+      "verified_actor_cycles": 18808832
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 2,
+      "rounds": 1208,
+      "verified_actor_cycles": 19873792
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 3,
+      "rounds": 1216,
+      "verified_actor_cycles": 20004864
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 3,
+      "rounds": 1286,
+      "verified_actor_cycles": 21151744
+    },
+    {
+      "build": "base",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 4,
+      "rounds": 1197,
+      "verified_actor_cycles": 19693568
+    },
+    {
+      "build": "new",
+      "mode": "private",
+      "consumers": 11,
+      "repeat": 4,
+      "rounds": 1218,
+      "verified_actor_cycles": 20037632
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1616,
+      "verified_actor_cycles": 26558464
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1599,
+      "verified_actor_cycles": 26279936
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1615,
+      "verified_actor_cycles": 26542080
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1616,
+      "verified_actor_cycles": 26558464
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1598,
+      "verified_actor_cycles": 26263552
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1603,
+      "verified_actor_cycles": 26345472
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1596,
+      "verified_actor_cycles": 26230784
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1603,
+      "verified_actor_cycles": 26345472
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1587,
+      "verified_actor_cycles": 26083328
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1603,
+      "verified_actor_cycles": 26345472
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 0,
+      "rounds": 1545,
+      "verified_actor_cycles": 25395200
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 0,
+      "rounds": 1516,
+      "verified_actor_cycles": 24920064
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 1,
+      "rounds": 1515,
+      "verified_actor_cycles": 24903680
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 1,
+      "rounds": 1540,
+      "verified_actor_cycles": 25313280
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 2,
+      "rounds": 1527,
+      "verified_actor_cycles": 25100288
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 2,
+      "rounds": 1514,
+      "verified_actor_cycles": 24887296
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 3,
+      "rounds": 1517,
+      "verified_actor_cycles": 24936448
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 3,
+      "rounds": 1528,
+      "verified_actor_cycles": 25116672
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 4,
+      "rounds": 1535,
+      "verified_actor_cycles": 25231360
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 1,
+      "repeat": 4,
+      "rounds": 1512,
+      "verified_actor_cycles": 24854528
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 0,
+      "rounds": 826,
+      "verified_actor_cycles": 13615104
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 0,
+      "rounds": 826,
+      "verified_actor_cycles": 13615104
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 1,
+      "rounds": 839,
+      "verified_actor_cycles": 13828096
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 1,
+      "rounds": 831,
+      "verified_actor_cycles": 13697024
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 2,
+      "rounds": 822,
+      "verified_actor_cycles": 13549568
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 2,
+      "rounds": 820,
+      "verified_actor_cycles": 13516800
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 3,
+      "rounds": 825,
+      "verified_actor_cycles": 13598720
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 3,
+      "rounds": 828,
+      "verified_actor_cycles": 13647872
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 4,
+      "rounds": 821,
+      "verified_actor_cycles": 13533184
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 5,
+      "repeat": 4,
+      "rounds": 800,
+      "verified_actor_cycles": 13189120
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 0,
+      "rounds": 594,
+      "verified_actor_cycles": 9814016
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 0,
+      "rounds": 621,
+      "verified_actor_cycles": 10256384
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 1,
+      "rounds": 616,
+      "verified_actor_cycles": 10174464
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 1,
+      "rounds": 606,
+      "verified_actor_cycles": 10010624
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 2,
+      "rounds": 661,
+      "verified_actor_cycles": 10911744
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 2,
+      "rounds": 612,
+      "verified_actor_cycles": 10108928
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 3,
+      "rounds": 630,
+      "verified_actor_cycles": 10403840
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 3,
+      "rounds": 618,
+      "verified_actor_cycles": 10207232
+    },
+    {
+      "build": "base",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 4,
+      "rounds": 614,
+      "verified_actor_cycles": 10141696
+    },
+    {
+      "build": "new",
+      "mode": "private-remote",
+      "consumers": 11,
+      "repeat": 4,
+      "rounds": 603,
+      "verified_actor_cycles": 9961472
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1945,
+      "verified_actor_cycles": 31948800
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1982,
+      "verified_actor_cycles": 32555008
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 2010,
+      "verified_actor_cycles": 33013760
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 2012,
+      "verified_actor_cycles": 33046528
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 2024,
+      "verified_actor_cycles": 33243136
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1975,
+      "verified_actor_cycles": 32440320
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 2018,
+      "verified_actor_cycles": 33144832
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 2008,
+      "verified_actor_cycles": 32980992
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1977,
+      "verified_actor_cycles": 32473088
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1929,
+      "verified_actor_cycles": 31686656
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 0,
+      "rounds": 1818,
+      "verified_actor_cycles": 29868032
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 0,
+      "rounds": 1966,
+      "verified_actor_cycles": 32292864
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 1,
+      "rounds": 1994,
+      "verified_actor_cycles": 32751616
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 1,
+      "rounds": 1808,
+      "verified_actor_cycles": 29704192
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 2,
+      "rounds": 1428,
+      "verified_actor_cycles": 23478272
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 2,
+      "rounds": 1856,
+      "verified_actor_cycles": 30490624
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 3,
+      "rounds": 1894,
+      "verified_actor_cycles": 31113216
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 3,
+      "rounds": 1786,
+      "verified_actor_cycles": 29343744
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 4,
+      "rounds": 1820,
+      "verified_actor_cycles": 29900800
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 4,
+      "rounds": 2038,
+      "verified_actor_cycles": 33472512
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 0,
+      "rounds": 1924,
+      "verified_actor_cycles": 31604736
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 0,
+      "rounds": 1992,
+      "verified_actor_cycles": 32718848
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 1,
+      "rounds": 1962,
+      "verified_actor_cycles": 32227328
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 1,
+      "rounds": 1923,
+      "verified_actor_cycles": 31588352
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 2,
+      "rounds": 1925,
+      "verified_actor_cycles": 31621120
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 2,
+      "rounds": 1955,
+      "verified_actor_cycles": 32112640
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 3,
+      "rounds": 1978,
+      "verified_actor_cycles": 32489472
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 3,
+      "rounds": 1905,
+      "verified_actor_cycles": 31293440
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 4,
+      "rounds": 1944,
+      "verified_actor_cycles": 31932416
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 5,
+      "repeat": 4,
+      "rounds": 1927,
+      "verified_actor_cycles": 31653888
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 0,
+      "rounds": 1632,
+      "verified_actor_cycles": 26820608
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 0,
+      "rounds": 1520,
+      "verified_actor_cycles": 24985600
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 1,
+      "rounds": 1501,
+      "verified_actor_cycles": 24674304
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 1,
+      "rounds": 1525,
+      "verified_actor_cycles": 25067520
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 2,
+      "rounds": 1342,
+      "verified_actor_cycles": 22069248
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 2,
+      "rounds": 1478,
+      "verified_actor_cycles": 24297472
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 3,
+      "rounds": 1537,
+      "verified_actor_cycles": 25264128
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 3,
+      "rounds": 1412,
+      "verified_actor_cycles": 23216128
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 4,
+      "rounds": 1597,
+      "verified_actor_cycles": 26247168
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 11,
+      "repeat": 4,
+      "rounds": 1438,
+      "verified_actor_cycles": 23642112
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1359,
+      "verified_actor_cycles": 22347776
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1452,
+      "verified_actor_cycles": 23871488
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1435,
+      "verified_actor_cycles": 23592960
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1341,
+      "verified_actor_cycles": 22052864
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1347,
+      "verified_actor_cycles": 22151168
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1407,
+      "verified_actor_cycles": 23134208
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1427,
+      "verified_actor_cycles": 23461888
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1371,
+      "verified_actor_cycles": 22544384
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1316,
+      "verified_actor_cycles": 21643264
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1329,
+      "verified_actor_cycles": 21856256
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 0,
+      "rounds": 1024,
+      "verified_actor_cycles": 16859136
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 0,
+      "rounds": 1043,
+      "verified_actor_cycles": 17170432
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 1,
+      "rounds": 1028,
+      "verified_actor_cycles": 16924672
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 1,
+      "rounds": 1018,
+      "verified_actor_cycles": 16760832
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 2,
+      "rounds": 1024,
+      "verified_actor_cycles": 16859136
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 2,
+      "rounds": 1039,
+      "verified_actor_cycles": 17104896
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 3,
+      "rounds": 1039,
+      "verified_actor_cycles": 17104896
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 3,
+      "rounds": 1003,
+      "verified_actor_cycles": 16515072
+    },
+    {
+      "build": "base",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 4,
+      "rounds": 1004,
+      "verified_actor_cycles": 16531456
+    },
+    {
+      "build": "new",
+      "mode": "actor",
+      "consumers": 6,
+      "repeat": 4,
+      "rounds": 1040,
+      "verified_actor_cycles": 17121280
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1351,
+      "verified_actor_cycles": 22216704
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1495,
+      "verified_actor_cycles": 24576000
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1488,
+      "verified_actor_cycles": 24461312
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1382,
+      "verified_actor_cycles": 22724608
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1353,
+      "verified_actor_cycles": 22249472
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1427,
+      "verified_actor_cycles": 23461888
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1398,
+      "verified_actor_cycles": 22986752
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1336,
+      "verified_actor_cycles": 21970944
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1336,
+      "verified_actor_cycles": 21970944
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1448,
+      "verified_actor_cycles": 23805952
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 0,
+      "rounds": 1034,
+      "verified_actor_cycles": 17022976
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 0,
+      "rounds": 1070,
+      "verified_actor_cycles": 17612800
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 1,
+      "rounds": 1054,
+      "verified_actor_cycles": 17350656
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 1,
+      "rounds": 1027,
+      "verified_actor_cycles": 16908288
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 2,
+      "rounds": 1046,
+      "verified_actor_cycles": 17219584
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 2,
+      "rounds": 1072,
+      "verified_actor_cycles": 17645568
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 3,
+      "rounds": 1066,
+      "verified_actor_cycles": 17547264
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 3,
+      "rounds": 1037,
+      "verified_actor_cycles": 17072128
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 4,
+      "rounds": 1040,
+      "verified_actor_cycles": 17121280
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 4,
+      "rounds": 1050,
+      "verified_actor_cycles": 17285120
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1400,
+      "verified_actor_cycles": 23019520
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1504,
+      "verified_actor_cycles": 24723456
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1522,
+      "verified_actor_cycles": 25018368
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 1452,
+      "verified_actor_cycles": 23871488
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1461,
+      "verified_actor_cycles": 24018944
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 1511,
+      "verified_actor_cycles": 24838144
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1581,
+      "verified_actor_cycles": 25985024
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 1458,
+      "verified_actor_cycles": 23969792
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1490,
+      "verified_actor_cycles": 24494080
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1516,
+      "verified_actor_cycles": 24920064
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 0,
+      "rounds": 1106,
+      "verified_actor_cycles": 18202624
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 0,
+      "rounds": 1133,
+      "verified_actor_cycles": 18644992
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 1,
+      "rounds": 1114,
+      "verified_actor_cycles": 18333696
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 1,
+      "rounds": 1092,
+      "verified_actor_cycles": 17973248
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 2,
+      "rounds": 1084,
+      "verified_actor_cycles": 17842176
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 2,
+      "rounds": 1135,
+      "verified_actor_cycles": 18677760
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 3,
+      "rounds": 1116,
+      "verified_actor_cycles": 18366464
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 3,
+      "rounds": 1100,
+      "verified_actor_cycles": 18104320
+    },
+    {
+      "build": "base",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 4,
+      "rounds": 1092,
+      "verified_actor_cycles": 17973248
+    },
+    {
+      "build": "new",
+      "mode": "wave",
+      "consumers": 6,
+      "repeat": 4,
+      "rounds": 1123,
+      "verified_actor_cycles": 18481152
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 0,
+      "repeat": 0,
+      "rounds": 1978,
+      "verified_actor_cycles": 32489472
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 0,
+      "repeat": 1,
+      "rounds": 2022,
+      "verified_actor_cycles": 33210368
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 0,
+      "repeat": 2,
+      "rounds": 2055,
+      "verified_actor_cycles": 33751040
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 0,
+      "repeat": 3,
+      "rounds": 2044,
+      "verified_actor_cycles": 33570816
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 0,
+      "repeat": 4,
+      "rounds": 1979,
+      "verified_actor_cycles": 32505856
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 1,
+      "repeat": 0,
+      "rounds": 1955,
+      "verified_actor_cycles": 32112640
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 1,
+      "repeat": 1,
+      "rounds": 1908,
+      "verified_actor_cycles": 31342592
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 1,
+      "repeat": 2,
+      "rounds": 1878,
+      "verified_actor_cycles": 30851072
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 1,
+      "repeat": 3,
+      "rounds": 2014,
+      "verified_actor_cycles": 33079296
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 1,
+      "repeat": 4,
+      "rounds": 1829,
+      "verified_actor_cycles": 30048256
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 5,
+      "repeat": 0,
+      "rounds": 2036,
+      "verified_actor_cycles": 33439744
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 5,
+      "repeat": 1,
+      "rounds": 2041,
+      "verified_actor_cycles": 33521664
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 5,
+      "repeat": 2,
+      "rounds": 2034,
+      "verified_actor_cycles": 33406976
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 5,
+      "repeat": 3,
+      "rounds": 2013,
+      "verified_actor_cycles": 33062912
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 5,
+      "repeat": 4,
+      "rounds": 2014,
+      "verified_actor_cycles": 33079296
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 11,
+      "repeat": 0,
+      "rounds": 1573,
+      "verified_actor_cycles": 25853952
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 11,
+      "repeat": 1,
+      "rounds": 1498,
+      "verified_actor_cycles": 24625152
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 11,
+      "repeat": 2,
+      "rounds": 1557,
+      "verified_actor_cycles": 25591808
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 11,
+      "repeat": 3,
+      "rounds": 1548,
+      "verified_actor_cycles": 25444352
+    },
+    {
+      "build": "new",
+      "mode": "tree-wait",
+      "consumers": 11,
+      "repeat": 4,
+      "rounds": 1515,
+      "verified_actor_cycles": 24903680
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 0,
+      "rounds": 1789,
+      "verified_actor_cycles": 29392896
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 0,
+      "rounds": 1857,
+      "verified_actor_cycles": 30507008
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 1,
+      "rounds": 1844,
+      "verified_actor_cycles": 30294016
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 1,
+      "rounds": 1746,
+      "verified_actor_cycles": 28688384
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 2,
+      "rounds": 1815,
+      "verified_actor_cycles": 29818880
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 2,
+      "rounds": 1892,
+      "verified_actor_cycles": 31080448
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 3,
+      "rounds": 1851,
+      "verified_actor_cycles": 30408704
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 3,
+      "rounds": 1909,
+      "verified_actor_cycles": 31358976
+    },
+    {
+      "build": "base",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 4,
+      "rounds": 1792,
+      "verified_actor_cycles": 29442048
+    },
+    {
+      "build": "new",
+      "mode": "tree",
+      "consumers": 1,
+      "repeat": 4,
+      "rounds": 1949,
+      "verified_actor_cycles": 32014336
+    }
+  ]
+}

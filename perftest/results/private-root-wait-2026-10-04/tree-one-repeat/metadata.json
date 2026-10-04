@@ -1,0 +1,53 @@
+{
+  "base_commit": "c5a174ff669b1cd274e31b143e7f90b7c1993beb",
+  "new_commit": "dd2b3000e7cb93c034803bac590836ae2cb05596",
+  "new_diff": "diff --git a/perftest/actor_churn.d b/perftest/actor_churn.d\nindex b7c1b61..d666f6d 100644\n--- a/perftest/actor_churn.d\n+++ b/perftest/actor_churn.d\n@@ -90,7 +90,7 @@ private struct TreeState\n     PrivateChildPark!State* children;\n }\n \n-private PrivateRootDisposition treeActivate(scope ref PrivateBorrow!TreeState actor,\n+private PrivateRootDisposition treeActivate(bool waitChildren)(scope ref PrivateBorrow!TreeState actor,\n         scope ref PrivateContext context) nothrow @nogc @system\n {\n     if (actor.value.children is null)\n@@ -103,9 +103,10 @@ private PrivateRootDisposition treeActivate(scope ref PrivateBorrow!TreeState ac\n                 fatal(\"private child allocation failed\");\n         if (actor.value.children.startFinal!privateOperate(context) != PrivateStartResult.started)\n             fatal(\"private child wave failed\");\n-        return PrivateRootDisposition.again;\n+        return waitChildren ? PrivateRootDisposition.waitChildren : PrivateRootDisposition.again;\n     }\n-    return actor.value.children.finished(context)\n+    static if (waitChildren) return PrivateRootDisposition.finish;\n+    else return actor.value.children.finished(context)\n         ? PrivateRootDisposition.finish : PrivateRootDisposition.again;\n }\n \n@@ -147,12 +148,13 @@ private double elapsedSeconds(long ticks)\n void main(string[] args)\n {\n     enforce(args.length >= 2 && args.length <= 11\n-            && (args[1] == \"actor\" || args[1] == \"wave\" || args[1] == \"private\" || args[1] == \"private-remote\" || args[1] == \"tree\"),\n-        \"usage: actor_churn actor|wave|private|private-remote|tree [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384]\");\n+            && (args[1] == \"actor\" || args[1] == \"wave\" || args[1] == \"private\" || args[1] == \"private-remote\" || args[1] == \"tree\" || args[1] == \"tree-wait\"),\n+        \"usage: actor_churn actor|wave|private|private-remote|tree|tree-wait [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384]\");\n     immutable waveMode = args[1] == \"wave\";\n     immutable remoteMode = args[1] == \"private-remote\";\n     immutable privateMode = args[1] == \"private\" || remoteMode;\n-    immutable treeMode = args[1] == \"tree\";\n+    immutable treeWaitMode = args[1] == \"tree-wait\";\n+    immutable treeMode = args[1] == \"tree\" || treeWaitMode;\n     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;\n     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;\n     immutable consumers = args.length > 4 ? to!uint(args[4]) : 0;\n@@ -210,9 +212,11 @@ void main(string[] args)\n     scope(exit) if (remotePark !is null) remotePark.destroy();\n     scope (exit) if (park !is null) park.destroy();\n     immutable parents = (count - 1) / batch + 1;\n-    auto trees = treeMode ? PrivateRootPark!(TreeState, treeActivate).create(farm, parents, batch, allocator) : null;\n-    enforce(!treeMode || trees !is null, \"private tree park allocation failed\");\n+    auto trees = treeMode && !treeWaitMode ? PrivateRootPark!(TreeState, treeActivate!false).create(farm, parents, batch, allocator) : null;\n+    auto waitingTrees = treeWaitMode ? PrivateRootPark!(TreeState, treeActivate!true).create(farm, parents, batch, allocator) : null;\n+    enforce(!treeMode || (treeWaitMode ? waitingTrees !is null : trees !is null), \"private tree park allocation failed\");\n     scope (exit) if (trees !is null) trees.destroy();\n+    scope (exit) if (waitingTrees !is null) waitingTrees.destroy();\n     auto owners = new ActorOwner!State[count];\n     auto handles = new ActorHandle!State[count];\n     auto completions = new Completion[count];\n@@ -270,12 +274,14 @@ void main(string[] args)\n                 {\n                     immutable offset = i * batch;\n                     immutable children = count - offset < batch ? count - offset : batch;\n-                    enforce(trees.spawn(TreeState(completions.ptr + offset, children, cycle, null)) == PrivateSpawnResult.spawned,\n+                    auto initial = TreeState(completions.ptr + offset, children, cycle, null);\n+                    enforce((treeWaitMode ? waitingTrees.spawn(initial) : trees.spawn(initial)) == PrivateSpawnResult.spawned,\n                         \"private parent creation failed\");\n                 }\n-            while (privateMode ? (remoteMode ? remotePark.live != 0 : park.live != 0) : trees.live != 0)\n+            while (privateMode ? (remoteMode ? remotePark.live != 0 : park.live != 0) : (treeWaitMode ? waitingTrees.live != 0 : trees.live != 0))\n             {\n                 if (privateMode) { if (remoteMode) remotePark.pump(token, batch); else park.pump(token, batch); }\n+                else if (treeWaitMode) waitingTrees.pump(token);\n                 else trees.pump(token);\n                 consume();\n                 enforce(MonoTime.currTime < deadline, \"private lifecycle timed out\");\n",
+  "compiler": "LDC - the LLVM D compiler (1.43.0):\n  based on DMD v2.113.0 and LLVM 22.1.8\n  built with LDC - the LLVM D compiler (1.43.0)\n  Default target: x86_64-pc-linux-gnu\n  Host CPU: znver3\n  https://dlang.org - https://wiki.dlang.org/LDC\n\n\n  Registered Targets:\n    aarch64     - AArch64 (little endian)\n    aarch64_32  - AArch64 (little endian ILP32)\n    aarch64_be  - AArch64 (big endian)\n    amdgcn      - AMD GCN GPUs\n    arm         - ARM\n    arm64       - ARM64 (little endian)\n    arm64_32    - ARM64 (little endian ILP32)\n    armeb       - ARM (big endian)\n    avr         - Atmel AVR Microcontroller\n    bpf         - BPF (host endian)\n    bpfeb       - BPF (big endian)\n    bpfel       - BPF (little endian)\n    hexagon     - Hexagon\n    lanai       - Lanai\n    loongarch32 - 32-bit LoongArch\n    loongarch64 - 64-bit LoongArch\n    mips        - MIPS (32-bit big endian)\n    mips64      - MIPS (64-bit big endian)\n    mips64el    - MIPS (64-bit little endian)\n    mipsel      - MIPS (32-bit little endian)\n    msp430      - MSP430 [experimental]\n    nvptx       - NVIDIA PTX 32-bit\n    nvptx64     - NVIDIA PTX 64-bit\n    ppc32       - PowerPC 32\n    ppc32le     - PowerPC 32 LE\n    ppc64       - PowerPC 64\n    ppc64le     - PowerPC 64 LE\n    r600        - AMD GPUs HD2XXX-HD6XXX\n    riscv32     - 32-bit RISC-V\n    riscv32be   - 32-bit big endian RISC-V\n    riscv64     - 64-bit RISC-V\n    riscv64be   - 64-bit big endian RISC-V\n    sparc       - Sparc\n    sparcel     - Sparc LE\n    sparcv9     - Sparc V9\n    spirv       - SPIR-V Logical\n    spirv32     - SPIR-V 32-bit\n    spirv64     - SPIR-V 64-bit\n    systemz     - SystemZ\n    thumb       - Thumb\n    thumbeb     - Thumb (big endian)\n    ve          - VE\n    wasm32      - WebAssembly 32-bit\n    wasm64      - WebAssembly 64-bit\n    x86         - 32-bit X86: Pentium-Pro and above\n    x86-64      - 64-bit X86: EM64T and AMD64\n    xcore       - XCore\n",
+  "timestamp": "2026-10-04T21:37:59.202940+00:00",
+  "allocator": "crt",
+  "allocator_reason": "mimalloc submodule unavailable; approved CRT fallback",
+  "gate_decision": "No regression below -3%; favourable deviations outside +3% are reported separately",
+  "flags": "-O2 -release -i",
+  "actors": 16384,
+  "warmups": 5,
+  "seconds": 3,
+  "repeats": 5,
+  "cases": [
+    [
+      "tree",
+      256,
+      1
+    ]
+  ],
+  "tree_wait_cases": [],
+  "ring_mib": 8,
+  "huge_pages": false,
+  "tier": "small",
+  "quota_words": 16384,
+  "pin": "controller CPU 0; consumers CPUs 1..N; 0/6, 1/7, ... are SMT siblings",
+  "cpuinfo": "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 80\nmodel name\t: AMD Ryzen 5 5500\nstepping\t: 0\nmicrocode\t: 0xa500014\ncpu MHz\t\t: 4241.899\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 12\ncore id\t\t: 0\ncpu cores\t: 6\napicid\t\t: 0\ninitial apicid\t: 0\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 7186.23\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]",
+  "affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "binaries": {
+    "base": {
+      "path": "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/.e1-evidence/base/perftest/actor_churn",
+      "sha256": "ed457aaa2de69ffa265b10d423ee86abbbf35416576faaaf2d44ead91d611762"
+    },
+    "new": {
+      "path": "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/perftest/actor_churn",
+      "sha256": "b9634fec9c5864585f2b1977f01f7e40c9a8726a35dd6e18e62cc3806004658c"
+    }
+  }
+}

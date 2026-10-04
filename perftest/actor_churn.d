@@ -90,7 +90,7 @@ private struct TreeState
     PrivateChildPark!State* children;
 }
 
-private PrivateRootDisposition treeActivate(scope ref PrivateBorrow!TreeState actor,
+private PrivateRootDisposition treeActivate(bool waitChildren)(scope ref PrivateBorrow!TreeState actor,
         scope ref PrivateContext context) nothrow @nogc @system
 {
     if (actor.value.children is null)
@@ -103,9 +103,10 @@ private PrivateRootDisposition treeActivate(scope ref PrivateBorrow!TreeState ac
                 fatal("private child allocation failed");
         if (actor.value.children.startFinal!privateOperate(context) != PrivateStartResult.started)
             fatal("private child wave failed");
-        return PrivateRootDisposition.again;
+        return waitChildren ? PrivateRootDisposition.waitChildren : PrivateRootDisposition.again;
     }
-    return actor.value.children.finished(context)
+    static if (waitChildren) return PrivateRootDisposition.finish;
+    else return actor.value.children.finished(context)
         ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
 }
 
@@ -147,12 +148,13 @@ private double elapsedSeconds(long ticks)
 void main(string[] args)
 {
     enforce(args.length >= 2 && args.length <= 11
-            && (args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree"),
-        "usage: actor_churn actor|wave|private|private-remote|tree [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384]");
+            && (args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
+        "usage: actor_churn actor|wave|private|private-remote|tree|tree-wait [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384]");
     immutable waveMode = args[1] == "wave";
     immutable remoteMode = args[1] == "private-remote";
     immutable privateMode = args[1] == "private" || remoteMode;
-    immutable treeMode = args[1] == "tree";
+    immutable treeWaitMode = args[1] == "tree-wait";
+    immutable treeMode = args[1] == "tree" || treeWaitMode;
     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;
     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;
     immutable consumers = args.length > 4 ? to!uint(args[4]) : 0;
@@ -210,9 +212,11 @@ void main(string[] args)
     scope(exit) if (remotePark !is null) remotePark.destroy();
     scope (exit) if (park !is null) park.destroy();
     immutable parents = (count - 1) / batch + 1;
-    auto trees = treeMode ? PrivateRootPark!(TreeState, treeActivate).create(farm, parents, batch, allocator) : null;
-    enforce(!treeMode || trees !is null, "private tree park allocation failed");
+    auto trees = treeMode && !treeWaitMode ? PrivateRootPark!(TreeState, treeActivate!false).create(farm, parents, batch, allocator) : null;
+    auto waitingTrees = treeWaitMode ? PrivateRootPark!(TreeState, treeActivate!true).create(farm, parents, batch, allocator) : null;
+    enforce(!treeMode || (treeWaitMode ? waitingTrees !is null : trees !is null), "private tree park allocation failed");
     scope (exit) if (trees !is null) trees.destroy();
+    scope (exit) if (waitingTrees !is null) waitingTrees.destroy();
     auto owners = new ActorOwner!State[count];
     auto handles = new ActorHandle!State[count];
     auto completions = new Completion[count];
@@ -270,12 +274,14 @@ void main(string[] args)
                 {
                     immutable offset = i * batch;
                     immutable children = count - offset < batch ? count - offset : batch;
-                    enforce(trees.spawn(TreeState(completions.ptr + offset, children, cycle, null)) == PrivateSpawnResult.spawned,
+                    auto initial = TreeState(completions.ptr + offset, children, cycle, null);
+                    enforce((treeWaitMode ? waitingTrees.spawn(initial) : trees.spawn(initial)) == PrivateSpawnResult.spawned,
                         "private parent creation failed");
                 }
-            while (privateMode ? (remoteMode ? remotePark.live != 0 : park.live != 0) : trees.live != 0)
+            while (privateMode ? (remoteMode ? remotePark.live != 0 : park.live != 0) : (treeWaitMode ? waitingTrees.live != 0 : trees.live != 0))
             {
                 if (privateMode) { if (remoteMode) remotePark.pump(token, batch); else park.pump(token, batch); }
+                else if (treeWaitMode) waitingTrees.pump(token);
                 else trees.pump(token);
                 consume();
                 enforce(MonoTime.currTime < deadline, "private lifecycle timed out");

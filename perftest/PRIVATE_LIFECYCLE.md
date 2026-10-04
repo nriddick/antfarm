@@ -1,5 +1,93 @@
 # Private actor lifecycle and batching measurements
 
+## Phase E1 root-wait gate — 2026-10-04
+
+The unused-feature gate passes against **c5a174f** under the orchestrator's
+clarification: reject regressions below −3%; report favourable differences outside
+the original symmetric ±3% band. The worst measured regression is **−1.61%**.
+The common child Entry remains 40 bytes, with LDC/DMD size and offset assertions.
+
+These runs use **CRT**, the approved fallback because the local mimalloc submodule
+is unavailable. They are not directly comparable to the mimalloc tables below.
+Ryzen 5 5500, LDC 1.43.0 / LLVM 22.1.8, `-O2 -release`, ordinary 8 MiB Farm,
+16,384 counted actors, small-tier quota 16,384 words, five warmup cycles and
+three-second windows. Each base/new configuration has five alternating pairs.
+Controller CPU 0 and consumers 1..N are pinned; 0/6, 1/7, … are SMT siblings.
+Private modes use the lifecycle profiles 0/1/5/11; public modes use the plan's
+0/6-consumer gate. Tests and the TSan soak finished before measurement.
+The base was built from a clean archive inside the implementation worktree.
+
+| Mode | Batch | Consumers | Base median M/s | New median M/s | Change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| private | 256 | 0 | 8.745 | 8.691 | -0.62% |
+| private | 256 | 1 | 8.172 | 8.224 | +0.65% |
+| private | 256 | 5 | 7.495 | 7.652 | +2.10% |
+| private | 256 | 11 | 6.532 | 6.644 | +1.71% |
+| private-remote | 256 | 0 | 8.748 | 8.752 | +0.05% |
+| private-remote | 256 | 1 | 8.379 | 8.271 | -1.28% |
+| private-remote | 256 | 5 | 4.507 | 4.502 | -0.11% |
+| private-remote | 256 | 11 | 3.352 | 3.361 | +0.26% |
+| tree | 256 | 0 | 10.965 | 10.819 | -1.33% |
+| tree | 256 | 1 | 9.871 | 10.733 | +8.73% † |
+| tree | 256 | 5 | 10.507 | 10.713 | +1.95% |
+| tree | 256 | 11 | 8.325 | 8.191 | -1.61% |
+| actor | 256 | 0 | 7.356 | 7.788 | +5.88% † |
+| actor | 256 | 6 | 5.559 | 5.674 | +2.07% |
+| wave | 256 | 0 | 7.374 | 7.907 | +7.23% † |
+| wave | 256 | 6 | 5.659 | 5.818 | +2.82% |
+| wave | 16384 | 0 | 7.961 | 8.275 | +3.94% † |
+| wave | 16384 | 6 | 5.964 | 6.133 | +2.84% |
+| tree, repeat | 256 | 1 | 9.783 | 10.137 | +3.61% † |
+
+† Outside the symmetric ±3% band, favourable; not a regression. These exceptions
+are retained explicitly rather than described as within ±3%. Polling tree at one
+consumer measured **+8.73%** initially and **+3.61%** in an additional five-pair
+repeat requested by the orchestrator. Both rounds are retained. The initial base
+sample **7.79 M/s** is an outlier (the other four are 9.75–9.94 M/s), but its median
+was calculated normally without discarding it. Public actor and wave controls
+also show favourable deviations at zero consumers.
+
+A work-equivalence check confirmed all **210** runs report
+`verified_actor_cycles == (rounds + 5) * 16384`. Tree runs retain 64 parents and
+one terminal operation per child; per-cycle callbacks remain exactly counted.
+Substituting `false` into the polling-tree specialization reproduces the base
+callback, and the measured public dispatch/retirement/checking body is unchanged.
+No cause for the favourable shifts was established; the benchmark code/link
+layout changed, but these measurements do not isolate its effect.
+
+### The `tree-wait` mode
+
+`actor_churn tree-wait` runs the same parent/child lifecycle as `tree`, using
+`waitChildren` after launching a terminal child wave and `finish` on the single
+resumption. It does not poll `finished`. Both modes share the callback template;
+child state layout and counted work are unchanged. `private_lifecycle_matrix.py`
+includes both in its lifecycle and child suites. For example:
+
+```sh
+make -C perftest actor_churn
+ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn tree-wait 16384 3 5 256 5 crt 0,1,2,3,4,5 small 16384
+```
+
+| Consumers | tree-wait median M/s | Min–max M/s |
+| ---: | ---: | ---: |
+| 0 | 11.038 | 10.802–11.218 |
+| 1 | 10.420 | 9.986–10.998 |
+| 5 | 11.106 | 10.989–11.144 |
+| 11 | 8.451 | 8.176–8.589 |
+
+These feature-enabled samples were taken after the paired gate and have no
+pre-E1 `tree-wait` baseline; they are throughput measurements, not a paired
+speedup claim. The deterministic tests establish the removed polling callbacks.
+
+Evidence: [protocol and reproduction](results/private-root-wait-2026-10-04/README.md),
+[metadata](results/private-root-wait-2026-10-04/metadata.json),
+[all primary runs](results/private-root-wait-2026-10-04/runs.jsonl),
+[medians and ranges](results/private-root-wait-2026-10-04/summary.json),
+[tree repeat](results/private-root-wait-2026-10-04/tree-one-repeat/summary.json),
+[gate assessment](results/private-root-wait-2026-10-04/assessment.json),
+[work-equivalence checks](results/private-root-wait-2026-10-04/work-equivalence.json),
+and [build/test/mutation evidence](results/private-root-wait-2026-10-04/validation.md).
+
 ## 1.7.1-rc.1 batch policy — 2026-10-04
 
 These measurements precede the follow-up that clamps root entry storage to
