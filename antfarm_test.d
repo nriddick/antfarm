@@ -2240,8 +2240,103 @@ void testProducerLifecycleChurn()
     printf("testProducerLifecycleChurn OK\n"); fflush(stdout);
 }
 
-void main()
+// Same-shard plain-write completion join.
+//
+// Both consumers claim different 1-payload runs of shard 0 (smallThreshold
+// is uint.max, so the table is not split across shards; MAX_AVG_COST makes
+// chunk size 1). The handshake before the plain writes is relaxed. There is
+// no test-side release after those writes, so a missing Farm join cannot hide
+// behind the test.
+//
+// Mutation check, do not leave applied: in processShard, change
+//   atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, cast(ulong) runlen)
+// back to MemoryOrder.raw, rebuild the Farm TSan binary, and run
+//   ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 \
+//     ./antfarm_test_tsan join-only
+// ThreadSanitizer reports a data race in joined (exit 66). Acquire/release
+// passes with no TSan warning.
+struct JoinProbe { shared uint entered, done; ulong[2] values; }
+struct JoinBodies
 {
+    JoinProbe* probe; size_t index; ulong[2] scratch;
+    @property bool empty() const nothrow @nogc { return index == 2; }
+    @property size_t length() const nothrow @nogc { return 2 - index; }
+    @property JoinBodies save() nothrow @nogc { return this; }
+    @property PayloadBody front() nothrow @nogc @system
+    { scratch[0] = cast(ulong) probe; scratch[1] = index; return scratch[]; }
+    void popFront() nothrow @nogc { ++index; }
+}
+void joinAbort() nothrow @nogc @system
+{
+    fprintf(stderr, "FAIL same-shard join\n");
+    import core.stdc.stdlib : abort;
+    abort();
+}
+long joinWork(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+{
+    auto probe = cast(JoinProbe*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
+    auto index = atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) (body.ptr + 1));
+    atomicFetchAdd!(MemoryOrder.raw)(probe.entered, 1u);
+    while (atomicLoad!(MemoryOrder.raw)(probe.entered) != 2) pause();
+    probe.values[index] = index + 1; // no test release after this write
+    return 1;
+}
+void joined(void* p) nothrow @nogc @system
+{
+    auto probe = cast(JoinProbe*) p;
+    if (probe.values[0] != 1 || probe.values[1] != 2) joinAbort();
+    atomicStore!(MemoryOrder.rel)(probe.done, 1u);
+}
+void testSameShardPlainWriteJoin()
+{
+    auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 8192, uint.max);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    shared uint stop, started;
+    Thread[2] threads;
+    foreach (i; 0 .. threads.length)
+    {
+        threads[i] = new Thread({
+            ConsumerView view;
+            if (view.subscribe(farm) < 0) joinAbort();
+            scope(exit) view.unsubscribe();
+            atomicFetchAdd(started, 1u);
+            while (atomicLoad(stop) == 0)
+                if (!view.consumeNext()) pause();
+            while (view.consumeNext()) {}
+        });
+        threads[i].start();
+    }
+    auto startDeadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad(started) < threads.length)
+        check(MonoTime.currTime < startDeadline, "join consumers did not start");
+    foreach (_; 0 .. 30)
+    {
+        JoinProbe probe;
+        TableCompletionHook hook = TableCompletionHook(&probe, &joined);
+        PayloadHeader header;
+        header.maxCs = header.done = 1;
+        header.plen = 2;
+        header.call = &joinWork;
+        auto n = farm.writeTracked(header, JoinBodies(&probe), 2, &hook, token, MAX_AVG_COST);
+        check(n == 2, "join table was not fully admitted");
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (atomicLoad!(MemoryOrder.acq)(probe.done) == 0)
+            check(MonoTime.currTime < deadline, "join timeout");
+    }
+    atomicStore(stop, 1u);
+    foreach (t; threads) t.join();
+    printf("PASS same-shard plain-write completion join\n"); fflush(stdout);
+}
+
+void main(string[] args)
+{
+    if (args.length > 1 && args[1] == "join-only")
+    {
+        testSameShardPlainWriteJoin();
+        return;
+    }
     testMagicWrap();
     testRingSizeUnits();
     testArithmetic();
@@ -2265,5 +2360,6 @@ void main()
     testActorPayload();
     testActorErasedAdapter();
     testActorInbox();
+    testSameShardPlainWriteJoin();
     printf("ALL TESTS PASSED\n");
 }
