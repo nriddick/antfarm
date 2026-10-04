@@ -270,7 +270,7 @@ The payload/table sizing contract, in order:
 
 At this level producers do nothing else to resolve fullness; they merely return commit lengths dwindling to 0. A stalled producer may subscribe a ConsumerView, drain, and retry (5a).
 
-`writeTracked` is the narrow completion-notification variant used by actor waves. It accepts only a uniform single-threaded, single-shot header (`MaxCs=1`, `Done=1`) and stores a caller-owned `TableCompletionHook*` in Thead word 7. The hook is invoked exactly once by the `Tprogress == Tlen` finisher, after every `Call` in that table has returned. Its storage and context must remain stable until invocation returns. An aggregate producer must count the table before calling `writeTracked`, because consumers may finish it before the write call returns; a zero write admits no table and requires rollback.
+`writeTracked` is the narrow completion-notification variant used by actor waves. It accepts only a uniform single-threaded, single-shot header (`MaxCs=1`, `Done=1`) and stores a caller-owned `TableCompletionHook*` in Thead word 7. The hook is invoked exactly once by the `Tprogress == Tlen` finisher, after every `Call` in that table has returned. The Farm snapshots the function and context before calling and never dereferences either afterward. Hook/context storage must remain stable until invocation; the notification may reclaim or transfer it as its **final access**. Otherwise it must remain stable until invocation returns. An aggregate producer must count the table before calling `writeTracked`, because consumers may finish it before the write call returns; a zero write admits no table and requires rollback.
 
 ### 5c. Reservation and Publication
 
@@ -420,7 +420,7 @@ The baseline loop:
 
 **d.** If `X < Shiter` it maps to a run of Tindex of Chunk length at `Shstart + X * Chunk`. If `X == Shiter-1`, `Ci` truncates the run to the remainder (`Shlen & (Chunk-1)`) if it's nonzero.
 
-**e.** When a `Ci` finishes a run do `Y = fetch_add(Shc, run_length)`; if the low half of `Y` equals `Shlen - run_length`, then `Ci` completed the shard and adds `Shlen` to `Tprogress` with acquire/release ordering. This bounds the number of mutations to `Tprogress` to `SqCs` and makes the final RMW a join over preceding shard callback writes. The completer additionally gains the *sweeper role* for this table (7e), and if its `Tprogress` add lands exactly on `Tlen` it is the table's finisher and performs the Sd accounting (8).
+**e.** When a `Ci` finishes a run do `Y = fetch_add(Shc, run_length)` with acquire/release ordering; if the low half of `Y` equals `Shlen - run_length`, then `Ci` completed the shard and adds `Shlen` to `Tprogress` with acquire/release ordering. The completion RMW joins preceding primary-run callback writes within the shard; the `Tprogress` RMW joins those shards. That is a join of all callbacks only for tracked ST single-shot tables (`MaxCs=1`, `Done=1`), whose callbacks all run on the primary path. Secondary and tertiary MT callbacks do not contribute an `Shc` completion and are not joined (7c, 7e). A relaxed shard completion sum would not establish the within-shard join. This bounds the number of mutations to `Tprogress` to `SqCs`. The completer additionally gains the *sweeper role* for this table (7e), and if its `Tprogress` add lands exactly on `Tlen` it is the table's finisher and performs the Sd accounting (8).
 
 **f.** Then `Ci` returns to step c; or if `X >= Shiter` it enters the secondary pathway.
 
@@ -479,7 +479,9 @@ Sweeps of foreign shards do not recursively confer the role. A late visitor find
 
 This is the canonical home for the completion/reclamation states defined in 1. Two facts drive the whole story: `Sd` says how far primary table accounting has advanced; `Rt` says whether ring memory is still protected. Keeping those separate prevents both the MT-wording confusion and most of the repeated reclamation explanation.
 
-`Tcount` accumulates primary runs per shard. `Tprogress` is the table's primary accounting: when it reaches `Tlen`, every Tindex run has been claimed, executed, and accounted. That is *not* a join on every concurrent MT callback; an MT callback entered by the secondary or tertiary path may still be in flight (7e). The table's finisher — the `Ci` whose `Tprogress` add lands on `Tlen` — adds `Tsize` to `Sd` of the table's starting segment, then invokes a nonzero table-completion hook. It may do so while another MT callback is still in flight; this is safe because that callback's own `ConsumerView` pin still prevents `Rt == 0` and therefore reuse.
+`Tcount` accumulates primary runs per shard. `Tprogress` is the table's primary accounting: when it reaches `Tlen`, every Tindex run has been claimed, executed, and accounted. That is *not* a join on every concurrent MT callback; an MT callback entered by the secondary or tertiary path may still be in flight (7e). The table's finisher — the `Ci` whose `Tprogress` add lands on `Tlen` — adds `Tsize` to `Sd` of the table's starting segment.
+
+A nonzero table-completion hook is a separate case from that MT discussion. `writeTracked` is the only writer of the hook, and it accepts only tracked ST single-shot tables (`MaxCs=1`, `Done=1`); ordinary `write` supplies no hook. For those tables every callback is a primary run, so the finisher's `Tprogress` transition has already joined all of them before the hook runs. The hook is not invoked while another MT callback is in flight: that combination is rejected. On an ordinary hook-less table, an MT callback still in flight remains safe for ring reuse because that callback's own `ConsumerView` pin still prevents `Rt == 0`.
 
 `Sd` is zeroed by the producer when its reservation crosses into the segment for a new epoch, before the release-store of `Es` (2c). The finisher provably still holds a reference on the segment (it was unconfirmed until this moment), so its accounting can never race a producer's re-zeroing.
 
@@ -516,7 +518,7 @@ Atomic memory orders, in one place:
 | leaf-tally RMWs | acq_rel on `Lt` | acq_rel edge decrement and release root update | a non-edge consumer's ring reads join the leaf release sequence carried by the last-on-leaf's `Rt` release |
 | table publication | release-store `Tsent` last | acquire-load and validate `Tsent` | raw-atomic Thead remainder, indexes, counters, payload header/body |
 | segment metadata publication | release-store `Es` last | acquire-load and validate expected `Es` | raw-atomic `Seqt`, `Cs`, `SqCs`, initial `Sd` |
-| table accounting join | acq_rel RMW on `Tprogress` | acquire observation of `Tprogress == Tlen` | preceding shard callback writes join the final transition before optional table-completion notification |
+| table accounting join | acq_rel completion RMWs on `Shc`, then acq_rel RMW on `Tprogress` | acquire observation of `Tprogress == Tlen` | primary-run callback writes join within each shard, then across shards, before optional table-completion notification; all callbacks only for tracked ST single-shot tables |
 | producer reuses a segment | release root transition toward zero | acquire-load `Rt == 0` in quota sweep | prior consumers' ring accesses happen before reuse |
 | temporary subscriber pin | release add/sub of `Sub` plus acquire metadata/root validation | producer acquire of nonzero `Rt` | pinned wrap window cannot be lapped while attaching |
 

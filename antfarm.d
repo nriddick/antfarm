@@ -2436,24 +2436,28 @@ private:
                 immutable poff = atomicLoad!(MemoryOrder.raw)(bp[tindexOff + runstart + i]);
                 enterPayload(bp, tseqIdx + poff, false);
             }
-            // Spec 5e-k: the consumer adding the final completion sum for
+            // Spec 7a-e: the consumer adding the final completion sum for
             // the shard increments Tprogress by the shard length, whichever
             // consumer (owner, sweeper, or re-walker) that happens to be.
-            // Join every chunk's callback writes before the final chunk
-            // forwards this shard's completion into Tprogress. A relaxed
+            // Join every chunk's primary-run callback writes before the final
+            // chunk forwards this shard's completion into Tprogress. A relaxed
             // completion sum would join only the shard finisher's writes.
+            // Every callback is included only for a tracked ST single-shot
+            // table.
             immutable y = atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, cast(ulong) runlen);
             if ((y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
             if ((y & 0xFFFF_FFFFUL) == shlen - runlen)
             {
                 // Tprogress is also a completion join: each shard publishes
-                // all callback writes, and the last RMW acquires the release
-                // chain before notifying an aggregate table observer.
+                // its primary-run callback writes, and the last RMW acquires
+                // the release chain before notifying an aggregate table
+                // observer. Secondary and tertiary MT callbacks are not
+                // joined here.
                 immutable tp = atomicFetchAdd!(MemoryOrder.acq_rel)(
                     bp[progOff], cast(ulong) shlen);
                 if (tp + shlen == tlen)
                 {
-                    // Spec 5j: the finisher accounts Tsize into the starting
+                    // Spec 8: the finisher accounts Tsize into the starting
                     // segment's Sd. We still hold that segment (it was
                     // unconfirmed until now), so no producer is re-zeroing.
                     immutable tsize = atomicLoad!(MemoryOrder.raw)(bp[tseqIdx + 5]);
