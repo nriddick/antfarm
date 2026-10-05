@@ -169,17 +169,25 @@ private struct ChildBase
     }
 }
 
+// A unit the Service pump schedules: it emits at most one table per pass. A
+// cohort owns one for its wave; other emitters embed their own.
+private struct Emittable
+{
+    Emittable* next;
+    // Returns true only when publication is sealed; can destroy the owner on return.
+    bool function(Emittable*, ref Token) nothrow @nogc @system emit;
+}
+
 private struct Wave
 {
+    Emittable emittable; // first: the pump hands this back to the wave's emit
     shared ulong pending;
     shared uint active;
     Wave* upstream;
-    Wave* next;
     TableCompletionHook hook;
-    // Returns true only when publication is sealed; can destroy w on return.
-    bool function(Wave*, ref Token) nothrow @nogc @system emit;
     void function(Wave*) nothrow @nogc @system finish;
 }
+static assert(Wave.emittable.offsetof == 0);
 
 // Increment under an existing hold; reject overflow before changing the counter.
 private void retainRootCredit(ref shared uint pending) nothrow @nogc @system
@@ -265,25 +273,25 @@ private struct Service
     AntFarm* farm;
     ActorAllocator allocator;
     size_t batchLimit;
-    shared(Wave*) incoming;
-    Wave* waiting;
+    shared(Emittable*) incoming;
+    Emittable* waiting;
     shared(Entry*) rootReturns;
 
-    void enqueue(Wave* wave) nothrow @nogc @system
+    void enqueue(Emittable* emittable) nothrow @nogc @system
     {
         auto head = atomicLoad!(MemoryOrder.raw)(incoming);
         while (true)
         {
-            wave.next = cast(Wave*) head;
+            emittable.next = cast(Emittable*) head;
             if (cas!(MemoryOrder.rel, MemoryOrder.raw)(
-                    &incoming, head, cast(shared(Wave)*) wave)) return;
+                    &incoming, head, cast(shared(Emittable)*) emittable)) return;
             head = atomicLoad!(MemoryOrder.raw)(incoming);
         }
     }
 
     void pump(ref Token token) nothrow @nogc @system
     {
-        auto fresh = cast(Wave*) atomicExchange!(MemoryOrder.acq_rel)(&incoming, cast(shared(Wave)*) null);
+        auto fresh = cast(Emittable*) atomicExchange!(MemoryOrder.acq_rel)(&incoming, cast(shared(Emittable)*) null);
         while (fresh !is null)
         {
             auto next = fresh.next;
@@ -812,7 +820,7 @@ private:
         park.parentIsRoot_ = parentIsRoot;
         park.base_.dispose = &dispose;
         park.base_.wave.hook = TableCompletionHook(&park.base_.wave, &waveCompleted);
-        park.base_.wave.emit = &emit;
+        park.base_.wave.emittable.emit = &emit;
         park.base_.wave.finish = &finish;
         park.base_.next = parent.children;
         parent.children = &park.base_;
@@ -905,7 +913,7 @@ public:
         if (count_ == 0) return PrivateStartResult.empty;
         retire_ = retire;
         isSubset_ = false;
-        base_.wave.emit = &emit;
+        base_.wave.emittable.emit = &emit;
         cursor_ = 0;
         static if (hasResults)
             resultCount_ = producesResults ? count_ : 0;
@@ -924,7 +932,7 @@ public:
             retainRootCredit(base_.parent.pending); // BEFORE enqueue / visibility
             base_.parent.hasJoinCredits = true;
         }
-        base_.service.enqueue(wave);
+        base_.service.enqueue(&wave.emittable);
         return PrivateStartResult.started;
     }
     /// Starts only the listed spawn-order indices. No subset retirement.
@@ -966,7 +974,7 @@ public:
         header_.plen = 1;
         header_.call = &runChild!(operation, true);
         auto wave = &base_.wave;
-        wave.emit = &emitSubset;
+        wave.emittable.emit = &emitSubset;
         wave.upstream = context.enclosing_;
         atomicStore!(MemoryOrder.raw)(wave.pending, 1UL);
         atomicStore!(MemoryOrder.raw)(wave.active, 1u);
@@ -977,7 +985,7 @@ public:
             retainRootCredit(base_.parent.pending);
             base_.parent.hasJoinCredits = true;
         }
-        base_.service.enqueue(wave);
+        base_.service.enqueue(&wave.emittable);
         return PrivateStartResult.started;
     }
     PrivateStartResult startFinal(alias operation)(scope ref PrivateContext context)
@@ -990,8 +998,9 @@ private:
     {
         return cast(PrivateChildPark*) ChildBase.fromWave(wave);
     }
-    static bool emit(Wave* wave, ref Token token) nothrow @nogc @system
+    static bool emit(Emittable* emittable, ref Token token) nothrow @nogc @system
     {
+        auto wave = cast(Wave*) emittable;
         auto park = fromWave(wave);
         auto remaining = park.count_ - park.cursor_;
         auto n = remaining > park.batchLimit_ ? park.batchLimit_ : remaining;
@@ -1005,8 +1014,9 @@ private:
         releaseWave(wave); // seal: last access, including park and its owner
         return true;
     }
-    static bool emitSubset(Wave* wave, ref Token token) nothrow @nogc @system
+    static bool emitSubset(Emittable* emittable, ref Token token) nothrow @nogc @system
     {
+        auto wave = cast(Wave*) emittable;
         auto park = fromWave(wave);
         auto remaining = park.k_ - park.cursor_;
         auto n = remaining > park.batchLimit_ ? park.batchLimit_ : remaining;
