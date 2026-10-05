@@ -121,7 +121,7 @@ The restored-source run on 2026-10-04 passed `make check` and completed
 
 Pass a selector to `private_actor_tests`, `private_actor_tests_dmd`, or
 `private_actor_tests_tsan`. The normal suite includes `phase-e1` and
-`phase-ports`; deterministic schedules require the test-hook build flags
+`phase-ports` and `phase-dtor`; deterministic schedules require the test-hook build flags
 supplied by the Makefile.
 
 | Group | Selectors |
@@ -130,9 +130,45 @@ supplied by the Makefile.
 | E1 counter death | `e1-counter-exhaustion-death` runs the harness; `e1-counter-exhaustion` is its fatal child mode. |
 | Result ports | `phase-ports`, `ports-basic`, `ports-poll-visibility`, `ports-wait-visibility`, `ports-late-tail`, `ports-large-cohort`, `ports-nested`, `ports-alloc-fail` |
 | Result-port death | `ports-death` runs the harness; `ports-read-active`, `ports-wrong-parent-results`, and `ports-default-results` are its fatal child modes. |
+| Destructors (E2-1) | `phase-dtor`, `dtor-root`, `dtor-child`, `dtor-order`, `dtor-failed-spawn`, `dtor-aligned`, `dtor-moved-from`, `dtor-recursive`, `dtor-results`, `dtor-gc` (skipped under TSan: druntime's GC suspend signals are not TSan-clean) |
+| Destructor death | `dtor-death` runs the harness; `dtor-destroy-live`, `dtor-finish-active-child`, and `dtor-reenter-failed-spawn` (debug only: the reentrancy flag is an assert-mode field) are its fatal child modes (the first two may not run a destructor). |
 
 The port tests cover typed-result lifetime, acquire visibility, notification
 tails, admission retries, pipelined reductions and allocator failures. Compile
 checks reject qualified/non-POD result types and invalid callback signatures.
 `make death` runs the E1 and port death harnesses in both compiler lanes,
-including debug and release.
+including debug and release. The destructor tests record every `~T` with its
+thread: the stored instance is destroyed exactly once on a consumer (never the
+emitter), caller-side values (failed-spawn arguments, moved-from sources) on
+the calling thread. The `stateAllowed` compile checks invoke `spawn`/`createChildren`.
+
+### E2-1 mutation evidence
+
+Verified individually on LDC against the final E2-1 implementation. Each
+mutated binary aborted with its named invariant; the unmodified tests passed.
+
+| Mutation | Selector | Failure |
+| --- | --- | --- |
+| D-M1: cohort disposal omits `~T` | `dtor-order` | stored exactly once |
+| D-M2: root destruction moves to emitter reclaim | `dtor-root` | stored exactly once / consumer placement |
+| D-M3: destroy member before descendants | `dtor-order` | leaves before mid |
+| D-M4: destroy terminal child twice | `dtor-child` | final destroyed exactly once before join |
+| D-M5: remove GC range before `~T` | `dtor-gc` | referenced objects survive until destroyed |
+| D-M6: write result slot after destruction | `dtor-results` | slot written before `~T` |
+| D-M8move: failed root spawn guards with `move(initial)` | `dtor-aligned` | argument destroyed once / no double frees (DMD) |
+
+D-M4 covers today's terminal child dispatch; deferred child retirement belongs
+to E2-4. Extra test-author scratch checks caught missing root/member destruction,
+root post-order reversal, destruction on nonfinal waves, copying instead of
+moving, duplicate failed-argument destruction, live-park teardown destruction,
+and destruction before the active-child fatal. Deleting the root failed-spawn
+guarded destruction makes its debug death test survive. Restoring `T a;` in
+the constraint probe rejects the disabled-default regression states.
+`dtor-aligned` also holds on LDC with D-M8move applied, because LDC's
+`core.lifetime.move` is correct for over-aligned structs; the mutation is
+confirmed on DMD, whose move runs `~T` during the move and double-frees the
+owning token.
+
+Forced `GC.collect()` runs under LDC/DMD debug and release. Only that test
+skips TSan: druntime's stop-the-world suspend-signal handler reports
+"signal handler spoils errno". All other destructor cases run under TSan.

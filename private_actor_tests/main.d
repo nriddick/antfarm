@@ -11,6 +11,7 @@ import std.algorithm.searching : canFind;
 import std.process : Redirect, pipeProcess, wait;
 import std.stdio : writeln;
 import std.exception : enforce;
+import std.traits : hasNested;
 
 void check(bool ok, string file = __FILE__, size_t line = __LINE__) nothrow @nogc @system
 {
@@ -930,6 +931,7 @@ void deathHarness()
             check(diedWithMessage(modeName, "antfarm fatal: private child park: unauthorized context"));
         writeln("PASS wrong-parent and default authority are fatal");
         portsDeath();
+        dtorDeath();
         foreach (modeName; ["batch-create-zero", "batch-pump-zero", "batch-pump-over"])
             check(diedWithMessage(modeName, "antfarm fatal: invalid private root batch limit"));
         check(diedWithMessage("batch-child-zero", "antfarm fatal: invalid private child batch limit"));
@@ -2396,7 +2398,8 @@ static assert(!__traits(compiles, PrivateChildPark!(PItem, shared ulong)));
 static assert(!__traits(compiles, PrivateChildPark!(PItem, shared const ulong)));
 static assert(!__traits(compiles, PrivateChildPark!(PItem, inout ulong)));
 static assert(!__traits(compiles, PrivateChildPark!(PItem, PNotPod)));       // non-POD R
-static assert(__traits(compiles, PrivateChildPark!(PNotPod, ulong)));        // non-POD T accepted; spawn/create validate it
+// non-POD T (postblit) is accepted since E2-1; see the stateAllowed probes in the destructor section.
+static assert(__traits(compiles, PrivateChildPark!(PNotPod, ulong)));
 static assert(__traits(compiles, PrivateChildPark!(PItem, PWide)));          // POD aggregate R
 static assert(!__traits(hasMember, PVoidCohort, "results"));                 // absent on a void cohort
 static assert(__traits(hasMember, PUlongCohort, "results"));
@@ -3573,11 +3576,1150 @@ void phasePorts()
     portsAllocationFailures(); writeln("PASS ports-alloc-fail cohort/entries/results failures and overflow");
 }
 
+// ===========================================================================
+// E2-1: destructors and non-POD state (design 86 section 5, tests 6.3 D1-D5).
+// Every destructor records (id, thread) in a global log; id 0 is a moved-from
+// or .init instance. The stored actor instance must be destroyed exactly once,
+// on a consumer, never on the emitter. Caller-side values (failed-spawn
+// arguments, moved-from parameters) are destroyed by the language on the
+// calling thread and are counted separately (review 89, finding 5).
+// Raw flags never supply a happens-before edge: log reads happen only after
+// the library's join (park.live == 0 or a callback after `waitChildren`).
+// Mutations are applied by hand to actors/private_actor.d; see each test.
+// ===========================================================================
+import core.lifetime : move;
+import core.memory : GC;
+
+enum dtOp = 1u << 20; // op-ran marker: id + dtOp
+struct DtEvent { shared uint id; shared ulong tid; }
+enum dtUnwritten = uint.max;
+struct DtLog { shared size_t n; DtEvent[512] events; }
+__gshared DtLog dtLog;
+__gshared ulong dtEmitter; // the test's emitter thread
+__gshared ulong dtCaller;  // the thread running the current parent callback
+
+void dtReset() nothrow @nogc @system
+{
+    foreach (ref e; dtLog.events) atomicStore!(MemoryOrder.raw)(e.id, dtUnwritten);
+    atomicStore(dtLog.n, cast(size_t) 0);
+}
+void dtRecord(uint id) nothrow @nogc @system
+{
+    auto i = atomicFetchAdd(dtLog.n, cast(size_t) 1);
+    namedCheck(i < dtLog.events.length, "dtor log capacity");
+    atomicStore!(MemoryOrder.raw)(dtLog.events[i].tid, portsThreadId());
+    atomicStore!(MemoryOrder.rel)(dtLog.events[i].id, id);
+}
+// Published events only; a slot reserved by a concurrent destructor is skipped.
+uint dtId(size_t i) nothrow @nogc @system { return atomicLoad!(MemoryOrder.acq)(dtLog.events[i].id); }
+size_t dtCount(uint id) nothrow @nogc @system
+{
+    size_t c;
+    foreach (i; 0 .. atomicLoad(dtLog.n)) if (dtId(i) == id) ++c;
+    return c;
+}
+// Index/thread of the first event with this id; size_t.max / 0 if absent.
+size_t dtPos(uint id) nothrow @nogc @system
+{
+    foreach (i; 0 .. atomicLoad(dtLog.n)) if (dtId(i) == id) return i;
+    return size_t.max;
+}
+ulong dtTid(uint id) nothrow @nogc @system
+{
+    auto p = dtPos(id);
+    return p == size_t.max ? 0 : atomicLoad!(MemoryOrder.raw)(dtLog.events[p].tid);
+}
+// Thread of the nth (0-based) event with this id.
+ulong dtTidAt(uint id, size_t nth) nothrow @nogc @system
+{
+    foreach (i; 0 .. atomicLoad(dtLog.n))
+        if (dtId(i) == id && nth-- == 0) return atomicLoad!(MemoryOrder.raw)(dtLog.events[i].tid);
+    return 0;
+}
+// Stored instance: exactly one destructor, on a consumer (never the emitter).
+void dtStoredOnConsumer(uint id, string what) nothrow @nogc @system
+{
+    namedCheck(dtCount(id) == 1, what);
+    namedCheck(dtTid(id) != dtEmitter, what);
+}
+// Caller-side: exactly one destructor, on the thread that made the call.
+void dtOnCaller(uint id, ulong caller, string what) nothrow @nogc @system
+{
+    namedCheck(dtCount(id) == 1, what);
+    namedCheck(dtTid(id) == caller, what);
+}
+
+struct DtObj { uint id; ~this() nothrow @nogc @system { dtRecord(id); } }
+struct DtKid { uint id; ~this() nothrow @nogc @system { dtRecord(id); } }
+struct DtUnique
+{
+    uint id;
+    @disable this(this);
+    ~this() nothrow @nogc @system { dtRecord(id); }
+}
+void dtKidOp(scope ref PrivateBorrow!DtKid b, scope ref PrivateContext) nothrow @nogc @system
+{ dtRecord(b.value.id + dtOp); }
+ulong dtKidTag(scope ref PrivateBorrow!DtKid b, scope ref PrivateContext) nothrow @nogc @system
+{ dtRecord(b.value.id + dtOp); return portsValue(1, b.value.id); }
+void dtKidNop(scope ref PrivateBorrow!DtKid, scope ref PrivateContext) nothrow @nogc @system {}
+
+PrivateRootDisposition dtFinish(T)(scope ref PrivateBorrow!T, scope ref PrivateContext)
+    nothrow @nogc @system { return PrivateRootDisposition.finish; }
+
+struct DtHarness
+{
+    AntFarm* farm;
+    Token token;
+    Workers workers;
+    Counts counts;
+    this(uint consumers)
+    {
+        farm = AntFarm.create(2, 8, consumers, 0, 0, 1, 4096);
+        token = farm.registerProducer(Tier.small);
+        workers = new Workers(farm, consumers);
+        dtReset();
+        dtEmitter = portsThreadId();
+    }
+    void drain(P)(P* park, string name)
+    {
+        auto deadline = MonoTime.currTime + 30.seconds;
+        while (park.live)
+        {
+            park.pump(token);
+            namedCheck(MonoTime.currTime < deadline, name);
+        }
+    }
+    void close()
+    {
+        workers.join();
+        farm.unregisterProducer(token);
+        farm.destroy();
+    }
+}
+
+// ---- D1a: roots: finish, finishAfterChildren, finish with never-dispatched members
+// Selector: dtor-root. Both reclamation policies.
+// Kind 0: `again` twice then `finish` (no children). Kind 1: starts a wave of
+// two members and returns finishAfterChildren (cleanup activation destroys
+// children, then the root). Kind 2: creates two members, never starts them,
+// `finish`es (members destroyed by disposal while never dispatched).
+// Catching mutations (each applied alone to actors/private_actor.d):
+//   D-M1b runRoot's finish branch deletes `destroyState!T(entry);`: "dtor-root
+//         stored exactly once" (observed: count 0).
+//   D-M2  runRoot deletes `destroyState!T(entry);` and PrivateRootPark.reclaim
+//         starts with `destroyState!T(entry);` (destructor on the emitter under
+//         emitter reclamation): "dtor-root stored exactly once" (placement).
+//   D-M1  (dispose loop skipping ~T) is caught by dtor-order, D-M3b by dtor-order.
+struct DtRoot
+{
+    uint id;
+    ubyte kind, step;
+    PrivateChildPark!DtKid* kids;
+    ~this() nothrow @nogc @system { dtRecord(id); }
+}
+PrivateRootDisposition dtRootStep(scope ref PrivateBorrow!DtRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    dtRecord(s.id + dtOp);
+    if (s.kind == 0) return ++s.step < 3 ? PrivateRootDisposition.again : PrivateRootDisposition.finish;
+    s.kids = ctx.createChildren!DtKid(2);
+    namedCheck(s.kids !is null, "dtor-root cohort");
+    foreach (k; 1 .. 3)
+        namedCheck(s.kids.spawn(ctx, DtKid(s.id * 10 + k)) == PrivateSpawnResult.spawned, "dtor-root spawn");
+    if (s.kind == 2) return PrivateRootDisposition.finish;
+    namedCheck(s.kids.start!dtKidOp(ctx) == PrivateStartResult.started, "dtor-root start");
+    return PrivateRootDisposition.finishAfterChildren;
+}
+void dtorRoot(PrivateRootReclamation reclaim)()
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    auto park = PrivateRootPark!(DtRoot, dtRootStep, reclaim).create(h.farm, 8, 8, policy(h.counts));
+    check(park !is null);
+    foreach (kind; 0 .. 3) foreach (r; 0 .. 2)
+        check(park.spawn(DtRoot(cast(uint) ((kind + 1) * 10 + r), cast(ubyte) kind)) == PrivateSpawnResult.spawned);
+    h.drain(park, "dtor-root completion");
+    foreach (kind; 0 .. 3) foreach (r; 0 .. 2)
+    {
+        immutable id = cast(uint) ((kind + 1) * 10 + r);
+        dtStoredOnConsumer(id, "dtor-root stored exactly once");
+        namedCheck(dtCount(id + dtOp) == (kind == 0 ? 3 : 1), "dtor-root exact user calls");
+        if (kind == 0) continue;
+        foreach (k; 1 .. 3)
+        {
+            immutable kid = id * 10 + k;
+            dtStoredOnConsumer(kid, "dtor-root member stored exactly once");
+            namedCheck(dtPos(kid) < dtPos(id), "dtor-root postorder");
+            namedCheck(dtCount(kid + dtOp) == (kind == 1 ? 1 : 0), "dtor-root never-dispatched members stay idle");
+            if (kind == 1) namedCheck(dtPos(kid + dtOp) < dtPos(kid), "dtor-root op before destructor");
+        }
+    }
+    // 6 root and 8 member spawns, each leaves one moved-from .init destroyed by its caller.
+    namedCheck(dtCount(0) == 6 + 8, "dtor-root moved-from sources destroyed on the caller");
+    park.destroy();
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "dtor-root allocation balance");
+}
+
+// ---- D1b: child startFinal, plain and result ops
+// Selector: dtor-child. Both reclamation policies.
+// Phase 0: two cohorts (plain, R = ulong), non-final waves: no destructor
+// yet. Phase 1: startFinal on both. Phase 2 (after the join): every member
+// is already destroyed, on a consumer, after its op; the root then finishes.
+// Catching mutations:
+//   D-M1c retireMember deletes `destroyState!T(entry);`: "dtor-child final
+//         destroyed exactly once before the join" (count 0).
+//   D-M4  runChild's retiring branch calls `destroyState!T(entry);` once more
+//         before `retireMember!T(entry);` (double destruction): the same check
+//         (count 2).
+//   D-M4b runChild calls `destroyState!T(entry);` after every operation, not
+//         only when retiring: "dtor-child non-final waves never destroy".
+struct DtParent
+{
+    uint id, phase;
+    PrivateChildPark!DtKid* plain;
+    PrivateChildPark!(DtKid, ulong)* typed;
+    ~this() nothrow @nogc @system { dtRecord(id); }
+}
+PrivateRootDisposition dtParentStep(scope ref PrivateBorrow!DtParent b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    switch (s.phase++)
+    {
+        case 0:
+            s.plain = ctx.createChildren!DtKid(3);
+            s.typed = ctx.createChildren!(DtKid, ulong)(3);
+            namedCheck(s.plain !is null && s.typed !is null, "dtor-child cohorts");
+            foreach (k; 1 .. 4)
+            {
+                namedCheck(s.plain.spawn(ctx, DtKid(s.id * 10 + k)) == PrivateSpawnResult.spawned, "dtor-child plain spawn");
+                namedCheck(s.typed.spawn(ctx, DtKid(s.id * 10 + 3 + k)) == PrivateSpawnResult.spawned, "dtor-child typed spawn");
+            }
+            namedCheck(s.plain.start!dtKidNop(ctx) == PrivateStartResult.started, "dtor-child plain wave");
+            namedCheck(s.typed.start!dtKidTag(ctx) == PrivateStartResult.started, "dtor-child typed wave");
+            return PrivateRootDisposition.waitChildren;
+        case 1:
+            foreach (k; 1 .. 7)
+                namedCheck(dtCount(s.id * 10 + k) == 0, "dtor-child non-final waves never destroy");
+            namedCheck(s.plain.startFinal!dtKidOp(ctx) == PrivateStartResult.started, "dtor-child plain final");
+            namedCheck(s.typed.startFinal!dtKidTag(ctx) == PrivateStartResult.started, "dtor-child typed final");
+            return PrivateRootDisposition.waitChildren;
+        case 2:
+            foreach (k; 1 .. 7)
+                namedCheck(dtCount(s.id * 10 + k) == 1, "dtor-child final destroyed exactly once before the join");
+            auto r = s.typed.results(ctx);
+            namedCheck(r.length == 3, "dtor-child results survive retirement");
+            foreach (i, v; r) namedCheck(v == portsValue(1, s.id * 10 + 3 + 1 + cast(uint) i), "dtor-child result value");
+            return PrivateRootDisposition.finish;
+        default:
+            namedCheck(false, "dtor-child phases");
+            return PrivateRootDisposition.finish;
+    }
+}
+void dtorChild(PrivateRootReclamation reclaim)()
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    auto park = PrivateRootPark!(DtParent, dtParentStep, reclaim).create(h.farm, 2, 2, policy(h.counts));
+    check(park !is null);
+    foreach (id; 1 .. 3) check(park.spawn(DtParent(cast(uint) id)) == PrivateSpawnResult.spawned);
+    h.drain(park, "dtor-child completion");
+    foreach (id; 1 .. 3) foreach (k; 1 .. 7)
+    {
+        immutable kid = cast(uint) (id * 10 + k);
+        dtStoredOnConsumer(kid, "dtor-child member stored exactly once");
+        namedCheck(dtCount(kid + dtOp) == 1 + (k > 3 ? 1 : 0), "dtor-child exact op count");
+        namedCheck(dtPos(kid + dtOp) < dtPos(kid), "dtor-child op before destructor");
+        namedCheck(dtPos(kid) < dtPos(cast(uint) id), "dtor-child members before the parent");
+    }
+    park.destroy();
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "dtor-child allocation balance");
+}
+
+// ---- D2: three-level postorder
+// Selector: dtor-order. Both policies, three retirement paths.
+// Top -> two mids -> two leaves each. Mid 10's leaves are never started
+// (never-dispatched); mid 11's leaves ran a plain wave. Mode 0: top `finish`
+// disposes the cohort tree. Mode 1: `startFinal` retires the mids first, the
+// top is destroyed afterwards. Mode 2: finishAfterChildren cleanup activation.
+// Catching mutations:
+//   D-M1  in PrivateChildPark.dispose replace `retireMember!T(&entry)` by
+//         disposeChildren + freeMemory + `entry.state = null` (no ~T): "dtor-order
+//         stored exactly once" (never-dispatched leaves 100/101 included).
+//   D-M3  retireMember runs `destroyState!T(entry);` before `disposeChildren(entry);`:
+//         "dtor-order leaves before mid".
+//   D-M3b the same swap in runRoot's finish branch: "dtor-order mids before top".
+struct DtLeaf { uint id; ~this() nothrow @nogc @system { dtRecord(id); } }
+struct DtMid
+{
+    uint id;
+    PrivateChildPark!DtLeaf* leaves;
+    ~this() nothrow @nogc @system { dtRecord(id); }
+}
+struct DtTop
+{
+    uint id;
+    ubyte mode, phase;
+    PrivateChildPark!DtMid* mids;
+    ~this() nothrow @nogc @system { dtRecord(id); }
+}
+void dtLeafOp(scope ref PrivateBorrow!DtLeaf b, scope ref PrivateContext) nothrow @nogc @system
+{ dtRecord(b.value.id + dtOp); }
+void dtMidOp(scope ref PrivateBorrow!DtMid b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto m = &b.value();
+    m.leaves = ctx.createChildren!DtLeaf(2);
+    namedCheck(m.leaves !is null, "dtor-order leaf cohort");
+    foreach (k; 0 .. 2)
+        namedCheck(m.leaves.spawn(ctx, DtLeaf(m.id * 10 + k)) == PrivateSpawnResult.spawned, "dtor-order leaf spawn");
+    if (m.id == 11) // mid 10 keeps never-dispatched leaves
+        namedCheck(m.leaves.start!dtLeafOp(ctx) == PrivateStartResult.started, "dtor-order leaf wave");
+}
+void dtMidNop(scope ref PrivateBorrow!DtMid, scope ref PrivateContext) nothrow @nogc @system {}
+PrivateRootDisposition dtTopStep(scope ref PrivateBorrow!DtTop b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    switch (s.phase++)
+    {
+        case 0:
+            s.mids = ctx.createChildren!DtMid(2);
+            namedCheck(s.mids !is null, "dtor-order mid cohort");
+            foreach (k; 0 .. 2)
+                namedCheck(s.mids.spawn(ctx, DtMid(10 + k)) == PrivateSpawnResult.spawned, "dtor-order mid spawn");
+            namedCheck(s.mids.start!dtMidOp(ctx) == PrivateStartResult.started, "dtor-order mid wave");
+            return s.mode == 2 ? PrivateRootDisposition.finishAfterChildren : PrivateRootDisposition.waitChildren;
+        case 1:
+            if (s.mode == 0) return PrivateRootDisposition.finish;
+            namedCheck(s.mids.startFinal!dtMidNop(ctx) == PrivateStartResult.started, "dtor-order mid retirement");
+            return PrivateRootDisposition.waitChildren;
+        default:
+            foreach (id; [10u, 11u, 100u, 101u, 110u, 111u])
+                namedCheck(dtCount(id) == 1 && dtCount(1) == 0, "dtor-order retired before the top's last callback");
+            return PrivateRootDisposition.finish;
+    }
+}
+void dtorOrder(PrivateRootReclamation reclaim)(ubyte mode)
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    auto park = PrivateRootPark!(DtTop, dtTopStep, reclaim).create(h.farm, 1, 1, policy(h.counts));
+    check(park !is null);
+    check(park.spawn(DtTop(1, mode)) == PrivateSpawnResult.spawned);
+    h.drain(park, "dtor-order completion");
+    foreach (id; [1u, 10u, 11u, 100u, 101u, 110u, 111u])
+        dtStoredOnConsumer(id, "dtor-order stored exactly once");
+    foreach (leaf; [100u, 101u]) namedCheck(dtPos(leaf) < dtPos(10), "dtor-order leaves before mid");
+    foreach (leaf; [110u, 111u]) namedCheck(dtPos(leaf) < dtPos(11), "dtor-order leaves before mid");
+    foreach (mid; [10u, 11u]) namedCheck(dtPos(mid) < dtPos(1), "dtor-order mids before top");
+    foreach (leaf; [100u, 101u]) namedCheck(dtCount(leaf + dtOp) == 0, "dtor-order never-dispatched leaves stay idle");
+    foreach (leaf; [110u, 111u])
+    {
+        namedCheck(dtCount(leaf + dtOp) == 1, "dtor-order dispatched leaves ran once");
+        namedCheck(dtPos(leaf + dtOp) < dtPos(leaf), "dtor-order op before destructor");
+    }
+    park.destroy();
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "dtor-order allocation balance");
+}
+
+// ---- D3: failed spawn: the language destroys the argument on the caller
+// Selector: dtor-failed-spawn. Both policies.
+// Roots (caller = emitter): capacityFull, allocationFailed. Members (caller =
+// the consumer running the parent callback): capacityFull, waveActive,
+// allocationFailed. The argument is destroyed exactly once, on the calling
+// thread, immediately; it is never stored, so disposal does not repeat it.
+// Catching mutations:
+//   D-M8guard  delete the `if (!spawned) .destroy(initial);` scope(exit)
+//         in PrivateRootPark.spawn: the root failure produces only the owning
+//         destructor (after entered_ clears), no [id, 0] pair:
+//         "dtor-failed-spawn root failure: owner, then moved-from .init" /
+//         the event-count check.
+//   D-M8root / D-M8child  the capacityFull return in the root / child spawn
+//         first calls `object.destroy!false(initial)` (an explicit extra
+//         destruction of the argument): "dtor-failed-spawn ... capacityFull
+//         argument destroyed once on the caller" (count 2). A spawn that stored
+//         or leaked the argument would likewise change the count.
+struct DtCaller { Counts* counts; PrivateChildPark!DtKid* a, b; }
+PrivateRootDisposition dtCallerStep(scope ref PrivateBorrow!DtCaller b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    dtCaller = portsThreadId();
+    s.a = ctx.createChildren!DtKid(1);
+    s.b = ctx.createChildren!DtKid(2);
+    namedCheck(s.a !is null && s.b !is null, "dtor-failed-spawn cohorts");
+    namedCheck(s.a.spawn(ctx, DtKid(201)) == PrivateSpawnResult.spawned, "dtor-failed-spawn first member");
+    namedCheck(s.a.spawn(ctx, DtKid(202)) == PrivateSpawnResult.capacityFull, "dtor-failed-spawn child capacityFull");
+    dtOnCaller(202, dtCaller, "dtor-failed-spawn child capacityFull argument destroyed once on the caller");
+    namedCheck(s.a.start!dtKidOp(ctx) == PrivateStartResult.started, "dtor-failed-spawn wave");
+    namedCheck(s.a.spawn(ctx, DtKid(203)) == PrivateSpawnResult.waveActive, "dtor-failed-spawn child waveActive");
+    dtOnCaller(203, dtCaller, "dtor-failed-spawn child waveActive argument destroyed once on the caller");
+    atomicStore(s.counts.budget, 0L);
+    namedCheck(s.b.spawn(ctx, DtKid(204)) == PrivateSpawnResult.allocationFailed, "dtor-failed-spawn child allocationFailed");
+    atomicStore(s.counts.budget, long.max);
+    dtOnCaller(204, dtCaller, "dtor-failed-spawn child allocationFailed argument destroyed once on the caller");
+    namedCheck(s.b.start!dtKidOp(ctx) == PrivateStartResult.empty, "dtor-failed-spawn failed slot stays empty");
+    return PrivateRootDisposition.finishAfterChildren;
+}
+// A failed root spawn destroys the argument through object.destroy inside
+// spawn (before the reentrancy flag clears), which also resets the parameter
+// to .init; that moved-from value is then destroyed on return: exactly
+// [id, 0], both on the emitter, nothing else. (Child spawn has no guard: the
+// live argument is destroyed on return.)
+void dtRootFailure(size_t before, uint id, string what) nothrow @nogc @system
+{
+    namedCheck(atomicLoad(dtLog.n) == before + 2, what);
+    namedCheck(dtId(before) == id && dtId(before + 1) == 0, "dtor-failed-spawn root failure: owner, then moved-from .init");
+    foreach (i; before .. before + 2)
+        namedCheck(atomicLoad!(MemoryOrder.raw)(dtLog.events[i].tid) == dtEmitter, "dtor-failed-spawn root failure on the emitter");
+}
+void dtorFailedSpawn(PrivateRootReclamation reclaim)()
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    // Root level.
+    auto roots = PrivateRootPark!(DtObj, dtFinish!DtObj, reclaim).create(h.farm, 2, 2, policy(h.counts));
+    check(roots !is null);
+    check(roots.spawn(DtObj(1)) == PrivateSpawnResult.spawned);
+    check(roots.spawn(DtObj(2)) == PrivateSpawnResult.spawned);
+    auto before = atomicLoad(dtLog.n);
+    check(roots.spawn(DtObj(3)) == PrivateSpawnResult.capacityFull);
+    dtOnCaller(3, dtEmitter, "dtor-failed-spawn root capacityFull argument destroyed once on the caller");
+    dtRootFailure(before, 3, "capacityFull");
+    h.drain(roots, "dtor-failed-spawn root drain");
+    atomicStore(h.counts.budget, 0L);
+    before = atomicLoad(dtLog.n);
+    check(roots.spawn(DtObj(4)) == PrivateSpawnResult.allocationFailed);
+    atomicStore(h.counts.budget, long.max);
+    dtOnCaller(4, dtEmitter, "dtor-failed-spawn root allocationFailed argument destroyed once on the caller");
+    dtRootFailure(before, 4, "allocationFailed");
+    namedCheck(roots.live == 0, "dtor-failed-spawn failed spawn stores nothing");
+    check(roots.spawn(DtObj(5)) == PrivateSpawnResult.spawned);
+    h.drain(roots, "dtor-failed-spawn root reuse");
+    foreach (id; [1u, 2u, 5u]) dtStoredOnConsumer(id, "dtor-failed-spawn stored exactly once");
+    dtOnCaller(3, dtEmitter, "dtor-failed-spawn failed root argument not destroyed again");
+    dtOnCaller(4, dtEmitter, "dtor-failed-spawn failed root argument not destroyed again");
+    roots.destroy();
+    // Member level.
+    auto park = PrivateRootPark!(DtCaller, dtCallerStep, reclaim).create(h.farm, 1, 1, policy(h.counts));
+    check(park !is null);
+    check(park.spawn(DtCaller(&h.counts)) == PrivateSpawnResult.spawned);
+    h.drain(park, "dtor-failed-spawn member drain");
+    dtStoredOnConsumer(201, "dtor-failed-spawn member stored exactly once");
+    foreach (id; [202u, 203u, 204u])
+        dtOnCaller(id, dtCaller, "dtor-failed-spawn failed member argument not destroyed again");
+    namedCheck(dtCaller != dtEmitter, "dtor-failed-spawn member caller is a consumer");
+    park.destroy();
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "dtor-failed-spawn allocation balance");
+}
+
+// ---- D3b: over-aligned copyable state through the failure paths
+// Selector: dtor-aligned. Both policies, align(32) and align(64). Every
+// destructor frees an owning token: the first free flips the token's cell and
+// counts as owning; a free of an already-freed cell counts as a bad (double)
+// free. A moved-from .init destructor owns nothing and records id 0.
+// DMD 2.113's core.lifetime.move runs ~T of a struct with align(32) or
+// align(64) during the move while the destination keeps the resource, so the
+// failed-root-spawn guard must destroy through object.destroy, never move.
+// Catching mutation:
+//   D-M8move  in PrivateRootPark.spawn's scope(exit) guard restore
+//         `T doomed = move(initial);`: on DMD every failed root spawn below
+//         destroys its argument twice ("dtor-aligned root ... argument
+//         destroyed once on the caller" count 2) and double-frees the token
+//         ("dtor-aligned root no double frees"). LDC's move is correct, so
+//         this is a DMD-only mutation; dtor-aligned passes there either way.
+struct DtAlignedLog { shared uint[8] tokens; shared size_t owning, bad; }
+__gshared DtAlignedLog dtAligned;
+void dtAlignedReset() nothrow @nogc @system
+{
+    foreach (ref token; dtAligned.tokens) atomicStore!(MemoryOrder.raw)(token, 1u);
+    atomicStore(dtAligned.owning, cast(size_t) 0);
+    atomicStore(dtAligned.bad, cast(size_t) 0);
+}
+void dtAlignedDtor(uint id, shared uint* token) nothrow @nogc @system
+{
+    if (token is null) { dtRecord(0); return; }
+    if (atomicExchange!(MemoryOrder.acq_rel)(token, 0u) != 1u)
+        atomicFetchAdd(dtAligned.bad, cast(size_t) 1);
+    else
+        atomicFetchAdd(dtAligned.owning, cast(size_t) 1);
+    dtRecord(id);
+}
+void dtAlignedCheckOwning(size_t live, string whatOwning, string whatBad) nothrow @nogc @system
+{
+    namedCheck(atomicLoad(dtAligned.owning) == live, whatOwning);
+    namedCheck(atomicLoad(dtAligned.bad) == 0, whatBad);
+}
+align(32) struct DtAligned32
+{
+    uint id;
+    shared uint* token;
+    ~this() nothrow @nogc @system { dtAlignedDtor(id, token); }
+}
+align(64) struct DtAligned64
+{
+    uint id;
+    shared uint* token;
+    ~this() nothrow @nogc @system { dtAlignedDtor(id, token); }
+}
+static assert(DtAligned32.alignof == 32 && DtAligned64.alignof == 64);
+static assert(stateAllowed!DtAligned32 && stateAllowed!DtAligned64);
+static assert(rootSpawnOk!DtAligned32 && childSpawnOk!DtAligned32 && childCreateOk!DtAligned32);
+static assert(rootSpawnOk!DtAligned64 && childSpawnOk!DtAligned64 && childCreateOk!DtAligned64);
+
+void dtorAlignedRoot(T, PrivateRootReclamation reclaim)()
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    dtAlignedReset();
+    auto park = PrivateRootPark!(T, dtFinish!T, reclaim).create(h.farm, 1, 1, policy(h.counts));
+    check(park !is null);
+    check(park.spawn(T(11, &dtAligned.tokens[0])) == PrivateSpawnResult.spawned);
+    auto before = atomicLoad(dtLog.n);
+    check(park.spawn(T(12, &dtAligned.tokens[1])) == PrivateSpawnResult.capacityFull);
+    dtRootFailure(before, 12, "dtor-aligned root capacityFull");
+    dtOnCaller(12, dtEmitter, "dtor-aligned root capacityFull argument destroyed once on the caller");
+    h.drain(park, "dtor-aligned root capacityFull drain");
+    dtStoredOnConsumer(11, "dtor-aligned root stored exactly once");
+    atomicStore(h.counts.budget, 0L);
+    before = atomicLoad(dtLog.n);
+    check(park.spawn(T(13, &dtAligned.tokens[2])) == PrivateSpawnResult.allocationFailed);
+    atomicStore(h.counts.budget, long.max);
+    dtRootFailure(before, 13, "dtor-aligned root allocationFailed");
+    dtOnCaller(13, dtEmitter, "dtor-aligned root allocationFailed argument destroyed once on the caller");
+    park.destroy();
+    dtAlignedCheckOwning(3,
+        "dtor-aligned root owning destructors equal live values",
+        "dtor-aligned root no double frees");
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "dtor-aligned root allocation balance");
+}
+
+struct DtAlignedCaller(T)
+{
+    Counts* counts;
+    PrivateChildPark!T* cohort;
+}
+void dtAlignedNop(T)(scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system {}
+PrivateRootDisposition dtAlignedStep(T)(scope ref PrivateBorrow!(DtAlignedCaller!T) b,
+    scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto s = &b.value();
+    dtCaller = portsThreadId();
+    s.cohort = ctx.createChildren!T(2);
+    namedCheck(s.cohort !is null, "dtor-aligned cohort");
+    namedCheck(s.cohort.spawn(ctx, T(21, &dtAligned.tokens[3])) == PrivateSpawnResult.spawned,
+        "dtor-aligned member stored");
+    atomicStore(s.counts.budget, 0L);
+    namedCheck(s.cohort.spawn(ctx, T(22, &dtAligned.tokens[4])) == PrivateSpawnResult.allocationFailed,
+        "dtor-aligned child allocationFailed");
+    atomicStore(s.counts.budget, long.max);
+    dtOnCaller(22, dtCaller, "dtor-aligned child allocationFailed argument destroyed once on the caller");
+    namedCheck(s.cohort.spawn(ctx, T(23, &dtAligned.tokens[5])) == PrivateSpawnResult.spawned,
+        "dtor-aligned second member stored");
+    namedCheck(s.cohort.spawn(ctx, T(24, &dtAligned.tokens[6])) == PrivateSpawnResult.capacityFull,
+        "dtor-aligned child capacityFull");
+    dtOnCaller(24, dtCaller, "dtor-aligned child capacityFull argument destroyed once on the caller");
+    namedCheck(s.cohort.startFinal!(dtAlignedNop!T)(ctx) == PrivateStartResult.started,
+        "dtor-aligned final wave");
+    return PrivateRootDisposition.finishAfterChildren;
+}
+void dtorAlignedChild(T, PrivateRootReclamation reclaim)()
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    dtAlignedReset();
+    auto park = PrivateRootPark!(DtAlignedCaller!T, dtAlignedStep!T, reclaim)
+        .create(h.farm, 1, 1, policy(h.counts));
+    check(park !is null);
+    check(park.spawn(DtAlignedCaller!T(&h.counts)) == PrivateSpawnResult.spawned);
+    h.drain(park, "dtor-aligned child drain");
+    dtStoredOnConsumer(21, "dtor-aligned member stored exactly once");
+    dtStoredOnConsumer(23, "dtor-aligned second member stored exactly once");
+    park.destroy();
+    dtAlignedCheckOwning(4,
+        "dtor-aligned child owning destructors equal live values",
+        "dtor-aligned child no double frees");
+    namedCheck(dtCaller != dtEmitter, "dtor-aligned child caller is a consumer");
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "dtor-aligned child allocation balance");
+}
+
+// ---- D4: moved-from accounting and non-copyable owners
+// Selector: dtor-moved-from. A successful spawn leaves one moved-from .init
+// argument that the caller's language scope destroys (a destructor with
+// observable actions runs once per spawn on the caller); the stored instance
+// is destroyed exactly once, on a consumer. Failures destroy the live argument
+// instead (no .init event). `@disable this(this)` owners are spawned via `move`
+// or as rvalues.
+// Catching mutations:
+//   D-M7root / D-M7child  replace `moveEmplace(initial, *cast(T*) state);` by
+//         `memcpy(state, &initial, T.sizeof);` in the root / child spawn: the
+//         source keeps its identity, so no .init destructor runs per spawn
+//         ("dtor-moved-from root/member .init event") and the id would later
+//         be destroyed twice.
+struct DtMover { Counts* counts; PrivateChildPark!DtUnique* uniq; PrivateChildPark!DtKid* kids; }
+PrivateRootDisposition dtMoverStep(scope ref PrivateBorrow!DtMover b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    dtCaller = portsThreadId();
+    s.kids = ctx.createChildren!DtKid(2);
+    s.uniq = ctx.createChildren!DtUnique(2);
+    namedCheck(s.kids !is null && s.uniq !is null, "dtor-moved-from cohorts");
+    auto before = dtCount(0);
+    namedCheck(s.kids.spawn(ctx, DtKid(301)) == PrivateSpawnResult.spawned, "dtor-moved-from kid spawn");
+    namedCheck(dtCount(0) == before + 1 && dtTidAt(0, before) == dtCaller, "dtor-moved-from member .init event on the caller");
+    namedCheck(s.kids.spawn(ctx, DtKid(302)) == PrivateSpawnResult.spawned, "dtor-moved-from kid spawn 2");
+    namedCheck(dtCount(0) == before + 2, "dtor-moved-from member per-spawn .init event");
+    namedCheck(s.kids.spawn(ctx, DtKid(303)) == PrivateSpawnResult.capacityFull, "dtor-moved-from kid capacityFull");
+    namedCheck(dtCount(0) == before + 2, "dtor-moved-from failed spawn leaves no .init event");
+    dtOnCaller(303, dtCaller, "dtor-moved-from failed member argument destroyed once on the caller");
+    auto owner = DtUnique(311);
+    namedCheck(s.uniq.spawn(ctx, move(owner)) == PrivateSpawnResult.spawned, "dtor-moved-from unique move spawn");
+    namedCheck(owner.id == 0, "dtor-moved-from unique source is .init");
+    namedCheck(s.uniq.spawn(ctx, DtUnique(312)) == PrivateSpawnResult.spawned, "dtor-moved-from unique rvalue spawn");
+    namedCheck(dtCount(311) == 0 && dtCount(312) == 0, "dtor-moved-from unique owners are not destroyed by spawn");
+    return PrivateRootDisposition.finish; // both cohorts disposed while idle
+}
+void dtorMovedFrom(PrivateRootReclamation reclaim)()
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    auto roots = PrivateRootPark!(DtUnique, dtFinish!DtUnique, reclaim).create(h.farm, 4, 4, policy(h.counts));
+    check(roots !is null);
+    foreach (i; 0 .. 2)
+    {
+        auto before = dtCount(0);
+        check(roots.spawn(DtUnique(400 + i)) == PrivateSpawnResult.spawned);
+        namedCheck(dtCount(0) == before + 1 && dtTidAt(0, before) == dtEmitter, "dtor-moved-from root .init event on the emitter");
+    }
+    auto owner = DtUnique(402);
+    check(roots.spawn(move(owner)) == PrivateSpawnResult.spawned);
+    namedCheck(owner.id == 0, "dtor-moved-from root unique source is .init");
+    namedCheck(dtCount(0) == 3 && dtCount(402) == 0, "dtor-moved-from root: only .init destroyed on the emitter");
+    h.drain(roots, "dtor-moved-from root drain");
+    foreach (id; [400u, 401u, 402u]) dtStoredOnConsumer(id, "dtor-moved-from root stored exactly once");
+    roots.destroy();
+    auto park = PrivateRootPark!(DtMover, dtMoverStep, reclaim).create(h.farm, 1, 1, policy(h.counts));
+    check(park !is null);
+    check(park.spawn(DtMover(&h.counts)) == PrivateSpawnResult.spawned);
+    h.drain(park, "dtor-moved-from member drain");
+    foreach (id; [301u, 302u, 311u, 312u]) dtStoredOnConsumer(id, "dtor-moved-from member stored exactly once");
+    park.destroy();
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "dtor-moved-from allocation balance");
+}
+
+// ---- D5: recursive non-POD members (T holds a pointer to its own cohort)
+// Selector: dtor-recursive. The existing DeepMember/RDeep tests keep covering
+// the recursive POD case. Chain of six members; mode 0: root `finish` disposes
+// the chain; mode 1: `startFinal` on the top cohort retires it. Deepest first.
+// Catching mutations: D-M3 (retireMember destroys the parent before its
+// cohorts): "dtor-recursive deepest first"; D-M1 (dispose skips ~T).
+struct DtRec
+{
+    uint id;
+    PrivateChildPark!DtRec* next;
+    ~this() nothrow @nogc @system { dtRecord(id); }
+}
+void dtRecOp(scope ref PrivateBorrow!DtRec b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto m = &b.value();
+    dtRecord(m.id + dtOp);
+    if (m.id == 205) return;
+    m.next = ctx.createChildren!DtRec(1);
+    namedCheck(m.next !is null && m.next.spawn(ctx, DtRec(m.id + 1)) == PrivateSpawnResult.spawned, "dtor-recursive spawn");
+    namedCheck(m.next.start!dtRecOp(ctx) == PrivateStartResult.started, "dtor-recursive descend");
+}
+void dtRecNop(scope ref PrivateBorrow!DtRec, scope ref PrivateContext) nothrow @nogc @system {}
+struct DtRecRoot
+{
+    uint id, phase;
+    ubyte mode;
+    PrivateChildPark!DtRec* chain;
+    ~this() nothrow @nogc @system { dtRecord(id); }
+}
+PrivateRootDisposition dtRecStep(scope ref PrivateBorrow!DtRecRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    switch (s.phase++)
+    {
+        case 0:
+            s.chain = ctx.createChildren!DtRec(1);
+            namedCheck(s.chain !is null && s.chain.spawn(ctx, DtRec(200)) == PrivateSpawnResult.spawned, "dtor-recursive top");
+            namedCheck(s.chain.start!dtRecOp(ctx) == PrivateStartResult.started, "dtor-recursive first wave");
+            return PrivateRootDisposition.waitChildren;
+        case 1:
+            if (s.mode == 0) return PrivateRootDisposition.finish;
+            namedCheck(s.chain.startFinal!dtRecNop(ctx) == PrivateStartResult.started, "dtor-recursive retire");
+            return PrivateRootDisposition.waitChildren;
+        default:
+            return PrivateRootDisposition.finish;
+    }
+}
+void dtorRecursive(PrivateRootReclamation reclaim)(ubyte mode)
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    auto park = PrivateRootPark!(DtRecRoot, dtRecStep, reclaim).create(h.farm, 1, 1, policy(h.counts));
+    check(park !is null);
+    check(park.spawn(DtRecRoot(1, 0, mode)) == PrivateSpawnResult.spawned);
+    h.drain(park, "dtor-recursive completion");
+    foreach (id; 200u .. 206u) dtStoredOnConsumer(id, "dtor-recursive stored exactly once");
+    dtStoredOnConsumer(1, "dtor-recursive root stored exactly once");
+    foreach (id; 200u .. 205u) namedCheck(dtPos(id + 1) < dtPos(id), "dtor-recursive deepest first");
+    namedCheck(dtPos(200) < dtPos(1), "dtor-recursive root last");
+    park.destroy();
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "dtor-recursive allocation balance");
+}
+
+// ---- D6: result slot is written before the destructor runs
+// Selector: dtor-results. The allocator records the base of the cohort's
+// result array (the unique request of capacity * R.sizeof bytes). A member's
+// destructor, running inside its own final dispatch, requires its slot to
+// already hold the operation's result.
+// Catching mutation:
+//   D-M6 runChild computes the result, calls `retireMember!T(entry)`, and only
+//        then stores `park.results_[entry - park.entries_] = result`: the
+//        member's destructor sees the zeroed slot: "dtor-results slot written
+//        before ~T". (Exact edit in the task report.)
+enum dtSlotCapacity = 9; // 72 bytes: no other request has this size
+struct DtSlotAlloc { Counts counts; size_t slotBytes; shared size_t hits; shared ulong* base; }
+__gshared DtSlotAlloc* dtSlotProbe;
+void* dtSlotAllocate(void* ctx, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    auto a = cast(DtSlotAlloc*) ctx;
+    auto p = allocate(&a.counts, bytes, alignment);
+    if (p !is null && bytes == a.slotBytes)
+    {
+        atomicFetchAdd(a.hits, cast(size_t) 1);
+        atomicStore(a.base, cast(shared(ulong)*) p);
+    }
+    return p;
+}
+void dtSlotDeallocate(void* ctx, void* ptr, size_t bytes, size_t alignment) nothrow @nogc @system
+{ deallocate(&(cast(DtSlotAlloc*) ctx).counts, ptr, bytes, alignment); }
+ulong dtSlotValue(uint index) nothrow @nogc @system { return 0xD500 + index; }
+struct DtSlot
+{
+    uint tag; // member index + 1; 0 for .init
+    ~this() nothrow @nogc @system
+    {
+        if (tag == 0) return;
+        auto base = cast(ulong*) atomicLoad(dtSlotProbe.base);
+        namedCheck(base !is null && base[tag - 1] == dtSlotValue(tag - 1), "dtor-results slot written before ~T");
+        dtRecord(tag + 1000);
+    }
+}
+ulong dtSlotOp(scope ref PrivateBorrow!DtSlot b, scope ref PrivateContext) nothrow @nogc @system
+{ return dtSlotValue(b.value.tag - 1); }
+struct DtSlotRoot { PrivateChildPark!(DtSlot, ulong)* kids; uint phase; }
+PrivateRootDisposition dtSlotStep(scope ref PrivateBorrow!DtSlotRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase++ == 0)
+    {
+        s.kids = ctx.createChildren!(DtSlot, ulong)(dtSlotCapacity);
+        namedCheck(s.kids !is null, "dtor-results cohort");
+        foreach (i; 1 .. dtSlotCapacity + 1)
+            namedCheck(s.kids.spawn(ctx, DtSlot(cast(uint) i)) == PrivateSpawnResult.spawned, "dtor-results spawn");
+        namedCheck(s.kids.startFinal!dtSlotOp(ctx) == PrivateStartResult.started, "dtor-results final wave");
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto r = s.kids.results(ctx);
+    namedCheck(r.length == dtSlotCapacity, "dtor-results length");
+    foreach (i, v; r) namedCheck(v == dtSlotValue(cast(uint) i), "dtor-results values intact after destruction");
+    return PrivateRootDisposition.finish;
+}
+void dtorResults(PrivateRootReclamation reclaim)()
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    DtSlotAlloc alloc;
+    alloc.slotBytes = dtSlotCapacity * ulong.sizeof;
+    dtSlotProbe = &alloc;
+    scope(exit) dtSlotProbe = null;
+    auto park = PrivateRootPark!(DtSlotRoot, dtSlotStep, reclaim).create(h.farm, 1, 1,
+        ActorAllocator(&alloc, &dtSlotAllocate, &dtSlotDeallocate));
+    check(park !is null);
+    check(park.spawn(DtSlotRoot()) == PrivateSpawnResult.spawned);
+    h.drain(park, "dtor-results completion");
+    namedCheck(atomicLoad(alloc.hits) == 1, "dtor-results unique slot allocation");
+    foreach (i; 1 .. dtSlotCapacity + 1) dtStoredOnConsumer(cast(uint) i + 1000, "dtor-results every member destroyed once");
+    park.destroy();
+    namedCheck(atomicLoad(alloc.counts.allocated) == atomicLoad(alloc.counts.freed), "dtor-results allocation balance");
+}
+
+// ---- D7: GC references held by actor state survive concurrent collection
+// Selector: dtor-gc. State holds class references; allocations come from
+// ActorAllocator.gcRooted(inner). A separate thread loops GC.collect() the
+// whole time. Every destructor first waits for two further collections and
+// then requires that no GcObj was finalized, so a reference that is only held
+// by allocator-backed state (children's objects are nulled in the parent) must
+// still be rooted while ~T runs. Both policies.
+// Catching mutation:
+//   D-M5  destroyState removes the GC root range before calling ~T:
+//         removing the root range first lets the collections
+//         during the destructor's wait finalize the (now unrooted) objects:
+//         "dtor-gc referenced objects survive until destroyed".
+// The documented negative control (no gcRooted adapter) is not part of the suite.
+shared uint gcRounds, gcStop;
+__gshared uint gcRun; // runs so far; one per policy instantiation
+shared ulong gcFinalized; // bit n: the GcObj constructed with idx n was finalized
+class GcObj
+{
+    uint magic = 0x600D, idx;
+    this(uint idx) { this.idx = idx; }
+    ~this() { atomicOp!"|="(gcFinalized, 1UL << idx); }
+}
+void gcWaitRounds(uint n) nothrow @nogc @system
+{
+    immutable target = atomicLoad(gcRounds) + n;
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (atomicLoad(gcRounds) < target)
+    {
+        namedCheck(MonoTime.currTime < deadline, "dtor-gc collector progress");
+        pause();
+    }
+}
+// `bit` lives in the state, not the object, so a collected object cannot be consulted.
+// The reference is read from its slot only after the wait: a copy held in this
+// frame during the wait would root the object by itself.
+void gcRequireAlive(const(GcObj)* slot, uint bit) nothrow @nogc @system
+{
+    gcWaitRounds(2);
+    namedCheck((atomicLoad(gcFinalized) & (1UL << bit)) == 0, "dtor-gc referenced objects survive until destroyed");
+    auto o = *slot;
+    namedCheck(o !is null && o.magic == 0x600D, "dtor-gc referenced object intact");
+}
+// The pads keep allocator free-list links off the fields read by ~T.
+struct GcKid
+{
+    ulong[2] pad;
+    GcObj obj;
+    uint id, bit;
+    ~this() nothrow @nogc @system { if (id != 0) { gcRequireAlive(&obj, bit); dtRecord(id); } }
+}
+struct GcRoot
+{
+    ulong[2] pad;
+    GcObj[2] held;
+    GcObj spare;
+    PrivateChildPark!GcKid* kids;
+    uint id, phase, startRound;
+    ~this() nothrow @nogc @system { if (id != 0) { gcRequireAlive(&spare, id * 4 + 2); dtRecord(id); } }
+}
+void gcKidOp(scope ref PrivateBorrow!GcKid b, scope ref PrivateContext) nothrow @nogc @system
+{ namedCheck(b.value.obj !is null && b.value.obj.magic == 0x600D, "dtor-gc member op reads its object"); }
+PrivateRootDisposition gcStep(scope ref PrivateBorrow!GcRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase == 0)
+    {
+        s.kids = ctx.createChildren!GcKid(2);
+        namedCheck(s.kids !is null, "dtor-gc cohort");
+        foreach (i; 0 .. 2)
+        {
+            namedCheck(s.kids.spawn(ctx, GcKid([0, 0], s.held[i], 700 + s.id * 10 + i, s.id * 4 + i)) == PrivateSpawnResult.spawned,
+                "dtor-gc spawn");
+            s.held[i] = null; // only the member state references it now
+        }
+        namedCheck(s.kids.start!gcKidOp(ctx) == PrivateStartResult.started, "dtor-gc wave");
+        s.startRound = atomicLoad(gcRounds);
+        s.phase = 1;
+        return PrivateRootDisposition.waitChildren;
+    }
+    // Keep the roots and members alive across many forced collections.
+    if (atomicLoad(gcRounds) < s.startRound + 6) return PrivateRootDisposition.again;
+    return PrivateRootDisposition.finish;
+}
+GcRoot gcMakeRoot(uint id)
+{
+    // Kept out of the test's frame so no stack slot or register of the emitter references the objects.
+    return GcRoot([0, 0], [new GcObj(id * 4), new GcObj(id * 4 + 1)], new GcObj(id * 4 + 2), null, id);
+}
+void dtorGc(PrivateRootReclamation reclaim)()
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    // Objects of earlier runs may be finalized at any time: every run uses its own
+    // root ids, hence its own finalization bits (id * 4 + n < 64).
+    immutable first = 1 + 4 * gcRun++;
+    atomicStore(gcRounds, 0u); atomicStore(gcStop, 0u);
+    auto inner = policy(h.counts);
+    auto park = PrivateRootPark!(GcRoot, gcStep, reclaim).create(h.farm, 2, 2, ActorAllocator.gcRooted(&inner));
+    check(park !is null);
+    auto collector = new Thread({
+        while (atomicLoad(gcStop) == 0) { GC.collect(); atomicFetchAdd(gcRounds, 1u); }
+    });
+    collector.start();
+    scope(exit) { atomicStore(gcStop, 1u); collector.join(); }
+    foreach (i; first .. first + 2) check(park.spawn(gcMakeRoot(i)) == PrivateSpawnResult.spawned);
+    h.drain(park, "dtor-gc completion");
+    foreach (i; first .. first + 2)
+    {
+        dtStoredOnConsumer(i, "dtor-gc root stored exactly once");
+        foreach (k; 0 .. 2) dtStoredOnConsumer(700 + i * 10 + k, "dtor-gc member stored exactly once");
+    }
+    namedCheck(atomicLoad(gcRounds) >= 6, "dtor-gc collections ran while the state lived");
+    park.destroy();
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "dtor-gc allocation balance");
+}
+
+// ThreadSanitizer reports druntime's stop-the-world suspend signal handler
+// ("signal handler spoils errno") as soon as GC.collect runs concurrently
+// with the Farm threads, independent of this library: skip under TSan.
+void dtorGcAll()
+{
+    version (TSan)
+        writeln("SKIP dtor-gc: druntime GC suspend signals are not TSan-clean");
+    else
+    {
+        dtorGc!(PrivateRootReclamation.emitter)();
+        dtorGc!(PrivateRootReclamation.consumer)();
+        writeln("PASS dtor-gc rooted class references survive concurrent forced collection");
+    }
+}
+
+// ---- compile-time contract (stateAllowed), checked through create/spawn
+// stateAllowed is evaluated inside spawn/create (not at struct scope, where a
+// recursive T is still incomplete), so each probe invokes those entry points.
+// Catching mutations (each applied alone; the class probe flips and the
+// static assert below fails to compile, on LDC and DMD):
+//   CT-root   delete `static assert(stateAllowed!T, ...)` in PrivateRootPark.spawn
+//             (first occurrence): rootSpawnOk!DtClass becomes true;
+//   CT-create delete it in PrivateChildPark.create: childCreateResultOk!DtClass;
+//   CT-child  delete it in PrivateChildPark.spawn: childSpawnOk!DtClass.
+template rootSpawnOk(T)
+{
+    enum rootSpawnOk = __traits(compiles, (PrivateRootPark!(T, dtFinish!T)* p) { p.spawn(T.init); });
+}
+template childSpawnOk(T)
+{
+    enum childSpawnOk = __traits(compiles, (PrivateChildPark!T* p, ref PrivateContext c) { p.spawn(c, T.init); });
+}
+template childCreateOk(T)
+{
+    enum childCreateOk = __traits(compiles, (ref PrivateContext c) { c.createChildren!T(1); });
+}
+template childCreateResultOk(T)
+{
+    enum childCreateResultOk = __traits(compiles, (ref PrivateContext c) { c.createChildren!(T, ulong)(1); });
+}
+template allPathsOk(T)
+{
+    enum allPathsOk = rootSpawnOk!T && childSpawnOk!T && childCreateOk!T && childCreateResultOk!T;
+}
+template anyPathOk(T)
+{
+    enum anyPathOk = rootSpawnOk!T || childSpawnOk!T || childCreateOk!T || childCreateResultOk!T;
+}
+class DtClass { int x; }
+interface DtInterface {}
+struct DtThrows { ~this() { throw new Exception("x"); } }
+struct DtGcAlloc { int[] a; ~this() { a = new int[1]; } }
+struct DtNoDtor { int a; }
+struct DtPostblit { int a; this(this) {} }
+struct DtNoCopyDtor { @disable this(this); int a; ~this() nothrow @nogc @system {} }
+struct DtArrayHolder { DtObj[2] pair; }
+static assert(allPathsOk!int && allPathsOk!DtNoDtor && allPathsOk!DtPostblit);
+static assert(allPathsOk!PNotPod);           // obsolete since E2-1: postblit state is allowed
+static assert(allPathsOk!DtObj && allPathsOk!DtNoCopyDtor && allPathsOk!DtArrayHolder);
+static assert(allPathsOk!(DtObj[2]));
+// Pre-E2-1 accepted every POD, including a struct with a disabled default
+// constructor; stateAllowed must not reject it (mutation: probe `T a;`).
+struct DtNoDefault { int x; @disable this(); this(int v) nothrow @nogc { x = v; } }
+static assert(stateAllowed!DtNoDefault && allPathsOk!DtNoDefault);
+struct DtNoDefaultDtor { uint id; @disable this(); this(uint v) nothrow @nogc { id = v; } ~this() nothrow @nogc @system {} }
+static assert(stateAllowed!DtNoDefaultDtor && allPathsOk!DtNoDefaultDtor);
+static assert(!rootSpawnOk!DtClass);          // CT-root
+static assert(!childSpawnOk!DtClass);         // CT-child
+static assert(!childCreateResultOk!DtClass);  // CT-create
+static assert(!childCreateOk!DtClass);
+static assert(!rootSpawnOk!DtInterface && !childSpawnOk!DtInterface && !childCreateOk!DtInterface);
+static assert(!anyPathOk!DtThrows && !anyPathOk!DtGcAlloc);  // destructor must be nothrow @nogc
+static assert(!stateAllowed!DtClass && !stateAllowed!DtInterface && !stateAllowed!DtThrows && !stateAllowed!DtGcAlloc);
+static assert(stateAllowed!int && stateAllowed!PNotPod && stateAllowed!DtObj && stateAllowed!(DtObj[2]));
+// Regression: const/immutable POD state compiled on main and must stay
+// accepted; the moveEmplace clause applies only to the moving (non-POD) spawn
+// path (mutation: drop `__traits(isPOD, T) ||` from that clause — these
+// asserts then fail to compile).
+static assert(stateAllowed!(const(State)) && stateAllowed!(immutable(State)));
+static assert(rootSpawnOk!(const(State)) && rootSpawnOk!(immutable(State)));
+static assert(childSpawnOk!(const(State)) && childCreateOk!(const(State))
+    && childCreateResultOk!(const(State)));
+static assert(childSpawnOk!(immutable(State)) && childCreateOk!(immutable(State))
+    && childCreateResultOk!(immutable(State)));
+// Recursive states (a member pointing at their own cohort) are not nested.
+static assert(stateAllowed!DeepMember && stateAllowed!RDeep && stateAllowed!DtRec);
+void dtNestedProbe()
+{
+    int local;
+    struct DtNested { int get() { return local; } }
+    static assert(__traits(isNested, DtNested) && !stateAllowed!DtNested);
+    static assert(!childSpawnOk!DtNested && !childCreateOk!DtNested && !childCreateResultOk!DtNested);
+    // Containment: hasNested also rejects members carrying a context pointer,
+    // including through static arrays, which the old top-level
+    // `is(T == struct) && __traits(isNested, T)` clause let through
+    // (mutation: revert stateAllowed to that clause — these asserts fail).
+    struct DtNestedMember { DtNested inner; }
+    struct DtNestedMemberArray { DtNested[2] inner; }
+    static assert(!__traits(isNested, DtNestedMember) && hasNested!DtNestedMember);
+    static assert(!stateAllowed!DtNestedMember && !anyPathOk!DtNestedMember);
+    static assert(!stateAllowed!DtNestedMemberArray && !anyPathOk!DtNestedMemberArray);
+    static assert(!stateAllowed!(DtNested[2]) && !anyPathOk!(DtNested[2]));
+}
+// PrivateChildPark/PrivateRootPark remain usable at a bare instantiation of
+// every allowed type; PNotPod child instantiation is checked above, and R stays POD.
+static assert(__traits(compiles, PrivateRootPark!(DtObj, dtFinish!DtObj)));
+
+// ---- death tests (debug and -release, LDC and DMD through deathHarness)
+// Selectors dtor-destroy-live, dtor-finish-active-child. The state's
+// destructor prints a marker: neither fatal may run it.
+// Catching mutations:
+//   D-M9  PrivateRootPark.destroy destroys every live root's state before its
+//         live check (implicit destruction): "dtor ran" appears on stderr.
+//   D-M10 runRoot's finish branch calls `destroyState!T(entry);` before
+//         `disposeChildren(entry);` (a destructor with an active child wave):
+//         "dtor ran" appears before the fatal.
+struct DtNoisy
+{
+    uint id;
+    ~this() nothrow @nogc @system { if (id != 0) fprintf(stderr, "dtor ran %u\n", id); }
+}
+void dtorDestroyLiveDeath()
+{
+    auto farm = AntFarm.create();
+    auto park = PrivateRootPark!(DtNoisy, dtFinish!DtNoisy).create(farm, 1);
+    check(park !is null);
+    check(park.spawn(DtNoisy(9)) == PrivateSpawnResult.spawned);
+    park.destroy();
+}
+PrivateRootDisposition dtActiveStep(scope ref PrivateBorrow!DtNoisy, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto kids = ctx.createChildren!DtNoisy(1);
+    check(kids !is null && kids.spawn(ctx, DtNoisy(8)) == PrivateSpawnResult.spawned);
+    check(kids.start!dtNoisyOp(ctx) == PrivateStartResult.started);
+    return PrivateRootDisposition.finish; // active child wave: fatal
+}
+void dtNoisyOp(scope ref PrivateBorrow!DtNoisy, scope ref PrivateContext) nothrow @nogc @system {}
+void dtorActiveChildDeath()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    auto park = PrivateRootPark!(DtNoisy, dtActiveStep).create(farm, 1);
+    check(park !is null);
+    check(park.spawn(DtNoisy(7)) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+}
+// Debug only (the reentrancy flag is an assert-mode field). An owning
+// destructor re-entering the same root park from a failed spawn dies: the
+// guard destroys it while the park is still entered. A moved-from .init
+// destructor runs after entered_ clears and is not a supported reentry point,
+// so this destructor re-enters only when it owns an id.
+// Catching mutation: D-M8guard (remove the failed-spawn guard): the owning
+// destructor then runs after entered_ clears, the reentry survives and the
+// child prints "reentry survived" and exits zero.
+struct DtReenter
+{
+    uint id;
+    ~this() nothrow @nogc @system { if (id == 2) dtReenterNow(); }
+}
+alias DtReenterPark = PrivateRootPark!(DtReenter, dtFinish!DtReenter);
+__gshared DtReenterPark* dtReenterPark;
+void dtReenterNow() nothrow @nogc @system
+{
+    fprintf(stderr, "dtor-reenter: owning destructor re-enters spawn\n");
+    dtReenterPark.spawn(DtReenter(0)); // fatal in debug: the park is still entered
+    fprintf(stderr, "dtor-reenter: reentry survived\n");
+}
+void dtorReenterDeath()
+{
+    auto farm = AntFarm.create();
+    dtReenterPark = DtReenterPark.create(farm, 1);
+    check(dtReenterPark !is null);
+    check(dtReenterPark.spawn(DtReenter(1)) == PrivateSpawnResult.spawned);
+    check(dtReenterPark.spawn(DtReenter(2)) == PrivateSpawnResult.capacityFull); // dies in debug
+}
+void dtorDeath()
+{
+    version (linux)
+    {
+        auto live = probeDeath("dtor-destroy-live");
+        check(live.status != 0);
+        check(live.stderrText.canFind("antfarm fatal: destroy nonempty private root park"));
+        check(!live.stderrText.canFind("dtor ran"));
+        auto active = probeDeath("dtor-finish-active-child");
+        check(active.status != 0);
+        check(active.stderrText.canFind("antfarm fatal: retire private actor with active child wave"));
+        check(!active.stderrText.canFind("dtor ran 7") && !active.stderrText.canFind("dtor ran 8"));
+        version (assert)
+        {
+            auto reenter = probeDeath("dtor-reenter-failed-spawn");
+            check(reenter.status != 0);
+            check(reenter.stderrText.canFind("dtor-reenter: owning destructor re-enters spawn"));
+            check(reenter.stderrText.canFind("antfarm fatal: private root park: reentrant entry"));
+            check(!reenter.stderrText.canFind("reentry survived"));
+        }
+        writeln("PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal");
+    }
+    else
+        writeln("SKIP dtor death modes: /proc/self/exe re-exec requires Linux");
+}
+
+void phaseDtor()
+{
+    dtorRoot!(PrivateRootReclamation.emitter)();
+    dtorRoot!(PrivateRootReclamation.consumer)();
+    writeln("PASS dtor-root exactly-once consumer destruction: finish, finishAfterChildren, never-dispatched members");
+    dtorChild!(PrivateRootReclamation.emitter)();
+    dtorChild!(PrivateRootReclamation.consumer)();
+    writeln("PASS dtor-child startFinal plain/result members destroyed on consumers after op and result");
+    foreach (mode; 0 .. 3)
+    {
+        dtorOrder!(PrivateRootReclamation.emitter)(cast(ubyte) mode);
+        dtorOrder!(PrivateRootReclamation.consumer)(cast(ubyte) mode);
+    }
+    writeln("PASS dtor-order depth-3 postorder across disposal, startFinal and finishAfterChildren");
+    dtorFailedSpawn!(PrivateRootReclamation.emitter)();
+    dtorFailedSpawn!(PrivateRootReclamation.consumer)();
+    writeln("PASS dtor-failed-spawn caller-side destruction for capacityFull/waveActive/allocationFailed");
+    dtorAlignedRoot!(DtAligned32, PrivateRootReclamation.emitter)();
+    dtorAlignedRoot!(DtAligned32, PrivateRootReclamation.consumer)();
+    dtorAlignedRoot!(DtAligned64, PrivateRootReclamation.emitter)();
+    dtorAlignedRoot!(DtAligned64, PrivateRootReclamation.consumer)();
+    dtorAlignedChild!(DtAligned32, PrivateRootReclamation.emitter)();
+    dtorAlignedChild!(DtAligned32, PrivateRootReclamation.consumer)();
+    dtorAlignedChild!(DtAligned64, PrivateRootReclamation.emitter)();
+    dtorAlignedChild!(DtAligned64, PrivateRootReclamation.consumer)();
+    writeln("PASS dtor-aligned align(32)/align(64) owning tokens: root and child capacityFull/allocationFailed exactly-once");
+    dtorMovedFrom!(PrivateRootReclamation.emitter)();
+    dtorMovedFrom!(PrivateRootReclamation.consumer)();
+    writeln("PASS dtor-moved-from per-spawn .init accounting and non-copyable owners via move");
+    foreach (mode; 0 .. 2)
+    {
+        dtorRecursive!(PrivateRootReclamation.emitter)(cast(ubyte) mode);
+        dtorRecursive!(PrivateRootReclamation.consumer)(cast(ubyte) mode);
+    }
+    writeln("PASS dtor-recursive non-POD chain destroyed deepest first");
+    dtorResults!(PrivateRootReclamation.emitter)();
+    dtorResults!(PrivateRootReclamation.consumer)();
+    writeln("PASS dtor-results slot written before ~T");
+    dtorGcAll();
+}
+
 void runSuite()
 {
     phaseE1();
     phaseD();
     phasePorts();
+    phaseDtor();
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
     version (AntfarmWriteAuditHooks)
     {
@@ -3669,6 +4811,53 @@ void main(string[] args)
         case "e1-counter-exhaustion-death": e1CounterExhaustionDeath(); return;
         case "phase-d": phaseD(); return;
         case "phase-ports": phasePorts(); return;
+        case "phase-dtor": phaseDtor(); return;
+        case "dtor-root":
+            dtorRoot!(PrivateRootReclamation.emitter)(); dtorRoot!(PrivateRootReclamation.consumer)();
+            writeln("PASS dtor-root"); return;
+        case "dtor-child":
+            dtorChild!(PrivateRootReclamation.emitter)(); dtorChild!(PrivateRootReclamation.consumer)();
+            writeln("PASS dtor-child"); return;
+        case "dtor-order":
+            foreach (m; 0 .. 3)
+            {
+                dtorOrder!(PrivateRootReclamation.emitter)(cast(ubyte) m);
+                dtorOrder!(PrivateRootReclamation.consumer)(cast(ubyte) m);
+            }
+            writeln("PASS dtor-order"); return;
+        case "dtor-failed-spawn":
+            dtorFailedSpawn!(PrivateRootReclamation.emitter)(); dtorFailedSpawn!(PrivateRootReclamation.consumer)();
+            writeln("PASS dtor-failed-spawn"); return;
+        case "dtor-aligned":
+            dtorAlignedRoot!(DtAligned32, PrivateRootReclamation.emitter)();
+            dtorAlignedRoot!(DtAligned32, PrivateRootReclamation.consumer)();
+            dtorAlignedRoot!(DtAligned64, PrivateRootReclamation.emitter)();
+            dtorAlignedRoot!(DtAligned64, PrivateRootReclamation.consumer)();
+            dtorAlignedChild!(DtAligned32, PrivateRootReclamation.emitter)();
+            dtorAlignedChild!(DtAligned32, PrivateRootReclamation.consumer)();
+            dtorAlignedChild!(DtAligned64, PrivateRootReclamation.emitter)();
+            dtorAlignedChild!(DtAligned64, PrivateRootReclamation.consumer)();
+            writeln("PASS dtor-aligned"); return;
+        case "dtor-moved-from":
+            dtorMovedFrom!(PrivateRootReclamation.emitter)(); dtorMovedFrom!(PrivateRootReclamation.consumer)();
+            writeln("PASS dtor-moved-from"); return;
+        case "dtor-recursive":
+            foreach (m; 0 .. 2)
+            {
+                dtorRecursive!(PrivateRootReclamation.emitter)(cast(ubyte) m);
+                dtorRecursive!(PrivateRootReclamation.consumer)(cast(ubyte) m);
+            }
+            writeln("PASS dtor-recursive"); return;
+        case "dtor-results":
+            dtorResults!(PrivateRootReclamation.emitter)(); dtorResults!(PrivateRootReclamation.consumer)();
+            writeln("PASS dtor-results"); return;
+        case "dtor-gc": dtorGcAll(); return;
+        case "dtor-destroy-live": dtorDestroyLiveDeath(); return;
+        case "dtor-finish-active-child": dtorActiveChildDeath(); return;
+        case "dtor-reenter-failed-spawn":
+            version (assert) dtorReenterDeath();
+            return;
+        case "dtor-death": dtorDeath(); return;
         case "ports-basic":
             portsBasic!(PrivateRootReclamation.emitter)();
             portsBasic!(PrivateRootReclamation.consumer)();
