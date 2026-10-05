@@ -1,7 +1,7 @@
 # Actor examples
 
-Complete programs for the two actor models. Read these instead of the
-test sources.
+Complete programs for the two actor models. Read these with
+[the lifecycle guide](../actors/LIFECYCLE.md), not the test sources.
 
 | Program | What it shows |
 | --- | --- |

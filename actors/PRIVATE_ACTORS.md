@@ -12,7 +12,9 @@ child waves. The emitter inspects scheduling metadata only.
 
 This API supports structs and scalars satisfying `stateAllowed!T` and synchronous callbacks. The existing
 `ActorOwner`, `ActorHandle`, inbox, and public `ActorWave` APIs remain available.
-It does not change DRuntime Fibers.
+It does not change DRuntime Fibers. Farm setup, tokens, pumping, allocators,
+storage lifetime, shutdown, and the ranked misuse hazards shared with public
+actors are in [LIFECYCLE.md](LIFECYCLE.md).
 
 ## Conductors, outputs, and general actors
 

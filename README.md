@@ -166,6 +166,8 @@ state is visible only inside the actor's authorized callback. See its
 [full-lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md) and ownership limits
 before choosing it over the public actor API. Its [complete examples](actors/PRIVATE_ACTORS.md#api)
 include same-thread consumption and joined, externally owned results.
+Shared setup, drain, and shutdown rules for both models are in
+[actors/LIFECYCLE.md](actors/LIFECYCLE.md).
 
 ## First actor and wave
 
@@ -173,7 +175,8 @@ The `actors` package adds explicit state lifetime and exclusive callback-local
 borrowing without changing the worker side: ordinary Farm consumers execute
 actor activations and wave tables. An `ActorOwner` controls retirement and
 reclamation, while its copyable `ActorHandle` is the identity used to wake,
-send to, or phase-dispatch the actor. The examples below assume the `farm`,
+send to, or phase-dispatch the actor. Contracts that apply to both models are
+in [actors/LIFECYCLE.md](actors/LIFECYCLE.md). The examples below assume the `farm`,
 `token`, and consuming `view` from [First payload](#first-payload);
 `drainOrYield()` stands for `view.consumeNext()` or a pool worker's pump.
 

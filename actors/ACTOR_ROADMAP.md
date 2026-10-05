@@ -19,6 +19,9 @@ an engine can aggregate before unloading code or reclaiming an arena.
 
 ## Private actor hierarchies
 
+Shared lifecycle and contract rules for public and private actors are in
+[LIFECYCLE.md](LIFECYCLE.md).
+
 [Private roots and parent-owned cohorts](PRIVATE_ACTORS.md) are now a separate
 path in `actors/private_actor.d`. The private path supports `stateAllowed` struct/scalar
 state, multiple single-emitter parks sharing a Farm, terminal dispatch,
@@ -63,6 +66,9 @@ buffers, and **X4** writer capability / in-place results. A compiler-enforced
 safe ownership front end remains future work.
 
 ## Current actor and wave spike
+
+Lifecycle, shutdown, and misuse contracts shared with private actors are in
+[LIFECYCLE.md](LIFECYCLE.md).
 
 As of 2026-08-31, the actor code is deliberately split into
 `actors/actor.d` and `actors/wave.d`. The former contains the
