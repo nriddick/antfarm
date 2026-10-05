@@ -201,6 +201,14 @@ Private roots use a different counter from public `Wcredits`: a 32-bit root
 The common Entry overlays this root metadata with the child's enclosing pointer;
 size and offset asserts preserve its 40-byte layout.
 
+The E2-3 plumbing (child Service pointer in the cohort, the generic wave credit
+target, `Emittable`, the declared-but-unused `childReturns` list and
+`ownJoin_`) changes no memory order and adds no atomic operation. Child
+`spawn` loses a store, and wave emission and enqueue lose one load each.
+`finish` selects the join target with one extra plain (non-atomic) byte load
+of `parentIsRoot_`; that load is not an atomic and not an ordering
+change.
+
 ```text
 child plain result writes
   -> Shc completion RMW (acq_rel) -> Tprogress RMW (acq_rel)

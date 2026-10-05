@@ -279,7 +279,8 @@ parent/upstream pointers after publishing idle.
 
 On 64-bit targets the fixed cohort metadata grows by 16 bytes (one selection
 pointer and a count, with the subset flag in existing padding): a signal-only
-cohort is 280 bytes instead of 264. Entry remains 40 bytes. Unreserved cohorts
+cohort is 280 bytes instead of 264 (288 after the child Service pointer below).
+Entry remains 40 bytes. Unreserved cohorts
 allocate no per-member subset storage and use the existing whole-wave dispatch
 path. Reserved cohorts make one extra eager allocation of 8 bytes per member
 of capacity, containing both the selection and its inverse positions. Starting
@@ -590,6 +591,34 @@ The common child Entry remains 40 bytes. Root-only disposition, flags and a
 checked 32-bit counter occupy the child enclosing-pointer union; static asserts
 verify size and offsets under LDC and DMD. Existing 64-bit wave increments retain
 their acquire/release fetch-add operations. No waiting-root scan is required.
+
+### Entry layout and Service access (internal)
+
+An Entry's word at offset 16 is a union. A root holds its `Service*` there. A
+child member holds child-only metadata there (`childStep`, `childFlags`,
+`childReserved`, `childPending`; declared for resumable continuations and
+unused today; zero until used). A child member's Service pointer lives in its
+cohort's `ChildBase.service`, set once at creation from the creating context
+(the root's Entry, or the `ChildBase` of the context's enclosing wave).
+`PrivateContext.createChildren` derives it; the cohort also remembers whether
+its parent is a root (`parentIsRoot_`, set when the creating context had no
+enclosing wave).
+
+Access rule: code that has only an Entry must never read `entry.service`
+directly. Roots use `rootService(entry)`, which is fatal in debug builds if the
+word is null (a child); members use their cohort's `ChildBase.service`. The
+audited `entry.service` reads are `PrivateContext.service` (root branch),
+`releaseRoot`, and `PrivateRootPark.runRoot` and `create`, all root-only. The
+debug check detects a child entry only while the child word is zero, so
+E2-4 must strengthen it once continuations write that word (for example
+with a kind/root flag or a debug tag in `childReserved`).
+
+A wave chooses one immutable credit target when it starts, and its finisher
+releases exactly that: its enclosing wave, the root's `pending` (direct wave of
+a root), or, for a member that joins its own waves (`PrivateContext.ownJoin_`, never
+set yet), the member's `childPending`. `Service.childReturns` is a declared,
+unused list for members that finish waiting. `Service` schedules `Emittable`s,
+of which a cohort's `Wave` is the only kind today.
 
 The existing emitter pump remains mandatory. Child consumers only hand roots
 back through the wake list; they never publish to the Farm and do not wake a
