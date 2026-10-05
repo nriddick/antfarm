@@ -2240,6 +2240,114 @@ void testProducerLifecycleChurn()
     printf("testProducerLifecycleChurn OK\n"); fflush(stdout);
 }
 
+// Cross-Farm provenance, positive side: with every token now carrying its
+// issuing Farm's identity, independent Farms must keep working normally --
+// ordinary writes, token transfer, slot reuse after unregister, and
+// concurrent operation. (The fatal side lives in the private_actor_tests
+// death harness: cross-farm-write / cross-farm-flush / cross-farm-unregister.)
+class CrossFarmWorker
+{
+    AntFarm* farm;
+    this(AntFarm* f) { farm = f; }
+    void run()
+    {
+        ConsumerView v;
+        check(v.subscribe(farm) >= 0, "cross-farm worker subscribe");
+        scope (exit) v.unsubscribe();
+        auto tok = farm.registerProducer(Tier.small);
+        check(tok.valid, "cross-farm worker register");
+        scope (exit) farm.unregisterProducer(tok);
+        PayloadHeader h;
+        ulong[2] body;
+        PayloadEntry[1] e = [payloadEntryRuntime!testCb(&h, body[0 .. 2], 1, 1, 0, 1)];
+        foreach (_; 0 .. 64)
+        {
+            while (farm.write(e[], tok) == 0) pause();
+            while (v.consumeNext()) {}
+        }
+    }
+}
+void testCrossFarmProvenance()
+{
+    enum N = 8;
+    allocCalls(N);
+    scope (exit) freeCalls();
+
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    scope (exit) { free(headers); free(bodies); free(entries); }
+    foreach (i; 0 .. N)
+        entries[i] = payloadEntryRuntime!testCb(
+            &headers[i], bodies[i * 2 .. i * 2 + 2], 1, 1, i, 1);
+
+    auto fa = AntFarm.create(2, 8, 2, 1, 8192, 4, 2048);
+    scope (exit) fa.destroy();
+    auto fb = AntFarm.create(2, 8, 2, 1, 8192, 4, 2048);
+    scope (exit) fb.destroy();
+
+    ConsumerView va;
+    check(va.subscribe(fa) >= 0, "subscribe farm A");
+    ConsumerView vb;
+    check(vb.subscribe(fb) >= 0, "subscribe farm B");
+
+    auto ta = fa.registerProducer(Tier.small);
+    check(ta.valid, "register on farm A");
+    auto tb = fb.registerProducer(Tier.small);
+    check(tb.valid, "register on farm B");
+    // Identical registration histories still produce identical slot hashes;
+    // provenance, not the hash, is what distinguishes the tickets now.
+    check(ta.hash == tb.hash, "matching histories collide in the slot hash");
+
+    // Ordinary writes on each farm, consumed by that farm's own view.
+    check(fa.write(entries[0 .. 4], ta) == 4, "write farm A");
+    check(fb.write(entries[4 .. 8], tb) == 4, "write farm B");
+    while (va.consumeNext()) {}
+    while (vb.consumeNext()) {}
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N, "both farms executed");
+
+    // Token transfer stays a same-farm transfer: the source is consumed and
+    // the destination carries the provenance.
+    Token ta2 = ta;
+    check(!ta.valid, "transfer consumes source");
+    check(ta2.valid, "transfer destination valid");
+    check(fa.write(entries[0 .. 2], ta2) == 2, "write with transferred token");
+    while (va.consumeNext()) {}
+
+    // Unregister then re-register: slot reuse on each farm keeps working.
+    fa.unregisterProducer(ta2);
+    check(!ta2.valid, "unregistered token invalid");
+    fb.unregisterProducer(tb);
+    auto ta3 = fa.registerProducer(Tier.small);
+    check(ta3.valid, "re-register farm A");
+    auto tb3 = fb.registerProducer(Tier.small);
+    check(tb3.valid, "re-register farm B");
+    check(fa.write(entries[2 .. 4], ta3) == 2, "write after reuse on farm A");
+    check(fb.write(entries[6 .. 8], tb3) == 2, "write after reuse on farm B");
+    while (va.consumeNext()) {}
+    while (vb.consumeNext()) {}
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N + 2 + 4, "reuse executed");
+
+    // Concurrent Farms: two threads each register, write, consume, and
+    // unregister on their own Farm at the same time.
+    auto wa = new CrossFarmWorker(fa);
+    auto wb = new CrossFarmWorker(fb);
+    auto tha = new Thread(&wa.run);
+    auto thb = new Thread(&wb.run);
+    tha.start();
+    thb.start();
+    tha.join();
+    thb.join();
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N + 2 + 4 + 128,
+        "concurrent farms executed");
+
+    va.unsubscribe();
+    vb.unsubscribe();
+    fa.unregisterProducer(ta3);
+    fb.unregisterProducer(tb3);
+    printf("testCrossFarmProvenance OK\n"); fflush(stdout);
+}
+
 // Same-shard plain-write completion join.
 //
 // Both consumers claim different 1-payload runs of shard 0 (smallThreshold
@@ -2356,6 +2464,7 @@ void main(string[] args)
     testSpannedTables();
     testSmallTableChurn();
     testMultiSmallProducers();
+    testCrossFarmProvenance();
     testActorWave();
     testActorPayload();
     testActorErasedAdapter();

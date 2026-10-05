@@ -887,6 +887,64 @@ version (assert)
     }
 }
 
+// ---- Cross-Farm token provenance deaths -------------------------------------
+//
+// A Token is bound to the Farm that issued it: write, flush, and unregister
+// on any other Farm must be fatal in debug and -release. These are child
+// bodies for the death harness; each must abort before any cleanup runs.
+
+void crossFarmWriteDeath()
+{
+    auto farmA = AntFarm.create();
+    auto farmB = AntFarm.create();
+    auto tokenA = farmA.registerProducer(Tier.small);
+    auto tokenB = farmB.registerProducer(Tier.small);
+    check(tokenA.valid && tokenB.valid);
+    // requireToken runs before payload handling, so even an empty write
+    // must reject the foreign ticket.
+    farmA.write(cast(PayloadEntry[]) null, tokenB);
+    // Reaching this point means the fatal contract was not enforced.
+}
+
+void crossFarmUnregisterDeath()
+{
+    auto farmA = AntFarm.create();
+    auto farmB = AntFarm.create();
+    auto tokenA = farmA.registerProducer(Tier.small);
+    auto tokenB = farmB.registerProducer(Tier.small);
+    check(tokenA.valid && tokenB.valid);
+    farmA.unregisterProducer(tokenB);
+    // Reaching this point means the fatal contract was not enforced.
+}
+
+struct CrossFarmFlushState { uint* completed; }
+void crossFarmFlushWork(scope ref ActorBorrow!CrossFarmFlushState actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    ++*actor.value.completed;
+}
+
+// The originally reproduced probe: one small token registered on each of
+// two new Farms, an actor woken on Farm A's runtime, then flush() handed
+// Farm B's token.
+void crossFarmFlushDeath()
+{
+    auto farmA = AntFarm.create();
+    auto farmB = AntFarm.create();
+    auto tokenA = farmA.registerProducer(Tier.small);
+    auto tokenB = farmB.registerProducer(Tier.small);
+    check(tokenA.valid && tokenB.valid);
+    auto runtime = ActorRuntime.create(farmA, 1);
+    check(runtime !is null);
+    uint completed;
+    auto owner = runtime.createActor!(CrossFarmFlushState, crossFarmFlushWork)(
+        CrossFarmFlushState(&completed));
+    check(owner.valid);
+    owner.handle.wake();
+    runtime.flush(tokenB); // Deliberately wrong Farm's token.
+    // Reaching this point means the fatal contract was not enforced.
+}
+
 enum fatalSamplePrefix = "fatal-sample:";
 enum deathSampleText = "private death harness sample";
 
@@ -939,6 +997,10 @@ void deathHarness()
         check(diedWithMessage("destroy-live", "antfarm fatal: destroy nonempty private root park"));
         check(diedWithMessage("finish-with-active-child", "antfarm fatal: retire private actor with active child wave"));
         writeln("PASS destroy-live and finish-with-active-child are fatal");
+        foreach (modeName; ["cross-farm-write", "cross-farm-flush"])
+            check(diedWithMessage(modeName, "antfarm fatal: write token from another farm"));
+        check(diedWithMessage("cross-farm-unregister", "antfarm fatal: unregister token from another farm"));
+        writeln("PASS cross-Farm token write, flush, and unregister are fatal");
         e1CounterExhaustionDeath();
         version (assert)
         {
@@ -4902,6 +4964,9 @@ void main(string[] args)
         case "depth-64": depth64(); return;
         case "destroy-live": destroyLiveDeath(); return;
         case "finish-with-active-child": activeChildDeath(); return;
+        case "cross-farm-write": crossFarmWriteDeath(); return;
+        case "cross-farm-unregister": crossFarmUnregisterDeath(); return;
+        case "cross-farm-flush": crossFarmFlushDeath(); return;
         case "death": deathHarness(); return;
         case "death-negative-control": deathNegativeControl(); return;
         case "death-exits-zero":
