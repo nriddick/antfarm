@@ -285,6 +285,7 @@ path. Reserved cohorts make one extra eager allocation of 8 bytes per member
 of capacity, containing both the selection and its inverse positions. Starting
 a subset copies and validates k indices in O(k), without scanning or clearing
 the capacity array; emission and result placement use one index indirection.
+When every member is needed, use `start` to avoid subset copying and indirection.
 
 This complete example selects members 3 and 1, then reads their squares in
 that order after the join. Parent retirement also disposes unselected members.

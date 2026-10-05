@@ -1,0 +1,3 @@
+Command: make check-soak
+PASS private actor TSan soak: 104 loops in 121 seconds
+Full local log: /tmp/e2-2-soak.log

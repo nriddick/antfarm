@@ -421,7 +421,7 @@ version 30503. It records the expected version in metadata and the reported
 version with each run; adapt placement deliberately when changing hosts.
 
 See [PRIVATE_ACTORS.md](../actors/PRIVATE_ACTORS.md) for API usage and limits:
-POD state, callback-scoped `@system` borrowing, whole-cohort child waves, and
+struct/scalar state, callback-scoped `@system` borrowing, whole and subset child waves, and
 synchronous child callbacks. Resumable child continuations are future work.
 
 ## Typed result ports: unused-feature gate (2026-10-04)
@@ -457,4 +457,75 @@ retain the evidence. Reproduce with an isolated baseline build:
 ```sh
 python3 perftest/results/private-result-ports-2026-10-04/measure.py \
   BASELINE/perftest/actor_churn perftest/actor_churn
+```
+
+## E2-2 subset waves and unused-feature gate (2026-10-05)
+
+Compared subset-wave code against local main `3441b8b`. Both binaries use LDC
+1.43.0 `-O2 -release`, mimalloc 3.5.3 (prebuilt static archive read from the
+main checkout), huge pages off, n=16384, batch 256, small quota 16384 words,
+five warmup waves/cycles and three-second windows. Each configuration has
+five alternating runs, pinned to CPU 0 for the controller and CPUs 1–6 for
+six workers. Builds and tests were stopped during the 150 measured runs.
+The baseline was built from an isolated git archive; the main checkout was
+not modified. `tree-results` is absent, so it is not part of the gate.
+
+The unused-feature gate compares ordinary create/dispatch/retire/reclaim
+cycles. All ten medians pass the −3% threshold, ranging from −1.10% to
++1.51%; no gain exceeds +3%.
+
+| Mode | 0 workers base → subsets, M lifetimes/s | Change | 6 workers base → subsets, M lifetimes/s | Change |
+| --- | ---: | ---: | ---: | ---: |
+| `private` | 27.039 → 27.256 | +0.80% | 20.755 → 20.883 | +0.62% |
+| `private-remote` | 26.816 → 26.521 | -1.10% | 12.813 → 12.832 | +0.14% |
+| `tree` | 53.729 → 53.836 | +0.20% | 43.460 → 43.791 | +0.76% |
+| `tree-wait` | 53.141 → 53.405 | +0.50% | 42.733 → 43.379 | +1.51% |
+| `dtor` | 26.751 → 26.607 | -0.54% | 20.848 → 21.008 | +0.77% |
+
+The subset mode keeps one root and its cohort alive, excludes setup and
+teardown from timing, and runs no-op member waves through `waitChildren`.
+The list selects indices in reverse order. Percentages round down to 163,
+1638 and 16384 participants. Two whole-wave comparators use the same model:
+`subset-whole` reserves selection storage, while
+`subset-whole-unreserved` does not. Rates include selection validation/copy,
+publication, the Wave join and root resumption. They measure waves and
+selected callbacks, not allocation or retirement churn.
+
+| Mode / participants | 0 workers, waves/s | Selected callbacks, M/s | 6 workers, waves/s | Selected callbacks, M/s |
+| --- | ---: | ---: | ---: | ---: |
+| Subset 1% / 163 | 600,205 | 97.833 | 253,318 | 41.291 |
+| Subset 10% / 1638 | 71,913 | 117.794 | 47,416 | 77.667 |
+| Subset 100% / 16384 | 7,246 | 118.721 | 5,098 | 83.534 |
+| Whole, reserved / 16384 | 9,256 | 151.651 | 5,927 | 97.110 |
+| Whole, unreserved / 16384 | 9,069 | 148.581 | 5,910 | 96.823 |
+
+Against the reserved whole wave, 1% subsets run 64.84× / 42.74× as many
+waves per second with 0 / 6 workers; 10% subsets run 7.77× / 8.00×.
+**Known limitation:** 100% subsets have 21.71% / 13.98% lower wave throughput
+than reserved whole waves, missing design §8's expectation of being within
+5%. This corresponds to 27.74% / 16.25% more time per wave. Use `start` when
+every member is needed. The unused-feature gate passes; the full-selection
+expectation was reported to the orchestrator, who approved recording it
+without runtime tuning in this PR. Reserved whole waves measure +2.07% /
++0.30% throughput versus unreserved whole waves; these small differences do
+not establish a benefit from storage reservation.
+
+[Metadata](results/private-subsets-2026-10-05/metadata.json),
+[raw runs](results/private-subsets-2026-10-05/runs.jsonl),
+[summary](results/private-subsets-2026-10-05/summary.json),
+[validation](results/private-subsets-2026-10-05/validation.md) and
+[35 mutations](results/private-subsets-2026-10-05/mutations.md) retain the
+evidence. Reproduce with the two matching binaries and prebuilt archive:
+
+```sh
+python3 perftest/results/private-subsets-2026-10-05/measure.py \
+  BASELINE/perftest/actor_churn_mimalloc perftest/actor_churn_mimalloc \
+  MAIN/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a
+# Explicit subset and whole-wave comparisons (last argument is percentage):
+ANTFARM_HUGE_PAGES=0 perftest/actor_churn_mimalloc subset \
+  16384 3 6 256 5 mimalloc 0,1,2,3,4,5,6 small 16384 10
+ANTFARM_HUGE_PAGES=0 perftest/actor_churn_mimalloc subset-whole \
+  16384 3 6 256 5 mimalloc 0,1,2,3,4,5,6 small 16384
+ANTFARM_HUGE_PAGES=0 perftest/actor_churn_mimalloc subset-whole-unreserved \
+  16384 3 6 256 5 mimalloc 0,1,2,3,4,5,6 small 16384
 ```

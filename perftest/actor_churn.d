@@ -131,6 +131,123 @@ private PrivateRootDisposition treeActivate(bool waitChildren)(scope ref Private
         ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
 }
 
+private enum SubsetKind : ubyte { selected, reservedWhole, plainWhole }
+private struct SubsetControl
+{
+    shared ulong requested, completed;
+    shared uint ready, stop;
+}
+private struct SubsetState
+{
+    PrivateChildPark!uint* children;
+    SubsetControl* control;
+    const(uint)[] members;
+    size_t count;
+    ulong completed;
+    SubsetKind kind;
+    bool inFlight;
+}
+private void subsetOperate(scope ref PrivateBorrow!uint, scope ref PrivateContext)
+    nothrow @nogc @system {}
+
+private PrivateRootDisposition subsetActivate(scope ref PrivateBorrow!SubsetState b,
+    scope ref PrivateContext context) nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.children is null)
+    {
+        s.children = context.createChildren!uint(s.count,
+            PrivateCohortOptions(0, s.kind != SubsetKind.plainWhole));
+        if (s.children is null) fatal("subset park allocation failed");
+        foreach (i; 0 .. s.count)
+            if (s.children.spawn(context, cast(uint) i) != PrivateSpawnResult.spawned)
+                fatal("subset member allocation failed");
+        atomicStore!(MemoryOrder.rel)(s.control.ready, 1u);
+        return PrivateRootDisposition.waitChildren;
+    }
+    if (s.inFlight)
+    {
+        s.inFlight = false;
+        atomicStore!(MemoryOrder.rel)(s.control.completed, ++s.completed);
+    }
+    if (atomicLoad!(MemoryOrder.acq)(s.control.stop) != 0)
+        return PrivateRootDisposition.finish;
+    if (atomicLoad!(MemoryOrder.acq)(s.control.requested) == s.completed)
+        return PrivateRootDisposition.waitChildren;
+    auto result = s.kind == SubsetKind.selected
+        ? s.children.startSubset!subsetOperate(context, s.members)
+        : s.children.start!subsetOperate(context);
+    if (result != PrivateStartResult.started) fatal("subset benchmark wave failed");
+    s.inFlight = true;
+    return PrivateRootDisposition.waitChildren;
+}
+
+private void runSubset(AntFarm* farm, ActorAllocator allocator, ref Token token,
+    ref ConsumerView view, string mode, size_t count, double duration, uint consumers,
+    size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus, uint percent)
+{
+    auto kind = mode == "subset" ? SubsetKind.selected
+        : mode == "subset-whole" ? SubsetKind.reservedWhole : SubsetKind.plainWhole;
+    immutable selected = kind == SubsetKind.selected ? cast(size_t) (cast(ulong) count * percent / 100) : count;
+    enforce(selected != 0, "subset percentage must select at least one member");
+    auto members = new uint[selected];
+    foreach (i; 0 .. selected) members[i] = cast(uint) (count - 1 - i);
+    SubsetControl control;
+    auto park = PrivateRootPark!(SubsetState, subsetActivate).create(farm, 1, batch, allocator);
+    enforce(park !is null, "subset root allocation failed");
+    scope(exit) park.destroy();
+    enforce(park.spawn(SubsetState(null, &control, members, count, 0, kind)) == PrivateSpawnResult.spawned,
+        "subset root spawn failed");
+    void pump()
+    {
+        park.pump(token);
+        if (consumers == 0) while (view.consumeNext()) {}
+        else pause();
+    }
+    auto deadline = MonoTime.currTime + 60.seconds;
+    while (atomicLoad!(MemoryOrder.acq)(control.ready) == 0)
+    {
+        pump();
+        enforce(MonoTime.currTime < deadline, "subset setup timed out");
+    }
+    ulong waves;
+    void runWave()
+    {
+        atomicStore!(MemoryOrder.rel)(control.requested, ++waves);
+        auto waveDeadline = MonoTime.currTime + 60.seconds;
+        while (atomicLoad!(MemoryOrder.acq)(control.completed) != waves)
+        {
+            pump();
+            enforce(MonoTime.currTime < waveDeadline, "subset wave timed out");
+        }
+    }
+    foreach (_; 0 .. warmups) runWave();
+    immutable start = MonoTime.currTime;
+    ulong rounds;
+    double elapsed;
+    do
+    {
+        runWave();
+        ++rounds;
+        elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
+    } while (elapsed < duration);
+    atomicStore!(MemoryOrder.rel)(control.stop, 1u);
+    deadline = MonoTime.currTime + 60.seconds;
+    while (park.live)
+    {
+        pump();
+        enforce(MonoTime.currTime < deadline, "subset teardown timed out");
+    }
+    enforce(atomicLoad!(MemoryOrder.acq)(control.completed) == warmups + rounds,
+        "subset joined-wave count mismatch");
+    writefln("mode=%s actors=%s selected=%s percent=%s consumers=%s batch=%s warmups=%s allocator=%s hugePages=%s cpus=%s setup=excluded teardown=excluded",
+        mode, count, selected, kind == SubsetKind.selected ? percent : 100,
+        consumers, batch, warmups, allocatorName, farm.usedLargePages, cpus);
+    writefln("rounds=%s elapsed_s=%.6f waves/s=%.6f Mselected_callbacks/s=%.6f ns/wave=%.2f verified_waves=%s",
+        rounds, elapsed, rounds / elapsed, cast(double) selected * rounds / elapsed / 1e6,
+        elapsed * 1e9 / rounds, waves);
+}
+
 private class Consumer
 {
     AntFarm* farm;
@@ -168,9 +285,14 @@ private double elapsedSeconds(long ticks)
 
 void main(string[] args)
 {
-    enforce(args.length >= 2 && args.length <= 11
-            && (args[1] == "dtor" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|wave|private|private-remote|tree|tree-wait|dtor [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384]");
+    enforce(args.length >= 2 && args.length <= 12
+            && (args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
+        "usage: actor_churn actor|wave|private|private-remote|tree|tree-wait|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
+    immutable subsetMode = args[1] == "subset" || args[1] == "subset-whole"
+        || args[1] == "subset-whole-unreserved";
+    immutable percent = args.length > 11 ? to!uint(args[11]) : 100;
+    enforce((subsetMode || args.length <= 11) && (percent == 1 || percent == 10 || percent == 100),
+        "subset-percent must be 1, 10 or 100, and is only for subset modes");
     immutable waveMode = args[1] == "wave";
     immutable remoteMode = args[1] == "private-remote";
     immutable dtorMode = args[1] == "dtor";
@@ -224,8 +346,8 @@ void main(string[] args)
     version (AntfarmMimallocV3)
         if (allocatorName != "crt") writefln("mimalloc_version=%s", mi_version());
     scope (exit) farm.destroy();
-    auto runtime = privateMode || treeMode ? null : ActorRuntime.create(farm, count, allocator);
-    enforce(privateMode || treeMode || runtime !is null, "actor runtime allocation failed");
+    auto runtime = privateMode || treeMode || subsetMode ? null : ActorRuntime.create(farm, count, allocator);
+    enforce(privateMode || treeMode || subsetMode || runtime !is null, "actor runtime allocation failed");
     scope (exit) if (runtime !is null) runtime.destroy();
     auto park = privateMode && !remoteMode && !dtorMode ? PrivateRootPark!(State, privateActivate).create(farm, count, batch, allocator) : null;
     enforce(!privateMode || remoteMode || dtorMode || park !is null, "private park allocation failed");
@@ -270,6 +392,13 @@ void main(string[] args)
             Thread.yield();
         enforce(atomicLoad!(MemoryOrder.acq)(jobs[i].started) == 1,
             "worker pin or subscription failed");
+    }
+
+    if (subsetMode)
+    {
+        runSubset(farm, allocator, token, view, args[1], count, duration, consumers,
+            batch, warmups, allocatorName, cpus, percent);
+        return;
     }
 
     ActorWave wave;
