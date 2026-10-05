@@ -2485,14 +2485,13 @@ static assert(is(typeof(PrivateContext.init.createChildren!PItem(1)) == PVoidCoh
 static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1)) == PUlongCohort*));
 static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1, 2)) == PUlongCohort*));
 static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNotPod)(1)));
-// Layout: R = void is today's cohort and root park (sizes measured on main
-// 374909c: ChildBase/Wave/payload header and Service are embedded), results
-// add exactly two words and nothing else. Entry's own
+// Layout: subset selection adds two words per cohort to main 3441b8b's
+// 264-byte signal-only park. Results add exactly two more words. Entry's own
 // 40-byte layout is asserted next to its definition and checked through the
 // allocation sizes in portsAllocationFailures.
 static if (size_t.sizeof == 8)
 {
-    static assert(PVoidCohort.sizeof == 264);
+    static assert(PVoidCohort.sizeof == 280);
     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
     version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 168);
     else static assert(PrivateRootPark!(State, repeat).sizeof == 160);
