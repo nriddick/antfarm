@@ -1,0 +1,25 @@
+[
+  {
+    "name": "tsan-10min",
+    "loops": 387,
+    "elapsed_seconds": 601.3406478529796,
+    "stress_processes": 0,
+    "passed": true
+  },
+  {
+    "name": "tsan-loaded-3min",
+    "loops": 38,
+    "elapsed_seconds": 181.24700968002435,
+    "stress_processes": 16,
+    "passed": true
+  },
+  {
+    "name": "tsan-loaded-revision",
+    "loops": 65,
+    "elapsed_seconds": 303.23641148605384,
+    "stress_processes": 16,
+    "passed": true,
+    "raw_lines": 3317,
+    "raw_sha256": "eeac04166b55862a19c9683fefceb1618bfd2a2b23110e3d9a468325919bba63"
+  }
+]

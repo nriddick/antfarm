@@ -131,6 +131,144 @@ private PrivateRootDisposition treeActivate(bool waitChildren)(scope ref Private
         ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
 }
 
+private enum foldFanout = 8;
+private struct FoldMid
+{
+    Completion* completions;
+    size_t count;
+    ulong cycle;
+    PrivateChildPark!(State, ulong)* leaves;
+}
+private ulong foldLeaf(scope ref PrivateBorrow!State b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    privateOperate(b, c);
+    return b.value.cycle;
+}
+private void foldLaunch(scope ref PrivateBorrow!FoldMid b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    b.value.leaves = c.createChildren!(State, ulong)(b.value.count);
+    if (b.value.leaves is null) fatal("fold leaf park allocation failed");
+    foreach (i; 0 .. b.value.count)
+        if (b.value.leaves.spawn(c, State(b.value.completions + i, b.value.cycle))
+                != PrivateSpawnResult.spawned)
+            fatal("fold leaf spawn failed");
+    if (b.value.leaves.startFinal!foldLeaf(c) != PrivateStartResult.started)
+        fatal("fold leaf wave failed");
+}
+private ulong foldValue(scope ref PrivateBorrow!FoldMid b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    ulong sum;
+    foreach (value; b.value.leaves.results(c)) sum += value;
+    return sum;
+}
+private PrivateChildStep!ulong foldContinue(scope ref PrivateBorrow!FoldMid b,
+    scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value.leaves is null)
+    {
+        foldLaunch(b, c);
+        return typeof(return).waitChildren();
+    }
+    return typeof(return).done(foldValue(b, c));
+}
+private struct FoldRoot
+{
+    Completion* completions;
+    size_t count;
+    ulong cycle;
+    PrivateChildPark!(FoldMid, ulong)* mids;
+    uint phase;
+}
+private PrivateRootDisposition foldRoot(bool continuation)(scope ref PrivateBorrow!FoldRoot b,
+    scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value.phase++ == 0)
+    {
+        immutable mids = (b.value.count - 1) / foldFanout + 1;
+        b.value.mids = c.createChildren!(FoldMid, ulong)(mids);
+        if (b.value.mids is null) fatal("fold middle park allocation failed");
+        foreach (i; 0 .. mids)
+        {
+            immutable offset = i * foldFanout;
+            immutable leaves = b.value.count - offset < foldFanout
+                ? b.value.count - offset : foldFanout;
+            if (b.value.mids.spawn(c, FoldMid(b.value.completions + offset, leaves,
+                    b.value.cycle)) != PrivateSpawnResult.spawned)
+                fatal("fold middle spawn failed");
+        }
+        static if (continuation)
+            auto started = b.value.mids.startFinal!foldContinue(c);
+        else
+            auto started = b.value.mids.start!foldLaunch(c);
+        if (started != PrivateStartResult.started) fatal("fold middle wave failed");
+        return PrivateRootDisposition.waitChildren;
+    }
+    static if (!continuation)
+        if (b.value.phase == 2)
+        {
+            if (b.value.mids.startFinal!foldValue(c) != PrivateStartResult.started)
+                fatal("fold result wave failed");
+            return PrivateRootDisposition.waitChildren;
+        }
+    ulong sum;
+    foreach (value; b.value.mids.results(c)) sum += value;
+    if (sum != b.value.count * b.value.cycle) fatal("fold result mismatch");
+    return PrivateRootDisposition.finish;
+}
+
+private void runFoldTree(bool continuation)(AntFarm* farm, ActorAllocator allocator,
+    ref Token token, ref ConsumerView view, string mode, Completion[] completions, double duration,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus)
+{
+    immutable count = completions.length;
+    immutable parents = (count - 1) / batch + 1;
+    auto park = PrivateRootPark!(FoldRoot, foldRoot!continuation).create(farm, parents, batch, allocator);
+    enforce(park !is null, "fold root park allocation failed");
+    scope(exit) park.destroy();
+    ulong cycle;
+    void runCycle()
+    {
+        ++cycle;
+        auto deadline = MonoTime.currTime + 60.seconds;
+        foreach (i; 0 .. parents)
+        {
+            immutable offset = i * batch;
+            immutable leaves = count - offset < batch ? count - offset : batch;
+            enforce(park.spawn(FoldRoot(completions.ptr + offset, leaves, cycle))
+                == PrivateSpawnResult.spawned, "fold root spawn failed");
+        }
+        while (park.live != 0)
+        {
+            park.pump(token);
+            if (consumers == 0) while (view.consumeNext()) {}
+            else pause();
+            enforce(MonoTime.currTime < deadline, "fold tree timed out");
+        }
+        foreach (ref completion; completions)
+            enforce(atomicLoad!(MemoryOrder.acq)(completion.stamp) == cycle
+                && completion.calls == cycle, "fold leaf count mismatch");
+    }
+    foreach (_; 0 .. warmups) runCycle();
+    immutable start = MonoTime.currTime;
+    ulong rounds;
+    double elapsed;
+    do
+    {
+        runCycle();
+        ++rounds;
+        elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
+    } while (elapsed < duration);
+    immutable leafCycles = cast(double) count * rounds;
+    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s allocator=%s hugePages=%s cpus=%s fanout=%s",
+        mode, count, consumers, batch, warmups, allocatorName, farm.usedLargePages, cpus, foldFanout);
+    writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f verified_actor_cycles=%s root_waves_per_cycle=%s",
+        rounds, elapsed, leafCycles / elapsed / 1e6, elapsed * 1e9 / leafCycles,
+        cycle * count, parents * (continuation ? 1 : 2));
+}
+
 private enum SubsetKind : ubyte { selected, reservedWhole, plainWhole }
 private struct SubsetControl
 {
@@ -286,8 +424,9 @@ private double elapsedSeconds(long ticks)
 void main(string[] args)
 {
     enforce(args.length >= 2 && args.length <= 12
-            && (args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|wave|private|private-remote|tree|tree-wait|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
+            && (args[1] == "tree-cont" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
+        "usage: actor_churn actor|wave|private|private-remote|tree|tree-wait|tree-cont|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
+    immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined";
     immutable subsetMode = args[1] == "subset" || args[1] == "subset-whole"
         || args[1] == "subset-whole-unreserved";
     immutable percent = args.length > 11 ? to!uint(args[11]) : 100;
@@ -309,7 +448,7 @@ void main(string[] args)
     immutable allocatorName = args.length > 7 ? args[7] : defaultAllocator;
     enforce(count > 0 && count <= uint.max && isFinite(duration)
             && duration > 0 && consumers <= 64 && batch > 0
-            && (waveMode || privateMode || treeMode || batch <= 256),
+            && (waveMode || privateMode || treeMode || foldTreeMode || batch <= 256),
         "actors/seconds/batch must be positive; consumers must be 0..64; actor batch must be <=256");
     ushort[] cpus;
     if (args.length > 8 && args[8] != "-")
@@ -346,8 +485,8 @@ void main(string[] args)
     version (AntfarmMimallocV3)
         if (allocatorName != "crt") writefln("mimalloc_version=%s", mi_version());
     scope (exit) farm.destroy();
-    auto runtime = privateMode || treeMode || subsetMode ? null : ActorRuntime.create(farm, count, allocator);
-    enforce(privateMode || treeMode || subsetMode || runtime !is null, "actor runtime allocation failed");
+    auto runtime = privateMode || treeMode || subsetMode || foldTreeMode ? null : ActorRuntime.create(farm, count, allocator);
+    enforce(privateMode || treeMode || subsetMode || foldTreeMode || runtime !is null, "actor runtime allocation failed");
     scope (exit) if (runtime !is null) runtime.destroy();
     auto park = privateMode && !remoteMode && !dtorMode ? PrivateRootPark!(State, privateActivate).create(farm, count, batch, allocator) : null;
     enforce(!privateMode || remoteMode || dtorMode || park !is null, "private park allocation failed");
@@ -398,6 +537,17 @@ void main(string[] args)
     {
         runSubset(farm, allocator, token, view, args[1], count, duration, consumers,
             batch, warmups, allocatorName, cpus, percent);
+        return;
+    }
+
+    if (foldTreeMode)
+    {
+        if (args[1] == "tree-cont")
+            runFoldTree!true(farm, allocator, token, view, args[1], completions, duration,
+                consumers, batch, warmups, allocatorName, cpus);
+        else
+            runFoldTree!false(farm, allocator, token, view, args[1], completions, duration,
+                consumers, batch, warmups, allocatorName, cpus);
         return;
     }
 

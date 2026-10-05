@@ -1,0 +1,19 @@
+make: Entering directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests'
+python3 extract_doc_examples.py
+for source in .doc-examples/*.d; do \
+	for compiler in ldc2 dmd; do \
+		for flags in -g -release; do \
+			$compiler $flags -I.. $source ../antfarm.d ../antfarm_allocation.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d -of=.doc-examples/example || exit $?; \
+			ANTFARM_HUGE_PAGES=0 ./.doc-examples/example || exit $?; \
+		done; \
+	done; \
+done
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+make: Leaving directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests'

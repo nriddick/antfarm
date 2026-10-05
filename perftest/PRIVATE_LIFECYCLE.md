@@ -600,3 +600,32 @@ python3 perftest/results/private-plumbing-2026-10-05/measure.py \
   BASELINE/perftest/actor_churn_mimalloc perftest/actor_churn_mimalloc \
   MAIN/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a 11
 ```
+
+## E2-4 child continuations (2026-10-05)
+
+Compared against local main `632c7f6`: 160 pinned mimalloc 3.5.3 runs, five alternating repeats per case/profile, three measured seconds and five warmups, 16,384 leaves/actors, batch 256 and quota 16,384. Controller CPU 0; remote consumers 1–6. 125/160 runs were flagged for more than 10% average CPU activity outside benchmark affinity. Large spreads are retained in the raw summary.
+
+**The normal −3% gate is deferred under the user-approved relaxed gate.** Two medians miss −3%; the worst is −4.51%, with no unused-case median below −5%. These are provisional measurements on the noisy host, not a quiet performance acceptance claim. A dedicated round remains. Measure `subset 1%` (−4.51%) and `tree` (−3.52%) first in that quiet round.
+
+| Unused mode | Change, 0 consumers | Change, 6 consumers |
+| --- | ---: | ---: |
+| `private` | +1.20% | -0.72% |
+| `private-remote` | +1.12% | -1.44% |
+| `tree` | -3.52% | -1.02% |
+| `tree-wait` | -1.07% | -2.18% |
+| `dtor` | +0.57% | -0.72% |
+| `subset 1%` | -4.51% | -1.18% |
+| `subset 100%` | -1.75% | +0.81% |
+
+Both new modes use root → mids → result leaves, fanout eight, identical leaf callbacks and verified folded results. `tree-cont` folds in one root-started wave; `tree-pipelined` uses launch then fold waves. The comparator is new in E2-4 because no pipelined benchmark existed in the base. Existing `tree`/`tree-wait` remain root → plain leaves and are shown for context, with different topology/work above the leaves.
+
+| Candidate mode | 0 consumers, Mleaf cycles/s | 6 consumers, Mleaf cycles/s |
+| --- | ---: | ---: |
+| `tree` | 56.018 | 45.474 |
+| `tree-wait` | 54.393 | 44.254 |
+| `tree-pipelined` | 22.957 | 29.352 |
+| `tree-cont` | 22.653 | 29.947 |
+
+Continuation versus pipelined: -1.32% at zero remote consumers; +2.03% at six. The differences are small relative to the host-load caveat.
+
+[Protocol, review and gate evidence](results/private-continuations-2026-10-05/README.md), [metadata](results/private-continuations-2026-10-05/metadata.json), [raw runs](results/private-continuations-2026-10-05/runs.jsonl), and [medians/ranges](results/private-continuations-2026-10-05/summary.json).

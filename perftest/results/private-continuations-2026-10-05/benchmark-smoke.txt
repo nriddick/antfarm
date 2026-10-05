@@ -1,0 +1,57 @@
+COMMAND ./perftest/actor_churn_mimalloc tree-cont 1 .05 0 1 1 mimalloc 0 small 1024
+batchLimit=1 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-cont actors=1 consumers=0 batch=1 warmups=1 allocator=mimalloc hugePages=false cpus=[0] fanout=8
+rounds=34906 elapsed_s=0.050001 Mactor_cycles/s=0.698104 ns/actor_cycle=1432.45 verified_actor_cycles=34907 root_waves_per_cycle=1
+COMMAND ./perftest/actor_churn_mimalloc tree-cont 13 .05 0 7 1 mimalloc 0 small 1024
+batchLimit=7 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-cont actors=13 consumers=0 batch=7 warmups=1 allocator=mimalloc hugePages=false cpus=[0] fanout=8
+rounds=23008 elapsed_s=0.050002 Mactor_cycles/s=5.981869 ns/actor_cycle=167.17 verified_actor_cycles=299117 root_waves_per_cycle=2
+COMMAND ./perftest/actor_churn_mimalloc tree-cont 513 .05 6 64 1 mimalloc 0,1,2,3,4,5,6 small 1024
+batchLimit=64 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-cont actors=513 consumers=6 batch=64 warmups=1 allocator=mimalloc hugePages=false cpus=[0, 1, 2, 3, 4, 5, 6] fanout=8
+rounds=1024 elapsed_s=0.050015 Mactor_cycles/s=10.503063 ns/actor_cycle=95.21 verified_actor_cycles=525825 root_waves_per_cycle=9
+COMMAND ./perftest/actor_churn_mimalloc tree-cont 1025 .05 6 256 1 mimalloc 0,1,2,3,4,5,6 small 1024
+batchLimit=256 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-cont actors=1025 consumers=6 batch=256 warmups=1 allocator=mimalloc hugePages=false cpus=[0, 1, 2, 3, 4, 5, 6] fanout=8
+rounds=660 elapsed_s=0.050017 Mactor_cycles/s=13.525513 ns/actor_cycle=73.93 verified_actor_cycles=677525 root_waves_per_cycle=5
+COMMAND ./perftest/actor_churn_mimalloc tree-cont 16384 .05 0 256 1 mimalloc 0 small 1024
+batchLimit=256 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-cont actors=16384 consumers=0 batch=256 warmups=1 allocator=mimalloc hugePages=false cpus=[0] fanout=8
+rounds=37 elapsed_s=0.050636 Mactor_cycles/s=11.971991 ns/actor_cycle=83.53 verified_actor_cycles=622592 root_waves_per_cycle=64
+COMMAND ./perftest/actor_churn_mimalloc tree-pipelined 1 .05 0 1 1 mimalloc 0 small 1024
+batchLimit=1 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-pipelined actors=1 consumers=0 batch=1 warmups=1 allocator=mimalloc hugePages=false cpus=[0] fanout=8
+rounds=38591 elapsed_s=0.050000 Mactor_cycles/s=0.771816 ns/actor_cycle=1295.64 verified_actor_cycles=38592 root_waves_per_cycle=2
+COMMAND ./perftest/actor_churn_mimalloc tree-pipelined 13 .05 0 7 1 mimalloc 0 small 1024
+batchLimit=7 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-pipelined actors=13 consumers=0 batch=7 warmups=1 allocator=mimalloc hugePages=false cpus=[0] fanout=8
+rounds=17930 elapsed_s=0.050000 Mactor_cycles/s=4.661789 ns/actor_cycle=214.51 verified_actor_cycles=233103 root_waves_per_cycle=4
+COMMAND ./perftest/actor_churn_mimalloc tree-pipelined 513 .05 6 64 1 mimalloc 0,1,2,3,4,5,6 small 1024
+batchLimit=64 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-pipelined actors=513 consumers=6 batch=64 warmups=1 allocator=mimalloc hugePages=false cpus=[0, 1, 2, 3, 4, 5, 6] fanout=8
+rounds=1131 elapsed_s=0.050014 Mactor_cycles/s=11.600699 ns/actor_cycle=86.20 verified_actor_cycles=580716 root_waves_per_cycle=18
+COMMAND ./perftest/actor_churn_mimalloc tree-pipelined 1025 .05 6 256 1 mimalloc 0,1,2,3,4,5,6 small 1024
+batchLimit=256 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-pipelined actors=1025 consumers=6 batch=256 warmups=1 allocator=mimalloc hugePages=false cpus=[0, 1, 2, 3, 4, 5, 6] fanout=8
+rounds=733 elapsed_s=0.050046 Mactor_cycles/s=15.012720 ns/actor_cycle=66.61 verified_actor_cycles=752350 root_waves_per_cycle=10
+COMMAND ./perftest/actor_churn_mimalloc tree-pipelined 16384 .05 0 256 1 mimalloc 0 small 1024
+batchLimit=256 tier=small quota_words=1024
+mimalloc_version=30503
+mode=tree-pipelined actors=16384 consumers=0 batch=256 warmups=1 allocator=mimalloc hugePages=false cpus=[0] fanout=8
+rounds=41 elapsed_s=0.050817 Mactor_cycles/s=13.218788 ns/actor_cycle=75.65 verified_actor_cycles=688128 root_waves_per_cycle=128
+PASS both modes, 1/13/513/1025/16384 leaves, 0/6 consumers, short groups and quota splits
+batchLimit=64 tier=small quota_words=1024
+mode=tree-cont actors=513 consumers=6 batch=64 warmups=1 allocator=crt hugePages=false cpus=[0, 1, 2, 3, 4, 5, 6] fanout=8
+rounds=290 elapsed_s=0.050035 Mactor_cycles/s=2.973327 ns/actor_cycle=336.32 verified_actor_cycles=149283 root_waves_per_cycle=9
+batchLimit=64 tier=small quota_words=1024
+mode=tree-pipelined actors=513 consumers=6 batch=64 warmups=1 allocator=crt hugePages=false cpus=[0, 1, 2, 3, 4, 5, 6] fanout=8
+rounds=287 elapsed_s=0.050131 Mactor_cycles/s=2.936954 ns/actor_cycle=340.49 verified_actor_cycles=147744 root_waves_per_cycle=18

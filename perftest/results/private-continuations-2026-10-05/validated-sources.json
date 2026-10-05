@@ -1,0 +1,15 @@
+{
+  "runtime_commit": "8afce872c266c872e537ae27c58cd58d7f985268",
+  "documentation_commit": "1d3a71d1befa0b701603bee4baacc8d9160bff8a",
+  "evidence_commit": "this commit",
+  "sha256": {
+    "actors/private_actor.d": "cde26e9eae2af02f24685784ccd0d44f1204bf38e2505538dba4b64c0b0b6ad9",
+    "actors/actor.d": "e65d3559851959a9b0537a4464e6fb28c21ec587d445325b4410d3a82c5e5189",
+    "private_actor_tests/main.d": "66033d67debe634b29b68b9ca824642cef18dad0710928da6c024fee9c170240",
+    "actors/PRIVATE_ACTORS.md": "dbcb6a951d6dd2bc341fc60003dadf00bc0ca21e4a9ff6bb0fdb54322d16cc22",
+    "private_actor_tests/extract_doc_examples.py": "a957f13e15d949cdd644524ed24867583fe83d70cfcec621d1f6d2827f5db68f",
+    "perftest/actor_churn.d": "447ce5e72eb31b38e8e43baec60df257a5f775c6b17bbc62405f186a2acbe500",
+    "perftest/PRIVATE_LIFECYCLE.md": "b87f76851bc5c5354d306fc06f8bc6efb4cba2d5d18d1ba1525805ad3218b304"
+  },
+  "note": "Final source tree verified before the evidence commit; subsequent edits only record gate results. commit-builds.txt labels the evidence commit as this commit, as approved by the orchestrator, to avoid a self-referential SHA."
+}
