@@ -62,6 +62,7 @@ private:
     Entry* actor_;
     Wave* enclosing_;
     bool retiring_;
+    bool ownJoin_; // waves started here join this member, not the enclosing wave
     size_t batchLimit_;
     this(Entry* actor, Wave* enclosing, bool retiring, size_t batchLimit) nothrow @nogc @system
     { actor_ = actor; enclosing_ = enclosing; retiring_ = retiring; batchLimit_ = batchLimit; }
@@ -103,6 +104,8 @@ public:
 // Child entries reach the Service through ChildBase.service; their word at
 // offset 16 is child-only metadata, never a Service pointer.
 private enum ChildStep : ubyte { done, waitChildren, doneRetire }
+
+static assert(PrivateContext.sizeof == 4 * size_t.sizeof);
 
 private struct Entry
 {
@@ -189,8 +192,8 @@ private struct Wave
 }
 static assert(Wave.emittable.offsetof == 0);
 
-// Increment under an existing hold; reject overflow before changing the counter.
-private void retainRootCredit(ref shared uint pending) nothrow @nogc @system
+// Increment a join counter under an existing hold; reject overflow before changing it.
+private void retainJoinCredit(ref shared uint pending) nothrow @nogc @system
 {
     auto old = atomicLoad!(MemoryOrder.raw)(pending);
     while (true)
@@ -251,6 +254,12 @@ private void releaseRoot(Entry* entry) nothrow @nogc @system
             return; // final entry AND service access
         head = atomicLoad!(MemoryOrder.raw)(*returns);
     }
+}
+
+// Join release for a member parent. Nothing selects it yet: ownJoin_ is never set.
+private void releaseMember(Entry* member) nothrow @nogc @system
+{
+    fatal("private member join: not available");
 }
 
 private void releaseWave(Wave* wave) nothrow @nogc @system
@@ -921,18 +930,7 @@ public:
         header_.maxCs = header_.done = 1;
         header_.plen = 1;
         header_.call = &runChild!operation;
-        auto wave = &base_.wave;
-        wave.upstream = context.enclosing_;
-        atomicStore!(MemoryOrder.raw)(wave.pending, 1UL); // producer hold
-        atomicStore!(MemoryOrder.raw)(wave.active, 1u);
-        if (wave.upstream !is null)
-            atomicFetchAdd!(MemoryOrder.acq_rel)(wave.upstream.pending, 1UL);
-        else
-        {
-            retainRootCredit(base_.parent.pending); // BEFORE enqueue / visibility
-            base_.parent.hasJoinCredits = true;
-        }
-        base_.service.enqueue(&wave.emittable);
+        publishWave(context);
         return PrivateStartResult.started;
     }
     /// Starts only the listed spawn-order indices. No subset retirement.
@@ -973,19 +971,8 @@ public:
         header_.maxCs = header_.done = 1;
         header_.plen = 1;
         header_.call = &runChild!(operation, true);
-        auto wave = &base_.wave;
-        wave.emittable.emit = &emitSubset;
-        wave.upstream = context.enclosing_;
-        atomicStore!(MemoryOrder.raw)(wave.pending, 1UL);
-        atomicStore!(MemoryOrder.raw)(wave.active, 1u);
-        if (wave.upstream !is null)
-            atomicFetchAdd!(MemoryOrder.acq_rel)(wave.upstream.pending, 1UL);
-        else
-        {
-            retainRootCredit(base_.parent.pending);
-            base_.parent.hasJoinCredits = true;
-        }
-        base_.service.enqueue(&wave.emittable);
+        base_.wave.emittable.emit = &emitSubset;
+        publishWave(context);
         return PrivateStartResult.started;
     }
     PrivateStartResult startFinal(alias operation)(scope ref PrivateContext context)
@@ -994,6 +981,25 @@ public:
         return start!operation(context, true);
     }
 private:
+    // Choose the wave's one immutable credit target and take that credit
+    // BEFORE enqueue / visibility: the enclosing wave, or the parent's join
+    // counter when the wave joins the parent directly (a root today).
+    void publishWave(scope ref PrivateContext context) nothrow @nogc @system
+    {
+        auto wave = &base_.wave;
+        wave.upstream = context.ownJoin_ ? null : context.enclosing_;
+        atomicStore!(MemoryOrder.raw)(wave.pending, 1UL); // producer hold
+        atomicStore!(MemoryOrder.raw)(wave.active, 1u);
+        if (wave.upstream !is null)
+            atomicFetchAdd!(MemoryOrder.acq_rel)(wave.upstream.pending, 1UL);
+        else if (parentIsRoot_)
+        {
+            retainJoinCredit(base_.parent.pending);
+            base_.parent.hasJoinCredits = true;
+        }
+        else retainJoinCredit(base_.parent.childPending);
+        base_.service.enqueue(&wave.emittable);
+    }
     static PrivateChildPark* fromWave(Wave* wave) nothrow @nogc @system
     {
         return cast(PrivateChildPark*) ChildBase.fromWave(wave);
@@ -1034,18 +1040,20 @@ private:
     {
         auto park = fromWave(wave);
         auto upstream = wave.upstream;
-        auto parent = park.base_.parent; // snapshot before final cohort access
+        auto parent = park.base_.parent;
+        immutable parentIsRoot = park.parentIsRoot_; // snapshots before final cohort access
         if (park.retire_) park.count_ = 0;
         version (AntfarmActorTestHooks)
             actorTestPoint(ActorTestPoint.privateWaveBeforeIdlePublish, null);
         atomicStore!(MemoryOrder.rel)(wave.active, 0u); // last park access
         if (upstream !is null) releaseWave(upstream);
-        else
+        else if (parentIsRoot)
         {
             version (AntfarmActorTestHooks)
                 actorTestPoint(ActorTestPoint.privateRootAfterIdleBeforeCredit, null);
             releaseRoot(parent); // final parent access; idle alone does not pin Entry
         }
+        else releaseMember(parent);
     }
     static long runChild(alias operation, bool subset = false)(PayloadHeader*, PayloadBody body, ulong)
         nothrow @nogc @system
