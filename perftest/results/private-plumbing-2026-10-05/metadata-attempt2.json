@@ -1,0 +1,46 @@
+{
+  "base": "370dfbc",
+  "candidate": "cf09780771195db369e570f554fae6f574553023",
+  "allocator": "mimalloc",
+  "mimalloc_version": 30503,
+  "seconds": 3,
+  "repeats": 11,
+  "warmups": 5,
+  "actors": 16384,
+  "batch": 256,
+  "tier": "small",
+  "quota_words": 16384,
+  "huge_pages": false,
+  "profiles": [
+    {
+      "consumers": 0,
+      "cpus": "0"
+    },
+    {
+      "consumers": 6,
+      "cpus": "0,1,2,3,4,5,6"
+    }
+  ],
+  "build_flags": "-O2 -release -d-version=AntfarmMimallocV3 -i",
+  "build_command": "make -C perftest -o ARCHIVE actor_churn_mimalloc MIMALLOC_LIBRARY=ARCHIVE",
+  "path_convention": "BASELINE is an isolated git archive of 370dfbc; ARCHIVE is the read-only prebuilt mimalloc archive from the main checkout.",
+  "modes": "private, private-remote, tree, tree-wait, dtor (Mactor_cycles/s); subset at 1% and 100% (waves/s). No tree-results mode exists in actor_churn.",
+  "compiler": "LDC - the LLVM D compiler (1.43.0):\n  based on DMD v2.113.0 and LLVM 22.1.8\n  built with LDC - the LLVM D compiler (1.43.0)\n  Default target: x86_64-pc-linux-gnu\n  Host CPU: znver3\n  https://dlang.org - https://wiki.dlang.org/LDC\n\n\n  Registered Targets:\n    aarch64     - AArch64 (little endian)\n    aarch64_32  - AArch64 (little endian ILP32)\n    aarch64_be  - AArch64 (big endian)\n    amdgcn      - AMD GCN GPUs\n    arm         - ARM\n    arm64       - ARM64 (little endian)\n    arm64_32    - ARM64 (little endian ILP32)\n    armeb       - ARM (big endian)\n    avr         - Atmel AVR Microcontroller\n    bpf         - BPF (host endian)\n    bpfeb       - BPF (big endian)\n    bpfel       - BPF (little endian)\n    hexagon     - Hexagon\n    lanai       - Lanai\n    loongarch32 - 32-bit LoongArch\n    loongarch64 - 64-bit LoongArch\n    mips        - MIPS (32-bit big endian)\n    mips64      - MIPS (64-bit big endian)\n    mips64el    - MIPS (64-bit little endian)\n    mipsel      - MIPS (32-bit little endian)\n    msp430      - MSP430 [experimental]\n    nvptx       - NVIDIA PTX 32-bit\n    nvptx64     - NVIDIA PTX 64-bit\n    ppc32       - PowerPC 32\n    ppc32le     - PowerPC 32 LE\n    ppc64       - PowerPC 64\n    ppc64le     - PowerPC 64 LE\n    r600        - AMD GPUs HD2XXX-HD6XXX\n    riscv32     - 32-bit RISC-V\n    riscv32be   - 32-bit big endian RISC-V\n    riscv64     - 64-bit RISC-V\n    riscv64be   - 64-bit big endian RISC-V\n    sparc       - Sparc\n    sparcel     - Sparc LE\n    sparcv9     - Sparc V9\n    spirv       - SPIR-V Logical\n    spirv32     - SPIR-V 32-bit\n    spirv64     - SPIR-V 64-bit\n    systemz     - SystemZ\n    thumb       - Thumb\n    thumbeb     - Thumb (big endian)\n    ve          - VE\n    wasm32      - WebAssembly 32-bit\n    wasm64      - WebAssembly 64-bit\n    x86         - 32-bit X86: Pentium-Pro and above\n    x86-64      - 64-bit X86: EM64T and AMD64\n    xcore       - XCore\n",
+  "cpu": "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 80\nmodel name\t: AMD Ryzen 5 5500\nstepping\t: 0\nmicrocode\t: 0xa500014\ncpu MHz\t\t: 3392.881\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 12\ncore id\t\t: 0\ncpu cores\t: 6\napicid\t\t: 0\ninitial apicid\t: 0\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 7186.23\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]",
+  "archive": {
+    "path": "MAIN/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+    "sha256": "551ee9a97e46b331736163a17cb3514b940d57b68cc82206723e0ccc0e8a1bec"
+  },
+  "binaries": {
+    "base": {
+      "path": "BASELINE/perftest/actor_churn_mimalloc",
+      "sha256": "336c751df2bee517ebe658aa21d108d53756ca56de58d268c6904abfed29e139"
+    },
+    "candidate": {
+      "path": "perftest/actor_churn_mimalloc",
+      "sha256": "a52b2531b6237952b0a2fcdae5ea2b3408e92771707b732f97fa734a753aa476"
+    }
+  },
+  "runtime_sha256": "15606d2a56b52d2f2254ee499f83351d0b2163ab67bfcbc43e8fba3c34fba524",
+  "benchmark_sha256": "820900e11d17fd1ae97d4e03461aa4e74fa3c47cc6f8e9eefef1f202a40db4e0"
+}

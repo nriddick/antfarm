@@ -529,3 +529,74 @@ ANTFARM_HUGE_PAGES=0 perftest/actor_churn_mimalloc subset-whole \
 ANTFARM_HUGE_PAGES=0 perftest/actor_churn_mimalloc subset-whole-unreserved \
   16384 3 6 256 5 mimalloc 0,1,2,3,4,5,6 small 16384
 ```
+
+## E2-3 behaviour-neutral plumbing gate (2026-10-05)
+
+Compared the E2-3 plumbing refactor (child Service pointer in the cohort,
+`rootService` accessor, `Emittable`, generic wave credit target,
+`Service.childReturns`) against local main `370dfbc`. LDC 1.43.0
+`-O2 -release`, mimalloc 3.5.3 from the main checkout's read-only prebuilt
+archive, huge pages off, n=16384, batch 256, small tier, quota 16384 words,
+five warmups, three-second windows. Profiles with 0 consumers (CPU 0) and 6
+consumers (CPUs 0–6); base/candidate measurements interleaved within each
+repeat with the order reversing on successive repeats. `tree-results` is
+absent from actor_churn, so it has no gate row. Tests and soak finished
+before measurements; the main checkout was not modified.
+
+**Gate verdict: passed on byte-identical binaries.** The gate table below is
+the clean 11-repeat alternating run (a second clean 7-repeat run agrees on
+all rows, worst −2.16%). Its base and candidate executables —
+`336c751d…` and `a52b2531…` — are bit-for-bit the executables rebuilt at the
+final tip `cf09780` (sha256-verified; the tip adds only documentation and
+commit messages over `cbd3093`, so no compiled source differs). All 14
+mode-configs pass the −3% median threshold; the worst regression is −2.64%
+(subset k=1%, 0 consumers) and the largest gain is +0.94%.
+
+| Mode | 0 cons. base → E2-3 | Change | 6 cons. base → E2-3 | Change |
+| --- | ---: | ---: | ---: | ---: |
+| `private` | 27.642 → 27.548 | -0.34% | 20.953 → 20.946 | -0.03% |
+| `private-remote` | 27.184 → 26.962 | -0.81% | 12.357 → 12.418 | +0.50% |
+| `tree` | 54.917 → 54.472 | -0.81% | 39.030 → 39.396 | +0.94% |
+| `tree-wait` | 54.445 → 54.186 | -0.48% | 38.915 → 39.222 | +0.79% |
+| `dtor` | 27.078 → 27.042 | -0.13% | 21.289 → 21.430 | +0.66% |
+| subset k=1% | 556,610 → 541,907 waves/s | -2.64% | 231,181 → 232,560 waves/s | +0.60% |
+| subset k=100% | 6,725 → 6,645 waves/s | -1.19% | 4,546 → 4,501 waves/s | -1.00% |
+
+The one clean fresh-at-tip profile (attempt 2, consumers=0, bases inside the
+established ranges) also passes all seven mode-configs (worst −1.81%) and
+reports two gains above +3% — `tree` +4.93% (55.341 → 58.068) and
+`tree-wait` +3.15% — which are reported, not failures, and do not change the
+verdict.
+
+Three fresh 11-repeat attempts against the tip itself were invalidated by
+erratic external host CPU load (loadavg spikes to ~7–15 from outside the
+measurement container): base and candidate depressed together far outside
+the clean runs' variance, with same-repeat interleaved pairs diverging
+exactly where bursts land. Per the agreed rule a burst depressing both
+versions alike invalidates an attempt rather than failing the candidate;
+attempt 2's clean first profile passes all seven mode-configs (worst
+−1.81%), and attempts were capped at three once the host stayed erratic.
+A dedicated re-measurement at the tip can revisit this when the host is
+quiet; it cannot change the binaries, which are already identical to the
+gate's. The known startSubset-at-k=100% overhead versus whole waves
+(21.71% / 13.98% in E2-2) is unchanged by the plumbing: no cheap
+reduction appeared, and none was implemented.
+
+[Protocol, file map and assessment](results/private-plumbing-2026-10-05/README.md),
+[the 7-repeat run](results/private-plumbing-2026-10-05/runs-run1.jsonl),
+[the 11-repeat summary](results/private-plumbing-2026-10-05/summary-cbd3093-11rep.txt),
+[contaminated attempts](results/private-plumbing-2026-10-05/attempt1-summary.txt),
+[mutation evidence](results/private-plumbing-2026-10-05/mutations.md),
+[tip checks](results/private-plumbing-2026-10-05/check-tip.txt) and
+[per-commit builds](results/private-plumbing-2026-10-05/commit-builds.txt)
+retain the evidence. Reproduce with the two matching binaries and the
+prebuilt archive (base from an isolated `git archive 370dfbc`):
+
+```sh
+make -C perftest -o MAIN/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a \
+  actor_churn_mimalloc \
+  MIMALLOC_LIBRARY=MAIN/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a
+python3 perftest/results/private-plumbing-2026-10-05/measure.py \
+  BASELINE/perftest/actor_churn_mimalloc perftest/actor_churn_mimalloc \
+  MAIN/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a 11
+```

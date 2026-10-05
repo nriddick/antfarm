@@ -1,0 +1,296 @@
+[
+  {
+    "mode": "private",
+    "percent": null,
+    "consumers": 0,
+    "metric": "Mactor_cycles/s",
+    "base": 21.531168,
+    "candidate": 21.509966,
+    "range": {
+      "base": [
+        20.19634,
+        27.382969
+      ],
+      "candidate": [
+        19.119146,
+        27.614924
+      ]
+    },
+    "change_percent": -0.09847120230542794,
+    "passed": true,
+    "gain_over_3": false
+  },
+  {
+    "mode": "private-remote",
+    "percent": null,
+    "consumers": 0,
+    "metric": "Mactor_cycles/s",
+    "base": 20.701392,
+    "candidate": 19.963639,
+    "range": {
+      "base": [
+        13.661647,
+        27.735936
+      ],
+      "candidate": [
+        10.446443,
+        28.083347
+      ]
+    },
+    "change_percent": -3.5637845029937942,
+    "passed": false,
+    "gain_over_3": false
+  },
+  {
+    "mode": "tree",
+    "percent": null,
+    "consumers": 0,
+    "metric": "Mactor_cycles/s",
+    "base": 34.548835,
+    "candidate": 37.846311,
+    "range": {
+      "base": [
+        27.195919,
+        55.125192
+      ],
+      "candidate": [
+        34.973477,
+        55.781539
+      ]
+    },
+    "change_percent": 9.54439129423612,
+    "passed": true,
+    "gain_over_3": true
+  },
+  {
+    "mode": "tree-wait",
+    "percent": null,
+    "consumers": 0,
+    "metric": "Mactor_cycles/s",
+    "base": 35.452208,
+    "candidate": 36.09847,
+    "range": {
+      "base": [
+        31.870098,
+        55.670772
+      ],
+      "candidate": [
+        32.707842,
+        55.354368
+      ]
+    },
+    "change_percent": 1.8229104376235261,
+    "passed": true,
+    "gain_over_3": false
+  },
+  {
+    "mode": "dtor",
+    "percent": null,
+    "consumers": 0,
+    "metric": "Mactor_cycles/s",
+    "base": 20.765162,
+    "candidate": 20.751862,
+    "range": {
+      "base": [
+        12.342289,
+        27.145306
+      ],
+      "candidate": [
+        19.035688,
+        27.253675
+      ]
+    },
+    "change_percent": -0.06404958458788856,
+    "passed": true,
+    "gain_over_3": false
+  },
+  {
+    "mode": "subset",
+    "percent": 1,
+    "consumers": 0,
+    "metric": "waves/s",
+    "base": 388979.271723,
+    "candidate": 355844.040592,
+    "range": {
+      "base": [
+        286765.995371,
+        566188.973767
+      ],
+      "candidate": [
+        326960.843386,
+        555372.636938
+      ]
+    },
+    "change_percent": -8.518508193052575,
+    "passed": false,
+    "gain_over_3": false
+  },
+  {
+    "mode": "subset",
+    "percent": 100,
+    "consumers": 0,
+    "metric": "waves/s",
+    "base": 4529.64023,
+    "candidate": 4873.589318,
+    "range": {
+      "base": [
+        4342.645177,
+        6917.096139
+      ],
+      "candidate": [
+        4266.075781,
+        6891.058412
+      ]
+    },
+    "change_percent": 7.593298154719008,
+    "passed": true,
+    "gain_over_3": true
+  },
+  {
+    "mode": "private",
+    "percent": null,
+    "consumers": 6,
+    "metric": "Mactor_cycles/s",
+    "base": 16.283779,
+    "candidate": 15.903101,
+    "range": {
+      "base": [
+        5.209228,
+        17.251183
+      ],
+      "candidate": [
+        5.70339,
+        17.067298
+      ]
+    },
+    "change_percent": -2.337774296740336,
+    "passed": true,
+    "gain_over_3": false
+  },
+  {
+    "mode": "private-remote",
+    "percent": null,
+    "consumers": 6,
+    "metric": "Mactor_cycles/s",
+    "base": 9.006018,
+    "candidate": 9.435166,
+    "range": {
+      "base": [
+        3.834765,
+        10.291298
+      ],
+      "candidate": [
+        3.61325,
+        10.671627
+      ]
+    },
+    "change_percent": 4.7651248309741545,
+    "passed": true,
+    "gain_over_3": true
+  },
+  {
+    "mode": "tree",
+    "percent": null,
+    "consumers": 6,
+    "metric": "Mactor_cycles/s",
+    "base": 26.457742,
+    "candidate": 25.235237,
+    "range": {
+      "base": [
+        10.165307,
+        35.114258
+      ],
+      "candidate": [
+        9.324832,
+        32.114702
+      ]
+    },
+    "change_percent": -4.6205946070530075,
+    "passed": false,
+    "gain_over_3": false
+  },
+  {
+    "mode": "tree-wait",
+    "percent": null,
+    "consumers": 6,
+    "metric": "Mactor_cycles/s",
+    "base": 26.807842,
+    "candidate": 27.982868,
+    "range": {
+      "base": [
+        7.9866,
+        32.017005
+      ],
+      "candidate": [
+        7.825934,
+        31.805227
+      ]
+    },
+    "change_percent": 4.383142813211149,
+    "passed": true,
+    "gain_over_3": true
+  },
+  {
+    "mode": "dtor",
+    "percent": null,
+    "consumers": 6,
+    "metric": "Mactor_cycles/s",
+    "base": 15.244205,
+    "candidate": 15.637962,
+    "range": {
+      "base": [
+        6.635374,
+        16.971565
+      ],
+      "candidate": [
+        6.334315,
+        16.774847
+      ]
+    },
+    "change_percent": 2.582994652722137,
+    "passed": true,
+    "gain_over_3": false
+  },
+  {
+    "mode": "subset",
+    "percent": 1,
+    "consumers": 6,
+    "metric": "waves/s",
+    "base": 173883.898162,
+    "candidate": 171482.15402,
+    "range": {
+      "base": [
+        71212.328165,
+        180377.269791
+      ],
+      "candidate": [
+        64904.295392,
+        192570.536232
+      ]
+    },
+    "change_percent": -1.3812343565948848,
+    "passed": true,
+    "gain_over_3": false
+  },
+  {
+    "mode": "subset",
+    "percent": 100,
+    "consumers": 6,
+    "metric": "waves/s",
+    "base": 3357.905226,
+    "candidate": 3349.691179,
+    "range": {
+      "base": [
+        1038.979493,
+        3753.562424
+      ],
+      "candidate": [
+        1291.64139,
+        3574.796896
+      ]
+    },
+    "change_percent": -0.24461819042417288,
+    "passed": true,
+    "gain_over_3": false
+  }
+]
