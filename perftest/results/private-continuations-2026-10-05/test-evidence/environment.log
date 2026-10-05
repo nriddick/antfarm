@@ -1,0 +1,26 @@
+ldc2 --version
+LDC - the LLVM D compiler (1.43.0):
+  based on DMD v2.113.0 and LLVM 22.1.8
+  built with LDC - the LLVM D compiler (1.43.0)
+  Default target: x86_64-pc-linux-gnu
+  Host CPU: znver3
+  https://dlang.org - https://wiki.dlang.org/LDC
+
+
+  Registered Targets:
+
+dmd --version
+DMD64 D Compiler v2.113.0
+Copyright (C) 1999-2026 by The D Language Foundation, All Rights Reserved written by Walter Bright
+
+git rev-parse HEAD
+632c7f6a36c11ff7f8310f7280c3fbfbc01e51de
+
+git branch --show-current
+feature/private-continuations
+
+Restored canonical runtime SHA256: 34abc0bc615910d574308c91c1d633f995f59d8aa45bed20d08f01059145929d
+
+Final test source SHA256: 2e28c826ad97f5cba5d0ce7128a82307c8d788bbe9880a9e2b31e738b12e0581
+
+Follow-up C4 correction (2026-10-05): final test SHA256 6b411bb2b1a6e2576e0fb48ace6e27e72487d797eed454421266906000b5e33d; runtime unchanged SHA256 34abc0bc615910d574308c91c1d633f995f59d8aa45bed20d08f01059145929d. Final post-fix commands/results: late-owner-investigation/README.md and validation.json.

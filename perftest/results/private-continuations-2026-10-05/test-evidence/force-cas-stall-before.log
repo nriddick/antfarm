@@ -1,0 +1,17 @@
+$ ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/cas_stall_probe.d antfarm.d antfarm_allocation.d actors/actor.d actors/wave.d actors/private_actor.d -of=/tmp/e24-review-revision/forced-cas-stall
+BUILD EXIT 0
+RUN 1 $ /tmp/e24-review-revision/forced-cas-stall cont-return-cas-retry
+FORCED A CAS before pump returns: firstAtCas=1 secondStarted=0 secondReturned=0 firstGo=0
+FAIL cont first CAS release:0
+FAIL cont competing CAS published:0
+EXIT -6
+RUN 2 $ /tmp/e24-review-revision/forced-cas-stall cont-return-cas-retry
+FORCED A CAS before pump returns: firstAtCas=1 secondStarted=0 secondReturned=0 firstGo=0
+FAIL cont first CAS release:0
+FAIL cont competing CAS published:0
+EXIT -6
+RUN 3 $ /tmp/e24-review-revision/forced-cas-stall cont-return-cas-retry
+FORCED A CAS before pump returns: firstAtCas=1 secondStarted=0 secondReturned=0 firstGo=0
+FAIL cont first CAS release:0
+FAIL cont competing CAS published:0
+EXIT -6

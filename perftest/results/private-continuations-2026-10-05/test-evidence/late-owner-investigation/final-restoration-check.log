@@ -1,0 +1,28 @@
+Runtime SHA256: 34abc0bc615910d574308c91c1d633f995f59d8aa45bed20d08f01059145929d
+Test SHA256: 6b411bb2b1a6e2576e0fb48ace6e27e72487d797eed454421266906000b5e33d
+Run: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 120 private_actor_tests/private_actor_tests_tsan cont
+Exit: 0
+External elapsed: 0.396s
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+Run: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 120 private_actor_tests/private_actor_tests_tsan cont-activation-first
+Exit: 0
+External elapsed: 0.012s
+Run: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 120 private_actor_tests/private_actor_tests_tsan cont-seal-final-owner
+Exit: 0
+External elapsed: 0.052s
+Run: git diff --check
+Exit: 0
+Run: git status --short
+Exit: 0
+ M ROADMAP.md
+ M actors/ACTOR_MEMORYORDER.md
+ M actors/ACTOR_ROADMAP.md
+ M actors/PRIVATE_ACTORS.md
+ M actors/actor.d
+ M actors/private_actor.d
+ M private_actor_tests/extract_doc_examples.py
+ M private_actor_tests/main.d
+?? perftest/results/private-continuations-2026-10-05/
+Run: git rev-parse HEAD
+Exit: 0
+632c7f6a36c11ff7f8310f7280c3fbfbc01e51de

@@ -1,0 +1,11 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1234,7 +1234,7 @@
+         else if (parentIsRoot) releaseRoot(parent);
+         else
+         {
+-            releaseMember(parent); // final parent access; idle alone does not pin Entry
++            atomicFetchSub!(MemoryOrder.acq_rel)(parent.childPending, 1u); // no final-owner handling
+             version (AntfarmActorTestHooks)
+                 actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
+         }

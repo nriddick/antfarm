@@ -1,0 +1,87 @@
+Historical log excerpt: 206 original lines, 6547 bytes.
+SHA-256 of complete original: 8dd0a2e1b1c229460fd9d32ec14dbacb0823556d9a0d8951a3f7f5dde3915914
+First 40 and last 40 lines retained; bulk output removed.
+
+Test SHA256: 2e28c826ad97f5cba5d0ce7128a82307c8d788bbe9880a9e2b31e738b12e0581
+Runtime SHA256: 34abc0bc615910d574308c91c1d633f995f59d8aa45bed20d08f01059145929d
+Affinity: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+Stress: 16 concurrent python3 -c "while True: pass" processes
+Run: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 35 private_actor_tests/private_actor_tests_tsan cont-activation-first
+Run 1: exit=0 elapsed=0.048s
+Run 2: exit=0 elapsed=0.051s
+Run 3: exit=0 elapsed=0.047s
+Run 4: exit=0 elapsed=0.056s
+Run 5: exit=0 elapsed=0.048s
+Run 6: exit=0 elapsed=0.049s
+Run 7: exit=0 elapsed=0.050s
+Run 8: exit=0 elapsed=0.041s
+Run 9: exit=0 elapsed=0.044s
+Run 10: exit=0 elapsed=0.052s
+Run 11: exit=0 elapsed=0.062s
+Run 12: exit=0 elapsed=0.047s
+Run 13: exit=0 elapsed=0.049s
+Run 14: exit=0 elapsed=0.046s
+Run 15: exit=0 elapsed=0.045s
+Run 16: exit=0 elapsed=0.051s
+Run 17: exit=0 elapsed=0.055s
+Run 18: exit=0 elapsed=0.040s
+Run 19: exit=0 elapsed=0.039s
+Run 20: exit=0 elapsed=0.047s
+Run 21: exit=0 elapsed=0.040s
+Run 22: exit=0 elapsed=0.048s
+Run 23: exit=0 elapsed=0.048s
+Run 24: exit=0 elapsed=0.049s
+Run 25: exit=0 elapsed=0.047s
+Run 26: exit=0 elapsed=0.040s
+Run 27: exit=0 elapsed=0.046s
+Run 28: exit=0 elapsed=0.061s
+Run 29: exit=0 elapsed=0.045s
+Run 30: exit=0 elapsed=0.044s
+Run 31: exit=0 elapsed=0.055s
+Run 32: exit=0 elapsed=0.041s
+Run 33: exit=0 elapsed=0.044s
+Run 34: exit=0 elapsed=0.051s
+Run 35: exit=0 elapsed=0.044s
+
+... 126 middle lines omitted ...
+
+Run 162: exit=0 elapsed=0.051s
+Run 163: exit=0 elapsed=0.070s
+Run 164: exit=0 elapsed=0.076s
+Run 165: exit=0 elapsed=0.053s
+Run 166: exit=0 elapsed=0.046s
+Run 167: exit=0 elapsed=0.048s
+Run 168: exit=0 elapsed=0.062s
+Run 169: exit=0 elapsed=0.040s
+Run 170: exit=0 elapsed=0.054s
+Run 171: exit=0 elapsed=0.056s
+Run 172: exit=0 elapsed=0.052s
+Run 173: exit=0 elapsed=0.051s
+Run 174: exit=0 elapsed=0.060s
+Run 175: exit=0 elapsed=0.062s
+Run 176: exit=0 elapsed=0.065s
+Run 177: exit=0 elapsed=0.051s
+Run 178: exit=0 elapsed=0.063s
+Run 179: exit=0 elapsed=0.047s
+Run 180: exit=0 elapsed=0.054s
+Run 181: exit=0 elapsed=0.060s
+Run 182: exit=0 elapsed=0.083s
+Run 183: exit=0 elapsed=0.044s
+Run 184: exit=0 elapsed=0.044s
+Run 185: exit=0 elapsed=0.054s
+Run 186: exit=0 elapsed=0.044s
+Run 187: exit=0 elapsed=0.047s
+Run 188: exit=0 elapsed=0.044s
+Run 189: exit=0 elapsed=0.043s
+Run 190: exit=0 elapsed=0.057s
+Run 191: exit=0 elapsed=0.059s
+Run 192: exit=0 elapsed=0.063s
+Run 193: exit=0 elapsed=0.069s
+Run 194: exit=0 elapsed=0.083s
+Run 195: exit=0 elapsed=0.063s
+Run 196: exit=0 elapsed=0.054s
+Run 197: exit=0 elapsed=0.054s
+Run 198: exit=0 elapsed=0.048s
+Run 199: exit=0 elapsed=0.060s
+Run 200: exit=0 elapsed=0.042s
+Total elapsed: 11.002s; failed=False

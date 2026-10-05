@@ -145,6 +145,11 @@ version (AntfarmActorTestHooks)
         privateRootCreditBeforeRelease,
         privateRootAfterIdleBeforeCredit,
         privateRootReadyBeforeCas,
+        privateChildCustodyBeforeRelease,
+        privateChildCustodyAfterRelease,
+        privateChildReturnBeforeCas,
+        privateResumeBeforeUnschedule,
+        privateResumeAfterUnschedule,
         readyDetached,
         retirementIdleObserved,
     }

@@ -1,0 +1,16 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1266,6 +1266,13 @@
+                 auto disposition = step.disposition_;
+             else
+                 auto disposition = step;
++            static if (kind == OpKind.resultContinuation)
++                if (disposition == PrivateChildDisposition.waitChildren)
++                {
++                    static if (subset)
++                        park.writeResult(park.sel_[park.capacity_ + (entry - park.entries_)], step.value_);
++                    else park.writeResult(entry - park.entries_, step.value_);
++                }
+             ChildStep next;
+             if (disposition == PrivateChildDisposition.done)
+             {

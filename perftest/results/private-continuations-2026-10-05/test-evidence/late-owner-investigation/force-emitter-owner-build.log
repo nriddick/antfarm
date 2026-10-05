@@ -1,0 +1,3 @@
+Runtime SHA256: 34abc0bc615910d574308c91c1d633f995f59d8aa45bed20d08f01059145929d
+Build: ldc2 -g -O1 -fsanitize=thread -d-version=TSan -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I. /tmp/private_late_owner_diag.d antfarm.d antfarm_allocation.d actors/actor.d actors/wave.d actors/private_actor.d -of=/tmp/private_late_owner_diag
+Exit: 0

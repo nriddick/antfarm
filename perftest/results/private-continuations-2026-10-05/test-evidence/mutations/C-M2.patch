@@ -1,0 +1,12 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1266,6 +1266,9 @@
+                 auto disposition = step.disposition_;
+             else
+                 auto disposition = step;
++            if (disposition == PrivateChildDisposition.waitChildren
++                && atomicLoad!(MemoryOrder.acq)(entry.childPending) == 1)
++                return runChild!(operation, subset)(null, body, 0);
+             ChildStep next;
+             if (disposition == PrivateChildDisposition.done)
+             {

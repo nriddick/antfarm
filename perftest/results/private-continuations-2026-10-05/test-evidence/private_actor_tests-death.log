@@ -1,0 +1,15 @@
+Command: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 240 private_actor_tests/private_actor_tests death
+Exit: 0
+Elapsed: 5.411s
+PASS fatal sample dies nonzero with expected stderr message
+PASS wrong-parent and default authority are fatal
+PASS ports early read, wrong-parent and default-context results are fatal
+PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal
+PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal
+PASS entry-word-death child service read is fatal in debug builds
+PASS invalid configured and per-call batch limits are fatal
+PASS destroy-live and finish-with-active-child are fatal
+PASS cross-Farm token write, flush, and unregister are fatal
+PASS E1 join counter exhaustion is fatal after the last legal retain
+PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths
+PASS debug reentrancy guard

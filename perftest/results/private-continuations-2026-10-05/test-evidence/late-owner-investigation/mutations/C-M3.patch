@@ -1,0 +1,13 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1295,7 +1295,9 @@
+                 atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
+                 entry.childFlags = childHolding;
+             }
+-            releaseMember(entry); // custody release: final Entry access unless owner
++            version (AntfarmActorTestHooks)
++                actorTestPoint(ActorTestPoint.privateChildCustodyBeforeRelease, null);
++            atomicFetchSub!(MemoryOrder.acq_rel)(entry.childPending, 1u); // no final-owner handling
+             version (AntfarmActorTestHooks)
+                 actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
+         }

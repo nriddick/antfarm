@@ -1,0 +1,8 @@
+Canonical runtime SHA256: cde26e9eae2af02f24685784ccd0d44f1204bf38e2505538dba4b64c0b0b6ad9
+Build: ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I. private_actor_tests/main.d antfarm.d antfarm_allocation.d actors/actor.d actors/wave.d actors/private_actor.d -of=/tmp/private-continuation-mutant-C-M12
+Build exit: 0
+Run: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 45 /tmp/private-continuation-mutant-C-M12 cont-return-cas-retry
+Exit: -6
+Build+run elapsed: 20.605s
+FAIL cont first CAS retry completed before drain:0
+timeout: the monitored command dumped core

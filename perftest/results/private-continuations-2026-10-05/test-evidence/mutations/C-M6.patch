@@ -1,0 +1,11 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -339,7 +339,7 @@
+         case ChildStep.done:
+             auto wave = member.enclosing;
+             member.childFlags = 0;
+-            releaseWave(wave); // drop the activation hold as the last owner access
++            // lost activation hold release
+             break;
+     }
+ }

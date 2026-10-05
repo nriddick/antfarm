@@ -1,0 +1,87 @@
+Historical log excerpt: 186 original lines, 8427 bytes.
+SHA-256 of complete original: dcf94c83633beda4b208f96ef4279f48d5005d2ff695de359e4f387a6fc45625
+First 40 and last 40 lines retained; bulk output removed.
+
+Command repeated 20 times for each binary: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 60 <binary> cont
+private_actor_tests repetition 1: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 2: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 3: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 4: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 5: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 6: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 7: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 8: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 9: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 10: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 11: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 12: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests repetition 13: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+
+... 106 middle lines omitted ...
+
+private_actor_tests_tsan repetition 8: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 9: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 10: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 11: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 12: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 13: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 14: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 15: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 16: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 17: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 18: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 19: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan repetition 20: exit=0
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+
+private_actor_tests_tsan: 20/20 passed; elapsed=7.177s

@@ -1,0 +1,11 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -319,7 +319,7 @@
+             actorTestPoint(ActorTestPoint.privateChildReturnBeforeCas, null);
+         if (cas!(MemoryOrder.rel, MemoryOrder.raw)(returns, head, cast(shared(Entry)*) member))
+             return; // final Entry AND Service access
+-        head = atomicLoad!(MemoryOrder.raw)(*returns);
++        // failed CAS keeps stale expected head
+     }
+ }
+ 

@@ -1004,6 +1004,7 @@ void deathHarness()
         check(diedWithMessage("cross-farm-unregister", "antfarm fatal: unregister token from another farm"));
         writeln("PASS cross-Farm token write, flush, and unregister are fatal");
         e1CounterExhaustionDeath();
+        contDeath();
         version (assert)
         {
             check(diedWithMessage("reentrant-spawn", "antfarm fatal: private root park: reentrant entry"));
@@ -2446,6 +2447,10 @@ ulong portsThreadId() nothrow @nogc @system { return cast(ulong) &portsThreadMar
 struct PItem { ulong input; }
 struct PNotPod { int x; this(this) {} }
 struct PWide { ulong[16] words; }
+version (assert) enum pWideStorage = PWide.sizeof + 1;
+else enum pWideStorage = PWide.sizeof;
+version (assert) enum ulongStorage = ulong.sizeof + 1;
+else enum ulongStorage = ulong.sizeof;
 ulong pSquare(scope ref PrivateBorrow!PItem, scope ref PrivateContext) nothrow @nogc @system { return 0; }
 void pVoidOp(scope ref PrivateBorrow!PItem, scope ref PrivateContext) nothrow @nogc @system {}
 uint pWrongType(scope ref PrivateBorrow!PItem, scope ref PrivateContext) nothrow @nogc @system { return 0; }
@@ -2493,9 +2498,10 @@ static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNo
 // allocation sizes in portsAllocationFailures.
 static if (size_t.sizeof == 8)
 {
-    static assert(PVoidCohort.sizeof == 288);
+    static assert(PVoidCohort.sizeof == 336);
     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
     // Service.childReturns (E2-3) accounts for one word of both.
+    // E2-4 reserves 48 more bytes in ChildBase for the resume descriptor/FIFO.
     version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 176);
     else static assert(PrivateRootPark!(State, repeat).sizeof == 168);
 }
@@ -3486,7 +3492,7 @@ PrivateRootDisposition paStep(scope ref PrivateBorrow!PaRoot b, scope ref Privat
         auto typed = ctx.createChildren!(PMember, PWide)(8);
         namedCheck(typed !is null && atomicLoad(log.requests) == 3, "ports result cohort makes three allocations");
         namedCheck(log.bytes[0] == PrivateChildPark!(PMember, PWide).sizeof && log.bytes[1] == 8 * 40
-            && log.bytes[2] == 8 * PWide.sizeof, "ports result cohort allocation sizes");
+            && log.bytes[2] == 8 * pWideStorage, "ports result cohort allocation sizes");
     }
     immutable allocated = atomicLoad(counts.allocated);
     immutable freed = atomicLoad(counts.freed);
@@ -4360,7 +4366,7 @@ void dtorRecursive(PrivateRootReclamation reclaim)(ubyte mode)
 
 // ---- D6: result slot is written before the destructor runs
 // Selector: dtor-results. The allocator records the base of the cohort's
-// result array (the unique request of capacity * R.sizeof bytes). A member's
+// result array (capacity * R.sizeof, plus one debug write tag/member). A member's
 // destructor, running inside its own final dispatch, requires its slot to
 // already hold the operation's result.
 // Catching mutation:
@@ -4368,7 +4374,7 @@ void dtorRecursive(PrivateRootReclamation reclaim)(ubyte mode)
 //        then stores `park.results_[entry - park.entries_] = result`: the
 //        member's destructor sees the zeroed slot: "dtor-results slot written
 //        before ~T". (Exact edit in the task report.)
-enum dtSlotCapacity = 9; // 72 bytes: no other request has this size
+enum dtSlotCapacity = 9; // 72 bytes release / 81 debug: unique allocation size
 struct DtSlotAlloc { Counts counts; size_t slotBytes; shared size_t hits; shared ulong* base; }
 __gshared DtSlotAlloc* dtSlotProbe;
 void* dtSlotAllocate(void* ctx, size_t bytes, size_t alignment) nothrow @nogc @system
@@ -4422,7 +4428,8 @@ void dtorResults(PrivateRootReclamation reclaim)()
     auto h = DtHarness(2);
     scope(exit) h.close();
     DtSlotAlloc alloc;
-    alloc.slotBytes = dtSlotCapacity * ulong.sizeof;
+    version (assert) alloc.slotBytes = dtSlotCapacity * (ulong.sizeof + 1);
+    else alloc.slotBytes = dtSlotCapacity * ulong.sizeof;
     dtSlotProbe = &alloc;
     scope(exit) dtSlotProbe = null;
     auto park = PrivateRootPark!(DtSlotRoot, dtSlotStep, reclaim).create(h.farm, 1, 1,
@@ -5539,7 +5546,7 @@ PrivateRootDisposition sfStep(scope ref PrivateBorrow!SfRoot b, scope ref Privat
         atomicStore(log.requests, cast(size_t) 0);
         auto typed = ctx.createChildren!(SbMember, ulong)(8, subsets);
         namedCheck(typed !is null && atomicLoad(log.requests) == 4, "subset alloc reserved result cohort makes four allocations");
-        namedCheck(log.bytes[0] == SbCohort.sizeof && log.bytes[1] == 8 * 40 && log.bytes[2] == 8 * ulong.sizeof
+        namedCheck(log.bytes[0] == SbCohort.sizeof && log.bytes[1] == 8 * 40 && log.bytes[2] == 8 * ulongStorage
             && log.bytes[3] == 8 * 2 * uint.sizeof, "subset alloc result cohort allocation sizes");
     }
     immutable allocated = atomicLoad(counts.allocated);
@@ -6155,8 +6162,942 @@ void phaseEntryWord()
     }
 }
 
+// ---- E2-4 continuations -----------------------------------------------------
+// Raw barriers below control scheduling only. The runtime join/return/table
+// chains must carry actor writes; no test release/acquire publishes them.
+struct CtControl
+{
+    uint[256] calls, destroyed;
+    ulong[256] writes;
+    uint width = 2, depth = 2;
+    ulong emitter;
+    }
+struct CtNode
+{
+    CtControl* c;
+    PrivateChildPark!(CtNode, ulong)* children;
+    uint id, depth, phase;
+    ~this() nothrow @nogc @system
+    {
+        if (c is null) return; // moved-from caller values
+        namedCheck(portsThreadId() != c.emitter, "cont stored destructor on consumer");
+        foreach (i; 0 .. (depth ? c.width : 0))
+            namedCheck(c.destroyed[id * c.width + i + 1] == 1, "cont post-order destructor");
+        namedCheck(++c.destroyed[id] == 1, "cont destructor exactly once");
+    }
+}
+PrivateChildStep!ulong ctFold(scope ref PrivateBorrow!CtNode b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto n = &b.value(); auto c = n.c;
+    ++c.calls[n.id];
+    if (!n.depth) { c.writes[n.id] = portsValue(1, n.id); return typeof(return).done(c.writes[n.id]); }
+    if (n.phase++ == 0)
+    {
+        n.children = ctx.createChildren!(CtNode, ulong)(c.width);
+        namedCheck(n.children !is null, "cont tree children create");
+        foreach (i; 0 .. c.width)
+            check(n.children.spawn(ctx, CtNode(c, null, n.id * c.width + i + 1, n.depth - 1)) == PrivateSpawnResult.spawned);
+        check(n.children.startFinal!ctFold(ctx) == PrivateStartResult.started);
+        return typeof(return).waitChildren();
+    }
+    ulong sum; foreach (v; n.children.results(ctx)) sum += v;
+    c.writes[n.id] = sum;
+    return typeof(return).done(sum);
+}
+struct CtRoot { CtControl* c; PrivateChildPark!(CtNode, ulong)* children; uint phase; }
+PrivateRootDisposition ctRoot(scope ref PrivateBorrow!CtRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto r = &b.value(); auto c = r.c;
+    if (r.phase++ == 0)
+    {
+        r.children = ctx.createChildren!(CtNode, ulong)(1);
+        check(r.children !is null);
+        check(r.children.spawn(ctx, CtNode(c, null, 0, c.depth)) == PrivateSpawnResult.spawned);
+        check(r.children.startFinal!ctFold(ctx) == PrivateStartResult.started);
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto values = r.children.results(ctx);
+    uint total = c.width == 1 ? c.depth + 1 : (1u << (c.depth + 1)) - 1;
+    ulong expected;
+    if (c.width == 1) expected = portsValue(1, c.depth);
+    else foreach (i; total / 2 .. total) expected += portsValue(1, i);
+    namedCheck(values.length == 1 && values[0] == expected && c.writes[0] == expected, "cont tree independent leaf sum");
+    check(c.destroyed[0] == 1);
+    check(r.children.startFinal!ctFold(ctx) == PrivateStartResult.empty);
+    return PrivateRootDisposition.finish;
+}
+// C1/C7/C12: C-M1 loses the resume; C-M7b calls the op on cleanup.
+void contTree(PrivateRootReclamation reclaim)(uint depth = 2, uint width = 2)
+{
+    Counts counts; CtControl c; c.depth = depth; c.width = width; c.emitter = portsThreadId();
+    auto farm = AntFarm.create(); scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
+    auto workers = new Workers(farm, 5); scope(exit) workers.join();
+    auto park = PrivateRootPark!(CtRoot, ctRoot, reclaim).create(farm, 1, 64, policy(counts));
+    check(park.spawn(CtRoot(&c)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 15.seconds;
+    while (park.live) { park.pump(token); namedCheck(MonoTime.currTime < deadline, "cont tree completion deadline"); }
+    uint total = width == 1 ? depth + 1 : (1u << (depth + 1)) - 1;
+    foreach (i; 0 .. total)
+    {
+        check(c.destroyed[i] == 1);
+        check(c.calls[i] == (i >= total / 2 && width == 2 || i == depth && width == 1 ? 1 : 2));
+    }
+    park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
+}
+struct CyControl { uint calls; ulong value; }
+struct CyMember { CyControl* c; uint phase; }
+uint contDepth; // TLS: inline recursive dispatch must fail
+PrivateChildDisposition cyYield(scope ref PrivateBorrow!CyMember b, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    namedCheck(++contDepth == 1, "cont yield never inline"); scope(exit) --contDepth;
+    ++b.value.c.calls;
+    namedCheck(b.value.c.value == b.value.phase, "cont prior activation visible");
+    b.value.c.value = ++b.value.phase;
+    return b.value.phase == 4 ? PrivateChildDisposition.done : PrivateChildDisposition.waitChildren;
+}
+struct CyRoot { CyControl* c; PrivateChildPark!CyMember* members; uint phase; }
+PrivateRootDisposition cyRoot(scope ref PrivateBorrow!CyRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    if (b.value.phase++ == 0)
+    {
+        b.value.members = ctx.createChildren!CyMember(1);
+        check(b.value.members.spawn(ctx, CyMember(b.value.c)) == PrivateSpawnResult.spawned);
+        check(b.value.members.start!cyYield(ctx) == PrivateStartResult.started);
+        return PrivateRootDisposition.waitChildren;
+    }
+    check(b.value.c.calls == 4 && b.value.c.value == 4);
+    return PrivateRootDisposition.finish;
+}
+// C2: C-M2 inline re-call violates the later-pump observation.
+void contYield(PrivateRootReclamation reclaim)()
+{
+    Counts counts; CyControl c;
+    auto farm = AntFarm.create(); scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
+    ConsumerView view; check(view.subscribe(farm) >= 0); scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(CyRoot, cyRoot, reclaim).create(farm, 1, 64, policy(counts));
+    check(park.spawn(CyRoot(&c)) == PrivateSpawnResult.spawned);
+    park.pump(token); while (view.consumeNext()) {}
+    foreach (expected; 1 .. 5)
+    {
+        park.pump(token); while (view.consumeNext()) {}
+        namedCheck(c.calls == expected, "cont yield exactly one activation per pump");
+        while (view.consumeNext()) {}
+        check(c.calls == expected);
+    }
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live) { park.pump(token); while (view.consumeNext()) {} check(MonoTime.currTime < deadline); }
+    park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
+}
+enum CiMode { early, late, hold, lateHold, done, finalDone, beforeP, afterP, overflow, serviceWord, finishSuspended }
+struct CiControl
+{
+    CiMode mode;
+    shared uint midCalls, leafArrived, leafGo, custodyReleased, hookArrived, hookGo;
+    shared uint activeSeen, rootDestroyed, midDestroyed, leafDestroyed, returnCalls, leafReturned, midReturned;
+    ulong value, result;
+    ulong emitter; bool seal;
+    shared uint emitterReturns, pPaused, descendantReleased, armPolling, pollEntered, midFrees, leafFrees;
+    void* midState; void* leafState;
+}
+// Identify actor state allocations by the addresses observed in callbacks,
+// so root metadata reclamation does not get mistaken for a child-state free.
+struct CiAlloc { Counts* counts; CiControl* c; }
+void* ciAllocate(void* context, size_t bytes, size_t alignment) nothrow @nogc @system
+{ return allocate((cast(CiAlloc*) context).counts, bytes, alignment); }
+void ciDeallocate(void* context, void* ptr, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    auto a = cast(CiAlloc*) context; auto c = a.c;
+    if (ptr is c.midState || ptr is c.leafState)
+    {
+        namedCheck(portsThreadId() != c.emitter, "cont child state free on consumer");
+        if (ptr is c.midState) namedCheck(atomicFetchAdd!(MemoryOrder.raw)(c.midFrees, 1u) == 0, "cont mid state freed once");
+        else namedCheck(atomicFetchAdd!(MemoryOrder.raw)(c.leafFrees, 1u) == 0, "cont leaf state freed once");
+    }
+    deallocate(a.counts, ptr, bytes, alignment);
+}
+ActorAllocator ciPolicy(ref CiAlloc a) nothrow @nogc @system
+{ return ActorAllocator(&a, &ciAllocate, &ciDeallocate); }
+uint ciRole; // TLS: 1=member, 2=leaf, 3=polling parent
+bool ciEmitter, ciSawLeaf;
+uint ciMidsInConsume;
+struct CiLeaf
+{
+    CiControl* c;
+    ~this() nothrow @nogc @system
+    { if (c !is null) { check(portsThreadId() != c.emitter); atomicFetchAdd!(MemoryOrder.raw)(c.leafDestroyed, 1u); } }
+}
+ulong ciLeaf(scope ref PrivateBorrow!CiLeaf b, scope ref PrivateContext) nothrow @nogc @system
+{
+    ciRole = 2; ciSawLeaf = true;
+    b.value.c.leafState = &b.value();
+    atomicStore!(MemoryOrder.raw)(b.value.c.leafArrived, 1u);
+    awaitRaw(b.value.c.leafGo, 1u, "cont leaf gate");
+    b.value.c.value = portsValue(7, 13);
+    return b.value.c.value;
+}
+struct CiMid
+{
+    CiControl* c; PrivateChildPark!(CiLeaf, ulong)* leaves; uint phase;
+    ~this() nothrow @nogc @system
+    {
+        if (c is null) return;
+        namedCheck(portsThreadId() != c.emitter, "cont final stored destructor on consumer");
+        check(atomicLoad!(MemoryOrder.raw)(c.leafDestroyed) == 1 || c.mode == CiMode.lateHold || c.mode == CiMode.serviceWord);
+        namedCheck(atomicFetchAdd!(MemoryOrder.raw)(c.midDestroyed, 1u) == 0, "cont final stored instance once");
+    }
+}
+PrivateChildStep!ulong ciMid(scope ref PrivateBorrow!CiMid b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    ciRole = 1; ++ciMidsInConsume; auto m = &b.value(); auto c = m.c;
+    atomicFetchAdd!(MemoryOrder.raw)(c.midCalls, 1u);
+    if (m.phase++ == 0)
+    {
+        c.midState = m;
+        version (AntfarmActorTestHooks)
+        {
+            if (c.mode == CiMode.serviceWord)
+            {
+                check(privateTestServiceWord(ctx) != 0); // custody occupies the word
+                cast(void) privateTestRootService(ctx);
+                return typeof(return).done(0);
+            }
+        }
+        if (c.mode == CiMode.lateHold) return typeof(return).waitChildren();
+        m.leaves = ctx.createChildren!(CiLeaf, ulong)(1);
+        check(m.leaves.spawn(ctx, CiLeaf(c)) == PrivateSpawnResult.spawned);
+        version (AntfarmActorTestHooks)
+            if (c.mode == CiMode.overflow) privateTestSetChildCredits(ctx, uint.max);
+        check(m.leaves.startFinal!ciLeaf(ctx) == PrivateStartResult.started);
+        if (c.mode == CiMode.done || c.mode == CiMode.finalDone) return typeof(return).done(portsValue(9, 1));
+        return typeof(return).waitChildren();
+    }
+    if (c.mode == CiMode.lateHold) return typeof(return).done(31);
+    auto r = m.leaves.results(ctx);
+    namedCheck(r.length == 1 && r[0] == portsValue(7, 13) && c.value == r[0], "cont descendant result visible");
+    return typeof(return).done(r[0]);
+}
+struct CiRoot
+{
+    CiControl* c; PrivateChildPark!(CiMid, ulong)* mids; uint phase; bool checked;
+    ~this() nothrow @nogc @system
+    { if (c !is null) atomicStore!(MemoryOrder.raw)(c.rootDestroyed, 1u); }
+}
+PrivateRootDisposition ciRoot(scope ref PrivateBorrow!CiRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    ciRole = 3; auto r = &b.value(); auto c = r.c;
+    if (r.phase++ == 0)
+    {
+        r.mids = ctx.createChildren!(CiMid, ulong)(1, 1);
+        check(r.mids.spawn(ctx, CiMid(c)) == PrivateSpawnResult.spawned);
+        auto start = c.mode == CiMode.finalDone ? r.mids.startFinal!ciMid(ctx) : r.mids.start!ciMid(ctx);
+        check(start == PrivateStartResult.started);
+        return c.seal ? PrivateRootDisposition.waitChildren : PrivateRootDisposition.again;
+    }
+    if ((c.mode == CiMode.beforeP || c.mode == CiMode.afterP) && atomicLoad!(MemoryOrder.raw)(c.armPolling))
+    {
+        atomicStore!(MemoryOrder.raw)(c.pollEntered, 1u);
+        auto deadline = MonoTime.currTime + 15.seconds;
+        while (!r.mids.finished(ctx))
+        {
+            if (!r.checked && c.mode == CiMode.beforeP && atomicLoad!(MemoryOrder.raw)(c.pPaused))
+            {
+                check(r.mids.start!ciMid(ctx) == PrivateStartResult.waveActive);
+                r.checked = true; atomicStore!(MemoryOrder.raw)(c.activeSeen, 1u);
+            }
+            namedCheck(MonoTime.currTime < deadline, "cont polling parent join deadline"); pause();
+        }
+    }
+    if (!r.mids.finished(ctx))
+    {
+        if (!r.checked && ((c.mode == CiMode.hold || c.mode == CiMode.done || c.mode == CiMode.finalDone)
+            && atomicLoad!(MemoryOrder.raw)(c.custodyReleased)
+            || c.mode == CiMode.lateHold && atomicLoad!(MemoryOrder.raw)(c.midReturned) >= 1))
+        {
+            namedCheck(r.mids.start!ciMid(ctx) == PrivateStartResult.waveActive, "cont suspended wave rejects start");
+            r.checked = true; atomicStore!(MemoryOrder.raw)(c.activeSeen, 1u);
+        }
+        if (c.mode == CiMode.finishSuspended && atomicLoad!(MemoryOrder.raw)(c.custodyReleased))
+            return PrivateRootDisposition.finish;
+        return PrivateRootDisposition.again;
+    }
+    auto values = r.mids.results(ctx); check(values.length == 1);
+    c.result = values[0];
+    auto expected = c.mode == CiMode.done || c.mode == CiMode.finalDone ? portsValue(9, 1)
+        : c.mode == CiMode.lateHold ? 31 : portsValue(7, 13);
+    check(c.result == expected);
+    check(atomicLoad!(MemoryOrder.raw)(c.midCalls) == (c.mode == CiMode.done || c.mode == CiMode.finalDone ? 1 : 2));
+    if (c.mode == CiMode.finalDone) check(r.mids.start!ciMid(ctx) == PrivateStartResult.empty);
+    return PrivateRootDisposition.finish;
+}
+version (AntfarmActorTestHooks)
+{
+    __gshared CiControl* ciControl;
+    void ciHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+    {
+        auto c = ciControl;
+        if (c.mode == CiMode.early && point == ActorTestPoint.privateChildCustodyAfterRelease
+            && atomicLoad!(MemoryOrder.raw)(c.leafDestroyed))
+            atomicStore!(MemoryOrder.raw)(c.descendantReleased, 1u);
+        if (point == ActorTestPoint.privateChildCustodyAfterRelease && ciRole == 1)
+        {
+            atomicStore!(MemoryOrder.raw)(c.custodyReleased, 1u);
+            if (c.mode == CiMode.lateHold && atomicLoad!(MemoryOrder.raw)(c.midCalls) == 1)
+            {
+                atomicStore!(MemoryOrder.raw)(c.hookArrived, 1u);
+                awaitRaw(c.hookGo, 1u, "cont late H seam");
+            }
+        }
+        bool block = c.mode == CiMode.early && point == ActorTestPoint.privateChildCustodyBeforeRelease
+            || c.mode == CiMode.late && point == ActorTestPoint.privateRootAfterIdleBeforeCredit;
+        if (block && cas!(MemoryOrder.raw, MemoryOrder.raw)(&c.hookArrived, 0u, 1u))
+        {
+            if (c.mode == CiMode.late)
+            {
+                namedCheck(!ciEmitter, "cont late descendant finish owned by consumer");
+                namedCheck(atomicLoad!(MemoryOrder.raw)(c.custodyReleased) == 1,
+                    "cont late activation custody released before descendant finish");
+                check(atomicLoad!(MemoryOrder.raw)(c.leafArrived) == 1);
+                check(atomicLoad!(MemoryOrder.raw)(c.leafGo) == 1);
+            }
+            auto deadline = MonoTime.currTime + 10.seconds;
+            while (!atomicLoad!(MemoryOrder.raw)(c.hookGo))
+            {
+                if (MonoTime.currTime >= deadline)
+                {
+                    fprintf(stderr, "CI stalled mode=%u emitter=%u leafArrived=%u leafGo=%u leafDestroyed=%u leafReturned=%u midCalls=%u custodyReleased=%u hookGo=%u returnCalls=%u midReturned=%u\n",
+                        cast(uint)c.mode, ciEmitter, atomicLoad!(MemoryOrder.raw)(c.leafArrived), atomicLoad!(MemoryOrder.raw)(c.leafGo),
+                        atomicLoad!(MemoryOrder.raw)(c.leafDestroyed), atomicLoad!(MemoryOrder.raw)(c.leafReturned), atomicLoad!(MemoryOrder.raw)(c.midCalls),
+                        atomicLoad!(MemoryOrder.raw)(c.custodyReleased), atomicLoad!(MemoryOrder.raw)(c.hookGo),
+                        atomicLoad!(MemoryOrder.raw)(c.returnCalls), atomicLoad!(MemoryOrder.raw)(c.midReturned));
+                    namedCheck(false, "cont final owner seam");
+                }
+                pause();
+            }
+        }
+        if (point == ActorTestPoint.privateChildReturnBeforeCas)
+        {
+            atomicFetchAdd!(MemoryOrder.raw)(c.returnCalls, 1u);
+            if (ciEmitter) atomicFetchAdd!(MemoryOrder.raw)(c.emitterReturns, 1u);
+        }
+        if ((c.mode == CiMode.beforeP && point == ActorTestPoint.privateResumeBeforeUnschedule)
+            || (c.mode == CiMode.afterP && point == ActorTestPoint.privateResumeAfterUnschedule))
+        {
+            atomicStore!(MemoryOrder.raw)(c.pPaused, 1u);
+            awaitRaw(c.midReturned, 2u, "cont P callbacks complete");
+            if (c.mode == CiMode.beforeP)
+            {
+                auto deadline = MonoTime.currTime + 10.seconds;
+                while (atomicLoad!(MemoryOrder.raw)(c.activeSeen) == 0)
+                { pause(); namedCheck(MonoTime.currTime < deadline, "cont P pins wave before unschedule"); }
+                check(atomicLoad!(MemoryOrder.raw)(c.rootDestroyed) == 0);
+            }
+            else awaitRaw(c.rootDestroyed, 1u, "cont park disposed after P release");
+        }
+    }
+}
+// C3/C4/C5/C6/C7/C9. Mutations C-M3/C-M4 lose final-owner dispatch;
+// C-M5a/b join early; C-M6 leaks H; C-M7 retires on the final owner;
+// C-M7b re-runs the op; C-M9a/b violate P lifetime at these seams.
+void contInterleave(PrivateRootReclamation reclaim)(CiMode mode)
+{
+    version (AntfarmActorTestHooks)
+    {
+        Counts counts; CiControl c; c.mode = mode; c.emitter = portsThreadId();
+        auto farm = AntFarm.create(); scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
+        CiAlloc allocation = CiAlloc(&counts, &c);
+        auto park = PrivateRootPark!(CiRoot, ciRoot, reclaim).create(farm, 1, 1, ciPolicy(allocation));
+        check(park.spawn(CiRoot(&c)) == PrivateSpawnResult.spawned);
+        ciControl = &c; setActorTestHook(&ciHook);
+        scope(exit) { setActorTestHook(null); ciControl = null; }
+        shared uint stop;
+        Thread[] workers;
+        foreach (_; 0 .. 5)
+        {
+            auto worker = new Thread({
+                ConsumerView view; check(view.subscribe(farm) >= 0);
+                scope(exit) view.unsubscribe();
+                while (atomicLoad!(MemoryOrder.raw)(stop) == 0)
+                {
+                    ciRole = 0; ciSawLeaf = false; ciMidsInConsume = 0;
+                    auto consumed = view.consumeNext(); // idle sweeps can run callbacks even when false
+                    if (ciSawLeaf) atomicStore!(MemoryOrder.raw)(c.leafReturned, 1u);
+                    if (ciMidsInConsume) atomicFetchAdd!(MemoryOrder.raw)(c.midReturned, ciMidsInConsume);
+                    if (!consumed) pause();
+                }
+            });
+            workers ~= worker; worker.start();
+        }
+        scope(exit) { atomicStore!(MemoryOrder.raw)(stop, 1u); foreach (worker; workers) worker.join(); }
+        ciEmitter = true; scope(exit) ciEmitter = false;
+        auto deadline = MonoTime.currTime + 15.seconds;
+        bool opened, unblocked;
+        while (park.live)
+        {
+            park.pump(token);
+            if (mode == CiMode.early)
+            {
+                if (atomicLoad!(MemoryOrder.raw)(c.hookArrived))
+                {
+                    atomicStore!(MemoryOrder.raw)(c.leafGo, 1u);
+                    if (atomicLoad!(MemoryOrder.raw)(c.descendantReleased) && !unblocked)
+                    {
+                        // The no-access finish seam follows the notification decrement.
+                        // returnCalls remains zero while activation custody is held.
+                        check(atomicLoad!(MemoryOrder.raw)(c.returnCalls) == 0);
+                        atomicStore!(MemoryOrder.raw)(c.hookGo, 1u); unblocked = true;
+                    }
+                }
+            }
+            else if (mode == CiMode.lateHold)
+            {
+                // A user-call entry count is too early: the resumer must have
+                // dropped H and returned its table before the old epilogue runs.
+                if (atomicLoad!(MemoryOrder.raw)(c.midReturned) >= 1 && !unblocked)
+                {
+                    namedCheck(atomicLoad!(MemoryOrder.raw)(c.rootDestroyed) == 0,
+                        "cont old activation table still pins cohort after resume");
+                    if (atomicLoad!(MemoryOrder.raw)(c.activeSeen))
+                    { atomicStore!(MemoryOrder.raw)(c.hookGo, 1u); unblocked = true; }
+                }
+            }
+            else
+            {
+                // C4 must hold a consumer-owned descendant finish. Observing
+                // activation custody alone can open leafGo before the leaf
+                // table is published, letting emitter seal own finish and
+                // block this pump on a hook only the emitter can release.
+                // leafArrived observed AFTER pump returns proves publication
+                // and producer seal completed while the leaf gate stayed shut.
+                if (mode != CiMode.finishSuspended && atomicLoad!(MemoryOrder.raw)(c.custodyReleased) && !opened
+                    && (mode != CiMode.late || atomicLoad!(MemoryOrder.raw)(c.leafArrived)))
+                {
+                    if (mode == CiMode.beforeP || mode == CiMode.afterP)
+                    {
+                        if (atomicLoad!(MemoryOrder.raw)(c.midReturned) == 0) continue;
+                        atomicStore!(MemoryOrder.raw)(c.armPolling, 1u);
+                        if (atomicLoad!(MemoryOrder.raw)(c.pollEntered) == 0) continue;
+                    }
+                    if (mode == CiMode.hold || mode == CiMode.done || mode == CiMode.finalDone)
+                    {
+                        if (atomicLoad!(MemoryOrder.raw)(c.activeSeen) == 0) continue;
+                        check(atomicLoad!(MemoryOrder.raw)(c.midCalls) == 1);
+                    }
+                    atomicStore!(MemoryOrder.raw)(c.leafGo, 1u); opened = true;
+                }
+                if (mode == CiMode.late && atomicLoad!(MemoryOrder.raw)(c.hookArrived) && !unblocked)
+                {
+                    check(atomicLoad!(MemoryOrder.raw)(c.midCalls) == 1);
+                    atomicStore!(MemoryOrder.raw)(c.hookGo, 1u); unblocked = true;
+                }
+            }
+            namedCheck(MonoTime.currTime < deadline, "cont interleave completion deadline");
+        }
+        if (mode == CiMode.late)
+            namedCheck(opened && unblocked && atomicLoad!(MemoryOrder.raw)(c.hookArrived) == 1,
+                "cont late descendant notification held and released");
+        park.destroy();
+        check(atomicLoad!(MemoryOrder.raw)(c.midDestroyed) == 1 && atomicLoad!(MemoryOrder.raw)(c.midFrees) == 1);
+        check(atomicLoad!(MemoryOrder.raw)(c.leafFrees) == (mode == CiMode.lateHold ? 0 : 1));
+        check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
+    }
+}
+
+struct CrControl
+{
+    uint* calls; uint* waves; ulong* writes;
+    size_t count = 8, limit = 64;
+    uint rounds = 6, completed;
+    bool subset, admission, casTest, fifoRace;
+    shared uint firstAtCas, firstGo, secondGo, firstReturned, secondReturned, casCalls, firstCalls, secondCalls, secondStarted;
+}
+uint crIndex; bool crMember, crSawFirst, crSawSecond;
+struct CrMember { CrControl* c; uint index, phase, wave; }
+PrivateChildStep!ulong crResult(scope ref PrivateBorrow!CrMember b, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    auto m = &b.value(); auto c = m.c; crMember = true; crIndex = m.index;
+    if (m.index == 0) { crSawFirst = true; atomicFetchAdd!(MemoryOrder.raw)(c.firstCalls, 1u); }
+    if (m.index == 1) { crSawSecond = true; atomicFetchAdd!(MemoryOrder.raw)(c.secondCalls, 1u); }
+    ++c.calls[m.index];
+    if ((c.casTest || c.fifoRace) && m.index == 1 && m.phase == 0)
+    {
+        atomicStore!(MemoryOrder.raw)(c.secondStarted, 1u);
+        awaitRaw(c.secondGo, 1u, "cont second member gate");
+    }
+    // Admission tests suspend every member twice; other waves mix immediate done.
+    if ((c.admission || c.casTest || m.index % 2 == 0) && m.phase++ < 2)
+    {
+        c.writes[m.index] = portsValue(m.wave + 1, m.index);
+        return typeof(return).waitChildren();
+    }
+    if (c.admission || c.casTest || m.index % 2 == 0)
+        check(c.writes[m.index] == portsValue(m.wave + 1, m.index));
+    m.phase = 0; c.waves[m.index] = ++m.wave;
+    return typeof(return).done(portsValue(m.wave, m.index));
+}
+PrivateChildDisposition crVoid(scope ref PrivateBorrow!CrMember b, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    auto m = &b.value(); ++m.c.calls[m.index];
+    if (m.phase++ < 2) return PrivateChildDisposition.waitChildren;
+    m.phase = 0; m.c.waves[m.index] = ++m.wave;
+    return PrivateChildDisposition.done;
+}
+ulong crPlainResult(scope ref PrivateBorrow!CrMember b, scope ref PrivateContext)
+    nothrow @nogc @system
+{ ++b.value.c.calls[b.value.index]; b.value.c.waves[b.value.index] = ++b.value.wave; return portsValue(b.value.wave, b.value.index); }
+void crPlain(scope ref PrivateBorrow!CrMember b, scope ref PrivateContext)
+    nothrow @nogc @system
+{ ++b.value.c.calls[b.value.index]; b.value.c.waves[b.value.index] = ++b.value.wave; }
+struct CrRoot { CrControl* c; PrivateChildPark!(CrMember, ulong)* members; uint phase; }
+PrivateRootDisposition crRoot(scope ref PrivateBorrow!CrRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto r = &b.value(); auto c = r.c;
+    if (r.phase)
+    {
+        auto values = r.members.results(ctx);
+        bool resultWave = (r.phase - 1) % 4 < 2;
+        uint[4] selected = [7, 0, 5, 2];
+        auto members = r.members.subsetMembers(ctx);
+        if (c.subset) check(members == selected[]);
+        else check(members.length == 0);
+        namedCheck(values.length == (resultWave ? c.subset ? 4 : c.count : 0), "cont void operation clears results");
+        foreach (i, value; values)
+        {
+            auto index = c.subset ? selected[i] : i;
+            namedCheck(value == portsValue(c.waves[index], index), "cont participant ordered final result tag");
+        }
+        ++c.completed;
+        if (r.phase == c.rounds) return PrivateRootDisposition.finish;
+    }
+    else
+    {
+        r.members = ctx.createChildren!(CrMember, ulong)(c.count, PrivateCohortOptions(c.limit, c.subset));
+        check(r.members !is null);
+        foreach (i; 0 .. c.count) check(r.members.spawn(ctx, CrMember(c, cast(uint) i)) == PrivateSpawnResult.spawned);
+    }
+    uint[4] selected = [7, 0, 5, 2];
+    PrivateStartResult start;
+    final switch (r.phase++ % 4)
+    {
+        case 0: start = c.subset ? r.members.startSubset!crResult(ctx, selected[]) : r.members.start!crResult(ctx); break;
+        case 1: start = c.subset ? r.members.startSubset!crPlainResult(ctx, selected[]) : r.members.start!crPlainResult(ctx); break;
+        case 2: start = c.subset ? r.members.startSubset!crVoid(ctx, selected[]) : r.members.start!crVoid(ctx); break;
+        case 3: start = c.subset ? r.members.startSubset!crPlain(ctx, selected[]) : r.members.start!crPlain(ctx); break;
+    }
+    check(start == PrivateStartResult.started);
+    return PrivateRootDisposition.waitChildren;
+}
+// CT: all four operation shapes, both cohort kinds, and ambiguous results.
+static assert(__traits(compiles, (PrivateChildPark!(CrMember, ulong)* p, ref PrivateContext c) { p.start!crResult(c); p.startFinal!crResult(c); p.start!crVoid(c); p.start!crPlainResult(c); p.start!crPlain(c); }));
+static assert(__traits(compiles, (PrivateChildPark!CrMember* p, ref PrivateContext c) { p.start!crVoid(c); p.start!crPlain(c); }));
+static assert(!__traits(compiles, (PrivateChildPark!CrMember* p, ref PrivateContext c) { p.start!crResult(c); }));
+static assert(!__traits(compiles, (PrivateChildPark!(CrMember, uint)* p, ref PrivateContext c) { p.start!crResult(c); }));
+static assert(!__traits(compiles, PrivateChildPark!(CrMember, PrivateChildDisposition).init));
+static assert(!__traits(compiles, PrivateChildPark!(CrMember, PrivateChildStep!ulong).init));
+static assert(!__traits(compiles, PrivateChildStep!void.init));
+static assert(!__traits(compiles, PrivateChildStep!(PrivateChildStep!int).init));
+static assert(!__traits(compiles, PrivateChildStep!PrivateChildDisposition.init));
+// C10/C11: C-M10 writes at suspension; C-M11 omits activation custody reset.
+void contResults(PrivateRootReclamation reclaim)(bool subset)
+{
+    Counts counts; uint[8] calls, waves; ulong[8] writes;
+    CrControl c = CrControl(calls.ptr, waves.ptr, writes.ptr); c.subset = subset;
+    auto farm = AntFarm.create(); scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
+    auto workers = new Workers(farm, 5); scope(exit) workers.join();
+    auto park = PrivateRootPark!(CrRoot, crRoot, reclaim).create(farm, 1, 64, policy(counts));
+    check(park.spawn(CrRoot(&c)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 15.seconds;
+    while (park.live) { park.pump(token); check(MonoTime.currTime < deadline); }
+    foreach (i; 0 .. 8)
+    {
+        bool selected = !subset || i == 7 || i == 0 || i == 5 || i == 2;
+        check(waves[i] == (selected ? 6 : 0));
+        check(calls[i] == (selected ? i % 2 == 0 ? 12 : 8 : 0));
+    }
+    park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
+}
+version (AntfarmWriteAuditHooks)
+{
+    __gshared uint* contPublications;
+    void contPublicationHook(AntFarm*, WriteAuditPhase phase, ulong, ulong) nothrow @nogc @system
+    { if (phase == WriteAuditPhase.tablePublished) ++*contPublications; }
+}
+// C8/C14: C-M8 reads published next links, C-M8b leaks rejected table
+// credits, C-M13 retains the empty tail, C-M14 aliases the ownership cursor.
+void contAdmission(PrivateRootReclamation reclaim)(size_t count, size_t limit)
+{
+    Counts counts;
+    auto calls = new uint[count]; auto waves = new uint[count]; auto writes = new ulong[count];
+    CrControl c = CrControl(calls.ptr, waves.ptr, writes.ptr, count, limit, 1); c.admission = true;
+    // 1024 words admits 54 payloads of a requested 64; 4096 admits 225
+    // of a requested 256. Limit 1 necessarily admits zero or one.
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, limit == 64 ? 1024 : 4096); scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
+    ConsumerView view; check(view.subscribe(farm) >= 0); scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(CrRoot, crRoot, reclaim).create(farm, 1, 256, policy(counts));
+    check(park.spawn(CrRoot(&c)) == PrivateSpawnResult.spawned);
+    park.pump(token); while (view.consumeNext()) {}
+    // Publish the initial wave without consumers running: no return can be
+    // drained yet. The large ring holds even 1025 one-member tables.
+    auto deadline = MonoTime.currTime + 30.seconds;
+    foreach (_; 0 .. count + 2) park.pump(token);
+    while (view.consumeNext()) {}
+    foreach (n; calls) check(n == 1);
+    enum fillCount = 20000;
+    auto fillerResults = new ulong[fillCount];
+    auto filler = Park.create(farm, fillCount, limit == 64 ? 64 : 256);
+    foreach (i; 0 .. fillCount) check(filler.spawn(State(fillerResults.ptr + i, 1)) == PrivateSpawnResult.spawned);
+    size_t admitted;
+    while (true) { auto n = filler.pump(token); if (!n) break; admitted += n; check(MonoTime.currTime < deadline); }
+    check(admitted > 0 && admitted < fillCount);
+    auto before = calls.dup;
+    version (AntfarmWriteAuditHooks)
+    {
+        uint publications;
+        contPublications = &publications; writeAuditHook = &contPublicationHook;
+        park.pump(token); // full ring: no resume table may be published
+        writeAuditHook = null; contPublications = null;
+        namedCheck(publications == 0, "cont full Farm gives zero resume admission");
+    }
+    else park.pump(token);
+    check(calls == before);
+    while (filler.live) { while (view.consumeNext()) {} filler.pump(token); check(MonoTime.currTime < deadline); }
+    filler.destroy();
+    park.pump(token); while (view.consumeNext()) {}
+    if (limit > 1)
+    {
+        size_t changed; foreach (i; 0 .. count) changed += calls[i] != before[i];
+        namedCheck(changed > 0 && changed < limit, "cont partial resume admission accepted prefix");
+    }
+    while (park.live) { park.pump(token); while (view.consumeNext()) {} namedCheck(MonoTime.currTime < deadline, "cont admission retry deadline"); }
+    foreach (i; 0 .. count) check(calls[i] == 3 && waves[i] == 1);
+    check(c.completed == 1);
+    park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
+}
+version (AntfarmActorTestHooks)
+{
+    __gshared CrControl* crControl;
+    void crCasHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+    {
+        if (point != ActorTestPoint.privateChildReturnBeforeCas) return;
+        auto c = crControl;
+        atomicFetchAdd!(MemoryOrder.raw)(c.casCalls, 1u);
+        if (crIndex == 0 && cas!(MemoryOrder.raw, MemoryOrder.raw)(&c.firstAtCas, 0u, 1u))
+            awaitRaw(c.firstGo, 1u, "cont first CAS release");
+    }
+}
+// C13: C-M12 omits head reload after a forced failed CAS.
+void contCasRetry(PrivateRootReclamation reclaim)()
+{
+    version (AntfarmActorTestHooks)
+    {
+        Counts counts; uint[2] calls, waves; ulong[2] writes;
+        CrControl c = CrControl(calls.ptr, waves.ptr, writes.ptr, 2, 1, 1); c.casTest = true;
+        auto farm = AntFarm.create(); scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
+        auto park = PrivateRootPark!(CrRoot, crRoot, reclaim).create(farm, 1, 64, policy(counts));
+        check(park.spawn(CrRoot(&c)) == PrivateSpawnResult.spawned);
+        crControl = &c; setActorTestHook(&crCasHook);
+        scope(exit) { setActorTestHook(null); crControl = null; }
+        shared uint stop; Thread[] threads;
+        foreach (_; 0 .. 2)
+        {
+            auto t = new Thread({
+                ConsumerView view; check(view.subscribe(farm) >= 0); scope(exit) view.unsubscribe();
+                while (!atomicLoad!(MemoryOrder.raw)(stop))
+                {
+                    crMember = false; crSawFirst = false; crSawSecond = false;
+                    auto consumed = view.consumeNext();
+                    if (crSawFirst) atomicStore!(MemoryOrder.raw)(c.firstReturned, 1u);
+                    if (crSawSecond) atomicStore!(MemoryOrder.raw)(c.secondReturned, 1u);
+                    if (!consumed) pause();
+                }
+            }); threads ~= t; t.start();
+        }
+        scope(exit) { atomicStore!(MemoryOrder.raw)(stop, 1u); foreach (t; threads) t.join(); }
+        auto deadline = MonoTime.currTime + 15.seconds;
+        while (!atomicLoad!(MemoryOrder.raw)(c.firstAtCas)) { park.pump(token); check(MonoTime.currTime < deadline); }
+        // A can reach its CAS before B's table is published; keep emitting until B starts.
+        while (!atomicLoad!(MemoryOrder.raw)(c.secondStarted)) { park.pump(token); check(MonoTime.currTime < deadline); }
+        atomicStore!(MemoryOrder.raw)(c.secondGo, 1u);
+        awaitRaw(c.secondReturned, 1u, "cont competing CAS published");
+        atomicStore!(MemoryOrder.raw)(c.firstGo, 1u);
+        // Keep the competing head in place until the first producer returns.
+        // Merely observing another CAS attempt would let the emitter clear the
+        // head, making the stale expected-null value valid again (C-M12).
+        awaitRaw(c.firstReturned, 1u, "cont first CAS retry completed before drain");
+        check(atomicLoad!(MemoryOrder.raw)(c.casCalls) >= 3);
+        while (park.live) { park.pump(token); check(MonoTime.currTime < deadline); }
+        check(calls[0] == 3 && calls[1] == 3);
+        park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
+    }
+}
+
+version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
+{
+    struct CsControl { CiControl* c; shared uint work, rootReturned, stop, ready; uint tables, allPublications; bool armed; }
+    __gshared CsControl* csControl;
+    void csPublished(AntFarm*, WriteAuditPhase phase, ulong, ulong) nothrow @nogc @system
+    {
+        if (phase != WriteAuditPhase.tablePublished) return;
+        auto s = csControl;
+        ++s.allPublications;
+        if (!s.armed || ++s.tables != 1) return;
+        atomicStore!(MemoryOrder.raw)(s.work, 3u);
+        awaitRaw(s.c.leafReturned, 1u, "cont seal callback returned before emitter seal");
+        check(atomicLoad!(MemoryOrder.raw)(s.c.midDestroyed) == 0);
+        check(atomicLoad!(MemoryOrder.raw)(s.c.returnCalls) == 0);
+    }
+    // C7 deferred terminal cleanup: C-M7 runs ~T on emitter; C-M7b calls op.
+    void contSealFinalOwner(PrivateRootReclamation reclaim)()
+    {
+        Counts counts; CiControl c; c.mode = CiMode.finalDone; c.emitter = portsThreadId(); c.seal = true;
+        CsControl s; s.c = &c;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096); scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
+        ConsumerView view; check(view.subscribe(farm) >= 0); scope(exit) view.unsubscribe();
+        CiAlloc allocation = CiAlloc(&counts, &c);
+        auto park = PrivateRootPark!(CiRoot, ciRoot, reclaim).create(farm, 1, 1, ciPolicy(allocation));
+        check(park.spawn(CiRoot(&c)) == PrivateSpawnResult.spawned);
+        ciControl = &c; setActorTestHook(&ciHook); ciEmitter = true;
+        scope(exit) { setActorTestHook(null); ciControl = null; ciEmitter = false; }
+        csControl = &s; writeAuditHook = &csPublished; // installed before subscribe reads it
+        auto worker = new Thread({
+            ConsumerView view; check(view.subscribe(farm) >= 0); scope(exit) view.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(s.ready, 1u);
+            awaitRaw(s.work, 1u, "cont seal root go");
+            do view.consumeNext(); while (ciRole != 3);
+            atomicStore!(MemoryOrder.raw)(s.rootReturned, 1u);
+            awaitRaw(s.work, 2u, "cont seal member go");
+            do view.consumeNext(); while (ciRole != 1);
+            atomicStore!(MemoryOrder.raw)(c.midReturned, 1u);
+            auto deadline = MonoTime.currTime + 20.seconds;
+            while (atomicLoad!(MemoryOrder.raw)(s.work) != 3)
+            {
+                if (atomicLoad!(MemoryOrder.raw)(s.work) == 4) { ciRole = 0; view.consumeNext(); }
+                else pause();
+                namedCheck(MonoTime.currTime < deadline, "cont seal leaf go");
+            }
+            do view.consumeNext(); while (ciRole != 2);
+            atomicStore!(MemoryOrder.raw)(c.leafReturned, 1u);
+            while (!atomicLoad!(MemoryOrder.raw)(s.stop)) { ciRole = 0; if (!view.consumeNext()) pause(); }
+        }); worker.start(); awaitRaw(s.ready, 1u, "cont seal worker subscribed");
+        scope(exit) { atomicStore!(MemoryOrder.raw)(s.stop, 1u); worker.join(); writeAuditHook = null; csControl = null; }
+        park.pump(token); atomicStore!(MemoryOrder.raw)(s.work, 1u);
+        awaitRaw(s.rootReturned, 1u, "cont seal root started children");
+        park.pump(token); atomicStore!(MemoryOrder.raw)(s.work, 2u);
+        awaitRaw(c.midReturned, 1u, "cont seal done with outstanding tail");
+        // No descendant table has been emitted yet. Force its first attempt to
+        // zero, then drain only filler while the actor consumer remains parked.
+        enum fillCount = 20000; auto results = new ulong[fillCount];
+        auto filler = Park.create(farm, fillCount, 256);
+        foreach (i; 0 .. fillCount) check(filler.spawn(State(results.ptr + i, 1)) == PrivateSpawnResult.spawned);
+        while (filler.pump(token)) {}
+        auto before = s.allPublications;
+        park.pump(token);
+        namedCheck(s.allPublications == before, "cont seal descendant zero admission");
+        check(atomicLoad!(MemoryOrder.raw)(c.leafArrived) == 0);
+        atomicStore!(MemoryOrder.raw)(s.work, 4u); // advance the parked view through filler
+        while (filler.live) { while (view.consumeNext()) {} filler.pump(token); }
+        filler.destroy();
+        atomicStore!(MemoryOrder.raw)(c.leafGo, 1u);
+        s.armed = true;
+        park.pump(token);
+        namedCheck(atomicLoad!(MemoryOrder.raw)(c.emitterReturns) == 1, "cont emitter seal owns terminal child return");
+        auto deadline = MonoTime.currTime + 15.seconds;
+        while (park.live) { park.pump(token); check(MonoTime.currTime < deadline); }
+        check(atomicLoad!(MemoryOrder.raw)(c.midCalls) == 1);
+        check(atomicLoad!(MemoryOrder.raw)(c.midDestroyed) == 1);
+        check(atomicLoad!(MemoryOrder.raw)(c.midFrees) == 1 && atomicLoad!(MemoryOrder.raw)(c.leafFrees) == 1);
+        park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
+    }
+}
+void contDeath()
+{
+    version (linux) version (AntfarmActorTestHooks)
+    {
+        check(diedWithMessage("cont-counter-exhaustion", "antfarm fatal: private join credit overflow"));
+        check(diedWithMessage("cont-finish-suspended", "antfarm fatal: retire private actor with active child wave"));
+        version (assert)
+            check(diedWithMessage("cont-child-service-word", "antfarm fatal: private entry: service read on a child"));
+        writeln("PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths");
+    }
+}
+
+version (AntfarmWriteAuditHooks)
+{
+    struct CfControl { CrControl* c; shared uint ready, go, returned, stop; uint publications; }
+    __gshared CfControl* cfControl;
+    void cfPublished(AntFarm*, WriteAuditPhase phase, ulong, ulong) nothrow @nogc @system
+    {
+        if (phase != WriteAuditPhase.tablePublished) return;
+        auto c = cfControl;
+        if (++c.publications != 1) return;
+        atomicStore!(MemoryOrder.raw)(c.go, 1u);
+        awaitRaw(c.returned, 1u, "cont FIFO accepted prefix returned before writeTracked returns");
+        if (c.c.limit == 1)
+            namedCheck(atomicLoad!(MemoryOrder.raw)(c.c.firstCalls) == 2 && atomicLoad!(MemoryOrder.raw)(c.c.secondCalls) == 1,
+                "cont partial FIFO accepts A and retains B");
+    }
+    // C14: independent cursor and accepted-prefix detachment. Run full drain
+    // (two members) and partial drain ([A,B,C] accepts [A,B]); accepted entries
+    // republish while the emitter is still inside writeTracked. C-M8 races
+    // next links; C-M13 fails empty-tail invariant; C-M14 skips accepted A.
+    void contFifo(PrivateRootReclamation reclaim)(size_t count, size_t limit = 2)
+    {
+        Counts counts; uint[3] calls, waves; ulong[3] writes;
+        CrControl c = CrControl(calls.ptr, waves.ptr, writes.ptr, count, limit, 1); c.admission = true;
+        CfControl f; f.c = &c;
+        auto farm = AntFarm.create(); scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
+        ConsumerView view; check(view.subscribe(farm) >= 0); scope(exit) view.unsubscribe();
+        auto park = PrivateRootPark!(CrRoot, crRoot, reclaim).create(farm, 1, 64, policy(counts));
+        check(park.spawn(CrRoot(&c)) == PrivateSpawnResult.spawned);
+        park.pump(token); while (view.consumeNext()) {}
+        foreach (_; 0 .. 4) park.pump(token);
+        while (view.consumeNext()) {}
+        foreach (i; 0 .. count) check(calls[i] == 1);
+        cfControl = &f; writeAuditHook = &cfPublished; // immutable while worker subscribes
+        auto worker = new Thread({
+            ConsumerView other; check(other.subscribe(farm) >= 0); scope(exit) other.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(f.ready, 1u);
+            awaitRaw(f.go, 1u, "cont FIFO publication go");
+            while (!atomicLoad!(MemoryOrder.raw)(f.stop))
+            {
+                auto consumed = other.consumeNext();
+                if (atomicLoad!(MemoryOrder.raw)(c.firstCalls) >= 2
+                    && (limit == 1 || atomicLoad!(MemoryOrder.raw)(c.secondCalls) >= 2))
+                    atomicStore!(MemoryOrder.raw)(f.returned, 1u);
+                if (!consumed) pause();
+            }
+        }); worker.start(); awaitRaw(f.ready, 1u, "cont FIFO worker ready");
+        scope(exit) { atomicStore!(MemoryOrder.raw)(f.stop, 1u); worker.join(); writeAuditHook = null; cfControl = null; }
+        park.pump(token);
+        auto deadline = MonoTime.currTime + 15.seconds;
+        while (park.live) { park.pump(token); check(MonoTime.currTime < deadline); }
+        foreach (i; 0 .. count) check(calls[i] == 3 && waves[i] == 1);
+        park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
+    }
+}
+
+version (AntfarmActorTestHooks) version (AntfarmWriteAuditHooks)
+{
+    struct CfrControl { CrControl* c; shared uint ready, go, stop; bool armed; uint publications; }
+    __gshared CfrControl* cfrControl;
+    void cfrHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+    {
+        auto c = cfrControl.c;
+        if (point == ActorTestPoint.privateChildCustodyAfterRelease)
+        {
+            // These no-access seams prove the respective CAS has published.
+            if (crIndex == 0 && atomicLoad!(MemoryOrder.raw)(c.firstCalls) == 1)
+                atomicStore!(MemoryOrder.raw)(c.firstReturned, 1u);
+            if (crIndex == 1 && atomicLoad!(MemoryOrder.raw)(c.secondCalls) == 1)
+                atomicStore!(MemoryOrder.raw)(c.secondReturned, 1u);
+        }
+        if (point == ActorTestPoint.privateChildReturnBeforeCas && crIndex == 0
+            && atomicLoad!(MemoryOrder.raw)(c.firstCalls) == 2
+            && cas!(MemoryOrder.raw, MemoryOrder.raw)(&c.firstAtCas, 0u, 1u))
+            awaitRaw(c.firstGo, 1u, "cont FIFO A republish release");
+    }
+    void cfrPublished(AntFarm*, WriteAuditPhase phase, ulong, ulong) nothrow @nogc @system
+    {
+        if (phase != WriteAuditPhase.tablePublished) return;
+        auto f = cfrControl; if (!f.armed || ++f.publications != 1) return;
+        // A's entire FIFO was detached before publication. A now writes its
+        // return link, while B's first activation has not yet returned.
+        awaitRaw(f.c.firstAtCas, 1u, "cont full FIFO A republishing");
+        atomicStore!(MemoryOrder.raw)(f.c.secondGo, 1u);
+        awaitRaw(f.c.secondReturned, 1u, "cont full FIFO later B return published");
+    }
+    // C14's full-drain/reuse schedule: FIFO [A] is fully drained; A pauses
+    // while republishing; B returns and the next pump appends it to the empty
+    // FIFO before A's return CAS completes. C-M13 catches the stale empty tail,
+    // and C-M8 catches reading A.next after that first resume publication.
+    void contFifoOverlap(PrivateRootReclamation reclaim)()
+    {
+        Counts counts; uint[2] calls, waves; ulong[2] writes;
+        CrControl c = CrControl(calls.ptr, waves.ptr, writes.ptr, 2, 1, 1); c.admission = true; c.fifoRace = true;
+        CfrControl f; f.c = &c;
+        auto farm = AntFarm.create(); scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
+        ConsumerView view; check(view.subscribe(farm) >= 0); scope(exit) view.unsubscribe();
+        auto park = PrivateRootPark!(CrRoot, crRoot, reclaim).create(farm, 1, 64, policy(counts));
+        cfrControl = &f; setActorTestHook(&cfrHook); writeAuditHook = &cfrPublished;
+        Thread[] workers;
+        foreach (_; 0 .. 2)
+        {
+            auto t = new Thread({
+                ConsumerView other; check(other.subscribe(farm) >= 0); scope(exit) other.unsubscribe();
+                atomicFetchAdd!(MemoryOrder.raw)(f.ready, 1u);
+                awaitRaw(f.go, 1u, "cont FIFO overlap initial go");
+                while (!atomicLoad!(MemoryOrder.raw)(f.stop)) if (!other.consumeNext()) pause();
+            }); workers ~= t; t.start();
+        }
+        scope(exit)
+        {
+            atomicStore!(MemoryOrder.raw)(f.stop, 1u); foreach (t; workers) t.join();
+            setActorTestHook(null); writeAuditHook = null; cfrControl = null;
+        }
+        awaitRaw(f.ready, 2u, "cont FIFO overlap consumers ready");
+        check(park.spawn(CrRoot(&c)) == PrivateSpawnResult.spawned);
+        park.pump(token); while (view.consumeNext()) {}
+        park.pump(token); park.pump(token); // both initial one-member tables
+        atomicStore!(MemoryOrder.raw)(f.go, 1u);
+        awaitRaw(c.firstReturned, 1u, "cont FIFO only A returned initially");
+        awaitRaw(c.secondStarted, 1u, "cont FIFO B activation held");
+        check(atomicLoad!(MemoryOrder.raw)(c.secondReturned) == 0);
+        f.armed = true;
+        park.pump(token); // drains [A]; audit releases B while A's CAS is held
+        check(atomicLoad!(MemoryOrder.raw)(c.firstGo) == 0);
+        park.pump(token); // append B to the empty FIFO, then publish B
+        atomicStore!(MemoryOrder.raw)(c.firstGo, 1u);
+        auto deadline = MonoTime.currTime + 15.seconds;
+        while (park.live) { park.pump(token); check(MonoTime.currTime < deadline); }
+        check(calls[0] == 3 && calls[1] == 3 && waves[0] == 1 && waves[1] == 1);
+        park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
+    }
+}
+
+void phaseCont()
+{
+    contTree!(PrivateRootReclamation.emitter)();
+    contTree!(PrivateRootReclamation.consumer)();
+    contYield!(PrivateRootReclamation.emitter)();
+    contYield!(PrivateRootReclamation.consumer)();
+    foreach (mode; [CiMode.early, CiMode.late, CiMode.hold, CiMode.lateHold, CiMode.done, CiMode.finalDone, CiMode.beforeP, CiMode.afterP])
+    { contInterleave!(PrivateRootReclamation.emitter)(mode); contInterleave!(PrivateRootReclamation.consumer)(mode); }
+    foreach (subset; [false, true]) { contResults!(PrivateRootReclamation.emitter)(subset); contResults!(PrivateRootReclamation.consumer)(subset); }
+    contTree!(PrivateRootReclamation.emitter)(64, 1); contTree!(PrivateRootReclamation.consumer)(64, 1);
+    foreach (count; [513, 1025]) foreach (limit; [1, 64, 256])
+    { contAdmission!(PrivateRootReclamation.emitter)(count, limit); contAdmission!(PrivateRootReclamation.consumer)(count, limit); }
+    version (AntfarmWriteAuditHooks) foreach (n; [2, 3])
+    { contFifo!(PrivateRootReclamation.emitter)(n); contFifo!(PrivateRootReclamation.consumer)(n); }
+    version (AntfarmWriteAuditHooks)
+    { contFifo!(PrivateRootReclamation.emitter)(2, 1); contFifo!(PrivateRootReclamation.consumer)(2, 1); }
+    version (AntfarmActorTestHooks) version (AntfarmWriteAuditHooks)
+    { contFifoOverlap!(PrivateRootReclamation.emitter)(); contFifoOverlap!(PrivateRootReclamation.consumer)(); }
+    contCasRetry!(PrivateRootReclamation.emitter)(); contCasRetry!(PrivateRootReclamation.consumer)();
+    version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
+    { contSealFinalOwner!(PrivateRootReclamation.emitter)(); contSealFinalOwner!(PrivateRootReclamation.consumer)(); }
+    writeln("PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies");
+}
+
 void runSuite()
 {
+    phaseCont();
     phaseE1();
     phaseD();
     phasePorts();
@@ -6193,6 +7134,33 @@ void main(string[] args)
     auto mode = args.length > 1 ? args[1] : "";
     switch (mode)
     {
+        case "cont-descendants-first": contInterleave!(PrivateRootReclamation.emitter)(CiMode.early); return;
+        case "cont-activation-first": contInterleave!(PrivateRootReclamation.emitter)(CiMode.late);
+            contInterleave!(PrivateRootReclamation.consumer)(CiMode.late); return;
+        case "cont-seal-final-owner": version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
+            { contSealFinalOwner!(PrivateRootReclamation.emitter)(); contSealFinalOwner!(PrivateRootReclamation.consumer)(); } return;
+        case "cont-hold-before-table": contInterleave!(PrivateRootReclamation.emitter)(CiMode.hold); contInterleave!(PrivateRootReclamation.emitter)(CiMode.lateHold); return;
+        case "cont-done-tails": contInterleave!(PrivateRootReclamation.emitter)(CiMode.done); return;
+        case "cont-final-retire": contTree!(PrivateRootReclamation.emitter)(); contInterleave!(PrivateRootReclamation.emitter)(CiMode.finalDone);
+            version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks) contSealFinalOwner!(PrivateRootReclamation.emitter)(); return;
+        case "cont-counter-exhaustion": contInterleave!(PrivateRootReclamation.emitter)(CiMode.overflow); return;
+        case "cont-finish-suspended": contInterleave!(PrivateRootReclamation.emitter)(CiMode.finishSuspended); return;
+        case "cont-child-service-word": contInterleave!(PrivateRootReclamation.emitter)(CiMode.serviceWord); return;
+        case "cont-counter-exhaustion-death": case "cont-death": contDeath(); return;
+        case "cont-unschedule-before": contInterleave!(PrivateRootReclamation.emitter)(CiMode.beforeP); return;
+        case "cont-unschedule-after": contInterleave!(PrivateRootReclamation.emitter)(CiMode.afterP); return;
+        case "cont-hold-after-custody": contInterleave!(PrivateRootReclamation.emitter)(CiMode.lateHold); return;
+        case "cont-fifo-return-overlap": version (AntfarmActorTestHooks) version (AntfarmWriteAuditHooks) contFifoOverlap!(PrivateRootReclamation.emitter)(); return;
+        case "cont-fifo-partial": version (AntfarmWriteAuditHooks) contFifo!(PrivateRootReclamation.emitter)(2, 1); return;
+        case "cont-unschedule-race": contInterleave!(PrivateRootReclamation.emitter)(CiMode.beforeP); contInterleave!(PrivateRootReclamation.emitter)(CiMode.afterP); return;
+        case "cont-results": case "cont-multi-gen": contResults!(PrivateRootReclamation.emitter)(false); contResults!(PrivateRootReclamation.consumer)(true); return;
+        case "cont-nested": contTree!(PrivateRootReclamation.emitter)(2, 2); contTree!(PrivateRootReclamation.consumer)(64, 1); return;
+        case "cont-resume-admission": foreach (count; [513, 1025]) foreach (limit; [1, 64, 256]) { contAdmission!(PrivateRootReclamation.emitter)(count, limit); contAdmission!(PrivateRootReclamation.consumer)(count, limit); } return;
+        case "cont-fifo-drain-reuse": version (AntfarmWriteAuditHooks) foreach (n; [2, 3]) { contFifo!(PrivateRootReclamation.emitter)(n); contFifo!(PrivateRootReclamation.consumer)(n); } return;
+        case "cont-return-cas-retry": contCasRetry!(PrivateRootReclamation.emitter)(); contCasRetry!(PrivateRootReclamation.consumer)(); return;
+        case "cont": phaseCont(); return;
+        case "cont-basic": contTree!(PrivateRootReclamation.emitter)(); contTree!(PrivateRootReclamation.consumer)(); return;
+        case "cont-yield": contYield!(PrivateRootReclamation.emitter)(); contYield!(PrivateRootReclamation.consumer)(); return;
         case "batch-create-zero": rootBatchDeath(true, false); return;
         case "batch-pump-zero": rootBatchDeath(false, false); return;
         case "batch-pump-over": rootBatchDeath(false, true); return;

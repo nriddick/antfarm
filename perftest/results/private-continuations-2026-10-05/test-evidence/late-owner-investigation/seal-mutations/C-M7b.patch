@@ -1,0 +1,12 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1252,6 +1252,9 @@
+             immutable flags = entry.childFlags;
+             if (flags & childCleanup)
+             {
++                auto cleanupBorrow = PrivateBorrow!T(cast(T*) entry.state);
++                auto cleanupContext = PrivateContext(entry, wave, false, park.batchLimit_);
++                operation(cleanupBorrow, cleanupContext); // erroneous user activation
+                 retireMember!T(park.base_.service, entry);
+                 entry.childFlags = 0;
+                 releaseWave(wave); // H; the resume table credit fences callback return

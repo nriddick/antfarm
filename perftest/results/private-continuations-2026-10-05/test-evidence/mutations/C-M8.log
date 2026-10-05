@@ -1,0 +1,54 @@
+Canonical runtime SHA256: 34abc0bc615910d574308c91c1d633f995f59d8aa45bed20d08f01059145929d
+Build: ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I. -fsanitize=thread -d-version=TSan private_actor_tests/main.d antfarm.d antfarm_allocation.d actors/actor.d actors/wave.d actors/private_actor.d -of=/tmp/private-continuation-mutant-C-M8
+Build exit: 0
+Run: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 45 /tmp/private-continuation-mutant-C-M8 cont-fifo-drain-reuse
+Exit: 66
+Build+run elapsed: 14.864s
+==================
+WARNING: ThreadSanitizer: data race (pid=8740)
+  Read of size 8 at 0x722000000098 by main thread:
+    #0 _D6actors13private_actor__T16PrivateChildParkTS19private_actor_tests8CrMemberTmZQCb10emitResumeFNbNiPSQDwQDs9EmittableKS7antfarm5TokenZb /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:1200:39 (private-continuation-mutant-C-M8+0x599a8) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #1 _D6actors13private_actor7Service4pumpMFNbNiKS7antfarm5TokenZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:432:13 (private-continuation-mutant-C-M8+0x2e3b8) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #2 _D6actors13private_actor__T15PrivateRootParkTS19private_actor_tests6CrRootS_DQBf6crRootFNbNiMKSQDpQDl__T13PrivateBorrowTQCxZQuMKSQExQEt14PrivateContextZEQFvQFr22PrivateRootDispositionVEQHbQGx22PrivateRootReclamationi0ZQHj4pumpMFNbNiKS7antfarm5TokenmkZm /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:749:9 (private-continuation-mutant-C-M8+0x108ec9) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #3 _D6actors13private_actor__T15PrivateRootParkTS19private_actor_tests6CrRootS_DQBf6crRootFNbNiMKSQDpQDl__T13PrivateBorrowTQCxZQuMKSQExQEt14PrivateContextZEQFvQFr22PrivateRootDispositionVEQHbQGx22PrivateRootReclamationi0ZQHj4pumpMFNbNiKS7antfarm5TokenZm /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:740:9 (private-continuation-mutant-C-M8+0x153957) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #4 _D19private_actor_tests__T8contFifoVE6actors13private_actor22PrivateRootReclamationi0ZQCiFmmZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/main.d:6963:9 (private-continuation-mutant-C-M8+0x153957)
+    #5 D main /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/main.d:7132:94 (private-continuation-mutant-C-M8+0x159eb5) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #6 _D2rt6dmain212_d_run_main2UAAamPUQgZiZ6runAllMFZv <null> (private-continuation-mutant-C-M8+0x27433c) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #7 <null> <null> (libc.so.6+0x27d0d) (BuildId: 5e3b85a3eaa72d02eaae3882b22410ebda6b5555)
+
+  Previous write of size 8 at 0x722000000098 by thread T1:
+    #0 _D6actors13private_actor15pushChildReturnFNbNiPSQBuQBq5EntryZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:314:9 (private-continuation-mutant-C-M8+0x2de57) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #1 _D6actors13private_actor13releaseMemberFNbNiPSQBsQBo5EntryZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:333:13 (private-continuation-mutant-C-M8+0x2de57)
+    #2 _D6actors13private_actor__T16PrivateChildParkTS19private_actor_tests8CrMemberTmZQCb__T8runChildS_DQBz8crResultFNbNiMKSQEmQEi__T13PrivateBorrowTQDtZQuMKSQFuQFq14PrivateContextZSQGsQGo__T16PrivateChildStepTmZQvVbi0ZQExFNbNiPS7antfarm13PayloadHeaderAxmmZl /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:1294:13 (private-continuation-mutant-C-M8+0x615f9) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #3 _D7antfarm12ConsumerView12enterPayloadMFNbNiPOmmbZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:2351:13 (private-continuation-mutant-C-M8+0x112086) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #4 _D7antfarm12ConsumerView12processShardMFNbNiPOmmmmmmkkkbbZk /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:2461:17 (private-continuation-mutant-C-M8+0x112086)
+    #5 _D7antfarm12ConsumerView11consumeNextMFNbNiZb /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:1934:17 (private-continuation-mutant-C-M8+0x110de1) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #6 _D19private_actor_tests__T8contFifoVE6actors13private_actor22PrivateRootReclamationi0ZQCiFmmZ18__lambda_L6949_C34MFNbNiZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/main.d:6955:17 (private-continuation-mutant-C-M8+0x15e5a5) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #7 thread_entryPoint <null> (private-continuation-mutant-C-M8+0x26f2b0) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+
+  Location is heap block of size 128 at 0x722000000080 allocated by main thread:
+    #0 aligned_alloc <null> (private-continuation-mutant-C-M8+0x17696e) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #1 _D18antfarm_allocation17allocateAligned64FNbNimZPv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm_allocation.d:28:9 (private-continuation-mutant-C-M8+0x1178c0) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #2 _D19private_actor_tests8allocateFNbNiPvmmZQf /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/main.d:25:5 (private-continuation-mutant-C-M8+0x1178c0)
+    #3 _D6actors13private_actor12allocateZeroFNbNiPSQBrQBn7ServicemmZPv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:480:5 (private-continuation-mutant-C-M8+0x58bd8) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #4 _D6actors13private_actor__T16PrivateChildParkTS19private_actor_tests8CrMemberTmZQCb6createFNbNiPSQDrQDn5EntryPSQEfQEb7ServicebmmbZPSQFaQEw__TQEkTQDvTmZQEu /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:957:9 (private-continuation-mutant-C-M8+0x58bd8)
+    #5 _D6actors13private_actor14PrivateContext__T14createChildrenTS19private_actor_tests8CrMemberTmZQBzMFNbNimSQDzQDv20PrivateCohortOptionsZPSQFeQFa__T16PrivateChildParkTQEaTmZQz /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:137:9 (private-continuation-mutant-C-M8+0x109caf) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #6 _D19private_actor_tests6crRootFNbNiMKS6actors13private_actor__T13PrivateBorrowTSQDa6CrRootZQBcMKSQChQCd14PrivateContextZEQDfQDb22PrivateRootDisposition /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/main.d:6665:9 (private-continuation-mutant-C-M8+0x109caf)
+    #7 _D6actors13private_actor__T15PrivateRootParkTS19private_actor_tests6CrRootS_DQBf6crRootFNbNiMKSQDpQDl__T13PrivateBorrowTQCxZQuMKSQExQEt14PrivateContextZEQFvQFr22PrivateRootDispositionVEQHbQGx22PrivateRootReclamationi0ZQHj7runRootFNbNiPS7antfarm13PayloadHeaderAxmmZl /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:827:9 (private-continuation-mutant-C-M8+0x10948e) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #8 _D7antfarm12ConsumerView12enterPayloadMFNbNiPOmmbZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:2351:13 (private-continuation-mutant-C-M8+0x112086) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #9 _D7antfarm12ConsumerView12processShardMFNbNiPOmmmmmmkkkbbZk /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:2461:17 (private-continuation-mutant-C-M8+0x112086)
+    #10 _D7antfarm12ConsumerView11consumeNextMFNbNiZb /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:1934:17 (private-continuation-mutant-C-M8+0x110de1) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #11 _D19private_actor_tests__T8contFifoVE6actors13private_actor22PrivateRootReclamationi0ZQCiFmmZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/main.d:6944:27 (private-continuation-mutant-C-M8+0x153787) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #12 D main /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/main.d:7132:94 (private-continuation-mutant-C-M8+0x159eb5) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #13 _D2rt6dmain212_d_run_main2UAAamPUQgZiZ6runAllMFZv <null> (private-continuation-mutant-C-M8+0x27433c) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #14 <null> <null> (libc.so.6+0x27d0d) (BuildId: 5e3b85a3eaa72d02eaae3882b22410ebda6b5555)
+
+  Thread T1 (tid=8742, running) created by main thread at:
+    #0 pthread_create <null> (private-continuation-mutant-C-M8+0x1722f7) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #1 _D4core6thread8osthread6Thread5startMFNbZCQBoQBmQBiQBc <null> (private-continuation-mutant-C-M8+0x26f15c) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #2 D main /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/main.d:7132:94 (private-continuation-mutant-C-M8+0x159eb5) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #3 _D2rt6dmain212_d_run_main2UAAamPUQgZiZ6runAllMFZv <null> (private-continuation-mutant-C-M8+0x27433c) (BuildId: 318ecd685657202518bc8d55e8cd01f1763568e5)
+    #4 <null> <null> (libc.so.6+0x27d0d) (BuildId: 5e3b85a3eaa72d02eaae3882b22410ebda6b5555)
+
+SUMMARY: ThreadSanitizer: data race /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actors/private_actor.d:1200:39 in _D6actors13private_actor__T16PrivateChildParkTS19private_actor_tests8CrMemberTmZQCb10emitResumeFNbNiPSQDwQDs9EmittableKS7antfarm5TokenZb
+==================

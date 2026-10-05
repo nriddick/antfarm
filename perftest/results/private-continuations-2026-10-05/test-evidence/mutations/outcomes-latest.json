@@ -1,0 +1,9 @@
+[
+  {
+    "name": "C-M12",
+    "selector": "cont-return-cas-retry",
+    "tsan": false,
+    "exit": -6,
+    "elapsed": 20.605
+  }
+]

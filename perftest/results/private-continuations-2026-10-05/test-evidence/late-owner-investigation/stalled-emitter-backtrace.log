@@ -1,0 +1,38 @@
+Run during after-fix-full loaded group
+Command arguments: ['timeout', '35', 'gdb', '--batch', '-ex', 'set pagination off', '-ex', 'set startup-with-shell off', '-ex', 'set environment ANTFARM_HUGE_PAGES 0', '-ex', 'set environment TSAN_OPTIONS history_size=7:halt_on_error=1', '-ex', 'run', '-ex', 'bt 25', '-ex', 'info threads', '--args', '/tmp/private_late_owner_diag_extended', 'cont-ci-emitter-owner']
+GDB exit: 0
+External elapsed: 11.398s
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.cachyos.org>
+  <https://debuginfod.archlinux.org>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/libthread_db.so.1".
+[New Thread 0x7ffff43ff6c0 (LWP 43858)]
+[New Thread 0x7ffff3bfe6c0 (LWP 43859)]
+CI stalled mode=1 emitter=1 leafArrived=1 leafGo=1 leafDestroyed=1 leafReturned=1 midCalls=1 custodyReleased=1 hookGo=0 returnCalls=0 midReturned=1
+FAIL cont final owner seam:0
+
+Thread 1 "private_late_ow" received signal SIGABRT, Aborted.
+0x00007ffff7aaeceb in pthread_kill () from /usr/lib/libc.so.6
+#0  0x00007ffff7aaeceb in pthread_kill () from /usr/lib/libc.so.6
+#1  0x00007ffff7a44d48 in raise () from /usr/lib/libc.so.6
+#2  0x00007ffff7a257c1 in abort () from /usr/lib/libc.so.6
+#3  0x00005555556c6251 in __interceptor_abort ()
+#4  0x000055555569e103 in private_actor_tests.ciHook(actors.actor.ActorTestPoint, actors.actor.ActorInboxNode*) (point=<optimized out>, __param_1=<optimized out>) at /tmp/private_late_owner_diag_extended.d:18
+#5  0x00005555555a8876 in actors.actor.actorTestPoint(actors.actor.ActorTestPoint, actors.actor.ActorInboxNode*) (point=actors.actor.privateRootAfterIdleBeforeCredit, node=0x0) at actors/actor.d:173
+#6  actors.private_actor.PrivateChildPark!(private_actor_tests.CiLeaf, ulong).PrivateChildPark.finish(actors.private_actor.Wave*) (wave=<optimized out>) at actors/private_actor.d:1232
+#7  0x00005555555a86d9 in actors.private_actor.releaseWave(actors.private_actor.Wave*) (wave=0x724800000198) at actors/private_actor.d:353
+#8  actors.private_actor.PrivateChildPark!(private_actor_tests.CiLeaf, ulong).PrivateChildPark.emit(actors.private_actor.Emittable*, ref antfarm.Token) (emittable=0x724800000198, token=...) at actors/private_actor.d:1180
+#9  0x00005555555823b9 in actors.private_actor.Service.pump(ref antfarm.Token) (this=0x72a000000000, token=...) at actors/private_actor.d:432
+#10 0x000055555565698a in actors.private_actor.PrivateRootPark!(private_actor_tests.CiRoot, private_actor_tests.ciRoot(scope ref actors.private_actor.PrivateBorrow!(private_actor_tests.CiRoot).PrivateBorrow, scope ref actors.private_actor.PrivateContext), 0).PrivateRootPark.pump(ref antfarm.Token, ulong, uint) (this=0x72a000000000, token=..., batchLimit=1, avgCost=0) at actors/private_actor.d:749
+#11 0x00005555556a931d in actors.private_actor.PrivateRootPark!(private_actor_tests.CiRoot, private_actor_tests.ciRoot(scope ref actors.private_actor.PrivateBorrow!(private_actor_tests.CiRoot).PrivateBorrow, scope ref actors.private_actor.PrivateContext), 0).PrivateRootPark.pump(ref antfarm.Token) (token=..., this=<optimized out>) at actors/private_actor.d:740
+#12 private_actor_tests.contSealFinalOwner!(0).contSealFinalOwner() () at /tmp/private_late_owner_diag_extended.d:6895
+#13 0x00005555556ab72e in D main (args=...) at /tmp/private_late_owner_diag_extended.d:7116
+  Id   Target Id                                           Frame 
+* 1    Thread 0x7ffff7e3d580 (LWP 43852) "private_late_ow" 0x00007ffff7aaeceb in pthread_kill () from /usr/lib/libc.so.6
+  2    Thread 0x7ffff43ff6c0 (LWP 43858) "private_late_ow" 0x000055555575e3b6 in __sanitizer::internal_usleep(unsigned long long) ()
+  3    Thread 0x7ffff3bfe6c0 (LWP 43859) "private_late_ow" 0x0000555555736bb5 in __tsan_read8 ()

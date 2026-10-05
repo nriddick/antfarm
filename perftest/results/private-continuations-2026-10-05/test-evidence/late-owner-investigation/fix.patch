@@ -1,0 +1,67 @@
+--- a/private_actor_tests/main.d
++++ b/private_actor_tests/main.d
+@@ -6459,14 +6459,24 @@
+             || c.mode == CiMode.late && point == ActorTestPoint.privateRootAfterIdleBeforeCredit;
+         if (block && cas!(MemoryOrder.raw, MemoryOrder.raw)(&c.hookArrived, 0u, 1u))
+         {
++            if (c.mode == CiMode.late)
++            {
++                namedCheck(!ciEmitter, "cont late descendant finish owned by consumer");
++                namedCheck(atomicLoad!(MemoryOrder.raw)(c.custodyReleased) == 1,
++                    "cont late activation custody released before descendant finish");
++                check(atomicLoad!(MemoryOrder.raw)(c.leafArrived) == 1);
++                check(atomicLoad!(MemoryOrder.raw)(c.leafGo) == 1);
++            }
+             auto deadline = MonoTime.currTime + 10.seconds;
+             while (!atomicLoad!(MemoryOrder.raw)(c.hookGo))
+             {
+                 if (MonoTime.currTime >= deadline)
+                 {
+-                    fprintf(stderr, "CI stalled mode=%u emitter=%u leafArrived=%u leafGo=%u leafDestroyed=%u leafReturned=%u midCalls=%u\n",
++                    fprintf(stderr, "CI stalled mode=%u emitter=%u leafArrived=%u leafGo=%u leafDestroyed=%u leafReturned=%u midCalls=%u custodyReleased=%u hookGo=%u returnCalls=%u midReturned=%u\n",
+                         cast(uint)c.mode, ciEmitter, atomicLoad!(MemoryOrder.raw)(c.leafArrived), atomicLoad!(MemoryOrder.raw)(c.leafGo),
+-                        atomicLoad!(MemoryOrder.raw)(c.leafDestroyed), atomicLoad!(MemoryOrder.raw)(c.leafReturned), atomicLoad!(MemoryOrder.raw)(c.midCalls));
++                        atomicLoad!(MemoryOrder.raw)(c.leafDestroyed), atomicLoad!(MemoryOrder.raw)(c.leafReturned), atomicLoad!(MemoryOrder.raw)(c.midCalls),
++                        atomicLoad!(MemoryOrder.raw)(c.custodyReleased), atomicLoad!(MemoryOrder.raw)(c.hookGo),
++                        atomicLoad!(MemoryOrder.raw)(c.returnCalls), atomicLoad!(MemoryOrder.raw)(c.midReturned));
+                     namedCheck(false, "cont final owner seam");
+                 }
+                 pause();
+@@ -6561,7 +6571,14 @@
+             }
+             else
+             {
+-                if (mode != CiMode.finishSuspended && atomicLoad!(MemoryOrder.raw)(c.custodyReleased) && !opened)
++                // C4 must hold a consumer-owned descendant finish. Observing
++                // activation custody alone can open leafGo before the leaf
++                // table is published, letting emitter seal own finish and
++                // block this pump on a hook only the emitter can release.
++                // leafArrived observed AFTER pump returns proves publication
++                // and producer seal completed while the leaf gate stayed shut.
++                if (mode != CiMode.finishSuspended && atomicLoad!(MemoryOrder.raw)(c.custodyReleased) && !opened
++                    && (mode != CiMode.late || atomicLoad!(MemoryOrder.raw)(c.leafArrived)))
+                 {
+                     if (mode == CiMode.beforeP || mode == CiMode.afterP)
+                     {
+@@ -6584,6 +6601,9 @@
+             }
+             namedCheck(MonoTime.currTime < deadline, "cont interleave completion deadline");
+         }
++        if (mode == CiMode.late)
++            namedCheck(opened && unblocked && atomicLoad!(MemoryOrder.raw)(c.hookArrived) == 1,
++                "cont late descendant notification held and released");
+         park.destroy();
+         check(atomicLoad!(MemoryOrder.raw)(c.midDestroyed) == 1 && atomicLoad!(MemoryOrder.raw)(c.midFrees) == 1);
+         check(atomicLoad!(MemoryOrder.raw)(c.leafFrees) == (mode == CiMode.lateHold ? 0 : 1));
+@@ -7111,7 +7131,10 @@
+     switch (mode)
+     {
+         case "cont-descendants-first": contInterleave!(PrivateRootReclamation.emitter)(CiMode.early); return;
+-        case "cont-activation-first": contInterleave!(PrivateRootReclamation.emitter)(CiMode.late); return;
++        case "cont-activation-first": contInterleave!(PrivateRootReclamation.emitter)(CiMode.late);
++            contInterleave!(PrivateRootReclamation.consumer)(CiMode.late); return;
++        case "cont-seal-final-owner": version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
++            { contSealFinalOwner!(PrivateRootReclamation.emitter)(); contSealFinalOwner!(PrivateRootReclamation.consumer)(); } return;
+         case "cont-hold-before-table": contInterleave!(PrivateRootReclamation.emitter)(CiMode.hold); contInterleave!(PrivateRootReclamation.emitter)(CiMode.lateHold); return;
+         case "cont-done-tails": contInterleave!(PrivateRootReclamation.emitter)(CiMode.done); return;
+         case "cont-final-retire": contTree!(PrivateRootReclamation.emitter)(); contInterleave!(PrivateRootReclamation.emitter)(CiMode.finalDone);

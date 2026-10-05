@@ -1,0 +1,10 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1292,7 +1292,6 @@
+             entry.childStep = next;
+             if (!(flags & childHolding))
+             {
+-                atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
+                 entry.childFlags = childHolding;
+             }
+             releaseMember(entry); // custody release: final Entry access unless owner

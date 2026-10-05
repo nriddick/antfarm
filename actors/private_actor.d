@@ -15,7 +15,7 @@ import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
     atomicFetchAdd, atomicFetchSub, cas;
 import core.stdc.string : memcpy, memset;
 import core.lifetime : moveEmplace;
-import std.traits : hasElaborateDestructor, hasNested;
+import std.traits : hasElaborateDestructor, hasNested, ReturnType;
 
 enum defaultPrivateBatchLimit = 256;
 
@@ -26,6 +26,46 @@ struct PrivateCohortOptions
 }
 
 enum PrivateRootDisposition : ubyte { again, finish, waitChildren, finishAfterChildren }
+enum PrivateChildDisposition : ubyte { done, waitChildren }
+
+struct PrivateChildStep(R)
+{
+    static assert(!is(R == void), "void cohorts return PrivateChildDisposition");
+    static assert(!is(R == PrivateChildDisposition) && !is(R == PrivateChildStep!X, X),
+        "result type is ambiguous with a continuation step");
+private:
+    R value_;
+    PrivateChildDisposition disposition_;
+public:
+    static PrivateChildStep done(R value) nothrow @nogc @system
+    {
+        PrivateChildStep step;
+        step.value_ = value;
+        step.disposition_ = PrivateChildDisposition.done;
+        return step;
+    }
+    static PrivateChildStep waitChildren() nothrow @nogc @system
+    {
+        PrivateChildStep step;
+        step.disposition_ = PrivateChildDisposition.waitChildren;
+        return step;
+    }
+}
+
+private enum OpKind { plain, result, continuation, resultContinuation }
+private template opKind(T, R, alias operation)
+{
+    alias Ret = ReturnType!operation;
+    static if (is(Ret == void)) enum opKind = OpKind.plain;
+    else static if (is(Ret == PrivateChildDisposition)) enum opKind = OpKind.continuation;
+    else static if (!is(R == void) && is(Ret == PrivateChildStep!R))
+        enum opKind = OpKind.resultContinuation;
+    else static if (!is(R == void) && is(Ret == R)) enum opKind = OpKind.result;
+    else static assert(0, "operation must return void, R, PrivateChildDisposition or PrivateChildStep!R");
+    static assert(is(typeof(&operation) : Ret function(scope ref PrivateBorrow!T,
+        scope ref PrivateContext) nothrow @nogc @system), "operation must be nothrow @nogc");
+}
+
 enum PrivateSpawnResult : ubyte { spawned, capacityFull, allocationFailed, waveActive, retiring }
 enum PrivateStartResult : ubyte { started, empty, waveActive, retiring }
 enum PrivateRootReclamation : ubyte { emitter, consumer }
@@ -71,7 +111,7 @@ private:
     // service lives in the ChildBase of the wave that dispatched it.
     Service* service() nothrow @nogc @system
     {
-        return enclosing_ is null ? rootService(actor_) : ChildBase.fromWave(enclosing_).service;
+        return enclosing_ is null ? rootService(actor_, enclosing_) : ChildBase.fromWave(enclosing_).service;
     }
 public:
     /// R is the per-member result type; void (the default) creates a
@@ -104,6 +144,7 @@ public:
 // Child entries reach the Service through ChildBase.service; their word at
 // offset 16 is child-only metadata, never a Service pointer.
 private enum ChildStep : ubyte { done, waitChildren, doneRetire }
+private enum ubyte childHolding = 1, childCleanup = 2;
 
 static assert(PrivateContext.sizeof == 4 * size_t.sizeof);
 
@@ -149,12 +190,12 @@ version (D_LP64)
 }
 
 // Only roots have a Service word. Every read of Entry.service goes through
-// here, so a child Entry's metadata can never be misread as a pointer. A child
-// word is zero until continuations use it; they must then extend this check.
-private Service* rootService(Entry* entry) nothrow @nogc @system
+// here with root identity proved by the calling context, not by the word's bits.
+private Service* rootService(Entry* entry, Wave* enclosing) nothrow @nogc @system
 {
     version (assert)
-        if (entry.service is null) fatal("private entry: service read on a child");
+        if (enclosing !is null || entry.service is null)
+            fatal("private entry: service read on a child");
     return entry.service;
 }
 
@@ -165,6 +206,10 @@ private struct ChildBase
     Service* service;
     Wave wave;
     void function(ChildBase*) nothrow @nogc @system dispose;
+    Emittable resume;
+    Entry* resumeHead, resumeTail;
+    size_t resumeCount;
+    bool resumeScheduled;
 
     static ChildBase* fromWave(Wave* wave) nothrow @nogc @system
     {
@@ -215,8 +260,14 @@ version (AntfarmActorTestHooks)
         atomicStore!(MemoryOrder.raw)(context.actor_.pending, credits);
     }
 
+    void privateTestSetChildCredits(scope ref PrivateContext context, uint credits)
+        nothrow @nogc @system
+    {
+        atomicStore!(MemoryOrder.raw)(context.actor_.childPending, credits);
+    }
+
     /// Test-only: the Entry word at offset 16 of the context's own Entry,
-    /// unchecked. Zero for a child; the Service pointer for a root.
+    /// unchecked. Child continuation metadata or the root Service pointer.
     ulong privateTestServiceWord(scope ref PrivateContext context) nothrow @nogc @system
     {
         return *cast(ulong*) &context.actor_.service;
@@ -226,7 +277,7 @@ version (AntfarmActorTestHooks)
     /// child Entry is fatal in debug builds.
     void* privateTestRootService(scope ref PrivateContext context) nothrow @nogc @system
     {
-        return rootService(context.actor_);
+        return rootService(context.actor_, context.enclosing_);
     }
 
     /// Test-only: the Service that createChildren would hand a new cohort.
@@ -243,7 +294,8 @@ private void releaseRoot(Entry* entry) nothrow @nogc @system
     immutable old = atomicFetchSub!(MemoryOrder.acq_rel)(entry.pending, 1u);
     if (old == 0) fatal("private root credit underflow");
     if (old != 1) return; // no entry access after relinquishing a nonfinal credit
-    auto returns = &rootService(entry).rootReturns;
+    // Only root batches and child waves whose parent is a root call releaseRoot.
+    auto returns = &rootService(entry, null).rootReturns;
     auto head = atomicLoad!(MemoryOrder.raw)(*returns);
     while (true)
     {
@@ -256,10 +308,43 @@ private void releaseRoot(Entry* entry) nothrow @nogc @system
     }
 }
 
-// Join release for a member parent. Nothing selects it yet: ownJoin_ is never set.
+private void pushChildReturn(Entry* member) nothrow @nogc @system
+{
+    auto returns = &ChildBase.fromWave(member.enclosing).service.childReturns;
+    auto head = atomicLoad!(MemoryOrder.raw)(*returns);
+    while (true)
+    {
+        member.next = cast(Entry*) head;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateChildReturnBeforeCas, null);
+        if (cas!(MemoryOrder.rel, MemoryOrder.raw)(returns, head, cast(shared(Entry)*) member))
+            return; // final Entry AND Service access
+        head = atomicLoad!(MemoryOrder.raw)(*returns);
+    }
+}
+
 private void releaseMember(Entry* member) nothrow @nogc @system
 {
-    fatal("private member join: not available");
+    version (AntfarmActorTestHooks)
+        actorTestPoint(ActorTestPoint.privateChildCustodyBeforeRelease, null);
+    immutable old = atomicFetchSub!(MemoryOrder.acq_rel)(member.childPending, 1u);
+    if (old == 0) fatal("private child credit underflow");
+    if (old != 1) return; // relinquishing a nonfinal credit is the last Entry access
+    final switch (member.childStep)
+    {
+        case ChildStep.waitChildren:
+            pushChildReturn(member);
+            break;
+        case ChildStep.doneRetire:
+            member.childFlags |= childCleanup;
+            pushChildReturn(member);
+            break;
+        case ChildStep.done:
+            auto wave = member.enclosing;
+            member.childFlags = 0;
+            releaseWave(wave); // drop the activation hold as the last owner access
+            break;
+    }
 }
 
 private void releaseWave(Wave* wave) nothrow @nogc @system
@@ -285,9 +370,7 @@ private struct Service
     shared(Emittable*) incoming;
     Emittable* waiting;
     shared(Entry*) rootReturns;
-    // Members that finish waiting, pushed by their final credit release;
-    // declared but unused. The pump will drain it with its own cursor (not
-    // the root park's) and clear the FIFO tail when a drain empties it.
+    // Members that finish waiting, pushed by their final credit release.
     shared(Entry*) childReturns;
 
     void enqueue(Emittable* emittable) nothrow @nogc @system
@@ -304,7 +387,6 @@ private struct Service
 
     void pump(ref Token token) nothrow @nogc @system
     {
-        // childReturns is drained here, before iterating waiting.
         auto fresh = cast(Emittable*) atomicExchange!(MemoryOrder.acq_rel)(&incoming, cast(shared(Emittable)*) null);
         while (fresh !is null)
         {
@@ -313,7 +395,38 @@ private struct Service
             waiting = fresh;
             fresh = next;
         }
-        // One pass, one table per wave: backpressure never blocks a worker.
+        if (atomicLoad!(MemoryOrder.raw)(childReturns) !is null)
+        {
+            auto returned = cast(Entry*) atomicExchange!(MemoryOrder.acq_rel)(
+                &childReturns, cast(shared(Entry)*) null);
+            Entry* fifo;
+            while (returned !is null)
+            {
+                auto next = returned.next;
+                returned.next = fifo;
+                fifo = returned;
+                returned = next;
+            }
+            while (fifo !is null)
+            {
+                auto member = fifo;
+                fifo = member.next;
+                auto base = ChildBase.fromWave(member.enclosing);
+                member.next = null;
+                if (base.resumeHead is null) base.resumeHead = member;
+                else base.resumeTail.next = member;
+                base.resumeTail = member;
+                ++base.resumeCount;
+                if (!base.resumeScheduled)
+                {
+                    base.resumeScheduled = true;
+                    atomicFetchAdd!(MemoryOrder.acq_rel)(base.wave.pending, 1UL);
+                    base.resume.next = waiting;
+                    waiting = &base.resume;
+                }
+            }
+        }
+        // One pass, one table per descriptor: backpressure never blocks a worker.
         auto current = waiting;
         waiting = null;
         while (current !is null)
@@ -355,7 +468,7 @@ private void destroyState(T)(Entry* entry) nothrow @nogc @system
         destroy!false(*cast(T*) entry.state);
 }
 
-// Shared retirement hook for terminal dispatches and future child cleanup activations.
+// Shared retirement hook for terminal dispatches and child cleanup activations.
 private void retireMember(T)(Service* service, Entry* entry) nothrow @nogc @system
 {
     disposeChildren(entry);
@@ -712,7 +825,7 @@ private:
     {
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         auto borrow = PrivateBorrow!T(cast(T*) entry.state);
-        auto service = rootService(entry);
+        auto service = rootService(entry, null);
         auto context = PrivateContext(entry, null, false, service.batchLimit);
         auto disposition = entry.cleanup ? PrivateRootDisposition.finish : step(borrow, context);
         entry.disposition = disposition;
@@ -758,6 +871,37 @@ private struct SubsetBodies
     void popFront() nothrow @nogc { members = members[1 .. $]; }
 }
 
+private struct ResumeBodies
+{
+    ChildBase* park;
+    Entry* cursor;
+    size_t remaining;
+    ulong[1] scratch;
+    @property bool empty() const nothrow @nogc { return remaining == 0; }
+    @property size_t length() const nothrow @nogc { return remaining; }
+    @property ResumeBodies save() nothrow @nogc { return this; }
+    @property PayloadBody front() nothrow @nogc @system
+    {
+        scratch[0] = cast(ulong) cursor;
+        return scratch[];
+    }
+    void popFront() nothrow @nogc @system { cursor = cursor.next; --remaining; }
+    bool prepareTableFrontN(size_t n) nothrow @nogc @system
+    {
+        auto next = cursor;
+        foreach (_; 0 .. n) next = next.next;
+        park.resumeHead = next;
+        park.resumeCount -= n;
+        if (park.resumeCount == 0) park.resumeTail = null;
+        version (assert)
+            if ((park.resumeCount == 0) != (park.resumeHead is null)
+                || (park.resumeHead is null) != (park.resumeTail is null))
+                fatal("private resume FIFO invariant");
+        // Farm copies from our independent cursor after prepare, before visibility.
+        return true;
+    }
+}
+
 /// Opaque homogeneous cohort. The parent may create members and request a
 /// whole-cohort wave, but can never borrow a child's state. No overlapping
 /// waves, external dispatches, removal, or reparenting in this first slice.
@@ -770,6 +914,8 @@ struct PrivateChildPark(T, R = void)
             && !is(R == shared) && !is(R == inout),
             "private child result type must be unqualified (not const/immutable/shared/inout)");
         static assert(__traits(isPOD, R), "private child results require POD values");
+        static assert(!is(R == PrivateChildDisposition) && !is(R == PrivateChildStep!X, X),
+            "result type is ambiguous with a continuation step");
     }
 private:
     ChildBase base_; // first: erased disposal and wave-to-park conversion
@@ -784,6 +930,30 @@ private:
     {
         R* results_;         // capacity_ slots, in participant order
         size_t resultCount_; // members in the last nonempty wave; parent-only
+        version (assert) enum resultBytesPerMember = R.sizeof + 1;
+        else enum resultBytesPerMember = R.sizeof;
+
+        version (assert)
+        {
+            ubyte* resultWritten() nothrow @nogc @system
+            {
+                return cast(ubyte*) (results_ + capacity_);
+            }
+            void checkResultsWritten() nothrow @nogc @system
+            {
+                foreach (i; 0 .. resultCount_)
+                    if (resultWritten[i] == 0) fatal("private child result: unwritten slot");
+            }
+        }
+        void writeResult(size_t slot, R value) nothrow @nogc @system
+        {
+            version (assert)
+            {
+                if (resultWritten[slot] != 0) fatal("private child result: slot written twice");
+                resultWritten[slot] = 1;
+            }
+            results_[slot] = value;
+        }
     }
     static assert(base_.offsetof == 0,
         "PrivateChildPark.fromWave requires base_ at offset zero");
@@ -796,14 +966,14 @@ private:
         if (capacity == 0 || capacity > size_t.max / Entry.sizeof) return null;
         if (subsets && capacity > uint.max) return null;
         static if (hasResults)
-            if (capacity > size_t.max / R.sizeof) return null;
+            if (capacity > size_t.max / resultBytesPerMember) return null;
         auto park = cast(PrivateChildPark*) allocateZero(service, PrivateChildPark.sizeof, PrivateChildPark.alignof);
         if (park is null) return null;
         park.entries_ = cast(Entry*) allocateZero(service, capacity * Entry.sizeof, Entry.alignof);
         static if (hasResults)
             if (park.entries_ !is null)
             {
-                park.results_ = cast(R*) allocateZero(service, capacity * R.sizeof, R.alignof);
+                park.results_ = cast(R*) allocateZero(service, capacity * resultBytesPerMember, R.alignof);
                 if (park.results_ is null)
                 {
                     freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
@@ -821,7 +991,7 @@ private:
             if (park.sel_ is null)
             {
                 static if (hasResults)
-                    freeMemory(service, park.results_, capacity * R.sizeof, R.alignof);
+                    freeMemory(service, park.results_, capacity * resultBytesPerMember, R.alignof);
                 freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
                 freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
                 return null;
@@ -836,6 +1006,7 @@ private:
         park.base_.wave.hook = TableCompletionHook(&park.base_.wave, &waveCompleted);
         park.base_.wave.emittable.emit = &emit;
         park.base_.wave.finish = &finish;
+        park.base_.resume.emit = &emitResume;
         park.base_.next = parent.children;
         parent.children = &park.base_;
         return park;
@@ -867,6 +1038,7 @@ public:
             authorized(context);
             if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0)
                 fatal("private child results: wave active");
+            version (assert) checkResultsWritten();
             return results_[0 .. resultCount_];
         }
     }
@@ -902,25 +1074,13 @@ public:
 
     /// Enqueue a wave under the parent's dispatch authority. Completion also
     /// joins descendant waves started by this operation. retire=true frees
-    /// members on their final dispatch and forbids launching descendants.
+    /// members after their final activation and join. Plain/result terminal
+    /// callbacks cannot launch descendants; continuation callbacks can.
     PrivateStartResult start(alias operation)(scope ref PrivateContext context, bool retire = false)
         nothrow @nogc @system
     {
-        enum producesResults = !is(typeof(&operation) : void function(
-            scope ref PrivateBorrow!T, scope ref PrivateContext) @system);
-        static if (producesResults)
-        {
-            static assert(hasResults && is(typeof(&operation) : R function(
-                scope ref PrivateBorrow!T, scope ref PrivateContext) @system),
-                "operation must return void or the cohort's result type");
-            static assert(is(typeof(&operation) : R function(
-                scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system),
-                "operation must be nothrow @nogc");
-        }
-        else
-            static assert(is(typeof(&operation) : void function(
-                scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system),
-                "operation must be nothrow @nogc");
+        enum kind = opKind!(T, R, operation);
+        enum producesResults = kind == OpKind.result || kind == OpKind.resultContinuation;
         authorized(context);
         if (context.retiring_) return PrivateStartResult.retiring;
         if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0) return PrivateStartResult.waveActive;
@@ -930,7 +1090,10 @@ public:
         base_.wave.emittable.emit = &emit;
         cursor_ = 0;
         static if (hasResults)
+        {
             resultCount_ = producesResults ? count_ : 0;
+            version (assert) memset(resultWritten, 0, resultCount_);
+        }
         header_ = PayloadHeader.init;
         header_.maxCs = header_.done = 1;
         header_.plen = 1;
@@ -942,16 +1105,8 @@ public:
     PrivateStartResult startSubset(alias operation)(scope ref PrivateContext context,
         scope const(uint)[] members) nothrow @nogc @system
     {
-        enum producesResults = !is(typeof(&operation) : void function(
-            scope ref PrivateBorrow!T, scope ref PrivateContext) @system);
-        static if (producesResults)
-            static assert(hasResults && is(typeof(&operation) : R function(
-                scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system),
-                "operation must return void or the cohort's result type and be nothrow @nogc");
-        else
-            static assert(is(typeof(&operation) : void function(
-                scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system),
-                "operation must be nothrow @nogc");
+        enum kind = opKind!(T, R, operation);
+        enum producesResults = kind == OpKind.result || kind == OpKind.resultContinuation;
         authorized(context);
         if (sel_ is null) fatal("private child subset: storage not reserved");
         if (context.retiring_) return PrivateStartResult.retiring;
@@ -971,7 +1126,10 @@ public:
         retire_ = false;
         isSubset_ = true;
         static if (hasResults)
+        {
             resultCount_ = producesResults ? k_ : 0;
+            version (assert) memset(resultWritten, 0, resultCount_);
+        }
         header_ = PayloadHeader.init;
         header_.maxCs = header_.done = 1;
         header_.plen = 1;
@@ -1041,45 +1199,123 @@ private:
         releaseWave(wave); // seal: last park access
         return true;
     }
+    static bool emitResume(Emittable* emittable, ref Token token) nothrow @nogc @system
+    {
+        auto base = cast(ChildBase*) (cast(ubyte*) emittable - ChildBase.resume.offsetof);
+        auto park = cast(PrivateChildPark*) base;
+        auto wave = &base.wave;
+        auto n = base.resumeCount > park.batchLimit_ ? park.batchLimit_ : base.resumeCount;
+        auto bodies = ResumeBodies(base, base.resumeHead, n);
+        atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
+        immutable written = park.base_.service.farm.writeTracked(
+            park.header_, bodies, 1, &wave.hook, token, 0);
+        if (written == 0) releaseWave(wave); // P still pins the park
+        if (base.resumeCount != 0) return false;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateResumeBeforeUnschedule, null);
+        base.resumeScheduled = false;
+        releaseWave(wave); // drop P: final park access
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateResumeAfterUnschedule, null);
+        return true;
+    }
     static void finish(Wave* wave) nothrow @nogc @system
     {
         auto park = fromWave(wave);
         auto upstream = wave.upstream;
         auto parent = park.base_.parent;
         immutable parentIsRoot = park.parentIsRoot_; // snapshots before final cohort access
+        static if (hasResults)
+            version (assert) park.checkResultsWritten();
         if (park.retire_) park.count_ = 0;
         version (AntfarmActorTestHooks)
             actorTestPoint(ActorTestPoint.privateWaveBeforeIdlePublish, null);
         atomicStore!(MemoryOrder.rel)(wave.active, 0u); // last park access
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateRootAfterIdleBeforeCredit, null);
         if (upstream !is null) releaseWave(upstream);
-        else if (parentIsRoot)
+        else if (parentIsRoot) releaseRoot(parent);
+        else
         {
+            releaseMember(parent); // final parent access; idle alone does not pin Entry
             version (AntfarmActorTestHooks)
-                actorTestPoint(ActorTestPoint.privateRootAfterIdleBeforeCredit, null);
-            releaseRoot(parent); // final parent access; idle alone does not pin Entry
+                actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
         }
-        else releaseMember(parent);
     }
     static long runChild(alias operation, bool subset = false)(PayloadHeader*, PayloadBody body, ulong)
         nothrow @nogc @system
     {
+        enum kind = opKind!(T, R, operation);
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
-        auto park = fromWave(entry.enclosing);
+        auto wave = entry.enclosing;
+        auto park = fromWave(wave);
         immutable retiring = park.retire_;
-        auto borrow = PrivateBorrow!T(cast(T*) entry.state);
-        auto context = PrivateContext(entry, entry.enclosing, retiring, park.batchLimit_);
-        static if (is(typeof(operation(borrow, context)) == void))
-            operation(borrow, context);
+        static if (kind == OpKind.continuation || kind == OpKind.resultContinuation)
+        {
+            immutable flags = entry.childFlags;
+            if (flags & childCleanup)
+            {
+                retireMember!T(park.base_.service, entry);
+                entry.childFlags = 0;
+                releaseWave(wave); // H; the resume table credit fences callback return
+                return 1;
+            }
+            atomicStore!(MemoryOrder.raw)(entry.childPending, 1u);
+            auto borrow = PrivateBorrow!T(cast(T*) entry.state);
+            auto context = PrivateContext(entry, wave, false, park.batchLimit_);
+            context.ownJoin_ = true;
+            auto step = operation(borrow, context);
+            static if (kind == OpKind.resultContinuation)
+                auto disposition = step.disposition_;
+            else
+                auto disposition = step;
+            ChildStep next;
+            if (disposition == PrivateChildDisposition.done)
+            {
+                static if (kind == OpKind.resultContinuation)
+                {
+                    static if (subset)
+                        park.writeResult(park.sel_[park.capacity_ + (entry - park.entries_)], step.value_);
+                    else
+                        park.writeResult(entry - park.entries_, step.value_);
+                }
+                if (atomicLoad!(MemoryOrder.acq)(entry.childPending) == 1)
+                {
+                    if (retiring) retireMember!T(park.base_.service, entry);
+                    if (flags & childHolding)
+                    {
+                        entry.childFlags = 0;
+                        releaseWave(wave);
+                    }
+                    return 1;
+                }
+                next = retiring ? ChildStep.doneRetire : ChildStep.done;
+            }
+            else next = ChildStep.waitChildren;
+            entry.childStep = next;
+            if (!(flags & childHolding))
+            {
+                atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
+                entry.childFlags = childHolding;
+            }
+            releaseMember(entry); // custody release: final Entry access unless owner
+            version (AntfarmActorTestHooks)
+                actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
+        }
         else
         {
-            static if (subset)
-                park.results_[park.sel_[park.capacity_ + (entry - park.entries_)]] = operation(borrow, context);
+            auto borrow = PrivateBorrow!T(cast(T*) entry.state);
+            auto context = PrivateContext(entry, wave, retiring, park.batchLimit_);
+            static if (kind == OpKind.plain)
+                operation(borrow, context);
             else
-                park.results_[entry - park.entries_] = operation(borrow, context);
-        }
-        if (retiring)
-        {
-            retireMember!T(park.base_.service, entry);
+            {
+                static if (subset)
+                    park.writeResult(park.sel_[park.capacity_ + (entry - park.entries_)], operation(borrow, context));
+                else
+                    park.writeResult(entry - park.entries_, operation(borrow, context));
+            }
+            if (retiring) retireMember!T(park.base_.service, entry);
         }
         return 1;
     }
@@ -1099,7 +1335,7 @@ private:
         }
         freeMemory(service, park.entries_, park.capacity_ * Entry.sizeof, Entry.alignof);
         static if (hasResults)
-            freeMemory(service, park.results_, park.capacity_ * R.sizeof, R.alignof);
+            freeMemory(service, park.results_, park.capacity_ * resultBytesPerMember, R.alignof);
         if (park.sel_ !is null)
             freeMemory(service, park.sel_, park.capacity_ * 2 * uint.sizeof, uint.alignof);
         freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);

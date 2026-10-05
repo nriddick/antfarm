@@ -1,0 +1,13 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -330,7 +330,9 @@
+     final switch (member.childStep)
+     {
+         case ChildStep.waitChildren:
+-            pushChildReturn(member);
++            auto lostWave = member.enclosing;
++            member.childFlags = 0;
++            releaseWave(lostWave);
+             break;
+         case ChildStep.doneRetire:
+             member.childFlags |= childCleanup;

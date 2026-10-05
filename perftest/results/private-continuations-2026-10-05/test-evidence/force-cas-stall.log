@@ -1,0 +1,87 @@
+Historical log excerpt: 150 original lines, 2505 bytes.
+SHA-256 of complete original: 8b86abcabf6263bc47f6240a4a1a581190896076bab22dcdf644a0b97b41433b
+First 40 and last 40 lines retained; bulk output removed.
+
+== forcing reproducer (adopted from task 148) ==
+worktree: /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree
+out: /tmp/force-cas-full
+expectation: child exit 0 for every invocation
+
+$ ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/cas_stall_probe.d antfarm.d antfarm_allocation.d actors/actor.d actors/wave.d actors/private_actor.d -of=/tmp/force-cas-full/forced-cas-stall
+BUILD EXIT 0 (10.533s)
+
+# 3 normal invocations (all ok):
+RUN 1 ok exit=0 (0.002s)
+RUN 2 ok exit=0 (0.002s)
+RUN 3 ok exit=0 (0.002s)
+
+# 100 TSan invocations: first/last 3; complete exit list in force-cas-stall-summary.json
+TSAN RUN 1 ok exit=0 (0.011s)
+TSAN RUN 2 ok exit=0 (0.010s)
+TSAN RUN 3 ok exit=0 (0.011s)
+...
+TSAN RUN 98 ok exit=0 (0.010s)
+TSAN RUN 99 ok exit=0 (0.010s)
+TSAN RUN 100 ok exit=0 (0.011s)
+== summary ==
+{
+  "worktree": "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree",
+  "out": "/tmp/force-cas-full",
+  "canonical_main_d": "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/main.d",
+  "probe_source": "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests/cas_stall_probe.d",
+  "expected_exit": 0,
+  "forced_marker": "FORCED A CAS before pump returns",
+  "normal": {
+    "runs": 3,
+    "build_exit": 0,
+    "normal_exits": [
+      0,
+      0,
+      0
+    ],
+    "passed": 3,
+    "missing_marker": 0
+  },
+
+... 70 middle lines omitted ...
+
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "passed": 100,
+    "missing_marker": 0
+  }
+}
+failures: 0
