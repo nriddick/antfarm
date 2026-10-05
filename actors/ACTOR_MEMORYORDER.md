@@ -202,8 +202,8 @@ The common Entry overlays this root metadata with the child's enclosing pointer;
 size and offset asserts preserve its 40-byte layout.
 
 The E2-3 plumbing (child Service pointer in the cohort, the generic wave credit
-target, `Emittable`, the declared-but-unused `childReturns` list and
-`ownJoin_`) changes no memory order and adds no atomic operation. Child
+target, `Emittable`, `childReturns` and `ownJoin_`) changed no memory order and
+added no atomic operation. E2-4 uses the reserved paths as described below. Child
 `spawn` loses a store, and wave emission and enqueue lose one load each.
 `finish` selects the join target with one extra plain (non-atomic) byte load
 of `parentIsRoot_`; that load is not an atomic and not an ordering
@@ -267,8 +267,9 @@ only at byte free. This rooting is separate from the visibility argument.
 ### Private child results
 
 Typed cohorts store each operation's return value in `results_[i]`, where i is
-its Entry index (spawn order). The store precedes callback return and member
-retirement. No new atomics or fences are needed: the plain slot write joins
+its participant position (spawn order for a whole wave, selection position for
+a subset). Continuations write only on their final `done` activation. The store
+precedes callback return and member retirement. No new atomics or fences are needed: the plain slot write joins
 through Shc and Tprogress acquire/release RMWs, table and descendant wave
 credits, and the final wave credit's acquire/release decrement. The finisher
 release-stores `active = 0` as its final cohort access.
@@ -287,6 +288,78 @@ before enqueue; children read neither that count nor any slot. The slot pointer
 is published through enqueue. The finisher never updates result bookkeeping
 after publishing idle, so a polling parent can read and dispose the cohort
 while the saved root notification credit is still in flight.
+
+## Private child continuation ordering
+
+A continuation member owns 32-bit `childPending` custody during its activation.
+Every wave it starts chooses that counter as its immutable notification target.
+A lazy hold H pins its enclosing wave W from the first suspension/draining
+activation until completion. Initial and resume tables both retain W credits;
+the emitter holds P while a park's resume descriptor is scheduled.
+
+```text
+descendant writes / result slots
+  -> Shc completion (acq_rel) -> Tprogress (acq_rel)
+  -> descendant wave table/descendant releases (acq_rel)
+  -> descendant finish: active.store(0, release)
+  -> member childPending.fetchSub (acq_rel)
+  -> childReturns push CAS (release; last Entry and Service access)
+  -> emitter detach exchange (acq_rel)
+  -> resume table publication (release) -> consumer acquire
+  -> next activation reads joined descendants and prior member state
+```
+
+The activation's own state, step and flags precede its custody decrement. The
+unique final decrement acquires both that release and all descendant releases,
+whichever side arrives last. Children cannot take the count to zero while
+custody is held. No new retain occurs without running custody. Nonfinal
+releasers never access the Entry again; final owners either push a return or
+clear flags and release H as their last access. This is the lost-wake and
+exactly-one-resumption argument.
+
+The exclusive reset `childPending := 1` is raw. A resumed activation follows
+the previous final owner's queue handoff. A new wave follows W's prior join
+and its parent's idle acquire. The immediate-done path can leave dormant one:
+its acquire load of one, after every retain, proves all notification decrements
+are finished. Neither path has another writer at reset.
+
+Final activation writes, including result slots, reach the parent through its
+tracked table's Shc/Tprogress/W releases. For done with outstanding tails,
+the member's final owner also carries the child join into `releaseWave(W)`.
+The last W decrement acquires all releases, publishes idle, then releases the
+snapshotted root/member/ancestor target. After idle, the finisher touches only
+those snapshots; a parent may reuse or dispose the child cohort immediately.
+
+Parent-written header, retirement flag, subset positions and result count
+precede start's incoming release CAS. The emitter acquires them before initial
+emission; resume emission is later on the same emitter. H and P prevent W from
+joining while a return is queued or a descriptor is still scheduled. Taking H
+inside the callback is safe because its table credit cannot drop before return.
+P is cleared and released only after the FIFO is empty, as the final park access.
+Service traversal snapshots descriptor `next` before calling emit and does not
+dereference a sealed descriptor afterward.
+
+Return-link ownership transfers through the release CAS and acquire exchange.
+The emitter reverses returns, groups them by park, and maintains an unpublished
+FIFO. `ResumeBodies.save` copies its independent cursor; prepare detaches the
+accepted prefix without moving that cursor, and clears tail on full drain.
+Farm sizes, prepares and copies the range before publication. **Reading an
+accepted Entry's `next` after publication is not an ordering edge and is
+forbidden:** its next activation can already be writing a new return link.
+Zero admission transfers nothing and rolls back its table credit under P.
+
+A terminal done with tails becomes `doneRetire`. Even if the emitter's seal
+is the final owner, it queues a cleanup activation instead of running a
+destructor. The consumer cleanup acquires the chain above, disposes descendant
+cohorts post-order, destroys state, then drops H while its table still fences
+return. The result write precedes inline or deferred retirement. Both root
+reclamation policies preserve this child destructor/free placement.
+
+Debug result-written bytes follow the same publication and W-join edges as
+their slots; each participant owns a distinct byte. They add no release-build
+work. The child-return hint is a raw load that may delay discovery until the
+next pump; the exchange supplies the acquire. Emitter wake remains outside
+this protocol.
 
 ## Inbox and close chart
 

@@ -46,21 +46,21 @@ One active Wave joins the selected callbacks and their descendants; subsets
 never retire members. The fixed metadata adds 16 bytes per cohort on 64-bit,
 with 8 bytes per member only when reserved. Entry stays 40 bytes.
 
-Port extensions remain: **X1** root-to-application outputs (next), **X2** library
-reductions, **X3** bounded append buffers, and **X4** writer capability / in-place
-results. The E2-3 plumbing refactor, E2-4 resumable child continuations and
-optional emitter wake integration remain deferred. A compiler-enforced safe
-ownership front end also remains future work.
+**E2-3 and E2-4 are done; E2 is complete except optional emitter wake.** Shared
+wave scheduling now publishes resumable child activations through the emitter.
+Members can wait, fold descendant results and finish within one enclosing wave,
+including subsets and `startFinal`. A custody counter and lazy enclosing-wave
+hold preserve lifetime; cleanup activations keep terminal destruction on
+consumers even when an emitter seal owns the final credit. Entry stays 40 bytes;
+continuation descriptors are reserved per cohort. The independent lifetime
+review, mutations, soak and perf evidence live in
+[the E2-4 results](../perftest/results/private-continuations-2026-10-05/).
 
-The child-continuation extension must preserve these boundaries: retain a logical
-enclosing-wave hold before the original child callback returns; retain callback
-custody until the last Entry access; choose exactly one immutable completion
-target per descendant wave; reserve opt-in continuation metadata and stable
-resume-table descriptors without growing ordinary child Entries; publish through
-the emitter; and release the logical hold only after the final continuation,
-descendants and table access have joined. Initially forbid suspension combined
-with `startFinal` retirement and omit cancellation. Subset waits need explicit
-generation-scoped join groups rather than reinterpreting the all-children counter.
+Next items are per-member retirement, outcomes/cancellation, concurrent subsets,
+non-POD results, **X1** root-to-application outputs, and optional emitter wake.
+Other port extensions remain: **X2** library reductions, **X3** bounded append
+buffers, and **X4** writer capability / in-place results. A compiler-enforced
+safe ownership front end remains future work.
 
 ## Current actor and wave spike
 

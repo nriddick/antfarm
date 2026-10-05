@@ -5,8 +5,8 @@ import re
 
 root = Path(__file__).resolve().parent
 programs = re.findall(r"```d\n(.*?)\n```", (root.parent / "actors/PRIVATE_ACTORS.md").read_text(), re.S)
-if len(programs) != 3:
-    raise SystemExit("expected the root, conductor and subset documentation programs")
+if len(programs) != 4:
+    raise SystemExit("expected the root, conductor, child-fold and subset documentation programs")
 output = root / ".doc-examples"
 output.mkdir(exist_ok=True)
 for index, program in enumerate(programs):

@@ -26,9 +26,14 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   retire members; one wave remains active per cohort. Entry stays 40 bytes.
 - **Port extensions:** X1 root-to-application outputs; X2 library reductions;
   X3 bounded append buffers; X4 writer capability / in-place results.
-- **E2 remaining:** the E2-3 plumbing refactor, E2-4 child continuations, and
-  optional emitter wake integration. No version bump accompanies these slices;
-  the release remains 1.7.1-rc.1 pending a tag decision.
+- **E2 complete except emitter wake:** E2-3 provides shared wave scheduling and
+  E2-4 resumes child operations after descendant joins within the same wave,
+  including result folds, subsets and deferred `startFinal` cleanup. Entry stays
+  40 bytes; continuations publish only through the emitter pump.
+- **Next:** per-member retirement, outcomes/cancellation, concurrent subsets,
+  non-POD results, root-to-application outputs X1, and optional emitter wake.
+  No version bump accompanies these slices; the release remains 1.7.1-rc.1
+  pending a tag decision.
 
 ## 1.7.0-rc.5 completion joins
 
