@@ -305,6 +305,8 @@ the live mapping when page size is material to the result.
    cursor and must not be copied.
 3. Register one producer `Token` per active producer. Copying transfers it;
    assigning over a still-registered token is fatal, so unregister first.
+   A token is bound to the Farm that issued it: writing, flushing, or
+   unregistering it through any other Farm is fatal.
 4. Publish useful batches and pop the returned count from the source.
 5. Consume with `consumeNext()` until application completion.
 6. Unsubscribe consumers, unregister producers, then destroy the Farm.

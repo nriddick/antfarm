@@ -86,6 +86,7 @@ The shared mutable Farm fields:
 - `Cf` — the current number of subscribed consumers.
 - `Reqs_c` — a monotonically increasing counter of consumer subscription requests. `IDc` is taken from this counter alone, so producer registration cannot fragment consumer shard assignment.
 - `Reqs_p` — a monotonically increasing counter of successful producer registrations (4d). It is separate from `Reqs_c` so Token hashes do not walk the consumer ID space.
+- `FarmId` — a process-unique identity taken from a global issuance counter at Farm creation and never reused for the process lifetime. Every Token carries a copy, binding it to its issuing Farm (4d).
 - `Prbulk` — the current number of bulk producers.
 - `Prsm` — the current number of small producers.
 - `Wt` — the write tail sequence.
@@ -224,9 +225,9 @@ The Farm uses two tiers of producer to cap the max excursion, so one or a few en
 
 Registration is how that invariant is enforced. The Farm preallocates two 64-byte-strided slot arrays, one for each producer tier. A Farm-local blocking mutex serializes complete registration and deregistration transactions, including the hash, authoritative quota ledger, and tier counter. Publishing and consuming do not acquire it. This prevents reuse of a released hash before the departing producer finishes clearing its ledger.
 
-`registerProducer(tier)` checks the tier capacity, assigns a hash derived from the slot and `Reqs_p`, initializes the quota ledger to zero, and returns a valid Token with zero remaining quota. Its first nonempty write must obtain a checked grant through the same forward sweep as every later renewal. `unregisterProducer(ref Token)` validates the live slot, clears its hash and ledger, invalidates the token, and releases the tier capacity while holding the mutex.
+`registerProducer(tier)` checks the tier capacity, assigns a hash derived from the slot and `Reqs_p`, stamps the token with the Farm's `FarmId`, initializes the quota ledger to zero, and returns a valid Token with zero remaining quota. Its first nonempty write must obtain a checked grant through the same forward sweep as every later renewal. `unregisterProducer(ref Token)` validates the token's Farm provenance and live slot, clears its hash and ledger, invalidates the token, and releases the tier capacity while holding the mutex.
 
-`write()` takes the Token by reference and fatals if the hash does not match the live slot or if the token's private quota mirror exceeds the farm's ledger for that slot. Unregistered threads therefore cannot call `write()` and cannot bypass `Exmax`, and a registered caller cannot forge a fresh quota past its grant by mutating the token.
+`write()` takes the Token by reference and fatals if the token's `FarmId` is not the receiving Farm's, if the hash does not match the live slot, or if the token's private quota mirror exceeds the farm's ledger for that slot. Unregistered threads therefore cannot call `write()` and cannot bypass `Exmax`, a registered caller cannot forge a fresh quota past its grant by mutating the token, and a token registered on one Farm — including a since-destroyed Farm whose identity is never reissued — is fatal on every other Farm. The slot hash alone does not prove ownership: two Farms with identical registration histories derive identical hashes, so provenance is a separate deterministic field, not another probabilistic check.
 
 Tokens are single-owner and transfer-only: copying consumes the source (the copy constructor release-stores the valid hash last, then clears the source's hash), so at most one live token exists per slot and a stale copy fails `requireToken`. When a producer leaves, it can pass its quota along only by transferring the Token; there is no undocumented inherited quota.
 
@@ -249,7 +250,7 @@ If a `Pi` has depleted its swept quota, probed its `Wt` position, and needs to c
 Arguments:
 
 - `Payloads` — a slice or forward range of `PayloadEntry` structs. `write()` saves independent checkpoints for sizing and emission and does not advance the caller's range.
-- `Token` — the caller's registration ticket (4d). Required; a mismatch is fatal. The Token is passed by reference; it carries the caller's remaining quota as a private field, and the Farm mirrors it in a per-slot ledger so a forged ticket cannot exceed the granted excursion.
+- `Token` — the caller's registration ticket (4d). Required; a mismatch is fatal. The Token is passed by reference; it carries the issuing Farm's `FarmId` and the caller's remaining quota as private fields, and the Farm mirrors the quota in a per-slot ledger so a forged ticket cannot exceed the granted excursion.
 - `AvgCost` — optional, default 1. The producer's declared `Call` cost class: a log2 shift in `0 .. log2(MAX_CHUNK)` published in Thead. 0 means `Call`s are very cheap (chunk stays at `MAX_CHUNK`, maximum claim amortization); larger values shrink the chunk (short visits, less tail). `write()` fatals on `AvgCost` out of range.
 
 Returns: the number of Payloads written.
@@ -545,7 +546,7 @@ The raw ring-read rule: acquire-validate `Es` or `Tsent` first, then raw-load th
 | assigning over a still-valid Token | fatal |
 | `write()` has no safe quota at present | returns 0; backpressure |
 | only a prefix fits current quota | returns the prefix count; caller advances its own range |
-| bad/stale/forged Token | fatal |
+| bad/stale/forged Token, or a Token presented to a Farm other than its issuer | fatal |
 | invalid payload header, callback, iteration bounds, or `avgCost` | fatal |
 | payload cannot fit a singleton table in the caller's tier | fatal |
 | size arithmetic or packed counter wraps | fatal |
