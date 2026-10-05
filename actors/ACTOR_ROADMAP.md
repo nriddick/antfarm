@@ -22,7 +22,7 @@ an engine can aggregate before unloading code or reclaiming an arena.
 [Private roots and parent-owned cohorts](PRIVATE_ACTORS.md) are now a separate
 path in `actors/private_actor.d`. The private path supports `stateAllowed` struct/scalar
 state, multiple single-emitter parks sharing a Farm, terminal dispatch,
-parent-authorized whole-cohort waves, and nested descendant joins. It removes
+parent-authorized whole-cohort and subset waves, and nested descendant joins. It removes
 public actor admission/generation/wake machinery from that narrower model.
 **E1 is done:** root-only `waitChildren` and `finishAfterChildren` use a custody
 and child join, then return through the emitter's ready FIFO. Waiting roots
@@ -33,16 +33,22 @@ Measurements and limitations are recorded in
 
 **E2 ports slice 1 is done:** POD return values populate cohort-owned slots in
 spawn order; only the direct parent reads the joined `const(R)[]`. Slots survive
-terminal member callbacks. Default `R = void` retains the existing layout and
+terminal member callbacks. Default `R = void` allocates no result slots and retains its dispatch
 code; ordinary child Entries remain 40 bytes.
 
 **E2-1 is done:** private non-POD state moves into storage, with exactly-once
 consumer destruction after descendants and result writes. GC references can
 use `ActorAllocator.gcRooted`. Public actor state and `R` remain POD.
 
+**E2-2 is done:** opt-in selection storage supports `startSubset` with `uint`
+spawn indices and participant-ordered results, matched by `subsetMembers`.
+One active Wave joins the selected callbacks and their descendants; subsets
+never retire members. The fixed metadata adds 16 bytes per cohort on 64-bit,
+with 8 bytes per member only when reserved. Entry stays 40 bytes.
+
 Port extensions remain: **X1** root-to-application outputs (next), **X2** library
 reductions, **X3** bounded append buffers, and **X4** writer capability / in-place
-results. Resumable child continuations, subset waves and
+results. The E2-3 plumbing refactor, E2-4 resumable child continuations and
 optional emitter wake integration remain deferred. A compiler-enforced safe
 ownership front end also remains future work.
 

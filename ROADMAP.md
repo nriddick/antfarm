@@ -17,13 +17,16 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   return through the existing emitter pump; child Entries remain 40 bytes.
 - **E2 ports slice 1 done:** POD return values populate cohort-owned per-member
   slots in spawn order; authorized parents acquire joined results, including
-  after member retirement. Signal-only cohorts retain their layout and dispatch.
+  after member retirement. Signal-only cohorts allocate no result slots and retain their dispatch.
 - **E2-1 done:** private state moves, consumer-only post-order destruction, and
   the composable `ActorAllocator.gcRooted` adapter. Public state and results
   remain POD.
+- **E2-2 done:** opt-in subset waves with `uint` spawn indices, copied selections,
+  participant-ordered results and the existing descendant join. Subsets never
+  retire members; one wave remains active per cohort. Entry stays 40 bytes.
 - **Port extensions:** X1 root-to-application outputs; X2 library reductions;
   X3 bounded append buffers; X4 writer capability / in-place results.
-- **E2 remaining:** child continuations, subset waves, and
+- **E2 remaining:** the E2-3 plumbing refactor, E2-4 child continuations, and
   optional emitter wake integration. No version bump accompanies these slices;
   the release remains 1.7.1-rc.1 pending a tag decision.
 

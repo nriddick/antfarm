@@ -2,7 +2,7 @@
 
 `actors.private_actor` implements a separate ownership model for actors that
 have no public identity. A root has no external application owner. A child
-has exactly one private parent, which can authorize whole-cohort waves but
+has exactly one private parent, which can authorize whole-cohort or subset waves but
 cannot inspect the child's state. Children can create children of their own.
 
 A single emitter owns each root park and its Farm producer token. Multiple
@@ -105,6 +105,9 @@ result storage. `PrivateChildPark!T` is the same type as `PrivateChildPark!(T, v
 
 - `children.spawn(context, initializer)` while the cohort is idle;
 - `children.start!operation(context)` to authorize a whole-cohort wave;
+- `children.startSubset!operation(context, members)` to authorize only the listed
+  members, after reserving subset storage at creation;
+- `children.subsetMembers(context)` to read that selection in list order;
 - `children.finished(context)` to acquire its completion;
 - `children.results(context)` to acquire a `const(R)[]` of joined results, when
   `R` is not `void`;
@@ -113,7 +116,8 @@ result storage. `PrivateChildPark!T` is the same type as `PrivateChildPark!(T, v
 
 An operation accepts `scope ref PrivateBorrow!T` and `scope ref PrivateContext`
 and returns either `void` or the cohort's result type `R`. The runtime stores
-each return value in that member's slot, indexed by spawn order. It may launch
+each return value in participant order: spawn order for whole waves, list order
+for subsets. It may launch
 descendant waves and return immediately.
 Its enclosing wave remains active until those descendants finish. Parent
 callbacks must not block waiting for child work. A root returns one of:
@@ -207,15 +211,16 @@ void main()
 
 Slots are allocated eagerly with the cohort through its inherited allocator
 and freed when the cohort is disposed. Results are empty before the first
-nonempty wave. A result-producing wave replaces every member's slot; a `void`
+nonempty wave. A result-producing wave replaces the participant slots; a `void`
 wave clears the result length. An empty start preserves previous results, as do
 rejected busy or retiring starts. Spawning another member preserves the previous
-slice; the next wave includes that member at its new spawn index.
+slice; the next whole wave includes that member at its new spawn index.
 
 `results(context)` is fatal while the wave is active. Polling parents retry
 `finished(context)` before reading. Wrong-parent and default contexts are fatal
 in debug and release. The slice is valid only within the authorized parent's
-callback and until the next `start` or `startFinal`; retaining it beyond that
+callback and until the next nonempty `start`, `startFinal` or `startSubset`;
+retaining it beyond that
 boundary violates the `@system` contract. Pointers inside a POD result follow
 application ownership rules; any pointer into child state must not be returned
 as a result value.
@@ -239,14 +244,120 @@ External result channels remain the route for root-to-application output and
 application-defined cross-level routing; they require their own ownership and
 synchronization contracts.
 
+## Subset waves
+
+Create a cohort with `context.createChildren!(T, R)(capacity,
+PrivateCohortOptions(batchLimit, true))` to reserve subset storage. A zero
+options batch limit inherits the creating context's effective limit. The two
+existing creation overloads keep their behavior; their cohorts have no subset
+storage. Creation returns null on allocation failure, overflowing allocation
+sizes, zero capacity, or reserved capacity above `uint.max`.
+
+`startSubset!operation(context, members)` copies a list of `uint` spawn indices
+into the reserved storage and authorizes only those members. The emitter
+publishes them in list order; consumer execution can run concurrently and
+complete in a different order. Out-of-range indices, duplicates and an
+unreserved cohort are fatal in debug and release, including an empty list on
+an unreserved cohort. Wrong-parent and default contexts are also fatal.
+
+There is one active wave per cohort. A busy start returns `waveActive` before
+validating or copying the list and changes nothing. A retiring context returns
+`retiring`. An empty list returns `empty`, takes no credit, and preserves both
+results and the last selection. `subsetMembers(context)` returns that selection
+for the most recent nonempty subset, or empty after a nonempty `start` or
+`startFinal`. Its slice is valid within the authorized callback until the next
+nonempty start; the input list may be reused as soon as `startSubset` returns.
+
+For result cohorts, `results(context)[j]` belongs to
+`subsetMembers(context)[j]`. A void subset clears the result length. Unselected
+members retain their state, and subsets never destroy members. There is no
+`startFinalSubset` or `startSubsetFinal`; whole-cohort `startFinal` and parent
+disposal retire every member. Descendant joins and root `waitChildren` use the
+same Wave join as whole waves, with no new atomics. Its idle acquire fences
+selection reuse between generations; the last finisher accesses only saved
+parent/upstream pointers after publishing idle.
+
+On 64-bit targets the fixed cohort metadata grows by 16 bytes (one selection
+pointer and a count, with the subset flag in existing padding): a signal-only
+cohort is 280 bytes instead of 264. Entry remains 40 bytes. Unreserved cohorts
+allocate no per-member subset storage and use the existing whole-wave dispatch
+path. Reserved cohorts make one extra eager allocation of 8 bytes per member
+of capacity, containing both the selection and its inverse positions. Starting
+a subset copies and validates k indices in O(k), without scanning or clearing
+the capacity array; emission and result placement use one index indirection.
+
+This complete example selects members 3 and 1, then reads their squares in
+that order after the join. Parent retirement also disposes unselected members.
+
+```d
+import antfarm;
+import actors;
+
+struct Item { ulong input; }
+ulong square(scope ref PrivateBorrow!Item actor, scope ref PrivateContext context)
+    nothrow @nogc @system
+{
+    return actor.value.input * actor.value.input;
+}
+struct Conductor { PrivateChildPark!(Item, ulong)* children; ulong* total; }
+PrivateRootDisposition conduct(scope ref PrivateBorrow!Conductor actor,
+    scope ref PrivateContext context) nothrow @nogc @system
+{
+    if (actor.value.children is null)
+    {
+        actor.value.children = context.createChildren!(Item, ulong)(4,
+            PrivateCohortOptions(0, true));
+        if (actor.value.children is null) fatal("child park allocation failed");
+        foreach (i; 0 .. 4)
+            if (actor.value.children.spawn(context, Item(i + 1)) != PrivateSpawnResult.spawned)
+                fatal("child spawn failed");
+        uint[2] members = [3, 1];
+        if (actor.value.children.startSubset!square(context, members[]) != PrivateStartResult.started)
+            fatal("subset wave failed");
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto members = actor.value.children.subsetMembers(context);
+    auto values = actor.value.children.results(context);
+    if (members.length != 2 || members[0] != 3 || members[1] != 1
+        || values.length != 2 || values[0] != 16 || values[1] != 4)
+        fatal("subset results order mismatch");
+    foreach (value; values) *actor.value.total += value;
+    return PrivateRootDisposition.finish;
+}
+void main()
+{
+    ulong total;
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    if (!token.valid) fatal("producer registration failed");
+    ConsumerView view;
+    if (view.subscribe(farm) < 0) fatal("consumer subscription failed");
+    auto park = PrivateRootPark!(Conductor, conduct).create(farm, 1);
+    if (park is null) fatal("private park allocation failed");
+    if (park.spawn(Conductor(null, &total)) != PrivateSpawnResult.spawned)
+        fatal("private spawn failed");
+    while (park.live != 0)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+    }
+    if (total != 20) fatal("subset total mismatch");
+    park.destroy();
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    farm.destroy();
+}
+```
+
 ## Progress and outcomes
 
 | Operation | Result / contract |
 | --- | --- |
 | Root `spawn` | `PrivateSpawnResult.spawned`, `capacityFull`, or `allocationFailed`; moves non-POD state (copies POD bytes) and returns no handle. |
 | Child `spawn` | The same outcomes, plus `waveActive` or `retiring`. |
-| `start` / `startFinal` | `PrivateStartResult.started`, `empty`, `waveActive`, or `retiring`. Empty starts are already complete and take no credit. |
-| `results(context)` | `const(R)[]` in spawn order, acquired after the join; fatal while active or with wrong/default authority. Available only for non-void `R`. |
+| `start` / `startFinal` / `startSubset` | `PrivateStartResult.started`, `empty`, `waveActive`, or `retiring`. Empty starts are already complete and take no credit. |
+| `results(context)` | `const(R)[]` in participant order, acquired after the join; fatal while active or with wrong/default authority. Available only for non-void `R`. |
+| `subsetMembers(context)` | `const(uint)[]` in list order for the most recent nonempty subset; empty after a whole wave. Wrong/default authority is fatal. |
 | `finished(context)` | True before the first start and after the current wave joins; a root notification tail may still be pending. Wrong-parent or default authority is fatal, including when the cohort is idle. |
 | `collectCompleted()` / `poll()` | Acquires completed root tables and wake returns, reclaims terminal roots and appends ready roots; never publishes work or runs consumers. |
 | `pump(token)` | Collects completions and emits at most one root table and one table per pending child wave; returns only the number of root activations published, including internal deferred cleanup. Zero does not mean idle. The emitter must keep pumping to resume waiting roots. |
@@ -332,7 +443,7 @@ raw pointers or transitive state. In particular:
 Hierarchy depth has no fixed limit. Completion and disposal recurse, so the
 available thread stack bounds usable depth; applications must size it accordingly.
 
-Arbitrary subset waves, external wake/inbox operations,
+External wake/inbox operations,
 reparenting, and resumable child continuations are not implemented. Children
 may launch nested work, but cannot resume themselves later in the same wave.
 A later continuation design must retain its ancestor's lease until its last
