@@ -1716,7 +1716,7 @@ struct AntFarm
     }
 }
 
-/// Spec 5a: a POD struct exclusively owned by one consumer at a time.
+/// Unique, non-copyable cursor exclusively owned by one consumer at a time.
 ///
 /// Held pins are a contiguous epoch range [oldestEi, newestEi] (equal when
 /// freshly subscribed). newestEi is the position: the segment of the last

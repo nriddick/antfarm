@@ -75,7 +75,8 @@ archive; it does not require a system mimalloc installation.
 Application functions can be adapted into Ant Farm payloads with
 `payloadRange`. The callback must be `nothrow @nogc`; its arguments are packed
 into the ring and reconstructed on a consumer. This complete single-threaded
-program produces and consumes on one thread:
+program produces and consumes on one thread. `make check` extracts this block
+and runs it with LDC and DMD in debug and release:
 
 ```d
 import antfarm_templates;
@@ -164,9 +165,12 @@ The [private actor model](actors/PRIVATE_ACTORS.md) adds self-owned
 roots and exclusively parent-owned child cohorts. Blind parks emit dispatches;
 state is visible only inside the actor's authorized callback. See its
 [full-lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md) and ownership limits
-before choosing it over the public actor API. Its [complete examples](actors/PRIVATE_ACTORS.md#api)
-include same-thread consumption and joined, externally owned results.
-Shared setup, drain, and shutdown rules for both models are in
+before choosing it over the public actor API. Its [documentation programs](actors/PRIVATE_ACTORS.md#api)
+are extracted and run by `make check`, including same-thread consumption and
+joined results. The onboarding program
+[examples/private_tree.d](examples/private_tree.d) uses typed result ports, a
+child continuation, a subset wave, and a destructor. Shared setup, drain, and
+shutdown rules for both models are in
 [actors/LIFECYCLE.md](actors/LIFECYCLE.md).
 
 ## First actor and wave
@@ -176,11 +180,15 @@ borrowing without changing the worker side: ordinary Farm consumers execute
 actor activations and wave tables. An `ActorOwner` controls retirement and
 reclamation, while its copyable `ActorHandle` is the identity used to wake,
 send to, or phase-dispatch the actor. Contracts that apply to both models are
-in [actors/LIFECYCLE.md](actors/LIFECYCLE.md). The examples below assume the `farm`,
-`token`, and consuming `view` from [First payload](#first-payload);
+in [actors/LIFECYCLE.md](actors/LIFECYCLE.md). Start with the compiled programs
+[examples/public_service.d](examples/public_service.d) and
+[examples/public_wave.d](examples/public_wave.d); build commands are in
+[examples/README.md](examples/README.md). The blocks below are fragments. They
+assume the `farm`, `token`, and consuming `view` from [First payload](#first-payload);
 `drainOrYield()` stands for `view.consumeNext()` or a pool worker's pump.
 
 ```d
+// fragment: assumes farm, token, and view from First payload
 import actors;
 
 struct Body { ulong position; }
@@ -205,11 +213,14 @@ handle.wake();                 // coalescing autonomous activation
 runtime.flush(token, 32);      // publish queued actors into the Farm
 ```
 
-A wave dispatches one phase operation across a collection of idle actor
-handles created by the same runtime. It may span several physical Farm tables,
-but exposes one generation-tagged completion:
+A wave dispatches one phase operation across a caller-selected collection of
+idle actor handles. Handles passed to one `publish` must match that operation's
+state type, and every handle must have been created on the same Farm. They need
+not come from the same `ActorRuntime`. The wave may span several physical Farm
+tables, but exposes one generation-tagged completion:
 
 ```d
+// fragment: assumes farm, token, handles, and drainOrYield
 ActorWave wave;
 wave.begin(farm);
 
@@ -233,8 +244,12 @@ while (!completion.finished)
 
 Actors in the same wave run in parallel and must not consume one another's
 intermediate writes. Observing `completion.finished` with acquire semantics and
-confirming `!completion.failed` is the boundary after which an orchestrator may
-publish a dependent wave. For cross-actor reads, keep private mutable actor
+confirming `!completion.failed` joins the actors' writes and is the boundary
+after which an orchestrator may publish a dependent wave. It does not join an
+optional completion hook: do not reuse that wave storage or free the hook
+context until the hook's last access.
+[examples/public_wave.d](examples/public_wave.d) is the compiled form of that
+rule. For cross-actor reads, keep private mutable actor
 state plus caller-owned public projections; write the inactive public buffer
 during a phase and select it only after successful wave completion. The actor
 package supplies the exclusive borrow and completion boundary, not a
@@ -280,6 +295,7 @@ Opt in per Farm with the final construction argument or for a complete process
 with the environment override:
 
 ```d
+// fragment: construction arguments only; consumers and producers are omitted
 auto farm = AntFarm.create(ringMiB: 32, k: 8, expectedConsumers: consumers,
                            maxBulk: 0, maxSmall: producers, quotaSmall: quota,
                            hugePages: true);
@@ -308,8 +324,9 @@ the live mapping when page size is material to the result.
    cursor and must not be copied.
 3. Register one producer `Token` per active producer. Copying transfers it;
    assigning over a still-registered token is fatal, so unregister first.
-   A token is bound to the Farm that issued it: writing, flushing, or
-   unregistering it through any other Farm is fatal.
+   A token is bound to the Farm that issued it: `write` and
+   `unregisterProducer` through any other Farm are fatal. `flush` and `pump`
+   catch a foreign token only when they publish something.
 4. Publish useful batches and pop the returned count from the source.
 5. Consume with `consumeNext()` until application completion.
 6. Unsubscribe consumers, unregister producers, then destroy the Farm.
@@ -327,6 +344,10 @@ still requires exclusive ownership and no live consumers or producer tickets.
 
 - [threadpool/README.md](threadpool/README.md) shows topology discovery,
   worker ownership, and Director wake/cadence policy.
+- [actors/LIFECYCLE.md](actors/LIFECYCLE.md) is the shared actor lifecycle
+  and contract guide.
+- [examples/README.md](examples/README.md) has the compiled public and private
+  actor programs.
 - [actors/ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md) shows autonomous actors,
   inbox ownership, retirement, and dependent phase waves.
 - [fibers/README.md](fibers/README.md) shows when and how to run managed Fibers

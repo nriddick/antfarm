@@ -36,4 +36,7 @@ unset. In cmd.exe set it with `set ANTFARM_HUGE_PAGES=0` before the run.
 
 `make -C examples check` is the Linux matrix: LDC and DMD, debug and release,
 each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
-threaded programs. The repository `make check` includes that target.
+threaded programs. That target also extracts the complete First payload program
+from the repository README and runs it with LDC and DMD in debug and release.
+Other README D blocks are fragments and are rejected by the extractor unless
+they say so. The repository `make check` includes that target.

@@ -3,8 +3,12 @@
 
 Windows builds use the compiler command in examples/README.md. This script is
 the Linux `make check` lane. It does not bump versions or require a shell.
+
+Every ```d block in README.md must be a complete program (`void main`) or
+contain the word fragment. Complete programs are compiled and run here.
 """
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -38,8 +42,38 @@ def run_example(binary, workers, sanitize=False):
     subprocess.run(cmd, cwd=root, env=env, check=True)
 
 
+def check_readme_programs():
+    text = (root / "README.md").read_text()
+    blocks = re.findall(r"```d\n(.*?)\n```", text, re.S)
+    if not blocks:
+        raise SystemExit("README.md has no ```d blocks")
+    programs = []
+    for index, block in enumerate(blocks):
+        if "void main" in block:
+            programs.append(block)
+        elif "fragment" not in block:
+            raise SystemExit(
+                f"README.md ```d block {index} is neither a complete program "
+                "nor marked as a fragment")
+    if len(programs) != 1:
+        raise SystemExit(
+            f"expected one complete README program, found {len(programs)}")
+    source = build / "readme_payload.d"
+    source.write_text(programs[0] + "\n")
+    for compiler, flags, suffix in configs:
+        output = build / f"readme_payload{suffix}"
+        cmd = [compiler, *flags, "-i", "-I.", str(source), f"-of={output}"]
+        print("==>", " ".join(cmd), flush=True)
+        subprocess.run(cmd, cwd=root, check=True)
+        env = os.environ.copy()
+        env["ANTFARM_HUGE_PAGES"] = "0"
+        print("==>", output, flush=True)
+        subprocess.run([str(output)], cwd=root, env=env, check=True)
+
+
 def main():
     build.mkdir(exist_ok=True)
+    check_readme_programs()
     for name in examples:
         for compiler, flags, suffix in configs:
             output = build / f"{name}{suffix}"

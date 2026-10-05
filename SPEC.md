@@ -291,7 +291,7 @@ All this comes before releasing the table's sentinel value. `Wt'`, or the sequen
 
 ### 6a. ConsumerView
 
-A `Ci`'s ConsumerView is a POD struct to be exclusively owned by one `Ci` at a time, with these fields:
+A `Ci`'s ConsumerView is exclusively owned by one `Ci` at a time. Ordinary copying is disabled; it is a unique cursor, not a POD value that may be duplicated. Fields:
 
 - `F` — reference to the target Ant Farm.
 - `IDc` — taken from `F`'s `Reqs_c` during subscription. `IDc` is a future targeting hint: 7d / `adopt` may nudge it, but already-incremented leaves are not moved.
@@ -303,7 +303,7 @@ Then derived and tracked stats as are convenient.
 
 ### 6b. Subscription
 
-ConsumerView is initialized with `subscribe(AntFarm F)`.
+ConsumerView is initialized with `subscribe(AntFarm* F)`.
 
 **Returns:** the non-negative starting epoch on success. Failures are negative: `SUBSCRIBE_FULL` (-1, capacity), `SUBSCRIBE_RETRY` (-2, transient frontier inconsistency), or `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed view). Epoch 0 is a valid success.
 

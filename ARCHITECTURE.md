@@ -45,8 +45,8 @@ Admission reserves exclusive borrowing before publication, rejects duplicate
 or overlapping membership, and may split the set across multiple Farm tables.
 The sealed wave finishes once every table finishes. An acquire observation of
 that generation's completion makes all of its actor writes visible to the
-orchestrator. A dependent phase proceeds only if the completed handle is not
-failed.
+orchestrator. It does not join an optional completion hook. A dependent phase
+proceeds only if the completed handle is not failed.
 
 Wave peers are still parallel: they cannot use same-wave mutation as an
 ordering channel. Cross-actor reads should come from an immutable public
@@ -58,10 +58,13 @@ boundary.
 Private roots and parent-owned cohorts are a separate path in
 [`actors.private_actor`](actors/PRIVATE_ACTORS.md). A single emitter owns a
 root park and publishes root and child tables through `pump`; subscribed
-consumers execute the callbacks. Parents authorize whole-cohort child waves
-and read externally owned results after the join, without public handles or
-access to child state. Use this path for an exclusive hierarchy; use public
-actors for independently addressed services and externally selected waves.
+consumers execute the callbacks. Parents authorize whole-cohort or subset
+waves, read cohort-owned result ports or externally owned buffers after the
+join, and may fold child work inside one enclosing wave. State may be non-POD;
+the stored instance is destroyed exactly once. There are no public handles and no access to
+child state. Use this path for an exclusive hierarchy; use public actors for
+independently addressed services and externally selected waves. Shared
+lifecycle rules are in [actors/LIFECYCLE.md](actors/LIFECYCLE.md).
 
 ### Threadpool
 
@@ -129,8 +132,10 @@ example. It exercises the complete non-Fiber path:
    down the pool, which runs every worker's `workerStop` and joins it, and only
    then uninstall the bins and destroy the Farm.
 
-The source remains a real example rather than a README-only snippet so release
-checks can compile and execute the exact onboarding program.
+The source remains a real example rather than a README-only snippet. Build it
+with the command in the README. The Linux `make check` matrix does not compile
+it; that matrix does compile and run the actor programs under
+[examples/](examples/README.md).
 
 ## The actor-wave path
 
@@ -150,9 +155,14 @@ Actor dispatch reuses the same Farm and worker pump as ordinary payloads:
    runtime.
 
 The actor operation and any code it reaches must remain resident until its
-activation or wave completes. Full examples and the private/public projection
-model are in [actors/ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md); the exact
-happens-before edges are in
+activation or wave completes. Actors in one wave share the Farm and the
+operation's state metadata; they may come from more than one runtime.
+`finished` joins actor writes, not a completion hook's later access. Compiled
+programs are [examples/public_service.d](examples/public_service.d),
+[examples/public_wave.d](examples/public_wave.d), and
+[examples/private_tree.d](examples/private_tree.d). The private/public
+projection model is in [actors/ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md); the
+exact happens-before edges are in
 [actors/ACTOR_MEMORYORDER.md](actors/ACTOR_MEMORYORDER.md).
 
 ## Sizing one Farm
@@ -219,17 +229,23 @@ For a full stack:
 
 1. Stop admitting application work.
 2. Seal admitted actor waves and let their orchestrating Fibers observe
-   completion.
-3. Stop actor inbox senders, retire and reclaim actors, then destroy actor
-   runtimes after their ready queues and wave memberships drain.
+   completion. If a wave installed a completion hook, do not reuse or destroy
+   that wave storage until the hook's last access.
+3. Stop actor inbox senders, retire and reclaim actors, and drain each
+   private root park with `pump` or `collectCompleted` until `live == 0`.
+   Do not destroy runtimes or parks yet. `pump() == 0` is not that drain.
 4. Signal or cooperatively cancel other indefinite Fiber waiters.
 5. Drain runnable work and completion/lifecycle records.
 6. Release completed Fiber tasks.
 7. Shut down and join the worker pool. Its `workerStop` hooks unsubscribe
    worker-owned consumers before `shutdown()` returns.
 8. Uninstall lane/bin mappings.
-9. Unsubscribe any control-thread consumers and unregister tokens.
-10. Destroy Farms only after no consumer or producer can touch them.
+9. Unsubscribe any control-thread consumers. Together with the worker
+   unsubscribe in step 7, this is what gets every consumer out of the trampoline.
+10. Destroy actor runtimes, and call `park.destroy()` on each drained private
+    park. `destroy(park)` does not free the park.
+11. Unregister producer tokens.
+12. Destroy Farms only after no consumer or producer can touch them.
 
 The owning application remains responsible for bounded shutdown of user code
 that never reaches a scheduler boundary.
@@ -237,6 +253,8 @@ that never reaches a scheduler boundary.
 ## Maintainer documents
 
 - [SPEC.md](SPEC.md): Farm algorithm and memory ordering.
+- [actors/LIFECYCLE.md](actors/LIFECYCLE.md): shared actor setup, drain, and
+  shutdown contracts.
 - [threadpool/DESIGN.md](threadpool/DESIGN.md): topology, worker, Director, and
   registry contracts.
 - [fibers/DESIGN.md](fibers/DESIGN.md): Fiber architecture, ownership, and
