@@ -789,16 +789,19 @@ auto broadcastPayloads(BR)(const ref PayloadHeader header, BR bodies,
 enum Tier : ubyte { small, bulk }
 
 /// Spec 3b/4a: registration ticket carrying the producer's private quota.
-/// The hash validates the slot; `quotaLeft` is the caller-held mirror of the
-/// farm's authoritative ledger (prodSlotQuota). It is deliberately private:
-/// the caller passes the Token by reference and never reads or writes it;
+/// The hash validates the slot; `farmId` binds the ticket to the Farm that
+/// issued it (a process-unique, never-reused identity), so a token presented
+/// to any other Farm is fatal at write and unregister; `quotaLeft` is the
+/// caller-held mirror of the farm's authoritative ledger (prodSlotQuota).
+/// The private fields are deliberately hidden: the caller passes the Token
+/// by reference and never reads or writes them;
 /// write() validates the mirror against the ledger on every call.
 ///
 /// Tickets start with no quota. Every grant follows an acquire probe of Wt
 /// and a successful forward-segment sweep; writes only spend that grant.
 ///
 /// Tokens are single-owner: copying is a *transfer*. The copy constructor
-/// copies tier/slot/quotaLeft, release-stores the valid hash
+/// copies tier/slot/farmId/quotaLeft, release-stores the valid hash
 /// *last* (so a reader that acquire-loads a valid hash is guaranteed to
 /// see the other fields), then clears the source's hash so at most one
 /// live token exists per slot and a stale copy fails requireToken.
@@ -810,31 +813,38 @@ struct Token
     Tier tier;
     uint slot;
     ulong hash;
+    /// Issuing Farm's identity (AntFarm.farmId). Binds the ticket to one
+    /// Farm for that Farm's lifetime; a mismatch is fatal at every entry
+    /// point that consumes a token.
+    private ulong farmId;
     private ulong quotaLeft;
 
     bool valid() const pure nothrow @nogc @safe { return hash != 0; }
 
-    private this(Tier t, uint s, ulong h, ulong grant) pure nothrow @nogc @safe
+    private this(Tier t, uint s, ulong h, ulong fid, ulong grant) pure nothrow @nogc @safe
     {
         tier = t;
         slot = s;
         hash = h;
+        farmId = fid;
         quotaLeft = grant;
     }
 
     private void invalidate() nothrow @nogc @system
     {
         hash = 0;
+        farmId = 0;
         quotaLeft = 0;
     }
 
     /// Transfer-only copy: the source is consumed. The destination's valid
     /// hash is release-stored last so a reader that acquire-loads the hash
-    /// also sees tier/slot/quotaLeft; the source hash is then cleared.
+    /// also sees tier/slot/farmId/quotaLeft; the source hash is then cleared.
     this(ref Token src) nothrow @nogc @system
     {
         tier = src.tier;
         slot = src.slot;
+        farmId = src.farmId;
         quotaLeft = src.quotaLeft;
         atomicStore!(MemoryOrder.rel)(*cast(shared ulong*) &hash, src.hash);
         atomicStore!(MemoryOrder.raw)(*cast(shared ulong*) &src.hash, 0UL);
@@ -849,6 +859,7 @@ struct Token
             fatal("overwrite live producer Token; unregister it first");
         tier = src.tier;
         slot = src.slot;
+        farmId = src.farmId;
         quotaLeft = src.quotaLeft;
         atomicStore!(MemoryOrder.raw)(*cast(shared ulong*) &hash, src.hash);
         return this;
@@ -952,6 +963,12 @@ private shared(ulong)* prodSlotQuota(shared(ulong)* hashes, size_t i) nothrow @n
     return hashes + i * PROD_SLOT_STRIDE + 1;
 }
 
+/// Process-global Farm issuance counter. Every created Farm takes one
+/// unique, nonzero identity that is never reused for the process lifetime,
+/// so a Token carries deterministic provenance: a ticket issued by one Farm
+/// (or by a since-destroyed Farm) can never validate against another.
+private shared ulong g_farmIssuance;
+
 struct AntFarm
 {
     // ---- immutable configuration (spec 1, 3) ----
@@ -970,6 +987,10 @@ struct AntFarm
     /// Small-table threshold (spec 5e-d): 0 selects the auto rule
     /// clamp(SqCs * Chunk, 16, 256); otherwise a fixed override.
     uint smallThreshold;
+    /// Process-unique Farm identity, assigned once in create() from
+    /// g_farmIssuance and never changed. Producer Tokens carry a copy;
+    /// requireToken and unregisterProducer reject foreign tickets fatally.
+    ulong farmId;
 
     // ---- magic buffer ----
     shared(ulong)* buf; /// 2*Ln ulongs mapped; second half mirrors the first
@@ -1075,6 +1096,7 @@ struct AntFarm
         f.quotaSmall = quotaSmall;
         f.exmax = exmax;
         f.smallThreshold = smallThreshold;
+        f.farmId = atomicFetchAdd!(MemoryOrder.raw)(g_farmIssuance, 1UL) + 1;
         f.buf = cast(shared(ulong)*) p;
         f.bufBytes = bytes;
         f.usedLargePages = hugePages;
@@ -1174,7 +1196,7 @@ struct AntFarm
             immutable h = mixToken(cast(uint) i, reqs);
             if (cas!(MemoryOrder.raw, MemoryOrder.raw)(prodSlot(hashes, i), 0UL, h))
             {
-                auto tok = Token(t, cast(uint) i, h, 0);
+                auto tok = Token(t, cast(uint) i, h, farmId, 0);
                 atomicStore!(MemoryOrder.raw)(*prodSlotQuota(hashes, i), 0UL);
                 return tok;
             }
@@ -1189,6 +1211,7 @@ struct AntFarm
         producerMutex.lock();
         scope (exit) producerMutex.unlock();
         if (!tok.valid) fatal("unregister invalid token");
+        if (tok.farmId != farmId) fatal("unregister token from another farm");
         immutable cap = tok.tier == Tier.bulk ? maxBulk : maxSmall;
         auto hashes = tok.tier == Tier.bulk ? prodHashBulk : prodHashSmall;
         if (hashes is null || tok.slot >= cap) fatal("unregister bad slot");
@@ -1214,6 +1237,7 @@ struct AntFarm
     private void requireToken(ref Token tok) nothrow @nogc @system
     {
         if (!tok.valid) fatal("write requires a producer token");
+        if (tok.farmId != farmId) fatal("write token from another farm");
         immutable cap = tok.tier == Tier.bulk ? maxBulk : maxSmall;
         auto hashes = tok.tier == Tier.bulk ? prodHashBulk : prodHashSmall;
         if (hashes is null || tok.slot >= cap) fatal("write bad token slot");
