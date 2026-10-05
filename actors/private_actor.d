@@ -70,7 +70,7 @@ private:
     // service lives in the ChildBase of the wave that dispatched it.
     Service* service() nothrow @nogc @system
     {
-        return enclosing_ is null ? actor_.service : ChildBase.fromWave(enclosing_).service;
+        return enclosing_ is null ? rootService(actor_) : ChildBase.fromWave(enclosing_).service;
     }
 public:
     /// R is the per-member result type; void (the default) creates a
@@ -145,6 +145,16 @@ version (D_LP64)
         && Entry.pending.offsetof == 36);
 }
 
+// Only roots have a Service word. Every read of Entry.service goes through
+// here, so a child Entry's metadata can never be misread as a pointer. A child
+// word is zero until continuations use it; they must then extend this check.
+private Service* rootService(Entry* entry) nothrow @nogc @system
+{
+    version (assert)
+        if (entry.service is null) fatal("private entry: service read on a child");
+    return entry.service;
+}
+
 private struct ChildBase
 {
     ChildBase* next;
@@ -193,6 +203,26 @@ version (AntfarmActorTestHooks)
     {
         atomicStore!(MemoryOrder.raw)(context.actor_.pending, credits);
     }
+
+    /// Test-only: the Entry word at offset 16 of the context's own Entry,
+    /// unchecked. Zero for a child; the Service pointer for a root.
+    ulong privateTestServiceWord(scope ref PrivateContext context) nothrow @nogc @system
+    {
+        return *cast(ulong*) &context.actor_.service;
+    }
+
+    /// Test-only: the context's own Entry through the checked accessor. A
+    /// child Entry is fatal in debug builds.
+    void* privateTestRootService(scope ref PrivateContext context) nothrow @nogc @system
+    {
+        return rootService(context.actor_);
+    }
+
+    /// Test-only: the Service that createChildren would hand a new cohort.
+    void* privateTestContextService(scope ref PrivateContext context) nothrow @nogc @system
+    {
+        return context.service;
+    }
 }
 
 private void releaseRoot(Entry* entry) nothrow @nogc @system
@@ -202,7 +232,7 @@ private void releaseRoot(Entry* entry) nothrow @nogc @system
     immutable old = atomicFetchSub!(MemoryOrder.acq_rel)(entry.pending, 1u);
     if (old == 0) fatal("private root credit underflow");
     if (old != 1) return; // no entry access after relinquishing a nonfinal credit
-    auto returns = &entry.service.rootReturns;
+    auto returns = &rootService(entry).rootReturns;
     auto head = atomicLoad!(MemoryOrder.raw)(*returns);
     while (true)
     {
@@ -439,7 +469,7 @@ public:
         }
         foreach (i; 0 .. capacity)
         {
-            park.entries_[i].service = &park.service_;
+            park.entries_[i].service = &park.service_; // root-only write
             park.entries_[i].next = park.free_;
             park.free_ = &park.entries_[i];
         }
@@ -660,7 +690,8 @@ private:
     {
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         auto borrow = PrivateBorrow!T(cast(T*) entry.state);
-        auto context = PrivateContext(entry, null, false, entry.service.batchLimit);
+        auto service = rootService(entry);
+        auto context = PrivateContext(entry, null, false, service.batchLimit);
         auto disposition = entry.cleanup ? PrivateRootDisposition.finish : step(borrow, context);
         entry.disposition = disposition;
         if (disposition == PrivateRootDisposition.finish)
@@ -668,7 +699,7 @@ private:
             disposeChildren(entry);
             destroyState!T(entry);
             static if (reclamation == PrivateRootReclamation.consumer)
-                freeMemory(entry.service, entry.state, T.sizeof, T.alignof);
+                freeMemory(service, entry.state, T.sizeof, T.alignof);
         }
         return 1;
     }

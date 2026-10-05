@@ -991,6 +991,7 @@ void deathHarness()
         portsDeath();
         dtorDeath();
         subsetDeath();
+        version (AntfarmActorTestHooks) entryWordDeath();
         foreach (modeName; ["batch-create-zero", "batch-pump-zero", "batch-pump-over"])
             check(diedWithMessage(modeName, "antfarm fatal: invalid private root batch limit"));
         check(diedWithMessage("batch-child-zero", "antfarm fatal: invalid private child batch limit"));
@@ -6042,6 +6043,117 @@ void phaseSubset()
     }
 }
 
+// ---- E2-3: child entries carry no Service pointer ----------------------------------------------
+// Selectors: entry-word, entry-word-death (debug builds; run through deathHarness).
+// Roots keep their Service in the Entry; a child member's word at that offset
+// is not a pointer, and every member reaches the Service through its ChildBase,
+// at depth one and two. Catching mutations:
+//   E3-M1 PrivateContext.service reads rootService(actor_) for members too: the
+//         members' contexts die with "service read on a child" (debug), or
+//         return a null service in -release ("entry word mid derives the
+//         root's service").
+//   E3-M2 dispose reads rootService(base.parent): the nested cohort, whose
+//         parent is a member, is fatal in debug builds.
+//   E3-M3 emit reads the old base_.parent.service for a nested cohort: a
+//         null Service is dereferenced (crash).
+version (AntfarmActorTestHooks)
+{
+    struct EwControl { void* service; uint midChecks, leafChecks; bool misuse; }
+    struct EwLeaf { EwControl* c; }
+    void ewLeaf(scope ref PrivateBorrow!EwLeaf b, scope ref PrivateContext ctx) nothrow @nogc @system
+    {
+        auto c = b.value.c;
+        namedCheck(privateTestServiceWord(ctx) == 0, "entry word leaf is not a pointer");
+        namedCheck(privateTestContextService(ctx) is c.service, "entry word leaf derives the root's service");
+        ++c.leafChecks;
+    }
+    struct EwMid { EwControl* c; PrivateChildPark!EwLeaf* leaves; }
+    void ewMid(scope ref PrivateBorrow!EwMid b, scope ref PrivateContext ctx) nothrow @nogc @system
+    {
+        auto m = &b.value();
+        auto c = m.c;
+        if (c.misuse) cast(void) privateTestRootService(ctx);
+        namedCheck(privateTestServiceWord(ctx) == 0, "entry word mid is not a pointer");
+        namedCheck(privateTestContextService(ctx) is c.service, "entry word mid derives the root's service");
+        ++c.midChecks;
+        m.leaves = ctx.createChildren!EwLeaf(2);
+        namedCheck(m.leaves !is null, "entry word leaf cohort");
+        foreach (i; 0 .. 2)
+            namedCheck(m.leaves.spawn(ctx, EwLeaf(c)) == PrivateSpawnResult.spawned, "entry word leaf spawn");
+        namedCheck(m.leaves.start!ewLeaf(ctx) == PrivateStartResult.started, "entry word leaf wave");
+    }
+    struct EwRoot { EwControl* c; PrivateChildPark!EwMid* mids; uint phase; }
+    PrivateRootDisposition ewStep(scope ref PrivateBorrow!EwRoot b, scope ref PrivateContext ctx)
+        nothrow @nogc @system
+    {
+        auto s = &b.value();
+        auto c = s.c;
+        if (s.phase++ != 0)
+        {
+            namedCheck(c.midChecks == 2 && c.leafChecks == 4, "entry word members ran");
+            return PrivateRootDisposition.finish;
+        }
+        namedCheck(privateTestServiceWord(ctx) != 0, "entry word root holds its service");
+        c.service = privateTestRootService(ctx);
+        namedCheck(cast(ulong) c.service == privateTestServiceWord(ctx), "entry word root accessor returns the word");
+        namedCheck(privateTestContextService(ctx) is c.service, "entry word root derives its service");
+        s.mids = ctx.createChildren!EwMid(2);
+        namedCheck(s.mids !is null, "entry word mid cohort");
+        foreach (i; 0 .. 2)
+            namedCheck(s.mids.spawn(ctx, EwMid(c)) == PrivateSpawnResult.spawned, "entry word mid spawn");
+        namedCheck(s.mids.start!ewMid(ctx) == PrivateStartResult.started, "entry word mid wave");
+        return PrivateRootDisposition.waitChildren;
+    }
+    void entryWord(bool misuse)
+    {
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        EwControl control;
+        control.misuse = misuse;
+        auto park = PrivateRootPark!(EwRoot, ewStep).create(farm, 1);
+        check(park !is null);
+        check(park.spawn(EwRoot(&control)) == PrivateSpawnResult.spawned);
+        auto deadline = MonoTime.currTime + 30.seconds;
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "entry word timeout");
+        }
+        park.destroy();
+        if (misuse) fprintf(stderr, "entry word misuse: survived\n");
+    }
+    void entryWordDeath()
+    {
+        version (linux)
+        {
+            version (assert)
+            {
+                auto probe = probeDeath("entry-word-misuse");
+                check(probe.status != 0);
+                check(probe.stderrText.canFind("antfarm fatal: private entry: service read on a child"));
+                check(!probe.stderrText.canFind("entry word misuse: survived"));
+                writeln("PASS entry-word-death child service read is fatal in debug builds");
+            }
+        }
+        else
+            writeln("SKIP entry-word death: /proc/self/exe re-exec requires Linux");
+    }
+}
+void phaseEntryWord()
+{
+    version (AntfarmActorTestHooks)
+    {
+        entryWord(false);
+        writeln("PASS entry-word roots hold the Service, members read it through ChildBase at depth two");
+    }
+}
+
 void runSuite()
 {
     phaseE1();
@@ -6049,6 +6161,7 @@ void runSuite()
     phasePorts();
     phaseDtor();
     phaseSubset();
+    phaseEntryWord();
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
     version (AntfarmWriteAuditHooks)
     {
@@ -6216,6 +6329,13 @@ void main(string[] args)
             return;
         case "subset-limits":
             version (AntfarmWriteAuditHooks) { subsetLimits(); writeln("PASS subset-limits"); }
+            return;
+        case "entry-word": phaseEntryWord(); return;
+        case "entry-word-misuse":
+            version (AntfarmActorTestHooks) entryWord(true);
+            return;
+        case "entry-word-death":
+            version (AntfarmActorTestHooks) entryWordDeath();
             return;
         case "subset-death": subsetDeath(); return;
         case "subset-dup-adjacent": subsetMisuseDeath(SubsetMisuse.dupAdjacent); return;
