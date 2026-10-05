@@ -10,7 +10,7 @@ parks and emitters can share a Farm. They do not share an actor free-list gate,
 ready-drain gate, or live counter. Each park also emits its parents' requested
 child waves. The emitter inspects scheduling metadata only.
 
-This API supports POD state and synchronous callbacks. The existing
+This API supports structs and scalars satisfying `stateAllowed!T` and synchronous callbacks. The existing
 `ActorOwner`, `ActorHandle`, inbox, and public `ActorWave` APIs remain available.
 It does not change DRuntime Fibers.
 
@@ -51,7 +51,17 @@ import antfarm;
 import actors;
 import std.stdio : writeln;
 
-struct Work { ulong remaining; }
+struct Work
+{
+    ulong remaining;
+    ulong* resource;
+    @disable this(this);
+    ~this() nothrow @nogc
+    {
+        import core.stdc.stdlib : free;
+        free(resource);
+    }
+}
 PrivateRootDisposition step(scope ref PrivateBorrow!Work actor,
     scope ref PrivateContext context) nothrow @nogc @system
 {
@@ -68,7 +78,10 @@ void main()
     if (view.subscribe(farm) < 0) fatal("consumer subscription failed");
     auto park = PrivateRootPark!(Work, step).create(farm, 4096);
     if (park is null) fatal("private park allocation failed");
-    auto spawned = park.spawn(Work(4));
+    import core.stdc.stdlib : malloc;
+    auto resource = cast(ulong*) malloc(ulong.sizeof);
+    if (resource is null) fatal("resource allocation failed");
+    auto spawned = park.spawn(Work(4, resource));
     if (spawned != PrivateSpawnResult.spawned) fatal("private spawn failed");
     if (park.live != 1) fatal("expected one live root after spawn");
     writeln("live=1 after spawn");
@@ -230,7 +243,7 @@ synchronization contracts.
 
 | Operation | Result / contract |
 | --- | --- |
-| Root `spawn` | `PrivateSpawnResult.spawned`, `capacityFull`, or `allocationFailed`; copies POD bytes and returns no handle. |
+| Root `spawn` | `PrivateSpawnResult.spawned`, `capacityFull`, or `allocationFailed`; moves non-POD state (copies POD bytes) and returns no handle. |
 | Child `spawn` | The same outcomes, plus `waveActive` or `retiring`. |
 | `start` / `startFinal` | `PrivateStartResult.started`, `empty`, `waveActive`, or `retiring`. Empty starts are already complete and take no credit. |
 | `results(context)` | `const(R)[]` in spawn order, acquired after the join; fatal while active or with wrong/default authority. Available only for non-void `R`. |
@@ -287,16 +300,19 @@ raw pointers or transitive state. In particular:
 
 - Borrows, contexts, and pointers/references into them must not escape their
   callback. A saved context is invalid even if an entry address is reused.
-- Spawning copies POD bytes; it is not a language-level move. A failed spawn
-  transfers nothing. An initializer must not leave external mutable aliases to the resulting
+- Spawning moves non-POD state and copies POD bytes. On a failed root spawn,
+  the live argument is destroyed inside the call on the caller's thread with
+  the root reentrancy guard active; the moved-from `.init` parameter is
+  destroyed on return. Child failure arguments follow normal language rules
+  on the calling consumer. An initializer must not leave external mutable aliases to the resulting
   state. No parent, sibling, emitter, or external observer may read or mutate
   private actor state. Library result slots belong to the cohort and survive
   member retirement until cohort disposal. External result channels need their
   own ownership/synchronization; a pointer into child state is not a result.
 - Allocator-managed actor state is not automatically scanned or rooted by the
-  GC. Keep any referenced GC allocations rooted externally for their required
-  lifetime. Descendants inherit the root allocator and its context, which must
-  outlive the hierarchy.
+  GC. Use `ActorAllocator.gcRooted` or external rooting for GC references.
+  Descendants inherit the root allocator and its context, which must outlive
+  the hierarchy.
 - Every operation on a root park, including observation and destruction, is
   single-emitter and non-reentrant. Callbacks and allocator hooks must not
   re-enter that park. Debug builds diagnose reentry into operational methods;
@@ -316,11 +332,60 @@ raw pointers or transitive state. In particular:
 Hierarchy depth has no fixed limit. Completion and disposal recurse, so the
 available thread stack bounds usable depth; applications must size it accordingly.
 
-General destructors, arbitrary subset waves, external wake/inbox operations,
+Arbitrary subset waves, external wake/inbox operations,
 reparenting, and resumable child continuations are not implemented. Children
 may launch nested work, but cannot resume themselves later in the same wave.
 A later continuation design must retain its ancestor's lease until its last
 continuation and descendant finish.
+
+## State destruction and results
+
+`stateAllowed!T` rejects classes, interfaces, context-carrying nested
+structs and structs containing them, and destructors or moves that cannot be
+called from `nothrow @nogc`. Postblits and copy constructors are allowed, but
+the library never copies non-POD state. Pass non-copyable values as rvalues or
+with `move(value)`. On DMD, non-copyable state with an alignment of 32 bytes
+or more cannot be `move`d into a by-value `spawn` argument: because of a
+compiler/druntime limit, `core.lifetime.move` tries to copy such structs and
+runs the destructor during the move. Public actors retain their existing POD
+restriction; `R` also remains POD.
+
+The stored instance is destroyed exactly once on a consumer. Caller-side
+parameters, temporaries and moved-from sources are excluded from that promise.
+Every successful spawn destroys its moved-from `.init` parameter on the caller;
+destructors must tolerate `.init`, including observable actions on that value.
+
+| Retirement path | Consumer sequence | Byte free |
+| --- | --- | --- |
+| Root `finish` | user callback → child cohorts recursively → `~T` | emitter or consumer policy |
+| Root `finishAfterChildren` | joined internal cleanup activation → child cohorts → `~T` | emitter or consumer policy |
+| Child `startFinal`, plain or result op | op → result slot write if any → child cohorts → `~T` | consumer |
+| Parent disposes a cohort | each live member's child cohorts → `~T`, including never-dispatched members | consumer |
+| Root park `destroy()` | requires no live state; no implicit retirement | emitter metadata free |
+
+Order across siblings is unspecified. Destructors must not read other actors'
+state, block, or call park APIs. Root-park reentry from an owning failed-spawn
+argument destructor is fatal in debug; release builds leave reentry unchecked.
+The guard does not cover moved-from parameter destruction after return.
+
+Result slots belong to the cohort and outlive members. A result must not refer
+to a resource its member's destructor releases. To transfer ownership, clear
+the owning field in `T` before returning the pointer as `R`.
+
+## GC references
+
+`ActorAllocator.gcRooted(&inner)` registers each allocation with `GC.addRange`
+before returning it and removes the range before freeing, after destruction.
+The `inner` allocator object and its context must outlive all allocations and
+the hierarchy. It can wrap C runtime or mimalloc allocation and also registers
+cohort metadata and result slots. Registration takes the global GC lock per
+allocation/free; omit it for state holding only manually managed resources.
+Callback threads must be druntime-registered. The threadpool workers already
+are; raw native threads must use `thread_attachThis`. The emitter
+(root-spawning) thread must also be registered, not only callback threads: a
+root `spawn` argument holding GC references sits on its stack while it pumps,
+and under the default emitter reclamation it is the thread that removes the
+GC ranges when freeing.
 
 ## Publication and reclamation
 
@@ -334,8 +399,9 @@ it does not dereference accepted actor entries until their completion returns
 custody. With consumer reclamation, callback completion can free the actor
 before `writeTracked` returns. Root state and entry metadata
 are separate allocations, so accepted-pointer source storage stays valid.
-By default, a terminal callback marks its metadata and the table notification
-returns it to the emitter, which frees the POD state without inspecting it.
+A terminal callback destroys stored state after disposing its descendants.
+By default, the table notification returns metadata to the emitter, which
+frees the raw bytes without inspecting state.
 Allocation and reclamation therefore occur on the same emitter. The optional
 third template argument `PrivateRootReclamation.consumer` frees state inside
 the terminal callback instead. This is a measured policy choice: simultaneous

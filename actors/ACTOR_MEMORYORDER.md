@@ -241,6 +241,21 @@ hint, makes the detached links and joined results visible. Reversing each list
 preserves its successful-push FIFO order; appending at collection gives no global
 completion-order guarantee. See [the state machine and lost-wake proof](PRIVATE_ACTORS.md#root-join-state-machine-and-lost-wake-argument).
 
+### Private state destructor visibility
+
+Stored-state destruction runs inside the final consumer dispatch, sequenced
+after the user callback and any cohort-owned result write. Disposal is
+post-order: `disposeChildren` acquire-loads every cohort's idle publication
+before reading or destroying its members. The existing tracked-table and
+wave-credit acquire/release joins therefore carry each member's last state
+writes to its destructor, including members last run on another consumer.
+`finishAfterChildren` uses the existing joined wake publication and consumer
+cleanup activation; it does not execute a destructor in emitter collection.
+Under emitter reclamation, the consumer destroys the stored instance before
+the table/wake handoff, and collection frees only its raw allocation.
+GC range registration remains present through destruction and is removed
+only at byte free. This rooting is separate from the visibility argument.
+
 ### Private child results
 
 Typed cohorts store each operation's return value in `results_[i]`, where i is

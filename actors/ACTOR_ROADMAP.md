@@ -20,7 +20,7 @@ an engine can aggregate before unloading code or reclaiming an arena.
 ## Private actor hierarchies
 
 [Private roots and parent-owned cohorts](PRIVATE_ACTORS.md) are now a separate
-path in `actors/private_actor.d`. The first slice supports POD
+path in `actors/private_actor.d`. The private path supports `stateAllowed` struct/scalar
 state, multiple single-emitter parks sharing a Farm, terminal dispatch,
 parent-authorized whole-cohort waves, and nested descendant joins. It removes
 public actor admission/generation/wake machinery from that narrower model.
@@ -36,9 +36,13 @@ spawn order; only the direct parent reads the joined `const(R)[]`. Slots survive
 terminal member callbacks. Default `R = void` retains the existing layout and
 code; ordinary child Entries remain 40 bytes.
 
+**E2-1 is done:** private non-POD state moves into storage, with exactly-once
+consumer destruction after descendants and result writes. GC references can
+use `ActorAllocator.gcRooted`. Public actor state and `R` remain POD.
+
 Port extensions remain: **X1** root-to-application outputs (next), **X2** library
 reductions, **X3** bounded append buffers, and **X4** writer capability / in-place
-results. Resumable child continuations, subset waves, general destructors and
+results. Resumable child continuations, subset waves and
 optional emitter wake integration remain deferred. A compiler-enforced safe
 ownership front end also remains future work.
 
