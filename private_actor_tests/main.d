@@ -4,7 +4,7 @@ import antfarm;
 import antfarm_allocation : allocateAligned64, freeAligned64;
 import core.atomic;
 import core.thread : Thread;
-import core.time : MonoTime, seconds;
+import core.time : MonoTime, msecs, seconds;
 import core.stdc.stdlib : abort;
 import core.stdc.stdio : fprintf, stderr;
 import std.algorithm.searching : canFind;
@@ -990,6 +990,7 @@ void deathHarness()
         writeln("PASS wrong-parent and default authority are fatal");
         portsDeath();
         dtorDeath();
+        subsetDeath();
         foreach (modeName; ["batch-create-zero", "batch-pump-zero", "batch-pump-over"])
             check(diedWithMessage(modeName, "antfarm fatal: invalid private root batch limit"));
         check(diedWithMessage("batch-child-zero", "antfarm fatal: invalid private child batch limit"));
@@ -2500,6 +2501,27 @@ static assert(PUlongCohort.sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
 static assert(PrivateChildPark!(PItem, ubyte).sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
 static assert(PrivateChildPark!(PItem, PWide).sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
 static assert(PrivateChildPark!(PItem, PWide).alignof == PVoidCohort.alignof);
+
+// E2-2 compile-time contract: the options overload and subset API follow the
+// same type rules as start. Mutation: dropping the R/nothrow/@nogc constraints
+// of startSubset, or exposing it elsewhere, turns one of these asserts false.
+static assert(is(typeof(PrivateContext.init.createChildren!PItem(1, PrivateCohortOptions(0, true))) == PVoidCohort*));
+static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1, PrivateCohortOptions(3, true))) == PUlongCohort*));
+static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNotPod)(1, PrivateCohortOptions(0, true))));
+static assert(PrivateCohortOptions.init.batchLimit == 0 && !PrivateCohortOptions.init.subsets);
+static assert(is(typeof({ PVoidCohort* p; PrivateContext c; return p.subsetMembers(c); }()) == const(uint)[]));
+static assert(__traits(compiles, (PVoidCohort* p, ref PrivateContext c, const(uint)[] m) => p.startSubset!pVoidOp(c, m)));
+static assert(__traits(compiles, (PVoidCohort* p, ref PrivateContext c, uint[] m) => p.startSubset!pVoidOp(c, m)));
+static assert(__traits(compiles, (PUlongCohort* p, ref PrivateContext c, const(uint)[] m) => p.startSubset!pSquare(c, m)));
+static assert(__traits(compiles, (PUlongCohort* p, ref PrivateContext c, const(uint)[] m) => p.startSubset!pVoidOp(c, m)));
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c, const(uint)[] m) => p.startSubset!pSquare(c, m)));
+static assert(!__traits(compiles, (PUlongCohort* p, ref PrivateContext c, const(uint)[] m) => p.startSubset!pWrongType(c, m)));
+static assert(!__traits(compiles, (PUlongCohort* p, ref PrivateContext c, const(uint)[] m) => p.startSubset!pNotNothrow(c, m)));
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c, const(uint)[] m) => p.startSubset!pVoidNotNothrow(c, m)));
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c, const(uint)[] m) => p.startSubset!pVoidNotNogc(c, m)));
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c, const(ulong)[] m) => p.startSubset!pVoidOp(c, m))); // indices are uint
+static assert(!__traits(compiles, (PVoidCohort* p, ref PrivateContext c) => p.startSubset!pVoidOp(c)));                       // a list is required
+static assert(!__traits(hasMember, PVoidCohort, "startFinalSubset"));                                                         // no subset retirement
 
 // ---- T1: ports-basic ------------------------------------------------------------
 // Selector: ports-basic. U1-U3: empty before the first wave, waitChildren
@@ -4775,12 +4797,1258 @@ void phaseDtor()
     dtorGcAll();
 }
 
+// ===========================================================================
+// E2-2: subset waves (design 86 section 4, tests 6.2 S1-S5, SD1-SD4).
+// startSubset starts only the listed spawn-order indices. Results come back in
+// participant (list) order, subsetMembers reports the list, and an empty list
+// is `empty` with no credit and no state change. Tags are (wave << 32) | index
+// as in the ports tests; the expected wave of a member is the number of times
+// the test's model says it has run. Every deterministic test names the
+// mutations it catches (Q-M*); each was applied by hand to
+// actors/private_actor.d and the outcome recorded in the evidence file.
+// ===========================================================================
+
+struct SbMember { ulong* ran; uint index, wave; }
+ulong sbTag(scope ref PrivateBorrow!SbMember m, scope ref PrivateContext) nothrow @nogc @system
+{
+    ++m.value.ran[m.value.index]; // external counter: runs are visible per member
+    return portsValue(++m.value.wave, m.value.index);
+}
+void sbTouch(scope ref PrivateBorrow!SbMember m, scope ref PrivateContext) nothrow @nogc @system
+{
+    ++m.value.ran[m.value.index];
+    ++m.value.wave;
+}
+alias SbCohort = PrivateChildPark!(SbMember, ulong);
+
+// Results and members of the last nonempty subset wave, against the model:
+// results[j] belongs to members[j] and carries that member's run count.
+void sbCheckSubset(SbCohort* c, scope ref PrivateContext ctx, const(ulong)[] ran, const(uint)[] model,
+    const(uint)[] members, string what) nothrow @nogc @system
+{
+    auto r = c.results(ctx);
+    namedCheck(c.subsetMembers(ctx) == members, what);
+    namedCheck(r.length == members.length, what);
+    foreach (j, i; members) namedCheck(r[j] == portsValue(model[i], i), what);
+    foreach (i; 0 .. ran.length) namedCheck(ran[i] == model[i], what);
+}
+// Results of the last whole wave: spawn order, no members.
+void sbCheckWhole(SbCohort* c, scope ref PrivateContext ctx, const(ulong)[] ran, const(uint)[] model,
+    string what) nothrow @nogc @system
+{
+    auto r = c.results(ctx);
+    namedCheck(c.subsetMembers(ctx).length == 0, what);
+    namedCheck(r.length == ran.length, what);
+    foreach (i; 0 .. ran.length)
+    {
+        namedCheck(r[i] == portsValue(model[i], i), what);
+        namedCheck(ran[i] == model[i], what);
+    }
+}
+
+// ---- Q1: subset-basic -----------------------------------------------------------------------
+// Selector: subset-basic. One cohort walks a plan of sparse, dense, full
+// (reversed), singleton, overlapping-reversed, void-op and whole waves, each
+// resumed through waitChildren. After every wave the root checks the results
+// order, subsetMembers and every member's run count against a model, then
+// probes an empty subset (must be `empty`, take no credit and leave results
+// and members intact). The list is passed through a buffer that is poisoned
+// right after the call. The tail then retires the cohort with startFinal,
+// refills it and runs a subset and a whole wave on the refilled members.
+// A void cohort walks subset, whole, subset. Both reclamation policies.
+// Catching mutations:
+//   Q-M1  subset runChild writes `results_[entry - entries_]` (slot by member
+//         index): fails "subset basic sparse" (tag in the wrong slot).
+//   Q-M2  startSubset stores `resultCount_` before the empty-list return: the
+//         empty probe clears the results: fails "subset basic whole results
+//         length" (the check inside the probe).
+//   Q-M3  start does not reset `isSubset_`: fails "subset void whole resets
+//         members" (stale subsetMembers after a whole wave).
+//   Q-M3b start does not reset `wave.emit` (a whole wave is emitted as a
+//         subset over the stale selection): fails "subset void whole ran
+//         everyone".
+//   Q-M4  empty list takes the credit (sets `active`) before returning: fails
+//         "subset basic fresh empty takes no credit" (finished is false).
+//   Q-M5  the copy `sel_[j] = i` is skipped (the list is not stored): the
+//         zeroed selection reports "private child subset: duplicate member".
+//   Q-M6  startSubset omits `retire_ = false`: after startFinal and refill the
+//         subset wave retires its members: fails "subset basic refill whole".
+//   Q-M7  duplicate test trusts a stale inverse position (`p < j` without the
+//         `sel_[p] == i` confirmation): a false "duplicate member" fatal on the
+//         first overlapping list.
+enum sbN = 10;
+enum SbKind : ubyte { whole, subset, voidSubset }
+struct SbStep { SbKind kind; immutable(uint)[] members; }
+immutable SbStep[] sbPlan = [
+    SbStep(SbKind.whole),
+    SbStep(SbKind.subset, [7, 2, 9, 0]),
+    SbStep(SbKind.voidSubset, [1, 3]),
+    SbStep(SbKind.subset, [9, 8, 7, 6, 5, 4, 3, 2, 1]),
+    SbStep(SbKind.subset, [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
+    SbStep(SbKind.subset, [5, 4, 3]),
+    SbStep(SbKind.subset, [3, 4, 5]),
+    SbStep(SbKind.subset, [4]),
+    SbStep(SbKind.whole),
+    SbStep(SbKind.subset, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+    SbStep(SbKind.whole),
+];
+struct SbControl
+{
+    ulong[sbN] ran;
+    uint[sbN] model;
+    ulong[3] refillRan;
+    ulong[6] voidRan;
+    shared ulong done;
+}
+struct SbRoot
+{
+    SbCohort* c;
+    SbControl* k;
+    uint next, stage;
+    SbKind lastKind;
+    uint lastLen;
+    uint[sbN] last;
+    uint[sbN] scratch;
+}
+void sbStart(ref SbRoot s, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto st = sbPlan[s.next++];
+    auto k = s.k;
+    s.lastKind = st.kind;
+    if (st.kind == SbKind.whole)
+    {
+        namedCheck(s.c.start!sbTag(ctx) == PrivateStartResult.started, "subset basic whole start");
+        s.lastLen = sbN;
+        foreach (i; 0 .. sbN) { ++k.model[i]; s.last[i] = cast(uint) i; }
+        return;
+    }
+    immutable n = st.members.length;
+    foreach (j; 0 .. n) s.scratch[j] = st.members[j];
+    immutable r = st.kind == SbKind.subset
+        ? s.c.startSubset!sbTag(ctx, s.scratch[0 .. n])
+        : s.c.startSubset!sbTouch(ctx, s.scratch[0 .. n]);
+    s.scratch[] = uint.max; // the runtime must have copied the list
+    namedCheck(r == PrivateStartResult.started, "subset basic subset start");
+    s.lastLen = cast(uint) n;
+    foreach (j; 0 .. n) { s.last[j] = st.members[j]; ++k.model[st.members[j]]; }
+}
+void sbVerify(ref SbRoot s, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto k = s.k;
+    auto r = s.c.results(ctx);
+    if (s.lastKind == SbKind.whole)
+    {
+        namedCheck(s.c.subsetMembers(ctx).length == 0, "subset basic whole after subset");
+        namedCheck(r.length == sbN, "subset basic whole results length");
+        foreach (i; 0 .. sbN) namedCheck(r[i] == portsValue(k.model[i], i), "subset basic whole tag");
+    }
+    else
+    {
+        namedCheck(s.c.subsetMembers(ctx) == s.last[0 .. s.lastLen], "subset basic members");
+        if (s.lastKind == SbKind.voidSubset)
+            namedCheck(r.length == 0, "subset basic void subset clears results");
+        else
+        {
+            namedCheck(r.length == s.lastLen, "subset basic sparse results length");
+            foreach (j; 0 .. s.lastLen)
+                namedCheck(r[j] == portsValue(k.model[s.last[j]], s.last[j]), "subset basic sparse");
+        }
+    }
+    foreach (i; 0 .. sbN) namedCheck(k.ran[i] == k.model[i], "subset basic exactly the selected members ran");
+}
+void sbEmptyProbe(ref SbRoot s, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    namedCheck(s.c.startSubset!sbTag(ctx, null) == PrivateStartResult.empty, "subset basic empty list");
+    namedCheck(s.c.finished(ctx), "subset basic empty takes no credit");
+    sbVerify(s, ctx); // results and members unchanged
+    foreach (i; 0 .. sbN) namedCheck(s.k.ran[i] == s.k.model[i], "subset basic empty keeps state");
+}
+PrivateRootDisposition sbStep(scope ref PrivateBorrow!SbRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    auto k = s.k;
+    if (s.c is null)
+    {
+        s.c = ctx.createChildren!(SbMember, ulong)(sbN, PrivateCohortOptions(3, true));
+        namedCheck(s.c !is null, "subset basic create");
+        namedCheck(s.c.subsetMembers(ctx).length == 0 && s.c.results(ctx).length == 0, "subset basic fresh cohort");
+        namedCheck(s.c.startSubset!sbTag(ctx, null) == PrivateStartResult.empty, "subset basic empty on a fresh cohort");
+        namedCheck(s.c.finished(ctx), "subset basic fresh empty takes no credit");
+        foreach (i; 0 .. sbN)
+            namedCheck(s.c.spawn(ctx, SbMember(k.ran.ptr, cast(uint) i)) == PrivateSpawnResult.spawned, "subset basic spawn");
+        namedCheck(s.c.startSubset!sbTag(ctx, null) == PrivateStartResult.empty, "subset basic empty with idle members");
+        namedCheck(s.c.subsetMembers(ctx).length == 0 && s.c.results(ctx).length == 0, "subset basic empty before any wave");
+        sbStart(*s, ctx);
+        return PrivateRootDisposition.waitChildren;
+    }
+    switch (s.stage)
+    {
+        case 0:
+            sbVerify(*s, ctx);
+            sbEmptyProbe(*s, ctx);
+            if (s.next < sbPlan.length)
+            {
+                sbStart(*s, ctx);
+                return PrivateRootDisposition.waitChildren;
+            }
+            namedCheck(s.c.startFinal!sbTag(ctx) == PrivateStartResult.started, "subset basic final start");
+            s.lastKind = SbKind.whole;
+            s.lastLen = sbN;
+            foreach (i; 0 .. sbN) ++k.model[i];
+            s.stage = 1;
+            return PrivateRootDisposition.waitChildren;
+        case 1:
+        {
+            sbVerify(*s, ctx); // results survive retirement; a whole wave has no members
+            namedCheck(s.c.startSubset!sbTag(ctx, null) == PrivateStartResult.empty, "subset basic empty after final");
+            foreach (i; 0 .. 3)
+                namedCheck(s.c.spawn(ctx, SbMember(k.refillRan.ptr, cast(uint) i)) == PrivateSpawnResult.spawned, "subset basic refill spawn");
+            s.scratch[0] = 2; s.scratch[1] = 0;
+            namedCheck(s.c.startSubset!sbTag(ctx, s.scratch[0 .. 2]) == PrivateStartResult.started, "subset basic refill subset");
+            s.stage = 2;
+            return PrivateRootDisposition.waitChildren;
+        }
+        case 2:
+        {
+            auto r = s.c.results(ctx);
+            namedCheck(r.length == 2 && r[0] == portsValue(1, 2) && r[1] == portsValue(1, 0), "subset basic refill results");
+            namedCheck(s.c.subsetMembers(ctx) == s.scratch[0 .. 2], "subset basic refill members");
+            namedCheck(k.refillRan[0] == 1 && k.refillRan[1] == 0 && k.refillRan[2] == 1, "subset basic refill ran");
+            namedCheck(s.c.start!sbTag(ctx) == PrivateStartResult.started, "subset basic refill whole");
+            s.stage = 3;
+            return PrivateRootDisposition.waitChildren;
+        }
+        case 3:
+        {
+            auto r = s.c.results(ctx);
+            namedCheck(s.c.subsetMembers(ctx).length == 0, "subset basic refill whole members");
+            namedCheck(r.length == 3 && r[0] == portsValue(2, 0) && r[1] == portsValue(1, 1)
+                && r[2] == portsValue(2, 2), "subset basic refill whole results");
+            atomicFetchAdd(k.done, 1UL);
+            return PrivateRootDisposition.finish;
+        }
+        default:
+            namedCheck(false, "subset basic stages");
+            return PrivateRootDisposition.finish;
+    }
+}
+
+alias SbVoidCohort = PrivateChildPark!SbMember;
+struct SvRoot { SbVoidCohort* c; SbControl* k; uint stage; uint[3] scratch; }
+PrivateRootDisposition svStep(scope ref PrivateBorrow!SvRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    auto k = s.k;
+    switch (s.stage++)
+    {
+        case 0:
+            s.c = ctx.createChildren!SbMember(6, PrivateCohortOptions(0, true));
+            namedCheck(s.c !is null, "subset void create");
+            foreach (i; 0 .. 6)
+                namedCheck(s.c.spawn(ctx, SbMember(k.voidRan.ptr, cast(uint) i)) == PrivateSpawnResult.spawned, "subset void spawn");
+            s.scratch = [5, 0, 3];
+            namedCheck(s.c.startSubset!sbTouch(ctx, s.scratch[]) == PrivateStartResult.started, "subset void start");
+            return PrivateRootDisposition.waitChildren;
+        case 1:
+            namedCheck(s.c.subsetMembers(ctx) == s.scratch[], "subset void members");
+            foreach (i; 0 .. 6)
+                namedCheck(k.voidRan[i] == (i == 5 || i == 0 || i == 3 ? 1 : 0), "subset void exactly the selected members ran");
+            namedCheck(s.c.startSubset!sbTouch(ctx, null) == PrivateStartResult.empty, "subset void empty");
+            namedCheck(s.c.subsetMembers(ctx) == s.scratch[], "subset void empty keeps members");
+            namedCheck(s.c.start!sbTouch(ctx) == PrivateStartResult.started, "subset void whole");
+            return PrivateRootDisposition.waitChildren;
+        case 2:
+        {
+            namedCheck(s.c.subsetMembers(ctx).length == 0, "subset void whole resets members");
+            foreach (i; 0 .. 6)
+                namedCheck(k.voidRan[i] == (i == 5 || i == 0 || i == 3 ? 2 : 1), "subset void whole ran everyone");
+            uint[1] one = [1];
+            namedCheck(s.c.startSubset!sbTouch(ctx, one[]) == PrivateStartResult.started, "subset void singleton");
+            return PrivateRootDisposition.waitChildren;
+        }
+        case 3:
+        {
+            uint[1] one = [1];
+            namedCheck(s.c.subsetMembers(ctx) == one[], "subset void singleton members");
+            foreach (i; 0 .. 6)
+                namedCheck(k.voidRan[i] == (i == 5 || i == 0 || i == 3 ? 2 : 1) + (i == 1 ? 1 : 0), "subset void singleton ran");
+            atomicFetchAdd(k.done, 1UL);
+            return PrivateRootDisposition.finish;
+        }
+        default:
+            namedCheck(false, "subset void stages");
+            return PrivateRootDisposition.finish;
+    }
+}
+void subsetBasic(PrivateRootReclamation reclaim)()
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 4, 0, 0, 1, 8192);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto workers = new Workers(farm, 3);
+    scope(exit) workers.join();
+    SbControl control;
+    auto park = PrivateRootPark!(SbRoot, sbStep, reclaim).create(farm, 1, 2, policy(counts));
+    auto voidPark = PrivateRootPark!(SvRoot, svStep, reclaim).create(farm, 1, 2, policy(counts));
+    check(park !is null && voidPark !is null);
+    check(park.spawn(SbRoot(null, &control)) == PrivateSpawnResult.spawned);
+    check(voidPark.spawn(SvRoot(null, &control)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (park.live || voidPark.live)
+    {
+        park.pump(token);
+        voidPark.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "subset basic timeout");
+    }
+    namedCheck(atomicLoad(control.done) == 2, "subset basic both roots completed");
+    park.destroy();
+    voidPark.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "subset basic allocation balance");
+}
+
+// ---- Q2: subset-active ------------------------------------------------------------------------
+// Selector: subset-active. startSubset on a cohort with an active wave returns
+// waveActive and has no effect at all: not even the selection, inverse
+// positions, count, flag, header or emit function may be touched. The check
+// order matters: a bad list (duplicate, out of range, empty) must still just
+// return waveActive. Single thread: with no worker consumer and one emitter
+// the wave cannot be emitted before the callback returns, so it is active for
+// every probe (as in ports-read-active). The first (subset) wave is started and, in the same
+// callback, probed with an overlapping reordered longer list; the second
+// (whole) wave is probed with another subset. After each join the wave that
+// actually ran must be exactly the one that was started.
+// Catching mutations:
+//   Q-M8a the `waveActive` return moved below the validation/copy loop: the
+//         duplicate list [2, 2] is fatal while the wave is active.
+//   Q-M8b `isSubset_ = true` stored before the active check: fails "subset
+//         active whole keeps no members" (stale flag on the whole wave).
+//   Q-M8c `wave.emit = &emitSubset` stored before the active check: the whole
+//         wave is emitted as a subset: fails "subset active whole wave results".
+//   Q-M8d `k_` stored before the active check: fails "subset active members
+//         unchanged".
+struct SxControl { ulong[6] ran; uint[6] model; }
+struct SxRoot { SbCohort* c; SxControl* k; uint stage; }
+immutable uint[2] sxA = [3, 1];
+immutable uint[3] sxB = [1, 3, 0];
+immutable uint[2] sxDup = [2, 2];
+immutable uint[1] sxBad = [9];
+immutable uint[1] sxOne = [4];
+PrivateRootDisposition sxStep(scope ref PrivateBorrow!SxRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    auto k = s.k;
+    switch (s.stage++)
+    {
+        case 0:
+            s.c = ctx.createChildren!(SbMember, ulong)(6, PrivateCohortOptions(2, true));
+            namedCheck(s.c !is null, "subset active create");
+            foreach (i; 0 .. 6)
+                namedCheck(s.c.spawn(ctx, SbMember(k.ran.ptr, cast(uint) i)) == PrivateSpawnResult.spawned, "subset active spawn");
+            namedCheck(s.c.startSubset!sbTag(ctx, sxA[]) == PrivateStartResult.started, "subset active first start");
+            foreach (i; sxA) ++k.model[i];
+            // The wave is enqueued and cannot be emitted before this callback returns.
+            namedCheck(s.c.startSubset!sbTag(ctx, sxB[]) == PrivateStartResult.waveActive, "subset active overlapping list");
+            namedCheck(s.c.startSubset!sbTag(ctx, sxDup[]) == PrivateStartResult.waveActive, "subset active duplicate list is not fatal");
+            namedCheck(s.c.startSubset!sbTag(ctx, sxBad[]) == PrivateStartResult.waveActive, "subset active bad index is not fatal");
+            namedCheck(s.c.startSubset!sbTag(ctx, null) == PrivateStartResult.waveActive, "subset active empty list");
+            namedCheck(s.c.start!sbTag(ctx) == PrivateStartResult.waveActive, "subset active whole start");
+            namedCheck(s.c.startFinal!sbTag(ctx) == PrivateStartResult.waveActive, "subset active final start");
+            namedCheck(s.c.subsetMembers(ctx) == sxA[], "subset active members unchanged");
+            return PrivateRootDisposition.waitChildren;
+        case 1:
+            sbCheckSubset(s.c, ctx, k.ran[], k.model[], sxA[], "subset active first wave");
+            namedCheck(s.c.start!sbTag(ctx) == PrivateStartResult.started, "subset active whole after subset");
+            foreach (i; 0 .. 6) ++k.model[i];
+            namedCheck(s.c.startSubset!sbTag(ctx, sxOne[]) == PrivateStartResult.waveActive, "subset active over whole wave");
+            namedCheck(s.c.subsetMembers(ctx).length == 0, "subset active whole keeps no members");
+            return PrivateRootDisposition.waitChildren;
+        case 2:
+            sbCheckWhole(s.c, ctx, k.ran[], k.model[], "subset active whole wave results");
+            return PrivateRootDisposition.finish;
+        default:
+            namedCheck(false, "subset active stages");
+            return PrivateRootDisposition.finish;
+    }
+}
+void subsetActive(PrivateRootReclamation reclaim)()
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 8192);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    SxControl control;
+    auto park = PrivateRootPark!(SxRoot, sxStep, reclaim).create(farm, 1, 2, policy(counts));
+    check(park !is null);
+    check(park.spawn(SxRoot(null, &control)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "subset active timeout");
+    }
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "subset active allocation balance");
+}
+
+// ---- Q3: subset-large -------------------------------------------------------------------------
+// Selector: subset-large. 1025 members, child batch limits 1, 64 and 256, and
+// the pre-filled Farm scaffolding of ports-large-cohort: the first wave is a
+// dense shuffled subset of 1024 members; the zero-admission emit must release
+// its table credit and run no member; after the quota refresh a strict prefix
+// is admitted and EXACTLY the first `prefix` listed members have run. Then:
+// a singleton, a sparse 64-member list, a full reversed list, a whole wave
+// and the sparse list again. Every wave is checked for results order,
+// subsetMembers and exactly-once dispatch of the selected members only.
+// Catching mutations:
+//   Q-M11 emitSubset slices `entries_` instead of `sel_` (cursor over spawn
+//         order): fails "subset large partial prefix is the listed prefix"
+//         (unselected member ran) and, in subset-basic, "subset void exactly
+//         the selected members ran".
+//   Q-M12 emitSubset advances `cursor_ += n` instead of `written` (as P-M9):
+//         fails the same prefix check or "subset large exactly once".
+//   Q-M13 delete `if (written == 0) releaseWave(wave);` in emitSubset: fails
+//         "subset large zero admission credit released" (credit count).
+//   Q-M14 runChild's subset slot uses `park.cursor_` instead of the inverse
+//         position: fails "subset large sparse".
+struct SlWave { uint[] members; bool whole; }
+struct SlControl
+{
+    size_t count, limit;
+    ulong* ran;
+    uint* model;
+    SlWave[] waves;
+    uint completed, busy;
+}
+struct SlRoot { SbCohort* c; SlControl* ctl; uint started; }
+void slStart(SlControl* k, SbCohort* c, scope ref PrivateContext ctx, size_t w) nothrow @nogc @system
+{
+    auto wave = k.waves[w];
+    if (wave.whole)
+    {
+        namedCheck(c.start!sbTag(ctx) == PrivateStartResult.started, "subset large whole start");
+        foreach (i; 0 .. k.count) ++k.model[i];
+    }
+    else
+    {
+        namedCheck(c.startSubset!sbTag(ctx, wave.members) == PrivateStartResult.started, "subset large subset start");
+        foreach (i; wave.members) ++k.model[i];
+    }
+}
+PrivateRootDisposition slStep(scope ref PrivateBorrow!SlRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    auto k = s.ctl;
+    if (s.c is null)
+    {
+        s.c = ctx.createChildren!(SbMember, ulong)(k.count, PrivateCohortOptions(k.limit, true));
+        namedCheck(s.c !is null, "subset large create");
+        foreach (i; 0 .. k.count)
+            namedCheck(s.c.spawn(ctx, SbMember(k.ran, cast(uint) i)) == PrivateSpawnResult.spawned, "subset large spawn");
+        slStart(k, s.c, ctx, 0);
+        s.started = 1;
+        return PrivateRootDisposition.again;
+    }
+    if (!s.c.finished(ctx))
+    {
+        ++k.busy;
+        return PrivateRootDisposition.again;
+    }
+    auto wave = k.waves[s.started - 1];
+    auto ran = k.ran[0 .. k.count];
+    auto model = k.model[0 .. k.count];
+    if (wave.whole) sbCheckWhole(s.c, ctx, ran, model, "subset large whole");
+    else sbCheckSubset(s.c, ctx, ran, model, wave.members, "subset large sparse");
+    k.completed = s.started;
+    if (s.started == k.waves.length) return PrivateRootDisposition.finish;
+    slStart(k, s.c, ctx, s.started);
+    ++s.started;
+    return PrivateRootDisposition.again;
+}
+void subsetLargeCohort(size_t count, size_t limit)
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto ran = new ulong[count];
+    auto model = new uint[count];
+    // Dense shuffled: a multiplicative permutation (389 is coprime to 1025), one member left out.
+    uint[] dense, sparse, full, one = [cast(uint) (count - 1)];
+    foreach (j; 0 .. count - 1) dense ~= cast(uint) ((j * 389 + 17) % count);
+    foreach (j; 0 .. 64) sparse ~= cast(uint) ((63 - j) * 16 + 5);
+    foreach (j; 0 .. count) full ~= cast(uint) (count - 1 - j);
+    SlControl control = SlControl(count, limit, ran.ptr, model.ptr,
+        [SlWave(dense), SlWave(one), SlWave(sparse), SlWave(full), SlWave(null, true), SlWave(sparse)]);
+    auto parent = PrivateRootPark!(SlRoot, slStep).create(farm, 1, 256, policy(counts));
+    check(parent !is null);
+    check(parent.spawn(SlRoot(null, &control)) == PrivateSpawnResult.spawned);
+    check(parent.pump(token) == 1);
+    while (view.consumeNext()) {}
+
+    enum fillCount = 20000;
+    auto fillResults = new ulong[fillCount];
+    auto filler = Park.create(farm, fillCount, 256);
+    check(filler !is null);
+    foreach (i; 0 .. fillCount) check(filler.spawn(State(fillResults.ptr + i, 1, 0)) == PrivateSpawnResult.spawned);
+    size_t admitted;
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (true)
+    {
+        auto n = filler.pump(token);
+        if (n == 0) break;
+        admitted += n;
+        namedCheck(MonoTime.currTime < deadline, "subset large prefill timeout");
+    }
+    namedCheck(admitted > 0 && admitted < fillCount, "subset large Farm prefilled");
+    version (AntfarmActorTestHooks)
+    {
+        PrivateHookControl hook;
+        privateControl = &hook;
+        setActorTestHook(&privateHook);
+        namedCheck(parent.pump(token) == 0, "subset large full Farm rejects child and polling root tables");
+        namedCheck(atomicLoad!(MemoryOrder.raw)(hook.creditCalls) == 1, "subset large zero admission credit released");
+        setActorTestHook(null);
+        privateControl = null;
+    }
+    else namedCheck(parent.pump(token) == 0, "subset large full Farm rejects child and polling root tables");
+    foreach (v; ran) namedCheck(v == 0, "subset large zero admission invokes no member");
+    while (filler.live)
+    {
+        while (view.consumeNext()) {}
+        filler.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "subset large prefill drain timeout");
+    }
+    filler.destroy();
+    namedCheck(parent.pump(token) == 1, "subset large partial admission after quota refresh");
+    while (view.consumeNext()) {}
+    size_t prefix;
+    foreach (v; ran) { namedCheck(v <= 1, "subset large partial prefix no duplicates"); prefix += v; }
+    namedCheck(prefix > 0 && prefix < dense.length && prefix <= limit, "subset large first table bounded by the child limit");
+    if (limit == 256) namedCheck(prefix < limit, "subset large quota admits a strict prefix");
+    // Exactly the first `prefix` listed members, in list order, and nobody else.
+    auto listed = new bool[count];
+    foreach (j; 0 .. prefix) listed[dense[j]] = true;
+    foreach (i; 0 .. count)
+        namedCheck(ran[i] == (listed[i] ? 1 : 0), "subset large partial prefix is the listed prefix");
+    namedCheck(control.completed == 0 && control.busy > 0, "subset large partial wave stays active");
+    while (parent.live)
+    {
+        parent.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "subset large retry timeout");
+    }
+    namedCheck(control.completed == control.waves.length, "subset large all waves joined");
+    parent.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "subset large allocation balance");
+}
+void subsetLargeCohorts()
+{
+    foreach (limit; [1UL, 64, 256]) subsetLargeCohort(1025, limit);
+}
+
+// ---- Q4: subset-nested ---------------------------------------------------------------------------
+// Selector: subset-nested. Two top members each own a leaf cohort and start a
+// subset wave on it from inside their operation, so the subset wave joins the
+// top wave (the `wave.upstream` credit) and through it the root's
+// waitChildren. One leaf is held at a raw barrier; the test thread pumps for a
+// while and requires that the root has NOT resumed. Then the held leaf is
+// released, the root resumes, checks the leaf run counts and starts a final
+// fold in which each top member reads its leaves' participant-ordered results
+// and members in a retiring context.
+// Catching mutation Q-M15: startSubset omits the
+// `atomicFetchAdd(wave.upstream.pending, 1)`: the nested wave is not joined,
+// the root resumes while a leaf is held: fails "subset nested leaves ran after
+// the join" and "subset nested root resumed before the nested subset joined".
+struct SnControl { ulong[12] ran; shared uint arrived, release, rootCalls; }
+struct SnLeaf { SnControl* c; uint index, wave, mid; }
+ulong snLeaf(scope ref PrivateBorrow!SnLeaf b, scope ref PrivateContext) nothrow @nogc @system
+{
+    auto c = b.value.c;
+    if (b.value.mid == 0 && b.value.index == 5)
+    {
+        atomicStore!(MemoryOrder.raw)(c.arrived, 1u);
+        awaitRaw(c.release, 1u, "subset nested leaf release");
+    }
+    ++c.ran[b.value.mid * 6 + b.value.index];
+    return portsValue(++b.value.wave, b.value.index);
+}
+struct SnMid { SnControl* c; PrivateChildPark!(SnLeaf, ulong)* leaves; uint mid, wave; }
+immutable uint[3] snList = [5, 1, 3];
+ulong snBuild(scope ref PrivateBorrow!SnMid b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto m = &b.value();
+    m.leaves = ctx.createChildren!(SnLeaf, ulong)(6, PrivateCohortOptions(2, true));
+    namedCheck(m.leaves !is null, "subset nested leaf create");
+    foreach (i; 0 .. 6)
+        namedCheck(m.leaves.spawn(ctx, SnLeaf(m.c, cast(uint) i, 0, m.mid)) == PrivateSpawnResult.spawned, "subset nested leaf spawn");
+    namedCheck(m.leaves.startSubset!snLeaf(ctx, snList[]) == PrivateStartResult.started, "subset nested leaf subset");
+    return portsValue(++m.wave, m.mid);
+}
+ulong snFold(scope ref PrivateBorrow!SnMid b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto m = &b.value();
+    auto r = m.leaves.results(ctx); // retiring context; the subset wave was joined by the previous wave
+    namedCheck(m.leaves.subsetMembers(ctx) == snList[], "subset nested fold members");
+    namedCheck(r.length == 3 && r[0] == portsValue(1, 5) && r[1] == portsValue(1, 1) && r[2] == portsValue(1, 3),
+        "subset nested fold results");
+    return portsValue(++m.wave, m.mid);
+}
+struct SnRoot { PrivateChildPark!(SnMid, ulong)* mids; SnControl* c; uint phase; }
+PrivateRootDisposition snStep(scope ref PrivateBorrow!SnRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    auto c = s.c;
+    atomicFetchAdd!(MemoryOrder.raw)(c.rootCalls, 1u);
+    switch (s.phase++)
+    {
+        case 0:
+            s.mids = ctx.createChildren!(SnMid, ulong)(2);
+            namedCheck(s.mids !is null, "subset nested create");
+            foreach (i; 0 .. 2)
+                namedCheck(s.mids.spawn(ctx, SnMid(c, null, cast(uint) i)) == PrivateSpawnResult.spawned, "subset nested spawn");
+            namedCheck(s.mids.start!snBuild(ctx) == PrivateStartResult.started, "subset nested build wave");
+            return PrivateRootDisposition.waitChildren;
+        case 1:
+        {
+            foreach (mid; 0 .. 2) foreach (i; 0 .. 6)
+                namedCheck(c.ran[mid * 6 + i] == (i == 5 || i == 1 || i == 3 ? 1 : 0), "subset nested leaves ran after the join");
+            auto r = s.mids.results(ctx);
+            namedCheck(r.length == 2 && r[0] == portsValue(1, 0) && r[1] == portsValue(1, 1), "subset nested build results");
+            namedCheck(s.mids.startFinal!snFold(ctx) == PrivateStartResult.started, "subset nested fold wave");
+            return PrivateRootDisposition.waitChildren;
+        }
+        case 2:
+        {
+            auto r = s.mids.results(ctx);
+            namedCheck(r.length == 2 && r[0] == portsValue(2, 0) && r[1] == portsValue(2, 1), "subset nested fold results");
+            return PrivateRootDisposition.finish;
+        }
+        default:
+            namedCheck(false, "subset nested phases");
+            return PrivateRootDisposition.finish;
+    }
+}
+void subsetNested(PrivateRootReclamation reclaim)()
+{
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 4, 0, 0, 1, 8192);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto workers = new Workers(farm, 3);
+    scope(exit) workers.join();
+    SnControl control;
+    auto park = PrivateRootPark!(SnRoot, snStep, reclaim).create(farm, 1, 2, policy(counts));
+    check(park !is null);
+    check(park.spawn(SnRoot(null, &control)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (atomicLoad!(MemoryOrder.raw)(control.arrived) == 0)
+    {
+        park.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "subset nested leaf held");
+    }
+    // The top wave is complete except for the held nested subset wave: keep
+    // pumping and collecting; the root must not be resumed.
+    auto window = MonoTime.currTime + 200.msecs;
+    while (MonoTime.currTime < window)
+    {
+        park.pump(token);
+        namedCheck(atomicLoad!(MemoryOrder.raw)(control.rootCalls) == 1,
+            "subset nested root resumed before the nested subset joined");
+    }
+    atomicStore!(MemoryOrder.raw)(control.release, 1u);
+    while (park.live)
+    {
+        park.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "subset nested timeout");
+    }
+    namedCheck(atomicLoad(control.rootCalls) == 3, "subset nested three root calls");
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "subset nested allocation balance");
+}
+
+// ---- Q5: subset-alloc-fail ---------------------------------------------------------------------
+// Selector: subset-alloc-fail. Reserving subset storage costs exactly ONE extra
+// allocation of 2 * capacity uints (selection and inverse positions share
+// it). Sizes and counts are logged; a failure injected at each allocation of
+// a void and a result cohort returns null with a balanced ledger; the budget
+// equal to the allocation count succeeds (so no hidden extra allocation);
+// capacity beyond uint.max or size_t overflow allocates nothing; a cohort
+// without subsets still makes two (void) allocations. The surviving cohort
+// is used for a subset wave, and the balance proves its disposal frees the
+// selection storage.
+// Catching mutations:
+//   Q-M16 dispose omits the `sel_` free: fails "subset alloc total allocation
+//         balance" (and the failed-create balance when the free is missing
+//         from the error path).
+//   Q-M17 the sel_ failure path omits freeing `results_` (R cohort), Q-M17b
+//         `entries_`: both fail "subset alloc failed create balance".
+//   Q-M18 a further (separate) allocation for the reserve: fails "subset alloc
+//         reserved void cohort makes three allocations".
+//   Q-M19 delete `capacity > uint.max` check: fails "subset alloc
+//         uint.max capacity allocates nothing".
+struct SfRoot { SizeLog* log; ulong* ran; SbCohort* c; uint phase; }
+PrivateRootDisposition sfStep(scope ref PrivateBorrow!SfRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    auto log = s.log;
+    auto counts = &log.counts;
+    if (s.phase++ == 1)
+    {
+        auto r = s.c.results(ctx);
+        namedCheck(r.length == 2 && r[0] == portsValue(1, 2) && r[1] == portsValue(1, 0), "subset alloc retry results");
+        return PrivateRootDisposition.finish;
+    }
+    enum subsets = PrivateCohortOptions(0, true);
+    static if (size_t.sizeof == 8)
+    {
+        atomicStore(log.requests, cast(size_t) 0);
+        auto plain = ctx.createChildren!SbMember(8, PrivateCohortOptions(5, false));
+        namedCheck(plain !is null && atomicLoad(log.requests) == 2, "subset alloc unreserved cohort makes two allocations");
+        atomicStore(log.requests, cast(size_t) 0);
+        auto reserved = ctx.createChildren!SbMember(8, subsets);
+        namedCheck(reserved !is null && atomicLoad(log.requests) == 3, "subset alloc reserved void cohort makes three allocations");
+        namedCheck(log.bytes[0] == SbVoidCohort.sizeof && log.bytes[1] == 8 * 40 && log.bytes[2] == 8 * 2 * uint.sizeof,
+            "subset alloc one combined selection allocation");
+        atomicStore(log.requests, cast(size_t) 0);
+        auto typed = ctx.createChildren!(SbMember, ulong)(8, subsets);
+        namedCheck(typed !is null && atomicLoad(log.requests) == 4, "subset alloc reserved result cohort makes four allocations");
+        namedCheck(log.bytes[0] == SbCohort.sizeof && log.bytes[1] == 8 * 40 && log.bytes[2] == 8 * ulong.sizeof
+            && log.bytes[3] == 8 * 2 * uint.sizeof, "subset alloc result cohort allocation sizes");
+    }
+    immutable allocated = atomicLoad(counts.allocated);
+    immutable freed = atomicLoad(counts.freed);
+    namedCheck(ctx.createChildren!(SbMember, ulong)(0, subsets) is null, "subset alloc zero capacity");
+    namedCheck(ctx.createChildren!(SbMember, ulong)(size_t.max, subsets) is null, "subset alloc capacity overflow");
+    static if (size_t.sizeof == 8)
+    {
+        // Every allocation attempt is counted and refused: the check must come first.
+        atomicStore(counts.budget, 0L);
+        atomicStore(log.requests, cast(size_t) 0);
+        namedCheck(ctx.createChildren!SbMember(cast(size_t) uint.max + 1, subsets) is null, "subset alloc uint.max capacity");
+        namedCheck(ctx.createChildren!(SbMember, ulong)(cast(size_t) uint.max + 1, subsets) is null, "subset alloc uint.max result capacity");
+        namedCheck(atomicLoad(log.requests) == 0, "subset alloc uint.max capacity allocates nothing");
+        atomicStore(counts.budget, long.max);
+    }
+    namedCheck(atomicLoad(counts.allocated) == allocated, "subset alloc invalid capacity allocates nothing");
+    foreach (budget; 0 .. 3)
+    {
+        atomicStore(counts.budget, cast(long) budget);
+        namedCheck(ctx.createChildren!SbMember(4, subsets) is null, "subset alloc void cohort/entries/selection failure");
+        namedCheck(atomicLoad(counts.allocated) - allocated == atomicLoad(counts.freed) - freed, "subset alloc failed create balance");
+    }
+    foreach (budget; 0 .. 4)
+    {
+        atomicStore(counts.budget, cast(long) budget);
+        namedCheck(ctx.createChildren!(SbMember, ulong)(4, subsets) is null, "subset alloc result cohort failure");
+        namedCheck(atomicLoad(counts.allocated) - allocated == atomicLoad(counts.freed) - freed, "subset alloc failed create balance");
+    }
+    atomicStore(counts.budget, 3L);
+    auto exactVoid = ctx.createChildren!SbMember(4, subsets);
+    namedCheck(exactVoid !is null, "subset alloc budget equal to the allocation count succeeds");
+    atomicStore(counts.budget, 4L);
+    auto children = ctx.createChildren!(SbMember, ulong)(3, subsets);
+    namedCheck(children !is null, "subset alloc budget equal to the result allocation count succeeds");
+    atomicStore(counts.budget, long.max);
+    s.c = children;
+    foreach (i; 0 .. 3)
+        namedCheck(children.spawn(ctx, SbMember(s.ran, cast(uint) i)) == PrivateSpawnResult.spawned, "subset alloc retry spawn");
+    immutable uint[2] list = [2, 0];
+    namedCheck(children.startSubset!sbTag(ctx, list[]) == PrivateStartResult.started, "subset alloc retry start");
+    return PrivateRootDisposition.waitChildren;
+}
+void subsetAllocationFailures()
+{
+    SizeLog log;
+    ulong[3] ran;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(SfRoot, sfStep).create(farm, 1, 256,
+        ActorAllocator(&log, &sizeLogAllocate, &sizeLogDeallocate));
+    check(park !is null);
+    check(park.spawn(SfRoot(&log, ran.ptr)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "subset alloc timeout");
+    }
+    park.destroy();
+    namedCheck(atomicLoad(log.counts.allocated) == atomicLoad(log.counts.freed), "subset alloc total allocation balance");
+}
+
+// ---- Q6: subset-dtor ------------------------------------------------------------------------------
+// Selector: subset-dtor. Non-POD members (the E2-1 DtKid logger) with a subset
+// wave: the wave runs the operation only for the selected members and
+// destroys NOBODY, selected or not. Mode 0: the root finishes and cohort
+// disposal destroys every member exactly once, on a consumer, after its op.
+// Mode 1: a whole startFinal retires every member (selected, unselected)
+// exactly once. Both reclamation policies.
+// Catching mutations:
+//   Q-M20 startSubset sets `retire_ = true`: the selected members are
+//         destroyed by the subset wave: fails "subset dtor wave destroys nobody".
+//   Q-M22 dispose walks only `k_` entries after a subset wave instead of
+//         every member: fails "subset dtor unselected member destroyed once".
+struct SgRoot { PrivateChildPark!(DtKid, ulong)* kids; uint phase; ubyte mode; }
+immutable uint[2] sgList = [3, 0]; // member ids 4 and 1 (id = index + 1)
+PrivateRootDisposition sgStep(scope ref PrivateBorrow!SgRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    switch (s.phase++)
+    {
+        case 0:
+            s.kids = ctx.createChildren!(DtKid, ulong)(6, PrivateCohortOptions(0, true));
+            namedCheck(s.kids !is null, "subset dtor create");
+            foreach (id; 1 .. 7)
+                namedCheck(s.kids.spawn(ctx, DtKid(cast(uint) id)) == PrivateSpawnResult.spawned, "subset dtor spawn");
+            namedCheck(s.kids.startSubset!dtKidTag(ctx, sgList[]) == PrivateStartResult.started, "subset dtor subset wave");
+            return PrivateRootDisposition.waitChildren;
+        case 1:
+        {
+            foreach (id; 1 .. 7)
+            {
+                namedCheck(dtCount(id) == 0, "subset dtor wave destroys nobody");
+                namedCheck(dtCount(id + dtOp) == (id == 4 || id == 1 ? 1 : 0), "subset dtor only selected members ran");
+            }
+            auto r = s.kids.results(ctx);
+            namedCheck(r.length == 2 && r[0] == portsValue(1, 4) && r[1] == portsValue(1, 1), "subset dtor results");
+            namedCheck(s.kids.subsetMembers(ctx) == sgList[], "subset dtor members");
+            if (s.mode == 0) return PrivateRootDisposition.finish;
+            namedCheck(s.kids.startFinal!dtKidTag(ctx) == PrivateStartResult.started, "subset dtor final wave");
+            return PrivateRootDisposition.waitChildren;
+        }
+        case 2:
+        {
+            foreach (id; 1 .. 7)
+            {
+                namedCheck(dtCount(id) == 1, "subset dtor final destroyed every member before the join");
+                namedCheck(dtCount(id + dtOp) == (id == 4 || id == 1 ? 2 : 1), "subset dtor final op count");
+            }
+            namedCheck(s.kids.results(ctx).length == 6, "subset dtor final results");
+            namedCheck(s.kids.subsetMembers(ctx).length == 0, "subset dtor final members");
+            return PrivateRootDisposition.finish;
+        }
+        default:
+            namedCheck(false, "subset dtor phases");
+            return PrivateRootDisposition.finish;
+    }
+}
+void subsetDtor(PrivateRootReclamation reclaim)(ubyte mode)
+{
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    auto park = PrivateRootPark!(SgRoot, sgStep, reclaim).create(h.farm, 1, 2, policy(h.counts));
+    check(park !is null);
+    check(park.spawn(SgRoot(null, 0, mode)) == PrivateSpawnResult.spawned);
+    h.drain(park, "subset dtor completion");
+    foreach (id; 1 .. 7)
+    {
+        dtStoredOnConsumer(id, "subset dtor unselected member destroyed once");
+        if (id == 4 || id == 1) namedCheck(dtPos(id + dtOp) < dtPos(id), "subset dtor op before destructor");
+    }
+    park.destroy();
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "subset dtor allocation balance");
+}
+
+// ---- Q7: subset-late-tail (TSan, deterministic) ----------------------------------------------
+// Selector: subset-late-tail. The generation fence: the wave finisher (worker
+// W) is paused at privateRootAfterIdleBeforeCredit, after its idle release and
+// before the root credit. The polling parent sees `finished`, checks the
+// results and members, and immediately starts a DIFFERENT, longer subset (it
+// rewrites sel_, the inverse positions, k_, the header and the flags) while
+// W's tail is still running. The second wave runs on this consumer (W is
+// paused), is joined, checked, and the root finishes strictly, which frees
+// the whole cohort (selection storage included) before W resumes. W then
+// releases the credit and the Entry is recycled.
+// Catching mutation Q-M23: `finish` reads `k_` between the idle store and the
+// hook (Q-M23a: TSan reports the data race with the second start's write of
+// `k_`), or reads `sel_[0]` after the hook (Q-M23b: TSan reports the heap use
+// after free of the disposed cohort). Non-TSan builds pass: this is TSan-only
+// evidence, like P-M7.
+struct StControl { ulong[8] ran; uint[8] model; uint calls, stage, reads; }
+struct StRoot { SbCohort* c; StControl* k; }
+immutable uint[3] stA = [6, 2, 4];
+immutable uint[4] stB = [2, 6, 1, 5];
+PrivateRootDisposition stStep(scope ref PrivateBorrow!StRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    auto k = s.k;
+    ++k.calls;
+    if (s.c is null)
+    {
+        s.c = ctx.createChildren!(SbMember, ulong)(8, PrivateCohortOptions(256, true));
+        namedCheck(s.c !is null, "subset tail create");
+        foreach (i; 0 .. 8)
+            namedCheck(s.c.spawn(ctx, SbMember(k.ran.ptr, cast(uint) i)) == PrivateSpawnResult.spawned, "subset tail spawn");
+        namedCheck(s.c.startSubset!sbTag(ctx, stA[]) == PrivateStartResult.started, "subset tail first subset");
+        foreach (i; stA) ++k.model[i];
+        return PrivateRootDisposition.again;
+    }
+    if (!s.c.finished(ctx)) return PrivateRootDisposition.again;
+    if (k.stage == 0)
+    {
+        sbCheckSubset(s.c, ctx, k.ran[], k.model[], stA[], "subset tail first wave");
+        namedCheck(s.c.startSubset!sbTag(ctx, stB[]) == PrivateStartResult.started, "subset tail second subset");
+        foreach (i; stB) ++k.model[i];
+        k.stage = 1;
+        return PrivateRootDisposition.again;
+    }
+    sbCheckSubset(s.c, ctx, k.ran[], k.model[], stB[], "subset tail second wave");
+    ++k.reads;
+    return PrivateRootDisposition.finish;
+}
+version (AntfarmActorTestHooks)
+{
+    void subsetLateTail(PrivateRootReclamation reclaim)()
+    {
+        Counts counts;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        StControl c;
+        auto park = PrivateRootPark!(StRoot, stStep, reclaim).create(farm, 1, 256, policy(counts));
+        check(park !is null);
+        check(park.spawn(StRoot(null, &c)) == PrivateSpawnResult.spawned);
+        check(park.pump(token) == 1);
+        while (view.consumeNext()) {} // first callback starts the first subset on this consumer
+        PrivateHookControl hook;
+        hook.point = ActorTestPoint.privateRootAfterIdleBeforeCredit;
+        hook.armed = 1;
+        privateControl = &hook;
+        setActorTestHook(&privateHook);
+        shared uint ready, go, leave;
+        auto worker = new Thread({
+            ConsumerView other;
+            check(other.subscribe(farm) >= 0);
+            scope(exit) other.unsubscribe();
+            atomicStore!(MemoryOrder.raw)(ready, 1u);
+            awaitRaw(go, 1u, "subset tail worker go");
+            while (atomicLoad!(MemoryOrder.raw)(leave) == 0) other.consumeNext();
+        });
+        worker.start();
+        awaitRaw(ready, 1u, "subset tail worker ready");
+        check(park.pump(token) == 1); // child table, then polling root
+        atomicStore!(MemoryOrder.raw)(go, 1u);
+        awaitRaw(hook.arrived, 1u, "subset tail idle tail paused");
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (c.reads == 0)
+        {
+            while (view.consumeNext()) {}
+            park.pump(token);
+            namedCheck(MonoTime.currTime < deadline, "subset tail second wave while the first tail is paused");
+        }
+        namedCheck(c.stage == 1 && c.reads == 1, "subset tail parent started and joined a new generation");
+        park.poll();
+        namedCheck(park.live == 1, "subset tail Entry pinned by the paused tail");
+        atomicStore!(MemoryOrder.raw)(hook.release, 1u);
+        while (park.live)
+        {
+            park.poll();
+            namedCheck(MonoTime.currTime < deadline, "subset tail completion");
+        }
+        park.destroy();
+        atomicStore!(MemoryOrder.raw)(leave, 1u);
+        worker.join();
+        setActorTestHook(null);
+        privateControl = null;
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "subset tail allocation balance");
+    }
+}
+
+// ---- Q8: subset-limits ---------------------------------------------------------------------------
+// Selector: subset-limits (audit hooks). `PrivateCohortOptions.batchLimit`
+// through the options overload: explicit 7 splits a full 50-member subset into
+// 8 tables of at most 7; 0 inherits the creating context's effective limit (5
+// for a grandchild cohort created in a limit-5 member): 10 tables.
+// Catching mutations:
+//   Q-M24 the options overload ignores `options.batchLimit` (always inherits):
+//         fails "explicit child table exceeds limit 7".
+//   Q-M25 the options overload does not inherit on 0 (passes the root's limit
+//         through): fails "inherited subset table count".
+static immutable uint[50] smReverse = () {
+    uint[50] a;
+    foreach (i; 0 .. 50) a[i] = cast(uint) (49 - i);
+    return a;
+}();
+version (AntfarmWriteAuditHooks)
+{
+    struct SmExplicitRoot { PrivateChildPark!BatchChild* children; ulong* slots; }
+    PrivateRootDisposition smExplicitStep(scope ref PrivateBorrow!SmExplicitRoot b,
+        scope ref PrivateContext ctx) nothrow @nogc @system
+    {
+        enum children = 50;
+        enum limit = 7;
+        if (b.value.children is null)
+        {
+            b.value.children = ctx.createChildren!BatchChild(children, PrivateCohortOptions(limit, true));
+            check(b.value.children !is null, "subset explicit create", 0);
+            foreach (i; 0 .. children)
+                check(b.value.children.spawn(ctx, BatchChild(b.value.slots + i)) == PrivateSpawnResult.spawned,
+                    "subset explicit spawn", 0);
+            check(b.value.children.startSubset!batchChildOperation(ctx, smReverse[]) == PrivateStartResult.started,
+                "subset explicit start", 0);
+            return PrivateRootDisposition.again;
+        }
+        if (!b.value.children.finished(ctx)) return PrivateRootDisposition.again;
+        foreach (i; 0 .. children) check(b.value.slots[i] == 1, "subset explicit joined", 0);
+        return PrivateRootDisposition.finish;
+    }
+    struct SmMiddle { PrivateChildPark!BatchChild* children; ulong* slots; }
+    void smMiddleStep(scope ref PrivateBorrow!SmMiddle b, scope ref PrivateContext ctx) nothrow @nogc @system
+    {
+        enum grandchildren = 50;
+        // Options with batchLimit 0: inherit this cohort's 5, not the root's 31.
+        b.value.children = ctx.createChildren!BatchChild(grandchildren, PrivateCohortOptions(0, true));
+        check(b.value.children !is null, "subset inherited create", 0);
+        foreach (i; 0 .. grandchildren)
+            check(b.value.children.spawn(ctx, BatchChild(b.value.slots + i)) == PrivateSpawnResult.spawned,
+                "subset inherited spawn", 0);
+        check(b.value.children.startSubset!batchChildOperation(ctx, smReverse[]) == PrivateStartResult.started,
+            "subset inherited start", 0);
+    }
+    struct SmInheritRoot { PrivateChildPark!SmMiddle* middle; ulong* slots; }
+    PrivateRootDisposition smInheritStep(scope ref PrivateBorrow!SmInheritRoot b,
+        scope ref PrivateContext ctx) nothrow @nogc @system
+    {
+        if (b.value.middle is null)
+        {
+            b.value.middle = ctx.createChildren!SmMiddle(1, 5);
+            check(b.value.middle !is null, "subset middle create", 0);
+            check(b.value.middle.spawn(ctx, SmMiddle(null, b.value.slots)) == PrivateSpawnResult.spawned,
+                "subset middle spawn", 0);
+            check(b.value.middle.start!smMiddleStep(ctx) == PrivateStartResult.started, "subset middle start", 0);
+            return PrivateRootDisposition.again;
+        }
+        if (!b.value.middle.finished(ctx)) return PrivateRootDisposition.again;
+        foreach (i; 0 .. 50) check(b.value.slots[i] == 1, "subset inherited joined", 0);
+        return PrivateRootDisposition.finish;
+    }
+    void subsetLimits()
+    {
+        ulong[50] slots;
+        drainCounted!(SmExplicitRoot, smExplicitStep)(256, slots[], 7, 8, "explicit subset table count");
+        slots[] = 0;
+        drainCounted!(SmInheritRoot, smInheritStep)(31, slots[], 5, 10, "inherited subset table count");
+    }
+}
+
+// ---- SD1-SD4: death modes ------------------------------------------------------------------------
+// Selectors subset-dup-adjacent, subset-dup-gap, subset-range, subset-range-max,
+// subset-too-many, subset-unreserved, subset-unreserved-empty,
+// subset-unreserved-options, subset-wrong-parent, subset-default-context,
+// subset-members-wrong-parent (run through deathHarness: LDC and DMD, debug
+// and -release). The harness needs a nonzero death AND the exact fatal text,
+// and that the survivor marker never printed.
+// Catching mutations:
+//   Q-M26 duplicate check removed: the duplicate lists start a double-dispatch
+//         wave and the root dies with "retire private actor with active child
+//         wave" instead of the duplicate-member text.
+//   Q-M27 range check `i >= capacity_` instead of `i >= count_`: the list
+//         [0, 4] on four members of capacity eight dies with the active-child
+//         text instead of the range text.
+//   Q-M28 the range check deleted: [0, 4] as above; [uint.max] segfaults.
+//   Q-M29 `members.length > count_` check deleted: [0,1,2,3,3] reaches the
+//         duplicate check instead (wrong fatal text).
+//   Q-M30 `sel_ is null` fatal deleted: the unreserved modes segfault, and the
+//         empty-list mode survives ("subset misuse: survived").
+//   Q-M31 `authorized(context)` deleted from startSubset / subsetMembers.
+enum SubsetMisuse : ubyte
+{
+    dupAdjacent, dupGap, range, rangeMax, tooMany, unreserved, unreservedEmpty,
+    unreservedOptions, wrongParent, defaultContext, membersWrongParent,
+}
+struct SdProbe { SbCohort* children; ulong* ran; SubsetMisuse misuse; }
+struct SdRoot { SdProbe* probe; bool owner; }
+immutable uint[2] sdDupAdjacent = [2, 2];
+immutable uint[3] sdDupGap = [1, 3, 1];
+immutable uint[2] sdRange = [0, 4];
+immutable uint[1] sdRangeMax = [uint.max];
+immutable uint[5] sdTooMany = [0, 1, 2, 3, 3];
+immutable uint[1] sdOne = [0];
+PrivateRootDisposition sdStep(scope ref PrivateBorrow!SdRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto probe = b.value.probe;
+    immutable misuse = probe.misuse;
+    immutable foreign = misuse == SubsetMisuse.wrongParent || misuse == SubsetMisuse.defaultContext
+        || misuse == SubsetMisuse.membersWrongParent;
+    if (b.value.owner)
+    {
+        if (probe.children is null)
+        {
+            probe.children = misuse == SubsetMisuse.unreserved || misuse == SubsetMisuse.unreservedEmpty
+                ? ctx.createChildren!(SbMember, ulong)(8)
+                : ctx.createChildren!(SbMember, ulong)(8, PrivateCohortOptions(0, misuse != SubsetMisuse.unreservedOptions));
+            namedCheck(probe.children !is null, "subset death owner cohort");
+            foreach (i; 0 .. 4)
+                namedCheck(probe.children.spawn(ctx, SbMember(probe.ran, cast(uint) i)) == PrivateSpawnResult.spawned, "subset death spawn");
+        }
+        if (foreign) return PrivateRootDisposition.again;
+        final switch (misuse)
+        {
+            case SubsetMisuse.dupAdjacent: probe.children.startSubset!sbTag(ctx, sdDupAdjacent[]); break;
+            case SubsetMisuse.dupGap: probe.children.startSubset!sbTag(ctx, sdDupGap[]); break;
+            case SubsetMisuse.range: probe.children.startSubset!sbTag(ctx, sdRange[]); break;
+            case SubsetMisuse.rangeMax: probe.children.startSubset!sbTag(ctx, sdRangeMax[]); break;
+            case SubsetMisuse.tooMany: probe.children.startSubset!sbTag(ctx, sdTooMany[]); break;
+            case SubsetMisuse.unreserved:
+            case SubsetMisuse.unreservedOptions:
+                probe.children.startSubset!sbTag(ctx, sdOne[]); break;
+            case SubsetMisuse.unreservedEmpty: probe.children.startSubset!sbTag(ctx, null); break;
+            case SubsetMisuse.wrongParent:
+            case SubsetMisuse.defaultContext:
+            case SubsetMisuse.membersWrongParent: break;
+        }
+        fprintf(stderr, "subset misuse: survived\n");
+        return PrivateRootDisposition.finish;
+    }
+    namedCheck(probe.children !is null, "subset death cohort exists");
+    PrivateContext empty;
+    final switch (misuse)
+    {
+        case SubsetMisuse.wrongParent: probe.children.startSubset!sbTag(ctx, sdOne[]); break;
+        case SubsetMisuse.defaultContext: probe.children.startSubset!sbTag(empty, sdOne[]); break;
+        case SubsetMisuse.membersWrongParent: cast(void) probe.children.subsetMembers(ctx); break;
+        case SubsetMisuse.dupAdjacent:
+        case SubsetMisuse.dupGap:
+        case SubsetMisuse.range:
+        case SubsetMisuse.rangeMax:
+        case SubsetMisuse.tooMany:
+        case SubsetMisuse.unreserved:
+        case SubsetMisuse.unreservedEmpty:
+        case SubsetMisuse.unreservedOptions: break;
+    }
+    fprintf(stderr, "subset misuse: survived\n");
+    return PrivateRootDisposition.finish;
+}
+void subsetMisuseDeath(SubsetMisuse misuse)
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    ulong[8] ran;
+    SdProbe probe;
+    probe.ran = ran.ptr;
+    probe.misuse = misuse;
+    auto park = PrivateRootPark!(SdRoot, sdStep).create(farm, 2);
+    check(park !is null);
+    check(park.spawn(SdRoot(&probe, true)) == PrivateSpawnResult.spawned);
+    if (misuse == SubsetMisuse.wrongParent || misuse == SubsetMisuse.defaultContext
+        || misuse == SubsetMisuse.membersWrongParent)
+        check(park.spawn(SdRoot(&probe, false)) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+    // Reaching this point means the fatal contract was not enforced.
+}
+struct SubsetDeathMode { string selector; SubsetMisuse misuse; string text; }
+immutable SubsetDeathMode[] subsetDeathModes = [
+    SubsetDeathMode("subset-dup-adjacent", SubsetMisuse.dupAdjacent, "antfarm fatal: private child subset: duplicate member"),
+    SubsetDeathMode("subset-dup-gap", SubsetMisuse.dupGap, "antfarm fatal: private child subset: duplicate member"),
+    SubsetDeathMode("subset-range", SubsetMisuse.range, "antfarm fatal: private child subset: member out of range"),
+    SubsetDeathMode("subset-range-max", SubsetMisuse.rangeMax, "antfarm fatal: private child subset: member out of range"),
+    SubsetDeathMode("subset-too-many", SubsetMisuse.tooMany, "antfarm fatal: private child subset: too many members"),
+    SubsetDeathMode("subset-unreserved", SubsetMisuse.unreserved, "antfarm fatal: private child subset: storage not reserved"),
+    SubsetDeathMode("subset-unreserved-empty", SubsetMisuse.unreservedEmpty, "antfarm fatal: private child subset: storage not reserved"),
+    SubsetDeathMode("subset-unreserved-options", SubsetMisuse.unreservedOptions, "antfarm fatal: private child subset: storage not reserved"),
+    SubsetDeathMode("subset-wrong-parent", SubsetMisuse.wrongParent, "antfarm fatal: private child park: unauthorized context"),
+    SubsetDeathMode("subset-default-context", SubsetMisuse.defaultContext, "antfarm fatal: private child park: unauthorized context"),
+    SubsetDeathMode("subset-members-wrong-parent", SubsetMisuse.membersWrongParent, "antfarm fatal: private child park: unauthorized context"),
+];
+void subsetDeath()
+{
+    version (linux)
+    {
+        foreach (mode; subsetDeathModes)
+        {
+            auto probe = probeDeath(mode.selector);
+            check(probe.status != 0);
+            check(probe.stderrText.canFind(mode.text));
+            check(!probe.stderrText.canFind("subset misuse: survived"));
+        }
+        writeln("PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal");
+    }
+    else
+        writeln("SKIP subset death modes: /proc/self/exe re-exec requires Linux");
+}
+
+void phaseSubset()
+{
+    subsetBasic!(PrivateRootReclamation.emitter)();
+    subsetBasic!(PrivateRootReclamation.consumer)();
+    writeln("PASS subset-basic sparse/dense/full/repeated/void/whole waves, empty list, refill, both policies");
+    subsetActive!(PrivateRootReclamation.emitter)();
+    subsetActive!(PrivateRootReclamation.consumer)();
+    writeln("PASS subset-active start over an active wave returns waveActive without side effects");
+    subsetLargeCohorts(); writeln("PASS subset-large 1025 members, child limits 1/64/256, zero and partial quota admission");
+    subsetNested!(PrivateRootReclamation.emitter)();
+    subsetNested!(PrivateRootReclamation.consumer)();
+    writeln("PASS subset-nested subset wave joins its parent wave and the root's waitChildren");
+    subsetAllocationFailures(); writeln("PASS subset-alloc-fail one selection allocation, balanced failures");
+    foreach (mode; 0 .. 2)
+    {
+        subsetDtor!(PrivateRootReclamation.emitter)(cast(ubyte) mode);
+        subsetDtor!(PrivateRootReclamation.consumer)(cast(ubyte) mode);
+    }
+    writeln("PASS subset-dtor subset waves destroy no member; disposal and startFinal destroy all once");
+    version (AntfarmActorTestHooks)
+    {
+        subsetLateTail!(PrivateRootReclamation.emitter)();
+        subsetLateTail!(PrivateRootReclamation.consumer)();
+        writeln("PASS subset-late-tail new subset generation started under a paused idle tail");
+    }
+    version (AntfarmWriteAuditHooks)
+    {
+        subsetLimits(); writeln("PASS subset-limits options.batchLimit explicit and inherited");
+    }
+}
+
 void runSuite()
 {
     phaseE1();
     phaseD();
     phasePorts();
     phaseDtor();
+    phaseSubset();
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
     version (AntfarmWriteAuditHooks)
     {
@@ -4919,6 +6187,48 @@ void main(string[] args)
             version (assert) dtorReenterDeath();
             return;
         case "dtor-death": dtorDeath(); return;
+        case "phase-subset": phaseSubset(); return;
+        case "subset-basic":
+            subsetBasic!(PrivateRootReclamation.emitter)(); subsetBasic!(PrivateRootReclamation.consumer)();
+            writeln("PASS subset-basic"); return;
+        case "subset-active":
+            subsetActive!(PrivateRootReclamation.emitter)(); subsetActive!(PrivateRootReclamation.consumer)();
+            writeln("PASS subset-active"); return;
+        case "subset-large": subsetLargeCohorts(); writeln("PASS subset-large"); return;
+        case "subset-nested":
+            subsetNested!(PrivateRootReclamation.emitter)(); subsetNested!(PrivateRootReclamation.consumer)();
+            writeln("PASS subset-nested"); return;
+        case "subset-alloc-fail": subsetAllocationFailures(); writeln("PASS subset-alloc-fail"); return;
+        case "subset-dtor":
+            foreach (m; 0 .. 2)
+            {
+                subsetDtor!(PrivateRootReclamation.emitter)(cast(ubyte) m);
+                subsetDtor!(PrivateRootReclamation.consumer)(cast(ubyte) m);
+            }
+            writeln("PASS subset-dtor"); return;
+        case "subset-late-tail":
+            version (AntfarmActorTestHooks)
+            {
+                subsetLateTail!(PrivateRootReclamation.emitter)();
+                subsetLateTail!(PrivateRootReclamation.consumer)();
+                writeln("PASS subset-late-tail");
+            }
+            return;
+        case "subset-limits":
+            version (AntfarmWriteAuditHooks) { subsetLimits(); writeln("PASS subset-limits"); }
+            return;
+        case "subset-death": subsetDeath(); return;
+        case "subset-dup-adjacent": subsetMisuseDeath(SubsetMisuse.dupAdjacent); return;
+        case "subset-dup-gap": subsetMisuseDeath(SubsetMisuse.dupGap); return;
+        case "subset-range": subsetMisuseDeath(SubsetMisuse.range); return;
+        case "subset-range-max": subsetMisuseDeath(SubsetMisuse.rangeMax); return;
+        case "subset-too-many": subsetMisuseDeath(SubsetMisuse.tooMany); return;
+        case "subset-unreserved": subsetMisuseDeath(SubsetMisuse.unreserved); return;
+        case "subset-unreserved-empty": subsetMisuseDeath(SubsetMisuse.unreservedEmpty); return;
+        case "subset-unreserved-options": subsetMisuseDeath(SubsetMisuse.unreservedOptions); return;
+        case "subset-wrong-parent": subsetMisuseDeath(SubsetMisuse.wrongParent); return;
+        case "subset-default-context": subsetMisuseDeath(SubsetMisuse.defaultContext); return;
+        case "subset-members-wrong-parent": subsetMisuseDeath(SubsetMisuse.membersWrongParent); return;
         case "ports-basic":
             portsBasic!(PrivateRootReclamation.emitter)();
             portsBasic!(PrivateRootReclamation.consumer)();
