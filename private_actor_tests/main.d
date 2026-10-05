@@ -2492,7 +2492,7 @@ static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNo
 // allocation sizes in portsAllocationFailures.
 static if (size_t.sizeof == 8)
 {
-    static assert(PVoidCohort.sizeof == 280);
+    static assert(PVoidCohort.sizeof == 288);
     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
     version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 168);
     else static assert(PrivateRootPark!(State, repeat).sizeof == 160);

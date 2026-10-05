@@ -66,6 +66,12 @@ private:
     this(Entry* actor, Wave* enclosing, bool retiring, size_t batchLimit) nothrow @nogc @system
     { actor_ = actor; enclosing_ = enclosing; retiring_ = retiring; batchLimit_ = batchLimit; }
     @disable this(this);
+    // A root context has no enclosing wave and reads its Entry; a member's
+    // service lives in the ChildBase of the wave that dispatched it.
+    Service* service() nothrow @nogc @system
+    {
+        return enclosing_ is null ? actor_.service : ChildBase.fromWave(enclosing_).service;
+    }
 public:
     /// R is the per-member result type; void (the default) creates a
     /// signal-only cohort with no result storage.
@@ -74,7 +80,7 @@ public:
     {
         if (actor_ is null) fatal("private child park: unauthorized context");
         if (retiring_) return null;
-        return PrivateChildPark!(T, R).create(actor_, capacity, batchLimit_);
+        return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, batchLimit_);
     }
     PrivateChildPark!(T, R)* createChildren(T, R = void)(size_t capacity, size_t childBatchLimit)
         nothrow @nogc @system
@@ -82,23 +88,37 @@ public:
         if (actor_ is null) fatal("private child park: unauthorized context");
         if (childBatchLimit == 0) fatal("invalid private child batch limit");
         if (retiring_) return null;
-        return PrivateChildPark!(T, R).create(actor_, capacity, childBatchLimit);
+        return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, childBatchLimit);
     }
     PrivateChildPark!(T, R)* createChildren(T, R = void)(size_t capacity, PrivateCohortOptions options)
         nothrow @nogc @system
     {
         if (actor_ is null) fatal("private child park: unauthorized context");
         if (retiring_) return null;
-        return PrivateChildPark!(T, R).create(actor_, capacity,
+        return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity,
             options.batchLimit == 0 ? batchLimit_ : options.batchLimit, options.subsets);
     }
 }
+
+// Child entries reach the Service through ChildBase.service; their word at
+// offset 16 is child-only metadata, never a Service pointer.
+private enum ChildStep : ubyte { done, waitChildren, doneRetire }
 
 private struct Entry
 {
     void* state;
     ChildBase* children;
-    Service* service;
+    union
+    {
+        Service* service; // roots only
+        struct // children only
+        {
+            ChildStep childStep;
+            ubyte childFlags;
+            ushort childReserved;
+            shared uint childPending;
+        }
+    }
     Entry* next;
     // Mutually exclusive metadata for root versus child entries.
     union
@@ -118,6 +138,8 @@ version (D_LP64)
     static assert(Entry.sizeof == 40 && Entry.alignof == 8);
     static assert(Entry.state.offsetof == 0 && Entry.children.offsetof == 8
         && Entry.service.offsetof == 16 && Entry.next.offsetof == 24);
+    static assert(Entry.childStep.offsetof == 16 && Entry.childFlags.offsetof == 17
+        && Entry.childReserved.offsetof == 18 && Entry.childPending.offsetof == 20);
     static assert(Entry.enclosing.offsetof == 32 && Entry.disposition.offsetof == 32
         && Entry.hasJoinCredits.offsetof == 33 && Entry.cleanup.offsetof == 34
         && Entry.pending.offsetof == 36);
@@ -127,8 +149,14 @@ private struct ChildBase
 {
     ChildBase* next;
     Entry* parent;
+    Service* service;
     Wave wave;
     void function(ChildBase*) nothrow @nogc @system dispose;
+
+    static ChildBase* fromWave(Wave* wave) nothrow @nogc @system
+    {
+        return cast(ChildBase*) (cast(ubyte*) wave - ChildBase.wave.offsetof);
+    }
 }
 
 private struct Wave
@@ -276,11 +304,11 @@ private void destroyState(T)(Entry* entry) nothrow @nogc @system
 }
 
 // Shared retirement hook for terminal dispatches and future child cleanup activations.
-private void retireMember(T)(Entry* entry) nothrow @nogc @system
+private void retireMember(T)(Service* service, Entry* entry) nothrow @nogc @system
 {
     disposeChildren(entry);
     destroyState!T(entry);
-    freeMemory(entry.service, entry.state, T.sizeof, T.alignof);
+    freeMemory(service, entry.state, T.sizeof, T.alignof);
     entry.state = null;
 }
 
@@ -695,6 +723,7 @@ private:
     Entry* entries_;
     size_t capacity_, count_, cursor_, batchLimit_;
     bool retire_, isSubset_;
+    bool parentIsRoot_; // fixed at creation: the creating context had no enclosing wave
     uint* sel_;
     size_t k_;
     PayloadHeader header_;
@@ -707,15 +736,14 @@ private:
         "PrivateChildPark.fromWave requires base_ at offset zero");
     @disable this(this);
 
-    static PrivateChildPark* create(Entry* parent, size_t capacity, size_t batchLimit, bool subsets = false)
-        nothrow @nogc @system
+    static PrivateChildPark* create(Entry* parent, Service* service, bool parentIsRoot,
+        size_t capacity, size_t batchLimit, bool subsets = false) nothrow @nogc @system
     {
         static assert(stateAllowed!T, "private actor state: struct/scalar with nothrow @nogc destructor");
         if (capacity == 0 || capacity > size_t.max / Entry.sizeof) return null;
         if (subsets && capacity > uint.max) return null;
         static if (hasResults)
             if (capacity > size_t.max / R.sizeof) return null;
-        auto service = parent.service;
         auto park = cast(PrivateChildPark*) allocateZero(service, PrivateChildPark.sizeof, PrivateChildPark.alignof);
         if (park is null) return null;
         park.entries_ = cast(Entry*) allocateZero(service, capacity * Entry.sizeof, Entry.alignof);
@@ -749,6 +777,8 @@ private:
         park.capacity_ = capacity;
         park.batchLimit_ = batchLimit;
         park.base_.parent = parent;
+        park.base_.service = service;
+        park.parentIsRoot_ = parentIsRoot;
         park.base_.dispose = &dispose;
         park.base_.wave.hook = TableCompletionHook(&park.base_.wave, &waveCompleted);
         park.base_.wave.emit = &emit;
@@ -804,7 +834,7 @@ public:
         if (context.retiring_) return PrivateSpawnResult.retiring;
         if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0) return PrivateSpawnResult.waveActive;
         if (count_ == capacity_) return PrivateSpawnResult.capacityFull;
-        auto service = base_.parent.service;
+        auto service = base_.service;
         auto state = service.allocator.allocate(service.allocator.context, T.sizeof, T.alignof);
         if (state is null) return PrivateSpawnResult.allocationFailed;
         static if (__traits(isPOD, T))
@@ -813,7 +843,6 @@ public:
             moveEmplace(initial, *cast(T*) state);
         auto entry = &entries_[count_++];
         entry.state = state;
-        entry.service = service;
         entry.enclosing = &base_.wave;
         return PrivateSpawnResult.spawned;
     }
@@ -864,7 +893,7 @@ public:
             retainRootCredit(base_.parent.pending); // BEFORE enqueue / visibility
             base_.parent.hasJoinCredits = true;
         }
-        base_.parent.service.enqueue(wave);
+        base_.service.enqueue(wave);
         return PrivateStartResult.started;
     }
     /// Starts only the listed spawn-order indices. No subset retirement.
@@ -917,7 +946,7 @@ public:
             retainRootCredit(base_.parent.pending);
             base_.parent.hasJoinCredits = true;
         }
-        base_.parent.service.enqueue(wave);
+        base_.service.enqueue(wave);
         return PrivateStartResult.started;
     }
     PrivateStartResult startFinal(alias operation)(scope ref PrivateContext context)
@@ -928,7 +957,7 @@ public:
 private:
     static PrivateChildPark* fromWave(Wave* wave) nothrow @nogc @system
     {
-        return cast(PrivateChildPark*) (cast(ubyte*) wave - ChildBase.wave.offsetof);
+        return cast(PrivateChildPark*) ChildBase.fromWave(wave);
     }
     static bool emit(Wave* wave, ref Token token) nothrow @nogc @system
     {
@@ -937,7 +966,7 @@ private:
         auto n = remaining > park.batchLimit_ ? park.batchLimit_ : remaining;
         auto bodies = ChildBodies(park.entries_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
-        immutable written = cast(size_t) park.base_.parent.service.farm.writeTracked(
+        immutable written = cast(size_t) park.base_.service.farm.writeTracked(
             park.header_, bodies, 1, &wave.hook, token, 0);
         if (written == 0) releaseWave(wave); // producer hold still protects it
         park.cursor_ += written;
@@ -952,7 +981,7 @@ private:
         auto n = remaining > park.batchLimit_ ? park.batchLimit_ : remaining;
         auto bodies = SubsetBodies(park.entries_, park.sel_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
-        immutable written = cast(size_t) park.base_.parent.service.farm.writeTracked(
+        immutable written = cast(size_t) park.base_.service.farm.writeTracked(
             park.header_, bodies, 1, &wave.hook, token, 0);
         if (written == 0) releaseWave(wave);
         park.cursor_ += written;
@@ -996,14 +1025,14 @@ private:
         }
         if (retiring)
         {
-            retireMember!T(entry);
+            retireMember!T(park.base_.service, entry);
         }
         return 1;
     }
     static void dispose(ChildBase* base) nothrow @nogc @system
     {
         auto park = cast(PrivateChildPark*) base;
-        auto service = base.parent.service;
+        auto service = base.service;
         foreach (ref entry; park.entries_[0 .. park.count_])
         {
             static if (__traits(isPOD, T))
@@ -1012,7 +1041,7 @@ private:
                 freeMemory(service, entry.state, T.sizeof, T.alignof);
             }
             else if (entry.state !is null)
-                retireMember!T(&entry);
+                retireMember!T(service, &entry);
         }
         freeMemory(service, park.entries_, park.capacity_ * Entry.sizeof, Entry.alignof);
         static if (hasResults)
