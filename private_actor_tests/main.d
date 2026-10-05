@@ -2495,8 +2495,9 @@ static if (size_t.sizeof == 8)
 {
     static assert(PVoidCohort.sizeof == 288);
     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
-    version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 168);
-    else static assert(PrivateRootPark!(State, repeat).sizeof == 160);
+    // Service.childReturns (E2-3) accounts for one word of both.
+    version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 176);
+    else static assert(PrivateRootPark!(State, repeat).sizeof == 168);
 }
 static assert(PUlongCohort.sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
 static assert(PrivateChildPark!(PItem, ubyte).sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);

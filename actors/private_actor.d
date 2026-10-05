@@ -285,6 +285,10 @@ private struct Service
     shared(Emittable*) incoming;
     Emittable* waiting;
     shared(Entry*) rootReturns;
+    // Members that finish waiting, pushed by their final credit release;
+    // declared but unused. The pump will drain it with its own cursor (not
+    // the root park's) and clear the FIFO tail when a drain empties it.
+    shared(Entry*) childReturns;
 
     void enqueue(Emittable* emittable) nothrow @nogc @system
     {
@@ -300,6 +304,7 @@ private struct Service
 
     void pump(ref Token token) nothrow @nogc @system
     {
+        // childReturns is drained here, before iterating waiting.
         auto fresh = cast(Emittable*) atomicExchange!(MemoryOrder.acq_rel)(&incoming, cast(shared(Emittable)*) null);
         while (fresh !is null)
         {
