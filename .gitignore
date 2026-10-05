@@ -50,3 +50,4 @@ review_torture/write_protection_allwrite
 review_torture/boundary_runoff_allwrite
 
 private_actor_tests/.doc-examples/
+examples/.build/

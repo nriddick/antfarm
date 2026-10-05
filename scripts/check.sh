@@ -52,6 +52,7 @@ run "${make_cmd[@]}" run-farm-tsan
 run "${make_cmd[@]}" -C actor_torture run run-dmd run-tsan
 run "${make_cmd[@]}" -C review_torture run run-tsan
 run "${make_cmd[@]}" -C private_actor_tests run run-dmd run-tsan doc-example death
+run "${make_cmd[@]}" -C examples check
 
 if [[ "$mimalloc" -eq 1 ]]; then
     if [[ ! -f third_party/mimalloc/CMakeLists.txt ]]; then
