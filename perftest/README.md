@@ -71,6 +71,19 @@ and defaults to the existing `actors.mimalloc` adapter. It can also select
 For the subsequent runtime improvements, larger wave offers, and consumer
 placement measurements, see [LIFECYCLE.md](LIFECYCLE.md).
 
+### Private destructor churn
+
+`actor_churn dtor` uses non-copyable private state whose destructor increments
+its per-actor completion counter and publishes the cycle stamp. Its callback
+returns `finish`; every cycle drains the park and verifies exactly one owning
+destruction per actor. Moved-from `.init` destructors do nothing. It uses the
+same arguments, allocator and default emitter byte-reclamation policy as
+`private`:
+
+```sh
+ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn_mimalloc dtor 4096 3 6 256 5 mimalloc 0,1,2,3,4,5,6
+```
+
 ### Sustained comparison
 
 Measured on 2026-09-24 on the Ryzen 5 5500 host described below, with LDC

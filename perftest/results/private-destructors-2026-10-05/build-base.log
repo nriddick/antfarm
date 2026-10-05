@@ -1,0 +1,5 @@
+make: Entering directory '/tmp/e2-base/perftest'
+ldc2 -O2 -release -d-version=AntfarmMimallocV3 -i -I.. -I../threadpool/source actor_churn.d \
+	../antfarm.d ../antfarm_allocation.d ../actors/package.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d ../actors/mimalloc.d /home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a \
+	-L-lpthread -L-lrt -L-latomic -of=actor_churn_mimalloc
+make: Leaving directory '/tmp/e2-base/perftest'
