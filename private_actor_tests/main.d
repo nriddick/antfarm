@@ -2396,7 +2396,7 @@ static assert(!__traits(compiles, PrivateChildPark!(PItem, shared ulong)));
 static assert(!__traits(compiles, PrivateChildPark!(PItem, shared const ulong)));
 static assert(!__traits(compiles, PrivateChildPark!(PItem, inout ulong)));
 static assert(!__traits(compiles, PrivateChildPark!(PItem, PNotPod)));       // non-POD R
-static assert(!__traits(compiles, PrivateChildPark!(PNotPod, ulong)));       // non-POD T (existing rule)
+static assert(__traits(compiles, PrivateChildPark!(PNotPod, ulong)));        // non-POD T accepted; spawn/create validate it
 static assert(__traits(compiles, PrivateChildPark!(PItem, PWide)));          // POD aggregate R
 static assert(!__traits(hasMember, PVoidCohort, "results"));                 // absent on a void cohort
 static assert(__traits(hasMember, PUlongCohort, "results"));

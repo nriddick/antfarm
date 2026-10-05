@@ -14,6 +14,8 @@ import antfarm : AntFarm, Token, PayloadHeader, PayloadBody,
 import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
     atomicFetchAdd, atomicFetchSub, cas;
 import core.stdc.string : memcpy, memset;
+import core.lifetime : moveEmplace;
+import std.traits : hasElaborateDestructor, hasNested;
 
 enum defaultPrivateBatchLimit = 256;
 
@@ -21,6 +23,17 @@ enum PrivateRootDisposition : ubyte { again, finish, waitChildren, finishAfterCh
 enum PrivateSpawnResult : ubyte { spawned, capacityFull, allocationFailed, waveActive, retiring }
 enum PrivateStartResult : ubyte { started, empty, waveActive, retiring }
 enum PrivateRootReclamation : ubyte { emitter, consumer }
+
+template stateAllowed(T)
+{
+    enum stateAllowed = !is(T == class) && !is(T == interface)
+        && !hasNested!T
+        && (!hasElaborateDestructor!T || __traits(compiles, () nothrow @nogc {
+                T* p; destroy!false(*p); }))
+        // Only the moving (non-POD) spawn path calls moveEmplace.
+        && (__traits(isPOD, T) || __traits(compiles, () nothrow @nogc {
+                T a = void; T b = void; moveEmplace(a, b); }));
+}
 
 /// Valid only within the callback. Neither this borrow nor pointers/references
 /// into its state may escape. Initializers must not retain mutable aliases.
@@ -242,6 +255,21 @@ private void disposeChildren(Entry* entry) nothrow @nogc @system
     }
 }
 
+private void destroyState(T)(Entry* entry) nothrow @nogc @system
+{
+    static if (hasElaborateDestructor!T)
+        destroy!false(*cast(T*) entry.state);
+}
+
+// Shared retirement hook for terminal dispatches and future child cleanup activations.
+private void retireMember(T)(Entry* entry) nothrow @nogc @system
+{
+    disposeChildren(entry);
+    destroyState!T(entry);
+    freeMemory(entry.service, entry.state, T.sizeof, T.alignof);
+    entry.state = null;
+}
+
 private void* allocateZero(Service* service, size_t bytes, size_t alignment)
     nothrow @nogc @system
 {
@@ -306,8 +334,9 @@ private struct RootBodies
 }
 
 /// Single-emitter scheduling custody for self-owned roots. spawn
-/// copies POD initializer bytes; it returns no actor handle. All methods on the
-/// park must be called by one emitter at a time (including live and destroy), without
+/// moves non-POD state (copies POD initializer bytes); it returns no
+/// actor handle. All methods on the park must be called by one emitter
+/// at a time (including live and destroy), without
 /// re-entry from callbacks or allocator hooks. Returning finish while a child
 /// wave is active is a fatal contract error. waitChildren joins all direct waves
 /// and their descendants before exactly one later user callback; finishAfterChildren
@@ -315,7 +344,6 @@ private struct RootBodies
 struct PrivateRootPark(T, alias step,
     PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
 {
-    static assert(__traits(isPOD, T), "private actors require POD state");
     static assert(is(typeof(&step) : PrivateRootDisposition function(
         scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system));
 private:
@@ -387,12 +415,27 @@ public:
 
     PrivateSpawnResult spawn(T initial) nothrow @nogc @system
     {
+        static assert(stateAllowed!T, "private actor state: struct/scalar with nothrow @nogc destructor");
         enter();
         scope(exit) { version (assert) entered_ = false; }
+        static if (hasElaborateDestructor!T)
+            bool spawned;
+        scope(exit)
+        {
+            static if (hasElaborateDestructor!T)
+                // object.destroy is exactly-once; core.lifetime.move of an
+                // over-aligned T runs the destructor during the move on DMD.
+                if (!spawned) .destroy(initial);
+        }
         if (free_ is null) return PrivateSpawnResult.capacityFull;
         auto state = service_.allocator.allocate(service_.allocator.context, T.sizeof, T.alignof);
         if (state is null) return PrivateSpawnResult.allocationFailed;
-        memcpy(state, &initial, T.sizeof);
+        static if (__traits(isPOD, T))
+            memcpy(state, &initial, T.sizeof);
+        else
+            moveEmplace(initial, *cast(T*) state);
+        static if (hasElaborateDestructor!T)
+            spawned = true;
         auto entry = free_;
         free_ = entry.next;
         entry.state = state;
@@ -581,6 +624,7 @@ private:
         if (disposition == PrivateRootDisposition.finish)
         {
             disposeChildren(entry);
+            destroyState!T(entry);
             static if (reclamation == PrivateRootReclamation.consumer)
                 freeMemory(entry.service, entry.state, T.sizeof, T.alignof);
         }
@@ -608,7 +652,6 @@ private struct ChildBodies
 /// waves, external dispatches, removal, or reparenting in this first slice.
 struct PrivateChildPark(T, R = void)
 {
-    static assert(__traits(isPOD, T), "private actors require POD state");
     enum hasResults = !is(R == void);
     static if (hasResults)
     {
@@ -635,6 +678,7 @@ private:
     static PrivateChildPark* create(Entry* parent, size_t capacity, size_t batchLimit)
         nothrow @nogc @system
     {
+        static assert(stateAllowed!T, "private actor state: struct/scalar with nothrow @nogc destructor");
         if (capacity == 0 || capacity > size_t.max / Entry.sizeof) return null;
         static if (hasResults)
             if (capacity > size_t.max / R.sizeof) return null;
@@ -702,6 +746,7 @@ public:
     PrivateSpawnResult spawn(scope ref PrivateContext context, T initial)
         nothrow @nogc @system
     {
+        static assert(stateAllowed!T, "private actor state: struct/scalar with nothrow @nogc destructor");
         authorized(context);
         if (context.retiring_) return PrivateSpawnResult.retiring;
         if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0) return PrivateSpawnResult.waveActive;
@@ -709,7 +754,10 @@ public:
         auto service = base_.parent.service;
         auto state = service.allocator.allocate(service.allocator.context, T.sizeof, T.alignof);
         if (state is null) return PrivateSpawnResult.allocationFailed;
-        memcpy(state, &initial, T.sizeof);
+        static if (__traits(isPOD, T))
+            memcpy(state, &initial, T.sizeof);
+        else
+            moveEmplace(initial, *cast(T*) state);
         auto entry = &entries_[count_++];
         entry.state = state;
         entry.service = service;
@@ -820,9 +868,7 @@ private:
             park.results_[entry - park.entries_] = operation(borrow, context);
         if (retiring)
         {
-            disposeChildren(entry);
-            freeMemory(entry.service, entry.state, T.sizeof, T.alignof);
-            entry.state = null;
+            retireMember!T(entry);
         }
         return 1;
     }
@@ -832,8 +878,13 @@ private:
         auto service = base.parent.service;
         foreach (ref entry; park.entries_[0 .. park.count_])
         {
-            disposeChildren(&entry);
-            freeMemory(service, entry.state, T.sizeof, T.alignof);
+            static if (__traits(isPOD, T))
+            {
+                disposeChildren(&entry);
+                freeMemory(service, entry.state, T.sizeof, T.alignof);
+            }
+            else if (entry.state !is null)
+                retireMember!T(&entry);
         }
         freeMemory(service, park.entries_, park.capacity_ * Entry.sizeof, Entry.alignof);
         static if (hasResults)

@@ -48,6 +48,33 @@ struct ActorAllocator
     {
         return ActorAllocator(null, &cRuntimeAllocate, &cRuntimeDeallocate);
     }
+
+    /// Register allocations as GC root ranges until free. inner must outlive
+    /// the adapter and every allocation; callback threads must be registered
+    /// with druntime.
+    static ActorAllocator gcRooted(const(ActorAllocator)* inner) pure nothrow @nogc @system
+    {
+        return ActorAllocator(cast(void*) inner, &gcRootedAllocate, &gcRootedDeallocate);
+    }
+}
+
+private void* gcRootedAllocate(void* context, size_t bytes, size_t alignment)
+    nothrow @nogc @system
+{
+    import core.memory : GC;
+    auto inner = cast(const(ActorAllocator)*) context;
+    auto memory = inner.allocate(cast(void*) inner.context, bytes, alignment);
+    if (memory !is null) GC.addRange(memory, bytes);
+    return memory;
+}
+
+private void gcRootedDeallocate(void* context, void* memory, size_t bytes, size_t alignment)
+    nothrow @nogc @system
+{
+    import core.memory : GC;
+    auto inner = cast(const(ActorAllocator)*) context;
+    GC.removeRange(memory);
+    inner.deallocate(cast(void*) inner.context, memory, bytes, alignment);
 }
 
 private void* cRuntimeAllocate(void*, size_t bytes, size_t alignment)
