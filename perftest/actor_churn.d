@@ -279,6 +279,108 @@ private void runFoldTree(bool continuation)(AntFarm* farm, ActorAllocator alloca
         cycle * count, parents * (continuation ? 1 : 2));
 }
 
+// tree-cancel: each root retires its leaves with startFinal in eight tables.
+// The middle leaf cancels its peers, so the emitter retires the rest of the
+// wave with cleanup tables and the root joins as usual.
+private enum cancelTreeTables = 8;
+private struct CancelLeaf
+{
+    Completion* completion;
+    ulong cycle;
+    bool trigger;
+}
+private void cancelLeaf(scope ref PrivateBorrow!CancelLeaf b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    ++b.value.completion.calls;
+    atomicStore!(MemoryOrder.rel)(b.value.completion.stamp, b.value.cycle);
+    if (b.value.trigger) c.cancelPeers();
+}
+private struct CancelTreeState
+{
+    Completion* completions;
+    size_t count;
+    ulong cycle;
+    ulong* dispatched;
+    PrivateChildPark!CancelLeaf* children;
+}
+private PrivateRootDisposition cancelTreeActivate(scope ref PrivateBorrow!CancelTreeState b,
+    scope ref PrivateContext c) nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (children is null)
+        {
+            children = c.createChildren!CancelLeaf(count, (count - 1) / cancelTreeTables + 1);
+            if (children is null) fatal("cancel tree park allocation failed");
+            foreach (i; 0 .. count)
+                if (children.spawn(c, CancelLeaf(completions + i, cycle, i == count / 2))
+                        != PrivateSpawnResult.spawned)
+                    fatal("cancel tree leaf spawn failed");
+            if (children.startFinal!cancelLeaf(c) != PrivateStartResult.started)
+                fatal("cancel tree wave failed");
+            return PrivateRootDisposition.waitChildren;
+        }
+        auto o = children.outcome(c);
+        if (!o.cancelled || o.participants != count || o.dispatched <= count / 2)
+            fatal("cancel tree outcome mismatch");
+        *dispatched += o.dispatched;
+        return PrivateRootDisposition.finish;
+    }
+}
+
+private void runCancelTree(AntFarm* farm, ActorAllocator allocator, ref Token token,
+    ref ConsumerView view, string mode, Completion[] completions, double duration,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus)
+{
+    immutable count = completions.length;
+    immutable parents = (count - 1) / batch + 1;
+    auto park = PrivateRootPark!(CancelTreeState, cancelTreeActivate).create(farm, parents, batch, allocator);
+    enforce(park !is null, "cancel tree root park allocation failed");
+    scope(exit) park.destroy();
+    auto dispatched = new ulong[parents];
+    ulong cycle;
+    void runCycle()
+    {
+        ++cycle;
+        auto deadline = MonoTime.currTime + 60.seconds;
+        foreach (i; 0 .. parents)
+        {
+            immutable offset = i * batch;
+            immutable leaves = count - offset < batch ? count - offset : batch;
+            enforce(park.spawn(CancelTreeState(completions.ptr + offset, leaves, cycle,
+                &dispatched[i])) == PrivateSpawnResult.spawned, "cancel tree root spawn failed");
+        }
+        while (park.live != 0)
+        {
+            park.pump(token);
+            if (consumers == 0) while (view.consumeNext()) {}
+            else pause();
+            enforce(MonoTime.currTime < deadline, "cancel tree timed out");
+        }
+    }
+    foreach (_; 0 .. warmups) runCycle();
+    immutable start = MonoTime.currTime;
+    ulong rounds;
+    double elapsed;
+    do
+    {
+        runCycle();
+        ++rounds;
+        elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
+    } while (elapsed < duration);
+    ulong calls, operated;
+    foreach (ref completion; completions) calls += completion.calls;
+    foreach (value; dispatched) operated += value;
+    enforce(calls == operated, "cancel tree dispatched count mismatch");
+    immutable leafCycles = cast(double) count * rounds;
+    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s allocator=%s hugePages=%s cpus=%s tables=%s",
+        mode, count, consumers, batch, warmups, allocatorName, farm.usedLargePages, cpus, cancelTreeTables);
+    writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f dispatched_fraction=%.4f verified_operated=%s",
+        rounds, elapsed, leafCycles / elapsed / 1e6, elapsed * 1e9 / leafCycles,
+        operated / (cast(double) count * cycle), operated);
+}
+
 private enum SubsetKind : ubyte { selected, reservedWhole, plainWhole }
 private struct SubsetControl
 {
@@ -434,9 +536,10 @@ private double elapsedSeconds(long ticks)
 void main(string[] args)
 {
     enforce(args.length >= 2 && args.length <= 12
-            && (args[1] == "tree-cont" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|inbox|wave|private|private-remote|tree|tree-wait|tree-cont|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
-    immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined";
+            && (args[1] == "tree-cont" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
+        "usage: actor_churn actor|inbox|wave|private|private-remote|tree|tree-wait|tree-cont|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
+    immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined"
+        || args[1] == "tree-cancel";
     immutable subsetMode = args[1] == "subset" || args[1] == "subset-whole"
         || args[1] == "subset-whole-unreserved";
     immutable percent = args.length > 11 ? to!uint(args[11]) : 100;
@@ -555,7 +658,10 @@ void main(string[] args)
 
     if (foldTreeMode)
     {
-        if (args[1] == "tree-cont")
+        if (args[1] == "tree-cancel")
+            runCancelTree(farm, allocator, token, view, args[1], completions, duration,
+                consumers, batch, warmups, allocatorName, cpus);
+        else if (args[1] == "tree-cont")
             runFoldTree!true(farm, allocator, token, view, args[1], completions, duration,
                 consumers, batch, warmups, allocatorName, cpus);
         else
