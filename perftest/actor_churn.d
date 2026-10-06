@@ -381,6 +381,76 @@ private void runCancelTree(AntFarm* farm, ActorAllocator allocator, ref Token to
         operated / (cast(double) count * cycle), operated);
 }
 
+// private-tracked (U5 churn): one tracked root per request with a deadline an
+// hour away, so every cancel check reads the clock. The root checks cancelled
+// once, operates and finishes; the drain pumps and takes each outcome and
+// verifies it completed. Compare with `private` for the cost of tracking.
+private PrivateRootDisposition trackedActivate(scope ref PrivateBorrow!State actor,
+    scope ref PrivateContext context) nothrow @nogc @system
+{
+    if (context.cancelled) fatal("tracked root cancelled before its deadline");
+    return privateActivate(actor, context);
+}
+
+private void runTracked(AntFarm* farm, ActorAllocator allocator, ref Token token,
+    ref ConsumerView view, string mode, Completion[] completions, double duration,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus)
+{
+    immutable count = completions.length;
+    PrivateRootOptions options;
+    options.batchLimit = batch;
+    options.allocator = allocator;
+    options.tracking = true;
+    auto park = PrivateRootPark!(State, trackedActivate).create(farm, count, options);
+    enforce(park !is null, "tracked root park allocation failed");
+    scope(exit) park.destroy();
+    ulong cycle, outcomes;
+    void runCycle()
+    {
+        ++cycle;
+        auto deadline = MonoTime.currTime + 60.seconds;
+        immutable due = MonoTime.currTime + 3600.seconds;
+        foreach (i; 0 .. count)
+        {
+            PrivateRootHandle root;
+            enforce(park.spawn(State(&completions[i], cycle), root, due) == PrivateSpawnResult.spawned,
+                "tracked root spawn failed");
+        }
+        while (park.live != 0)
+        {
+            park.pump(token, batch);
+            if (consumers == 0) while (view.consumeNext()) {}
+            else pause();
+            PrivateRootOutcome outcome;
+            while (park.takeOutcome(outcome))
+            {
+                if (outcome.status != PrivateOutcomeStatus.completed) fatal("tracked root outcome mismatch");
+                ++outcomes;
+            }
+            enforce(MonoTime.currTime < deadline, "tracked lifecycle timed out");
+        }
+        foreach (ref completion; completions)
+            enforce(atomicLoad!(MemoryOrder.acq)(completion.stamp) == cycle
+                && completion.calls == cycle, "tracked count mismatch");
+    }
+    foreach (_; 0 .. warmups) runCycle();
+    immutable start = MonoTime.currTime;
+    ulong rounds;
+    double elapsed;
+    do
+    {
+        runCycle();
+        ++rounds;
+        elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
+    } while (elapsed < duration);
+    enforce(outcomes == cycle * count, "tracked outcome count mismatch");
+    immutable actorCycles = cast(double) count * rounds;
+    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s allocator=%s hugePages=%s cpus=%s",
+        mode, count, consumers, batch, warmups, allocatorName, farm.usedLargePages, cpus);
+    writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f cycles/s=%.2f verified_outcomes=%s",
+        rounds, elapsed, actorCycles / elapsed / 1e6, elapsed * 1e9 / actorCycles, rounds / elapsed, outcomes);
+}
+
 private enum SubsetKind : ubyte { selected, reservedWhole, plainWhole }
 private struct SubsetControl
 {
@@ -536,12 +606,13 @@ private double elapsedSeconds(long ticks)
 void main(string[] args)
 {
     enforce(args.length >= 2 && args.length <= 12
-            && (args[1] == "tree-cont" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|inbox|wave|private|private-remote|tree|tree-wait|tree-cont|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
+            && (args[1] == "private-tracked" || args[1] == "tree-cont" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
+        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
     immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined"
         || args[1] == "tree-cancel";
     immutable subsetMode = args[1] == "subset" || args[1] == "subset-whole"
         || args[1] == "subset-whole-unreserved";
+    immutable trackedMode = args[1] == "private-tracked";
     immutable percent = args.length > 11 ? to!uint(args[11]) : 100;
     enforce((subsetMode || args.length <= 11) && (percent == 1 || percent == 10 || percent == 100),
         "subset-percent must be 1, 10 or 100, and is only for subset modes");
@@ -562,7 +633,7 @@ void main(string[] args)
     immutable allocatorName = args.length > 7 ? args[7] : defaultAllocator;
     enforce(count > 0 && count <= uint.max && isFinite(duration)
             && duration > 0 && consumers <= 64 && batch > 0
-            && (waveMode || privateMode || treeMode || foldTreeMode || batch <= 256),
+            && (waveMode || privateMode || treeMode || foldTreeMode || trackedMode || batch <= 256),
         "actors/seconds/batch must be positive; consumers must be 0..64; actor batch must be <=256");
     ushort[] cpus;
     if (args.length > 8 && args[8] != "-")
@@ -599,8 +670,9 @@ void main(string[] args)
     version (AntfarmMimallocV3)
         if (allocatorName != "crt") writefln("mimalloc_version=%s", mi_version());
     scope (exit) farm.destroy();
-    auto runtime = privateMode || treeMode || subsetMode || foldTreeMode ? null : ActorRuntime.create(farm, count, allocator);
-    enforce(privateMode || treeMode || subsetMode || foldTreeMode || runtime !is null, "actor runtime allocation failed");
+    immutable noRuntime = privateMode || treeMode || subsetMode || foldTreeMode || trackedMode;
+    auto runtime = noRuntime ? null : ActorRuntime.create(farm, count, allocator);
+    enforce(noRuntime || runtime !is null, "actor runtime allocation failed");
     scope (exit) if (runtime !is null) runtime.destroy();
     auto park = privateMode && !remoteMode && !dtorMode ? PrivateRootPark!(State, privateActivate).create(farm, count, batch, allocator) : null;
     enforce(!privateMode || remoteMode || dtorMode || park !is null, "private park allocation failed");
@@ -653,6 +725,13 @@ void main(string[] args)
     {
         runSubset(farm, allocator, token, view, args[1], count, duration, consumers,
             batch, warmups, allocatorName, cpus, percent);
+        return;
+    }
+
+    if (trackedMode)
+    {
+        runTracked(farm, allocator, token, view, args[1], completions, duration,
+            consumers, batch, warmups, allocatorName, cpus);
         return;
     }
 
