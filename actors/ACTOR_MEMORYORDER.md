@@ -316,10 +316,48 @@ The next nonempty `start` or `startSubset` resets the count, the cancel flag,
 the winning Entry, and the participant counters only after rejecting an active,
 retiring, or empty start, and before its enqueue release. That start's idle
 acquire happens-before the reset, so no writer from the previous generation
-remains. `firstFailureCode` is valid only when `failures != 0`. In-tree
-cancellation is not part of this slice; observing `cancelled` false is not a
-claim about a later cancel protocol, and `dispatched` is not a prefix until
-that protocol exists.
+remains. `firstFailureCode` is valid only when `failures != 0`. The emitter
+may lower `dispatched` on truncation; see the next section.
+
+## Private in-tree cancellation
+
+Cancellation adds no operation on `root.pending`, `childPending`, `W.pending`
+or any return list, and no wake source. The E1/E2 credit proofs quantify over
+the tables a wave publishes and the activations they run. Cancellation changes
+only *which* tables exist: a prefix, or cleanup tables that take the same
+per-table credit and rollback. The lost-wake and double-wake arguments
+therefore carry over. The new obligations are below. R7, R8, R10 and R11
+concern root records and arrive with root tracking.
+
+Writers set a flag with two idempotent release stores: `W.cancel = true`,
+then the root Entry's `subtreeCancel = true` (byte 35, formerly padding).
+`scopeCancelled(W)` acquire-loads the summary byte and, only if it is set,
+walks up: acquire-load `w.cancel`; stop when the cohort's parent is the root;
+otherwise continue at `parent.enclosing`. The summary is a sticky fast-path
+hint, not an aggregate join. Acquiring one writer's summary store orders that
+writer's flag only; the per-wave acquire loads plus advisory semantics make
+that sufficient.
+
+| # | Race | Argument |
+| --- | --- | --- |
+| R1 | In-tree cancel vs the emitter emitting W | Flags are atomic and advisory. The emitter sees the flag at a table boundary and truncates, or it does not and publishes the table, whose members may observe the flag later. Both are valid E2 executions; no credit depends on the observation. |
+| R2 | Flag reset at `start` vs a late writer | Writers are the parent (in its own activation, program-ordered before its next `start`) and members of W (`cancelPeers`, under a W table or resume credit). W's join precedes `start`'s idle acquire, so every member write happens-before the reset. A parent store onto a wave that went idle after its `active` check is also before the reset; it only makes `outcome.cancelled` true for a fully dispatched wave. |
+| R3 | Truncated seal vs P lifetime | The emitter holds P when it checks. It stores `dispatched_` **before** `releaseWave` (the seal), which stays its last park access, including through the `Service` traversal that snapshotted `next`. A retiring wave keeps P until its cleanup tables cover `cursor_ == count_`. |
+| R4 | `dispatched_` visibility | Emitter plain store -> seal RMW (acq_rel) on `W.pending` -> later RMWs in its modification order -> final decrement (acq_rel) -> `finish`, which reads it for the debug prefix check -> `active.store(release)` -> parent acquire in `outcome`/`results`. The same chain already carries consumer writes; the seal's release gains a new use, not a new edge. |
+| R5 | Truncation with a scheduled resume descriptor | The resume descriptor has its own P', independent of the initial seal; an early seal with suspended members behaves like a normal seal with suspended members. The cleanup header is a local copy, because `emitResume` publishes `header_`; Farm copies the header into the table during `writeTracked`. Cleanup covers `[cursor_, count_)`; resumable members come only from the written prefix. |
+| R6 | Cancel vs a suspended continuation or waiting root | No early wake exists. Resumption remains the unique final decrement of `childPending`/`pending`, and the flag is read only inside the resumed activation. |
+| R9 | `subtreeCancel` reset at spawn vs in-tree writers | Every in-tree writer runs under a credit that precedes the root's final `pending` decrement or its table return. Collection acquires both before `reclaim`; the raw reset in `spawn` follows on the same emitter. |
+| R13 | Ancestor reads during a walk | Each ancestor wave and parent Entry is pinned by the walker's credit chain: the emitter's P or a consumer's table credit on W, W's credit on its upstream or on the parent member's counter (whose H is taken before custody release), and so on up to `root.pending`. `ChildBase.parent`, `ChildBase.root` and child `Entry.enclosing` are immutable while pinned. The `parent is root` test precedes any read of the root union. |
+
+An undispatched member of a truncated `startFinal` wave has idle children:
+the previous wave's join included all descendants, every exit path cleared
+its continuation flags, and it holds no H. Its cleanup table therefore runs
+`retireMember` (post-order disposal, `~T`, free) on a consumer without the
+operation. It does not touch `childPending`; a dormant one from an earlier
+immediate `done` is not an obligation.
+
+`subtreeCancel` is a one-byte atomic beside plain root bytes at offsets 32–34.
+Those are distinct memory locations; TSan shadows by offset and size.
 
 ## Private child continuation ordering
 
@@ -711,6 +749,9 @@ remains deliberately undefined.
 
 - A result slice used after `start` or `startFinal` is a race with the next
   wave; it must not escape the authorized callback.
+- Observing `context.cancelled` false is not a guarantee that no cancel was
+  requested. `outcome.cancelled` true does not mean any work was skipped.
+- `dispatched` is not readable before the join; the emitter may still lower it.
 - `ActorHandle` copies are plain values. Publishing a newly created handle to
   another thread requires ordinary application synchronization.
 - `scope ref` on `ActorBorrow` and `ActorContext` is a callback type contract,

@@ -172,3 +172,54 @@ owning token.
 Forced `GC.collect()` runs under LDC/DMD debug and release. Only that test
 skips TSan: druntime's stop-the-world suspend-signal handler reports
 "signal handler spoils errno". All other destructor cases run under TSan.
+
+## In-tree cancellation (F2)
+
+| Group | Selectors |
+| --- | --- |
+| Deterministic schedules | `cancel` (all), `cancel-c1` … `cancel-c13` |
+| Torture | `cancel-torture [roots=3000] [seed=17]` |
+| Death | `cancel-death` runs the harness; `cancel-peers-root`, `cancel-park-unauthorized`, `cancel-default-cancelled`, `cancel-default-children` and `cancel-default-peers` are its fatal child modes |
+
+Most schedules use a lockstep consumer: a second thread consumes only while
+the emitter waits in `lockstepDrain`. Publication, cancellation and completion
+then interleave in one fixed order, and no callback runs on the emitter
+thread, so destructor placement is checkable. C4 and C7 use free-running
+workers; C7 and C9 also use the `privateEmitBeforeCancelCheck`,
+`privateTruncateBeforeSeal`, `privateEmitBeforeSeal` and
+`privateRootAfterIdleBeforeCredit` hook points. C7's quarantining allocator
+poisons each freed block with an offset-dependent pattern and verifies it at
+the end.
+
+The torture builds random trees up to depth 4 on four consumers, with random
+`start`/`startFinal`/`startSubset`, member `fail`, `cancelPeers`,
+`cancelChildren`, polling-root `park.cancel` and `cancelChildren` +
+`finishAfterChildren`. It checks result prefixes and slot values, failure
+pairs, `cancelled` monotonicity, exactly-once destruction and allocation
+balance, and requires that truncation and failure both occurred. The normal
+suite runs 3000 roots (300 under TSan).
+
+Each mutation below was applied alone to `actors/private_actor.d`, rebuilt
+with LDC and run on its selector on 2026-10-06; the source was restored
+afterwards. Every run aborted (SIGABRT) with the listed failure. The script and
+raw results are in
+[the F2 results](../perftest/results/private-cancellation-2026-10-06/).
+
+| Mutation | Selector | Observed failure |
+| --- | --- | --- |
+| C1a: drop `dispatched_ = cursor_` | `cancel-c1` | debug: `private child result: unwritten slot`; release: `c1 truncated outcome` |
+| C1b: truncate without the seal | `cancel-c1` | `c1 drain` timeout |
+| C2a: seal a truncated `startFinal` wave like a non-retiring one | `cancel-c2` | `c2 every member destroyed once` |
+| C2b: seal at truncation and retire the skipped members in `finish` | `cancel-c2` | `c2 destructors on consumers` |
+| C3: switch `park.header_.call` instead of a local cleanup header | `cancel-c3` | `c3 drain` timeout |
+| C4: omit the `subtreeCancel` store | `cancel-c4` | `c4 grandchildren observe cancellation` |
+| C5: omit the `subtreeCancel` reset at spawn | `cancel-c5` | `c5 recycled root starts clear` |
+| C6: omit the `cancel` reset at start | `cancel-c6` | `c6 second wave runs fully` |
+| C7: store `dispatched_` after the truncating seal | `cancel-c7` | `c7 freed memory untouched` |
+| C8: early wake (`releaseRoot` in `cancelPeers`) | `cancel-c8` | `c8 drain` timeout (root reclaimed twice) |
+| C9: re-check truncation at the seal | `cancel-c9` | `private wave credit underflow` |
+| C12: subset counters from `count_` | `cancel-c12` | `c12 subset outcome` |
+| C13: result prefix from `count_` | `cancel-c13` | debug: `private child result: unwritten slot`; release: `c13 prefix survives retirement` |
+
+C10 and C11 are behavioural (`cancelChildren` + `finishAfterChildren`, and
+partial construction).

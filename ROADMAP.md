@@ -37,10 +37,14 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
 - **F4a public node outcomes done:** `ActorNodeOutcome`, `node.fail(code)` and
   `node.cancel()` use the reserved completion word. Node stays 32 bytes and
   `send` is unchanged. Public cancel-mode retirement (F4b) remains open.
-- **Next:** in-tree cancellation, root tracking with deadlines and X1a,
-  per-member retirement, concurrent subsets, non-POD results, and optional
-  emitter wake. No version bump accompanies these slices; the release remains
-  1.7.1-rc.1 pending a tag decision.
+- **F2 in-tree cancellation done:** `park.cancel`, `cancelChildren`,
+  `cancelPeers` and `context.cancelled`. The emitter truncates a cancelled
+  wave at a table boundary; `startFinal` retires the rest through cleanup
+  tables. Resumptions and joins are unchanged. Entry stays 40 bytes.
+- **Next:** root tracking with deadlines and X1a, per-member retirement,
+  concurrent subsets, non-POD results, and optional emitter wake. No version
+  bump accompanies these slices; the release remains 1.7.1-rc.1 pending a tag
+  decision.
 
 ## 1.7.0-rc.5 completion joins
 

@@ -65,9 +65,22 @@ consistent `(code, participant position)` pair. Propagation is explicit.
 Root `fail` stays fatal on an untracked park until root tracking. Entry stays
 40 bytes; a signal-only cohort grows to 368 bytes on 64-bit.
 
-Next items are in-tree cancellation, root tracking with deadlines and X1a,
-per-member retirement, concurrent subsets, non-POD results, and optional
-emitter wake. Typed root outputs (X1b) stay deferred.
+**F2 in-tree cancellation is done:** `park.cancel`, `cancelChildren` and
+`cancelPeers` set a per-wave flag and a sticky root summary byte (Entry offset
+35, formerly padding). The emitter checks before each initial table: a
+non-retiring wave seals its published prefix; a `startFinal` wave retires the
+rest through cleanup tables on consumers. Resumptions are always delivered and
+no wait is cut short. `results` and the debug check use the dispatched prefix.
+A signal-only cohort grows to 376 bytes. The lifetime review, mutations, soak
+and perf evidence live in
+[the F2 results](../perftest/results/private-cancellation-2026-10-06/).
+
+Next items are root tracking with deadlines and X1a, per-member retirement,
+concurrent subsets, non-POD results, and optional emitter wake. Typed root
+outputs (X1b) stay deferred. F3 also owes two F2 leftovers: the `records`
+branch in `scopeCancelled` (a root's `cancelled` returns false until then),
+and the root-outcome half of test C10 (`cancelChildren` +
+`finishAfterChildren` reporting a tracked `failed`/`cancelled` status).
 Other port extensions remain: **X2** library reductions, **X3** bounded append
 buffers, and **X4** writer capability / in-place results. A compiler-enforced
 safe ownership front end remains future work.

@@ -438,8 +438,8 @@ parent/upstream pointers after publishing idle.
 
 On 64-bit targets the fixed cohort metadata grows by 16 bytes (one selection
 pointer and a count, with the subset flag in existing padding): a signal-only
-cohort is 280 bytes instead of 264 (368 with the child Service pointer,
-continuation descriptors, and wave-outcome fields below).
+cohort is 280 bytes instead of 264 (376 with the child Service pointer,
+continuation descriptors, wave-outcome fields, and cohort root pointer below).
 Entry remains 40 bytes. Unreserved cohorts
 allocate no per-member subset storage and use the existing whole-wave dispatch
 path. Reserved cohorts make one extra eager allocation of 8 bytes per member
@@ -543,14 +543,90 @@ A rejected start preserves the last nonempty wave. `start`, `startFinal`, and
 `startSubset` reset the aggregate only after the active, retiring, and empty
 rejections, and before the enqueue. An empty start, a busy start, and a void
 operation after a result wave therefore leave the previous snapshot in place
-until a new nonempty wave is actually published. Cancellation of a wave is a
-later slice: `cancelled` is false and `dispatched == participants` until then.
+until a new nonempty wave is actually published. `cancelled` and a
+`dispatched` prefix shorter than `participants` come from
+[cancellation](#cancellation).
 
 Partial construction needs no extra API. If `createChildren` returns null or
-`spawn` does not return `spawned`, a member calls `fail` and, when no wave of
-that actor is active, returns `done`. Never-dispatched members are destroyed
-once when the owning actor retires. The fold above uses that pattern instead
-of `fatal` on a leaf spawn failure.
+`spawn` does not return `spawned`, a member calls `fail`. If no wave of that
+actor is active it returns `done`; otherwise it calls `cancelChildren()` and
+returns `done`, which still drains the cancelled waves. Never-dispatched
+members are destroyed once when the owning actor retires. The fold above uses
+that pattern instead of `fatal` on a leaf spawn failure.
+
+## Cancellation
+
+Cancellation is cooperative and advisory. It never interrupts a callback and
+never wakes a waiting root or suspended member early. It shortens the
+existing joins: the emitter stops publishing a cancelled wave's remaining
+tables, and running or resumed callbacks see `context.cancelled` and finish
+early. Every wait still ends through the unchanged credit chain.
+
+- `park.cancel(context)` cancels that cohort's active wave and returns true.
+  It returns false, with no effect, when it observes the cohort idle. Only the
+  park's parent may call it.
+- `context.cancelChildren()` cancels the active wave of every cohort the
+  actor owns. Idle cohorts are unaffected. Roots and members may call it.
+- `context.cancelPeers()` cancels the member's enclosing wave: its siblings
+  and, through them, their descendants. It is fatal on a root context.
+- `context.cancelled` is true when a wave on the path from this activation to
+  its root is cancelled. It may become true at any time and never becomes
+  false within an activation. A root context sees only root-level
+  cancellation. That needs root tracking, a later slice, so today a root's
+  `cancelled` is false.
+
+What a cancelled wave does:
+
+1. **Undispatched work is skipped at table granularity.** Before each initial
+   table the emitter checks the wave's scope. Once it is cancelled, the
+   published prefix is final. A non-retiring wave seals at once. Its
+   remaining members do not run, and their state, results and children are
+   untouched, so they stay ordinary live members for a later wave or for
+   disposal. A `startFinal` wave publishes the remaining members in cleanup
+   tables. These retire each member on a consumer without calling the
+   operation or writing a result, so `startFinal` still retires every member
+   exactly once. Subsets never retire.
+2. **Resumptions are always delivered.** A suspended continuation is resumed
+   into its operation, sees `cancelled`, and should return `done` (possibly
+   after `fail`). Skipping it would leave its phase in `T` inconsistent and
+   its result unwritten.
+3. **Roots are always dispatched.** A root is the outcome authority. To stop
+   its tree it calls `cancelChildren()` and returns `finishAfterChildren`, or
+   `finish` if nothing is active. `finish` with an active child wave stays
+   fatal.
+4. **The join is never cut short.** The parent owns the child state, so it must
+   join before it may finish or dispose anyway.
+
+`outcome.dispatched` is the prefix that ran the operation, and
+`results(context)` returns only that prefix (`min` of the result count and
+`dispatched`). The debug unwritten-slot check covers the same prefix. A
+retiring wave's prefix survives `count_ = 0`. `outcome.cancelled` means this
+wave's own scope was cancelled, by its parent or a peer. It reports that a
+cancel was requested during the generation, not that work was skipped. A
+cancel that lands just as the wave finishes reports `cancelled` with a full
+`dispatched`. A wave skipped because an ancestor was cancelled has
+`dispatched < participants` with `cancelled` false. The wave flag is reset by
+the next nonempty start. A per-root summary byte is sticky until the root
+slot is recycled. While it is clear, a check costs one acquire load. After the
+first in-tree cancel, checks in that root's tree walk the ancestor waves.
+
+Recipes:
+
+- Fail-fast (one failure stops the siblings and their descendants):
+  `c.fail(code); c.cancelPeers();` then return as usual. The resumed parent
+  reads `outcome` and propagates with its own `fail`, `cancelPeers`, or
+  `cancelChildren`.
+- First-wins search: the finder calls `c.cancelPeers()`. A polling root calls
+  `park.cancel(c)` and keeps returning `again` until `finished`.
+
+**Termination is eventual, not bounded by depth.** A cancelled tree drains
+under fair pumping and consumption. The drain still includes cleanup tables
+for truncated `startFinal` waves (N members at batch limit b take about N/b
+pumps), resume tables for members that were already suspended, Farm
+backpressure, root collection waiting for a whole physical batch, and any
+running callback until it next checks `cancelled` or returns. Shutdown
+deadlines must budget for that volume. A callback that ignores `cancelled`, or
+a member that never returns `done`, is not interrupted.
 
 ## Progress and outcomes
 
@@ -563,7 +639,10 @@ of `fatal` on a leaf spawn failure.
 | `PrivateChildDisposition.waitChildren` / `PrivateChildStep!R.waitChildren()` | Join this member's descendants, then publish exactly one later activation of the same operation, even if nothing is outstanding. |
 | `context.fail(code)` | Member: counts one report on the enclosing wave and, for the first report, records that code and participant position. Does not end the activation. Root: fatal on an untracked park. Wrong or default context is fatal. A count of `uint.max` is fatal. |
 | `outcome(context)` | `PrivateWaveOutcome` of the last nonempty wave, acquired after the join; all zero before the first such wave. Fatal while active or with wrong/default authority. Valid until the next nonempty start. |
-| `results(context)` | `const(R)[]` in participant order, acquired after the join; fatal while active or with wrong/default authority. Available only for non-void `R`. |
+| `results(context)` | `const(R)[]` in participant order, acquired after the join; only the dispatched prefix of a cancelled wave. Fatal while active or with wrong/default authority. Available only for non-void `R`. |
+| `park.cancel(context)` | True if the cohort's active wave was cancelled; false, with no effect, if it was observed idle. Wrong/default authority is fatal. |
+| `context.cancelChildren()` / `context.cancelPeers()` | Cancel every active owned cohort / the member's enclosing wave. `cancelPeers` on a root is fatal; default context is fatal for both. |
+| `context.cancelled` | Advisory: true once a wave between this activation and its root is cancelled. False on a root until root tracking. Default context is fatal. |
 | `subsetMembers(context)` | `const(uint)[]` in list order for the most recent nonempty subset; empty after a whole wave. Wrong/default authority is fatal. |
 | `finished(context)` | True before the first start and after the current wave joins; a root notification tail may still be pending. Wrong-parent or default authority is fatal, including when the cohort is idle. |
 | `collectCompleted()` / `poll()` | Acquires completed root tables and wake returns, reclaims terminal roots and appends ready roots; never publishes work or runs consumers. |
@@ -822,8 +901,11 @@ The finisher snapshots that target and parent kind before publishing idle.
 `Emittable` descriptors: initial emission and resumption. Its resume FIFO,
 counter and scheduled flag are emitter-owned and reserved at cohort creation.
 This adds 48 bytes per cohort on 64-bit targets. Wave outcomes add 16 bytes
-to the wave and two parent-only counters, for 368 bytes in a signal-only
-cohort; there is no additional per-member continuation or outcome allocation.
+to the wave and two participant counters, and cancellation adds the immutable
+`ChildBase.root` pointer, for 376 bytes in a signal-only cohort; there is no
+additional per-member continuation, outcome or cancellation allocation. A root
+Entry keeps the sticky `subtreeCancel` byte at offset 35, formerly padding;
+child Entries are unchanged.
 Entry stays 40 bytes and `PrivateContext` stays four words. Plain/result
 dispatch adds no RMW, and an empty child-return list costs one raw load per pump.
 
@@ -856,7 +938,8 @@ empty/already-joined waves, both custody orders, late strict-finish tails,
 root-ready CAS retry, emitter-owned final sealing, and counter-exhaustion death
 tests. E2-4 adds continuation trees, both final-owner orders, deferred terminal
 cleanup on consumers, resume admission/FIFO reuse, subsets, repeated generations,
-and all C-M mutation checks. [The test comments](../private_actor_tests/main.d)
+and all C-M mutation checks. F2 adds the C1–C13 cancellation schedules, each
+with its mutation, and a random fail/cancel tree torture. [The test comments](../private_actor_tests/main.d)
 identify the bug each deterministic schedule catches. It tests ordinary backing with
 LDC and DMD; ThreadSanitizer uses LDC.
 
