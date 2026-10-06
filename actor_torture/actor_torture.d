@@ -2436,9 +2436,325 @@ version (AntfarmMimallocReal)
     }
 }
 
+// -------------------------------------------------------------------------
+// Public inbox-node outcomes (ActorNodeOutcome, fail, cancel)
+// -------------------------------------------------------------------------
+
+private enum NodeAction : uint { complete, fail, cancel }
+
+private struct NodeOutcomeMessage
+{
+    ActorInboxNode node;
+    uint action;
+    uint code;
+}
+
+private struct NodeOutcomeState
+{
+    shared int* handled;
+}
+
+private void nodeOutcomeActor(scope ref ActorBorrow!NodeOutcomeState actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    while (true)
+    {
+        auto node = context.popInbox();
+        if (node is null) break;
+        auto message = cast(NodeOutcomeMessage*) node.payload;
+        // Count before the terminal call: after it the sender owns the node
+        // and may rewrite the message.
+        atomicFetchAdd!(MemoryOrder.rel)(*actor.value.handled, 1);
+        immutable action = message.action;
+        immutable code = message.code;
+        if (action == NodeAction.fail) node.fail(code);
+        else if (action == NodeAction.cancel) node.cancel();
+        else node.complete();
+    }
+}
+
+/// One actor, one consumer thread. The test thread is the only sender and
+/// the only flusher, so it can read an outcome the moment `available` flips
+/// without joining or otherwise synchronizing with the consumer thread.
+private final class NodeOutcomeRig
+{
+    AntFarm* farm;
+    ActorRuntime* runtime;
+    Token token;
+    ActorOwner!NodeOutcomeState owner;
+    ActorHandle!NodeOutcomeState handle;
+    shared int handled;
+    shared int stop;
+    Thread consumer;
+
+    this()
+    {
+        farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+        check(farm !is null, "node outcome Farm allocation");
+        runtime = ActorRuntime.create(farm, 1);
+        check(runtime !is null, "node outcome runtime allocation");
+        token = farm.registerProducer(Tier.small);
+        check(token.valid, "node outcome producer registration");
+        owner = runtime.createActor!(NodeOutcomeState, nodeOutcomeActor)(
+            NodeOutcomeState(&handled));
+        check(owner.valid, "node outcome actor creation");
+        handle = owner.handle;
+        auto job = new StressConsumer(farm, &stop);
+        consumer = new Thread(&job.run);
+        consumer.start();
+    }
+
+    void send(ref NodeOutcomeMessage message, NodeAction action, uint code)
+    {
+        message.action = action;
+        message.code = code;
+        check(accepted(handle.send(&message.node)),
+            "node outcome interaction accepted");
+        runtime.flush(token, 8, 1);
+    }
+
+    /// Wait for completion by polling `available` on the sending thread
+    /// only. The consumer thread is deliberately left running and unjoined.
+    void awaitAvailable(ref NodeOutcomeMessage message, MonoTime deadline)
+    {
+        size_t spins;
+        while (!message.node.available)
+        {
+            if ((++spins & 0xfff) == 0)
+            {
+                runtime.flush(token, 8, 1);
+                if (MonoTime.currTime >= deadline)
+                    check(false, "node outcome completion timeout");
+                Thread.yield();
+            }
+        }
+    }
+
+    void roundTrip(ref NodeOutcomeMessage message, NodeAction action,
+            uint code, MonoTime deadline)
+    {
+        send(message, action, code);
+        awaitAvailable(message, deadline);
+    }
+
+    void close()
+    {
+        auto deadline = MonoTime.currTime + 15.seconds;
+        check(owner.requestRetire() == ActorRetireResult.requested,
+            "node outcome retirement");
+        while (!owner.retired)
+        {
+            runtime.flush(token, 8, 1);
+            if (MonoTime.currTime >= deadline)
+                check(false, "node outcome retirement timeout");
+            Thread.yield();
+        }
+        atomicStore!(MemoryOrder.rel)(stop, 1);
+        consumer.join();
+        check(owner.reclaim() == ActorReclaimResult.reclaimed,
+            "node outcome reclaim");
+        farm.unregisterProducer(token);
+        runtime.destroy();
+        farm.destroy();
+    }
+}
+
+private struct NodeStep
+{
+    NodeAction action;
+    uint code;
+    ActorNodeOutcome outcome;
+    uint expectedCode;
+}
+
+private immutable NodeStep[5] nodeSteps = [
+    NodeStep(NodeAction.complete, 0, ActorNodeOutcome.completed, 0),
+    NodeStep(NodeAction.fail, 7, ActorNodeOutcome.failed, 7),
+    NodeStep(NodeAction.cancel, 0, ActorNodeOutcome.cancelled, 0),
+    NodeStep(NodeAction.fail, 0, ActorNodeOutcome.failed, 0),
+    NodeStep(NodeAction.fail, 0xFF_FFFF, ActorNodeOutcome.failed,
+        0xFF_FFFF),
+];
+
+/// P1 (reuse): every ordered pair of {complete, fail(7), cancel, fail(0),
+/// fail(0xFFFFFF)} on one reused node. Each outcome is read on the sender
+/// thread straight after `available`, before anything joins the consumer.
+///
+/// Mutations caught:
+///  - complete()/cancel() skip the completion_ write: a failed->completed or
+///    failed->cancelled pair shows the stale outcome or code.
+///  - cancel()/complete() write the outcome byte but not the whole word
+///    (stale code bits survive): the failed(7|0xFFFFFF)->cancelled and
+///    ->completed pairs show a nonzero failureCode.
+///  - completion_ updated with |= instead of =: any pair whose second step
+///    has fewer set bits than its first.
+///  - fail() omits the outcome byte when the code is 0: fail(0) reads back
+///    as completed.
+///  - fail() shifts or masks the code to fewer than 24 bits: the 0xFFFFFF
+///    steps read back truncated.
+private void testNodeOutcomeTransitions()
+{
+    auto rig = new NodeOutcomeRig;
+    NodeOutcomeMessage message;
+    memset(&message, 0xff, message.sizeof);
+    message.node.initialize(&message, 0x1234);
+    // initialize resets the word even over arbitrary storage contents.
+    check(message.node.outcome == ActorNodeOutcome.completed
+            && message.node.failureCode == 0,
+        "initialize clears the completion word over dirty storage");
+
+    auto deadline = MonoTime.currTime + 60.seconds;
+    foreach (first; nodeSteps)
+    {
+        foreach (second; nodeSteps)
+        {
+            rig.roundTrip(message, first.action, first.code, deadline);
+            check(message.node.outcome == first.outcome
+                    && message.node.failureCode == first.expectedCode,
+                "first outcome visible after available");
+            rig.roundTrip(message, second.action, second.code, deadline);
+            check(message.node.outcome == second.outcome
+                    && message.node.failureCode == second.expectedCode,
+                "second outcome replaces the first, code cleared");
+            check(message.node.payload is &message
+                    && message.node.tag == 0x1234,
+                "outcome publication leaves application fields intact");
+        }
+    }
+    check(atomicLoad!(MemoryOrder.acq)(rig.handled)
+            == 2 * nodeSteps.length * nodeSteps.length,
+        "every interaction reached the actor exactly once");
+
+    // initialize on a node that last failed resets the word.
+    rig.roundTrip(message, NodeAction.fail, 0xFF_FFFF, deadline);
+    check(message.node.failureCode == 0xFF_FFFF,
+        "failure code staged before re-initialize");
+    message.node.initialize(&message, 0x1234);
+    // Mutation caught: initialize() leaves completion_ untouched.
+    check(message.node.outcome == ActorNodeOutcome.completed
+            && message.node.failureCode == 0,
+        "initialize clears the completion word of a failed node");
+
+    rig.close();
+}
+
+/// P1 (deterministic ordering). The actor thread is parked at
+/// `actorNodeBeforeCompletionStore`, which fires after the plain completion_
+/// write and before the release store of FREE. In correct code the node is
+/// therefore still unavailable while parked. After release the sender sees
+/// `available` and must read the new outcome on the sender thread, with no
+/// join in between, over a stale outcome left by the previous interaction.
+///
+/// Mutations caught:
+///  - M1: release FREE; hook; completion_ write (the write moved after the
+///    release, hook kept between them). The node is available while the
+///    actor is parked, so the `!available` check fails deterministically
+///    (and the stale outcome would be read if it continued).
+///  - M1': hook; release FREE; completion_ write (hook left before FREE).
+///    Not deterministic here; caught by the TSan lane of the handoff stress
+///    test, where the post-acquire read races the late plain write.
+private void testNodeCompletionStoreOrdering(NodeAction staleAction,
+        uint staleCode, NodeAction action, uint code,
+        ActorNodeOutcome outcome)
+{
+    auto rig = new NodeOutcomeRig;
+    NodeOutcomeMessage message;
+    message.node.initialize(&message, 0xa5a5);
+    auto deadline = MonoTime.currTime + 30.seconds;
+
+    // Leave a stale, different outcome behind from an earlier interaction.
+    rig.roundTrip(message, staleAction, staleCode, deadline);
+    check(message.node.outcome != outcome || message.node.failureCode != code,
+        "stale outcome differs from the expected outcome");
+
+    g_hookNode = &message.node;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.actorNodeBeforeCompletionStore);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    setActorTestHook(&blockingActorHook);
+
+    rig.send(message, action, code);
+    while (atomicLoad!(MemoryOrder.acq)(g_hookArrived) == 0)
+    {
+        rig.runtime.flush(rig.token, 8, 1);
+        if (MonoTime.currTime >= deadline)
+            check(false, "actor did not reach the completion-store seam");
+        Thread.yield();
+    }
+    // The completion word is written but FREE is not yet published.
+    foreach (_; 0 .. 1000)
+    {
+        check(!message.node.available,
+            "node published FREE before its completion word (M1)");
+        Thread.yield();
+    }
+
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    rig.awaitAvailable(message, deadline);
+    // Read on the sending thread right after the acquire; the consumer
+    // thread is still running and has not been joined.
+    check(message.node.outcome == outcome
+            && message.node.failureCode == code,
+        "outcome visible after available, not the stale one");
+
+    setActorTestHook(null);
+    g_hookNode = null;
+    rig.close();
+}
+
+/// P1 (stress). Ping-pong one node through all three terminals with a
+/// varying code; the sender reads immediately after observing FREE.
+///
+/// Mutation caught: M1' (hook; release FREE; completion_ write). The late
+/// plain write races the sender's post-acquire read, which TSan reports and
+/// which also surfaces as a stale outcome on a fast interleaving.
+private void testNodeOutcomeHandoffStress()
+{
+    auto rig = new NodeOutcomeRig;
+    NodeOutcomeMessage message;
+    message.node.initialize(&message, 0);
+    auto deadline = MonoTime.currTime + 120.seconds;
+    enum rounds = 20_000;
+    foreach (round; 0 .. rounds)
+    {
+        immutable action = cast(NodeAction)(round % 3);
+        immutable code = action == NodeAction.fail
+            ? cast(uint)((round * 2_654_435_761UL) & 0xFF_FFFF) : 0;
+        rig.roundTrip(message, action, code, deadline);
+        immutable outcome = action == NodeAction.fail
+            ? ActorNodeOutcome.failed
+            : action == NodeAction.cancel
+                ? ActorNodeOutcome.cancelled : ActorNodeOutcome.completed;
+        if (message.node.outcome != outcome
+                || message.node.failureCode != code)
+            check(false, "stress outcome mismatch after available");
+    }
+    check(atomicLoad!(MemoryOrder.acq)(rig.handled) == rounds,
+        "stress interactions each handled once");
+    rig.close();
+}
+
+private void testNodeOutcomes()
+{
+    testNodeOutcomeTransitions();
+    testNodeCompletionStoreOrdering(NodeAction.fail, 7,
+        NodeAction.complete, 0, ActorNodeOutcome.completed);
+    testNodeCompletionStoreOrdering(NodeAction.cancel, 0,
+        NodeAction.fail, 9, ActorNodeOutcome.failed);
+    testNodeCompletionStoreOrdering(NodeAction.fail, 7,
+        NodeAction.cancel, 0, ActorNodeOutcome.cancelled);
+    testNodeCompletionStoreOrdering(NodeAction.cancel, 0,
+        NodeAction.fail, 0xFF_FFFF, ActorNodeOutcome.failed);
+    testNodeOutcomeHandoffStress();
+    printf("actor node outcomes OK\n");
+    fflush(stdout);
+}
+
 void main()
 {
     testDeterministicInterleavings();
+    testNodeOutcomes();
     testCompletionCallbackRunsAfterFinished();
     testAggregateModuleUnloadFence();
     testSustainedContention();

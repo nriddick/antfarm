@@ -72,6 +72,11 @@ Other port extensions remain: **X2** library reductions, **X3** bounded append
 buffers, and **X4** writer capability / in-place results. A compiler-enforced
 safe ownership front end remains future work.
 
+**F4a public inbox-node outcomes are done:** `complete`, `fail(code)` and
+`cancel` publish `ActorNodeOutcome` and a 24-bit failure code through the
+existing release/acquire node-availability edge. Node stays 32 bytes and
+`send` is unchanged. Cancel-mode retirement and `cancelInbox` (F4b) remain open.
+
 ## Current actor and wave spike
 
 Lifecycle, shutdown, and misuse contracts shared with private actors are in
@@ -303,8 +308,8 @@ may initialize freshly allocated storage with `ActorInboxNode.initialize` and
 submit it; the actor is the only consumer and processes nodes while it
 exclusively owns its state. A wake is only a coalescing notification, not one
 unit of work. The node and payload remain caller-allocated, and a successful
-send owns the node until the actor calls `complete` or consumes its storage.
-This makes malloc, slab, pool, and arena storage equally usable without adding
+send owns the node until the actor calls `complete`, `fail(code)`, or `cancel`,
+or consumes its storage. This makes malloc, slab, pool, and arena storage equally usable without adding
 a GC or allocation policy to the actor runtime.
 
 ## First third-party allocator candidate: mimalloc v3

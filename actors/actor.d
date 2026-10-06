@@ -109,6 +109,13 @@ enum ActorSendResult : ubyte
     nodeBusy,
 }
 
+enum ActorNodeOutcome : ubyte
+{
+    completed,
+    failed,
+    cancelled,
+}
+
 enum ActorRetireResult : ubyte
 {
     requested,
@@ -152,6 +159,7 @@ version (AntfarmActorTestHooks)
         privateResumeAfterUnschedule,
         readyDetached,
         retirementIdleObserved,
+        actorNodeBeforeCompletionStore,
     }
 
     alias ActorTestHook = void function(ActorTestPoint point,
@@ -180,13 +188,13 @@ private enum uint inboxNodeProcessing = 2;
 
 /// Intrusive header for one caller-owned interaction. `payload` and `tag` are
 /// application fields; the node itself must remain stable from a successful
-/// send until the actor either calls `complete` or otherwise takes ownership
+/// send until the actor calls `complete`, `fail`, or `cancel`, or takes ownership
 /// of its storage. A node may belong to only one inbox at a time.
 struct ActorInboxNode
 {
     private shared size_t nextWord_;
     private shared uint state_;
-    private uint reserved_;
+    private uint completion_;
     void* payload;
     ulong tag;
 
@@ -197,7 +205,7 @@ struct ActorInboxNode
     {
         atomicStore!(MemoryOrder.raw)(nextWord_, size_t.init);
         atomicStore!(MemoryOrder.raw)(state_, inboxNodeFree);
-        reserved_ = 0;
+        completion_ = 0;
         payload = initialPayload;
         tag = initialTag;
     }
@@ -214,10 +222,51 @@ struct ActorInboxNode
     {
         if (atomicLoad!(MemoryOrder.raw)(state_) != inboxNodeProcessing)
             fatal("complete actor inbox node not owned by actor");
+        completion_ = cast(uint) ActorNodeOutcome.completed;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.actorNodeBeforeCompletionStore, &this);
         atomicStore!(MemoryOrder.rel)(state_, inboxNodeFree);
     }
+
+    /// Return a processing node with a domain failure code of at most 24 bits.
+    void fail(uint code) nothrow @nogc @system
+    {
+        if (atomicLoad!(MemoryOrder.raw)(state_) != inboxNodeProcessing)
+            fatal("fail actor inbox node not owned by actor");
+        if (code > 0xFF_FFFF)
+            fatal("actor inbox node failure code out of range");
+        completion_ = (code << 8) | cast(uint) ActorNodeOutcome.failed;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.actorNodeBeforeCompletionStore, &this);
+        atomicStore!(MemoryOrder.rel)(state_, inboxNodeFree);
+    }
+
+    /// Return a processing node as cancelled, with code zero.
+    void cancel() nothrow @nogc @system
+    {
+        if (atomicLoad!(MemoryOrder.raw)(state_) != inboxNodeProcessing)
+            fatal("cancel actor inbox node not owned by actor");
+        completion_ = cast(uint) ActorNodeOutcome.cancelled;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.actorNodeBeforeCompletionStore, &this);
+        atomicStore!(MemoryOrder.rel)(state_, inboxNodeFree);
+    }
+
+    /// Read after available acquired completion for this interaction, before
+    /// reusing or transferring the node. Initialization alone is not a reply.
+    @property ActorNodeOutcome outcome() const nothrow @nogc @system
+    {
+        return cast(ActorNodeOutcome)(completion_ & 0xFF);
+    }
+
+    /// Same ownership/acquire requirement as outcome; zero unless failed.
+    @property uint failureCode() const nothrow @nogc @system
+    {
+        return completion_ >> 8;
+    }
 }
-static assert(ActorInboxNode.sizeof == 32);
+static assert(ActorInboxNode.sizeof == 32
+    && ActorInboxNode.completion_.offsetof == 12);
 
 /// Callback-local control. Actor handlers receive this as `scope ref`.
 /// Requests take effect only after the application callback returns and its

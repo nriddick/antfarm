@@ -122,9 +122,16 @@ hooks are not checked.
 ## Message, result, and hook storage
 
 Public inbox nodes are caller-owned and address-stable from a successful
-`send` until the actor `complete`s them or explicitly takes over the storage.
-Read and write payload fields before `complete`. That release is what
-`available` acquires; a reply read before `available` is a race.
+`send` until the actor calls `complete`, `fail(code)`, or `cancel`, or explicitly
+takes over the storage. Each terminal call requires a node popped into
+processing ownership and releases it to the sender. Read and write payload
+fields before that call. After `available` acquire-observes completion for
+this interaction, read `outcome` (`ActorNodeOutcome.completed`, `failed`, or
+`cancelled`) and `failureCode` before reuse or transfer. Failure codes are
+24-bit (0 through `0xFF_FFFF`); larger codes are fatal. `complete` and `cancel`
+clear the code to zero, while `fail(0)` still reports failed. A reply read
+before `available` is a race. A newly initialized node is available but has
+not completed an interaction; `send` does not reset a previous outcome.
 `initialize` is for fresh exclusive storage. Calling it on a live node
 bypasses the send/complete state checks. One node belongs to one inbox.
 `nodeBusy` means that node is unavailable, not that a mailbox is full. There
@@ -167,7 +174,7 @@ quiescent" or "the process may exit".
 | Public `runtime.live == 0` | no live actor generation in that runtime | ready queue empty, consumers gone, wave hook returned |
 | `owner.retired` | this generation closed and drained | reclaimed; `handle.valid` is still true on copies |
 | `ActorHandle.valid` | the copy holds a non-null slot and a non-zero generation | the generation is still live. After reclaim, `wake`/`send` return `staleHandle` |
-| `node.available` | the actor release-stored `complete`; payload writes are visible and the node may be reused | the actor has retired, or the runtime is quiet |
+| `node.available` | for an accepted interaction, the actor released `complete`/`fail`/`cancel`; outcome, code and payload writes are visible and the node may be reused | the actor has retired, or the runtime is quiet |
 | `ActorWaveHandle.finished` and `!failed` | this generation completed; actor writes in the wave are visible. `failed` is structural or control-path interference, not a domain error, and it does not roll back earlier tables | the completion hook has returned. After `begin`, the old handle's `finished` is false |
 | Private `park.live == 0` | the emitter has collected every root, including waiters and notification tails | consumers unsubscribed, token unregistered, or `pump() == 0` along the way |
 | Private `finished(context)` | the current child wave is idle. True before the first start, and true while a root notification tail may still hold `live` | safe to destroy the park, or authority to read child state |
@@ -261,7 +268,7 @@ service never receive identities for the internal actors.
 | Who names the actor | external handle | no external identity; parent owns the cohort |
 | How work is admitted | `wake` / `send`, or an external wave | `spawn`, then `start` / `startSubset` / `startFinal` |
 | How the caller sees a result | caller-owned node or other external buffer, after an acquire | cohort `results(context)` after the join; root output still external |
-| Domain failure | application value in state or a node, not a library status yet | `context.fail(code)`, then `outcome` after the join. Untracked root `fail` is fatal |
+| Domain failure | `node.fail(code)` and `ActorNodeOutcome` after `available`; public wave failures remain structural | `context.fail(code)`, then `outcome` after the join. Untracked root `fail` is fatal |
 | How to wait | poll a wave handle, a node, or `retired` | `waitChildren` on a root; `PrivateChildStep!R` inside a child wave |
 | Shutdown fence | retire, reclaim, empty ready queue | `live == 0` through pump or collect, then `park.destroy()` |
 

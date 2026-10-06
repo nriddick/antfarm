@@ -94,6 +94,9 @@ void main(string[] args)
             }
             // available is an acquire of complete's release. The reply is
             // visible; the node may now be reused. Do not read it earlier.
+            if (nodes[i].outcome != ActorNodeOutcome.completed
+                    || nodes[i].failureCode != 0)
+                fatal("request outcome mismatch");
             expected += requests[i].delta;
             if (requests[i].balance != expected)
                 fatal("reply order or value mismatch");

@@ -34,6 +34,9 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   The wave keeps a report count and one consistent code/position pair, read
   through `outcome` after the join. Root `fail` on an untracked park stays
   fatal until root tracking. No version bump.
+- **F4a public node outcomes done:** `ActorNodeOutcome`, `node.fail(code)` and
+  `node.cancel()` use the reserved completion word. Node stays 32 bytes and
+  `send` is unchanged. Public cancel-mode retirement (F4b) remains open.
 - **Next:** in-tree cancellation, root tracking with deadlines and X1a,
   per-member retirement, concurrent subsets, non-POD results, and optional
   emitter wake. No version bump accompanies these slices; the release remains

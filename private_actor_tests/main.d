@@ -976,6 +976,179 @@ version (linux)
 
 }
 
+// ---- F4a: public inbox-node fatal contracts ---------------------------------
+// Child modes are "node-death:<name>". The parent (nodeDeath, run by
+// deathHarness in LDC/DMD debug and -release) requires a nonzero death, the
+// exact fatal text, and that no "survived" marker was printed. Every misuse
+// is checked on a node whose preceding legal call succeeded (or on a node in a
+// distinct non-processing state), so a death for the wrong reason cannot pass.
+//
+// Mutations caught:
+//  - drop the `code > 0xFF_FFFF` check in ActorInboxNode.fail (oversize);
+//  - drop the processing-state check in fail/cancel (free, queued);
+//  - make a terminal call idempotent or reopen the node (double).
+enum NodeDeathAct : ubyte { complete, fail, cancel }
+enum NodeDeathMode : ubyte { oversize, twice }
+
+struct NodeDeathState { NodeDeathMode mode; NodeDeathAct first, second; }
+
+void nodeDeathApply(ActorInboxNode* node, NodeDeathAct act) nothrow @nogc @system
+{
+    final switch (act)
+    {
+        case NodeDeathAct.complete: node.complete(); break;
+        case NodeDeathAct.fail: node.fail(3); break;
+        case NodeDeathAct.cancel: node.cancel(); break;
+    }
+}
+
+void nodeDeathActor(scope ref ActorBorrow!NodeDeathState actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    final switch (actor.value.mode)
+    {
+        case NodeDeathMode.oversize:
+            auto a = context.popInbox();
+            auto b = context.popInbox();
+            if (a is null || b is null) return;
+            a.fail(0xFF_FFFF);
+            fprintf(stderr, "node death: fail 0xFFFFFF accepted\n");
+            b.fail(1 << 24);
+            fprintf(stderr, "node death: survived oversize fail\n");
+            break;
+        case NodeDeathMode.twice:
+            auto node = context.popInbox();
+            if (node is null) return;
+            nodeDeathApply(node, actor.value.first);
+            nodeDeathApply(node, actor.value.second);
+            fprintf(stderr, "node death: survived second terminal call\n");
+            break;
+    }
+}
+
+string nodeDeathActName(NodeDeathAct act) nothrow pure @safe
+{
+    final switch (act)
+    {
+        case NodeDeathAct.complete: return "complete";
+        case NodeDeathAct.fail: return "fail";
+        case NodeDeathAct.cancel: return "cancel";
+    }
+}
+
+void nodeDeathRun(NodeDeathState state, bool sendTwo)
+{
+    auto farm = AntFarm.create();
+    check(farm !is null);
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null);
+    auto owner = runtime.createActor!(NodeDeathState, nodeDeathActor)(state);
+    check(owner.valid);
+    ActorInboxNode[2] nodes;
+    foreach (ref node; nodes) node.initialize();
+    check(owner.handle.send(&nodes[0]) == ActorSendResult.queued);
+    if (sendTwo)
+    {
+        // The actor is already signalled, so the second node coalesces.
+        auto result = owner.handle.send(&nodes[1]);
+        check(result == ActorSendResult.queued || result == ActorSendResult.coalesced);
+    }
+    foreach (_; 0 .. 64)
+    {
+        runtime.flush(token);
+        while (view.consumeNext()) {}
+    }
+    fprintf(stderr, "node death: survived pump\n");
+}
+
+// Standalone terminal misuse on a node that is not processing.
+void nodeDeathNotProcessing(NodeDeathAct act, bool queued)
+{
+    ActorInboxNode node;
+    node.initialize();
+    if (queued)
+    {
+        // Queued (claimed and published) but never popped: still not the
+        // actor's to complete.
+        auto farm = AntFarm.create();
+        check(farm !is null);
+        auto runtime = ActorRuntime.create(farm, 1);
+        check(runtime !is null);
+        auto owner = runtime.createActor!(NodeDeathState, nodeDeathActor)(
+            NodeDeathState.init);
+        check(owner.valid);
+        check(owner.handle.send(&node) == ActorSendResult.queued);
+        check(!node.available);
+        nodeDeathApply(&node, act);
+    }
+    else
+        nodeDeathApply(&node, act);
+    fprintf(stderr, "node death: survived not-processing call\n");
+}
+
+void nodeDeathChild(string name)
+{
+    if (name == "oversize")
+    {
+        nodeDeathRun(NodeDeathState(NodeDeathMode.oversize), true);
+        return;
+    }
+    foreach (act; [NodeDeathAct.complete, NodeDeathAct.fail, NodeDeathAct.cancel])
+    {
+        if (name == nodeDeathActName(act) ~ "-free")
+        { nodeDeathNotProcessing(act, false); return; }
+        if (name == nodeDeathActName(act) ~ "-queued")
+        { nodeDeathNotProcessing(act, true); return; }
+        foreach (second; [NodeDeathAct.complete, NodeDeathAct.fail, NodeDeathAct.cancel])
+            if (name == "twice-" ~ nodeDeathActName(act) ~ "-" ~ nodeDeathActName(second))
+            {
+                nodeDeathRun(NodeDeathState(NodeDeathMode.twice, act, second), false);
+                return;
+            }
+    }
+    fprintf(stderr, "node death: unknown mode\n");
+}
+
+void nodeDeath()
+{
+    version (linux)
+    {
+        auto oversize = probeDeath("node-death:oversize");
+        check(oversize.status != 0);
+        check(oversize.stderrText.canFind("node death: fail 0xFFFFFF accepted"));
+        check(oversize.stderrText.canFind("antfarm fatal: actor inbox node failure code out of range"));
+        check(!oversize.stderrText.canFind("survived"));
+        auto acts = [NodeDeathAct.complete, NodeDeathAct.fail, NodeDeathAct.cancel];
+        foreach (act; acts)
+        {
+            auto text = "antfarm fatal: " ~ nodeDeathActName(act) ~ " actor inbox node not owned by actor";
+            foreach (where; ["-free", "-queued"])
+            {
+                auto probe = probeDeath("node-death:" ~ nodeDeathActName(act) ~ where);
+                check(probe.status != 0);
+                check(probe.stderrText.canFind(text));
+                check(!probe.stderrText.canFind("survived"));
+            }
+            foreach (second; acts)
+            {
+                // The second terminal call is the one that must die, with its own name.
+                auto twiceText = "antfarm fatal: " ~ nodeDeathActName(second) ~ " actor inbox node not owned by actor";
+                auto probe = probeDeath("node-death:twice-" ~ nodeDeathActName(act) ~ "-" ~ nodeDeathActName(second));
+                check(probe.status != 0);
+                check(probe.stderrText.canFind(twiceText));
+                check(!probe.stderrText.canFind("survived"));
+            }
+        }
+        writeln("PASS node death: oversize fail code, non-processing and repeated terminal calls are fatal");
+    }
+    else
+        writeln("SKIP node death: /proc/self/exe re-exec requires Linux");
+}
+
 void deathHarness()
 {
     version (linux)
@@ -989,6 +1162,7 @@ void deathHarness()
             check(diedWithMessage(modeName, "antfarm fatal: private child park: unauthorized context"));
         writeln("PASS wrong-parent and default authority are fatal");
         portsDeath();
+        nodeDeath();
         dtorDeath();
         subsetDeath();
         version (AntfarmActorTestHooks) entryWordDeath();
@@ -8041,11 +8215,19 @@ void main(string[] args)
         case "fail-unauthorized": failUnauthorizedDeath(); return;
         case "outcome-unauthorized": outcomeUnauthorizedDeath(); return;
         case "death": deathHarness(); return;
+        case "node-death": nodeDeath(); return;
         case "death-negative-control": deathNegativeControl(); return;
         case "death-exits-zero":
             fprintf(stderr, "antfarm fatal: private death harness sample\n");
             return; // right message, wrong exit status
         default: break;
+    }
+    enum nodeDeathPrefix = "node-death:";
+    if (mode.length > nodeDeathPrefix.length
+        && mode[0 .. nodeDeathPrefix.length] == nodeDeathPrefix)
+    {
+        nodeDeathChild(mode[nodeDeathPrefix.length .. $]);
+        return;
     }
     if (mode.length >= fatalSamplePrefix.length
         && mode[0 .. fatalSamplePrefix.length] == fatalSamplePrefix)

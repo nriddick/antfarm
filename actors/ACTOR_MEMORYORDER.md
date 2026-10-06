@@ -47,6 +47,7 @@ caller-observed quiescence described below.
 | `G` | `ActorSlot.submissionGate` | Inbox/wave admission: one `CLOSED` bit and a count of in-flight reservations in one atomic word. |
 | `I` | `ActorSlot.inboxHeadWord` | Intrusive MPSC inbox stack, detached and reversed by the exclusive actor. |
 | `Inext` | `ActorInboxNode.nextWord_` | Link owned first by the inbox, then by the actor-private detached batch. |
+| `Ncompletion` | `ActorInboxNode.completion_` | Plain 32-bit node outcome (low 8 bits) and failure code (high 24 bits), read only after acquiring availability. |
 | `Nstate` | `ActorInboxNode.state_` | `FREE -> QUEUED -> PROCESSING -> FREE` node-ownership cycle. |
 | `C` | `ActorSlot.inboxCarryWord` | Plain actor-private remainder of a bounded drain; handed to the next activation through `L`. |
 | `Wowner` | `ActorSlot.waveOwnerWord` | Stable owning wave while aggregate membership and its lifetime pin remain active. |
@@ -411,6 +412,7 @@ G.fetchSub(acq_rel)                                      L.CAS(acq_rel,
                                                         reverse detached list
                                                         Nstate.store(raw, PROCESSING)
                                                         read/process payload
+                                                        Ncompletion = outcome | (code << 8)
                                                         Nstate.store(rel, FREE)
                                                         bounded remainder -> C
                                                         L.CAS(acq_rel,
@@ -440,6 +442,15 @@ The inbox is a Treiber MPSC stack only on the producer side. The actor acquire-
 exchanges the entire stack and reverses it, yielding FIFO order by successful
 head-CAS linearization within each detached batch. New concurrent sends form a
 later batch. The actor is the sole consumer and sole owner of `C`.
+
+`complete`, `fail(code)` and `cancel` all require `PROCESSING` and write the
+whole completion word before the existing release of `FREE`. `complete` and
+`cancel` clear the code; `fail` accepts at most 24 bits. The sender reads
+`outcome` and `failureCode` only after `available` acquire-observed completion
+for that interaction, before reuse or transfer. `send` still claims only
+`Nstate`; the completion word is not reset by a send. Initialization sets zero
+but is not an interaction reply. An outcome read while queued or processing,
+or after another producer has acquired the node, has no ordering guarantee.
 
 ## Lifecycle states
 
@@ -495,7 +506,7 @@ empty.
 | Sender to inbox | Caller payload writes and `Nstate: FREE -> QUEUED` precede raw `Inext` updates and the successful release CAS on `I`. | The actor detaches `I` with an acquire exchange before following links or reading payload fields. | Node identity, link, tag, payload pointer, and caller-initialized payload data. |
 | Inbox to activation | The successful `I` publication is sequenced before an `acq_rel` signal RMW on `L`. | Entry acquires a pre-entry signal; an exit racing a signal reloads `L` and schedules another activation. The actor independently acquire-detaches `I`. | The notice cannot be lost even when several sends coalesce into one activation. |
 | Detached batch to later activation | Actor stores an unpopped FIFO remainder in plain `C`, then release-CASes `RUNNING -> SCHEDULED`. | The later activation acquire-loads/CASes `L` before reading and taking `C`. | Exclusive ownership of the detached links and their payloads migrates between actor threads. |
-| Actor completion to node reuse | Actor finishes reading/processing a node, then release-stores `Nstate = FREE`. | `available` acquire-loads `Nstate`, or the next send claims it with an `acq_rel` CAS. | Completion of actor access before a producer rewrites or reuses node/payload storage. |
+| Actor completion to node reuse | Actor finishes reading/processing a node and plain-writes `Ncompletion`, then release-stores `Nstate = FREE`. | `available` acquire-loads `Nstate`, or the next send claims it with an `acq_rel` CAS. | Outcome, failure code and payload writes, plus completion of actor access before a producer rewrites or reuses node/payload storage. |
 | Close against new send | Retirement first marks `RETIRE` on `L`, then sets `CLOSED` in `G` with an `acq_rel` CAS. | A sender's reservation CAS is totally ordered before or after the close CAS on `G`; post-close senders acquire-observe `CLOSED`. | Deterministic admission: earlier reservations finish, later attempts return `closed`. |
 | Submission release to closing actor | An accepted sender enqueues and signals before release-decrementing the reservation count in `G`. | Closing entry/exit acquire-loads `G`; it may publish `RETIRED` only after observing `CLOSED`, count zero, `I` empty, and `C` empty. | All accepted send publication and signalling happens before final retirement. |
 | External retirement to callback | `requestRetire` uses an `acq_rel` CAS to set `RETIRE` on `L` and closes `G`. | Entry or exit reloads/acquires `L`; `ActorContext.closing` also acquire-loads it. | Ordinary admission is closed; callbacks may still run to drain previously accepted inbox nodes. |
@@ -715,8 +726,8 @@ remains deliberately undefined.
   in which they are used. Arena reset requires higher-level quiescence.
 - Non-GC actor and inbox memory is not scanned. Lifecycle ordering does not
   retain GC references stored inside it.
-- A successful `send` transfers the intrusive node until `complete`; freeing,
-  rewriting, or submitting it elsewhere in that interval violates ownership.
+- A successful `send` transfers the intrusive node until `complete`, `fail`,
+  or `cancel`; freeing, rewriting, or submitting it elsewhere in that interval violates ownership.
 - A closing handler must eventually drain or deliberately assume ownership of
   every accepted node. A handler which permanently ignores a nonempty inbox
   deliberately prevents retirement rather than dropping work.
