@@ -67,6 +67,16 @@ private void activate(scope ref ActorBorrow!State actor,
     operate(actor);
 }
 
+private void inboxActivate(scope ref ActorBorrow!State actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    while (auto node = context.popInbox())
+    {
+        operate(actor);
+        node.complete();
+    }
+}
+
 private PrivateRootDisposition privateActivate(scope ref PrivateBorrow!State actor,
         scope ref PrivateContext) nothrow @nogc @system
 {
@@ -424,14 +434,15 @@ private double elapsedSeconds(long ticks)
 void main(string[] args)
 {
     enforce(args.length >= 2 && args.length <= 12
-            && (args[1] == "tree-cont" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|wave|private|private-remote|tree|tree-wait|tree-cont|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
+            && (args[1] == "tree-cont" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
+        "usage: actor_churn actor|inbox|wave|private|private-remote|tree|tree-wait|tree-cont|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
     immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined";
     immutable subsetMode = args[1] == "subset" || args[1] == "subset-whole"
         || args[1] == "subset-whole-unreserved";
     immutable percent = args.length > 11 ? to!uint(args[11]) : 100;
     enforce((subsetMode || args.length <= 11) && (percent == 1 || percent == 10 || percent == 100),
         "subset-percent must be 1, 10 or 100, and is only for subset modes");
+    immutable inboxMode = args[1] == "inbox";
     immutable waveMode = args[1] == "wave";
     immutable remoteMode = args[1] == "private-remote";
     immutable dtorMode = args[1] == "dtor";
@@ -506,6 +517,8 @@ void main(string[] args)
     auto owners = new ActorOwner!State[count];
     auto handles = new ActorHandle!State[count];
     auto completions = new Completion[count];
+    auto nodes = inboxMode ? new ActorInboxNode[count] : null;
+    foreach (ref node; nodes) node.initialize();
     auto token = farm.registerProducer(tier);
     enforce(token.valid, "producer registration failed");
     scope (exit) farm.unregisterProducer(token);
@@ -601,8 +614,9 @@ void main(string[] args)
         }
         foreach (i; 0 .. count)
         {
-            owners[i] = runtime.createActor!(State, activate)(
-                State(&completions[i], cycle));
+            owners[i] = inboxMode
+                ? runtime.createActor!(State, inboxActivate)(State(&completions[i], cycle))
+                : runtime.createActor!(State, activate)(State(&completions[i], cycle));
             enforce(owners[i].valid, "actor creation failed");
             handles[i] = owners[i].handle;
         }
@@ -631,8 +645,11 @@ void main(string[] args)
         }
         else
         {
-            foreach (handle; handles)
-                enforce(handle.wake() == ActorWakeResult.queued, "wake failed");
+            foreach (i, handle; handles)
+                if (inboxMode)
+                    enforce(handle.send(&nodes[i]) == ActorSendResult.queued, "send failed");
+                else
+                    enforce(handle.wake() == ActorWakeResult.queued, "wake failed");
             size_t published;
             while (published < count)
             {
@@ -647,6 +664,12 @@ void main(string[] args)
                     enforce(MonoTime.currTime < deadline, "actor completion timed out");
                 }
         }
+        foreach (ref node; nodes)
+            while (!node.available)
+            {
+                consume();
+                enforce(MonoTime.currTime < deadline, "inbox completion timed out");
+            }
         immutable dispatched = MonoTime.currTime;
         foreach (ref owner; owners)
             enforce(owner.requestRetire() == ActorRetireResult.requested,

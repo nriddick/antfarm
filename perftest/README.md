@@ -24,7 +24,7 @@ ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn actor 4096 3 6 256 5
 ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn wave 4096 3 6 256 5
 ```
 
-Arguments are mode (`actor` or `wave`), actors per cohort, minimum measured
+Arguments are mode (`actor`, `inbox`, or `wave`), actors per cohort, minimum measured
 seconds, background consumers, publication batch, warm-up cycles,
 and optional allocator (`crt`, `mimalloc`, or `mimalloc64`). Autonomous
 publication batches are 1–256; wave publication accepts any positive batch,
@@ -53,7 +53,9 @@ completion counter and release-publishes the cycle number on a separate
 Autonomous mode wakes the whole cohort, flushes batches, and waits for all
 callbacks. Wave mode starts one wave per cohort, publishes batches, seals
 the wave, and waits for aggregate completion and membership release. Both
-then retire and reclaim all actors. This is a minimal-work, cohort-based
+then retire and reclaim all actors. Inbox mode sends one caller-owned node per
+actor instead of waking it. The handler pops and completes the node; the sender
+acquires `available` before reusing that same node in the next cycle. This is a minimal-work, cohort-based
 allocation/reuse test; it does not model staggered lifetimes, simultaneous
 creators/reclaimers, or substantial application work.
 
