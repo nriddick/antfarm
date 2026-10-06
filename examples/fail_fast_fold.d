@@ -118,7 +118,9 @@ void main(string[] args)
     immutable leafRuns = atomicLoad!(MemoryOrder.acq)(ran);
     if (outcome.status != PrivateOutcomeStatus.failed || outcome.code != 7)
         fatal("root did not propagate the leaf failure");
-    if (failures != 1 || dispatched < 1 || dispatched > 8 || leafRuns < 1)
+    // The failing member is at position 4, so dispatch is the prefix 0..4 at
+    // least; each dispatched member runs once before the wave joins.
+    if (failures != 1 || dispatched < 5 || leafRuns != dispatched)
         fatal("fold aggregate mismatch");
 
     host.stopConsumers();

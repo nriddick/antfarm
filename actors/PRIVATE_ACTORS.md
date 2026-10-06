@@ -40,7 +40,8 @@ child cohort's membership and scheduling authority.
 Application-defined result channels are supported. A root can return
 `waitChildren` to resume once all its child work joins, without polling in
 repeated callbacks. Child cohorts can carry typed per-member results;
-root-to-application outputs and library reductions remain future work.
+typed root-to-application outputs (X1b) and library reductions remain future
+work; tracked parks report each root's terminal status through `takeOutcome`.
 Continuation operations can suspend and resume within the same child wave.
 
 ## API

@@ -203,10 +203,10 @@ reclaim).
 
 | Step | Public actor service | Private root park |
 | --- | --- | --- |
-| 1. Close admission | Stop senders, then `owner.requestRetire()` (the default is drain). Late `send`s return `closed`. | Stop `spawn`ing roots. |
-| 2. Drain or cancel | Handlers process accepted nodes. To escalate a drain, call `owner.requestRetire(ActorRetireMode.cancel)` on the same owner after an application deadline; every later activation of that generation sees `context.cancelling` and calls `context.cancelInbox()`, so senders observe `ActorNodeOutcome.cancelled`. | Drain with `pump`/`collectCompleted` and consumer progress to `live == 0`. To cancel instead, call `cancelAll()` first (tracked parks), then run the same loop. A tracked park must also call `takeOutcome` every pass: a terminal root stays in `live` until its outcome is taken. |
+| 1. Close admission | Stop senders, then `owner.requestRetire()` (the default is drain). Late `send`s return `closed`; a request during a wave returns `waveOwned` and must be retried after the wave. | Stop `spawn`ing roots. |
+| 2. Drain or cancel | Keep calling `runtime.flush` and running consumers until `owner.retired`, then `owner.reclaim()` (retry on `busy`). Handlers process accepted nodes. To escalate a drain, call `owner.requestRetire(ActorRetireMode.cancel)` on the same owner after an application deadline; every later activation of that generation sees `context.cancelling`, so the handler calls `context.cancelInbox()` and senders observe `ActorNodeOutcome.cancelled`. | Drain with `pump`/`collectCompleted` and consumer progress to `live == 0`. To cancel instead, call `cancelAll()` first (tracked parks), then run the same loop. A tracked park must also call `takeOutcome` every pass: a terminal root stays in `live` until its outcome is taken. |
 | 3. Join workers | Join every worker and unsubscribe every view, so no consumer can still be in the actor trampoline. | Same, and also join every thread that may call `handle.requestCancel` on its handles. |
-| 4. Destroy infrastructure | `runtime.destroy()` only after the actor drain and the consumer join. | `park.destroy()` only after `live == 0` and the canceller join; then `park = null`. |
+| 4. Destroy infrastructure | `runtime.destroy()` only after every owner is reclaimed (`runtime.live == 0`) and the consumer join. | `park.destroy()` only after `live == 0` and the canceller join; then `park = null`. |
 | 5. Unregister and destroy the Farm | Unregister producer tokens, then `farm.destroy()`. | Same. |
 
 There is no guaranteed final handler call in either retire mode. An idle or

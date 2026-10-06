@@ -43,8 +43,8 @@ dmd -g -i -I. -Iexamples examples/fail_fast_fold.d -of=fail_fast_fold
 ANTFARM_HUGE_PAGES=0 ./fail_fast_fold 0
 ```
 
-The fiber `cancelAt` adapter links the separate fibers package, so add its two
-import paths (and `threadpool` comes with it):
+The fiber `cancelAt` adapter links the separate fibers package, so add the
+fibers and threadpool import paths:
 
 ```text
 ldc2 -g -i -I. -Iexamples -Ifibers/source -Ithreadpool/source \
@@ -58,7 +58,9 @@ unset. In cmd.exe set it with `set ANTFARM_HUGE_PAGES=0` before the run.
 
 `make -C examples check` is the Linux matrix: LDC and DMD, debug and release,
 each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
-threaded programs. That target also extracts the complete First payload program
+threaded programs. `fiber_cancel_at` runs under TSan with 0 workers only,
+because TSan fails at the stack switch for migrating DRuntime Fibers; see
+[fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary). That target also extracts the complete First payload program
 from the repository README and runs it with LDC and DMD in debug and release.
 Other README D blocks are fragments and are rejected by the extractor unless
 they say so. The repository `make check` includes that target.

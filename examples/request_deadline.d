@@ -2,8 +2,9 @@
  + Request service with deadlines (U5): one tracked root per request, a
  + per-request deadline, cancellation from another thread, and a terminal
  + status/code read back through `takeOutcome`. Requests 4 and 5 run until the
- + shutdown `cancelAll()`. No hash map and no unbounded buffering: the park's
- + slot table is the identity, and untaken outcomes backpressure `spawn`.
+ + shutdown `cancelAll()`. No hash map and no unbounded buffering: handles are
+ + compared with `==` (PrivateRootHandle hashing is not provided) and untaken
+ + outcomes backpressure `spawn`.
  + Build notes: examples/README.md.
  +/
 module request_deadline;

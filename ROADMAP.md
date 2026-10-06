@@ -52,7 +52,8 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   which recycles the slot. A tracked drain pumps and takes outcomes.
   Untracked parks are unchanged apart from one branch per spawn, collection
   and cancel check. Entry stays 40 bytes.
-- **F5 docs and examples done:** [LIFECYCLE.md](actors/LIFECYCLE.md#shutdown-recipe)
+- **Outcomes and cancellation (F1–F5) complete.** F5 docs and examples:
+  [LIFECYCLE.md](actors/LIFECYCLE.md#shutdown-recipe)
   has the shared shutdown recipe, and the compiled lane in
   [examples/](examples/README.md) adds a deadline request service, a
   `fail` + `cancelPeers` fail-fast fold, and a fiber `cancelAt` bridge.
