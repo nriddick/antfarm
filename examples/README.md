@@ -8,6 +8,9 @@ Complete programs for the two actor models. Read these with
 | [public_service.d](public_service.d) | POD ledger, caller-owned inbox nodes, queued/coalesced acceptance versus rejection, a two-node drain, replies after `available`, node reuse, admission close, idle retirement, stale handles |
 | [public_wave.d](public_wave.d) | Externally selected actors from two runtimes on one Farm, and the completion-hook tail after `finished` |
 | [private_tree.d](private_tree.d) | Typed result ports, root `waitChildren`, a child continuation fold, a subset wave, non-POD state with a destructor, drain to `live == 0` |
+| [request_deadline.d](request_deadline.d) | Tracked root per request, a per-request deadline, cancellation from another thread, and terminal `takeOutcome` statuses |
+| [fail_fast_fold.d](fail_fast_fold.d) | `context.fail` + `cancelPeers` fail-fast, the wave aggregate after the join, and explicit root propagation |
+| [fiber_cancel_at.d](fiber_cancel_at.d) | Example bridge from `FiberDomain.sleepUntil` to `PrivateRootHandle.requestCancel` (not library API) |
 
 [example_host.d](example_host.d) is scaffolding: a same-thread consumer or a few druntime workers, plus a progress deadline. It is not a production scheduler. It does not treat `consumeNext() == false` or `pump() == 0` as idle.
 
@@ -28,6 +31,25 @@ ANTFARM_HUGE_PAGES=0 ./public_wave 2
 
 dmd -g -i -I. -Iexamples examples/private_tree.d -of=private_tree
 ANTFARM_HUGE_PAGES=0 ./private_tree 0
+```
+
+The outcomes and cancellation programs use the same command:
+
+```text
+dmd -g -i -I. -Iexamples examples/request_deadline.d -of=request_deadline
+ANTFARM_HUGE_PAGES=0 ./request_deadline 0
+
+dmd -g -i -I. -Iexamples examples/fail_fast_fold.d -of=fail_fast_fold
+ANTFARM_HUGE_PAGES=0 ./fail_fast_fold 0
+```
+
+The fiber `cancelAt` adapter links the separate fibers package, so add its two
+import paths (and `threadpool` comes with it):
+
+```text
+ldc2 -g -i -I. -Iexamples -Ifibers/source -Ithreadpool/source \
+    examples/fiber_cancel_at.d -of=fiber_cancel_at
+ANTFARM_HUGE_PAGES=0 ./fiber_cancel_at 0
 ```
 
 On Windows the linker writes `public_service.exe` (and the same for the other

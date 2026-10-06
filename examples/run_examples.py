@@ -15,7 +15,12 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
 build = Path(__file__).resolve().parent / ".build"
-examples = ("public_service", "public_wave", "private_tree")
+examples = ("public_service", "public_wave", "private_tree",
+            "request_deadline", "fail_fast_fold", "fiber_cancel_at")
+extra_includes = {
+    # The fiber adapter example bridges to the separate antfarm-fibers package.
+    "fiber_cancel_at": ("-Ifibers/source", "-Ithreadpool/source"),
+}
 configs = (
     ("ldc2", ("-g",), ""),
     ("ldc2", ("-O2", "-release"), "_release"),
@@ -27,6 +32,7 @@ tsan = ("ldc2", ("-g", "-O1", "-fsanitize=thread"), "_tsan")
 
 def compile_example(compiler, flags, source, output):
     cmd = [compiler, *flags, "-i", "-I.", "-Iexamples",
+           *extra_includes.get(source, ()),
            f"examples/{source}.d", f"-of={output}"]
     print("==>", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=root, check=True)
