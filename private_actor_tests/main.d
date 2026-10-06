@@ -4,7 +4,7 @@ import antfarm;
 import antfarm_allocation : allocateAligned64, freeAligned64;
 import core.atomic;
 import core.thread : Thread;
-import core.time : MonoTime, msecs, seconds;
+import core.time : MonoTime, msecs, seconds, usecs;
 import core.stdc.stdlib : abort;
 import core.stdc.stdio : fprintf, stderr;
 import std.algorithm.searching : canFind;
@@ -1186,6 +1186,7 @@ void deathHarness()
         check(diedWithMessage("outcome-unauthorized", "antfarm fatal: private child park: unauthorized context"));
         writeln("PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome");
         cancelDeath();
+        rootTrackingDeath();
         version (assert)
         {
             check(diedWithMessage("reentrant-spawn", "antfarm fatal: private root park: reentrant entry"));
@@ -2685,8 +2686,9 @@ static if (size_t.sizeof == 8)
     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
     // Service.childReturns (E2-3) accounts for one word of both.
     // E2-4 reserves 48 more bytes in ChildBase for the resume descriptor/FIFO.
-    version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 176);
-    else static assert(PrivateRootPark!(State, repeat).sizeof == 168);
+    // F3 adds 32: Service.records/rootEntries and the outcome FIFO head/tail.
+    version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 208);
+    else static assert(PrivateRootPark!(State, repeat).sizeof == 200);
 }
 static assert(PUlongCohort.sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
 static assert(PrivateChildPark!(PItem, ubyte).sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
@@ -7289,7 +7291,8 @@ void phaseCont()
 // O3 position taken from the spawn index instead of sel_[capacity + index].
 // O4 outcome() while active is fatal (death); a continuation counts one report.
 // O5 plain increment of failures: TSan race and/or a short count.
-// O6 behavioural propagation through application storage (root fail is O7).
+// O6 behavioural propagation leaf -> mid -> root -> application: the root's
+// fail on a tracked park ends in takeOutcome (untracked root fail is O7).
 // O7 missing untracked-park check: root fail returns.
 // O8 wrapping fetchAdd: the second report near uint.max is not fatal.
 // O9 resets before empty/active rejection: last nonempty outcome/results change.
@@ -7542,6 +7545,7 @@ PrivateRootDisposition o6Root(scope ref PrivateBorrow!O6Root b, scope ref Privat
     b.value.app.failed = o.failures != 0;
     b.value.app.code = o.firstFailureCode;
     namedCheck(o.firstFailurePosition == 0 && o.participants == 1, "o6 mid outcome");
+    c.fail(o.firstFailureCode); // root -> application outcome (tracked park)
     return PrivateRootDisposition.finish;
 }
 
@@ -7723,12 +7727,15 @@ void phaseOutcomes()
         ConsumerView view;
         check(view.subscribe(farm) >= 0);
         scope(exit) view.unsubscribe();
-        auto park = PrivateRootPark!(O6Root, o6Root).create(farm, 1);
-        check(park.spawn(O6Root(null, &app)) == PrivateSpawnResult.spawned);
-        auto deadline = MonoTime.currTime + 10.seconds;
-        while (park.live) { park.pump(token); while (view.consumeNext()) {} namedCheck(MonoTime.currTime < deadline, "o6 drain"); }
+        auto park = PrivateRootPark!(O6Root, o6Root).create(farm, 1, trackedOptions());
+        PrivateRootHandle h;
+        check(park.spawn(O6Root(null, &app), h) == PrivateSpawnResult.spawned);
+        PrivateRootOutcome[] taken;
+        drainTracked(park, token, view, taken, "o6 drain");
         park.destroy();
         check(app.failed && app.code == o6Code);
+        check(taken.length == 1 && taken[0].root == h && taken[0].status == PrivateOutcomeStatus.failed
+            && taken[0].code == o6Code && taken[0].cause == PrivateCancelCause.none);
     }
     {
         O9App app;
@@ -8637,19 +8644,25 @@ version (AntfarmActorTestHooks)
 // C10. The root starts cohort A, leaves cohort B idle, calls cancelChildren
 // and returns finishAfterChildren. A is truncated at zero, the cleanup
 // activation runs once and disposes both cohorts on the consumer.
-// Behavioural; the tracked root status belongs to root tracking (F3).
+// Root-outcome half (F3), on tracked parks: the root fails, is cancelled
+// through its handle before its first activation, or both. takeOutcome
+// reports failed(31), cancelled(requested), and failed (failed outranks
+// cancelled). Behavioural.
+enum C10Mode : ubyte { untracked, failed, cancelled, failedAndCancelled }
 shared uint c10Activations, c10Runs;
 void c10Op(scope ref PrivateBorrow!CancelTracked, scope ref PrivateContext) nothrow @nogc @system
 {
     atomicFetchAdd!(MemoryOrder.raw)(c10Runs, 1u);
 }
-struct C10Root { PrivateChildPark!CancelTracked* active, idle; }
+struct C10Root { PrivateChildPark!CancelTracked* active, idle; C10Mode mode; bool* sawCancelled; }
 PrivateRootDisposition c10Root(scope ref PrivateBorrow!C10Root b, scope ref PrivateContext c)
     nothrow @nogc @system
 {
     atomicFetchAdd!(MemoryOrder.raw)(c10Activations, 1u);
     with (b.value)
     {
+        if (mode != C10Mode.untracked) *sawCancelled = c.cancelled;
+        if (mode == C10Mode.failed || mode == C10Mode.failedAndCancelled) c.fail(31);
         active = c.createChildren!CancelTracked(4, 1);
         idle = c.createChildren!CancelTracked(2);
         namedCheck(active !is null && idle !is null, "c10 cohorts");
@@ -8663,9 +8676,11 @@ PrivateRootDisposition c10Root(scope ref PrivateBorrow!C10Root b, scope ref Priv
         return PrivateRootDisposition.finishAfterChildren;
     }
 }
-void cancelC10()
+void cancelC10(C10Mode mode = C10Mode.untracked)
 {
     Counts counts;
+    bool sawCancelled;
+    PrivateRootOutcome[] taken;
     resetCancelDtors();
     atomicStore!(MemoryOrder.raw)(c10Activations, 0u);
     atomicStore!(MemoryOrder.raw)(c10Runs, 0u);
@@ -8677,9 +8692,40 @@ void cancelC10()
         Lockstep l;
         auto t = startLockstep(farm, &l);
         scope(exit) stopLockstep(&l, t);
-        auto park = PrivateRootPark!(C10Root, c10Root).create(farm, 1, 256, policy(counts));
-        check(park.spawn(C10Root.init) == PrivateSpawnResult.spawned);
-        lockstepRun(park, token, &l, "c10 drain");
+        if (mode == C10Mode.untracked)
+        {
+            auto park = PrivateRootPark!(C10Root, c10Root).create(farm, 1, 256, policy(counts));
+            check(park.spawn(C10Root.init) == PrivateSpawnResult.spawned);
+            lockstepRun(park, token, &l, "c10 drain");
+        }
+        else
+        {
+            PrivateRootOptions options = trackedOptions();
+            options.allocator = policy(counts);
+            auto park = PrivateRootPark!(C10Root, c10Root).create(farm, 1, options);
+            PrivateRootHandle h;
+            check(park.spawn(C10Root(null, null, mode, &sawCancelled), h) == PrivateSpawnResult.spawned);
+            if (mode != C10Mode.failed)
+                namedCheck(h.requestCancel() == PrivateCancelResult.requested, "c10 handle cancel");
+            lockstepRunTracked(park, token, &l, taken, "c10 tracked drain");
+            namedCheck(taken.length == 1 && taken[0].root == h, "c10 one outcome");
+        }
+    }
+    final switch (mode)
+    {
+        case C10Mode.untracked: break;
+        case C10Mode.failed:
+            namedCheck(!sawCancelled && taken[0].status == PrivateOutcomeStatus.failed
+                && taken[0].code == 31 && taken[0].cause == PrivateCancelCause.none, "c10 root outcome failed");
+            break;
+        case C10Mode.cancelled:
+            namedCheck(sawCancelled && taken[0].status == PrivateOutcomeStatus.cancelled
+                && taken[0].cause == PrivateCancelCause.requested, "c10 root outcome cancelled");
+            break;
+        case C10Mode.failedAndCancelled:
+            namedCheck(sawCancelled && taken[0].status == PrivateOutcomeStatus.failed
+                && taken[0].code == 31 && taken[0].cause == PrivateCancelCause.none, "c10 failed outranks cancelled");
+            break;
     }
     namedCheck(atomicLoad(c10Activations) == 1, "c10 one user activation");
     namedCheck(atomicLoad(c10Runs) == 0, "c10 cancelled wave skipped");
@@ -9111,7 +9157,8 @@ void phaseCancel()
     version (AntfarmActorTestHooks) cancelC7();
     cancelC8();
     version (AntfarmActorTestHooks) cancelC9();
-    cancelC10();
+    foreach (mode; [C10Mode.untracked, C10Mode.failed, C10Mode.cancelled, C10Mode.failedAndCancelled])
+        cancelC10(mode);
     cancelC11();
     cancelC12();
     cancelC13();
@@ -9121,9 +9168,934 @@ void phaseCancel()
     writeln("PASS private cancellation torture");
 }
 
+// ---------------------------------------------------------------------------
+// F3 root tracking, deadlines and X1a (design 170 §5, tests §12.3). Each
+// deterministic test names the mutation of actors/private_actor.d it catches;
+// the results are recorded in perftest/results/private-root-tracking-2026-10-06.
+// Tracked parks hold every terminal root until takeOutcome, so each drain
+// pumps and takes outcomes; pumping alone never brings live to zero (T7).
+
+PrivateRootOptions trackedOptions(size_t batchLimit = defaultPrivateBatchLimit)
+{
+    PrivateRootOptions options;
+    options.batchLimit = batchLimit;
+    options.tracking = true;
+    return options;
+}
+
+// Pump, run published callbacks inline, and take every outcome until no
+// root is live. Outcomes are appended to `taken` in take order.
+void drainTracked(P)(P* park, ref Token token, ref ConsumerView view,
+    ref PrivateRootOutcome[] taken, string name)
+{
+    auto deadline = MonoTime.currTime + 20.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        PrivateRootOutcome o;
+        while (park.takeOutcome(o)) taken ~= o;
+        namedCheck(MonoTime.currTime < deadline, name);
+    }
+}
+
+// The same with the lockstep consumer, so no callback runs on the emitter.
+void lockstepRunTracked(P)(P* park, ref Token token, Lockstep* l,
+    ref PrivateRootOutcome[] taken, string name)
+{
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        lockstepDrain(l);
+        PrivateRootOutcome o;
+        while (park.takeOutcome(o)) taken ~= o;
+        namedCheck(MonoTime.currTime < deadline, name);
+    }
+    park.destroy();
+}
+
+// Thread-local: only the designated foreign canceller pauses in T1's hook.
+bool rtIsCanceller;
+shared uint rtPaused, rtResume, rtDone, rtArmed;
+shared ubyte rtResult;
+__gshared PrivateRootHandle rtHandle;
+
+// T1. A foreign canceller loads root A's LIVE(g) word and pauses at
+// privateRootCancelBeforeCas. Meanwhile the emitter collects A, takes its
+// outcome and respawns the slot as root B (LIVE(g+1)). On resume the CAS
+// fails and the reload sees another generation: staleHandle. B never
+// observes cancelled and completes.
+// Mutation T1a: the canceller does a load+store instead of the CAS
+// (`atomicStore(record_.control, w | cancelled | cause); return requested;`).
+// It overwrites B's word: "t1 resumed canceller is stale" fails.
+// Mutation T1b: takeOutcome does not bump the generation (stores
+// `generation << shift`). B's LIVE(g) word equals the stale expected word,
+// the CAS succeeds (ABA): "t1 resumed canceller is stale" fails.
+struct T1Root { ubyte kind; }
+shared uint t1Stop, t1SawCancelled, t1BActivations;
+version (AntfarmActorTestHooks)
+void t1Hook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+{
+    if (point != ActorTestPoint.privateRootCancelBeforeCas || !rtIsCanceller) return;
+    if (!cas!(MemoryOrder.raw, MemoryOrder.raw)(&rtArmed, 1u, 0u)) return;
+    atomicStore!(MemoryOrder.rel)(rtPaused, 1u);
+    while (atomicLoad!(MemoryOrder.acq)(rtResume) == 0) pause();
+}
+PrivateRootDisposition t1Root(scope ref PrivateBorrow!T1Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.kind == 0) return PrivateRootDisposition.finish;
+    atomicFetchAdd!(MemoryOrder.raw)(t1BActivations, 1u);
+    if (c.cancelled) atomicStore!(MemoryOrder.raw)(t1SawCancelled, 1u);
+    return atomicLoad!(MemoryOrder.acq)(t1Stop) != 0
+        ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
+}
+version (AntfarmActorTestHooks)
+void rootTrackingT1()
+{
+    atomicStore(rtPaused, 0u);
+    atomicStore(rtResume, 0u);
+    atomicStore(rtDone, 0u);
+    atomicStore(rtArmed, 1u);
+    atomicStore(t1Stop, 0u);
+    atomicStore(t1SawCancelled, 0u);
+    atomicStore(t1BActivations, 0u);
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    setActorTestHook(&t1Hook);
+    scope(exit) setActorTestHook(null);
+    auto park = PrivateRootPark!(T1Root, t1Root).create(farm, 1, trackedOptions());
+    PrivateRootHandle a;
+    check(park.spawn(T1Root(0), a) == PrivateSpawnResult.spawned);
+    rtHandle = a;
+    auto canceller = new Thread({
+        rtIsCanceller = true;
+        atomicStore!(MemoryOrder.rel)(rtResult, cast(ubyte) rtHandle.requestCancel());
+        atomicStore!(MemoryOrder.rel)(rtDone, 1u);
+    });
+    canceller.start();
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad!(MemoryOrder.acq)(rtPaused) == 0)
+        namedCheck(MonoTime.currTime < deadline, "t1 canceller paused");
+    PrivateRootOutcome o;
+    while (!park.takeOutcome(o))
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "t1 collect A");
+    }
+    namedCheck(o.root == a && o.status == PrivateOutcomeStatus.completed
+        && o.cause == PrivateCancelCause.none, "t1 A completed");
+    PrivateRootHandle b;
+    check(park.spawn(T1Root(1), b) == PrivateSpawnResult.spawned);
+    namedCheck(b.index == a.index, "t1 slot recycled");
+    while (atomicLoad(t1BActivations) < 2)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "t1 B running");
+    }
+    atomicStore!(MemoryOrder.rel)(rtResume, 1u);
+    canceller.join();
+    namedCheck(atomicLoad(rtDone) == 1
+        && atomicLoad(rtResult) == PrivateCancelResult.staleHandle, "t1 resumed canceller is stale");
+    namedCheck(b != a, "t1 new generation");
+    atomicStore!(MemoryOrder.rel)(t1Stop, 1u);
+    PrivateRootOutcome[] taken;
+    drainTracked(park, token, view, taken, "t1 drain B");
+    namedCheck(a.requestCancel() == PrivateCancelResult.staleHandle
+        && b.requestCancel() == PrivateCancelResult.staleHandle, "t1 taken handles are stale");
+    park.destroy(); // handles are undefined from here
+    namedCheck(taken.length == 1 && taken[0].root == b
+        && taken[0].status == PrivateOutcomeStatus.completed
+        && taken[0].cause == PrivateCancelCause.none, "t1 B completed");
+    namedCheck(atomicLoad(t1SawCancelled) == 0, "t1 B never cancelled");
+}
+
+// T2. Cancel against the emitter's terminal CAS, in both orders.
+// Order 1: the emitter pauses at privateRootTerminalBeforeCas after loading
+// the LIVE word; a foreign thread's requestCancel succeeds (requested); the
+// emitter's CAS fails, re-reads and records cancelled.
+// Order 2: the request lands after the terminal CAS, while take is paused
+// before the VACANT store: finished, outcome completed; after take, stale.
+// Never {requested, completed}.
+// Mutation T2: the terminal transition is a plain store computed from the
+// first load (`atomicStore(record.control, w & ~controlLive)` and no loop).
+// Order 1 then yields {requested, completed}: "t2 cancel before terminal CAS".
+shared uint t2Point; // ActorTestPoint + 1 to pause at; 0 disarms
+version (AntfarmActorTestHooks)
+void t2Hook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+{
+    if (point + 1 != atomicLoad!(MemoryOrder.raw)(t2Point)) return;
+    if (!cas!(MemoryOrder.raw, MemoryOrder.raw)(&t2Point, point + 1u, 0u)) return;
+    atomicStore!(MemoryOrder.rel)(rtPaused, 1u);
+    while (atomicLoad!(MemoryOrder.acq)(rtDone) == 0) pause();
+}
+PrivateRootDisposition t2Root(scope ref PrivateBorrow!int, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    return PrivateRootDisposition.finish;
+}
+version (AntfarmActorTestHooks)
+PrivateRootOutcome t2Run(ActorTestPoint point, ref PrivateCancelResult result)
+{
+    atomicStore(rtPaused, 0u);
+    atomicStore(rtDone, 0u);
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    setActorTestHook(&t2Hook);
+    scope(exit) setActorTestHook(null);
+    auto park = PrivateRootPark!(int, t2Root).create(farm, 1, trackedOptions());
+    PrivateRootHandle h;
+    check(park.spawn(0, h) == PrivateSpawnResult.spawned);
+    rtHandle = h;
+    atomicStore!(MemoryOrder.rel)(t2Point, point + 1u);
+    auto canceller = new Thread({
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (atomicLoad!(MemoryOrder.acq)(rtPaused) == 0)
+            namedCheck(MonoTime.currTime < deadline, "t2 emitter paused");
+        atomicStore!(MemoryOrder.rel)(rtResult, cast(ubyte) rtHandle.requestCancel());
+        atomicStore!(MemoryOrder.rel)(rtDone, 1u);
+    });
+    canceller.start();
+    PrivateRootOutcome[] taken;
+    drainTracked(park, token, view, taken, "t2 drain");
+    canceller.join();
+    namedCheck(h.requestCancel() == PrivateCancelResult.staleHandle, "t2 taken handle is stale");
+    park.destroy();
+    namedCheck(atomicLoad(t2Point) == 0 && taken.length == 1 && taken[0].root == h, "t2 hook ran");
+    result = cast(PrivateCancelResult) atomicLoad(rtResult);
+    return taken[0];
+}
+version (AntfarmActorTestHooks)
+void rootTrackingT2()
+{
+    PrivateCancelResult r;
+    auto o = t2Run(ActorTestPoint.privateRootTerminalBeforeCas, r);
+    namedCheck(r == PrivateCancelResult.requested && o.status == PrivateOutcomeStatus.cancelled
+        && o.cause == PrivateCancelCause.requested, "t2 cancel before terminal CAS");
+    o = t2Run(ActorTestPoint.privateTakeBeforeVacantStore, r);
+    namedCheck(r == PrivateCancelResult.finished && o.status == PrivateOutcomeStatus.completed
+        && o.cause == PrivateCancelCause.none, "t2 cancel after terminal CAS");
+}
+
+// T3. A deadline already past at spawn. The root starts a 64-member wave at
+// batchLimit 4 and waits without checking; the emitter's first cancel check
+// observes the deadline, converts it, and truncates at zero.
+// Mutation T3: drop the records branch from scopeCancelled. The emitter
+// publishes all 64: "t3 first emit truncates".
+shared uint t3MemberRuns;
+void t3Op(scope ref PrivateBorrow!uint, scope ref PrivateContext) nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(t3MemberRuns, 1u);
+}
+struct T3App { size_t participants, dispatched; bool waveCancelled, rootCancelled, saw; }
+struct T3Root { PrivateChildPark!uint* kids; T3App* app; }
+PrivateRootDisposition t3Root(scope ref PrivateBorrow!T3Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (kids is null)
+        {
+            kids = c.createChildren!uint(64, 4);
+            namedCheck(kids !is null, "t3 cohort");
+            foreach (i; 0 .. 64) namedCheck(kids.spawn(c, cast(uint) i) == PrivateSpawnResult.spawned, "t3 spawn");
+            namedCheck(kids.start!t3Op(c) == PrivateStartResult.started, "t3 start");
+            return PrivateRootDisposition.waitChildren;
+        }
+        auto o = kids.outcome(c);
+        app.participants = o.participants;
+        app.dispatched = o.dispatched;
+        app.waveCancelled = o.cancelled;
+        app.rootCancelled = c.cancelled;
+        app.saw = true;
+        return PrivateRootDisposition.finish;
+    }
+}
+void rootTrackingT3()
+{
+    T3App app;
+    atomicStore(t3MemberRuns, 0u);
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(T3Root, t3Root).create(farm, 1, trackedOptions());
+    PrivateRootHandle h;
+    check(park.spawn(T3Root(null, &app), h, MonoTime.currTime - 1.seconds) == PrivateSpawnResult.spawned);
+    PrivateRootOutcome[] taken;
+    drainTracked(park, token, view, taken, "t3 drain");
+    park.destroy();
+    namedCheck(app.saw && app.participants == 64 && app.dispatched == 0
+        && atomicLoad(t3MemberRuns) == 0, "t3 first emit truncates");
+    namedCheck(!app.waveCancelled && app.rootCancelled, "t3 root scope, not the wave, is cancelled");
+    namedCheck(taken.length == 1 && taken[0].root == h && taken[0].status == PrivateOutcomeStatus.cancelled
+        && taken[0].cause == PrivateCancelCause.deadline, "t3 cause deadline");
+}
+
+// T4. Without a deadline (spawn(T), or MonoTime.max) no check reads the
+// clock: not the root's, not its members', not the emitter's. A control
+// root with a deadline an hour away reads it and still completes.
+// Mutation T4: ignore the armed flag in rootCancelledNow (drop
+// `!(w & controlArmed) ||`): "t4 no clock read without a deadline".
+shared uint t4Checks, t4SawCancelled;
+void t4Op(scope ref PrivateBorrow!uint, scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (c.cancelled) atomicStore!(MemoryOrder.raw)(t4SawCancelled, 1u);
+    atomicFetchAdd!(MemoryOrder.raw)(t4Checks, 1u);
+}
+struct T4Root { PrivateChildPark!uint* kids; uint rounds; }
+PrivateRootDisposition t4Root(scope ref PrivateBorrow!T4Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (c.cancelled) atomicStore!(MemoryOrder.raw)(t4SawCancelled, 1u);
+        atomicFetchAdd!(MemoryOrder.raw)(t4Checks, 1u);
+        if (kids is null)
+        {
+            kids = c.createChildren!uint(8, 2);
+            namedCheck(kids !is null, "t4 cohort");
+            foreach (i; 0 .. 8) namedCheck(kids.spawn(c, cast(uint) i) == PrivateSpawnResult.spawned, "t4 spawn");
+        }
+        if (!kids.finished(c)) return PrivateRootDisposition.again;
+        if (rounds++ == 3) return PrivateRootDisposition.finish;
+        namedCheck(kids.start!t4Op(c) == PrivateStartResult.started, "t4 start");
+        return PrivateRootDisposition.again;
+    }
+}
+ulong t4Run(bool withDeadline)
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(T4Root, t4Root).create(farm, 3, trackedOptions());
+    PrivateRootHandle h;
+    immutable before = atomicLoad(privateClockReads);
+    if (withDeadline)
+        check(park.spawn(T4Root.init, h, MonoTime.currTime + 3600.seconds) == PrivateSpawnResult.spawned);
+    else
+    {
+        check(park.spawn(T4Root.init) == PrivateSpawnResult.spawned);
+        check(park.spawn(T4Root.init, h) == PrivateSpawnResult.spawned);
+        check(park.spawn(T4Root.init, h, MonoTime.max) == PrivateSpawnResult.spawned);
+    }
+    PrivateRootOutcome[] taken;
+    drainTracked(park, token, view, taken, "t4 drain");
+    park.destroy();
+    foreach (o; taken)
+        namedCheck(o.status == PrivateOutcomeStatus.completed && o.cause == PrivateCancelCause.none, "t4 completed");
+    namedCheck(taken.length == (withDeadline ? 1 : 3), "t4 outcomes");
+    return atomicLoad(privateClockReads) - before;
+}
+void rootTrackingT4()
+{
+    atomicStore(t4SawCancelled, 0u);
+    atomicStore(t4Checks, 0u);
+    namedCheck(t4Run(false) == 0, "t4 no clock read without a deadline");
+    namedCheck(atomicLoad(t4Checks) >= 3 * (3 * 8 + 4), "t4 checks ran");
+    namedCheck(t4Run(true) != 0, "t4 armed deadline reads the clock");
+    namedCheck(atomicLoad(t4SawCancelled) == 0, "t4 nothing cancelled");
+}
+
+// T5. Untaken outcomes hold their slots: a full park of terminal roots
+// returns capacityFull until one is taken. destroy with an untaken outcome
+// is fatal (death test tracked-destroy-untaken).
+// Mutation T5: recycle at collection (drop the `return` after retainOutcome
+// in reclaim): "t5 capacityFull while outcomes held".
+shared uint t5Finished;
+PrivateRootDisposition t5Root(scope ref PrivateBorrow!int, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(t5Finished, 1u);
+    return PrivateRootDisposition.finish;
+}
+void rootTrackingT5()
+{
+    atomicStore(t5Finished, 0u);
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(int, t5Root).create(farm, 2, trackedOptions());
+    check(park.spawn(1) == PrivateSpawnResult.spawned && park.spawn(2) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad(t5Finished) < 2)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "t5 roots finish");
+    }
+    park.collectCompleted();
+    namedCheck(park.live == 2 && park.spawn(3) == PrivateSpawnResult.capacityFull,
+        "t5 capacityFull while outcomes held");
+    PrivateRootOutcome o;
+    namedCheck(park.takeOutcome(o) && park.live == 1, "t5 take frees one slot");
+    namedCheck(park.spawn(3) == PrivateSpawnResult.spawned, "t5 spawn into the taken slot");
+    PrivateRootOutcome[] taken;
+    drainTracked(park, token, view, taken, "t5 drain");
+    park.destroy();
+    namedCheck(taken.length == 2, "t5 remaining outcomes");
+}
+
+// T6. X1a edge: each root's final activation writes application storage
+// plainly on a worker; the emitter reads it right after takeOutcome returns
+// that root. TSan checks the edge on both terminal paths (leaf finish and
+// joined finish) and with consumer-side reclamation. Edge check, no mutation.
+enum t6Roots = 2000;
+__gshared ulong[t6Roots] t6Output;
+void t6Op(scope ref PrivateBorrow!uint, scope ref PrivateContext) nothrow @nogc @system {}
+struct T6Root { uint id; PrivateChildPark!uint* kids; }
+PrivateRootDisposition t6Root(scope ref PrivateBorrow!T6Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (id % 2 == 0 && kids is null)
+        {
+            kids = c.createChildren!uint(4, 2);
+            namedCheck(kids !is null, "t6 cohort");
+            foreach (i; 0 .. 4) namedCheck(kids.spawn(c, cast(uint) i) == PrivateSpawnResult.spawned, "t6 spawn");
+            namedCheck(kids.start!t6Op(c) == PrivateStartResult.started, "t6 start");
+            return PrivateRootDisposition.waitChildren;
+        }
+        t6Output[id] = id * 7919UL + 1;
+        return PrivateRootDisposition.finish;
+    }
+}
+void rootTrackingT6(PrivateRootReclamation reclaim)()
+{
+    t6Output[] = 0;
+    auto farm = AntFarm.create(4, 8, 4, 0, 0, 1, 65536);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    auto workers = new Workers(farm, 4);
+    scope(exit) workers.join();
+    auto park = PrivateRootPark!(T6Root, t6Root, reclaim).create(farm, 64, trackedOptions(16));
+    uint[64] slotId;
+    uint spawned, taken;
+    auto deadline = MonoTime.currTime + 60.seconds;
+    while (taken < t6Roots)
+    {
+        while (spawned < t6Roots && park.live < park.capacity)
+        {
+            PrivateRootHandle h;
+            check(park.spawn(T6Root(spawned), h) == PrivateSpawnResult.spawned);
+            slotId[h.index] = spawned++;
+        }
+        park.pump(token);
+        PrivateRootOutcome o;
+        while (park.takeOutcome(o))
+        {
+            immutable id = slotId[o.root.index];
+            namedCheck(o.status == PrivateOutcomeStatus.completed, "t6 completed");
+            namedCheck(t6Output[id] == id * 7919UL + 1, "t6 root output visible after takeOutcome");
+            ++taken;
+        }
+        namedCheck(MonoTime.currTime < deadline, "t6 drain");
+    }
+    park.destroy();
+}
+
+// T7. Shutdown with cancelAll and 1000 roots at mixed states, run inline so
+// the states are exact. Before cancelAll, kinds 0 and 1 are terminal and
+// their outcomes held; the others are live. cancelAll skips held outcomes,
+// returns the live count, and records cause deadline for the armed root
+// whose deadline passed. Pumping alone then finishes every computation but
+// leaves live at 1000; taking outcomes drains it.
+// kind 0 finish: completed. kind 1 fail(1000+i), finish: failed.
+// kind 2 polls until cancelled: cancelled(requested).
+// kind 3 polls with an active child wave; on cancel, cancelChildren and
+// finishAfterChildren: cancelled(requested).
+// kind 4 fails twice (first code wins), polls until cancelled: failed.
+// kind 5 expired deadline, polls without checking until cancelAll: cancelled(deadline).
+// Mutation T7a: drop the takeOutcome loop from the recipe: "t7 drained"
+// times out (documented; pumping alone is checked by "t7 pumping holds outcomes").
+// Mutation T7b: cancelled outranks failed in retainOutcome: "t7 statuses".
+// Mutation T7c: root fail keeps the last code: "t7 statuses" (kind 4).
+enum t7Roots = 1000;
+shared uint t7Final, t7AfterCancelAll;
+void t7Op(scope ref PrivateBorrow!uint, scope ref PrivateContext) nothrow @nogc @system {}
+struct T7Root { uint id; PrivateChildPark!uint* kids; uint activations; }
+PrivateRootDisposition t7Root(scope ref PrivateBorrow!T7Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        immutable kind = id % 6;
+        ++activations;
+        final switch (kind)
+        {
+            case 0:
+                atomicFetchAdd!(MemoryOrder.raw)(t7Final, 1u);
+                return PrivateRootDisposition.finish;
+            case 1:
+                c.fail(1000 + id);
+                atomicFetchAdd!(MemoryOrder.raw)(t7Final, 1u);
+                return PrivateRootDisposition.finish;
+            case 2:
+                if (!c.cancelled) return PrivateRootDisposition.again;
+                atomicFetchAdd!(MemoryOrder.raw)(t7Final, 1u);
+                return PrivateRootDisposition.finish;
+            case 3:
+                if (kids is null)
+                {
+                    kids = c.createChildren!uint(4, 1);
+                    namedCheck(kids !is null, "t7 cohort");
+                    foreach (i; 0 .. 4) namedCheck(kids.spawn(c, cast(uint) i) == PrivateSpawnResult.spawned, "t7 spawn");
+                }
+                if (c.cancelled)
+                {
+                    atomicFetchAdd!(MemoryOrder.raw)(t7Final, 1u);
+                    c.cancelChildren();
+                    return PrivateRootDisposition.finishAfterChildren;
+                }
+                if (kids.finished(c))
+                    namedCheck(kids.start!t7Op(c) == PrivateStartResult.started, "t7 start");
+                return PrivateRootDisposition.again;
+            case 4:
+                if (activations == 1) c.fail(2000 + id);
+                if (activations == 2) c.fail(3000 + id);
+                if (!c.cancelled) return PrivateRootDisposition.again;
+                atomicFetchAdd!(MemoryOrder.raw)(t7Final, 1u);
+                return PrivateRootDisposition.finish;
+            case 5:
+                if (atomicLoad!(MemoryOrder.raw)(t7AfterCancelAll) == 0 || !c.cancelled)
+                    return PrivateRootDisposition.again;
+                atomicFetchAdd!(MemoryOrder.raw)(t7Final, 1u);
+                return PrivateRootDisposition.finish;
+        }
+    }
+}
+void rootTrackingT7()
+{
+    atomicStore(t7Final, 0u);
+    atomicStore(t7AfterCancelAll, 0u);
+    auto farm = AntFarm.create(4, 8, 1, 0, 0, 1, 65536);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(T7Root, t7Root).create(farm, t7Roots, trackedOptions(64));
+    auto handles = new PrivateRootHandle[t7Roots];
+    auto past = MonoTime.currTime - 1.seconds;
+    size_t live;
+    foreach (i; 0 .. t7Roots)
+    {
+        check(park.spawn(T7Root(cast(uint) i), handles[i], i % 6 == 5 ? past : MonoTime.max)
+            == PrivateSpawnResult.spawned);
+        if (i % 6 > 1) ++live;
+    }
+    enum terminalEarly = (t7Roots + 5) / 6 + (t7Roots + 4) / 6; // kinds 0 and 1
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (atomicLoad(t7Final) < terminalEarly)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "t7 early roots");
+    }
+    foreach (_; 0 .. 4) { park.pump(token); while (view.consumeNext()) {} }
+    park.collectCompleted();
+    namedCheck(park.live == t7Roots, "t7 early outcomes held");
+    namedCheck(park.cancelAll() == live, "t7 cancelAll counts live unfinished roots");
+    namedCheck(park.cancelAll() == 0, "t7 cancelAll is idempotent");
+    atomicStore!(MemoryOrder.raw)(t7AfterCancelAll, 1u);
+    while (atomicLoad(t7Final) < t7Roots)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, "t7 computations finish");
+    }
+    foreach (_; 0 .. 16) { park.pump(token); while (view.consumeNext()) {} }
+    namedCheck(park.live == t7Roots, "t7 pumping holds outcomes");
+    PrivateRootOutcome[] taken;
+    drainTracked(park, token, view, taken, "t7 drained");
+    park.destroy();
+    namedCheck(taken.length == t7Roots, "t7 every root taken once");
+    auto seen = new bool[t7Roots];
+    foreach (o; taken)
+    {
+        size_t id = t7Roots;
+        foreach (i, h; handles) if (h == o.root) { id = i; break; }
+        namedCheck(id < t7Roots && !seen[id], "t7 outcome identity");
+        seen[id] = true;
+        bool ok;
+        final switch (id % 6)
+        {
+            case 0: ok = o.status == PrivateOutcomeStatus.completed && o.cause == PrivateCancelCause.none; break;
+            case 1: ok = o.status == PrivateOutcomeStatus.failed && o.code == 1000 + id; break;
+            case 2: case 3:
+                ok = o.status == PrivateOutcomeStatus.cancelled && o.cause == PrivateCancelCause.requested; break;
+            case 4: ok = o.status == PrivateOutcomeStatus.failed && o.code == 2000 + id
+                && o.cause == PrivateCancelCause.none; break;
+            case 5: ok = o.status == PrivateOutcomeStatus.cancelled && o.cause == PrivateCancelCause.deadline; break;
+        }
+        namedCheck(ok, "t7 statuses");
+    }
+    // Held kinds 0 and 1 were collected first, in collection order.
+    foreach (o; taken[0 .. terminalEarly])
+    {
+        size_t id;
+        foreach (i, h; handles) if (h == o.root) { id = i; break; }
+        namedCheck(id % 6 <= 1, "t7 outcome FIFO order");
+    }
+}
+
+// T8. Handles: equality, density of index, recycling, default handles.
+// Behavioural.
+PrivateRootDisposition t8Root(scope ref PrivateBorrow!int, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    return PrivateRootDisposition.finish;
+}
+void rootTrackingT8()
+{
+    PrivateRootHandle none;
+    namedCheck(!none.valid && none == PrivateRootHandle.init
+        && none.requestCancel() == PrivateCancelResult.staleHandle, "t8 default handle");
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(int, t8Root).create(farm, 4, trackedOptions());
+    PrivateRootHandle[4] h;
+    bool[4] used;
+    foreach (i; 0 .. 4)
+    {
+        check(park.spawn(cast(int) i, h[i]) == PrivateSpawnResult.spawned);
+        namedCheck(h[i].valid && h[i].index < 4 && !used[h[i].index], "t8 dense distinct index");
+        used[h[i].index] = true;
+        auto copy = h[i];
+        namedCheck(copy == h[i], "t8 copies are equal");
+        foreach (j; 0 .. i) namedCheck(h[j] != h[i], "t8 distinct roots differ");
+    }
+    PrivateRootHandle extra;
+    namedCheck(park.spawn(9, extra) == PrivateSpawnResult.capacityFull && !extra.valid, "t8 full park issues no handle");
+    PrivateRootOutcome[] taken;
+    drainTracked(park, token, view, taken, "t8 drain");
+    namedCheck(taken.length == 4, "t8 outcomes");
+    foreach (o; taken)
+    {
+        size_t matches;
+        foreach (x; h) if (x == o.root) ++matches;
+        namedCheck(matches == 1 && o.status == PrivateOutcomeStatus.completed, "t8 outcome names its root");
+    }
+    PrivateRootHandle again;
+    check(park.spawn(4, again) == PrivateSpawnResult.spawned);
+    size_t sameIndex;
+    foreach (x; h)
+    {
+        namedCheck(x != again && x.requestCancel() == PrivateCancelResult.staleHandle, "t8 recycled slot, new identity");
+        if (x.index == again.index) ++sameIndex;
+    }
+    namedCheck(sameIndex == 1, "t8 recycled index");
+    taken = null;
+    drainTracked(park, token, view, taken, "t8 drain again");
+    park.destroy();
+}
+
+// T9 (death tests root-generation-wrap). A seam seeds the root's generation.
+// At 2^48 - 2 the take succeeds and the slot's next generation is the last
+// one; taking that generation is fatal before the store would wrap.
+// Mutation T9: delete the wrap check; the second take stores VACANT(0) and
+// returns: "root generation wrap survived".
+struct T9Root { ulong generation; }
+PrivateRootDisposition t9Root(scope ref PrivateBorrow!T9Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    version (AntfarmActorTestHooks)
+        if (b.value.generation != 0) privateTestSetRootGeneration(c, b.value.generation);
+    return PrivateRootDisposition.finish;
+}
+void rootGenerationWrapDeath()
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(T9Root, t9Root).create(farm, 1, trackedOptions());
+    check(park.spawn(T9Root((1UL << 48) - 2)) == PrivateSpawnResult.spawned);
+    PrivateRootOutcome[] taken;
+    drainTracked(park, token, view, taken, "t9 first generation");
+    check(taken.length == 1 && park.spawn(T9Root(0)) == PrivateSpawnResult.spawned);
+    drainTracked(park, token, view, taken, "t9 last generation");
+    fprintf(stderr, "root generation wrap survived\n");
+}
+
+// Tracking-only API on an untracked park, invalid handles and untaken
+// outcomes are fatal in debug and release.
+PrivateRootDisposition finishStep(scope ref PrivateBorrow!int, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    return PrivateRootDisposition.finish;
+}
+void rootTrackingMisuse(string which)
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto untracked = PrivateRootPark!(int, finishStep).create(farm, 1);
+    PrivateRootHandle h;
+    PrivateRootOutcome o;
+    if (which == "spawn-handle") untracked.spawn(0, h);
+    else if (which == "take") untracked.takeOutcome(o);
+    else if (which == "cancel-all") untracked.cancelAll();
+    else if (which == "handle-index") cast(void) h.index;
+    else if (which == "destroy-untaken")
+    {
+        auto park = PrivateRootPark!(int, finishStep).create(farm, 1, trackedOptions());
+        check(park.spawn(0) == PrivateSpawnResult.spawned);
+        foreach (_; 0 .. 8) { park.pump(token); while (view.consumeNext()) {} }
+        park.destroy();
+    }
+    fprintf(stderr, "root tracking misuse survived\n");
+}
+void rootTrackingDeath()
+{
+    version (linux)
+    {
+        check(diedWithMessage("root-tracking-misuse:spawn-handle",
+            "antfarm fatal: private root spawn handle: untracked park"));
+        check(diedWithMessage("root-tracking-misuse:take", "antfarm fatal: private root takeOutcome: untracked park"));
+        check(diedWithMessage("root-tracking-misuse:cancel-all", "antfarm fatal: private root cancelAll: untracked park"));
+        check(diedWithMessage("root-tracking-misuse:handle-index", "antfarm fatal: private root handle: invalid"));
+        check(diedWithMessage("root-tracking-misuse:destroy-untaken", "antfarm fatal: destroy nonempty private root park"));
+        version (AntfarmActorTestHooks)
+            check(diedWithMessage("root-generation-wrap", "antfarm fatal: private root generation wrap"));
+        writeln("PASS tracking-only API on untracked parks, invalid handles, untaken outcomes and generation wrap are fatal");
+    }
+    else
+        writeln("SKIP root tracking death tests: /proc/self/exe re-exec requires Linux");
+}
+
+// Tracked torture (§12.5): the cancellation torture's trees under tracked
+// roots with random deadlines (none, past, within 2 ms, an hour away), root
+// fail, a foreign thread cancelling random published handles (most of them
+// stale by then) and occasional cancelAll. The emitter pumps and takes
+// outcomes. Invariants, beyond cancelTorture's: one outcome per root, named by
+// its handle; failed exactly when the root failed, with its code; cancelled
+// carries a cause, and deadline only for a root that had one; a root that
+// observed cancelled never completes; a `requested` handle result never ends
+// completed; live reaches zero only by taking outcomes.
+struct TrackedTortureRoot
+{
+    ulong seed;
+    void* kids;
+    uint count, id;
+    bool polling, live;
+    ~this() nothrow @nogc @system
+    {
+        if (live) atomicFetchAdd!(MemoryOrder.raw)(tortureDtors, 1u);
+    }
+}
+__gshared bool[] ttFailed, ttSawCancelled;
+PrivateRootDisposition trackedTortureRoot(scope ref PrivateBorrow!TrackedTortureRoot b,
+    scope ref PrivateContext c) nothrow @nogc @system
+{
+    with (b.value)
+    {
+        auto r = tortureNext(seed);
+        immutable cancelled = c.cancelled;
+        if (cancelled) ttSawCancelled[id] = true;
+        if ((r >> 24) % 8 == 0)
+        {
+            c.fail(5000 + id);
+            ttFailed[id] = true;
+        }
+        if (kids is null)
+        {
+            tortureLaunch(seed, 0, kids, count, c);
+            polling = (r & 1) != 0;
+            if (cancelled || (r >> 8) % 6 == 0) c.cancelChildren();
+            return polling ? PrivateRootDisposition.again : PrivateRootDisposition.waitChildren;
+        }
+        auto cohort = cast(TortureCohort*) kids;
+        if (!cohort.finished(c))
+        {
+            namedCheck(polling, "tracked torture waiting root resumed before its join");
+            if (cancelled)
+            {
+                c.cancelChildren();
+                return PrivateRootDisposition.finishAfterChildren;
+            }
+            if ((r >> 4) % 4 == 0) cohort.cancel(c);
+            return PrivateRootDisposition.again;
+        }
+        tortureCheck(cohort, c);
+        return PrivateRootDisposition.finish;
+    }
+}
+void trackedTorture(size_t roots, uint seed)
+{
+    Counts counts;
+    atomicStore!(MemoryOrder.raw)(tortureSpawned, 0u);
+    atomicStore!(MemoryOrder.raw)(tortureDtors, 0u);
+    atomicStore!(MemoryOrder.raw)(tortureTruncated, 0u);
+    atomicStore!(MemoryOrder.raw)(tortureCancelled, 0u);
+    atomicStore!(MemoryOrder.raw)(tortureFailed, 0u);
+    ttFailed = new bool[roots];
+    ttSawCancelled = new bool[roots];
+    auto hasDeadline = new bool[roots];
+    auto status = new PrivateOutcomeStatus[roots];
+    auto requested = new shared(ubyte)[roots];
+    auto handles = new PrivateRootHandle[roots];
+    shared size_t published;
+    shared uint stop;
+    size_t[PrivateOutcomeStatus.max + 1] byStatus;
+    size_t byDeadline, cancelAlls;
+    {
+        auto farm = AntFarm.create(2, 8, 4, 0, 0, 1, 8192);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        auto workers = new Workers(farm, 4);
+        scope(exit) workers.join();
+        PrivateRootOptions options = trackedOptions(8);
+        options.allocator = policy(counts);
+        auto park = PrivateRootPark!(TrackedTortureRoot, trackedTortureRoot).create(farm, 64, options);
+        check(park !is null);
+        auto canceller = new Thread({
+            ulong r = seed * 7919UL | 1;
+            while (atomicLoad!(MemoryOrder.acq)(stop) == 0)
+            {
+                immutable n = atomicLoad!(MemoryOrder.acq)(published);
+                foreach (_; 0 .. 2000) pause();
+                if (n == 0) continue;
+                immutable id = cast(size_t) (tortureNext(r) % n);
+                if (handles[id].requestCancel() == PrivateCancelResult.requested)
+                    atomicStore!(MemoryOrder.raw)(requested[id], cast(ubyte) 1);
+            }
+        });
+        canceller.start();
+        auto slotId = new size_t[park.capacity];
+        ulong s = seed | 1;
+        size_t spawned, taken;
+        auto deadline = MonoTime.currTime + 120.seconds;
+        while (taken < roots)
+        {
+            while (spawned < roots && park.live < park.capacity)
+            {
+                immutable r = tortureNext(s);
+                auto now = MonoTime.currTime;
+                MonoTime due = MonoTime.max;
+                switch (r % 10)
+                {
+                    case 5: due = now - 1.seconds; break;
+                    case 6: case 7: due = now + usecs(cast(long) ((r >> 8) % 2000)); break;
+                    case 8: case 9: due = now + 3600.seconds; break;
+                    default: break;
+                }
+                hasDeadline[spawned] = due != MonoTime.max;
+                PrivateRootHandle h;
+                check(park.spawn(TrackedTortureRoot(tortureNext(s) | 1, null, 0, cast(uint) spawned, false, true),
+                    h, due) == PrivateSpawnResult.spawned);
+                atomicFetchAdd!(MemoryOrder.raw)(tortureSpawned, 1u);
+                handles[spawned] = h;
+                slotId[h.index] = spawned;
+                atomicStore!(MemoryOrder.rel)(published, ++spawned);
+            }
+            if (tortureNext(s) % 2048 == 0)
+            {
+                park.cancelAll();
+                ++cancelAlls;
+            }
+            park.pump(token);
+            PrivateRootOutcome o;
+            while (park.takeOutcome(o))
+            {
+                immutable id = slotId[o.root.index];
+                namedCheck(o.root == handles[id], "tracked torture outcome identity");
+                namedCheck((o.status == PrivateOutcomeStatus.failed) == ttFailed[id]
+                    && (!ttFailed[id] || o.code == 5000 + id), "tracked torture failure");
+                namedCheck((o.status == PrivateOutcomeStatus.cancelled) == (o.cause != PrivateCancelCause.none),
+                    "tracked torture cause");
+                namedCheck(o.cause != PrivateCancelCause.deadline || hasDeadline[id], "tracked torture deadline cause");
+                namedCheck(!ttSawCancelled[id] || o.status != PrivateOutcomeStatus.completed,
+                    "tracked torture observed cancel never completes");
+                status[id] = o.status;
+                ++byStatus[o.status];
+                if (o.cause == PrivateCancelCause.deadline) ++byDeadline;
+                ++taken;
+            }
+            namedCheck(MonoTime.currTime < deadline, "tracked torture drain");
+        }
+        namedCheck(park.live == 0, "tracked torture live reaches zero");
+        atomicStore!(MemoryOrder.rel)(stop, 1u);
+        canceller.join();
+        park.destroy();
+    }
+    foreach (id; 0 .. roots)
+        namedCheck(atomicLoad(requested[id]) == 0 || status[id] != PrivateOutcomeStatus.completed,
+            "tracked torture requested never completes");
+    namedCheck(atomicLoad(tortureDtors) == atomicLoad(tortureSpawned), "tracked torture destroyed exactly once");
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "tracked torture allocation balance");
+    namedCheck(byStatus[PrivateOutcomeStatus.failed] != 0 && byStatus[PrivateOutcomeStatus.cancelled] != 0
+        && byStatus[PrivateOutcomeStatus.completed] != 0 && byDeadline != 0, "tracked torture exercised every status");
+    writeln("tracked torture: ", roots, " roots (", byStatus[PrivateOutcomeStatus.completed], " completed, ",
+        byStatus[PrivateOutcomeStatus.failed], " failed, ", byStatus[PrivateOutcomeStatus.cancelled], " cancelled, ",
+        byDeadline, " by deadline; ", cancelAlls, " cancelAll), ", atomicLoad(tortureSpawned), " actors, ",
+        atomicLoad(tortureTruncated), " truncated joined waves");
+}
+
+void phaseRootTracking()
+{
+    version (AntfarmActorTestHooks)
+    {
+        rootTrackingT1();
+        rootTrackingT2();
+    }
+    rootTrackingT3();
+    rootTrackingT4();
+    rootTrackingT5();
+    rootTrackingT6!(PrivateRootReclamation.emitter)();
+    rootTrackingT6!(PrivateRootReclamation.consumer)();
+    rootTrackingT7();
+    rootTrackingT8();
+    writeln("PASS private root tracking T1-T8");
+    version (TSan) trackedTorture(300, 23);
+    else trackedTorture(3000, 23);
+    writeln("PASS private tracked torture");
+}
+
 void runSuite()
 {
     phaseCancel();
+    phaseRootTracking();
     phaseOutcomes();
     phaseCont();
     phaseE1();
@@ -9404,7 +10376,29 @@ void main(string[] args)
         case "cancel-c7": version (AntfarmActorTestHooks) cancelC7(); return;
         case "cancel-c8": cancelC8(); return;
         case "cancel-c9": version (AntfarmActorTestHooks) cancelC9(); return;
-        case "cancel-c10": cancelC10(); return;
+        case "cancel-c10":
+            foreach (c10Mode; [C10Mode.untracked, C10Mode.failed, C10Mode.cancelled, C10Mode.failedAndCancelled])
+                cancelC10(c10Mode);
+            return;
+        case "root-tracking": phaseRootTracking(); return;
+        case "root-t1": version (AntfarmActorTestHooks) rootTrackingT1(); return;
+        case "root-t2": version (AntfarmActorTestHooks) rootTrackingT2(); return;
+        case "root-t3": rootTrackingT3(); return;
+        case "root-t4": rootTrackingT4(); return;
+        case "root-t5": rootTrackingT5(); return;
+        case "root-t6":
+            rootTrackingT6!(PrivateRootReclamation.emitter)();
+            rootTrackingT6!(PrivateRootReclamation.consumer)();
+            return;
+        case "root-t7": rootTrackingT7(); return;
+        case "root-t8": rootTrackingT8(); return;
+        case "root-tracking-death": rootTrackingDeath(); return;
+        case "root-generation-wrap": rootGenerationWrapDeath(); return;
+        case "tracked-torture":
+            import std.conv : to;
+            trackedTorture(args.length > 2 ? args[2].to!size_t : 3000, args.length > 3 ? args[3].to!uint : 23);
+            writeln("PASS private tracked torture");
+            return;
         case "cancel-c11": cancelC11(); return;
         case "cancel-c12": cancelC12(); return;
         case "cancel-c13": cancelC13(); return;
@@ -9454,6 +10448,12 @@ void main(string[] args)
             fprintf(stderr, "antfarm fatal: private death harness sample\n");
             return; // right message, wrong exit status
         default: break;
+    }
+    enum misusePrefix = "root-tracking-misuse:";
+    if (mode.length > misusePrefix.length && mode[0 .. misusePrefix.length] == misusePrefix)
+    {
+        rootTrackingMisuse(mode[misusePrefix.length .. $]);
+        return;
     }
     enum nodeDeathPrefix = "node-death:";
     if (mode.length > nodeDeathPrefix.length

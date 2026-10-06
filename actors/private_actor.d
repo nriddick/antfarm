@@ -15,6 +15,7 @@ import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
     atomicFetchAdd, atomicFetchSub, cas;
 import core.stdc.string : memcpy, memset;
 import core.lifetime : moveEmplace;
+import core.time : MonoTime;
 import std.traits : hasElaborateDestructor, hasNested, ReturnType;
 
 enum defaultPrivateBatchLimit = 256;
@@ -69,6 +70,77 @@ private template opKind(T, R, alias operation)
 enum PrivateSpawnResult : ubyte { spawned, capacityFull, allocationFailed, waveActive, retiring }
 enum PrivateStartResult : ubyte { started, empty, waveActive, retiring }
 enum PrivateRootReclamation : ubyte { emitter, consumer }
+
+struct PrivateRootOptions
+{
+    size_t batchLimit = defaultPrivateBatchLimit;
+    ActorAllocator allocator = ActorAllocator.cRuntime();
+    bool tracking; // per-root records: handles, cancel, deadlines, outcomes
+}
+
+enum PrivateOutcomeStatus : ubyte { completed, failed, cancelled }
+enum PrivateCancelCause : ubyte { none, requested, deadline }
+enum PrivateCancelResult : ubyte { requested, alreadyRequested, finished, staleHandle }
+
+/// Identity of one tracked root generation. Copyable and non-owning.
+/// requestCancel may be called from any thread while the park exists (the
+/// one exception to single-emitter park access); after destroy it is
+/// undefined, as for ActorHandle after runtime destruction.
+struct PrivateRootHandle
+{
+private:
+    RootRecord* record_;
+    ulong generation_;
+public:
+    @property bool valid() const pure nothrow @nogc @safe { return record_ !is null; }
+
+    /// Dense slot index, below the park's capacity. A recycled slot keeps its
+    /// index under a new generation, so index alone is not identity.
+    @property size_t index() const nothrow @nogc @system
+    {
+        if (record_ is null) fatal("private root handle: invalid");
+        return record_.index;
+    }
+
+    /// Ask this root generation to cancel. The root observes it through
+    /// context.cancelled, and the emitter stops publishing initial tables
+    /// in its tree. A request linearized before the root's terminal
+    /// collection makes its outcome cancelled (unless it failed); a later one
+    /// returns finished. staleHandle once the outcome was taken, or for a
+    /// default handle. Writes before a successful request happen-before any
+    /// activation that observes cancelled. Join every thread that may call
+    /// this before the park's destroy.
+    PrivateCancelResult requestCancel() nothrow @nogc @system
+    {
+        if (record_ is null) return PrivateCancelResult.staleHandle;
+        auto w = atomicLoad!(MemoryOrder.acq)(record_.control);
+        while (true)
+        {
+            if (controlGeneration(w) != generation_) return PrivateCancelResult.staleHandle;
+            if (!(w & controlLive)) return PrivateCancelResult.finished;
+            if (w & controlCancelled) return PrivateCancelResult.alreadyRequested;
+            version (AntfarmActorTestHooks)
+                actorTestPoint(ActorTestPoint.privateRootCancelBeforeCas, null);
+            if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(&record_.control, &w,
+                    w | controlCancelled | causeBits(PrivateCancelCause.requested)))
+                return PrivateCancelResult.requested;
+        }
+    }
+
+    bool opEquals(const PrivateRootHandle other) const pure nothrow @nogc @safe
+    {
+        return record_ is other.record_ && generation_ == other.generation_;
+    }
+}
+
+/// One terminal tracked root, popped by takeOutcome in collection order.
+struct PrivateRootOutcome
+{
+    PrivateRootHandle root;      // identity; already stale when returned
+    PrivateOutcomeStatus status;
+    PrivateCancelCause cause;    // status == cancelled; none otherwise
+    uint code;                   // status == failed: the first root fail(code)
+}
 
 /// Snapshot of the last nonempty wave of a cohort, acquired after its join.
 struct PrivateWaveOutcome
@@ -156,28 +228,41 @@ public:
     /// Record a domain failure. Does not end the activation; return normally.
     /// A member aggregates the report on its enclosing wave (call at most once
     /// per member per wave; extra reports are counted and not diagnosed).
-    /// A root sets the tracked root's outcome, first code wins; fatal on an
-    /// untracked park until root tracking exists.
+    /// A root sets its tracked outcome to failed; the first code wins across
+    /// all of its activations. Fatal on an untracked park.
     void fail(uint code) nothrow @nogc @system
     {
         if (actor_ is null) fatal("private fail: unauthorized context");
         if (enclosing_ is null)
         {
-            if (!rootParkTracked(actor_))
-                fatal("private root fail: untracked park");
-            return; // F3 records the first code on the root record
+            auto service = rootService(actor_, null);
+            if (service.records is null) fatal("private root fail: untracked park");
+            // Root activations are serialized by custody; the emitter reads
+            // these after the activation's table join.
+            auto record = rootRecord(service, actor_);
+            if (!record.failed)
+            {
+                record.failed = true;
+                record.failureCode = code;
+            }
+            return;
         }
         recordWaveFailure(enclosing_, actor_, code);
     }
 
     /// True if a scope containing this activation is cancelled: an enclosing
-    /// wave on the path to the root, cancelled by its parent or a peer. Roots
-    /// see only root-level cancellation, which needs root tracking. Advisory:
-    /// may become true at any time; never becomes false within an activation.
+    /// wave on the path to the root, cancelled by its parent or a peer, or the
+    /// tracked root itself (handle, cancelAll, or an expired deadline). Roots
+    /// see only root-level cancellation. Advisory: may become true at any
+    /// time; never becomes false within an activation.
     @property bool cancelled() nothrow @nogc @system
     {
         if (actor_ is null) fatal("private cancelled: unauthorized context");
-        if (enclosing_ is null) return false; // root records arrive with tracking
+        if (enclosing_ is null)
+        {
+            auto service = rootService(actor_, null);
+            return service.records !is null && rootCancelledNow(service, actor_);
+        }
         return scopeCancelled(enclosing_);
     }
 
@@ -272,6 +357,9 @@ private struct ChildBase
     Entry* resumeHead, resumeTail;
     size_t resumeCount;
     bool resumeScheduled;
+    // Immutable: the root park keeps records. Padding beside a line the emitter
+    // already reads, so the untracked check never loads the shared Service.
+    bool tracked;
 
     static ChildBase* fromWave(Wave* wave) nothrow @nogc @system
     {
@@ -313,11 +401,70 @@ version (D_LP64)
     static assert(ChildBase.sizeof == 168);
 }
 
-// F3 installs per-root records and returns records !is null. Until then
-// every park is untracked, so root fail has no application outcome slot.
-private bool rootParkTracked(Entry*) nothrow @nogc @system
+// Per-root record of a tracked park, parallel to its Entries. Only control
+// is shared with foreign threads (handle cancellers).
+private struct RootRecord
 {
-    return false;
+    shared ulong control; // generation:48 | cause:8 | flags:8
+    long deadline;        // MonoTime ticks; the emitter writes before publication
+    uint failureCode;     // root activations write; the emitter reads after the join
+    bool failed;
+    PrivateOutcomeStatus status; // emitter: set by the terminal CAS
+    uint index;           // immutable
+}
+static assert(RootRecord.sizeof == 32);
+
+// Control-word states: VACANT(g) = g; LIVE(g) = g|live[|armed][|cancelled|cause];
+// FINISHED(g) = LIVE(g) without live. Cancellers CAS only from a live word of
+// their own generation; the emitter's plain stores happen only from non-live
+// words, and only it recycles generations.
+private enum ulong controlLive = 1, controlCancelled = 2, controlArmed = 4;
+private enum controlCauseShift = 8, controlGenerationShift = 16;
+private enum ulong maxRootGeneration = (1UL << 48) - 1;
+
+private ulong controlGeneration(ulong w) pure nothrow @nogc @safe
+{
+    return w >> controlGenerationShift;
+}
+
+private ulong causeBits(PrivateCancelCause cause) pure nothrow @nogc @safe
+{
+    return cast(ulong) cause << controlCauseShift;
+}
+
+private RootRecord* rootRecord(Service* service, Entry* root) nothrow @nogc @system
+{
+    return &service.records[root - service.rootEntries];
+}
+
+private long privateClockTicks() nothrow @nogc @system
+{
+    version (AntfarmActorTestHooks)
+        atomicFetchAdd!(MemoryOrder.raw)(privateClockReads, 1UL);
+    return MonoTime.currTime.ticks;
+}
+
+// Root contexts, descendants and the emitter for roots in its trees. Every
+// caller's credit keeps the root live, so the CAS stops only on cancelled.
+// The clock is read only for armed, not-yet-cancelled roots; an expired
+// deadline becomes cancellation exactly once, when observed. Out of line, so
+// the untracked check in scopeCancelled and the emitter stays one branch.
+pragma(inline, false)
+private bool rootCancelledNow(Service* service, Entry* root) nothrow @nogc @system
+{
+    auto record = rootRecord(service, root);
+    auto w = atomicLoad!(MemoryOrder.acq)(record.control);
+    version (assert)
+        if (!(w & controlLive)) fatal("private root cancel check: root not live");
+    if (w & controlCancelled) return true;
+    if (!(w & controlArmed) || privateClockTicks() < record.deadline) return false;
+    while (!(w & controlCancelled) && (w & controlLive))
+    {
+        if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(&record.control, &w,
+                w | controlCancelled | causeBits(PrivateCancelCause.deadline)))
+            break;
+    }
+    return true;
 }
 
 // Callable on a consumer (context) or the emitter (emit). w is active and
@@ -329,6 +476,7 @@ private bool scopeCancelled(Wave* w) nothrow @nogc @system
 {
     auto base = ChildBase.fromWave(w);
     auto root = base.root;
+    if (base.tracked && rootCancelledNow(base.service, root)) return true;
     if (!atomicLoad!(MemoryOrder.acq)(root.subtreeCancel)) return false;
     while (true)
     {
@@ -451,6 +599,26 @@ version (AntfarmActorTestHooks)
         return atomicLoad!(MemoryOrder.acq)(root.subtreeCancel);
     }
 
+    /// Test-only: clock reads by deadline checks since process start.
+    shared ulong privateClockReads;
+
+    /// Test-only: replace the running tracked root's control generation,
+    /// keeping its flags, so a later takeOutcome reaches the wrap check.
+    /// Handles issued for the old generation become stale.
+    void privateTestSetRootGeneration(scope ref PrivateContext context, ulong generation)
+        nothrow @nogc @system
+    {
+        if (context.actor_ is null || context.enclosing_ !is null)
+            fatal("private test: root generation requires a root context");
+        auto service = rootService(context.actor_, null);
+        if (service.records is null) fatal("private test: root generation requires tracking");
+        auto record = rootRecord(service, context.actor_);
+        auto w = atomicLoad!(MemoryOrder.raw)(record.control);
+        // A CAS keeps a concurrent cancel's flag and cause bits.
+        while (!cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&record.control, &w,
+                generation << controlGenerationShift | (w & ((1UL << controlGenerationShift) - 1)))) {}
+    }
+
     shared uint privateFailPairPause;
     shared uint privateFailPairWaiting;
 
@@ -564,6 +732,9 @@ private struct Service
     shared(Entry*) rootReturns;
     // Members that finish waiting, pushed by their final credit release.
     shared(Entry*) childReturns;
+    // Tracked root parks only: records parallel to rootEntries; null otherwise.
+    RootRecord* records;
+    Entry* rootEntries;
 
     void enqueue(Emittable* emittable) nothrow @nogc @system
     {
@@ -740,6 +911,9 @@ private struct RootBodies
 /// wave is active is a fatal contract error. waitChildren joins all direct waves
 /// and their descendants before exactly one later user callback; finishAfterChildren
 /// joins them before an internal consumer cleanup dispatch with no further user call.
+/// With PrivateRootOptions.tracking, each root has a record: a handle for
+/// cancellation, an optional lazy deadline, and an outcome that holds the slot
+/// (and counts in live) until takeOutcome pops it.
 struct PrivateRootPark(T, alias step,
     PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
 {
@@ -759,6 +933,9 @@ private:
     size_t storageLimit_;
     Batch* spare_;
     shared(Batch*) returned_;
+    // Tracked only: terminal roots in collection order, linked through
+    // Entry.next, which is unused once terminal. Emitter-local.
+    Entry* outcomeHead_, outcomeTail_;
     version (assert) bool entered_;
     @disable this(this);
 public:
@@ -766,9 +943,19 @@ public:
         size_t batchLimit = defaultPrivateBatchLimit,
         ActorAllocator allocator = ActorAllocator.cRuntime()) nothrow @nogc @system
     {
+        return create(farm, capacity, PrivateRootOptions(batchLimit, allocator, false));
+    }
+
+    static PrivateRootPark* create(AntFarm* farm, size_t capacity, PrivateRootOptions options)
+        nothrow @nogc @system
+    {
+        immutable batchLimit = options.batchLimit;
+        auto allocator = options.allocator;
         if (batchLimit == 0) fatal("invalid private root batch limit");
         if (farm is null || !allocator.valid || capacity == 0
             || capacity > size_t.max / Entry.sizeof) return null;
+        if (options.tracking && (capacity > uint.max || capacity > size_t.max / RootRecord.sizeof))
+            return null;
         immutable storageLimit = batchLimit < capacity ? batchLimit : capacity;
         immutable batchCount = (capacity - 1) / storageLimit + 1;
         if (batchCount > size_t.max / Batch.sizeof
@@ -786,13 +973,24 @@ public:
         park.entries_ = cast(Entry*) allocateZero(&park.service_, capacity * Entry.sizeof, Entry.alignof);
         park.batches_ = cast(Batch*) allocateZero(&park.service_, park.batchCount_ * Batch.sizeof, Batch.alignof);
         park.batchEntries_ = cast(Entry**) allocateZero(&park.service_, batchSlots * (Entry*).sizeof, (Entry*).alignof);
-        if (park.entries_ is null || park.batches_ is null || park.batchEntries_ is null)
+        if (options.tracking)
+            park.service_.records = cast(RootRecord*) allocateZero(&park.service_,
+                capacity * RootRecord.sizeof, RootRecord.alignof);
+        if (park.entries_ is null || park.batches_ is null || park.batchEntries_ is null
+            || (options.tracking && park.service_.records is null))
         {
             freeMemory(&park.service_, park.entries_, capacity * Entry.sizeof, Entry.alignof);
             freeMemory(&park.service_, park.batches_, park.batchCount_ * Batch.sizeof, Batch.alignof);
             freeMemory(&park.service_, park.batchEntries_, batchSlots * (Entry*).sizeof, (Entry*).alignof);
+            freeMemory(&park.service_, park.service_.records, capacity * RootRecord.sizeof, RootRecord.alignof);
             allocator.deallocate(allocator.context, park, PrivateRootPark.sizeof, PrivateRootPark.alignof);
             return null;
+        }
+        if (options.tracking)
+        {
+            park.service_.rootEntries = park.entries_;
+            foreach (i; 0 .. capacity)
+                park.service_.records[i].index = cast(uint) i;
         }
         foreach (i; 0 .. capacity)
         {
@@ -812,7 +1010,28 @@ public:
         return park;
     }
 
+    /// On a tracked park the root is tracked with no deadline; its handle is
+    /// discarded, but its outcome must still be taken.
     PrivateSpawnResult spawn(T initial) nothrow @nogc @system
+    {
+        return spawnRoot(initial, null, MonoTime.max);
+    }
+
+    /// Tracked parks only. deadline == MonoTime.max means none. A deadline is
+    /// lazy: it becomes cancellation when a check observes it (the root or a
+    /// descendant reading context.cancelled, the emitter before an initial
+    /// table in the root's tree, or cancelAll). A root that never checks and
+    /// never emits after its deadline completes normally.
+    PrivateSpawnResult spawn(T initial, out PrivateRootHandle root,
+        MonoTime deadline = MonoTime.max) nothrow @nogc @system
+    {
+        if (service_.records is null) fatal("private root spawn handle: untracked park");
+        return spawnRoot(initial, &root, deadline);
+    }
+
+private:
+    PrivateSpawnResult spawnRoot(ref T initial, PrivateRootHandle* root, MonoTime deadline)
+        nothrow @nogc @system
     {
         static assert(stateAllowed!T, "private actor state: struct/scalar with nothrow @nogc destructor");
         enter();
@@ -844,10 +1063,35 @@ public:
         // Every in-tree writer of the previous root joined before collection.
         atomicStore!(MemoryOrder.raw)(entry.subtreeCancel, false);
         atomicStore!(MemoryOrder.raw)(entry.pending, 1u);
+        if (service_.records !is null) trackRoot(entry, root, deadline);
         appendReady(entry);
         ++live_;
         return PrivateSpawnResult.spawned;
     }
+
+    // VACANT(g) -> LIVE(g). No canceller writes a non-live word, so the plain
+    // fields and this store race with no CAS. Consumers read the fields
+    // through the table publication; the release is not load-bearing for
+    // cancellers, which read only control. Out of line: untracked spawn keeps
+    // its original shape.
+    pragma(inline, false)
+    void trackRoot(Entry* entry, PrivateRootHandle* root, MonoTime deadline) nothrow @nogc @system
+    {
+        auto record = rootRecord(&service_, entry);
+        immutable generation = controlGeneration(atomicLoad!(MemoryOrder.raw)(record.control));
+        immutable armed = deadline != MonoTime.max;
+        record.deadline = deadline.ticks;
+        record.failed = false;
+        record.failureCode = 0;
+        atomicStore!(MemoryOrder.rel)(record.control, generation << controlGenerationShift
+            | controlLive | (armed ? controlArmed : 0));
+        if (root !is null)
+        {
+            root.record_ = record;
+            root.generation_ = generation;
+        }
+    }
+public:
 
     /// Acquire completed physical tables and root wakes, recycle joined terminal
     /// roots, and append ready roots to the emitter's unpublished list. Never publishes work
@@ -914,14 +1158,48 @@ private:
         }
     }
 
+    // Both terminal paths (leaf finish and joined finish) end here. A tracked
+    // root keeps its slot, and its place in live, until takeOutcome.
     void reclaim(Entry* entry) nothrow @nogc @system
     {
         static if (reclamation == PrivateRootReclamation.emitter)
             freeMemory(&service_, entry.state, T.sizeof, T.alignof);
         entry.state = null;
+        if (service_.records !is null)
+        {
+            retainOutcome(entry);
+            return;
+        }
         entry.next = free_;
         free_ = entry;
         --live_;
+    }
+
+    // LIVE(g) -> FINISHED(g). The CAS linearizes against cancellers: a
+    // request before it makes the outcome cancelled, one after it returns
+    // finished. failed takes priority; its fields were written by root
+    // activations ordered before this collection. Out of line, like trackRoot.
+    pragma(inline, false)
+    void retainOutcome(Entry* entry) nothrow @nogc @system
+    {
+        auto record = rootRecord(&service_, entry);
+        auto w = atomicLoad!(MemoryOrder.acq)(record.control);
+        version (assert)
+            if (!(w & controlLive)) fatal("private root terminal: not live");
+        while (true)
+        {
+            version (AntfarmActorTestHooks)
+                actorTestPoint(ActorTestPoint.privateRootTerminalBeforeCas, null);
+            if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(&record.control, &w, w & ~controlLive))
+                break;
+        }
+        record.status = record.failed ? PrivateOutcomeStatus.failed
+            : (w & controlCancelled) ? PrivateOutcomeStatus.cancelled
+            : PrivateOutcomeStatus.completed;
+        entry.next = null;
+        if (outcomeTail_ is null) outcomeHead_ = entry;
+        else outcomeTail_.next = entry;
+        outcomeTail_ = entry;
     }
 
 public:
@@ -979,10 +1257,89 @@ public:
 
     /// Emitter-local roots, including sleepers and completed callbacks with
     /// outstanding child-notification tails. Drain through collection to zero.
+    /// On a tracked park a terminal root stays live until takeOutcome pops
+    /// it, so a drain must pump and take outcomes.
     @property size_t live() const pure nothrow @nogc @safe { return live_; }
     @property size_t capacity() const pure nothrow @nogc @safe { return capacity_; }
 
-    /// Collect once and require no live roots or pending work. This is not a drain.
+    /// Tracked parks only. Pops one terminal root's outcome in collection
+    /// order and recycles its slot; live decreases here, not at collection.
+    /// Does not collect: pump or collectCompleted first. Writes of the
+    /// root's activations to application storage happen-before this return.
+    bool takeOutcome(out PrivateRootOutcome outcome) nothrow @nogc @system
+    {
+        enter();
+        scope(exit) { version (assert) entered_ = false; }
+        if (service_.records is null) fatal("private root takeOutcome: untracked park");
+        auto entry = outcomeHead_;
+        if (entry is null) return false;
+        outcomeHead_ = entry.next;
+        if (outcomeHead_ is null) outcomeTail_ = null;
+        auto record = rootRecord(&service_, entry);
+        // FINISHED: no canceller writes a non-live word, so this is stable.
+        immutable w = atomicLoad!(MemoryOrder.raw)(record.control);
+        version (assert)
+            if (w & controlLive) fatal("private root takeOutcome: root live");
+        immutable generation = controlGeneration(w);
+        if (generation == maxRootGeneration) fatal("private root generation wrap");
+        outcome.root.record_ = record;
+        outcome.root.generation_ = generation;
+        outcome.status = record.status;
+        if (record.status == PrivateOutcomeStatus.cancelled)
+            outcome.cause = cast(PrivateCancelCause) ((w >> controlCauseShift) & 0xFF);
+        if (record.status == PrivateOutcomeStatus.failed)
+            outcome.code = record.failureCode;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateTakeBeforeVacantStore, null);
+        // FINISHED(g) -> VACANT(g+1): every handle of g is stale from here.
+        // Cancellers read no plain field, so the release is not load-bearing.
+        atomicStore!(MemoryOrder.rel)(record.control, (generation + 1) << controlGenerationShift);
+        entry.next = free_;
+        free_ = entry;
+        --live_;
+        return true;
+    }
+
+    /// Tracked parks only. Request cancellation of every live, unfinished
+    /// root; an armed root whose deadline has passed is cancelled with cause
+    /// deadline. Returns the number this call cancelled. O(capacity). Roots
+    /// still need pumping to finish and their outcomes taken.
+    size_t cancelAll() nothrow @nogc @system
+    {
+        enter();
+        scope(exit) { version (assert) entered_ = false; }
+        if (service_.records is null) fatal("private root cancelAll: untracked park");
+        size_t cancelled;
+        long now;
+        bool haveNow;
+        foreach (ref record; service_.records[0 .. capacity_])
+        {
+            auto w = atomicLoad!(MemoryOrder.acq)(record.control);
+            while ((w & controlLive) && !(w & controlCancelled))
+            {
+                auto cause = PrivateCancelCause.requested;
+                if (w & controlArmed)
+                {
+                    if (!haveNow)
+                    {
+                        now = privateClockTicks();
+                        haveNow = true;
+                    }
+                    if (now >= record.deadline) cause = PrivateCancelCause.deadline;
+                }
+                if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(&record.control, &w,
+                        w | controlCancelled | causeBits(cause)))
+                {
+                    ++cancelled;
+                    break;
+                }
+            }
+        }
+        return cancelled;
+    }
+
+    /// Collect once and require no live roots or pending work. This is not a
+    /// drain. Untaken outcomes keep roots live, so they are fatal here too.
     /// Use the member call; object.destroy(park) does not free the park.
     void destroy() nothrow @nogc @system
     {
@@ -992,6 +1349,7 @@ public:
             || atomicLoad!(MemoryOrder.acq)(service_.incoming) !is null)
             fatal("destroy nonempty private root park");
         auto allocator = service_.allocator;
+        freeMemory(&service_, service_.records, capacity_ * RootRecord.sizeof, RootRecord.alignof);
         freeMemory(&service_, entries_, capacity_ * Entry.sizeof, Entry.alignof);
         freeMemory(&service_, batches_, batchCount_ * Batch.sizeof, Batch.alignof);
         freeMemory(&service_, batchEntries_, batchCount_ * storageLimit_ * (Entry*).sizeof, (Entry*).alignof);
@@ -1205,6 +1563,7 @@ private:
         park.base_.parent = parent;
         park.base_.service = service;
         park.base_.root = parentIsRoot ? parent : ChildBase.fromWave(parent.enclosing).root;
+        park.base_.tracked = service.records !is null;
         park.parentIsRoot_ = parentIsRoot;
         park.base_.dispose = &dispose;
         park.base_.wave.hook = TableCompletionHook(&park.base_.wave, &waveCompleted);

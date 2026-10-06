@@ -163,6 +163,9 @@ version (AntfarmActorTestHooks)
         privateEmitBeforeCancelCheck,
         privateTruncateBeforeSeal,
         privateEmitBeforeSeal,
+        privateRootCancelBeforeCas,
+        privateRootTerminalBeforeCas,
+        privateTakeBeforeVacantStore,
     }
 
     alias ActorTestHook = void function(ActorTestPoint point,
