@@ -1185,6 +1185,7 @@ void deathHarness()
         check(diedWithMessage("fail-unauthorized", "antfarm fatal: private fail: unauthorized context"));
         check(diedWithMessage("outcome-unauthorized", "antfarm fatal: private child park: unauthorized context"));
         writeln("PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome");
+        cancelDeath();
         version (assert)
         {
             check(diedWithMessage("reentrant-spawn", "antfarm fatal: private root park: reentrant entry"));
@@ -2674,12 +2675,13 @@ static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1, 2))
 static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNotPod)(1)));
 // Layout: subset selection adds two words per cohort to main 3441b8b's
 // 264-byte signal-only park. Results add exactly two more words. F1 adds
-// 16 bytes of wave failure fields and two parent-only participant counters.
+// 16 bytes of wave failure fields and two participant counters; F2 adds
+// the immutable ChildBase.root word.
 // Entry's own 40-byte layout is asserted next to its definition and checked
 // through the allocation sizes in portsAllocationFailures.
 static if (size_t.sizeof == 8)
 {
-    static assert(PVoidCohort.sizeof == 368);
+    static assert(PVoidCohort.sizeof == 376);
     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
     // Service.childReturns (E2-3) accounts for one word of both.
     // E2-4 reserves 48 more bytes in ChildBase for the resume descriptor/FIFO.
@@ -7914,8 +7916,1214 @@ PrivateRootDisposition outcomeAuthorityStep(scope ref PrivateBorrow!AuthorityRoo
     return PrivateRootDisposition.finish;
 }
 
+// ---------------------------------------------------------------------------
+// F2 in-tree cancellation (design 170 §4, tests §12.2). Each deterministic
+// test names the mutation of actors/private_actor.d that it catches; the
+// results are recorded in perftest/results/private-cancellation-2026-10-06.
+//
+// Most schedules use a lockstep consumer: a second thread runs callbacks only
+// while the emitter waits in lockstepDrain. Table publication, cancellation
+// and completion therefore interleave in one fixed order, and no callback
+// ever runs on the emitter thread.
+
+ubyte cancelThreadMarker; // thread-local: its address identifies the thread
+size_t cancelTid() nothrow @nogc @system { return cast(size_t) &cancelThreadMarker; }
+
+struct Lockstep { shared uint requested, served, stop; }
+void lockstepDrain(Lockstep* l) nothrow @nogc @system
+{
+    immutable target = atomicFetchAdd!(MemoryOrder.acq_rel)(l.requested, 1u) + 1;
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad!(MemoryOrder.acq)(l.served) < target)
+    {
+        namedCheck(MonoTime.currTime < deadline, "lockstep drain timeout");
+        pause();
+    }
+}
+Thread startLockstep(AntFarm* farm, Lockstep* l)
+{
+    shared uint ready;
+    auto t = new Thread({
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        atomicStore!(MemoryOrder.rel)(ready, 1u);
+        uint served;
+        while (atomicLoad!(MemoryOrder.acq)(l.stop) == 0)
+        {
+            immutable want = atomicLoad!(MemoryOrder.acq)(l.requested);
+            if (want == served) { pause(); continue; }
+            while (view.consumeNext()) {}
+            served = want;
+            atomicStore!(MemoryOrder.rel)(l.served, served);
+        }
+    });
+    t.start();
+    while (atomicLoad!(MemoryOrder.acq)(ready) == 0) Thread.yield();
+    return t;
+}
+void stopLockstep(Lockstep* l, Thread t)
+{
+    atomicStore!(MemoryOrder.rel)(l.stop, 1u);
+    t.join();
+}
+// One pump, then every published callback, until no root is live.
+void lockstepRun(P)(P* park, ref Token token, Lockstep* l, string name)
+{
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        lockstepDrain(l);
+        namedCheck(MonoTime.currTime < deadline, name);
+    }
+    park.destroy();
+}
+
+// Stored-instance destructor counter; `live` is false in moved-from values.
+shared uint cancelDtors, cancelDtorsOnEmitter;
+shared size_t cancelEmitterTid;
+void resetCancelDtors() nothrow @nogc @system
+{
+    atomicStore!(MemoryOrder.raw)(cancelDtors, 0u);
+    atomicStore!(MemoryOrder.raw)(cancelDtorsOnEmitter, 0u);
+    atomicStore!(MemoryOrder.raw)(cancelEmitterTid, cancelTid());
+}
+struct CancelTracked
+{
+    uint index;
+    bool live;
+    ~this() nothrow @nogc @system
+    {
+        if (!live) return;
+        atomicFetchAdd!(MemoryOrder.raw)(cancelDtors, 1u);
+        if (cancelTid() == atomicLoad!(MemoryOrder.raw)(cancelEmitterTid))
+            atomicFetchAdd!(MemoryOrder.raw)(cancelDtorsOnEmitter, 1u);
+    }
+}
+
+// C1. Polling root, batchLimit 2, six result members. The root cancels on
+// its second activation, after the first table; the second emit truncates.
+// A second wave then runs all six, and the per-member run counts show the
+// undispatched members were untouched.
+// Mutation C1a: delete `dispatched_ = cursor_` in truncated(). The debug build
+// dies "private child result: unwritten slot" at finish; release fails
+// "c1 truncated outcome" (dispatched 6).
+// Mutation C1b: truncate without sealing (`return true` instead of the
+// releaseWave): the wave never joins, "c1 drain" times out.
+struct C1Member { uint index, runs; }
+uint c1Op(scope ref PrivateBorrow!C1Member b, scope ref PrivateContext) nothrow @nogc @system
+{
+    ++b.value.runs;
+    return b.value.index * 100 + b.value.runs;
+}
+struct C1App { bool truncatedOk, secondOk; }
+struct C1Root { PrivateChildPark!(C1Member, uint)* kids; C1App* app; ubyte phase; }
+PrivateRootDisposition c1Root(scope ref PrivateBorrow!C1Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (kids is null)
+        {
+            kids = c.createChildren!(C1Member, uint)(6, 2);
+            namedCheck(kids !is null, "c1 cohort");
+            foreach (i; 0 .. 6)
+                namedCheck(kids.spawn(c, C1Member(cast(uint) i)) == PrivateSpawnResult.spawned, "c1 spawn");
+            namedCheck(kids.start!c1Op(c) == PrivateStartResult.started, "c1 start");
+            phase = 1;
+            return PrivateRootDisposition.again;
+        }
+        if (phase == 1)
+        {
+            namedCheck(!c.cancelled, "c1 root is not cancelled by its own child wave");
+            namedCheck(kids.cancel(c), "c1 cancel active wave");
+            phase = 2;
+            return PrivateRootDisposition.again;
+        }
+        if (!kids.finished(c)) return PrivateRootDisposition.again;
+        auto o = kids.outcome(c);
+        auto r = kids.results(c);
+        if (phase == 2)
+        {
+            namedCheck(o.participants == 6 && o.dispatched == 2 && o.cancelled && !o.succeeded
+                && r.length == 2 && r[0] == 1 && r[1] == 101, "c1 truncated outcome");
+            app.truncatedOk = true;
+            namedCheck(!kids.cancel(c), "c1 cancel idle cohort");
+            namedCheck(kids.start!c1Op(c) == PrivateStartResult.started, "c1 second start");
+            phase = 3;
+            return PrivateRootDisposition.again;
+        }
+        namedCheck(o.participants == 6 && o.dispatched == 6 && !o.cancelled && o.succeeded
+            && r.length == 6, "c1 second outcome");
+        foreach (i; 0 .. 6)
+            namedCheck(r[i] == i * 100 + (i < 2 ? 2 : 1), "c1 undispatched members untouched");
+        app.secondOk = true;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC1()
+{
+    C1App app;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    Lockstep l;
+    auto t = startLockstep(farm, &l);
+    scope(exit) stopLockstep(&l, t);
+    auto park = PrivateRootPark!(C1Root, c1Root).create(farm, 1);
+    check(park.spawn(C1Root(null, &app)) == PrivateSpawnResult.spawned);
+    lockstepRun(park, token, &l, "c1 drain");
+    check(app.truncatedOk && app.secondOk);
+}
+
+// C2. startFinal with a counting ~T, batchLimit 2; member 0 cancels its
+// peers. Members 2..5 are retired by cleanup tables. Every stored member is
+// destroyed exactly once, all on the consumer thread.
+// Mutation C2a: seal a truncated retiring wave like a non-retiring one
+// (drop the `if (retire_) return false;`): finish zeroes count_ and members
+// 2..5 are never destroyed, "c2 every member destroyed once" (2 of 6).
+// Mutation C2b: seal at truncation and retire the skipped members in finish:
+// the seal is the final credit, so finish and ~T run on the emitter,
+// "c2 destructors on consumers".
+void c2Op(scope ref PrivateBorrow!CancelTracked b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value.index != 0) return;
+    c.cancelPeers();
+    namedCheck(c.cancelled, "c2 member sees its wave cancelled");
+}
+struct C2App { bool ok; }
+struct C2Root { PrivateChildPark!CancelTracked* kids; C2App* app; }
+PrivateRootDisposition c2Root(scope ref PrivateBorrow!C2Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (kids is null)
+        {
+            kids = c.createChildren!CancelTracked(6, 2);
+            namedCheck(kids !is null, "c2 cohort");
+            foreach (i; 0 .. 6)
+                namedCheck(kids.spawn(c, CancelTracked(cast(uint) i, true)) == PrivateSpawnResult.spawned, "c2 spawn");
+            namedCheck(kids.startFinal!c2Op(c) == PrivateStartResult.started, "c2 start");
+            return PrivateRootDisposition.waitChildren;
+        }
+        auto o = kids.outcome(c);
+        namedCheck(o.participants == 6 && o.dispatched == 2 && o.cancelled, "c2 outcome");
+        namedCheck(kids.start!c2Op(c) == PrivateStartResult.empty, "c2 retiring wave emptied the cohort");
+        app.ok = true;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC2()
+{
+    C2App app;
+    Counts counts;
+    resetCancelDtors();
+    {
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        Lockstep l;
+        auto t = startLockstep(farm, &l);
+        scope(exit) stopLockstep(&l, t);
+        auto park = PrivateRootPark!(C2Root, c2Root).create(farm, 1, 256, policy(counts));
+        check(park.spawn(C2Root(null, &app)) == PrivateSpawnResult.spawned);
+        lockstepRun(park, token, &l, "c2 drain");
+    }
+    check(app.ok);
+    namedCheck(atomicLoad(cancelDtors) == 6, "c2 every member destroyed once");
+    namedCheck(atomicLoad(cancelDtorsOnEmitter) == 0, "c2 destructors on consumers");
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "c2 allocation balance");
+}
+
+// C3. Retiring result-continuation wave, batchLimit 2. Members 0 and 1 each
+// start a one-leaf wave and suspend; member 0 also cancels its peers. The
+// next emit truncates: members 2..5 get cleanup tables while members 0 and 1
+// are resumed into their op, write their results and retire.
+// Mutation C3: switch `park.header_.call` to runSkippedRetire instead of
+// using the local header. The resume tables then run the cleanup callback:
+// members 0 and 1 never return done, their activation holds are never
+// dropped, and "c3 drain" times out (debug builds may first die on the
+// unwritten-slot check).
+struct C3Member
+{
+    uint index, activations;
+    PrivateChildPark!uint* leaves;
+    bool live;
+    ~this() nothrow @nogc @system
+    {
+        if (live) atomicFetchAdd!(MemoryOrder.raw)(cancelDtors, 1u);
+    }
+}
+shared uint c3LeafRuns;
+void c3Leaf(scope ref PrivateBorrow!uint, scope ref PrivateContext) nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(c3LeafRuns, 1u);
+}
+PrivateChildStep!uint c3Op(scope ref PrivateBorrow!C3Member b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        ++activations;
+        if (leaves is null)
+        {
+            leaves = c.createChildren!uint(1);
+            namedCheck(leaves !is null && leaves.spawn(c, 0) == PrivateSpawnResult.spawned, "c3 leaf");
+            namedCheck(leaves.start!c3Leaf(c) == PrivateStartResult.started, "c3 leaf wave");
+            if (index == 0) c.cancelPeers();
+            return typeof(return).waitChildren();
+        }
+        namedCheck(c.cancelled, "c3 resumed member sees cancellation");
+        namedCheck(activations == 2, "c3 resumed exactly once");
+        return typeof(return).done(100 + index);
+    }
+}
+struct C3App { bool ok; }
+struct C3Root { PrivateChildPark!(C3Member, uint)* kids; C3App* app; }
+PrivateRootDisposition c3Root(scope ref PrivateBorrow!C3Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (kids is null)
+        {
+            kids = c.createChildren!(C3Member, uint)(6, 2);
+            namedCheck(kids !is null, "c3 cohort");
+            foreach (i; 0 .. 6) // rvalues: moved into storage, no live copy remains
+                namedCheck(kids.spawn(c, C3Member(cast(uint) i, 0, null, true)) == PrivateSpawnResult.spawned, "c3 spawn");
+            namedCheck(kids.startFinal!c3Op(c) == PrivateStartResult.started, "c3 start");
+            return PrivateRootDisposition.waitChildren;
+        }
+        auto o = kids.outcome(c);
+        auto r = kids.results(c);
+        namedCheck(o.participants == 6 && o.dispatched == 2 && o.cancelled
+            && r.length == 2 && r[0] == 100 && r[1] == 101, "c3 resumed results");
+        app.ok = true;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC3()
+{
+    C3App app;
+    Counts counts;
+    resetCancelDtors();
+    atomicStore!(MemoryOrder.raw)(c3LeafRuns, 0u);
+    {
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        Lockstep l;
+        auto t = startLockstep(farm, &l);
+        scope(exit) stopLockstep(&l, t);
+        auto park = PrivateRootPark!(C3Root, c3Root).create(farm, 1, 256, policy(counts));
+        check(park.spawn(C3Root(null, &app)) == PrivateSpawnResult.spawned);
+        lockstepRun(park, token, &l, "c3 drain");
+    }
+    check(app.ok);
+    // Both leaf waves start after member 0's cancel and are truncated at zero.
+    namedCheck(atomicLoad(c3LeafRuns) == 0, "c3 leaves of a cancelled scope skipped");
+    namedCheck(atomicLoad(cancelDtors) == 6, "c3 every member retired once");
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "c3 allocation balance");
+}
+
+// C4. Four continuation members, one per table. Members 1..3 each start a
+// one-member grandchild wave and suspend. Member 0 waits until all three
+// grandchildren are running, then cancels its peers. The grandchildren
+// observe `cancelled` through the walk: their own wave is not cancelled, but
+// their parent's enclosing wave is.
+// Mutation C4: omit the subtreeCancel store in cancelWave. The fast path
+// stays false and "c4 grandchildren observe cancellation" fails (0 of 3).
+shared uint c4Started, c4Cancelled, c4Saw;
+struct C4Member { uint index; PrivateChildPark!uint* kids; }
+void c4Grandchild(scope ref PrivateBorrow!uint, scope ref PrivateContext c) nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.acq_rel)(c4Started, 1u);
+    awaitRaw(c4Cancelled, 1u, "c4 grandchild waits for the cancel");
+    atomicFence!(MemoryOrder.acq)();
+    if (c.cancelled) atomicFetchAdd!(MemoryOrder.raw)(c4Saw, 1u);
+}
+PrivateChildDisposition c4Op(scope ref PrivateBorrow!C4Member b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (index == 0)
+        {
+            awaitRaw(c4Started, 3u, "c4 grandchildren running");
+            c.cancelPeers();
+            atomicStore!(MemoryOrder.rel)(c4Cancelled, 1u);
+            return PrivateChildDisposition.done;
+        }
+        if (kids !is null) return PrivateChildDisposition.done;
+        kids = c.createChildren!uint(1);
+        namedCheck(kids !is null && kids.spawn(c, 0) == PrivateSpawnResult.spawned, "c4 grandchild");
+        namedCheck(kids.start!c4Grandchild(c) == PrivateStartResult.started, "c4 grandchild wave");
+        return PrivateChildDisposition.waitChildren;
+    }
+}
+struct C4Root { PrivateChildPark!C4Member* kids; bool* ok; }
+PrivateRootDisposition c4Root(scope ref PrivateBorrow!C4Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (kids is null)
+        {
+            kids = c.createChildren!C4Member(4, 1);
+            namedCheck(kids !is null, "c4 cohort");
+            foreach (i; 0 .. 4)
+                namedCheck(kids.spawn(c, C4Member(cast(uint) i)) == PrivateSpawnResult.spawned, "c4 spawn");
+            namedCheck(kids.start!c4Op(c) == PrivateStartResult.started, "c4 start");
+            return PrivateRootDisposition.waitChildren;
+        }
+        auto o = kids.outcome(c);
+        *ok = o.cancelled && o.participants == 4 && o.dispatched == 4;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC4()
+{
+    bool ok;
+    atomicStore!(MemoryOrder.raw)(c4Started, 0u);
+    atomicStore!(MemoryOrder.raw)(c4Cancelled, 0u);
+    atomicStore!(MemoryOrder.raw)(c4Saw, 0u);
+    auto farm = AntFarm.create(2, 8, 5, 0, 0, 1, 8192);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    auto workers = new Workers(farm, 5);
+    scope(exit) workers.join();
+    auto park = PrivateRootPark!(C4Root, c4Root).create(farm, 1);
+    check(park.spawn(C4Root(null, &ok)) == PrivateSpawnResult.spawned);
+    drainOutcome(park, token, "c4 drain");
+    check(ok);
+    namedCheck(atomicLoad(c4Saw) == 3, "c4 grandchildren observe cancellation");
+}
+
+// C5. Capacity-one park: root A cancels its tree and finishes; root B
+// reuses the slot and must start with a clear summary byte.
+// Mutation C5: delete the `subtreeCancel = false` reset in spawn. Root B
+// sees the stale byte, "c5 recycled root starts clear".
+struct C5Root { PrivateChildPark!uint* kids; bool second; bool* ok; }
+void c5Op(scope ref PrivateBorrow!uint, scope ref PrivateContext c) nothrow @nogc @system
+{
+    namedCheck(!c.cancelled, "c5 recycled tree is not cancelled");
+}
+PrivateRootDisposition c5Root(scope ref PrivateBorrow!C5Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (kids is null)
+        {
+            version (AntfarmActorTestHooks)
+                if (second)
+                    namedCheck(!privateTestSubtreeCancel(c), "c5 recycled root starts clear");
+            kids = c.createChildren!uint(2);
+            namedCheck(kids !is null, "c5 cohort");
+            foreach (i; 0 .. 2) namedCheck(kids.spawn(c, 0) == PrivateSpawnResult.spawned, "c5 spawn");
+            namedCheck(kids.start!c5Op(c) == PrivateStartResult.started, "c5 start");
+            if (!second) c.cancelChildren();
+            return PrivateRootDisposition.waitChildren;
+        }
+        auto o = kids.outcome(c);
+        version (AntfarmActorTestHooks)
+            namedCheck(privateTestSubtreeCancel(c) == !second, "c5 summary is sticky for the root's life");
+        *ok = second ? o.dispatched == 2 && !o.cancelled : o.dispatched == 0 && o.cancelled;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC5()
+{
+    bool first, second;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    Lockstep l;
+    auto t = startLockstep(farm, &l);
+    scope(exit) stopLockstep(&l, t);
+    auto park = PrivateRootPark!(C5Root, c5Root).create(farm, 1);
+    check(park.spawn(C5Root(null, false, &first)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        lockstepDrain(&l);
+        namedCheck(MonoTime.currTime < deadline, "c5 first drain");
+    }
+    check(park.spawn(C5Root(null, true, &second)) == PrivateSpawnResult.spawned);
+    lockstepRun(park, token, &l, "c5 second drain");
+    check(first && second);
+}
+
+// C6. Cancel wave 1 before its first table, then start wave 2 on the same
+// cohort: wave 2 runs every member.
+// Mutation C6: delete the `cancel` reset from resetOutcome. Wave 2 is
+// truncated at zero, "c6 second wave runs fully".
+shared uint c6Runs;
+void c6Op(scope ref PrivateBorrow!uint, scope ref PrivateContext) nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(c6Runs, 1u);
+}
+struct C6Root { PrivateChildPark!uint* kids; ubyte phase; bool* ok; }
+PrivateRootDisposition c6Root(scope ref PrivateBorrow!C6Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (phase == 0)
+        {
+            kids = c.createChildren!uint(4, 1);
+            namedCheck(kids !is null, "c6 cohort");
+            foreach (i; 0 .. 4) namedCheck(kids.spawn(c, 0) == PrivateSpawnResult.spawned, "c6 spawn");
+            namedCheck(kids.start!c6Op(c) == PrivateStartResult.started, "c6 first start");
+            namedCheck(kids.cancel(c), "c6 cancel");
+            phase = 1;
+            return PrivateRootDisposition.waitChildren;
+        }
+        auto o = kids.outcome(c);
+        if (phase == 1)
+        {
+            namedCheck(o.dispatched == 0 && o.cancelled && atomicLoad(c6Runs) == 0, "c6 first wave skipped");
+            namedCheck(kids.start!c6Op(c) == PrivateStartResult.started, "c6 second start");
+            phase = 2;
+            return PrivateRootDisposition.waitChildren;
+        }
+        namedCheck(o.dispatched == 4 && !o.cancelled && o.succeeded, "c6 second wave runs fully");
+        *ok = atomicLoad(c6Runs) == 4;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC6()
+{
+    bool ok;
+    atomicStore!(MemoryOrder.raw)(c6Runs, 0u);
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    Lockstep l;
+    auto t = startLockstep(farm, &l);
+    scope(exit) stopLockstep(&l, t);
+    auto park = PrivateRootPark!(C6Root, c6Root).create(farm, 1);
+    check(park.spawn(C6Root(null, 0, &ok)) == PrivateSpawnResult.spawned);
+    lockstepRun(park, token, &l, "c6 drain");
+    check(ok);
+}
+
+// C7. The truncating seal is the final W credit, and the parent disposes the
+// cohort while the emitter is still inside that seal's finish. A quarantining
+// allocator poisons every freed block with an offset-dependent pattern and
+// verifies it at the end, so any later park write is detected.
+// Mutation C7: store dispatched_ after the truncating releaseWave. It writes
+// into the freed cohort: "c7 freed memory untouched".
+struct Quarantine
+{
+    void*[64] blocks;
+    size_t[64] sizes;
+    shared uint count;
+    shared size_t watch;
+    shared uint watchFreed;
+}
+ubyte poisonByte(size_t i) nothrow @nogc @safe { return cast(ubyte) (i * 37 + 0x5B); }
+void* quarantineAllocate(void*, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    return alignment > 64 ? null : allocateAligned64(bytes);
+}
+void quarantineDeallocate(void* context, void* ptr, size_t bytes, size_t) nothrow @nogc @system
+{
+    auto q = cast(Quarantine*) context;
+    foreach (i; 0 .. bytes) (cast(ubyte*) ptr)[i] = poisonByte(i);
+    immutable slot = atomicFetchAdd!(MemoryOrder.raw)(q.count, 1u);
+    namedCheck(slot < q.blocks.length, "c7 quarantine full");
+    q.blocks[slot] = ptr;
+    q.sizes[slot] = bytes;
+    if (cast(size_t) ptr == atomicLoad!(MemoryOrder.raw)(q.watch))
+        atomicStore!(MemoryOrder.rel)(q.watchFreed, 1u);
+}
+version (AntfarmActorTestHooks)
+{
+    __gshared Quarantine* c7Quarantine;
+    shared uint c7RootCancelled, c7Armed, c7TruncatingSeals;
+    __gshared PrivateWaveOutcome c7Outcome; // read after the workers join
+    void c7Hook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+    {
+        if (atomicLoad!(MemoryOrder.raw)(c7Armed) == 0) return;
+        if (point == ActorTestPoint.privateEmitBeforeCancelCheck)
+            awaitRaw(c7RootCancelled, 1u, "c7 root cancels before the first check");
+        else if (point == ActorTestPoint.privateTruncateBeforeSeal)
+            atomicFetchAdd!(MemoryOrder.raw)(c7TruncatingSeals, 1u);
+        else if (point == ActorTestPoint.privateRootAfterIdleBeforeCredit)
+        {
+            // Inside the truncating seal's finish, on the emitter.
+            awaitRaw(c7Quarantine.watchFreed, 1u, "c7 parent disposes the cohort");
+            atomicStore!(MemoryOrder.raw)(c7Armed, 0u);
+        }
+    }
+    struct C7Root { PrivateChildPark!uint* kids; }
+    void c7Op(scope ref PrivateBorrow!uint, scope ref PrivateContext) nothrow @nogc @system
+    {
+        namedCheck(false, "c7 cancelled member never runs");
+    }
+    PrivateRootDisposition c7Root(scope ref PrivateBorrow!C7Root b, scope ref PrivateContext c)
+        nothrow @nogc @system
+    {
+        auto kids = c.createChildren!uint(4, 1);
+        namedCheck(kids !is null, "c7 cohort");
+        foreach (i; 0 .. 4) namedCheck(kids.spawn(c, 0) == PrivateSpawnResult.spawned, "c7 spawn");
+        atomicStore!(MemoryOrder.raw)(c7Quarantine.watch, cast(size_t) kids);
+        namedCheck(kids.start!c7Op(c) == PrivateStartResult.started, "c7 start");
+        namedCheck(kids.cancel(c), "c7 cancel");
+        atomicStore!(MemoryOrder.rel)(c7RootCancelled, 1u);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (!kids.finished(c)) namedCheck(MonoTime.currTime < deadline, "c7 wave joins");
+        c7Outcome = kids.outcome(c);
+        return PrivateRootDisposition.finish; // disposes the cohort on this consumer
+    }
+    void cancelC7()
+    {
+        auto q = new Quarantine;
+        c7Quarantine = q;
+        atomicStore!(MemoryOrder.raw)(c7RootCancelled, 0u);
+        atomicStore!(MemoryOrder.raw)(c7TruncatingSeals, 0u);
+        atomicStore!(MemoryOrder.raw)(c7Armed, 1u);
+        setActorTestHook(&c7Hook);
+        {
+            scope(exit) { setActorTestHook(null); atomicStore!(MemoryOrder.raw)(c7Armed, 0u); }
+            auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 8192);
+            scope(exit) farm.destroy();
+            auto token = farm.registerProducer(Tier.small);
+            scope(exit) farm.unregisterProducer(token);
+            auto workers = new Workers(farm, 1);
+            scope(exit) workers.join();
+            auto park = PrivateRootPark!(C7Root, c7Root).create(farm, 1, 256,
+                ActorAllocator(q, &quarantineAllocate, &quarantineDeallocate));
+            check(park.spawn(C7Root.init) == PrivateSpawnResult.spawned);
+            drainOutcome(park, token, "c7 drain");
+        }
+        namedCheck(atomicLoad(q.watchFreed) == 1, "c7 cohort freed during the seal");
+        namedCheck(atomicLoad(c7TruncatingSeals) == 1, "c7 one truncating seal");
+        foreach (slot; 0 .. atomicLoad(q.count))
+        {
+            auto bytes = cast(ubyte*) q.blocks[slot];
+            foreach (i; 0 .. q.sizes[slot])
+                namedCheck(bytes[i] == poisonByte(i), "c7 freed memory untouched");
+            freeAligned64(q.blocks[slot]);
+        }
+        c7Quarantine = null;
+        namedCheck(c7Outcome.dispatched == 0 && c7Outcome.participants == 4 && c7Outcome.cancelled, "c7 outcome");
+    }
+}
+
+// C8. Waiting root; member 0 cancels its peers. The root is resumed exactly
+// once, by the unchanged join, and only after the wave is idle.
+// Mutation C8: an early wake. In cancelPeers, when the cancelled wave's
+// parent is the root, also `releaseRoot(root)`. The root is pushed twice
+// (once by the cancel, once by the join) and reclaimed twice, so live never
+// reaches zero: "c8 drain" times out. A schedule that resumes it before the
+// truncating seal fails "c8 resumed after the join".
+shared uint c8Activations;
+void c8Op(scope ref PrivateBorrow!uint b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value == 0) c.cancelPeers();
+}
+struct C8Root { PrivateChildPark!uint* kids; bool* ok; }
+PrivateRootDisposition c8Root(scope ref PrivateBorrow!C8Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(c8Activations, 1u);
+    with (b.value)
+    {
+        if (kids is null)
+        {
+            kids = c.createChildren!uint(4, 1);
+            namedCheck(kids !is null, "c8 cohort");
+            foreach (i; 0 .. 4) namedCheck(kids.spawn(c, cast(uint) i) == PrivateSpawnResult.spawned, "c8 spawn");
+            namedCheck(kids.start!c8Op(c) == PrivateStartResult.started, "c8 start");
+            return PrivateRootDisposition.waitChildren;
+        }
+        namedCheck(kids.finished(c), "c8 resumed after the join");
+        auto o = kids.outcome(c);
+        *ok = o.cancelled && o.dispatched == 1 && o.participants == 4;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC8()
+{
+    bool ok;
+    atomicStore!(MemoryOrder.raw)(c8Activations, 0u);
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    Lockstep l;
+    auto t = startLockstep(farm, &l);
+    scope(exit) stopLockstep(&l, t);
+    auto park = PrivateRootPark!(C8Root, c8Root).create(farm, 1);
+    check(park.spawn(C8Root(null, &ok)) == PrivateSpawnResult.spawned);
+    lockstepRun(park, token, &l, "c8 drain");
+    check(ok);
+    namedCheck(atomicLoad(c8Activations) == 2, "c8 exactly one resumption");
+}
+
+// C9. The cancel lands between the last table write and the seal: a hook at
+// privateEmitBeforeSeal runs the published table, whose member 0 cancels its
+// peers. The seal then joins the wave once; nothing is truncated.
+// Mutation C9: evaluate truncation again at the seal, before the final
+// releaseWave: `if (scopeCancelled(wave)) { dispatched_ = cursor_;
+// releaseWave(wave); }`. The second release dies "private wave credit underflow".
+version (AntfarmActorTestHooks)
+{
+    __gshared Lockstep* c9Lockstep;
+    shared uint c9Armed;
+    void c9Hook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+    {
+        if (point != ActorTestPoint.privateEmitBeforeSeal) return;
+        if (!cas!(MemoryOrder.raw, MemoryOrder.raw)(&c9Armed, 1u, 0u)) return;
+        lockstepDrain(c9Lockstep); // the last table runs before the seal
+    }
+    struct C9Root { PrivateChildPark!uint* kids; bool* ok; }
+    void c9Op(scope ref PrivateBorrow!uint b, scope ref PrivateContext c) nothrow @nogc @system
+    {
+        if (b.value == 0) c.cancelPeers();
+    }
+    PrivateRootDisposition c9Root(scope ref PrivateBorrow!C9Root b, scope ref PrivateContext c)
+        nothrow @nogc @system
+    {
+        with (b.value)
+        {
+            if (kids is null)
+            {
+                kids = c.createChildren!uint(2, 2);
+                namedCheck(kids !is null, "c9 cohort");
+                foreach (i; 0 .. 2) namedCheck(kids.spawn(c, cast(uint) i) == PrivateSpawnResult.spawned, "c9 spawn");
+                namedCheck(kids.start!c9Op(c) == PrivateStartResult.started, "c9 start");
+                atomicStore!(MemoryOrder.raw)(c9Armed, 1u);
+                return PrivateRootDisposition.waitChildren;
+            }
+            auto o = kids.outcome(c);
+            *ok = o.cancelled && o.dispatched == 2 && o.participants == 2;
+            return PrivateRootDisposition.finish;
+        }
+    }
+    void cancelC9()
+    {
+        bool ok;
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        Lockstep l;
+        auto t = startLockstep(farm, &l);
+        scope(exit) stopLockstep(&l, t);
+        c9Lockstep = &l;
+        atomicStore!(MemoryOrder.raw)(c9Armed, 0u);
+        setActorTestHook(&c9Hook);
+        scope(exit) { setActorTestHook(null); c9Lockstep = null; }
+        auto park = PrivateRootPark!(C9Root, c9Root).create(farm, 1);
+        check(park.spawn(C9Root(null, &ok)) == PrivateSpawnResult.spawned);
+        lockstepRun(park, token, &l, "c9 drain");
+        check(ok);
+        namedCheck(atomicLoad(c9Armed) == 0, "c9 hook ran");
+    }
+}
+
+// C10. The root starts cohort A, leaves cohort B idle, calls cancelChildren
+// and returns finishAfterChildren. A is truncated at zero, the cleanup
+// activation runs once and disposes both cohorts on the consumer.
+// Behavioural; the tracked root status belongs to root tracking (F3).
+shared uint c10Activations, c10Runs;
+void c10Op(scope ref PrivateBorrow!CancelTracked, scope ref PrivateContext) nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(c10Runs, 1u);
+}
+struct C10Root { PrivateChildPark!CancelTracked* active, idle; }
+PrivateRootDisposition c10Root(scope ref PrivateBorrow!C10Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(c10Activations, 1u);
+    with (b.value)
+    {
+        active = c.createChildren!CancelTracked(4, 1);
+        idle = c.createChildren!CancelTracked(2);
+        namedCheck(active !is null && idle !is null, "c10 cohorts");
+        foreach (i; 0 .. 4)
+            namedCheck(active.spawn(c, CancelTracked(cast(uint) i, true)) == PrivateSpawnResult.spawned, "c10 spawn");
+        foreach (i; 0 .. 2)
+            namedCheck(idle.spawn(c, CancelTracked(cast(uint) i, true)) == PrivateSpawnResult.spawned, "c10 spawn idle");
+        namedCheck(active.start!c10Op(c) == PrivateStartResult.started, "c10 start");
+        c.cancelChildren();
+        namedCheck(!idle.cancel(c) && idle.outcome(c) == PrivateWaveOutcome.init, "c10 idle cohort unaffected");
+        return PrivateRootDisposition.finishAfterChildren;
+    }
+}
+void cancelC10()
+{
+    Counts counts;
+    resetCancelDtors();
+    atomicStore!(MemoryOrder.raw)(c10Activations, 0u);
+    atomicStore!(MemoryOrder.raw)(c10Runs, 0u);
+    {
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        Lockstep l;
+        auto t = startLockstep(farm, &l);
+        scope(exit) stopLockstep(&l, t);
+        auto park = PrivateRootPark!(C10Root, c10Root).create(farm, 1, 256, policy(counts));
+        check(park.spawn(C10Root.init) == PrivateSpawnResult.spawned);
+        lockstepRun(park, token, &l, "c10 drain");
+    }
+    namedCheck(atomicLoad(c10Activations) == 1, "c10 one user activation");
+    namedCheck(atomicLoad(c10Runs) == 0, "c10 cancelled wave skipped");
+    namedCheck(atomicLoad(cancelDtors) == 6 && atomicLoad(cancelDtorsOnEmitter) == 0,
+        "c10 cleanup disposes both cohorts once on the consumer");
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "c10 allocation balance");
+}
+
+// C11. Partial construction (U7): a mid-level member spawns four leaves and
+// the allocator fails the fourth. It reports fail(77) and returns done. The
+// root reads the failure and finishes; post-order disposal destroys the
+// three built leaves, and spawn destroyed the rejected argument. No fatal.
+// Behavioural.
+shared uint c11FailNext;
+void* c11Allocate(void* context, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    if (cas!(MemoryOrder.raw, MemoryOrder.raw)(&c11FailNext, 1u, 0u)) return null;
+    return allocate(context, bytes, alignment);
+}
+struct C11Mid { uint unused; }
+void c11Mid(scope ref PrivateBorrow!C11Mid b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    auto leaves = c.createChildren!CancelTracked(4);
+    namedCheck(leaves !is null, "c11 leaves");
+    foreach (i; 0 .. 3)
+        namedCheck(leaves.spawn(c, CancelTracked(cast(uint) i, true)) == PrivateSpawnResult.spawned, "c11 spawn");
+    atomicStore!(MemoryOrder.raw)(c11FailNext, 1u);
+    namedCheck(leaves.spawn(c, CancelTracked(3, true)) == PrivateSpawnResult.allocationFailed, "c11 fourth spawn fails");
+    namedCheck(atomicLoad!(MemoryOrder.raw)(cancelDtors) == 1, "c11 rejected argument destroyed by spawn");
+    c.fail(77);
+    namedCheck(leaves.finished(c), "c11 no wave of this member is active");
+}
+struct C11Root { PrivateChildPark!C11Mid* mids; bool* ok; }
+PrivateRootDisposition c11Root(scope ref PrivateBorrow!C11Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (mids is null)
+        {
+            mids = c.createChildren!C11Mid(1);
+            namedCheck(mids !is null && mids.spawn(c, C11Mid.init) == PrivateSpawnResult.spawned, "c11 mid");
+            namedCheck(mids.start!c11Mid(c) == PrivateStartResult.started, "c11 start");
+            return PrivateRootDisposition.waitChildren;
+        }
+        auto o = mids.outcome(c);
+        *ok = o.failures == 1 && o.firstFailureCode == 77 && o.dispatched == 1;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC11()
+{
+    bool ok;
+    Counts counts;
+    resetCancelDtors();
+    atomicStore!(MemoryOrder.raw)(c11FailNext, 0u);
+    {
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        Lockstep l;
+        auto t = startLockstep(farm, &l);
+        scope(exit) stopLockstep(&l, t);
+        auto park = PrivateRootPark!(C11Root, c11Root).create(farm, 1, 256,
+            ActorAllocator(&counts, &c11Allocate, &deallocate));
+        check(park.spawn(C11Root(null, &ok)) == PrivateSpawnResult.spawned);
+        lockstepRun(park, token, &l, "c11 drain");
+    }
+    // 3 stored leaves + the rejected argument, destroyed inside spawn.
+    check(ok);
+    namedCheck(atomicLoad(cancelDtors) == 4, "c11 three leaves and the argument destroyed");
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "c11 allocation balance");
+}
+
+// C12. Subset [9,3,6] of ten, batchLimit 1, cancelled after the first table.
+// Mutation C12: initialize participants_/dispatched_ from count_ instead of
+// k_ in startSubset: "c12 subset outcome" (participants 10).
+uint c12Op(scope ref PrivateBorrow!uint b, scope ref PrivateContext) nothrow @nogc @system
+{
+    return b.value + 1000;
+}
+struct C12Root { PrivateChildPark!(uint, uint)* kids; ubyte phase; bool* ok; }
+PrivateRootDisposition c12Root(scope ref PrivateBorrow!C12Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (phase == 0)
+        {
+            kids = c.createChildren!(uint, uint)(10, PrivateCohortOptions(1, true));
+            namedCheck(kids !is null, "c12 cohort");
+            foreach (i; 0 .. 10) namedCheck(kids.spawn(c, cast(uint) i) == PrivateSpawnResult.spawned, "c12 spawn");
+            uint[3] sel = [9, 3, 6];
+            namedCheck(kids.startSubset!c12Op(c, sel[]) == PrivateStartResult.started, "c12 start");
+            phase = 1;
+            return PrivateRootDisposition.again;
+        }
+        if (phase == 1)
+        {
+            namedCheck(kids.cancel(c), "c12 cancel");
+            phase = 2;
+            return PrivateRootDisposition.again;
+        }
+        if (!kids.finished(c)) return PrivateRootDisposition.again;
+        auto o = kids.outcome(c);
+        auto r = kids.results(c);
+        namedCheck(o.participants == 3 && o.dispatched == 1 && o.cancelled, "c12 subset outcome");
+        *ok = r.length == 1 && r[0] == 1009;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC12()
+{
+    bool ok;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    Lockstep l;
+    auto t = startLockstep(farm, &l);
+    scope(exit) stopLockstep(&l, t);
+    auto park = PrivateRootPark!(C12Root, c12Root).create(farm, 1);
+    check(park.spawn(C12Root(null, 0, &ok)) == PrivateSpawnResult.spawned);
+    lockstepRun(park, token, &l, "c12 drain");
+    check(ok);
+}
+
+// C13. A truncated startFinal result wave, then an empty start: the outcome
+// is unchanged and the result prefix survives count_ = 0.
+// Mutation C13: compute the result prefix from count_ instead of
+// dispatched_. Debug dies "private child result: unwritten slot" in finish
+// (count_ is still 4 there); release fails "c13 prefix survives retirement".
+uint c13Op(scope ref PrivateBorrow!uint b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value == 0) c.cancelPeers();
+    return b.value + 50;
+}
+struct C13Root { PrivateChildPark!(uint, uint)* kids; bool* ok; }
+PrivateRootDisposition c13Root(scope ref PrivateBorrow!C13Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (kids is null)
+        {
+            kids = c.createChildren!(uint, uint)(4, 2);
+            namedCheck(kids !is null, "c13 cohort");
+            foreach (i; 0 .. 4) namedCheck(kids.spawn(c, cast(uint) i) == PrivateSpawnResult.spawned, "c13 spawn");
+            namedCheck(kids.startFinal!c13Op(c) == PrivateStartResult.started, "c13 start");
+            return PrivateRootDisposition.waitChildren;
+        }
+        auto before = kids.outcome(c);
+        auto r = kids.results(c);
+        namedCheck(before.participants == 4 && before.dispatched == 2 && before.cancelled
+            && r.length == 2 && r[0] == 50 && r[1] == 51, "c13 prefix survives retirement");
+        namedCheck(kids.start!c13Op(c) == PrivateStartResult.empty, "c13 empty start");
+        auto after = kids.outcome(c);
+        auto again = kids.results(c);
+        *ok = after == before && again.length == 2 && again[0] == 50 && again[1] == 51;
+        return PrivateRootDisposition.finish;
+    }
+}
+void cancelC13()
+{
+    bool ok;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    Lockstep l;
+    auto t = startLockstep(farm, &l);
+    scope(exit) stopLockstep(&l, t);
+    auto park = PrivateRootPark!(C13Root, c13Root).create(farm, 1);
+    check(park.spawn(C13Root(null, &ok)) == PrivateSpawnResult.spawned);
+    lockstepRun(park, token, &l, "c13 drain");
+    check(ok);
+}
+
+// Cancellation torture (§12.5): random trees up to depth 4 on 4 consumers.
+// Members randomly fail, cancel their peers or their children; polling roots
+// randomly cancel their cohort or cancel and finishAfterChildren. Invariants:
+// every root finishes, each stored state is destroyed exactly once,
+// allocations balance, outcomes are consistent with their result prefix,
+// and `cancelled` never reverts within an activation.
+shared uint tortureSpawned, tortureDtors, tortureTruncated, tortureCancelled, tortureFailed;
+ulong tortureNext(ref ulong s) nothrow @nogc @safe
+{
+    s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+    return s;
+}
+struct TortureNode
+{
+    ulong seed;
+    uint depth, index, count;
+    void* kids; // PrivateChildPark!(TortureNode, uint)*
+    bool live;
+    ~this() nothrow @nogc @system
+    {
+        if (live) atomicFetchAdd!(MemoryOrder.raw)(tortureDtors, 1u);
+    }
+}
+alias TortureCohort = PrivateChildPark!(TortureNode, uint);
+
+// Starts a random wave (start, startFinal or startSubset) of a fresh cohort.
+void tortureLaunch(ref ulong seed, uint depth, ref void* kidsOut, ref uint countOut,
+    scope ref PrivateContext c) nothrow @nogc @system
+{
+    auto r = tortureNext(seed);
+    immutable n = cast(uint) (1 + r % 6);
+    auto kids = c.createChildren!(TortureNode, uint)(n,
+        PrivateCohortOptions(cast(size_t) (1 + (r >> 8) % 3), true));
+    namedCheck(kids !is null, "torture cohort");
+    foreach (i; 0 .. n)
+    {
+        namedCheck(kids.spawn(c, TortureNode(tortureNext(seed) | 1, depth + 1, i, 0, null, true))
+            == PrivateSpawnResult.spawned, "torture spawn");
+        atomicFetchAdd!(MemoryOrder.raw)(tortureSpawned, 1u);
+    }
+    kidsOut = kids;
+    countOut = n;
+    final switch ((r >> 4) % 3)
+    {
+        case 0:
+            namedCheck(kids.start!tortureOp(c) == PrivateStartResult.started, "torture start");
+            break;
+        case 1:
+            namedCheck(kids.startFinal!tortureOp(c) == PrivateStartResult.started, "torture final");
+            break;
+        case 2:
+            uint[6] sel;
+            size_t k;
+            foreach_reverse (i; 0 .. n) if (i % 2 == 0 || (r >> 30) & 1) sel[k++] = i;
+            namedCheck(kids.startSubset!tortureOp(c, sel[0 .. k]) == PrivateStartResult.started, "torture subset");
+            break;
+    }
+}
+
+// Joined-wave invariants: prefix length, slot values, position validity.
+void tortureCheck(TortureCohort* kids, scope ref PrivateContext c) nothrow @nogc @system
+{
+    auto o = kids.outcome(c);
+    auto sel = kids.subsetMembers(c);
+    auto r = kids.results(c);
+    namedCheck(o.dispatched <= o.participants && o.participants != 0, "torture outcome counts");
+    namedCheck(r.length == o.dispatched, "torture result prefix");
+    foreach (j, value; r)
+        namedCheck(value == (sel.length ? sel[j] : j) + 1, "torture result slot");
+    namedCheck(o.succeeded == (o.failures == 0 && o.dispatched == o.participants), "torture succeeded");
+    if (o.dispatched < o.participants) atomicFetchAdd!(MemoryOrder.raw)(tortureTruncated, 1u);
+    if (o.cancelled) atomicFetchAdd!(MemoryOrder.raw)(tortureCancelled, 1u);
+    if (o.failures != 0) atomicFetchAdd!(MemoryOrder.raw)(tortureFailed, 1u);
+    if (o.failures != 0)
+        namedCheck(o.firstFailurePosition < o.participants && o.firstFailureCode
+            == (sel.length ? sel[o.firstFailurePosition] : o.firstFailurePosition) + 1000,
+            "torture failure pair");
+}
+
+PrivateChildStep!uint tortureOp(scope ref PrivateBorrow!TortureNode b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    immutable before = c.cancelled;
+    with (b.value)
+    {
+        auto r = tortureNext(seed);
+        if (kids !is null)
+        {
+            tortureCheck(cast(TortureCohort*) kids, c);
+            namedCheck(!before || c.cancelled, "torture cancelled is monotonic");
+            return typeof(return).done(index + 1);
+        }
+        bool waiting;
+        if (depth < 4 && r % 3 != 0)
+        {
+            tortureLaunch(seed, depth, kids, count, c);
+            if ((r >> 12) % 5 == 0) c.cancelChildren();
+            waiting = true;
+        }
+        if ((r >> 16) % 7 == 0) c.cancelPeers();
+        if ((r >> 20) % 9 == 0) c.fail(1000 + index);
+        namedCheck(!before || c.cancelled, "torture cancelled is monotonic");
+        return waiting ? typeof(return).waitChildren() : typeof(return).done(index + 1);
+    }
+}
+
+struct TortureRoot
+{
+    ulong seed;
+    void* kids;
+    uint count;
+    bool polling, live;
+    ~this() nothrow @nogc @system
+    {
+        if (live) atomicFetchAdd!(MemoryOrder.raw)(tortureDtors, 1u);
+    }
+}
+PrivateRootDisposition tortureRoot(scope ref PrivateBorrow!TortureRoot b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    with (b.value)
+    {
+        auto r = tortureNext(seed);
+        if (kids is null)
+        {
+            tortureLaunch(seed, 0, kids, count, c);
+            polling = (r & 1) != 0;
+            if ((r >> 8) % 6 == 0) c.cancelChildren();
+            return polling ? PrivateRootDisposition.again : PrivateRootDisposition.waitChildren;
+        }
+        auto cohort = cast(TortureCohort*) kids;
+        if (!cohort.finished(c))
+        {
+            namedCheck(polling, "torture waiting root resumed before its join");
+            if ((r >> 4) % 4 == 0) cohort.cancel(c);
+            if ((r >> 8) % 16 == 0)
+            {
+                c.cancelChildren();
+                return PrivateRootDisposition.finishAfterChildren;
+            }
+            return PrivateRootDisposition.again;
+        }
+        tortureCheck(cohort, c);
+        return PrivateRootDisposition.finish;
+    }
+}
+
+void cancelTorture(size_t roots, uint seed)
+{
+    Counts counts;
+    atomicStore!(MemoryOrder.raw)(tortureSpawned, 0u);
+    atomicStore!(MemoryOrder.raw)(tortureDtors, 0u);
+    atomicStore!(MemoryOrder.raw)(tortureTruncated, 0u);
+    atomicStore!(MemoryOrder.raw)(tortureCancelled, 0u);
+    atomicStore!(MemoryOrder.raw)(tortureFailed, 0u);
+    {
+        auto farm = AntFarm.create(2, 8, 4, 0, 0, 1, 8192);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        auto workers = new Workers(farm, 4);
+        scope(exit) workers.join();
+        auto park = PrivateRootPark!(TortureRoot, tortureRoot).create(farm, 64, 8, policy(counts));
+        check(park !is null);
+        ulong s = seed | 1;
+        size_t spawned;
+        auto deadline = MonoTime.currTime + 120.seconds;
+        while (spawned < roots || park.live)
+        {
+            while (spawned < roots && park.live < park.capacity)
+            {
+                check(park.spawn(TortureRoot(tortureNext(s) | 1, null, 0, false, true)) == PrivateSpawnResult.spawned);
+                atomicFetchAdd!(MemoryOrder.raw)(tortureSpawned, 1u);
+                ++spawned;
+            }
+            park.pump(token);
+            namedCheck(MonoTime.currTime < deadline, "torture drain");
+        }
+        park.destroy();
+    }
+    namedCheck(atomicLoad(tortureDtors) == atomicLoad(tortureSpawned), "torture destroyed exactly once");
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "torture allocation balance");
+    namedCheck(atomicLoad(tortureTruncated) != 0 && atomicLoad(tortureFailed) != 0, "torture exercised truncation and failure");
+    writeln("torture: ", roots, " roots, ", atomicLoad(tortureSpawned), " actors, ", atomicLoad(tortureCancelled),
+        " cancelled and ", atomicLoad(tortureTruncated), " truncated joined waves, ", atomicLoad(tortureFailed), " with failures");
+}
+
+// Cancellation misuse is fatal in debug and release.
+PrivateRootDisposition cancelPeersRootStep(scope ref PrivateBorrow!int, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    c.cancelPeers();
+    fprintf(stderr, "root cancelPeers survived\n");
+    return PrivateRootDisposition.finish;
+}
+PrivateRootDisposition parkCancelAuthorityStep(scope ref PrivateBorrow!int, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    auto kids = c.createChildren!int(1);
+    namedCheck(kids !is null, "park cancel unauthorized cohort");
+    PrivateContext empty;
+    kids.cancel(empty);
+    fprintf(stderr, "unauthorized park cancel survived\n");
+    return PrivateRootDisposition.finish;
+}
+void cancelDeathRun(alias step)()
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(int, step).create(farm, 1);
+    check(park.spawn(0) == PrivateSpawnResult.spawned);
+    while (park.live) { park.pump(token); while (view.consumeNext()) {} }
+}
+void cancelDefaultContextDeath(string which)
+{
+    PrivateContext empty;
+    if (which == "cancelled") cast(void) empty.cancelled;
+    else if (which == "children") empty.cancelChildren();
+    else empty.cancelPeers();
+    fprintf(stderr, "default-context cancellation survived\n");
+}
+void cancelDeath()
+{
+    version (linux)
+    {
+        check(diedWithMessage("cancel-peers-root", "antfarm fatal: private cancelPeers: root context"));
+        check(diedWithMessage("cancel-park-unauthorized", "antfarm fatal: private child park: unauthorized context"));
+        check(diedWithMessage("cancel-default-cancelled", "antfarm fatal: private cancelled: unauthorized context"));
+        check(diedWithMessage("cancel-default-children", "antfarm fatal: private cancelChildren: unauthorized context"));
+        check(diedWithMessage("cancel-default-peers", "antfarm fatal: private cancelPeers: unauthorized context"));
+        writeln("PASS cancelPeers on a root and unauthorized cancellation are fatal");
+    }
+    else
+        writeln("SKIP cancellation death tests: /proc/self/exe re-exec requires Linux");
+}
+
+void phaseCancel()
+{
+    cancelC1();
+    cancelC2();
+    cancelC3();
+    cancelC4();
+    cancelC5();
+    cancelC6();
+    version (AntfarmActorTestHooks) cancelC7();
+    cancelC8();
+    version (AntfarmActorTestHooks) cancelC9();
+    cancelC10();
+    cancelC11();
+    cancelC12();
+    cancelC13();
+    writeln("PASS private in-tree cancellation C1-C13");
+    version (TSan) cancelTorture(300, 17);
+    else cancelTorture(3000, 17);
+    writeln("PASS private cancellation torture");
+}
+
 void runSuite()
 {
+    phaseCancel();
     phaseOutcomes();
     phaseCont();
     phaseE1();
@@ -8186,6 +9394,31 @@ void main(string[] args)
         case "cross-farm-unregister": crossFarmUnregisterDeath(); return;
         case "cross-farm-flush": crossFarmFlushDeath(); return;
         case "outcomes": phaseOutcomes(); return;
+        case "cancel": phaseCancel(); return;
+        case "cancel-c1": cancelC1(); return;
+        case "cancel-c2": cancelC2(); return;
+        case "cancel-c3": cancelC3(); return;
+        case "cancel-c4": cancelC4(); return;
+        case "cancel-c5": cancelC5(); return;
+        case "cancel-c6": cancelC6(); return;
+        case "cancel-c7": version (AntfarmActorTestHooks) cancelC7(); return;
+        case "cancel-c8": cancelC8(); return;
+        case "cancel-c9": version (AntfarmActorTestHooks) cancelC9(); return;
+        case "cancel-c10": cancelC10(); return;
+        case "cancel-c11": cancelC11(); return;
+        case "cancel-c12": cancelC12(); return;
+        case "cancel-c13": cancelC13(); return;
+        case "cancel-death": cancelDeath(); return;
+        case "cancel-peers-root": cancelDeathRun!cancelPeersRootStep(); return;
+        case "cancel-park-unauthorized": cancelDeathRun!parkCancelAuthorityStep(); return;
+        case "cancel-default-cancelled": cancelDefaultContextDeath("cancelled"); return;
+        case "cancel-default-children": cancelDefaultContextDeath("children"); return;
+        case "cancel-default-peers": cancelDefaultContextDeath("peers"); return;
+        case "cancel-torture":
+            import std.conv : to;
+            cancelTorture(args.length > 2 ? args[2].to!size_t : 3000, args.length > 3 ? args[3].to!uint : 17);
+            writeln("PASS private cancellation torture");
+            return;
         case "outcomes-o9-empty":
         {
             O9EmptyApp app;

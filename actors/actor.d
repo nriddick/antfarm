@@ -160,6 +160,9 @@ version (AntfarmActorTestHooks)
         readyDetached,
         retirementIdleObserved,
         actorNodeBeforeCompletionStore,
+        privateEmitBeforeCancelCheck,
+        privateTruncateBeforeSeal,
+        privateEmitBeforeSeal,
     }
 
     alias ActorTestHook = void function(ActorTestPoint point,

@@ -169,6 +169,36 @@ public:
         }
         recordWaveFailure(enclosing_, actor_, code);
     }
+
+    /// True if a scope containing this activation is cancelled: an enclosing
+    /// wave on the path to the root, cancelled by its parent or a peer. Roots
+    /// see only root-level cancellation, which needs root tracking. Advisory:
+    /// may become true at any time; never becomes false within an activation.
+    @property bool cancelled() nothrow @nogc @system
+    {
+        if (actor_ is null) fatal("private cancelled: unauthorized context");
+        if (enclosing_ is null) return false; // root records arrive with tracking
+        return scopeCancelled(enclosing_);
+    }
+
+    /// Cancel the active wave of every cohort this actor owns, and therefore
+    /// their descendants. Idle cohorts are unaffected. Roots and members.
+    void cancelChildren() nothrow @nogc @system
+    {
+        if (actor_ is null) fatal("private cancelChildren: unauthorized context");
+        for (auto child = actor_.children; child !is null; child = child.next)
+            if (atomicLoad!(MemoryOrder.acq)(child.wave.active) != 0)
+                cancelWave(&child.wave);
+    }
+
+    /// Cancel this member's enclosing wave: its siblings and their
+    /// descendants. Fatal on a root context.
+    void cancelPeers() nothrow @nogc @system
+    {
+        if (actor_ is null) fatal("private cancelPeers: unauthorized context");
+        if (enclosing_ is null) fatal("private cancelPeers: root context");
+        cancelWave(enclosing_);
+    }
 }
 
 // Child entries reach the Service through ChildBase.service; their word at
@@ -203,6 +233,7 @@ private struct Entry
             PrivateRootDisposition disposition;
             bool hasJoinCredits; // dispatch writes; collection reads after table join
             bool cleanup; // emitter sets after all credits join
+            shared bool subtreeCancel; // sticky in-tree cancel hint; emitter resets at spawn
             shared uint pending; // custody + direct-wave notification tails
         }
     }
@@ -216,7 +247,7 @@ version (D_LP64)
         && Entry.childReserved.offsetof == 18 && Entry.childPending.offsetof == 20);
     static assert(Entry.enclosing.offsetof == 32 && Entry.disposition.offsetof == 32
         && Entry.hasJoinCredits.offsetof == 33 && Entry.cleanup.offsetof == 34
-        && Entry.pending.offsetof == 36);
+        && Entry.subtreeCancel.offsetof == 35 && Entry.pending.offsetof == 36);
 }
 
 // Only roots have a Service word. Every read of Entry.service goes through
@@ -234,6 +265,7 @@ private struct ChildBase
     ChildBase* next;
     Entry* parent;
     Service* service;
+    Entry* root; // immutable: the parent if it is a root, else the parent's cohort root
     Wave wave;
     void function(ChildBase*) nothrow @nogc @system dispose;
     Emittable resume;
@@ -265,7 +297,7 @@ private struct Wave
     Wave* upstream;
     TableCompletionHook hook;
     void function(Wave*) nothrow @nogc @system finish;
-    shared bool cancel; // reset with each wave; F2 is the writer
+    shared bool cancel; // this wave's own scope; reset by each start
     uint firstFailureCode; // valid iff failures != 0
     Entry* firstFailed;
 }
@@ -278,7 +310,7 @@ version (D_LP64)
         && Wave.hook.offsetof == 40 && Wave.finish.offsetof == 56
         && Wave.cancel.offsetof == 64 && Wave.firstFailureCode.offsetof == 68
         && Wave.firstFailed.offsetof == 72);
-    static assert(ChildBase.sizeof == 160);
+    static assert(ChildBase.sizeof == 168);
 }
 
 // F3 installs per-root records and returns records !is null. Until then
@@ -286,6 +318,36 @@ version (D_LP64)
 private bool rootParkTracked(Entry*) nothrow @nogc @system
 {
     return false;
+}
+
+// Callable on a consumer (context) or the emitter (emit). w is active and
+// pinned by the caller's credit, and so is every ancestor wave and parent
+// Entry the walk reads (ChildBase.parent/root, child Entry.enclosing are
+// immutable while pinned). The summary byte keeps the uncancelled check at
+// one acquire load; after the first in-tree cancel the root's tree walks.
+private bool scopeCancelled(Wave* w) nothrow @nogc @system
+{
+    auto base = ChildBase.fromWave(w);
+    auto root = base.root;
+    if (!atomicLoad!(MemoryOrder.acq)(root.subtreeCancel)) return false;
+    while (true)
+    {
+        if (atomicLoad!(MemoryOrder.acq)(w.cancel)) return true;
+        auto parent = base.parent;
+        if (parent is root) return false; // never read the root union as a pointer
+        w = parent.enclosing;
+        base = ChildBase.fromWave(w);
+    }
+}
+
+// Idempotent single-value stores: the flag first, then the sticky summary.
+// The summary orders this writer's flag only, not every independent writer's.
+// The parent may store onto a wave that went idle after its active check;
+// that is harmless (the next start resets it), so never walk from here.
+private void cancelWave(Wave* w) nothrow @nogc @system
+{
+    atomicStore!(MemoryOrder.rel)(w.cancel, true);
+    atomicStore!(MemoryOrder.rel)(ChildBase.fromWave(w).root.subtreeCancel, true);
 }
 
 // Checked CAS, like retainJoinCredit: uint.max is fatal before the store so a
@@ -379,6 +441,14 @@ version (AntfarmActorTestHooks)
             wave.firstFailureCode = 1;
             wave.firstFailed = context.actor_;
         }
+    }
+
+    /// Test-only: the sticky in-tree cancel summary of the context's root.
+    bool privateTestSubtreeCancel(scope ref PrivateContext context) nothrow @nogc @system
+    {
+        auto root = context.enclosing_ is null ? context.actor_
+            : ChildBase.fromWave(context.enclosing_).root;
+        return atomicLoad!(MemoryOrder.acq)(root.subtreeCancel);
     }
 
     shared uint privateFailPairPause;
@@ -771,6 +841,8 @@ public:
         entry.disposition = PrivateRootDisposition.again;
         entry.hasJoinCredits = false;
         entry.cleanup = false;
+        // Every in-tree writer of the previous root joined before collection.
+        atomicStore!(MemoryOrder.raw)(entry.subtreeCancel, false);
         atomicStore!(MemoryOrder.raw)(entry.pending, 1u);
         appendReady(entry);
         ++live_;
@@ -1043,7 +1115,9 @@ private:
     ChildBase base_; // first: erased disposal and wave-to-park conversion
     Entry* entries_;
     size_t capacity_, count_, cursor_, batchLimit_;
-    size_t participants_, dispatched_; // last nonempty wave; parent-only
+    // Last nonempty wave. The parent writes both before the enqueue; the
+    // emitter alone lowers dispatched_ on truncation, before its seal.
+    size_t participants_, dispatched_;
     bool retire_, isSubset_;
     bool parentIsRoot_; // fixed at creation: the creating context had no enclosing wave
     uint* sel_;
@@ -1064,9 +1138,15 @@ private:
             }
             void checkResultsWritten() nothrow @nogc @system
             {
-                foreach (i; 0 .. resultCount_)
+                foreach (i; 0 .. resultPrefix)
                     if (resultWritten[i] == 0) fatal("private child result: unwritten slot");
             }
+        }
+        // Only the dispatched prefix ran the operation. Independent of count_,
+        // so a retiring wave's results survive count_ = 0.
+        @property size_t resultPrefix() const nothrow @nogc @system
+        {
+            return resultCount_ < dispatched_ ? resultCount_ : dispatched_;
         }
         void writeResult(size_t slot, R value) nothrow @nogc @system
         {
@@ -1124,6 +1204,7 @@ private:
         park.batchLimit_ = batchLimit;
         park.base_.parent = parent;
         park.base_.service = service;
+        park.base_.root = parentIsRoot ? parent : ChildBase.fromWave(parent.enclosing).root;
         park.parentIsRoot_ = parentIsRoot;
         park.base_.dispose = &dispose;
         park.base_.wave.hook = TableCompletionHook(&park.base_.wave, &waveCompleted);
@@ -1172,10 +1253,24 @@ public:
         return result;
     }
 
+    /// Cancel this cohort's active wave and therefore its descendants:
+    /// undispatched tables are skipped and running members observe
+    /// context.cancelled. Returns false, with no effect, if the cohort is
+    /// observed idle. A wave that finishes concurrently still reports
+    /// outcome.cancelled: a cancel was requested, not that work was skipped.
+    bool cancel(scope ref PrivateContext context) nothrow @nogc @system
+    {
+        authorized(context);
+        if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) == 0) return false;
+        cancelWave(&base_.wave);
+        return true;
+    }
+
     static if (hasResults)
     {
         /// Results of the last nonempty wave, in participant order;
         /// empty before the first such wave or after a void-operation wave.
+        /// A cancelled wave returns only its dispatched prefix.
         /// Acquires the join. Calling while a wave is active is fatal. Valid
         /// only within this callback and until the next nonempty start/startFinal/startSubset.
         const(R)[] results(scope ref PrivateContext context) nothrow @nogc @system
@@ -1184,7 +1279,7 @@ public:
             if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0)
                 fatal("private child results: wave active");
             version (assert) checkResultsWritten();
-            return results_[0 .. resultCount_];
+            return results_[0 .. resultPrefix];
         }
     }
 
@@ -1330,15 +1425,28 @@ private:
     {
         auto wave = cast(Wave*) emittable;
         auto park = fromWave(wave);
+        if (park.truncated(wave)) return true;
+        // A truncated retiring wave covers its remaining members with cleanup
+        // tables. The header is local: emitResume still publishes header_.
+        PayloadHeader cleanupHeader = void;
+        const(PayloadHeader)* header = &park.header_;
+        if (park.cursor_ >= park.dispatched_)
+        {
+            cleanupHeader = park.header_;
+            cleanupHeader.call = &runSkippedRetire;
+            header = &cleanupHeader;
+        }
         auto remaining = park.count_ - park.cursor_;
         auto n = remaining > park.batchLimit_ ? park.batchLimit_ : remaining;
         auto bodies = ChildBodies(park.entries_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
         immutable written = cast(size_t) park.base_.service.farm.writeTracked(
-            park.header_, bodies, 1, &wave.hook, token, 0);
+            *header, bodies, 1, &wave.hook, token, 0);
         if (written == 0) releaseWave(wave); // producer hold still protects it
         park.cursor_ += written;
         if (park.cursor_ < park.count_) return false;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateEmitBeforeSeal, null);
         releaseWave(wave); // seal: last access, including park and its owner
         return true;
     }
@@ -1346,6 +1454,7 @@ private:
     {
         auto wave = cast(Wave*) emittable;
         auto park = fromWave(wave);
+        if (park.truncated(wave)) return true; // subsets never retire
         auto remaining = park.k_ - park.cursor_;
         auto n = remaining > park.batchLimit_ ? park.batchLimit_ : remaining;
         auto bodies = SubsetBodies(park.entries_, park.sel_[park.cursor_ .. park.cursor_ + n]);
@@ -1355,6 +1464,25 @@ private:
         if (written == 0) releaseWave(wave);
         park.cursor_ += written;
         if (park.cursor_ < park.k_) return false;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateEmitBeforeSeal, null);
+        releaseWave(wave); // seal: last park access
+        return true;
+    }
+    // Before each initial table: once the wave's scope is cancelled, the
+    // published prefix becomes final. dispatched_ is stored while the producer
+    // hold still pins the park; a non-retiring wave then seals at once, and
+    // that release is its last park access. cursor_ < dispatched_ holds
+    // until truncation and never again afterwards, so this runs once per table.
+    bool truncated(Wave* wave) nothrow @nogc @system
+    {
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateEmitBeforeCancelCheck, null);
+        if (cursor_ >= dispatched_ || !scopeCancelled(wave)) return false;
+        dispatched_ = cursor_; // BEFORE the seal
+        if (retire_) return false;
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.privateTruncateBeforeSeal, null);
         releaseWave(wave); // seal: last park access
         return true;
     }
@@ -1476,6 +1604,15 @@ private:
             }
             if (retiring) retireMember!T(park.base_.service, entry);
         }
+        return 1;
+    }
+    // Cleanup header for undispatched members of a truncated retiring wave:
+    // retire without calling the op or writing a result. The previous wave's
+    // join included all descendants, so the member's children are idle.
+    static long runSkippedRetire(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+    {
+        auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
+        retireMember!T(fromWave(entry.enclosing).base_.service, entry);
         return 1;
     }
     static void dispose(ChildBase* base) nothrow @nogc @system
