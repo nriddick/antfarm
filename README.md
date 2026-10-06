@@ -171,7 +171,14 @@ joined results. The onboarding program
 [examples/private_tree.d](examples/private_tree.d) uses typed result ports, a
 child continuation, a subset wave, and a destructor. Shared setup, drain, and
 shutdown rules for both models are in
-[actors/LIFECYCLE.md](actors/LIFECYCLE.md).
+[actors/LIFECYCLE.md](actors/LIFECYCLE.md). The
+[shutdown recipe](actors/LIFECYCLE.md#shutdown-recipe) covers the public
+retire/escalation path and the private tracked-root `cancelAll` and
+`takeOutcome` drain. Its compiled forms are
+[examples/request_deadline.d](examples/request_deadline.d),
+[examples/fail_fast_fold.d](examples/fail_fast_fold.d), and
+[examples/fiber_cancel_at.d](examples/fiber_cancel_at.d); build commands are in
+[examples/README.md](examples/README.md).
 
 ## First actor and wave
 
@@ -345,11 +352,13 @@ still requires exclusive ownership and no live consumers or producer tickets.
 - [threadpool/README.md](threadpool/README.md) shows topology discovery,
   worker ownership, and Director wake/cadence policy.
 - [actors/LIFECYCLE.md](actors/LIFECYCLE.md) is the shared actor lifecycle
-  and contract guide.
+  and contract guide, including the
+  [shutdown recipe](actors/LIFECYCLE.md#shutdown-recipe) for both models.
 - [examples/README.md](examples/README.md) has the compiled public and private
-  actor programs.
+  actor programs, including the outcomes, cancellation, and deadline programs.
 - [actors/ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md) shows autonomous actors,
-  inbox ownership, retirement, and dependent phase waves.
+  inbox ownership, retirement, outcomes, cancellation, and dependent phase
+  waves.
 - [fibers/README.md](fibers/README.md) shows when and how to run managed Fibers
   on the same workers.
 - [SPEC.md](SPEC.md) is the core algorithm and memory-order contract.

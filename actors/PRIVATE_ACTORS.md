@@ -682,8 +682,13 @@ Untaken outcomes are the backpressure. A park whose slots all hold outcomes
 returns `capacityFull` from `spawn`, and `destroy` with an untaken outcome is
 the usual `live != 0` fatal. **A tracked drain must pump and take outcomes**
 until `live == 0`; pumping alone never gets there. A cancel-mode shutdown is
-`cancelAll()`, then that same loop. Tracking-only calls (`spawn` with a handle,
-`takeOutcome`, `cancelAll`, root `fail`) are fatal on an untracked park.
+`cancelAll()`, then that same loop. The shared recipe for both actor models is
+in [LIFECYCLE.md](LIFECYCLE.md#shutdown-recipe); its compiled forms are
+[request_deadline.d](../examples/request_deadline.d),
+[fail_fast_fold.d](../examples/fail_fast_fold.d), and
+[fiber_cancel_at.d](../examples/fiber_cancel_at.d). Tracking-only calls
+(`spawn` with a handle, `takeOutcome`, `cancelAll`, root `fail`) are fatal on
+an untracked park.
 
 ```d
 import antfarm;

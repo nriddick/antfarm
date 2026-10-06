@@ -190,6 +190,31 @@ finished and still count in `live` until its notification tail is collected.
 `spawn` can return `capacityFull` for that slot until then. On a tracked park
 a terminal root also counts in `live` until its outcome is taken.
 
+## Shutdown recipe
+
+Shutdown is application-driven: close admission, finish the logical drain or
+cancel, then quiesce and destroy. The table is the recipe in both models;
+[Shutdown order](#shutdown-order) below explains the ordering constraints.
+
+The compiled forms are [examples/request_deadline.d](../examples/request_deadline.d)
+(private drain and `takeOutcome`) and
+[examples/public_service.d](../examples/public_service.d) (public retire and
+reclaim).
+
+| Step | Public actor service | Private root park |
+| --- | --- | --- |
+| 1. Close admission | Stop senders, then `owner.requestRetire()` (the default is drain). Late `send`s return `closed`. | Stop `spawn`ing roots. |
+| 2. Drain or cancel | Handlers process accepted nodes. To escalate a drain, call `owner.requestRetire(ActorRetireMode.cancel)` on the same owner after an application deadline; every later activation of that generation sees `context.cancelling` and calls `context.cancelInbox()`, so senders observe `ActorNodeOutcome.cancelled`. | Drain with `pump`/`collectCompleted` and consumer progress to `live == 0`. To cancel instead, call `cancelAll()` first (tracked parks), then run the same loop. A tracked park must also call `takeOutcome` every pass: a terminal root stays in `live` until its outcome is taken. |
+| 3. Join workers | Join every worker and unsubscribe every view, so no consumer can still be in the actor trampoline. | Same, and also join every thread that may call `handle.requestCancel` on its handles. |
+| 4. Destroy infrastructure | `runtime.destroy()` only after the actor drain and the consumer join. | `park.destroy()` only after `live == 0` and the canceller join; then `park = null`. |
+| 5. Unregister and destroy the Farm | Unregister producer tokens, then `farm.destroy()`. | Same. |
+
+There is no guaranteed final handler call in either retire mode. An idle or
+empty actor retires without another activation, so release resources reachable
+from public state after `retired`, not from a hoped-for last callback. On the
+private side, a cancelled callback is only *asked* to stop: cancellation never
+interrupts it.
+
 ## Shutdown order
 
 `destroy` checks preconditions and frees. It is not graceful shutdown. Keep
@@ -294,4 +319,7 @@ service never receive identities for the internal actors.
 - [examples/public_service.d](../examples/public_service.d) — inbox statuses, bounded drain, close, stale handle.
 - [examples/public_wave.d](../examples/public_wave.d) — external selection and the hook tail.
 - [examples/private_tree.d](../examples/private_tree.d) — ports, continuation fold, subset, destructor, `live == 0`.
+- [examples/request_deadline.d](../examples/request_deadline.d) — tracked roots, per-request deadlines, external cancel, `takeOutcome`.
+- [examples/fail_fast_fold.d](../examples/fail_fast_fold.d) — `fail` + `cancelPeers` truncation and explicit propagation.
+- [examples/fiber_cancel_at.d](../examples/fiber_cancel_at.d) — example bridge from the fibers timer to `requestCancel`.
 - [examples/README.md](../examples/README.md) — Windows and Linux build commands. `make check` runs the Linux matrix.

@@ -39,6 +39,8 @@ separately allocated POD state. A move-only `ActorOwner` controls retirement
 and reclamation; copyable `ActorHandle`s carry identity without extending state
 lifetime. Autonomous wakes and inbox sends coalesce through a ready queue, and
 `ActorRuntime.flush` publishes those activations as fixed-width Farm payloads.
+Inbox nodes report `completed`, `failed(code)`, or `cancelled`; cancellation
+closes admission and is cooperative, with no forced callback interruption.
 
 An `ActorWave` is the bulk-synchronous path for a phase over a set of actors.
 Admission reserves exclusive borrowing before publication, rejects duplicate
@@ -60,8 +62,12 @@ Private roots and parent-owned cohorts are a separate path in
 root park and publishes root and child tables through `pump`; subscribed
 consumers execute the callbacks. Parents authorize whole-cohort or subset
 waves, read cohort-owned result ports or externally owned buffers after the
-join, and may fold child work inside one enclosing wave. State may be non-POD;
-the stored instance is destroyed exactly once. There are no public handles and no access to
+join, and may fold child work inside one enclosing wave. Domain failures are
+values (`context.fail`), in-tree cancellation is cooperative
+(`park.cancel`, `cancelChildren`, `cancelPeers`), and an opt-in tracked park
+adds thread-safe root cancellation, lazy deadlines, and pull-based terminal
+outcomes. State may be non-POD; the stored instance is destroyed exactly once.
+There are no public handles and no access to
 child state. Use this path for an exclusive hierarchy; use public actors for
 independently addressed services and externally selected waves. Shared
 lifecycle rules are in [actors/LIFECYCLE.md](actors/LIFECYCLE.md).
@@ -150,9 +156,9 @@ Actor dispatch reuses the same Farm and worker pump as ordinary payloads:
    Farm backpressure, then seal it.
 5. Poll the returned `ActorWaveHandle`, or attach an `ActorWaveTrigger` so a
    Fiber can publish the dependent phase after completion.
-6. Stop senders, finish all wave membership, request retirement, drain any
-   resulting activation, reclaim every owner, and only then destroy the actor
-   runtime.
+6. Stop senders, finish all wave membership, request retirement (or escalate
+   to cancel), drain any resulting activation, reclaim every owner, and only
+   then destroy the actor runtime.
 
 The actor operation and any code it reaches must remain resident until its
 activation or wave completes. Actors in one wave share the Farm and the
@@ -231,9 +237,14 @@ For a full stack:
 2. Seal admitted actor waves and let their orchestrating Fibers observe
    completion. If a wave installed a completion hook, do not reuse or destroy
    that wave storage until the hook's last access.
-3. Stop actor inbox senders, retire and reclaim actors, and drain each
-   private root park with `pump` or `collectCompleted` until `live == 0`.
-   Do not destroy runtimes or parks yet. `pump() == 0` is not that drain.
+3. Stop actor inbox senders. A public service calls `requestRetire` (drain)
+   and may escalate with `requestRetire(ActorRetireMode.cancel)` after an
+   application deadline; handlers then call `context.cancelInbox()` while
+   `context.cancelling`. A private park drains with `pump` or
+   `collectCompleted` until `live == 0`, or calls `cancelAll()` first; a
+   tracked park must also take outcomes. Do not destroy runtimes or parks yet.
+   `pump() == 0` is not that drain. The full recipe is
+   [actors/LIFECYCLE.md](actors/LIFECYCLE.md#shutdown-recipe).
 4. Signal or cooperatively cancel other indefinite Fiber waiters.
 5. Drain runnable work and completion/lifecycle records.
 6. Release completed Fiber tasks.
@@ -254,7 +265,9 @@ that never reaches a scheduler boundary.
 
 - [SPEC.md](SPEC.md): Farm algorithm and memory ordering.
 - [actors/LIFECYCLE.md](actors/LIFECYCLE.md): shared actor setup, drain, and
-  shutdown contracts.
+  shutdown contracts, including the [shutdown recipe](actors/LIFECYCLE.md#shutdown-recipe).
+- [examples/README.md](examples/README.md): compiled public and private actor
+  programs, including outcomes, cancellation, and deadline examples.
 - [threadpool/DESIGN.md](threadpool/DESIGN.md): topology, worker, Director, and
   registry contracts.
 - [fibers/DESIGN.md](fibers/DESIGN.md): Fiber architecture, ownership, and
