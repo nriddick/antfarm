@@ -1,0 +1,54 @@
+{
+  "base": "b782ce4",
+  "baseline_benchmark_commit": "8cc8203",
+  "candidate_head": "8cc8203b550a2f1dbc5a75adad386c9b03132ea2",
+  "allocator": "mimalloc",
+  "mimalloc_version": 30503,
+  "seconds": 3,
+  "repeats": 5,
+  "warmups": 5,
+  "actors": 16384,
+  "batch": 256,
+  "tier": "small",
+  "quota_words": 16384,
+  "huge_pages": false,
+  "profiles": [
+    {
+      "consumers": 0,
+      "cpus": "0"
+    },
+    {
+      "consumers": 6,
+      "cpus": "0,1,2,3,4,5,6"
+    }
+  ],
+  "modes": [
+    "inbox",
+    "actor",
+    "wave"
+  ],
+  "build_flags": "-O2 -release -d-version=AntfarmMimallocV3 -i",
+  "archive": "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+  "archive_sha256": "551ee9a97e46b331736163a17cb3514b940d57b68cc82206723e0ccc0e8a1bec",
+  "gate": "User relaxed -3% gate; escalate only a quiet reproducible regression worse than -5%.",
+  "contamination_rule": "Flag a run if mean busy fraction outside benchmark affinity exceeds 10%.",
+  "compiler": "LDC - the LLVM D compiler (1.43.0):\n  based on DMD v2.113.0 and LLVM 22.1.8\n  built with LDC - the LLVM D compiler (1.43.0)\n  Default target: x86_64-pc-linux-gnu\n  Host CPU: znver3\n  https://dlang.org - https://wiki.dlang.org/LDC\n\n\n  Registered Targets:\n    aarch64     - AArch64 (little endian)\n    aarch64_32  - AArch64 (little endian ILP32)\n    aarch64_be  - AArch64 (big endian)\n    amdgcn      - AMD GCN GPUs\n    arm         - ARM\n    arm64       - ARM64 (little endian)\n    arm64_32    - ARM64 (little endian ILP32)\n    armeb       - ARM (big endian)\n    avr         - Atmel AVR Microcontroller\n    bpf         - BPF (host endian)\n    bpfeb       - BPF (big endian)\n    bpfel       - BPF (little endian)\n    hexagon     - Hexagon\n    lanai       - Lanai\n    loongarch32 - 32-bit LoongArch\n    loongarch64 - 64-bit LoongArch\n    mips        - MIPS (32-bit big endian)\n    mips64      - MIPS (64-bit big endian)\n    mips64el    - MIPS (64-bit little endian)\n    mipsel      - MIPS (32-bit little endian)\n    msp430      - MSP430 [experimental]\n    nvptx       - NVIDIA PTX 32-bit\n    nvptx64     - NVIDIA PTX 64-bit\n    ppc32       - PowerPC 32\n    ppc32le     - PowerPC 32 LE\n    ppc64       - PowerPC 64\n    ppc64le     - PowerPC 64 LE\n    r600        - AMD GPUs HD2XXX-HD6XXX\n    riscv32     - 32-bit RISC-V\n    riscv32be   - 32-bit big endian RISC-V\n    riscv64     - 64-bit RISC-V\n    riscv64be   - 64-bit big endian RISC-V\n    sparc       - Sparc\n    sparcel     - Sparc LE\n    sparcv9     - Sparc V9\n    spirv       - SPIR-V Logical\n    spirv32     - SPIR-V 32-bit\n    spirv64     - SPIR-V 64-bit\n    systemz     - SystemZ\n    thumb       - Thumb\n    thumbeb     - Thumb (big endian)\n    ve          - VE\n    wasm32      - WebAssembly 32-bit\n    wasm64      - WebAssembly 64-bit\n    x86         - 32-bit X86: Pentium-Pro and above\n    x86-64      - 64-bit X86: EM64T and AMD64\n    xcore       - XCore\n",
+  "affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "note": "actor is the existing public wake mode; inbox adds send/pop/complete/node reuse. Baseline is b782ce4 plus benchmark commit 8cc8203; candidate runtime is the uncommitted F4a diff at measurement time.",
+  "base_binary_sha256": "3589b4b1539d7bb10d1fa53c15934186768508f486e77f48109c5d7b753fff0d",
+  "candidate_binary_sha256": "eda6adb86c795154e8c2a82bffaf7cfda7487b413b7d50f550ea0d19e7372480",
+  "candidate_runtime_commit": "119debb"
+}
