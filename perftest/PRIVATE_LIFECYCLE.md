@@ -641,3 +641,19 @@ reports how much ran the operation: about 0.62 with inline consumption, near 1
 with six consumers, which are usually behind the emitter when the cancel lands.
 Results are in [the F2 results](results/private-cancellation-2026-10-06/).
 
+## F3 `private-tracked` baseline
+
+`private-tracked` (F3, 2026-10-06) is a new baseline with no base comparator.
+It is the `private` lifecycle on a tracked park, modelling U5 (one root per
+request). Each root spawns with a handle and an armed deadline an hour away.
+It checks `cancelled` once, which reads the clock, then operates and
+finishes. The drain pumps and takes every outcome and verifies it
+`completed`. With mimalloc, 16384 actors and batch 256, it measured 13.38
+Mactor_cycles/s with inline consumption and 12.96 with six consumers. That is
+−55% and −42% against untracked `private` in the same pass. The difference is
+the per-root clock read, the record stores, the terminal CAS and the take.
+
+Untracked modes stay within −5% of the F2 base after F3 moved the tracked
+tails out of line and gave cohorts an immutable tracked flag. Results,
+including the escalated pre-fix regression and its bisect, are in
+[the F3 results](results/private-root-tracking-2026-10-06/).
