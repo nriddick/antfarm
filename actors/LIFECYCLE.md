@@ -176,7 +176,9 @@ quiescent" or "the process may exit".
 | `ActorHandle.valid` | the copy holds a non-null slot and a non-zero generation | the generation is still live. After reclaim, `wake`/`send` return `staleHandle` |
 | `node.available` | for an accepted interaction, the actor released `complete`/`fail`/`cancel`; outcome, code and payload writes are visible and the node may be reused | the actor has retired, or the runtime is quiet |
 | `ActorWaveHandle.finished` and `!failed` | this generation completed; actor writes in the wave are visible. `failed` is structural or control-path interference, not a domain error, and it does not roll back earlier tables | the completion hook has returned. After `begin`, the old handle's `finished` is false |
-| Private `park.live == 0` | the emitter has collected every root, including waiters and notification tails | consumers unsubscribed, token unregistered, or `pump() == 0` along the way |
+| Private `park.live == 0` | the emitter has collected every root, including waiters and notification tails, and on a tracked park every outcome was taken | consumers unsubscribed, token unregistered, or `pump() == 0` along the way |
+| Private `takeOutcome` returned a root | that root is terminal with this status; its application writes are visible on the emitter thread; its handle is stale | other roots are done, or another thread may read those writes without synchronizing with the emitter |
+| `requestCancel() == requested` | the root's outcome will be `cancelled` or `failed` | the root has observed it or stopped working |
 | Private `finished(context)` | the current child wave is idle. True before the first start, and true while a root notification tail may still hold `live` | safe to destroy the park, or authority to read child state |
 | `consumeNext() == false` | this cursor sees nothing ready | any actor, wave, or park is done |
 | `pump() == 0` | that call published no root activation | no child work, no waiting root, idle |
@@ -184,7 +186,8 @@ quiescent" or "the process may exit".
 
 User callback counters are not a destruction fence. A root can be logically
 finished and still count in `live` until its notification tail is collected.
-`spawn` can return `capacityFull` for that slot until then.
+`spawn` can return `capacityFull` for that slot until then. On a tracked park
+a terminal root also counts in `live` until its outcome is taken.
 
 ## Shutdown order
 
@@ -203,14 +206,18 @@ or park, unregister, then destroy the Farm.
 2. Keep flushing or pumping, and keep consumers running, until the model-specific
    drain holds: public owners `retired` and reclaimed; waves `finished` and,
    if a hook was set, the hook's last access observed; private `live == 0`
-   reached through `pump` or `collectCompleted`. Idle public retirement can
+   reached through `pump` or `collectCompleted`. A tracked park reaches it
+   only if the loop also drains `takeOutcome`; to cancel instead of drain,
+   call `cancelAll()` first, then run the same loop. Idle public retirement can
    complete without another handler call. `context.closing` is not a
    guaranteed finalizer. Do not destroy the runtime or park in this step.
 3. Stop and join workers. Their unsubscribe must happen before the join
    returns. Unsubscribe any control-thread view the same way.
 4. Destroy actor infrastructure only after that join. `runtime.destroy`
    fatals if actors are live or the ready queue is non-empty.
-   `park.destroy()` fatals if roots are live; then set the pointer null.
+   `park.destroy()` fatals if roots are live, including untaken outcomes;
+   then set the pointer null. Join every thread that may call
+   `requestCancel` on its handles first.
    `destroy(park)` is D's pointer destruction and does not free the park.
 5. Unregister producer tokens.
 6. Destroy the Farm. Live consumers or live tickets are fatal.
@@ -232,11 +239,11 @@ a race, or a use of freed memory.
 
 | Rank | Hazard | What is caught | What is silent |
 | --- | --- | --- | --- |
-| 1 | Lifetime and aliasing across callbacks, messages, outputs, and runtime storage. Escaped state or context pointers, freeing a node or hook context too early, dangling GC references, handles used after runtime destruction. | `complete` on a node the actor does not own. Generation checks reject stale submits while that runtime's slot slab is alive. | The compiler does not prove these contracts. `@system` code can stash a `scope` pointer; DIP1000 does not make that a compile error today. Generation checks do not cover a destroyed slot slab. `initialize` on a live node skips the send/complete checks. |
+| 1 | Lifetime and aliasing across callbacks, messages, outputs, and runtime storage. Escaped state or context pointers, freeing a node or hook context too early, dangling GC references, handles used after runtime or park destruction. | `complete` on a node the actor does not own. Generation checks reject stale submits while that runtime's slot slab is alive. | The compiler does not prove these contracts. `@system` code can stash a `scope` pointer; DIP1000 does not make that a compile error today. Generation checks do not cover a destroyed slot slab. `initialize` on a live node skips the send/complete checks. |
 | 2 | Progress and shutdown. Stop the emitter too soon, block every consumer while waiting for child work, treat node completion or `live == 0` as infrastructure quiescence, or free hook context after `finished`. | Destroying a Farm with live consumers or tickets, a runtime with live or queued actors, or a park with live roots. | A lost pump or a missing consumer hangs. `pump() == 0`, `consumeNext() == false`, `finished`, and `closing` do not mean what a shutdown loop wants. |
 | 3 | Token used on the wrong Farm. | Fatal at `write` and `unregisterProducer`. `flush` and `pump` catch it only when they publish something. A since-destroyed Farm's id is never reissued, so a leftover ticket cannot match a new Farm. | `Token.valid` does not report provenance. An empty `flush` or `pump` returns before `write`. The slot hash matches across Farms with the same registration history; only `farmId` distinguishes them. |
 | 4 | Assuming thread, allocator, or state properties the API does not enforce. A non-thread-safe allocator, thread-affine data in state that migrates across consumers, concurrent use of one private park, re-entering a park from a callback. | Alignment above 64 on the default allocator fails the allocation (null), not a later checked fault. Unauthorized private contexts, active-child `finish`, bad batch overrides, and subset index errors are fatal. Park reentry is fatal only in assertion builds. | POD checks are not transitive ownership. The reentry guard is not a lock. Release builds do not diagnose park reentry. |
-| 5 | Overload and nontermination left as application policy. Unbounded inbox growth, an endless `again` or empty wait, a callback that never returns, a child that never finishes. | Ring, runtime capacity, and private cohort capacity are finite. Exhaustion is a typed status or backpressure, not an automatic cancel. | No mailbox byte cap or deadline. Private in-tree cancellation is cooperative: a callback that ignores `cancelled` runs to completion, and roots have no application-side cancel yet. An actor that never pops its inbox can refuse retirement forever. The example host deadline is not part of the library. |
+| 5 | Overload and nontermination left as application policy. Unbounded inbox growth, an endless `again` or empty wait, a callback that never returns, a child that never finishes. | Ring, runtime capacity, and private cohort capacity are finite. Exhaustion is a typed status or backpressure, not an automatic cancel. | No mailbox byte cap or public deadline. Private cancellation is cooperative: a callback that ignores `cancelled` runs to completion. Private deadlines are lazy, observed only by checks and emission, and need a tracked park, as do root handles and `cancelAll`. An actor that never pops its inbox can refuse retirement forever. The example host deadline is not part of the library. |
 
 Other mistakes that fail late or not at all: dropping an owner or token skips
 cleanup; a type-erased create checks size and alignment, not the semantic
@@ -267,11 +274,11 @@ service never receive identities for the internal actors.
 | --- | --- | --- |
 | Who names the actor | external handle | no external identity; parent owns the cohort |
 | How work is admitted | `wake` / `send`, or an external wave | `spawn`, then `start` / `startSubset` / `startFinal` |
-| How the caller sees a result | caller-owned node or other external buffer, after an acquire | cohort `results(context)` after the join; root output still external |
-| Domain failure | `node.fail(code)` and `ActorNodeOutcome` after `available`; public wave failures remain structural | `context.fail(code)`, then `outcome` after the join. Untracked root `fail` is fatal |
-| Cancellation | no cancel-mode retirement yet; the handler drains, or `node.cancel()`s, what it pops | cooperative and in-tree: `park.cancel`, `cancelChildren`, `cancelPeers`, observed through `context.cancelled`. Skips undispatched tables; never interrupts a callback or wakes a waiter early |
+| How the caller sees a result | caller-owned node or other external buffer, after an acquire | cohort `results(context)` after the join; root output still external, visible on the emitter after `takeOutcome` on a tracked park |
+| Domain failure | `node.fail(code)` and `ActorNodeOutcome` after `available`; public wave failures remain structural | `context.fail(code)`, then `outcome` after the join. A tracked root's `fail` becomes `PrivateRootOutcome.failed`; untracked root `fail` is fatal |
+| Cancellation | no cancel-mode retirement yet; the handler drains, or `node.cancel()`s, what it pops | cooperative and in-tree: `park.cancel`, `cancelChildren`, `cancelPeers`, observed through `context.cancelled`. Tracked parks add thread-safe `PrivateRootHandle.requestCancel`, `cancelAll` and lazy deadlines. Skips undispatched tables; never interrupts a callback or wakes a waiter early |
 | How to wait | poll a wave handle, a node, or `retired` | `waitChildren` on a root; `PrivateChildStep!R` inside a child wave |
-| Shutdown fence | retire, reclaim, empty ready queue | `live == 0` through pump or collect, then `park.destroy()` |
+| Shutdown fence | retire, reclaim, empty ready queue | `live == 0` through pump or collect (and `takeOutcome` when tracked), then `park.destroy()` |
 
 ## Where to go next
 

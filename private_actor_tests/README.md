@@ -222,4 +222,56 @@ raw results are in
 | C13: result prefix from `count_` | `cancel-c13` | debug: `private child result: unwritten slot`; release: `c13 prefix survives retirement` |
 
 C10 and C11 are behavioural (`cancelChildren` + `finishAfterChildren`, and
-partial construction).
+partial construction). F3 runs C10 also on tracked parks, where the root
+fails, is cancelled through its handle, or both, and checks the taken
+`failed(31)`, `cancelled(requested)` and `failed` outcomes.
+
+## Root tracking (F3)
+
+| Group | Selectors |
+| --- | --- |
+| Deterministic schedules | `root-tracking` (all), `root-t1` … `root-t8`; C10's tracked half runs under `cancel-c10`; O6 under `outcomes` |
+| Torture | `tracked-torture [roots=3000] [seed=23]` |
+| Death | `root-tracking-death` runs the harness; `root-tracking-misuse:spawn-handle`, `:take`, `:cancel-all`, `:handle-index`, `:destroy-untaken` and `root-generation-wrap` are its fatal child modes |
+
+T1 and T2 pause at `privateRootCancelBeforeCas`, `privateRootTerminalBeforeCas`
+and `privateTakeBeforeVacantStore` while a foreign thread cancels; T4 counts
+clock reads through the test-only `privateClockReads`; T9 seeds a root's
+generation with `privateTestSetRootGeneration`. T6 runs under four free-running
+consumers and is the TSan check of the X1a edge on both terminal paths and with
+consumer reclamation. T7 is inline, so its 1000 roots are in exact states when
+`cancelAll` runs.
+
+The tracked torture reuses the F2 trees under tracked roots with random
+deadlines (none, past, within 2 ms, an hour away), root `fail`, a foreign
+thread cancelling random published handles (most of them stale by then) and
+occasional `cancelAll`. The emitter pumps and takes outcomes. It checks one
+outcome per root named by its handle, `failed` exactly for failing roots with
+their code, a cause exactly for `cancelled`, `deadline` only for roots that had
+one, that no root which observed `cancelled` and no handle that got
+`requested` ends `completed`, exactly-once destruction, allocation balance and
+`live` reaching zero. The normal suite runs 3000 roots (300 under TSan).
+
+Each mutation below was applied alone to a copy of the sources, built with
+LDC in debug and `-release`, and run on its selector on 2026-10-06. Both builds
+aborted (SIGABRT) with the listed failure. T7a mutates the test's drain loop,
+not the runtime. The script and raw results are in
+[the F3 results](../perftest/results/private-root-tracking-2026-10-06/).
+
+| Mutation | Selector | Observed failure |
+| --- | --- | --- |
+| T1a: canceller load+store instead of CAS | `root-t1` | `t1 resumed canceller is stale` |
+| T1b: `takeOutcome` does not bump the generation | `root-t1` | `t1 resumed canceller is stale` (ABA: the stale CAS succeeds) |
+| T2: terminal transition as a plain store from the first load | `root-t2` | `t2 cancel before terminal CAS` |
+| T3: drop the `records` branch from `scopeCancelled` | `root-t3` | `t3 first emit truncates` |
+| T4: ignore the armed flag (always read the clock) | `root-t4` | `t4 no clock read without a deadline` |
+| T5: recycle the slot at collection | `root-t5` | `t5 capacityFull while outcomes held` |
+| T7a: drain without `takeOutcome` | `root-t7` | `t7 drained` timeout |
+| T7b: `cancelled` outranks `failed` | `root-t7` | `t7 statuses` |
+| T7c: a later root `fail` overwrites the code | `root-t7` | `t7 statuses` |
+| T7d: `cancelAll` ignores expired deadlines | `root-t7` | `t7 statuses` |
+| T7e: `cancelAll` also marks held outcomes | `root-t7` | `t7 cancelAll counts live unfinished roots` |
+| T9: no generation wrap check | `root-tracking-death` | the `root-generation-wrap` child prints `root generation wrap survived` and exits 0, so the harness check fails |
+
+T6 (visibility edge under TSan), T8 (handle identity) and the O6 and C10
+extensions are behavioural.

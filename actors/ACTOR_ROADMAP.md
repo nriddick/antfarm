@@ -62,8 +62,8 @@ review, mutations, soak and perf evidence live in
 **F1 wave outcomes are done:** a member's `context.fail(code)` aggregates on
 the enclosing wave. After the join, `outcome` reports the count and one
 consistent `(code, participant position)` pair. Propagation is explicit.
-Root `fail` stays fatal on an untracked park until root tracking. Entry stays
-40 bytes; a signal-only cohort grows to 368 bytes on 64-bit.
+Root `fail` stays fatal on an untracked park (F3 adds tracked root outcomes).
+Entry stays 40 bytes; a signal-only cohort grows to 368 bytes on 64-bit.
 
 **F2 in-tree cancellation is done:** `park.cancel`, `cancelChildren` and
 `cancelPeers` set a per-wave flag and a sticky root summary byte (Entry offset
@@ -75,13 +75,22 @@ A signal-only cohort grows to 376 bytes. The lifetime review, mutations, soak
 and perf evidence live in
 [the F2 results](../perftest/results/private-cancellation-2026-10-06/).
 
-Next items are root tracking with deadlines and X1a, per-member retirement,
-concurrent subsets, non-POD results, and optional emitter wake. Typed root
-outputs (X1b) stay deferred. F3 also owes two F2 leftovers: the `records`
-branch in `scopeCancelled` (a root's `cancelled` returns false until then),
-and the root-outcome half of test C10 (`cancelChildren` +
-`finishAfterChildren` reporting a tracked `failed`/`cancelled` status).
-Other port extensions remain: **X2** library reductions, **X3** bounded append
+**F3 root tracking, X1a and lazy deadlines are done:** the opt-in
+`PrivateRootOptions.tracking` gives each root slot a 32-byte record. Its
+generation-checked control word supports a thread-safe
+`PrivateRootHandle.requestCancel`, `cancelAll`, and lazy `MonoTime` deadlines
+that become cancellation when a check or the emitter observes them. A
+tracked root's `fail` is no longer fatal. Terminal roots hold their slot until
+`takeOutcome` returns `{handle, status, cause, code}` (X1a), so `live` falls
+there and a tracked drain must take outcomes. The F2 leftovers are closed: a
+root's `cancelled` reads its record, and C10 checks the tracked root status.
+Untracked parks gain one null branch per spawn, collection and cancel check,
+and 32 bytes. The control-word review, mutations, soak and perf evidence live
+in [the F3 results](../perftest/results/private-root-tracking-2026-10-06/).
+
+Next items are per-member retirement, concurrent subsets, non-POD results,
+and optional emitter wake. Typed root outputs (X1b) stay deferred; deadlines
+remain lazy until a timed wake exists. Other port extensions remain: **X2** library reductions, **X3** bounded append
 buffers, and **X4** writer capability / in-place results. A compiler-enforced
 safe ownership front end remains future work.
 

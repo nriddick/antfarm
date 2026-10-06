@@ -24,7 +24,8 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
 - **E2-2 done:** opt-in subset waves with `uint` spawn indices, copied selections,
   participant-ordered results and the existing descendant join. Subsets never
   retire members; one wave remains active per cohort. Entry stays 40 bytes.
-- **Port extensions:** X1 root-to-application outputs; X2 library reductions;
+- **Port extensions:** X1 root-to-application outputs (X1a status/identity
+  done in F3; typed X1b deferred); X2 library reductions;
   X3 bounded append buffers; X4 writer capability / in-place results.
 - **E2 complete except emitter wake:** E2-3 provides shared wave scheduling and
   E2-4 resumes child operations after descendant joins within the same wave,
@@ -33,7 +34,7 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
 - **F1 wave outcomes done:** members report domain failure with `context.fail`.
   The wave keeps a report count and one consistent code/position pair, read
   through `outcome` after the join. Root `fail` on an untracked park stays
-  fatal until root tracking. No version bump.
+  fatal; F3 tracks it. No version bump.
 - **F4a public node outcomes done:** `ActorNodeOutcome`, `node.fail(code)` and
   `node.cancel()` use the reserved completion word. Node stays 32 bytes and
   `send` is unchanged. Public cancel-mode retirement (F4b) remains open.
@@ -41,8 +42,14 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   `cancelPeers` and `context.cancelled`. The emitter truncates a cancelled
   wave at a table boundary; `startFinal` retires the rest through cleanup
   tables. Resumptions and joins are unchanged. Entry stays 40 bytes.
-- **Next:** root tracking with deadlines and X1a, per-member retirement,
-  concurrent subsets, non-POD results, and optional emitter wake. No version
+- **F3 root tracking done:** opt-in per-root records give thread-safe
+  `PrivateRootHandle.requestCancel`, `cancelAll`, lazy `MonoTime` deadlines,
+  tracked root `fail`, and pull-based X1a outcomes through `takeOutcome`,
+  which recycles the slot. A tracked drain pumps and takes outcomes.
+  Untracked parks are unchanged apart from one branch per spawn, collection
+  and cancel check. Entry stays 40 bytes.
+- **Next:** per-member retirement, concurrent subsets, non-POD results, and
+  optional emitter wake. No version
   bump accompanies these slices; the release remains 1.7.1-rc.1 pending a tag
   decision.
 

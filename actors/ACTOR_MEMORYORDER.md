@@ -327,7 +327,7 @@ the tables a wave publishes and the activations they run. Cancellation changes
 only *which* tables exist: a prefix, or cleanup tables that take the same
 per-table credit and rollback. The lost-wake and double-wake arguments
 therefore carry over. The new obligations are below. R7, R8, R10 and R11
-concern root records and arrive with root tracking.
+concern root records; see [private root tracking](#private-root-tracking).
 
 Writers set a flag with two idempotent release stores: `W.cancel = true`,
 then the root Entry's `subtreeCancel = true` (byte 35, formerly padding).
@@ -358,6 +358,47 @@ immediate `done` is not an obligation.
 
 `subtreeCancel` is a one-byte atomic beside plain root bytes at offsets 32–34.
 Those are distinct memory locations; TSan shadows by offset and size.
+
+## Private root tracking
+
+A tracked root park has one 32-byte record per slot. Its `control` word,
+`generation:48 | cause:8 | flags:8` (live, cancelled, armed), is the only
+location another thread touches, and only through `requestCancel`. The other
+record fields are plain: `deadline`, `failed`/`failureCode`, `status` and the
+immutable `index`. Tracking adds no operation on any join counter and no wake
+source, so the credit proofs above are unchanged.
+
+```text
+VACANT(g)   --spawn (emitter: deadline/failed/code, then control.store(g|live[|armed], release))--> LIVE(g)
+LIVE(g)     --requestCancel / cancelAll / observed deadline (CAS acq_rel from a live word)--> LIVE(g)|cancelled|cause
+LIVE(g)*    --terminal collection (emitter CAS loop clears live; status from the replaced word)--> FINISHED(g)
+FINISHED(g) --takeOutcome (emitter: control.store(g+1, release); slot to the free list)--> VACANT(g+1)
+```
+
+| # | Race | Argument |
+| --- | --- | --- |
+| R7 | Handle cancel vs terminal collection | Both are CASes on `control`; modification order linearizes them. Cancel first: the emitter's CAS fails, re-reads the cancelled word and records `cancelled` (unless `failed`). Collection first: the canceller's CAS fails, re-reads a non-live word and returns `finished`. `requested` never pairs with `completed`. |
+| R8 | Handle cancel vs take and respawn (stale handle) | Cancellers CAS only from a live word of their own generation. The emitter's plain stores happen only from non-live words (FINISHED to VACANT(g+1), VACANT to LIVE), which no canceller writes, so neither store can overwrite a successful cancel. Every emitter transition runs on the one emitter after its own checks. A canceller holding a stale LIVE(g) fails its CAS and then sees another generation. `takeOutcome` is fatal at generation 2^48−1, before the store would wrap, so a stale handle never matches a later generation. |
+| R10 | Observed deadline vs handle vs `cancelAll` | All set the same bit by CAS from a live word whose cancelled bit is clear, writing the cause with it. The first fixes the cause; the others see cancelled. Terminal collection keeps the bits and only the generation-advancing take clears them. In-tree observers know the root is live: a root context runs under custody, a member under a table credit that chains to the root's join, and the emitter's `truncated` check under the wave's producer hold. Debug builds assert it. |
+| R11 | Root `fail` fields vs the emitter read | Plain writes in a root activation; activations are serialized by custody. The leaf-finish path orders them by the Batch return (release CAS) and the emitter's acquire exchange; the joined path adds the root's release RMW and the `rootReturns` push and exchange. Spawn resets them before publication. |
+
+The canceller's CAS is acq_rel and every in-tree check starts with an acquire
+load, so writes made before a successful `requestCancel` are visible to any
+activation that observes `cancelled`. The release stores at spawn and take
+publish nothing a canceller reads; consumers read the plain fields through
+table publication. They are kept for clarity and cost nothing on x86.
+
+**X1a.** A terminal root's activations happen-before `takeOutcome` returns it on
+the emitter: the same R11 chain reaches collection, and `takeOutcome` follows
+collection in emitter program order. Application storage written in the final
+activation (typed outputs outside the library) is therefore readable on the
+emitter after the take, and on another thread after ordinary synchronization
+with the emitter. This replaces "read after `live` falls" with a per-root edge.
+
+`deadline` is written only by the emitter at spawn, before publication; consumers
+read it while the root is live, and `cancelAll` reads it on the emitter. The
+clock (`MonoTime.currTime`) is read only for an armed word without the
+cancelled bit.
 
 ## Private child continuation ordering
 
@@ -752,6 +793,14 @@ remains deliberately undefined.
 - Observing `context.cancelled` false is not a guarantee that no cancel was
   requested. `outcome.cancelled` true does not mean any work was skipped.
 - `dispatched` is not readable before the join; the emitter may still lower it.
+- `requestCancel` returning `requested` does not mean the root has observed
+  it; it means the outcome will be `cancelled` or `failed`. `finished` does
+  not mean the outcome was taken.
+- `PrivateRootHandle` copies are plain values; publishing one to another
+  thread needs ordinary synchronization. `requestCancel` after the park's
+  `destroy` uses freed memory: join every canceller first.
+- `takeOutcome`'s visibility edge reaches the emitter thread only. `live`
+  falling on a tracked park is not a per-root edge for another thread.
 - `ActorHandle` copies are plain values. Publishing a newly created handle to
   another thread requires ordinary application synchronization.
 - `scope ref` on `ActorBorrow` and `ActorContext` is a callback type contract,
