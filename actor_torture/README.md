@@ -38,7 +38,8 @@ Coverage includes:
   after its activation signal), consumer exit (activation stalled inside the
   handler while the owner escalates), and a drain request parked at
   `retirementIdleObserved` while a late sender's signal reschedules the
-  actor;
+  actor; the same cancel and drain-to-cancel escalation through the
+  type-erased `ActorErasedOwner`, whose handler must observe `cancelling`;
 - cancel while SCHEDULED with a queued inbox (the entry word), cancel of an
   idle actor whose submission gate is held by a paused sender (retirement's
   idle reschedule and the empty-inbox consumer reschedule, both without a

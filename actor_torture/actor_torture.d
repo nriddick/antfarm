@@ -3024,6 +3024,57 @@ private void testCancelEscalationQueued()
     rig.close();
 }
 
+/// Erased owner. requestRetire(cancel) through ActorErasedOwner must forward
+/// the mode: the handler sees cancelling and cancels the backlog. With
+/// `escalate`, a drain request precedes the cancel and a later drain leaves
+/// the actor cancelling. Catches the erased owner dropping the mode.
+private void testCancelThroughErasedOwner(bool escalate)
+{
+    enum nodeCount = 4;
+    auto rig = new CancelRig;
+    CancelMessage[nodeCount] messages;
+    sendCancelMessages(rig.handle, messages[]);
+    auto erased = rig.owner.intoErased();
+    check(erased.valid && !rig.owner.valid, "erased owner transfer");
+    if (escalate)
+        check(erased.requestRetire() == ActorRetireResult.requested,
+            "erased drain request before escalation");
+    check(erased.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "erased cancel request");
+    check(erased.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.alreadyRetired,
+        "erased repeated cancel is alreadyRetired");
+    if (escalate)
+        check(erased.requestRetire() == ActorRetireResult.requested,
+            "erased drain after cancel stays requested");
+    auto deadline = MonoTime.currTime + 15.seconds;
+    while (!erased.retired)
+    {
+        rig.runtime.flush(rig.token, 8, 1);
+        while (rig.view.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            check(false, "erased cancel retirement timeout");
+        Thread.yield();
+    }
+    check(rig.output.cancelActivations == 1
+            && rig.output.cancelledNodes == nodeCount
+            && rig.output.completedNodes == 0,
+        "erased owner forwards the cancel mode to the handler");
+    foreach (message; messages)
+        check(message.node.available
+                && message.node.outcome == ActorNodeOutcome.cancelled,
+            "erased cancel sender observes cancelled");
+    check(erased.reclaim() == ActorReclaimResult.reclaimed,
+        "erased cancel reclaim");
+    rig.view.unsubscribe();
+    rig.farm.unregisterProducer(rig.token);
+    check(rig.runtime.live == 0 && rig.runtime.ready == 0,
+        "erased cancel runtime drained");
+    rig.runtime.destroy();
+    rig.farm.destroy();
+}
+
 /// P3, consumer-entry side. The sender is paused after its activation
 /// signal (node published, actor scheduled, reservation still held) while
 /// the owner sequentially requests drain and then cancel. The scheduled
@@ -3567,6 +3618,8 @@ private void testCancelModeRetirement()
     testCancelBacklog();
     testCancelInboxCarry();
     testCancelEscalationQueued();
+    testCancelThroughErasedOwner(false);
+    testCancelThroughErasedOwner(true);
     testCancelEscalationAfterSignal();
     testCancelEscalationAcrossIdleJoin();
     testCancelWhileScheduled();

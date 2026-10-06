@@ -559,6 +559,12 @@ struct ActorErasedOwner
         return result;
     }
 
+    /// Same contract as `ActorOwner.requestRetire`: cancel mode or a later
+    /// cancel after drain sets `cancelling`; cancel returns `alreadyRetired`
+    /// once cancelling, even if not yet `retired`; `waveOwned` during a wave,
+    /// so retry after it. Drain on a cancelling actor returns `requested` and
+    /// never downgrades cancel. No final handler call is guaranteed. Requests
+    /// on one owner must not overlap.
     ActorRetireResult requestRetire(
             ActorRetireMode mode = ActorRetireMode.drain) nothrow @nogc @system
     {
@@ -616,8 +622,9 @@ struct ActorOwner(T)
     /// Close admission and retire once accepted interactions are handled.
     /// Cancel mode, or a later cancel after drain, also sets `cancelling`.
     /// Cancel returns `alreadyRetired` once cancelling, even if not yet
-    /// `retired`; `waveOwned` during a wave, so retry after it. No final
-    /// handler call is guaranteed. Requests on one owner must not overlap.
+    /// `retired`; `waveOwned` during a wave, so retry after it. Drain on a
+    /// cancelling actor returns `requested` and never downgrades cancel. No
+    /// final handler call is guaranteed. Requests on one owner must not overlap.
     ActorRetireResult requestRetire(
             ActorRetireMode mode = ActorRetireMode.drain) nothrow @nogc @system
     {

@@ -207,7 +207,9 @@ or park, unregister, then destroy the Farm.
    makes `context.cancelling` true so handlers call `context.cancelInbox()`,
    and senders see `ActorNodeOutcome.cancelled`. A drain can be escalated
    later with a cancel-mode request on the same owner, for example after an
-   application deadline. Requests on one owner must not overlap. For a
+   application deadline. A drain request on an actor already cancelling
+   returns `requested` and leaves it in cancel mode: drain never downgrades
+   cancel. Requests on one owner must not overlap. For a
    private tree, stop spawning new roots.
 2. Keep flushing or pumping, and keep consumers running, until the model-specific
    drain holds: public owners `retired` and reclaimed; waves `finished` and,
