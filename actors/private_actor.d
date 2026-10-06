@@ -70,6 +70,19 @@ enum PrivateSpawnResult : ubyte { spawned, capacityFull, allocationFailed, waveA
 enum PrivateStartResult : ubyte { started, empty, waveActive, retiring }
 enum PrivateRootReclamation : ubyte { emitter, consumer }
 
+/// Snapshot of the last nonempty wave of a cohort, acquired after its join.
+struct PrivateWaveOutcome
+{
+    size_t participants;   // members selected by the last nonempty start/startFinal/startSubset
+    size_t dispatched;     // participant prefix that ran the operation (== participants unless truncated)
+    uint failures;         // number of fail() reports by participants during the wave
+    uint firstFailureCode; // valid iff failures != 0
+    size_t firstFailurePosition; // participant position (spawn index, or selection position for a subset)
+    bool cancelled;        // this wave's own scope was cancelled by its parent or a peer
+    @property bool succeeded() const pure nothrow @nogc @safe
+    { return failures == 0 && dispatched == participants; }
+}
+
 template stateAllowed(T)
 {
     enum stateAllowed = !is(T == class) && !is(T == interface)
@@ -138,6 +151,23 @@ public:
         if (retiring_) return null;
         return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity,
             options.batchLimit == 0 ? batchLimit_ : options.batchLimit, options.subsets);
+    }
+
+    /// Record a domain failure. Does not end the activation; return normally.
+    /// A member aggregates the report on its enclosing wave (call at most once
+    /// per member per wave; extra reports are counted and not diagnosed).
+    /// A root sets the tracked root's outcome, first code wins; fatal on an
+    /// untracked park until root tracking exists.
+    void fail(uint code) nothrow @nogc @system
+    {
+        if (actor_ is null) fatal("private fail: unauthorized context");
+        if (enclosing_ is null)
+        {
+            if (!rootParkTracked(actor_))
+                fatal("private root fail: untracked park");
+            return; // F3 records the first code on the root record
+        }
+        recordWaveFailure(enclosing_, actor_, code);
     }
 }
 
@@ -231,11 +261,56 @@ private struct Wave
     Emittable emittable; // first: the pump hands this back to the wave's emit
     shared ulong pending;
     shared uint active;
+    shared uint failures; // report count; occupies the former padding
     Wave* upstream;
     TableCompletionHook hook;
     void function(Wave*) nothrow @nogc @system finish;
+    shared bool cancel; // reset with each wave; F2 is the writer
+    uint firstFailureCode; // valid iff failures != 0
+    Entry* firstFailed;
 }
 static assert(Wave.emittable.offsetof == 0);
+version (D_LP64)
+{
+    static assert(Wave.sizeof == 80);
+    static assert(Wave.pending.offsetof == 16 && Wave.active.offsetof == 24
+        && Wave.failures.offsetof == 28 && Wave.upstream.offsetof == 32
+        && Wave.hook.offsetof == 40 && Wave.finish.offsetof == 56
+        && Wave.cancel.offsetof == 64 && Wave.firstFailureCode.offsetof == 68
+        && Wave.firstFailed.offsetof == 72);
+    static assert(ChildBase.sizeof == 160);
+}
+
+// F3 installs per-root records and returns records !is null. Until then
+// every park is untracked, so root fail has no application outcome slot.
+private bool rootParkTracked(Entry*) nothrow @nogc @system
+{
+    return false;
+}
+
+// Checked CAS, like retainJoinCredit: uint.max is fatal before the store so a
+// wrap cannot observe zero and elect a second plain (code, Entry) writer.
+private void recordWaveFailure(Wave* wave, Entry* member, uint code) nothrow @nogc @system
+{
+    auto old = atomicLoad!(MemoryOrder.raw)(wave.failures);
+    while (true)
+    {
+        if (old == uint.max) fatal("private failure count overflow");
+        if (!cas!(MemoryOrder.raw, MemoryOrder.raw)(&wave.failures, old, old + 1))
+        {
+            old = atomicLoad!(MemoryOrder.raw)(wave.failures);
+            continue;
+        }
+        if (old == 0)
+        {
+            wave.firstFailureCode = code;
+            version (AntfarmActorTestHooks)
+                privateFailPairSplit();
+            wave.firstFailed = member;
+        }
+        return;
+    }
+}
 
 // Increment a join counter under an existing hold; reject overflow before changing it.
 private void retainJoinCredit(ref shared uint pending) nothrow @nogc @system
@@ -284,6 +359,53 @@ version (AntfarmActorTestHooks)
     void* privateTestContextService(scope ref PrivateContext context) nothrow @nogc @system
     {
         return context.service;
+    }
+
+    /// Test-only: seed the enclosing wave's failure count so a legitimate
+    /// report can reach the overflow check. The caller must be a member.
+    /// A non-zero count also records that member as the representative, so
+    /// outcome does not pair the count with an unset Entry.
+    void privateTestSetWaveFailures(scope ref PrivateContext context, uint count)
+        nothrow @nogc @system
+    {
+        if (context.actor_ is null || context.enclosing_ is null)
+            fatal("private test: wave failures require a member context");
+        auto wave = context.enclosing_;
+        atomicStore!(MemoryOrder.raw)(wave.failures, count);
+        if (count == 0)
+            wave.firstFailed = null;
+        else
+        {
+            wave.firstFailureCode = 1;
+            wave.firstFailed = context.actor_;
+        }
+    }
+
+    shared uint privateFailPairPause;
+    shared uint privateFailPairWaiting;
+
+    void privateFailPairSplit() nothrow @nogc @system
+    {
+        if (atomicLoad!(MemoryOrder.raw)(privateFailPairPause) != 1) return;
+        atomicStore!(MemoryOrder.rel)(privateFailPairWaiting, 1u);
+        while (atomicLoad!(MemoryOrder.acq)(privateFailPairPause) == 1) {}
+    }
+
+    /// Pause the winning fail between the code store and the Entry store.
+    void privateTestArmFailPairPause() nothrow @nogc @system
+    {
+        atomicStore!(MemoryOrder.raw)(privateFailPairWaiting, 0u);
+        atomicStore!(MemoryOrder.rel)(privateFailPairPause, 1u);
+    }
+
+    void privateTestReleaseFailPairPause() nothrow @nogc @system
+    {
+        atomicStore!(MemoryOrder.rel)(privateFailPairPause, 0u);
+    }
+
+    bool privateTestFailPairWaiting() nothrow @nogc @system
+    {
+        return atomicLoad!(MemoryOrder.acq)(privateFailPairWaiting) == 1;
     }
 }
 
@@ -921,6 +1043,7 @@ private:
     ChildBase base_; // first: erased disposal and wave-to-park conversion
     Entry* entries_;
     size_t capacity_, count_, cursor_, batchLimit_;
+    size_t participants_, dispatched_; // last nonempty wave; parent-only
     bool retire_, isSubset_;
     bool parentIsRoot_; // fixed at creation: the creating context had no enclosing wave
     uint* sel_;
@@ -1027,6 +1150,28 @@ public:
         return atomicLoad!(MemoryOrder.acq)(base_.wave.active) == 0;
     }
 
+    /// Acquires the join. All zero before the first nonempty start. Fatal
+    /// while a wave is active or with wrong authority. Valid until the next
+    /// nonempty start/startFinal/startSubset.
+    PrivateWaveOutcome outcome(scope ref PrivateContext context) nothrow @nogc @system
+    {
+        authorized(context);
+        if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0)
+            fatal("private child outcome: wave active");
+        PrivateWaveOutcome result;
+        result.participants = participants_;
+        result.dispatched = dispatched_;
+        result.failures = atomicLoad!(MemoryOrder.raw)(base_.wave.failures);
+        result.cancelled = atomicLoad!(MemoryOrder.raw)(base_.wave.cancel);
+        if (result.failures != 0)
+        {
+            result.firstFailureCode = base_.wave.firstFailureCode;
+            auto index = base_.wave.firstFailed - entries_;
+            result.firstFailurePosition = isSubset_ ? sel_[capacity_ + index] : index;
+        }
+        return result;
+    }
+
     static if (hasResults)
     {
         /// Results of the last nonempty wave, in participant order;
@@ -1089,6 +1234,7 @@ public:
         isSubset_ = false;
         base_.wave.emittable.emit = &emit;
         cursor_ = 0;
+        resetOutcome(count_);
         static if (hasResults)
         {
             resultCount_ = producesResults ? count_ : 0;
@@ -1125,6 +1271,7 @@ public:
         cursor_ = 0;
         retire_ = false;
         isSubset_ = true;
+        resetOutcome(k_);
         static if (hasResults)
         {
             resultCount_ = producesResults ? k_ : 0;
@@ -1144,6 +1291,18 @@ public:
         return start!operation(context, true);
     }
 private:
+    // After active/retiring/empty rejection, before the enqueue release.
+    // A rejected start must preserve the last nonempty wave's outcome.
+    void resetOutcome(size_t participants) nothrow @nogc @system
+    {
+        auto wave = &base_.wave;
+        atomicStore!(MemoryOrder.raw)(wave.failures, 0u);
+        atomicStore!(MemoryOrder.raw)(wave.cancel, false);
+        wave.firstFailed = null;
+        participants_ = participants;
+        dispatched_ = participants;
+    }
+
     // Choose the wave's one immutable credit target and take that credit
     // BEFORE enqueue / visibility: the enclosing wave, or the parent's join
     // counter when the wave joins the parent directly (a root today).

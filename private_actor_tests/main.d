@@ -1005,6 +1005,12 @@ void deathHarness()
         writeln("PASS cross-Farm token write, flush, and unregister are fatal");
         e1CounterExhaustionDeath();
         contDeath();
+        check(diedWithMessage("outcome-active", "antfarm fatal: private child outcome: wave active"));
+        check(diedWithMessage("root-fail-untracked", "antfarm fatal: private root fail: untracked park"));
+        check(diedWithMessage("failure-overflow", "antfarm fatal: private failure count overflow"));
+        check(diedWithMessage("fail-unauthorized", "antfarm fatal: private fail: unauthorized context"));
+        check(diedWithMessage("outcome-unauthorized", "antfarm fatal: private child park: unauthorized context"));
+        writeln("PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome");
         version (assert)
         {
             check(diedWithMessage("reentrant-spawn", "antfarm fatal: private root park: reentrant entry"));
@@ -2493,12 +2499,13 @@ static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1)) ==
 static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1, 2)) == PUlongCohort*));
 static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNotPod)(1)));
 // Layout: subset selection adds two words per cohort to main 3441b8b's
-// 264-byte signal-only park. Results add exactly two more words. Entry's own
-// 40-byte layout is asserted next to its definition and checked through the
-// allocation sizes in portsAllocationFailures.
+// 264-byte signal-only park. Results add exactly two more words. F1 adds
+// 16 bytes of wave failure fields and two parent-only participant counters.
+// Entry's own 40-byte layout is asserted next to its definition and checked
+// through the allocation sizes in portsAllocationFailures.
 static if (size_t.sizeof == 8)
 {
-    static assert(PVoidCohort.sizeof == 336);
+    static assert(PVoidCohort.sizeof == 368);
     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
     // Service.childReturns (E2-3) accounts for one word of both.
     // E2-4 reserves 48 more bytes in ChildBase for the resume descriptor/FIFO.
@@ -7095,8 +7102,647 @@ void phaseCont()
     writeln("PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies");
 }
 
+// ---- F1 outcomes (design §12.1) ------------------------------------------------
+// O1 applied mutation: move the winner's code and Entry stores out of
+// `if (old == 0)` and leave privateFailPairSplit inside that branch.
+// Member 5 overwrites the code during the pause; the winner still stores
+// its Entry. Observed failure: FAIL main.d:7201
+// (`app.code - 100 == app.position`). Dropping the gate around the pause
+// too would hang member 5 in the hook and time out at "o1 second report".
+// O2 reset removed from start: wave 2 still reports wave 1's failures.
+// O3 position taken from the spawn index instead of sel_[capacity + index].
+// O4 outcome() while active is fatal (death); a continuation counts one report.
+// O5 plain increment of failures: TSan race and/or a short count.
+// O6 behavioural propagation through application storage (root fail is O7).
+// O7 missing untracked-park check: root fail returns.
+// O8 wrapping fetchAdd: the second report near uint.max is not fatal.
+// O9 resets before empty/active rejection: last nonempty outcome/results change.
+// The plain-start sibling catches resetOutcome(count_) placed above start's
+// empty check: startFinal has already zeroed count_, so that reset clears the
+// joined failure snapshot before returning empty.
+
+struct OcMember { uint index; }
+shared uint ocAllowSecond, ocSecondDone;
+void ocFail(scope ref PrivateBorrow!OcMember b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value.index == 5)
+        while (atomicLoad!(MemoryOrder.acq)(ocAllowSecond) == 0) {}
+    if (b.value.index == 2 || b.value.index == 5) c.fail(100 + b.value.index);
+    if (b.value.index == 5) atomicStore!(MemoryOrder.rel)(ocSecondDone, 1u);
+}
+struct OcApp
+{
+    uint failures, code;
+    size_t position, participants, dispatched;
+    bool cancelled, succeeded, saw;
+}
+struct OcRoot { PrivateChildPark!OcMember* kids; OcApp* app; }
+PrivateRootDisposition ocRoot(scope ref PrivateBorrow!OcRoot b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.kids is null)
+    {
+        b.value.kids = c.createChildren!OcMember(8, 1);
+        namedCheck(b.value.kids !is null, "o1 cohort");
+        foreach (i; 0 .. 8)
+            namedCheck(b.value.kids.spawn(c, OcMember(cast(uint) i)) == PrivateSpawnResult.spawned, "o1 spawn");
+        namedCheck(b.value.kids.start!ocFail(c) == PrivateStartResult.started, "o1 start");
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto o = b.value.kids.outcome(c);
+    b.value.app.failures = o.failures;
+    b.value.app.code = o.firstFailureCode;
+    b.value.app.position = o.firstFailurePosition;
+    b.value.app.participants = o.participants;
+    b.value.app.dispatched = o.dispatched;
+    b.value.app.cancelled = o.cancelled;
+    b.value.app.succeeded = o.succeeded;
+    b.value.app.saw = true;
+    return PrivateRootDisposition.finish;
+}
+void outcomeO1()
+{
+    OcApp app;
+    atomicStore!(MemoryOrder.raw)(ocAllowSecond, 0u);
+    atomicStore!(MemoryOrder.raw)(ocSecondDone, 0u);
+    auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 8192);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    auto workers = new Workers(farm, 2);
+    scope(exit) workers.join();
+    privateTestArmFailPairPause();
+    scope(exit)
+    {
+        privateTestReleaseFailPairPause();
+        atomicStore!(MemoryOrder.rel)(ocAllowSecond, 1u);
+    }
+    auto park = PrivateRootPark!(OcRoot, ocRoot).create(farm, 1, 1);
+    check(park !is null && park.spawn(OcRoot(null, &app)) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 15.seconds;
+    while (!privateTestFailPairWaiting())
+    {
+        park.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "o1 winner pause");
+    }
+    atomicStore!(MemoryOrder.rel)(ocAllowSecond, 1u);
+    while (atomicLoad!(MemoryOrder.acq)(ocSecondDone) == 0)
+    {
+        park.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "o1 second report");
+    }
+    privateTestReleaseFailPairPause();
+    while (park.live)
+    {
+        park.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "o1 drain");
+    }
+    park.destroy();
+    check(app.saw && app.failures == 2 && app.code - 100 == app.position);
+    check(app.participants == 8 && app.dispatched == 8 && !app.cancelled && !app.succeeded);
+}
+
+struct O2Member { uint wave; }
+void o2Op(scope ref PrivateBorrow!O2Member b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value.wave == 0) c.fail(9);
+    b.value.wave = 1;
+}
+struct O2App { uint failures; bool zeroBefore, clean, saw; }
+struct O2Root { PrivateChildPark!O2Member* kids; O2App* app; ubyte phase; }
+PrivateRootDisposition o2Root(scope ref PrivateBorrow!O2Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.kids is null)
+    {
+        b.value.kids = c.createChildren!O2Member(1);
+        namedCheck(b.value.kids.spawn(c, O2Member.init) == PrivateSpawnResult.spawned, "o2 spawn");
+        auto idle = b.value.kids.outcome(c);
+        b.value.app.zeroBefore = idle.failures == 0 && idle.participants == 0
+            && idle.dispatched == 0 && !idle.cancelled && idle.succeeded;
+        namedCheck(b.value.kids.start!o2Op(c) == PrivateStartResult.started, "o2 wave 1");
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto o = b.value.kids.outcome(c);
+    if (b.value.phase == 0)
+    {
+        namedCheck(o.failures == 1 && o.firstFailureCode == 9 && o.firstFailurePosition == 0, "o2 wave 1 outcome");
+        b.value.phase = 1;
+        namedCheck(b.value.kids.start!o2Op(c) == PrivateStartResult.started, "o2 wave 2");
+        return PrivateRootDisposition.waitChildren;
+    }
+    b.value.app.failures = o.failures;
+    b.value.app.clean = o.succeeded && o.participants == 1 && o.dispatched == 1 && !o.cancelled;
+    b.value.app.saw = true;
+    return PrivateRootDisposition.finish;
+}
+
+struct O3Member { uint index; }
+void o3Op(scope ref PrivateBorrow!O3Member b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value.index == 5) c.fail(5);
+}
+struct O3App { uint failures, code; size_t position; bool saw; }
+struct O3Root { PrivateChildPark!O3Member* kids; O3App* app; }
+PrivateRootDisposition o3Root(scope ref PrivateBorrow!O3Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.kids is null)
+    {
+        b.value.kids = c.createChildren!O3Member(8, PrivateCohortOptions(0, true));
+        namedCheck(b.value.kids !is null, "o3 cohort");
+        foreach (i; 0 .. 8)
+            namedCheck(b.value.kids.spawn(c, O3Member(cast(uint) i)) == PrivateSpawnResult.spawned, "o3 spawn");
+        uint[3] sel = [7, 2, 5];
+        namedCheck(b.value.kids.startSubset!o3Op(c, sel[]) == PrivateStartResult.started, "o3 subset");
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto o = b.value.kids.outcome(c);
+    b.value.app.failures = o.failures;
+    b.value.app.code = o.firstFailureCode;
+    b.value.app.position = o.firstFailurePosition;
+    b.value.app.saw = true;
+    namedCheck(o.participants == 3 && o.dispatched == 3, "o3 counts");
+    return PrivateRootDisposition.finish;
+}
+
+struct O4Member { ubyte phase; }
+PrivateChildDisposition o4Op(scope ref PrivateBorrow!O4Member b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.phase == 0)
+    {
+        c.fail(3);
+        b.value.phase = 1;
+        return PrivateChildDisposition.waitChildren;
+    }
+    return PrivateChildDisposition.done;
+}
+struct O4App { uint failures, code; bool saw; }
+struct O4Root { PrivateChildPark!O4Member* kids; O4App* app; }
+PrivateRootDisposition o4Root(scope ref PrivateBorrow!O4Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.kids is null)
+    {
+        b.value.kids = c.createChildren!O4Member(1);
+        namedCheck(b.value.kids.spawn(c, O4Member.init) == PrivateSpawnResult.spawned, "o4 spawn");
+        namedCheck(b.value.kids.start!o4Op(c) == PrivateStartResult.started, "o4 start");
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto o = b.value.kids.outcome(c);
+    b.value.app.failures = o.failures;
+    b.value.app.code = o.firstFailureCode;
+    b.value.app.saw = o.firstFailurePosition == 0 && o.participants == 1 && o.dispatched == 1;
+    return PrivateRootDisposition.finish;
+}
+
+struct O5Member { uint index; }
+void o5Op(scope ref PrivateBorrow!O5Member b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value.index % 3 == 0) c.fail(b.value.index);
+}
+struct O5App { uint failures, code; size_t position, participants; bool saw; }
+struct O5Root { PrivateChildPark!O5Member* kids; O5App* app; }
+PrivateRootDisposition o5Root(scope ref PrivateBorrow!O5Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.kids is null)
+    {
+        enum n = 4096;
+        b.value.kids = c.createChildren!O5Member(n, 256);
+        namedCheck(b.value.kids !is null, "o5 cohort");
+        foreach (i; 0 .. n)
+            namedCheck(b.value.kids.spawn(c, O5Member(cast(uint) i)) == PrivateSpawnResult.spawned, "o5 spawn");
+        namedCheck(b.value.kids.start!o5Op(c) == PrivateStartResult.started, "o5 start");
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto o = b.value.kids.outcome(c);
+    b.value.app.failures = o.failures;
+    b.value.app.code = o.firstFailureCode;
+    b.value.app.position = o.firstFailurePosition;
+    b.value.app.participants = o.participants;
+    b.value.app.saw = o.dispatched == o.participants && !o.cancelled && !o.succeeded;
+    return PrivateRootDisposition.finish;
+}
+
+enum o6Code = 42u;
+struct O6Leaf { uint code; }
+void o6Leaf(scope ref PrivateBorrow!O6Leaf b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    c.fail(b.value.code);
+}
+struct O6Mid { PrivateChildPark!O6Leaf* leaves; }
+PrivateChildDisposition o6Mid(scope ref PrivateBorrow!O6Mid b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.leaves is null)
+    {
+        b.value.leaves = c.createChildren!O6Leaf(1);
+        namedCheck(b.value.leaves !is null
+            && b.value.leaves.spawn(c, O6Leaf(o6Code)) == PrivateSpawnResult.spawned, "o6 leaf");
+        namedCheck(b.value.leaves.start!o6Leaf(c) == PrivateStartResult.started, "o6 leaf wave");
+        return PrivateChildDisposition.waitChildren;
+    }
+    auto o = b.value.leaves.outcome(c);
+    namedCheck(o.failures == 1 && o.firstFailureCode == o6Code && o.firstFailurePosition == 0, "o6 leaf outcome");
+    c.fail(o.firstFailureCode);
+    return PrivateChildDisposition.done;
+}
+struct O6App { bool failed; uint code; }
+struct O6Root { PrivateChildPark!O6Mid* mids; O6App* app; }
+PrivateRootDisposition o6Root(scope ref PrivateBorrow!O6Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.mids is null)
+    {
+        b.value.mids = c.createChildren!O6Mid(1);
+        namedCheck(b.value.mids !is null
+            && b.value.mids.spawn(c, O6Mid.init) == PrivateSpawnResult.spawned, "o6 mid");
+        namedCheck(b.value.mids.start!o6Mid(c) == PrivateStartResult.started, "o6 mid wave");
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto o = b.value.mids.outcome(c);
+    b.value.app.failed = o.failures != 0;
+    b.value.app.code = o.firstFailureCode;
+    namedCheck(o.firstFailurePosition == 0 && o.participants == 1, "o6 mid outcome");
+    return PrivateRootDisposition.finish;
+}
+
+struct O9Member { ubyte phase; uint index; }
+shared uint o9Failed, o9Release;
+uint o9Result(scope ref PrivateBorrow!O9Member b, scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value.index == 0 && b.value.phase == 0)
+    {
+        c.fail(7);
+        b.value.phase = 1;
+    }
+    return 11;
+}
+void o9Void(scope ref PrivateBorrow!O9Member, scope ref PrivateContext) nothrow @nogc @system {}
+PrivateChildStep!uint o9Cont(scope ref PrivateBorrow!O9Member b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.phase < 2)
+    {
+        c.fail(9);
+        b.value.phase = 2;
+        atomicStore!(MemoryOrder.rel)(o9Failed, 1u);
+        while (atomicLoad!(MemoryOrder.acq)(o9Release) == 0) {}
+        return typeof(return).waitChildren();
+    }
+    return typeof(return).done(13);
+}
+struct O9App { bool emptyOk, rejected, finalOk; }
+struct O9Root
+{
+    PrivateChildPark!(O9Member, uint)* kids;
+    O9App* app;
+    ubyte phase;
+}
+PrivateRootDisposition o9Root(scope ref PrivateBorrow!O9Root b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.kids is null)
+    {
+        b.value.kids = c.createChildren!(O9Member, uint)(2, PrivateCohortOptions(0, true));
+        namedCheck(b.value.kids !is null, "o9 cohort");
+        foreach (i; 0 .. 2)
+            namedCheck(b.value.kids.spawn(c, O9Member(0, cast(uint) i)) == PrivateSpawnResult.spawned, "o9 spawn");
+        namedCheck(b.value.kids.start!o9Result(c) == PrivateStartResult.started, "o9 result wave");
+        return PrivateRootDisposition.waitChildren;
+    }
+    if (b.value.phase == 0)
+    {
+        auto o = b.value.kids.outcome(c);
+        auto r = b.value.kids.results(c);
+        namedCheck(o.failures == 1 && o.firstFailureCode == 7 && o.firstFailurePosition == 0, "o9 result outcome");
+        namedCheck(r.length == 2 && r[0] == 11 && r[1] == 11, "o9 result slots");
+        b.value.phase = 1;
+        namedCheck(b.value.kids.start!o9Void(c) == PrivateStartResult.started, "o9 void wave");
+        return PrivateRootDisposition.waitChildren;
+    }
+    if (b.value.phase == 1)
+    {
+        auto before = b.value.kids.outcome(c);
+        auto results = b.value.kids.results(c);
+        namedCheck(results.length == 0 && before.failures == 0 && before.participants == 2
+            && before.dispatched == 2 && before.succeeded && !before.cancelled, "o9 void outcome");
+        namedCheck(b.value.kids.startSubset!o9Result(c, null) == PrivateStartResult.empty, "o9 empty");
+        auto after = b.value.kids.outcome(c);
+        b.value.app.emptyOk = b.value.kids.results(c).length == 0
+            && after.failures == before.failures && after.participants == before.participants
+            && after.dispatched == before.dispatched && after.cancelled == before.cancelled
+            && after.firstFailureCode == before.firstFailureCode;
+        b.value.phase = 2;
+        uint[1] only = [0];
+        namedCheck(b.value.kids.startSubset!o9Cont(c, only[]) == PrivateStartResult.started, "o9 continuation");
+        return PrivateRootDisposition.again;
+    }
+    if (!b.value.kids.finished(c))
+    {
+        if (atomicLoad!(MemoryOrder.acq)(o9Failed) != 0 && !b.value.app.rejected)
+        {
+            namedCheck(b.value.kids.start!o9Void(c) == PrivateStartResult.waveActive, "o9 active reject");
+            b.value.app.rejected = true;
+            atomicStore!(MemoryOrder.rel)(o9Release, 1u);
+        }
+        return PrivateRootDisposition.again;
+    }
+    auto o = b.value.kids.outcome(c);
+    auto r = b.value.kids.results(c);
+    b.value.app.finalOk = o.failures == 1 && o.firstFailureCode == 9 && o.firstFailurePosition == 0
+        && o.participants == 1 && o.dispatched == 1
+        && r.length == 1 && r[0] == 13;
+    return PrivateRootDisposition.finish;
+}
+
+void drainOutcome(P)(P* park, ref Token token, string name)
+{
+    auto deadline = MonoTime.currTime + 20.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        namedCheck(MonoTime.currTime < deadline, name);
+    }
+    park.destroy();
+}
+void phaseOutcomes()
+{
+    version (AntfarmActorTestHooks) outcomeO1();
+    {
+        O2App app;
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        auto park = PrivateRootPark!(O2Root, o2Root).create(farm, 1);
+        check(park.spawn(O2Root(null, &app)) == PrivateSpawnResult.spawned);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "o2 drain");
+        }
+        park.destroy();
+        check(app.zeroBefore && app.saw && app.failures == 0 && app.clean);
+    }
+    {
+        O3App app;
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        auto park = PrivateRootPark!(O3Root, o3Root).create(farm, 1);
+        check(park.spawn(O3Root(null, &app)) == PrivateSpawnResult.spawned);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live) { park.pump(token); while (view.consumeNext()) {} namedCheck(MonoTime.currTime < deadline, "o3 drain"); }
+        park.destroy();
+        check(app.saw && app.failures == 1 && app.code == 5 && app.position == 2);
+    }
+    {
+        O4App app;
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        auto park = PrivateRootPark!(O4Root, o4Root).create(farm, 1);
+        check(park.spawn(O4Root(null, &app)) == PrivateSpawnResult.spawned);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live) { park.pump(token); while (view.consumeNext()) {} namedCheck(MonoTime.currTime < deadline, "o4 drain"); }
+        park.destroy();
+        check(app.saw && app.failures == 1 && app.code == 3);
+    }
+    {
+        O5App app;
+        auto farm = AntFarm.create(4, 8, 4, 0, 0, 1, 65536);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        auto workers = new Workers(farm, 4);
+        scope(exit) workers.join();
+        auto park = PrivateRootPark!(O5Root, o5Root).create(farm, 1, 256);
+        check(park.spawn(O5Root(null, &app)) == PrivateSpawnResult.spawned);
+        drainOutcome(park, token, "o5 drain");
+        check(app.saw && app.failures == 1366 && app.participants == 4096);
+        check(app.position == app.code && app.code % 3 == 0);
+    }
+    {
+        O6App app;
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        auto park = PrivateRootPark!(O6Root, o6Root).create(farm, 1);
+        check(park.spawn(O6Root(null, &app)) == PrivateSpawnResult.spawned);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live) { park.pump(token); while (view.consumeNext()) {} namedCheck(MonoTime.currTime < deadline, "o6 drain"); }
+        park.destroy();
+        check(app.failed && app.code == o6Code);
+    }
+    {
+        O9App app;
+        atomicStore!(MemoryOrder.raw)(o9Failed, 0u);
+        atomicStore!(MemoryOrder.raw)(o9Release, 0u);
+        scope(exit) atomicStore!(MemoryOrder.rel)(o9Release, 1u);
+        auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 8192);
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        auto workers = new Workers(farm, 2);
+        scope(exit) workers.join();
+        auto park = PrivateRootPark!(O9Root, o9Root).create(farm, 1, 1);
+        check(park.spawn(O9Root(null, &app)) == PrivateSpawnResult.spawned);
+        drainOutcome(park, token, "o9 drain");
+        check(app.emptyOk && app.rejected && app.finalOk);
+    }
+    {
+        O9EmptyApp app;
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        auto park = PrivateRootPark!(O9EmptyRoot, o9EmptyRoot).create(farm, 1);
+        check(park.spawn(O9EmptyRoot(null, &app)) == PrivateSpawnResult.spawned);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (park.live)
+        {
+            park.pump(token);
+            while (view.consumeNext()) {}
+            namedCheck(MonoTime.currTime < deadline, "o9 empty-start drain");
+        }
+        park.destroy();
+        check(app.preserved);
+    }
+    writeln("PASS private wave outcomes O1-O6 and O9");
+}
+
+// Mutation: move resetOutcome(count_) above start's `count_ == 0` return.
+// startFinal has retired the members, so the misplaced reset stores
+// participants 0 and failures 0, then returns empty.
+struct O9EmptyMember { uint n; }
+void o9EmptyOp(scope ref PrivateBorrow!O9EmptyMember, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    c.fail(17);
+}
+struct O9EmptyApp { bool preserved; }
+struct O9EmptyRoot { PrivateChildPark!O9EmptyMember* kids; O9EmptyApp* app; }
+PrivateRootDisposition o9EmptyRoot(scope ref PrivateBorrow!O9EmptyRoot b,
+    scope ref PrivateContext c) nothrow @nogc @system
+{
+    if (b.value.kids is null)
+    {
+        b.value.kids = c.createChildren!O9EmptyMember(1);
+        namedCheck(b.value.kids !is null
+            && b.value.kids.spawn(c, O9EmptyMember.init) == PrivateSpawnResult.spawned,
+            "o9 empty-start spawn");
+        namedCheck(b.value.kids.startFinal!o9EmptyOp(c) == PrivateStartResult.started,
+            "o9 empty-start final");
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto before = b.value.kids.outcome(c);
+    namedCheck(before.failures == 1 && before.firstFailureCode == 17
+        && before.firstFailurePosition == 0 && before.participants == 1
+        && before.dispatched == 1 && !before.cancelled, "o9 empty-start joined");
+    namedCheck(b.value.kids.start!o9EmptyOp(c) == PrivateStartResult.empty,
+        "o9 empty-start rejects");
+    auto after = b.value.kids.outcome(c);
+    b.value.app.preserved = after.failures == before.failures
+        && after.firstFailureCode == before.firstFailureCode
+        && after.firstFailurePosition == before.firstFailurePosition
+        && after.participants == before.participants
+        && after.dispatched == before.dispatched
+        && after.cancelled == before.cancelled;
+    return PrivateRootDisposition.finish;
+}
+
+struct OutcomeDeathRoot { PrivateChildPark!int* kids; }
+void outcomeDeathNop(scope ref PrivateBorrow!int, scope ref PrivateContext) nothrow @nogc @system {}
+PrivateRootDisposition outcomeActiveStep(scope ref PrivateBorrow!OutcomeDeathRoot b,
+    scope ref PrivateContext c) nothrow @nogc @system
+{
+    b.value.kids = c.createChildren!int(1);
+    namedCheck(b.value.kids.spawn(c, 0) == PrivateSpawnResult.spawned, "outcome active spawn");
+    namedCheck(b.value.kids.start!outcomeDeathNop(c) == PrivateStartResult.started, "outcome active start");
+    b.value.kids.outcome(c);
+    fprintf(stderr, "outcome active survived\n");
+    return PrivateRootDisposition.finish;
+}
+PrivateRootDisposition rootFailStep(scope ref PrivateBorrow!int, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    c.fail(1);
+    fprintf(stderr, "root fail survived\n");
+    return PrivateRootDisposition.finish;
+}
+struct OverflowMember { uint n; }
+void overflowOp(scope ref PrivateBorrow!OverflowMember, scope ref PrivateContext c) nothrow @nogc @system
+{
+    privateTestSetWaveFailures(c, uint.max - 1);
+    c.fail(1);
+    c.fail(2);
+    fprintf(stderr, "failure overflow survived\n");
+}
+struct OverflowRoot { PrivateChildPark!OverflowMember* kids; ubyte phase; }
+PrivateRootDisposition overflowStep(scope ref PrivateBorrow!OverflowRoot b, scope ref PrivateContext c)
+    nothrow @nogc @system
+{
+    if (b.value.phase != 0) return PrivateRootDisposition.finish;
+    b.value.kids = c.createChildren!OverflowMember(1);
+    namedCheck(b.value.kids.spawn(c, OverflowMember.init) == PrivateSpawnResult.spawned, "overflow spawn");
+    namedCheck(b.value.kids.start!overflowOp(c) == PrivateStartResult.started, "overflow start");
+    b.value.phase = 1;
+    return PrivateRootDisposition.waitChildren;
+}
+void outcomeActiveDeath()
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(OutcomeDeathRoot, outcomeActiveStep).create(farm, 1);
+    check(park.spawn(OutcomeDeathRoot.init) == PrivateSpawnResult.spawned);
+    while (park.live) { park.pump(token); while (view.consumeNext()) {} }
+}
+void rootFailDeath()
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(int, rootFailStep).create(farm, 1);
+    check(park.spawn(0) == PrivateSpawnResult.spawned);
+    while (park.live) { park.pump(token); while (view.consumeNext()) {} }
+}
+void failureOverflowDeath()
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(OverflowRoot, overflowStep).create(farm, 1);
+    check(park.spawn(OverflowRoot.init) == PrivateSpawnResult.spawned);
+    while (park.live) { park.pump(token); while (view.consumeNext()) {} }
+}
+void failUnauthorizedDeath()
+{
+    PrivateContext empty;
+    empty.fail(1);
+}
+void outcomeUnauthorizedDeath()
+{
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    AuthorityProbe probe;
+    auto park = PrivateRootPark!(AuthorityRoot, outcomeAuthorityStep).create(farm, 1);
+    check(park.spawn(AuthorityRoot(&probe, true)) == PrivateSpawnResult.spawned);
+    while (park.live) { park.pump(token); while (view.consumeNext()) {} }
+}
+PrivateRootDisposition outcomeAuthorityStep(scope ref PrivateBorrow!AuthorityRoot b,
+    scope ref PrivateContext c) nothrow @nogc @system
+{
+    auto kids = c.createChildren!State(1);
+    namedCheck(kids !is null, "outcome unauthorized cohort");
+    PrivateContext empty;
+    kids.outcome(empty);
+    return PrivateRootDisposition.finish;
+}
+
 void runSuite()
 {
+    phaseOutcomes();
     phaseCont();
     phaseE1();
     phaseD();
@@ -7365,6 +8011,35 @@ void main(string[] args)
         case "cross-farm-write": crossFarmWriteDeath(); return;
         case "cross-farm-unregister": crossFarmUnregisterDeath(); return;
         case "cross-farm-flush": crossFarmFlushDeath(); return;
+        case "outcomes": phaseOutcomes(); return;
+        case "outcomes-o9-empty":
+        {
+            O9EmptyApp app;
+            auto farm = AntFarm.create();
+            scope(exit) farm.destroy();
+            auto token = farm.registerProducer(Tier.small);
+            scope(exit) farm.unregisterProducer(token);
+            ConsumerView view;
+            check(view.subscribe(farm) >= 0);
+            scope(exit) view.unsubscribe();
+            auto park = PrivateRootPark!(O9EmptyRoot, o9EmptyRoot).create(farm, 1);
+            check(park.spawn(O9EmptyRoot(null, &app)) == PrivateSpawnResult.spawned);
+            auto deadline = MonoTime.currTime + 10.seconds;
+            while (park.live)
+            {
+                park.pump(token);
+                while (view.consumeNext()) {}
+                namedCheck(MonoTime.currTime < deadline, "o9 empty-start drain");
+            }
+            park.destroy();
+            check(app.preserved);
+            return;
+        }
+        case "outcome-active": outcomeActiveDeath(); return;
+        case "root-fail-untracked": rootFailDeath(); return;
+        case "failure-overflow": failureOverflowDeath(); return;
+        case "fail-unauthorized": failUnauthorizedDeath(); return;
+        case "outcome-unauthorized": outcomeUnauthorizedDeath(); return;
         case "death": deathHarness(); return;
         case "death-negative-control": deathNegativeControl(); return;
         case "death-exits-zero":
