@@ -1,0 +1,102 @@
+[
+  {
+    "mode": "private",
+    "consumers": 0,
+    "base_mean": 31.2697428,
+    "candidate_mean": 31.5371812,
+    "delta": 0.008552625511201839,
+    "quiet_delta": 0.008552625511201839,
+    "quiet_n": 5,
+    "contaminated": 0
+  },
+  {
+    "mode": "private-remote",
+    "consumers": 0,
+    "base_mean": 30.8956644,
+    "candidate_mean": 31.1054876,
+    "delta": 0.006791347720620511,
+    "quiet_delta": 0.006791347720620511,
+    "quiet_n": 5,
+    "contaminated": 0
+  },
+  {
+    "mode": "tree",
+    "consumers": 0,
+    "base_mean": 61.655993200000005,
+    "candidate_mean": 61.9494866,
+    "delta": 0.004760176339191569,
+    "quiet_delta": 0.004760176339191569,
+    "quiet_n": 5,
+    "contaminated": 0
+  },
+  {
+    "mode": "tree-wait",
+    "consumers": 0,
+    "base_mean": 60.9061024,
+    "candidate_mean": 61.8989958,
+    "delta": 0.0163020347859264,
+    "quiet_delta": 0.0163020347859264,
+    "quiet_n": 5,
+    "contaminated": 0
+  },
+  {
+    "mode": "tree-cont",
+    "consumers": 0,
+    "base_mean": 25.82182,
+    "candidate_mean": 25.6986508,
+    "delta": -0.004769965866077586,
+    "quiet_delta": -0.004769965866077586,
+    "quiet_n": 5,
+    "contaminated": 0
+  },
+  {
+    "mode": "private",
+    "consumers": 6,
+    "base_mean": 22.7669676,
+    "candidate_mean": 22.6798528,
+    "delta": -0.003826368163321048,
+    "quiet_delta": -0.003826368163321048,
+    "quiet_n": 5,
+    "contaminated": 0
+  },
+  {
+    "mode": "private-remote",
+    "consumers": 6,
+    "base_mean": 13.1861642,
+    "candidate_mean": 13.3515472,
+    "delta": 0.01254216142705089,
+    "quiet_delta": 0.01254216142705089,
+    "quiet_n": 5,
+    "contaminated": 0
+  },
+  {
+    "mode": "tree",
+    "consumers": 6,
+    "base_mean": 47.0377214,
+    "candidate_mean": 46.9652016,
+    "delta": -0.0015417370961341437,
+    "quiet_delta": -0.0015417370961341437,
+    "quiet_n": 5,
+    "contaminated": 0
+  },
+  {
+    "mode": "tree-wait",
+    "consumers": 6,
+    "base_mean": 46.489326,
+    "candidate_mean": 46.2867846,
+    "delta": -0.004356729112398816,
+    "quiet_delta": -0.004356729112398816,
+    "quiet_n": 5,
+    "contaminated": 0
+  },
+  {
+    "mode": "tree-cont",
+    "consumers": 6,
+    "base_mean": 31.3611606,
+    "candidate_mean": 31.3389394,
+    "delta": -0.0007085579607025716,
+    "quiet_delta": -0.0007085579607025716,
+    "quiet_n": 5,
+    "contaminated": 0
+  }
+]
