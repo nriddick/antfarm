@@ -1,0 +1,287 @@
+==> dub test --compiler=ldc2
+PASS same-shard plain-write completion join
+==> dub test --compiler=dmd
+PASS same-shard plain-write completion join
+==> make SHELL=/usr/bin/bash run-farm-tsan
+PASS same-shard plain-write completion join
+==> make SHELL=/usr/bin/bash -C actor_torture run run-dmd run-tsan
+==> make SHELL=/usr/bin/bash -C review_torture run run-tsan
+==> make SHELL=/usr/bin/bash -C private_actor_tests run run-dmd run-tsan doc-example death
+PASS private in-tree cancellation C1-C13
+PASS private cancellation torture
+PASS private wave outcomes O1-O6 and O9
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle
+PASS child-large-cohort zero/partial admission, retry and three waves
+PASS child allocation failures, capacity overflow and reusable slot
+PASS mixed-table again/finish and early completion under both reclamation policies
+PASS refill-after-final and empty starts
+PASS delayed-final-credit authorized observation and immediate reuse/retirement
+PASS deterministic return-CAS retry and slot reuse
+PASS child completion before emitter seal and immediate reuse
+PASS depth64 transitive joins, retirement and allocation balance
+PASS ports-basic results lifecycle under both reclamation policies
+PASS ports-poll-visibility deterministic raw-barrier schedule
+PASS ports-wait-visibility before/after custody schedules with result reads
+PASS ports-late-tail results read and freed under a paused idle tail
+PASS ports-large-cohort 257/513/1025 members, child limits 1/64/256
+PASS ports-nested depth-3 pipelined reduction
+PASS ports-nested depth64 results
+PASS ports-alloc-fail cohort/entries/results failures and overflow
+PASS dtor-root exactly-once consumer destruction: finish, finishAfterChildren, never-dispatched members
+PASS dtor-child startFinal plain/result members destroyed on consumers after op and result
+PASS dtor-order depth-3 postorder across disposal, startFinal and finishAfterChildren
+PASS dtor-failed-spawn caller-side destruction for capacityFull/waveActive/allocationFailed
+PASS dtor-aligned align(32)/align(64) owning tokens: root and child capacityFull/allocationFailed exactly-once
+PASS dtor-moved-from per-spawn .init accounting and non-copyable owners via move
+PASS dtor-recursive non-POD chain destroyed deepest first
+PASS dtor-results slot written before ~T
+PASS dtor-gc rooted class references survive concurrent forced collection
+PASS subset-basic sparse/dense/full/repeated/void/whole waves, empty list, refill, both policies
+PASS subset-active start over an active wave returns waveActive without side effects
+PASS subset-large 1025 members, child limits 1/64/256, zero and partial quota admission
+PASS subset-nested subset wave joins its parent wave and the root's waitChildren
+PASS subset-alloc-fail one selection allocation, balanced failures
+PASS subset-dtor subset waves destroy no member; disposal and startFinal destroy all once
+PASS subset-late-tail new subset generation started under a paused idle tail
+PASS subset-limits options.batchLimit explicit and inherited
+PASS entry-word roots hold the Service, members read it through ChildBase at depth two
+PASS huge configured root limits and descriptor overflow
+PASS configured root and child limits, overflow and quota splitting
+PASS explicit child limit 7 emits 8 tables
+PASS inherited child limit 5 emits 10 grandchild tables
+PASS bounded FIFO progress
+PASS completion/free before publication returns, including nested waves
+PASS allocation failures
+PASS partial-prefix/zero-admission recovery
+PASS same-shard plain-write completion join
+PASS roots single thread, partial tables and reuse
+PASS roots one consumer, small batches
+PASS roots six consumers, ring reuse/backpressure
+PASS optional consumer-side root reclamation
+PASS nested waves, authority, retirement, allocation balance
+PASS four independent creators sharing the Farm
+PASS private in-tree cancellation C1-C13
+PASS private cancellation torture
+PASS private wave outcomes O1-O6 and O9
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle
+PASS child-large-cohort zero/partial admission, retry and three waves
+PASS child allocation failures, capacity overflow and reusable slot
+PASS mixed-table again/finish and early completion under both reclamation policies
+PASS refill-after-final and empty starts
+PASS delayed-final-credit authorized observation and immediate reuse/retirement
+PASS deterministic return-CAS retry and slot reuse
+PASS child completion before emitter seal and immediate reuse
+PASS depth64 transitive joins, retirement and allocation balance
+PASS ports-basic results lifecycle under both reclamation policies
+PASS ports-poll-visibility deterministic raw-barrier schedule
+PASS ports-wait-visibility before/after custody schedules with result reads
+PASS ports-late-tail results read and freed under a paused idle tail
+PASS ports-large-cohort 257/513/1025 members, child limits 1/64/256
+PASS ports-nested depth-3 pipelined reduction
+PASS ports-nested depth64 results
+PASS ports-alloc-fail cohort/entries/results failures and overflow
+PASS dtor-root exactly-once consumer destruction: finish, finishAfterChildren, never-dispatched members
+PASS dtor-child startFinal plain/result members destroyed on consumers after op and result
+PASS dtor-order depth-3 postorder across disposal, startFinal and finishAfterChildren
+PASS dtor-failed-spawn caller-side destruction for capacityFull/waveActive/allocationFailed
+PASS dtor-aligned align(32)/align(64) owning tokens: root and child capacityFull/allocationFailed exactly-once
+PASS dtor-moved-from per-spawn .init accounting and non-copyable owners via move
+PASS dtor-recursive non-POD chain destroyed deepest first
+PASS dtor-results slot written before ~T
+PASS dtor-gc rooted class references survive concurrent forced collection
+PASS subset-basic sparse/dense/full/repeated/void/whole waves, empty list, refill, both policies
+PASS subset-active start over an active wave returns waveActive without side effects
+PASS subset-large 1025 members, child limits 1/64/256, zero and partial quota admission
+PASS subset-nested subset wave joins its parent wave and the root's waitChildren
+PASS subset-alloc-fail one selection allocation, balanced failures
+PASS subset-dtor subset waves destroy no member; disposal and startFinal destroy all once
+PASS subset-late-tail new subset generation started under a paused idle tail
+PASS subset-limits options.batchLimit explicit and inherited
+PASS entry-word roots hold the Service, members read it through ChildBase at depth two
+PASS huge configured root limits and descriptor overflow
+PASS configured root and child limits, overflow and quota splitting
+PASS explicit child limit 7 emits 8 tables
+PASS inherited child limit 5 emits 10 grandchild tables
+PASS bounded FIFO progress
+PASS completion/free before publication returns, including nested waves
+PASS allocation failures
+PASS partial-prefix/zero-admission recovery
+PASS same-shard plain-write completion join
+PASS roots single thread, partial tables and reuse
+PASS roots one consumer, small batches
+PASS roots six consumers, ring reuse/backpressure
+PASS optional consumer-side root reclamation
+PASS nested waves, authority, retirement, allocation balance
+PASS four independent creators sharing the Farm
+PASS private in-tree cancellation C1-C13
+PASS private cancellation torture
+PASS private wave outcomes O1-O6 and O9
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle
+PASS child-large-cohort zero/partial admission, retry and three waves
+PASS child allocation failures, capacity overflow and reusable slot
+PASS mixed-table again/finish and early completion under both reclamation policies
+PASS refill-after-final and empty starts
+PASS delayed-final-credit authorized observation and immediate reuse/retirement
+PASS deterministic return-CAS retry and slot reuse
+PASS child completion before emitter seal and immediate reuse
+PASS depth64 transitive joins, retirement and allocation balance
+PASS ports-basic results lifecycle under both reclamation policies
+PASS ports-poll-visibility deterministic raw-barrier schedule
+PASS ports-wait-visibility before/after custody schedules with result reads
+PASS ports-late-tail results read and freed under a paused idle tail
+PASS ports-large-cohort 257/513/1025 members, child limits 1/64/256
+PASS ports-nested depth-3 pipelined reduction
+PASS ports-nested depth64 results
+PASS ports-alloc-fail cohort/entries/results failures and overflow
+PASS dtor-root exactly-once consumer destruction: finish, finishAfterChildren, never-dispatched members
+PASS dtor-child startFinal plain/result members destroyed on consumers after op and result
+PASS dtor-order depth-3 postorder across disposal, startFinal and finishAfterChildren
+PASS dtor-failed-spawn caller-side destruction for capacityFull/waveActive/allocationFailed
+PASS dtor-aligned align(32)/align(64) owning tokens: root and child capacityFull/allocationFailed exactly-once
+PASS dtor-moved-from per-spawn .init accounting and non-copyable owners via move
+PASS dtor-recursive non-POD chain destroyed deepest first
+PASS dtor-results slot written before ~T
+PASS subset-basic sparse/dense/full/repeated/void/whole waves, empty list, refill, both policies
+PASS subset-active start over an active wave returns waveActive without side effects
+PASS subset-large 1025 members, child limits 1/64/256, zero and partial quota admission
+PASS subset-nested subset wave joins its parent wave and the root's waitChildren
+PASS subset-alloc-fail one selection allocation, balanced failures
+PASS subset-dtor subset waves destroy no member; disposal and startFinal destroy all once
+PASS subset-late-tail new subset generation started under a paused idle tail
+PASS subset-limits options.batchLimit explicit and inherited
+PASS entry-word roots hold the Service, members read it through ChildBase at depth two
+PASS huge configured root limits and descriptor overflow
+PASS configured root and child limits, overflow and quota splitting
+PASS explicit child limit 7 emits 8 tables
+PASS inherited child limit 5 emits 10 grandchild tables
+PASS bounded FIFO progress
+PASS completion/free before publication returns, including nested waves
+PASS allocation failures
+PASS partial-prefix/zero-admission recovery
+PASS same-shard plain-write completion join
+PASS roots single thread, partial tables and reuse
+PASS roots one consumer, small batches
+PASS roots six consumers, ring reuse/backpressure
+PASS optional consumer-side root reclamation
+PASS nested waves, authority, retirement, allocation balance
+PASS four independent creators sharing the Farm
+PASS fatal sample dies nonzero with expected stderr message
+PASS wrong-parent and default authority are fatal
+PASS ports early read, wrong-parent and default-context results are fatal
+PASS node death: oversize fail code, non-processing and repeated terminal calls are fatal
+PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal
+PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal
+PASS entry-word-death child service read is fatal in debug builds
+PASS invalid configured and per-call batch limits are fatal
+PASS destroy-live and finish-with-active-child are fatal
+PASS cross-Farm token write, flush, and unregister are fatal
+PASS E1 join counter exhaustion is fatal after the last legal retain
+PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths
+PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome
+PASS cancelPeers on a root and unauthorized cancellation are fatal
+PASS debug reentrancy guard
+PASS death negative control: survivor and wrong-message child rejected
+PASS fatal sample dies nonzero with expected stderr message
+PASS wrong-parent and default authority are fatal
+PASS ports early read, wrong-parent and default-context results are fatal
+PASS node death: oversize fail code, non-processing and repeated terminal calls are fatal
+PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal
+PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal
+PASS invalid configured and per-call batch limits are fatal
+PASS destroy-live and finish-with-active-child are fatal
+PASS cross-Farm token write, flush, and unregister are fatal
+PASS E1 join counter exhaustion is fatal after the last legal retain
+PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths
+PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome
+PASS cancelPeers on a root and unauthorized cancellation are fatal
+PASS death negative control: survivor and wrong-message child rejected
+PASS fatal sample dies nonzero with expected stderr message
+PASS wrong-parent and default authority are fatal
+PASS ports early read, wrong-parent and default-context results are fatal
+PASS node death: oversize fail code, non-processing and repeated terminal calls are fatal
+PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal
+PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal
+PASS entry-word-death child service read is fatal in debug builds
+PASS invalid configured and per-call batch limits are fatal
+PASS destroy-live and finish-with-active-child are fatal
+PASS cross-Farm token write, flush, and unregister are fatal
+PASS E1 join counter exhaustion is fatal after the last legal retain
+PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths
+PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome
+PASS cancelPeers on a root and unauthorized cancellation are fatal
+PASS debug reentrancy guard
+PASS death negative control: survivor and wrong-message child rejected
+PASS fatal sample dies nonzero with expected stderr message
+PASS wrong-parent and default authority are fatal
+PASS ports early read, wrong-parent and default-context results are fatal
+PASS node death: oversize fail code, non-processing and repeated terminal calls are fatal
+PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal
+PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal
+PASS invalid configured and per-call batch limits are fatal
+PASS destroy-live and finish-with-active-child are fatal
+PASS cross-Farm token write, flush, and unregister are fatal
+PASS E1 join counter exhaustion is fatal after the last legal retain
+PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths
+PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome
+PASS cancelPeers on a root and unauthorized cancellation are fatal
+PASS death negative control: survivor and wrong-message child rejected
+==> make SHELL=/usr/bin/bash -C examples check
+==> ldc2 -g -i -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload
+==> ldc2 -O2 -release -i -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_release
+==> dmd -g -i -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_dmd
+==> dmd -O -release -i -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_dmd_release
+==> ldc2 -g -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service 2
+==> ldc2 -O2 -release -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_release 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_release 2
+==> dmd -g -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd 2
+==> dmd -O -release -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd_release 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd_release 2
+==> ldc2 -g -O1 -fsanitize=thread -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_tsan
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_tsan 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_tsan 2
+==> ldc2 -g -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave 2
+==> ldc2 -O2 -release -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_release 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_release 2
+==> dmd -g -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd 2
+==> dmd -O -release -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd_release 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd_release 2
+==> ldc2 -g -O1 -fsanitize=thread -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_tsan
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_tsan 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_tsan 2
+==> ldc2 -g -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree 2
+==> ldc2 -O2 -release -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_release 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_release 2
+==> dmd -g -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd 2
+==> dmd -O -release -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd_release 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd_release 2
+==> ldc2 -g -O1 -fsanitize=thread -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_tsan
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_tsan 0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_tsan 2
+PASS actor examples
+ALL CHECKS PASSED
+EXIT 0

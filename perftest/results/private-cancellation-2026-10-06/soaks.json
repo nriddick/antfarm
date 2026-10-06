@@ -1,0 +1,42 @@
+{
+  "tsan-cancel-torture-10min": {
+    "status": "PASS",
+    "loops": 17666,
+    "seconds": 601.028,
+    "head": [
+      "$ ./private_actor_tests/private_actor_tests_tsan cancel-torture 300 1000",
+      "torture: 300 roots, 6430 actors, 671 cancelled and 875 truncated joined waves, 305 with failures",
+      "PASS private cancellation torture"
+    ],
+    "last_tail": [
+      "torture: 300 roots, 6640 actors, 722 cancelled and 994 truncated joined waves, 316 with failures",
+      "PASS private cancellation torture"
+    ]
+  },
+  "tsan-suite-10min": {
+    "status": "PASS",
+    "loops": 354,
+    "seconds": 601.606,
+    "head": [
+      "$ ./private_actor_tests/private_actor_tests_tsan",
+      "PASS private in-tree cancellation C1-C13",
+      "torture: 300 roots, 5463 actors, 631 cancelled and 857 truncated joined waves, 228 with failures",
+      "PASS private cancellation torture",
+      "PASS private wave outcomes O1-O6 and O9",
+      "PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies",
+      "PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle"
+    ],
+    "last_tail": [
+      "PASS roots six consumers, ring reuse/backpressure",
+      "PASS optional consumer-side root reclamation",
+      "PASS nested waves, authority, retirement, allocation balance",
+      "PASS four independent creators sharing the Farm"
+    ]
+  },
+  "_meta": {
+    "head": "e6245c0c6066ccc150b4e012ab5c30e20e9bd162",
+    "tsan_options": "history_size=7:halt_on_error=1",
+    "concurrent": true,
+    "minimum_seconds": 601
+  }
+}

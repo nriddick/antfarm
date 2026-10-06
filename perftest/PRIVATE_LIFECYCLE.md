@@ -629,3 +629,15 @@ Both new modes use root → mids → result leaves, fanout eight, identical leaf
 Continuation versus pipelined: -1.32% at zero remote consumers; +2.03% at six. The differences are small relative to the host-load caveat.
 
 [Protocol, review and gate evidence](results/private-continuations-2026-10-05/README.md), [metadata](results/private-continuations-2026-10-05/metadata.json), [raw runs](results/private-continuations-2026-10-05/runs.jsonl), and [medians/ranges](results/private-continuations-2026-10-05/summary.json).
+
+## F2 `tree-cancel` baseline
+
+`tree-cancel` (F2, 2026-10-06) is a new baseline with no base comparator. Each
+root retires its leaves with `startFinal` in eight tables. The middle leaf calls
+`cancelPeers`, so the emitter retires the rest of the wave through cleanup
+tables, and the root reads `outcome` after the usual join. The throughput figure
+counts every leaf lifecycle, operated or cleanup-retired. `dispatched_fraction`
+reports how much ran the operation: about 0.62 with inline consumption, near 1
+with six consumers, which are usually behind the emitter when the cancel lands.
+Results are in [the F2 results](results/private-cancellation-2026-10-06/).
+
