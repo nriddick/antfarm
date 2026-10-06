@@ -289,10 +289,17 @@ PrivateChildStep!ulong fold(scope ref PrivateBorrow!Mid b, scope ref PrivateCont
     if (b.value.leaves is null)
     {
         b.value.leaves = c.createChildren!(Leaf, ulong)(4);
-        if (b.value.leaves is null) fatal("leaf park allocation failed");
+        if (b.value.leaves is null)
+        {
+            c.fail(1); // no wave of this member is active yet
+            return typeof(return).done(0);
+        }
         foreach (i; 1 .. 5)
             if (b.value.leaves.spawn(c, Leaf(i)) != PrivateSpawnResult.spawned)
-                fatal("leaf spawn failed");
+            {
+                c.fail(2);
+                return typeof(return).done(0);
+            }
         if (b.value.leaves.startFinal!square(c) != PrivateStartResult.started)
             fatal("leaf wave failed");
         return typeof(return).waitChildren();
@@ -431,7 +438,8 @@ parent/upstream pointers after publishing idle.
 
 On 64-bit targets the fixed cohort metadata grows by 16 bytes (one selection
 pointer and a count, with the subset flag in existing padding): a signal-only
-cohort is 280 bytes instead of 264 (336 with the child Service pointer and continuation descriptors below).
+cohort is 280 bytes instead of 264 (368 with the child Service pointer,
+continuation descriptors, and wave-outcome fields below).
 Entry remains 40 bytes. Unreserved cohorts
 allocate no per-member subset storage and use the existing whole-wave dispatch
 path. Reserved cohorts make one extra eager allocation of 8 bytes per member
@@ -503,6 +511,47 @@ void main()
 }
 ```
 
+## Failures and outcomes
+
+A domain failure is a value, not `fatal`. `context.fail(code)` records it and
+returns; the callback still returns its normal step. It is valid in plain,
+result, continuation, and result-continuation operations. Call it at most once
+per member per wave. Extra calls are counted and not diagnosed. A failed
+result member still writes the `R` it returns; the usual convention is
+`R.init` or a partial value. The debug unwritten-slot rule is unchanged.
+
+The enclosing wave aggregates reports. `park.outcome(context)` is the snapshot
+after the join: participants, dispatched, the report count, the first
+failure's code and participant position, and whether this wave's own scope was
+cancelled. Before the first nonempty start every field is zero. `succeeded`
+means no reports and a full dispatch. Per-member detail belongs in `R`. Which
+concurrent report supplies the representative pair is unspecified; the code
+and position always belong to the same report. A whole wave's position is the
+spawn index. A subset's position is the selection index, valid until the next
+nonempty start.
+
+Nothing fails a parent automatically. After the join the parent reads
+`outcome` and chooses: recover, or propagate with its own `context.fail`.
+Propagation toward the application is explicit at each level. A root's
+`fail` records a tracked root outcome once root tracking exists. Until then it
+is fatal on an untracked park; an untracked root reports through application
+storage instead. Wrong or default context is fatal for both `fail` and
+`outcome`. `outcome` and `results` while a wave is active are fatal.
+`uint.max` reports in one wave are fatal before the count wraps.
+
+A rejected start preserves the last nonempty wave. `start`, `startFinal`, and
+`startSubset` reset the aggregate only after the active, retiring, and empty
+rejections, and before the enqueue. An empty start, a busy start, and a void
+operation after a result wave therefore leave the previous snapshot in place
+until a new nonempty wave is actually published. Cancellation of a wave is a
+later slice: `cancelled` is false and `dispatched == participants` until then.
+
+Partial construction needs no extra API. If `createChildren` returns null or
+`spawn` does not return `spawned`, a member calls `fail` and, when no wave of
+that actor is active, returns `done`. Never-dispatched members are destroyed
+once when the owning actor retires. The fold above uses that pattern instead
+of `fatal` on a leaf spawn failure.
+
 ## Progress and outcomes
 
 | Operation | Result / contract |
@@ -512,6 +561,8 @@ void main()
 | `start` / `startFinal` / `startSubset` | `PrivateStartResult.started`, `empty`, `waveActive`, or `retiring`. Empty starts are already complete and take no credit. |
 | `PrivateChildDisposition.done` / `PrivateChildStep!R.done(value)` | Finish this member's participation; outstanding descendants still hold the wave active. The result form writes its slot once. |
 | `PrivateChildDisposition.waitChildren` / `PrivateChildStep!R.waitChildren()` | Join this member's descendants, then publish exactly one later activation of the same operation, even if nothing is outstanding. |
+| `context.fail(code)` | Member: counts one report on the enclosing wave and, for the first report, records that code and participant position. Does not end the activation. Root: fatal on an untracked park. Wrong or default context is fatal. A count of `uint.max` is fatal. |
+| `outcome(context)` | `PrivateWaveOutcome` of the last nonempty wave, acquired after the join; all zero before the first such wave. Fatal while active or with wrong/default authority. Valid until the next nonempty start. |
 | `results(context)` | `const(R)[]` in participant order, acquired after the join; fatal while active or with wrong/default authority. Available only for non-void `R`. |
 | `subsetMembers(context)` | `const(uint)[]` in list order for the most recent nonempty subset; empty after a whole wave. Wrong/default authority is fatal. |
 | `finished(context)` | True before the first start and after the current wave joins; a root notification tail may still be pending. Wrong-parent or default authority is fatal, including when the cohort is idle. |
@@ -770,10 +821,11 @@ The finisher snapshots that target and parent kind before publishing idle.
 `Service.childReturns` carries completed child waits. Each cohort embeds two
 `Emittable` descriptors: initial emission and resumption. Its resume FIFO,
 counter and scheduled flag are emitter-owned and reserved at cohort creation.
-This adds 48 bytes per cohort on 64-bit targets, for 336 bytes in a signal-only
-cohort; there is no additional per-member continuation allocation. Entry stays
-40 bytes and `PrivateContext` stays four words. Plain/result dispatch adds no
-RMW, and an empty child-return list costs one raw load per pump.
+This adds 48 bytes per cohort on 64-bit targets. Wave outcomes add 16 bytes
+to the wave and two parent-only counters, for 368 bytes in a signal-only
+cohort; there is no additional per-member continuation or outcome allocation.
+Entry stays 40 bytes and `PrivateContext` stays four words. Plain/result
+dispatch adds no RMW, and an empty child-return list costs one raw load per pump.
 
 The existing emitter pump remains mandatory. Consumers hand roots and children
 back through their wake lists; they never publish to the Farm and do not wake a

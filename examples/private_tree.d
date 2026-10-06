@@ -38,11 +38,18 @@ PrivateChildStep!ulong fold(scope ref PrivateBorrow!Folder actor,
     {
         actor.value.leaves = context.createChildren!(Leaf, ulong)(4,
             PrivateCohortOptions(0, true));
-        if (actor.value.leaves is null) fatal("leaf park allocation failed");
+        if (actor.value.leaves is null)
+        {
+            context.fail(1); // no wave of this member is active yet
+            return typeof(return).done(0);
+        }
         foreach (i; 0 .. 4)
             if (actor.value.leaves.spawn(context, Leaf(i + 1))
                     != PrivateSpawnResult.spawned)
-                fatal("leaf spawn failed");
+            {
+                context.fail(2);
+                return typeof(return).done(0);
+            }
         uint[2] members = [3, 1]; // inputs 4 and 2, in that list order
         if (actor.value.leaves.startSubset!square(context, members[])
                 != PrivateStartResult.started)

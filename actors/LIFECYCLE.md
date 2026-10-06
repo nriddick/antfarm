@@ -261,6 +261,7 @@ service never receive identities for the internal actors.
 | Who names the actor | external handle | no external identity; parent owns the cohort |
 | How work is admitted | `wake` / `send`, or an external wave | `spawn`, then `start` / `startSubset` / `startFinal` |
 | How the caller sees a result | caller-owned node or other external buffer, after an acquire | cohort `results(context)` after the join; root output still external |
+| Domain failure | application value in state or a node, not a library status yet | `context.fail(code)`, then `outcome` after the join. Untracked root `fail` is fatal |
 | How to wait | poll a wave handle, a node, or `retired` | `waitChildren` on a root; `PrivateChildStep!R` inside a child wave |
 | Shutdown fence | retire, reclaim, empty ready queue | `live == 0` through pump or collect, then `park.destroy()` |
 

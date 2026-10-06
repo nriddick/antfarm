@@ -289,6 +289,37 @@ is published through enqueue. The finisher never updates result bookkeeping
 after publishing idle, so a polling parent can read and dispose the cohort
 while the saved root notification credit is still in flight.
 
+## Private wave failure aggregation
+
+`context.fail` on a member elects one plain `(code, Entry)` writer with a raw
+checked CAS on `Wave.failures`. The CAS needs atomicity only. Reaching
+`uint.max` is fatal before the store, so a wrap cannot observe zero and elect
+a second writer. The winner's plain code and Entry stores are sequenced before
+the callback returns. They join through the same chain that carries result slots:
+
+```text
+member fail RMW + winner's plain code/Entry stores (sequenced before callback return)
+  -> Shc completion (acq_rel) -> Tprogress (acq_rel)
+  -> table/descendant releases (acq_rel)
+  -> final wave decrement (acq_rel) -> finish: active.store(0, release)
+  -> parent outcome(): active.load(acquire) -> plain reads
+```
+
+Every cohort callback, including a continuation activation, runs under a wave
+table credit, so every report precedes the join. `outcome` then maps the
+winning Entry to a participant position: the spawn index for a whole wave, or
+`sel_[capacity + index]` for a subset. The pair is consistent. Which concurrent
+report wins is unspecified. `failures` counts reports, not distinct members.
+
+The next nonempty `start` or `startSubset` resets the count, the cancel flag,
+the winning Entry, and the participant counters only after rejecting an active,
+retiring, or empty start, and before its enqueue release. That start's idle
+acquire happens-before the reset, so no writer from the previous generation
+remains. `firstFailureCode` is valid only when `failures != 0`. In-tree
+cancellation is not part of this slice; observing `cancelled` false is not a
+claim about a later cancel protocol, and `dispatched` is not a prefix until
+that protocol exists.
+
 ## Private child continuation ordering
 
 A continuation member owns 32-bit `childPending` custody during its activation.

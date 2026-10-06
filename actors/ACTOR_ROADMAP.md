@@ -59,8 +59,15 @@ continuation descriptors are reserved per cohort. The independent lifetime
 review, mutations, soak and perf evidence live in
 [the E2-4 results](../perftest/results/private-continuations-2026-10-05/).
 
-Next items are per-member retirement, outcomes/cancellation, concurrent subsets,
-non-POD results, **X1** root-to-application outputs, and optional emitter wake.
+**F1 wave outcomes are done:** a member's `context.fail(code)` aggregates on
+the enclosing wave. After the join, `outcome` reports the count and one
+consistent `(code, participant position)` pair. Propagation is explicit.
+Root `fail` stays fatal on an untracked park until root tracking. Entry stays
+40 bytes; a signal-only cohort grows to 368 bytes on 64-bit.
+
+Next items are in-tree cancellation, root tracking with deadlines and X1a,
+per-member retirement, concurrent subsets, non-POD results, and optional
+emitter wake. Typed root outputs (X1b) stay deferred.
 Other port extensions remain: **X2** library reductions, **X3** bounded append
 buffers, and **X4** writer capability / in-place results. A compiler-enforced
 safe ownership front end remains future work.
