@@ -52,6 +52,16 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   which recycles the slot. A tracked drain pumps and takes outcomes.
   Untracked parks are unchanged apart from one branch per spawn, collection
   and cancel check. Entry stays 40 bytes.
+- **F5 docs and examples done:** [LIFECYCLE.md](actors/LIFECYCLE.md#shutdown-recipe)
+  has the shared shutdown recipe, and the compiled lane in
+  [examples/](examples/README.md) adds a deadline request service, a
+  `fail` + `cancelPeers` fail-fast fold, and a fiber `cancelAt` bridge.
+- **Outcomes and cancellation deliberately deferred:** X1b typed root
+  outputs; timed or external wake of a waiting private root as a join credit;
+  an emitter-owned timer source; per-wave deadlines; public `sendAfter` and
+  actor timers; supervision/retry policies; a guaranteed public final
+  activation; and `PrivateRootHandle` hashing (handles are compared by `==`,
+  not used as map keys).
 - **Next:** per-member retirement, concurrent subsets, non-POD results, and
   optional emitter wake. No version
   bump accompanies these slices; the release remains 1.7.1-rc.1 pending a tag

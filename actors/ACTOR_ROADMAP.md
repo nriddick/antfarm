@@ -107,6 +107,17 @@ admission rollback and wave exit, preserves the mode. Handlers observe
 cooperative: no library discard and no guaranteed final handler call. Slot
 stays 128 bytes.
 
+**F5 docs and examples are done:** [LIFECYCLE.md](LIFECYCLE.md#shutdown-recipe)
+carries the shared shutdown recipe for both models, and the compiled
+[examples](../examples/README.md) lane adds a deadline request service
+(U5), a `fail` + `cancelPeers` fail-fast fold (U3), and a fiber `cancelAt`
+bridge that is deliberately an example, not library API. The outcomes and
+cancellation work is complete. Deliberately deferred: X1b typed root outputs;
+timed or external wake of a waiting private root as a join credit; an
+emitter-owned timer source; per-wave deadlines; public `sendAfter` and actor
+timers; supervision/retry policies; a guaranteed public final activation; and
+`PrivateRootHandle` hashing (handles compare by `==`, they are not map keys).
+
 ## Current actor and wave spike
 
 Lifecycle, shutdown, and misuse contracts shared with private actors are in
