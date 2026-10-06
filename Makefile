@@ -9,7 +9,7 @@
 # `actor_torture`, `antfarm_test`). New tests stay on druntime threads and
 # atomics; this matrix itself is the Linux gate.
 
-.PHONY: check check-soak check-mimalloc farm-tsan run-farm-tsan
+.PHONY: check check-soak check-mimalloc farm-tsan run-farm-tsan perf-gate
 
 check:
 	./scripts/check.sh
@@ -30,3 +30,9 @@ farm-tsan: $(FARM_TSAN_SOURCES)
 
 run-farm-tsan: farm-tsan
 	./scripts/run-farm-tsan.sh
+
+# Standalone timing gate; intentionally outside the correctness matrix.
+PERF_GATE_OUTPUT ?= perftest/results/perf-gate
+PERF_GATE_ARGS ?=
+perf-gate:
+	python3 perftest/perf_gate.py --base $(BASE) $(if $(CANDIDATE),--candidate $(CANDIDATE)) --output $(PERF_GATE_OUTPUT) $(PERF_GATE_ARGS)

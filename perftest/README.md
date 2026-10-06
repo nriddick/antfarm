@@ -300,3 +300,70 @@ its quota in ulongs (default `small 16384`, preserving the historical setup).
 `private_lifecycle_matrix.py --suite batch` sweeps root batch limit × quota ×
 consumer count; `--suite child` checks inherited child limits. Both use five
 warmup cycles, five repetitions and three-second measurement windows by default.
+
+## Optimization PR performance gate
+
+`perf_gate.py` is the standard gate for optimization PRs. The **−3% boundary
+is restored now that the host is quiet**. Inconclusive is never pass. Run
+correctness checks first, then run timing serially on a quiet host, with no
+other heavy jobs. This Linux gate requires LDC, Python 3, and the real pinned
+mimalloc 3.5.3 archive. It builds committed refs in temporary detached
+worktrees and removes them after building.
+
+```sh
+make perf-gate BASE=BASE_SHA CANDIDATE=CANDIDATE_SHA \
+  PERF_GATE_OUTPUT=perftest/results/optimization-001
+```
+
+The target is separate from `make check`. `PERF_GATE_ARGS` passes additional
+options, including `--archive /path/libmimalloc.a`. The archive defaults to
+`actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a` in the selected repository;
+`--repo` defaults to this checkout. Output directories must be new.
+
+Defaults cover every `actor_churn` mode at 0 and 6 consumers, with subset
+selections of 1%, 10%, and 100%, 16,384 actors, batch/quota 256/16,384, five
+warmups, three-second windows and five clean matched pairs per cell. Both
+revisions must use identical benchmark source; use `--benchmark-ref REF` to
+select a common source when needed. Unsupported modes are incomplete.
+
+Near the boundary, collect at least 20 process pairs and a byte-identical
+control. `--boundary` defaults to 20 pairs and rejects fewer; its default
+attempt limit is twice the pair count. `--control` independently builds the
+base twice, sets candidate to base, and requires identical binary hashes.
+The Make target also accepts control mode without `CANDIDATE`:
+`make perf-gate BASE=CANDIDATE_SHA PERF_GATE_ARGS=--control`.
+Both options can be combined. For example:
+
+```sh
+python3 perftest/perf_gate.py --base BASE_SHA --candidate CANDIDATE_SHA \
+  --boundary --modes tree-wait --consumers 0 --output /tmp/boundary-001
+python3 perftest/perf_gate.py --base CANDIDATE_SHA --control \
+  --output /tmp/control-001
+```
+
+Exit codes are **0 pass, 1 regression, 2 inconclusive/error**. A known
+regression takes precedence over incomplete cells. Decisions use clean
+paired ratios and a descriptive bootstrap median interval. At the default
+five pairs, its bounds effectively equal the minimum/maximum paired ratios,
+so this acts as a conservative all-pairs threshold screen. In boundary mode
+(>=20 pairs), the decision tests the paired-median interval: individual pairs
+can fall below −3% while the cell still passes if the interval's lower bound
+is above −3%. The same interval decision applies to other repeat counts.
+Neither mode provides a calibrated 95% confidence guarantee.
+
+The gate alternates accepted-pair order and discards a whole pair if either
+run has outside-affinity mean CPU use above 10%, any outside CPU above 25%,
+or system busy time minus benchmark CPU above 0.25 core. Initial load is
+checked before builds. CPU placement, SMT sharing, frequency samples,
+governor availability, source/binary/archive hashes and build commands are
+recorded. `tree-cancel` additionally requires valid dispatched fractions and
+no median fraction change beyond the default 0.01 absolute tolerance;
+unequal cancellation work is inconclusive.
+
+Keep `gate.json`, `summary.json`, `metadata.json`, build logs and raw
+`runs.jsonl` evidence with the PR results. Quote `paired_median_delta` and
+its spread, or the `quiet_*` fields: legacy mean/delta fields include
+contaminated attempts and cannot establish a pass.
+
+Gate decision and option tests run without builds or timing:
+`python3 -B -m unittest perftest/test_perf_gate.py`.
