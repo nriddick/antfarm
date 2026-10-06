@@ -124,6 +124,15 @@ enum ActorRetireResult : ubyte
     staleOwner,
 }
 
+/// Drain lets handlers process accepted interactions. Cancel additionally
+/// makes `ActorContext.cancelling` true so handlers can `cancelInbox`; it is
+/// cooperative, and the library never discards nodes itself.
+enum ActorRetireMode : ubyte
+{
+    drain,
+    cancel,
+}
+
 enum ActorReclaimResult : ubyte
 {
     reclaimed,
@@ -295,6 +304,27 @@ struct ActorContext
         return (atomicLoad!(MemoryOrder.acq)(slot_.lifecycle) & retireBit) != 0;
     }
 
+    /// True after a cancel-mode retirement request; implies `closing`. The
+    /// handler should `cancelInbox` rather than process accepted work.
+    @property bool cancelling() const nothrow @nogc @system
+    {
+        return (atomicLoad!(MemoryOrder.acq)(slot_.lifecycle) & cancelBit) != 0;
+    }
+
+    /// Pop every queued interaction, including the carried remainder, and
+    /// `cancel` it. Returns the number of nodes cancelled.
+    size_t cancelInbox() nothrow @nogc @system
+    {
+        size_t count;
+        for (auto node = popInboxNode(slot_, inboxLocal_); node !is null;
+                node = popInboxNode(slot_, inboxLocal_))
+        {
+            node.cancel();
+            ++count;
+        }
+        return count;
+    }
+
     /// Detach interactions in producer linearization order and return one to
     /// the exclusive actor. Unpopped nodes stay actor-private across the next
     /// activation and force republishing; producers never touch that carry.
@@ -361,8 +391,13 @@ alias ActorErasedHandler = void function(scope ref ActorErasedBorrow,
 private enum ulong phaseMask = 0x7;
 private enum ulong retireBit = 0x8;
 private enum ulong pendingBit = 0x10;
+private enum ulong cancelBit = 0x20;
+// Sticky across every nonterminal lifecycle rebuild; RETIRED/VACANT clear it.
+private enum ulong retireModeMask = retireBit | cancelBit;
 private enum uint generationShift = 8;
 private enum ulong maxGeneration = ulong.max >> generationShift;
+static assert((cancelBit & (phaseMask | retireBit | pendingBit)) == 0
+    && cancelBit < (1UL << generationShift));
 
 private enum ulong phaseVacant = 0;
 private enum ulong phaseConstructing = 1;
@@ -524,9 +559,10 @@ struct ActorErasedOwner
         return result;
     }
 
-    ActorRetireResult requestRetire() nothrow @nogc @system
+    ActorRetireResult requestRetire(
+            ActorRetireMode mode = ActorRetireMode.drain) nothrow @nogc @system
     {
-        return requestActorRetire(slot_, generation_);
+        return requestActorRetire(slot_, generation_, mode);
     }
 
     @property bool retired() const nothrow @nogc @system
@@ -577,9 +613,15 @@ struct ActorOwner(T)
         return result;
     }
 
-    ActorRetireResult requestRetire() nothrow @nogc @system
+    /// Close admission and retire once accepted interactions are handled.
+    /// Cancel mode, or a later cancel after drain, also sets `cancelling`.
+    /// Cancel returns `alreadyRetired` once cancelling, even if not yet
+    /// `retired`; `waveOwned` during a wave, so retry after it. No final
+    /// handler call is guaranteed. Requests on one owner must not overlap.
+    ActorRetireResult requestRetire(
+            ActorRetireMode mode = ActorRetireMode.drain) nothrow @nogc @system
     {
-        return requestActorRetire(slot_, generation_);
+        return requestActorRetire(slot_, generation_, mode);
     }
 
     @property bool retired() const nothrow @nogc @system
@@ -986,7 +1028,8 @@ private:
                 else
                 {
                     immutable scheduledWord = lifecycleWord(
-                        generation, phaseScheduled) | retireBit;
+                        generation, phaseScheduled)
+                        | (observed & retireModeMask);
                     if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
                             &slot.lifecycle, observed, scheduledWord))
                     {
@@ -999,7 +1042,7 @@ private:
             {
                 immutable runningWord = lifecycleWord(
                     generation, phaseRunning)
-                    | (retiring ? retireBit : 0);
+                    | (observed & retireModeMask);
                 if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
                         &slot.lifecycle, observed, runningWord))
                     break;
@@ -1021,7 +1064,8 @@ private:
 
         if (context.retire_)
         {
-            if (!markActorRetiring(slot, generation))
+            if (markActorRetiring(slot, generation, retireBit)
+                    == ActorRetireResult.staleOwner)
                 fatal("running actor lost generation during self-retirement");
             closeSubmissionGate(slot);
         }
@@ -1054,7 +1098,7 @@ private:
                 nextPhase = mustRepublish ? phaseScheduled : phaseIdle;
             }
             immutable replacement = lifecycleWord(generation, nextPhase)
-                | (mustRetire && nextPhase != phaseRetired ? retireBit : 0);
+                | (nextPhase != phaseRetired ? observed & retireModeMask : 0);
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
                     &slot.lifecycle, observed, replacement))
             {
@@ -1140,25 +1184,32 @@ private void closeSubmissionGate(ActorSlot* slot) nothrow @nogc @system
     }
 }
 
-private bool markActorRetiring(ActorSlot* slot, ulong generation)
-    nothrow @nogc @system
+// modeBits is retireBit (drain) or retireModeMask (cancel). Drain keeps its
+// historical `requested` for an already closing or retired generation; cancel
+// reports `alreadyRetired` once its bit is present or the actor has retired.
+// Escalation CASes against the full current word rather than returning early
+// on retireBit alone.
+private ActorRetireResult markActorRetiring(ActorSlot* slot, ulong generation,
+        ulong modeBits) nothrow @nogc @system
 {
+    immutable satisfied = (modeBits & cancelBit) != 0
+        ? ActorRetireResult.alreadyRetired : ActorRetireResult.requested;
     auto observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     while (true)
     {
         if (wordGeneration(observed) != generation)
-            return false;
+            return ActorRetireResult.staleOwner;
         immutable phase = wordPhase(observed);
         if (phase == phaseRetired)
-            return true;
+            return satisfied;
         if (phase == phaseVacant || phase == phaseConstructing)
-            return false;
-        if ((observed & retireBit) != 0)
-            return true;
-        immutable replacement = observed | retireBit;
+            return ActorRetireResult.staleOwner;
+        if ((observed & modeBits) == modeBits)
+            return satisfied;
+        immutable replacement = observed | modeBits;
         if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
                 &slot.lifecycle, observed, replacement))
-            return true;
+            return ActorRetireResult.requested;
         observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     }
 }
@@ -1185,7 +1236,7 @@ private ActorWakeResult signalActor(ActorSlot* slot, ulong generation,
         if (phase == phaseIdle)
         {
             replacement = lifecycleWord(generation, phaseScheduled)
-                | (closing ? retireBit : 0);
+                | (observed & retireModeMask);
             result = ActorWakeResult.queued;
         }
         else
@@ -1265,7 +1316,7 @@ private void driveActorRetirement(ActorSlot* slot, ulong generation)
                 return;
             }
             immutable replacement = lifecycleWord(generation, phaseScheduled)
-                | retireBit;
+                | (observed & retireModeMask);
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
                     &slot.lifecycle, observed, replacement))
             {
@@ -1284,8 +1335,12 @@ private void driveActorRetirement(ActorSlot* slot, ulong generation)
     }
 }
 
+// Requests on one owner must be serialized, as the idle fast path's blind
+// RETIRED store assumes no other lifecycle writer. An aliased concurrent cancel
+// landing after its second load would be overwritten; the inbox is empty
+// there, so only that caller's result code (requested) would be inaccurate.
 private ActorRetireResult requestActorRetire(ActorSlot* slot,
-        ulong generation) nothrow @nogc @system
+        ulong generation, ActorRetireMode mode) nothrow @nogc @system
 {
     if (slot is null || generation == 0)
         return ActorRetireResult.staleOwner;
@@ -1298,8 +1353,10 @@ private ActorRetireResult requestActorRetire(ActorSlot* slot,
         return ActorRetireResult.alreadyRetired;
     if (atomicLoad!(MemoryOrder.acq)(slot.waveOwnerWord) != 0)
         return ActorRetireResult.waveOwned;
-    if (!markActorRetiring(slot, generation))
-        return ActorRetireResult.staleOwner;
+    immutable marked = markActorRetiring(slot, generation,
+        mode == ActorRetireMode.cancel ? retireModeMask : retireBit);
+    if (marked != ActorRetireResult.requested)
+        return marked;
     closeSubmissionGate(slot);
     driveActorRetirement(slot, generation);
     return ActorRetireResult.requested;
@@ -1515,7 +1572,7 @@ package void cancelActorWavePayload(ActorSlot* slot, ulong generation,
         immutable interrupted = (observed & (retireBit | pendingBit)) != 0;
         immutable replacement = lifecycleWord(generation,
             interrupted ? phaseScheduled : phaseIdle)
-            | ((observed & retireBit) != 0 ? retireBit : 0);
+            | (observed & retireModeMask);
         if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
                 &slot.lifecycle, observed, replacement))
         {
@@ -1577,7 +1634,7 @@ package bool dispatchActorWavePayload(T, alias operation)(ActorSlot* slot,
         clean = clean && !interrupted;
         immutable replacement = lifecycleWord(generation,
             interrupted ? phaseScheduled : phaseIdle)
-            | ((observed & retireBit) != 0 ? retireBit : 0);
+            | (observed & retireModeMask);
         if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
                 &slot.lifecycle, observed, replacement))
         {

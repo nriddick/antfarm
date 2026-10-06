@@ -35,7 +35,7 @@ caller-observed quiescence described below.
 
 | Name | Field | Role |
 | --- | --- | --- |
-| `L` | `ActorSlot.lifecycle` | Generation, phase, `RETIRE`, and `PENDING` in one atomic word. |
+| `L` | `ActorSlot.lifecycle` | Generation, phase, `RETIRE`, `PENDING`, and `CANCEL` in one atomic word. |
 | `H` | `ActorRuntime.readyHeadWord` | Intrusive MPSC ready-stack head. |
 | `D` | `ActorRuntime.readyDrainGate` | Nonblocking exclusive ownership of ready-list snapshot extraction. |
 | `Rcarry` | `ActorRuntime.readyCarryWord` | Plain detached backlog, accessed only while holding `D`. |
@@ -557,9 +557,31 @@ VACANT --exclusive free-list pop, generation++--> CONSTRUCTING
 RETIRED --clear/deallocate, store-release--> VACANT
 ```
 
-`RETIRE` and `PENDING` are bits in the same word as the phase. Therefore an
-exit decision cannot be made from a phase snapshot that is independent of a
-concurrent wake or retirement request.
+`RETIRE`, `PENDING`, and `CANCEL` are bits in the same word as the phase.
+Therefore an exit decision cannot be made from a phase snapshot that is
+independent of a concurrent wake or retirement request.
+
+`CANCEL` (0x20) is set only together with `RETIRE`, by a cancel-mode
+`requestRetire` or by a drain-to-cancel escalation CAS against the full
+current word. `RETIRE | CANCEL` is the sticky retirement mode: every
+nonterminal rebuild of `L` copies `observed & (RETIRE | CANCEL)` rather than
+reconstructing `RETIRE` alone. The seven rebuild sites are:
+
+- consumer entry when it reschedules a closing actor with an undrained gate;
+- consumer entry to `RUNNING`;
+- the callback exit CAS;
+- the `IDLE -> SCHEDULED` signal;
+- the idle retirement driver's `IDLE -> SCHEDULED`;
+- wave admission rollback;
+- wave operation exit.
+
+The other writes either OR bits into the observed word (retirement mark,
+`PENDING`), start a fresh generation, or publish `RETIRED`/`VACANT`, which
+clear both bits. A wave reservation CASes from the exact bare `IDLE` word, so
+it never succeeds over a mode bit. However, a cancel accepted between a wave's
+`IDLE -> SCHEDULED` reservation and its `Wowner` publication must survive that
+wave's exit or rollback, because a pre-reserved sender can still queue work
+afterwards. Losing `CANCEL` at any site silently turns cancel into drain.
 
 `RETIRE` closes ordinary wakes immediately, but it does not skip interactions
 whose `G` reservation won before `CLOSED`. A closing actor may continue through
@@ -589,6 +611,7 @@ empty.
 | Close against new send | Retirement first marks `RETIRE` on `L`, then sets `CLOSED` in `G` with an `acq_rel` CAS. | A sender's reservation CAS is totally ordered before or after the close CAS on `G`; post-close senders acquire-observe `CLOSED`. | Deterministic admission: earlier reservations finish, later attempts return `closed`. |
 | Submission release to closing actor | An accepted sender enqueues and signals before release-decrementing the reservation count in `G`. | Closing entry/exit acquire-loads `G`; it may publish `RETIRED` only after observing `CLOSED`, count zero, `I` empty, and `C` empty. | All accepted send publication and signalling happens before final retirement. |
 | External retirement to callback | `requestRetire` uses an `acq_rel` CAS to set `RETIRE` on `L` and closes `G`. | Entry or exit reloads/acquires `L`; `ActorContext.closing` also acquire-loads it. | Ordinary admission is closed; callbacks may still run to drain previously accepted inbox nodes. |
+| Cancel request to callback | `requestRetire(cancel)` or escalation sets `RETIRE \| CANCEL` with an `acq_rel` CAS on `L`, then closes `G` and drives retirement. | Every nonterminal rebuild copies the mode bits. An entry CAS ordered after the request carries `CANCEL` into `RUNNING`; otherwise the exit CAS reloads it and schedules the next activation. `ActorContext.cancelling` acquire-loads `L`. | A flag only, no data. A handler activated after the request observes `cancelling` and may `cancelInbox`. Retirement with an empty inbox and a drained gate needs no activation. |
 | Retirement publication to owner | Callback retirement uses `L.CAS(acq_rel, ... -> RETIRED)`; an idle external close may release-store `RETIRED` after joining the closed submission gate and rechecking `L`. | `ActorOwner.retired` and `reclaim` acquire-load `L`. | Completion of the user dispatch and all actor-state writes. |
 | Reclamation to slot reuse | Reclaimer clears slot fields, deallocates state, then publishes `VACANT` and returns the slot through `Fgate`. | Creator acquires the free-slot gate and the `VACANT` lifecycle before incrementing the generation. | Completion of old-state teardown before new slot initialization. |
 | Stale handle to reused slot | Every handle RMW compares the generation as part of the same `L` value it would modify. | A mismatch returns `staleHandle`; there is no state acquisition. | Nothing: an old generation cannot schedule or borrow the new state. |
@@ -699,12 +722,22 @@ For an idle actor, the owner acquire-loads the closed gate with zero accepted
 senders, then acquire-loads `L` again. That second lifecycle load is essential:
 an accepted sender may have queued an activation after the initial idle
 observation but before dropping the last reservation. If the joined load
-still observes the same `IDLE | RETIRE` word, no lifecycle writer remains:
-accepted senders have completed their signals, no callback is running, and
-ordinary wakes and wave reservations reject `RETIRE`. The unique owner can
-therefore finish with a release store of `RETIRED`, avoiding a redundant CAS.
-If `L` changed, retirement retries from the joined value. Outstanding senders
-and scheduled/running actors retain the existing RMW and drain protocol.
+still observes the same `IDLE | RETIRE` (or `IDLE | RETIRE | CANCEL`) word, no
+lifecycle writer remains: accepted senders have completed their signals, no
+callback is running, and ordinary wakes and wave reservations reject `RETIRE`.
+The unique owner can therefore finish with a release store of `RETIRED`,
+avoiding a redundant CAS. If `L` changed, retirement retries from the joined
+value. Outstanding senders and scheduled/running actors retain the existing
+RMW and drain protocol.
+
+That argument also requires retirement requests on one owner to be serialized.
+Sequential drain-then-cancel escalation is supported. Concurrent
+`requestRetire` calls through aliases of one move-only owner are not: a
+cancel CASed after the second load would be overwritten by the blind store.
+The inbox is empty at that point, so no node escapes cancellation, but the
+overlapping caller would see `requested` for a cancel no handler observed.
+Supporting concurrent callers would require turning that store into a
+retrying CAS.
 
 After an acquire observation of `RETIRED`, the unique typed or erased owner may
 deallocate the POD state using the size and alignment recorded at creation. It
@@ -820,7 +853,13 @@ remains deliberately undefined.
   or `cancel`; freeing, rewriting, or submitting it elsewhere in that interval violates ownership.
 - A closing handler must eventually drain or deliberately assume ownership of
   every accepted node. A handler which permanently ignores a nonempty inbox
-  deliberately prevents retirement rather than dropping work.
+  deliberately prevents retirement rather than dropping work. Cancel mode is
+  cooperative in the same way: the library never discards nodes, so a
+  `cancelling` handler calls `cancelInbox` (or `cancel`s what it pops).
+- Retirement guarantees no final handler call in either mode. An idle actor
+  with an empty inbox retires directly, and a scheduled one can retire at
+  entry before dispatch. Resources reachable from POD state are released by
+  the application after `retired`.
 - Plain access through an escaped state pointer is not repaired by lifecycle
   atomics; it is a data race and an ownership violation.
 - Module unload is engine policy. Its aggregate fence must cover actor

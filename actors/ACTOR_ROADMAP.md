@@ -97,7 +97,15 @@ safe ownership front end remains future work.
 **F4a public inbox-node outcomes are done:** `complete`, `fail(code)` and
 `cancel` publish `ActorNodeOutcome` and a 24-bit failure code through the
 existing release/acquire node-availability edge. Node stays 32 bytes and
-`send` is unchanged. Cancel-mode retirement and `cancelInbox` (F4b) remain open.
+`send` is unchanged.
+
+**F4b public cancel retirement is done:** `requestRetire(ActorRetireMode.cancel)`
+sets a sticky `CANCEL` lifecycle bit alongside `RETIRE`; drain escalates to
+cancel on the same owner. Every nonterminal lifecycle rebuild, including wave
+admission rollback and wave exit, preserves the mode. Handlers observe
+`context.cancelling` and call `context.cancelInbox()`. Shutdown stays
+cooperative: no library discard and no guaranteed final handler call. Slot
+stays 128 bytes.
 
 ## Current actor and wave spike
 
@@ -240,7 +248,7 @@ handle.wake();                    // queued/coalesced/wave-owned/stale/closed
 handle.send(&interaction.node);   // transfers caller-owned node if accepted
 runtime.flush(token, maximum);    // fixed-width Farm publication
 
-owner.requestRetire();
+owner.requestRetire();            // or requestRetire(ActorRetireMode.cancel)
 if (owner.retired)
     owner.reclaim();              // POD storage allocator release
 ```

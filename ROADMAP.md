@@ -37,7 +37,11 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   fatal; F3 tracks it. No version bump.
 - **F4a public node outcomes done:** `ActorNodeOutcome`, `node.fail(code)` and
   `node.cancel()` use the reserved completion word. Node stays 32 bytes and
-  `send` is unchanged. Public cancel-mode retirement (F4b) remains open.
+  `send` is unchanged.
+- **F4b public cancel retirement done:** `requestRetire(ActorRetireMode.cancel)`
+  and drain-to-cancel escalation set a sticky lifecycle bit that every
+  nonterminal rebuild preserves. Handlers see `context.cancelling` and call
+  `cancelInbox()`. It is cooperative, with no guaranteed final handler call.
 - **F2 in-tree cancellation done:** `park.cancel`, `cancelChildren`,
   `cancelPeers` and `context.cancelled`. The emitter truncates a cancelled
   wave at a table boundary; `startFinal` retires the rest through cleanup

@@ -2751,10 +2751,840 @@ private void testNodeOutcomes()
     fflush(stdout);
 }
 
+// -------------------------------------------------------------------------
+// F4b public actor cancel-mode retirement
+// -------------------------------------------------------------------------
+
+private struct CancelProbeResult
+{
+    ulong activations;       // autonomous handler invocations
+    ulong cancelActivations; // invocations that observed context.cancelling
+    ulong cancelledNodes;    // nodes cancelled through cancelInbox
+    ulong completedNodes;    // nodes completed during drain activations
+    ulong waveCalls;         // wave operation invocations
+}
+
+private struct CancelProbeState
+{
+    CancelProbeResult* output;
+    shared int* activationArrived; // signalled after the budgeted pops
+    shared int* activationRelease; // gates the drain activation's return
+    ulong popBudget;               // zero: pop everything per activation
+}
+
+/// Branch on `context.cancelling` exactly as the design prescribes: cancel
+/// the whole inbox (including any carried remainder) or drain by popping
+/// and completing, honouring an optional per-activation pop budget so a
+/// first activation can deliberately strand a carry.
+private void cancelProbeActor(scope ref ActorBorrow!CancelProbeState actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    auto output = actor.value.output;
+    ++output.activations;
+    if (context.cancelling)
+    {
+        ++output.cancelActivations;
+        output.cancelledNodes += context.cancelInbox();
+        return;
+    }
+    immutable budget = actor.value.popBudget == 0
+        ? ulong.max : actor.value.popBudget;
+    foreach (_; 0 .. budget)
+    {
+        auto node = context.popInbox();
+        if (node is null) break;
+        node.complete();
+        ++output.completedNodes;
+    }
+    if (actor.value.activationArrived !is null)
+    {
+        atomicStore!(MemoryOrder.rel)(*actor.value.activationArrived, 1);
+        while (atomicLoad!(MemoryOrder.acq)(
+                *actor.value.activationRelease) == 0) {}
+    }
+}
+
+private void cancelProbeWaveOperation(
+        scope ref ActorBorrow!CancelProbeState actor) nothrow @nogc @system
+{
+    ++actor.value.output.waveCalls;
+}
+
+private struct CancelMessage
+{
+    ActorInboxNode node;
+    ulong value;
+}
+
+private final class CancelSender
+{
+    ActorHandle!CancelProbeState handle;
+    ActorInboxNode* node;
+    ActorSendResult result;
+    shared int done;
+
+    this(ActorHandle!CancelProbeState initialHandle,
+            ActorInboxNode* initialNode)
+    {
+        handle = initialHandle;
+        node = initialNode;
+    }
+
+    void run()
+    {
+        result = handle.send(node);
+        atomicStore!(MemoryOrder.rel)(done, 1);
+    }
+}
+
+/// One actor, one producer token, and a subscribed view driven by the
+/// calling thread, matching the deterministic-interleaving rigs above.
+private final class CancelRig
+{
+    AntFarm* farm;
+    ActorRuntime* runtime;
+    Token token;
+    ActorOwner!CancelProbeState owner;
+    ActorHandle!CancelProbeState handle;
+    ConsumerView view;
+    CancelProbeResult output;
+
+    this(size_t capacity = 1, uint farmConsumers = 1,
+            shared int* activationArrived = null,
+            shared int* activationRelease = null, ulong popBudget = 0)
+    {
+        farm = AntFarm.create(2, 4, farmConsumers, 0, 0, 1, 256);
+        check(farm !is null, "cancel probe Farm allocation");
+        runtime = ActorRuntime.create(farm, capacity);
+        check(runtime !is null, "cancel probe runtime allocation");
+        owner = runtime.createActor!(CancelProbeState, cancelProbeActor)(
+            CancelProbeState(&output, activationArrived, activationRelease,
+                popBudget));
+        check(owner.valid, "cancel probe actor allocation");
+        handle = owner.handle;
+        token = farm.registerProducer(Tier.small);
+        check(token.valid, "cancel probe producer registration");
+        check(view.subscribe(farm) >= 0, "cancel probe subscribe");
+    }
+
+    void drain(MonoTime deadline, const(char)* failure)
+    {
+        while (!owner.retired)
+        {
+            runtime.flush(token, 8, 1);
+            while (view.consumeNext()) {}
+            if (MonoTime.currTime >= deadline)
+                check(false, failure);
+            Thread.yield();
+        }
+    }
+
+    void close()
+    {
+        check(owner.reclaim() == ActorReclaimResult.reclaimed,
+            "cancel probe reclaim");
+        view.unsubscribe();
+        farm.unregisterProducer(token);
+        check(runtime.live == 0 && runtime.ready == 0,
+            "cancel probe runtime drained");
+        runtime.destroy();
+        farm.destroy();
+    }
+}
+
+private void sendCancelMessages(ActorHandle!CancelProbeState handle,
+        CancelMessage[] messages)
+{
+    foreach (i, ref message; messages)
+    {
+        message.value = i;
+        message.node.initialize(&message, i);
+        check(accepted(handle.send(&message.node)),
+            "cancel-mode interaction accepted");
+    }
+}
+
+/// P2 drain control. The identical 32-node backlog retired with the default
+/// drain mode must complete every node, and the handler must never observe
+/// `cancelling`. Catches `cancelling` reading retireBit instead of cancelBit:
+/// the handler would then cancelInbox a merely-draining actor.
+private void testCancelBacklogDrainControl()
+{
+    enum nodeCount = 32;
+    auto rig = new CancelRig;
+    CancelMessage[nodeCount] messages;
+    sendCancelMessages(rig.handle, messages[]);
+    check(rig.owner.requestRetire() == ActorRetireResult.requested,
+        "drain-control retirement");
+    rig.drain(MonoTime.currTime + 15.seconds,
+        "drain-control retirement timeout");
+    check(rig.output.completedNodes == nodeCount
+            && rig.output.cancelledNodes == 0,
+        "drain retirement completes the whole backlog");
+    check(rig.output.cancelActivations == 0,
+        "drain retirement never reports cancelling");
+    foreach (message; messages)
+        check(message.node.available
+                && message.node.outcome == ActorNodeOutcome.completed,
+            "drain-control sender observes completed");
+    rig.close();
+}
+
+/// P2. A 32-node backlog queued before requestRetire(cancel) must be
+/// cancelled by the handler's cancelInbox in a single cancelling activation;
+/// every sender then reads `cancelled` after `available`. Catches
+/// `cancelling` stuck false (the backlog would complete instead).
+private void testCancelBacklog()
+{
+    enum nodeCount = 32;
+    auto rig = new CancelRig;
+    CancelMessage[nodeCount] messages;
+    sendCancelMessages(rig.handle, messages[]);
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "cancel-backlog retirement");
+    check(!rig.owner.retired, "cancel backlog waits for the queued nodes");
+    rig.drain(MonoTime.currTime + 15.seconds,
+        "cancel-backlog retirement timeout");
+    check(rig.output.cancelActivations == 1
+            && rig.output.cancelledNodes == nodeCount
+            && rig.output.completedNodes == 0,
+        "cancelInbox cancels exactly the whole backlog");
+    foreach (message; messages)
+        check(message.node.available
+                && message.node.outcome == ActorNodeOutcome.cancelled,
+            "cancel-backlog sender observes cancelled");
+    rig.close();
+}
+
+/// P2 carry. The first activation pops and completes one node and returns
+/// with the remaining two as the actor-private carry. After the cancel
+/// request, the next activation's cancelInbox must cancel the carried
+/// remainder, not just a freshly published inbox.
+private void testCancelInboxCarry()
+{
+    auto rig = new CancelRig(1, 1, null, null, 1);
+    CancelMessage[3] messages;
+    sendCancelMessages(rig.handle, messages[]);
+    auto deadline = MonoTime.currTime + 15.seconds;
+    rig.runtime.flush(rig.token, 8, 1);
+    check(rig.view.consumeNext(), "cancel carry first activation");
+    check(rig.output.completedNodes == 1,
+        "budgeted activation completes exactly one node");
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "cancel-carry retirement");
+    rig.drain(deadline, "cancel-carry retirement timeout");
+    check(rig.output.cancelledNodes == 2 && rig.output.completedNodes == 1,
+        "cancelInbox includes the carried remainder");
+    check(messages[0].node.outcome == ActorNodeOutcome.completed
+            && messages[1].node.outcome == ActorNodeOutcome.cancelled
+            && messages[2].node.outcome == ActorNodeOutcome.cancelled,
+        "carry outcomes split by activation");
+    rig.close();
+}
+
+/// P3. Sequential drain-then-cancel escalation on a queued backlog: the
+/// cancel request returns requested, a repeated cancel is alreadyRetired,
+/// a later drain stays requested without clearing the cancel mode, and the
+/// next handler activation observes cancelling. Catches markActorRetiring
+/// early-returning once retireBit is set: the escalation would be silently
+/// lost and the backlog completed instead of cancelled.
+private void testCancelEscalationQueued()
+{
+    enum nodeCount = 4;
+    auto rig = new CancelRig;
+    CancelMessage[nodeCount] messages;
+    sendCancelMessages(rig.handle, messages[]);
+    check(rig.owner.requestRetire() == ActorRetireResult.requested,
+        "drain request before escalation");
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "cancel escalation returns requested");
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.alreadyRetired,
+        "repeated cancel is alreadyRetired");
+    check(rig.owner.requestRetire() == ActorRetireResult.requested,
+        "drain after cancel stays requested");
+    rig.drain(MonoTime.currTime + 15.seconds,
+        "cancel escalation retirement timeout");
+    check(rig.output.cancelActivations == 1
+            && rig.output.cancelledNodes == nodeCount
+            && rig.output.completedNodes == 0,
+        "escalated cancel observed after the drain request");
+    foreach (message; messages)
+        check(message.node.available
+                && message.node.outcome == ActorNodeOutcome.cancelled,
+            "escalation cancels the queued backlog");
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.alreadyRetired,
+        "cancel after RETIRED is alreadyRetired");
+    check(rig.owner.requestRetire() == ActorRetireResult.alreadyRetired,
+        "drain after RETIRED is alreadyRetired");
+    rig.close();
+}
+
+/// P3, consumer-entry side. The sender is paused after its activation
+/// signal (node published, actor scheduled, reservation still held) while
+/// the owner sequentially requests drain and then cancel. The scheduled
+/// entry must carry the escalated mode into the handler.
+private void testCancelEscalationAfterSignal()
+{
+    auto rig = new CancelRig;
+    CancelMessage message;
+    message.node.initialize(&message, 1);
+    g_hookNode = &message.node;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.activationSignalled);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    setActorTestHook(&blockingActorHook);
+    auto sender = new CancelSender(rig.handle, &message.node);
+    auto thread = new Thread(&sender.run);
+    thread.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(g_hookArrived, deadline,
+        "escalation sender did not pause after its activation signal");
+    check(rig.owner.requestRetire() == ActorRetireResult.requested,
+        "drain request with a signalled activation");
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "cancel escalation while the activation is scheduled");
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    thread.join();
+    setActorTestHook(null);
+    g_hookNode = null;
+    check(accepted(sender.result), "escalation sender remains accepted");
+    rig.drain(deadline, "escalation after signal retirement timeout");
+    check(rig.output.cancelActivations == 1
+            && rig.output.cancelledNodes == 1
+            && message.node.outcome == ActorNodeOutcome.cancelled,
+        "entry after escalation observes cancelling");
+    rig.close();
+}
+
+/// P3, idle-join side. A drain request parked at retirementIdleObserved
+/// while an accepted sender still holds its reservation; the sender's late
+/// signal re-schedules the actor, the retirement re-observes the lifecycle,
+/// and the owner then escalates to cancel. The escalated mode must reach
+/// the handler across both transitions.
+private void testCancelEscalationAcrossIdleJoin()
+{
+    auto rig = new CancelRig;
+    CancelMessage message;
+    message.node.initialize(&message, 1);
+    g_hookNode = &message.node;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.submissionReserved);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    atomicStore!(MemoryOrder.rel)(g_retirementIdleArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_retirementIdleRelease, 0);
+    setActorTestHook(&retirementJoinHook);
+    auto sender = new CancelSender(rig.handle, &message.node);
+    auto senderThread = new Thread(&sender.run);
+    senderThread.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(g_hookArrived, deadline,
+        "idle-join escalation sender reservation");
+    ActorRetireResult drained;
+    auto retireThread = new Thread({ drained = rig.owner.requestRetire(); });
+    retireThread.start();
+    waitFlag(g_retirementIdleArrived, deadline,
+        "idle-join drain did not sample idle");
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    senderThread.join();
+    check(accepted(sender.result), "idle-join sender accepted");
+    check(rig.runtime.ready == 1 && !rig.owner.retired,
+        "late signal queued the actor before retirement resumed");
+    atomicStore!(MemoryOrder.rel)(g_retirementIdleRelease, 1);
+    retireThread.join();
+    setActorTestHook(null);
+    g_hookNode = null;
+    check(drained == ActorRetireResult.requested,
+        "drain re-observes the lifecycle after its idle sample");
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "cancel escalation after the joined drain request");
+    rig.drain(deadline, "idle-join escalation retirement timeout");
+    check(rig.output.cancelActivations == 1
+            && message.node.outcome == ActorNodeOutcome.cancelled,
+        "escalation across the idle join reaches the handler");
+    rig.close();
+}
+
+/// P5. requestRetire(cancel) on a SCHEDULED actor with a queued inbox (send,
+/// no flush yet, cancel, then flush and consume). The scheduled-to-running
+/// entry word must preserve the cancel mode; the handler observes
+/// cancelling and cancels the message. Catches S2 keeping only retireBit.
+private void testCancelWhileScheduled()
+{
+    auto rig = new CancelRig;
+    CancelMessage message;
+    message.node.initialize(&message, 1);
+    check(accepted(rig.handle.send(&message.node)),
+        "scheduled cancel send accepted");
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "scheduled cancel request");
+    rig.drain(MonoTime.currTime + 15.seconds,
+        "scheduled cancel retirement timeout");
+    check(rig.output.cancelActivations == 1
+            && rig.output.cancelledNodes == 1
+            && message.node.outcome == ActorNodeOutcome.cancelled,
+        "scheduled entry preserves the cancel mode");
+    rig.close();
+}
+
+/// P6. Escalate drain-then-cancel while the actor is RUNNING with a
+/// stranded carry. Activation one completes a single node and then blocks
+/// inside the handler until the owner thread has issued both requests;
+/// its exit word must preserve the cancel mode, and the next activation
+/// must observe cancelling and cancel the carried remainder. Catches S3
+/// dropping cancelBit.
+private void testCancelEscalationWhileRunning()
+{
+    enum nodeCount = 3;
+    shared int arrived;
+    shared int release;
+    auto rig = new CancelRig(1, 2, &arrived, &release, 1);
+    CancelMessage[nodeCount] messages;
+    sendCancelMessages(rig.handle, messages[]);
+    shared int stop;
+    auto consumerJob = new StressConsumer(rig.farm, &stop);
+    auto consumer = new Thread(&consumerJob.run);
+    consumer.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    while (atomicLoad!(MemoryOrder.acq)(arrived) == 0)
+    {
+        rig.runtime.flush(rig.token, 8, 1);
+        if (MonoTime.currTime >= deadline)
+            check(false, "running activation did not stall in the handler");
+        Thread.yield();
+    }
+    check(rig.output.completedNodes == 1,
+        "running activation completed one node before stalling");
+    check(rig.owner.requestRetire() == ActorRetireResult.requested,
+        "drain request while running");
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "cancel escalation while running");
+    atomicStore!(MemoryOrder.rel)(release, 1);
+    while (!rig.owner.retired)
+    {
+        rig.runtime.flush(rig.token, 8, 1);
+        if (MonoTime.currTime >= deadline)
+            check(false, "running escalation retirement timeout");
+        Thread.yield();
+    }
+    atomicStore!(MemoryOrder.rel)(stop, 1);
+    consumer.join();
+    check(rig.output.cancelActivations == 1
+            && rig.output.completedNodes == 1
+            && rig.output.cancelledNodes == 2,
+        "exit after escalation cancels the carried remainder");
+    foreach (i, message; messages)
+        check(message.node.available
+                && message.node.outcome == (i == 0
+                    ? ActorNodeOutcome.completed : ActorNodeOutcome.cancelled),
+            "running escalation node outcomes");
+    rig.close();
+}
+
+/// S1/S5. The sender holds a submission reservation on an otherwise idle,
+/// empty actor. The owner's cancel request cannot retire through the idle
+/// fast path (S5: reschedule with the undrained gate), and the consumer's
+/// empty-inbox entry reschedules again (S1) rather than running the
+/// handler. Once the sender finally publishes and signals, the running
+/// entry must observe cancelling and cancel the late message.
+private void testCancelIdleReschedule()
+{
+    auto rig = new CancelRig;
+    CancelMessage message;
+    message.node.initialize(&message, 1);
+    g_hookNode = &message.node;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.submissionReserved);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    setActorTestHook(&blockingActorHook);
+    auto sender = new CancelSender(rig.handle, &message.node);
+    auto thread = new Thread(&sender.run);
+    thread.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(g_hookArrived, deadline,
+        "idle-reschedule sender did not hold its reservation");
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "idle-reschedule cancel request");
+    check(!rig.owner.retired && rig.runtime.ready == 1,
+        "undrained gate reschedules the cancelling actor");
+    rig.runtime.flush(rig.token, 8, 1);
+    check(rig.view.consumeNext(), "idle-reschedule consumer entry");
+    check(rig.output.activations == 0 && !rig.owner.retired
+            && rig.runtime.ready == 1,
+        "empty-inbox entry reschedules without a handler call");
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    thread.join();
+    setActorTestHook(null);
+    g_hookNode = null;
+    check(accepted(sender.result), "idle-reschedule sender accepted");
+    rig.drain(deadline, "idle-reschedule retirement timeout");
+    check(rig.output.cancelActivations == 1
+            && rig.output.cancelledNodes == 1
+            && message.node.outcome == ActorNodeOutcome.cancelled,
+        "late message cancelled after the reschedules");
+    rig.close();
+}
+
+/// S4. The owner's cancel request is parked at retirementIdleObserved with
+/// the lifecycle still IDLE|RETIRE|CANCEL when the paused sender publishes
+/// and signals: signalActor's IDLE-to-SCHEDULED word must keep the cancel
+/// mode, and after the retirement re-observes and re-signals, the handler
+/// must observe cancelling. Catches S4 keeping only retireBit.
+private void testCancelSignalDuringIdleRetirement()
+{
+    auto rig = new CancelRig;
+    CancelMessage message;
+    message.node.initialize(&message, 1);
+    g_hookNode = &message.node;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.submissionReserved);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    atomicStore!(MemoryOrder.rel)(g_retirementIdleArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_retirementIdleRelease, 0);
+    setActorTestHook(&retirementJoinHook);
+    auto sender = new CancelSender(rig.handle, &message.node);
+    auto senderThread = new Thread(&sender.run);
+    senderThread.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(g_hookArrived, deadline,
+        "idle-retirement sender reservation");
+    ActorRetireResult cancelled;
+    auto retireThread = new Thread(
+        { cancelled = rig.owner.requestRetire(ActorRetireMode.cancel); });
+    retireThread.start();
+    waitFlag(g_retirementIdleArrived, deadline,
+        "cancel retirement did not sample idle");
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    senderThread.join();
+    check(accepted(sender.result), "idle-retirement sender accepted");
+    check(rig.runtime.ready == 1 && !rig.owner.retired,
+        "late signal queued the cancelling actor");
+    atomicStore!(MemoryOrder.rel)(g_retirementIdleRelease, 1);
+    retireThread.join();
+    setActorTestHook(null);
+    g_hookNode = null;
+    check(cancelled == ActorRetireResult.requested,
+        "cancel retirement re-observes after its idle sample");
+    rig.drain(deadline, "idle-retirement drain timeout");
+    check(rig.output.cancelActivations == 1
+            && message.node.outcome == ActorNodeOutcome.cancelled,
+        "signalled cancellation reaches the handler");
+    rig.close();
+}
+
+/// P8. An idle, empty actor cancelled directly retires without any handler
+/// invocation: no final handler call is guaranteed.
+private void testCancelIdleEmpty()
+{
+    auto rig = new CancelRig;
+    check(rig.owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "idle empty cancel request");
+    check(rig.owner.retired, "idle empty actor retires immediately");
+    check(rig.output.activations == 0,
+        "idle empty cancellation makes no handler call");
+    rig.close();
+}
+
+private void waveReserveJoinHook(ActorTestPoint point, ActorInboxNode* node)
+    nothrow @nogc @system
+{
+    if (point == ActorTestPoint.waveLifecycleReserved)
+    {
+        atomicStore!(MemoryOrder.rel)(g_waveReserveArrived, 1);
+        while (atomicLoad!(MemoryOrder.acq)(g_waveReserveRelease) == 0) {}
+        return;
+    }
+    blockingActorHook(point, node);
+}
+
+private final class CancelWavePublisher
+{
+    AntFarm* farm;
+    ActorHandle!CancelProbeState[2] members;
+    size_t memberCount;
+    ActorWave wave;
+    size_t written;
+    ActorWaveHandle completion;
+    shared int published;
+    shared int sealRequested;
+    shared int done;
+
+    this(AntFarm* initialFarm, ActorHandle!CancelProbeState first)
+    {
+        farm = initialFarm;
+        members[0] = first;
+        memberCount = 1;
+    }
+
+    this(AntFarm* initialFarm, ActorHandle!CancelProbeState first,
+            ActorHandle!CancelProbeState second)
+    {
+        farm = initialFarm;
+        members[0] = first;
+        members[1] = second;
+        memberCount = 2;
+    }
+
+    void run()
+    {
+        auto token = farm.registerProducer(Tier.small);
+        check(token.valid, "cancel-wave publisher token");
+        wave.begin(farm);
+        written = cast(size_t) wave.publish!cancelProbeWaveOperation(
+            members[0 .. memberCount], token, 0);
+        atomicStore!(MemoryOrder.rel)(published, 1);
+        while (atomicLoad!(MemoryOrder.acq)(sealRequested) == 0)
+            Thread.yield();
+        completion = wave.seal();
+        farm.unregisterProducer(token);
+        atomicStore!(MemoryOrder.rel)(done, 1);
+    }
+}
+
+/// P7 admission path. The owner cancels between the wave's lifecycle
+/// reservation and its membership publication, while a sender that already
+/// passed the zero waveOwnerWord check is paused at submissionReserved.
+/// The wave runs its operation and exits interrupted (S7): the exit word
+/// must keep the cancel mode, hand the actor back to autonomous
+/// scheduling, and the handler must cancel the late message rather than
+/// complete it. Catches S7 keeping only retireBit.
+private void testCancelDuringWaveAdmission()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 2, 256);
+    check(farm !is null, "cancel wave admission Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "cancel wave admission runtime allocation");
+    CancelProbeResult output;
+    auto owner = runtime.createActor!(CancelProbeState, cancelProbeActor)(
+        CancelProbeState(&output));
+    check(owner.valid, "cancel wave admission actor allocation");
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "cancel wave admission subscribe");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "cancel wave admission producer token");
+
+    CancelMessage message;
+    message.node.initialize(&message, 1);
+    g_hookNode = &message.node;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.submissionReserved);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    atomicStore!(MemoryOrder.rel)(g_waveReserveArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 0);
+    setActorTestHook(&waveReserveJoinHook);
+    auto publisher = new CancelWavePublisher(farm, owner.handle);
+    auto publisherThread = new Thread(&publisher.run);
+    publisherThread.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(g_waveReserveArrived, deadline,
+        "admission publisher did not pause after the lifecycle reservation");
+
+    auto sender = new CancelSender(owner.handle, &message.node);
+    auto senderThread = new Thread(&sender.run);
+    senderThread.start();
+    waitFlag(g_hookArrived, deadline,
+        "admission sender did not pause after its reservation");
+
+    check(owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "cancel between wave reservation and membership publication");
+    check(!owner.retired, "reserved wave payload prevents retirement");
+
+    atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 1);
+    waitFlag(publisher.published, deadline,
+        "admission wave table publication timeout");
+    check(publisher.written == 1,
+        "admission wave publishes the reserved actor");
+
+    while (publisher.wave.handle.progress != 1)
+    {
+        while (view.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            check(false, "admission wave payload completion timeout");
+        Thread.yield();
+    }
+    check(output.waveCalls == 1, "admission wave operation ran exactly once");
+
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    senderThread.join();
+    setActorTestHook(null);
+    g_hookNode = null;
+    check(accepted(sender.result), "admission sender accepted");
+
+    while (!owner.retired)
+    {
+        runtime.flush(token, 8, 1);
+        while (view.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            check(false, "admission autonomous retirement timeout");
+        Thread.yield();
+    }
+    check(output.cancelActivations == 1 && output.cancelledNodes == 1,
+        "wave exit preserves the cancel mode into the handler");
+    check(message.node.available
+            && message.node.outcome == ActorNodeOutcome.cancelled,
+        "admission sender observes cancelled, not completed");
+    check(owner.reclaim() == ActorReclaimResult.busy,
+        "wave membership still pins the retired actor");
+    atomicStore!(MemoryOrder.rel)(publisher.sealRequested, 1);
+    waitFlag(publisher.done, deadline, "admission wave seal timeout");
+    publisherThread.join();
+    check(publisher.completion.finished && publisher.completion.failed,
+        "interrupted wave finishes failed");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed,
+        "admission reclaim after wave release");
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    check(runtime.live == 0 && runtime.ready == 0,
+        "admission runtime drained");
+    runtime.destroy();
+}
+
+/// P7 rollback path. The wave reserves the target, then fails to reserve
+/// the non-idle blocker and rolls the target back through
+/// cancelActorWavePayload (S6) while the owner has already cancelled. The
+/// rollback word must keep the cancel mode, so the sender that passed the
+/// zero waveOwnerWord check before the reservation observes its message
+/// cancelled once the actor returns to autonomous scheduling. Catches S6
+/// keeping only retireBit.
+private void testCancelDuringWaveRollback()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 2, 256);
+    check(farm !is null, "cancel wave rollback Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 2);
+    check(runtime !is null, "cancel wave rollback runtime allocation");
+    CancelProbeResult[2] outputs;
+    auto target = runtime.createActor!(CancelProbeState, cancelProbeActor)(
+        CancelProbeState(&outputs[0]));
+    auto blocker = runtime.createActor!(CancelProbeState, cancelProbeActor)(
+        CancelProbeState(&outputs[1]));
+    check(target.valid && blocker.valid,
+        "cancel wave rollback actor allocation");
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "cancel wave rollback subscribe");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "cancel wave rollback producer token");
+    // The blocker stays scheduled, so the wave's second reservation fails
+    // and the first is rolled back before any table is published.
+    check(blocker.handle.wake() == ActorWakeResult.queued,
+        "rollback blocker is scheduled");
+
+    CancelMessage message;
+    message.node.initialize(&message, 1);
+    g_hookNode = &message.node;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.submissionReserved);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    atomicStore!(MemoryOrder.rel)(g_waveReserveArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 0);
+    setActorTestHook(&waveReserveJoinHook);
+    auto publisher = new CancelWavePublisher(farm, target.handle,
+        blocker.handle);
+    auto publisherThread = new Thread(&publisher.run);
+    publisherThread.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(g_waveReserveArrived, deadline,
+        "rollback publisher did not pause after the lifecycle reservation");
+
+    auto sender = new CancelSender(target.handle, &message.node);
+    auto senderThread = new Thread(&sender.run);
+    senderThread.start();
+    waitFlag(g_hookArrived, deadline,
+        "rollback sender did not pause after its reservation");
+
+    check(target.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "cancel before the wave membership rollback");
+    check(!target.retired, "reserved wave payload prevents retirement");
+
+    atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 1);
+    waitFlag(publisher.published, deadline,
+        "rollback wave publication timeout");
+    check(publisher.written == 0, "rollback wave publishes nothing");
+
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    senderThread.join();
+    setActorTestHook(null);
+    g_hookNode = null;
+    check(accepted(sender.result), "rollback sender accepted");
+
+    while (!target.retired)
+    {
+        runtime.flush(token, 8, 1);
+        while (view.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            check(false, "rollback autonomous retirement timeout");
+        Thread.yield();
+    }
+    check(outputs[0].cancelActivations == 1 && outputs[0].cancelledNodes == 1
+            && outputs[0].waveCalls == 0,
+        "rollback exits with the cancel mode preserved and no wave call");
+    check(message.node.available
+            && message.node.outcome == ActorNodeOutcome.cancelled,
+        "rollback sender observes cancelled, not completed");
+    check(target.reclaim() == ActorReclaimResult.reclaimed,
+        "rollback released wave membership");
+
+    atomicStore!(MemoryOrder.rel)(publisher.sealRequested, 1);
+    waitFlag(publisher.done, deadline, "rollback wave seal timeout");
+    publisherThread.join();
+    check(publisher.completion.finished && publisher.completion.failed,
+        "rolled-back wave finishes failed");
+
+    check(blocker.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "rollback blocker cancel retirement");
+    check(blocker.retired && blocker.reclaim() == ActorReclaimResult.reclaimed,
+        "rollback blocker reclaim");
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    check(runtime.live == 0 && runtime.ready == 0,
+        "rollback runtime drained");
+    runtime.destroy();
+}
+
+private void testCancelModeRetirement()
+{
+    testCancelBacklogDrainControl();
+    testCancelBacklog();
+    testCancelInboxCarry();
+    testCancelEscalationQueued();
+    testCancelEscalationAfterSignal();
+    testCancelEscalationAcrossIdleJoin();
+    testCancelWhileScheduled();
+    testCancelEscalationWhileRunning();
+    testCancelIdleReschedule();
+    testCancelSignalDuringIdleRetirement();
+    testCancelDuringWaveAdmission();
+    testCancelDuringWaveRollback();
+    testCancelIdleEmpty();
+    printf("actor cancel-mode retirement OK\n");
+    fflush(stdout);
+}
+
 void main()
 {
     testDeterministicInterleavings();
     testNodeOutcomes();
+    testCancelModeRetirement();
     testCompletionCallbackRunsAfterFinished();
     testAggregateModuleUnloadFence();
     testSustainedContention();
