@@ -20,6 +20,9 @@ import std.traits : hasElaborateDestructor, hasNested, ReturnType;
 
 enum defaultPrivateBatchLimit = 256;
 
+private enum noDeadline = MonoTime.max;
+static assert(noDeadline == MonoTime.max);
+
 struct PrivateCohortOptions
 {
     size_t batchLimit; // 0 inherits the creating context's effective limit
@@ -1014,7 +1017,7 @@ public:
     /// discarded, but its outcome must still be taken.
     PrivateSpawnResult spawn(T initial) nothrow @nogc @system
     {
-        return spawnRoot(initial, null, MonoTime.max);
+        return spawnRoot(initial, null, noDeadline);
     }
 
     /// Tracked parks only. deadline == MonoTime.max means none. A deadline is
@@ -1079,7 +1082,7 @@ private:
     {
         auto record = rootRecord(&service_, entry);
         immutable generation = controlGeneration(atomicLoad!(MemoryOrder.raw)(record.control));
-        immutable armed = deadline != MonoTime.max;
+        immutable armed = deadline != noDeadline;
         record.deadline = deadline.ticks;
         record.failed = false;
         record.failureCode = 0;
