@@ -88,6 +88,24 @@ Untracked parks gain one null branch per spawn, collection and cancel check,
 and 32 bytes. The control-word review, mutations, soak and perf evidence live
 in [the F3 results](../perftest/results/private-root-tracking-2026-10-06/).
 
+**RF2 opt-in cohort slabs are done:** `PrivateChildPark!(T, R,
+PrivateStateStorage.cohortSlab)` reserves one zeroed state slab per cohort,
+under an explicit `slabByteLimit` passed to its own `createChildren` overload.
+Spawn maps Entry i to slot i. Retirement destroys and zeroes the slot, and a
+refill reuses it after the retiring join. The slab is freed once at disposal.
+Allocation failure moves from spawn to create. Code that never instantiates
+`cohortSlab` compiles to `.text` identical to before, and Entry stays 40
+bytes.
+
+With six consumers the slab cuts cross-thread frees in tree retirement by
+about 99% and measured +49–51% on tree and tree-wait and +32% on a refill
+workload. tree-cont is unchanged (-1%). Peak RSS did not change. Gate,
+counts, profiles, the lifetime review and soak evidence are in
+[the RF2 results](../perftest/results/rf2-cohort-slab-2026-10-07/README.md).
+The RF1 mimalloc option screen that preceded it is in
+[MIMALLOC.md](../perftest/MIMALLOC.md#option-screen-rf1). A general
+owner-batching reclamation domain remains a separate, later experiment.
+
 Next items are per-member retirement, concurrent subsets, non-POD results,
 and optional emitter wake. Typed root outputs (X1b) stay deferred; deadlines
 remain lazy until a timed wake exists. Other port extensions remain: **X2** library reductions, **X3** bounded append

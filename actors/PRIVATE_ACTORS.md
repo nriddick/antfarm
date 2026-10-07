@@ -1116,6 +1116,9 @@ void main()
   reused, so allocator or sanitizer use-after-free detection no longer sees
   it. Debug builds check that `spawn` writes into a zeroed slot.
 
+Measurements, cross-thread free counts and peak RSS are in
+[the RF2 results](../perftest/results/rf2-cohort-slab-2026-10-07/README.md).
+
 ## Publication and reclamation
 
 Root entries have no admission/exit CAS. An untracked park has no public

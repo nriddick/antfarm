@@ -354,6 +354,8 @@ G5 targeted public inlining passed the gate with no /0 layout waiver needed; see
 
 RF1 screened mimalloc page-retention and reclaim options against unchanged defaults; no runtime change. See [MIMALLOC.md](MIMALLOC.md#option-screen-rf1) and [results](results/rf1-mimalloc-options-2026-10-07/README.md).
 
+RF2 adds opt-in cohort-slab child storage. The runtime-only default gate passes with `.text`-identical code. At six consumers tree, tree-wait and refill slab modes measured +32–51%; tree-cont is unchanged. See [results](results/rf2-cohort-slab-2026-10-07/README.md).
+
 ## Optimization PR performance gate
 
 `perf_gate.py` is the standard gate for optimization PRs. The **−3% boundary

@@ -172,4 +172,6 @@ Guidance for applications using `mimallocV3ActorAllocator`:
 
 None of these options removes the per-block remote-free CAS that dominates
 tree retirement with six consumers; no tree/6 or tree-wait/6 cell improved.
-That cost needs a storage change, not allocator tuning.
+That cost needs a storage change, not allocator tuning: see the opt-in
+cohort slab in [PRIVATE_ACTORS.md](../actors/PRIVATE_ACTORS.md#cohort-state-storage)
+and [its measurements](results/rf2-cohort-slab-2026-10-07/README.md).

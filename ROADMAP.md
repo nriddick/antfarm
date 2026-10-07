@@ -63,6 +63,15 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   actor timers; supervision/retry policies; a guaranteed public final
   activation; and `PrivateRootHandle` hashing (handles are compared by `==`,
   not used as map keys).
+- **RF2 opt-in cohort slabs done:** `PrivateStateStorage.cohortSlab` reserves
+  a zeroed per-cohort state slab under an explicit byte cap, passed to its own
+  `createChildren` overload. Slots are reused after the retiring join and the
+  slab is freed once at disposal. Allocation failure moves from spawn to
+  create. Measured with six consumers: about 99% fewer cross-thread frees,
+  +49–51% on tree and tree-wait, +32% with refills. Code without slabs is
+  `.text`-identical, and the default gate passes. RF1 screened mimalloc
+  options with no runtime change. Owner-batching reclamation remains a
+  separate later experiment.
 - **Next:** per-member retirement, concurrent subsets, non-POD results, and
   optional emitter wake. No version
   bump accompanies these slices; the release remains 1.7.1-rc.1 pending a tag

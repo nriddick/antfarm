@@ -1,0 +1,41 @@
+== base bbe1be5830429592 .text=850641
+  0000000000041280 size=1441 mod64=0 _D7antfarm12ConsumerView12processShardMFNbNiPOmmmm
+  0000000000043a30 size=1897 mod64=48 _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBr
+== candidate caecc37d54e2a666 .text=856657
+  0000000000042a00 size=1441 mod64=0 _D7antfarm12ConsumerView12processShardMFNbNiPOmmmm
+  00000000000451b0 size=1897 mod64=48 _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBr
+tree-wait/0 base      rate=62.629027 instr/unit=212.59 cycles/unit=66.583 IPC=3.193 branch_miss/unit=0.05202
+tree-wait/0 candidate rate=61.626971 instr/unit=212.59 cycles/unit=65.376 IPC=3.252 branch_miss/unit=0.05176
+tree-wait/0 base      rate=62.438550 instr/unit=212.59 cycles/unit=64.757 IPC=3.283 branch_miss/unit=0.05183
+tree-wait/0 candidate rate=64.257588 instr/unit=212.59 cycles/unit=64.816 IPC=3.280 branch_miss/unit=0.05190
+inbox/0 base      rate=14.989745 instr/unit=778.04 cycles/unit=282.054 IPC=2.758 branch_miss/unit=0.05387
+inbox/0 candidate rate=15.008678 instr/unit=778.05 cycles/unit=281.675 IPC=2.762 branch_miss/unit=0.05390
+inbox/0 base      rate=15.135898 instr/unit=778.04 cycles/unit=279.315 IPC=2.786 branch_miss/unit=0.05378
+inbox/0 candidate rate=15.046557 instr/unit=778.05 cycles/unit=280.919 IPC=2.770 branch_miss/unit=0.05475
+subset-whole/0 base      rate=207.806111 instr/unit=60.56 cycles/unit=20.337 IPC=2.978 branch_miss/unit=0.00942
+subset-whole/0 candidate rate=207.659074 instr/unit=60.56 cycles/unit=20.350 IPC=2.976 branch_miss/unit=0.00946
+subset-whole/0 base      rate=205.779778 instr/unit=60.56 cycles/unit=20.534 IPC=2.949 branch_miss/unit=0.00942
+subset-whole/0 candidate rate=208.782950 instr/unit=60.56 cycles/unit=20.240 IPC=2.992 branch_miss/unit=0.00941
+
+== private-remote/6 (six consumers; whole-process instruction counts include consumer polling, so placement and profiles are reported instead)
+Top user-cycle symbols (perf record -e cycles:u, one 3 s run each; base | candidate):
+  57.29% mi_free_size_aligned                                  | 58.13% mi_free_size_aligned                                 
+  9.96% _D11actor_churn8Consumer3runMFZv                       | 9.71% _D11actor_churn8Consumer3runMFZv                      
+  5.35% _mi_page_free_collect                                  | 5.57% _mi_page_free_collect                                 
+  3.73% _D7antfarm12ConsumerView11consumeNextMFNbNiZb          | 3.47% _D7antfarm12ConsumerView11consumeNextMFNbNiZb         
+  3.32% _D7antfarm12ConsumerView20sweepCurrentPositionMFNbNiZv | 3.33% _D7antfarm12ConsumerView20sweepCurrentPositionMFNbNiZv
+  2.77% __vdso_clock_gettime                                   | 2.78% __vdso_clock_gettime                                  
+  2.61% _D6actors13private_actor__T15PrivateRootParkTS11actor_ | 2.55% _D6actors13private_actor__T15PrivateRootParkTS11actor_
+  2.28% _D11actor_churn4mainFAAyaZ8runCycleMFbZv               | 2.39% _D4core4time__T12MonoTimeImplVEQBdQBb9ClockTypei0ZQBj8
+Hot symbol placement (identical code; the candidate's extra benchmark slab-mode text precedes mimalloc in link order):
+  base
+    000000000004d260 size=4739 mod64=32 _D11actor_churn4mainFAAyaZ8runCycleMFbZv
+    00000000000489b0 size=311 mod64=48 _D11actor_churn8Consumer3runMFZv
+    0000000000099470 size=362 mod64=48 _mi_page_free_collect
+    000000000007de20 size=205 mod64=32 mi_free_size_aligned
+  candidate
+    000000000004e9e0 size=4739 mod64=32 _D11actor_churn4mainFAAyaZ8runCycleMFbZv
+    000000000004a130 size=311 mod64=48 _D11actor_churn8Consumer3runMFZv
+    000000000009abf0 size=362 mod64=48 _mi_page_free_collect
+    000000000007f590 size=205 mod64=16 mi_free_size_aligned
+Gate (a) (runtime only, text-identical binaries): private-remote/6 +0.10% (5 pairs). Gate (c): -2.96% (5 pairs), -2.58% (20 pairs, c-boundary-6).
