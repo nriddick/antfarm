@@ -133,3 +133,43 @@ checks. Allocator-selection smoke tests also passed with LDC release, DMD
 release, and LDC debug linked to the real `MI_DEBUG=FULL` mimalloc library,
 including non-divisible cohorts, six consumers, and the 64-byte control.
 The default production actor allocator is unchanged.
+
+## Option screen (RF1)
+
+On 2026-10-07, mimalloc's page-retention and reclaim options were screened on
+the private lifecycle modes. One byte-identical binary was used throughout,
+and the baseline always ran the defaults. Full tables, method and raw evidence
+are in [the RF1 results](results/rf1-mimalloc-options-2026-10-07/README.md).
+No runtime default changed.
+
+Set options through the environment (`MIMALLOC_PAGE_FULL_RETAIN=-1` and so
+on), or call `mi_option_set` before any thread allocates. mimalloc caches
+these options per theap when the theap initializes, so changing them later is
+not a valid configuration. The gate can screen such settings directly:
+`perf_gate.py --base REF --control --candidate-env MIMALLOC_…=…`.
+
+Guidance for applications using `mimallocV3ActorAllocator`:
+
+- **`page_full_retain=-1`** (keep full pages instead of abandoning them) is a
+  trade-off, not a default. It measured **+13.9%** on `private-remote` with
+  six consumers: roots allocated on the emitter and freed on consumers. It
+  measured +2.2% on `tree-cont`/6. But it cost **−10.8%** on single-thread
+  `tree`/0 and −7.2% on `tree-wait`/0. Consider it only when one producer
+  thread allocates and many consumers free, and measure on your own workload.
+- **`page_reclaim_on_free=-1`** is harmful: −24.5% on `private`/6 and −10%
+  to −18% on every single-thread case. Do not use it.
+- **`page_reclaim_on_free=1`**, alone or with an unlimited
+  `page_cross_thread_max_reclaim`, changed nothing measurable here.
+- **`mi_thread_set_in_threadpool`** on every worker gave no benefit, and
+  measured −4.8% on `private`/0. Do not set it just because the application
+  uses a thread pool. Two caveats limit this result. The benchmark hook runs
+  after each thread's default theap initializes, so it did not exercise the
+  part of thread-pool mode that reduces `page_full_retain` (only the
+  reclaim-on-free decisions changed). And the −4.8% comes from 5 pairs only,
+  with no 20-pair confirmation.
+- Peak RSS (VmHWM) did not change measurably in any of these configurations
+  at 16,384 actors.
+
+None of these options removes the per-block remote-free CAS that dominates
+tree retirement with six consumers; no tree/6 or tree-wait/6 cell improved.
+That cost needs a storage change, not allocator tuning.

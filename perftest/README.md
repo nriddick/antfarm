@@ -338,6 +338,8 @@ warmup cycles, five repetitions and three-second measurement windows by default.
 
 G5 targeted public inlining passed the gate with no /0 layout waiver needed; see [results](results/perf-g5-2026-10-07/).
 
+RF1 screened mimalloc page-retention and reclaim options against unchanged defaults; no runtime change. See [MIMALLOC.md](MIMALLOC.md#option-screen-rf1) and [results](results/rf1-mimalloc-options-2026-10-07/README.md).
+
 ## Optimization PR performance gate
 
 `perf_gate.py` is the standard gate for optimization PRs. The **−3% boundary
