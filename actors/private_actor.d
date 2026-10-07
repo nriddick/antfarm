@@ -1700,7 +1700,8 @@ public:
         header_ = PayloadHeader.init;
         header_.maxCs = header_.done = 1;
         header_.plen = 1;
-        header_.call = &runChild!operation;
+        header_.call = retire ? &runChild!(operation, false, true)
+            : &runChild!(operation, false, false);
         publishWave(context);
         return PrivateStartResult.started;
     }
@@ -1891,14 +1892,23 @@ private:
                 actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
         }
     }
-    static long runChild(alias operation, bool subset = false)(PayloadHeader*, PayloadBody body, ulong)
+    static long runChild(alias operation, bool subset = false, bool retiringWave = false)(PayloadHeader*, PayloadBody body, ulong)
         nothrow @nogc @system
     {
         enum kind = opKind!(T, R, operation);
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         auto wave = entry.enclosing;
         auto park = fromWave(wave);
-        immutable retiring = park.retire_;
+        // Whole starts select the policy with the header; it is immutable through
+        // initial/resume/cleanup calls. Subsets never retire but keep the load:
+        // their specialized callback measured slower with six consumers (G2).
+        static assert(!(subset && retiringWave));
+        static if (subset) immutable retiring = park.retire_;
+        else
+        {
+            enum retiring = retiringWave;
+            version (assert) if (park.retire_ != retiring) fatal("wave retirement policy invariant");
+        }
         static if (kind == OpKind.continuation || kind == OpKind.resultContinuation)
         {
             immutable flags = entry.childFlags;
