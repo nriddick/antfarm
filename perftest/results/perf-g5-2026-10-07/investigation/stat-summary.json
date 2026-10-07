@@ -1,0 +1,44 @@
+[
+  {
+    "mode": "actor",
+    "rate": 14.559873,
+    "verified_actor_cycles": 43761664,
+    "counters_per_cycle": {
+      "cycles:u": 2022.8785507562052,
+      "instructions:u": 2423.56564435027,
+      "branches:u": 439.8869132124409,
+      "branch-misses:u": 0.15725987933182797,
+      "cache-references:u": 57.00411570273013,
+      "cache-misses:u": 6.189137780501217
+    },
+    "contaminated": false
+  },
+  {
+    "mode": "inbox",
+    "rate": 12.235105,
+    "verified_actor_cycles": 36798464,
+    "counters_per_cycle": {
+      "cycles:u": 2386.524817747828,
+      "instructions:u": 2837.2360389824967,
+      "branches:u": 515.9693975542023,
+      "branch-misses:u": 0.1592252328792854,
+      "cache-references:u": 61.99452833139992,
+      "cache-misses:u": 7.140308763974496
+    },
+    "contaminated": false
+  },
+  {
+    "mode": "wave",
+    "rate": 15.344795,
+    "verified_actor_cycles": 46120960,
+    "counters_per_cycle": {
+      "cycles:u": 1911.5895302699685,
+      "instructions:u": 2241.578910781562,
+      "branches:u": 410.7142312302259,
+      "branch-misses:u": 0.1432214116965475,
+      "cache-references:u": 52.8512474371739,
+      "cache-misses:u": 6.086728116674068
+    },
+    "contaminated": false
+  }
+]

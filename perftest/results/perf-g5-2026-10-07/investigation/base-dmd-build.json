@@ -1,0 +1,42 @@
+{
+  "commands": [
+    [
+      "dmd",
+      "-O",
+      "-release",
+      "-version=AntfarmMimallocV3",
+      "-i",
+      "-I.",
+      "-Ithreadpool/source",
+      "-inline",
+      "perftest/actor_churn.d",
+      "antfarm.d",
+      "antfarm_allocation.d",
+      "actors/package.d",
+      "actors/actor.d",
+      "actors/wave.d",
+      "actors/private_actor.d",
+      "actors/mimalloc.d",
+      "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "-L-lpthread",
+      "-L-lrt",
+      "-L-latomic",
+      "-of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/perftest/results/perf-g5-2026-10-07/investigation/base-dmd-churn"
+    ]
+  ],
+  "compiler": "DMD64 D Compiler v2.113.0\nCopyright (C) 1999-2026 by The D Language Foundation, All Rights Reserved written by Walter Bright\n",
+  "revision": "fcbf12264ff4cdc47023602b75640e83ea2f3f9b",
+  "source_hashes": {
+    "perftest/actor_churn.d": "df652f220f78cc487354e09c862a625e8c7c9511771ff342ebf6f519a24352be",
+    "antfarm.d": "a0fa5aad6c81ffcc1dc776e84992e1ad807093b3e1af3fec2b4e3a4b926b8bff",
+    "antfarm_allocation.d": "1976a4d17517aa91b13569a1d5c48b0eb8192f8be66e7b94f8641ad73fc662c0",
+    "actors/package.d": "33667cad4a064642cca3eaadd069ad602f5e7780fc5d39bd4550692b7cce3c52",
+    "actors/actor.d": "038153efc05577548eda94340d7dddd106f696f25bddf32698f4eadef4ce16ca",
+    "actors/wave.d": "44b1612735a78a1012fac20c9c8bb0a4aa9953bb97bd066ac288874bc6943e7d",
+    "actors/private_actor.d": "cc5470e088af2776528196c19747697f3f33fb08248da78470db256b6085b1c8",
+    "actors/mimalloc.d": "6126406361ebac413c61746e1583f0ef3d299355157d5315f5d01fa26044f9fa"
+  },
+  "archive_sha256": "551ee9a97e46b331736163a17cb3514b940d57b68cc82206723e0ccc0e8a1bec",
+  "binary_sha256": "c19c741449e7452a304785c1431d854f40af254059f688f10b7d5e888488ca43",
+  "size": "   text\t   data\t    bss\t    dec\t    hex\tfilename\n1826862\t 100992\t  86912\t2014766\t 1ebe2e\t/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/perftest/results/perf-g5-2026-10-07/investigation/base-dmd-churn\n"
+}

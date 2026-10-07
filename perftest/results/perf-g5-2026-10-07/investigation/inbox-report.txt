@@ -1,0 +1,30 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 4K of event 'cycles:u'
+# Event count (approx.): 86865460874
+#
+# Overhead  Command        Shared Object         Symbol
+# ........  .............  ....................  ........................................................................................................................................................................................
+#
+    42.77%  base-o2-churn  base-o2-churn         [.] _D11actor_churn8Consumer3runMFZv
+    15.77%  base-o2-churn  base-o2-churn         [.] _D7antfarm12ConsumerView11consumeNextMFNbNiZb
+    15.01%  base-o2-churn  base-o2-churn         [.] _D7antfarm12ConsumerView20sweepCurrentPositionMFNbNiZv
+     3.96%  base-o2-churn  base-o2-churn         [.] _D6actors5actor12ActorRuntime5enterMFNbNiPSQBpQBl9ActorSlotmZv
+     3.86%  base-o2-churn  base-o2-churn         [.] _D6actors5actor__T13actorDispatchTS11actor_churn5StateS_DQw13inboxActivateFNbNiMKSQDcQCy__T11ActorBorrowTQCtZQsMKSQEiQEe12ActorContextZvZQEpFNbNiMKSQFqQFm17ActorErasedBorrowMKQCkZv
+     2.88%  base-o2-churn  base-o2-churn         [.] _D7antfarm12ConsumerView19sweepOldestTrailingMFNbNiZv
+     2.66%  base-o2-churn  base-o2-churn         [.] _D6actors5actor9sendActorFNbNiPSQBeQBa9ActorSlotmPSQBxQBt14ActorInboxNodeZEQCvQCr15ActorSendResult
+     2.42%  base-o2-churn  base-o2-churn         [.] _D6actors5actor12reclaimActorFNbNiKPSQBjQBf9ActorSlotKmZEQCdQBz18ActorReclaimResult
+     2.01%  base-o2-churn  base-o2-churn         [.] _D11actor_churn4mainFAAyaZ8runCycleMFbZv
+     1.80%  base-o2-churn  base-o2-churn         [.] _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBroadcastRangeTS6actors5actor14ActorBodyRangeVbi1ZQChZQDdMFNbNiMQDcKSQEl5TokenkPSQEx19TableCompletionHookZm
+     1.46%  base-o2-churn  base-o2-churn         [.] _D6actors5actor__T10ActorOwnerTS11actor_churn5StateZQBi13requestRetireMFNbNiEQCxQCt15ActorRetireModeZEQDwQDs17ActorRetireResult
+     1.31%  base-o2-churn  base-o2-churn         [.] _D6actors5actor12ActorRuntime17createActorErasedMFNbNiMPxvmmPFNbNiMKSQCpQCl17ActorErasedBorrowMKSQDrQDn12ActorContextZvZSQEpQEl16ActorErasedOwner
+     0.93%  base-o2-churn  base-o2-churn         [.] _D7antfarm12ConsumerView12processShardMFNbNiPOmmmmmmkkkbbZk
+     0.69%  base-o2-churn  base-o2-churn         [.] _D6actors5actor12ActorRuntime5flushMFNbNiKS7antfarm5TokenmkZm
+
+
+#
+# (Tip: To set sample time separation other than 100ms with --sort time use --time-quantum)
+#

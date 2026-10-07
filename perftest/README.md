@@ -336,6 +336,8 @@ batch) over hint tuning.
 consumer count; `--suite child` checks inherited child limits. Both use five
 warmup cycles, five repetitions and three-second measurement windows by default.
 
+G5 targeted public inlining passed the gate with no /0 layout waiver needed; see [results](results/perf-g5-2026-10-07/).
+
 ## Optimization PR performance gate
 
 `perf_gate.py` is the standard gate for optimization PRs. The **−3% boundary

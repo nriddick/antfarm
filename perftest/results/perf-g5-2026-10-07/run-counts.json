@@ -1,0 +1,67 @@
+[
+  {
+    "measurement": "full-5",
+    "cells": 34,
+    "decisions": {
+      "pass": 25,
+      "inconclusive": 9,
+      "regression": 0
+    },
+    "raw_runs": 348,
+    "contaminated_runs": 5,
+    "clean_pairs": 170,
+    "exit_status": 2
+  },
+  {
+    "measurement": "boundary-0",
+    "cells": 8,
+    "decisions": {
+      "pass": 8,
+      "inconclusive": 0,
+      "regression": 0
+    },
+    "raw_runs": 322,
+    "contaminated_runs": 1,
+    "clean_pairs": 160,
+    "exit_status": 0
+  },
+  {
+    "measurement": "control-boundary-0",
+    "cells": 8,
+    "decisions": {
+      "pass": 8,
+      "inconclusive": 0,
+      "regression": 0
+    },
+    "raw_runs": 320,
+    "contaminated_runs": 0,
+    "clean_pairs": 160,
+    "exit_status": 0
+  },
+  {
+    "measurement": "boundary-6",
+    "cells": 4,
+    "decisions": {
+      "pass": 4,
+      "inconclusive": 0,
+      "regression": 0
+    },
+    "raw_runs": 160,
+    "contaminated_runs": 0,
+    "clean_pairs": 80,
+    "exit_status": 0
+  },
+  {
+    "measurement": "control-boundary-6",
+    "cells": 4,
+    "decisions": {
+      "pass": 4,
+      "inconclusive": 0,
+      "regression": 0
+    },
+    "raw_runs": 160,
+    "contaminated_runs": 0,
+    "clean_pairs": 80,
+    "exit_status": 0
+  }
+]

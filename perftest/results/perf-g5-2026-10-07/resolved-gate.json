@@ -1,0 +1,50 @@
+{
+  "exit_status": 0,
+  "base": "fcbf12264ff4cdc47023602b75640e83ea2f3f9b",
+  "candidate": "006e12ccbf919878c2c0e1ef8acd1ff62cdbca75",
+  "threshold": -0.03,
+  "resolved_cells": 34,
+  "decision": "pass",
+  "sources": [
+    "full-5",
+    "boundary-0",
+    "boundary-6"
+  ],
+  "controls": {
+    "control-boundary-0": {
+      "exit_status": 0,
+      "binary_sha256": "d594fa94925e8343628fc22e078fcc787564d5d2548805687060a9a9d5385373"
+    },
+    "control-boundary-6": {
+      "exit_status": 0,
+      "binary_sha256": "d594fa94925e8343628fc22e078fcc787564d5d2548805687060a9a9d5385373"
+    }
+  },
+  "public_gains": [
+    {
+      "mode": "actor",
+      "paired_median_delta": 0.016705901749712204,
+      "paired_bootstrap95": [
+        0.01575692996078637,
+        0.01733686020410219
+      ]
+    },
+    {
+      "mode": "inbox",
+      "paired_median_delta": 0.013570328479342031,
+      "paired_bootstrap95": [
+        0.01187523686527725,
+        0.015174876248767233
+      ]
+    },
+    {
+      "mode": "wave",
+      "paired_median_delta": 0.02439858534025474,
+      "paired_bootstrap95": [
+        0.023806070298251436,
+        0.025418342016065076
+      ]
+    }
+  ],
+  "interpretation": "Retain the initial exit-2 screen; replace its repeated cells with the complete 20-pair standard-gate results. All 34 resolved cells and both byte-identical control batches pass. Descriptive intervals are not calibrated statistical guarantees. No regression waiver applied."
+}

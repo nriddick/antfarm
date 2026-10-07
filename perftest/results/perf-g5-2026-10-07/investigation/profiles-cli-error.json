@@ -1,0 +1,81 @@
+[
+  {
+    "mode": "actor",
+    "kind": "stat",
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/perftest/results/perf-g5-2026-10-07/investigation/actor-stat.csv",
+      "-e",
+      "cycles,instructions,branches,branch-misses,cache-references,cache-misses",
+      "--",
+      "/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/perftest/results/perf-g5-2026-10-07/investigation/base-o2-churn",
+      "actor",
+      "16384",
+      "3",
+      "6",
+      "256",
+      "5",
+      "mimalloc",
+      "0",
+      "small",
+      "16384"
+    ],
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "object.Exception@perftest/actor_churn.d(697): CPU list must name the controller followed by each consumer\n----------------\n??:? [0x55c10555b84e]\n??:? [0x55c10555b4d2]\n??:? [0x55c10557d48e]\n??:? [0x55c105561f4c]\n??:? [0x55c1054e2e3b]\n??:? [0x55c1054e11de]\n??:? [0x55c105561c6c]\n??:? [0x55c105561b71]\n??:? [0x55c1055619dc]\n??:? [0x7fadb6a27d0d]\n??:? __libc_start_main [0x7fadb6a27e4a]\n??:? [0x55c1054c5a54]\n",
+    "load_before": [
+      0.95703125,
+      1.5732421875,
+      1.36572265625
+    ],
+    "load_after": [
+      0.95703125,
+      1.5732421875,
+      1.36572265625
+    ],
+    "load_samples": [
+      {
+        "time": 1791388866.5836496,
+        "load": [
+          0.95703125,
+          1.5732421875,
+          1.36572265625
+        ],
+        "mhz": [
+          "2391.429",
+          "3566.107",
+          "2391.429",
+          "2391.429",
+          "2391.429",
+          "2391.429",
+          "2391.429",
+          "4241.839",
+          "2391.429",
+          "2391.429",
+          "2391.429",
+          "2391.429"
+        ]
+      }
+    ],
+    "outside_affinity_busy_fraction": 0.0,
+    "outside_per_cpu": {
+      "7": 0.0,
+      "8": 0.0,
+      "9": 0.0,
+      "10": 0.0,
+      "11": 0.0
+    },
+    "external_cpu_cores": 0.0,
+    "benchmark_cpu_seconds": 0.012431,
+    "wall_seconds": 0.019400954013690352,
+    "contaminated": false,
+    "reasons": [],
+    "rate": null,
+    "metric": null,
+    "fields": {},
+    "valid": false
+  }
+]

@@ -1,0 +1,31 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 4K of event 'cycles:u'
+# Event count (approx.): 87693703392
+#
+# Overhead  Command        Shared Object     Symbol
+# ........  .............  ................  ..............................................................................................................................................................................................
+#
+    43.55%  base-o2-churn  base-o2-churn     [.] _D11actor_churn8Consumer3runMFZv
+    15.60%  base-o2-churn  base-o2-churn     [.] _D7antfarm12ConsumerView11consumeNextMFNbNiZb
+    15.39%  base-o2-churn  base-o2-churn     [.] _D7antfarm12ConsumerView20sweepCurrentPositionMFNbNiZv
+     4.85%  base-o2-churn  base-o2-churn     [.] _D6actors5actor__T24dispatchActorWavePayloadTS11actor_churn5StateS_DQw7operateFNbNiMKSQDgQDc__T11ActorBorrowTQCmZQsZvZQDwFNbNiPSQEwQEs9ActorSlotmZb
+     3.24%  base-o2-churn  base-o2-churn     [.] _D6actors5actor12reclaimActorFNbNiKPSQBjQBf9ActorSlotKmZEQCdQBz18ActorReclaimResult
+     2.54%  base-o2-churn  base-o2-churn     [.] _D7antfarm12ConsumerView19sweepOldestTrailingMFNbNiZv
+     2.19%  base-o2-churn  base-o2-churn     [.] _D7antfarm12ConsumerView12processShardMFNbNiPOmmmmmmkkkbbZk
+     1.92%  base-o2-churn  base-o2-churn     [.] _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBroadcastRangeTS6actors4wave__T18ActorWaveBodyRangeTS11actor_churn5StateZQBqVbi1ZQDmZQEiMFNbNiMQEhKSQFq5TokenkPSQGc19TableCompletionHookZm
+     1.81%  base-o2-churn  base-o2-churn     [.] _D6actors5actor12ActorRuntime17createActorErasedMFNbNiMPxvmmPFNbNiMKSQCpQCl17ActorErasedBorrowMKSQDrQDn12ActorContextZvZSQEpQEl16ActorErasedOwner
+     1.80%  base-o2-churn  base-o2-churn     [.] _D6actors5actor__T10ActorOwnerTS11actor_churn5StateZQBi13requestRetireMFNbNiEQCxQCt15ActorRetireModeZEQDwQDs17ActorRetireResult
+     1.41%  base-o2-churn  base-o2-churn     [.] _D6actors4wave__T18ActorWaveBodyRangeTS11actor_churn5StateZQBq18prepareTableFrontNMFNbNimZb
+     1.27%  base-o2-churn  base-o2-churn     [.] _D11actor_churn4mainFAAyaZ8runCycleMFbZv
+     0.82%  base-o2-churn  base-o2-churn     [.] _D6actors4wave9ActorWave13releaseCreditMFNbNiZv
+     0.65%  base-o2-churn  base-o2-churn     [.] _D6actors5actor20driveActorRetirementFNbNiPSQBqQBm9ActorSlotmZv
+     0.57%  base-o2-churn  [vdso]            [.] __vdso_clock_gettime
+
+
+#
+# (Tip: To collect Processor Trace with samples use perf record -e '{intel_pt//,cycles}' ; perf script --call-trace or --insn-trace --xed -F +ipc (remove --xed if no xed))
+#
