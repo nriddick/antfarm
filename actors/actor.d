@@ -565,6 +565,7 @@ struct ActorErasedOwner
     /// so retry after it. Drain on a cancelling actor returns `requested` and
     /// never downgrades cancel. No final handler call is guaranteed. Requests
     /// on one owner must not overlap.
+    pragma(inline, true)
     ActorRetireResult requestRetire(
             ActorRetireMode mode = ActorRetireMode.drain) nothrow @nogc @system
     {
@@ -625,6 +626,7 @@ struct ActorOwner(T)
     /// `retired`; `waveOwned` during a wave, so retry after it. Drain on a
     /// cancelling actor returns `requested` and never downgrades cancel. No
     /// final handler call is guaranteed. Requests on one owner must not overlap.
+    pragma(inline, true)
     ActorRetireResult requestRetire(
             ActorRetireMode mode = ActorRetireMode.drain) nothrow @nogc @system
     {
@@ -1137,6 +1139,7 @@ private bool actorRetired(const(ActorSlot)* slot, ulong generation)
         && wordPhase(word) == phaseRetired;
 }
 
+pragma(inline, true)
 private ActorReclaimResult reclaimActor(ref ActorSlot* slot,
         ref ulong generation) nothrow @nogc @system
 {
