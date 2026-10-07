@@ -388,6 +388,23 @@ can fall below −3% while the cell still passes if the interval's lower bound
 is above −3%. The same interval decision applies to other repeat counts.
 Neither mode provides a calibrated 95% confidence guarantee.
 
+### Known limitation: code-layout sensitivity at 0 consumers
+
+A binary that differs only in unused code size can move every function
+(LDC's whole-program layout is size-driven) and measurably change
+single-threaded cells. In the G4 gate
+(`results/perf-g4-2026-10-07`), a byte-identical base/base control passed
+all four boundary cells while base plus ~2.1 KB of **never-executed** text
+(with the same hot-function alignment pattern as the real candidate)
+swung actor/0 by −5.09%, subset10/0 by −4.53% and subset100/0 by −4.12%
+over 20 pairs. When a regressing or near-boundary 0-consumer cell executes
+byte-identical semantics in both binaries, an inert-code control of this
+kind can attribute the swing to layout. The G4 waiver of actor/0, subset10/0, subset100/0 and
+tree-wait/0 on that evidence is a **one-off backed by control
+evidence, not a general precedent**: such a waiver still requires the
+20-pair candidate run, the byte-identical control, and the inert control
+to be recorded together.
+
 The gate alternates accepted-pair order and discards a whole pair if either
 run has outside-affinity mean CPU use above 10%, any outside CPU above 25%,
 or system busy time minus benchmark CPU above 0.25 core. Initial load is

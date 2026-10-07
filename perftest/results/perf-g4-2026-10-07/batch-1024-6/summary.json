@@ -1,0 +1,190 @@
+[
+  {
+    "mode": "tree",
+    "percent": 100,
+    "consumers": 6,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "quiet_n": 5,
+    "contaminated": 0,
+    "base_mean": 18.2747354,
+    "candidate_mean": 83.8834794,
+    "delta": 3.590133731840517,
+    "kept_order_counts": {
+      "base": 3,
+      "candidate": 2
+    },
+    "legacy_mean_fields_include_contaminated": true,
+    "quiet_base_mean": 18.2747354,
+    "quiet_candidate_mean": 83.8834794,
+    "base_median": 18.258833,
+    "candidate_median": 83.878894,
+    "base_min": 18.011298,
+    "base_max": 18.579822,
+    "candidate_min": 83.690483,
+    "candidate_max": 84.112652,
+    "quiet_delta": 3.590133731840517,
+    "median_delta": 3.5938803427360337,
+    "paired_median_delta": 3.606682803879087,
+    "paired_bootstrap95": [
+      3.504374853537348,
+      3.6570823490899995
+    ],
+    "paired_ratios": [
+      3.5602484835397217,
+      3.606682803879087,
+      3.6251625461825316,
+      3.6570823490899995,
+      3.504374853537348
+    ],
+    "decision": "pass"
+  },
+  {
+    "mode": "tree-wait",
+    "percent": 100,
+    "consumers": 6,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "quiet_n": 5,
+    "contaminated": 0,
+    "base_mean": 18.3405778,
+    "candidate_mean": 83.2987024,
+    "delta": 3.5417708922998052,
+    "kept_order_counts": {
+      "base": 3,
+      "candidate": 2
+    },
+    "legacy_mean_fields_include_contaminated": true,
+    "quiet_base_mean": 18.3405778,
+    "quiet_candidate_mean": 83.2987024,
+    "base_median": 18.35783,
+    "candidate_median": 83.619822,
+    "base_min": 18.117403,
+    "base_max": 18.473308,
+    "candidate_min": 81.403042,
+    "candidate_max": 84.015068,
+    "quiet_delta": 3.5417708922998052,
+    "median_delta": 3.5549948986345337,
+    "paired_median_delta": 3.5549948986345337,
+    "paired_bootstrap95": [
+      3.440439942784833,
+      3.633675312074253
+    ],
+    "paired_ratios": [
+      3.440439942784833,
+      3.5605472891160455,
+      3.633675312074253,
+      3.5549948986345337,
+      3.5203283028681165
+    ],
+    "decision": "pass"
+  },
+  {
+    "mode": "tree-cont",
+    "percent": 100,
+    "consumers": 6,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "quiet_n": 5,
+    "contaminated": 0,
+    "base_mean": 32.6308646,
+    "candidate_mean": 33.626768,
+    "delta": 0.030520288451075794,
+    "kept_order_counts": {
+      "base": 3,
+      "candidate": 2
+    },
+    "legacy_mean_fields_include_contaminated": true,
+    "quiet_base_mean": 32.6308646,
+    "quiet_candidate_mean": 33.626768,
+    "base_median": 32.651007,
+    "candidate_median": 33.606286,
+    "base_min": 32.554837,
+    "base_max": 32.698364,
+    "candidate_min": 33.545937,
+    "candidate_max": 33.735235,
+    "quiet_delta": 0.030520288451075794,
+    "median_delta": 0.029257259967510274,
+    "paired_median_delta": 0.03132164353948386,
+    "paired_bootstrap95": [
+      0.026451508612084007,
+      0.03185990012727569
+    ],
+    "paired_ratios": [
+      0.026451508612084007,
+      0.03132164353948386,
+      0.031266018839786636,
+      0.03185990012727569,
+      0.03171017975088919
+    ],
+    "decision": "pass"
+  },
+  {
+    "mode": "private",
+    "percent": 100,
+    "consumers": 6,
+    "cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "quiet_n": 5,
+    "contaminated": 0,
+    "base_mean": 22.9968606,
+    "candidate_mean": 23.155005,
+    "delta": 0.006876782129122239,
+    "kept_order_counts": {
+      "base": 3,
+      "candidate": 2
+    },
+    "legacy_mean_fields_include_contaminated": true,
+    "quiet_base_mean": 22.9968606,
+    "quiet_candidate_mean": 23.155005,
+    "base_median": 23.00993,
+    "candidate_median": 23.164558,
+    "base_min": 22.886298,
+    "base_max": 23.052225,
+    "candidate_min": 23.079834,
+    "candidate_max": 23.256919,
+    "quiet_delta": 0.006876782129122239,
+    "median_delta": 0.0067200552109458744,
+    "paired_median_delta": 0.0067200552109458744,
+    "paired_bootstrap95": [
+      0.0022416057452154803,
+      0.01238806730559916
+    ],
+    "paired_ratios": [
+      0.009122793406717511,
+      0.0067200552109458744,
+      0.003943289671781036,
+      0.0022416057452154803,
+      0.01238806730559916
+    ],
+    "decision": "pass"
+  }
+]

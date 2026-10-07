@@ -1,0 +1,68 @@
+diff --git a/actors/private_actor.d b/actors/private_actor.d
+index 8ae3812..7e20438 100644
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -10,7 +10,7 @@ import actors.actor : ActorAllocator;
+ version (AntfarmActorTestHooks)
+     import actors.actor : ActorTestPoint, actorTestPoint;
+ import antfarm : AntFarm, Token, PayloadHeader, PayloadBody,
+-    TableCompletionHook, fatal;
++    TableCompletionHook, g4InertAutoSentinel, g4InertHintFor, fatal;
+ import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
+     atomicFetchAdd, atomicFetchSub, cas;
+ import core.stdc.string : memcpy, memset;
+@@ -1244,6 +1244,12 @@ public:
+         header.plen = 1;
+         header.call = &runRoot;
+         auto bodies = RootBodies(batch.entries[0 .. count], batch);
++        // Inert layout control: dead branch, size twin of the G4 derivation;
++        // the condition folds false for every caller's class, so it never runs.
++        if (avgCost == g4InertAutoSentinel)
++            avgCost = g4InertHintFor(count,
++                cast(ulong) atomicLoad!(MemoryOrder.raw)(service_.farm.Cf),
++                service_.farm.smallThreshold);
+         immutable n = cast(size_t) service_.farm.writeTracked(header, bodies, 1,
+             &batch.hook, token, avgCost);
+         foreach (entry; batch.entries[n .. count])
+diff --git a/antfarm.d b/antfarm.d
+index fe8f6dc..c308aea 100644
+--- a/antfarm.d
++++ b/antfarm.d
+@@ -384,7 +384,36 @@ enum bool DEFAULT_HUGE_PAGES = false;
+ enum uint MAX_CHUNK = 32;
+ /// log2(MAX_CHUNK); avgCost outside 0 .. MAX_AVG_COST is a caller error.
+ enum uint MAX_AVG_COST = 5;
+-/// Smallest ring accepted by `AntFarm.create`, in MiB (2^18 ulongs).
++
++/// Inert layout-control twin of rootCostHintAuto (never on a shipped branch).
++enum uint g4InertAutoSentinel = uint.max;
++
++// Inert layout control for perf-g4: a size twin of the G4 candidate's
++// rootCostHintFor at the same source position. pump carries a dead branch
++// calling it behind a condition that folds false for every caller's class,
++// so it never executes and the published classes stay at the base. Sized so
++// the hot public functions land at the candidate's exact offsets; the bulk
++// region sits 128 bytes short because the candidate additionally carries
++// the derivation inlined into benchmark wrapper code, which a semantically
++// null twin cannot reproduce. Never on a shipped branch.
++uint g4InertHintFor(size_t count, ulong consumers, uint smallThreshold)
++    pure nothrow @nogc @safe
++{
++    if (count == 0) return 0;
++    if (count >= (smallThreshold != 0 ? smallThreshold : DEFAULT_SMALL_TABLE_THRESHOLD))
++        return 0;
++    immutable splits = consumers < 1 ? cast(ulong) 1
++        : consumers > 8 ? cast(ulong) 8
++        : consumers;
++    immutable target = cast(size_t) (count < splits ? count : splits);
++    uint hint;
++    while (hint < MAX_AVG_COST
++        && (count + (MAX_CHUNK >> hint) - 1) / (MAX_CHUNK >> hint) < target)
++        ++hint;
++    return hint;
++}
++
++
+ enum uint MIN_RING_MIB = 2;
+ /// Largest ring accepted by `AntFarm.create`, in MiB (64 GiB). Far beyond any
+ /// characterized size; it mainly rejects a length accidentally given in ulongs.
