@@ -121,7 +121,7 @@ class GateCase(unittest.TestCase):
             binary.write_bytes(build(label, rev, serial))
             return mock.Mock(returncode=0)
 
-        def fake_runone(cmd, cpus, seconds, child_affinity=None):
+        def fake_runone(cmd, cpus, seconds, child_affinity=None, env=None):
             version = pathlib.Path(cmd[0]).name.split('-')[0]
             mode, consumers = cmd[1], int(cmd[4])
             percent = int(cmd[11]) if len(cmd) > 11 else 100
@@ -134,7 +134,7 @@ class GateCase(unittest.TestCase):
             if row['contaminated'] and not row['reasons']:
                 row['reasons'] = ['fake contamination']
             r.runs.append(dict(version=version, mode=mode, consumers=consumers,
-                               percent=percent, cmd=cmd, n=n))
+                               percent=percent, cmd=cmd, n=n, env=env))
             return row
 
         cpuinfo = [dict(processor=str(i), **{'physical id': '0', 'core id': str(i),
@@ -522,6 +522,35 @@ class ControlTests(GateCase):
 
     def test_control_with_boundary_still_rejects_short_runs(self):
         self.assertEqual(self.usage_error(self.CONTROL + ['--boundary', '--repeats', '10']), 2)
+
+
+class EnvironmentTests(GateCase):
+    def test_side_environment_reaches_only_that_side(self):
+        r = self.gate(['--base', 'BASE', '--control', '--modes', 'actor', '--consumers', '0',
+                       '--candidate-env', 'MIMALLOC_PAGE_FULL_RETAIN=-1',
+                       '--candidate-env', 'X=a=b', '--base-env', 'Y='])
+        self.assert_exit_recorded(r, 0)
+        for run in r.runs:
+            expected = ({'MIMALLOC_PAGE_FULL_RETAIN': '-1', 'X': 'a=b'}
+                        if run['version'] == 'candidate' else {'Y': ''})
+            self.assertEqual(run['env'], expected)
+        args = self.load(r, 'metadata.json')['arguments']
+        self.assertEqual(args['candidate_env'], ['MIMALLOC_PAGE_FULL_RETAIN=-1', 'X=a=b'])
+
+    def test_default_environment_is_empty_on_both_sides(self):
+        r = self.gate(FAST)
+        self.assertTrue(all(run['env'] == {} for run in r.runs))
+
+    def test_malformed_or_page_mode_environment_rejected(self):
+        for bad in ('NOEQUALS', '=1', '1X=2', 'ANTFARM_HUGE_PAGES=1'):
+            self.assertEqual(self.usage_error(FAST + ['--candidate-env', bad]), 2)
+
+    def test_peak_rss_medians_are_summarised_per_side(self):
+        r = self.gate(FAST, rate=lambda v, m, c, p, n: dict(
+            fields=dict(peak_rss_kib=str(100 + n if v == 'base' else 200 + n))))
+        cell = self.load(r, 'summary.json')[0]
+        self.assertEqual(cell['base_peak_rss_kib_median'], 102)
+        self.assertEqual(cell['candidate_peak_rss_kib_median'], 202)
 
 
 class BenchmarkSourceTests(GateCase):

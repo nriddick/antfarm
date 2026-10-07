@@ -30,10 +30,10 @@ def ticks():
 def cpuusage():
     r=resource.getrusage(resource.RUSAGE_CHILDREN);return r.ru_utime+r.ru_stime
 
-def runone(cmd,cpus,seconds,child_affinity=None):
+def runone(cmd,cpus,seconds,child_affinity=None,env=None):
     before=ticks();start=time.monotonic();used=cpuusage();samples=[]
     proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
-        env={**os.environ,'ANTFARM_HUGE_PAGES':'0'},
+        env={**os.environ,**(env or {}),'ANTFARM_HUGE_PAGES':'0'},
         preexec_fn=(lambda: os.sched_setaffinity(0,child_affinity)) if child_affinity is not None else None)
     expired=False
     while True:
@@ -56,7 +56,7 @@ def runone(cmd,cpus,seconds,child_affinity=None):
     if expired:reasons.append('timeout')
     rate=re.search(r'\b(Mactor_cycles/s|Mleaf_cycles/s|Mselected_callbacks/s)=([0-9.]+)',stdout)
     fields=dict(re.findall(r'([A-Za-z_]+)=([0-9]+(?:\.[0-9]+)?)',stdout))
-    return dict(command=cmd,returncode=proc.returncode,stdout=stdout,stderr=stderr,
+    return dict(command=cmd,extra_env=env or {},returncode=proc.returncode,stdout=stdout,stderr=stderr,
         load_before=samples[0]['load'],load_after=os.getloadavg(),load_samples=samples,
         outside_affinity_busy_fraction=outside,outside_per_cpu=busy,external_cpu_cores=external_cpu,
         benchmark_cpu_seconds=child_cpu,wall_seconds=elapsed,contaminated=bool(reasons),reasons=reasons,
@@ -82,6 +82,8 @@ def main():
     p.add_argument('--subset-percent',default='1,10,100');p.add_argument('--benchmark-ref')
     p.add_argument('--root-hint',default='auto',help='Pass a fixed actor_churn root-hint (0..5) to both builds instead of the default derived policy; auto appends no argument')
     p.add_argument('--allow-benchmark-change',action='store_true',help='Explicitly allow different checkpoint benchmark sources; fixed source is safer')
+    p.add_argument('--base-env',action='append',default=[],metavar='KEY=VALUE',help='Extra environment for base runs only (repeatable), e.g. MIMALLOC_* options; recorded per run')
+    p.add_argument('--candidate-env',action='append',default=[],metavar='KEY=VALUE',help='Extra environment for candidate runs only (repeatable); with --control this screens a runtime setting on byte-identical binaries')
     p.add_argument('--optimization',choices=['O2','O3'],default='O2');p.add_argument('--initial-load-limit',type=float,default=1.0)
     p.add_argument('--threshold',type=float,default=-.03)
     p.add_argument('--cancel-fraction-tolerance',type=float,default=.01,help='Max absolute median dispatched-fraction change before cancellation timing is inconclusive')
@@ -100,6 +102,13 @@ def main():
     if not -1<a.threshold<0:p.error('threshold must be a negative fraction between -1 and 0')
     if not 0<=a.cancel_fraction_tolerance<=1:p.error('cancel fraction tolerance must be in [0,1]')
     if a.root_hint!='auto' and not (a.root_hint.isdigit() and 0<=int(a.root_hint)<=5):p.error('root-hint must be auto or 0..5')
+    envs={}
+    for label,items in (('base',a.base_env),('candidate',a.candidate_env)):
+        envs[label]={}
+        for item in items:
+            key,eq,value=item.partition('=')
+            if not eq or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',key) or key=='ANTFARM_HUGE_PAGES':p.error('environment must be KEY=VALUE and cannot override ANTFARM_HUGE_PAGES')
+            envs[label][key]=value
     pins=list(map(int,a.cpus.split(',')));profiles=list(map(int,a.consumers.split(',')))
     if not pins or len(set(pins))!=len(pins) or not set(pins)<=os.sched_getaffinity(0):p.error('invalid CPU affinity')
     if any(n<0 or n>=len(pins) for n in profiles):p.error('one controller plus consumers required')
@@ -180,7 +189,7 @@ def main():
             cmd=[str(binaries[version]),mode,str(a.actors),str(a.seconds),str(consumers),str(a.batch),'5','mimalloc',','.join(map(str,cpus)),a.tier,str(a.quota)]
             if mode.startswith('subset'):cmd.append(str(percent))
             if a.root_hint!='auto':cmd.append(a.root_hint)
-            row=runone(cmd,cpus,a.seconds,child_affinity=full_affinity);row.update(version=version,mode=mode,percent=percent,consumers=consumers,cpus=cpus,repeat=repeat,accepted_pair_target=len(pairs))
+            row=runone(cmd,cpus,a.seconds,child_affinity=full_affinity,env=envs[version]);row.update(version=version,mode=mode,percent=percent,consumers=consumers,cpus=cpus,repeat=repeat,accepted_pair_target=len(pairs))
             log.write(json.dumps(row)+'\n');log.flush();pair[version]=row
             print(version,mode,percent,consumers,row['rate'],'contaminated',row['reasons'],flush=True)
             if not row['valid']:
@@ -201,6 +210,9 @@ def main():
             item.update(base_median=statistics.median(bs),candidate_median=statistics.median(cs),base_min=min(bs),base_max=max(bs),candidate_min=min(cs),candidate_max=max(cs),quiet_delta=statistics.mean(cs)/statistics.mean(bs)-1,median_delta=statistics.median(cs)/statistics.median(bs)-1,paired_median_delta=statistics.median(ratios),paired_bootstrap95=ci,paired_ratios=ratios)
             item['decision']='insufficient' if len(pairs)<a.repeats else 'regression' if ci[1]<a.threshold else 'pass' if ci[0]>a.threshold else 'inconclusive'
          else:item.update(quiet_delta=None,decision='insufficient')
+         for version,rows in (('base',[x['base'] for x in pairs]),('candidate',[x['candidate'] for x in pairs])):
+            rss=[int(x['fields']['peak_rss_kib']) for x in rows if 'peak_rss_kib' in x.get('fields',{})]
+            if rss:item[version+'_peak_rss_kib_median']=statistics.median(rss)
          if mode=='tree-cancel' and pairs:
             try:
                 bf=[float(x['base']['fields']['dispatched_fraction']) for x in pairs]

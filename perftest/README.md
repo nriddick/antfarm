@@ -380,6 +380,16 @@ python3 perftest/perf_gate.py --base CANDIDATE_SHA --control \
   --output /tmp/control-001
 ```
 
+`--base-env KEY=VALUE` and `--candidate-env KEY=VALUE` (repeatable) add
+environment variables to one side's runs only. Combined with `--control`, they
+screen a process setting, such as a `MIMALLOC_*` option, on byte-identical
+binaries. Each run records its extra environment. `actor_churn` prints
+`peak_rss_kib` (VmHWM) and the effective screened mimalloc options at exit, and
+`summary.json` reports each side's median peak RSS. The benchmark-only
+`ANTFARM_CHURN_MI_THREADPOOL=1` hook calls `mi_thread_set_in_threadpool` first
+thing on the controller and on each consumer thread. See
+[MIMALLOC.md](MIMALLOC.md#option-screen-rf1).
+
 Exit codes are **0 pass, 1 regression, 2 inconclusive/error**. A known
 regression takes precedence over incomplete cells. Decisions use clean
 paired ratios and a descriptive bootstrap median interval. At the default

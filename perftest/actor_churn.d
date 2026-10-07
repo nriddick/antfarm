@@ -21,7 +21,10 @@ import threadpool.pin : PinTarget, pinToLogicalProcessor;
 version (AntfarmMimallocV3)
 {
     import actors.mimalloc : mimallocV3ActorAllocator;
+    import core.stdc.config : c_long;
     private extern(C) int mi_version() nothrow @nogc @system;
+    private extern(C) void mi_thread_set_in_threadpool() nothrow @nogc @system;
+    private extern(C) c_long mi_option_get(int option) nothrow @nogc @system;
 
     // Diagnostic control: match cRuntime's rounded size and 64-byte alignment.
     // The ordinary mimalloc mode uses the adapter's exact size/alignment.
@@ -39,6 +42,43 @@ version (AntfarmMimallocV3)
         immutable rounded = (bytes + 63) & ~cast(size_t) 63;
         mimallocV3ActorAllocator().deallocate(null, memory, rounded, 64);
     }
+}
+
+// Option-screen hook: ANTFARM_CHURN_MI_THREADPOOL=1 marks the controller and
+// every consumer as mimalloc threadpool threads before their first actor
+// allocation. Other options use MIMALLOC_* environment variables, which
+// mimalloc reads before any theap caches them.
+private bool threadpoolRequested() nothrow @nogc @system
+{
+    import core.stdc.stdlib : getenv;
+    auto flag = getenv("ANTFARM_CHURN_MI_THREADPOOL");
+    return flag !is null && flag[0] == '1' && flag[1] == 0;
+}
+
+private void markThreadpoolThread() nothrow @nogc @system
+{
+    version (AntfarmMimallocV3)
+        if (threadpoolRequested()) mi_thread_set_in_threadpool();
+}
+
+// Peak resident set (VmHWM) and, in mimalloc builds, the effective values of
+// the screened options, printed once at exit. Option indices are mi_option_t
+// ordinals from the pinned v3.5.3 header.
+private void reportProcess()
+{
+    version (linux)
+    {
+        import std.file : readText;
+        import std.string : splitLines, strip;
+        import std.algorithm : startsWith;
+        foreach (line; readText("/proc/self/status").splitLines)
+            if (line.startsWith("VmHWM:"))
+                writefln("peak_rss_kib=%s", line["VmHWM:".length .. $].strip.split(" ")[0]);
+    }
+    version (AntfarmMimallocV3)
+        writefln("mi_threadpool=%s mi_page_reclaim_on_free=%s mi_page_full_retain=%s mi_page_max_reclaim=%s mi_page_cross_thread_max_reclaim=%s",
+            threadpoolRequested() ? 1 : 0, mi_option_get(35), mi_option_get(36),
+            mi_option_get(41), mi_option_get(42));
 }
 
 // Separate completion lines avoid one contended global callback counter.
@@ -584,6 +624,7 @@ private class Consumer
 
     void run()
     {
+        markThreadpoolThread();
         if (cpu >= 0 && !pinToLogicalProcessor(PinTarget(0, 0, cast(ushort) cpu)))
         {
             atomicStore!(MemoryOrder.rel)(started, -1);
@@ -646,6 +687,7 @@ private double elapsedSeconds(long ticks)
 
 void main(string[] args)
 {
+    markThreadpoolThread();
     enforce(args.length >= 2 && args.length <= 13
             && (args[1] == "private-tracked" || args[1] == "tree-cont" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
         "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..5]");
@@ -699,6 +741,7 @@ void main(string[] args)
         enforce(pinToLogicalProcessor(PinTarget(0, 0, cpus[0])),
             "controller CPU pin failed");
     }
+    scope (exit) reportProcess();
     auto allocator = ActorAllocator.cRuntime();
     if (allocatorName != "crt")
     {
