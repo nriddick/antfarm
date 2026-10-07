@@ -6,7 +6,8 @@
 module actor_churn;
 
 import actors;
-import antfarm : ConsumerView, fatal;
+import antfarm : ConsumerView, MAX_CHUNK, MAX_AVG_COST,
+    DEFAULT_SMALL_TABLE_THRESHOLD, fatal;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore, pause;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;
@@ -231,7 +232,8 @@ private PrivateRootDisposition foldRoot(bool continuation)(scope ref PrivateBorr
 
 private void runFoldTree(bool continuation)(AntFarm* farm, ActorAllocator allocator,
     ref Token token, ref ConsumerView view, string mode, Completion[] completions, double duration,
-    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus)
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint rootHint)
 {
     immutable count = completions.length;
     immutable parents = (count - 1) / batch + 1;
@@ -252,7 +254,7 @@ private void runFoldTree(bool continuation)(AntFarm* farm, ActorAllocator alloca
         }
         while (park.live != 0)
         {
-            park.pump(token);
+            pumpRoot(park, token, batch, rootHint);
             if (consumers == 0) while (view.consumeNext()) {}
             else pause();
             enforce(MonoTime.currTime < deadline, "fold tree timed out");
@@ -331,7 +333,8 @@ private PrivateRootDisposition cancelTreeActivate(scope ref PrivateBorrow!Cancel
 
 private void runCancelTree(AntFarm* farm, ActorAllocator allocator, ref Token token,
     ref ConsumerView view, string mode, Completion[] completions, double duration,
-    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus)
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint rootHint)
 {
     immutable count = completions.length;
     immutable parents = (count - 1) / batch + 1;
@@ -353,7 +356,7 @@ private void runCancelTree(AntFarm* farm, ActorAllocator allocator, ref Token to
         }
         while (park.live != 0)
         {
-            park.pump(token);
+            pumpRoot(park, token, batch, rootHint);
             if (consumers == 0) while (view.consumeNext()) {}
             else pause();
             enforce(MonoTime.currTime < deadline, "cancel tree timed out");
@@ -394,7 +397,8 @@ private PrivateRootDisposition trackedActivate(scope ref PrivateBorrow!State act
 
 private void runTracked(AntFarm* farm, ActorAllocator allocator, ref Token token,
     ref ConsumerView view, string mode, Completion[] completions, double duration,
-    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus)
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint rootHint)
 {
     immutable count = completions.length;
     PrivateRootOptions options;
@@ -418,7 +422,7 @@ private void runTracked(AntFarm* farm, ActorAllocator allocator, ref Token token
         }
         while (park.live != 0)
         {
-            park.pump(token, batch);
+            pumpRoot(park, token, batch, rootHint);
             if (consumers == 0) while (view.consumeNext()) {}
             else pause();
             PrivateRootOutcome outcome;
@@ -504,7 +508,8 @@ private PrivateRootDisposition subsetActivate(scope ref PrivateBorrow!SubsetStat
 
 private void runSubset(AntFarm* farm, ActorAllocator allocator, ref Token token,
     ref ConsumerView view, string mode, size_t count, double duration, uint consumers,
-    size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus, uint percent)
+    size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus, uint percent,
+    uint rootHint)
 {
     auto kind = mode == "subset" ? SubsetKind.selected
         : mode == "subset-whole" ? SubsetKind.reservedWhole : SubsetKind.plainWhole;
@@ -520,7 +525,7 @@ private void runSubset(AntFarm* farm, ActorAllocator allocator, ref Token token,
         "subset root spawn failed");
     void pump()
     {
-        park.pump(token);
+        pumpRoot(park, token, batch, rootHint);
         if (consumers == 0) while (view.consumeNext()) {}
         else pause();
     }
@@ -598,6 +603,42 @@ private class Consumer
     }
 }
 
+// Root pump under the configured cost-hint policy: "auto" (the default)
+// passes no hint so the runtime derives one per table from its entry count
+// and the live consumer count; an explicit 0..5 keeps its literal
+// writeTracked meaning, which is how fixed-hint historical baselines
+// (root-hint=0) stay comparable across runtimes. The sentinel is local so
+// this source also builds against pre-derivation runtimes; it is never
+// passed to pump.
+private enum uint rootHintAuto = uint.max;
+
+size_t pumpRoot(Park)(Park park, ref Token token, size_t batchLimit, uint hint)
+{
+    return hint == rootHintAuto ? park.pump(token, batchLimit)
+        : park.pump(token, batchLimit, hint);
+}
+
+// Effective class a runtime publishes for a default-hint root table of
+// `count` entries at `consumers` live consumers. Derivation runtimes expose
+// rootCostHintFor; pre-derivation runtimes publish class 0 unconditionally.
+// The benchmark always creates its Farm with the default small-table
+// threshold.
+private uint autoRootHint(size_t count, uint consumers)
+{
+    // Derivation runtimes expose rootCostHintFor in antfarm; the selective
+    // top-level import would not build against pre-derivation runtimes, so
+    // probe and import it locally. Pre-derivation runtimes publish class 0
+    // unconditionally.
+    static if (__traits(compiles, { import antfarm : rootCostHintFor; }))
+    {
+        import antfarm : rootCostHintFor;
+        return rootCostHintFor(count, cast(ulong) consumers,
+            DEFAULT_SMALL_TABLE_THRESHOLD);
+    }
+    else
+        return 0;
+}
+
 private double elapsedSeconds(long ticks)
 {
     return cast(double) ticks / MonoTime.ticksPerSecond;
@@ -605,16 +646,16 @@ private double elapsedSeconds(long ticks)
 
 void main(string[] args)
 {
-    enforce(args.length >= 2 && args.length <= 12
+    enforce(args.length >= 2 && args.length <= 13
             && (args[1] == "private-tracked" || args[1] == "tree-cont" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100]");
+        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..5]");
     immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined"
         || args[1] == "tree-cancel";
     immutable subsetMode = args[1] == "subset" || args[1] == "subset-whole"
         || args[1] == "subset-whole-unreserved";
     immutable trackedMode = args[1] == "private-tracked";
-    immutable percent = args.length > 11 ? to!uint(args[11]) : 100;
-    enforce((subsetMode || args.length <= 11) && (percent == 1 || percent == 10 || percent == 100),
+    immutable percent = subsetMode && args.length > 11 ? to!uint(args[11]) : 100;
+    enforce(!subsetMode || args.length <= 11 || percent == 1 || percent == 10 || percent == 100,
         "subset-percent must be 1, 10 or 100, and is only for subset modes");
     immutable inboxMode = args[1] == "inbox";
     immutable waveMode = args[1] == "wave";
@@ -623,6 +664,18 @@ void main(string[] args)
     immutable privateMode = args[1] == "private" || remoteMode || dtorMode;
     immutable treeWaitMode = args[1] == "tree-wait";
     immutable treeMode = args[1] == "tree" || treeWaitMode;
+    // Root work-cost hint policy: the trailing argument after subset-percent.
+    // "auto" (default) publishes the runtime's derived hint; 0..5 pins the
+    // literal writeTracked class (root-hint=0 is the pre-G4 historical
+    // default, chunk 32).
+    immutable rootHintArg = args.length > (subsetMode ? 12 : 11)
+        ? args[subsetMode ? 12 : 11] : "auto";
+    uint rootHint = rootHintAuto;
+    if (rootHintArg != "auto")
+    {
+        rootHint = to!uint(rootHintArg);
+        enforce(rootHint <= MAX_AVG_COST, "root-hint must be auto or 0..5");
+    }
     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;
     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;
     immutable consumers = args.length > 4 ? to!uint(args[4]) : 0;
@@ -633,8 +686,10 @@ void main(string[] args)
     immutable allocatorName = args.length > 7 ? args[7] : defaultAllocator;
     enforce(count > 0 && count <= uint.max && isFinite(duration)
             && duration > 0 && consumers <= 64 && batch > 0
-            && (waveMode || privateMode || treeMode || foldTreeMode || trackedMode || batch <= 256),
-        "actors/seconds/batch must be positive; consumers must be 0..64; actor batch must be <=256");
+            && (waveMode || privateMode || treeMode || foldTreeMode || trackedMode || batch <= 256)
+            && ((privateMode || treeMode || foldTreeMode || trackedMode || subsetMode)
+                || args.length <= (subsetMode ? 12 : 11)),
+        "actors/seconds/batch must be positive; consumers must be 0..64; actor batch must be <=256; root-hint is only for private-family modes");
     ushort[] cpus;
     if (args.length > 8 && args[8] != "-")
     {
@@ -667,6 +722,22 @@ void main(string[] args)
         tier == Tier.small ? 1 : 0, tier == Tier.small ? quota : 0);
     enforce(farm !is null, "Farm allocation failed");
     writefln("batchLimit=%s tier=%s quota_words=%s", batch, tierName, quota);
+    // Effective root work-cost hint for this configuration's nominal first
+    // root table (subset roots publish one entry; tree-family roots publish
+    // min(batch, parents); private-family roots publish min(batch, actors)).
+    // With consumers=0 the controller's inline view is the one subscriber.
+    if (privateMode || treeMode || foldTreeMode || trackedMode || subsetMode)
+    {
+        immutable nominal = subsetMode ? 1
+            : treeMode || foldTreeMode
+                ? ((count - 1) / batch + 1 < batch ? (count - 1) / batch + 1 : batch)
+            : count < batch ? count : batch;
+        immutable hint = rootHint == rootHintAuto
+            ? autoRootHint(nominal, consumers ? consumers : 1) : rootHint;
+        immutable chunk = MAX_CHUNK >> hint;
+        writefln("root_hint=%s root_cost_hint=%s root_hint_table=%s root_hint_claims=%s",
+            rootHintArg, hint, nominal, (nominal + chunk - 1) / chunk);
+    }
     version (AntfarmMimallocV3)
         if (allocatorName != "crt") writefln("mimalloc_version=%s", mi_version());
     scope (exit) farm.destroy();
@@ -724,14 +795,14 @@ void main(string[] args)
     if (subsetMode)
     {
         runSubset(farm, allocator, token, view, args[1], count, duration, consumers,
-            batch, warmups, allocatorName, cpus, percent);
+            batch, warmups, allocatorName, cpus, percent, rootHint);
         return;
     }
 
     if (trackedMode)
     {
         runTracked(farm, allocator, token, view, args[1], completions, duration,
-            consumers, batch, warmups, allocatorName, cpus);
+            consumers, batch, warmups, allocatorName, cpus, rootHint);
         return;
     }
 
@@ -739,13 +810,13 @@ void main(string[] args)
     {
         if (args[1] == "tree-cancel")
             runCancelTree(farm, allocator, token, view, args[1], completions, duration,
-                consumers, batch, warmups, allocatorName, cpus);
+                consumers, batch, warmups, allocatorName, cpus, rootHint);
         else if (args[1] == "tree-cont")
             runFoldTree!true(farm, allocator, token, view, args[1], completions, duration,
-                consumers, batch, warmups, allocatorName, cpus);
+                consumers, batch, warmups, allocatorName, cpus, rootHint);
         else
             runFoldTree!false(farm, allocator, token, view, args[1], completions, duration,
-                consumers, batch, warmups, allocatorName, cpus);
+                consumers, batch, warmups, allocatorName, cpus, rootHint);
         return;
     }
 
@@ -786,9 +857,9 @@ void main(string[] args)
                 }
             while (privateMode ? (dtorMode ? dtorPark.live != 0 : remoteMode ? remotePark.live != 0 : park.live != 0) : (treeWaitMode ? waitingTrees.live != 0 : trees.live != 0))
             {
-                if (privateMode) { if (dtorMode) dtorPark.pump(token, batch); else if (remoteMode) remotePark.pump(token, batch); else park.pump(token, batch); }
-                else if (treeWaitMode) waitingTrees.pump(token);
-                else trees.pump(token);
+                if (privateMode) { if (dtorMode) pumpRoot(dtorPark, token, batch, rootHint); else if (remoteMode) pumpRoot(remotePark, token, batch, rootHint); else pumpRoot(park, token, batch, rootHint); }
+                else if (treeWaitMode) pumpRoot(waitingTrees, token, batch, rootHint);
+                else pumpRoot(trees, token, batch, rootHint);
                 consume();
                 enforce(MonoTime.currTime < deadline, "private lifecycle timed out");
             }

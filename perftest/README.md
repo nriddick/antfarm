@@ -297,6 +297,41 @@ host's 0..11 CPU layout; adapt placement when changing hosts.
 The private modes accept any positive batch size that fits allocation sizing.
 Optional final arguments select the Farm producer tier (`small` or `bulk`) and
 its quota in ulongs (default `small 16384`, preserving the historical setup).
+A final `subset-percent` (subset modes only) or `root-hint` argument follows.
+`root-hint` is `auto` (default) or a fixed class `0..5` published for every
+root table. Every private-family mode prints
+`root_hint=… root_cost_hint=… root_hint_table=… root_hint_claims=…` for its
+nominal first root table, where `root_cost_hint` is the derived class under
+`auto` or the pinned class otherwise.
+
+### Batch size versus work-cost hints
+
+The root batch limit and the root table's work-cost hint interact. Consumers
+claim a table in runs of `MAX_CHUNK >> hint` entries (32 at class 0), and a
+table below the small-table threshold is claimed wholesale by shard 0, so a
+root table of at most 32 entries published at class 0 runs on **one** worker
+no matter how many consumers exist. A large batch limit shrinks the number of
+parents a tree mode needs (`parents = ceil(actors / batch)`), so batch 1024
+with 16,384 actors publishes 16-entry root tables whose parent callbacks —
+each allocating a 1,024-child wave — all landed on one worker: tree/6 fell to
+about 18 Mleaf/s. `pump` therefore derives its default hint per table now
+(`rootCostHintFor`, see
+[PRIVATE_ACTORS.md](../actors/PRIVATE_ACTORS.md#work-cost-hints)): only
+wholesale (sub-threshold) root tables are reclassed, so a 16-entry root table
+at six consumers derives class 4 (runs of two), which restored about 83
+Mleaf/s in the G4 gate (see `results/perf-g4-*`). Tables at least the small
+table threshold wide keep class 0; reclassing those, too, measured +31% on
+tree/6 at the default batch but also shifted tree-cancel's dispatched work
+fraction, so it stays out of the default.
+
+Guidance: with the default derived hint, choose the batch for table overhead
+and latency as before; the derived hint removes the small-table single-claim
+pathology automatically. Pass an explicit `root-hint` only to pin scheduling
+behavior for comparability — `root-hint=0` reproduces the pre-G4 fixed class
+0 baseline, and the gate accepts `--root-hint` to run fixed-hint cells.
+Larger batches still concentrate parent allocation ownership on fewer
+callbacks; if parent callbacks are expensive, prefer more parents (smaller
+batch) over hint tuning.
 `private_lifecycle_matrix.py --suite batch` sweeps root batch limit × quota ×
 consumer count; `--suite child` checks inherited child limits. Both use five
 warmup cycles, five repetitions and three-second measurement windows by default.
@@ -332,7 +367,9 @@ attempt limit is twice the pair count. `--control` independently builds the
 base twice, sets candidate to base, and requires identical binary hashes.
 The Make target also accepts control mode without `CANDIDATE`:
 `make perf-gate BASE=CANDIDATE_SHA PERF_GATE_ARGS=--control`.
-Both options can be combined. For example:
+Both options can be combined. `--root-hint N` passes a fixed actor_churn
+root work-cost class to both builds (the default `auto` appends nothing and
+uses each runtime's derived default). For example:
 
 ```sh
 python3 perftest/perf_gate.py --base BASE_SHA --candidate CANDIDATE_SHA \
