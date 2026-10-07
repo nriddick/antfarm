@@ -8,7 +8,7 @@ module actor_churn;
 import actors;
 import antfarm : ConsumerView, MAX_CHUNK, MAX_AVG_COST,
     DEFAULT_SMALL_TABLE_THRESHOLD, fatal;
-import core.atomic : MemoryOrder, atomicLoad, atomicStore, pause;
+import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad, atomicStore, pause;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;
 import std.conv : to;
@@ -61,10 +61,59 @@ private void markThreadpoolThread() nothrow @nogc @system
         if (threadpoolRequested()) mi_thread_set_in_threadpool();
 }
 
+version (AntfarmMimallocV3)
+{
+    // Diagnostic allocator (never for timing): the mimalloc adapter plus a
+    // prefix holding the allocating thread, so it can count frees issued by a
+    // different thread than the allocation's. That is antfarm's cross-thread
+    // free traffic; mimalloc may still free locally or remotely depending on
+    // page ownership. The prefix changes size classes and adds shared counters.
+    private shared ulong countAllocations, countFrees, countCrossFrees, countCrossBytes;
+    private shared size_t countThreads;
+    private size_t countThread; // thread-local, assigned on first use
+
+    private size_t countingThread() nothrow @nogc @system
+    {
+        if (countThread == 0)
+            countThread = atomicFetchAdd!(MemoryOrder.raw)(countThreads, 1) + 1;
+        return countThread;
+    }
+
+    private size_t countingPrefix(size_t alignment) nothrow @nogc @system
+    {
+        return alignment > 16 ? alignment : 16;
+    }
+
+    private void* countingAllocate(void*, size_t bytes, size_t alignment) nothrow @nogc @system
+    {
+        immutable prefix = countingPrefix(alignment);
+        if (bytes > size_t.max - prefix) return null;
+        auto raw = cast(ubyte*) mimallocV3ActorAllocator().allocate(null, bytes + prefix, prefix);
+        if (raw is null) return null;
+        *cast(size_t*) raw = countingThread();
+        atomicFetchAdd!(MemoryOrder.raw)(countAllocations, 1);
+        return raw + prefix;
+    }
+
+    private void countingDeallocate(void*, void* memory, size_t bytes, size_t alignment)
+        nothrow @nogc @system
+    {
+        immutable prefix = countingPrefix(alignment);
+        auto raw = cast(ubyte*) memory - prefix;
+        atomicFetchAdd!(MemoryOrder.raw)(countFrees, 1);
+        if (*cast(size_t*) raw != countingThread())
+        {
+            atomicFetchAdd!(MemoryOrder.raw)(countCrossFrees, 1);
+            atomicFetchAdd!(MemoryOrder.raw)(countCrossBytes, bytes);
+        }
+        mimallocV3ActorAllocator().deallocate(null, raw, bytes + prefix, prefix);
+    }
+}
+
 // Peak resident set (VmHWM) and, in mimalloc builds, the effective values of
 // the screened options, printed once at exit. Option indices are mi_option_t
 // ordinals from the pinned v3.5.3 header.
-private void reportProcess()
+private void reportProcess(string allocatorName)
 {
     version (linux)
     {
@@ -79,6 +128,11 @@ private void reportProcess()
         writefln("mi_threadpool=%s mi_page_reclaim_on_free=%s mi_page_full_retain=%s mi_page_max_reclaim=%s mi_page_cross_thread_max_reclaim=%s",
             threadpoolRequested() ? 1 : 0, mi_option_get(35), mi_option_get(36),
             mi_option_get(41), mi_option_get(42));
+    version (AntfarmMimallocV3)
+        if (allocatorName == "mimalloc-count")
+            writefln("alloc_calls=%s free_calls=%s cross_thread_frees=%s cross_thread_free_bytes=%s",
+                atomicLoad(countAllocations), atomicLoad(countFrees),
+                atomicLoad(countCrossFrees), atomicLoad(countCrossBytes));
 }
 
 // Separate completion lines avoid one contended global callback counter.
@@ -154,20 +208,56 @@ private PrivateRootDisposition dtorActivate(scope ref PrivateBorrow!DtorState,
     return PrivateRootDisposition.finish;
 }
 
-private struct TreeState
+// Opt-in cohort slabs (`*-slab` modes). This source also builds against
+// runtimes without PrivateStateStorage; there the slab modes run perObject
+// cohorts and print storage=perObject, so a base/candidate gate on a slab mode
+// compares per-object (base) with slab (candidate) storage on one harness.
+static if (__traits(compiles, PrivateStateStorage.cohortSlab))
+{
+    enum slabSupported = true;
+    alias ChildPark(T, R, bool slab) = PrivateChildPark!(T, R,
+        slab ? PrivateStateStorage.cohortSlab : PrivateStateStorage.perObject);
+    ChildPark!(T, R, slab)* createCohort(T, R, bool slab)(scope ref PrivateContext context,
+        size_t capacity) nothrow @nogc @system
+    {
+        static if (slab)
+            return context.createChildren!(T, R, PrivateStateStorage.cohortSlab)(capacity,
+                PrivateCohortOptions(0, false), capacity * T.sizeof);
+        else
+            return context.createChildren!(T, R)(capacity);
+    }
+}
+else
+{
+    enum slabSupported = false;
+    alias ChildPark(T, R, bool slab) = PrivateChildPark!(T, R);
+    ChildPark!(T, R, slab)* createCohort(T, R, bool slab)(scope ref PrivateContext context,
+        size_t capacity) nothrow @nogc @system
+    {
+        return context.createChildren!(T, R)(capacity);
+    }
+}
+
+private string storageName(bool slab)
+{
+    return slab && slabSupported ? "cohortSlab" : "perObject";
+}
+
+private struct TreeState(bool slab = false)
 {
     Completion* completions;
     size_t count;
     ulong cycle;
-    PrivateChildPark!State* children;
+    ChildPark!(State, void, slab)* children;
 }
 
-private PrivateRootDisposition treeActivate(bool waitChildren)(scope ref PrivateBorrow!TreeState actor,
+private PrivateRootDisposition treeActivate(bool waitChildren, bool slab = false)(
+        scope ref PrivateBorrow!(TreeState!slab) actor,
         scope ref PrivateContext context) nothrow @nogc @system
 {
     if (actor.value.children is null)
     {
-        actor.value.children = context.createChildren!State(actor.value.count);
+        actor.value.children = createCohort!(State, void, slab)(context, actor.value.count);
         if (actor.value.children is null) fatal("child park allocation failed");
         foreach (i; 0 .. actor.value.count)
             if (actor.value.children.spawn(context,
@@ -183,12 +273,12 @@ private PrivateRootDisposition treeActivate(bool waitChildren)(scope ref Private
 }
 
 private enum foldFanout = 8;
-private struct FoldMid
+private struct FoldMid(bool slab)
 {
     Completion* completions;
     size_t count;
     ulong cycle;
-    PrivateChildPark!(State, ulong)* leaves;
+    ChildPark!(State, ulong, slab)* leaves;
 }
 private ulong foldLeaf(scope ref PrivateBorrow!State b, scope ref PrivateContext c)
     nothrow @nogc @system
@@ -196,10 +286,10 @@ private ulong foldLeaf(scope ref PrivateBorrow!State b, scope ref PrivateContext
     privateOperate(b, c);
     return b.value.cycle;
 }
-private void foldLaunch(scope ref PrivateBorrow!FoldMid b, scope ref PrivateContext c)
+private void foldLaunch(bool slab)(scope ref PrivateBorrow!(FoldMid!slab) b, scope ref PrivateContext c)
     nothrow @nogc @system
 {
-    b.value.leaves = c.createChildren!(State, ulong)(b.value.count);
+    b.value.leaves = createCohort!(State, ulong, slab)(c, b.value.count);
     if (b.value.leaves is null) fatal("fold leaf park allocation failed");
     foreach (i; 0 .. b.value.count)
         if (b.value.leaves.spawn(c, State(b.value.completions + i, b.value.cycle))
@@ -208,59 +298,59 @@ private void foldLaunch(scope ref PrivateBorrow!FoldMid b, scope ref PrivateCont
     if (b.value.leaves.startFinal!foldLeaf(c) != PrivateStartResult.started)
         fatal("fold leaf wave failed");
 }
-private ulong foldValue(scope ref PrivateBorrow!FoldMid b, scope ref PrivateContext c)
+private ulong foldValue(bool slab)(scope ref PrivateBorrow!(FoldMid!slab) b, scope ref PrivateContext c)
     nothrow @nogc @system
 {
     ulong sum;
     foreach (value; b.value.leaves.results(c)) sum += value;
     return sum;
 }
-private PrivateChildStep!ulong foldContinue(scope ref PrivateBorrow!FoldMid b,
+private PrivateChildStep!ulong foldContinue(bool slab)(scope ref PrivateBorrow!(FoldMid!slab) b,
     scope ref PrivateContext c) nothrow @nogc @system
 {
     if (b.value.leaves is null)
     {
-        foldLaunch(b, c);
+        foldLaunch!slab(b, c);
         return typeof(return).waitChildren();
     }
-    return typeof(return).done(foldValue(b, c));
+    return typeof(return).done(foldValue!slab(b, c));
 }
-private struct FoldRoot
+private struct FoldRoot(bool slab)
 {
     Completion* completions;
     size_t count;
     ulong cycle;
-    PrivateChildPark!(FoldMid, ulong)* mids;
+    ChildPark!(FoldMid!slab, ulong, slab)* mids;
     uint phase;
 }
-private PrivateRootDisposition foldRoot(bool continuation)(scope ref PrivateBorrow!FoldRoot b,
+private PrivateRootDisposition foldRoot(bool continuation, bool slab)(scope ref PrivateBorrow!(FoldRoot!slab) b,
     scope ref PrivateContext c) nothrow @nogc @system
 {
     if (b.value.phase++ == 0)
     {
         immutable mids = (b.value.count - 1) / foldFanout + 1;
-        b.value.mids = c.createChildren!(FoldMid, ulong)(mids);
+        b.value.mids = createCohort!(FoldMid!slab, ulong, slab)(c, mids);
         if (b.value.mids is null) fatal("fold middle park allocation failed");
         foreach (i; 0 .. mids)
         {
             immutable offset = i * foldFanout;
             immutable leaves = b.value.count - offset < foldFanout
                 ? b.value.count - offset : foldFanout;
-            if (b.value.mids.spawn(c, FoldMid(b.value.completions + offset, leaves,
+            if (b.value.mids.spawn(c, FoldMid!slab(b.value.completions + offset, leaves,
                     b.value.cycle)) != PrivateSpawnResult.spawned)
                 fatal("fold middle spawn failed");
         }
         static if (continuation)
-            auto started = b.value.mids.startFinal!foldContinue(c);
+            auto started = b.value.mids.startFinal!(foldContinue!slab)(c);
         else
-            auto started = b.value.mids.start!foldLaunch(c);
+            auto started = b.value.mids.start!(foldLaunch!slab)(c);
         if (started != PrivateStartResult.started) fatal("fold middle wave failed");
         return PrivateRootDisposition.waitChildren;
     }
     static if (!continuation)
         if (b.value.phase == 2)
         {
-            if (b.value.mids.startFinal!foldValue(c) != PrivateStartResult.started)
+            if (b.value.mids.startFinal!(foldValue!slab)(c) != PrivateStartResult.started)
                 fatal("fold result wave failed");
             return PrivateRootDisposition.waitChildren;
         }
@@ -270,14 +360,14 @@ private PrivateRootDisposition foldRoot(bool continuation)(scope ref PrivateBorr
     return PrivateRootDisposition.finish;
 }
 
-private void runFoldTree(bool continuation)(AntFarm* farm, ActorAllocator allocator,
+private void runFoldTree(bool continuation, bool slab = false)(AntFarm* farm, ActorAllocator allocator,
     ref Token token, ref ConsumerView view, string mode, Completion[] completions, double duration,
     uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
     uint rootHint)
 {
     immutable count = completions.length;
     immutable parents = (count - 1) / batch + 1;
-    auto park = PrivateRootPark!(FoldRoot, foldRoot!continuation).create(farm, parents, batch, allocator);
+    auto park = PrivateRootPark!(FoldRoot!slab, foldRoot!(continuation, slab)).create(farm, parents, batch, allocator);
     enforce(park !is null, "fold root park allocation failed");
     scope(exit) park.destroy();
     ulong cycle;
@@ -289,7 +379,7 @@ private void runFoldTree(bool continuation)(AntFarm* farm, ActorAllocator alloca
         {
             immutable offset = i * batch;
             immutable leaves = count - offset < batch ? count - offset : batch;
-            enforce(park.spawn(FoldRoot(completions.ptr + offset, leaves, cycle))
+            enforce(park.spawn(FoldRoot!slab(completions.ptr + offset, leaves, cycle))
                 == PrivateSpawnResult.spawned, "fold root spawn failed");
         }
         while (park.live != 0)
@@ -314,11 +404,158 @@ private void runFoldTree(bool continuation)(AntFarm* farm, ActorAllocator alloca
         elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
     } while (elapsed < duration);
     immutable leafCycles = cast(double) count * rounds;
-    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s allocator=%s hugePages=%s cpus=%s fanout=%s",
-        mode, count, consumers, batch, warmups, allocatorName, farm.usedLargePages, cpus, foldFanout);
+    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s allocator=%s hugePages=%s cpus=%s fanout=%s storage=%s",
+        mode, count, consumers, batch, warmups, allocatorName, farm.usedLargePages, cpus, foldFanout,
+        storageName(slab));
     writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f verified_actor_cycles=%s root_waves_per_cycle=%s",
         rounds, elapsed, leafCycles / elapsed / 1e6, elapsed * 1e9 / leafCycles,
         cycle * count, parents * (continuation ? 1 : 2));
+}
+
+// tree-slab / tree-wait-slab: the tree and tree-wait workloads with
+// cohortSlab children (perObject on runtimes without it). Same verification
+// and rate as tree; the parent's slab is reserved at create and freed when the
+// parent finishes.
+private void runTree(bool waitChildren, bool slab)(AntFarm* farm, ActorAllocator allocator,
+    ref Token token, ref ConsumerView view, string mode, Completion[] completions, double duration,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint rootHint)
+{
+    immutable count = completions.length;
+    immutable parents = (count - 1) / batch + 1;
+    auto park = PrivateRootPark!(TreeState!slab, treeActivate!(waitChildren, slab))
+        .create(farm, parents, batch, allocator);
+    enforce(park !is null, "private tree park allocation failed");
+    scope(exit) park.destroy();
+    ulong cycle;
+    void runCycle()
+    {
+        ++cycle;
+        auto deadline = MonoTime.currTime + 60.seconds;
+        foreach (i; 0 .. parents)
+        {
+            immutable offset = i * batch;
+            immutable children = count - offset < batch ? count - offset : batch;
+            enforce(park.spawn(TreeState!slab(completions.ptr + offset, children, cycle, null))
+                == PrivateSpawnResult.spawned, "private parent creation failed");
+        }
+        while (park.live != 0)
+        {
+            pumpRoot(park, token, batch, rootHint);
+            if (consumers == 0) while (view.consumeNext()) {}
+            else pause();
+            enforce(MonoTime.currTime < deadline, "private lifecycle timed out");
+        }
+        foreach (ref completion; completions)
+            enforce(atomicLoad!(MemoryOrder.acq)(completion.stamp) == cycle
+                && completion.calls == cycle, "private count mismatch");
+    }
+    foreach (_; 0 .. warmups) runCycle();
+    immutable start = MonoTime.currTime;
+    ulong rounds;
+    double elapsed;
+    do
+    {
+        runCycle();
+        ++rounds;
+        elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
+    } while (elapsed < duration);
+    immutable actorCycles = cast(double) count * rounds;
+    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s state=%s stateAlign=%s allocator=%s ringMiB=8 hugePages=%s cpus=%s storage=%s",
+        mode, count, consumers, batch, warmups, State.sizeof, State.alignof,
+        allocatorName, farm.usedLargePages, cpus, storageName(slab));
+    writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f cycles/s=%.2f",
+        rounds, elapsed, actorCycles / elapsed / 1e6, elapsed * 1e9 / actorCycles, rounds / elapsed);
+    writefln("verified_actor_cycles=%s extra_parents_per_cycle=%s retirement=children_consumer_free phases=overlap",
+        cycle * count, parents);
+}
+
+// tree-refill / tree-refill-slab: each parent creates one cohort and refills
+// it refillWaves times: spawn every member, startFinal, waitChildren, then
+// respawn into the slots the joined retiring wave released. One cohort
+// create/dispose (and, for slab storage, one slab allocation/free) serves
+// refillWaves full waves. The rate counts leaf lifetimes, including the
+// parents' creation and cohort setup/teardown.
+private enum refillWaves = 8;
+private struct RefillState(bool slab)
+{
+    Completion* completions;
+    size_t count;
+    ulong cycle;
+    uint wave;
+    ChildPark!(State, void, slab)* children;
+}
+private PrivateRootDisposition refillActivate(bool slab)(scope ref PrivateBorrow!(RefillState!slab) b,
+    scope ref PrivateContext c) nothrow @nogc @system
+{
+    with (b.value)
+    {
+        if (children is null)
+        {
+            children = createCohort!(State, void, slab)(c, count);
+            if (children is null) fatal("refill park allocation failed");
+        }
+        else if (++wave == refillWaves)
+            return PrivateRootDisposition.finish;
+        foreach (i; 0 .. count)
+            if (children.spawn(c, State(completions + i, cycle)) != PrivateSpawnResult.spawned)
+                fatal("refill child spawn failed");
+        if (children.startFinal!privateOperate(c) != PrivateStartResult.started)
+            fatal("refill wave failed");
+        return PrivateRootDisposition.waitChildren;
+    }
+}
+
+private void runRefill(bool slab)(AntFarm* farm, ActorAllocator allocator, ref Token token,
+    ref ConsumerView view, string mode, Completion[] completions, double duration,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint rootHint)
+{
+    immutable count = completions.length;
+    immutable parents = (count - 1) / batch + 1;
+    auto park = PrivateRootPark!(RefillState!slab, refillActivate!slab).create(farm, parents, batch, allocator);
+    enforce(park !is null, "refill root park allocation failed");
+    scope(exit) park.destroy();
+    ulong cycle;
+    void runCycle()
+    {
+        ++cycle;
+        auto deadline = MonoTime.currTime + 60.seconds;
+        foreach (i; 0 .. parents)
+        {
+            immutable offset = i * batch;
+            immutable leaves = count - offset < batch ? count - offset : batch;
+            enforce(park.spawn(RefillState!slab(completions.ptr + offset, leaves, cycle))
+                == PrivateSpawnResult.spawned, "refill root spawn failed");
+        }
+        while (park.live != 0)
+        {
+            pumpRoot(park, token, batch, rootHint);
+            if (consumers == 0) while (view.consumeNext()) {}
+            else pause();
+            enforce(MonoTime.currTime < deadline, "refill tree timed out");
+        }
+        foreach (ref completion; completions)
+            enforce(atomicLoad!(MemoryOrder.acq)(completion.stamp) == cycle
+                && completion.calls == cycle * refillWaves, "refill leaf count mismatch");
+    }
+    foreach (_; 0 .. warmups) runCycle();
+    immutable start = MonoTime.currTime;
+    ulong rounds;
+    double elapsed;
+    do
+    {
+        runCycle();
+        ++rounds;
+        elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
+    } while (elapsed < duration);
+    immutable leafCycles = cast(double) count * refillWaves * rounds;
+    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s allocator=%s hugePages=%s cpus=%s refill_waves=%s storage=%s",
+        mode, count, consumers, batch, warmups, allocatorName, farm.usedLargePages, cpus,
+        refillWaves, storageName(slab));
+    writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f verified_actor_cycles=%s cohorts_per_cycle=%s",
+        rounds, elapsed, leafCycles / elapsed / 1e6, elapsed * 1e9 / leafCycles,
+        cycle * count * refillWaves, parents);
 }
 
 // tree-cancel: each root retires its leaves with startFinal in eight tables.
@@ -689,10 +926,13 @@ void main(string[] args)
 {
     markThreadpoolThread();
     enforce(args.length >= 2 && args.length <= 13
-            && (args[1] == "private-tracked" || args[1] == "tree-cont" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..5]");
+            && (args[1] == "private-tracked" || args[1] == "tree-cont" || args[1] == "tree-slab" || args[1] == "tree-wait-slab" || args[1] == "tree-cont-slab" || args[1] == "tree-refill" || args[1] == "tree-refill-slab" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
+        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-slab|tree-wait-slab|tree-cont-slab|tree-refill|tree-refill-slab|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64|mimalloc-count] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..5]");
+    // Tree modes with their own run function, including the slab and refill
+    // variants.
     immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined"
-        || args[1] == "tree-cancel";
+        || args[1] == "tree-cancel" || args[1] == "tree-slab" || args[1] == "tree-wait-slab"
+        || args[1] == "tree-cont-slab" || args[1] == "tree-refill" || args[1] == "tree-refill-slab";
     immutable subsetMode = args[1] == "subset" || args[1] == "subset-whole"
         || args[1] == "subset-whole-unreserved";
     immutable trackedMode = args[1] == "private-tracked";
@@ -741,16 +981,18 @@ void main(string[] args)
         enforce(pinToLogicalProcessor(PinTarget(0, 0, cpus[0])),
             "controller CPU pin failed");
     }
-    scope (exit) reportProcess();
+    scope (exit) reportProcess(allocatorName);
     auto allocator = ActorAllocator.cRuntime();
     if (allocatorName != "crt")
     {
-        enforce(allocatorName == "mimalloc" || allocatorName == "mimalloc64",
-            "allocator must be crt, mimalloc, or mimalloc64");
+        enforce(allocatorName == "mimalloc" || allocatorName == "mimalloc64"
+                || allocatorName == "mimalloc-count",
+            "allocator must be crt, mimalloc, mimalloc64, or mimalloc-count");
         version (AntfarmMimallocV3)
-            allocator = allocatorName == "mimalloc"
-                ? mimallocV3ActorAllocator()
-                : ActorAllocator(null, &mimalloc64Allocate, &mimalloc64Deallocate);
+            allocator = allocatorName == "mimalloc" ? mimallocV3ActorAllocator()
+                : allocatorName == "mimalloc64"
+                    ? ActorAllocator(null, &mimalloc64Allocate, &mimalloc64Deallocate)
+                    : ActorAllocator(null, &countingAllocate, &countingDeallocate);
         else
             enforce(false, "mimalloc requires the actor_churn_mimalloc build");
     }
@@ -798,8 +1040,8 @@ void main(string[] args)
     scope(exit) if (remotePark !is null) remotePark.destroy();
     scope (exit) if (park !is null) park.destroy();
     immutable parents = (count - 1) / batch + 1;
-    auto trees = treeMode && !treeWaitMode ? PrivateRootPark!(TreeState, treeActivate!false).create(farm, parents, batch, allocator) : null;
-    auto waitingTrees = treeWaitMode ? PrivateRootPark!(TreeState, treeActivate!true).create(farm, parents, batch, allocator) : null;
+    auto trees = treeMode && !treeWaitMode ? PrivateRootPark!(TreeState!false, treeActivate!false).create(farm, parents, batch, allocator) : null;
+    auto waitingTrees = treeWaitMode ? PrivateRootPark!(TreeState!false, treeActivate!true).create(farm, parents, batch, allocator) : null;
     enforce(!treeMode || (treeWaitMode ? waitingTrees !is null : trees !is null), "private tree park allocation failed");
     scope (exit) if (trees !is null) trees.destroy();
     scope (exit) if (waitingTrees !is null) waitingTrees.destroy();
@@ -854,6 +1096,21 @@ void main(string[] args)
         if (args[1] == "tree-cancel")
             runCancelTree(farm, allocator, token, view, args[1], completions, duration,
                 consumers, batch, warmups, allocatorName, cpus, rootHint);
+        else if (args[1] == "tree-slab")
+            runTree!(false, true)(farm, allocator, token, view, args[1], completions, duration,
+                consumers, batch, warmups, allocatorName, cpus, rootHint);
+        else if (args[1] == "tree-wait-slab")
+            runTree!(true, true)(farm, allocator, token, view, args[1], completions, duration,
+                consumers, batch, warmups, allocatorName, cpus, rootHint);
+        else if (args[1] == "tree-cont-slab")
+            runFoldTree!(true, true)(farm, allocator, token, view, args[1], completions, duration,
+                consumers, batch, warmups, allocatorName, cpus, rootHint);
+        else if (args[1] == "tree-refill")
+            runRefill!false(farm, allocator, token, view, args[1], completions, duration,
+                consumers, batch, warmups, allocatorName, cpus, rootHint);
+        else if (args[1] == "tree-refill-slab")
+            runRefill!true(farm, allocator, token, view, args[1], completions, duration,
+                consumers, batch, warmups, allocatorName, cpus, rootHint);
         else if (args[1] == "tree-cont")
             runFoldTree!true(farm, allocator, token, view, args[1], completions, duration,
                 consumers, batch, warmups, allocatorName, cpus, rootHint);
@@ -894,7 +1151,7 @@ void main(string[] args)
                 {
                     immutable offset = i * batch;
                     immutable children = count - offset < batch ? count - offset : batch;
-                    auto initial = TreeState(completions.ptr + offset, children, cycle, null);
+                    auto initial = TreeState!false(completions.ptr + offset, children, cycle, null);
                     enforce((treeWaitMode ? waitingTrees.spawn(initial) : trees.spawn(initial)) == PrivateSpawnResult.spawned,
                         "private parent creation failed");
                 }

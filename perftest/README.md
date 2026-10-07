@@ -278,6 +278,20 @@ reported rate counts children; parent and cohort creation/free are included
 in elapsed time and reported separately as extra parents per cycle. This
 mode distributes creation across workers and changes allocation locality.
 
+`tree-slab`, `tree-wait-slab` and `tree-cont-slab` repeat `tree`, `tree-wait`
+and `tree-cont` with `PrivateStateStorage.cohortSlab` child cohorts, each
+capped at exactly `capacity * T.sizeof`. `tree-refill` and `tree-refill-slab`
+measure reuse: each parent creates one cohort and refills it eight times
+(spawn all, `startFinal`, `waitChildren`), so one cohort lifetime serves eight
+full waves. The rate counts leaf lifetimes. These modes print
+`storage=perObject|cohortSlab`. The source also builds against runtimes
+without `PrivateStateStorage`; there the slab modes run per-object cohorts. A
+base/candidate gate on a slab mode therefore compares per-object storage
+(base) with slab storage (candidate) on the same harness. The diagnostic
+allocator `mimalloc-count`, which is never used for timing, prefixes each
+allocation with its allocating thread. It prints
+`alloc_calls free_calls cross_thread_frees cross_thread_free_bytes` at exit.
+
 See [PRIVATE_LIFECYCLE.md](PRIVATE_LIFECYCLE.md) for paired measurements and
 [the ownership contract](../actors/PRIVATE_ACTORS.md). All modes can run
 in one binary with the same Farm and allocator. For example:
