@@ -367,3 +367,12 @@ contaminated attempts and cannot establish a pass.
 
 Gate decision and option tests run without builds or timing:
 `python3 -B -m unittest perftest/test_perf_gate.py`.
+
+### Known limitations
+
+The [2026-10-06 identical controls](results/perf-g1-2026-10-06/control-analysis.md)
+showed one-sided shifts even at 20 balanced pairs: dtor/0 −1.40% and
+subset1/0 +0.85%, both inside the −3% boundary. CPU contamination rules also
+retained large throughput outliers. A passing screen does not establish an
+unbiased effect estimate; keep matched controls and inspect order and drift
+before attributing small gains or losses to code.

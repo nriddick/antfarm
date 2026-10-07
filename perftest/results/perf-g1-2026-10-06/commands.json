@@ -1,0 +1,127 @@
+[
+  {
+    "run": "full-5",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--base",
+      "71e914c",
+      "--candidate",
+      "4682799",
+      "--benchmark-ref",
+      "71e914c",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--output",
+      "perftest/results/perf-g1-2026-10-06/full-5"
+    ]
+  },
+  {
+    "run": "boundary-0",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--base",
+      "71e914c",
+      "--candidate",
+      "4682799",
+      "--benchmark-ref",
+      "71e914c",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--boundary",
+      "--consumers",
+      "0",
+      "--modes",
+      "wave,inbox,tree-wait,subset,subset-whole-unreserved",
+      "--output",
+      "perftest/results/perf-g1-2026-10-06/boundary-0"
+    ]
+  },
+  {
+    "run": "boundary-6",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--base",
+      "71e914c",
+      "--candidate",
+      "4682799",
+      "--benchmark-ref",
+      "71e914c",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--boundary",
+      "--consumers",
+      "6",
+      "--modes",
+      "subset",
+      "--subset-percent",
+      "100",
+      "--output",
+      "perftest/results/perf-g1-2026-10-06/boundary-6"
+    ]
+  },
+  {
+    "run": "control-5",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--base",
+      "4682799",
+      "--control",
+      "--benchmark-ref",
+      "71e914c",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--output",
+      "perftest/results/perf-g1-2026-10-06/control-5"
+    ]
+  },
+  {
+    "run": "control-boundary-0",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--base",
+      "4682799",
+      "--control",
+      "--boundary",
+      "--benchmark-ref",
+      "71e914c",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--consumers",
+      "0",
+      "--modes",
+      "tree,tree-wait,dtor,subset",
+      "--subset-percent",
+      "1,10",
+      "--output",
+      "perftest/results/perf-g1-2026-10-06/control-boundary-0"
+    ]
+  },
+  {
+    "run": "control-boundary-6",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--base",
+      "4682799",
+      "--control",
+      "--boundary",
+      "--benchmark-ref",
+      "71e914c",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--consumers",
+      "6",
+      "--modes",
+      "tree-pipelined,subset",
+      "--subset-percent",
+      "100",
+      "--output",
+      "perftest/results/perf-g1-2026-10-06/control-boundary-6"
+    ]
+  }
+]
