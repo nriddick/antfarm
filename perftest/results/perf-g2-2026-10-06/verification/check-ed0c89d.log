@@ -1,0 +1,674 @@
+./scripts/check.sh
+==> dub test --compiler=ldc2
+    Starting Performing "unittest" build using ldc2 for x86_64.
+    Building antfarm ~master: building configuration [unittest]
+     Linking antfarm
+     Running antfarm 
+testMagicWrap OK
+testRingSizeUnits OK
+testArithmetic OK
+testSweptQuotaBalance OK
+testProducerLifecycleChurn OK
+testSingleThreaded OK
+testInputRangeWrite OK
+testPayloadRange OK
+testUniformRanges OK
+testSeparateRanges OK
+testConcurrent OK
+testWraparound OK
+testSubscriptionCap OK
+testChurn(3) OK
+testChurn(1) OK
+testBacklog OK
+testSpannedTables OK
+testSmallTableChurn OK
+testMultiSmallProducers OK
+testCrossFarmProvenance OK
+testActorWave OK
+testActorPayload OK
+testActorErasedAdapter OK
+testActorInbox OK
+PASS same-shard plain-write completion join
+ALL TESTS PASSED
+==> dub test --compiler=dmd
+    Starting Performing "unittest" build using dmd for x86_64.
+    Building antfarm ~master: building configuration [unittest]
+     Linking antfarm
+     Running antfarm 
+testMagicWrap OK
+testRingSizeUnits OK
+testArithmetic OK
+testSweptQuotaBalance OK
+testProducerLifecycleChurn OK
+testSingleThreaded OK
+testInputRangeWrite OK
+testPayloadRange OK
+testUniformRanges OK
+testSeparateRanges OK
+testConcurrent OK
+testWraparound OK
+testSubscriptionCap OK
+testChurn(3) OK
+testChurn(1) OK
+testBacklog OK
+testSpannedTables OK
+testSmallTableChurn OK
+testMultiSmallProducers OK
+testCrossFarmProvenance OK
+testActorWave OK
+testActorPayload OK
+testActorErasedAdapter OK
+testActorInbox OK
+PASS same-shard plain-write completion join
+ALL TESTS PASSED
+==> make SHELL=/usr/bin/bash run-farm-tsan
+make[1]: Entering directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree'
+ldc2 -fsanitize=thread -g -O1 -I. antfarm.d antfarm_allocation.d antfarm_templates.d actors/package.d actors/actor.d actors/wave.d actors/private_actor.d actors/mimalloc.d antfarm_test.d -of=antfarm_test_tsan
+./scripts/run-farm-tsan.sh
+testMagicWrap OK
+testRingSizeUnits OK
+testArithmetic OK
+testSweptQuotaBalance OK
+testProducerLifecycleChurn OK
+testSingleThreaded OK
+testInputRangeWrite OK
+testPayloadRange OK
+testUniformRanges OK
+testSeparateRanges OK
+testConcurrent OK
+testWraparound OK
+testSubscriptionCap OK
+testChurn(3) OK
+testChurn(1) OK
+testBacklog OK
+testSpannedTables OK
+testSmallTableChurn OK
+testMultiSmallProducers OK
+testCrossFarmProvenance OK
+testActorWave OK
+testActorPayload OK
+testActorErasedAdapter OK
+testActorInbox OK
+PASS same-shard plain-write completion join
+ALL TESTS PASSED
+make[1]: Leaving directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree'
+==> make SHELL=/usr/bin/bash -C actor_torture run run-dmd run-tsan
+make[1]: Entering directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actor_torture'
+ldc2 -g -O1 -d-version=AntfarmActorTestHooks -d-version=AntfarmMimallocV3 -d-version=AntfarmMimallocStub actor_torture.d ../antfarm.d ../antfarm_allocation.d ../antfarm_templates.d ../actors/package.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d ../actors/mimalloc.d -of=actor_torture
+./actor_torture
+actor deterministic interleavings OK
+actor node outcomes OK
+actor cancel-mode retirement OK
+actor completion-callback contract OK (callback may outlive finished)
+actor module-generation aggregate unload fence OK
+actor sustained contention: 32 rounds, 147456 messages OK
+actor ready handoff, backlog, and concurrent flushers OK
+actor free-slot failure and concurrent cross-thread reuse OK
+mimalloc v3 actor adapter contract OK
+ALL ACTOR TORTURE TESTS PASSED
+dmd -g -checkaction=context -version=AntfarmActorTestHooks -version=AntfarmMimallocV3 -version=AntfarmMimallocStub actor_torture.d ../antfarm.d ../antfarm_allocation.d ../antfarm_templates.d ../actors/package.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d ../actors/mimalloc.d -of=actor_torture_dmd
+./actor_torture_dmd
+actor deterministic interleavings OK
+actor node outcomes OK
+actor cancel-mode retirement OK
+actor completion-callback contract OK (callback may outlive finished)
+actor module-generation aggregate unload fence OK
+actor sustained contention: 32 rounds, 147456 messages OK
+actor ready handoff, backlog, and concurrent flushers OK
+actor free-slot failure and concurrent cross-thread reuse OK
+mimalloc v3 actor adapter contract OK
+ALL ACTOR TORTURE TESTS PASSED
+ldc2 -g -O1 -fsanitize=thread -d-version=TSan -d-version=AntfarmActorTestHooks -d-version=AntfarmMimallocV3 -d-version=AntfarmMimallocStub actor_torture.d ../antfarm.d ../antfarm_allocation.d ../antfarm_templates.d ../actors/package.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d ../actors/mimalloc.d -of=actor_torture_tsan
+TSAN_OPTIONS='history_size=7 halt_on_error=1' ./actor_torture_tsan
+actor deterministic interleavings OK
+actor node outcomes OK
+actor cancel-mode retirement OK
+actor completion-callback contract OK (callback may outlive finished)
+actor module-generation aggregate unload fence OK
+actor sustained contention: 4 rounds, 18432 messages OK
+actor ready handoff, backlog, and concurrent flushers OK
+actor free-slot failure and concurrent cross-thread reuse OK
+mimalloc v3 actor adapter contract OK
+ALL ACTOR TORTURE TESTS PASSED
+make[1]: Leaving directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/actor_torture'
+==> make SHELL=/usr/bin/bash -C review_torture run run-tsan
+make[1]: Entering directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/review_torture'
+./torture_tests
+antfarm fatal: payload Done out of range
+antfarm fatal: payload MaxCs out of range
+T01 write rejects >512 OK
+T16 producer completed OK
+T02 Done=512 exact OK
+antfarm fatal: table size overflow
+antfarm fatal: payload larger than this producer tier's Exi
+antfarm fatal: payload larger than this producer tier's Exi
+T17 fatal on wrap/unsizable/per-tier OK
+T18 trial 0: pre=96 post=1200 exp=1200 orphans=0 zeros=0 pulses=1
+T18 trial 1: pre=96 post=1200 exp=1200 orphans=0 zeros=0 pulses=1
+T18 trial 2: pre=96 post=1200 exp=1200 orphans=0 zeros=0 pulses=1
+T18 pure-churn OK
+T20 trial 0: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 1: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 2: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 3: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 4: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 5: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 6: confirmed=15 pulses=1 calls=10000/10000
+T20 trial 7: confirmed=15 pulses=0 calls=10000/10000
+T20 plant-confirmed-segment OK
+T21 payload content multilap OK Wt=1483908 laps=5.66
+T22 avgCost sharding exact OK
+T23 trial 0 OK Wt=793060
+T23 trial 1 OK Wt=792716
+T23 trial 2 OK Wt=790580
+T23 late attach under wrap OK
+T24 ns=9 OK Wt=728280
+T24 ns=11 OK Wt=728602
+T24 topology hang canary OK
+T25 single-shot claim contract and mixed-table exact execution OK
+T03 concurrent exact OK
+T04 many consumers two producers OK
+T05 zero-consumer gap OK
+T06 storm OK cycles=1618
+T07 small-table churn OK
+T08 spanning OK
+T09 slow MT bounds OK
+T10 caps OK
+T11 late sub multilap OK
+T12 no reexecution OK
+T13 create OK
+T14 K=4 OK
+T14 K=16 OK
+T15 wave consumers OK
+ALL TORTURE TESTS PASSED
+ldc2 -g -O1 -fsanitize=thread -d-version=TSan torture_common.d torture_tests.d ../antfarm.d ../antfarm_allocation.d ../antfarm_templates.d -of=torture_tests_tsan
+TSAN_OPTIONS='history_size=7 halt_on_error=1' ./torture_tests_tsan
+antfarm fatal: payload Done out of range
+antfarm fatal: payload MaxCs out of range
+T01 write rejects >512 OK
+T16 producer completed OK
+T02 Done=512 exact OK
+antfarm fatal: table size overflow
+antfarm fatal: payload larger than this producer tier's Exi
+antfarm fatal: payload larger than this producer tier's Exi
+T17 fatal on wrap/unsizable/per-tier OK
+T18 trial 0: pre=96 post=1200 exp=1200 orphans=0 zeros=0 pulses=1
+T18 trial 1: pre=96 post=1200 exp=1200 orphans=0 zeros=0 pulses=1
+T18 trial 2: pre=96 post=1200 exp=1200 orphans=0 zeros=0 pulses=1
+T18 pure-churn OK
+T20 trial 0: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 1: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 2: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 3: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 4: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 5: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 6: confirmed=15 pulses=0 calls=10000/10000
+T20 trial 7: confirmed=15 pulses=0 calls=10000/10000
+T20 plant-confirmed-segment OK
+T21 payload content multilap OK Wt=1483908 laps=5.66
+T22 avgCost sharding exact OK
+T23 trial 0 OK Wt=797576
+T23 trial 1 OK Wt=797832
+T23 trial 2 OK Wt=797384
+T23 late attach under wrap OK
+T24 ns=9 OK Wt=728280
+T24 ns=11 OK Wt=728602
+T24 topology hang canary OK
+T25 single-shot claim contract and mixed-table exact execution OK
+T03 concurrent exact OK
+T04 many consumers two producers OK
+T05 zero-consumer gap OK
+T06 storm OK cycles=1202
+T07 small-table churn OK
+T08 spanning OK
+T09 slow MT bounds OK
+T10 caps OK
+T11 late sub multilap OK
+T12 no reexecution OK
+T13 create OK
+T14 K=4 OK
+T14 K=16 OK
+T15 wave consumers OK
+ALL TORTURE TESTS PASSED
+make[1]: Leaving directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/review_torture'
+==> make SHELL=/usr/bin/bash -C private_actor_tests run run-dmd run-tsan doc-example death
+make[1]: Entering directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests'
+ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I.. main.d ../antfarm.d ../antfarm_allocation.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d -of=private_actor_tests
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests
+PASS private in-tree cancellation C1-C13
+torture: 3000 roots, 66504 actors, 7235 cancelled and 9451 truncated joined waves, 2663 with failures
+PASS private cancellation torture
+PASS private root tracking T1-T8
+tracked torture: 3000 roots (1344 completed, 893 failed, 763 cancelled, 289 by deadline; 14 cancelAll), 52792 actors, 7999 truncated joined waves
+PASS private tracked torture
+PASS private wave outcomes O1-O6 and O9
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle
+PASS child-large-cohort zero/partial admission, retry and three waves
+PASS child allocation failures, capacity overflow and reusable slot
+PASS mixed-table again/finish and early completion under both reclamation policies
+PASS refill-after-final and empty starts
+PASS delayed-final-credit authorized observation and immediate reuse/retirement
+PASS deterministic return-CAS retry and slot reuse
+PASS child completion before emitter seal and immediate reuse
+PASS depth64 transitive joins, retirement and allocation balance
+PASS ports-basic results lifecycle under both reclamation policies
+PASS ports-poll-visibility deterministic raw-barrier schedule
+PASS ports-wait-visibility before/after custody schedules with result reads
+PASS ports-late-tail results read and freed under a paused idle tail
+PASS ports-large-cohort 257/513/1025 members, child limits 1/64/256
+PASS ports-nested depth-3 pipelined reduction
+PASS ports-nested depth64 results
+PASS ports-alloc-fail cohort/entries/results failures and overflow
+PASS dtor-root exactly-once consumer destruction: finish, finishAfterChildren, never-dispatched members
+PASS dtor-child startFinal plain/result members destroyed on consumers after op and result
+PASS dtor-order depth-3 postorder across disposal, startFinal and finishAfterChildren
+PASS dtor-failed-spawn caller-side destruction for capacityFull/waveActive/allocationFailed
+PASS dtor-aligned align(32)/align(64) owning tokens: root and child capacityFull/allocationFailed exactly-once
+PASS dtor-moved-from per-spawn .init accounting and non-copyable owners via move
+PASS dtor-recursive non-POD chain destroyed deepest first
+PASS dtor-results slot written before ~T
+PASS dtor-gc rooted class references survive concurrent forced collection
+PASS subset-basic sparse/dense/full/repeated/void/whole waves, empty list, refill, both policies
+PASS subset-active start over an active wave returns waveActive without side effects
+PASS subset-large 1025 members, child limits 1/64/256, zero and partial quota admission
+PASS subset-nested subset wave joins its parent wave and the root's waitChildren
+PASS subset-alloc-fail one selection allocation, balanced failures
+PASS subset-dtor subset waves destroy no member; disposal and startFinal destroy all once
+PASS subset-late-tail new subset generation started under a paused idle tail
+PASS subset-limits options.batchLimit explicit and inherited
+PASS entry-word roots hold the Service, members read it through ChildBase at depth two
+PASS huge configured root limits and descriptor overflow
+PASS configured root and child limits, overflow and quota splitting
+PASS explicit child limit 7 emits 8 tables
+PASS inherited child limit 5 emits 10 grandchild tables
+PASS bounded FIFO progress
+PASS completion/free before publication returns, including nested waves
+PASS allocation failures
+PASS partial-prefix/zero-admission recovery
+PASS same-shard plain-write completion join
+PASS roots single thread, partial tables and reuse
+PASS roots one consumer, small batches
+PASS roots six consumers, ring reuse/backpressure
+PASS optional consumer-side root reclamation
+PASS nested waves, authority, retirement, allocation balance
+PASS four independent creators sharing the Farm
+dmd -g -version=AntfarmWriteAuditHooks -version=AntfarmActorTestHooks -I.. main.d ../antfarm.d ../antfarm_allocation.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d -of=private_actor_tests_dmd
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests_dmd
+PASS private in-tree cancellation C1-C13
+torture: 3000 roots, 61549 actors, 7004 cancelled and 9108 truncated joined waves, 2638 with failures
+PASS private cancellation torture
+PASS private root tracking T1-T8
+tracked torture: 3000 roots (1812 completed, 780 failed, 408 cancelled, 357 by deadline; 0 cancelAll), 53957 actors, 8215 truncated joined waves
+PASS private tracked torture
+PASS private wave outcomes O1-O6 and O9
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle
+PASS child-large-cohort zero/partial admission, retry and three waves
+PASS child allocation failures, capacity overflow and reusable slot
+PASS mixed-table again/finish and early completion under both reclamation policies
+PASS refill-after-final and empty starts
+PASS delayed-final-credit authorized observation and immediate reuse/retirement
+PASS deterministic return-CAS retry and slot reuse
+PASS child completion before emitter seal and immediate reuse
+PASS depth64 transitive joins, retirement and allocation balance
+PASS ports-basic results lifecycle under both reclamation policies
+PASS ports-poll-visibility deterministic raw-barrier schedule
+PASS ports-wait-visibility before/after custody schedules with result reads
+PASS ports-late-tail results read and freed under a paused idle tail
+PASS ports-large-cohort 257/513/1025 members, child limits 1/64/256
+PASS ports-nested depth-3 pipelined reduction
+PASS ports-nested depth64 results
+PASS ports-alloc-fail cohort/entries/results failures and overflow
+PASS dtor-root exactly-once consumer destruction: finish, finishAfterChildren, never-dispatched members
+PASS dtor-child startFinal plain/result members destroyed on consumers after op and result
+PASS dtor-order depth-3 postorder across disposal, startFinal and finishAfterChildren
+PASS dtor-failed-spawn caller-side destruction for capacityFull/waveActive/allocationFailed
+PASS dtor-aligned align(32)/align(64) owning tokens: root and child capacityFull/allocationFailed exactly-once
+PASS dtor-moved-from per-spawn .init accounting and non-copyable owners via move
+PASS dtor-recursive non-POD chain destroyed deepest first
+PASS dtor-results slot written before ~T
+PASS dtor-gc rooted class references survive concurrent forced collection
+PASS subset-basic sparse/dense/full/repeated/void/whole waves, empty list, refill, both policies
+PASS subset-active start over an active wave returns waveActive without side effects
+PASS subset-large 1025 members, child limits 1/64/256, zero and partial quota admission
+PASS subset-nested subset wave joins its parent wave and the root's waitChildren
+PASS subset-alloc-fail one selection allocation, balanced failures
+PASS subset-dtor subset waves destroy no member; disposal and startFinal destroy all once
+PASS subset-late-tail new subset generation started under a paused idle tail
+PASS subset-limits options.batchLimit explicit and inherited
+PASS entry-word roots hold the Service, members read it through ChildBase at depth two
+PASS huge configured root limits and descriptor overflow
+PASS configured root and child limits, overflow and quota splitting
+PASS explicit child limit 7 emits 8 tables
+PASS inherited child limit 5 emits 10 grandchild tables
+PASS bounded FIFO progress
+PASS completion/free before publication returns, including nested waves
+PASS allocation failures
+PASS partial-prefix/zero-admission recovery
+PASS same-shard plain-write completion join
+PASS roots single thread, partial tables and reuse
+PASS roots one consumer, small batches
+PASS roots six consumers, ring reuse/backpressure
+PASS optional consumer-side root reclamation
+PASS nested waves, authority, retirement, allocation balance
+PASS four independent creators sharing the Farm
+ldc2 -g -O1 -fsanitize=thread -d-version=TSan -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I.. main.d ../antfarm.d ../antfarm_allocation.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d -of=private_actor_tests_tsan
+ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 ./private_actor_tests_tsan
+PASS private in-tree cancellation C1-C13
+torture: 300 roots, 5418 actors, 627 cancelled and 853 truncated joined waves, 228 with failures
+PASS private cancellation torture
+PASS private root tracking T1-T8
+tracked torture: 300 roots (99 completed, 80 failed, 121 cancelled, 52 by deadline; 0 cancelAll), 4258 actors, 701 truncated joined waves
+PASS private tracked torture
+PASS private wave outcomes O1-O6 and O9
+PASS cont core, deterministic handoffs, results, admission, CAS and depth64 both policies
+PASS E1 waits, two direct cohorts/descendants, repeated/empty waves, both frees, cleanup, custody before/after and Batch recycle
+PASS child-large-cohort zero/partial admission, retry and three waves
+PASS child allocation failures, capacity overflow and reusable slot
+PASS mixed-table again/finish and early completion under both reclamation policies
+PASS refill-after-final and empty starts
+PASS delayed-final-credit authorized observation and immediate reuse/retirement
+PASS deterministic return-CAS retry and slot reuse
+PASS child completion before emitter seal and immediate reuse
+PASS depth64 transitive joins, retirement and allocation balance
+PASS ports-basic results lifecycle under both reclamation policies
+PASS ports-poll-visibility deterministic raw-barrier schedule
+PASS ports-wait-visibility before/after custody schedules with result reads
+PASS ports-late-tail results read and freed under a paused idle tail
+PASS ports-large-cohort 257/513/1025 members, child limits 1/64/256
+PASS ports-nested depth-3 pipelined reduction
+PASS ports-nested depth64 results
+PASS ports-alloc-fail cohort/entries/results failures and overflow
+PASS dtor-root exactly-once consumer destruction: finish, finishAfterChildren, never-dispatched members
+PASS dtor-child startFinal plain/result members destroyed on consumers after op and result
+PASS dtor-order depth-3 postorder across disposal, startFinal and finishAfterChildren
+PASS dtor-failed-spawn caller-side destruction for capacityFull/waveActive/allocationFailed
+PASS dtor-aligned align(32)/align(64) owning tokens: root and child capacityFull/allocationFailed exactly-once
+PASS dtor-moved-from per-spawn .init accounting and non-copyable owners via move
+PASS dtor-recursive non-POD chain destroyed deepest first
+PASS dtor-results slot written before ~T
+SKIP dtor-gc: druntime GC suspend signals are not TSan-clean
+PASS subset-basic sparse/dense/full/repeated/void/whole waves, empty list, refill, both policies
+PASS subset-active start over an active wave returns waveActive without side effects
+PASS subset-large 1025 members, child limits 1/64/256, zero and partial quota admission
+PASS subset-nested subset wave joins its parent wave and the root's waitChildren
+PASS subset-alloc-fail one selection allocation, balanced failures
+PASS subset-dtor subset waves destroy no member; disposal and startFinal destroy all once
+PASS subset-late-tail new subset generation started under a paused idle tail
+PASS subset-limits options.batchLimit explicit and inherited
+PASS entry-word roots hold the Service, members read it through ChildBase at depth two
+PASS huge configured root limits and descriptor overflow
+PASS configured root and child limits, overflow and quota splitting
+PASS explicit child limit 7 emits 8 tables
+PASS inherited child limit 5 emits 10 grandchild tables
+PASS bounded FIFO progress
+PASS completion/free before publication returns, including nested waves
+PASS allocation failures
+PASS partial-prefix/zero-admission recovery
+PASS same-shard plain-write completion join
+PASS roots single thread, partial tables and reuse
+PASS roots one consumer, small batches
+PASS roots six consumers, ring reuse/backpressure
+PASS optional consumer-side root reclamation
+PASS nested waves, authority, retirement, allocation balance
+PASS four independent creators sharing the Farm
+python3 extract_doc_examples.py
+for source in .doc-examples/*.d; do \
+	for compiler in ldc2 dmd; do \
+		for flags in -g -release; do \
+			$compiler $flags -I.. $source ../antfarm.d ../antfarm_allocation.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d -of=.doc-examples/example || exit $?; \
+			ANTFARM_HUGE_PAGES=0 ./.doc-examples/example || exit $?; \
+		done; \
+	done; \
+done
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+live=1 after spawn
+completed, cancelled, failed 404, deadline, cancelled at shutdown
+completed, cancelled, failed 404, deadline, cancelled at shutdown
+completed, cancelled, failed 404, deadline, cancelled at shutdown
+completed, cancelled, failed 404, deadline, cancelled at shutdown
+ldc2 -g -O1 -release -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I.. main.d ../antfarm.d ../antfarm_allocation.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d -of=private_actor_tests_release
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests death
+PASS fatal sample dies nonzero with expected stderr message
+PASS wrong-parent and default authority are fatal
+PASS ports early read, wrong-parent and default-context results are fatal
+PASS node death: oversize fail code, non-processing and repeated terminal calls are fatal
+PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal
+PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal
+PASS entry-word-death child service read is fatal in debug builds
+PASS invalid configured and per-call batch limits are fatal
+PASS destroy-live and finish-with-active-child are fatal
+PASS cross-Farm token write, flush, and unregister are fatal
+PASS E1 join counter exhaustion is fatal after the last legal retain
+PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths
+PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome
+PASS cancelPeers on a root and unauthorized cancellation are fatal
+PASS tracking-only API on untracked parks, invalid handles, untaken outcomes and generation wrap are fatal
+PASS debug reentrancy guard
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests death-negative-control
+PASS death negative control: survivor and wrong-message child rejected
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests_release death
+PASS fatal sample dies nonzero with expected stderr message
+PASS wrong-parent and default authority are fatal
+PASS ports early read, wrong-parent and default-context results are fatal
+PASS node death: oversize fail code, non-processing and repeated terminal calls are fatal
+PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal
+PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal
+PASS invalid configured and per-call batch limits are fatal
+PASS destroy-live and finish-with-active-child are fatal
+PASS cross-Farm token write, flush, and unregister are fatal
+PASS E1 join counter exhaustion is fatal after the last legal retain
+PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths
+PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome
+PASS cancelPeers on a root and unauthorized cancellation are fatal
+PASS tracking-only API on untracked parks, invalid handles, untaken outcomes and generation wrap are fatal
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests_release death-negative-control
+PASS death negative control: survivor and wrong-message child rejected
+dmd -g -release -version=AntfarmWriteAuditHooks -version=AntfarmActorTestHooks -I.. main.d ../antfarm.d ../antfarm_allocation.d ../actors/actor.d ../actors/wave.d ../actors/private_actor.d -of=private_actor_tests_dmd_release
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests_dmd death
+PASS fatal sample dies nonzero with expected stderr message
+PASS wrong-parent and default authority are fatal
+PASS ports early read, wrong-parent and default-context results are fatal
+PASS node death: oversize fail code, non-processing and repeated terminal calls are fatal
+PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal
+PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal
+PASS entry-word-death child service read is fatal in debug builds
+PASS invalid configured and per-call batch limits are fatal
+PASS destroy-live and finish-with-active-child are fatal
+PASS cross-Farm token write, flush, and unregister are fatal
+PASS E1 join counter exhaustion is fatal after the last legal retain
+PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths
+PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome
+PASS cancelPeers on a root and unauthorized cancellation are fatal
+PASS tracking-only API on untracked parks, invalid handles, untaken outcomes and generation wrap are fatal
+PASS debug reentrancy guard
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests_dmd death-negative-control
+PASS death negative control: survivor and wrong-message child rejected
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests_dmd_release death
+PASS fatal sample dies nonzero with expected stderr message
+PASS wrong-parent and default authority are fatal
+PASS ports early read, wrong-parent and default-context results are fatal
+PASS node death: oversize fail code, non-processing and repeated terminal calls are fatal
+PASS dtor death modes: destroy-live and active-child retirement run no destructor; debug failed-spawn reentry is fatal
+PASS subset duplicate, out-of-range, too-many, unreserved and wrong-parent are fatal
+PASS invalid configured and per-call batch limits are fatal
+PASS destroy-live and finish-with-active-child are fatal
+PASS cross-Farm token write, flush, and unregister are fatal
+PASS E1 join counter exhaustion is fatal after the last legal retain
+PASS cont counter exhaustion, suspended finish, and nonzero child service-word deaths
+PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome
+PASS cancelPeers on a root and unauthorized cancellation are fatal
+PASS tracking-only API on untracked parks, invalid handles, untaken outcomes and generation wrap are fatal
+ANTFARM_HUGE_PAGES=0 ./private_actor_tests_dmd_release death-negative-control
+PASS death negative control: survivor and wrong-message child rejected
+make[1]: Leaving directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/private_actor_tests'
+==> make SHELL=/usr/bin/bash -C examples check
+make[1]: Entering directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples'
+python3 run_examples.py
+==> ldc2 -g -i -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload
+==> ldc2 -O2 -release -i -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_release
+==> dmd -g -i -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_dmd
+==> dmd -O -release -i -I. /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/readme_payload_dmd_release
+==> ldc2 -g -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service 0
+public service: 36 ordered replies, balance=234, workers=0, closing-callback-count=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service 2
+public service: 36 ordered replies, balance=234, workers=2, closing-callback-count=0
+==> ldc2 -O2 -release -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_release 0
+public service: 36 ordered replies, balance=234, workers=0, closing-callback-count=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_release 2
+public service: 36 ordered replies, balance=234, workers=2, closing-callback-count=0
+==> dmd -g -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd 0
+public service: 36 ordered replies, balance=234, workers=0, closing-callback-count=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd 2
+public service: 36 ordered replies, balance=234, workers=2, closing-callback-count=0
+==> dmd -O -release -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd_release 0
+public service: 36 ordered replies, balance=234, workers=0, closing-callback-count=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_dmd_release 2
+public service: 36 ordered replies, balance=234, workers=2, closing-callback-count=0
+==> ldc2 -g -O1 -fsanitize=thread -i -I. -Iexamples examples/public_service.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_tsan
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_tsan 0
+public service: 36 ordered replies, balance=234, workers=0, closing-callback-count=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_service_tsan 2
+public service: 36 ordered replies, balance=234, workers=2, closing-callback-count=0
+==> ldc2 -g -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave 0
+public wave: two runtimes, hook joined after finished, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave 2
+public wave: two runtimes, hook joined after finished, workers=2
+==> ldc2 -O2 -release -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_release 0
+public wave: two runtimes, hook joined after finished, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_release 2
+public wave: two runtimes, hook joined after finished, workers=2
+==> dmd -g -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd 0
+public wave: two runtimes, hook joined after finished, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd 2
+public wave: two runtimes, hook joined after finished, workers=2
+==> dmd -O -release -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd_release 0
+public wave: two runtimes, hook joined after finished, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_dmd_release 2
+public wave: two runtimes, hook joined after finished, workers=2
+==> ldc2 -g -O1 -fsanitize=thread -i -I. -Iexamples examples/public_wave.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_tsan
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_tsan 0
+public wave: two runtimes, hook joined after finished, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/public_wave_tsan 2
+public wave: two runtimes, hook joined after finished, workers=2
+==> ldc2 -g -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree 0
+private tree: subset fold 40, root callbacks=2, workers=0, pumps publishing zero roots=6
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree 2
+private tree: subset fold 40, root callbacks=2, workers=2, pumps publishing zero roots=20
+==> ldc2 -O2 -release -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_release 0
+private tree: subset fold 40, root callbacks=2, workers=0, pumps publishing zero roots=6
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_release 2
+private tree: subset fold 40, root callbacks=2, workers=2, pumps publishing zero roots=24
+==> dmd -g -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd 0
+private tree: subset fold 40, root callbacks=2, workers=0, pumps publishing zero roots=6
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd 2
+private tree: subset fold 40, root callbacks=2, workers=2, pumps publishing zero roots=19
+==> dmd -O -release -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd_release 0
+private tree: subset fold 40, root callbacks=2, workers=0, pumps publishing zero roots=6
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_dmd_release 2
+private tree: subset fold 40, root callbacks=2, workers=2, pumps publishing zero roots=23
+==> ldc2 -g -O1 -fsanitize=thread -i -I. -Iexamples examples/private_tree.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_tsan
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_tsan 0
+private tree: subset fold 40, root callbacks=2, workers=0, pumps publishing zero roots=6
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/private_tree_tsan 2
+private tree: subset fold 40, root callbacks=2, workers=2, pumps publishing zero roots=134
+==> ldc2 -g -i -I. -Iexamples examples/request_deadline.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline 0
+request service: completed, failed 501, requested, deadline, cancelAll, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline 2
+request service: completed, failed 501, requested, deadline, cancelAll, workers=2
+==> ldc2 -O2 -release -i -I. -Iexamples examples/request_deadline.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_release 0
+request service: completed, failed 501, requested, deadline, cancelAll, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_release 2
+request service: completed, failed 501, requested, deadline, cancelAll, workers=2
+==> dmd -g -i -I. -Iexamples examples/request_deadline.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_dmd 0
+request service: completed, failed 501, requested, deadline, cancelAll, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_dmd 2
+request service: completed, failed 501, requested, deadline, cancelAll, workers=2
+==> dmd -O -release -i -I. -Iexamples examples/request_deadline.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_dmd_release 0
+request service: completed, failed 501, requested, deadline, cancelAll, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_dmd_release 2
+request service: completed, failed 501, requested, deadline, cancelAll, workers=2
+==> ldc2 -g -O1 -fsanitize=thread -i -I. -Iexamples examples/request_deadline.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_tsan
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_tsan 0
+request service: completed, failed 501, requested, deadline, cancelAll, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/request_deadline_tsan 2
+request service: completed, failed 501, requested, deadline, cancelAll, workers=2
+==> ldc2 -g -i -I. -Iexamples examples/fail_fast_fold.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold 0
+fail-fast fold: code=7, failures=1, dispatched=5/8, leaves run=5, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold 2
+fail-fast fold: code=7, failures=1, dispatched=5/8, leaves run=5, workers=2
+==> ldc2 -O2 -release -i -I. -Iexamples examples/fail_fast_fold.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_release 0
+fail-fast fold: code=7, failures=1, dispatched=5/8, leaves run=5, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_release 2
+fail-fast fold: code=7, failures=1, dispatched=6/8, leaves run=6, workers=2
+==> dmd -g -i -I. -Iexamples examples/fail_fast_fold.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_dmd 0
+fail-fast fold: code=7, failures=1, dispatched=5/8, leaves run=5, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_dmd 2
+fail-fast fold: code=7, failures=1, dispatched=6/8, leaves run=6, workers=2
+==> dmd -O -release -i -I. -Iexamples examples/fail_fast_fold.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_dmd_release 0
+fail-fast fold: code=7, failures=1, dispatched=5/8, leaves run=5, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_dmd_release 2
+fail-fast fold: code=7, failures=1, dispatched=5/8, leaves run=5, workers=2
+==> ldc2 -g -O1 -fsanitize=thread -i -I. -Iexamples examples/fail_fast_fold.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_tsan
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_tsan 0
+fail-fast fold: code=7, failures=1, dispatched=5/8, leaves run=5, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fail_fast_fold_tsan 2
+fail-fast fold: code=7, failures=1, dispatched=6/8, leaves run=6, workers=2
+==> ldc2 -g -i -I. -Iexamples -Ifibers/source -Ithreadpool/source examples/fiber_cancel_at.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at 0
+fiber cancelAt: sleeping fiber requested root cancellation, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at 2
+fiber cancelAt: sleeping fiber requested root cancellation, workers=2
+==> ldc2 -O2 -release -i -I. -Iexamples -Ifibers/source -Ithreadpool/source examples/fiber_cancel_at.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_release 0
+fiber cancelAt: sleeping fiber requested root cancellation, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_release 2
+fiber cancelAt: sleeping fiber requested root cancellation, workers=2
+==> dmd -g -i -I. -Iexamples -Ifibers/source -Ithreadpool/source examples/fiber_cancel_at.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_dmd
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_dmd 0
+fiber cancelAt: sleeping fiber requested root cancellation, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_dmd 2
+fiber cancelAt: sleeping fiber requested root cancellation, workers=2
+==> dmd -O -release -i -I. -Iexamples -Ifibers/source -Ithreadpool/source examples/fiber_cancel_at.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_dmd_release
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_dmd_release 0
+fiber cancelAt: sleeping fiber requested root cancellation, workers=0
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_dmd_release 2
+fiber cancelAt: sleeping fiber requested root cancellation, workers=2
+==> ldc2 -g -O1 -fsanitize=thread -i -I. -Iexamples -Ifibers/source -Ithreadpool/source examples/fiber_cancel_at.d -of=/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_tsan
+==> /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples/.build/fiber_cancel_at_tsan 0
+fiber cancelAt: sleeping fiber requested root cancellation, workers=0
+PASS actor examples
+make[1]: Leaving directory '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/examples'
+ALL CHECKS PASSED
+exit=0

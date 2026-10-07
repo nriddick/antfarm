@@ -1,0 +1,167 @@
+{
+ "D-M4-debug": {
+  "selector": "dtor-child",
+  "flags": "debug",
+  "status": -6,
+  "tail": [
+   "FAIL dtor-child final destroyed exactly once before the join:0"
+  ],
+  "seconds": 0.2
+ },
+ "D-M4-release": {
+  "selector": "dtor-child",
+  "flags": "-release",
+  "status": -6,
+  "tail": [
+   "FAIL dtor-child final destroyed exactly once before the join:0"
+  ],
+  "seconds": 0.2
+ },
+ "D-M4b-debug": {
+  "selector": "dtor-child",
+  "flags": "debug",
+  "status": -6,
+  "tail": [
+   "FAIL dtor-child non-final waves never destroy:0"
+  ],
+  "seconds": 0.2
+ },
+ "D-M4b-release": {
+  "selector": "dtor-child",
+  "flags": "-release",
+  "status": -6,
+  "tail": [
+   "FAIL dtor-child non-final waves never destroy:0"
+  ],
+  "seconds": 0.2
+ },
+ "D-M6-debug": {
+  "selector": "dtor-results",
+  "flags": "debug",
+  "status": -6,
+  "tail": [
+   "FAIL dtor-results slot written before ~T:0",
+   "FAIL dtor-results slot written before ~T:0"
+  ],
+  "seconds": 0.2
+ },
+ "D-M6-release": {
+  "selector": "dtor-results",
+  "flags": "-release",
+  "status": -6,
+  "tail": [
+   "FAIL dtor-results slot written before ~T:0",
+   "FAIL dtor-results slot written before ~T:0"
+  ],
+  "seconds": 0.2
+ },
+ "C2a-debug": {
+  "selector": "cancel-c2",
+  "flags": "debug",
+  "status": -6,
+  "tail": [
+   "FAIL c2 every member destroyed once:0"
+  ],
+  "seconds": 0.2
+ },
+ "C2a-release": {
+  "selector": "cancel-c2",
+  "flags": "-release",
+  "status": -6,
+  "tail": [
+   "FAIL c2 every member destroyed once:0"
+  ],
+  "seconds": 0.2
+ },
+ "C2b-debug": {
+  "selector": "cancel-c2",
+  "flags": "debug",
+  "status": -6,
+  "tail": [
+   "FAIL c2 destructors on consumers:0"
+  ],
+  "seconds": 0.2
+ },
+ "C2b-release": {
+  "selector": "cancel-c2",
+  "flags": "-release",
+  "status": -6,
+  "tail": [
+   "FAIL c2 destructors on consumers:0"
+  ],
+  "seconds": 0.2
+ },
+ "C3-debug": {
+  "selector": "cancel-c3",
+  "flags": "debug",
+  "status": -6,
+  "tail": [
+   "FAIL c3 drain:0"
+  ],
+  "seconds": 10.2
+ },
+ "C3-release": {
+  "selector": "cancel-c3",
+  "flags": "-release",
+  "status": -6,
+  "tail": [
+   "FAIL c3 drain:0"
+  ],
+  "seconds": 10.2
+ },
+ "keep-count-debug": {
+  "selector": "refill-after-final",
+  "flags": "debug",
+  "status": -6,
+  "tail": [
+   "FAIL post-final empty start:0"
+  ],
+  "seconds": 0.2
+ },
+ "keep-count-release": {
+  "selector": "refill-after-final",
+  "flags": "-release",
+  "status": -6,
+  "tail": [
+   "FAIL post-final empty start:0"
+  ],
+  "seconds": 0.2
+ },
+ "W1-swap-variant-debug": {
+  "selector": "dtor-child",
+  "flags": "debug",
+  "status": -6,
+  "tail": [
+   "antfarm fatal: wave retirement policy invariant",
+   "antfarm fatal: wave retirement policy invariant"
+  ],
+  "seconds": 0.2
+ },
+ "W1-swap-variant-release": {
+  "selector": "dtor-child",
+  "flags": "-release",
+  "status": -6,
+  "tail": [
+   "FAIL dtor-child non-final waves never destroy:0"
+  ],
+  "seconds": 0.2
+ },
+ "W2-cont-done-debug": {
+  "selector": "cont-final-retire",
+  "flags": "debug",
+  "status": -6,
+  "tail": [
+   "FAIL private_actor_tests/main.d:6793"
+  ],
+  "seconds": 0.2
+ },
+ "W2-cont-done-release": {
+  "selector": "cont-final-retire",
+  "flags": "-release",
+  "status": -6,
+  "tail": [
+   "FAIL private_actor_tests/main.d:6793"
+  ],
+  "seconds": 0.2
+ }
+}

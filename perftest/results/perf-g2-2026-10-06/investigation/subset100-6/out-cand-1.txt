@@ -1,0 +1,4 @@
+batchLimit=256 tier=small quota_words=16384
+mimalloc_version=30503
+mode=subset actors=16384 selected=16384 percent=100 consumers=6 batch=256 warmups=5 allocator=mimalloc hugePages=false cpus=[0, 1, 2, 3, 4, 5, 6] setup=excluded teardown=excluded
+rounds=16257 elapsed_s=3.000146 waves/s=5418.737166 Mselected_callbacks/s=88.780590 ns/wave=184544.84 verified_waves=16262

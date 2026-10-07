@@ -1,0 +1,11 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1974,7 +1974,7 @@
+                 else
+                     park.writeResult(entry - park.entries_, operation(borrow, context));
+             }
+-            if (retiring) retireMember!T(park.base_.service, entry);
++            if (retiring) { destroyState!T(entry); retireMember!T(park.base_.service, entry); }
+         }
+         return 1;
+     }

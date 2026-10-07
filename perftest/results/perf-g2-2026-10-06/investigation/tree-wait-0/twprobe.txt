@@ -1,0 +1,14 @@
+# twprobe.py 6 churn-base churn-cand (cand = superseded d30d286 port); console output transcribed verbatim.
+# userGHz = cycles:u / user CPU seconds; mhz0 = /proc/cpuinfo cpu0 samples every 0.2 s.
+churn-base  rate= 64.41 user=2.99s sys=0.011s userGHz=4.215 mhz0 med=4233 min=4167
+churn-cand  rate= 63.88 user=2.99s sys=0.011s userGHz=4.189 mhz0 med=4204 min=3449
+churn-cand  rate= 63.70 user=2.99s sys=0.010s userGHz=4.214 mhz0 med=4217 min=3444
+churn-base  rate= 64.30 user=2.99s sys=0.010s userGHz=4.150 mhz0 med=4167 min=3565
+churn-base  rate= 64.16 user=2.99s sys=0.010s userGHz=4.142 mhz0 med=4192 min=2391
+churn-cand  rate= 63.07 user=2.99s sys=0.009s userGHz=4.088 mhz0 med=4155 min=2391
+churn-cand  rate= 64.07 user=2.99s sys=0.011s userGHz=4.189 mhz0 med=4217 min=2391
+churn-base  rate= 63.81 user=2.99s sys=0.012s userGHz=4.074 mhz0 med=4054 min=3503
+churn-base  rate= 64.65 user=2.99s sys=0.012s userGHz=4.199 mhz0 med=4217 min=2391
+churn-cand  rate= 63.62 user=2.99s sys=0.012s userGHz=4.221 mhz0 med=4241 min=2391
+churn-cand  rate= 64.79 user=3.00s sys=0.010s userGHz=4.191 mhz0 med=4204 min=2391
+churn-base  rate= 64.67 user=2.99s sys=0.013s userGHz=4.207 mhz0 med=4217 min=2391

@@ -1,0 +1,10 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1843,7 +1843,6 @@
+             actorTestPoint(ActorTestPoint.privateEmitBeforeCancelCheck, null);
+         if (cursor_ >= dispatched_ || !scopeCancelled(wave)) return false;
+         dispatched_ = cursor_; // BEFORE the seal
+-        if (retire_) return false;
+         version (AntfarmActorTestHooks)
+             actorTestPoint(ActorTestPoint.privateTruncateBeforeSeal, null);
+         releaseWave(wave); // seal: last park access

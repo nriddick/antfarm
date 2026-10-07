@@ -1,0 +1,10 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1877,7 +1877,6 @@
+         immutable parentIsRoot = park.parentIsRoot_; // snapshots before final cohort access
+         static if (hasResults)
+             version (assert) park.checkResultsWritten();
+-        if (park.retire_) park.count_ = 0;
+         version (AntfarmActorTestHooks)
+             actorTestPoint(ActorTestPoint.privateWaveBeforeIdlePublish, null);
+         atomicStore!(MemoryOrder.rel)(wave.active, 0u); // last park access

@@ -1,0 +1,18 @@
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -1972,9 +1972,13 @@
+                 static if (subset)
+                     park.writeResult(park.sel_[park.capacity_ + (entry - park.entries_)], operation(borrow, context));
+                 else
+-                    park.writeResult(entry - park.entries_, operation(borrow, context));
++                {
++                    auto result = operation(borrow, context);
++                    if (retiring) retireMember!T(park.base_.service, entry);
++                    park.writeResult(entry - park.entries_, result);
++                }
+             }
+-            if (retiring) retireMember!T(park.base_.service, entry);
++            static if (kind == OpKind.plain || subset) if (retiring) retireMember!T(park.base_.service, entry);
+         }
+         return 1;
+     }

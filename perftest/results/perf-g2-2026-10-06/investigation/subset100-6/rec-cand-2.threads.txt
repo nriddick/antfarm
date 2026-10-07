@@ -1,0 +1,26 @@
+--- controller 930: 12.49 Gcyc
+   81.62% _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBroadcastRangeTS6actors13private_actor12SubsetBodiesVbi1ZQCoZQDkMFNbNiMQDjKSQEs5TokenkPSQFe19TableComp
+    7.40% __vdso_clock_gettime
+    5.20% _D4core4time__T12MonoTimeImplVEQBdQBb9ClockTypei0ZQBj8currTimeFNbNdNiNeZSQCtQCr__TQCpVQCei0ZQCz
+    1.53% _D6actors13private_actor__T15PrivateRootParkTS11actor_churn11SubsetStateS_DQBd14subsetActivateFNbNiMKSQDwQDs__T13PrivateBorrowTQDeZQuMKSQFeQFa14Privat
+    0.90% _D6actors13private_actor7Service4pumpMFNbNiKS7antfarm5TokenZv
+    0.90% _D4core4time__T12MonoTimeImplVEQBdQBb9ClockTypei0ZQBj5opCmpMxFNaNbNiNfSQCrQCp__TQCnVQCci0ZQCxZi
+    0.80% _D6actors13private_actor__T16PrivateChildParkTkTvZQx10emitSubsetFNbNiPSQCrQCn9EmittableKS7antfarm5TokenZb
+    0.57% _D11actor_churn9runSubsetFPS7antfarm7AntFarmS6actors5actor14ActorAllocatorKSQBw5TokenKSQCh12ConsumerViewAyamdkmmQiAxtkZ7runWaveMFZv
+    0.47% clock_gettime
+    0.37% _D7antfarm7AntFarm12requireTokenMFNbNiKSQBm5TokenZv
+    0.10% _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBroadcastRangeTS6actors13private_actor10RootBodiesVbi1ZQCmZQDiMFNbNiMQDhKSQEq5TokenkPSQFc19TableComple
+    0.03% [unknown]
+--- workers: 75.13 Gcyc
+   35.42% _D11actor_churn8Consumer3runMFZv
+   24.04% _D7antfarm12ConsumerView12processShardMFNbNiPOmmmmmmkkkbbZk
+   16.64% _D7antfarm12ConsumerView11consumeNextMFNbNiZb
+   14.19% _D7antfarm12ConsumerView20sweepCurrentPositionMFNbNiZv
+    4.12% _D6actors13private_actor__T16PrivateChildParkTkTvZQx__T8runChildS_D11actor_churn13subsetOperateFNbNiMKSQDxQDt__T13PrivateBorrowTkZQsMKSQFdQEz14Private
+    2.47% _D6actors13private_actor__T16PrivateChildParkTkTvZQx__T11startSubsetS_D11actor_churn13subsetOperateFNbNiMKSQEbQDx__T13PrivateBorrowTkZQsMKSQFhQFd14Pri
+    2.09% _D7antfarm12ConsumerView19sweepOldestTrailingMFNbNiZv
+    0.85% _D7antfarm12ConsumerView16tryReleaseOldestMFNbNiZv
+    0.05% _D7antfarm12ConsumerView7moveRefMFNbNikmZv
+    0.03% [unknown]
+    0.03% _D6actors13private_actor13waveCompletedFNbNiPvZv
+    0.03% _D7antfarm12ConsumerView10tertiaryMtMFNbNiPOmmmkkZv

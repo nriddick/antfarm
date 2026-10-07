@@ -1,0 +1,26 @@
+--- controller 864: 12.53 Gcyc
+   81.01% _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBroadcastRangeTS6actors13private_actor12SubsetBodiesVbi1ZQCoZQDkMFNbNiMQDjKSQEs5TokenkPSQFe19TableComp
+    7.20% __vdso_clock_gettime
+    5.54% _D4core4time__T12MonoTimeImplVEQBdQBb9ClockTypei0ZQBj8currTimeFNbNdNiNeZSQCtQCr__TQCpVQCei0ZQCz
+    1.83% _D6actors13private_actor__T15PrivateRootParkTS11actor_churn11SubsetStateS_DQBd14subsetActivateFNbNiMKSQDwQDs__T13PrivateBorrowTQDeZQuMKSQFeQFa14Privat
+    1.17% _D6actors13private_actor__T16PrivateChildParkTkTvZQx10emitSubsetFNbNiPSQCrQCn9EmittableKS7antfarm5TokenZb
+    0.93% _D6actors13private_actor7Service4pumpMFNbNiKS7antfarm5TokenZv
+    0.67% _D11actor_churn9runSubsetFPS7antfarm7AntFarmS6actors5actor14ActorAllocatorKSQBw5TokenKSQCh12ConsumerViewAyamdkmmQiAxtkZ7runWaveMFZv
+    0.53% clock_gettime
+    0.50% _D4core4time__T12MonoTimeImplVEQBdQBb9ClockTypei0ZQBj5opCmpMxFNaNbNiNfSQCrQCp__TQCnVQCci0ZQCxZi
+    0.20% _D7antfarm7AntFarm12requireTokenMFNbNiKSQBm5TokenZv
+    0.13% clock_gettime@plt
+    0.13% _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBroadcastRangeTS6actors13private_actor10RootBodiesVbi1ZQCmZQDiMFNbNiMQDhKSQEq5TokenkPSQFc19TableComple
+--- workers: 75.36 Gcyc
+   34.55% _D11actor_churn8Consumer3runMFZv
+   19.57% _D7antfarm12ConsumerView12processShardMFNbNiPOmmmmmmkkkbbZk
+   16.17% _D7antfarm12ConsumerView11consumeNextMFNbNiZb
+   14.16% _D7antfarm12ConsumerView20sweepCurrentPositionMFNbNiZv
+    9.85% _D6actors13private_actor__T16PrivateChildParkTkTvZQx__T8runChildS_D11actor_churn13subsetOperateFNbNiMKSQDxQDt__T13PrivateBorrowTkZQsMKSQFdQEz14Private
+    2.30% _D6actors13private_actor__T16PrivateChildParkTkTvZQx__T11startSubsetS_D11actor_churn13subsetOperateFNbNiMKSQEbQDx__T13PrivateBorrowTkZQsMKSQFhQFd14Pri
+    2.12% _D7antfarm12ConsumerView19sweepOldestTrailingMFNbNiZv
+    0.95% _D7antfarm12ConsumerView16tryReleaseOldestMFNbNiZv
+    0.07% [unknown]
+    0.07% _D7antfarm12ConsumerView10tertiaryMtMFNbNiPOmmmkkZv
+    0.06% _D6actors13private_actor13waveCompletedFNbNiPvZv
+    0.05% _D7antfarm12ConsumerView7moveRefMFNbNikmZv
