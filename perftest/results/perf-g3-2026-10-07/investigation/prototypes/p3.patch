@@ -1,0 +1,55 @@
+diff --git a/actors/private_actor.d b/actors/private_actor.d
+index 8ae3812..72dfd4e 100644
+--- a/actors/private_actor.d
++++ b/actors/private_actor.d
+@@ -350,19 +350,21 @@ private Service* rootService(Entry* entry, Wave* enclosing) nothrow @nogc @syste
+ 
+ private struct ChildBase
+ {
++    // First: the emitter's per-table credit RMW finds this line in no member's
++    // cache for the immutable words below, which members read per callback.
++    Wave wave;
+     ChildBase* next;
+     Entry* parent;
+     Service* service;
+     Entry* root; // immutable: the parent if it is a root, else the parent's cohort root
+-    Wave wave;
+     void function(ChildBase*) nothrow @nogc @system dispose;
+-    Emittable resume;
++    // Immutable: the root park keeps records. Beside root, which every
++    // cancellation check reads, so the untracked check never loads the Service.
++    bool tracked;
++    Emittable resume; // the emitter writes its link and FIFO on their own line
+     Entry* resumeHead, resumeTail;
+     size_t resumeCount;
+     bool resumeScheduled;
+-    // Immutable: the root park keeps records. Padding beside a line the emitter
+-    // already reads, so the untracked check never loads the shared Service.
+-    bool tracked;
+ 
+     static ChildBase* fromWave(Wave* wave) nothrow @nogc @system
+     {
+@@ -401,7 +403,9 @@ version (D_LP64)
+         && Wave.hook.offsetof == 40 && Wave.finish.offsetof == 56
+         && Wave.cancel.offsetof == 64 && Wave.firstFailureCode.offsetof == 68
+         && Wave.firstFailed.offsetof == 72);
+-    static assert(ChildBase.sizeof == 168);
++    static assert(ChildBase.wave.offsetof == 0 && ChildBase.service.offsetof == 96
++        && ChildBase.tracked.offsetof == 120 && ChildBase.resume.offsetof == 128);
++    static assert(ChildBase.sizeof == 176);
+ }
+ 
+ // Per-root record of a tracked park, parallel to its Entries. Only control
+diff --git a/private_actor_tests/main.d b/private_actor_tests/main.d
+index 05c30d0..f76216d 100644
+--- a/private_actor_tests/main.d
++++ b/private_actor_tests/main.d
+@@ -2682,7 +2682,7 @@ static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNo
+ // through the allocation sizes in portsAllocationFailures.
+ static if (size_t.sizeof == 8)
+ {
+-    static assert(PVoidCohort.sizeof == 376);
++    static assert(PVoidCohort.sizeof == 384); // G3: Wave first, resume on its own line (+8)
+     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
+     // Service.childReturns (E2-3) accounts for one word of both.
+     // E2-4 reserves 48 more bytes in ChildBase for the resume descriptor/FIFO.

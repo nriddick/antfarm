@@ -1,0 +1,6 @@
+{
+  "exit_status": 0,
+  "threshold": -0.03,
+  "unavailable": {},
+  "interpretation": "Bootstrap interval is descriptive. Paired-median interval threshold screen; individual pairs may fall below the threshold and still pass. Not a calibrated 95% confidence guarantee. Inconclusive is not pass. Legacy mean fields include all attempts; use quiet fields and decision. Run correctness separately before timing."
+}

@@ -1,0 +1,4 @@
+tree0/6: medA=10.562 medB=12.483 paired median=+18.54% min=+16.46% max=+19.28%
+tree-wait0/6: medA=11.106 medB=12.782 paired median=+15.81% min=+11.21% max=+19.24%
+tree-cont0/6: medA=10.214 medB=10.861 paired median=+6.02% min=+4.97% max=+9.60%
+private-remote0/6: medA=4.085 medB=4.264 paired median=+4.40% min=+2.74% max=+5.01%

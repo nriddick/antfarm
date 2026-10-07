@@ -657,3 +657,48 @@ Untracked modes stay within −5% of the F2 base after F3 moved the tracked
 tails out of line and gave cohorts an immutable tracked flag. Results,
 including the escalated pre-fix regression and its bisect, are in
 [the F3 results](results/private-root-tracking-2026-10-06/).
+
+## G3 cache-line placement — negative result (2026-10-07)
+
+G3 looked for six-consumer drift caused by false sharing or allocation
+placement in root parks, Service, cohorts and Wave. No runtime change landed.
+Raw data, scripts, prototypes and the gate are in
+[the G3 results](results/perf-g3-2026-10-07/README.md).
+
+- **Where the drift is.** IBS, and so `perf c2c`, is unavailable on this host.
+  Zen 3 coherence events (`r0243` int-cache fills, `r0860` change-to-X)
+  combined with an address probe point to:
+  - mimalloc remote free for tree/6 and private-remote/6, at about 54% of
+    fills;
+  - Entry/state/completion handoffs for private/6;
+  - per-slot `lifecycle` CAS and the Farm writer for actor/6 and wave/6.
+
+  These are true sharing or allocator costs, not metadata false sharing. The
+  only contended metadata line is the root park's Service queue line in
+  tree-cont/tree-pipelined: consumer CASes on `incoming` and `childReturns`.
+- **Do not pad the queue line apart from the read-only fields.** P1a
+  (`align(64)` on `incoming`, with the read-only fields alone on their own
+  line) cost tree-cont/6 −6.70% and tree-pipelined/6 −6.85%. These modes are
+  controller-bound. Cheaper consumers poll the ring harder, which raises the
+  Farm writer's share of the controller from 53.8% to 56.6%. The audit's
+  broad padding (−6.10%) lost for the same reason.
+- **The root park's good layout is placement luck.** Under default mimalloc
+  the 200-byte park lands at 32 mod 64, keeping the consumer-read allocator
+  apart from the queues. Under the default C-runtime allocator or mimalloc64
+  it lands at 0 mod 64, and the allocator shares a line with batchLimit,
+  incoming, waiting and rootReturns (E1's layout). Fixing that line
+  regardless of address (P1d, root park 200 → 256 B) gained tree/6 +18.5%
+  (CRT) and +13.6% (mimalloc64) in six-pair screens. The CRT baseline is
+  only about 10.6 M/s, against about 54 M/s under mimalloc.
+- **P1d still failed the default-mimalloc gate.** Instruction counts are
+  unchanged, but IPC fell. The drop coincides with the park's hot fields
+  moving past offset 127 (4-byte displacements) and the resulting code-layout
+  shifts; the subset mechanism was not isolated. Failing or inconclusive
+  zero-consumer cells: subset/0 −13…−16% and whole/0 −10% (byte-identical
+  controls ≤ |3.1|%), tree/0 −4.09%, actor/0 −3.04%. tree/6 −1.87% passed,
+  within the boundary. A future fix should keep the hot emitter fields within
+  127 bytes, or the cost must be paid for elsewhere, and must be screened
+  under CRT, mimalloc64 and default mimalloc.
+- Reordering cohort fields (P2) and putting `Wave` first in `ChildBase` (P3)
+  had no robust effect. P3's −1.99% on private/6, which never touches a
+  cohort, shows the size of code-placement noise.

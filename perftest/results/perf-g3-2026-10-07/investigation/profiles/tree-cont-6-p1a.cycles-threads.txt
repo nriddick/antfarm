@@ -1,0 +1,26 @@
+--- controller 5879: 12.55 Gcyc
+   56.55% _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBroadcastRangeTS6actors13private_actor11ChildBodiesVbi1ZQCnZQDjMFNbNiMQDiKSQEr5TokenkPSQFd19TableCompl
+   16.70% _D6actors13private_actor__T16PrivateChildParkTS11actor_churn5StateTmZQBq4emitFNbNiPSQDeQDa9EmittableKS7antfarm5TokenZb
+   12.20% _D6actors13private_actor7Service4pumpMFNbNiKS7antfarm5TokenZv
+    5.66% _D7antfarm7AntFarm__T9writeImplTSQBf__T21PayloadBroadcastRangeTS6actors13private_actor12ResumeBodiesVbi1ZQCoZQDkMFNbNiMQDjKSQEs5TokenkPSQFe19TableComp
+    2.38% _D11actor_churn__T11runFoldTreeVbi1ZQsFPS7antfarm7AntFarmS6actors5actor14ActorAllocatorKSQBw5TokenKSQCh12ConsumerViewAyaASQEq10CompletiondkmmQyAxtZ8ru
+    1.87% _D7antfarm7AntFarm12requireTokenMFNbNiKSQBm5TokenZv
+    0.93% _D6actors13private_actor__T16PrivateChildParkTS11actor_churn7FoldMidTmZQBs10emitResumeFNbNiPSQDnQDj9EmittableKS7antfarm5TokenZb
+    0.73% _D7antfarm16tableSizeCheckedFNbNimmmmZm
+    0.63% _D6actors13private_actor__T16PrivateChildParkTS11actor_churn7FoldMidTmZQBs4emitFNbNiPSQDgQDc9EmittableKS7antfarm5TokenZb
+    0.53% _D6actors13private_actor__T15PrivateRootParkTS11actor_churn8FoldRootS_DQz__T8foldRootVbi1ZQoFNbNiMKSQDuQDq__T13PrivateBorrowTQDcZQuMKSQFcQEy14PrivateC
+    0.49% __vdso_clock_gettime
+    0.47% _D4core4time__T12MonoTimeImplVEQBdQBb9ClockTypei0ZQBj8currTimeFNbNdNiNeZSQCtQCr__TQCpVQCei0ZQCz
+--- workers: 75.47 Gcyc
+   22.32% _D7antfarm12ConsumerView11consumeNextMFNbNiZb
+   19.80% _D7antfarm12ConsumerView12processShardMFNbNiPOmmmmmmkkkbbZk
+   12.26% mi_free_size_aligned
+    9.44% _D7antfarm12ConsumerView20sweepCurrentPositionMFNbNiZv
+    6.93% _D11actor_churn8Consumer3runMFZv
+    6.71% _D6actors13private_actor__T16PrivateChildParkTS11actor_churn5StateTmZQBq__T8runChildS_DQBo8foldLeafFNbNiMKSQEbQDx__T13PrivateBorrowTQDiZQuMKSQFjQFf14P
+    3.36% mi_page_queue_find_free_ex.constprop.0
+    3.32% _mi_page_malloc_zero
+    2.30% _D6actors13private_actor__T16PrivateChildParkTS11actor_churn7FoldMidTmZQBs__T8runChildS_DQBq12foldContinueFNbNiMKSQEiQEe__T13PrivateBorrowTQDpZQuMKSQF
+    2.29% _D6actors13private_actor__T16PrivateChildParkTS11actor_churn5StateTmZQBq11publishWaveMFNbNiMKSQDoQDk14PrivateContextZv
+    1.95% _D6actors13private_actor13releaseMemberFNbNiPSQBsQBo5EntryZv
+    1.51% _D7antfarm12ConsumerView19sweepOldestTrailingMFNbNiZv

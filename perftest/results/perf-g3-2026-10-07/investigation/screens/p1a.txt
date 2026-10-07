@@ -1,0 +1,9 @@
+tree-cont0/6: medA=31.599 medB=29.462 paired median=-6.70% min=-8.84% max=-4.00%
+tree0/6: medA=54.569 medB=54.623 paired median=+0.15% min=-1.13% max=+1.04%
+tree-wait0/6: medA=54.202 medB=54.223 paired median=-0.07% min=-0.37% max=+0.34%
+tree-pipelined0/6: medA=31.843 medB=29.648 paired median=-6.85% min=-7.66% max=-6.27%
+private-remote0/6: medA=14.408 medB=14.257 paired median=-1.28% min=-1.50% max=-0.44%
+private0/6: medA=22.847 medB=22.765 paired median=-0.30% min=-0.96% max=-0.22%
+subset100/6: medA=92.458 medB=91.309 paired median=-0.45% min=-6.11% max=+4.67%
+tree-cont0/0: medA=25.542 medB=26.052 paired median=+1.89% min=+1.30% max=+2.36%
+private0/0: medA=31.529 medB=31.571 paired median=+0.17% min=-0.49% max=+0.56%

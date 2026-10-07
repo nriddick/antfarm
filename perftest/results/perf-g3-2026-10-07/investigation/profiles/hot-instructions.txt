@@ -1,0 +1,79 @@
+### tree-cont/6 publishWave (Service.incoming CAS)
+total=48031 sym=3676 (7.7%)
+ 33.60% +98: mov    0x28(%rdx),%rax | mov    %rax,0x20(%rdi) | lock cmpxchg %rcx,0x28(%rdx) | je     2a06f 
+ 30.88% +8e: lea    0x20(%rdi),%rcx | mov    0x10(%rdi),%rdx | mov    0x28(%rdx),%rax | mov    %rax,0x20(%rdi)
+ 22.71% +ad: mov    0x28(%rdx),%rax | mov    %rax,(%rcx) | lock cmpxchg %rcx,0x28(%rdx) | jne    2a060 
+  6.07% +a4: je     2a06f  | nopw   0x0(%rax,%rax,1) | mov    0x28(%rdx),%rax | mov    %rax,(%rcx)
+  3.92% +80: je     2a071  | lea    0x1(%rax),%edx | lock cmpxchg %edx,0x14(%rcx) | jne    2a030 
+  0.92% +a0: lock cmpxchg %rcx,0x28(%rdx) | je     2a06f  | nopw   0x0(%rax,%rax,1) | mov    0x28(%rdx),%rax
+### tree-cont/6 releaseMember (Service.childReturns CAS)
+total=48031 sym=2049 (4.3%)
+ 38.51% +4e: mov    0x40(%rcx),%rax | mov    %rax,0x18(%rdi) | lock cmpxchg %rdi,0x40(%rcx) | jne    28c70 
+ 33.67% +44: mov    -0x10(%rax),%rcx | nop | mov    0x40(%rcx),%rax | mov    %rax,0x18(%rdi)
+ 20.55% +b: push   %rax | mov    $0xffffffff,%eax | lock xadd %eax,0x14(%rdi) | cmp    $0x1,%eax
+  1.66% +3f: jne    28ccb  | mov    0x20(%rdi),%rax | mov    -0x10(%rax),%rcx | nop
+  1.37% +48: nop | mov    0x40(%rcx),%rax | mov    %rax,0x18(%rdi) | lock cmpxchg %rdi,0x40(%rcx)
+  1.32% +e: mov    $0xffffffff,%eax | lock xadd %eax,0x14(%rdi) | cmp    $0x1,%eax | je     28c55 
+### tree-cont/6 cohort emit (wave.pending RMW)
+total=83655 sym=7566 (9.0%)
+ 41.41% +14a: shl    $0x3,%rsi | add    0x88(%rbx),%rsi | lock incq 0x10(%rbx) | cmpq   $0x0,0x30(%rbx)
+ 21.28% +210: lea    0xa0(%rsp),%rsi | mov    $0x14,%ecx | mov    %rsp,%rdi | rep movsq (%rsi),(%rdi)
+  7.51% +276: jmp    29d0c  | mov    $0xffffffffffffffff,%rcx | lock xadd %rcx,0x10(%rbx) | cmp    $0x1,%rcx
+  6.74% +19: mov    %rsi,%r14 | mov    %rdi,%rbx | mov    0xa0(%rdi),%rax | cmp    0xb8(%rdi),%rax
+  3.33% +0: push   %r15
+  2.75% +192: mov    %rsi,0xa8(%rsp) | movq   $0x0,0xb0(%rsp) | xorps  %xmm0,%xmm0 | movups %xmm0,0xc8(%rsp)
+### subset100/6 selected runChild (entry.enclosing, retire_)
+total=15486 sym=3445 (22.2%)
+ 39.48% +8: push   %r14 | push   %rbx | mov    (%rdx),%rbx | mov    0x20(%rbx),%rax
+ 20.49% +c: push   %rbx | mov    (%rdx),%rbx | mov    0x20(%rbx),%rax | cmpb   $0x1,0xc0(%rax)
+ 15.76% +4: push   %r15 | push   %r14 | push   %rbx
+ 15.47% +13: mov    (%rdx),%rbx | mov    0x20(%rbx),%rax | cmpb   $0x1,0xc0(%rax) | jne    2e67f 
+  3.05% +7f: mov    $0x4,%ecx | call   *0x18(%r14) | movq   $0x0,(%rbx) | mov    $0x1,%eax
+  1.13% +0: push   %r15
+### tree/6 runChild privateOperate
+total=29071 sym=2945 (10.1%)
+ 47.23% +12: mov    (%rbx),%rax | mov    0x20(%rbx),%rcx | mov    (%rax),%rdx | incq   0x8(%rdx)
+ 18.20% +16: mov    0x20(%rbx),%rcx | mov    (%rax),%rdx | incq   0x8(%rdx) | mov    0x8(%rax),%rax
+ 10.83% +4: push   %r15 | push   %r14 | push   %rbx
+  5.30% +b: push   %rbx | mov    (%rdx),%rbx | mov    (%rbx),%rax | mov    0x20(%rbx),%rcx
+  3.77% +88: mov    $0x10,%edx | mov    $0x8,%ecx | call   *0x18(%r14) | movq   $0x0,(%rbx)
+  2.31% +1d: incq   0x8(%rdx) | mov    0x8(%rax),%rax | mov    %rax,(%rdx) | mov    -0x10(%rcx),%r14
+  2.14% +1a: mov    (%rax),%rdx | incq   0x8(%rdx) | mov    0x8(%rax),%rax | mov    %rax,(%rdx)
+  1.32% +36: nopl   0x0(%rax,%rax,1) | mov    (%rcx),%rcx | test   %rcx,%rcx | je     32210 
+### private/6 runRoot
+total=17032 sym=3695 (21.7%)
+ 26.06% +8: push   %rbx | mov    (%rdx),%rax | cmpb   $0x0,0x22(%rax) | jne    3038b 
+ 23.25% +14: mov    (%rax),%rcx | mov    (%rcx),%rdx | incq   0x8(%rdx) | mov    0x8(%rcx),%rcx
+ 20.35% +0: push   %rbx
+  6.01% +d: cmpb   $0x0,0x22(%rax) | jne    3038b  | mov    (%rax),%rcx | mov    (%rcx),%rdx
+  5.74% +1b: incq   0x8(%rdx) | mov    0x8(%rcx),%rcx | mov    %rcx,(%rdx) | movb   $0x1,0x20(%rax)
+  4.95% +5a: call   27a80  | mov    (%rax),%rdi | movq   $0x0,(%rax) | test   %rdi,%rdi
+### private/6 collectCompletedImpl
+total=17032 sym=2581 (15.2%)
+ 69.51% +d2: je     2fe40  | mov    0x0(%rbp,%r12,8),%r14 | movzbl 0x20(%r14),%eax | test   %al,%al
+  9.22% +e4: cmpb   $0x0,0x21(%r14) | jne    2fe80  | mov    (%r14),%rsi | test   %rsi,%rsi
+  8.41% +17d: jmp    2fea0  | mov    0x70(%rbx),%rax | mov    %rax,0x18(%r14) | mov    %r14,0x70(%rbx)
+  2.25% +185: mov    %rax,0x18(%r14) | mov    %r14,0x70(%rbx) | decq   0x68(%rbx) | jmp    2fea0 
+### actor/6 ActorRuntime.enter (slot lifecycle CAS)
+total=24192 sym=9012 (37.3%)
+ 66.63% +66: and    $0x28,%r10d | or     %r9,%r10 | lock cmpxchg %r10,(%rsi) | je     37c95 
+ 14.86% +255: or     %r14,%r11 | or     %r10,%r11 | lock cmpxchg %r11,(%rcx) | je     37e3a 
+  3.89% +113: mov    0x10(%rsi),%rax | mov    %rax,0x18(%rsp) | movups 0x38(%rsi),%xmm0 | movups %xmm0,0x20(%rsp)
+  0.95% +134: call   *0x18(%r12) | mov    %r13,%rdx | mov    %r12,%rcx | mov    0x10(%rsp),%rax
+### wave/6 dispatchActorWavePayload
+total=21344 sym=4232 (19.8%)
+ 85.33% +83: or     %rax,%r9 | mov    %rdx,%rax | lock cmpxchg %r9,(%rdi) | je     3716f 
+  3.19% +2d: mov    0x10(%rdi),%rcx | mov    (%rcx),%rdx | incq   0x8(%rdx) | mov    0x8(%rcx),%rcx
+  2.34% +4: push   %rax | mov    (%rdi),%rax | mov    %rax,%rcx
+### private-remote/6 collectCompletedImpl
+total=20648 sym=1927 (9.3%)
+ 79.76% +c1: je     31990  | mov    0x0(%r13,%rbp,8),%rsi | movzbl 0x20(%rsi),%eax | test   %al,%al
+  5.03% +cf: jne    319c0  | cmpb   $0x0,0x21(%rsi) | jne    319c0  | movq   $0x0,(%rsi)
+  3.63% +b0: test   %eax,%eax | je     31b13  | nopw   0x0(%rax,%rax,1) | inc    %rbp
+  2.96% +155: mov    %rax,0x18(%rsi) | mov    %rsi,0x70(%rbx) | decq   0x68(%rbx) | jmp    319e0 
+### private-remote/6 pump
+total=20648 sym=1747 (8.5%)
+ 91.81% +96: test   %rax,%rax | je     31c7f  | mov    0x18(%rax),%rcx | mov    %rcx,0x78(%rbx)
+  2.46% +9d: mov    0x18(%rax),%rcx | mov    %rcx,0x78(%rbx) | test   %rcx,%rcx | jne    31c40 
+  2.06% +8d: cmp    0xa0(%rbx),%r13 | jae    31c7f  | mov    0x78(%rbx),%rax | test   %rax,%rax
+  1.37% +90: jae    31c7f  | mov    0x78(%rbx),%rax | test   %rax,%rax | je     31c7f 

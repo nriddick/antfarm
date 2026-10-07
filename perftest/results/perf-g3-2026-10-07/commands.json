@@ -1,0 +1,118 @@
+[
+  {
+    "run": "full-5",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--benchmark-ref",
+      "daad3d9",
+      "--output",
+      "perftest/results/perf-g3-2026-10-07/full-5",
+      "--base",
+      "daad3d9",
+      "--candidate",
+      "1091472"
+    ],
+    "admission": "investigation/scripts/gate.sh waited for 1-min load <= 1.0 before each run"
+  },
+  {
+    "run": "boundary-0",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--benchmark-ref",
+      "daad3d9",
+      "--output",
+      "perftest/results/perf-g3-2026-10-07/boundary-0",
+      "--base",
+      "daad3d9",
+      "--candidate",
+      "1091472",
+      "--boundary",
+      "--consumers",
+      "0",
+      "--modes",
+      "actor,private,tree,tree-wait,subset,subset-whole,subset-whole-unreserved,tree-cancel,private-tracked",
+      "--subset-percent",
+      "1,10,100"
+    ],
+    "admission": "investigation/scripts/gate.sh waited for 1-min load <= 1.0 before each run"
+  },
+  {
+    "run": "boundary-6",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--benchmark-ref",
+      "daad3d9",
+      "--output",
+      "perftest/results/perf-g3-2026-10-07/boundary-6",
+      "--base",
+      "daad3d9",
+      "--candidate",
+      "1091472",
+      "--boundary",
+      "--consumers",
+      "6",
+      "--modes",
+      "tree,subset",
+      "--subset-percent",
+      "100"
+    ],
+    "admission": "investigation/scripts/gate.sh waited for 1-min load <= 1.0 before each run"
+  },
+  {
+    "run": "control-boundary-0",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--benchmark-ref",
+      "daad3d9",
+      "--output",
+      "perftest/results/perf-g3-2026-10-07/control-boundary-0",
+      "--base",
+      "daad3d9",
+      "--control",
+      "--boundary",
+      "--consumers",
+      "0",
+      "--modes",
+      "actor,private,tree,tree-wait,subset,subset-whole,subset-whole-unreserved,tree-cancel,private-tracked",
+      "--subset-percent",
+      "1,10,100"
+    ],
+    "admission": "investigation/scripts/gate.sh waited for 1-min load <= 1.0 before each run"
+  },
+  {
+    "run": "control-boundary-6",
+    "command": [
+      "python3",
+      "perftest/perf_gate.py",
+      "--archive",
+      "/home/nathan-riddick/pi_ground/antfarm/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a",
+      "--benchmark-ref",
+      "daad3d9",
+      "--output",
+      "perftest/results/perf-g3-2026-10-07/control-boundary-6",
+      "--base",
+      "daad3d9",
+      "--control",
+      "--boundary",
+      "--consumers",
+      "6",
+      "--modes",
+      "tree,subset",
+      "--subset-percent",
+      "100"
+    ],
+    "admission": "investigation/scripts/gate.sh waited for 1-min load <= 1.0 before each run"
+  }
+]
