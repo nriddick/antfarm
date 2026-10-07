@@ -275,3 +275,49 @@ not the runtime. The script and raw results are in
 
 T6 (visibility edge under TSan), T8 (handle identity) and the O6 and C10
 extensions are behavioural.
+
+## Cohort slab storage
+
+Opt-in `PrivateStateStorage.cohortSlab` cohorts. `slab` runs the group; death
+modes run from `deathHarness` (`make death`) as well as `slab-death`.
+`slab-gc` is skipped under TSan, like `dtor-gc`. Test-only accessors
+(`privateTestSlabPointer`, `privateTestSlabSlotZero`, `privateTestDirtySlabSlot`,
+entry/result/selection pointers) live in `version (AntfarmActorTestHooks)` in
+`actors/private_actor.d`.
+
+| Group | Selectors |
+| --- | --- |
+| Correctness | `slab`, `slab-retire`, `slab-retain`, `slab-refill`, `slab-continuation`, `slab-cancel`, `slab-idle`, `slab-create-fail`, `slab-gc`, `slab-reclaim`, `slab-results`, `slab-per-object` |
+| Death | `slab-death`; child modes `slab-unauthorized`, `slab-active-dispose`, `slab-dirty-slot` (debug death; `-release` survives because the uncleared-slot check is `version(assert)`) |
+
+Each mutation below was applied alone to `actors/private_actor.d`, rebuilt with
+LDC, and run on its selector; the source was restored afterwards. Every run
+aborted (SIGABRT) with the listed failure. The release row used the `-release`
+binary.
+
+| Mutation | Selector | Observed failure |
+| --- | --- | --- |
+| Slab `retireMember` also `freeMemory`s the slot | `slab-retire` | `slab exact: mismatched triple` |
+| `dispose` frees each slab slot | `slab-retire` | `slab exact: mismatched triple` |
+| POD `dispose` frees `entry.state` | `slab-retain` | `slab exact: mismatched triple` |
+| non-POD `dispose` skips retained members | `slab-retain` | `slab-retain disposed once` |
+| Slab `spawn` allocates | `slab-refill` | `slab-refill no allocation after create` |
+| `retireMember` drops the slot memset | `slab-refill` | `private child slab: spawn into an uncleared slot` |
+| Cleanup calls `retireMember` with `perObject` | `slab-continuation` | `slab exact: mismatched triple` |
+| Retire when a continuation returns `done`, before the join | `slab-continuation` | `retire private actor with active child wave` |
+| `runSkippedRetire` uses `perObject` | `slab-cancel` | `slab exact: interior pointer` |
+| Truncation seals a retiring wave | `slab-cancel` | `slab-cancel destroyed once before refill` |
+| Slot memset removed from `retireMember` (not done before idle publication) | `slab-idle` | `slab-idle slots zero` |
+| Slot memset moved above `destroyState` | `slab-idle` | `slab-idle field live in destructor` |
+| Slab allocation failure frees only the park | `slab-create-fail` | `slab exact: unwind order` |
+| Slab `createChildren` drops the `slabByteLimit` check | `slab-create-fail` | `slab-create-fail limit 0` |
+| Slab `createChildren` drops the `capacity * T.sizeof` overflow check | `slab-create-fail` | `slab-create-fail overflow allocates nothing` |
+| No post-destroy memset | `slab-gc` | `slab-gc retired slot released its reference` |
+| Slab uses `allocate` instead of `allocateZero` | `slab-gc` | `slab-gc unspawned tail was zeroed` |
+| `dispose` skips the slab free | `slab-reclaim` | `slab-reclaim allocation balance` |
+| Retiring `finish` clears result storage | `slab-results` | `slab-results readable after retirement` |
+| perObject `spawn` does not allocate | `slab-per-object` | `slab-per-object one state per spawn` |
+| `spawn` drops `authorized` | `slab-death` | harness rejects a surviving unauthorized spawn |
+| `disposeChildren` drops the active-wave fatal | `slab-death` | harness rejects a surviving active disposal |
+| Uncleared-slot check deleted | `slab-death` (debug) | harness rejects a surviving dirty spawn |
+| Uncleared-slot check not under `version(assert)` | `slab-death` (`-release`) | harness rejects a dying release child |

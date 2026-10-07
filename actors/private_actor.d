@@ -2106,3 +2106,66 @@ private:
         freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
     }
 }
+
+version (AntfarmActorTestHooks)
+{
+    /// Test-only: slot i of a cohortSlab park is entirely zero. Not a
+    /// production accessor; the range is the reserved slot, not count_.
+    bool privateTestSlabSlotZero(T, R)(PrivateChildPark!(T, R, PrivateStateStorage.cohortSlab)* park,
+        size_t index) nothrow @nogc @system
+    {
+        if (park is null || index >= park.capacity_) return false;
+        auto base = cast(const(ubyte)*) park.slab_;
+        foreach (b; base[index * T.sizeof .. (index + 1) * T.sizeof])
+            if (b != 0) return false;
+        return true;
+    }
+
+    /// Test-only: write one nonzero byte into slot i so a later spawn hits
+    /// the debug uncleared-slot check. The slot must not be occupied.
+    void privateTestDirtySlabSlot(T, R)(PrivateChildPark!(T, R, PrivateStateStorage.cohortSlab)* park,
+        size_t index) nothrow @nogc @system
+    {
+        if (park is null || index >= park.capacity_) fatal("private test: slab slot out of range");
+        (cast(ubyte*) park.slab_)[index * T.sizeof] = 0xA5;
+    }
+
+    void* privateTestSlabPointer(T, R)(PrivateChildPark!(T, R, PrivateStateStorage.cohortSlab)* park)
+        nothrow @nogc @system
+    {
+        return park is null ? null : park.slab_;
+    }
+
+    bool privateTestEntryStateNull(T, R, PrivateStateStorage storage)(
+        PrivateChildPark!(T, R, storage)* park, size_t index) nothrow @nogc @system
+    {
+        return park !is null && index < park.capacity_ && park.entries_[index].state is null;
+    }
+
+    void* privateTestEntryState(T, R, PrivateStateStorage storage)(
+        PrivateChildPark!(T, R, storage)* park, size_t index) nothrow @nogc @system
+    {
+        return park is null || index >= park.capacity_ ? null : park.entries_[index].state;
+    }
+
+    void* privateTestEntriesPointer(T, R, PrivateStateStorage storage)(
+        PrivateChildPark!(T, R, storage)* park) nothrow @nogc @system
+    {
+        return park is null ? null : park.entries_;
+    }
+
+    void* privateTestResultsPointer(T, R, PrivateStateStorage storage)(
+        PrivateChildPark!(T, R, storage)* park) nothrow @nogc @system
+    {
+        static if (PrivateChildPark!(T, R, storage).hasResults)
+            return park is null ? null : park.results_;
+        else
+            return null;
+    }
+
+    void* privateTestSelectionPointer(T, R, PrivateStateStorage storage)(
+        PrivateChildPark!(T, R, storage)* park) nothrow @nogc @system
+    {
+        return park is null ? null : park.sel_;
+    }
+}

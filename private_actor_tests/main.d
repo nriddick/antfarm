@@ -1187,6 +1187,7 @@ void deathHarness()
         writeln("PASS outcome active, untracked root fail, failure overflow, and unauthorized fail/outcome");
         cancelDeath();
         rootTrackingDeath();
+        slabDeath();
         version (assert)
         {
             check(diedWithMessage("reentrant-spawn", "antfarm fatal: private root park: reentrant entry"));
@@ -10150,6 +10151,1428 @@ void rootCostHintRule()
             }
 }
 
+// ===========================================================================
+// Cohort slab storage. Selectors: slab (all), slab-retire, slab-retain,
+// slab-refill, slab-continuation, slab-cancel, slab-idle, slab-create-fail,
+// slab-gc, slab-reclaim, slab-results, slab-per-object; death modes are
+// slab-unauthorized, slab-active-dispose and slab-dirty-slot (slab-death).
+// Each case names the mutation of actors/private_actor.d it catches.
+// Allocation checks use a pointer+size+alignment ledger. It is single-threaded
+// except where a lockstep acquire publishes the consumer's frees.
+// ===========================================================================
+
+static assert(is(PrivateChildPark!(ulong, ulong) ==
+    PrivateChildPark!(ulong, ulong, PrivateStateStorage.perObject)));
+static assert(is(PrivateChildPark!(ulong, void) ==
+    PrivateChildPark!(ulong, void, PrivateStateStorage.perObject)));
+static assert(PrivateChildPark!(ulong, ulong, PrivateStateStorage.cohortSlab).sizeof
+    == PrivateChildPark!(ulong, ulong).sizeof + 8);
+static assert(!__traits(compiles, (ref PrivateContext ctx) {
+    ctx.createChildren!(ulong, ulong, PrivateStateStorage.cohortSlab)(4);
+}));
+static assert(!__traits(compiles, (ref PrivateContext ctx) {
+    ctx.createChildren!(ulong, void, PrivateStateStorage.cohortSlab)(4, 8);
+}));
+static assert(__traits(compiles, (ref PrivateContext ctx) {
+    ctx.createChildren!(ulong, ulong, PrivateStateStorage.cohortSlab)(4,
+        PrivateCohortOptions(0, false), 4 * ulong.sizeof);
+}));
+// The cap is a slab-only argument: PrivateCohortOptions keeps its layout, a
+// slab cohort cannot be created without a cap, and perObject takes none.
+static assert(PrivateCohortOptions.sizeof == 2 * size_t.sizeof);
+static assert(!__traits(compiles, (ref PrivateContext ctx) {
+    ctx.createChildren!(ulong, ulong, PrivateStateStorage.cohortSlab)(4, PrivateCohortOptions(0, false));
+}));
+static assert(!__traits(compiles, (ref PrivateContext ctx) {
+    ctx.createChildren!(ulong, ulong)(4, PrivateCohortOptions(0, false), 4 * ulong.sizeof);
+}));
+
+struct SlabExact
+{
+    struct Rec { void* ptr; size_t bytes, alignment; bool live; }
+    Rec[160] recs;
+    uint[160] stack;
+    uint n, top, live, frees, calls, failAt;
+    bool strictLifo;
+}
+
+void* slabExactAllocate(void* ctx, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    auto a = cast(SlabExact*) ctx;
+    a.calls++;
+    if (a.failAt != 0 && a.calls == a.failAt) return null;
+    auto p = ActorAllocator.cRuntime().allocate(null, bytes, alignment);
+    if (p is null) return null;
+    namedCheck(a.n < a.recs.length && a.top < a.stack.length, "slab exact capacity");
+    a.recs[a.n] = SlabExact.Rec(p, bytes, alignment, true);
+    a.stack[a.top++] = a.n;
+    a.n++;
+    a.live++;
+    return p;
+}
+
+void slabExactDeallocate(void* ctx, void* ptr, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    if (ptr is null) return;
+    auto a = cast(SlabExact*) ctx;
+    auto addr = cast(size_t) ptr;
+    // The C runtime recycles addresses. Match the live record, not an older
+    // generation of the same pointer.
+    uint found = uint.max;
+    foreach (i; 0 .. a.n)
+        if (a.recs[i].live && cast(size_t) a.recs[i].ptr == addr) { found = cast(uint) i; break; }
+    if (found == uint.max)
+    {
+        foreach (i; 0 .. a.n)
+            if (!a.recs[i].live && cast(size_t) a.recs[i].ptr == addr)
+                fatal("slab exact: double free");
+        foreach (i; 0 .. a.n)
+        {
+            if (!a.recs[i].live) continue;
+            auto base = cast(size_t) a.recs[i].ptr;
+            if (addr > base && addr < base + a.recs[i].bytes)
+                fatal("slab exact: interior pointer");
+        }
+        fatal("slab exact: unknown pointer");
+    }
+    if (a.recs[found].bytes != bytes || a.recs[found].alignment != alignment)
+        fatal("slab exact: mismatched triple");
+    if (a.strictLifo && (a.top == 0 || a.stack[a.top - 1] != found))
+        fatal("slab exact: unwind order");
+    uint pos = uint.max;
+    foreach (i; 0 .. a.top)
+        if (a.stack[i] == found) { pos = cast(uint) i; break; }
+    if (pos == uint.max) fatal("slab exact: free of unstacked pointer");
+    foreach (i; pos + 1 .. a.top) a.stack[i - 1] = a.stack[i];
+    a.top--;
+    a.recs[found].live = false;
+    a.live--;
+    a.frees++;
+    ActorAllocator.cRuntime().deallocate(null, ptr, bytes, alignment);
+}
+
+ActorAllocator slabExactPolicy(ref SlabExact exact) nothrow @nogc @system
+{ return ActorAllocator(&exact, &slabExactAllocate, &slabExactDeallocate); }
+
+uint slabExactSizeCount(ref SlabExact exact, size_t bytes) nothrow @nogc @system
+{
+    uint c;
+    foreach (i; 0 .. exact.n)
+        if (exact.recs[i].bytes == bytes) c++;
+    return c;
+}
+
+bool slabExactFreedOnce(ref SlabExact exact, void* ptr) nothrow @nogc @system
+{
+    if (ptr is null) return false;
+    bool saw;
+    foreach (i; 0 .. exact.n)
+        if (exact.recs[i].ptr is ptr)
+        {
+            if (exact.recs[i].live) return false;
+            saw = true;
+        }
+    return saw;
+}
+bool slabExactFreedSize(ref SlabExact exact, void* ptr, size_t bytes) nothrow @nogc @system
+{
+    if (ptr is null) return false;
+    foreach (i; 0 .. exact.n)
+        if (exact.recs[i].ptr is ptr && exact.recs[i].bytes == bytes)
+            return !exact.recs[i].live;
+    return false;
+}
+
+void slabDrain(P)(P* park, ref Token token, ref ConsumerView view, string name) nothrow @nogc @system
+{
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, name);
+    }
+}
+
+void slabPumpUntil(P)(P* park, ref Token token, ref ConsumerView view, shared uint* flag, string name)
+    nothrow @nogc @system
+{
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (atomicLoad(*flag) == 0)
+    {
+        namedCheck(park.live != 0, name);
+        park.pump(token);
+        while (view.consumeNext()) {}
+        namedCheck(MonoTime.currTime < deadline, name);
+    }
+}
+
+// ---- slab-retire -----------------------------------------------------------------
+// Final retiring wave of N non-POD members. Each destructor runs once. The
+// ledger sees one slab allocation and one free of that exact pointer, and no
+// per-member allocation.
+// Catching mutations:
+//   retireMember's cohortSlab branch also calls
+//     freeMemory(service, entry.state, T.sizeof, T.alignof)
+//     (slot 0 is a mismatched triple, later slots are interior): the run
+//     aborts "slab exact: mismatched triple" or "slab exact: interior pointer".
+//   dispose walks capacity_ and freeMemory's each slot before the slab free:
+//     the same abort, even though the retiring wave left count_ at 0.
+enum slabOnceN = 5;
+struct SlabOnce
+{
+    uint id;
+    uint pad;
+    shared uint* hits;
+    ~this() nothrow @nogc @system { if (id != 0) atomicFetchAdd(hits[id - 1], 1u); }
+}
+static assert(SlabOnce.sizeof == 16);
+alias SlabOnceKids = PrivateChildPark!(SlabOnce, void, PrivateStateStorage.cohortSlab);
+struct SlabOnceRoot
+{
+    SlabOnceKids* kids;
+    shared uint* hits;
+    void* slab;
+    uint phase;
+}
+void slabOnceOp(scope ref PrivateBorrow!SlabOnce b, scope ref PrivateContext) nothrow @nogc @system
+{ namedCheck(b.value.id != 0, "slab-retire op sees a live member"); }
+PrivateRootDisposition slabOnceStep(scope ref PrivateBorrow!SlabOnceRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase++ == 0)
+    {
+        s.kids = ctx.createChildren!(SlabOnce, void, PrivateStateStorage.cohortSlab)(
+            slabOnceN, PrivateCohortOptions(0, false), slabOnceN * SlabOnce.sizeof);
+        namedCheck(s.kids !is null, "slab-retire cohort");
+        s.slab = privateTestSlabPointer(s.kids);
+        namedCheck(s.slab !is null, "slab-retire slab pointer");
+        foreach (i; 0 .. slabOnceN)
+            namedCheck(s.kids.spawn(ctx, SlabOnce(cast(uint) i + 1, 0, s.hits)) == PrivateSpawnResult.spawned,
+                "slab-retire spawn");
+        namedCheck(s.kids.startFinal!slabOnceOp(ctx) == PrivateStartResult.started, "slab-retire final");
+        return PrivateRootDisposition.waitChildren;
+    }
+    foreach (i; 0 .. slabOnceN)
+    {
+        namedCheck(atomicLoad(s.hits[i]) == 1, "slab-retire destructor once");
+        namedCheck(privateTestSlabSlotZero(s.kids, i), "slab-retire slot zero after join");
+        namedCheck(privateTestEntryStateNull(s.kids, i), "slab-retire state null after join");
+    }
+    return PrivateRootDisposition.finish;
+}
+void slabRetire()
+{
+    SlabExact exact;
+    auto hits = new shared uint[slabOnceN];
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(SlabOnceRoot, slabOnceStep).create(farm, 1, 256, slabExactPolicy(exact));
+    check(park !is null);
+    void* slab;
+    check(park.spawn(SlabOnceRoot(null, hits.ptr, null)) == PrivateSpawnResult.spawned);
+    slabDrain(park, token, view, "slab-retire drain");
+    // The root copied the pointer into state; recover it from the ledger.
+    namedCheck(slabExactSizeCount(exact, slabOnceN * SlabOnce.sizeof) == 1, "slab-retire one slab allocation");
+    foreach (i; 0 .. exact.n)
+        if (exact.recs[i].bytes == slabOnceN * SlabOnce.sizeof) slab = exact.recs[i].ptr;
+    namedCheck(slabExactFreedOnce(exact, slab), "slab-retire slab freed once");
+    namedCheck(slabExactSizeCount(exact, SlabOnce.sizeof) == 0, "slab-retire no per-member allocation");
+    park.destroy();
+    namedCheck(exact.live == 0 && exact.top == 0, "slab-retire zero live allocations");
+    writeln("PASS slab-retire one slab free and exactly-once destructors");
+}
+
+// ---- slab-retain -----------------------------------------------------------------
+// Nonretiring whole wave, then a subset wave, then parent disposal with the
+// members still retained. POD and non-POD. Destructors (non-POD) run once,
+// at disposal; the slab is freed once.
+// Catching mutations:
+//   POD dispose drops `static if (!slab)` and freeMemory's entry.state:
+//     "slab exact: interior pointer" or "slab exact: mismatched triple".
+//   non-POD dispose skips `retireMember` for retained members: destructor
+//     count stays 0, "slab-retain disposed once".
+enum slabRetainN = 4;
+struct SlabPod
+{
+    ulong tag;
+    ulong generation;
+    ulong spare;
+}
+static assert(SlabPod.sizeof == 24);
+alias SlabPodKids = PrivateChildPark!(SlabPod, void, PrivateStateStorage.cohortSlab);
+shared uint slabPodRuns;
+struct SlabPodRoot { SlabPodKids* kids; uint phase; void* slab; ulong pad; }
+void slabPodOp(scope ref PrivateBorrow!SlabPod b, scope ref PrivateContext) nothrow @nogc @system
+{
+    atomicFetchAdd(slabPodRuns, 1u);
+    b.value.generation = b.value.tag;
+}
+PrivateRootDisposition slabPodStep(scope ref PrivateBorrow!SlabPodRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase == 0)
+    {
+        s.kids = ctx.createChildren!(SlabPod, void, PrivateStateStorage.cohortSlab)(
+            slabRetainN, PrivateCohortOptions(0, true), slabRetainN * SlabPod.sizeof);
+        namedCheck(s.kids !is null, "slab-retain pod cohort");
+        s.slab = privateTestSlabPointer(s.kids);
+        foreach (i; 0 .. slabRetainN)
+            namedCheck(s.kids.spawn(ctx, SlabPod(i + 1)) == PrivateSpawnResult.spawned, "slab-retain pod spawn");
+        namedCheck(s.kids.start!slabPodOp(ctx) == PrivateStartResult.started, "slab-retain pod wave");
+        s.phase = 1;
+        return PrivateRootDisposition.waitChildren;
+    }
+    if (s.phase == 1)
+    {
+        namedCheck(atomicLoad(slabPodRuns) == slabRetainN, "slab-retain pod whole wave ran");
+        uint[2] sel = [0, 2];
+        namedCheck(s.kids.startSubset!slabPodOp(ctx, sel[]) == PrivateStartResult.started, "slab-retain pod subset");
+        s.phase = 2;
+        return PrivateRootDisposition.waitChildren;
+    }
+    namedCheck(atomicLoad(slabPodRuns) == slabRetainN + 2, "slab-retain pod subset ran");
+    namedCheck(s.kids.subsetMembers(ctx).length == 2, "slab-retain pod selection kept");
+    return PrivateRootDisposition.finish;
+}
+struct SlabHeld
+{
+    uint id;
+    uint pad;
+    shared uint* hits;
+    ~this() nothrow @nogc @system { if (id != 0) atomicFetchAdd(hits[id - 1], 1u); }
+}
+static assert(SlabHeld.sizeof == 16);
+alias SlabHeldKids = PrivateChildPark!(SlabHeld, void, PrivateStateStorage.cohortSlab);
+struct SlabHeldRoot { SlabHeldKids* kids; shared uint* hits; void* slab; uint phase; }
+void slabHeldOp(scope ref PrivateBorrow!SlabHeld, scope ref PrivateContext) nothrow @nogc @system {}
+PrivateRootDisposition slabHeldStep(scope ref PrivateBorrow!SlabHeldRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase == 0)
+    {
+        s.kids = ctx.createChildren!(SlabHeld, void, PrivateStateStorage.cohortSlab)(
+            slabRetainN, PrivateCohortOptions(0, true), slabRetainN * SlabHeld.sizeof);
+        namedCheck(s.kids !is null, "slab-retain cohort");
+        s.slab = privateTestSlabPointer(s.kids);
+        foreach (i; 0 .. slabRetainN)
+            namedCheck(s.kids.spawn(ctx, SlabHeld(cast(uint) i + 1, 0, s.hits)) == PrivateSpawnResult.spawned,
+                "slab-retain spawn");
+        namedCheck(s.kids.start!slabHeldOp(ctx) == PrivateStartResult.started, "slab-retain wave");
+        s.phase = 1;
+        return PrivateRootDisposition.waitChildren;
+    }
+    if (s.phase == 1)
+    {
+        foreach (i; 0 .. slabRetainN)
+            namedCheck(atomicLoad(s.hits[i]) == 0, "slab-retain nonretiring keeps members");
+        uint[2] sel = [1, 3];
+        namedCheck(s.kids.startSubset!slabHeldOp(ctx, sel[]) == PrivateStartResult.started, "slab-retain subset");
+        s.phase = 2;
+        return PrivateRootDisposition.waitChildren;
+    }
+    foreach (i; 0 .. slabRetainN)
+        namedCheck(atomicLoad(s.hits[i]) == 0, "slab-retain subset keeps members");
+    return PrivateRootDisposition.finish;
+}
+void slabRetain()
+{
+    atomicStore(slabPodRuns, 0u);
+    SlabExact podExact;
+    // slab pointer is filled in during the callback; the ledger identifies it.
+    {
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        auto park = PrivateRootPark!(SlabPodRoot, slabPodStep).create(farm, 1, 256, slabExactPolicy(podExact));
+        check(park !is null);
+        check(park.spawn(SlabPodRoot.init) == PrivateSpawnResult.spawned);
+        slabDrain(park, token, view, "slab-retain pod drain");
+        void* slab;
+        namedCheck(slabExactSizeCount(podExact, slabRetainN * SlabPod.sizeof) == 1, "slab-retain pod one slab");
+        foreach (i; 0 .. podExact.n)
+            if (podExact.recs[i].bytes == slabRetainN * SlabPod.sizeof) slab = podExact.recs[i].ptr;
+        namedCheck(slabExactFreedOnce(podExact, slab), "slab-retain pod slab freed once");
+        namedCheck(slabExactSizeCount(podExact, SlabPod.sizeof) == 0, "slab-retain pod no per-member allocation");
+        park.destroy();
+        namedCheck(podExact.live == 0, "slab-retain pod zero live allocations");
+    }
+    auto hits = new shared uint[slabRetainN];
+    SlabExact heldExact;
+    {
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        auto park = PrivateRootPark!(SlabHeldRoot, slabHeldStep).create(farm, 1, 256, slabExactPolicy(heldExact));
+        check(park !is null);
+        check(park.spawn(SlabHeldRoot(null, hits.ptr)) == PrivateSpawnResult.spawned);
+        slabDrain(park, token, view, "slab-retain held drain");
+        foreach (i; 0 .. slabRetainN)
+            namedCheck(atomicLoad(hits[i]) == 1, "slab-retain disposed once");
+        void* slab;
+        namedCheck(slabExactSizeCount(heldExact, slabRetainN * SlabHeld.sizeof) == 1, "slab-retain one slab");
+        foreach (i; 0 .. heldExact.n)
+            if (heldExact.recs[i].bytes == slabRetainN * SlabHeld.sizeof) slab = heldExact.recs[i].ptr;
+        namedCheck(slabExactFreedOnce(heldExact, slab), "slab-retain slab freed once");
+        namedCheck(slabExactSizeCount(heldExact, SlabHeld.sizeof) == 0, "slab-retain no per-member allocation");
+        park.destroy();
+        namedCheck(heldExact.live == 0, "slab-retain zero live allocations");
+    }
+    writeln("PASS slab-retain waves keep members; disposal frees the slab once");
+}
+
+// ---- slab-refill -----------------------------------------------------------------
+// Hundreds of spawn / startFinal / join / respawn cycles into the same slots.
+// Results and per-slot destructor counts are checked every cycle. No
+// allocation after create.
+// Catching mutations:
+//   slab spawn takes the perObject allocate path: "slab-refill no allocation
+//     after create".
+//   retireMember drops the slot memset: the next spawn dies in debug with
+//     "private child slab: spawn into an uncleared slot" (the check this
+//     loop exercises; release still checks results and destructor counts).
+version (TSan) enum slabRefillRounds = 40;
+else enum slabRefillRounds = 1000;
+enum slabRefillN = 8;
+struct SlabRefill
+{
+    uint slot; // 1-based; 0 is the moved-from argument
+    uint cycle;
+    shared uint* hits;
+    ~this() nothrow @nogc @system { if (slot != 0) atomicFetchAdd(hits[slot - 1], 1u); }
+}
+alias SlabRefillKids = PrivateChildPark!(SlabRefill, ulong, PrivateStateStorage.cohortSlab);
+struct SlabRefillRoot
+{
+    SlabRefillKids* kids;
+    shared uint* hits;
+    Counts* counts;
+    long allocated, freed;
+    uint cycle;
+}
+ulong slabRefillOp(scope ref PrivateBorrow!SlabRefill b, scope ref PrivateContext) nothrow @nogc @system
+{ return cast(ulong) b.value.cycle * 1000 + b.value.slot; }
+PrivateRootDisposition slabRefillStep(scope ref PrivateBorrow!SlabRefillRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.kids is null)
+    {
+        s.kids = ctx.createChildren!(SlabRefill, ulong, PrivateStateStorage.cohortSlab)(
+            slabRefillN, PrivateCohortOptions(0, false), slabRefillN * SlabRefill.sizeof);
+        namedCheck(s.kids !is null, "slab-refill cohort");
+        s.allocated = atomicLoad(s.counts.allocated);
+        s.freed = atomicLoad(s.counts.freed);
+    }
+    else
+    {
+        auto r = s.kids.results(ctx);
+        namedCheck(r.length == slabRefillN, "slab-refill result length");
+        foreach (i, v; r)
+            namedCheck(v == cast(ulong) s.cycle * 1000 + (i + 1), "slab-refill result");
+        foreach (i; 0 .. slabRefillN)
+            namedCheck(atomicLoad(s.hits[i]) == s.cycle, "slab-refill destructor per cycle");
+        if (s.cycle == slabRefillRounds)
+        {
+            namedCheck(atomicLoad(s.counts.allocated) == s.allocated, "slab-refill no allocation after create");
+            namedCheck(atomicLoad(s.counts.freed) == s.freed, "slab-refill no free until dispose");
+            return PrivateRootDisposition.finish;
+        }
+    }
+    s.cycle++;
+    foreach (i; 0 .. slabRefillN)
+    {
+        auto result = s.kids.spawn(ctx, SlabRefill(cast(uint) i + 1, s.cycle, s.hits));
+        namedCheck(result == PrivateSpawnResult.spawned, "slab-refill spawn");
+    }
+    namedCheck(s.kids.startFinal!slabRefillOp(ctx) == PrivateStartResult.started, "slab-refill final");
+    return PrivateRootDisposition.waitChildren;
+}
+void slabRefill()
+{
+    Counts counts;
+    auto hits = new shared uint[slabRefillN];
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(SlabRefillRoot, slabRefillStep).create(farm, 1, 256, policy(counts));
+    check(park !is null);
+    check(park.spawn(SlabRefillRoot(null, hits.ptr, &counts)) == PrivateSpawnResult.spawned);
+    slabDrain(park, token, view, "slab-refill drain");
+    foreach (i; 0 .. slabRefillN)
+        namedCheck(atomicLoad(hits[i]) == slabRefillRounds, "slab-refill destructor total");
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "slab-refill allocation balance");
+    writeln("PASS slab-refill ", slabRefillRounds, " cycles reuse cleared slots without allocating");
+}
+
+// ---- slab-continuation -----------------------------------------------------------
+// A retiring continuation launches a nested slab grandchild cohort and returns
+// done before that wave joins, so retirement is the deferred cleanup activation.
+// Catching mutations:
+//   the childCleanup branch calls retireMember!(T, PrivateStateStorage.perObject)
+//     (policy lost after disposeChildren): "slab exact: interior pointer" or
+//     "slab exact: mismatched triple" on the member slot.
+//   retireMember runs when the continuation returns done, before the
+//     childPending == 1 join: disposeChildren dies
+//     "retire private actor with active child wave", or the destructor sees a
+//     zeroed token ("slab-continuation field live in destructor").
+struct SlabGrand
+{
+    uint id;
+    uint pad;
+    shared uint* hits;
+    ~this() nothrow @nogc @system { if (id != 0) atomicFetchAdd(hits[id - 1], 1u); }
+}
+static assert(SlabGrand.sizeof == 16);
+alias SlabGrandKids = PrivateChildPark!(SlabGrand, void, PrivateStateStorage.cohortSlab);
+__gshared bool slabContArmed;
+struct SlabCont
+{
+    uint token;
+    uint pad;
+    shared uint* hits;
+    SlabGrandKids* kids;
+    ~this() nothrow @nogc @system
+    {
+        if (!slabContArmed) return;
+        namedCheck(token != 0, "slab-continuation field live in destructor");
+        atomicFetchAdd(hits[0], 1u);
+    }
+}
+static assert(SlabCont.sizeof == 24);
+alias SlabContKids = PrivateChildPark!(SlabCont, void, PrivateStateStorage.cohortSlab);
+enum slabGrandN = 5; // 80 bytes: not a root Batch (48) or the 24-byte member slab
+__gshared void* slabContGrandSlab, slabContMemberSlab;
+__gshared shared(uint)* slabContGrandHits;
+void slabGrandOp(scope ref PrivateBorrow!SlabGrand b, scope ref PrivateContext) nothrow @nogc @system
+{ namedCheck(b.value.id != 0, "slab-continuation grandchild ran"); }
+PrivateChildDisposition slabContOp(scope ref PrivateBorrow!SlabCont b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto m = &b.value();
+    namedCheck(m.kids is null, "slab-continuation single activation before cleanup");
+    m.kids = ctx.createChildren!(SlabGrand, void, PrivateStateStorage.cohortSlab)(
+        slabGrandN, PrivateCohortOptions(0, false), slabGrandN * SlabGrand.sizeof);
+    namedCheck(m.kids !is null, "slab-continuation grandchild cohort");
+    slabContGrandSlab = privateTestSlabPointer(m.kids);
+    foreach (i; 0 .. slabGrandN)
+        namedCheck(m.kids.spawn(ctx, SlabGrand(cast(uint) i + 1, 0, slabContGrandHits)) == PrivateSpawnResult.spawned,
+            "slab-continuation grandchild spawn");
+    namedCheck(m.kids.start!slabGrandOp(ctx) == PrivateStartResult.started, "slab-continuation grandchild wave");
+    return PrivateChildDisposition.done;
+}
+struct SlabContRoot { SlabContKids* kids; shared uint* hits; ulong pad; uint phase; }
+PrivateRootDisposition slabContStep(scope ref PrivateBorrow!SlabContRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase++ == 0)
+    {
+        s.kids = ctx.createChildren!(SlabCont, void, PrivateStateStorage.cohortSlab)(
+            2, PrivateCohortOptions(0, false), 2 * SlabCont.sizeof);
+        namedCheck(s.kids !is null, "slab-continuation cohort");
+        slabContMemberSlab = privateTestSlabPointer(s.kids);
+        namedCheck(s.kids.spawn(ctx, SlabCont(7, 0, s.hits)) == PrivateSpawnResult.spawned, "slab-continuation spawn");
+        slabContArmed = true;
+        namedCheck(s.kids.startFinal!slabContOp(ctx) == PrivateStartResult.started, "slab-continuation final");
+        return PrivateRootDisposition.waitChildren;
+    }
+    namedCheck(privateTestSlabSlotZero(s.kids, 0), "slab-continuation slot zero after join");
+    namedCheck(privateTestEntryStateNull(s.kids, 0), "slab-continuation state null after join");
+    namedCheck(atomicLoad(s.hits[0]) == 1, "slab-continuation member destroyed once");
+    foreach (i; 0 .. slabGrandN)
+        namedCheck(atomicLoad(slabContGrandHits[i]) == 1, "slab-continuation grandchild destroyed once");
+    return PrivateRootDisposition.finish;
+}
+void slabContinuation()
+{
+    slabContArmed = false;
+    slabContGrandSlab = null;
+    slabContMemberSlab = null;
+    auto memberHits = new shared uint[1];
+    auto grandHits = new shared uint[slabGrandN];
+    slabContGrandHits = grandHits.ptr;
+    scope(exit) slabContGrandHits = null;
+    SlabExact exact;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(SlabContRoot, slabContStep).create(farm, 1, 256, slabExactPolicy(exact));
+    check(park !is null);
+    check(park.spawn(SlabContRoot(null, memberHits.ptr)) == PrivateSpawnResult.spawned);
+    slabDrain(park, token, view, "slab-continuation drain");
+    namedCheck(slabExactFreedSize(exact, slabContGrandSlab, slabGrandN * SlabGrand.sizeof),
+        "slab-continuation grandchild slab freed once");
+    namedCheck(slabExactSizeCount(exact, SlabGrand.sizeof) == 0, "slab-continuation no grandchild per-member allocation");
+    namedCheck(slabExactFreedSize(exact, slabContMemberSlab, 2 * SlabCont.sizeof),
+        "slab-continuation member slab freed once");
+    park.destroy();
+    namedCheck(exact.live == 0, "slab-continuation zero live allocations");
+    writeln("PASS slab-continuation deferred cleanup zeros the slot and frees the grandchild slab once");
+}
+
+// ---- slab-cancel -----------------------------------------------------------------
+// Retiring wave, batch 1. Member 0 cancelPeers. The hook at
+// privateEmitBeforeCancelCheck drains the published table before the next
+// truncation decision, so the undispatched suffix is retired by runSkippedRetire.
+// After the join the slots are refilled with a new generation.
+// Catching mutations:
+//   runSkippedRetire calls retireMember!(T, PrivateStateStorage.perObject):
+//     "slab exact: interior pointer" or "slab exact: mismatched triple".
+//   truncated() seals a retiring wave like a non-retiring one (suffix not
+//     retired before count_ rewinds): "slab-cancel destroyed once before refill"
+//     or "slab-cancel slot zero before refill".
+enum slabCancelN = 4;
+struct SlabSkip
+{
+    uint id;
+    uint generation;
+    shared uint* hits;
+    ~this() nothrow @nogc @system { if (id != 0) atomicFetchAdd(hits[id - 1], 1u); }
+}
+alias SlabSkipKids = PrivateChildPark!(SlabSkip, ulong, PrivateStateStorage.cohortSlab);
+struct SlabSkipRoot { SlabSkipKids* kids; shared uint* hits; ubyte phase; }
+ulong slabSkipOp(scope ref PrivateBorrow!SlabSkip b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    if (b.value.generation == 1 && b.value.id == 1) ctx.cancelPeers();
+    return b.value.generation;
+}
+PrivateRootDisposition slabSkipStep(scope ref PrivateBorrow!SlabSkipRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase == 0)
+    {
+        s.kids = ctx.createChildren!(SlabSkip, ulong, PrivateStateStorage.cohortSlab)(
+            slabCancelN, PrivateCohortOptions(1, false), slabCancelN * SlabSkip.sizeof);
+        namedCheck(s.kids !is null, "slab-cancel cohort");
+        foreach (i; 0 .. slabCancelN)
+            namedCheck(s.kids.spawn(ctx, SlabSkip(cast(uint) i + 1, 1, s.hits)) == PrivateSpawnResult.spawned,
+                "slab-cancel spawn");
+        namedCheck(s.kids.startFinal!slabSkipOp(ctx) == PrivateStartResult.started, "slab-cancel final");
+        s.phase = 1;
+        return PrivateRootDisposition.waitChildren;
+    }
+    if (s.phase == 1)
+    {
+        auto o = s.kids.outcome(ctx);
+        namedCheck(o.participants == slabCancelN && o.dispatched == 1 && o.cancelled, "slab-cancel truncated");
+        auto prefix = s.kids.results(ctx);
+        namedCheck(prefix.length == 1 && prefix[0] == 1, "slab-cancel prefix result");
+        foreach (i; 0 .. slabCancelN)
+        {
+            namedCheck(atomicLoad(s.hits[i]) == 1, "slab-cancel destroyed once before refill");
+            namedCheck(privateTestSlabSlotZero(s.kids, i), "slab-cancel slot zero before refill");
+            namedCheck(privateTestEntryStateNull(s.kids, i), "slab-cancel state null before refill");
+        }
+        foreach (i; 0 .. slabCancelN)
+            namedCheck(s.kids.spawn(ctx, SlabSkip(cast(uint) i + 1, 2, s.hits)) == PrivateSpawnResult.spawned,
+                "slab-cancel refill");
+        namedCheck(s.kids.startFinal!slabSkipOp(ctx) == PrivateStartResult.started, "slab-cancel refill final");
+        s.phase = 2;
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto o = s.kids.outcome(ctx);
+    auto r = s.kids.results(ctx);
+    namedCheck(o.dispatched == slabCancelN && o.succeeded && r.length == slabCancelN, "slab-cancel refill outcome");
+    foreach (v; r) namedCheck(v == 2, "slab-cancel fresh generation");
+    foreach (i; 0 .. slabCancelN)
+        namedCheck(atomicLoad(s.hits[i]) == 2, "slab-cancel refill destroyed once");
+    return PrivateRootDisposition.finish;
+}
+__gshared Lockstep* slabCancelLock;
+shared uint slabCancelChecks;
+void slabCancelHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+{
+    if (point != ActorTestPoint.privateEmitBeforeCancelCheck) return;
+    immutable n = atomicFetchAdd(slabCancelChecks, 1u);
+    // Second cancel-check: the first table is published. Drain it so member 0's
+    // cancelPeers happens-before this truncation decision.
+    if (n == 1 && slabCancelLock !is null) lockstepDrain(slabCancelLock);
+}
+void slabCancel()
+{
+    auto hits = new shared uint[slabCancelN];
+    SlabExact exact;
+    atomicStore(slabCancelChecks, 0u);
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    Lockstep lockstep;
+    auto consumer = startLockstep(farm, &lockstep);
+    scope(exit) stopLockstep(&lockstep, consumer);
+    slabCancelLock = &lockstep;
+    setActorTestHook(&slabCancelHook);
+    scope(exit) { setActorTestHook(null); slabCancelLock = null; }
+    auto park = PrivateRootPark!(SlabSkipRoot, slabSkipStep).create(farm, 1, 256, slabExactPolicy(exact));
+    check(park !is null);
+    check(park.spawn(SlabSkipRoot(null, hits.ptr)) == PrivateSpawnResult.spawned);
+    lockstepRun(park, token, &lockstep, "slab-cancel drain");
+    namedCheck(atomicLoad(slabCancelChecks) >= 2, "slab-cancel truncation hook ran");
+    namedCheck(slabExactSizeCount(exact, SlabSkip.sizeof) == 0, "slab-cancel no per-member allocation");
+    namedCheck(exact.live == 0, "slab-cancel zero live allocations");
+    writeln("PASS slab-cancel skipped suffix retired on the slab path and refilled");
+}
+
+// ---- slab-idle -------------------------------------------------------------------
+// At privateWaveBeforeIdlePublish (after count_ rewinds, before the idle
+// store) every retired slot is zero and entry.state is null. The destructor
+// still sees its nonzero token.
+// Catching mutations:
+//   move the cohortSlab memset to after actorTestPoint(privateWaveBeforeIdlePublish)
+//     in finish: "slab-idle slots zero".
+//   move that memset above destroyState: "slab-idle field live in destructor".
+enum slabIdleN = 4;
+struct SlabIdleMember
+{
+    uint token;
+    ~this() nothrow @nogc @system
+    {
+        if (!slabIdleArmed) return;
+        namedCheck(token != 0, "slab-idle field live in destructor");
+    }
+}
+alias SlabIdleKids = PrivateChildPark!(SlabIdleMember, void, PrivateStateStorage.cohortSlab);
+__gshared bool slabIdleArmed;
+__gshared SlabIdleKids* slabIdleKids;
+__gshared size_t slabIdleCount;
+shared uint slabIdleSaw;
+struct SlabIdleRoot { SlabIdleKids* kids; uint phase; }
+void slabIdleOp(scope ref PrivateBorrow!SlabIdleMember b, scope ref PrivateContext) nothrow @nogc @system
+{ namedCheck(b.value.token != 0, "slab-idle op sees a live token"); }
+void slabIdleHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
+{
+    if (point != ActorTestPoint.privateWaveBeforeIdlePublish) return;
+    auto kids = slabIdleKids;
+    if (kids is null) return;
+    // finish has already rewound count_; the saved count is the retired prefix.
+    foreach (i; 0 .. slabIdleCount)
+    {
+        namedCheck(privateTestSlabSlotZero(kids, i), "slab-idle slots zero");
+        namedCheck(privateTestEntryStateNull(kids, i), "slab-idle state null");
+    }
+    atomicFetchAdd(slabIdleSaw, 1u);
+}
+PrivateRootDisposition slabIdleStep(scope ref PrivateBorrow!SlabIdleRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase++ == 0)
+    {
+        s.kids = ctx.createChildren!(SlabIdleMember, void, PrivateStateStorage.cohortSlab)(
+            slabIdleN, PrivateCohortOptions(0, false), slabIdleN * SlabIdleMember.sizeof);
+        namedCheck(s.kids !is null, "slab-idle cohort");
+        foreach (i; 0 .. slabIdleN)
+            namedCheck(s.kids.spawn(ctx, SlabIdleMember(cast(uint) i + 1)) == PrivateSpawnResult.spawned,
+                "slab-idle spawn");
+        slabIdleKids = s.kids;
+        slabIdleCount = slabIdleN;
+        slabIdleArmed = true;
+        namedCheck(s.kids.startFinal!slabIdleOp(ctx) == PrivateStartResult.started, "slab-idle final");
+        return PrivateRootDisposition.waitChildren;
+    }
+    namedCheck(atomicLoad(slabIdleSaw) == 1, "slab-idle hook observed the retiring join");
+    return PrivateRootDisposition.finish;
+}
+void slabIdle()
+{
+    slabIdleArmed = false;
+    slabIdleKids = null;
+    slabIdleCount = 0;
+    atomicStore(slabIdleSaw, 0u);
+    setActorTestHook(&slabIdleHook);
+    scope(exit) { setActorTestHook(null); slabIdleKids = null; slabIdleArmed = false; }
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(SlabIdleRoot, slabIdleStep).create(farm, 1);
+    check(park !is null);
+    check(park.spawn(SlabIdleRoot.init) == PrivateSpawnResult.spawned);
+    slabDrain(park, token, view, "slab-idle drain");
+    namedCheck(atomicLoad(slabIdleSaw) == 1, "slab-idle hook ran once");
+    park.destroy();
+    writeln("PASS slab-idle slots are zero at idle publication and live in the destructor");
+}
+
+// ---- slab-create-fail ------------------------------------------------------------
+// Fault the k-th allocation of create, with and without results and subsets.
+// Also the byte cap, capacity overflow, and align(128) under cRuntime.
+// Catching mutation: the slab-failure path frees park but not entries_ (or
+// frees in an order other than the reverse of this attempt's allocations):
+// "slab-create-fail live allocations" or "slab exact: unwind order".
+struct SlabWide { ulong[8] w; }
+static assert(SlabWide.sizeof == 64);
+static assert(size_t.max / SlabWide.sizeof + 1 <= size_t.max / 40);
+align(128) struct SlabOveraligned { ulong x; }
+static assert(SlabOveraligned.alignof == 128);
+
+void slabFailOne(T, R, bool subsets)(scope ref PrivateContext ctx, SlabExact* exact,
+    size_t capacity, uint allocs) nothrow @nogc @system
+{
+    immutable live = exact.live;
+    immutable top = exact.top;
+    foreach (k; 1 .. allocs + 1)
+    {
+        exact.calls = 0;
+        exact.failAt = k;
+        exact.strictLifo = true;
+        auto p = ctx.createChildren!(T, R, PrivateStateStorage.cohortSlab)(capacity,
+            PrivateCohortOptions(0, subsets), capacity * T.sizeof);
+        namedCheck(p is null, "slab-create-fail returns null");
+        namedCheck(exact.live == live, "slab-create-fail live allocations");
+        namedCheck(exact.top == top, "slab-create-fail unwind restored");
+        exact.strictLifo = false;
+        exact.failAt = 0;
+    }
+}
+
+struct SlabFailRoot { SlabExact* exact; uint phase; }
+PrivateRootDisposition slabFailStep(scope ref PrivateBorrow!SlabFailRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto exact = b.value.exact;
+    if (b.value.phase++ != 0) return PrivateRootDisposition.finish;
+    slabFailOne!(ulong, void, false)(ctx, exact, 4, 3);
+    slabFailOne!(ulong, ulong, false)(ctx, exact, 4, 4);
+    slabFailOne!(ulong, void, true)(ctx, exact, 4, 4);
+    slabFailOne!(ulong, ulong, true)(ctx, exact, 4, 5);
+
+    immutable live = exact.live;
+    exact.calls = 0;
+    namedCheck(ctx.createChildren!(ulong, void, PrivateStateStorage.cohortSlab)(
+        4, PrivateCohortOptions(0, false), 0) is null, "slab-create-fail limit 0");
+    namedCheck(ctx.createChildren!(ulong, ulong, PrivateStateStorage.cohortSlab)(
+        4, PrivateCohortOptions(0, true), 4 * ulong.sizeof - 1) is null, "slab-create-fail under limit");
+    namedCheck(exact.calls == 0 && exact.live == live, "slab-create-fail rejected cap allocates nothing");
+    exact.calls = 0;
+    namedCheck(ctx.createChildren!(SlabWide, void, PrivateStateStorage.cohortSlab)(
+        size_t.max / SlabWide.sizeof + 1, PrivateCohortOptions(0, false), size_t.max) is null,
+        "slab-create-fail capacity overflow");
+    namedCheck(exact.calls == 0 && exact.live == live, "slab-create-fail overflow allocates nothing");
+
+    exact.calls = 0;
+    exact.strictLifo = true;
+    immutable top = exact.top;
+    namedCheck(ctx.createChildren!(SlabOveraligned, void, PrivateStateStorage.cohortSlab)(
+        1, PrivateCohortOptions(0, false), SlabOveraligned.sizeof) is null, "slab-create-fail over-aligned");
+    namedCheck(exact.live == live && exact.top == top, "slab-create-fail over-aligned balance");
+    exact.strictLifo = false;
+
+    exact.calls = 0;
+    auto plain = ctx.createChildren!(ulong, void, PrivateStateStorage.cohortSlab)(
+        4, PrivateCohortOptions(0, false), 4 * ulong.sizeof);
+    namedCheck(plain !is null && exact.calls == 3, "slab-create-fail plain allocation count");
+    namedCheck(privateTestSlabSlotZero(plain, 0), "slab-create-fail plain slab zero");
+    exact.calls = 0;
+    auto typed = ctx.createChildren!(ulong, ulong, PrivateStateStorage.cohortSlab)(
+        4, PrivateCohortOptions(0, false), 4 * ulong.sizeof);
+    namedCheck(typed !is null && exact.calls == 4, "slab-create-fail result allocation count");
+    exact.calls = 0;
+    auto subset = ctx.createChildren!(ulong, void, PrivateStateStorage.cohortSlab)(
+        4, PrivateCohortOptions(0, true), 4 * ulong.sizeof);
+    namedCheck(subset !is null && exact.calls == 4, "slab-create-fail subset allocation count");
+    exact.calls = 0;
+    auto both = ctx.createChildren!(ulong, ulong, PrivateStateStorage.cohortSlab)(
+        4, PrivateCohortOptions(0, true), 4 * ulong.sizeof);
+    namedCheck(both !is null && exact.calls == 5, "slab-create-fail result+subset allocation count");
+    namedCheck(privateTestSlabPointer(both) !is null
+        && privateTestSlabPointer(both) != privateTestEntriesPointer(both)
+        && privateTestSlabPointer(both) != privateTestResultsPointer(both)
+        && privateTestSlabPointer(both) != privateTestSelectionPointer(both),
+        "slab-create-fail slab is its own allocation");
+    return PrivateRootDisposition.finish;
+}
+void slabCreateFail()
+{
+    SlabExact exact;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(SlabFailRoot, slabFailStep).create(farm, 1, 256, slabExactPolicy(exact));
+    check(park !is null);
+    check(park.spawn(SlabFailRoot(&exact)) == PrivateSpawnResult.spawned);
+    slabDrain(park, token, view, "slab-create-fail drain");
+    park.destroy();
+    namedCheck(exact.live == 0 && exact.top == 0, "slab-create-fail zero live allocations");
+    writeln("PASS slab-create-fail unwind, byte cap, overflow and over-aligned rejection");
+}
+
+// ---- slab-gc --------------------------------------------------------------------
+// gcRooted slab. A retired member's class reference is finalized while the
+// parent still holds the cohort (the slab allocation is still live). An
+// unspawned tail filled with that class's address before allocateZero must
+// also be finalized, and a retained member must not be.
+// Catching mutations:
+//   retireMember drops the post-destroy memset: "slab-gc retired slot released
+//     its reference".
+//   the slab uses allocate instead of allocateZero: "slab-gc unspawned tail was zeroed".
+// Skipped under TSan, like dtor-gc: druntime's suspend signal is not TSan-clean.
+shared uint slabGcPoisonFlag, slabGcLiveFlag;
+shared uint slabGcCreated, slabGcSpawned, slabGcRetired, slabGcGoSpawn, slabGcGoRetire, slabGcGoFinish;
+__gshared uint slabPoisonLo, slabPoisonHi;
+enum slabPoisonHiMask = 0xA5A5A5A5u;
+__gshared SlabGcObj slabGcHandoff;
+
+class SlabPoisonObj
+{
+    uint magic = 0xA150;
+    ~this() { atomicStore(slabGcPoisonFlag, 1u); }
+}
+class SlabGcObj
+{
+    uint magic = 0x51AB;
+    ~this() { atomicStore(slabGcLiveFlag, 1u); }
+}
+struct SlabGcMember
+{
+    ulong[2] pad;
+    SlabGcObj obj;
+    uint id;
+    ~this() nothrow @nogc @system
+    {
+        if (id == 0) return;
+        namedCheck(obj !is null && obj.magic == 0x51AB, "slab-gc destructor sees its reference");
+    }
+}
+alias SlabGcKids = PrivateChildPark!(SlabGcMember, void, PrivateStateStorage.cohortSlab);
+struct SlabGcRoot { SlabGcKids* kids; uint phase; }
+struct SlabPoisonChain { ActorAllocator raw; }
+
+void slabPoisonStore(void* p) nothrow @nogc @system
+{
+    auto u = cast(ulong) p;
+    slabPoisonLo = cast(uint) u;
+    slabPoisonHi = cast(uint)(u >> 32) ^ slabPoisonHiMask;
+}
+void* slabPoisonLoad() nothrow @nogc @system
+{
+    if (slabPoisonLo == 0 && slabPoisonHi == 0) return null;
+    auto hi = slabPoisonHi ^ slabPoisonHiMask;
+    return cast(void*)(cast(ulong) slabPoisonLo | (cast(ulong) hi << 32));
+}
+void* slabPoisonAllocate(void* ctx, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    auto chain = cast(SlabPoisonChain*) ctx;
+    auto p = chain.raw.allocate(chain.raw.context, bytes, alignment);
+    if (p is null) return null;
+    auto addr = slabPoisonLoad();
+    if (addr !is null)
+        foreach (i; 0 .. bytes / (void*).sizeof)
+            (cast(void**) p)[i] = addr;
+    return p;
+}
+void slabPoisonDeallocate(void* ctx, void* ptr, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    auto chain = cast(SlabPoisonChain*) ctx;
+    chain.raw.deallocate(chain.raw.context, ptr, bytes, alignment);
+}
+pragma(inline, false) void slabArmPoison()
+{
+    auto obj = new SlabPoisonObj();
+    GC.addRoot(cast(void*) obj);
+    slabPoisonStore(cast(void*) obj);
+}
+pragma(inline, false) void slabDropPoisonRoot()
+{
+    auto p = slabPoisonLoad();
+    if (p !is null) GC.removeRoot(p);
+    slabPoisonLo = 0;
+    slabPoisonHi = 0;
+}
+pragma(inline, false) void slabGcPlantHandoff()
+{
+    slabGcHandoff = new SlabGcObj();
+}
+pragma(inline, false) void slabGcCollectTwice()
+{
+    ulong[64] scrub = 0;
+    if (scrub[63] == 1) return;
+    GC.collect();
+    GC.collect();
+}
+void slabGcNop(scope ref PrivateBorrow!SlabGcMember, scope ref PrivateContext) nothrow @nogc @system {}
+PrivateRootDisposition slabGcStep(scope ref PrivateBorrow!SlabGcRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase == 0)
+    {
+        s.kids = ctx.createChildren!(SlabGcMember, void, PrivateStateStorage.cohortSlab)(
+            4, PrivateCohortOptions(0, false), 4 * SlabGcMember.sizeof);
+        namedCheck(s.kids !is null, "slab-gc cohort");
+        atomicStore(slabGcCreated, 1u);
+        s.phase = 1;
+        return PrivateRootDisposition.again;
+    }
+    if (s.phase == 1)
+    {
+        if (atomicLoad(slabGcGoSpawn) == 0) return PrivateRootDisposition.again;
+        namedCheck(slabGcHandoff !is null, "slab-gc handoff");
+        auto obj = slabGcHandoff;
+        slabGcHandoff = null;
+        namedCheck(s.kids.spawn(ctx, SlabGcMember([0, 0], obj, 1)) == PrivateSpawnResult.spawned, "slab-gc spawn");
+        atomicStore(slabGcSpawned, 1u);
+        s.phase = 2;
+        return PrivateRootDisposition.again;
+    }
+    if (s.phase == 2)
+    {
+        if (atomicLoad(slabGcGoRetire) == 0) return PrivateRootDisposition.again;
+        namedCheck(s.kids.startFinal!slabGcNop(ctx) == PrivateStartResult.started, "slab-gc final");
+        s.phase = 3;
+        return PrivateRootDisposition.waitChildren;
+    }
+    atomicStore(slabGcRetired, 1u);
+    if (atomicLoad(slabGcGoFinish) == 0) return PrivateRootDisposition.again;
+    return PrivateRootDisposition.finish;
+}
+void slabGc()
+{
+    version (TSan)
+    {
+        writeln("SKIP slab-gc: druntime GC suspend signals are not TSan-clean");
+        return;
+    }
+    else
+    {
+        atomicStore(slabGcPoisonFlag, 0u);
+        atomicStore(slabGcLiveFlag, 0u);
+        atomicStore(slabGcCreated, 0u);
+        atomicStore(slabGcSpawned, 0u);
+        atomicStore(slabGcRetired, 0u);
+        atomicStore(slabGcGoSpawn, 0u);
+        atomicStore(slabGcGoRetire, 0u);
+        atomicStore(slabGcGoFinish, 0u);
+        slabPoisonLo = 0;
+        slabPoisonHi = 0;
+        slabGcHandoff = null;
+        slabArmPoison();
+        Counts counts;
+        SlabPoisonChain chain;
+        chain.raw = policy(counts);
+        auto filler = ActorAllocator(&chain, &slabPoisonAllocate, &slabPoisonDeallocate);
+        auto farm = AntFarm.create();
+        scope(exit) farm.destroy();
+        auto token = farm.registerProducer(Tier.small);
+        scope(exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0);
+        scope(exit) view.unsubscribe();
+        auto rooted = ActorAllocator.gcRooted(&filler);
+        auto park = PrivateRootPark!(SlabGcRoot, slabGcStep).create(farm, 1, 256, rooted);
+        check(park !is null);
+        check(park.spawn(SlabGcRoot.init) == PrivateSpawnResult.spawned);
+        slabPumpUntil(park, token, view, &slabGcCreated, "slab-gc created");
+        slabDropPoisonRoot();
+        slabGcCollectTwice();
+        namedCheck(atomicLoad(slabGcPoisonFlag) == 1, "slab-gc unspawned tail was zeroed");
+        slabGcPlantHandoff();
+        atomicStore(slabGcGoSpawn, 1u);
+        slabPumpUntil(park, token, view, &slabGcSpawned, "slab-gc spawned");
+        slabGcCollectTwice();
+        namedCheck(atomicLoad(slabGcLiveFlag) == 0, "slab-gc live member retained");
+        atomicStore(slabGcGoRetire, 1u);
+        slabPumpUntil(park, token, view, &slabGcRetired, "slab-gc retired");
+        // Cohort is still alive: the root has not finished, so the slab is allocated.
+        namedCheck(park.live == 1, "slab-gc parent keeps the cohort");
+        slabGcCollectTwice();
+        namedCheck(atomicLoad(slabGcLiveFlag) == 1, "slab-gc retired slot released its reference");
+        atomicStore(slabGcGoFinish, 1u);
+        slabDrain(park, token, view, "slab-gc drain");
+        park.destroy();
+        namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "slab-gc allocation balance");
+        writeln("PASS slab-gc dead slots release references and the unspawned tail is zero");
+    }
+}
+
+// ---- slab-reclaim ----------------------------------------------------------------
+// A two-level slab tree under both root reclamation policies, with workers.
+// Catching mutation: dispose skips the one slab free (or freeMemory's each
+// slot instead): "slab-reclaim allocation balance" under emitter and consumer.
+struct SlabLeaf { ulong v; }
+struct SlabMid
+{
+    PrivateChildPark!(SlabLeaf, ulong, PrivateStateStorage.cohortSlab)* leaves;
+    ulong base;
+}
+alias SlabMidKids = PrivateChildPark!(SlabMid, void, PrivateStateStorage.cohortSlab);
+shared uint slabReclaimLeaves;
+ulong slabLeafOp(scope ref PrivateBorrow!SlabLeaf b, scope ref PrivateContext) nothrow @nogc @system
+{
+    atomicFetchAdd(slabReclaimLeaves, 1u);
+    return b.value.v + 1;
+}
+void slabMidOp(scope ref PrivateBorrow!SlabMid b, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto m = &b.value();
+    enum n = 3;
+    m.leaves = ctx.createChildren!(SlabLeaf, ulong, PrivateStateStorage.cohortSlab)(
+        n, PrivateCohortOptions(0, false), n * SlabLeaf.sizeof);
+    namedCheck(m.leaves !is null, "slab-reclaim leaves");
+    foreach (i; 0 .. n)
+        namedCheck(m.leaves.spawn(ctx, SlabLeaf(m.base + i)) == PrivateSpawnResult.spawned, "slab-reclaim leaf spawn");
+    namedCheck(m.leaves.startFinal!slabLeafOp(ctx) == PrivateStartResult.started, "slab-reclaim leaf final");
+}
+void slabMidNop(scope ref PrivateBorrow!SlabMid, scope ref PrivateContext) nothrow @nogc @system {}
+struct SlabReclaimRoot { SlabMidKids* mids; uint phase; }
+PrivateRootDisposition slabReclaimStep(scope ref PrivateBorrow!SlabReclaimRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase == 0)
+    {
+        enum n = 3;
+        s.mids = ctx.createChildren!(SlabMid, void, PrivateStateStorage.cohortSlab)(
+            n, PrivateCohortOptions(0, false), n * SlabMid.sizeof);
+        namedCheck(s.mids !is null, "slab-reclaim mids");
+        foreach (i; 0 .. n)
+            namedCheck(s.mids.spawn(ctx, SlabMid(null, i * 10)) == PrivateSpawnResult.spawned, "slab-reclaim mid spawn");
+        namedCheck(s.mids.start!slabMidOp(ctx) == PrivateStartResult.started, "slab-reclaim mid wave");
+        s.phase = 1;
+        return PrivateRootDisposition.waitChildren;
+    }
+    if (s.phase == 1)
+    {
+        namedCheck(s.mids.startFinal!slabMidNop(ctx) == PrivateStartResult.started, "slab-reclaim mid final");
+        s.phase = 2;
+        return PrivateRootDisposition.waitChildren;
+    }
+    return PrivateRootDisposition.finish;
+}
+void slabReclaim(PrivateRootReclamation reclaim)()
+{
+    atomicStore(slabReclaimLeaves, 0u);
+    Counts counts;
+    auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    auto workers = new Workers(farm, 2);
+    scope(exit) workers.join();
+    auto park = PrivateRootPark!(SlabReclaimRoot, slabReclaimStep, reclaim).create(
+        farm, 1, 256, policy(counts));
+    check(park !is null);
+    check(park.spawn(SlabReclaimRoot.init) == PrivateSpawnResult.spawned);
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (park.live)
+    {
+        park.pump(token);
+        namedCheck(MonoTime.currTime < deadline, "slab-reclaim drain");
+    }
+    namedCheck(atomicLoad(slabReclaimLeaves) == 9, "slab-reclaim tree ran");
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "slab-reclaim allocation balance");
+}
+void slabReclaimAll()
+{
+    slabReclaim!(PrivateRootReclamation.emitter)();
+    slabReclaim!(PrivateRootReclamation.consumer)();
+    writeln("PASS slab-reclaim tree under emitter and consumer reclamation");
+}
+
+// ---- slab-results ----------------------------------------------------------------
+// Results stay readable after the retiring wave zeros slots. Entry, result and
+// selection storage are distinct from the slab and survive slot clearing.
+// Catching mutation: finish of a retiring wave memsets the result storage
+// (or retireMember zeros past the slot into the result array):
+// "slab-results readable after retirement".
+enum slabResultN = 4;
+struct SlabRes { ulong input; }
+alias SlabResKids = PrivateChildPark!(SlabRes, ulong, PrivateStateStorage.cohortSlab);
+struct SlabResRoot { SlabResKids* kids; uint phase; }
+ulong slabResOp(scope ref PrivateBorrow!SlabRes b, scope ref PrivateContext) nothrow @nogc @system
+{ return 0x51AB_0000 + b.value.input; }
+PrivateRootDisposition slabResStep(scope ref PrivateBorrow!SlabResRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase == 0)
+    {
+        s.kids = ctx.createChildren!(SlabRes, ulong, PrivateStateStorage.cohortSlab)(
+            slabResultN, PrivateCohortOptions(0, true), slabResultN * SlabRes.sizeof);
+        namedCheck(s.kids !is null, "slab-results cohort");
+        foreach (i; 0 .. slabResultN)
+            namedCheck(s.kids.spawn(ctx, SlabRes(i + 1)) == PrivateSpawnResult.spawned, "slab-results spawn");
+        namedCheck(s.kids.startFinal!slabResOp(ctx) == PrivateStartResult.started, "slab-results final");
+        s.phase = 1;
+        return PrivateRootDisposition.waitChildren;
+    }
+    if (s.phase == 1)
+    {
+        auto r = s.kids.results(ctx);
+        namedCheck(r.length == slabResultN, "slab-results length after retirement");
+        foreach (i, v; r) namedCheck(v == 0x51AB_0000 + i + 1, "slab-results readable after retirement");
+        auto slab = privateTestSlabPointer(s.kids);
+        auto entries = privateTestEntriesPointer(s.kids);
+        auto results = privateTestResultsPointer(s.kids);
+        auto sel = privateTestSelectionPointer(s.kids);
+        namedCheck(slab !is null && entries !is null && results !is null && sel !is null, "slab-results storage present");
+        namedCheck(slab != entries && slab != results && slab != sel
+            && entries != results && results != sel && entries != sel, "slab-results storage independent");
+        foreach (i; 0 .. slabResultN)
+            namedCheck(privateTestSlabSlotZero(s.kids, i), "slab-results slot cleared");
+        foreach (i; 0 .. slabResultN)
+            namedCheck(s.kids.spawn(ctx, SlabRes(i + 10)) == PrivateSpawnResult.spawned, "slab-results refill");
+        uint[2] selIdx = [3, 1];
+        namedCheck(s.kids.startSubset!slabResOp(ctx, selIdx[]) == PrivateStartResult.started, "slab-results subset");
+        s.phase = 2;
+        return PrivateRootDisposition.waitChildren;
+    }
+    auto r = s.kids.results(ctx);
+    auto members = s.kids.subsetMembers(ctx);
+    namedCheck(r.length == 2 && members.length == 2, "slab-results subset length");
+    namedCheck(members[0] == 3 && members[1] == 1, "slab-results selection after slot clearing");
+    namedCheck(r[0] == 0x51AB_0000 + 13 && r[1] == 0x51AB_0000 + 11, "slab-results subset values");
+    return PrivateRootDisposition.finish;
+}
+void slabResults()
+{
+    Counts counts;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(SlabResRoot, slabResStep).create(farm, 1, 256, policy(counts));
+    check(park !is null);
+    check(park.spawn(SlabResRoot.init) == PrivateSpawnResult.spawned);
+    slabDrain(park, token, view, "slab-results drain");
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "slab-results allocation balance");
+    writeln("PASS slab-results outlive slot clearing; entry and selection storage stay independent");
+}
+
+// ---- slab-per-object -------------------------------------------------------------
+// The default policy still allocates one state per spawn and frees it at
+// retirement. The compile-time checks above pin the default type, the rejected
+// no-options slab overload, and the extra word.
+// Catching mutation: perObject spawn stops allocating (returns a static slot):
+// "slab-per-object one state per spawn". Freeing that state only at dispose,
+// not in retireMember: "slab-per-object frees each state at retirement".
+enum slabPerObjectN = 4;
+struct SlabPlain { ulong n; }
+alias SlabPlainKids = PrivateChildPark!(SlabPlain, void);
+struct SlabPlainRoot { SlabPlainKids* kids; Counts* counts; long allocated, freed; uint phase; }
+void slabPlainOp(scope ref PrivateBorrow!SlabPlain, scope ref PrivateContext) nothrow @nogc @system {}
+PrivateRootDisposition slabPlainStep(scope ref PrivateBorrow!SlabPlainRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    if (s.phase++ == 0)
+    {
+        s.kids = ctx.createChildren!SlabPlain(slabPerObjectN);
+        namedCheck(s.kids !is null, "slab-per-object cohort");
+        s.allocated = atomicLoad(s.counts.allocated);
+        foreach (i; 0 .. slabPerObjectN)
+            namedCheck(s.kids.spawn(ctx, SlabPlain(i + 1)) == PrivateSpawnResult.spawned, "slab-per-object spawn");
+        namedCheck(atomicLoad(s.counts.allocated) == s.allocated + slabPerObjectN,
+            "slab-per-object one state per spawn");
+        s.freed = atomicLoad(s.counts.freed);
+        namedCheck(s.kids.startFinal!slabPlainOp(ctx) == PrivateStartResult.started, "slab-per-object final");
+        return PrivateRootDisposition.waitChildren;
+    }
+    namedCheck(atomicLoad(s.counts.freed) == s.freed + slabPerObjectN,
+        "slab-per-object frees each state at retirement");
+    return PrivateRootDisposition.finish;
+}
+void slabPerObject()
+{
+    Counts counts;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(SlabPlainRoot, slabPlainStep).create(farm, 1, 256, policy(counts));
+    check(park !is null);
+    check(park.spawn(SlabPlainRoot(null, &counts)) == PrivateSpawnResult.spawned);
+    slabDrain(park, token, view, "slab-per-object drain");
+    park.destroy();
+    namedCheck(atomicLoad(counts.allocated) == atomicLoad(counts.freed), "slab-per-object allocation balance");
+    writeln("PASS slab-per-object still allocates and frees one state per member");
+}
+
+// ---- death -----------------------------------------------------------------------
+// slab-unauthorized, slab-active-dispose: debug and release.
+// slab-dirty-slot: debug dies; release survives because the zero-check is
+// version(assert).
+// Catching mutations:
+//   spawn drops authorized(): the unauthorized child prints "spawn survived".
+//   disposeChildren drops the active-wave fatal: the active-dispose child exits 0.
+//   the uncleared-slot fatal is not under version(assert): the release child dies.
+//   the uncleared-slot check is deleted: the debug child prints "release survived".
+alias SlabAuthKids = PrivateChildPark!(ulong, void, PrivateStateStorage.cohortSlab);
+struct SlabAuthProbe { SlabAuthKids* kids; }
+struct SlabAuthRoot { SlabAuthProbe* probe; bool owner; }
+void slabAuthOp(scope ref PrivateBorrow!ulong, scope ref PrivateContext) nothrow @nogc @system {}
+PrivateRootDisposition slabAuthStep(scope ref PrivateBorrow!SlabAuthRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto probe = b.value.probe;
+    if (b.value.owner)
+    {
+        if (probe.kids is null)
+        {
+            probe.kids = ctx.createChildren!(ulong, void, PrivateStateStorage.cohortSlab)(
+                2, PrivateCohortOptions(0, false), 2 * ulong.sizeof);
+            namedCheck(probe.kids !is null, "slab unauthorized cohort");
+        }
+        return PrivateRootDisposition.again;
+    }
+    namedCheck(probe.kids !is null, "slab unauthorized cohort exists");
+    fprintf(stderr, "slab unauthorized: other root calls spawn\n");
+    probe.kids.spawn(ctx, 1);
+    fprintf(stderr, "slab unauthorized: spawn survived\n");
+    return PrivateRootDisposition.finish;
+}
+void slabUnauthorizedDeath()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    SlabAuthProbe probe;
+    auto park = PrivateRootPark!(SlabAuthRoot, slabAuthStep).create(farm, 2);
+    check(park !is null);
+    check(park.spawn(SlabAuthRoot(&probe, true)) == PrivateSpawnResult.spawned);
+    check(park.spawn(SlabAuthRoot(&probe, false)) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+}
+PrivateRootDisposition slabActiveDisposeStep(scope ref PrivateBorrow!ulong, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto kids = ctx.createChildren!(ulong, void, PrivateStateStorage.cohortSlab)(
+        1, PrivateCohortOptions(0, false), ulong.sizeof);
+    namedCheck(kids !is null && kids.spawn(ctx, 1) == PrivateSpawnResult.spawned, "slab active-dispose setup");
+    namedCheck(kids.start!slabAuthOp(ctx) == PrivateStartResult.started, "slab active-dispose wave");
+    fprintf(stderr, "slab active-dispose: returning finish\n");
+    return PrivateRootDisposition.finish;
+}
+void slabActiveDisposeDeath()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    auto park = PrivateRootPark!(ulong, slabActiveDisposeStep).create(farm, 1);
+    check(park !is null);
+    check(park.spawn(0) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+}
+PrivateRootDisposition slabDirtyStep(scope ref PrivateBorrow!ulong, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    auto kids = ctx.createChildren!(ulong, void, PrivateStateStorage.cohortSlab)(
+        1, PrivateCohortOptions(0, false), ulong.sizeof);
+    namedCheck(kids !is null, "slab dirty-slot cohort");
+    privateTestDirtySlabSlot(kids, 0);
+    fprintf(stderr, "slab dirty-slot: spawning into a dirty slot\n");
+    auto result = kids.spawn(ctx, 7);
+    namedCheck(result == PrivateSpawnResult.spawned, "slab dirty-slot release spawn");
+    fprintf(stderr, "slab dirty-slot: release survived\n");
+    return PrivateRootDisposition.finish;
+}
+void slabDirtySlotDeath()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    auto park = PrivateRootPark!(ulong, slabDirtyStep).create(farm, 1);
+    check(park !is null);
+    check(park.spawn(0) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+}
+void slabDeath()
+{
+    version (linux)
+    {
+        auto unauthorized = probeDeath("slab-unauthorized");
+        check(unauthorized.status != 0);
+        check(unauthorized.stderrText.canFind("slab unauthorized: other root calls spawn"));
+        check(unauthorized.stderrText.canFind("antfarm fatal: private child park: unauthorized context"));
+        check(!unauthorized.stderrText.canFind("survived"));
+        auto active = probeDeath("slab-active-dispose");
+        check(active.status != 0);
+        check(active.stderrText.canFind("slab active-dispose: returning finish"));
+        check(active.stderrText.canFind("antfarm fatal: retire private actor with active child wave"));
+        version (assert)
+        {
+            auto dirty = probeDeath("slab-dirty-slot");
+            check(dirty.status != 0);
+            check(dirty.stderrText.canFind("slab dirty-slot: spawning into a dirty slot"));
+            check(dirty.stderrText.canFind("antfarm fatal: private child slab: spawn into an uncleared slot"));
+            check(!dirty.stderrText.canFind("survived"));
+            writeln("PASS slab death: unauthorized context, active disposal, and debug uncleared-slot spawn");
+        }
+        else
+        {
+            auto dirty = probeDeath("slab-dirty-slot");
+            check(dirty.status == 0);
+            check(dirty.stderrText.canFind("slab dirty-slot: release survived"));
+            writeln("PASS slab death: unauthorized context and active disposal; uncleared-slot check compiled out of release");
+        }
+    }
+    else
+        writeln("SKIP slab death: /proc/self/exe re-exec requires Linux");
+}
+
+void phaseSlab()
+{
+    slabRetire();
+    slabRetain();
+    slabRefill();
+    slabContinuation();
+    slabCancel();
+    slabIdle();
+    slabCreateFail();
+    slabGc();
+    slabReclaimAll();
+    slabResults();
+    slabPerObject();
+}
+
 void runSuite()
 {
     rootCostHintRule(); writeln("PASS derived root cost hint rule");
@@ -10161,6 +11584,7 @@ void runSuite()
     phaseD();
     phasePorts();
     phaseDtor();
+    phaseSlab();
     phaseSubset();
     phaseEntryWord();
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
@@ -10500,6 +11924,22 @@ void main(string[] args)
         case "failure-overflow": failureOverflowDeath(); return;
         case "fail-unauthorized": failUnauthorizedDeath(); return;
         case "outcome-unauthorized": outcomeUnauthorizedDeath(); return;
+        case "slab": phaseSlab(); return;
+        case "slab-retire": slabRetire(); return;
+        case "slab-retain": slabRetain(); return;
+        case "slab-refill": slabRefill(); return;
+        case "slab-continuation": slabContinuation(); return;
+        case "slab-cancel": slabCancel(); return;
+        case "slab-idle": slabIdle(); return;
+        case "slab-create-fail": slabCreateFail(); return;
+        case "slab-gc": slabGc(); return;
+        case "slab-reclaim": slabReclaimAll(); return;
+        case "slab-results": slabResults(); return;
+        case "slab-per-object": slabPerObject(); return;
+        case "slab-death": slabDeath(); return;
+        case "slab-unauthorized": slabUnauthorizedDeath(); return;
+        case "slab-active-dispose": slabActiveDisposeDeath(); return;
+        case "slab-dirty-slot": slabDirtySlotDeath(); return;
         case "death": deathHarness(); return;
         case "node-death": nodeDeath(); return;
         case "death-negative-control": deathNegativeControl(); return;
