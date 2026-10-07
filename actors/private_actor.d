@@ -29,6 +29,15 @@ struct PrivateCohortOptions
     bool subsets;     // reserve selection and inverse-position storage
 }
 
+/// Member state storage of a child cohort, fixed by its type. perObject (the
+/// default) allocates each member at spawn and frees it at retirement.
+/// cohortSlab reserves one zeroed slab of capacity * T.sizeof at create, under
+/// the explicit slabByteLimit of its createChildren overload, so allocation
+/// failure moves from spawn to create; Entry i always uses slot i. Retirement
+/// destroys and clears its slot, which spawn reuses only after the retiring
+/// wave's join. The slab is freed once, at cohort disposal.
+enum PrivateStateStorage : ubyte { perObject, cohortSlab }
+
 enum PrivateRootDisposition : ubyte { again, finish, waitChildren, finishAfterChildren }
 enum PrivateChildDisposition : ubyte { done, waitChildren }
 
@@ -203,28 +212,49 @@ private:
     }
 public:
     /// R is the per-member result type; void (the default) creates a
-    /// signal-only cohort with no result storage.
-    PrivateChildPark!(T, R)* createChildren(T, R = void)(size_t capacity)
+    /// signal-only cohort with no result storage. These three overloads
+    /// create perObject cohorts; cohortSlab has its own overload below.
+    PrivateChildPark!(T, R)* createChildren(T, R = void,
+        PrivateStateStorage storage = PrivateStateStorage.perObject)(size_t capacity)
         nothrow @nogc @system
+        if (storage == PrivateStateStorage.perObject)
     {
         if (actor_ is null) fatal("private child park: unauthorized context");
         if (retiring_) return null;
         return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, batchLimit_);
     }
-    PrivateChildPark!(T, R)* createChildren(T, R = void)(size_t capacity, size_t childBatchLimit)
+    PrivateChildPark!(T, R)* createChildren(T, R = void,
+        PrivateStateStorage storage = PrivateStateStorage.perObject)(size_t capacity, size_t childBatchLimit)
         nothrow @nogc @system
+        if (storage == PrivateStateStorage.perObject)
     {
         if (actor_ is null) fatal("private child park: unauthorized context");
         if (childBatchLimit == 0) fatal("invalid private child batch limit");
         if (retiring_) return null;
         return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, childBatchLimit);
     }
-    PrivateChildPark!(T, R)* createChildren(T, R = void)(size_t capacity, PrivateCohortOptions options)
-        nothrow @nogc @system
+    PrivateChildPark!(T, R)* createChildren(T, R = void,
+        PrivateStateStorage storage = PrivateStateStorage.perObject)(size_t capacity,
+        PrivateCohortOptions options) nothrow @nogc @system
+        if (storage == PrivateStateStorage.perObject)
     {
         if (actor_ is null) fatal("private child park: unauthorized context");
         if (retiring_) return null;
         return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity,
+            options.batchLimit == 0 ? batchLimit_ : options.batchLimit, options.subsets);
+    }
+    /// cohortSlab only. slabByteLimit is the explicit cap on the state slab of
+    /// capacity * T.sizeof bytes reserved here; null if that product overflows
+    /// or exceeds the cap (0 rejects every slab), or if any allocation fails.
+    PrivateChildPark!(T, R, storage)* createChildren(T, R = void,
+        PrivateStateStorage storage = PrivateStateStorage.perObject)(size_t capacity,
+        PrivateCohortOptions options, size_t slabByteLimit) nothrow @nogc @system
+        if (storage == PrivateStateStorage.cohortSlab)
+    {
+        if (actor_ is null) fatal("private child park: unauthorized context");
+        if (retiring_) return null;
+        if (capacity > size_t.max / T.sizeof || capacity * T.sizeof > slabByteLimit) return null;
+        return PrivateChildPark!(T, R, storage).create(actor_, service, enclosing_ is null, capacity,
             options.batchLimit == 0 ? batchLimit_ : options.batchLimit, options.subsets);
     }
 
@@ -835,11 +865,19 @@ private void destroyState(T)(Entry* entry) nothrow @nogc @system
 }
 
 // Shared retirement hook for terminal dispatches and child cleanup activations.
-private void retireMember(T)(Service* service, Entry* entry) nothrow @nogc @system
+// A slab slot is never freed (the cohort frees the slab once, at dispose). It
+// is cleared after the destructor, which may read it: a rooted slab then stops
+// retaining dead references, and the slot is zero when spawn reuses it after
+// the retiring join. These writes precede the caller's credit release.
+private void retireMember(T, PrivateStateStorage storage)(Service* service, Entry* entry)
+    nothrow @nogc @system
 {
     disposeChildren(entry);
     destroyState!T(entry);
-    freeMemory(service, entry.state, T.sizeof, T.alignof);
+    static if (storage == PrivateStateStorage.perObject)
+        freeMemory(service, entry.state, T.sizeof, T.alignof);
+    else
+        memset(entry.state, 0, T.sizeof);
     entry.state = null;
 }
 
@@ -1469,9 +1507,12 @@ private struct ResumeBodies
 /// Opaque homogeneous cohort. The parent may create members and request a
 /// whole-cohort wave, but can never borrow a child's state. No overlapping
 /// waves, external dispatches, removal, or reparenting in this first slice.
-struct PrivateChildPark(T, R = void)
+/// storage selects per-member allocation or one reserved state slab; see
+/// PrivateStateStorage.
+struct PrivateChildPark(T, R = void, PrivateStateStorage storage = PrivateStateStorage.perObject)
 {
     enum hasResults = !is(R == void);
+    enum slab = storage == PrivateStateStorage.cohortSlab;
     static if (hasResults)
     {
         static assert(!is(R == const) && !is(R == immutable)
@@ -1528,10 +1569,27 @@ private:
             results_[slot] = value;
         }
     }
+    // capacity_ * T.sizeof bytes at T.alignof; slot i belongs to entries_[i].
+    // Last, so the perObject layout is the unchanged prefix.
+    static if (slab)
+        void* slab_;
     static assert(base_.offsetof == 0,
         "PrivateChildPark.fromWave requires base_ at offset zero");
+    version (D_LP64)
+    {
+        static if (slab)
+            static assert(slab_.offsetof == PrivateChildPark!(T, R).sizeof
+                && PrivateChildPark.sizeof == PrivateChildPark!(T, R).sizeof + (void*).sizeof,
+                "cohortSlab appends one word to the perObject layout");
+        else
+            static assert(PrivateChildPark.sizeof == (hasResults ? 392 : 376),
+                "perObject child park layout changed");
+    }
     @disable this(this);
 
+    // A cohortSlab caller (createChildren) has already checked capacity *
+    // T.sizeof against overflow and the cap; the signature stays the
+    // perObject one so the default path's code is unchanged.
     static PrivateChildPark* create(Entry* parent, Service* service, bool parentIsRoot,
         size_t capacity, size_t batchLimit, bool subsets = false) nothrow @nogc @system
     {
@@ -1563,6 +1621,21 @@ private:
             park.sel_ = cast(uint*) allocateZero(service, capacity * 2 * uint.sizeof, uint.alignof);
             if (park.sel_ is null)
             {
+                static if (hasResults)
+                    freeMemory(service, park.results_, capacity * resultBytesPerMember, R.alignof);
+                freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
+                freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
+                return null;
+            }
+        }
+        // Last, so failure unwinds every earlier allocation. Zeroed before any
+        // publication: a rooted slab is scanned whole, unspawned slots included.
+        static if (slab)
+        {
+            park.slab_ = allocateZero(service, capacity * T.sizeof, T.alignof);
+            if (park.slab_ is null)
+            {
+                freeMemory(service, park.sel_, capacity * 2 * uint.sizeof, uint.alignof);
                 static if (hasResults)
                     freeMemory(service, park.results_, capacity * resultBytesPerMember, R.alignof);
                 freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
@@ -1670,9 +1743,20 @@ public:
         if (context.retiring_) return PrivateSpawnResult.retiring;
         if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0) return PrivateSpawnResult.waveActive;
         if (count_ == capacity_) return PrivateSpawnResult.capacityFull;
-        auto service = base_.service;
-        auto state = service.allocator.allocate(service.allocator.context, T.sizeof, T.alignof);
-        if (state is null) return PrivateSpawnResult.allocationFailed;
+        static if (slab)
+        {
+            // Reserved at create; zero, because a retiring join cleared it.
+            void* state = cast(ubyte*) slab_ + count_ * T.sizeof;
+            version (assert)
+                foreach (b; (cast(const(ubyte)*) state)[0 .. T.sizeof])
+                    if (b != 0) fatal("private child slab: spawn into an uncleared slot");
+        }
+        else
+        {
+            auto service = base_.service;
+            auto state = service.allocator.allocate(service.allocator.context, T.sizeof, T.alignof);
+            if (state is null) return PrivateSpawnResult.allocationFailed;
+        }
         static if (__traits(isPOD, T))
             memcpy(state, &initial, T.sizeof);
         else
@@ -1923,7 +2007,7 @@ private:
             immutable flags = entry.childFlags;
             if (flags & childCleanup)
             {
-                retireMember!T(park.base_.service, entry);
+                retireMember!(T, storage)(park.base_.service, entry);
                 entry.childFlags = 0;
                 releaseWave(wave); // H; the resume table credit fences callback return
                 return 1;
@@ -1949,7 +2033,7 @@ private:
                 }
                 if (atomicLoad!(MemoryOrder.acq)(entry.childPending) == 1)
                 {
-                    if (retiring) retireMember!T(park.base_.service, entry);
+                    if (retiring) retireMember!(T, storage)(park.base_.service, entry);
                     if (flags & childHolding)
                     {
                         entry.childFlags = 0;
@@ -1983,7 +2067,7 @@ private:
                 else
                     park.writeResult(entry - park.entries_, operation(borrow, context));
             }
-            if (retiring) retireMember!T(park.base_.service, entry);
+            if (retiring) retireMember!(T, storage)(park.base_.service, entry);
         }
         return 1;
     }
@@ -1993,7 +2077,7 @@ private:
     static long runSkippedRetire(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
     {
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
-        retireMember!T(fromWave(entry.enclosing).base_.service, entry);
+        retireMember!(T, storage)(fromWave(entry.enclosing).base_.service, entry);
         return 1;
     }
     static void dispose(ChildBase* base) nothrow @nogc @system
@@ -2005,11 +2089,15 @@ private:
             static if (__traits(isPOD, T))
             {
                 disposeChildren(&entry);
-                freeMemory(service, entry.state, T.sizeof, T.alignof);
+                static if (!slab)
+                    freeMemory(service, entry.state, T.sizeof, T.alignof);
             }
             else if (entry.state !is null)
-                retireMember!T(service, &entry);
+                retireMember!(T, storage)(service, &entry);
         }
+        // Once, after every retained destructor and descendant disposal.
+        static if (slab)
+            freeMemory(service, park.slab_, park.capacity_ * T.sizeof, T.alignof);
         freeMemory(service, park.entries_, park.capacity_ * Entry.sizeof, Entry.alignof);
         static if (hasResults)
             freeMemory(service, park.results_, park.capacity_ * resultBytesPerMember, R.alignof);

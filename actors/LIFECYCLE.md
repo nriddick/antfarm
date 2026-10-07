@@ -119,6 +119,17 @@ The allocator must allow allocate on one thread and free on another. The
 allocating thread is not necessarily the freeing thread. Non-thread-safe
 hooks are not checked.
 
+A private child cohort can opt into one reserved state slab,
+`PrivateStateStorage.cohortSlab` ([details](PRIVATE_ACTORS.md#cohort-state-storage)).
+`capacity * T.sizeof` bytes are allocated when the cohort is created, up to the
+explicit `slabByteLimit` argument of its `createChildren` overload. Allocation failure therefore
+shows up as a null `createChildren`, never as a failed `spawn`. Retirement
+destroys and zeroes a slot, and a refill reuses it only after the retiring
+wave's join. The slab is freed once, when the cohort is disposed, on whichever
+consumer disposes it. Under `gcRooted` it is a single range for the cohort's
+life: one registration instead of one per member, but every collection scans
+the whole reservation. The default per-object storage is unchanged.
+
 ## Message, result, and hook storage
 
 Public inbox nodes are caller-owned and address-stable from a successful

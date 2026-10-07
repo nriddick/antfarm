@@ -115,7 +115,12 @@ result storage. `PrivateChildPark!T` is the same type as `PrivateChildPark!(T, v
 - `children.results(context)` to acquire a `const(R)[]` of joined results, when
   `R` is not `void`;
 - `children.startFinal!operation(context)` to execute a terminal wave and
-  free every member after its final callback.
+  retire every member after its final callback.
+
+A third template argument selects member state storage:
+`PrivateChildPark!(T, R, PrivateStateStorage.cohortSlab)` reserves every
+member's state at creation instead of allocating it at spawn; see
+[cohort state storage](#cohort-state-storage).
 
 An operation accepts `scope ref PrivateBorrow!T` and `scope ref PrivateContext`
 and returns `void`, the cohort's result type `R`, `PrivateChildDisposition`, or
@@ -943,9 +948,9 @@ destructors must tolerate `.init`, including observable actions on that value.
 | --- | --- | --- |
 | Root `finish` | user callback → child cohorts recursively → `~T` | emitter or consumer policy |
 | Root `finishAfterChildren` | joined internal cleanup activation → child cohorts → `~T` | emitter or consumer policy |
-| Child `startFinal`, plain or result op | op → result slot write if any → child cohorts → `~T` | consumer |
-| Child `startFinal`, continuation op | final `done` result write → descendant join → child cohorts → `~T`; deferred retirement uses a consumer cleanup activation | consumer |
-| Parent disposes a cohort | each live member's child cohorts → `~T`, including never-dispatched members | consumer |
+| Child `startFinal`, plain or result op | op → result slot write if any → child cohorts → `~T` | consumer (perObject); slab slot zeroed on the consumer (cohortSlab) |
+| Child `startFinal`, continuation op | final `done` result write → descendant join → child cohorts → `~T`; deferred retirement uses a consumer cleanup activation | as above |
+| Parent disposes a cohort | each live member's child cohorts → `~T`, including never-dispatched members | consumer; a cohortSlab slab is freed once, after every member |
 | Root park `destroy()` | requires no live state; no implicit retirement | emitter metadata free |
 
 Order across siblings is unspecified. Destructors must not read other actors'
@@ -971,6 +976,145 @@ are; raw native threads must use `thread_attachThis`. The emitter
 root `spawn` argument holding GC references sits on its stack while it pumps,
 and under the default emitter reclamation it is the thread that removes the
 GC ranges when freeing.
+
+## Cohort state storage
+
+By default (`PrivateStateStorage.perObject`) a child `spawn` allocates its
+state through the root allocator, and retirement frees it on the retiring
+consumer. In the tree workloads one parent callback allocates a whole cohort
+and several consumers free it. With mimalloc each of those frees is a remote
+free: a CAS on the owning page's shared free list. About half of tree/6 cache
+fills land there; see
+[the G3 measurements](../perftest/results/perf-g3-2026-10-07/README.md).
+An opt-in cohort slab reserves every member's state when the cohort is
+created. The conductor below refills one slab cohort three times. Each refill
+reuses the slots that the previous retiring wave cleared:
+
+```d
+import antfarm;
+import actors;
+import std.stdio : writeln;
+
+struct Item { ulong input; }
+ulong square(scope ref PrivateBorrow!Item actor, scope ref PrivateContext context)
+    nothrow @nogc @system
+{
+    return actor.value.input * actor.value.input;
+}
+enum members = 4;
+alias Items = PrivateChildPark!(Item, ulong, PrivateStateStorage.cohortSlab);
+struct Conductor
+{
+    Items* children;
+    ulong* total;
+    uint wave;
+}
+PrivateRootDisposition conduct(scope ref PrivateBorrow!Conductor actor,
+    scope ref PrivateContext context) nothrow @nogc @system
+{
+    with (actor.value)
+    {
+        if (children is null)
+        {
+            // One zeroed slab of members * Item.sizeof bytes, under an explicit cap
+            // (the last argument).
+            children = context.createChildren!(Item, ulong, PrivateStateStorage.cohortSlab)(
+                members, PrivateCohortOptions(0, false), members * Item.sizeof);
+            if (children is null) fatal("child park or slab allocation failed");
+        }
+        else
+        {
+            foreach (r; children.results(context)) *total += r;
+            if (++wave == 3) return PrivateRootDisposition.finish;
+        }
+        // Slot i serves Entry i; spawn cannot fail with allocationFailed.
+        foreach (i; 0 .. members)
+            if (children.spawn(context, Item(wave * members + i + 1)) != PrivateSpawnResult.spawned)
+                fatal("child spawn failed");
+        if (children.startFinal!square(context) != PrivateStartResult.started)
+            fatal("child wave failed");
+        return PrivateRootDisposition.waitChildren;
+    }
+}
+void main()
+{
+    ulong total;
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    if (!token.valid) fatal("producer registration failed");
+    ConsumerView view;
+    if (view.subscribe(farm) < 0) fatal("consumer subscription failed");
+    auto park = PrivateRootPark!(Conductor, conduct).create(farm, 1);
+    if (park is null) fatal("private park allocation failed");
+    if (park.spawn(Conductor(null, &total)) != PrivateSpawnResult.spawned)
+        fatal("private spawn failed");
+    while (park.live != 0)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+    }
+    if (total != 650) fatal("joined result mismatch"); // 1^2 + ... + 12^2
+    writeln("slab cohort refilled three times");
+    park.destroy();
+    park = null;
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    farm.destroy();
+}
+```
+
+- **Type and API.** The storage policy is the park's third template argument,
+  so pointer fields name it. `PrivateChildPark!(T, R)` stays per-object with
+  an unchanged layout and unchanged code. A slab cohort comes only from
+  `createChildren!(T, R, PrivateStateStorage.cohortSlab)(capacity, options,
+  slabByteLimit)`. The other three overloads remain per-object only, and
+  `PrivateCohortOptions` is unchanged. Every other park operation is
+  unchanged.
+- **Creation and the byte cap.** Creation makes one allocation of
+  `capacity * T.sizeof` bytes at `T.alignof`, through the hierarchy's
+  allocator, after the Entry, result and selection arrays. It is zeroed before
+  the park is published. `createChildren` returns null, allocating nothing,
+  if `capacity * T.sizeof` overflows or exceeds `slabByteLimit`.
+  `slabByteLimit` is a required, explicit reservation budget: 0 rejects every
+  slab. It also returns null if any allocation fails or the alignment exceeds
+  the allocator's limit (64 bytes for `cRuntime`); every earlier allocation
+  is unwound first.
+- **Failure moves from spawn to create.** Entry i always uses slot i, so
+  `spawn` never returns `allocationFailed` for a slab cohort. `capacityFull`,
+  `waveActive` and `retiring` are unchanged.
+- **Retirement.** Each retirement path keeps its consumer sequence: child
+  cohorts, then `~T`. The slot is then zeroed and the member's state pointer
+  cleared. The slot is never freed on its own.
+- **Reuse.** A slot is reused only when `spawn` refills a cohort whose
+  retiring wave (`startFinal`, or `start` with `retire = true`) has joined.
+  That join resets the member count, as it always has. Nonretiring and subset
+  waves keep their members. There is no per-member reuse or compaction. A
+  cancelled retiring wave still retires its undispatched suffix through
+  cleanup tables before the join. The proof is in
+  [ACTOR_MEMORYORDER.md](ACTOR_MEMORYORDER.md#private-cohort-slab-reuse).
+- **Disposal.** The slab is freed once, at cohort disposal, after every
+  retained member's descendants and destructor. The consumer that disposes
+  the cohort performs that one larger free, which may be cross-thread. Result,
+  Entry and selection storage remain separate allocations with unchanged
+  lifetimes. Results still outlive member retirement.
+- **Memory cost.** The full `capacity * T.sizeof` is reserved for the
+  cohort's life, whatever its occupancy, plus one pointer in the park. A
+  sparse or mostly idle cohort pays for its whole capacity. For full cohorts
+  it replaces one allocation and free per member per refill with one pair per
+  cohort lifetime.
+- **GC granularity.** Under `ActorAllocator.gcRooted` the slab is one range,
+  added at creation and removed at disposal. This replaces one
+  `GC.addRange`/`removeRange` pair per member, each under the global GC lock.
+  Every collection scans the whole slab, unspawned and retired slots
+  included. Those slots are zero, so they retain nothing: the slab is zeroed
+  before publication, and each slot is cleared after its destructor. Live
+  members are scanned as before. `gcRooted` registers the range just before
+  creation zeroes it, so a collection that races creation can see stale
+  allocator bytes. That is conservative retention, never a live `T`.
+- **Diagnostics.** The borrow contract already forbids escaping pointers into
+  state. Such a pointer now dangles into a slot that stays mapped and may be
+  reused, so allocator or sanitizer use-after-free detection no longer sees
+  it. Debug builds check that `spawn` writes into a zeroed slot.
 
 ## Publication and reclamation
 

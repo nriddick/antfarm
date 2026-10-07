@@ -290,6 +290,56 @@ is published through enqueue. The finisher never updates result bookkeeping
 after publishing idle, so a polling parent can read and dispose the cohort
 while the saved root notification credit is still in flight.
 
+### Private cohort slab reuse
+
+A `cohortSlab` cohort adds no atomic operation and no fence. Slot i belongs to
+`entries_[i]`. Spawn writes the slot for Entry `count_`; `count_` rewinds to
+zero in exactly one place, `finish` of a retiring wave, which is sequenced
+before the finisher's `active = 0` release store.
+
+```text
+retiring member (any consumer): ~T -> zero slot -> entry.state = null
+  -> callback return -> Shc completion RMW (acq_rel) -> Tprogress RMW (acq_rel)
+  -> wave table/descendant credit releases (acq_rel)
+  -> final wave decrement (acq_rel) -> finish: count_ = 0
+  -> active = 0 (release)
+parent spawn: active acquire-load sees 0 -> writes reused slot i
+```
+
+1. Every slot write of a retiring member runs in the consumer callback that
+   retires it, before that callback returns: the terminal `runChild`, the
+   continuation cleanup activation (before its `releaseWave`), or
+   `runSkippedRetire` for members a cancelled wave never dispatched. The
+   destructor precedes the zeroing, which precedes the state pointer clear.
+2. Those writes precede the consumer's table-completion RMWs. Every wave
+   credit release is an acquire/release RMW on `pending`, so the final
+   decrement acquires all of them. The thread that runs `finish` therefore
+   resets `count_` after every member's destroy and clear.
+3. `spawn`, like `start`, acquire-loads `active` and returns `waveActive`
+   unless it observes the idle store. A spawn that reuses slot i therefore
+   happens after the previous occupant's destructor and clear. No new
+   per-member synchronization is needed.
+4. Coverage: a truncated retiring wave never seals early (`truncated` returns
+   false when `retire_` is set), so cleanup tables still retire its
+   undispatched members. When `count_` rewinds, each slot in
+   `[0, old count)` has been destroyed exactly once and is zero. Nonretiring
+   and subset waves never reset `count_`.
+5. `finish` never reads the slab pointer. Its post-idle tail uses only the
+   saved parent and upstream pointers, so the idle store remains its last
+   cohort access.
+6. Disposal runs once per cohort, after `disposeChildren` acquire-loads every
+   descendant cohort's idle publication. It destroys retained members, then
+   frees the slab once. A retired slot is never passed to the allocator. A
+   retained POD slot is not zeroed; it needs no clearing, because a rooted
+   slab's range is removed before its free.
+
+Zeroing serves two purposes. Under `gcRooted` the slab stays rooted until
+disposal, so a cleared dead slot stops retaining its references. (`gcRooted`
+adds the range just before creation zeroes it, as for every zeroed metadata
+allocation; a collection in that window over-retains transiently.) A refill
+also starts from a zero slot, which debug builds check before construction.
+Results, Entry and selection storage do not depend on slot contents.
+
 ## Private wave failure aggregation
 
 `context.fail` on a member elects one plain `(code, Entry)` writer with a raw
