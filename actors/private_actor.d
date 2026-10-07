@@ -10,7 +10,7 @@ import actors.actor : ActorAllocator;
 version (AntfarmActorTestHooks)
     import actors.actor : ActorTestPoint, actorTestPoint;
 import antfarm : AntFarm, Token, PayloadHeader, PayloadBody,
-    TableCompletionHook, fatal;
+    TableCompletionHook, rootCostHintAuto, rootCostHintFor, fatal;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
     atomicFetchAdd, atomicFetchSub, cas;
 import core.stdc.string : memcpy, memset;
@@ -1213,11 +1213,16 @@ public:
     /// can be in flight, including when a call requests a smaller batch.
     /// By default terminal root state is freed here on the emitter; the
     /// consumer policy frees it in the callback. Child frees run on consumers.
+    /// With no cost hint (`rootCostHintAuto`, the default) the published hint
+    /// is derived per table from its entry count and the live consumer count
+    /// (`rootCostHintFor`), so small root tables are split across enough
+    /// claims for the available consumers; an explicit 0 .. MAX_AVG_COST hint
+    /// is passed through unchanged.
     size_t pump(ref Token token) nothrow @nogc @system
     {
         return pump(token, service_.batchLimit);
     }
-    size_t pump(ref Token token, size_t batchLimit, uint avgCost = 0)
+    size_t pump(ref Token token, size_t batchLimit, uint avgCost = rootCostHintAuto)
         nothrow @nogc @system
     {
         enter();
@@ -1244,6 +1249,10 @@ public:
         header.plen = 1;
         header.call = &runRoot;
         auto bodies = RootBodies(batch.entries[0 .. count], batch);
+        if (avgCost == rootCostHintAuto)
+            avgCost = rootCostHintFor(count,
+                cast(ulong) atomicLoad!(MemoryOrder.raw)(service_.farm.Cf),
+                service_.farm.smallThreshold);
         immutable n = cast(size_t) service_.farm.writeTracked(header, bodies, 1,
             &batch.hook, token, avgCost);
         foreach (entry; batch.entries[n .. count])

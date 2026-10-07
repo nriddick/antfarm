@@ -801,7 +801,7 @@ them in application storage reached from `T` and read them after
 | `subsetMembers(context)` | `const(uint)[]` in list order for the most recent nonempty subset; empty after a whole wave. Wrong/default authority is fatal. |
 | `finished(context)` | True before the first start and after the current wave joins; a root notification tail may still be pending. Wrong-parent or default authority is fatal, including when the cohort is idle. |
 | `collectCompleted()` / `poll()` | Acquires completed root tables and wake returns, reclaims terminal roots and appends ready roots; never publishes work or runs consumers. |
-| `pump(token)` | Collects completions and emits at most one root table and one initial table and one resume table per pending child wave; returns only the number of root activations published, including internal deferred cleanup. Zero does not mean idle. The emitter must keep pumping to resume waiting roots and children. |
+| `pump(token)` | Collects completions and emits at most one root table and one initial table and one resume table per pending child wave; returns only the number of root activations published, including internal deferred cleanup. Zero does not mean idle. The emitter must keep pumping to resume waiting roots and children. With no cost hint the published class is derived per table (see [work-cost hints](#work-cost-hints)); an explicit class is published unchanged. |
 | `live` / `capacity` | Emitter-local root counts; `live` includes waiting roots and terminal roots with outstanding notification tails. It falls only on collection after the join, or, on a tracked park, only at `takeOutcome`. Neither getter synchronizes another thread. |
 | `destroy()` | Collects once, then requires no live roots (including untaken outcomes) or pending work. It does not drain or cancel waiting roots. Use `park.destroy(); park = null;`, because `destroy(park)` resolves to D's pointer destruction and does not free the park. |
 
@@ -818,10 +818,41 @@ using `storageLimit = min(batchLimit, capacity)` entries per batch. It reserves
 larger than capacity therefore does not reserve unusable entry storage.
 Allocation sizes that overflow return null. A zero configured limit is fatal.
 
-`pump(token)` uses that configured limit. `pump(token, limit, avgCost = 0)`
-accepts 1 through the configured maximum; zero or an oversized override is
-fatal. Choosing a smaller per-call limit does not increase the table pool.
-Choose a smaller configured limit when more small tables must be in flight.
+`pump(token)` uses that configured limit. `pump(token, limit,
+avgCost = rootCostHintAuto)` accepts 1 through the configured maximum; zero or
+an oversized override is fatal. Choosing a smaller per-call limit does not
+increase the table pool. Choose a smaller configured limit when more small
+tables must be in flight.
+
+### Work-cost hints
+
+The trailing `avgCost` argument is the Farm work-cost class the table
+publishes (`write`'s `avgCost`, spec 5e-g): consumers claim a table in runs of
+`MAX_CHUNK >> avgCost` entries, and a table below the small-table threshold is
+claimed wholesale by shard 0. With no hint — the default
+`rootCostHintAuto` — `pump` derives the class per table with
+`rootCostHintFor(count, live consumers, small threshold)`, where the
+consumer count is the farm's live subscribed-view count (`Cf`), which can
+include the emitter's own view. A table at least
+the small-table threshold wide is sharded across every shard and keeps the
+cheapest class; a wholesale table gets the cheapest class whose runs still
+split it into at least `min(count, clamp(consumers, 1,
+rootCostHintMaxSplits))` claims (class 0 whenever it already provides that
+many). That lets a small expensive root table — for example parents that
+allocate a child wave each — occupy up to ~consumer-count workers instead of
+one, while every sharded table and every single-consumer table keeps its
+exact prior claim sequence. An explicit `0 .. MAX_AVG_COST` hint is published
+unchanged and keeps its exact meaning; `pump(token, limit, 0)` is the
+pre-derivation fixed-hint behavior (runs of 32).
+
+Child wave tables (`emit`, `emitSubset`, resume emits) always publish class 0.
+Any child table below the small-table threshold is claimed wholesale by
+shard 0, and one of at most 32 entries runs in a single class-0 claim on one
+worker: that includes every child table while the cohort's batch limit is 32
+or less, as well as a small final partial table under a larger limit. Child
+waves take no cost-hint argument, so a caller whose child callbacks are too
+expensive for one claim should keep the child batch limit at least the
+small-table threshold so tables shard across consumers.
 
 `context.createChildren!T(capacity)` inherits the immediate parent's effective
 limit: a root's children use the root park's configured `batchLimit`, while a

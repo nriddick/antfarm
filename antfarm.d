@@ -384,6 +384,60 @@ enum bool DEFAULT_HUGE_PAGES = false;
 enum uint MAX_CHUNK = 32;
 /// log2(MAX_CHUNK); avgCost outside 0 .. MAX_AVG_COST is a caller error.
 enum uint MAX_AVG_COST = 5;
+/// Sentinel work-cost hint for callers that derive an effective class from
+/// the table they are about to publish instead of naming one. The private
+/// root pump uses it as its `avgCost` default; see `rootCostHintFor`.
+enum uint rootCostHintAuto = uint.max;
+/// Ceiling on the claims a derived-hint wholesale table asks for. It bounds
+/// the per-table claim overhead on large hosts; 8 covers the consumer counts
+/// where splitting small tables measurably pays (see perftest results
+/// perf-g4).
+enum uint rootCostHintMaxSplits = 8;
+
+/++
+ + Effective work-cost class for a default-hint table of `count` entries on
+ + a farm whose configured small-table threshold is `smallThreshold`.
+ + Consumers size a table's claims as `chunk = MAX_CHUNK >> avgCost` (spec
+ + 5e-g), and a table below the small threshold is claimed wholesale by
+ + shard 0 (spec 5e-d), so the cheapest class (`avgCost = 0`, chunk 32) can
+ + run every callback of a table of up to 32 entries inside one consumer
+ + claim, serializing an expensive table (for example parents that each
+ + allocate a child wave) on one worker.
+ +
+ + A table at least `smallThreshold` entries wide is sharded across every
+ + shard and already spans multiple workers, so it keeps the cheapest class;
+ + only a wholesale (single-shard) table is reclassed. For such a table this
+ + returns the cheapest class whose claims still number at least
+ + `min(count, clamp(consumers, 1, rootCostHintMaxSplits))`, so a small table
+ + can occupy up to ~consumer-count workers, and the cheapest class is kept
+ + whenever it already provides that many claims. `consumers` is the farm's
+ + live subscribed-view count (`Cf`), which can include the emitter's own
+ + view; it may change between tables, and each table's class follows it
+ + independently. A farm using the auto threshold rule
+ + (`smallThreshold == 0`) is classified against DEFAULT_SMALL_TABLE_THRESHOLD,
+ + which may differ from the auto rule's effective threshold; the result is
+ + still a valid class.
+ + Returns 0 .. MAX_AVG_COST.
+ +/
+uint rootCostHintFor(size_t count, ulong consumers, uint smallThreshold)
+    pure nothrow @nogc @safe
+{
+    if (count == 0) return 0;
+    // Sharded tables are already split across every shard (spec 5e-d), so
+    // only wholesale tables can collapse onto fewer claims than consumers.
+    if (count >= (smallThreshold != 0 ? smallThreshold : DEFAULT_SMALL_TABLE_THRESHOLD))
+        return 0;
+    immutable splits = consumers < 1 ? cast(ulong) 1
+        : consumers > rootCostHintMaxSplits ? cast(ulong) rootCostHintMaxSplits
+        : consumers;
+    immutable target = cast(size_t) (count < splits ? count : splits);
+    // Cheapest class whose ceil(count / chunk) claims reach the target.
+    uint hint;
+    while (hint < MAX_AVG_COST
+        && (count + (MAX_CHUNK >> hint) - 1) / (MAX_CHUNK >> hint) < target)
+        ++hint;
+    return hint;
+}
 /// Smallest ring accepted by `AntFarm.create`, in MiB (2^18 ulongs).
 enum uint MIN_RING_MIB = 2;
 /// Largest ring accepted by `AntFarm.create`, in MiB (64 GiB). Far beyond any
