@@ -2524,6 +2524,722 @@ void testStaleQuotaReuse()
     printf("testStaleQuotaReuse OK\n"); fflush(stdout);
 }
 
+// ---------------------------------------------------------------------
+// Compact ST tables (SPEC 2f, prototype)
+// ---------------------------------------------------------------------
+
+__gshared const(size_t)* g_compactLens;
+__gshared size_t g_compactN;
+__gshared shared(long) g_compactZero;
+__gshared shared(long) g_compactBad;
+__gshared shared(long) g_compactHeaderBad;
+__gshared shared(long) g_compactCompletions;
+__gshared shared(long) g_compactMtCalls;
+__gshared ulong g_compactLastHead;
+
+ulong compactWord(size_t idx, size_t k) pure nothrow @nogc @safe
+{
+    return k == 0 ? cast(ulong) idx : (cast(ulong) idx << 20) + k;
+}
+
+/// Exact compact table size for n payloads with total body length sumBody.
+ulong compactTableSize(ulong n, ulong sumBody, ulong sq) pure nothrow @nogc @safe
+{
+    return 30 + 8 * sq + 2 * n + sumBody;
+}
+
+long compactBodyCb(PayloadHeader* head, PayloadBody body, ulong iteration)
+    nothrow @nogc @system
+{
+    g_compactLastHead = cast(ulong) cast(void*) head;
+    if (iteration != 0 || head.maxCs != 1 || head.done != 1
+        || head.plen != body.length
+        || atomicLoad!(MemoryOrder.raw)(head.pcount) != (1UL << 32))
+        atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
+    if (body.length == 0)
+    {
+        atomicFetchAdd!(MemoryOrder.raw)(g_compactZero, 1L);
+        atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
+        return 1;
+    }
+    immutable idx = body[0];
+    if (idx >= g_compactN || body.length != g_compactLens[idx])
+    {
+        atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
+        atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
+        return 1;
+    }
+    bool ok = true;
+    foreach (k, v; body)
+        if (v != compactWord(idx, k)) ok = false;
+    if (!ok) atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
+    atomicFetchAdd(g_calls[idx], 1L);
+    atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
+    return 1;
+}
+
+long compactOneCb(PayloadHeader* head, PayloadBody body, ulong iteration)
+    nothrow @nogc @system
+{
+    if (iteration != 0 || head.maxCs != 1 || head.done != 1
+        || head.plen != 1 || body.length != 1
+        || atomicLoad!(MemoryOrder.raw)(head.pcount) != (1UL << 32))
+        atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
+    atomicFetchAdd(g_calls[body[0]], 1L);
+    atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
+    return 1;
+}
+
+long compactSingle28Cb(PayloadHeader* head, PayloadBody body, ulong iteration)
+    nothrow @nogc @system
+{
+    bool ok = iteration == 0 && head.maxCs == 1 && head.done == 1
+        && head.plen == 28 && body.length == 28 && head.call == &compactSingle28Cb
+        && atomicLoad!(MemoryOrder.raw)(head.pcount) == (1UL << 32);
+    if (ok)
+        foreach (k, w; body)
+            if (w != k) ok = false;
+    if (!ok) atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
+    atomicFetchAdd(g_calls[0], 1L);
+    atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
+    return 1;
+}
+
+long compactMtCb(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(g_compactMtCalls, 1L);
+    return 1;
+}
+
+long compactHeaderCb(PayloadHeader* head, PayloadBody body, ulong iteration)
+    nothrow @nogc @system
+{
+    if (head.maxCs != 1 || head.done != 1 || iteration != 0
+        || head.plen != body.length || head.call != &compactHeaderCb
+        || atomicLoad!(MemoryOrder.raw)(head.pcount) != (1UL << 32))
+        atomicFetchAdd!(MemoryOrder.raw)(g_compactHeaderBad, 1L);
+    if (body.length > 0)
+        atomicFetchAdd(g_calls[body[0]], 1L);
+    atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
+    return 1;
+}
+
+__gshared size_t g_compactWrapN;
+__gshared shared(long) g_compactWrapBad;
+
+long compactWrapCb(PayloadHeader* head, PayloadBody body, ulong iteration)
+    nothrow @nogc @system
+{
+    if (iteration != 0 || head.maxCs != 1 || head.done != 1
+        || body.length != 2 || head.plen != 2
+        || atomicLoad!(MemoryOrder.raw)(head.pcount) != (1UL << 32))
+        atomicFetchAdd!(MemoryOrder.raw)(g_compactWrapBad, 1L);
+    immutable idx = body[0];
+    if (idx >= g_compactWrapN
+        || body[1] != ((cast(ulong) idx) ^ 0xA5A5_A5A5_A5A5_A5A5UL))
+        atomicFetchAdd!(MemoryOrder.raw)(g_compactWrapBad, 1L);
+    if (idx < g_compactWrapN)
+        atomicFetchAdd(g_calls[idx], 1L);
+    atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
+    return 1;
+}
+
+void compactCompletion(void* context) nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(g_compactCompletions, 1L);
+}
+
+struct CompactBodies
+{
+    ulong* words;
+    size_t i, n;
+    @property bool empty() const nothrow @nogc @safe { return i >= n; }
+    @property size_t length() const nothrow @nogc @safe { return n - i; }
+    @property CompactBodies save() nothrow @nogc @safe { return this; }
+    @property PayloadBody front() nothrow @nogc @system { return words[i .. i + 1]; }
+    void popFront() nothrow @nogc @safe { ++i; }
+}
+
+/// One heterogeneous compact table, drained by one consumer; checks exact
+/// geometry, Tmt == 0, per-payload body/length/header and exactly-once.
+void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label)
+{
+    immutable N = lens.length;
+    ulong totalBody;
+    size_t zeros;
+    foreach (l; lens) { totalBody += l; if (l == 0) ++zeros; }
+
+    allocCalls(N);
+    scope (exit) freeCalls();
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    auto bodies = cast(ulong*) malloc((totalBody + 1) * ulong.sizeof);
+    scope (exit) { free(headers); free(entries); free(bodies); }
+    check(headers !is null && entries !is null && bodies !is null, label);
+
+    g_compactLens = lens.ptr;
+    g_compactN = N;
+    atomicStore!(MemoryOrder.raw)(g_compactZero, 0L);
+    atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+
+    size_t off;
+    foreach (i; 0 .. N)
+    {
+        headers[i] = PayloadHeader.init;
+        headers[i].maxCs = headers[i].done = 1;
+        headers[i].plen = lens[i];
+        headers[i].call = &compactBodyCb;
+        auto b = bodies[off .. off + lens[i]];
+        foreach (k; 0 .. lens[i]) b[k] = compactWord(i, k);
+        entries[i] = PayloadEntry(&headers[i], b);
+        off += lens[i];
+    }
+
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope (exit) f.destroy();
+    ConsumerView v;
+    check(v.subscribe(f) == 0, label);
+    auto tok = f.registerProducer(Tier.small);
+
+    immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(entries[0 .. N], tok, avgCost) == N, label);
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + compactTableSize(N, totalBody, 1),
+        label);
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 2]) >> 32) == 0, label);
+
+    while (v.consumeNext()) {}
+    check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, label);
+    check(atomicLoad!(MemoryOrder.raw)(g_compactZero) == zeros, label);
+    foreach (i; 0 .. N)
+        if (lens[i] > 0)
+            check(g_calls[i] == 1, label);
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N, label);
+
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+}
+
+// Catches M2 (compact sizing miscount), M3 (last Plen off-by-one) and M4
+// (non-last Plen off-by-one). One claimed run (12 payloads < chunk 16).
+void testCompactMixedBodies()
+{
+    static immutable size_t[12] lens = [0, 1, 2, 7, 31, 3, 0, 5, 9, 1, 2, 47];
+    compactMixedCase(lens[], 1, "compact mixed body contract");
+    printf("testCompactMixedBodies OK\n"); fflush(stdout);
+}
+
+// Catches M7 (non-final run end read from the wrong Tindex entry): AvgCost 3
+// gives chunk 4, so 40 heterogeneous payloads form 10 claimed runs and nine
+// of them take runCompact's `endOff = Tindex[runend]` branch. The last
+// payload is zero-length, pinning the Tsize - END_PAD end rule at Plen 0.
+void testCompactMultiRunBodies()
+{
+    static immutable size_t[40] lens = [
+        3, 0, 5, 1, 9, 2, 0, 4, 7, 1, 1, 6, 0, 2, 13, 3, 5, 0, 1, 8,
+        2, 2, 0, 11, 1, 4, 3, 0, 6, 1, 9, 2, 5, 0, 1, 3, 7, 2, 4, 0];
+    compactMixedCase(lens[], 3, "compact multi-run body contract");
+    printf("testCompactMultiRunBodies OK\n"); fflush(stdout);
+}
+
+Thread compactProducerThread(ProdCtx* c)
+{
+    return new Thread({ producerMain(c); });
+}
+
+Thread compactConsumerThread(ConsCtx* c, bool late)
+{
+    if (late)
+        return new Thread({ Thread.sleep(5.msecs); consumerMain(c); });
+    return new Thread({ consumerMain(c); });
+}
+
+// Exercises compact Plen derivation across multi-run tables and ring laps
+// under TSan (backup for M3/M4), with a lagging consumer.
+void testCompactWraparound()
+{
+    auto f = AntFarm.create(2, 8, 4, 0, 0, 4, 4096);
+    scope (exit) f.destroy();
+
+    enum N = 160000;
+    enum NP = 3;
+    enum NC = 4;
+    allocCalls(N);
+    scope (exit) freeCalls();
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    scope (exit) { free(headers); free(bodies); free(entries); }
+    check(headers !is null && bodies !is null && entries !is null, "compact wrap alloc");
+
+    g_compactWrapN = N;
+    atomicStore!(MemoryOrder.raw)(g_compactWrapBad, 0L);
+    foreach (i; 0 .. N)
+    {
+        headers[i] = PayloadHeader.init;
+        headers[i].maxCs = headers[i].done = 1;
+        headers[i].plen = 2;
+        headers[i].call = &compactWrapCb;
+        bodies[i * 2] = i;
+        bodies[i * 2 + 1] = cast(ulong) i ^ 0xA5A5_A5A5_A5A5_A5A5UL;
+        entries[i] = PayloadEntry(&headers[i], bodies[i * 2 .. i * 2 + 2]);
+    }
+
+    auto deadline = MonoTime.currTime + 120.seconds;
+    Thread[NC] consumers;
+    ConsCtx[NC] cctx;
+    foreach (j; 0 .. NC)
+    {
+        cctx[j] = ConsCtx(f, N, deadline);
+        consumers[j] = compactConsumerThread(&cctx[j], j == NC - 1);
+        consumers[j].start();
+    }
+
+    Thread[NP] producers;
+    ProdCtx[NP] pctx;
+    size_t cursor;
+    foreach (j; 0 .. NP)
+    {
+        immutable remain = N - cursor;
+        immutable share = remain / (NP - j);
+        pctx[j] = ProdCtx(f, entries + cursor, share, Tier.small);
+        cursor += share;
+        producers[j] = compactProducerThread(&pctx[j]);
+        producers[j].start();
+    }
+    foreach (t; producers) t.join();
+    foreach (t; consumers) t.join();
+
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) > 2 * f.Ln,
+        "compact wraparound laps the ring");
+    check(atomicLoad!(MemoryOrder.raw)(g_compactWrapBad) == 0,
+        "compact wraparound body and header contract");
+    foreach (i; 0 .. N)
+        check(g_calls[i] == 1, "compact wraparound exact call count");
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N, "compact wraparound total");
+    printf("testCompactWraparound OK\n"); fflush(stdout);
+}
+
+// Catches M2 (writer miscounts compact size) and verifies the accepted
+// prefix is prepared/emitted exactly; zero admission leaves Wt untouched.
+void testCompactPartialAdmission()
+{
+    enum N = 20;
+    enum K = 10;
+    enum Q = 68; // compact table of 10 one-word bodies: 38 + 3*10.
+
+    // Heterogeneous accepted prefix.
+    {
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+        auto bodies = cast(ulong*) malloc(N * ulong.sizeof);
+        auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+        scope (exit) { free(headers); free(bodies); free(entries); }
+        atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+        foreach (i; 0 .. N)
+        {
+            headers[i] = PayloadHeader.init;
+            headers[i].maxCs = headers[i].done = 1;
+            headers[i].plen = 1;
+            headers[i].call = &compactOneCb;
+            bodies[i] = i;
+            entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
+        }
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+        scope (exit) f.destroy();
+        ConsumerView v;
+        check(v.subscribe(f) == 0, "compact partial subscribe");
+        auto tok = f.registerProducer(Tier.small);
+        immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+        check(f.write(entries[0 .. N], tok) == K, "compact partial admits exactly k");
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q,
+            "compact partial exact Wt advance");
+        while (v.consumeNext()) {}
+        foreach (i; 0 .. K) check(g_calls[i] == 1, "compact partial prefix ran");
+        foreach (i; K .. N) check(g_calls[i] == 0, "compact partial suffix not run");
+        check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, "compact partial body");
+        v.unsubscribe();
+        f.unregisterProducer(tok);
+    }
+
+    // writeTracked with a completion hook.
+    {
+        allocCalls(N);
+        scope (exit) freeCalls();
+        static immutable size_t[N] ones = 1;
+        g_compactLens = ones.ptr;
+        g_compactN = N;
+        atomicStore!(MemoryOrder.raw)(g_compactZero, 0L);
+        atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+        ulong[N] words;
+        foreach (i; 0 .. N) words[i] = i;
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+        scope (exit) f.destroy();
+        ConsumerView v;
+        check(v.subscribe(f) == 0, "compact tracked subscribe");
+        auto tok = f.registerProducer(Tier.small);
+        PayloadHeader h = PayloadHeader.init;
+        h.maxCs = h.done = 1;
+        h.plen = 1;
+        h.call = &compactBodyCb;
+        atomicStore!(MemoryOrder.raw)(g_compactCompletions, 0L);
+        TableCompletionHook hook = TableCompletionHook(null, &compactCompletion);
+        immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+        immutable got = f.writeTracked(h, CompactBodies(words.ptr, 0, N), 1, &hook, tok);
+        check(got == K, "compact tracked partial admits exactly k");
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q,
+            "compact tracked exact Wt advance");
+        while (v.consumeNext()) {}
+        check(atomicLoad!(MemoryOrder.raw)(g_compactCompletions) == 1,
+            "compact tracked completion hook once");
+        check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, "compact tracked body");
+        v.unsubscribe();
+        f.unregisterProducer(tok);
+    }
+
+    // Transactional prepareTableFrontN and zero admission.
+    {
+        allocCalls(N);
+        scope (exit) freeCalls();
+        ulong[N] words;
+        foreach (i; 0 .. N) words[i] = i;
+        size_t frontCalls, prepareCalls, prepared;
+        bool permit = true;
+        auto prep = PreparingBodyRange(words.ptr, 0, N, &frontCalls, &prepareCalls, &prepared, &permit);
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+        scope (exit) f.destroy();
+        ConsumerView v;
+        check(v.subscribe(f) == 0, "compact transactional subscribe");
+        auto tok = f.registerProducer(Tier.small);
+        PayloadHeader h = PayloadHeader.init;
+        h.maxCs = h.done = 1;
+        h.plen = 1;
+        h.call = &compactOneCb;
+        immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+        immutable got = f.write(h, prep, 1, tok);
+        check(got == K, "compact transactional partial admits exactly k");
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q,
+            "compact transactional exact Wt advance");
+        check(prepared == K && prepareCalls == 1,
+            "compact transactional prepared only the accepted prefix");
+        while (v.consumeNext()) {}
+
+        size_t rejectFrontCalls, rejectPrepareCalls, rejectPrepared;
+        bool reject = false;
+        auto rej = PreparingBodyRange(words.ptr, 0, 1, &rejectFrontCalls,
+            &rejectPrepareCalls, &rejectPrepared, &reject);
+        immutable beforeReject = atomicLoad!(MemoryOrder.raw)(f.Wt);
+        check(f.write(h, rej, 1, tok) == 0, "compact transactional zero admission");
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == beforeReject,
+            "compact transactional zero admission leaves Wt untouched");
+        check(rejectPrepareCalls == 1 && rejectPrepared == 0 && rejectFrontCalls == 0,
+            "compact transactional rejected prepare emitted nothing");
+        v.unsubscribe();
+        f.unregisterProducer(tok);
+    }
+
+    printf("testCompactPartialAdmission OK\n"); fflush(stdout);
+}
+
+// Catches M2 (compact sizing off-by-one) at the quota boundary.
+void testCompactQuotaBoundaries()
+{
+    enum Q = 68;
+
+    // Exact table: 10 one-word bodies -> 38 + 3*10 = 68.
+    {
+        allocCalls(10);
+        scope (exit) freeCalls();
+        auto headers = cast(PayloadHeader*) malloc(10 * PayloadHeader.sizeof);
+        auto bodies = cast(ulong*) malloc(10 * ulong.sizeof);
+        auto entries = cast(PayloadEntry*) malloc(10 * PayloadEntry.sizeof);
+        scope (exit) { free(headers); free(bodies); free(entries); }
+        atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+        foreach (i; 0 .. 10)
+        {
+            headers[i] = PayloadHeader.init;
+            headers[i].maxCs = headers[i].done = 1;
+            headers[i].plen = 1;
+            headers[i].call = &compactOneCb;
+            bodies[i] = i;
+            entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
+        }
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+        scope (exit) f.destroy();
+        ConsumerView v;
+        check(v.subscribe(f) == 0, "compact boundary subscribe");
+        auto tok = f.registerProducer(Tier.small);
+        immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+        check(f.write(entries[0 .. 10], tok) == 10, "compact exact table admitted");
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q, "compact exact table size");
+        while (v.consumeNext()) {}
+        check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, "compact exact table bodies");
+        foreach (i; 0 .. 10) check(g_calls[i] == 1, "compact exact table calls");
+        v.unsubscribe();
+        f.unregisterProducer(tok);
+    }
+
+    // One word over: 11 one-word bodies -> 71 > 68, truncated to 10.
+    {
+        allocCalls(11);
+        scope (exit) freeCalls();
+        auto headers = cast(PayloadHeader*) malloc(11 * PayloadHeader.sizeof);
+        auto bodies = cast(ulong*) malloc(11 * ulong.sizeof);
+        auto entries = cast(PayloadEntry*) malloc(11 * PayloadEntry.sizeof);
+        scope (exit) { free(headers); free(bodies); free(entries); }
+        atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+        foreach (i; 0 .. 11)
+        {
+            headers[i] = PayloadHeader.init;
+            headers[i].maxCs = headers[i].done = 1;
+            headers[i].plen = 1;
+            headers[i].call = &compactOneCb;
+            bodies[i] = i;
+            entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
+        }
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+        scope (exit) f.destroy();
+        ConsumerView v;
+        check(v.subscribe(f) == 0, "compact boundary subscribe 2");
+        auto tok = f.registerProducer(Tier.small);
+        immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+        check(f.write(entries[0 .. 11], tok) == 10, "compact over-quota table truncated");
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q, "compact truncated size");
+        while (v.consumeNext()) {}
+        check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, "compact truncated bodies");
+        foreach (i; 0 .. 10) check(g_calls[i] == 1, "compact truncated calls");
+        check(g_calls[10] == 0, "compact truncated payload not run");
+        v.unsubscribe();
+        f.unregisterProducer(tok);
+    }
+
+    // Exact-quota compact singleton: body 28 -> 38 + 2 + 28 = 68.
+    {
+        allocCalls(1);
+        scope (exit) freeCalls();
+        ulong[28] body;
+        PayloadHeader h = PayloadHeader.init;
+        h.maxCs = h.done = 1;
+        h.plen = 28;
+        h.call = &compactSingle28Cb;
+        foreach (i; 0 .. 28) body[i] = i;
+        PayloadEntry[1] entries = [PayloadEntry(&h, body[])];
+        atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+        scope (exit) f.destroy();
+        ConsumerView v;
+        check(v.subscribe(f) == 0, "compact singleton subscribe");
+        auto tok = f.registerProducer(Tier.small);
+        immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+        check(f.write(entries[], tok) == 1, "compact exact-quota singleton admitted");
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q, "compact singleton size");
+        while (v.consumeNext()) {}
+        check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0 && g_calls[0] == 1,
+            "compact exact-quota singleton body and header");
+        v.unsubscribe();
+        f.unregisterProducer(tok);
+    }
+    printf("testCompactQuotaBoundaries OK\n"); fflush(stdout);
+}
+
+// Catches M1 (compact reader on an MT table) and M6a (writer emitting compact
+// records when m != 0): asserts the old 16-word header layout for Tmt != 0
+// and [Call][Pbody] for Tmt == 0.
+void testCompactOldLayout()
+{
+    enum Q = 4096;
+    static immutable size_t[1] lens = [3];
+    g_compactLens = lens.ptr;
+    g_compactN = 1;
+    atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+    atomicStore!(MemoryOrder.raw)(g_compactMtCalls, 0L);
+    allocCalls(1);
+    scope (exit) freeCalls();
+
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+    scope (exit) f.destroy();
+    ConsumerView v;
+    check(v.subscribe(f) == 0, "compact old-layout subscribe");
+    auto tok = f.registerProducer(Tier.small);
+
+    PayloadHeader mh = PayloadHeader.init;
+    mh.maxCs = 2;
+    mh.done = 1;
+    mh.plen = 0;
+    mh.call = &compactMtCb;
+    ulong[3] stBody;
+    stBody[0] = 0;
+    stBody[1] = compactWord(0, 1);
+    stBody[2] = compactWord(0, 2);
+    PayloadHeader sh = PayloadHeader.init;
+    sh.maxCs = sh.done = 1;
+    sh.plen = 3;
+    sh.call = &compactBodyCb;
+    PayloadEntry[2] mixed = [PayloadEntry(&mh, null), PayloadEntry(&sh, stBody[])];
+
+    immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(mixed[], tok) == 2, "mixed table admitted");
+    immutable start = before & f.Lmask;
+    immutable size = atomicLoad!(MemoryOrder.raw)(f.buf[start + 5]);
+    check(size == 38 + 2 + 1 + 16 + 0 + 16 + 3, "mixed table full-format size");
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[start + 2]) >> 32) == 1, "mixed table Tmt != 0");
+    immutable n = cast(size_t)(atomicLoad!(MemoryOrder.raw)(f.buf[start + 2]) & 0xFFFF_FFFFUL);
+    check(n == 2, "mixed table Tlen");
+    immutable poff0 = atomicLoad!(MemoryOrder.raw)(f.buf[start + 8]);
+    immutable poff1 = atomicLoad!(MemoryOrder.raw)(f.buf[start + 9]);
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + 8 + 2]) == poff0, "MT index entry");
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[start + poff0]) & 0xFFFF_FFFFUL) == 2, "MT maxCs word");
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[start + poff0]) >> 32) == 1, "MT done word");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + poff0 + 1]) == 0, "MT plen word");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + poff0 + 9]) == cast(ulong) cast(void*) &compactMtCb, "MT call word");
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[start + poff1]) & 0xFFFF_FFFFUL) == 1, "ST maxCs word");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + poff1 + 1]) == 3, "ST plen word");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + poff1 + 9]) == cast(ulong) cast(void*) &compactBodyCb, "ST call word");
+
+    while (v.consumeNext()) {}
+    check(atomicLoad!(MemoryOrder.raw)(g_compactMtCalls) == 1, "mixed MT callback ran once");
+    check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, "mixed ST callback body");
+    check(g_compactLastHead == cast(ulong) cast(void*) f.buf + 8 * (start + poff1),
+        "mixed ST callback head points into the ring");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + poff1 + 8]) == (1UL << 32),
+        "mixed ST ring Pcount");
+
+    immutable before2 = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(mixed[1 .. 2], tok) == 1, "compact singleton admitted");
+    immutable start2 = before2 & f.Lmask;
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[start2 + 2]) >> 32) == 0, "compact table Tmt == 0");
+    immutable off = atomicLoad!(MemoryOrder.raw)(f.buf[start2 + 8]);
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start2 + off]) == cast(ulong) cast(void*) &compactBodyCb,
+        "compact Call at Tindex offset");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start2 + off + 1]) == stBody[0], "compact body at +1");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start2 + off + 2]) == stBody[1], "compact body at +2");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start2 + off + 3]) == stBody[2], "compact body at +3");
+    while (v.consumeNext()) {}
+
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+    printf("testCompactOldLayout OK\n"); fflush(stdout);
+}
+
+// Checks the compact callback-visible header contract under one and several
+// consumers. M6b (scratch header Pcount not set) is caught first by
+// testCompactMixedBodies, which runs earlier with the same header checks.
+void testCompactCallbackHeader()
+{
+    enum N = 32;
+    foreach (round; 0 .. 2)
+    {
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+        auto bodies = cast(ulong*) malloc(N * ulong.sizeof);
+        auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+        scope (exit) { free(headers); free(bodies); free(entries); }
+        atomicStore!(MemoryOrder.raw)(g_compactHeaderBad, 0L);
+        foreach (i; 0 .. N)
+        {
+            headers[i] = PayloadHeader.init;
+            headers[i].maxCs = headers[i].done = 1;
+            headers[i].plen = 1;
+            headers[i].call = &compactHeaderCb;
+            bodies[i] = i;
+            entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
+        }
+        auto f = AntFarm.create(2, 8, round == 0 ? 1 : 4, 0, 0, 1, 4096);
+        scope (exit) f.destroy();
+        auto tok = f.registerProducer(Tier.small);
+        if (round == 0)
+        {
+            ConsumerView v;
+            check(v.subscribe(f) == 0, "compact header single subscribe");
+            check(f.write(entries[0 .. N], tok) == N, "compact header single write");
+            while (v.consumeNext()) {}
+            v.unsubscribe();
+        }
+        else
+        {
+            enum NC = 4;
+            Thread[NC] threads;
+            ConsCtx[NC] ctx;
+            check(f.write(entries[0 .. N], tok) == N, "compact header multi write");
+            foreach (j; 0 .. NC)
+            {
+                ctx[j] = ConsCtx(f, N, MonoTime.currTime + 60.seconds);
+                threads[j] = compactConsumerThread(&ctx[j], false);
+                threads[j].start();
+            }
+            foreach (t; threads) t.join();
+        }
+        check(atomicLoad!(MemoryOrder.raw)(g_compactHeaderBad) == 0,
+            "compact callback header contract");
+        foreach (i; 0 .. N)
+            check(g_calls[i] == 1, "compact header exact call count");
+        check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N, "compact header total");
+        f.unregisterProducer(tok);
+    }
+    printf("testCompactCallbackHeader OK\n"); fflush(stdout);
+}
+
+// Catches the heterogeneous prefix C' rule (the writer must size the
+// accepted prefix by the format it will actually emit): an ST payload that
+// fits only as a compact singleton ends the accepted prefix after a preceding
+// MT payload and is admitted alone as a compact table on the next call. Also
+// catches M2 sizing regressions in that rule.
+void testCompactHeterogeneousRule()
+{
+    enum Q = 100; // MT(0) singleton 56 <= 100; ST(55) compact 95 <= 100.
+    static immutable size_t[1] lens = [55];
+    g_compactLens = lens.ptr;
+    g_compactN = 1;
+    atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+    atomicStore!(MemoryOrder.raw)(g_compactMtCalls, 0L);
+    allocCalls(1);
+    scope (exit) freeCalls();
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+    scope (exit) f.destroy();
+    ConsumerView v;
+    check(v.subscribe(f) == 0, "compact hetero subscribe");
+    auto tok = f.registerProducer(Tier.small);
+
+    ulong[55] stBody;
+    stBody[0] = 0;
+    foreach (k; 1 .. 55) stBody[k] = compactWord(0, k);
+    PayloadHeader mh = PayloadHeader.init;
+    mh.maxCs = 2;
+    mh.done = 1;
+    mh.plen = 0;
+    mh.call = &compactMtCb;
+    PayloadHeader sh = PayloadHeader.init;
+    sh.maxCs = sh.done = 1;
+    sh.plen = 55;
+    sh.call = &compactBodyCb;
+    PayloadEntry[2] both = [PayloadEntry(&mh, null), PayloadEntry(&sh, stBody[])];
+
+    immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(both[], tok) == 1, "heterogeneous prefix ends at the MT payload");
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + 56, "MT singleton table size");
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 2]) >> 32) == 1,
+        "first table is MT format");
+    while (v.consumeNext()) {}
+    check(atomicLoad!(MemoryOrder.raw)(g_compactMtCalls) == 1, "MT callback ran");
+
+    immutable before2 = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(both[1 .. 2], tok) == 1, "ST payload admitted alone compact");
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before2 + 95, "compact ST singleton size");
+    immutable start = before2 & f.Lmask;
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[start + 2]) >> 32) == 0, "second table Tmt == 0");
+    immutable off = atomicLoad!(MemoryOrder.raw)(f.buf[start + 8]);
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + off]) == cast(ulong) cast(void*) &compactBodyCb,
+        "compact Call at Tindex offset");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + off + 1]) == stBody[0], "compact body at +1");
+    while (v.consumeNext()) {}
+    check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, "compact ST callback body");
+
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+    printf("testCompactHeterogeneousRule OK\n"); fflush(stdout);
+}
+
 void main(string[] args)
 {
     if (args.length > 1 && args[1] == "join-only")
@@ -2534,6 +3250,19 @@ void main(string[] args)
     if (args.length > 1 && args[1] == "stale-quota-only")
     {
         testStaleQuotaReuse();
+        return;
+    }
+    if (args.length > 1 && args[1] == "compact-only")
+    {
+        testCompactMixedBodies();
+        testCompactMultiRunBodies();
+        testCompactWraparound();
+        testCompactPartialAdmission();
+        testCompactQuotaBoundaries();
+        testCompactOldLayout();
+        testCompactCallbackHeader();
+        testCompactHeterogeneousRule();
+        printf("ALL COMPACT TESTS PASSED\n");
         return;
     }
     testMagicWrap();
@@ -2562,5 +3291,13 @@ void main(string[] args)
     testActorErasedAdapter();
     testActorInbox();
     testSameShardPlainWriteJoin();
+    testCompactMixedBodies();
+    testCompactMultiRunBodies();
+    testCompactWraparound();
+    testCompactPartialAdmission();
+    testCompactQuotaBoundaries();
+    testCompactOldLayout();
+    testCompactCallbackHeader();
+    testCompactHeterogeneousRule();
     printf("ALL TESTS PASSED\n");
 }

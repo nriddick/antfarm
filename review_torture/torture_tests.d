@@ -966,6 +966,119 @@ void t17_write_size_wrap()
     }
 }
 
+// SPEC 2f singleton contract: an ST singleton is compact
+// (base + 1 index + 1 Call + Plen), so a body at the compact limit is
+// accepted while one word more fatals; an MT payload keeps the full
+// 16-word-header size and fatals at that same body. Catches M5 (compact
+// size used for MT too).
+void t26_compact_singleton_contract()
+{
+    version (Windows)
+    {
+        say("T26 skipped (fork abort-probe)");
+        return;
+    }
+    else version (Posix)
+    {
+    import core.sys.posix.unistd : fork, _exit;
+    import core.sys.posix.sys.wait : waitpid, WNOHANG;
+    import core.sys.posix.signal : SIGABRT, SIGKILL, kill;
+
+    enum size_t Lmax = 100;        // ST compact singleton == Qsmall.
+    enum ulong Qsmall = 40 + Lmax; // base 38 + index 1 + Call 1 + Plen.
+    enum ulong Qbulk = 56 + Lmax;  // MT full singleton with the same body.
+    auto f = AntFarm.create(2, 4, 1, 1, Qbulk, 1, Qsmall);
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "T26 reg");
+
+    bool expectAbort(PayloadEntry e, const(char)[] label)
+    {
+        auto pid = fork();
+        if (pid == 0)
+        {
+            cast(void) f.write((&e)[0 .. 1], tok);
+            _exit(0);
+        }
+        // Bounded wait: a mutated singleton check can admit a payload whose
+        // full table exceeds the tier quota and then spin in refreshQuota, so
+        // report a survivor instead of hanging the suite.
+        int st;
+        auto deadline = MonoTime.currTime + 10.seconds;
+        for (;;)
+        {
+            auto r = waitpid(pid, &st, WNOHANG);
+            if (r == pid) break;
+            if (r < 0) break;
+            if (MonoTime.currTime > deadline)
+            {
+                cast(void) kill(pid, SIGKILL);
+                waitpid(pid, &st, 0);
+                char[112] buf;
+                auto n = snprintf(buf.ptr, buf.length, "%.*s: watchdog (no exit)",
+                    cast(int) label.length, label.ptr);
+                defect("T26", buf[0 .. n]);
+                return false;
+            }
+            Thread.sleep(1.msecs);
+        }
+        immutable signaled = ((st & 0x7f) != 0) && ((st & 0x7f) != 0x7f);
+        immutable sig = st & 0x7f;
+        if (signaled && sig == SIGABRT)
+            return true;
+        char[112] buf;
+        auto n = snprintf(buf.ptr, buf.length, "%.*s: st=%d signaled=%d sig=%d (want SIGABRT)",
+            cast(int) label.length, label.ptr, st, signaled, sig);
+        defect("T26", buf[0 .. n]);
+        return false;
+    }
+
+    auto okBody = cast(ulong*) malloc(Lmax * ulong.sizeof);
+    check(okBody !is null, "T26 ok body");
+    foreach (i, ref w; okBody[0 .. Lmax]) w = i;
+    PayloadHeader st;
+    initPayloadHeader!countingCb(&st, 1, 1);
+    PayloadEntry exAccept;
+    exAccept.header = &st;
+    exAccept.body = okBody[0 .. Lmax];
+    immutable wrote = f.write((&exAccept)[0 .. 1], tok);
+    check(wrote == 1, "T26 exact-quota compact singleton accepted");
+
+    auto overBody = cast(ulong*) malloc((Lmax + 1) * ulong.sizeof);
+    check(overBody !is null, "T26 over body");
+    foreach (i, ref w; overBody[0 .. Lmax + 1]) w = i;
+    PayloadEntry stOver;
+    stOver.header = &st;
+    stOver.body = overBody[0 .. Lmax + 1];
+    immutable okSt = expectAbort(stOver, "compact-one-word-over");
+
+    PayloadHeader mt;
+    initPayloadHeader!countingCb(&mt, 2, 1);
+    PayloadEntry mtSame;
+    mtSame.header = &mt;
+    mtSame.body = okBody[0 .. Lmax];
+    immutable okMt = expectAbort(mtSame, "mt-same-body");
+
+    // MT 15 words under the ST limit: the correct full-header check still
+    // aborts, while a check that used the compact size for MT would accept.
+    auto mtNearBody = cast(ulong*) malloc((Lmax - 15) * ulong.sizeof);
+    check(mtNearBody !is null, "T26 near body");
+    foreach (i, ref w; mtNearBody[0 .. Lmax - 15]) w = i;
+    PayloadEntry mtNear;
+    mtNear.header = &mt;
+    mtNear.body = mtNearBody[0 .. Lmax - 15];
+    immutable okMtNear = expectAbort(mtNear, "mt-near-limit");
+
+    free(okBody);
+    free(overBody);
+    free(mtNearBody);
+    f.unregisterProducer(tok);
+    f.destroy();
+    say((wrote == 1 && okSt && okMt && okMtNear)
+        ? "T26 compact singleton contract OK"
+        : "T26 DEFECT confirmed");
+    }
+}
+
 void t18_pure_churn_orphan()
 {
     // Pure subscription churn with NO steady consumer. Non-last unsubscribers
@@ -1610,6 +1723,8 @@ void main(string[] args)
         t02_done_wrap_overexec();
     if (want("T17"))
         t17_write_size_wrap();
+    if (want("T26"))
+        t26_compact_singleton_contract();
     if (want("T18"))
         t18_pure_churn_orphan();
     if (want("T20"))
