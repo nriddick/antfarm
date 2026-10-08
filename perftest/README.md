@@ -267,6 +267,23 @@ Raw throughput uses a synthetic callback with batched counting, not useful
 payload processing. For Windows huge-page comparisons set `ANTFARM_HUGE_PAGES=1`
 and pass `--huge` from an account with the existing large-page privilege.
 
+## Compact ST tables (SPEC 2f)
+
+All-ST tables (`Tmt == 0`) store each payload as `[Call][Pbody]` (SPEC 2f).
+`throughput` and `dual` publish only ST payloads, so their quota-fit check
+sizes singleton tables with the one-word record. Pass `--full-header-size`
+to size with the old 16-word `PayloadHeader` when running these benches
+against a pre-2f runtime, which rejects any singleton larger than its tier
+quota as a fatal contract error.
+
+`digest.d` was retired with this change. It was a linear-chunk consume
+experiment that reimplemented the consumer over its own tables, shuffling
+Tindex in place and reading ring `PayloadHeader`s. It only published ST
+payloads, which the compact layout now covers: every configuration forms
+compact tables, which have no ring headers and whose record lengths come from
+Tindex order. See
+[results/farm-st-compact-2026-10-08](results/farm-st-compact-2026-10-08/README.md).
+
 ## Private actor lifecycle experiment
 
 `actor_churn private` measures fresh allocation, one private root dispatch,

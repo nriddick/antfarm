@@ -13,9 +13,9 @@ MIMALLOC_LIBRARY := $(ROOT)/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a
 MIMALLOC_VERSION ?= -d-version=AntfarmMimallocV3
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
-.PHONY: all run run-once run-once-constant-header run-once-constant-callandlength dual-run dual-grid-run dual-run-constant-header dual-run-constant-callandlength digest-run tail-run grid-run run-grid run-huge run-once-huge dual-run-huge digest-run-huge tail-run-huge clean
+.PHONY: all run run-once run-once-constant-header run-once-constant-callandlength dual-run dual-grid-run dual-run-constant-header dual-run-constant-callandlength tail-run grid-run run-grid run-huge run-once-huge dual-run-huge tail-run-huge clean
 
-all: throughput dual digest tail actor_ready actor_churn scaling
+all: throughput dual tail actor_ready actor_churn scaling
 
 actor_churn: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOOL_SOURCES)
 	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source \
@@ -38,9 +38,6 @@ actor_ready: actor_ready.d $(FARM_SOURCES) $(ACTOR_SOURCES)
 
 throughput: throughput.d $(FARM_SOURCES)
 	$(DC) $(DFLAGS) throughput.d $(FARM_SOURCES) -of=$@
-
-digest: digest.d $(FARM_SOURCES)
-	$(DC) $(DFLAGS) digest.d $(FARM_SOURCES) -of=$@
 
 tail: tail.d placement.d $(FARM_SOURCES) $(wildcard $(ROOT)/threadpool/source/threadpool/*.d) $(wildcard $(ROOT)/threadpool/source/threadpool/sys/*.d)
 	$(DC) $(DFLAGS) -i -I$(ROOT)/threadpool/source tail.d $(FARM_SOURCES) -of=$@
@@ -77,9 +74,6 @@ dual-run-constant-header: dual
 dual-run-constant-callandlength: dual
 	./dual --constant-callandlength
 
-digest-run: digest
-	./digest
-
 tail-run: tail
 	./tail | tee last_tail.txt
 
@@ -92,11 +86,8 @@ run-once-huge: throughput
 dual-run-huge: dual
 	./dual --huge
 
-digest-run-huge: digest
-	./digest --huge
-
 tail-run-huge: tail
 	./tail --huge | tee last_tail_huge.txt
 
 clean:
-	rm -f throughput digest tail dual actor_ready actor_churn actor_churn_mimalloc scaling *.o
+	rm -f throughput tail dual actor_ready actor_churn actor_churn_mimalloc scaling *.o

@@ -32,7 +32,6 @@ actor_torture/actor_torture_mimalloc_debug
 actor_torture/actor_torture_mimalloc_tsan
 actor_torture/.build/
 perftest/throughput
-perftest/digest
 perftest/tail
 perftest/dual
 perftest/actor_ready

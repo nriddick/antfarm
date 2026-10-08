@@ -13,6 +13,8 @@
  + write overload while keeping the same bodies, batches, and callbacks.
  + `--constant-callandlength` additionally supplies the uniform body length,
  + selecting arithmetic sizing without inspecting body fronts.
+ + `--full-header-size` sizes the quota-fit check with the pre-compact
+ + 16-word PayloadHeader, for runs against runtimes before SPEC 2f.
  +/
 module throughput;
 
@@ -29,6 +31,7 @@ __gshared shared(long) g_calls;
 __gshared shared(int) g_stop;
 __gshared shared(int) g_ready;
 __gshared bool g_globalCount;   // --global-count: old one-global-atomic callback
+__gshared bool g_fullHeaderSize; // --full-header-size: pre-compact singleton sizing
 
 enum WriteMode : ubyte
 {
@@ -259,8 +262,10 @@ bool waitReady(int n, MonoTime deadline)
 ulong singletonSize(uint body, uint sq)
 {
     // THEAD 8 + 1 index + 7 pad + 1 progress + 7 pad + 8*sq Tcount + payload + 7 end
-    // Full 16-word header; all-ST tables are now compact (SPEC 2f), so this overestimates and may skip configs that fit.
-    return 8 + 1 + 7 + 1 + 7 + 8UL * sq + 16 + body + 7;
+    // The bench's payloads are all ST, so the table is compact (SPEC 2f):
+    // one Call word per record. --full-header-size restores the 16-word
+    // PayloadHeader for runs against pre-compact runtimes.
+    return 8 + 1 + 7 + 1 + 7 + 8UL * sq + (g_fullHeaderSize ? 16 : 1) + body + 7;
 }
 
 bool cfgFits(ref const Cfg c)
@@ -518,6 +523,11 @@ Cfg parseArgs(string[] args, Cfg base)
         if (a == "--global-count")
         {
             g_globalCount = true;
+            continue;
+        }
+        if (a == "--full-header-size")
+        {
+            g_fullHeaderSize = true;
             continue;
         }
         if (a == "--constant-header")
