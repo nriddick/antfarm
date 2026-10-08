@@ -36,3 +36,11 @@ PERF_GATE_OUTPUT ?= perftest/results/perf-gate
 PERF_GATE_ARGS ?=
 perf-gate:
 	python3 perftest/perf_gate.py --base $(BASE) $(if $(CANDIDATE),--candidate $(CANDIDATE)) --output $(PERF_GATE_OUTPUT) $(PERF_GATE_ARGS)
+
+# Controlled subscription/reclamation schedules; hooks compile out normally.
+.PHONY: check-farm-ordering
+check-farm-ordering:
+	ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm.d antfarm_allocation.d -of=antfarm_test_ordering
+	./antfarm_test_ordering
+	dmd -g -version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm.d antfarm_allocation.d -of=antfarm_test_ordering_dmd
+	./antfarm_test_ordering_dmd

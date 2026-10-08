@@ -480,7 +480,7 @@ enum uint MAX_PAYLOAD_ITERS = 512;
 // changing quota or tally state; ordinary builds contain neither hook nor call.
 version (AntfarmWriteAuditHooks)
 {
-    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned, tablePublished }
+    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned, tablePublished, subscriberProbed }
     __gshared void function(AntFarm*, WriteAuditPhase, ulong, ulong)
         nothrow @nogc @system writeAuditHook;
 }
@@ -1848,6 +1848,9 @@ struct ConsumerView
         // frontier. bestSeg is the earliest Es among Rtlow != 0; else the
         // frontier.
         immutable wt0 = atomicLoad!(MemoryOrder.acq)(f.Wt);
+        version (AntfarmWriteAuditHooks)
+            if (writeAuditHook !is null)
+                writeAuditHook(f, WriteAuditPhase.subscriberProbed, wt0, 0);
         immutable eg = wt0 >> f.segShift;
         uint[KMAX] pinned;
         uint nPinned = 0;
@@ -1895,7 +1898,11 @@ struct ConsumerView
         immutable wt1 = atomicLoad!(MemoryOrder.acq)(f.Wt);
         immutable esU = cast(ulong) es;
         immutable seqtEpoch = seqt >> f.segShift;
-        if (seqtEpoch < esU || seqtEpoch > esU + f.K - 1 ||
+        // With no live candidate the old frontier may already have been
+        // reclaimed and swept into retained quota, even before Wt reserves
+        // its next lap. Only attach to a still-current fallback frontier.
+        if ((bestSeg < 0 && esU != (wt1 >> f.segShift)) ||
+            seqtEpoch < esU || seqtEpoch > esU + f.K - 1 ||
             (wt1 >> f.segShift) >= esU + f.K)
         {
             foreach (i; 0 .. nPinned)

@@ -317,7 +317,21 @@ Groping an unpinned slot's `Rtlow`/`Es` is incorrect: those reads are not protec
 
 Race note: the one case where the walk finds no `Rtlow != 0` candidate is a transient race with a *not-last* unsubscribe of a *confirmed* pin, in which case `Si` stands at the frontier. The second `Wt` read and the bounds below still validate that frontier before attach.
 
-**c.** After the attach candidate is read, and while all Sub pins are still held, `Si` re-reads `F.Wt` and validates two bounds, both compared as epoch numbers after shifting by `segShift`. `Seqt >> segShift` must lie in `[Es, Es + K - 1]`; this rejects a mixed snapshot where `Es` is still the previous lap's value while `Seqt` has already been advanced. `Wt >> segShift` must be `< Es + K`; this rejects a slot whose next lap was already reserved before the pin. If either bound fails, `Si` unwinds every Sub and `Cf` and returns `SUBSCRIBE_RETRY`.
+**c.** After the attach candidate is read, and while all Sub pins are still held, `Si` re-reads `F.Wt` and validates the following bounds, all compared as epoch numbers after shifting by `segShift`. `Seqt >> segShift` must lie in `[Es, Es + K - 1]`; this rejects a mixed snapshot where `Es` is still the previous lap's value while `Seqt` has already been advanced. `Wt >> segShift` must be `< Es + K`; this rejects a slot whose next lap was already reserved before the pin. When no live candidate was found (`bestSeg < 0`), the fallback must also satisfy `Es == Wt >> segShift`. A delayed initial tail probe can name an already reclaimed slot; another producer may have swept that slot into retained quota without reserving its next lap yet. The fallback therefore must still be the current frontier. This extra bound applies only to the fallback: an older live candidate remains protected and must stay available to drain a backed-up Farm. If any bound fails, `Si` unwinds every Sub and `Cf` and returns `SUBSCRIBE_RETRY`.
+
+**Fallback ordering proof.** The acquire root read after the subscriber's
+`Sub` RMW imports earlier root releases: all post-construction root writes
+are RMWs. If epoch `e` was entered and then reclaimed, the release that
+made its low half zero follows `confirmed(e)`, whose acquire of `Es[e+1]`
+imports the reservation crossing out of `e`. Thus the second tail read
+cannot still name `e`. A preceding producer plant also releases that
+crossing reservation through the root chain. If `e` was never entered and
+is a trivially complete interior of a spanning table, acquiring `Es[e]`
+itself imports a reservation ending beyond `e`. The remaining accepted
+case is a current, initialized frontier: its reuse still requires completion
+and the contiguous-sweep/pulse invariant I3. A stale tail load alone cannot
+turn a reclaimed epoch into an accepted fallback. This argument uses the
+actual reclamation history, not a presumed globally fresh acquire load.
 
 **d.** `Sub` is `2^32` such that it tracks subscribers in the most significant half, apart from normal consumers incrementing in `Rtlow`. The walk of 6b-b already holds one Sub on every inspected slot, including the attach candidate. The number of unique subscribers (and thus Sub units per segment) is bounded by `MAX_CONSUMERS_LIMIT = 128`; one `Si` pins each physical segment at most once, so `K × 128` is well under `2^32`. Sub is only the establish-leaf window; it does not plant or clear Sub0.
 

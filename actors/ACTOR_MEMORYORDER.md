@@ -756,6 +756,12 @@ reads the stable slot's two identity words after the ready-queue acquire.
 release `Tsent`. A consumer validates `Tsent` with acquire before entering the
 payload and the actor trampoline raw-loads those same ring words.
 
+A Farm subscription with no live root/pulse candidate validates that its
+fallback epoch still equals the second acquired tail's epoch. A retained
+producer grant can already cover a reclaimed old frontier before its next
+lap is reserved; the reservation bound alone cannot authorize that attach.
+A rejected attempt unwinds provisional pins and registration before retry.
+
 Ring reuse is ordered by the Farm, not by the actor layer. A consumer's ring
 reads precede its tally release. A producer's zero-`Rt` sweep acquires that
 release, and every `Wt` reservation is `acq_rel`, so a producer spending a
