@@ -761,6 +761,10 @@ fallback epoch still equals the second acquired tail's epoch. A retained
 producer grant can already cover a reclaimed old frontier before its next
 lap is reserved; the reservation bound alone cannot authorize that attach.
 A rejected attempt unwinds provisional pins and registration before retry.
+Unsubscribe protects incomplete epochs in the atomic last-releaser drop;
+it does not scan and plant after releasing ownership. The only independent
+plant is the producer's, before publishing its own table, which prevents
+that epoch from being completed and recycled during the plant.
 
 Ring reuse is ordered by the Farm, not by the actor layer. A consumer's ring
 reads precede its tally release. A producer's zero-`Rt` sweep acquires that

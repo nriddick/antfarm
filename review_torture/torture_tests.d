@@ -1065,36 +1065,18 @@ void t18_pure_churn_orphan()
 
 void t20_plant_confirmed_segment()
 {
-    // D2 regression: plantIfUnprotected reads Seqt/Sd/SeqtN once, then CASes
-    // Sub0 onto Rt without re-reading them.  A finisher completing the
-    // segment between the sd read and the CAS leaves Sub0 on a confirmed
-    // segment (spec 5b-a violation: confirmed must reach Rt==0) until a new
-    // subscriber's 0→1 retracts it.  The fix re-verifies completeness after
-    // the plant CAS and retracts the pulse (exact-value CAS) if a finisher
-    // completed the segment in between.
-    //
-    // The natural window is nanoseconds, so a stress run cannot reliably
-    // trigger the race.  This arm instead maximizes plant activity -- write
-    // crossings and unsubscribe sweeps both call plantIfUnprotected -- and
-    // asserts the invariant the fix preserves: after a full drain, every
-    // confirmed segment carries no stray pulse beyond the single legitimate
-    // empty-farm pulse, and exact call accounting holds.  A reverted fix
-    // that makes the race observable (or a future change that widens the
-    // window) fails the scan.
-    //
-    // Mechanism demo (not in-suite): instrument a scratch antfarm.d build
-    // with a 2ms sleep between the plant's sd read and its CAS, then run a
-    // few-tables-per-segment geometry. It exposes stale plants; the fix's
-    // post-CAS exact-value retract removes them. This arm deliberately uses
-    // small bodies because it is the durable invariant check, not the
-    // widened-window mechanism demonstration.
+    // Stress the producer plant and atomic last-releaser pulse protocol.
+    // Unsubscribe must cover every held incomplete epoch in its last drop;
+    // there is deliberately no unpinned orphan scan afterward. The controlled
+    // stale-scan regression is in farm_ordering.d. At quiescence, confirmed
+    // epochs carry no stray pulse beyond the legitimate empty-farm anchor.
     enum TRIALS = 8;
     int bad;
     foreach (trial; 0 .. TRIALS)
     {
         // K=16 and one-payload tables make the producer cross segments often.
         // Tiny bodies keep this an invariant scan (many crossings, finishers,
-        // unsubscribe sweeps) rather than a memcpy bench. 10000 single-payload
+        // last-releaser drops) rather than a memcpy bench. 10000 single-payload
         // tables write roughly three Ln laps.
         auto f = AntFarm.create(2, 16, 6, 1, 9000, 3, 2048);
         scope (exit) f.destroy();
@@ -1140,7 +1122,7 @@ void t20_plant_confirmed_segment()
                 if (v.subscribe(f) < 0) { Thread.yield(); continue; }
                 foreach (_; 0 .. 3)
                     v.consumeNext();
-                v.unsubscribe(); // triggers plantUnprotectedIncomplete sweep
+                v.unsubscribe(); // preserves incomplete pins with the last-releaser CAS
                 ++done;
             }
         }

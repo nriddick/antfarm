@@ -103,4 +103,74 @@ void staleFallback()
     puts("PASS stale fallback: retained grant, balanced retry, wrap and resubscribe");
 }
 
-void main() { staleFallback(); }
+__gshared ConsumerView laggard;
+__gshared bool advanced;
+
+void delayedUnsubscribe(AntFarm* f, WriteAuditPhase phase, ulong e, ulong)
+    nothrow @nogc @system
+{
+    if (e != 0) return;
+    if (phase == WriteAuditPhase.plantChecked && !advanced)
+    {
+        advanced = true;
+        // U has dropped its own pins and checked incomplete epoch zero.
+        // C now completes it and P certifies its reuse before U's plant.
+        reclaimAndGrant(f);
+    }
+    else if (phase == WriteAuditPhase.plantPublished && advanced)
+    {
+        // Even a subsequently retracted pulse is unsafe: S can convert it
+        // into a real pin before the retract. The fallback fix cannot help
+        // this main-walk candidate selected through nonzero Rtlow.
+        require(laggard.subscribe(f) == 0, "stale pulse selected epoch zero");
+    }
+}
+
+void checkIncompletePins(AntFarm* f) nothrow @nogc @system
+{
+    // Quiescent only: no concurrent metadata writers or pin changes here.
+    foreach (i; 0 .. f.K)
+    {
+        auto e = atomicLoad(f.stats[i].es);
+        if (e < 0) continue;
+        auto next = cast(uint)((e + 1) & f.kMask);
+        if (atomicLoad(f.stats[next].es) != e + 1) continue;
+        if (atomicLoad(f.stats[i].seqt) + atomicLoad(f.stats[i].sd) <
+                atomicLoad(f.stats[next].seqt))
+            require((atomicLoad(f.Rt[i][0]) & LOWMASK) != 0,
+                "crossed incomplete epoch lost its pin or pulse");
+    }
+}
+
+void staleUnsubscribe()
+{
+    auto f = AntFarm.create(2, 4, 1, 1, 3 * (1 << 16), 0, 0);
+    scope(exit) f.destroy();
+    auto tok = f.registerProducer(Tier.bulk);
+    producer = &tok;
+    scope(exit) f.unregisterProducer(tok);
+    ConsumerView c, u;
+    require(c.subscribe(f) == 0 && u.subscribe(f) == 0, "two initial consumers");
+    consumer = &c;
+    scope(exit) c.unsubscribe();
+    calls = 0;
+    require(writeWords(f, f.segCap) == 1, "publish before unsubscribe");
+    advanced = false;
+    writeAuditHook = &delayedUnsubscribe;
+    u.unsubscribe();
+    writeAuditHook = null;
+    checkIncompletePins(f);
+    if (!advanced) reclaimAndGrant(f);
+    require(writeWords(f, 3 * f.segCap) == 1, "reuse after unsubscribe");
+    while (c.consumeNext()) {}
+    require(calls == 2, "unsubscribe preserves exact accounting");
+    laggard.unsubscribe();
+    checkIncompletePins(f);
+    puts("PASS unsubscribe: no stale pulse can resurrect reclaimed epoch");
+}
+
+void main(string[] args)
+{
+    if (args.length == 1 || args[1] == "s1") staleFallback();
+    if (args.length == 1 || args[1] == "s2") staleUnsubscribe();
+}

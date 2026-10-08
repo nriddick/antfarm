@@ -352,7 +352,7 @@ This is the root-tally lifecycle in one place. Keep the bit layout from 2b next 
 | final root, incomplete segment | count 1 | atomically replace count with one Sub0 | preserve backlog discoverability and prevent reuse |
 | final root, confirmed non-empty-farm segment | count 1 | decrement to zero | admit producer reclamation |
 | final root of an empty Farm | count 1 | atomically replace count with one Sub0 | retain a subscribe anchor |
-| producer/unsubscribe orphan scan | incomplete, count 0, no pulse | CAS in one Sub0, then recheck confirmation | cover a segment no consumer entered or retained |
+| producer crossing before table publication | incomplete, count 0, no pulse | CAS in one Sub0, then recheck confirmation | cover a segment no consumer entered or retained |
 | racing confirmation after orphan plant | the planted low half is still exactly one Sub0 | CAS out that unit | avoid a confirmed-segment capacity leak |
 
 **Taking a count** (leaf 0→1, subscribe or `moveRef`): `old = fetch_add(Rt, 1)`; if `(old & COUNTMASK) == 0` and `(old & Sub0MASK) != 0`, `fetch_sub(Rt, extra)` where `extra = old & Sub0MASK`, the Sub0 units the thread observed (normally one). Only one thread observes the count 0→1, so that thread is the unique subtractor for that segment. Construction's dummy Sub0 (4b) clears on this same edge.
@@ -364,8 +364,22 @@ So the "leave a pulse only if this decrement actually hits zero" decision is one
 **Deposition sites.** Deposition happens at exactly three sites, all CAS-gated or cold:
 
 1. Construction places the dummy pulse on `Rt[0]` (4b).
-2. `plantIfUnprotected(e)` CAS-plants one unit on an incomplete epoch (`Es[e] == e`, `Es[e+1] == e+1`, `Seqt + Sd < Seqt[e+1]`, and `Rt` with count 0 and no pulse). Invoked by `write()` for every segment its reservation crosses out of (5c), and by `unsubscribe()` via `plantUnprotectedIncomplete()` for every initialized segment left with `Rt == 0` (6e).
+2. `plantIfUnprotected(e)` CAS-plants one unit on an incomplete epoch (`Es[e] == e`, `Es[e+1] == e+1`, `Seqt + Sd < Seqt[e+1]`, and `Rt` with count 0 and no pulse). Invoked only by `write()` for every segment its reservation crosses out of (5c), before publishing its table.
 3. `releaseRootLeavePulse`, the last-releaser helper: clears the count bits and leaves one unit (only if none is present) when the final root of an unconfirmed — or last-of-farm confirmed — segment is released.
+
+**Plant ownership.** Only the crossing producer may call the plant helper.
+Its own table starts in `eold` and is unpublished until after the plant;
+`Sd[eold]` therefore cannot confirm that epoch meanwhile. Interior crossed
+epochs have equal `Seqt`/`SeqtNext` and need no pulse. Any consumer that
+enters and leaves the incomplete start epoch replaces its last count with
+Sub0 atomically, so the root cannot ABA back to zero under this producer.
+Unsubscription already applies that last-releaser protocol to every held
+incomplete epoch; no unpinned follow-up scan is needed. Such a scan could
+read incompleteness, pause through completion and quota certification,
+then CAS a stale Sub0 onto zero. Even immediate post-CAS retraction is too
+late: a subscriber can convert the transient pulse into a pin on certified
+space. Moving the reads nearer the CAS cannot eliminate a zero/count/zero
+ABA. Removing the scan also removes this invalid source of live candidates.
 
 **Clear sites.** The primary clear is the 0→1 retract in `takeRootCount`, where the unique thread whose fetch_add observed count 0 subtracts the Sub0 units it saw (normally one). The secondary clear is the retract inside `plantIfUnprotected`: the plant's completeness check read Seqt/Sd/SeqtNext once, and a finisher could have completed the segment between that read and the plant CAS, leaving Sub0 on a confirmed segment. The plant therefore re-reads the completeness values after its CAS succeeds and, if the segment is now confirmed, retracts exactly the unit it planted. The retract is a low-half masked CAS retry loop: it reloads `Rt`, checks that the low half is still exactly the `Sub0` that was planted, and then CASes `cur → cur - Sub0` against the freshly observed full word. A concurrent subscriber's `Sub` pin/unpin only changes the high half, so it can make a one-shot exact-value CAS fail while the planted `Sub0` is still present; the masked loop retries against the new high half and succeeds. The loop is bounded by the low-half state — it either removes the exact `Sub0`, or a racing 0→1 has already changed the low half and that same edge cleared the pulse, so the loop bails.
 

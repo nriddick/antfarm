@@ -480,7 +480,7 @@ enum uint MAX_PAYLOAD_ITERS = 512;
 // changing quota or tally state; ordinary builds contain neither hook nor call.
 version (AntfarmWriteAuditHooks)
 {
-    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned, tablePublished, subscriberProbed }
+    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned, tablePublished, subscriberProbed, plantChecked, plantPublished }
     __gshared void function(AntFarm*, WriteAuditPhase, ulong, ulong)
         nothrow @nogc @system writeAuditHook;
 }
@@ -1317,7 +1317,10 @@ struct AntFarm
     /// Plant one Sub0 on an incomplete epoch with count 0 and no pulse
     /// (spec 2a). After the plant CAS, re-check completeness and retract
     /// that unit if a finisher confirmed the segment in between.
-    void plantIfUnprotected(ulong e) nothrow @nogc @system
+    /// Producer-only: the caller's unpublished table prevents e from
+    /// confirming/recycling before this plant. Never call from an unpinned
+    /// scan after unsubscribe; a zero->count->zero ABA can resurrect a slot.
+    private void plantIfUnprotected(ulong e) nothrow @nogc @system
     {
         immutable ki = cast(uint)(e & kMask);
         if (atomicLoad!(MemoryOrder.acq)(stats[ki].es) != cast(long) e)
@@ -1334,6 +1337,9 @@ struct AntFarm
         immutable sd = atomicLoad!(MemoryOrder.raw)(stats[ki].sd);
         if (seqt >= seqtN || seqt + sd >= seqtN)
             return;
+        version (AntfarmWriteAuditHooks)
+            if (writeAuditHook !is null)
+                writeAuditHook(&this, WriteAuditPhase.plantChecked, e, 0);
         // Spec 2a: CAS the plant so a racing 0->1 cannot be straddled by a
         // bare fetch_add(SUB0). Count or pulse appearing bails — the race
         // invalidated the plant. Not an open loop; strong CAS (spec 1).
@@ -1344,6 +1350,9 @@ struct AntFarm
                 return;
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&Rt[ki][0], rt, rt + SUB0))
             {
+                version (AntfarmWriteAuditHooks)
+                    if (writeAuditHook !is null)
+                        writeAuditHook(&this, WriteAuditPhase.plantPublished, e, 0);
                 // Spec 2a post-CAS retract: a finisher may have confirmed
                 // the segment between the completeness read and this plant.
                 // Retract exactly the unit we planted. The full-word CAS is
@@ -1369,17 +1378,6 @@ struct AntFarm
                 }
                 return;
             }
-        }
-    }
-
-    /// After unsubscribe, cover any incomplete epoch still sitting at Rt==0.
-    void plantUnprotectedIncomplete() nothrow @nogc @system
-    {
-        foreach (i; 0 .. K)
-        {
-            immutable es = atomicLoad!(MemoryOrder.raw)(stats[i].es);
-            if (es >= 0)
-                plantIfUnprotected(cast(ulong) es);
         }
     }
 
@@ -1951,7 +1949,9 @@ struct ConsumerView
         decRef(posKi(), ltiOf(newestEi), posPulse, newestEi, !lastOfFarm);
         hasRef = false;
         IDc = 0;
-        f.plantUnprotectedIncomplete();
+        // Every incomplete held epoch was protected by its last drop above.
+        // An unpinned scan here could resurrect a reclaimed, quota-certified
+        // slot with a stale Sub0 plant before its post-CAS retract.
         F = null;
     }
 
