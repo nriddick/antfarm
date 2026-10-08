@@ -284,6 +284,22 @@ compact tables, which have no ring headers and whose record lengths come from
 Tindex order. See
 [results/farm-st-compact-2026-10-08](results/farm-st-compact-2026-10-08/README.md).
 
+**tree-cancel is not comparable across this change.** Cheaper publication
+lets more of each round's cancellable work be dispatched before cancellation
+lands (dispatched fraction 0.948 → 0.999 at six consumers), so each round does
+more work. A gate whose base predates SPEC 2f and whose candidate includes it
+reports tree-cancel/6 as `inconclusive_work`. That is expected and not a
+regression signal. Gates with both sides on the same layout compare normally.
+
+**private-remote/6 is allocator-contention bound.** Every root free is a
+cross-thread push onto the controller's mimalloc page free list. Throughput
+there tracks how those pushes collide, not Farm cost. It moves non-monotonically
+with the small-tier quota's table geometry: about ±8% across quotas for the
+full layout and about ±4% for the compact layout. It also *rises* when consumer
+callbacks are artificially slowed.
+Read changes in this cell against a matched-geometry control (see
+[private-remote-6](results/farm-st-compact-2026-10-08/private-remote-6/README.md)).
+
 ## Private actor lifecycle experiment
 
 `actor_churn private` measures fresh allocation, one private root dispatch,

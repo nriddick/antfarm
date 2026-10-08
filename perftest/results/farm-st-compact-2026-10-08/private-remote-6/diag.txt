@@ -1,0 +1,45 @@
+== base q=16384
+diag_consumer cpu=1 claims=194825 entries=5281793 entries_per_claim=27.11 polls=18267630 idle_polls=18070087 busy_frac=0.7894
+diag_consumer cpu=2 claims=279225 entries=7595242 entries_per_claim=27.20 polls=18294934 idle_polls=18097391 busy_frac=0.7892
+diag_consumer cpu=3 claims=229543 entries=6242729 entries_per_claim=27.20 polls=18196437 idle_polls=17998894 busy_frac=0.7893
+diag_consumer cpu=4 claims=425226 entries=11469594 entries_per_claim=26.97 polls=18346929 idle_polls=18149386 busy_frac=0.7878
+diag_consumer cpu=5 claims=260698 entries=7093532 entries_per_claim=27.21 polls=18315173 idle_polls=18117630 busy_frac=0.7894
+diag_consumer cpu=6 claims=230780 entries=6275382 entries_per_claim=27.19 polls=12654100 idle_polls=12456557 busy_frac=0.7884
+diag_emitter tables=197543 entries_per_table=222.53 short_tables=48897 pumps=24268099 pumps_no_spare=0 mean_inflight_batches=24.01 tables_per_cycle=73.63 cycles_total=2683
+rounds=2678 elapsed_s=3.000984 Mactor_cycles/s=14.620654 ns/actor_cycle=68.40 cycles/s=892.37
+== cand q=16384
+diag_consumer cpu=1 claims=168643 entries=4782415 entries_per_claim=28.36 polls=17420873 idle_polls=17256856 busy_frac=0.8025
+diag_consumer cpu=2 claims=256953 entries=7267679 entries_per_claim=28.28 polls=17369620 idle_polls=17205603 busy_frac=0.8015
+diag_consumer cpu=3 claims=203972 entries=5784399 entries_per_claim=28.36 polls=17355578 idle_polls=17191561 busy_frac=0.8021
+diag_consumer cpu=4 claims=400351 entries=11146256 entries_per_claim=27.84 polls=17494041 idle_polls=17330024 busy_frac=0.8005
+diag_consumer cpu=5 claims=235126 entries=6660286 entries_per_claim=28.33 polls=17452597 idle_polls=17288580 busy_frac=0.8020
+diag_consumer cpu=6 claims=195599 entries=5564725 entries_per_claim=28.45 polls=11940361 idle_polls=11776344 busy_frac=0.8014
+diag_emitter tables=164017 entries_per_table=251.23 short_tables=7990 pumps=32465741 pumps_no_spare=0 mean_inflight_batches=26.24 tables_per_cycle=65.22 cycles_total=2515
+rounds=2510 elapsed_s=3.000250 Mactor_cycles/s=13.706802 ns/actor_cycle=72.96 cycles/s=836.60
+== cand q=2842
+diag_consumer cpu=1 claims=195536 entries=5219121 entries_per_claim=26.69 polls=18612971 idle_polls=18412208 busy_frac=0.7888
+diag_consumer cpu=2 claims=289643 entries=7674993 entries_per_claim=26.50 polls=18486974 idle_polls=18286211 busy_frac=0.7889
+diag_consumer cpu=3 claims=233315 entries=6210228 entries_per_claim=26.62 polls=18497521 idle_polls=18296758 busy_frac=0.7889
+diag_consumer cpu=4 claims=441551 entries=11582468 entries_per_claim=26.23 polls=18658898 idle_polls=18458135 busy_frac=0.7883
+diag_consumer cpu=5 claims=265396 entries=7052208 entries_per_claim=26.57 polls=18582672 idle_polls=18381909 busy_frac=0.7890
+diag_consumer cpu=6 claims=222082 entries=5924342 entries_per_claim=26.68 polls=12752372 idle_polls=12551609 busy_frac=0.7883
+diag_emitter tables=200763 entries_per_table=217.49 short_tables=49573 pumps=29373569 pumps_no_spare=9992 mean_inflight_batches=28.48 tables_per_cycle=75.33 cycles_total=2665
+rounds=2660 elapsed_s=3.000750 Mactor_cycles/s=14.523515 ns/actor_cycle=68.85 cycles/s=886.45
+== base q=94440
+diag_consumer cpu=1 claims=176417 entries=5005610 entries_per_claim=28.37 polls=17404154 idle_polls=17231302 busy_frac=0.7993
+diag_consumer cpu=2 claims=259039 entries=7364268 entries_per_claim=28.43 polls=17439722 idle_polls=17266870 busy_frac=0.7988
+diag_consumer cpu=3 claims=208187 entries=5916517 entries_per_claim=28.42 polls=17317326 idle_polls=17144474 busy_frac=0.7990
+diag_consumer cpu=4 claims=401032 entries=11235970 entries_per_claim=28.02 polls=17466768 idle_polls=17293916 busy_frac=0.7976
+diag_consumer cpu=5 claims=240126 entries=6828554 entries_per_claim=28.44 polls=17441052 idle_polls=17268200 busy_frac=0.7991
+diag_consumer cpu=6 claims=215758 entries=6149177 entries_per_claim=28.50 polls=12027794 idle_polls=11854942 busy_frac=0.7984
+diag_emitter tables=172852 entries_per_table=245.88 short_tables=8180 pumps=26809743 pumps_no_spare=0 mean_inflight_batches=22.81 tables_per_cycle=66.64 cycles_total=2594
+rounds=2589 elapsed_s=3.000023 Mactor_cycles/s=14.139282 ns/actor_cycle=70.72 cycles/s=862.99
+== base q=14000
+diag_consumer cpu=1 claims=187972 entries=5372309 entries_per_claim=28.58 polls=14097671 idle_polls=13920455 busy_frac=0.8374
+diag_consumer cpu=2 claims=275233 entries=7856260 entries_per_claim=28.54 polls=14181035 idle_polls=14003819 busy_frac=0.8355
+diag_consumer cpu=3 claims=221314 entries=6322406 entries_per_claim=28.57 polls=14093224 idle_polls=13916008 busy_frac=0.8366
+diag_consumer cpu=4 claims=425362 entries=11952398 entries_per_claim=28.10 polls=14235058 idle_polls=14057842 busy_frac=0.8335
+diag_consumer cpu=5 claims=259209 entries=7401804 entries_per_claim=28.56 polls=14183533 idle_polls=14006317 busy_frac=0.8362
+diag_consumer cpu=6 claims=225854 entries=6462119 entries_per_claim=28.61 polls=9485686 idle_polls=9308470 busy_frac=0.8356
+diag_emitter tables=177216 entries_per_table=256.00 short_tables=0 pumps=36707504 pumps_no_spare=0 mean_inflight_batches=27.28 tables_per_cycle=64.00 cycles_total=2769
+rounds=2764 elapsed_s=3.000682 Mactor_cycles/s=15.091696 ns/actor_cycle=66.26 cycles/s=921.12

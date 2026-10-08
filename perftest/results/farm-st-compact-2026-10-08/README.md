@@ -1,12 +1,15 @@
 # Farm compact ST tables (prototype) and the Wt reservation fix (2026-10-08)
 
-**This is a prototype, not ready to land as is.** Branch `proto/farm-st-compact` stacks three commits on local main 2f853e5:
+**Round 2 (below) explains private-remote/6 and settles the perftest follow-ups; whether the prototype lands depends on the user's decision about that cell.** cf2aa91 is now local main; the prototype commits sit on it:
 
 | Commit | Content | State |
 | --- | --- | --- |
 | cf2aa91 | `antfarm: acquire other producers' reclamation in the Wt reservation`. Pre-existing bug fix: the `Wt` reservation goes from `rel` to `acq_rel`. Adds the `testStaleQuotaReuse` regression and SPEC/ACTOR_MEMORYORDER docs. | Standalone on 2f853e5 and cherry-pickable to main. Correctness and gate evidence below. **Ready for review.** |
-| 5e22442 | `antfarm: prototype compact encoding for all-ST (Tmt == 0) tables`. Runtime, SPEC 2f, and geometry retunes of existing tests. | Prototype. One confirmed 6-consumer regression (private-remote/6 −4.5%). |
+| 5e22442 | `antfarm: prototype compact encoding for all-ST (Tmt == 0) tables`. Runtime, SPEC 2f, and geometry retunes of existing tests. | Prototype. One 6-consumer cell below the boundary (private-remote/6 −4.5%), explained in round 2 as allocator-contention geometry; needs a user decision. |
 | 902549c | `tests: compact ST table coverage`. Eight Farm tests plus the T26 death test. | Goes with 5e22442. |
+| a7ab59f | `perf: record compact ST prototype and Wt reservation fix gates` (round 1 evidence). | Results only. |
+| 7fb4e17 | `perftest: retire digest.d; size compact singletons in throughput/dual` (round 2). | Perftest only; no runtime change. |
+| (this) | `perf: private-remote/6 investigation; tree-cancel comparability` (round 2). | Results and docs only. |
 
 **Revision names in the evidence below.** Timing, soaks and profiles ran on the pre-review SHAs 0469901, 13b1f85 and 82cbce0. The review cleanup produced the commits above:
 - cf2aa91 has the same tree as 0469901; only the commit message changed.
@@ -23,8 +26,8 @@
 - **Gate (i)**, compact 82cbce0 against base+fix 0469901, full actor_churn matrix at 0/6 consumers, 5 pairs: 32 of 34 cells pass, mostly with large gains:
   - 0 consumers: +7.9% (wave) to +76.3% (subset-whole-unreserved). private/0 is +30.3%, tree/0 +22.5%.
   - 6 consumers: tree/6 +2.1% and tree-wait/6 +0.6%, then up to +226% (subset-whole/6). private/6 is +30.9%, subset/100%/6 +127%.
-  - **private-remote/6 regresses: −4.42%** at 5 pairs. The 20-pair boundary run confirms it at −4.49% (pairs −4.85..−4.10), against −0.08% for the byte-identical control.
-  - **tree-cancel/6 is `inconclusive_work`** at −16.0%. The candidate dispatches 99.9% of the cancellable work before cancellation lands, against 94.8% on base, so per-round work is unequal.
+  - **private-remote/6 regresses: −4.42%** at 5 pairs. The 20-pair boundary run confirms it at −4.49% (pairs −4.85..−4.10), against −0.08% for the byte-identical control. **Round 2:** about three quarters of it reproduces in the base build from quota headroom alone (mimalloc cross-thread-free contention that depends on quota geometry). A residual of about 1% is unexplained. See [Round 2](#round-2-private-remote6-tree-cancel-and-perftest-follow-ups).
+  - **tree-cancel/6 is `inconclusive_work`** at −16.0%. The candidate dispatches 99.9% of the cancellable work before cancellation lands, against 94.8% on base, so per-round work is unequal. **Accepted by the user (round 2):** tree-cancel rates are not comparable across this change.
 - **Gate (ii)**, fix only, 0469901 against 2f853e5, same matrix: no regression. Five cells were inconclusive on single outlier pairs. All five pass in 20-pair boundary runs (paired medians −1.46%..+0.24%), and the byte-identical controls pass too. The x86 cost of `acq_rel` is nil within noise, as expected: `lock xadd` is already a full barrier.
 - **Correctness**, final HEAD 82cbce0:
   - `make check` and `make check-soak` pass.
@@ -33,6 +36,56 @@
   - All eight listed mutations (M1–M5, M6a, M6b, M7) were verified by hand.
   - Independent consultant reviews: compact layout ([task 278](/home/nathan-riddick/pi_ground/.cydo/tasks/278/output.md)) and sibling producer ordering ([task 282](/home/nathan-riddick/pi_ground/.cydo/tasks/282/output.md)). Neither found a defect beyond the Wt reservation.
   - See [correctness.txt](correctness.txt).
+
+## Round 2: private-remote/6, tree-cancel and perftest follow-ups
+
+The full evidence is in [private-remote-6/README.md](private-remote-6/README.md); the driver is [investigate.sh](private-remote-6/investigate.sh). The investigation used diagnostic builds of cf2aa91 and 5e22442 only, and changed no runtime code.
+
+**private-remote/6: mostly allocator-contention geometry; a residual of about 1% is unexplained.**
+- **The bottleneck.** Every root free in this cell is a cross-thread push onto the controller's mimalloc page `xthread_free` list. That push averages about 3 CAS attempts.
+- **CAS attempts order the rates exactly**, independent of layout:
+
+  | config | rate | CAS attempts per free |
+  | --- | ---: | ---: |
+  | compact at quota 2842 | 14.34 | 2.90 |
+  | base at quota 16384 | 14.29 | 2.91 |
+  | base at quota 94440 | 13.86 | 3.02 |
+  | compact at quota 16384 | 13.61 | 3.07 |
+
+- **Writer speed is not the cause.** Adding spin to the candidate writer, up to 5× base's whole writer cost, raises the rate steadily from 13.59 to 13.78 (+1.4%). That stays small against the 5.4% gap to base (14.37) in that run.
+- **Contention collapse.** Adding a useless 40-tick spin to each consumer callback *raises* throughput by about 40% in both trees, as CAS attempts per free fall to 1.9.
+- **Geometry is the lever.** At batch 256 both layouts publish the same ≤256-entry tables with the same 32-entry claims, so claim chunking and cost hints do not apply. What changes is quota admission:
+  - 16,384 words hold 3.5 full-layout or 20.3 compact root tables.
+  - That changes how often the writer meets partly reclaimed quota (at the gate quota, base quota-truncates 25% of its tables and compact 5%), and with it the free interleaving.
+- **The landscape is non-monotone in quota.** Base spans 13.62–15.87 M/s across quotas (about ±8%). Compact spans only 13.66–14.87 (about ±4%) and never reaches base's best (15.87 at quota 9400).
+- **Matched geometry, 10 rounds:**
+
+  | comparison | paired median |
+  | --- | ---: |
+  | compact at full-layout tables per quota (2842) vs base | +1.65% |
+  | compact vs base at compact tables per quota (94440) | −0.94% |
+  | base given compact's headroom (94440 vs 16384) | −3.44% |
+
+  From the 3-run quota landscape, compact against base at matched tables per quota:
+
+  | tables per quota | ~2 | 3.0 | 3.5 | 4.0 | ~10 | 20.3 |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | compact vs base | −6.3% | −4.8% | +1.2% | +4.2% | −3.5% | −1.2% |
+
+  The two paired points fall on the favourable side of that spread.
+- **Reading.** About three quarters of the loss (−3.44% of −4.49%) reproduces in the base build from quota headroom alone. The mechanism is mimalloc cross-thread-free contention that depends on quota geometry. A residual of roughly 1% is unexplained and could be format-related.
+
+- **Remedy.** The only Farm-side lever would be a quota or admission default change, which would tune this non-monotone landscape rather than remove a mechanism. It was not made. A real remedy belongs on the allocation side (root-state recycling or a slab).
+
+**tree-cancel/6: accepted change in dispatched work.**
+- Compact publication is cheap enough that the candidate dispatches 99.9% of the cancellable work before cancellation lands, against 94.8% on base.
+- Each round therefore does more work, so tree-cancel rates are **not comparable across this change**.
+- The gate's `inconclusive_work` decision on tree-cancel/6 is correct and is documented, not waived.
+- Future gates whose base and candidate are both at or after 5e22442 compare normally.
+
+**Perftest follow-ups (7fb4e17).**
+- `perftest/digest.d` is retired. It only published ST payloads, which compact tables now cover, and it read ring headers that compact tables no longer have.
+- `singletonSize()` in throughput and dual uses the compact one-word record. `--full-header-size` keeps the old sizing for runs against pre-2f runtimes.
 
 ## How the Wt bug was found
 
@@ -156,10 +209,10 @@ User-space `cycles:u` profiles of the gate-compact binaries, after all timing ([
 | private/6 | 2.60% | 1.13% | 22.7 | 29.9 |
 | private-remote/6 | 1.45% | < 0.5% | 14.36 | 13.71 |
 
-**private-remote/6 is unexplained.** In both binaries `mi_free_size_aligned` takes about 58% of samples, plus `_mi_page_free_collect` at about 5.5% and `mi_free_try_collect_mt` at about 1.9%. The Farm writer is negligible on both sides. The regression is real (20 pairs plus control) but sits in consumer-side remote-free and allocator behaviour, not in the format itself.
+**private-remote/6 (round 1 view; explained in round 2).** In both binaries `mi_free_size_aligned` takes about 58% of samples, plus `_mi_page_free_collect` at about 5.5% and `mi_free_try_collect_mt` at about 1.9%. The Farm writer is negligible on both sides. The regression is real (20 pairs plus control) but sits in consumer-side remote-free and allocator behaviour, not in the format itself.
 - One hypothesis is that a cheaper emitter changes the timing or batching of cross-thread frees, raising contention on mimalloc's page free lists.
 - Another is layout: compact moves `processShard`/`runCompact` code.
-- Neither was tested. This needs investigation before landing; see open questions.
+- Round 2 tested both: neither is the cause. See [private-remote-6/README.md](private-remote-6/README.md).
 
 ## Gate tables
 
@@ -328,7 +381,7 @@ Existing tests retuned for compact geometry in 13b1f85, each keeping its intent:
 | private_actor_tests ring fillers | 20000 → 100000 |
 | `testStaleQuotaReuse` | payloads become MaxCs=2 |
 
-`perftest/digest.d` is outside `make check`. It only produces ST payloads, so every digest configuration now fatals at its compact-table guard (digest.d:219) instead of misreading tables. The bench is disabled until it is ported or retired.
+`perftest/digest.d` was outside `make check`. It only produced ST payloads, so after 5e22442 every digest configuration fatalled at its compact-table guard. Round 2 retired it (7fb4e17).
 
 ## What is ready and what is not
 
@@ -337,20 +390,20 @@ Existing tests retuned for compact geometry in 13b1f85, each keeping its intent:
 - The compact format's correctness: `make check`, check-soak, Farm and private TSan soaks, mutations verified by hand, and a consultant review.
 
 **Not ready:**
-- The compact prototype as a landing candidate. private-remote/6 regresses −4.49% over 20 pairs, against a −3% boundary, and the mechanism is unexplained.
-- tree-cancel/6 is inconclusive because the dispatched-work fraction changed.
+- The compact prototype as a landing candidate, pending the user's decision on private-remote/6: −4.49% over 20 pairs against a −3% boundary. Round 2 attributes about three quarters of it to allocator-contention geometry (a residual of about 1% is unexplained), and no principled Farm-side fix exists without a quota or admission default change.
+- tree-cancel/6 stays `inconclusive_work`; the user accepted the dispatched-work change, so it is documented rather than gated.
 - No Windows run was done. The format is ulong words in the same magic buffer, so no platform-specific code changed.
 
 ## Open questions
 
-1. **private-remote/6 −4.5%.** Investigate before landing. Ideas: an inert-code layout control, perf c2c on mimalloc page free lists, and checking whether emitter speed changes cross-thread free batching.
-2. **tree-cancel/6.** Is the higher dispatched fraction (0.948 → 0.999) acceptable, or does the benchmark need a fixed-work variant to compare fairly?
+1. **private-remote/6 −4.5%.** Investigated in round 2: about three quarters of it is quota-geometry-dependent allocator contention that reproduces in the base build; a residual of about 1% is unexplained and could be format-related. Open for the user: waive the cell on the matched-geometry evidence, or pursue an allocation-side change. A quota or admission default change is the only Farm lever, and it is not recommended.
+2. **tree-cancel/6.** Resolved: the user accepted the higher dispatched fraction (0.948 → 0.999). Rates are not comparable across this change (perftest/README.md).
 3. **Private batch and work-cost defaults.** Quota no longer limits one-word tables below about 5.4k entries. Should `defaultPrivateBatchLimit` or root cost hints be revisited? Not retuned here.
 4. **Callback-header contract.** For compact tables `head` is a stack copy shared by the run's payloads. It must not be modified or retained past return (SPEC 2f). No in-tree callback does either. Should SPEC 7c state this for every table kind?
-5. **perftest/digest.d.** It is a linear-chunk experiment that shuffles Tindex in place and reads ring headers. It only produces ST payloads, so every configuration now fatals at the digest.d:219 guard and the bench is disabled. Port it to compact, or retire it?
+5. **perftest/digest.d.** Resolved: retired in 7fb4e17. It only produced ST payloads, which the compact layout now covers.
 6. **Compact-geometry stale-quota regression.** The all-ST variant did not trigger the release-only race with this schedule, so full-layout (MaxCs=2) coverage is used. A compact-specific trigger would need calibration.
 7. **Suspected S1/S2 and the TSan hook/comment cleanup** (above). These are pre-existing and deferred.
-8. **`singletonSize()` in perftest/dual.d:76 and throughput.d:259** still assumes the 16-word header. That is conservative, but geometry sweeps may skip configurations that now fit as compact tables. Each site now has a comment saying so.
+8. **`singletonSize()` in perftest/dual.d and throughput.d.** Resolved in 7fb4e17: it sizes with the one-word compact record, which matches the runtime's check exactly. `--full-header-size` keeps the old sizing for runs against pre-2f runtimes.
 
 ## Step 0 analysis
 
@@ -415,4 +468,4 @@ The table format depends on the accepted prefix's `m`. The scan keeps both runni
 - **A: callback ABI.** Use a stack-local scratch `PayloadHeader`: maxCs = done = 1, pcount = 1<<32, zero filler, set once per claimed run; plen and call set per payload. The ABI and the SPEC 7c observable values are unchanged.
 - **B: body location and length.** Use the index-difference rule over the existing Tindex, with no added per-payload word. The compact record is exactly `[Call][Pbody...]`.
 - **C → C′: singleton contract check.** The first decision was to keep the full-header size. Implementing it showed that a single ST payload could no longer form an exact-quota table, which two existing tests (boundary_runoff, write_protection) rely on. Revised to C′: an ST payload's singleton check uses the compact size, and MT keeps the full size. The fatal set only shrinks, and `write() == 0` still means full.
-- **Layout-dependent harnesses.** boundary_runoff and write_protection were retuned to the compact geometry, keeping their exact-geometry intent. perftest/digest.d (not in `make check`) shuffles Tindex in place and reads ring headers, so porting it is not small. It now refuses compact tables loudly (open question).
+- **Layout-dependent harnesses.** boundary_runoff and write_protection were retuned to the compact geometry, keeping their exact-geometry intent. perftest/digest.d (not in `make check`) shuffles Tindex in place and reads ring headers, so porting it is not small. It refused compact tables loudly until round 2 retired it (7fb4e17).
