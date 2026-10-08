@@ -756,6 +756,13 @@ reads the stable slot's two identity words after the ready-queue acquire.
 release `Tsent`. A consumer validates `Tsent` with acquire before entering the
 payload and the actor trampoline raw-loads those same ring words.
 
+Ring reuse is ordered by the Farm, not by the actor layer. A consumer's ring
+reads precede its tally release. A producer's zero-`Rt` sweep acquires that
+release, and every `Wt` reservation is `acq_rel`, so a producer spending a
+retained quota balance acquires the sweeps other producers performed before it
+overwrites those words. See the write-tail reservation and segment-reuse rows of the memory-order
+contract in [SPEC.md](../SPEC.md#9-memory-order-contract).
+
 The ring identity is immutable for the live generation. Reclamation cannot
 clear or reuse the slot until the activation has transitioned it to
 `RETIRED`; generation comparison rejects an old ring identity after reuse.

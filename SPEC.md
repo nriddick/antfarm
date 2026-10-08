@@ -241,7 +241,7 @@ Let `Exi` be a producer `Pi`'s running quota of ulongs: the amount it may blindl
 
 Every quota grant requires a fresh acquire-load of `Wt` followed by a forward-segment sweep from that anchor. This applies to the first grant after registration as well as later renewals. A successful reservation only subtracts its table size from the remaining grant. There is no automatic renewal based on the reservation's returned tail or the amount of space remaining in its segment.
 
-Once a sweep grants quota, the producer may spend that finite balance across table writes and segment boundaries. If no next payload fits the balance, `write()` probes `Wt` and attempts a new sweep; a failed sweep returns 0 without granting additional space. There is no separate unchecked-leftover state or `quotaSwept` flag. Reservations of `Wt` remain release RMWs, paired with the acquire probe used for each grant.
+Once a sweep grants quota, the producer may spend that finite balance across table writes and segment boundaries. If no next payload fits the balance, `write()` probes `Wt` and attempts a new sweep; a failed sweep returns 0 without granting additional space. There is no separate unchecked-leftover state or `quotaSwept` flag. Reservations of `Wt` are acq_rel RMWs. Release pairs with the acquire probe used for each grant. Acquire is the producer-to-producer reclamation handoff: a producer may spend a retained balance long after its sweep, while other producers sweep and lap the ring. Its reservation must acquire the history those producers imported (consumer pin drops → `Rt` release → zero-`Rt` sweep acquire) before it stores into the words it reserved (9).
 
 If a `Pi` has depleted its swept quota, probed its `Wt` position, and needs to check following segments to make `Exmax` space, then it scans the K-1 segments ahead of the probe for contiguous 0 Rts, adding their full capacities until it has found `>= Exmax` space or encounters a live segment and breaks. The same acquire-load is the sweep's anchor; a second probe is not taken. If sweeping fails then backpressure is simply too high; full for `Pi`'s purposes. A stalled producer may subscribe a ConsumerView, drain, and retry `write()` — that is the supported escape hatch, not an out-of-band trick. The sweep cannot land on spuriously orphaned islands of space because consumers maintain continuous reference spans without gaps.
 
@@ -277,7 +277,7 @@ At this level producers do nothing else to resolve fullness; they merely return 
 
 The ordered contract of a write:
 
-1. Reserve `Wt` with a release RMW; the returned `Wret` plus the reserved size gives `Wt'`, the sequence after this write.
+1. Reserve `Wt` with an acq_rel RMW; the returned `Wret` plus the reserved size gives `Wt'`, the sequence after this write. The acquire half imports other producers' reclamation history before any ring store (5a, 9).
 2. Deduct the reserved size from the checked quota grant; do not renew it.
 3. For every segment/epoch boundary the reservation crosses, initialize that segment's metadata (2c) and, for segments crossed *out of* that are incomplete, plant Sub0 protection via `plantIfUnprotected` (6c).
 4. Write the table parts described in 2d into the reserved space.
@@ -515,15 +515,17 @@ Atomic memory orders, in one place:
 | Object/transition | Publishing operation | Observing operation | Ordered data |
 | --- | --- | --- | --- |
 | root-tally RMWs | release `fetch_add`/`fetch_sub` on `Rt` | acquire loads of `Rt` (producers, subscribers, last-releaser CAS) | prior ring reads by the counted consumer join the tally's release sequence |
-| write-tail reservation | release RMW on `Wt` | acquire probe used by quota logic and subscription | published tail position and bounded sweep anchor |
+| write-tail reservation | acq_rel RMW on `Wt` | acquire probe used by quota logic and subscription; the acquire half of every later reservation | published tail position and bounded sweep anchor; each reserver's acquired reclamation history, handed to producers that later spend retained quota without sweeping |
 | leaf-tally RMWs | acq_rel on `Lt` | acq_rel edge decrement and release root update | a non-edge consumer's ring reads join the leaf release sequence carried by the last-on-leaf's `Rt` release |
 | table publication | release-store `Tsent` last | acquire-load and validate `Tsent` | raw-atomic Thead remainder, indexes, counters, payload header/body |
 | segment metadata publication | release-store `Es` last | acquire-load and validate expected `Es` | raw-atomic `Seqt`, `Cs`, `SqCs`, initial `Sd` |
 | table accounting join | acq_rel completion RMWs on `Shc`, then acq_rel RMW on `Tprogress` | acquire observation of `Tprogress == Tlen` | primary-run callback writes join within each shard, then across shards, before optional table-completion notification; all callbacks only for tracked ST single-shot tables |
-| producer reuses a segment | release root transition toward zero | acquire-load `Rt == 0` in quota sweep | prior consumers' ring accesses happen before reuse |
+| producer reuses a segment | release root transition toward zero | acquire-load `Rt == 0` in quota sweep; then, for any other producer reusing the swept space, the acq_rel `Wt` reservation chain | prior consumers' ring accesses happen before reuse, including reuse by a producer spending quota granted before those accesses |
 | temporary subscriber pin | release add/sub of `Sub` plus acquire metadata/root validation | producer acquire of nonzero `Rt` | pinned wrap window cannot be lapped while attaching |
 
 The operational sections cite these edges by name rather than restating the orders.
+
+**Why the reservation chain suffices.** Every `Wt` change is an RMW, so a producer P's acq_rel reservation acquires every earlier reservation and, through each one, the sweep that preceded it in its thread. Let `A*` be the largest anchor of a grant P has acquired this way, including its own. P's span ends at most `Exmax` past `A*` (I1). One producer holds at most one unspent grant at a time, and `refreshQuota` replaces the balance. The grant at `A*` swept `Exmax` of free space after `A*`'s segment. That segment itself was certified by an earlier sweep, whose crossing reservation the `A*` probe acquired. Induction gives consumer accesses → leaf/`Rt` release → zero-`Rt` sweep acquire → reservation chain → P's ring and `stats` stores. P's per-lap `stats` stores come after its reservation, so this chain also orders a previous epoch's `Sd` add (made while the finisher still holds its pin) before P zeroes `Sd`. A separate acquire load of `Wt` before the RMW would not suffice: the tail can move between that load and the RMW that decides the write address.
 
 All ring words are atomic objects even when accessed with raw order. The release sentinel publishes their initialized values; using raw atomic stores/loads also prevents a later physical-word reuse from becoming a plain-versus-atomic data race. Table contents other than `Tsent` (Thead words 1–7, Tindex, Tcount, Phead, Pbody) are stored raw and loaded raw, but they are the same atomic objects; wrap reuse of a physical word is atomic vs atomic.
 

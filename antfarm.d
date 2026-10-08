@@ -1389,7 +1389,9 @@ struct AntFarm
 
     /// Spec 3a: sweep contiguously-forward zero Rts from `anchor`.
     /// `anchor` is a fresh acquire-load of Wt for this grant. Reservations of
-    /// Wt are release, so the load synchronizes with a published tail.
+    /// Wt are acq_rel, so the load synchronizes with a published tail, and a
+    /// later reservation spending this grant forwards the sweep's acquired
+    /// reclamation history to every producer that reserves after it.
     private bool refreshQuota(ref ulong exi, ulong quota, ulong anchor) nothrow @nogc @system
     {
         version (AntfarmWriteAuditHooks)
@@ -1673,8 +1675,12 @@ struct AntFarm
         static if (__traits(hasMember, R, "prepareTableFrontN"))
             if (!payloads.prepareTableFrontN(n)) return 0;
 
-        // Reserve space on the write tail (spec 3a, 4b).
-        immutable wret = atomicFetchAdd!(MemoryOrder.rel)(Wt, size);
+        // Reserve space on the write tail (spec 3a, 4b, 9). acq_rel, not
+        // release: a producer spending retained quota without a fresh sweep
+        // must acquire the reclamation history (consumer pin drops -> Rt
+        // release -> zero-Rt sweep acquire) that other producers imported
+        // before advancing Wt past the words it is about to store.
+        immutable wret = atomicFetchAdd!(MemoryOrder.acq_rel)(Wt, size);
         immutable wtprime = wret + size;
         immutable eold = wret >> segShift;
         immutable enew = wtprime >> segShift;
@@ -2538,6 +2544,9 @@ private:
                     // Spec 8: the finisher accounts Tsize into the starting
                     // segment's Sd. We still hold that segment (it was
                     // unconfirmed until now), so no producer is re-zeroing.
+                    // The next lap's Sd reset is ordered after this add by
+                    // our later pin drop -> zero-Rt sweep -> acq_rel Wt
+                    // reservation chain (spec 9).
                     immutable tsize = atomicLoad!(MemoryOrder.raw)(bp[tseqIdx + 5]);
                     immutable tki = cast(uint)((tseq >> F.segShift) & F.kMask);
                     atomicFetchAdd!(MemoryOrder.raw)(F.stats[tki].sd, tsize);

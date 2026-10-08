@@ -2438,11 +2438,96 @@ void testSameShardPlainWriteJoin()
     printf("PASS same-shard plain-write completion join\n"); fflush(stdout);
 }
 
+// Regression: Wt reservation must be acq_rel (spec 5a, 9). P spends a quota
+// balance granted before Q drives the ring through several laps; the
+// consumer's callback reads ring body words plainly. With a release-only
+// reservation, P's ring stores have no happens-before with those reads (TSan
+// reported 6/6 races at 2f853e5). Handshakes are relaxed on purpose so the
+// test supplies no synchronization of its own.
+__gshared AntFarm* g_staleFarm;
+shared int g_stalePReady, g_staleQDone;
+shared long g_staleCalls;
+shared ulong g_staleObserved;
+enum STALE_N = 100_000;
+long staleQuotaCb(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+{
+    atomicStore!(MemoryOrder.raw)(g_staleObserved, body[0] + body[1]); // plain ring reads
+    atomicFetchAdd!(MemoryOrder.raw)(g_staleCalls, 1L);
+    return 1;
+}
+void staleQuotaPaused()
+{
+    auto tok = g_staleFarm.registerProducer(Tier.small);
+    PayloadHeader h;
+    h.maxCs = h.done = 1;
+    h.plen = 2;
+    h.call = &staleQuotaCb;
+    ulong[2] body = [1, 2];
+    PayloadEntry[1] e = [PayloadEntry(&h, body[])];
+    while (g_staleFarm.write(e[], tok) == 0) Thread.yield();
+    atomicStore!(MemoryOrder.raw)(g_stalePReady, 1);
+    while (atomicLoad!(MemoryOrder.raw)(g_staleQDone) == 0) Thread.yield();
+    // Spends the original grant after Q has lapped the ring.
+    check(g_staleFarm.write(e[], tok) == 1, "stale quota write");
+    g_staleFarm.unregisterProducer(tok);
+}
+void staleQuotaMoving()
+{
+    while (atomicLoad!(MemoryOrder.raw)(g_stalePReady) == 0) Thread.yield();
+    auto tok = g_staleFarm.registerProducer(Tier.small);
+    PayloadHeader h;
+    h.maxCs = h.done = 1;
+    h.plen = 2;
+    h.call = &staleQuotaCb;
+    ulong[2] body = [3, 4];
+    auto entries = cast(PayloadEntry*) malloc(STALE_N * PayloadEntry.sizeof);
+    scope (exit) free(entries);
+    foreach (i; 0 .. STALE_N) entries[i] = PayloadEntry(&h, body[]);
+    size_t off;
+    while (off < STALE_N)
+    {
+        off += g_staleFarm.write(entries[off .. STALE_N], tok);
+        Thread.yield();
+    }
+    atomicStore!(MemoryOrder.raw)(g_staleQDone, 1);
+    g_staleFarm.unregisterProducer(tok);
+}
+void staleQuotaConsume()
+{
+    ConsumerView v;
+    check(v.subscribe(g_staleFarm) >= 0, "stale quota subscribe");
+    while (atomicLoad!(MemoryOrder.raw)(g_staleCalls) < STALE_N + 2)
+        if (!v.consumeNext()) Thread.yield();
+    v.unsubscribe();
+}
+void testStaleQuotaReuse()
+{
+    g_staleFarm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096);
+    atomicStore!(MemoryOrder.raw)(g_stalePReady, 0);
+    atomicStore!(MemoryOrder.raw)(g_staleQDone, 0);
+    atomicStore!(MemoryOrder.raw)(g_staleCalls, 0L);
+    auto c = new Thread(&staleQuotaConsume);
+    auto p = new Thread(&staleQuotaPaused);
+    auto q = new Thread(&staleQuotaMoving);
+    c.start(); p.start(); q.start();
+    p.join(); q.join(); c.join();
+    check(atomicLoad!(MemoryOrder.raw)(g_staleFarm.Wt) > 2 * g_staleFarm.Ln,
+        "stale quota test lapped the ring");
+    g_staleFarm.destroy();
+    g_staleFarm = null;
+    printf("testStaleQuotaReuse OK\n"); fflush(stdout);
+}
+
 void main(string[] args)
 {
     if (args.length > 1 && args[1] == "join-only")
     {
         testSameShardPlainWriteJoin();
+        return;
+    }
+    if (args.length > 1 && args[1] == "stale-quota-only")
+    {
+        testStaleQuotaReuse();
         return;
     }
     testMagicWrap();
@@ -2465,6 +2550,7 @@ void main(string[] args)
     testSmallTableChurn();
     testMultiSmallProducers();
     testCrossFarmProvenance();
+    testStaleQuotaReuse();
     testActorWave();
     testActorPayload();
     testActorErasedAdapter();
