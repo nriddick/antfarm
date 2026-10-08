@@ -944,7 +944,7 @@ void t17_write_size_wrap()
     // (singleton in (quotaSmall, quotaBulk]) must abort from a small-tier
     // producer - previously it cleared the farm-max check and then returned
     // write()==0 forever - and must be publishable from a bulk producer.
-    enum midLen = 1500; // singleton 56 + 17 + 1500 = 1573 in (512, 2048]
+    enum midLen = 1500; // compact ST singleton 40 + 1500 = 1540 in (512, 2048]
     auto mid = cast(ulong*) malloc(midLen * ulong.sizeof);
     check(mid !is null, "T17 mid");
     mid[0] = 0;
@@ -1437,7 +1437,9 @@ void t23_late_attach_under_wrap()
     // Wt > Ln. Fail on watchdog, lost work, leftover Sub, or unprotected
     // incomplete segments.
     enum TRIALS = 3;
-    enum N = 40000;
+    // Enough two-word ST payloads to wrap the 2 MiB ring several times even
+    // in the compact layout (SPEC 2f: 4 ring words per entry plus tables).
+    enum N = 160000;
     enum NP = 6;
     enum NLATE = 4;
     foreach (trial; 0 .. TRIALS)

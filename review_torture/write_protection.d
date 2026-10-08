@@ -56,13 +56,13 @@ long bodyCallback(PayloadHeader*, PayloadBody body, ulong)
     return 1;
 }
 
-// A one-payload, maxCs=done=1 table has 55 + 8*(SqCs-1) overhead words.
+// A one-payload, maxCs=done=1 (compact) table has 40 + 8*(SqCs-1) overhead words.
 ulong writeWords(AntFarm* f, ref Token tok, ulong words)
     nothrow @nogc @system
 {
     immutable cf = atomicLoad!(MemoryOrder.raw)(f.Cf);
     immutable sq = sqcsOf(cf > 0 ? cast(ulong) cf : 1);
-    immutable overhead = 55 + 8 * (sq - 1);
+    immutable overhead = 40 + 8 * (sq - 1);
     require(words > overhead, "test table too short");
     immutable n = cast(size_t)(words - overhead);
     auto mem = cast(ulong*) malloc(n * ulong.sizeof);

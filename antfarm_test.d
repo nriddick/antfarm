@@ -674,11 +674,13 @@ void testPayloadRange()
 
 void testUniformRanges()
 {
-    enum N = 300; // exceeds one 4096-word small-producer table
+    // N and P exceed one 4096-word small-producer table even in the compact
+    // ST layout (3 words per one-word payload).
+    enum N = 1500;
     enum M = 24;
     enum F = 24;
     enum K = 8;
-    enum P = 300;
+    enum P = 1500;
     allocCalls(N + M + F + K + P);
     scope (exit) freeCalls();
 
@@ -2443,7 +2445,9 @@ void testSameShardPlainWriteJoin()
 // consumer's callback reads ring body words plainly. With a release-only
 // reservation, P's ring stores have no happens-before with those reads (TSan
 // reported 6/6 races at 2f853e5). Handshakes are relaxed on purpose so the
-// test supplies no synchronization of its own.
+// test supplies no synchronization of its own. Payloads are MaxCs=2 so the
+// tables keep the full layout: all-ST tables are compact (SPEC 2f), and this
+// schedule does not reliably trigger the race with compact geometry.
 __gshared AntFarm* g_staleFarm;
 shared int g_stalePReady, g_staleQDone;
 shared long g_staleCalls;
@@ -2459,7 +2463,8 @@ void staleQuotaPaused()
 {
     auto tok = g_staleFarm.registerProducer(Tier.small);
     PayloadHeader h;
-    h.maxCs = h.done = 1;
+    h.maxCs = 2;
+    h.done = 1;
     h.plen = 2;
     h.call = &staleQuotaCb;
     ulong[2] body = [1, 2];
@@ -2476,7 +2481,8 @@ void staleQuotaMoving()
     while (atomicLoad!(MemoryOrder.raw)(g_stalePReady) == 0) Thread.yield();
     auto tok = g_staleFarm.registerProducer(Tier.small);
     PayloadHeader h;
-    h.maxCs = h.done = 1;
+    h.maxCs = 2;
+    h.done = 1;
     h.plen = 2;
     h.call = &staleQuotaCb;
     ulong[2] body = [3, 4];

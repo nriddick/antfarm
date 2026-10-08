@@ -259,6 +259,7 @@ bool waitReady(int n, MonoTime deadline)
 ulong singletonSize(uint body, uint sq)
 {
     // THEAD 8 + 1 index + 7 pad + 1 progress + 7 pad + 8*sq Tcount + payload + 7 end
+    // Full 16-word header; all-ST tables are now compact (SPEC 2f), so this overestimates and may skip configs that fit.
     return 8 + 1 + 7 + 1 + 7 + 8UL * sq + 16 + body + 7;
 }
 

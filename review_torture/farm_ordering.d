@@ -36,8 +36,8 @@ struct PreparedRange
 
 ulong writeWords(AntFarm* f, ulong words, bool permit = true) nothrow @nogc @system
 {
-    // Full-layout ST singleton: 55 words at SqCs=1 (at most two views).
-    auto n = cast(size_t)(words - 55);
+    // Compact ST singleton (spec 2f): 40 words at SqCs=1 (at most two views).
+    auto n = cast(size_t)(words - 40);
     auto body = cast(ulong*) malloc(n * ulong.sizeof);
     require(body !is null, "ordering allocation");
     scope(exit) free(body);

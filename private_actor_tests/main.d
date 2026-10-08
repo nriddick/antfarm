@@ -746,7 +746,7 @@ void configuredBatches()
         roots(0, limit == 1 ? 1 : limit - 1, 2, limit);
         roots(2, limit + 3, 2, limit);
     }
-    auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 4096);
+    auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 713);
     scope(exit) farm.destroy();
     check(Park.create(farm, 0, 1) is null);
     check(Park.create(farm, size_t.max, 1) is null);
@@ -764,6 +764,8 @@ void configuredBatches()
     check(park !is null);
     foreach (i; 0 .. count)
         check(park.spawn(State(&outputs[i], 1, 0)) == PrivateSpawnResult.spawned);
+    // Compact ST geometry (SPEC 2f): the 713-word quota admits 225 of a
+    // 1025-member batch, so a single pump cannot take the whole batch.
     auto admitted = park.pump(token);
     check(admitted > 0 && admitted < count); // Farm quota splits the configured batch.
     auto deadline = MonoTime.currTime + 30.seconds;
@@ -1284,7 +1286,10 @@ PrivateRootDisposition cohortStep(scope ref PrivateBorrow!CohortRoot b, scope re
 void childLargeCohort(size_t count)
 {
     Counts counts;
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    // Compact ST geometry (SPEC 2f, one-word bodies: 38 + 3*n words): a fresh
+    // 713-word quota admits 225 of a requested 256 children and leaves zero,
+    // so the following 41-word root needs writeImpl's automatic quota refresh.
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 713);
     scope(exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope(exit) farm.unregisterProducer(token);
@@ -1299,7 +1304,7 @@ void childLargeCohort(size_t count)
     check(parent.pump(token) == 1);
     while (view.consumeNext()) {}
 
-    enum fillCount = 20000;
+    enum fillCount = 100000;
     auto fillResults = new ulong[fillCount];
     auto filler = Park.create(farm, fillCount, 256);
     check(filler !is null);
@@ -1336,11 +1341,8 @@ void childLargeCohort(size_t count)
         namedCheck(MonoTime.currTime < deadline, "cohort prefill drain timeout");
     }
     filler.destroy();
-    // For SqCs=1, a one-word ST table costs 40 + 18*n ulongs.
-    // A fresh 4096-word quota admits 225 children and leaves only six words;
-    // the following 58-word root needs writeImpl's automatic quota refresh.
     // All filler tables are drained and the sole view has released its confirmed
-    // prefix, so the next segment ahead is free (32768 words > Exmax=4096).
+    // prefix, so the next segment ahead is free (32768 words > Exmax=713).
     // The child table is smaller than a segment; crossing into the next segment
     // still leaves its following segment free. Make root admission explicit
     // before relying on its live callback's deterministic busy observation.
@@ -1573,7 +1575,8 @@ version (AntfarmActorTestHooks)
         worker.start();
         awaitRaw(ready, 1u, "delayed idle subscriber timeout");
         // SqCs remains one with two subscribed views: each singleton costs
-        // 58 words. Initial root + child + polling root total only 174 of 4096.
+        // 41 compact words (SPEC 2f). Initial root + child + polling root total
+        // only 123 of 4096.
         namedCheck(park.pump(token) == 1, "delayed idle polling root admission");
         atomicStore!(MemoryOrder.raw)(go, 1u);
         awaitRaw(hook.arrived, 1u, "delayed idle final-credit hook timeout");
@@ -3332,7 +3335,10 @@ PrivateRootDisposition plStep(scope ref PrivateBorrow!PlRoot b, scope ref Privat
 void portsLargeCohort(size_t count, size_t limit)
 {
     Counts counts;
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    // Compact ST geometry (SPEC 2f): a 256-child one-word ST table costs
+    // 38 + 3*256 = 806 words, so a 713-word quota admits a strict 225-word
+    // prefix. Other limits fit whole and are checked only against the limit.
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 713);
     scope(exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope(exit) farm.unregisterProducer(token);
@@ -3347,7 +3353,7 @@ void portsLargeCohort(size_t count, size_t limit)
     check(parent.pump(token) == 1);
     while (view.consumeNext()) {}
 
-    enum fillCount = 20000;
+    enum fillCount = 100000;
     auto fillResults = new ulong[fillCount];
     auto filler = Park.create(farm, fillCount, 256);
     check(filler !is null);
@@ -5477,7 +5483,10 @@ PrivateRootDisposition slStep(scope ref PrivateBorrow!SlRoot b, scope ref Privat
 void subsetLargeCohort(size_t count, size_t limit)
 {
     Counts counts;
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    // Compact ST geometry (SPEC 2f): a 256-member one-word ST table costs
+    // 38 + 3*256 = 806 words, so a 713-word quota admits a strict 225-member
+    // prefix. Other limits fit whole and are checked only against the limit.
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 713);
     scope(exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope(exit) farm.unregisterProducer(token);
@@ -5499,7 +5508,7 @@ void subsetLargeCohort(size_t count, size_t limit)
     check(parent.pump(token) == 1);
     while (view.consumeNext()) {}
 
-    enum fillCount = 20000;
+    enum fillCount = 100000;
     auto fillResults = new ulong[fillCount];
     auto filler = Park.create(farm, fillCount, 256);
     check(filler !is null);
@@ -6927,9 +6936,10 @@ void contAdmission(PrivateRootReclamation reclaim)(size_t count, size_t limit)
     Counts counts;
     auto calls = new uint[count]; auto waves = new uint[count]; auto writes = new ulong[count];
     CrControl c = CrControl(calls.ptr, waves.ptr, writes.ptr, count, limit, 1); c.admission = true;
-    // 1024 words admits 54 payloads of a requested 64; 4096 admits 225
-    // of a requested 256. Limit 1 necessarily admits zero or one.
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, limit == 64 ? 1024 : 4096); scope(exit) farm.destroy();
+    // A fresh compact ST quota (SPEC 2f, one-word bodies: 38 + 3*n words)
+    // admits 54 payloads of a requested 64 at 200 words; 225 of a requested
+    // 256 at 713 words. Limit 1 necessarily admits zero or one.
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, limit == 64 ? 200 : limit == 256 ? 713 : 4096); scope(exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small); scope(exit) farm.unregisterProducer(token);
     ConsumerView view; check(view.subscribe(farm) >= 0); scope(exit) view.unsubscribe();
     auto park = PrivateRootPark!(CrRoot, crRoot, reclaim).create(farm, 1, 256, policy(counts));
@@ -6941,7 +6951,7 @@ void contAdmission(PrivateRootReclamation reclaim)(size_t count, size_t limit)
     foreach (_; 0 .. count + 2) park.pump(token);
     while (view.consumeNext()) {}
     foreach (n; calls) check(n == 1);
-    enum fillCount = 20000;
+    enum fillCount = 100000;
     auto fillerResults = new ulong[fillCount];
     auto filler = Park.create(farm, fillCount, limit == 64 ? 64 : 256);
     foreach (i; 0 .. fillCount) check(filler.spawn(State(fillerResults.ptr + i, 1)) == PrivateSpawnResult.spawned);
@@ -7087,7 +7097,7 @@ version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
         awaitRaw(c.midReturned, 1u, "cont seal done with outstanding tail");
         // No descendant table has been emitted yet. Force its first attempt to
         // zero, then drain only filler while the actor consumer remains parked.
-        enum fillCount = 20000; auto results = new ulong[fillCount];
+        enum fillCount = 100000; auto results = new ulong[fillCount];
         auto filler = Park.create(farm, fillCount, 256);
         foreach (i; 0 .. fillCount) check(filler.spawn(State(results.ptr + i, 1)) == PrivateSpawnResult.spawned);
         while (filler.pump(token)) {}

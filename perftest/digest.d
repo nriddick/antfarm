@@ -212,6 +212,11 @@ bool digestTable(ConsumerView* v, uint chunk, bool copyOut, ulong* tmp, size_t t
     immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(bp[idx + 4]);
     immutable tindexOff = idx + THEAD;
     immutable tmt = cast(uint)(w2 >> 32);
+    // This bench walks ring PayloadHeaders and shuffles Tindex in place; it
+    // predates compact ST tables (SPEC 2f), whose records carry only Call
+    // and whose Plen depends on Tindex order. Refuse rather than misread.
+    if (tlen > 0 && tmt == 0)
+        fatal("digest: compact ST tables (SPEC 2f) are not supported");
     immutable progOff = tindexOff + tlen + tmt + 7;
     immutable tcountOff = progOff + 8;
     if (tlen > 0 && sq > 0)

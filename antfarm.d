@@ -609,6 +609,16 @@ static assert(PayloadHeader.filler2.offsetof == 80);
 /// PayloadHeader length in ulongs.
 private enum ulong PHEAD_LEN = PayloadHeader.sizeof / 8;
 
+/// Prototype compact ST table (spec 2f): a table with Tmt == 0 stores each
+/// payload as [Call][Pbody...] with no other per-payload word. Tindex still
+/// points at each record; Plen is the distance to the next Tindex entry
+/// minus the Call word, and the last record ends at Tsize - END_PAD. The
+/// reader hands the callback a consumer-local PayloadHeader carrying the
+/// same values the ring header showed on the ST fast path.
+private enum ulong PCOMPACT_LEN = 1;
+static assert(Callback.sizeof == ulong.sizeof);
+static assert(PCOMPACT_LEN < PHEAD_LEN);
+
 /// Spec 4a.
 struct PayloadEntry
 {
@@ -932,7 +942,8 @@ static assert(SegStats.sizeof == 64);
 ///   Tprogress (1 ulong)
 ///   7 ulongs padding
 ///   Tcount: SqCs counters, each followed by 7 ulongs padding
-///   Payloads (each: 16-ulong header + Plen-ulong body)
+///   Payloads (each: 16-ulong header + Plen-ulong body; when Tmt == 0,
+///             the prototype compact record: Call + Plen-ulong body, 2f)
 ///   7 ulongs padding
 private enum ulong THEAD_LEN = 8;
 private enum ulong PROG_PAD = 7;
@@ -1571,8 +1582,9 @@ struct AntFarm
                 immutable bodyLen = cast(ulong) payloads.fixedPayloadLength;
                 if (bodyLen > ulong.max - PHEAD_LEN)
                     fatal("payload size overflow");
-                immutable psz = PHEAD_LEN + bodyLen;
                 immutable oneMt = commonHeader.maxCs > 1 ? 1UL : 0UL;
+                // Spec 2f: a uniform ST range always forms compact tables.
+                immutable psz = (oneMt != 0 ? PHEAD_LEN : PCOMPACT_LEN) + bodyLen;
                 immutable singletonBase = base + 1UL + oneMt;
                 if (psz > ulong.max - singletonBase)
                     fatal("table size overflow");
@@ -1617,6 +1629,9 @@ struct AntFarm
             else
             {
                 size_t i = 0;
+                // Spec 2f: the prefix is compact while it has no MT payload,
+                // so track both payload sums and size by the prefix's format.
+                ulong psumFull, psumCompact;
                 auto scan = payloads.save;
                 foreach (ref pe; scan)
                 {
@@ -1631,17 +1646,22 @@ struct AntFarm
                     if (pe.body.length > ulong.max - PHEAD_LEN)
                         fatal("payload size overflow");
                     immutable psz = PHEAD_LEN + pe.body.length;
+                    immutable cpsz = PCOMPACT_LEN + pe.body.length;
                     immutable oneMt = hp.maxCs > 1 ? 1UL : 0UL;
                     // A singleton that exceeds this tier can never be
                     // published by this producer, so it is a contract error.
+                    // An ST singleton is a compact table (spec 2f).
                     immutable singletonBase = base + 1UL + oneMt;
-                    if (psz > ulong.max - singletonBase)
+                    immutable singletonPsz = oneMt != 0 ? psz : cpsz;
+                    if (singletonPsz > ulong.max - singletonBase)
                         fatal("table size overflow");
-                    if (singletonBase + psz > quota)
+                    if (singletonBase + singletonPsz > quota)
                         fatal("payload larger than this producer tier's Exi");
                     immutable cm = m + (hp.maxCs > 1 ? 1 : 0);
-                    immutable psumNext = addChecked(psum, psz,
+                    immutable psumFullNext = addChecked(psumFull, psz,
                         "payload sum overflow");
+                    immutable psumCompactNext = psumCompact + cpsz; // <= psumFullNext
+                    immutable psumNext = cm == 0 ? psumCompactNext : psumFullNext;
                     immutable fixed = base + (cast(ulong) i + 1) + cm;
                     if (fixed > ulong.max - psumNext)
                         fatal("table size overflow");
@@ -1650,6 +1670,8 @@ struct AntFarm
                     n = i + 1;
                     m = cast(uint) cm;
                     psum = psumNext;
+                    psumFull = psumFullNext;
+                    psumCompact = psumCompactNext;
                     ++i;
                 }
             }
@@ -1727,6 +1749,27 @@ struct AntFarm
         size_t mi = THEAD_LEN + n;
         size_t i = 0;
         auto emit = payloads.save;
+        // Spec 2f: an all-ST table (Tmt == 0) stores [Call][Pbody] records.
+        if (m == 0)
+        {
+            while (i < n)
+            {
+                auto pe = emit.front;
+                static if (hasCommonPayloadHeader!R)
+                    auto hp = commonHeader;
+                else
+                    auto hp = pe.header;
+
+                storeRaw(w[THEAD_LEN + i], po);
+                auto ph = w + po;
+                storeRaw(ph[0], cast(ulong) cast(void*) hp.call);
+                foreach (k; 0 .. pe.body.length)
+                    storeRaw(ph[PCOMPACT_LEN + k], pe.body[k]);
+                po += PCOMPACT_LEN + pe.body.length;
+                ++i;
+                emit.popFront();
+            }
+        }
         while (i < n)
         {
             auto pe = emit.front;
@@ -1752,6 +1795,8 @@ struct AntFarm
             ++i;
             emit.popFront();
         }
+        // The compact reader derives the last Plen from this end point.
+        assert(po == size - END_PAD);
         storeRawRange(w + (size - END_PAD), END_PAD);
 
         // The sentinel is store-released as the last value written, so that
@@ -1990,12 +2035,12 @@ struct ConsumerView
                 // Spec 5e: primary path. Completing a shard gains the
                 // sweeper role (5i).
                 sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
-                                        progOff, tlen, sq, myShi, false, false) & 1) != 0;
+                                        progOff, tlen, tmt == 0, sq, myShi, false, false) & 1) != 0;
                 // Spec 5i carried role: small tables concentrate on shard 0
                 // (5e-d); a carried sweeper sweeps them regardless of Shi.
                 if (!sweeper && sweeperNext && tlen < smallThresh(sq, bp, idx) && myShi != 0)
                     sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
-                                            progOff, tlen, sq, 0, true, false) & 1) != 0;
+                                            progOff, tlen, tmt == 0, sq, 0, true, false) & 1) != 0;
                 if (sweeper)
                 {
                     immutable nshards = tlen < smallThresh(sq, bp, idx) ? 1 : sq;
@@ -2004,7 +2049,7 @@ struct ConsumerView
                         if (s != myShi)
                         {
                             immutable r = processShard(bp, nextSeq, idx, tindexOff, tcountOff,
-                                                       progOff, tlen, sq, s, true, !adopted);
+                                                       progOff, tlen, tmt == 0, sq, s, true, !adopted);
                             if (r & 2) adopted = true;
                         }
                     tertiaryMt(bp, idx, tindexOff, tlen, tmt);
@@ -2293,7 +2338,7 @@ private:
                     immutable nshards = tlen < smallThresh(sq, bp, idx) ? 1 : sq;
                     foreach (s; 0 .. nshards)
                         processShard(bp, seq, idx, tindexOff, tcountOff,
-                                     progOff, tlen, sq, s, true, false);
+                                     progOff, tlen, tmt == 0, sq, s, true, false);
                 }
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
@@ -2342,7 +2387,7 @@ private:
                     immutable nshards = tlen < smallThresh(sq, bp, idx) ? 1 : sq;
                     foreach (s; 0 .. nshards)
                         processShard(bp, seq, idx, tindexOff, tcountOff,
-                                     progOff, tlen, sq, s, true, false);
+                                     progOff, tlen, tmt == 0, sq, s, true, false);
                 }
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
@@ -2428,6 +2473,39 @@ private:
         while (loopAll);
     }
 
+    /// Spec 2f: execute one claimed Tindex run of a compact (Tmt == 0)
+    /// table. Each record is [Call][Pbody]; Plen is the gap to the next
+    /// Tindex entry minus the Call word, and the table's last record ends
+    /// at Tsize - END_PAD. The run's claim makes this consumer the unique
+    /// visitor of every payload in it, so the callback-visible header is a
+    /// stack copy holding the ST fast path's values: MaxCs = Done = 1,
+    /// claims 1, calls/completions 0, zero filler. It is shared by the run's
+    /// payloads: callbacks must not modify it or retain it past return.
+    void runCompact(shared(ulong)* bp, ulong tseqIdx, ulong tindexOff,
+                    uint tlen, uint runstart, uint runlen) nothrow @nogc @system
+    {
+        pragma(inline, true);
+        PayloadHeader head;
+        head.maxCs = 1;
+        head.done = 1;
+        atomicStore!(MemoryOrder.raw)(head.pcount, 1UL << 32);
+        immutable runend = runstart + runlen;
+        immutable endOff = runend < tlen
+            ? loadRaw(bp[tindexOff + runend])
+            : loadRaw(bp[tseqIdx + 5]) - END_PAD;
+        ulong poff = loadRaw(bp[tindexOff + runstart]);
+        foreach (j; runstart + 1 .. runend + 1)
+        {
+            immutable next = j < runend ? loadRaw(bp[tindexOff + j]) : endOff;
+            immutable absIdx = tseqIdx + poff;
+            head.plen = next - poff - PCOMPACT_LEN;
+            head.call = cast(Callback) loadRaw(bp[absIdx]);
+            auto body_ = (cast(const(ulong)*)(bp + absIdx + PCOMPACT_LEN))[0 .. head.plen];
+            head.call(&head, body_, 0);
+            poff = next;
+        }
+    }
+
     /// Spec 5e: work claims on one shard, mapping it to a linear slice of
     /// Tindex claimed by chunks on the shard's Tcount counter. With
     /// checkFirst (sweeps of foreign shards and re-walks), a plain load
@@ -2440,8 +2518,8 @@ private:
     /// when, sweeping a foreign shard, it found the shard starved
     /// (Z <= 1) and adopted it (only when allowAdopt).
     uint processShard(shared(ulong)* bp, ulong tseq, ulong tseqIdx, ulong tindexOff,
-                      ulong tcountOff, ulong progOff, uint tlen, uint sq, uint shi,
-                      bool checkFirst, bool allowAdopt) nothrow @nogc @system
+                      ulong tcountOff, ulong progOff, uint tlen, bool compact, uint sq,
+                      uint shi, bool checkFirst, bool allowAdopt) nothrow @nogc @system
     {
         // Spec 5e-d/g: threshold and chunk come from the table's own
         // header (farm override or auto rule; AvgCost), so every consumer
@@ -2512,11 +2590,14 @@ private:
                 firstClaimant = true;
             immutable runstart = shstart + x * chunk;
             immutable runlen = chunk < shlen - x * chunk ? chunk : shlen - x * chunk;
-            foreach (i; 0 .. runlen)
-            {
-                immutable poff = atomicLoad!(MemoryOrder.raw)(bp[tindexOff + runstart + i]);
-                enterPayload(bp, tseqIdx + poff, false);
-            }
+            if (compact)
+                runCompact(bp, tseqIdx, tindexOff, tlen, runstart, runlen);
+            else
+                foreach (i; 0 .. runlen)
+                {
+                    immutable poff = atomicLoad!(MemoryOrder.raw)(bp[tindexOff + runstart + i]);
+                    enterPayload(bp, tseqIdx + poff, false);
+                }
             // Spec 7a-e: the consumer adding the final completion sum for
             // the shard increments Tprogress by the shard length, whichever
             // consumer (owner, sweeper, or re-walker) that happens to be.

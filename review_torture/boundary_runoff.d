@@ -26,8 +26,9 @@ void main(string[] args)
     PayloadHeader header;
     header.maxCs = header.done = 1;
     header.call = &unusedCallback;
-    // Cf=SqCs=1, ST singleton overhead=55 words, body=457 => Tsize=512.
-    ulong[457] body;
+    // Cf=SqCs=1, compact ST singleton overhead=40 words (Thead 8, index 1,
+    // pads/progress 15, Tcount 8, Call 1, end pad 7), body=472 => Tsize=512.
+    ulong[472] body;
     foreach (i; 0 .. body.length) body[i] = i;
     PayloadEntry[1] entries = [PayloadEntry(&header, body[])];
     ulong sent;
@@ -52,7 +53,7 @@ void main(string[] args)
                 if (wt > f.Ln)
                 {
                     immutable poff = atomicLoad(f.buf[8]);
-                    immutable body0 = atomicLoad(f.buf[poff + 16]);
+                    immutable body0 = atomicLoad(f.buf[poff + 1]); // compact [Call][body]
                     printf("old overwrite: heldRt=%llx heldEs=%lld sentinel=%llu expected=%llu body0=%llu expectedBody0=0\n",
                         atomicLoad(f.Rt[0][0]), atomicLoad(f.stats[0].es),
                         atomicLoad(f.buf[0]), sentinelOf(0), body0);

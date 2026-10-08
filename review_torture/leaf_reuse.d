@@ -45,7 +45,8 @@ void lastLeaf()
 ulong writeWords(ref Token tok, ulong words)
 {
     auto sq = sqcsOf(atomicLoad!(MemoryOrder.raw)(f.Cf));
-    auto n = cast(size_t)(words - (55 + 8 * (sq-1)));
+    // Compact ST singleton (spec 2f): 40 + 8*(sq-1) words.
+    auto n = cast(size_t)(words - (40 + 8 * (sq-1)));
     auto body = cast(ulong*)malloc(n * 8);
     scope(exit) free(body);
     require(body !is null, "leaf body allocation");
