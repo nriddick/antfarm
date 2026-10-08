@@ -181,13 +181,23 @@ These are the load-bearing rules. Later sections describe mechanisms; this secti
 
 **I2 — Consumer pins form a contiguous epoch range and move increment-ahead.** A consumer holding any tally protects not just that segment but everything ahead of it within one lap: any sweep far enough ahead to threaten the consumer's unread data must pass contiguously through the held segment and break. Conversely, a producer cannot jump a lap on blind quota alone, so the protection cannot be outflanked. Consumers always increment a tally ahead before decrementing their current one, so the protected span has no zero gap.
 
-**I3 — Incomplete unowned segments retain a pulse.** An incomplete segment is never visible as `Rt == 0`: the last releaser of an unconfirmed segment leaves a Sub0 pin (6c), so a producer cannot treat abandoned incomplete work as free space. `plantIfUnprotected`'s post-CAS retract keeps a confirmed segment from carrying Sub0, so the "incomplete segments are never `Rt == 0`" invariant is not paid for with the mirror-image leak of "confirmed segments are `Rt != 0`". Idle consumers that have caught `Wt` keep a live pin on the frontier segment (6d), so the system never drops to zero pins while anyone is still subscribed.
+**I3 — Incomplete unowned epochs remain protected from reuse.** The last
+releaser of an unconfirmed epoch replaces its last count with Sub0 atomically
+(6c), so abandoned work has no zero gap. A crossing producer covers a
+never-entered epoch before publishing its own table. A current frontier or
+the producer's pre-plant window can have `Rt == 0`; this is not permission
+to reclaim it. A qualifying contiguous sweep is still blocked by an earlier
+held pin or the empty-farm pulse under I1/I2. Thus the invariant concerns
+admission for reuse, not every isolated zero-root observation. Confirmation
+rechecks on last-releaser pulses avoid retaining a confirmed non-empty-farm
+segment. Idle consumers keep a live frontier pin (6d), and the last-of-farm
+release retains a subscribe anchor.
 
 **I4 — Raw ring reads occur only after publication and while pinned.** The ring is read without acquire only after an acquire-validated `Es` or `Tsent` publishes the initialized values, and only while the reader holds a tally on the relevant segment (9).
 
 **I5 — Producer reuse requires a contiguous sweep observing `Rt == 0`.** Confirmation says table accounting is complete; it does not itself grant reuse. A producer admits a slot for reuse only when `refreshQuota`'s contiguous forward sweep observes `Rt == 0` for that slot. The sweep's anchor and contiguity, plus I2 and I3, make zero sufficient there.
 
-Safety argument in one paragraph: producers only ever write within quota verified by sweeps of contiguously-forward zero Rts, and total maximum quota `Exmax` is bounded by K-1 segments' capacities, strictly less than a lap. A consumer holding any tally therefore protects not just that segment but everything ahead of it within one lap. An incomplete segment is never visible as `Rt == 0`, and a confirmed segment does not retain Sub0. Idle consumers keep a live pin on the frontier segment, so the system never drops to zero pins while anyone is still subscribed. Consumers retain references until segments are confirmed (8). Consumers' unread data is always protected, and the system never overwrites unexecuted work.
+Safety argument in one paragraph: producers only ever write within quota verified by sweeps of contiguously-forward zero Rts, and total maximum quota `Exmax` is bounded by K-1 segments' capacities, strictly less than a lap. A consumer holding any tally therefore protects not just that segment but everything ahead of it within one lap. Incomplete epochs remain protected against qualifying reuse sweeps, and confirmed non-empty-farm epochs do not retain Sub0. Idle consumers keep a live pin on the frontier segment, so the system never drops to zero pins while anyone is still subscribed. Consumers retain references until segments are confirmed (8). Consumers' unread data is always protected, and the system never overwrites unexecuted work.
 
 ---
 
@@ -353,7 +363,7 @@ This is the root-tally lifecycle in one place. Keep the bit layout from 2b next 
 | final root, confirmed non-empty-farm segment | count 1 | decrement to zero | admit producer reclamation |
 | final root of an empty Farm | count 1 | atomically replace count with one Sub0 | retain a subscribe anchor |
 | producer crossing before table publication | incomplete, count 0, no pulse | CAS in one Sub0, then recheck confirmation | cover a segment no consumer entered or retained |
-| racing confirmation after orphan plant | the planted low half is still exactly one Sub0 | CAS out that unit | avoid a confirmed-segment capacity leak |
+| confirmation recheck after last-releaser pulse | count remains zero and a pulse is present | CAS out that unit | avoid a confirmed-segment capacity leak |
 
 **Taking a count** (leaf 0→1, subscribe or `moveRef`): `old = fetch_add(Rt, 1)`; if `(old & COUNTMASK) == 0` and `(old & Sub0MASK) != 0`, `fetch_sub(Rt, extra)` where `extra = old & Sub0MASK`, the Sub0 units the thread observed (normally one). Only one thread observes the count 0→1, so that thread is the unique subtractor for that segment. Construction's dummy Sub0 (4b) clears on this same edge.
 
@@ -381,11 +391,11 @@ late: a subscriber can convert the transient pulse into a pin on certified
 space. Moving the reads nearer the CAS cannot eliminate a zero/count/zero
 ABA. Removing the scan also removes this invalid source of live candidates.
 
-**Clear sites.** The primary clear is the 0→1 retract in `takeRootCount`, where the unique thread whose fetch_add observed count 0 subtracts the Sub0 units it saw (normally one). The secondary clear is the retract inside `plantIfUnprotected`: the plant's completeness check read Seqt/Sd/SeqtNext once, and a finisher could have completed the segment between that read and the plant CAS, leaving Sub0 on a confirmed segment. The plant therefore re-reads the completeness values after its CAS succeeds and, if the segment is now confirmed, retracts exactly the unit it planted. The retract is a low-half masked CAS retry loop: it reloads `Rt`, checks that the low half is still exactly the `Sub0` that was planted, and then CASes `cur → cur - Sub0` against the freshly observed full word. A concurrent subscriber's `Sub` pin/unpin only changes the high half, so it can make a one-shot exact-value CAS fail while the planted `Sub0` is still present; the masked loop retries against the new high half and succeeds. The loop is bounded by the low-half state — it either removes the exact `Sub0`, or a racing 0→1 has already changed the low half and that same edge cleared the pulse, so the loop bails.
+**Clear sites.** The primary clear is the 0→1 retract in `takeRootCount`, where the unique thread whose fetch_add observed count 0 subtracts the Sub0 units it saw (normally one). A last-releaser helper may replace its last count with a pulse just as accounting confirms the epoch; it re-checks confirmation and retracts that pulse when requested. `plantIfUnprotected` also retains its defensive post-CAS completeness check and masked retract, although its producer's unpublished table prevents confirmation during supported use. Neither check authorizes a plant after ownership has been relinquished. The retract is a low-half masked CAS retry loop: it reloads `Rt`, checks that the low half is still exactly the `Sub0` that was planted, and then CASes `cur → cur - Sub0` against the freshly observed full word. A concurrent subscriber's `Sub` pin/unpin only changes the high half, so it can make a one-shot exact-value CAS fail while the planted `Sub0` is still present; the masked loop retries against the new high half and succeeds. The loop is bounded by the low-half state — it either removes the exact `Sub0`, or a racing 0→1 has already changed the low half and that same edge cleared the pulse, so the loop bails.
 
 **Race proof, once.** The two deposition sides are symmetric. Plants are CAS-gated and only fire while the count is zero, so a plant cannot straddle a racing first subscriber: the CAS fails and retries against the new word, or bails if the count or pulse is now present — the race that invalidated the plant. Clears are keyed to the 0→1 edge or to the plant's own post-CAS re-check, and only the thread that observed the edge subtracts, so a clear cannot underflow `Rtlow` or borrow into the Sub field.
 
-The contract is the hard invariant: **a confirmed non-empty-farm segment cannot retain Sub0.** A segment that ever carried Sub0 and later becomes confirmed must have been entered by a consumer: either a table starts there and the finisher held that starting segment, or the segment was already incomplete and pulsed, and the only way to confirm it later is for a table starting there to complete — which again means a finisher held it. A segment that confirms trivially because a spanning table made `Seqt + Sd >= SeqtNext` without any local accounting was never incomplete at the moment `plantIfUnprotected` inspected it, so it never received a plant pulse in the first place. Therefore every path to confirmation either passes through a first real root, whose 0→1 edge clears any pulse, or races the plant's own post-CAS recheck, whose acquire load synchronizes with the finisher's release RMW and sees the completed values (9). There is no accepted residual case.
+The contract is the hard invariant: **a confirmed non-empty-farm segment cannot retain Sub0.** A segment that ever carried Sub0 and later becomes confirmed must have been entered by a consumer: either a table starts there and the finisher held that starting segment, or the segment was already incomplete and pulsed, and the only way to confirm it later is for a table starting there to complete — which again means a finisher held it. A segment that confirms trivially because a spanning table made `Seqt + Sd >= SeqtNext` without any local accounting was never incomplete at the moment `plantIfUnprotected` inspected it, so it never received a plant pulse in the first place. Therefore every path to confirmation either passes through a first real root, whose 0→1 edge clears any pulse, or races the last-releaser helper's confirmation recheck. That helper's acquire/release root CAS joins preceding root releases, and its expected-epoch acquires validate the completion values before retraction (9). There is no accepted residual case.
 
 Producers see the signal in `refreshQuota`'s `Rt == 0` check — a lone pulse reads as occupied — and subscribers see it in the subscribe walk's `Rtlow != 0` test, so an abandoned incomplete segment is both protected from overwrite and discoverable for reclamation.
 
@@ -407,7 +417,7 @@ Thead's contents were laid out in 2d; orientation uses `Tsent`, `Tnext`, `Tmt`, 
 
 Inactive consumers block reclamation unless they `unsubscribe()` from `F`.
 
-**a.** `Ci` first releases the confirmed prefix from `oldestEi` toward `newestEi` (8). Only the old end moves; confirmed interiors stay pinned until they become oldest. Confirmed release is the plain leaf-root propagation of 2b. A confirmed segment that is not the empty-farm pulse must be allowed to reach `Rt == 0` so producers can reclaim it; the `plantIfUnprotected` post-CAS retract (6c) enforces this on the other side by removing a pulse a finisher completed out from under.
+**a.** `Ci` first releases the confirmed prefix from `oldestEi` toward `newestEi` (8). Only the old end moves; confirmed interiors stay pinned until they become oldest. Confirmed release is the plain leaf-root propagation of 2b. A confirmed segment that is not the empty-farm pulse must be allowed to reach `Rt == 0` so producers can reclaim it; the last-releaser helper's confirmation recheck (6c) removes a transient pulse when completion races that release.
 
 **b.** `Ci` calls `F.sub_consumer()`. The return value 1 means `Ci` is the last unsubscriber of the farm (`Cf` went 1→0). That flag is used only in step c; it is not itself a Sub0 plant.
 
@@ -555,11 +565,31 @@ The operational sections cite these edges by name rather than restating the orde
 
 **Why the reservation chain suffices.** Every `Wt` change is an RMW, so a producer P's acq_rel reservation acquires every earlier reservation and, through each one, the sweep that preceded it in its thread. Let `A*` be the largest anchor of a grant P has acquired this way, including its own. P's span ends at most `Exmax` past `A*` (I1). One producer holds at most one unspent grant at a time, and `refreshQuota` replaces the balance. The grant at `A*` swept `Exmax` of free space after `A*`'s segment. That segment itself was certified by an earlier sweep, whose crossing reservation the `A*` probe acquired. Induction gives consumer accesses → leaf/`Rt` release → zero-`Rt` sweep acquire → reservation chain → P's ring and `stats` stores. P's per-lap `stats` stores come after its reservation, so this chain also orders a previous epoch's `Sd` add (made while the finisher still holds its pin) before P zeroes `Sd`. A separate acquire load of `Wt` before the RMW would not suffice: the tail can move between that load and the RMW that decides the write address.
 
-All ring words are atomic objects even when accessed with raw order. The release sentinel publishes their initialized values; using raw atomic stores/loads also prevents a later physical-word reuse from becoming a plain-versus-atomic data race. Table contents other than `Tsent` (Thead words 1–7, Tindex, Tcount, Phead, Pbody) are stored raw and loaded raw, but they are the same atomic objects; wrap reuse of a physical word is atomic vs atomic.
+The runtime accesses ring words atomically even with raw order, and the
+release sentinel publishes their initialized values. Callbacks may read
+payload bodies plainly, so atomic stores alone do not make wrap reuse safe:
+the leaf/root/sweep/reservation happens-before chain must order every such
+read before the next producer's stores. Raw runtime loads also remain
+subject to publication and lifetime validation.
 
 The raw ring-read rule: acquire-validate `Es` or `Tsent` first, then raw-load the published sibling fields, and only while holding the tally that protects that segment.
 
-**Platform note: the Sub0 recheck.** On x86 TSO the re-read in `plantIfUnprotected` is airtight for the entered-and-released path: the last releaser's plain dec on a confirmed segment is a release RMW on `Rt`, and the plant's `Rt` load is acquire, so observing count 0 synchronizes with that release and orders the finisher's earlier `Sd` add. On every supported target the 6c proof applies: any segment that ever carried Sub0 and later confirms has been entered, so the pulse is either cleared by the first real root's 0→1 or retracted by the plant's own post-CAS recheck; a trivially confirmed segment never received a plant pulse to begin with. There is no accepted "residual" confirmed segment carrying Sub0.
+**Pulse ownership and the recheck.** The last-releaser helper changes count
+to Sub0 atomically, so no producer can certify a zero gap before its
+confirmation recheck. Its acquire/release root CAS and expected-epoch
+acquires import accounting history before retraction. A producer's separate
+plant is protected by its unpublished table (6c). An unpinned scan would
+have neither guarantee: a transient stale pulse can be consumed by a
+subscriber before a post-CAS recheck removes it. The ordering argument is
+not specific to x86 TSO.
+
+**Sanitizer evidence.** TSan builds use the same real atomic edges as ordinary
+builds. `version(TSan)` selects runtime options, not synchronization hooks.
+LLVM 22.1.8 carries non-edge leaf releases through the last-on-leaf acquire
+and root release. The controlled `review_torture/leaf_reuse.d` mutation
+exposes a missing leaf acquire only when the old manual root annotations
+are absent; see [the ordering audit](review_torture/FARM_ORDERING.md).
+
 
 ---
 

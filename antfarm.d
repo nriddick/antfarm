@@ -527,7 +527,13 @@ private ulong loadRaw(ref shared ulong slot) nothrow @nogc @system
     return atomicLoad!(MemoryOrder.raw)(slot);
 }
 
-// TSan builds use real atomic synchronization, without manual HB annotations.
+// Every leaf decrement is acq_rel: the last-on-leaf acquires preceding
+// readers before releasing Rt. All Rt updates are RMWs, so a zero-root
+// acquire sweep joins their release sequences; the acq_rel Wt reservation
+// forwards that history to later producers spending retained quota. LLVM
+// TSan models these actual atomics. Manual pin-drop/sweep annotations would
+// bypass this chain and can hide a missing leaf acquire (leaf_reuse.d).
+// The TSan version therefore selects runtime defaults only.
 version (TSan)
 {
     /// Default for a `-d-version=TSan` build. `TSAN_OPTIONS` still overrides.
@@ -1299,8 +1305,9 @@ struct AntFarm
     private enum ulong SUB0MASK = LOWMASK ^ COUNTMASK;
 
     /// Plant one Sub0 on an incomplete epoch with count 0 and no pulse
-    /// (spec 2a). After the plant CAS, re-check completeness and retract
-    /// that unit if a finisher confirmed the segment in between.
+    /// (spec 2a). Retain the defensive post-CAS completeness recheck and
+    /// masked retract, although producer ownership rules out confirmation
+    /// of its start epoch before this call returns.
     /// Producer-only: the caller's unpublished table prevents e from
     /// confirming/recycling before this plant. Never call from an unpinned
     /// scan after unsubscribe; a zero->count->zero ABA can resurrect a slot.
@@ -1337,8 +1344,9 @@ struct AntFarm
                 version (AntfarmWriteAuditHooks)
                     if (writeAuditHook !is null)
                         writeAuditHook(&this, WriteAuditPhase.plantPublished, e, 0);
-                // Spec 2a post-CAS retract: a finisher may have confirmed
-                // the segment between the completeness read and this plant.
+                // Spec 2a defensive post-CAS retract. Producer ownership
+                // prevents confirmation during a supported plant; this check
+                // alone would not make an unpinned caller safe.
                 // Retract exactly the unit we planted. The full-word CAS is
                 // masked to the low half: a concurrent subscriber's SUB
                 // pin/unpin changes the high half and would make a one-shot

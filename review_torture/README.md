@@ -145,3 +145,12 @@ last slot — that was a real harness race, not a sanitizer artifact.
 `-fsanitize=thread -d-version=TSan`. The TSan build defaults to
 `history_size=7 halt_on_error=1` (`__tsan_default_options`; override with
 `TSAN_OPTIONS`). A TSan report is a defect.
+
+
+The Farm, actor, private-actor, review, and example lanes all use these
+flags. Farm has no manual acquire/release TSan annotations: the sanitizer
+must observe the real leaf/root/sweep/reservation chain. The root-level
+`make check-farm-ordering` target adds deterministic S1/S2 schedules and the
+leaf-reuse test under LDC and DMD; `make run-farm-tsan` includes leaf reuse
+under TSan. See [the ordering audit](FARM_ORDERING.md) for proofs and mutation
+evidence, including a leaf-acquire defect hidden by the former annotations.
