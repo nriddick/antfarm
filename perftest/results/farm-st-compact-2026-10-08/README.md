@@ -1,15 +1,43 @@
-# Farm compact ST tables (prototype) and the Wt reservation fix (2026-10-08)
+# Farm compact ST tables and the Wt reservation fix (2026-10-08)
 
-**Round 2 (below) explains private-remote/6 and settles the perftest follow-ups; whether the prototype lands depends on the user's decision about that cell.** cf2aa91 is now local main; the prototype commits sit on it:
+## Landing (round 3): rebased onto main and approved
+
+**The user approved landing.** The prototype label is removed: compact ST tables are a settled part of the protocol (SPEC 2f). The two accepted trade-offs are:
+
+- **private-remote/6 at about −4.5%** is accepted as a documented trade-off. Round 2 showed about three quarters of it reproduces in the base build from quota headroom alone (mimalloc cross-thread-free contention that depends on quota geometry); a real remedy belongs on the allocation side, not in Farm defaults.
+- **tree-cancel/6 is not comparable** across this change: compact publication is cheap enough that 99.9% of the cancellable work is dispatched before cancellation lands, against 94.8% on base. Gates whose base and candidate are both at or after the compact layout compare normally.
+
+The five prototype commits were replayed onto local main **0801c17** (which now carries the S1 subscription-fallback fix, the removal of the post-unsubscribe plant scan, and the consistent `-fsanitize=thread -d-version=TSan` lanes without manual hooks) as `feature/farm-st-compact`:
+
+| New commit | Replaces | Note |
+| --- | --- | --- |
+| 8f9c2d6 | 5e22442 | Cherry-pick was textually clean. `review_torture/farm_ordering.d` and `review_torture/leaf_reuse.d` (new on main) sized ST singletons by the full layout (55 words at SqCs=1); both `writeWords` helpers are retuned to the compact 40-word singleton so each table still occupies exactly the requested ring words. |
+| a4ae395 | 902549c | Clean. |
+| 6722d9b | a7ab59f | Clean (round-1 results). |
+| fa5e83f | a3a4d2b | Clean (digest retirement, singletonSize). |
+| cd9031f | 0c9abde | Clean (round-2 investigation). |
+
+`antfarm.d` differs from the reviewed prototype only by main's S1/S2/TSan fixes; no compact code changed. The replay preserves the S1 fallback bound (`bestSeg < 0` epoch check), the private producer-only `plantIfUnprotected` with no unpinned scan, and the removal of `tsanAcquire`/`tsanRelease` and the manual TSan annotations; the compact layout never depended on them (all ring accesses that can race stay relaxed-atomic raw stores/loads published by the `Tsent` release).
+
+**Rebase validation** (all at the replayed commits on base 0801c17):
+
+- `make check` passes at every replayed commit (includes dub test with LDC and DMD, `check-farm-ordering` with both compilers, and the Farm TSan lane in the new consistent configuration including `leaf_reuse`).
+- `make check-soak` passes (43 private-actor TSan loops in 121 s).
+- Farm TSan soak at the tip: **1170 full-lane loops plus 1170 `leaf_reuse` loops in 630 s, zero failures.**
+- The compact suite (wraparound with lagging readers, mixed bodies, partial admission, quota boundaries, old-layout, callback header, heterogeneous rule) passed **20/20** runs of `antfarm_test_tsan compact-only` under the new TSan configuration.
+
+**Landing gate:** base 0801c17 against the landed tip, full actor_churn matrix at 0/6 consumers, five pairs — [land-gate](land-gate/) (recorded in the follow-up results commit; summary below in Gate tables).
+
+Round 2 (below) explains private-remote/6 and settles the perftest follow-ups. The original commit history was:
 
 | Commit | Content | State |
 | --- | --- | --- |
-| cf2aa91 | `antfarm: acquire other producers' reclamation in the Wt reservation`. Pre-existing bug fix: the `Wt` reservation goes from `rel` to `acq_rel`. Adds the `testStaleQuotaReuse` regression and SPEC/ACTOR_MEMORYORDER docs. | Standalone on 2f853e5 and cherry-pickable to main. Correctness and gate evidence below. **Ready for review.** |
-| 5e22442 | `antfarm: prototype compact encoding for all-ST (Tmt == 0) tables`. Runtime, SPEC 2f, and geometry retunes of existing tests. | Prototype. One 6-consumer cell below the boundary (private-remote/6 −4.5%), explained in round 2 as allocator-contention geometry; needs a user decision. |
-| 902549c | `tests: compact ST table coverage`. Eight Farm tests plus the T26 death test. | Goes with 5e22442. |
-| a7ab59f | `perf: record compact ST prototype and Wt reservation fix gates` (round 1 evidence). | Results only. |
-| 7fb4e17 | `perftest: retire digest.d; size compact singletons in throughput/dual` (round 2). | Perftest only; no runtime change. |
-| (this) | `perf: private-remote/6 investigation; tree-cancel comparability` (round 2). | Results and docs only. |
+| cf2aa91 | `antfarm: acquire other producers' reclamation in the Wt reservation`. Pre-existing bug fix: the `Wt` reservation goes from `rel` to `acq_rel`. Adds the `testStaleQuotaReuse` regression and SPEC/ACTOR_MEMORYORDER docs. | Landed on main before this rebase. |
+| 5e22442 | `antfarm: prototype compact encoding for all-ST (Tmt == 0) tables`. Runtime, SPEC 2f, and geometry retunes of existing tests. | Replayed as 8f9c2d6. |
+| 902549c | `tests: compact ST table coverage`. Eight Farm tests plus the T26 death test. | Replayed as a4ae395. |
+| a7ab59f | `perf: record compact ST prototype and Wt reservation fix gates` (round 1 evidence). | Replayed as 6722d9b. |
+| 7fb4e17 / a3a4d2b | `perftest: retire digest.d; size compact singletons in throughput/dual` (round 2). | Replayed as fa5e83f. |
+| 0c9abde | `perf: private-remote/6 investigation; tree-cancel comparability` (round 2). | Replayed as cd9031f. |
 
 **Revision names in the evidence below.** Timing, soaks and profiles ran on the pre-review SHAs 0469901, 13b1f85 and 82cbce0. The review cleanup produced the commits above:
 - cf2aa91 has the same tree as 0469901; only the commit message changed.
@@ -19,7 +47,7 @@
 
 ## Summary
 
-- **Format.** A table whose payloads are all single-threaded (`Tmt == 0`) stores each payload as `[Call][Pbody]`. Tindex, Thead and the counters are unchanged. Plen comes from consecutive Tindex entries; the last record ends at `Tsize − 7`. Callbacks receive a stack-local `PayloadHeader` with the same observable values as before. Tables with `Tmt != 0` are untouched. Details are in [SPEC 2f](../../../SPEC.md#2f-compact-st-tables-prototype) and the step-0 analysis below.
+- **Format.** A table whose payloads are all single-threaded (`Tmt == 0`) stores each payload as `[Call][Pbody]`. Tindex, Thead and the counters are unchanged. Plen comes from consecutive Tindex entries; the last record ends at `Tsize − 7`. Callbacks receive a stack-local `PayloadHeader` with the same observable values as before. Tables with `Tmt != 0` are untouched. Details are in [SPEC 2f](../../../SPEC.md#2f-compact-st-tables) and the step-0 analysis below.
 - **Ring words per entry**, one-word private body: **18.04 → 3.01** at a full table, 18.15 → 3.15 at batch 256. Two words (public actor): 19 → 4. Three words (wave): 20 → 5.
 - **Writer cost per entry**, `writeTracked`, one-word body, single thread, TSC ticks: **12.1 → 4.8** at batch 256 (−60%) and 11.5 → 4.3 at full tables. Small tables gain less (batch 16: 18.0 → 11.2), and singletons are flat at 108.
 - **Small-tier admission at quota 16384**, one table: one-word bodies **908 → 5448**, two words 860 → 4086, three words 817 → 3269.

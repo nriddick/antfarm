@@ -9,7 +9,7 @@ Living spec, matching the implementation in this directory. The farmer metaphor 
   - [2c. Segment Statistics](#2c-segment-statistics)
   - [2d. Payload Layout](#2d-payload-layout)
   - [2e. Table Layout](#2e-table-layout)
-  - [2f. Compact ST Tables (prototype)](#2f-compact-st-tables-prototype)
+  - [2f. Compact ST Tables](#2f-compact-st-tables)
 - [3. Safety Invariants](#3-safety-invariants)
 - [4. Construction and Registration](#4-construction-and-registration)
   - [4a. Geometry and Quota Constraints](#4a-geometry-and-quota-constraints)
@@ -172,9 +172,9 @@ Tindex entries are payload offsets relative to the table start; `Tnext` and `Tse
 
 `Tmt` is populated when `MaxCs > 1`, matching the MT index; single-threaded payloads appear only in the total index.
 
-### 2f. Compact ST Tables (prototype)
+### 2f. Compact ST Tables
 
-**Prototype; not yet a settled part of the protocol.** A table whose committed payloads are all single-threaded (`Tmt == 0`) stores each payload as a compact record instead of `Phead` + `Pbody`:
+Landed (no longer a prototype). A table whose committed payloads are all single-threaded (`Tmt == 0`) stores each payload as a compact record instead of `Phead` + `Pbody`:
 
 | Offset (ulongs from the Tindex entry) | Contents |
 | --- | --- |
@@ -296,7 +296,7 @@ The payload/table sizing contract, in order:
 
 1. `write()` validates every payload header before accepting it. `Done` and `MaxCs` are in 1..512. `MaxCs >= 1`, and `Done > 1` requires `MaxCs >= 2` (2d). Violations are fatal.
 2. Size arithmetic is overflow-checked before any compare to quota. If `body.length` would overflow when added to the payload-header length, or the running payload sum, candidate table size, or final table size would wrap, that is fatal. A wrapped candidate must never be compared to `Exi`.
-3. A payload that cannot fit in the *caller tier* maximum `Exi` is a caller error, not backpressure. If a singleton table containing only that payload — Thead, index slots, pads, Tcount words for the current `SqCs`, the payload, and the end pad — exceeds the caller's tier quota, `write()` fatals. An ST payload's singleton is a compact table (2f, prototype). The check is by caller tier, not `max(quotaBulk, quotaSmall)`, because a payload that only the other tier could ever publish would remain in a small producer's input range on future calls. Thus it's a contract failure that must be wrangled upstream, and `write() == 0` strictly means the farm is full for `Pi`'s purposes.
+3. A payload that cannot fit in the *caller tier* maximum `Exi` is a caller error, not backpressure. If a singleton table containing only that payload — Thead, index slots, pads, Tcount words for the current `SqCs`, the payload, and the end pad — exceeds the caller's tier quota, `write()` fatals. An ST payload's singleton is a compact table (2f). The check is by caller tier, not `max(quotaBulk, quotaSmall)`, because a payload that only the other tier could ever publish would remain in a small producer's input range on future calls. Thus it's a contract failure that must be wrangled upstream, and `write() == 0` strictly means the farm is full for `Pi`'s purposes.
 4. Multi-payload truncation to the caller's current `Exi` stays legal: if `Ti`'s size exceeds a depleted `Exi`, `Pi` attempts to refresh it, then keeps however many Payloads fit. The committed table also carries fewer than 2^31 payloads (2e); the sizing scan breaks at that bound exactly as it breaks on quota, so a longer input range is truncated, not fatal.
 
 At this level producers do nothing else to resolve fullness; they merely return commit lengths dwindling to 0. A stalled producer may subscribe a ConsumerView, drain, and retry (5a).
@@ -505,7 +505,7 @@ The general MT entry order is the callback ordering that makes the accounting pr
 
 Callback return values are presently ignored by Farm accounting.
 
-The ST fast path is exactly `MaxCs == 1 && Done == 1` on a primary visit. The shard counter already assigns the payload to exactly one consumer: shard slices and their claimed runs are disjoint, and sweepers/re-walkers claim runs through the same counters. ST payloads never appear in the MT index, so secondary/tertiary visitors cannot enter them. The unique consumer therefore raw-stores `1UL << 32` to Pcount and executes `Call` without another admission RMW. This preserves the callback-visible claims value of one and calls/completions values of zero. In a compact table (2f, prototype) there is no ring `Phead`; the callback receives a consumer-local header with the same values. The store remains atomic because later ring laps reuse the same words. Table completion is tracked by Tcount/`Tprogress`; no ST completion depends on Pcount. Multi-threaded payloads, including `MaxCs > 1 && Done == 1`, keep the full packed fetch_add path.
+The ST fast path is exactly `MaxCs == 1 && Done == 1` on a primary visit. The shard counter already assigns the payload to exactly one consumer: shard slices and their claimed runs are disjoint, and sweepers/re-walkers claim runs through the same counters. ST payloads never appear in the MT index, so secondary/tertiary visitors cannot enter them. The unique consumer therefore raw-stores `1UL << 32` to Pcount and executes `Call` without another admission RMW. This preserves the callback-visible claims value of one and calls/completions values of zero. In a compact table (2f) there is no ring `Phead`; the callback receives a consumer-local header with the same values. The store remains atomic because later ring laps reuse the same words. Table completion is tracked by Tcount/`Tprogress`; no ST completion depends on Pcount. Multi-threaded payloads, including `MaxCs > 1 && Done == 1`, keep the full packed fetch_add path.
 
 This structures the consumer strategy such that exactly 1 consumer normally enters a single-threaded Payload, and ~`SqCs` consumers normally enter an MT payload. "Normally" is performance intuition, not a guarantee: `MaxCs`, races, and repeated visitors to the same shard determine actual admissions. Tertiary behavior is the sweeper role in 7e.
 

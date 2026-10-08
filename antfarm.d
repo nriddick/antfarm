@@ -609,7 +609,7 @@ static assert(PayloadHeader.filler2.offsetof == 80);
 /// PayloadHeader length in ulongs.
 private enum ulong PHEAD_LEN = PayloadHeader.sizeof / 8;
 
-/// Prototype compact ST table (spec 2f): a table with Tmt == 0 stores each
+/// Compact ST table (spec 2f): a table with Tmt == 0 stores each
 /// payload as [Call][Pbody...] with no other per-payload word. Tindex still
 /// points at each record; Plen is the distance to the next Tindex entry
 /// minus the Call word, and the last record ends at Tsize - END_PAD. The
@@ -943,7 +943,7 @@ static assert(SegStats.sizeof == 64);
 ///   7 ulongs padding
 ///   Tcount: SqCs counters, each followed by 7 ulongs padding
 ///   Payloads (each: 16-ulong header + Plen-ulong body; when Tmt == 0,
-///             the prototype compact record: Call + Plen-ulong body, 2f)
+///             the compact record: Call + Plen-ulong body, 2f)
 ///   7 ulongs padding
 private enum ulong THEAD_LEN = 8;
 private enum ulong PROG_PAD = 7;

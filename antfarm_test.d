@@ -2525,7 +2525,7 @@ void testStaleQuotaReuse()
 }
 
 // ---------------------------------------------------------------------
-// Compact ST tables (SPEC 2f, prototype)
+// Compact ST tables (SPEC 2f)
 // ---------------------------------------------------------------------
 
 __gshared const(size_t)* g_compactLens;
