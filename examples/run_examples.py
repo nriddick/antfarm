@@ -27,7 +27,7 @@ configs = (
     ("dmd", ("-g",), "_dmd"),
     ("dmd", ("-O", "-release"), "_dmd_release"),
 )
-tsan = ("ldc2", ("-g", "-O1", "-fsanitize=thread"), "_tsan")
+tsan = ("ldc2", ("-g", "-O1", "-fsanitize=thread", "-d-version=TSan"), "_tsan")
 
 
 def compile_example(compiler, flags, source, output):

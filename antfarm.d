@@ -527,30 +527,14 @@ private ulong loadRaw(ref shared ulong slot) nothrow @nogc @system
     return atomicLoad!(MemoryOrder.raw)(slot);
 }
 
-// TSan does not carry a non-edge leaf acq_rel through the last-on-leaf's
-// Rt release. Annotate the pin-drop as a release on Rt, and the producer's
-// zero-Rt sweep as the matching acquire, so wrap reuse is not a data race
-// against a callback's remaining plain body loads.
+// TSan builds use real atomic synchronization, without manual HB annotations.
 version (TSan)
 {
-    extern (C) void __tsan_acquire(void* addr) nothrow @nogc @system;
-    extern (C) void __tsan_release(void* addr) nothrow @nogc @system;
-
     /// Default for a `-d-version=TSan` build. `TSAN_OPTIONS` still overrides.
     export extern (C) const(char)* __tsan_default_options() nothrow @nogc @system
     {
         return "history_size=7 halt_on_error=1";
     }
-}
-
-private void tsanAcquire(ref shared ulong slot) nothrow @nogc @system
-{
-    version (TSan) __tsan_acquire(cast(void*)&slot);
-}
-
-private void tsanRelease(ref shared ulong slot) nothrow @nogc @system
-{
-    version (TSan) __tsan_release(cast(void*)&slot);
 }
 
 /// Packed-field wrap guards (Tcount/Pcount claims, calls, completions).
@@ -1402,7 +1386,6 @@ struct AntFarm
             immutable ki = (ea + j) & kMask;
             if (atomicLoad!(MemoryOrder.acq)(Rt[ki][0]) == 0)
             {
-                tsanAcquire(Rt[ki][0]);
                 freeSp += segCap;
             }
             else
@@ -2150,7 +2133,6 @@ private:
                 ulong ei = ulong.max, bool retractIfConfirmed = false) nothrow @nogc @system
     {
         auto f = F;
-        tsanRelease(f.Rt[ki][0]);
         immutable lo = atomicFetchSub!(MemoryOrder.acq_rel)(f.Lt[ki * MAX_LEAVES + lti][0], 1);
         if (lo <= 0) fatal("leaf tally underflow");
         if (lo == 1)

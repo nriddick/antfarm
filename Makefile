@@ -25,8 +25,9 @@ FARM_TSAN_SOURCES := antfarm.d antfarm_allocation.d antfarm_templates.d \
 	antfarm_test.d
 
 # ThreadSanitizer build of the Farm suite. Part of `make check`.
-farm-tsan: $(FARM_TSAN_SOURCES)
-	ldc2 -fsanitize=thread -g -O1 -I. $(FARM_TSAN_SOURCES) -of=antfarm_test_tsan
+farm-tsan: $(FARM_TSAN_SOURCES) review_torture/leaf_reuse.d
+	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I. $(FARM_TSAN_SOURCES) -of=antfarm_test_tsan
+	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I. review_torture/leaf_reuse.d antfarm.d antfarm_allocation.d -of=antfarm_test_leaf_tsan
 
 run-farm-tsan: farm-tsan
 	./scripts/run-farm-tsan.sh
@@ -44,3 +45,7 @@ check-farm-ordering:
 	./antfarm_test_ordering
 	dmd -g -version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm.d antfarm_allocation.d -of=antfarm_test_ordering_dmd
 	./antfarm_test_ordering_dmd
+	ldc2 -g -O1 -I. review_torture/leaf_reuse.d antfarm.d antfarm_allocation.d -of=antfarm_test_leaf
+	./antfarm_test_leaf
+	dmd -g -I. review_torture/leaf_reuse.d antfarm.d antfarm_allocation.d -of=antfarm_test_leaf_dmd
+	./antfarm_test_leaf_dmd
