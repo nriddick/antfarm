@@ -1,0 +1,54 @@
+Correctness evidence (LDC 1.43.0 / LLVM 22.1.8, ANTFARM_HUGE_PAGES=0,
+TSAN_OPTIONS=history_size=7:halt_on_error=1). All runs serial on this host.
+
+== Original incident (pre-fix candidate a5e95ed: compact on top of base) ==
+make check: ALL CHECKS PASSED; make check-soak: PASS (43 loops / 121 s)
+private TSan soak: 184 loops / 631 s, 0 failures
+Farm TSan soak: FAILED at loop 1121 (578 s): data race, writer raw store of
+  Thead word 2 vs an earlier lap's plain callback body read
+  (original-farm-tsan-race-a5e95ed.log). Root cause: pre-existing
+  release-only Wt reservation (task 279 report); fixed by 0469901.
+
+== 0469901 (base + Wt reservation acq_rel + testStaleQuotaReuse) ==
+make check: ALL CHECKS PASSED at 0469901 (independent verify task 284,
+  log /home/nathan-riddick/pi_ground/.cydo/tasks/284/fix-check.log)
+Farm TSan soak: 1468 loops / 630 s, 0 failures
+Regression test with the reservation reverted to rel (Farm TSan build,
+  `antfarm_test_tsan stale-quota-only`): 6/6 runs report a race (exit 66).
+  Base reproducer (task 279 stale_quota.d): 6/6 races at 2f853e5, 20/20
+  passes with acq_rel.
+
+== 82cbce0 (final HEAD: 0469901 + compact runtime 13b1f85 + tests) ==
+make check: ALL CHECKS PASSED (06:12-06:16)
+make check-soak: PASS (43 loops / 122 s)
+Farm TSan soak: 1131 loops / 630 s, 0 failures   (parallel with private)
+private TSan soak: 182 loops / 630 s, 0 failures
+review_torture run-allwrite (outside make check): PASS (boundary runoff
+  live-root and Sub0 modes, write protection)
+Stale-quota regression in the compact tree: MaxCs=2 (full-layout) variant
+  races 3/3 with rel and passes 3/3 with acq_rel. An all-ST (compact)
+  variant passed undetected 3/3 with rel, so it was not kept.
+
+== Hand-verified compact mutations (test task 277; antfarm.d restored
+   byte-identically after each) ==
+M1  reader uses compact on MT tables (tmt == 0 -> true)    -> segfault in testCompactOldLayout
+M2  writer miscounts compact size (cpsz + 1)              -> writer assert po == size - END_PAD, testCompactMixedBodies
+M3  last-payload Plen off by one (Tsize - END_PAD + 1)     -> CHECK FAILED compact mixed body contract
+M4  non-last Plen off by one (next - poff)                 -> CHECK FAILED compact mixed body contract
+M5  C' singleton check uses compact size for MT too        -> T26 death test defect (no abort)
+M6a writer emits compact when m != 0                       -> writer assert in testCompactOldLayout
+M6b scratch header pcount not set                          -> CHECK FAILED compact mixed body contract
+M7  non-final run end read from Tindex[runend - 1]         -> CHECK FAILED compact multi-run body contract
+    (testCompactMultiRunBodies; the single-run testCompactMixedBodies passes under M7)
+
+Test-to-mutation labels in antfarm_test.d: testCompactMixedBodies M2/M3/M4/M6b,
+testCompactMultiRunBodies M7, testCompactOldLayout M1/M6a, review_torture T26 M5.
+testCompactWraparound is a TSan backup for M3/M4, and testCompactHeterogeneousRule
+covers the C' prefix rule (M2 sizing); neither was hand-verified as the first catcher.
+
+== Review cleanup: cf2aa91 / 5e22442 / 902549c (antfarm.d and actors/
+   identical to the timed revisions; tests, SPEC wording, comments changed) ==
+make check at 902549c (results README edits uncommitted): ALL CHECKS PASSED
+Farm TSan soak at 902549c: 367 loops / 190 s, 0 failures
+M7 hand-verified at 902549c (compact-only run in a /tmp copy): exit 134,
+  CHECK FAILED compact multi-run body contract

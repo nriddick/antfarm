@@ -1,0 +1,7 @@
+batchLimit=256 tier=small quota_words=16384
+root_hint=auto root_cost_hint=0 root_hint_table=1 root_hint_claims=1
+mimalloc_version=30503
+mode=subset actors=16384 selected=16384 percent=100 consumers=0 batch=256 warmups=5 allocator=mimalloc hugePages=false cpus=[0] setup=excluded teardown=excluded
+rounds=39158 elapsed_s=3.000066 waves/s=13052.377848 Mselected_callbacks/s=213.850159 ns/wave=76614.39 verified_waves=39163
+peak_rss_kib=18060
+mi_threadpool=0 mi_page_reclaim_on_free=0 mi_page_full_retain=2 mi_page_max_reclaim=-1 mi_page_cross_thread_max_reclaim=32

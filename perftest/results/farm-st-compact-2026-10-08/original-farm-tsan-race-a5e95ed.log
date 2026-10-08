@@ -1,0 +1,64 @@
+testMagicWrap OK
+testRingSizeUnits OK
+testArithmetic OK
+testSweptQuotaBalance OK
+testProducerLifecycleChurn OK
+testSingleThreaded OK
+testInputRangeWrite OK
+testPayloadRange OK
+testUniformRanges OK
+testSeparateRanges OK
+testConcurrent OK
+testWraparound OK
+testSubscriptionCap OK
+testChurn(3) OK
+testChurn(1) OK
+testBacklog OK
+testSpannedTables OK
+testSmallTableChurn OK
+testMultiSmallProducers OK
+testCrossFarmProvenance OK
+testActorWave OK
+testActorPayload OK
+testActorErasedAdapter OK
+testActorInbox OK
+PASS same-shard plain-write completion join
+testCompactMixedBodies OK
+==================
+WARNING: ThreadSanitizer: data race (pid=204606)
+  Atomic write of size 8 at 0x7fd20f08faf0 by thread T68:
+    #0 _D4core8internal6atomic__T11atomicStoreVEQBnQBc11MemoryOrderi0TmZQBnFNaNbNiNePmmZv /usr/include/dlang/ldc/core/internal/atomic.d:39:9 (antfarm_test_tsan+0x4f903) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #1 _D4core6atomic__T11atomicStoreVEQBeQBc11MemoryOrderi0TmTmZQBpFNaNbNiNeKmmZv /usr/include/dlang/ldc/core/atomic.d:159:5 (antfarm_test_tsan+0x4f903)
+    #2 _D4core6atomic__T11atomicStoreVEQBeQBc11MemoryOrderi0TmTmZQBpFNaNbNiNeKOmmZv /usr/include/dlang/ldc/core/atomic.d:174:5 (antfarm_test_tsan+0x4f903)
+    #3 _D7antfarm8storeRawFNbNiKOmmZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:516:5 (antfarm_test_tsan+0x4f903)
+    #4 _D7antfarm7AntFarm__T9writeImplTASQBg12PayloadEntryZQBfMFNbNiMQBeKSQCn5TokenkPSQCz19TableCompletionHookZm /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:1740:9 (antfarm_test_tsan+0x4f903)
+    #5 _D7antfarm7AntFarm5writeMFNbNiMASQBf12PayloadEntryKSQBy5TokenkZm /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:1492:9 (antfarm_test_tsan+0x338bc) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #6 _D12antfarm_test12producerMainFPSQBf7ProdCtxZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm_test.d:848:9 (antfarm_test_tsan+0x338bc)
+    #7 _D12antfarm_test21compactProducerThreadFPSQBo7ProdCtxZ18__lambda_L2628_C23MFZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm_test.d:2628:25 (antfarm_test_tsan+0x45efd) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #8 thread_entryPoint <null> (antfarm_test_tsan+0x16bb70) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+
+  Previous read of size 8 at 0x7fd20f08faf0 by thread T63:
+    #0 _D12antfarm_test13compactWrapCbFNbNiPS7antfarm13PayloadHeaderAxmmZl /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm_test.d:2538:5 (antfarm_test_tsan+0x453b0) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #1 _D7antfarm12ConsumerView10runCompactMFNbNiPOmmmkkkZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:2501:13 (antfarm_test_tsan+0x51b26) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #2 _D7antfarm12ConsumerView12processShardMFNbNiPOmmmmmmkbkkbbZk /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:2591:17 (antfarm_test_tsan+0x51b26)
+    #3 _D7antfarm12ConsumerView11consumeNextMFNbNiZb /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm.d:2047:29 (antfarm_test_tsan+0x302f5) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #4 _D12antfarm_test12consumerMainFPSQBf7ConsCtxZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm_test.d:862:9 (antfarm_test_tsan+0x33997) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #5 _D12antfarm_test21compactConsumerThreadFPSQBo7ConsCtxbZ18__lambda_L2635_C23MFZv /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm_test.d:2635:25 (antfarm_test_tsan+0x45f8d) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #6 thread_entryPoint <null> (antfarm_test_tsan+0x16bb70) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+
+  Thread T68 (tid=204707, running) created by main thread at:
+    #0 pthread_create <null> (antfarm_test_tsan+0x725b7) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #1 _D4core6thread8osthread6Thread5startMFNbZCQBoQBmQBiQBc <null> (antfarm_test_tsan+0x16ba1c) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #2 D main /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm_test.d:3161:5 (antfarm_test_tsan+0x4bb62) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #3 _D2rt6dmain212_d_run_main2UAAamPUQgZiZ6runAllMFZv <null> (antfarm_test_tsan+0x170c9c) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #4 <null> <null> (libc.so.6+0x27d0d) (BuildId: 5e3b85a3eaa72d02eaae3882b22410ebda6b5555)
+
+  Thread T63 (tid=204702, running) created by main thread at:
+    #0 pthread_create <null> (antfarm_test_tsan+0x725b7) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #1 _D4core6thread8osthread6Thread5startMFNbZCQBoQBmQBiQBc <null> (antfarm_test_tsan+0x16ba1c) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #2 D main /home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/antfarm_test.d:3161:5 (antfarm_test_tsan+0x4bb62) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #3 _D2rt6dmain212_d_run_main2UAAamPUQgZiZ6runAllMFZv <null> (antfarm_test_tsan+0x170c9c) (BuildId: 77fff9051547e93f3afe9b7f3096fe473174a2dc)
+    #4 <null> <null> (libc.so.6+0x27d0d) (BuildId: 5e3b85a3eaa72d02eaae3882b22410ebda6b5555)
+
+SUMMARY: ThreadSanitizer: data race /usr/include/dlang/ldc/core/internal/atomic.d:39:9 in _D4core8internal6atomic__T11atomicStoreVEQBnQBc11MemoryOrderi0TmZQBnFNaNbNiNePmmZv
+==================
