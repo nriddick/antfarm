@@ -26,7 +26,7 @@ The five prototype commits were replayed onto local main **0801c17** (which now 
 - Farm TSan soak at the tip: **1170 full-lane loops plus 1170 `leaf_reuse` loops in 630 s, zero failures.**
 - The compact suite (wraparound with lagging readers, mixed bodies, partial admission, quota boundaries, old-layout, callback header, heterogeneous rule) passed **20/20** runs of `antfarm_test_tsan compact-only` under the new TSan configuration.
 
-**Landing gate:** base 0801c17 against the landed tip, full actor_churn matrix at 0/6 consumers, five pairs — [land-gate](land-gate/) (recorded in the follow-up results commit; summary below in Gate tables).
+**Landing gate:** base 0801c17 against the landed tip 56b8eef, full actor_churn matrix at 0/6 consumers, five pairs — [land-gate](land-gate/), driver [run-land-gate.sh](run-land-gate.sh). **32 of 34 cells pass, all with gains in line with round 1** (0 consumers +8.6%..+70.5%; 6 consumers +0.6%..+227%). The two non-passing cells are the accepted ones: **private-remote/6 at −3.85%** (5 pairs; the 20-pair boundary run [land-boundary-6](land-boundary-6/) gives **−3.54%**, pairs −4.25..−3.02%, against **−0.08%** for the byte-identical control [land-control-6](land-control-6/) — consistent with round 1's −4.49% and inside the accepted ~−4.5% trade-off) and **tree-cancel/6 `inconclusive_work`** at −15.75% (dispatched-fraction change; not comparable across this change). No other cell regressed. Full tables in [Gate tables](#gate-tables) below.
 
 Round 2 (below) explains private-remote/6 and settles the perftest follow-ups. The original commit history was:
 
@@ -177,6 +177,8 @@ Consequences:
 | `compact-boundary-6`, `compact-control-6` | 0469901 | 82cbce0 / 0469901 | 20-pair confirmation of private-remote/6, byte-identical control |
 | `gate-fix` (ii) | 2f853e5 | 0469901 | fix-only cost, full matrix, 5 pairs |
 | `fix-boundary-{0,6}`, `fix-control-{0,6}` | 2f853e5 | 0469901 / 2f853e5 | 20-pair runs of the five inconclusive cells, byte-identical controls |
+| `land-gate` | 0801c17 | 56b8eef | landing gate, full matrix, 5 pairs |
+| `land-boundary-6`, `land-control-6` | 0801c17 | 56b8eef / 0801c17 | 20-pair confirmation of the accepted private-remote/6 cell, byte-identical control |
 
 ## Writer microbenchmark: ring words, writer ticks, admission
 
@@ -243,6 +245,63 @@ User-space `cycles:u` profiles of the gate-compact binaries, after all timing ([
 - Round 2 tested both: neither is the cause. See [private-remote-6/README.md](private-remote-6/README.md).
 
 ## Gate tables
+
+### land-gate
+
+exit=1 candidate_env=(none) base=0801c17 candidate=56b8eef repeats=5
+
+| cell | decision | paired median | min..max pair | base median | cand median | base RSS KiB | cand RSS KiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| actor/0 | pass | +8.59% | +8.24..+8.73% | 18.777 | 20.381 | 18124 | 17996 |
+| wave/0 | pass | +9.31% | +7.78..+9.79% | 24.098 | 26.296 | 18080 | 17960 |
+| inbox/0 | pass | +9.47% | +9.28..+10.34% | 15.143 | 16.579 | 20080 | 20116 |
+| private/0 | pass | +27.77% | +22.67..+29.27% | 31.551 | 40.488 | 18152 | 18008 |
+| private-remote/0 | pass | +29.33% | +28.73..+30.17% | 31.379 | 40.582 | 18000 | 18104 |
+| tree/0 | pass | +19.33% | +17.99..+24.39% | 65.452 | 77.794 | 18060 | 18064 |
+| tree-wait/0 | pass | +23.69% | +21.03..+27.11% | 64.780 | 80.124 | 18052 | 18052 |
+| tree-cont/0 | pass | +13.13% | +12.62..+13.68% | 26.485 | 29.910 | 18056 | 18012 |
+| tree-pipelined/0 | pass | +16.05% | +15.38..+18.33% | 27.600 | 31.984 | 18152 | 18024 |
+| dtor/0 | pass | +28.96% | +27.34..+29.40% | 31.331 | 40.369 | 17948 | 18060 |
+| subset/1%/0 | pass | +41.04% | +28.22..+46.21% | 106.400 | 149.625 | 18060 | 18044 |
+| subset/10%/0 | pass | +64.57% | +42.10..+65.89% | 128.680 | 211.147 | 18024 | 18068 |
+| subset/100%/0 | pass | +65.48% | +63.01..+67.31% | 130.679 | 216.390 | 18036 | 18036 |
+| subset-whole/0 | pass | +70.45% | +37.18..+72.21% | 206.594 | 352.702 | 18044 | 18112 |
+| subset-whole-unreserved/0 | pass | +70.53% | +35.05..+92.00% | 207.676 | 354.526 | 16060 | 16052 |
+| tree-cancel/0 | pass | +19.57% | +17.58..+20.15% | 53.769 | 64.013 | 18056 | 18020 |
+| private-tracked/0 | pass | +21.66% | +20.75..+24.83% | 13.547 | 16.469 | 20132 | 20144 |
+| actor/6 | pass | +10.76% | +8.53..+13.25% | 15.085 | 16.631 | 18096 | 17912 |
+| wave/6 | pass | +7.01% | +6.29..+9.19% | 16.189 | 17.426 | 18024 | 18072 |
+| inbox/6 | pass | +11.05% | +10.33..+11.18% | 12.630 | 14.005 | 20132 | 19976 |
+| private/6 | pass | +33.17% | +32.34..+34.65% | 22.928 | 30.489 | 18176 | 18020 |
+| private-remote/6 | regression | -3.85% | -4.14..-3.29% | 14.351 | 13.816 | 18048 | 18088 |
+| tree/6 | pass | +1.29% | +0.98..+2.53% | 54.814 | 55.732 | 22156 | 20160 |
+| tree-wait/6 | pass | +0.55% | -0.28..+0.92% | 55.341 | 55.616 | 20044 | 20140 |
+| tree-cont/6 | pass | +18.81% | +18.37..+18.93% | 31.085 | 36.937 | 22204 | 20188 |
+| tree-pipelined/6 | pass | +32.24% | +31.78..+36.84% | 30.823 | 40.814 | 22268 | 20004 |
+| dtor/6 | pass | +32.70% | +31.98..+33.05% | 23.139 | 30.666 | 18168 | 17992 |
+| subset/1%/6 | pass | +46.90% | +46.49..+47.05% | 42.819 | 62.896 | 18120 | 17928 |
+| subset/10%/6 | pass | +97.37% | +89.78..+118.62% | 88.455 | 174.396 | 18064 | 18152 |
+| subset/100%/6 | pass | +113.14% | +110.68..+131.06% | 101.029 | 215.737 | 18096 | 18156 |
+| subset-whole/6 | pass | +227.03% | +226.62..+227.14% | 102.550 | 335.063 | 18132 | 18080 |
+| subset-whole-unreserved/6 | pass | +226.87% | +226.41..+227.29% | 102.383 | 334.544 | 16028 | 16108 |
+| tree-cancel/6 | inconclusive_work | -15.75% | -16.21..-15.64% | 66.709 | 56.153 | 20192 | 20096 |
+| private-tracked/6 | pass | +19.08% | +18.23..+20.35% | 13.432 | 15.946 | 20208 | 20008 |
+
+### land-boundary-6
+
+exit=1 candidate_env=(none) base=0801c17 candidate=56b8eef repeats=20
+
+| cell | decision | paired median | min..max pair | base median | cand median | base RSS KiB | cand RSS KiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| private-remote/6 | regression | -3.54% | -4.25..-3.02% | 14.390 | 13.883 | 18168.0 | 18114.0 |
+
+### land-control-6
+
+exit=0 candidate_env=(none) base=0801c17 candidate=0801c17 repeats=20
+
+| cell | decision | paired median | min..max pair | base median | cand median | base RSS KiB | cand RSS KiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| private-remote/6 | pass | -0.08% | -0.60..+0.37% | 14.441 | 14.431 | 18134.0 | 18110.0 |
 
 ### gate-compact
 

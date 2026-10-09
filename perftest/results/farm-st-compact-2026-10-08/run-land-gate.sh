@@ -17,3 +17,7 @@ gate() { label=$1; shift; waitquiet; echo "=== $label $(date -Is)"; python3 perf
 
 # Full actor_churn matrix, 0 and 6 consumers, five pairs.
 gate land-gate --base $BASE --candidate $CAND
+# Follow-up: 20-pair boundary run of the accepted private-remote/6 cell,
+# plus a byte-identical control of the base, as in round 1.
+gate land-boundary-6 --base $BASE --candidate $CAND --boundary --modes private-remote --consumers 6
+gate land-control-6 --base $BASE --control --boundary --modes private-remote --consumers 6
