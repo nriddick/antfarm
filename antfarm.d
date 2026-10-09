@@ -641,9 +641,10 @@ struct TableCompletionHook
 /// Spec 2d: payload header, 16 ulongs (128 bytes) as laid out in the buffer.
 /// This is the public API type and the mixed/multithreaded ring layout: a
 /// table containing any multithreaded payload stores this header per
-/// payload. A compact all-single-threaded table stores only the Call word
-/// per record (SPEC.md section 2f; the callback then receives a
-/// consumer-local copy, not a ring header — see Callback). Producers set
+/// payload. An all-single-threaded table stores only the Call word per
+/// record (compact, SPEC.md section 2f), or only the body when the table's
+/// payloads share one Call (uniform, section 2g); the callback then receives
+/// a consumer-local copy, not a ring header — see Callback. Producers set
 /// maxCs, done and call; plen is overwritten with the body length and
 /// pcount is runtime-owned.
 /// Call sits immediately after Pcount: it is dereferenced only after a valid
@@ -681,7 +682,7 @@ private enum ulong PCOMPACT_LEN = 1;
 static assert(Callback.sizeof == ulong.sizeof);
 static assert(PCOMPACT_LEN < PHEAD_LEN);
 
-/// Uniform-call ST tables (spec 2g, prototype): an all-ST table whose
+/// Uniform-call ST tables (spec 2g): an all-ST table whose
 /// payloads share one Call stores it once, in a Thead extension word, and
 /// each record is the bare Pbody. Thead word 6's high half carries the
 /// kind (0 for per-payload Call, so full and compact tables are unchanged);
@@ -699,12 +700,6 @@ private enum TableKind : uint
 /// Thead extension words for uniformCall / uniformCallAndLength tables.
 private enum ulong UNIFORM_EXT = 1;
 private enum ulong UNIFORM_FIXED_EXT = 2;
-/// Prototype measurement switch: -d-version=AntfarmNoIndexFree keeps
-/// uniform tables indexed (uniformCall) even when body lengths match.
-version (AntfarmNoIndexFree)
-    private enum bool UNIFORM_FIXED_ENABLED = false;
-else
-    private enum bool UNIFORM_FIXED_ENABLED = true;
 
 /// How a table's records are stored, decoded from Tmt and the Thead kind.
 private enum TableLayout : uint
@@ -1698,6 +1693,12 @@ struct AntFarm
     /// can maintain the quota state; the caller must never inspect or copy
     /// the token's private quota. `avgCost` is the producer's declared Call
     /// cost class, a log2 shift in 0 .. MAX_AVG_COST (spec 5b / 7a).
+    ///
+    /// The table layout, and so how many payloads fit the quota, follows the
+    /// accepted prefix's contents in every overload: an all-single-threaded
+    /// prefix sharing one Call stores it once and drops the per-payload Call
+    /// word, and one sharing a nonzero body length as well drops Tindex
+    /// (spec 2g); other single-threaded prefixes are compact (2f).
     ulong write(scope PayloadEntry[] payloads, ref Token tok,
                 uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
     {
@@ -1750,6 +1751,8 @@ struct AntFarm
 
     /// Broadcast a uniform single-shot payload range into one physical table
     /// and notify `completion` when all callbacks in that table have returned.
+    /// The table is a uniform one (spec 2g): `bodyWords` ring words per entry,
+    /// or one index word per entry when `bodyWords` is 0.
     /// This is intentionally narrower than `write`: aggregate users such as
     /// actor waves must count the table before calling, because consumers may
     /// complete it before this function returns.
@@ -1812,8 +1815,7 @@ struct AntFarm
                 // Spec 2g: a uniform ST range shares its Call by
                 // construction, and a nonzero uniform length drops Tindex.
                 layout = oneMt != 0 ? TableLayout.full
-                    : (bodyLen != 0 && UNIFORM_FIXED_ENABLED)
-                        ? TableLayout.uniformFixed : TableLayout.uniform;
+                    : bodyLen != 0 ? TableLayout.uniformFixed : TableLayout.uniform;
                 tcall = commonHeader.call;
                 tblen = bodyLen;
                 immutable head = base + extWordsOf(layout);
@@ -1890,7 +1892,7 @@ struct AntFarm
                 }
 
                 // Spec 2g kind 2: one Call and one nonzero length.
-                if (UNIFORM_FIXED_ENABLED && tblen != 0)
+                if (tblen != 0)
                     while (!scan.empty && i < maxTablePayloads)
                     {
                         auto pe = scan.front;

@@ -2736,12 +2736,6 @@ ulong compactTableSize(ulong n, ulong sumBody, ulong sq) pure nothrow @nogc @saf
     return 30 + 8 * sq + 2 * n + sumBody;
 }
 
-// Index-free uniform tables can be switched off for measurement (SPEC 2g).
-version (AntfarmNoIndexFree)
-    enum bool g_indexFree = false;
-else
-    enum bool g_indexFree = true;
-
 /// Thead word 6's high half (SPEC 2g): 0 per-payload Call, 1 uniform Call,
 /// 2 uniform Call and length.
 enum ulong KIND_PER_PAYLOAD = 0, KIND_UNIFORM = 1, KIND_UNIFORM_FIXED = 2;
@@ -2751,14 +2745,14 @@ enum ulong KIND_PER_PAYLOAD = 0, KIND_UNIFORM = 1, KIND_UNIFORM_FIXED = 2;
 ulong uniformTableSize(ulong n, ulong sumBody, ulong sq, bool sameLen)
     pure nothrow @nogc @safe
 {
-    return sameLen && sumBody != 0 && g_indexFree
+    return sameLen && sumBody != 0
         ? 30 + 8 * sq + 2 + sumBody
         : 30 + 8 * sq + 1 + n + sumBody;
 }
 
 ulong uniformKind(ulong sumBody, bool sameLen) pure nothrow @nogc @safe
 {
-    return sameLen && sumBody != 0 && g_indexFree
+    return sameLen && sumBody != 0
         ? KIND_UNIFORM_FIXED : KIND_UNIFORM;
 }
 
@@ -3448,13 +3442,8 @@ void testCompactOldLayout()
         "uniform singleton size");
     check(atomicLoad!(MemoryOrder.raw)(f.buf[start3 + 8]) == cast(ulong) cast(void*) &compactBodyCb,
         "uniform Tcall in the Thead extension");
-    static if (g_indexFree)
-    {
-        check(atomicLoad!(MemoryOrder.raw)(f.buf[start3 + 9]) == 3, "uniform Tblen");
-        immutable boff = 8 + 2 + 7 + 1 + 7 + 8; // no Tindex
-    }
-    else
-        immutable boff = atomicLoad!(MemoryOrder.raw)(f.buf[start3 + 9]);
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start3 + 9]) == 3, "uniform Tblen");
+    immutable boff = 8 + 2 + 7 + 1 + 7 + 8; // no Tindex
     // Thead 8 + Tcall + (Tblen or one Tindex entry) + pads, Tprogress, Tcount.
     check(boff == 8 + 2 + 7 + 1 + 7 + 8, "uniform body follows Tcount");
     check(atomicLoad!(MemoryOrder.raw)(f.buf[start3 + boff]) == stBody[0], "uniform body at +0");
@@ -3596,7 +3585,7 @@ void testCompactHeterogeneousRule()
 }
 
 // ---------------------------------------------------------------------
-// Uniform-call ST tables (SPEC 2g, prototype)
+// Uniform-call ST tables (SPEC 2g)
 // ---------------------------------------------------------------------
 
 /// Bodies for `lens`, word k of payload i = compactWord(i, k), plus one

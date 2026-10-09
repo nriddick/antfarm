@@ -10,7 +10,7 @@ Living spec, matching the implementation in this directory. The farmer metaphor 
   - [2d. Payload Layout](#2d-payload-layout)
   - [2e. Table Layout](#2e-table-layout)
   - [2f. Compact ST Tables](#2f-compact-st-tables)
-  - [2g. Uniform-Call ST Tables (prototype)](#2g-uniform-call-st-tables-prototype)
+  - [2g. Uniform-Call ST Tables](#2g-uniform-call-st-tables)
 - [3. Safety Invariants](#3-safety-invariants)
 - [4. Construction and Registration](#4-construction-and-registration)
   - [4a. Geometry and Quota Constraints](#4a-geometry-and-quota-constraints)
@@ -194,9 +194,7 @@ Nothing else of `Phead` is stored. Thead, Tindex, Tprogress, Tcount and the end 
 
 **Known cost.** Compact tables admit several times more entries per quota, which shifts quota admission geometry and with it allocator cross-thread-free contention. At six consumers the private-remote churn cell moves against the full layout; that is an accepted trade-off, and the measured compact-path rates and allocator geometry are recorded in [PERFORMANCE.md](PERFORMANCE.md#allocators).
 
-### 2g. Uniform-Call ST Tables (prototype)
-
-**Prototype.** This layout is on the `proto/farm-st-uniform` branch for measurement and has not landed.
+### 2g. Uniform-Call ST Tables
 
 An all-ST table (`Tmt == 0`) whose committed payloads all carry the same `Call` stores that `Call` once, in a Thead extension, and each payload as its bare `Pbody`. `Tkind`, the high half of Thead word 6, names the kind. The low half stays `AvgCost`, so the chunk rule (7a) reads it unchanged.
 
