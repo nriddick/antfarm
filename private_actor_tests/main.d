@@ -10106,8 +10106,9 @@ void phaseRootTracking()
 // G4: the derived default root work-cost hint. A table below the small
 // threshold is claimed wholesale by shard 0 in ceil(count / (MAX_CHUNK >>
 // hint)) claims, so the hint determines how many consumers can share one
-// small root table; a table at least the threshold wide is sharded and
-// keeps the cheapest class.
+// small root table; a table at least the threshold wide is sharded and keeps
+// the cheapest class the hint ever names (chunk rootCostHintMaxChunk), so the
+// derived hint's claim splits do not follow MAX_CHUNK.
 void rootCostHintRule()
 {
     static uint claimCount(size_t count, uint hint) pure nothrow @nogc @safe
@@ -10115,23 +10116,25 @@ void rootCostHintRule()
         immutable chunk = MAX_CHUNK >> hint;
         return cast(uint) ((count + chunk - 1) / chunk);
     }
-    check(rootCostHintFor(0, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 0);
-    check(rootCostHintFor(1, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 0);  // one claim already
-    check(rootCostHintFor(8, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 5);   // chunk 1: eight claims
-    check(rootCostHintFor(15, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 4);  // chunk 2: eight claims
-    check(rootCostHintFor(16, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 4);  // chunk 2: eight claims
-    check(rootCostHintFor(31, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 3);  // chunk 4: eight claims
-    check(rootCostHintFor(63, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 2);  // chunk 8: eight claims
-    check(rootCostHintFor(64, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 0);  // sharded: cheapest class
-    check(rootCostHintFor(256, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 0);
-    check(rootCostHintFor(1024, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == 0);
-    check(rootCostHintFor(63, 6, 0) == 2);          // auto rule falls back to 64
-    check(rootCostHintFor(64, 6, 128) == 2);        // wider threshold: 64 is wholesale
-    check(rootCostHintFor(100, 6, 128) == 1);       // chunk 16: seven claims
+    enum uint cheapest = avgCostForChunk(rootCostHintMaxChunk);
+    check((MAX_CHUNK >> cheapest) == rootCostHintMaxChunk);
+    check(rootCostHintFor(0, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == cheapest);
+    check(rootCostHintFor(1, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == cheapest);  // one claim already
+    check(rootCostHintFor(8, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == avgCostForChunk(1));   // eight claims
+    check(rootCostHintFor(15, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == avgCostForChunk(2));  // eight claims
+    check(rootCostHintFor(16, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == avgCostForChunk(2));  // eight claims
+    check(rootCostHintFor(31, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == avgCostForChunk(4));  // eight claims
+    check(rootCostHintFor(63, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == avgCostForChunk(8));  // eight claims
+    check(rootCostHintFor(64, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == cheapest);  // sharded: cheapest class
+    check(rootCostHintFor(256, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == cheapest);
+    check(rootCostHintFor(1024, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == cheapest);
+    check(rootCostHintFor(63, 6, 0) == avgCostForChunk(8));          // auto rule falls back to 64
+    check(rootCostHintFor(64, 6, 128) == avgCostForChunk(8));        // wider threshold: 64 is wholesale
+    check(rootCostHintFor(100, 6, 128) == avgCostForChunk(16));      // seven claims
     // Pins rootCostHintMaxSplits = 8: a 46-entry table needs chunk 4
-    // (12 claims) to span eight target claims; with a bound of 6 the
-    // cheapest class 2 (six claims) would already reach the target.
-    check(rootCostHintFor(46, 64, 128) == 3);
+    // (12 claims) to span eight target claims; with a bound of 6 chunk 8
+    // (six claims) would already reach the target.
+    check(rootCostHintFor(46, 64, 128) == avgCostForChunk(4));
     foreach (immutable consumers; [0UL, 1, 2, 6, 8, 64])
         foreach (immutable threshold; [0U, 16U, DEFAULT_SMALL_TABLE_THRESHOLD, 128U, 256U])
             foreach (immutable count; [
@@ -10139,7 +10142,7 @@ void rootCostHintRule()
                 100U, 127U, 128U, 255U, 256U, 257U, 1023U, 1024U])
             {
                 immutable hint = rootCostHintFor(count, consumers, threshold);
-                check(hint <= MAX_AVG_COST);
+                check(hint >= cheapest && hint <= MAX_AVG_COST);
                 immutable splits = consumers < 1 ? cast(ulong) 1
                     : consumers > rootCostHintMaxSplits ? cast(ulong) rootCostHintMaxSplits
                     : consumers;
@@ -10147,8 +10150,8 @@ void rootCostHintRule()
                 // Sharded tables, and any table whose cheapest class already
                 // provides the target claims, keep the cheapest class.
                 immutable effThresh = threshold != 0 ? threshold : DEFAULT_SMALL_TABLE_THRESHOLD;
-                if (count >= effThresh || claimCount(count, 0) >= target)
-                    check(hint == 0);
+                if (count >= effThresh || claimCount(count, cheapest) >= target)
+                    check(hint == cheapest);
                 else
                 {
                     // The rule's guarantee: at least min(count, splits) claims
@@ -10157,7 +10160,7 @@ void rootCostHintRule()
                     check(claimCount(count, hint - 1) < target);
                 }
                 // One consumer never needs more than the cheapest class.
-                if (consumers <= 1) check(hint == 0);
+                if (consumers <= 1) check(hint == cheapest);
             }
 }
 

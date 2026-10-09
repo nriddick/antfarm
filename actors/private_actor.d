@@ -26,7 +26,7 @@ import actors.actor : ActorAllocator;
 version (AntfarmActorTestHooks)
     import actors.actor : ActorTestPoint, actorTestPoint;
 import antfarm : AntFarm, Token, PayloadHeader, PayloadBody,
-    TableCompletionHook, rootCostHintAuto, rootCostHintFor, fatal;
+    TableCompletionHook, avgCostForChunk, rootCostHintAuto, rootCostHintFor, fatal;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
     atomicFetchAdd, atomicFetchSub, cas;
 import core.stdc.string : memcpy, memset;
@@ -42,6 +42,9 @@ enum defaultPrivateBatchLimit = 256;
 
 private enum noDeadline = MonoTime.max;
 static assert(noDeadline == MonoTime.max);
+/// Cost class of every child, subset and resume wave table: chunk 32, the
+/// cheapest class they were sized for before `MAX_CHUNK` rose to 128.
+private enum uint childAvgCost = avgCostForChunk(32);
 
 /// Per-cohort options accepted by PrivateContext.createChildren.
 /// See_Also:
@@ -1448,7 +1451,8 @@ public:
     /// is derived per table from its entry count and the live consumer count
     /// (`rootCostHintFor`), so small root tables are split across enough
     /// claims for the available consumers; an explicit 0 .. MAX_AVG_COST hint
-    /// is passed through unchanged.
+    /// is passed through unchanged and names claims of `MAX_CHUNK >> hint`
+    /// entries.
     size_t pump(ref Token token) nothrow @nogc @system
     {
         return pump(token, service_.batchLimit);
@@ -2109,7 +2113,7 @@ private:
         auto bodies = ChildBodies(park.entries_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
         immutable written = cast(size_t) park.base_.service.farm.writeTracked(
-            *header, bodies, 1, &wave.hook, token, 0);
+            *header, bodies, 1, &wave.hook, token, childAvgCost);
         if (written == 0) releaseWave(wave); // producer hold still protects it
         park.cursor_ += written;
         if (park.cursor_ < park.count_) return false;
@@ -2128,7 +2132,7 @@ private:
         auto bodies = SubsetBodies(park.entries_, park.sel_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
         immutable written = cast(size_t) park.base_.service.farm.writeTracked(
-            park.header_, bodies, 1, &wave.hook, token, 0);
+            park.header_, bodies, 1, &wave.hook, token, childAvgCost);
         if (written == 0) releaseWave(wave);
         park.cursor_ += written;
         if (park.cursor_ < park.k_) return false;
@@ -2163,7 +2167,7 @@ private:
         auto bodies = ResumeBodies(base, base.resumeHead, n);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
         immutable written = park.base_.service.farm.writeTracked(
-            park.header_, bodies, 1, &wave.hook, token, 0);
+            park.header_, bodies, 1, &wave.hook, token, childAvgCost);
         if (written == 0) releaseWave(wave); // P still pins the park
         if (base.resumeCount != 0) return false;
         version (AntfarmActorTestHooks)

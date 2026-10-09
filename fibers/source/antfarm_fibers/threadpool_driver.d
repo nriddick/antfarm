@@ -88,7 +88,7 @@ final class FiberLane : FiberReadyLane
     FiberBackend backend;
     private CacheAwarePool pool;
     size_t flushBatch = 32;
-    uint avgCost = 2;
+    uint avgCost = avgCostForChunk(8);
     FiberWakePolicy wakePolicy = FiberWakePolicy.broadcast;
     FiberResponderSelector responderSelector;
     private FiberWakeNotifier wakeNotifier;
@@ -350,7 +350,7 @@ void applyFiberTopologyPreset(FiberTopologyPreset preset, FiberLane[] lanes,
             if (lane is null)
                 throw new Exception("antfarm_fibers: null lane in topology preset");
             lane.flushBatch = 256;
-            lane.avgCost = 0;
+            lane.avgCost = avgCostForChunk(32);
         }
         break;
     case FiberTopologyPreset.payloadThroughput:
@@ -360,7 +360,7 @@ void applyFiberTopologyPreset(FiberTopologyPreset preset, FiberLane[] lanes,
             if (lane is null)
                 throw new Exception("antfarm_fibers: null lane in topology preset");
             lane.flushBatch = 32;
-            lane.avgCost = 2;
+            lane.avgCost = avgCostForChunk(8);
         }
         break;
     }

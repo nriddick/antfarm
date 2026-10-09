@@ -425,23 +425,28 @@ enum uint rootCostHintAuto = uint.max;
 /// where splitting small tables measurably pays (see perftest results
 /// perf-g4).
 enum uint rootCostHintMaxSplits = 8;
+/// Largest chunk `rootCostHintFor` hands out. It is the cheapest class the
+/// derived hint ever names: the hint was tuned against chunk 32 (perf-g4), so
+/// it does not follow `MAX_CHUNK` upward.
+enum uint rootCostHintMaxChunk = 32;
 
 /++
  + Effective work-cost class for a default-hint table of `count` entries on
  + a farm whose configured small-table threshold is `smallThreshold`.
  + Consumers size a table's claims as `chunk = MAX_CHUNK >> avgCost` (spec
  + 7a), and a table below the small threshold is claimed wholesale by
- + shard 0 (spec 7a), so the cheapest class (`avgCost = 0`, chunk 128) can
- + run every callback of a table of up to 128 entries inside one consumer
- + claim, serializing an expensive table (for example parents that each
- + allocate a child wave) on one worker.
+ + shard 0 (spec 7a), so a cheap class (`avgCost = 0`, chunk 128) can run
+ + every callback of a table of up to 128 entries inside one consumer claim,
+ + serializing an expensive table (for example parents that each allocate a
+ + child wave) on one worker.
  +
- + A table at least `smallThreshold` entries wide is sharded across every
- + shard and already spans multiple workers, so it keeps the cheapest class;
+ + The derived hint never names a chunk above `rootCostHintMaxChunk` (32,
+ + class 2). A table at least `smallThreshold` entries wide is sharded across
+ + every shard and already spans multiple workers, so it keeps that class;
  + only a wholesale (single-shard) table is reclassed. For such a table this
  + returns the cheapest class whose claims still number at least
  + `min(count, clamp(consumers, 1, rootCostHintMaxSplits))`, so a small table
- + can occupy up to ~consumer-count workers, and the cheapest class is kept
+ + can occupy up to ~consumer-count workers, and the class of chunk 32 is kept
  + whenever it already provides that many claims. `consumers` is the farm's
  + live subscribed-view count (`Cf`), which can include the emitter's own
  + view; it may change between tables, and each table's class follows it
@@ -449,22 +454,23 @@ enum uint rootCostHintMaxSplits = 8;
  + (`smallThreshold == 0`) is classified against DEFAULT_SMALL_TABLE_THRESHOLD,
  + which may differ from the auto rule's effective threshold; the result is
  + still a valid class.
- + Returns 0 .. MAX_AVG_COST.
+ + Returns `avgCostForChunk(rootCostHintMaxChunk) .. MAX_AVG_COST`.
  +/
 uint rootCostHintFor(size_t count, ulong consumers, uint smallThreshold)
     pure nothrow @nogc @safe
 {
-    if (count == 0) return 0;
+    enum uint cheapest = avgCostForChunk(rootCostHintMaxChunk);
+    if (count == 0) return cheapest;
     // Sharded tables are already split across every shard (spec 7a), so
     // only wholesale tables can collapse onto fewer claims than consumers.
     if (count >= (smallThreshold != 0 ? smallThreshold : DEFAULT_SMALL_TABLE_THRESHOLD))
-        return 0;
+        return cheapest;
     immutable splits = consumers < 1 ? cast(ulong) 1
         : consumers > rootCostHintMaxSplits ? cast(ulong) rootCostHintMaxSplits
         : consumers;
     immutable target = cast(size_t) (count < splits ? count : splits);
     // Cheapest class whose ceil(count / chunk) claims reach the target.
-    uint hint;
+    uint hint = cheapest;
     while (hint < MAX_AVG_COST
         && (count + (MAX_CHUNK >> hint) - 1) / (MAX_CHUNK >> hint) < target)
         ++hint;

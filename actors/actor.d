@@ -30,10 +30,13 @@ module actors.actor;
 public import antfarm : AntFarm, PayloadBody, PayloadHeader, Tier, Token;
 
 import antfarm_allocation : allocateAligned64, freeAligned64;
-import antfarm : fatal;
+import antfarm : avgCostForChunk, fatal;
 import core.atomic : MemoryOrder, atomicExchange, atomicFetchAdd,
     atomicFetchSub, atomicLoad, atomicStore, cas, pause;
 import core.stdc.string : memcpy, memset;
+
+// Cost class of the public flush table: claims of 8 entries.
+private enum uint flushAvgCost = avgCostForChunk(8);
 
 // ==== Section: allocator and result enums ====
 /// Non-GC allocation policy used for the runtime, stable slots, and actor
@@ -1014,8 +1017,10 @@ public:
     /// and return how many were written. Snapshot work is bounded by
     /// `maximum`, regardless of the backlog. A concurrent snapshot returns zero rather
     /// than waiting; callers retry as for Farm backpressure. Unwritten
-    /// activations are returned to the intrusive queue.
-    size_t flush(ref Token token, size_t maximum = 32, uint avgCost = 2)
+    /// activations are returned to the intrusive queue. `avgCost` is the
+    /// table's Farm work-cost class (`0 .. MAX_AVG_COST`, consumers claim
+    /// `MAX_CHUNK >> avgCost` entries at a time); the default claims 8.
+    size_t flush(ref Token token, size_t maximum = 32, uint avgCost = flushAvgCost)
         nothrow @nogc @system
     {
         enum size_t snapshotCapacity = 256;

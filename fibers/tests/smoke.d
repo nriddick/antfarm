@@ -62,7 +62,7 @@ void uxHelpersSmoke()
 
     auto recycled = lane.spawn(&functionSpawnBody);
     assert(recycled is first);
-    drainUntilEmpty(lane.domain, token, view, 256, 0);
+    drainUntilEmpty(lane.domain, token, view, 256, avgCostForChunk(32));
     assert(atomicLoad(functionSpawnRuns) == 4);
     lane.domain.releaseAll(lane.domain.takeCompletions());
 
@@ -70,11 +70,11 @@ void uxHelpersSmoke()
     applyFiberTopologyPreset(
         FiberTopologyPreset.fiberThroughput, [lane], options);
     assert(!options.skipSmtSiblings && options.managedWorker.pump !is null);
-    assert(lane.flushBatch == 256 && lane.avgCost == 0);
+    assert(lane.flushBatch == 256 && lane.avgCost == avgCostForChunk(32));
     applyFiberTopologyPreset(
         FiberTopologyPreset.payloadThroughput, [lane], options);
     assert(options.skipSmtSiblings);
-    assert(lane.flushBatch == 32 && lane.avgCost == 2);
+    assert(lane.flushBatch == 32 && lane.avgCost == avgCostForChunk(8));
 }
 
 void cancellationOwnershipSmoke()
@@ -1362,9 +1362,9 @@ void mixedPayloadSmoke()
     foreach (_; 0 .. 200_000)
     {
         if (bareOffset < bare.length)
-            bareOffset += farm.write(bare[bareOffset .. $], token, 1);
+            bareOffset += farm.write(bare[bareOffset .. $], token, DEFAULT_AVG_COST);
         if (backend.ready != 0)
-            backend.flush(token, 17, 1);
+            backend.flush(token, 17, DEFAULT_AVG_COST);
         view.consumeNext();
         if (bareOffset == count && backend.drained
             && atomicLoad(barePayloadRuns) == count)

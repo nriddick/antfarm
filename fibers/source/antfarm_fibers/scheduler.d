@@ -23,6 +23,8 @@ private enum Signal persistentSignalBit = 1UL << 62;
 private enum Signal internalSignalMask = timerSignalBit | persistentSignalBit;
 enum size_t defaultLifecycleRetention = 65_536;
 private enum uint lifecycleRecordsPerTask = 4;
+// Cost class of a Fiber flush table: claims of 8 entries.
+private enum uint flushAvgCost = avgCostForChunk(8);
 
 private bool persistentSignal(Signal signal) pure nothrow @nogc
 {
@@ -1508,7 +1510,7 @@ class FiberReadyLane
 
     /// Publish up to `maximum` accumulated activations using a caller-owned
     /// producer token for this lane's Farm.
-    size_t flush(ref Token token, size_t maximum = 32, uint avgCost = 2)
+    size_t flush(ref Token token, size_t maximum = 32, uint avgCost = flushAvgCost)
     {
         if (maximum > snapshotCap) maximum = snapshotCap;
         size_t written;
@@ -2500,7 +2502,7 @@ final class FiberDomain
 
     /// Compatibility flush for a one-lane domain. Multi-lane embeddings flush
     /// each selected `FiberReadyLane` with a token registered on its Farm.
-    size_t flush(ref Token token, size_t maximum = 32, uint avgCost = 2)
+    size_t flush(ref Token token, size_t maximum = 32, uint avgCost = flushAvgCost)
     {
         if (defaultReadyLane is null)
             throw new Exception("antfarm_fibers: domain has no ready lane");
@@ -3031,7 +3033,7 @@ long subscribeOrThrow(ref ConsumerView consumer, AntFarm* farm)
 /// ConsumerView is a unique cursor and must never be copied.
 void drainUntilEmpty(FiberDomain domain, ref Token token,
                      ref ConsumerView consumer, size_t flushBatch = 32,
-                     uint avgCost = 2)
+                     uint avgCost = flushAvgCost)
 {
     if (domain is null)
         throw new Exception("antfarm_fibers: cannot drain a null domain");

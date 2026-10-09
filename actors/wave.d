@@ -22,7 +22,7 @@ module actors.wave;
 public import actors.actor : ActorBorrow, ActorHandle;
 
 import antfarm : AntFarm, PayloadBody, PayloadHeader, TableCompletionHook,
-    Tier, Token, fatal;
+    Tier, Token, avgCostForChunk, fatal;
 import actors.actor : ActorSlot, cancelActorWavePayload,
     dispatchActorWavePayload, releaseActorWaveMembership,
     reserveActorWavePayload;
@@ -34,6 +34,8 @@ version (AntfarmActorTestHooks)
 private enum uint waveSealedBit = 1U << 0;
 private enum uint waveFinishedBit = 1U << 1;
 private enum uint waveFailedBit = 1U << 2;
+// Cost class of a published wave table: claims of 8 entries.
+private enum uint publishAvgCost = avgCostForChunk(8);
 
 // ==== Section: completion callback, hook and handle ====
 /// Signature of ActorWaveCompletionHook.call: invoked exactly once, after
@@ -201,9 +203,11 @@ public:
     /// The return value is the actor prefix accepted by that table; callers
     /// advance by it and retry on backpressure. A zero return with `failed`
     /// set means an actor was stale, non-idle, duplicated, or from another
-    /// Farm, and this wave should be sealed and discarded.
+    /// Farm, and this wave should be sealed and discarded. `avgCost` is the
+    /// table's Farm work-cost class (`0 .. MAX_AVG_COST`, consumers claim
+    /// `MAX_CHUNK >> avgCost` entries at a time); the default claims 8.
     size_t publish(alias operation, T)(scope ActorHandle!T[] actors,
-            ref Token token, uint avgCost = 2) nothrow @nogc @system
+            ref Token token, uint avgCost = publishAvgCost) nothrow @nogc @system
     {
         static assert(is(typeof(&operation) : void function(
                 scope ref ActorBorrow!T) nothrow @nogc @system),
