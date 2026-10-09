@@ -384,7 +384,7 @@ enum long SUBSCRIBE_FULL = -1;
 enum long SUBSCRIBE_RETRY = -2;
 /// Caller error: a null Farm, or a view that is already subscribed.
 enum long SUBSCRIBE_INVALID = -3;
-/// Spec 2b: preallocated leaf tallies per segment: ceiling square root of 128.
+/// Internal: spec 2b — preallocated leaf tallies per segment: ceiling square root of 128.
 enum MAX_LEAVES = 12;
 /// Spec 7a default small-table threshold. 0 at construction selects the
 /// auto rule so each shard gets at least one chunk.
@@ -477,13 +477,13 @@ enum KMAX = 16;
 /// the stride (not the natural ulong size) must carry the isolation.
 private enum size_t PROD_SLOT_STRIDE = 8;
 
-/// Spec 2b/6b: a subscriber reference lives in the most significant half of Rt.
+/// Internal: spec 2b/6b — a subscriber reference lives in the most significant half of Rt.
 enum ulong SUB = 1UL << 32;
-/// Spec 2b/6c: Sub0 is a counted pin in units of 2^16, not a bit.
+/// Internal: spec 2b/6c — Sub0 is a counted pin in units of 2^16, not a bit.
 enum ulong SUB0 = 1UL << 16;
-/// Mask for Rtlow (least significant half of Rt).
+/// Internal: mask for Rtlow (least significant half of Rt).
 enum ulong LOWMASK = 0xFFFF_FFFFUL;
-/// Mask for the active-consumer count bits within Rtlow (below the Sub0 bit).
+/// Internal: mask for the active-consumer count bits within Rtlow (below the Sub0 bit).
 enum ulong COUNTMASK = SUB0 - 1;
 /// Spec 2d: Done and MaxCs are capped so packed 16-bit fields cannot wrap
 /// through write().
@@ -501,12 +501,13 @@ version (AntfarmWriteAuditHooks)
 
 private enum ulong SENTINEL_XOR = 0x9E37_79B9_7F4A_7C15UL;
 
-/// Sentinel stored (release) as the first word of a table; computed from the
-/// 64-bit sequence pointing at the start of the table (spec 5c/Thead).
+/// Internal: sentinel stored (release) as the first word of a table; computed
+/// from the 64-bit sequence pointing at the start of the table (spec
+/// 5c/Thead).
 ulong sentinelOf(ulong seq) pure nothrow @nogc @safe { return seq ^ SENTINEL_XOR; }
 
-/// Spec 2b: square root with a minimum value of 1 for Cs <= 2, capped at the
-/// preallocated leaf count. ceil_sqrt(128) == 12.
+/// Internal: spec 2b — square root with a minimum value of 1 for Cs <= 2,
+/// capped at the preallocated leaf count. ceil_sqrt(128) == 12.
 uint sqcsOf(ulong cs) pure nothrow @nogc @safe
 {
     if (cs <= 2) return 1;
@@ -593,11 +594,19 @@ alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iter
 alias TableCompletionCallback = void function(void* context)
     nothrow @nogc @system;
 
+/// Optional exactly-once notification attached to one physical payload
+/// table by writeTracked. The Farm snapshots both fields before invoking
+/// `call(context)`, exactly once, on the consumer that advances that table's
+/// primary Tprogress to Tlen. The pointed-to storage must remain stable
+/// until invocation; see TableCompletionCallback for the full contract.
 struct TableCompletionHook
 {
+    /// Opaque argument passed back to `call`.
     void* context;
+    /// Invoked exactly once, on the consumer that completes the table.
     TableCompletionCallback call;
 
+    /// True when `call` is set, i.e. the hook participates in a write.
     @property bool valid() const pure nothrow @nogc @safe
     {
         return call !is null;
@@ -605,6 +614,13 @@ struct TableCompletionHook
 }
 
 /// Spec 2d: payload header, 16 ulongs (128 bytes) as laid out in the buffer.
+/// This is the public API type and the mixed/multithreaded ring layout: a
+/// table containing any multithreaded payload stores this header per
+/// payload. A compact all-single-threaded table stores only the Call word
+/// per record (SPEC.md section 2f; the callback then receives a
+/// consumer-local copy, not a ring header — see Callback). Producers set
+/// maxCs, done and call; plen is overwritten with the body length and
+/// pcount is runtime-owned.
 /// Call sits immediately after Pcount: it is dereferenced only after a valid
 /// claim is acquired (by the consumer that just wrote Pcount), so it can
 /// share Pcount's cache line without adding cross-thread traffic; with the
@@ -614,10 +630,10 @@ struct PayloadHeader
     uint maxCs;             /// maximum consumers per payload; 1 = single threaded
     uint done;              /// iterations to complete; 1 = single threaded
     ulong plen;             /// payload body length in ulongs
-    ulong[6] filler;
+    ulong[6] filler;        /// layout filler covering Pcount's cache line
     shared ulong pcount;    /// 32 MSB claims | 16 bits calls | 16 LSB completions
     Callback call;          /// work callback — claim-gated, shares Pcount's line
-    ulong[6] filler2;
+    ulong[6] filler2;       /// layout filler closing the 128-byte header
 }
 static assert(PayloadHeader.sizeof == 128);
 static assert(PayloadHeader.maxCs.offsetof == 0);
@@ -640,10 +656,13 @@ private enum ulong PCOMPACT_LEN = 1;
 static assert(Callback.sizeof == ulong.sizeof);
 static assert(PCOMPACT_LEN < PHEAD_LEN);
 
-/// Spec 2d.
+/// Spec 2d: one ready-to-publish job: the header to copy into the table
+/// (or a common header, for broadcast sources) and the body to append.
 struct PayloadEntry
 {
+    /// Configuration of this payload; the Farm copies it into the table.
     PayloadHeader* header;
+    /// Type-erased body words; copied after the header.
     PayloadBody body;
 }
 
@@ -668,15 +687,20 @@ private enum bool hasFixedPayloadLength(R) =
 /// argument storage.  The range ends when either input ends.
 struct PayloadPairRange(HR, BR)
 {
+    /// Internal: the header source this adapter zips.
     HR headers;
+    /// Internal: the body source this adapter zips.
     BR bodies;
     private PayloadHeader headerScratch;
 
+    /// True when either source is exhausted.
     @property bool empty() nothrow @nogc @system
     {
         return headers.empty || bodies.empty;
     }
 
+    /// The next PayloadEntry; header values are copied into scratch storage
+    /// when the source yields values rather than pointers.
     @property PayloadEntry front() nothrow @nogc @system
     {
         PayloadHeader* hp;
@@ -696,12 +720,14 @@ struct PayloadPairRange(HR, BR)
         return PayloadEntry(hp, cast(PayloadBody) bodies.front);
     }
 
+    /// Advance both sources by one element.
     void popFront() nothrow @nogc @system
     {
         headers.popFront();
         bodies.popFront();
     }
 
+    /// Checkpoint both sources when they are forward ranges.
     static if (isForwardRange!HR && isForwardRange!BR)
     {
         @property typeof(this) save() nothrow @nogc @system
@@ -715,6 +741,7 @@ struct PayloadPairRange(HR, BR)
 
     static if (hasLength!HR && hasLength!BR)
     {
+        /// The shorter of the two source lengths.
         @property size_t length() nothrow @nogc @system
         {
             immutable hn = cast(size_t) headers.length;
@@ -723,6 +750,7 @@ struct PayloadPairRange(HR, BR)
         }
     }
 
+    /// Pop up to `n` entries from both sources; returns how many were popped.
     size_t popFrontN(size_t n) nothrow @nogc @system
     {
         static if (hasLength!HR && hasLength!BR)
@@ -785,8 +813,10 @@ struct PayloadBroadcastRange(BR, bool fixedLength = false)
         return &hdr;
     }
 
+    /// True when the body source is exhausted.
     @property bool empty() nothrow @nogc @system { return bodies.empty; }
 
+    /// The next entry: the common header paired with the next body.
     @property PayloadEntry front() nothrow @nogc @system
     {
         auto body = cast(PayloadBody) bodies.front;
@@ -798,14 +828,17 @@ struct PayloadBroadcastRange(BR, bool fixedLength = false)
 
     static if (fixedLength)
     {
+        /// The uniform body length supplied at construction.
         @property ulong fixedPayloadLength() const pure nothrow @nogc @safe
         {
             return bodyWords;
         }
     }
 
+    /// Advance the body source by one element.
     void popFront() nothrow @nogc @system { bodies.popFront(); }
 
+    /// Checkpoint the body source when it is a forward range.
     static if (isForwardRange!BR)
     {
         @property typeof(this) save() nothrow @nogc @system
@@ -818,12 +851,14 @@ struct PayloadBroadcastRange(BR, bool fixedLength = false)
 
     static if (hasLength!BR)
     {
+        /// The body source's remaining length.
         @property size_t length() nothrow @nogc @system
         {
             return cast(size_t) bodies.length;
         }
     }
 
+    /// Pop up to `n` entries; returns how many were popped.
     size_t popFrontN(size_t n) nothrow @nogc @system
     {
         return bodies.popFrontN(n);
@@ -835,6 +870,8 @@ struct PayloadBroadcastRange(BR, bool fixedLength = false)
     // false abandons the write without making a table visible.
     static if (__traits(hasMember, BR, "prepareTableFrontN"))
     {
+        /// Transactional-source hook: called with the exact table prefix the
+        /// Farm will accept; false abandons this write attempt.
         bool prepareTableFrontN(size_t n) nothrow @nogc @system
         {
             return bodies.prepareTableFrontN(n);
@@ -861,7 +898,13 @@ auto broadcastPayloads(BR)(const ref PayloadHeader header, BR bodies,
 }
 
 /// Spec 4d: producer tiers.
-enum Tier : ubyte { small, bulk }
+enum Tier : ubyte
+{
+    /// Short-burst producers; the default tier with the small-table quota.
+    small,
+    /// Large-table producers with the segment-scale bulk quota.
+    bulk,
+}
 
 /// Spec 4d: registration ticket carrying the producer's private quota.
 /// The hash validates the slot; `farmId` binds the ticket to the Farm that
@@ -885,8 +928,11 @@ enum Tier : ubyte { small, bulk }
 /// the only handle to a registered slot. Unregister the old token first.
 struct Token
 {
+    /// The issuing tier; selects the quota validated on every write.
     Tier tier;
+    /// Dense slot index within that tier's ticket array.
     uint slot;
+    /// Nonzero while the token is valid; opaque, validated against the slot.
     ulong hash;
     /// Issuing Farm's identity (AntFarm.farmId). Binds the ticket to one
     /// Farm for that Farm's lifetime; a mismatch is fatal at every entry
@@ -894,6 +940,7 @@ struct Token
     private ulong farmId;
     private ulong quotaLeft;
 
+    /// True while this token is registered with its Farm.
     bool valid() const pure nothrow @nogc @safe { return hash != 0; }
 
     private this(Tier t, uint s, ulong h, ulong fid, ulong grant) pure nothrow @nogc @safe
@@ -941,14 +988,20 @@ struct Token
     }
 }
 
-/// Per-segment statistics (spec 2c). Padded to a cache line.
+/// Internal: per-segment statistics (spec 2c). Padded to a cache line.
 struct SegStats
 {
-    shared long es;     /// epoch currently occupying this segment; -1 = never written
-    shared ulong seqt;  /// sequence of the first valid payload table for that epoch
-    shared ulong cs;    /// snapshot of the number of consumers
-    shared ulong sqcs;  /// sqcsOf(cs)
-    shared ulong sd;    /// consumed-size accumulator: sum of completed table sizes
+    /// Internal: epoch currently occupying this segment; -1 = never written.
+    shared long es;
+    /// Internal: sequence of the first valid payload table for that epoch.
+    shared ulong seqt;
+    /// Internal: snapshot of the number of consumers.
+    shared ulong cs;
+    /// Internal: sqcsOf(cs).
+    shared ulong sqcs;
+    /// Internal: consumed-size accumulator: sum of completed table sizes.
+    shared ulong sd;
+    /// Internal: cache-line padding.
     ulong[3] pad;
 }
 static assert(SegStats.sizeof == 64);
@@ -1046,6 +1099,14 @@ private shared(ulong)* prodSlotQuota(shared(ulong)* hashes, size_t i) nothrow @n
 private shared ulong g_farmIssuance;
 
 // ==== Section: AntFarm (construction, registration, production) ====
+/// One fixed-capacity Farm: the dual-mapped ring plus its quota, tally and
+/// statistics state. Create it with create() and release it with destroy();
+/// a Farm is never copied or moved. The public fields are the immutable
+/// configuration published at create time and the live shared counters named
+/// in SPEC.md; callers read them but never write them.
+/// See_Also:
+///     SPEC.md (the algorithm and layout), ARCHITECTURE.md (sizing one
+///     Farm), docs/reference/actor-lifecycle.md (tokens and provenance)
 struct AntFarm
 {
     // ---- immutable configuration (spec 1, 4a) ----
@@ -1055,10 +1116,10 @@ struct AntFarm
     ulong kMask;        /// K - 1
     uint segShift;      /// log2(Ln / K)
     ulong segCap;       /// Ln / K segment capacity in ulongs
-    uint expectedConsumers;
-    uint maxBulk;
+    uint expectedConsumers; /// configuration hint for epoch 0's Cs/SqCs
+    uint maxBulk;           /// configured bulk producer slots
     ulong quotaBulk;    /// Exi for bulk producers
-    uint maxSmall;
+    uint maxSmall;           /// configured small producer slots
     ulong quotaSmall;   /// Exi for small producers
     ulong exmax;        /// Exmax: sum of all producer quotas (spec 4a)
     /// Small-table threshold (spec 7a): 0 selects the auto rule
@@ -1085,14 +1146,19 @@ struct AntFarm
     align(64) shared long Prsm;     /// current number of small producers
 
     // ---- producer tickets (spec 4d); 0 = free slot ----
+    /// Internal: bulk ticket array: slot hashes and quotas.
     shared(ulong)* prodHashBulk;
+    /// Internal: small ticket array: slot hashes and quotas.
     shared(ulong)* prodHashSmall;
     private ProducerMutex producerMutex;
 
     // ---- segment metadata (spec 2b/2c) ----
-    align(64) shared ulong[8][KMAX] Rt;              /// root tallies, one per segment
-    align(64) shared long[8][KMAX * MAX_LEAVES] Lt;  /// leaf tallies
-    align(64) SegStats[KMAX] stats;                  /// segment statistics
+    /// Internal: root tallies, one per segment.
+    align(64) shared ulong[8][KMAX] Rt;
+    /// Internal: leaf tallies.
+    align(64) shared long[8][KMAX * MAX_LEAVES] Lt;
+    /// Internal: segment statistics.
+    align(64) SegStats[KMAX] stats;
 
     // ------------------------------------------------------------------
     // Construction / destruction
@@ -1206,6 +1272,10 @@ struct AntFarm
         return f;
     }
 
+    /// Release the Farm. Fatal unless every consumer has unsubscribed and
+    /// every producer token has been unregistered; the caller must join all
+    /// threads that touched the Farm first. Unmaps the ring, frees the
+    /// ticket arrays and the Farm storage itself.
     void destroy() nothrow @nogc @system
     {
         if (atomicLoad!(MemoryOrder.raw)(Cf) != 0)
@@ -1229,7 +1299,8 @@ struct AntFarm
     // Registration (spec 4c, 4d, 6b, 6e)
     // ------------------------------------------------------------------
 
-    /// fetch-inc Cf; on success fetch-inc Reqs_c and return it (the IDc).
+    /// Internal: subscribe half used by ConsumerView.subscribe. fetch-inc Cf;
+    /// on success fetch-inc Reqs_c and return it (the IDc).
     /// Returns SUBSCRIBE_FULL if oversubscribed.
     long add_consumer() nothrow @nogc @system
     {
@@ -1242,6 +1313,7 @@ struct AntFarm
         return cast(long) atomicFetchAdd!(MemoryOrder.raw)(Reqs_c, 1);
     }
 
+    /// Internal: unsubscribe half used by ConsumerView.unsubscribe.
     /// Returns the previous Cf; when it returns 1 the caller is the last
     /// unsubscriber (spec 6e).
     long sub_consumer() nothrow @nogc @system
@@ -1834,6 +1906,8 @@ struct AntFarm
 
 // ==== Section: ConsumerView (claims, dispatch, reclamation) ====
 /// Unique, non-copyable cursor exclusively owned by one consumer at a time.
+/// See docs/guide/quickstart.md for who pumps and consumes, and
+/// docs/reference/actor-lifecycle.md for the completion contract.
 ///
 /// Held pins are a contiguous epoch range [oldestEi, newestEi] (equal when
 /// freshly subscribed). newestEi is the position: the segment of the last
@@ -1855,37 +1929,46 @@ struct ConsumerView
 {
     @disable this(this);
 
+    /// Internal: the subscribed Farm; null while unsubscribed.
     AntFarm* F;
-    ulong IDc;          /// from F.Reqs_c; targeting hint, not a leaf retarget (4c/6a; nudges 7d/7e)
-    ulong nextSeq;      /// sequence of the next table to read
-    ulong oldestEi;     /// first still-held epoch
-    ulong newestEi;     /// position epoch
-    uint[KMAX] ltiRing; /// Lti actually incremented at physical ki
+    /// Internal: from F.Reqs_c; targeting hint, not a leaf retarget (4c/6a; nudges 7d/7e)
+    ulong IDc;
+    /// Internal: sequence of the next table to read.
+    ulong nextSeq;
+    /// Internal: first still-held epoch.
+    ulong oldestEi;
+    /// Internal: position epoch.
+    ulong newestEi;
+    /// Internal: Lti actually incremented at physical ki.
+    uint[KMAX] ltiRing;
+    /// Internal: true between successful subscribe and unsubscribe.
     bool hasRef;
 
-    /// Carried sweeper role: set when this consumer completed a shard of the
-    /// previous table. Small tables concentrate all claims on shard 0
-    /// (7a), so under churn they may have no native consumer at all; a
-    /// carried sweeper sweeps a small next table regardless of its own
+    /// Internal: carried sweeper role: set when this consumer completed a
+    /// shard of the previous table. Small tables concentrate all claims on
+    /// shard 0 (7a), so under churn they may have no native consumer at all;
+    /// a carried sweeper sweeps a small next table regardless of its own
     /// shard assignment.
     bool sweeperNext;
 
-    /// Idle-path re-walk cursor (spec 8): sequence up to which the current
-    /// position segment has been drained. A park resumes from here —
+    /// Internal: idle-path re-walk cursor (spec 8): sequence up to which the
+    /// current position segment has been drained. A park resumes from here —
     /// O(new tables) per miss rather than O(tables in the segment). Reset
     /// when the position moves to a new segment.
     ulong sweepSeq;
 
-    /// Oldest-prefix release counter. With -d-version=SdCheckEveryN,
+    /// Internal: oldest-prefix release counter. With -d-version=SdCheckEveryN,
     /// tryReleaseOldest() runs every SD_CHECK_EVERY_N table advances
     /// instead of after every table. Default N = 1 (eager).
     uint sdCheckCounter;
 
+    /// Internal: physical slot of the current position epoch.
     uint posKi() nothrow @nogc @system
     {
         return cast(uint)(newestEi & F.kMask);
     }
 
+    /// Internal: leaf tally this view incremented for epoch `ei`.
     uint ltiOf(ulong ei) nothrow @nogc @system
     {
         return ltiRing[cast(uint)(ei & F.kMask)];

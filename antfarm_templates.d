@@ -183,10 +183,13 @@ struct PayloadArgRangeImpl(alias fn, bool withIteration, AR)
         return &hdr;
     }
 
+    /// The compile-time packed body width of every element.
     enum ulong fixedPayloadLength = packedLen!(fn, withIteration);
 
+    /// True when the argument source is exhausted.
     @property bool empty() nothrow @nogc @system { return args.empty; }
 
+    /// The next payload entry, packed on demand from the current element.
     @property PayloadEntry front() nothrow @nogc @system
     {
         static if (packedParams!(fn, withIteration).length == 0)
@@ -208,8 +211,10 @@ struct PayloadArgRangeImpl(alias fn, bool withIteration, AR)
         return PayloadEntry(&hdr, bodyBuf[]);
     }
 
+    /// Advance the argument source by one element.
     void popFront() nothrow @nogc @system { args.popFront(); }
 
+    /// Checkpoint the argument source when it is a forward range.
     static if (isForwardRange!AR)
     {
         @property typeof(this) save() nothrow @nogc @system
@@ -222,12 +227,14 @@ struct PayloadArgRangeImpl(alias fn, bool withIteration, AR)
 
     static if (hasLength!AR)
     {
+        /// The argument source's remaining length.
         @property size_t length() nothrow @nogc @system
         {
             return cast(size_t) args.length;
         }
     }
 
+    /// Pop up to `n` arguments; returns how many were popped.
     size_t popFrontN(size_t n) nothrow @nogc @system
     {
         return args.popFrontN(n);
