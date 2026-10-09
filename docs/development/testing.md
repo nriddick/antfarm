@@ -16,7 +16,7 @@ lists every target.
 
 | Lane | What runs | Compilers |
 | --- | --- | --- |
-| Docs links | `make check-docs`: tracked Markdown relative links and heading anchors (no network) | Python 3 |
+| Docs links | `make check-docs`: tracked Markdown relative links and heading anchors (no network), plus `scripts/check-api-docs.py`, the API symbol/coverage check over the Ddoc of the public runtime modules | Python 3, DMD |
 | Root suite | `dub test` (module `unittest` blocks plus `antfarm_test.d`) | LDC, DMD |
 | Farm ordering | `make check-farm-ordering`: controlled subscription/reclamation schedules and the leaf-reuse test, with write-audit hooks | LDC, DMD |
 | Farm TSan | `make run-farm-tsan`: the root suite and `leaf_reuse.d` under ThreadSanitizer | LDC |

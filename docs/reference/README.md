@@ -2,66 +2,96 @@
 
 The D source comments are authoritative for signatures, parameters, results,
 calling thread, fatal conditions, memory visibility, and lifetimes. This page
-is a topic index: it maps a topic to the source symbol that documents it and to
-the guide or design page that explains it. It is not a second signature
-catalog.
+is a topic index: it maps a topic to the source symbols that document it and
+to the guide page that explains it. It is not a second signature catalog.
 
-Generate local HTML reference from the repository root:
+Generate the local HTML reference from the repository root with:
 
 ```sh
-mkdir -p /tmp/antfarm-ddoc
-dmd -D -Dd/tmp/antfarm-ddoc -o- -I. \
-  antfarm.d antfarm_templates.d \
-  actors/package.d actors/actor.d actors/wave.d actors/private_actor.d
+make docs
 ```
 
-Ddoc omits declarations that carry no doc comment, and exposes the package
-re-exports through `actors/package.d`. The public surface is reached with
-`import antfarm;`, `import antfarm_templates;`, or `import actors;`.
+which runs DMD's Ddoc generator into the ignored `.build/docs/` directory
+(start with `.build/docs/antfarm.html`). The same works wherever DMD exists,
+Windows included, with the raw command:
+
+```sh
+dmd -D -Dd.build\docs -o- -version=AntfarmMimallocV3 -I. antfarm.d antfarm_templates.d actors\package.d actors\actor.d actors\wave.d actors\private_actor.d actors\mimalloc.d
+```
+
+Ddoc omits declarations that carry no doc comment, so the generated pages
+cover every public declaration of the runtime modules. `make check-docs`
+verifies that: every symbol named in the Symbol column of the table on this
+page exists in the DMD declaration inventory, and every public declaration
+in those modules carries a non-empty Ddoc comment. The public surface is
+reached with `import antfarm;`, `import antfarm_templates;`, or
+`import actors;`.
 
 ## Farm
 
-| Topic | Symbol | Explanation |
+| Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Ring construction and tuning | `AntFarm.create`, `AntFarm` | [ARCHITECTURE.md](../../ARCHITECTURE.md#sizing-one-farm) |
-| Consumer cursor | `ConsumerView` | [actor-lifecycle.md](actor-lifecycle.md#consumers-and-views) |
-| Producer tickets | `Token`, `Tier` | [actor-lifecycle.md](actor-lifecycle.md#tokens-and-farm-provenance) |
-| Payload adapters | `PayloadBody`, `Callback`, `PayloadHeader`, `PayloadEntry`, `pairPayloads`, `broadcastPayloads` | [SPEC.md](../../SPEC.md), [README First payload](../../README.md#first-payload) |
-| Generated payload shims | `antfarm_templates` (`payloadRange`, `payloadEntry`, `argsConvert`) | [SPEC.md](../../SPEC.md) |
-| Huge pages | `AntFarm.usedLargePages`, `hugePages` | [guide/sizing-and-allocation.md](../guide/sizing-and-allocation.md#memory-backing) |
+| Ring construction, tuning and destruction | `AntFarm.create`, `AntFarm.destroy`, `MIN_RING_MIB`, `MAX_RING_MIB`, `ringMiBFromUlongs` | [ARCHITECTURE.md](../../ARCHITECTURE.md#sizing-one-farm) |
+| Producer tickets and registration | `Token`, `Token.valid`, `Tier`, `AntFarm.registerProducer`, `AntFarm.unregisterProducer`, `SUBSCRIBE_FULL`, `SUBSCRIBE_RETRY`, `SUBSCRIBE_INVALID` | [actor-lifecycle.md](actor-lifecycle.md#tokens-and-farm-provenance) |
+| Writing payload tables | `AntFarm.write`, `AntFarm.writeTracked`, `PayloadEntry` | [actor-lifecycle.md](actor-lifecycle.md) |
+| Payload layout and callbacks | `PayloadBody`, `Callback`, `PayloadHeader`, `TableCompletionCallback`, `TableCompletionHook` | [SPEC.md](../../SPEC.md), [README First payload](../../README.md#first-payload) |
+| Payload range adapters | `pairPayloads`, `broadcastPayloads`, `PayloadPairRange`, `PayloadBroadcastRange` | [SPEC.md](../../SPEC.md) |
+| Consumers and views | `ConsumerView`, `ConsumerView.subscribe`, `ConsumerView.unsubscribe`, `ConsumerView.consumeNext` | [actor-lifecycle.md](actor-lifecycle.md#consumers-and-views) |
+| Work-cost hints | `rootCostHintAuto`, `rootCostHintFor`, `MAX_CHUNK`, `MAX_AVG_COST` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md) |
+| Huge pages | `AntFarm.usedLargePages`, `DEFAULT_HUGE_PAGES`, `DEFAULT_SMALL_TABLE_THRESHOLD` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md#memory-backing) |
 
 ## Public actors
 
-| Topic | Symbol | Explanation |
+| Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Runtime and slot capacity | `ActorRuntime` | [public-actors.md](../guide/public-actors.md) |
-| Ownership and identity | `ActorOwner`, `ActorHandle` | [public-actors.md](../guide/public-actors.md) |
-| Callback borrow and context | `ActorBorrow`, `ActorContext` | [design/public-actor-ordering.md](../design/public-actor-ordering.md) |
-| Inbox nodes and outcomes | `ActorInboxNode`, `ActorNodeOutcome` | [public-actors.md](../guide/public-actors.md#inbox) |
-| Wake/send/retire/reclaim results | `ActorWakeResult`, `ActorSendResult`, `ActorRetireResult`, `ActorRetireMode`, `ActorReclaimResult` | [actor-lifecycle.md](actor-lifecycle.md) |
+| Runtime and slot capacity | `ActorRuntime.create`, `ActorRuntime.capacity`, `ActorRuntime.live`, `ActorRuntime.ready`, `ActorRuntime.flush`, `ActorRuntime.destroy`, `ActorRuntime.erasedAdapter` | [public-actors.md](../guide/public-actors.md) |
+| Ownership and identity | `ActorOwner`, `ActorOwner.handle`, `ActorOwner.intoErased`, `ActorHandle` | [public-actors.md](../guide/public-actors.md) |
+| Callback borrow and context | `ActorBorrow`, `ActorContext`, `ActorContext.popInbox` | [design/public-actor-ordering.md](../design/public-actor-ordering.md) |
+| Inbox nodes and outcomes | `ActorInboxNode`, `ActorInboxNode.initialize`, `ActorInboxNode.complete`, `ActorInboxNode.fail`, `ActorInboxNode.cancel`, `ActorNodeOutcome` | [public-actors.md](../guide/public-actors.md#inbox) |
+| Wake and send statuses | `ActorWakeResult`, `ActorSendResult` | [actor-lifecycle.md](actor-lifecycle.md) |
+| Retirement and reclamation | `ActorRetireMode`, `ActorRetireResult`, `ActorOwner.requestRetire`, `ActorOwner.reclaim`, `ActorReclaimResult` | [actor-lifecycle.md](actor-lifecycle.md) |
 | Type-erased resident adapter | `ActorErasedAdapter`, `ActorErasedOwner`, `ActorErasedHandle`, `ActorErasedBorrow`, `ActorErasedHandler` | [public-actors.md](../guide/public-actors.md#resident-type-erased-adapter) |
-| Phase waves | `ActorWave`, `ActorWaveHandle`, `ActorWaveCompletionHook` | [public-actors.md](../guide/public-actors.md#waves) |
+
+## Actor waves
+
+| Topic | Symbols | Explanation |
+| --- | --- | --- |
+| Wave lifecycle and publication | `ActorWave`, `ActorWave.begin`, `ActorWave.publish`, `ActorWave.seal` | [public-actors.md](../guide/public-actors.md#waves) |
+| Observation and completion | `ActorWaveHandle`, `ActorWaveHandle.finished`, `ActorWaveCompletionHook` | [public-actors.md](../guide/public-actors.md#waves) |
 
 ## Private actors
 
-| Topic | Symbol | Explanation |
+| Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Root park and options | `PrivateRootPark`, `PrivateRootOptions`, `defaultPrivateBatchLimit` | [private-actors.md](../guide/private-actors.md) |
+| Root park and options | `PrivateRootPark`, `PrivateRootOptions`, `defaultPrivateBatchLimit`, `PrivateRootReclamation` | [private-actors.md](../guide/private-actors.md) |
+| Root scheduling | `PrivateRootPark.spawn`, `PrivateRootPark.collectCompleted`, `PrivateRootPark.pump`, `PrivateRootPark.live`, `PrivateRootPark.destroy` | [private-actors.md](../guide/private-actors.md) |
+| Root dispositions | `PrivateRootDisposition` | [private-actors.md](../guide/private-actors.md#the-cohort-api) |
 | Child cohort park | `PrivateChildPark`, `PrivateCohortOptions`, `PrivateStateStorage` | [private-results-and-waits.md](../guide/private-results-and-waits.md) |
-| Callback borrow and context | `PrivateBorrow`, `PrivateContext` | [private-actors.md](../guide/private-actors.md) |
-| Root disposition | `PrivateRootDisposition` | [private-actors.md](../guide/private-actors.md#the-cohort-api) |
-| Child step and disposition | `PrivateChildStep`, `PrivateChildDisposition` | [private-results-and-waits.md](../guide/private-results-and-waits.md#resumable-child-folds) |
-| Spawn/start results | `PrivateSpawnResult`, `PrivateStartResult` | [outcomes-and-cancellation.md](../guide/outcomes-and-cancellation.md#progress-and-outcomes) |
-| Wave outcomes | `PrivateWaveOutcome`, `PrivateOutcomeStatus`, `PrivateCancelCause` | [guide/outcomes-and-cancellation.md](../guide/outcomes-and-cancellation.md) |
-| Tracked roots | `PrivateRootHandle`, `PrivateRootOutcome`, `PrivateCancelResult` | [outcomes-and-cancellation.md](../guide/outcomes-and-cancellation.md#root-tracking-and-deadlines) |
+| Cohort waves and results | `PrivateChildPark.spawn`, `PrivateChildPark.start`, `PrivateChildPark.startSubset`, `PrivateChildPark.startFinal`, `PrivateChildPark.finished`, `PrivateChildPark.outcome`, `PrivateChildPark.results`, `PrivateChildPark.subsetMembers`, `PrivateWaveOutcome` | [private-results-and-waits.md](../guide/private-results-and-waits.md) |
+| Child steps and dispositions | `PrivateChildStep`, `PrivateChildDisposition` | [private-results-and-waits.md](../guide/private-results-and-waits.md#resumable-child-folds) |
+| Borrow and context | `PrivateBorrow`, `PrivateContext`, `PrivateContext.createChildren`, `PrivateContext.fail`, `PrivateContext.cancelled`, `PrivateContext.cancelChildren`, `PrivateContext.cancelPeers` | [private-actors.md](../guide/private-actors.md) |
+| Spawn and start statuses | `PrivateSpawnResult`, `PrivateStartResult` | [outcomes-and-cancellation.md](../guide/outcomes-and-cancellation.md#progress-and-outcomes) |
+
+## Tracked roots and cancellation
+
+| Topic | Symbols | Explanation |
+| --- | --- | --- |
+| Tracking options and outcomes | `PrivateRootOptions`, `PrivateRootOutcome`, `PrivateOutcomeStatus`, `PrivateRootPark.takeOutcome`, `PrivateRootPark.cancelAll` | [outcomes-and-cancellation.md](../guide/outcomes-and-cancellation.md#root-tracking-and-deadlines) |
+| Handles and deadlines | `PrivateRootHandle`, `PrivateRootHandle.index`, `PrivateRootHandle.requestCancel`, `PrivateCancelResult`, `PrivateCancelCause` | [outcomes-and-cancellation.md](../guide/outcomes-and-cancellation.md#root-tracking-and-deadlines) |
 
 ## Allocation
 
-| Topic | Symbol | Explanation |
+| Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Allocator interface | `ActorAllocator` | [guide/sizing-and-allocation.md](../guide/sizing-and-allocation.md#allocators) |
-| GC-rooted adapter | `ActorAllocator.gcRooted` | [guide/sizing-and-allocation.md](../guide/sizing-and-allocation.md#gc-references) |
-| Real mimalloc v3 adapter | `mimallocV3ActorAllocator` | [guide/sizing-and-allocation.md](../guide/sizing-and-allocation.md#the-mimalloc-v3-adapter) |
+| Allocator interface | `ActorAllocator`, `ActorAllocate`, `ActorDeallocate`, `ActorAllocator.cRuntime` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md#allocators) |
+| GC-rooted adapter | `ActorAllocator.gcRooted` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md#gc-references) |
+| Real mimalloc v3 adapter | `mimallocV3ActorAllocator` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md#the-mimalloc-v3-adapter) |
+
+## Generated payload shims
+
+| Topic | Symbols | Explanation |
+| --- | --- | --- |
+| Function adaptation | `payloadEntry`, `payloadEntryRuntime`, `callbackFor`, `initPayloadHeader`, `payloadRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [README First payload](../../README.md#first-payload) |
 
 ## Contracts
 
