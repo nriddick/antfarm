@@ -108,8 +108,7 @@ are in [perftest/README.md](perftest/README.md).
 - Cancellation is cooperative. No final public callback is guaranteed.
 - Deferred: typed root outputs, external wake of a waiting root, timers,
   per-member retirement, concurrent subsets, non-POD results, adopted actor
-  storage, and engine wake integration (see [ROADMAP.md](ROADMAP.md) and
-  [docs/guide/public-actors.md](docs/guide/public-actors.md)).
+  storage, and engine wake integration (see [ROADMAP.md](ROADMAP.md)).
 
 ## Development milestones
 
@@ -120,5 +119,50 @@ These are not published releases; no tags were created for them.
 - **1.7.0-rc.5** (completion joins, October 2026): the shard-completion and
   public wave-credit fixes above.
 
-Earlier candidates (1.7.0-rc.1 to rc.4) and the 1.6 line are described in
-[ROADMAP.md](ROADMAP.md).
+Earlier candidates (1.7.0-rc.1 to rc.4) and the 1.6 line are recorded here for
+history. They were development milestones, not published releases.
+
+### 1.7.0 candidates
+
+- **1.7.0-rc.4 — usability and shutdown fixes:** `AntFarm.create`'s first
+  parameter became `ringMiB` (a power of two in `[2, MAX_RING_MIB]`) instead of
+  a ulong length; `ConsumerView.subscribe` failures became distinguishable
+  (`SUBSCRIBE_FULL` -1, `SUBSCRIBE_RETRY` -2, `SUBSCRIBE_INVALID` -3);
+  `PoolOptions.workerStop` runs once on each worker during shutdown so
+  worker-owned consumers unsubscribe deterministically;
+  `CacheAwarePool.shutdown(bool drain)` was deprecated; assigning over a
+  still-registered producer `Token` became fatal; generated payload shims
+  require implicit argument conversion; an `ANTFARM_HUGE_PAGES` value other
+  than `0` or `1` became fatal; Fiber `unittest`/`stress` keep asserts in
+  `--build=release`; and a Fiber ready-lane accounting race that the
+  stripped asserts had hidden was fixed.
+- **1.7.0-rc.3 — lifecycle performance:** consolidated the host-audit fixes
+  (swept quota grants, serialized producer registration, armed waits,
+  fresh-segment protection checks in every build) with actor lifecycle
+  optimizations (bounded ready-queue snapshots, linear actor creation and
+  backlog scans, reused table ownership for single-shot payload admission, and
+  optional pinned mimalloc v3.5.3 linking).
+- **1.7.0-rc.2 — specification:** [SPEC.md](SPEC.md) was rewritten as one
+  synthesized living specification of the current algorithm, replacing the
+  separate edit notes.
+- **1.7.0-rc.1 — actor waves:** made `actors` a directly onboarded work
+  representation alongside bare payloads and Fibers: explicit non-GC actor
+  ownership, generation-tagged handles, exclusive callback-local borrowing,
+  coalesced autonomous activation, intrusive inboxes, sealed multi-table
+  waves, and Fiber generation triggers for dependent phases.
+
+### 1.6 line
+
+- **1.6.1 — Windows integration:** patched the Fiber cache-line allocator to
+  use the same Microsoft CRT-safe 64-byte allocation path as the core Farm,
+  avoiding a C11 `aligned_alloc` import unavailable in DMD's Microsoft runtime
+  bindings. Verified on Windows x64 on 2026-08-30.
+- **1.6.0 — objective and scope:** shipped the unified Ant Farm, cache-aware
+  threadpool, and migrating Fiber scheduler as one repository. Required
+  generic `write()` sources to be forward ranges; added common-header and
+  fixed-body-length write forms; routed Fiber ready activations through the
+  fixed one-word path; defaulted Farms to 4 KiB backing with huge pages as an
+  explicit option; removed the experimental Fiber parallel-loop API with no
+  replacement compatibility promise; made each README an onboarding document;
+  and kept examples as real compile targets. Cross-package release gates ran
+  on 2026-08-29 on the Linux/Ryzen 5 5500 host.

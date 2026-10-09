@@ -1,246 +1,93 @@
 # Ant Farm roadmap
 
-The current development line targets **1.8.0-rc.1**. The 1.7.0-rc.5 and
-1.7.1-rc.1 headings below are development milestones, not published releases;
-[CHANGELOG.md](CHANGELOG.md) lists what the candidate contains. Windows
-validation follows the release candidate and is not part of its local gate.
+The current development line targets **1.8.0-rc.1**. This page lists remaining
+and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
+no history here. Windows validation follows the release candidate and is not
+part of its local gate.
 
-## 1.7.1-rc.1 private actors (development milestone)
+## 1.8.0-rc.1
 
-Adds self-owned roots, parent-owned child cohorts, and joined descendant
-lifetimes, with typed spawn/start results, fatal authority checks, configurable
-root and child batches, and compiled onboarding and owned-results examples.
-The completed slices below ship in the 1.8.0-rc.1 candidate; no tag has been
-created for them yet. The Farm shard-completion join and public actor-wave completion credits landed
-in 1.7.0-rc.5 and are prerequisites for this release.
+- Finish the documentation restructuring: every major rule has one named owner
+  in [docs/README.md](docs/README.md), the local docs link check passes, and the
+  three reader journeys work from the README.
+- Measure the RC performance numbers and write the root
+  [PERFORMANCE.md](PERFORMANCE.md) from fresh measurements at the RC commit.
+  Historical measurements stay archived outside the repository.
+- Run and record the local Linux `make check` at the RC revision with LDC and
+  DMD, including the documentation-example and compiled-example lanes.
+- Cut the release: switch the version banners in [README.md](README.md) and
+  [ARCHITECTURE.md](ARCHITECTURE.md) and the [CHANGELOG.md](CHANGELOG.md)
+  heading together with the tag.
 
-See [the ownership contract](docs/guide/private-actors.md).
+## Deferred after the RC
 
-- **E1 done:** root-only `waitChildren` resumes once after all direct waves and
-  descendants join; `finishAfterChildren` retires after the join without another
-  user callback. Strict `finish` with active children remains fatal. Notifications
-  return through the existing emitter pump; child Entries remain 40 bytes.
-- **E2 ports slice 1 done:** POD return values populate cohort-owned per-member
-  slots in spawn order; authorized parents acquire joined results, including
-  after member retirement. Signal-only cohorts allocate no result slots and retain their dispatch.
-- **E2-1 done:** private state moves, consumer-only post-order destruction, and
-  the composable `ActorAllocator.gcRooted` adapter. Public state and results
-  remain POD.
-- **E2-2 done:** opt-in subset waves with `uint` spawn indices, copied selections,
-  participant-ordered results and the existing descendant join. Subsets never
-  retire members; one wave remains active per cohort. Entry stays 40 bytes.
-- **Port extensions:** X1 root-to-application outputs (X1a status/identity
-  done in F3; typed X1b deferred); X2 library reductions;
-  X3 bounded append buffers; X4 writer capability / in-place results.
-- **E2 complete except emitter wake:** E2-3 provides shared wave scheduling and
-  E2-4 resumes child operations after descendant joins within the same wave,
-  including result folds, subsets and deferred `startFinal` cleanup. Entry stays
-  40 bytes; continuations publish only through the emitter pump.
-- **F1 wave outcomes done:** members report domain failure with `context.fail`.
-  The wave keeps a report count and one consistent code/position pair, read
-  through `outcome` after the join. Root `fail` on an untracked park stays
-  fatal; F3 tracks it. No version bump.
-- **F4a public node outcomes done:** `ActorNodeOutcome`, `node.fail(code)` and
-  `node.cancel()` use the reserved completion word. Node stays 32 bytes and
-  `send` is unchanged.
-- **F4b public cancel retirement done:** `requestRetire(ActorRetireMode.cancel)`
-  and drain-to-cancel escalation set a sticky lifecycle bit that every
-  nonterminal rebuild preserves. Handlers see `context.cancelling` and call
-  `cancelInbox()`. It is cooperative, with no guaranteed final handler call.
-- **F2 in-tree cancellation done:** `park.cancel`, `cancelChildren`,
-  `cancelPeers` and `context.cancelled`. The emitter truncates a cancelled
-  wave at a table boundary; `startFinal` retires the rest through cleanup
-  tables. Resumptions and joins are unchanged. Entry stays 40 bytes.
-- **F3 root tracking done:** opt-in per-root records give thread-safe
-  `PrivateRootHandle.requestCancel`, `cancelAll`, lazy `MonoTime` deadlines,
-  tracked root `fail`, and pull-based X1a outcomes through `takeOutcome`,
-  which recycles the slot. A tracked drain pumps and takes outcomes.
-  Untracked parks are unchanged apart from one branch per spawn, collection
-  and cancel check. Entry stays 40 bytes.
-- **Outcomes and cancellation (F1–F5) complete.** F5 docs and examples:
-  [docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md#shutdown-recipe)
-  has the shared shutdown recipe, and the compiled lane in
-  [examples/](examples/README.md) adds a deadline request service, a
-  `fail` + `cancelPeers` fail-fast fold, and a fiber `cancelAt` bridge.
-- **Outcomes and cancellation deliberately deferred:** X1b typed root
-  outputs; timed or external wake of a waiting private root as a join credit;
-  an emitter-owned timer source; per-wave deadlines; public `sendAfter` and
-  actor timers; supervision/retry policies; a guaranteed public final
-  activation; and `PrivateRootHandle` hashing (handles are compared by `==`,
-  not used as map keys).
-- **RF2 opt-in cohort slabs done:** `PrivateStateStorage.cohortSlab` reserves
-  a zeroed per-cohort state slab under an explicit byte cap, passed to its own
-  `createChildren` overload. Slots are reused after the retiring join and the
-  slab is freed once at disposal. Allocation failure moves from spawn to
-  create. Measured with six consumers: about 99% fewer cross-thread frees,
-  +49–51% on tree and tree-wait, +32% with refills. Code without slabs is
-  `.text`-identical, and the default gate passes. RF1 screened mimalloc
-  options with no runtime change. Owner-batching reclamation remains a
-  separate later experiment.
-- **Next:** per-member retirement, concurrent subsets, non-POD results, and
-  optional emitter wake.
+Committed compatibility limits and features that are deliberately not in the
+RC. The actor API is supported release-candidate functionality; these surfaces
+are not promised yet.
 
-## 1.7.0-rc.5 completion joins (development milestone)
+- Typed root-to-application outputs (X1b). Put them in application storage
+  reached from `T` and read after `takeOutcome` until then.
+- Timed or external wake of a waiting private root as a join credit, and an
+  emitter-owned timer source. Private deadlines stay lazy until then.
+- Per-wave deadlines, public `sendAfter`, and actor timers.
+- Supervision/retry policies and a guaranteed public final activation. Public
+  retirement stays cooperative with no guaranteed last callback.
+- `PrivateRootHandle` hashing (handles compare by `==`, they are not map keys).
+- Per-member retirement, concurrent subsets, and non-POD child results.
+- Adopted/arena-owned actor storage, retirement groups/fences, and reserve/
+  prewarm APIs. Arena safety must not rely on transitive compiler lifetime
+  inference; reserve/prewarm must report exhaustion explicitly rather than fall
+  back to hidden allocation; and arena reset must be guarded by an aggregate
+  retirement fence.
+- Engine wake integration between the ready queue and Farm publication. Keep the
+  ready-queue and Farm-publication notification boundaries separate; notify only
+  after the release-publication, and treat the notification as a nudge that
+  workers recheck; target an execution lane, not a per-actor owner; use a
+  setup-time wake-set handle rather than the single-owner `Director` selection
+  API. Until then, `flush()` plus the application's own notification is
+  sufficient.
+- Engine-owned module-generation reload. The engine owns the close/migrate/
+  retire/unload sequence; old-generation handles never redirect silently to the
+  replacement generation.
+- Custom mailbox adapters. A future adapter surface must not weaken generation
+  admission or retirement.
+- Long-running resident-memory characterization and Windows static/shared link
+  coverage for the mimalloc adapter.
 
-Fixes two public completion bugs that were still on 1.7.0-rc.4:
+## Post-RC platform and validation work
 
-- Tracked single-shot shard completion uses an acquire/release RMW, so a
-  table hook or wave observer acquires every primary-run callback's plain
-  writes, including chunks the finisher did not run. A relaxed completion
-  sum joined only the finisher's writes. Secondary and tertiary MT callbacks
-  are not part of that join.
-- Public wave completion no longer treats progress equality as a descriptor
-  lifetime fence. A producer hold plus one credit per admitted table keeps
-  the descriptor alive until each holder's last access. `finished` still
-  does not join the optional user completion callback; that context must
-  outlive the callback.
-
-## 1.7.0-rc.4 usability and shutdown fixes
-
-Behavior changes since 1.7.0-rc.3:
-
-- `AntFarm.create`'s first parameter is now `ringMiB`, the ring size in MiB
-  (a power of two in `[2, MAX_RING_MIB]`), instead of `ln` in ulongs. Divide a
-  former length by 131072, or use `ringMiBFromUlongs`. A leftover ulong
-  length such as `1 << 18` exceeds `MAX_RING_MIB` and is fatal rather than
-  mapping 256 GiB.
-- `ConsumerView.subscribe` failures are distinguishable: `SUBSCRIBE_FULL`
-  (-1, 128 views already subscribed), `SUBSCRIBE_RETRY` (-2, transient
-  frontier), and `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed).
-- `PoolOptions.workerStop` runs once on each `workerBody` worker during
-  shutdown so worker-owned consumers can unsubscribe deterministically. The
-  examples previously relied on a final pump visit and could abort with
-  "destroy with live consumers" under load.
-- `CacheAwarePool.shutdown(bool drain)` is deprecated; it never drained. Use
-  `shutdown()`.
-- Assigning over a still-valid producer `Token` is fatal instead of silently
-  leaking its slot.
-- Generated payload shims require implicit argument conversion. Narrowing or
-  mutable-to-`immutable` pointer arguments no longer compile.
-- An `ANTFARM_HUGE_PAGES` value other than `0` or `1` is fatal.
-- The Fiber `unittest` and `stress` configurations keep `assert` checks in
-  `--build=release`.
-- Fixed a Fiber ready-lane accounting race that the release-stripped asserts
-  had hidden: `flush` counted published activations only after `write()`
-  returned, so a consumer could enter one first and drive `published`
-  negative. With asserts enabled, release stress hung in about a third of
-  runs; it now counts before publishing and retracts the unwritten tail.
-
-## 1.7.0-rc.3 lifecycle performance
-
-Consolidates the host-audit fixes (swept quota grants, serialized producer
-registration, armed waits, fresh-segment protection checks in every build)
-with actor lifecycle optimizations: bounded ready-queue snapshots, linear actor
-creation and backlog scans, reused table ownership for single-shot payload
-admission, and optional pinned mimalloc v3.5.3 linking through Dub. Measured
-results are in [perftest/](perftest/README.md).
-
-## 1.7.0-rc.2 specification
-
-[SPEC.md](SPEC.md) was rewritten as one synthesized living specification of
-the current algorithm, replacing the separate edit notes.
-
-## 1.7.0-rc.1 actor waves
-
-Make `actors` a directly onboarded work representation alongside bare
-payloads and Fibers. The release candidate includes explicit non-GC actor
-ownership, generation-tagged handles, exclusive callback-local borrowing,
-coalesced autonomous activation, intrusive inboxes, sealed multi-table waves,
-and Fiber generation triggers for dependent phases.
-
-Verified on 2026-09-02 on the current Linux/Ryzen 5 5500 host:
-
-- [x] Root unit tests pass under DMD and LDC.
-- [x] The forced actor deterministic-interleaving, aggregate unload-fence,
-  sustained-contention, and allocator-adapter suite passes under LDC.
-- [x] Fiber unit tests and the LDC release stress suite, including actor-wave
-  generation handoff, pass.
-- [x] Root onboarding and architecture distinguish autonomous actors, actor
-  waves, bare payloads, and suspendable Fiber control flow.
-
-## 1.6.1 Windows integration
-
-Patch the Fiber cache-line allocator to use the same Microsoft CRT-safe
-64-byte allocation path as the core Farm. The shared allocator avoids a C11
-`aligned_alloc` import that is unavailable in DMD's Microsoft runtime bindings
-and keeps allocation and deallocation paired on every supported platform.
-
-Verified on 2026-08-30 on Windows x64:
-
-- [x] Root, threadpool, and Fiber unit tests pass under DMD 2.112.1 and LDC
-  1.42.0.
-- [x] The Fiber LDC release stress configuration passes.
-- [x] The review torture and T19 flood/lap suites pass under DMD and LDC.
-- [x] T01 and T17 remain POSIX-only fork/abort probes; ThreadSanitizer remains
-  unavailable in the Windows LDC runtime (`Scoped EH not supported`).
-
-## 1.6.0 objective
-
-Ship the unified Ant Farm, cache-aware threadpool, and freely migrating Fiber
-scheduler as one understandable repository with a passing cross-package build
-matrix. Version 1.6 prioritizes a small coherent public surface over retaining
-experiments.
-
-## 1.6.0 scope
-
-- Treat `antfarm`, `threadpool`, and `antfarm-fibers` as ordinary packages in
-  one repository, not Git submodules.
-- Require generic `write()` sources to be forward ranges so sizing and
-  emission always use independent checkpoints.
-- Provide common-header and fixed-body-length write forms for homogeneous
-  payload batches.
-- Route Fiber ready activations through the fixed one-word write path.
-- Default Farms to ordinary 4 KiB backing while retaining huge pages as an
-  explicit, benchmark-driven option for high-volume payloads.
-- Remove the experimental Fiber parallel-loop API, descriptor, completion
-  bridge, and tests. There is no replacement compatibility promise in 1.6.
-- Make each README an onboarding document and keep the full layer relationship
-  in `ARCHITECTURE.md`.
-- Keep examples as real compile targets; identify characterization programs as
-  benchmarks rather than onboarding.
-
-## Release gates
-
-Verified on 2026-08-29 on the current Linux/Ryzen 5 5500 host:
-
-- [x] Root unit tests pass under DMD and LDC.
-- [x] The 4K default and forced huge-page override pass the root suite; an
-  unset override reports `usedLargePages=false` through the Fiber benchmark.
-- [x] Threadpool captured-topology tests pass under DMD and LDC.
-- [x] Fiber smoke passes under DMD and LDC debug, plus LDC release and
-  release-debug.
-- [x] Fiber stress passes under DMD and LDC release.
-- [x] Root torture and supported ThreadSanitizer tests pass.
-- [x] Every example and benchmark configuration builds under DMD and LDC.
-- [x] `examples/iota_sum.d`, threadpool hello programs, and Fiber hello execute on
-  supported local hardware.
-- [x] Documentation contains one roadmap, no stale command paths, and no claim
-  that a currently failing matrix passes.
-- [x] Release notes call out the forward-range requirement and removal of the
-  experimental parallel-loop API.
-
-## After 1.6.0
-
-- Cross the multi-LLC hardware validation bridge before making remote-lane
-  performance or failover guarantees.
+- Windows x64 validation by hand: root, threadpool and Fiber unit tests, the
+  review torture and T19 flood/lap suites, and allocator pairing. A Windows pass
+  is not claimed until it is run. Known limits: T01 and T17 are POSIX-only
+  fork/abort probes, and ThreadSanitizer is unavailable in the Windows LDC
+  runtime (`Scoped EH not supported`).
+- Multi-LLC hardware validation. The software model supports one lane per LLC,
+  but current characterization hardware has one LLC; topology-specific
+  performance, lost-worker-group and remote-sweeper claims wait for that bridge.
+- Fiber ThreadSanitizer migration remains a known external limitation at the
+  DRuntime stack-switch boundary; the Fiber gate stays the DMD/LDC smoke,
+  release, deterministic-migration and repeated-stress matrix.
 - Profile multi-producer cold Fiber admission before deciding whether stack
-  preparation or moving mmap outside the admission lock is justified.
-- Add higher-level synchronization or task-group facilities only in response
-  to concrete application ownership and shutdown requirements.
-- Evaluate an explicit actor/exclusive-borrow payload handle without making
-  ring bodies mutable or weakening the default shim policy. Its design must
-  define actor lifetime and rooting, one-activation serial ownership,
-  republish ordering, stale-handle behavior, and interaction with thread-safe
-  mailboxes. A non-GC A1/A2 evaluation spike now covers the exclusive borrow,
-  intrusive inbox admission, close-before-drain retirement, deterministic
-  interleaving torture, a pinned mimalloc v3.5.3 adapter with cross-thread
-  reclamation tests, and sealed multi-table actor waves with dependent-phase
-  visibility; its remaining
-  promotion gates are in [docs/guide/public-actors.md](docs/guide/public-actors.md).
-- Reconsider bounded parallel work from first principles, with explicit
-  lifetime, completion, cancellation, error, and allocation contracts.
+  preparation or moving `mmap` outside the admission lock is justified.
+- Add higher-level synchronization or task-group facilities only in response to
+  concrete application ownership and shutdown requirements.
 
-The sanitizer/runtime boundary for migrating DRuntime Fibers remains a known
-external limitation. Until stack-switch-aware sanitizer evidence is available,
-the Fiber concurrency gate is the DMD/LDC smoke, release, deterministic
-migration, and repeated stress matrix.
+## Actor API promotion gates
+
+The release-candidate compatibility limits are lifted only when all of these
+hold (the current implementation satisfies most of them; the list is the bar for
+a stability promise):
+
+- The default shim policy and ring ABI are unchanged.
+- Handlers use the exact `scope ref ActorBorrow!T` and `scope ref ActorContext`
+  callback contract, and documentation does not claim this makes an `@system`
+  escape impossible.
+- A long run with the GC disabled completes without actor-path allocation.
+- Allocator counters show zero warm-path allocations and balanced cold-path
+  reclamation.
+- Concurrent entry instrumentation never observes two borrows for one actor.
+- A stale handle remains safe after state reclamation and slot reuse.
+- Mailbox retirement races have deterministic, documented outcomes.
+- Arena reset is guarded by an aggregate retirement fence.
+- Shutdown detects live owners, queued activations, producer submissions, or
+  unreclaimed state rather than silently freeing underneath them.
