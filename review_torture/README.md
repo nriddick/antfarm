@@ -4,7 +4,7 @@ Adversarial tests + code review for `antfarm.d` (`SPEC.md`).
 
 ## Build & run
 
-From `construction/`:
+From the repository root:
 
 ```
 make -C review_torture

@@ -1,9 +1,9 @@
 # Ant Farm architecture
 
-Ant Farm 1.7.1-rc.1 is one repository with four cooperating packages. They
-separate transport, worker placement, stateful identities, and suspendable
-control flow so an application can choose the narrowest representation for
-each kind of work.
+Ant Farm's current development line targets 1.8.0-rc.1. It is one repository
+with four cooperating packages. They separate transport, worker placement,
+stateful identities, and suspendable control flow so an application can choose
+the narrowest representation for each kind of work.
 
 ```text
 application
@@ -27,8 +27,13 @@ The Farm owns a fixed-size, virtually double-mapped ring. Producers reserve
 quota and publish complete tables; consumers independently claim chunks. Work
 is not FIFO and a false `consumeNext()` result may be a temporary hole.
 
-The hot API is `@nogc nothrow`. Payload callbacks receive a copied 128-byte
-header, a body of packed ulongs, and an iteration number. A payload may be
+The hot API is `@nogc nothrow`. Payload callbacks receive a
+`PayloadHeader*` (the type is 128 bytes), a body of packed ulongs, and an
+iteration number. Multi-threaded payloads and mixed tables keep the full header
+in the ring. Tables whose payloads are all single-threaded store compact
+records without a ring header, so the callback instead sees a temporary
+consumer-local header: callbacks must not modify it or retain the pointer after
+returning ([SPEC.md section 2f](SPEC.md#2f-compact-st-tables)). A payload may be
 serial or countable/multiconsumer, but construction and completion policy stay
 with the caller.
 
@@ -67,8 +72,9 @@ values (`context.fail`), in-tree cancellation is cooperative
 (`park.cancel`, `cancelChildren`, `cancelPeers`), and an opt-in tracked park
 adds thread-safe root cancellation, lazy deadlines, and pull-based terminal
 outcomes. State may be non-POD; the stored instance is destroyed exactly once.
-There are no public handles and no access to
-child state. Use this path for an exclusive hierarchy; use public actors for
+There is no general submission handle, no external
+identity for a child, and no access to child state; a tracked root exposes only
+a cancellation/status handle. Use this path for an exclusive hierarchy; use public actors for
 independently addressed services and externally selected waves. Shared
 lifecycle rules are in [actors/LIFECYCLE.md](actors/LIFECYCLE.md).
 
@@ -198,6 +204,22 @@ segments. The ring holds `ringMiB * 131072` ulongs, so that limit is
 `(k - 1) * ringMiB * 131072 / k` ulongs, and every payload must fit one table
 within its producer's quota.
 
+### How many entries fit a quota
+
+A table spends its quota on fixed overhead plus a per-entry cost. The overhead
+is the table header and padding and grows with the table's work-shard count
+(eight ulongs per shard counter), which follows the consumer count. In a table
+whose payloads are all single-threaded, each entry costs one index word, one
+callback word, and its body words. Once an accepted prefix contains a
+multi-threaded payload, each entry instead carries the full 16-word payload
+header ahead of its body, and each multi-threaded entry also takes a second
+index word (the multi-threaded index). The number of entries admitted per quota therefore depends on the shard
+count, the body width, and whether any entry is multi-threaded. Do not copy a
+count from another configuration: compute it from the table layout in
+[SPEC.md section 2f](SPEC.md#2f-compact-st-tables), or probe the configuration
+you intend to run. `write() == 0` and a short accepted prefix are ordinary
+backpressure, and the surplus is written by a later call.
+
 - The ring should generally fit the intended LLC working set. Quotas and
   payload sizes remain in ulongs (8 bytes); only the ring size is in MiB.
   `ringMiBFromUlongs` converts a former ulong length exactly.
@@ -226,7 +248,7 @@ owned by one locality.
 Current characterization hardware has one LLC. Multi-LLC validation is a
 bridge that must be crossed before topology-specific performance, loss of a
 native worker group, or remote-sweeper claims are treated as release evidence.
-It is not emulated away and it is not a blocker for the 1.7 release-candidate
+It is not emulated away and it is not a blocker for the 1.8.0-rc.1
 single-LLC contract.
 
 ## Shutdown order

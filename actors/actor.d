@@ -1,5 +1,5 @@
 /++
- + Experimental non-GC actor activations for Ant Farm.
+ + Non-GC actor activations for Ant Farm.
  +
  + Actor state lives outside the ring in caller-allocator storage. The ring
  + carries only a stable control-slot address and generation to one permanent
@@ -7,11 +7,11 @@
  + state; only the trampoline can construct an `ActorBorrow` after winning the
  + slot's scheduled-to-running transition.
  +
- + This is the A1 vertical slice described by ACTOR_ROADMAP.md. Construction is
- + deliberately restricted to POD state while the ownership and publication
- + protocol is evaluated. The A2 slice adds allocator-neutral intrusive actor
- + inboxes and submission reservations. Adopted storage, general placement
- + construction, and aggregate retirement fences remain follow-on work.
+ + See ACTOR_ROADMAP.md for the contract and its compatibility limits.
+ + Construction is restricted to POD state, and the provided intrusive actor
+ + inboxes are allocator-neutral with submission reservations. Adopted storage,
+ + general placement construction, and aggregate retirement fences remain
+ + deferred.
  +/
 module actors.actor;
 

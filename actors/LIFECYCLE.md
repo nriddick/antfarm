@@ -29,9 +29,11 @@ batch you actually publish.
 
 Private root batches and the Farm quota are different knobs. The park's
 configured batch limit fixes how many root-table slots are reserved.
-`pump(token, limit)` may use a smaller limit; that does not add slots. The
-default small quota of 4096 ulongs admits roughly 225 one-word private
-entries per table. A larger configured batch is split into accepted prefixes.
+`pump(token, limit)` may use a smaller limit; that does not add slots. How
+many private entries one table admits per quota depends on the Farm's shard
+count and the entry's body width; see
+[How many entries fit a quota](../ARCHITECTURE.md#how-many-entries-fit-a-quota).
+A larger configured batch is split into accepted prefixes.
 Child waves inherit the creating context's limit unless creation passes an
 override.
 
@@ -304,8 +306,10 @@ with an inbox, several event sources, or actors an external orchestrator
 selects into an `ActorWave`. The owner retires and reclaims; handles do not
 extend state lifetime. Waves are how external code names the set.
 
-Use a private hierarchy when one conductor owns the tree. There is no public
-handle, no inbox, and no way for a sibling or the emitter to read child state.
+Use a private hierarchy when one conductor owns the tree. There is no
+general submission handle, no inbox, no external identity for a child, and no
+way for a sibling or the emitter to read child state. Tracked roots expose
+only a cancellation/status handle.
 The parent authorizes whole-cohort or subset waves, children can fold
 descendant results inside one enclosing wave, and the root joins with
 `waitChildren` instead of polling. That is the cheaper path for an exclusive

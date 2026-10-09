@@ -1,11 +1,17 @@
 # Ant Farm roadmap
 
-## 1.7.1-rc.1 private actors
+The current development line targets **1.8.0-rc.1**. The 1.7.0-rc.5 and
+1.7.1-rc.1 headings below are development milestones, not published releases;
+`CHANGELOG.md` lists what the candidate contains. Windows
+validation follows the release candidate and is not part of its local gate.
+
+## 1.7.1-rc.1 private actors (development milestone)
 
 Adds self-owned roots, parent-owned child cohorts, and joined descendant
 lifetimes, with typed spawn/start results, fatal authority checks, configurable
 root and child batches, and compiled onboarding and owned-results examples.
-The Farm shard-completion join and public actor-wave completion credits landed
+The completed slices below ship in the 1.8.0-rc.1 candidate; no tag has been
+created for them yet. The Farm shard-completion join and public actor-wave completion credits landed
 in 1.7.0-rc.5 and are prerequisites for this release.
 
 See [the ownership contract](actors/PRIVATE_ACTORS.md) and
@@ -73,11 +79,9 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md) and
   options with no runtime change. Owner-batching reclamation remains a
   separate later experiment.
 - **Next:** per-member retirement, concurrent subsets, non-POD results, and
-  optional emitter wake. No version
-  bump accompanies these slices; the release remains 1.7.1-rc.1 pending a tag
-  decision.
+  optional emitter wake.
 
-## 1.7.0-rc.5 completion joins
+## 1.7.0-rc.5 completion joins (development milestone)
 
 Fixes two public completion bugs that were still on 1.7.0-rc.4:
 

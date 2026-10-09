@@ -832,7 +832,7 @@ tables must be in flight.
 ### Work-cost hints
 
 The trailing `avgCost` argument is the Farm work-cost class the table
-publishes (`write`'s `avgCost`, spec 5e-g): consumers claim a table in runs of
+publishes (`write`'s `avgCost`, SPEC 7a): consumers claim a table in runs of
 `MAX_CHUNK >> avgCost` entries, and a table below the small-table threshold is
 claimed wholesale by shard 0. With no hint — the default
 `rootCostHintAuto` — `pump` derives the class per table with
@@ -870,8 +870,10 @@ extra child dispatch storage. Zero is fatal; overflowing member capacity
 returns null. Values above 256 are legal for both roots and children.
 
 The Farm producer tier bounds actual admission. Its default small quota is
-4096 ulongs, enough for about 225 one-word private entries in a table with one
-shard. A larger batch is split into accepted prefixes and requeued suffixes.
+4096 ulongs; how many private entries that admits in one table depends on the
+shard count and the entry's body width (see
+[How many entries fit a quota](../ARCHITECTURE.md#how-many-entries-fit-a-quota)).
+A larger batch is split into accepted prefixes and requeued suffixes.
 To admit larger tables, configure a larger `quotaSmall`, or configure a bulk
 producer (`maxBulk` / `quotaBulk`) and register a `Tier.bulk` token. All quotas
 must still fit the Farm's segment and total producer-quota constraints.

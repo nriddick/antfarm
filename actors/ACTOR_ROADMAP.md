@@ -170,7 +170,10 @@ dispatch:
   actor operations, structural duplicate/overlap rejection, and dependent-wave
   visibility tests.
 
-This is evaluation code, not a stable public contract. Adopted/arena-owned
+The public actor API is supported release-candidate functionality in the
+1.8.0-rc.1 line. Its compatibility limits are: source and ABI stability are
+not promised across release candidates, state is POD, ownership is manual and
+`@system`, and the surfaces listed next are deferred. Adopted/arena-owned
 state, non-POD destruction, retirement groups, custom inbox adapters,
 long-running allocator memory characterization, and engine wake integration
 remain open below.
@@ -265,12 +268,13 @@ Acquiring that state joins actor writes from every table in the wave.
 
 ## API direction
 
-The concrete spelling is experimental, but the responsibilities should remain
-separate:
+The responsibilities below are separate, supported surfaces. This sketch is
+illustrative rather than compiled source; spelling may still change between
+release candidates:
 
 ```d
 auto runtime = ActorRuntime.create(farm, capacity, allocator);
-auto owner = runtime.createActor!(State, runActor)(constructorArgs);
+auto owner = runtime.createActor!(State, runActor)(initial); // POD copy
 ActorHandle!State handle = owner.handle;
 
 handle.wake();                    // queued/coalesced/wave-owned/stale/closed
@@ -496,8 +500,8 @@ future adapter surface without weakening generation admission or retirement.
 
 This integration is deliberately lower priority than completing the allocator,
 construction, and retirement contracts in A3. Explicit `flush()` followed by
-the application's existing threadpool notification remains sufficient while
-the actor surface is experimental.
+the application's existing threadpool notification remains sufficient until
+engine wake integration lands.
 
 There are two notification boundaries to keep distinct. An idle actor becoming
 scheduled first publishes a slot to `ActorRuntime`'s ready queue; this may need
@@ -559,7 +563,7 @@ destruction.
 
 ## Promotion gates
 
-The experimental actor API is ready for broader use only when:
+The actor API's release-candidate compatibility limits are lifted only when:
 
 - The default shim policy and ring ABI are unchanged.
 - Actor handlers use the exact `scope ref ActorBorrow!T` and

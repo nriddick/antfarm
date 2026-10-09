@@ -560,6 +560,12 @@ else
 alias PayloadBody = const(ulong)[];
 
 /// Spec 5f: decodes Pbody and executes an iteration of work.
+///
+/// `head` is valid only for the duration of the call and must not be modified
+/// or retained. For a payload in a table of single-threaded payloads it points
+/// to a consumer-local copy shared by the run's callbacks (SPEC.md section 2f,
+/// compact ST tables), not to a ring header; multi-threaded payloads and mixed
+/// tables point into the ring.
 alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration) nothrow @nogc @system;
 
 /// Low-level notification attached to one physical payload table. The Farm

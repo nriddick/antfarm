@@ -2,7 +2,7 @@
  + Private actors. Roots have scheduling custody in a single-
  + emitter park; children have one private parent and run only in its waves.
  + The emitter reads metadata, never actor state. See PRIVATE_ACTORS.md for
- + the @system borrowing contract and the deliberately limited first slice.
+ + the @system borrowing contract.
  +/
 module actors.private_actor;
 
@@ -1505,8 +1505,8 @@ private struct ResumeBodies
 }
 
 /// Opaque homogeneous cohort. The parent may create members and request a
-/// whole-cohort wave, but can never borrow a child's state. No overlapping
-/// waves, external dispatches, removal, or reparenting in this first slice.
+/// whole-cohort or subset wave, but can never borrow a child's state. There
+/// are no overlapping waves, external dispatches, removal, or reparenting.
 /// storage selects per-member allocation or one reserved state slab; see
 /// PrivateStateStorage.
 struct PrivateChildPark(T, R = void, PrivateStateStorage storage = PrivateStateStorage.perObject)
