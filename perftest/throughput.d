@@ -15,6 +15,8 @@
  + selecting arithmetic sizing without inspecting body fronts.
  + `--full-header-size` sizes the quota-fit check with the pre-compact
  + 16-word PayloadHeader, for runs against runtimes before SPEC 2f.
+ + `--mixed-calls` alternates the PayloadEntry pool between two equivalent
+ + callbacks, so every table has two Calls and is never uniform (SPEC 2g).
  +/
 module throughput;
 
@@ -32,6 +34,7 @@ __gshared shared(int) g_stop;
 __gshared shared(int) g_ready;
 __gshared bool g_globalCount;   // --global-count: old one-global-atomic callback
 __gshared bool g_fullHeaderSize; // --full-header-size: pre-compact singleton sizing
+__gshared bool g_mixedCalls;     // --mixed-calls: two Calls per PayloadEntry table
 
 enum WriteMode : ubyte
 {
@@ -67,6 +70,19 @@ long benchCbLocal(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @sy
         *p = 0;
     }
     return 1;
+}
+
+/// benchCbLocal's twin for --mixed-calls; a distinct function so tables that
+/// alternate the two are not uniform.
+long benchCbLocalAlt(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+{
+    auto p = workerCalls();
+    if (++(*p) >= LOCAL_FLUSH)
+    {
+        atomicFetchAdd(g_calls, cast(long) *p);
+        *p = 0;
+    }
+    return 2;
 }
 
 long benchCbGlobal(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
@@ -311,7 +327,7 @@ Trial runOnce(Cfg c)
     auto f = AntFarm.create(ringMiBFromUlongs(c.ln), c.k, c.nc, c.nb, qb, c.ns, c.qs, c.small, c.huge);
 
     immutable poolN = c.batch < 256 ? 256 : c.batch;
-    auto headers = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);
+    auto headers = cast(PayloadHeader*) malloc(2 * PayloadHeader.sizeof);
     auto body = cast(ulong*) malloc(c.body * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(poolN * PayloadEntry.sizeof);
     auto bodies = cast(PayloadBody*) malloc(poolN * PayloadBody.sizeof);
@@ -329,11 +345,13 @@ Trial runOnce(Cfg c)
     headers.maxCs = 1;
     headers.done = 1;
     headers.call = g_globalCount ? &benchCbGlobal : &benchCbLocal;
+    headers[1] = headers[0];
+    headers[1].call = &benchCbLocalAlt;
     foreach (i; 0 .. c.body)
         body[i] = i;
     foreach (i; 0 .. poolN)
     {
-        entries[i].header = headers;
+        entries[i].header = g_mixedCalls && (i & 1) ? headers + 1 : headers;
         entries[i].body = body[0 .. c.body];
         bodies[i] = body[0 .. c.body];
     }
@@ -530,6 +548,11 @@ Cfg parseArgs(string[] args, Cfg base)
             g_fullHeaderSize = true;
             continue;
         }
+        if (a == "--mixed-calls")
+        {
+            g_mixedCalls = true;
+            continue;
+        }
         if (a == "--constant-header")
         {
             c.writeMode = WriteMode.constantHeader;
@@ -585,7 +608,8 @@ void banner(ref const Cfg c)
     immutable bytes = c.ln * 8.0 / (1024.0 * 1024.0);
     printf("Ant Farm throughput  Ln=%llu (%.1f MiB)  repeats=%u  callback=%s  write=%s  huge=%s\n",
            cast(ulong) c.ln, bytes, c.repeats,
-           g_globalCount ? "global-atomic".ptr : "per-worker-batched".ptr,
+           g_mixedCalls ? "mixed-two-calls".ptr :
+               (g_globalCount ? "global-atomic".ptr : "per-worker-batched".ptr),
            c.writeMode == WriteMode.payloadEntry ? "payload-entry".ptr :
                (c.writeMode == WriteMode.constantHeader ?
                     "constant-header".ptr : "constant-callandlength".ptr),
