@@ -9,7 +9,7 @@
 # `actor_torture`, `antfarm_test`). New tests stay on druntime threads and
 # atomics; this matrix itself is the Linux gate.
 
-.PHONY: help check check-docs check-soak check-mimalloc farm-tsan run-farm-tsan perf-gate
+.PHONY: help check check-docs check-soak check-mimalloc farm-tsan run-farm-tsan docs perf-gate
 
 # `help` is the first rule, so name the default goal explicitly.
 .DEFAULT_GOAL := check
@@ -21,6 +21,7 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
   make check               full matrix, LDC and DMD, stops at the first failure
                            (bare `make` runs this)
   make check-docs          tracked Markdown relative links and anchors (no network)
+                           plus the API reference symbol/coverage check (needs DMD)
   make check-farm-ordering Farm ordering and leaf-reuse tests, LDC and DMD
   make run-farm-tsan       Farm suite under ThreadSanitizer (LDC)
   make -C actor_torture run run-dmd run-tsan
@@ -30,6 +31,10 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
   make -C private_actor_tests run run-dmd run-tsan doc-example death
                            private actor suite, doc programs and death tests
   make -C examples check   README payload program and the actor examples
+
+Reference (needs DMD):
+  make docs               generate the HTML API reference into .build/docs/
+                          (ignored; open .build/docs/antfarm.html first)
 
 Longer or optional (not run by make check):
   make check-soak          private-actor TSan loop for at least 121 s
@@ -52,6 +57,7 @@ check:
 check-docs:
 	python3 scripts/check-doc-links.py
 	python3 -B scripts/test_check_doc_links.py
+	python3 scripts/check-api-docs.py
 
 check-soak:
 	./scripts/check.sh --soak
@@ -70,6 +76,18 @@ farm-tsan: $(FARM_TSAN_SOURCES) review_torture/leaf_reuse.d
 
 run-farm-tsan: farm-tsan
 	./scripts/run-farm-tsan.sh
+
+# Generated HTML API reference. DMD creates the -Dd output directory
+# itself, so the recipe is a single dmd exec with no shell metacharacters.
+# mimalloc is included with its own version so the optional allocator
+# adapter appears in the reference without a C dependency.
+DOCS_SOURCES := antfarm.d antfarm_templates.d \
+	actors/package.d actors/actor.d actors/wave.d actors/private_actor.d \
+	actors/mimalloc.d
+DOCS_DIR := .build/docs
+
+docs:
+	dmd -D -Dd$(DOCS_DIR) -o- -version=AntfarmMimallocV3 -I. $(DOCS_SOURCES)
 
 # Standalone timing gate; intentionally outside the correctness matrix.
 PERF_GATE_OUTPUT ?= /tmp/antfarm-perf-gate
