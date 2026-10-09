@@ -134,7 +134,7 @@ registration, armed waits, fresh-segment protection checks in every build)
 with actor lifecycle optimizations: bounded ready-queue snapshots, linear actor
 creation and backlog scans, reused table ownership for single-shot payload
 admission, and optional pinned mimalloc v3.5.3 linking through Dub. Measured
-results are in [writeup.md](writeup.md) and [perftest/](perftest/README.md).
+results are in [perftest/](perftest/README.md).
 
 ## 1.7.0-rc.2 specification
 
