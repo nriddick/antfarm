@@ -36,6 +36,8 @@ private enum uint waveFinishedBit = 1U << 1;
 private enum uint waveFailedBit = 1U << 2;
 
 // ==== Section: completion callback, hook and handle ====
+/// Signature of ActorWaveCompletionHook.call: invoked exactly once, after
+/// the wave has published `finished`, with the hook's context.
 alias ActorWaveCompletionCallback = void function(void* context)
     nothrow @nogc @system;
 
@@ -48,7 +50,9 @@ alias ActorWaveCompletionCallback = void function(void* context)
 /// without separate synchronization.
 struct ActorWaveCompletionHook
 {
+    /// Opaque argument passed back to `call`.
     void* context;
+    /// Invoked exactly once, after the wave's finished publication.
     ActorWaveCompletionCallback call;
 }
 
@@ -60,17 +64,22 @@ struct ActorWaveHandle
     private ActorWave* wave_;
     private ulong generation_;
 
+    /// The generation this handle observes.
     @property ulong generation() const pure nothrow @nogc @safe
     {
         return generation_;
     }
 
+    /// True while the observed generation still owns the wave storage.
     @property bool valid() const nothrow @nogc @system
     {
         if (wave_ is null || generation_ == 0) return false;
         return atomicLoad!(MemoryOrder.acq)(wave_.generation_) == generation_;
     }
 
+    /// True when the observed generation has finished. An acquire load that
+    /// observes finished also observes every actor operation in the wave;
+    /// completion-hook tails may still be running.
     @property bool finished() const nothrow @nogc @system
     {
         if (wave_ is null || generation_ == 0) return false;
@@ -82,6 +91,8 @@ struct ActorWaveHandle
             && (status & waveFinishedBit) != 0;
     }
 
+    /// True when a wave operation observed a stale, non-idle or foreign
+    /// actor and the wave should be discarded after draining.
     @property bool failed() const nothrow @nogc @system
     {
         if (wave_ is null || generation_ == 0) return false;
@@ -92,6 +103,7 @@ struct ActorWaveHandle
         return after == generation_ && (status & waveFailedBit) != 0;
     }
 
+    /// Tables completed by the observed generation so far.
     @property ulong progress() const nothrow @nogc @system
     {
         if (wave_ is null || generation_ == 0) return 0;
@@ -103,6 +115,7 @@ struct ActorWaveHandle
         return after == generation_ ? result : 0;
     }
 
+    /// Tables published by the observed generation so far.
     @property ulong length() const nothrow @nogc @system
     {
         if (wave_ is null || generation_ == 0) return 0;
@@ -125,6 +138,8 @@ struct ActorWaveHandle
 /// autonomous activation from borrowing that actor generation in parallel.
 /// Intrusive membership and its lifetime pin remain until aggregate finish,
 /// including after an individual actor's table has completed.
+/// See_Also:
+///     docs/guide/public-actors.md (waves), docs/design/public-actor-ordering.md
 align(64) struct ActorWave
 {
     @disable this(this);

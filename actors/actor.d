@@ -41,15 +41,26 @@ import core.stdc.string : memcpy, memset;
 /// in which case per-object deallocation may intentionally do nothing.
 alias ActorAllocate = void* function(void* context, size_t bytes,
     size_t alignment) nothrow @nogc @system;
+/// The matching deallocation half of ActorAllocator. `memory`, `bytes` and
+/// `alignment` repeat the values passed to `allocate`.
 alias ActorDeallocate = void function(void* context, void* memory,
     size_t bytes, size_t alignment) nothrow @nogc @system;
 
+/// Value-type allocator vtable: one context pointer plus the allocate and
+/// deallocate halves. Copyable and equality-free; pass it by value to
+/// runtime and park constructors. `valid` checks that both halves are set.
+/// See_Also:
+///     docs/guide/sizing-and-allocation.md (choosing an allocator)
 struct ActorAllocator
 {
+    /// Opaque state passed back to both function pointers.
     void* context;
+    /// Allocation half; returns null on failure.
     ActorAllocate allocate;
+    /// Deallocation half; must free what `allocate` returned.
     ActorDeallocate deallocate;
 
+    /// True when both function pointers are set.
     @property bool valid() const pure nothrow @nogc @safe
     {
         return allocate !is null && deallocate !is null;
@@ -103,37 +114,65 @@ private void cRuntimeDeallocate(void*, void* memory, size_t, size_t)
     freeAligned64(memory);
 }
 
+/// Typed result of ActorHandle.wake and ActorErasedHandle.wake. No result
+/// is fatal; every failure leaves the actor's lifecycle untouched.
 enum ActorWakeResult : ubyte
 {
+    /// The actor was idle and this call published its activation.
     queued,
+    /// The actor was already scheduled or running; the activation persists.
     coalesced,
+    /// A wave currently owns this actor generation; retry after the wave.
     waveOwned,
+    /// The handle's generation no longer matches the actor (or is invalid).
     staleHandle,
+    /// The actor is retiring or retired; admission is closed.
     closed,
 }
 
+/// Typed result of ActorHandle.send and ActorErasedHandle.send. On every
+/// value other than `queued`/`coalesced` the node was not transferred.
 enum ActorSendResult : ubyte
 {
+    /// The node was accepted and this call published the activation.
     queued,
+    /// The node was accepted; the actor was already scheduled or running.
     coalesced,
+    /// A wave currently owns this actor generation; retry after the wave.
     waveOwned,
+    /// The handle's generation no longer matches the actor (or is invalid).
     staleHandle,
+    /// The actor is retiring or retired; admission is closed.
     closed,
+    /// The node was null or not in its caller-defined free state.
     nodeBusy,
 }
 
+/// Terminal state of one inbox interaction, read after the sender observes
+/// the node available again. Initialization alone is not a reply.
 enum ActorNodeOutcome : ubyte
 {
+    /// The actor returned the node with ActorInboxNode.complete.
     completed,
+    /// The actor returned the node with fail(code).
     failed,
+    /// The actor returned the node with ActorInboxNode.cancel.
     cancelled,
 }
 
+/// Typed result of ActorOwner.requestRetire and ActorErasedOwner.requestRetire.
 enum ActorRetireResult : ubyte
 {
+    /// Retirement in the requested mode is recorded; a drain request on an
+    /// actor already draining or cancelling also returns requested. See
+    /// ActorRetireMode for what each mode does with accepted interactions.
     requested,
+    /// A wave currently owns this actor generation; retry after the wave.
     waveOwned,
+    /// Returned for a cancel request on an already-cancelling actor, or for
+    /// any request once the actor is retired.
     alreadyRetired,
+    /// The owner's generation no longer matches the actor (or is invalid).
     staleOwner,
 }
 
@@ -142,14 +181,22 @@ enum ActorRetireResult : ubyte
 /// cooperative, and the library never discards nodes itself.
 enum ActorRetireMode : ubyte
 {
+    /// Close admission, then retire once accepted interactions are handled.
     drain,
+    /// Also mark the generation cancelling so handlers cancel remaining
+    /// inbox nodes instead of processing them.
     cancel,
 }
 
+/// Typed result of ActorOwner.reclaim and ActorErasedOwner.reclaim.
 enum ActorReclaimResult : ubyte
 {
+    /// The POD state was deallocated and the slot is reusable; the owner
+    /// became invalid.
     reclaimed,
+    /// The actor has not retired yet, or a wave still holds membership.
     busy,
+    /// The owner's generation no longer matches the actor (or is invalid).
     staleOwner,
 }
 
@@ -220,12 +267,16 @@ private enum uint inboxNodeProcessing = 2;
 /// application fields; the node itself must remain stable from a successful
 /// send until the actor calls `complete`, `fail`, or `cancel`, or takes ownership
 /// of its storage. A node may belong to only one inbox at a time.
+/// See_Also:
+///     docs/guide/public-actors.md (inbox usage and the ownership contract)
 struct ActorInboxNode
 {
     private shared size_t nextWord_;
     private shared uint state_;
     private uint completion_;
+    /// Application payload pointer; never touched by the library.
     void* payload;
+    /// Application tag; never touched by the library.
     ulong tag;
 
     /// Initialize freshly allocated, caller-exclusive storage. Do not call
@@ -240,6 +291,8 @@ struct ActorInboxNode
         tag = initialTag;
     }
 
+    /// True while the node is in its caller-defined free state, i.e. not
+    /// queued for or owned by an actor.
     @property bool available() const nothrow @nogc @system
     {
         return atomicLoad!(MemoryOrder.acq)(state_) == inboxNodeFree;
@@ -301,6 +354,8 @@ static assert(ActorInboxNode.sizeof == 32
 /// Callback-local control. Actor handlers receive this as `scope ref`.
 /// Requests take effect only after the application callback returns and its
 /// ActorBorrow has ended.
+/// See_Also:
+///     docs/guide/public-actors.md, docs/reference/actor-lifecycle.md
 struct ActorContext
 {
     private bool republish_;
@@ -308,7 +363,12 @@ struct ActorContext
     private ActorSlot* slot_;
     private ActorInboxNode* inboxLocal_;
 
+    /// Request that this actor be scheduled again after the callback
+    /// returns (for example because the handler deferred part of its work).
     void republish() pure nothrow @nogc @safe { republish_ = true; }
+
+    /// Request that this actor retire after the callback returns. The
+    /// handler must still drain or cancel its accepted interactions.
     void retire() pure nothrow @nogc @safe { retire_ = true; }
 
     /// True after external or callback-local retirement has closed this
@@ -359,6 +419,7 @@ struct ActorBorrow(T)
     package T* state_;
     @disable this(this);
 
+    /// The actor state for the duration of this callback.
     @property ref T value() return nothrow @nogc @system
     {
         return *state_;
@@ -376,6 +437,9 @@ struct ActorErasedBorrow
     private size_t stateAlignment_;
     @disable this(this);
 
+    /// The type-erased actor state for the duration of this callback.
+    /// The requested POD type must exactly match the size and alignment
+    /// supplied at creation; any mismatch is fatal.
     @property ref T value(T)() return nothrow @nogc @system
     {
         static assert(__traits(isPOD, T),
@@ -385,11 +449,13 @@ struct ActorErasedBorrow
         return *cast(T*) state_;
     }
 
+    /// The state size recorded at creation.
     @property size_t stateSize() const pure nothrow @nogc @safe
     {
         return stateSize_;
     }
 
+    /// The state alignment recorded at creation.
     @property size_t stateAlignment() const pure nothrow @nogc @safe
     {
         return stateAlignment_;
@@ -465,21 +531,29 @@ static assert(ActorSlot.alignof == 64);
 
 /// Copyable, non-owning submission capability. It deliberately exposes no
 /// actor-state pointer or borrowing operation.
+/// See_Also:
+///     docs/guide/public-actors.md (waking, sending and retirement)
 struct ActorHandle(T)
 {
     package ActorSlot* slot_;
     package ulong generation_;
 
+    /// True for a non-default handle. Does not check liveness; wake/send on
+    /// a reclaimed or recycled actor report staleHandle.
     @property bool valid() const pure nothrow @nogc @safe
     {
         return slot_ !is null && generation_ != 0;
     }
 
+    /// The generation this handle addresses; matches ActorOwner.generation
+    /// of the owner it was derived from.
     @property ulong generation() const pure nothrow @nogc @safe
     {
         return generation_;
     }
 
+    /// Schedule this actor. Thread-safe; never fatal. Actors reserved by a
+    /// wave report waveOwned until the wave finishes.
     ActorWakeResult wake() nothrow @nogc @system
     {
         return wakeActor(slot_, generation_);
@@ -504,26 +578,33 @@ struct ActorHandle(T)
 }
 
 /// Copyable, non-owning actor capability whose ABI does not depend on `T`.
+/// The resident-module counterpart of ActorHandle: share it across a
+/// module boundary that must not carry the state type.
 struct ActorErasedHandle
 {
     package ActorSlot* slot_;
     package ulong generation_;
 
+    /// True for a non-default handle. Does not check liveness; wake/send on
+    /// a reclaimed or recycled actor report staleHandle.
     @property bool valid() const pure nothrow @nogc @safe
     {
         return slot_ !is null && generation_ != 0;
     }
 
+    /// The generation this handle addresses.
     @property ulong generation() const pure nothrow @nogc @safe
     {
         return generation_;
     }
 
+    /// Same contract as ActorHandle.wake.
     ActorWakeResult wake() nothrow @nogc @system
     {
         return wakeActor(slot_, generation_);
     }
 
+    /// Same contract as ActorHandle.send.
     ActorSendResult send(ActorInboxNode* node) nothrow @nogc @system
     {
         return sendActor(slot_, generation_, node);
@@ -538,6 +619,7 @@ struct ActorErasedOwner
     private ActorSlot* slot_;
     private ulong generation_;
 
+    /// Transfer-only copy, matching Ant Farm's producer Token convention.
     this(ref ActorErasedOwner src) pure nothrow @nogc @system
     {
         slot_ = src.slot_;
@@ -546,6 +628,7 @@ struct ActorErasedOwner
         src.generation_ = 0;
     }
 
+    /// Transfer-only assignment; overwriting a live owner is fatal.
     ref ActorErasedOwner opAssign(ActorErasedOwner src)
         nothrow @nogc @system
     {
@@ -556,16 +639,19 @@ struct ActorErasedOwner
         return this;
     }
 
+    /// True while this owner still holds its actor generation.
     @property bool valid() const pure nothrow @nogc @safe
     {
         return slot_ !is null && generation_ != 0;
     }
 
+    /// The owned actor generation.
     @property ulong generation() const pure nothrow @nogc @safe
     {
         return generation_;
     }
 
+    /// A non-owning submission capability for this generation.
     @property ActorErasedHandle handle() pure nothrow @nogc @system
     {
         ActorErasedHandle result;
@@ -587,11 +673,14 @@ struct ActorErasedOwner
         return requestActorRetire(slot_, generation_, mode);
     }
 
+    /// True once this generation has reached RETIRED: accepted work drained
+    /// or cancelled and every sender's final signal joined.
     @property bool retired() const nothrow @nogc @system
     {
         return actorRetired(slot_, generation_);
     }
 
+    /// Same contract as ActorOwner.reclaim.
     ActorReclaimResult reclaim() nothrow @nogc @system
     {
         return reclaimActor(slot_, generation_);
@@ -599,6 +688,9 @@ struct ActorErasedOwner
 }
 
 /// Move-only authority for retiring and reclaiming one actor generation.
+/// See_Also:
+///     docs/guide/public-actors.md, docs/reference/actor-lifecycle.md (the
+///     drain and shutdown obligations)
 struct ActorOwner(T)
 {
     private ActorSlot* slot_;
@@ -613,6 +705,7 @@ struct ActorOwner(T)
         src.generation_ = 0;
     }
 
+    /// Transfer-only assignment; overwriting a live owner is fatal.
     ref ActorOwner opAssign(ActorOwner src) nothrow @nogc @system
     {
         if (slot_ !is null)
@@ -622,11 +715,13 @@ struct ActorOwner(T)
         return this;
     }
 
+    /// True while this owner still holds its actor generation.
     @property bool valid() const pure nothrow @nogc @safe
     {
         return slot_ !is null && generation_ != 0;
     }
 
+    /// A copyable, non-owning submission capability for this generation.
     @property ActorHandle!T handle() pure nothrow @nogc @system
     {
         ActorHandle!T result;
@@ -648,6 +743,8 @@ struct ActorOwner(T)
         return requestActorRetire(slot_, generation_, mode);
     }
 
+    /// True once this generation has reached RETIRED: accepted work drained
+    /// or cancelled and every sender's final signal joined.
     @property bool retired() const nothrow @nogc @system
     {
         return actorRetired(slot_, generation_);
@@ -682,11 +779,16 @@ private alias ActorErasedCreate = ActorErasedOwner function(void* context,
         size_t stateAlignment, ActorErasedHandler handler)
     nothrow @nogc @system;
 
+/// Non-owning creation adapter suitable for passing across a resident
+/// engine boundary. It contains no `T`-dependent layout or template entry
+/// point. The runtime must outlive the adapter and every handle/owner
+/// created through it.
 struct ActorErasedAdapter
 {
     private void* context_;
     private ActorErasedCreate create_;
 
+    /// True when this adapter is bound to a live runtime.
     @property bool valid() const pure nothrow @nogc @safe
     {
         return context_ !is null && create_ !is null;
@@ -733,6 +835,8 @@ private struct ActorBodyRange
 // ==== Section: ActorRuntime (creation, wake/send/flush, lifecycle) ====
 /// Fixed-capacity non-GC actor runtime associated with one Farm. Runtime and
 /// slots use the supplied allocator and require explicit destruction.
+/// See_Also:
+///     docs/guide/public-actors.md (creation, pumping with flush, teardown)
 align(64) struct ActorRuntime
 {
     @disable this(this);
@@ -751,6 +855,12 @@ align(64) struct ActorRuntime
     private ActorSlot* freeSlots;
     private PayloadHeader actorHeader;
 
+    /// Create a runtime over `farm` with `capacity` actor slots, allocating
+    /// the runtime and slots through `allocator`. Returns null on invalid
+    /// arguments, capacity overflow, or allocation failure. The runtime is
+    /// not thread-safe to create or destroy; it must outlive every actor,
+    /// handle and owner created through it. Release it with destroy() after
+    /// every actor has been retired and reclaimed.
     static ActorRuntime* create(AntFarm* farm, size_t capacity,
             ActorAllocator allocator = ActorAllocator.cRuntime())
         nothrow @nogc @system
@@ -791,21 +901,26 @@ align(64) struct ActorRuntime
         return runtime;
     }
 
+    /// The configured actor slot capacity.
     @property size_t capacity() const pure nothrow @nogc @safe
     {
         return capacity_;
     }
 
+    /// Actors currently queued for Farm publication (an acquire load).
     @property size_t ready() const nothrow @nogc @system
     {
         return cast(size_t) atomicLoad!(MemoryOrder.acq)(readyCount);
     }
 
+    /// Actors currently created and not yet reclaimed (an acquire load).
     @property size_t live() const nothrow @nogc @system
     {
         return cast(size_t) atomicLoad!(MemoryOrder.acq)(liveCount);
     }
 
+    /// Diagnostic counter of payload arrivals whose actor generation had
+    /// already moved on; grows only under handle misuse or recycling races.
     @property ulong staleActivations() const nothrow @nogc @system
     {
         return atomicLoad!(MemoryOrder.acq)(staleActivations_);
