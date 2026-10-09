@@ -49,6 +49,7 @@ fi
 
 run dub test --compiler=ldc2
 run dub test --compiler=dmd
+run "${make_cmd[@]}" check-docs
 run "${make_cmd[@]}" check-farm-ordering
 run "${make_cmd[@]}" run-farm-tsan
 run "${make_cmd[@]}" -C actor_torture run run-dmd run-tsan

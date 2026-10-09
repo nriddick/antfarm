@@ -18,7 +18,7 @@ The trailing `0` consumes on the calling thread; `/tmp/public_service 2` uses
 two worker threads and prints `workers=2` with the same counts. LDC works with
 the same command (`ldc2 -g -i -I. -Iexamples examples/public_service.d
 -of=/tmp/public_service`). If the program prints nothing or aborts, check the
-toolchain first. [../examples/README.md](../examples/README.md) lists the other
+toolchain first. [../../examples/README.md](../../examples/README.md) lists the other
 programs and the Windows commands.
 
 ## What just happened
@@ -50,4 +50,4 @@ The shared rules are in
 - Read the public actor guide, [public-actors.md](public-actors.md), or the
   private actor guide, [private-actors.md](private-actors.md).
 - The smallest complete payload program, with its compile-and-run command, is
-  the [First payload](../README.md#first-payload) section of the README.
+  the [First payload](../../README.md#first-payload) section of the README.

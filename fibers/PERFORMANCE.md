@@ -199,7 +199,7 @@ Bounded lifecycle reporting now retains its detached backlog count instead of
 recounting the shrinking list on every call. This removes quadratic traversal
 without changing DRuntime Fiber execution. The isolated 16,384-record,
 batch-32 probe improved from 20.20 ms to 1.05 ms for handler delivery; see
-[the scaling benchmark](../perftest/README.md#actor-creation-and-fiber-lifecycle-drains)
+[the scaling benchmark](../perftest/README.md#scaling)
 for host details, timing boundaries, and reproduction commands.
 
 After warm-up, ready and completion MPSC publication, stack-snapshot flush,

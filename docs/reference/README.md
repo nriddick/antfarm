@@ -27,8 +27,8 @@ re-exports through `actors/package.d`. The public surface is reached with
 | Consumer cursor | `ConsumerView` | [actor-lifecycle.md](actor-lifecycle.md#consumers-and-views) |
 | Producer tickets | `Token`, `Tier` | [actor-lifecycle.md](actor-lifecycle.md#tokens-and-farm-provenance) |
 | Payload adapters | `PayloadBody`, `Callback`, `PayloadHeader`, `PayloadEntry`, `pairPayloads`, `broadcastPayloads` | [SPEC.md](../../SPEC.md), [README First payload](../../README.md#first-payload) |
-| Generated payload shims | `antfarm_templates` (`payloadRange`, `payloadEntry`, `argsConvert`) | [README Choosing a write path](../../README.md#choosing-a-write-path) |
-| Huge pages | `AntFarm.usedLargePages`, `hugePages` | [README Memory backing](../../README.md#memory-backing) |
+| Generated payload shims | `antfarm_templates` (`payloadRange`, `payloadEntry`, `argsConvert`) | [SPEC.md](../../SPEC.md) |
+| Huge pages | `AntFarm.usedLargePages`, `hugePages` | [guide/sizing-and-allocation.md](../guide/sizing-and-allocation.md#memory-backing) |
 
 ## Public actors
 

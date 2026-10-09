@@ -219,7 +219,7 @@ void main()
 ```
 
 The child custody/lost-wake argument behind these joins is in
-[../design/private-actor-ordering.md](../design/private-actor-ordering.md#child-continuation-ordering).
+[../design/private-actor-ordering.md](../design/private-actor-ordering.md#private-child-continuation-ordering).
 
 ## Subset waves
 
