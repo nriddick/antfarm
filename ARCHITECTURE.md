@@ -63,7 +63,7 @@ layout; `actors` supplies exclusive scoped borrowing and the publication
 boundary.
 
 Private roots and parent-owned cohorts are a separate path in
-[`actors.private_actor`](actors/PRIVATE_ACTORS.md). A single emitter owns a
+[`actors.private_actor`](docs/guide/private-actors.md). A single emitter owns a
 root park and publishes root and child tables through `pump`; subscribed
 consumers execute the callbacks. Parents authorize whole-cohort or subset
 waves, read cohort-owned result ports or externally owned buffers after the
@@ -76,7 +76,7 @@ There is no general submission handle, no external
 identity for a child, and no access to child state; a tracked root exposes only
 a cancellation/status handle. Use this path for an exclusive hierarchy; use public actors for
 independently addressed services and externally selected waves. Shared
-lifecycle rules are in [actors/LIFECYCLE.md](actors/LIFECYCLE.md).
+lifecycle rules are in [docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md).
 
 ### Threadpool
 
@@ -126,6 +126,9 @@ Callers can construct countable Farm payloads directly when their ownership and
 completion contract is clear. A higher-level bounded parallel API may be
 designed later without preserving the removed experimental surface.
 
+The full work-representation table and the public-vs-private actor comparison
+are in [docs/guide/choosing-work.md](docs/guide/choosing-work.md).
+
 ## The `iota_sum` path
 
 [examples/iota_sum.d](examples/iota_sum.d) is the compile-and-run integration
@@ -173,9 +176,9 @@ operation's state metadata; they may come from more than one runtime.
 programs are [examples/public_service.d](examples/public_service.d),
 [examples/public_wave.d](examples/public_wave.d), and
 [examples/private_tree.d](examples/private_tree.d). The private/public
-projection model is in [actors/ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md); the
+projection model is in [docs/guide/public-actors.md](docs/guide/public-actors.md#waves); the
 exact happens-before edges are in
-[actors/ACTOR_MEMORYORDER.md](actors/ACTOR_MEMORYORDER.md).
+[docs/design/public-actor-ordering.md](docs/design/public-actor-ordering.md).
 
 ## Sizing one Farm
 
@@ -266,7 +269,7 @@ For a full stack:
    `collectCompleted` until `live == 0`, or calls `cancelAll()` first; a
    tracked park must also take outcomes. Do not destroy runtimes or parks yet.
    `pump() == 0` is not that drain. The full recipe is
-   [actors/LIFECYCLE.md](actors/LIFECYCLE.md#shutdown-recipe).
+   [docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md#shutdown-recipe).
 4. Signal or cooperatively cancel other indefinite Fiber waiters.
 5. Drain runnable work and completion/lifecycle records.
 6. Release completed Fiber tasks.
@@ -286,8 +289,8 @@ that never reaches a scheduler boundary.
 ## Maintainer documents
 
 - [SPEC.md](SPEC.md): Farm algorithm and memory ordering.
-- [actors/LIFECYCLE.md](actors/LIFECYCLE.md): shared actor setup, drain, and
-  shutdown contracts, including the [shutdown recipe](actors/LIFECYCLE.md#shutdown-recipe).
+- [docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md): shared actor setup, drain, and
+  shutdown contracts, including the [shutdown recipe](docs/reference/actor-lifecycle.md#shutdown-recipe).
 - [examples/README.md](examples/README.md): compiled public and private actor
   programs, including outcomes, cancellation, and deadline examples.
 - [threadpool/DESIGN.md](threadpool/DESIGN.md): topology, worker, Director, and
@@ -296,10 +299,14 @@ that never reaches a scheduler boundary.
   synchronization invariants.
 - [fibers/PERFORMANCE.md](fibers/PERFORMANCE.md): Fiber benchmark evidence and
   tuning guidance.
-- [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md): non-GC actor ownership,
-  retirement, and phase-oriented wave plan.
-- [ACTOR_MEMORYORDER.md](actors/ACTOR_MEMORYORDER.md): actor lifecycle, ready-queue,
+- [docs/guide/public-actors.md](docs/guide/public-actors.md): public actor ownership, retirement, and
+  phase-oriented waves.
+- [docs/design/public-actor-ordering.md](docs/design/public-actor-ordering.md): actor lifecycle, ready-queue,
   Farm, wave completion, inbox, retirement, and handoff edges.
+- [docs/design/private-actor-ordering.md](docs/design/private-actor-ordering.md): private join, outcome and
+  cancellation ordering.
+- [docs/design/private-actor-layout.md](docs/design/private-actor-layout.md): private Entry/Service/cohort
+  layout and slab reuse.
 - [actor_torture/README.md](actor_torture/README.md): forced actor
   interleavings, sustained generation churn, and allocator-adapter checks.
 - [ROADMAP.md](ROADMAP.md): current release gates and later work.

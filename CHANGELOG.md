@@ -68,7 +68,7 @@ validation and Fiber ThreadSanitizer migration remain limited as stated in
 A second actor model, not a drop-in replacement for public actors: self-owned
 roots, exclusively parent-owned child cohorts, explicit emitter and consumer
 roles, configurable root and child batches, and fatal ownership checks. See
-[actors/PRIVATE_ACTORS.md](actors/PRIVATE_ACTORS.md).
+[docs/guide/private-actors.md](docs/guide/private-actors.md).
 
 - Root waits: `waitChildren` and `finishAfterChildren`.
 - Typed POD result ports, joined results, and result folds.
@@ -80,7 +80,7 @@ roles, configurable root and child batches, and fatal ownership checks. See
   lazy deadlines, `cancelAll` and `takeOutcome`.
 - Opt-in per-cohort state slab (`PrivateStateStorage.cohortSlab`).
 - Compiled examples and a shared lifecycle and shutdown guide
-  ([actors/LIFECYCLE.md](actors/LIFECYCLE.md), [examples/](examples/README.md)).
+  ([docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md), [examples/](examples/README.md)).
 
 ### Performance work
 
@@ -109,7 +109,7 @@ are in [perftest/README.md](perftest/README.md).
 - Deferred: typed root outputs, external wake of a waiting root, timers,
   per-member retirement, concurrent subsets, non-POD results, adopted actor
   storage, and engine wake integration (see [ROADMAP.md](ROADMAP.md) and
-  [actors/ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md)).
+  [docs/guide/public-actors.md](docs/guide/public-actors.md)).
 
 ## Development milestones
 

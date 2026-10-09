@@ -14,7 +14,7 @@ The completed slices below ship in the 1.8.0-rc.1 candidate; no tag has been
 created for them yet. The Farm shard-completion join and public actor-wave completion credits landed
 in 1.7.0-rc.5 and are prerequisites for this release.
 
-See [the ownership contract](actors/PRIVATE_ACTORS.md).
+See [the ownership contract](docs/guide/private-actors.md).
 
 - **E1 done:** root-only `waitChildren` resumes once after all direct waves and
   descendants join; `finishAfterChildren` retires after the join without another
@@ -58,7 +58,7 @@ See [the ownership contract](actors/PRIVATE_ACTORS.md).
   Untracked parks are unchanged apart from one branch per spawn, collection
   and cancel check. Entry stays 40 bytes.
 - **Outcomes and cancellation (F1–F5) complete.** F5 docs and examples:
-  [LIFECYCLE.md](actors/LIFECYCLE.md#shutdown-recipe)
+  [docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md#shutdown-recipe)
   has the shared shutdown recipe, and the compiled lane in
   [examples/](examples/README.md) adds a deadline request service, a
   `fail` + `cancelPeers` fail-fast fold, and a fiber `cancelAt` bridge.
@@ -236,7 +236,7 @@ Verified on 2026-08-29 on the current Linux/Ryzen 5 5500 host:
   interleaving torture, a pinned mimalloc v3.5.3 adapter with cross-thread
   reclamation tests, and sealed multi-table actor waves with dependent-phase
   visibility; its remaining
-  promotion gates are in [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md).
+  promotion gates are in [docs/guide/public-actors.md](docs/guide/public-actors.md).
 - Reconsider bounded parallel work from first principles, with explicit
   lifetime, completion, cancellation, error, and allocation contracts.
 

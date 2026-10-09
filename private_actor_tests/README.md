@@ -21,7 +21,7 @@ parent authority, nonoverlapping child waves, three-level descendant joins,
 terminal-wave restrictions, and four independent creator parks on one Farm.
 Borrow/context/park ordinary copies and state-field access are compile-fail
 assertions. They do not prove arbitrary `@system` code obeys the no-escape
-contract; see [PRIVATE_ACTORS.md](../actors/PRIVATE_ACTORS.md).
+contract; see [../docs/guide/private-actors.md](../docs/guide/private-actors.md).
 
 `./private_actor_tests/private_actor_tests_tsan join-only` is the focused
 same-shard memory-order regression. It forces two consumers into distinct
