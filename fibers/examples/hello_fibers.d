@@ -32,7 +32,7 @@ void main()
     scope (exit) consumer.unsubscribe();
 
     auto task = domain.spawn(&fiberBody);
-    drainUntilEmpty(domain, token, consumer, 256, 0);
+    drainUntilEmpty(domain, token, consumer, 256, avgCostForChunk(32));
 
     assert(task.outcome == FiberOutcome.completed);
     assert(atomicLoad(steps) == 3);

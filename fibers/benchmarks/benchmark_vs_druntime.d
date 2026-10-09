@@ -61,7 +61,7 @@ struct Topo
     bool skipSmt;
     size_t workers; // 0 = all LPs after SMT filter
     size_t flushBatch = 256;
-    uint avgCost = 0;
+    uint avgCost = avgCostForChunk(32);
 }
 
 ushort[] pickLps(bool skipSmt, size_t workers)
@@ -227,7 +227,7 @@ void main(string[] args)
         foreach (_; 0 .. n) backend.spawn(dg);
         note(createName, n, t0);
         t0 = MonoTime.currTime;
-        drainUntilEmpty(backend, token, consumer, flushMax, 0);
+        drainUntilEmpty(backend, token, consumer, flushMax, avgCostForChunk(32));
         note(runName, n, t0);
         assert(atomicLoad(ran) == expected);
         backend.releaseAll(backend.takeCompletions());
@@ -260,7 +260,7 @@ void main(string[] args)
             {
                 immutable take = n - written;
                 immutable batch = take < chunk.length ? take : chunk.length;
-                written += farm.write(chunk[0 .. batch], token, 0);
+                written += farm.write(chunk[0 .. batch], token, avgCostForChunk(32));
             }
             consumer.consumeNext();
             if (++visits == 4_000_000)
@@ -357,9 +357,9 @@ void main(string[] args)
         Topo("2-workers", false, 2),
         Topo("4-workers", false, 4),
         Topo("6-phys", true, 6),
-        Topo("6-phys flush32/2", true, 6, 32, 2),
+        Topo("6-phys flush32/2", true, 6, 32, avgCostForChunk(8)),
         Topo("12-smt", false, 12),
-        Topo("12-smt flush32/2", false, 12, 32, 2),
+        Topo("12-smt flush32/2", false, 12, 32, avgCostForChunk(8)),
     ];
 
     Rate[] mtRows;

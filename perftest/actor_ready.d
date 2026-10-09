@@ -7,7 +7,7 @@
 module actor_ready;
 
 import actors;
-import antfarm : ConsumerView;
+import antfarm : ConsumerView, avgCostForChunk;
 import core.time : MonoTime, seconds;
 import std.conv : to;
 import std.stdio : writefln;
@@ -72,7 +72,7 @@ void main(string[] args)
         ulong roundFlushes;
         while (published < count)
         {
-            published += runtime.flush(token, batch, 0);
+            published += runtime.flush(token, batch, avgCostForChunk(32));
             ++roundFlushes;
             while (view.consumeNext()) {}
             if (MonoTime.currTime >= deadline)

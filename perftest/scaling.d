@@ -81,7 +81,7 @@ void main(string[] args)
     ConsumerView view;
     subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
-    drainUntilEmpty(domain, token, view, 256, 0);
+    drainUntilEmpty(domain, token, view, 256, avgCostForChunk(32));
     domain.handleLifecycleEvents(sink);
     domain.releaseAll(domain.takeCompletions());
 }

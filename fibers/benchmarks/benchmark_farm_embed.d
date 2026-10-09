@@ -292,7 +292,7 @@ void report(string name, size_t n, double seconds)
 void main(string[] args)
 {
     immutable n = args.length > 1 ? args[1].to!size_t : 500_000;
-    immutable avgCost = args.length > 2 ? args[2].to!uint : 0;
+    immutable avgCost = args.length > 2 ? args[2].to!uint : avgCostForChunk(32);
     auto snap = CacheAwarePool.topology();
     writefln("n=%s avgCost=%s  llc=%s lps=%s pcores=%s",
              n, avgCost, snap.llcCount, snap.logicalProcessorCount, snap.pCoreCount);

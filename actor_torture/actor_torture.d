@@ -246,7 +246,7 @@ private void drainBoundary(ActorRuntime* runtime, ref Token token,
 {
     while (!owner.retired)
     {
-        runtime.flush(token, 8, 1);
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
         while (view.consumeNext()) {}
         if (MonoTime.currTime >= deadline)
             check(false, "deterministic boundary drain timeout");
@@ -304,7 +304,7 @@ private void testCloseBoundary(ActorTestPoint point)
         if (point == ActorTestPoint.inboxPublished)
             check(handle.wake() == ActorWakeResult.closed,
                 "ordinary wake is closed after retirement");
-        runtime.flush(token, 8, 1);
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
         while (view.consumeNext()) {}
         check(output.consumed == 1,
             "published node visible before sender releases reservation");
@@ -370,7 +370,7 @@ private void testClaimIsNotPublication()
         "independent activation while claimed node is unpublished");
     while (output.activations == 0)
     {
-        runtime.flush(token, 8, 1);
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
         while (view.consumeNext()) {}
         if (MonoTime.currTime >= deadline)
             check(false, "unpublished-node activation timeout");
@@ -573,7 +573,7 @@ private final class WaveRacePublisher
         ActorHandle!WavePinState[1] members;
         members[0] = actor;
         written = cast(size_t) wave.publish!wavePinOperation(
-            members[], token, 0);
+            members[], token, avgCostForChunk(32));
         atomicStore!(MemoryOrder.rel)(published, 1);
         while (atomicLoad!(MemoryOrder.acq)(sealRequested) == 0)
             Thread.yield();
@@ -636,7 +636,7 @@ private void testWaveMembershipPinsRetiredActor()
     }
     while (!owner.retired)
     {
-        runtime.flush(retirementToken, 1, 0);
+        runtime.flush(retirementToken, 1, avgCostForChunk(32));
         while (view.consumeNext()) {}
         if (MonoTime.currTime >= deadline)
             check(false, "wave-race retirement drain timeout");
@@ -727,7 +727,7 @@ private void testWaveReleaseAllowsImmediateReuse()
     next.begin(farm);
     ActorHandle!WavePinState[2] members =
         [owners[1].handle, owners[0].handle];
-    check(next.publish!wavePinOperation(members[], token, 0) == 2,
+    check(next.publish!wavePinOperation(members[], token, avgCostForChunk(32)) == 2,
         "released actor accepts a new wave immediately");
     atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
     thread.join();
@@ -850,11 +850,11 @@ private void testWaveCompletionCreditPinsDescriptor(bool twoTables)
     worker.start();
     auto deadline = MonoTime.currTime + 15.seconds;
     waitFlag(started, deadline, "credit regression worker start");
-    check(wave.publish!wavePinOperation(members[0 .. 1], token, 0) == 1, "credit regression publish");
+    check(wave.publish!wavePinOperation(members[0 .. 1], token, avgCostForChunk(32)) == 1, "credit regression publish");
     waitFlag(g_hookArrived, deadline, "credit regression notification pause");
     check(wave.handle.progress == 1 && wave.handle.length == 1, "credit regression progress recorded");
     if (twoTables)
-        check(wave.publish!wavePinOperation(members[1 .. 2], token, 0) == 1, "credit regression second table");
+        check(wave.publish!wavePinOperation(members[1 .. 2], token, avgCostForChunk(32)) == 1, "credit regression second table");
     auto old = wave.seal();
     check(!old.finished, "progress equality must not release active table notification");
     if (twoTables)
@@ -1191,7 +1191,7 @@ private void testCallbackBlocksAggregateUnload()
     check(handle.wake() == ActorWakeResult.queued,
         "callback-fence actor wake");
     auto deadline = MonoTime.currTime + 15.seconds;
-    while (runtime.flush(token, 1, 1) == 0)
+    while (runtime.flush(token, 1, DEFAULT_AVG_COST) == 0)
     {
         if (MonoTime.currTime >= deadline)
             check(false, "callback-fence publication timeout");
@@ -1333,7 +1333,7 @@ private void testSenderBlocksAggregateUnload()
     generation.close();
     while (runtime.live != 0)
     {
-        runtime.flush(token, 8, 1);
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
         while (view.consumeNext()) {}
         generation.tryUnload();
         if (MonoTime.currTime >= deadline)
@@ -1447,7 +1447,7 @@ private void testDetachedNodeBlocksAggregateUnload()
     auto deadline = MonoTime.currTime + 15.seconds;
     while (atomicLoad!(MemoryOrder.acq)(popped) == 0)
     {
-        runtime.flush(token, 8, 1);
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
         while (view.consumeNext()) {}
         if (MonoTime.currTime >= deadline)
             check(false, "detached-node-fence pop timeout");
@@ -1749,7 +1749,7 @@ private void testSustainedContention()
         immutable targetDone = round * stressProducerCount;
         while (atomicLoad!(MemoryOrder.acq)(g_stressDone) != targetDone)
         {
-            runtime.flush(token, 64, 2);
+            runtime.flush(token, 64, avgCostForChunk(8));
             if (MonoTime.currTime >= deadline)
                 check(false, "stress producer timeout");
             Thread.yield();
@@ -1762,7 +1762,7 @@ private void testSustainedContention()
         bool allRetired;
         while (!allRetired)
         {
-            runtime.flush(token, 64, 2);
+            runtime.flush(token, 64, avgCostForChunk(8));
             allRetired = true;
             foreach (actor; 0 .. stressActorCount)
                 allRetired = allRetired && owners[actor].retired;
@@ -1847,7 +1847,7 @@ private class ReadyFlusher
         scope (exit) farm.unregisterProducer(token);
         do
         {
-            published += runtime.flush(token, batch, 0);
+            published += runtime.flush(token, batch, avgCostForChunk(32));
             if (stop is null) break;
             Thread.yield();
         }
@@ -1896,7 +1896,7 @@ private void testReadyDrainHandoff()
     waitFlag(g_hookArrived, MonoTime.currTime + 15.seconds,
         "ready flusher did not pause after detach");
     check(runtime.ready == 2, "detached backlog remains counted");
-    check(runtime.flush(token, 1, 0) == 0,
+    check(runtime.flush(token, 1, avgCostForChunk(32)) == 0,
         "contended ready drain does not wait");
     check(owners[2].handle.wake() == ActorWakeResult.queued,
         "producer publishes while ready drain is held");
@@ -1906,11 +1906,11 @@ private void testReadyDrainHandoff()
     setActorTestHook(null);
     check(flusher.published == 1 && runtime.ready == 2,
         "bounded snapshot leaves carry");
-    check(runtime.flush(token, 0, 0) == 0 && runtime.ready == 2,
+    check(runtime.flush(token, 0, avgCostForChunk(32)) == 0 && runtime.ready == 2,
         "zero maximum preserves carry");
     // The next holder must see both the prior thread's carry and the newer
     // head, and fill one snapshot across that boundary.
-    check(runtime.flush(token, 2, 0) == 2 && runtime.ready == 0,
+    check(runtime.flush(token, 2, avgCostForChunk(32)) == 2 && runtime.ready == 0,
         "ready carry transfers between threads and joins new head");
     auto deadline = MonoTime.currTime + 15.seconds;
     foreach (ref owner; owners)
@@ -1956,12 +1956,12 @@ private void testReadyBacklog()
     check(token.valid, "ready backlog producer registration");
     ConsumerView view;
     check(view.subscribe(farm) >= 0, "ready backlog subscribe");
-    check(runtime.flush(token, 0, 0) == 0 && runtime.ready == actorCount,
+    check(runtime.flush(token, 0, avgCostForChunk(32)) == 0 && runtime.ready == actorCount,
         "zero maximum preserves head");
 
     // Withhold consumers until the Farm is full. A deliberately oversized
     // request exercises snapshot clamping and partial table acceptance.
-    size_t published = runtime.flush(token, size_t.max, 0);
+    size_t published = runtime.flush(token, size_t.max, avgCostForChunk(32));
     check(published > 0 && published < 256
             && runtime.ready == actorCount - published,
         "partial table acceptance returns unwritten actors");
@@ -1971,12 +1971,12 @@ private void testReadyBacklog()
     paddingHeader.call = &readyPadding;
     ulong[400] paddingBody;
     PayloadEntry[1] padding = [PayloadEntry(&paddingHeader, paddingBody[])];
-    while (farm.write(padding[], token, 0) != 0)
+    while (farm.write(padding[], token, avgCostForChunk(32)) != 0)
         check(MonoTime.currTime < deadline, "ready backlog padding timeout");
     while (true)
     {
         immutable before = runtime.ready;
-        immutable n = runtime.flush(token, size_t.max, 0);
+        immutable n = runtime.flush(token, size_t.max, avgCostForChunk(32));
         check(n <= 256 && runtime.ready == before - n,
             "partial flush preserves exact ready count");
         published += n;
@@ -1988,7 +1988,7 @@ private void testReadyBacklog()
     foreach (_; 0 .. 3)
     {
         immutable before = runtime.ready;
-        check(runtime.flush(token, 1, 0) == 0 && runtime.ready == before,
+        check(runtime.flush(token, 1, avgCostForChunk(32)) == 0 && runtime.ready == before,
             "backpressured snapshot is requeued without loss");
     }
 
@@ -2510,7 +2510,7 @@ private final class NodeOutcomeRig
         message.code = code;
         check(accepted(handle.send(&message.node)),
             "node outcome interaction accepted");
-        runtime.flush(token, 8, 1);
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
     }
 
     /// Wait for completion by polling `available` on the sending thread
@@ -2522,7 +2522,7 @@ private final class NodeOutcomeRig
         {
             if ((++spins & 0xfff) == 0)
             {
-                runtime.flush(token, 8, 1);
+                runtime.flush(token, 8, DEFAULT_AVG_COST);
                 if (MonoTime.currTime >= deadline)
                     check(false, "node outcome completion timeout");
                 Thread.yield();
@@ -2544,7 +2544,7 @@ private final class NodeOutcomeRig
             "node outcome retirement");
         while (!owner.retired)
         {
-            runtime.flush(token, 8, 1);
+            runtime.flush(token, 8, DEFAULT_AVG_COST);
             if (MonoTime.currTime >= deadline)
                 check(false, "node outcome retirement timeout");
             Thread.yield();
@@ -2677,7 +2677,7 @@ private void testNodeCompletionStoreOrdering(NodeAction staleAction,
     rig.send(message, action, code);
     while (atomicLoad!(MemoryOrder.acq)(g_hookArrived) == 0)
     {
-        rig.runtime.flush(rig.token, 8, 1);
+        rig.runtime.flush(rig.token, 8, DEFAULT_AVG_COST);
         if (MonoTime.currTime >= deadline)
             check(false, "actor did not reach the completion-store seam");
         Thread.yield();
@@ -2871,7 +2871,7 @@ private final class CancelRig
     {
         while (!owner.retired)
         {
-            runtime.flush(token, 8, 1);
+            runtime.flush(token, 8, DEFAULT_AVG_COST);
             while (view.consumeNext()) {}
             if (MonoTime.currTime >= deadline)
                 check(false, failure);
@@ -2967,7 +2967,7 @@ private void testCancelInboxCarry()
     CancelMessage[3] messages;
     sendCancelMessages(rig.handle, messages[]);
     auto deadline = MonoTime.currTime + 15.seconds;
-    rig.runtime.flush(rig.token, 8, 1);
+    rig.runtime.flush(rig.token, 8, DEFAULT_AVG_COST);
     check(rig.view.consumeNext(), "cancel carry first activation");
     check(rig.output.completedNodes == 1,
         "budgeted activation completes exactly one node");
@@ -3051,7 +3051,7 @@ private void testCancelThroughErasedOwner(bool escalate)
     auto deadline = MonoTime.currTime + 15.seconds;
     while (!erased.retired)
     {
-        rig.runtime.flush(rig.token, 8, 1);
+        rig.runtime.flush(rig.token, 8, DEFAULT_AVG_COST);
         while (rig.view.consumeNext()) {}
         if (MonoTime.currTime >= deadline)
             check(false, "erased cancel retirement timeout");
@@ -3208,7 +3208,7 @@ private void testCancelEscalationWhileRunning()
     auto deadline = MonoTime.currTime + 15.seconds;
     while (atomicLoad!(MemoryOrder.acq)(arrived) == 0)
     {
-        rig.runtime.flush(rig.token, 8, 1);
+        rig.runtime.flush(rig.token, 8, DEFAULT_AVG_COST);
         if (MonoTime.currTime >= deadline)
             check(false, "running activation did not stall in the handler");
         Thread.yield();
@@ -3223,7 +3223,7 @@ private void testCancelEscalationWhileRunning()
     atomicStore!(MemoryOrder.rel)(release, 1);
     while (!rig.owner.retired)
     {
-        rig.runtime.flush(rig.token, 8, 1);
+        rig.runtime.flush(rig.token, 8, DEFAULT_AVG_COST);
         if (MonoTime.currTime >= deadline)
             check(false, "running escalation retirement timeout");
         Thread.yield();
@@ -3270,7 +3270,7 @@ private void testCancelIdleReschedule()
         "idle-reschedule cancel request");
     check(!rig.owner.retired && rig.runtime.ready == 1,
         "undrained gate reschedules the cancelling actor");
-    rig.runtime.flush(rig.token, 8, 1);
+    rig.runtime.flush(rig.token, 8, DEFAULT_AVG_COST);
     check(rig.view.consumeNext(), "idle-reschedule consumer entry");
     check(rig.output.activations == 0 && !rig.owner.retired
             && rig.runtime.ready == 1,
@@ -3396,7 +3396,7 @@ private final class CancelWavePublisher
         check(token.valid, "cancel-wave publisher token");
         wave.begin(farm);
         written = cast(size_t) wave.publish!cancelProbeWaveOperation(
-            members[0 .. memberCount], token, 0);
+            members[0 .. memberCount], token, avgCostForChunk(32));
         atomicStore!(MemoryOrder.rel)(published, 1);
         while (atomicLoad!(MemoryOrder.acq)(sealRequested) == 0)
             Thread.yield();
@@ -3480,7 +3480,7 @@ private void testCancelDuringWaveAdmission()
 
     while (!owner.retired)
     {
-        runtime.flush(token, 8, 1);
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
         while (view.consumeNext()) {}
         if (MonoTime.currTime >= deadline)
             check(false, "admission autonomous retirement timeout");
@@ -3579,7 +3579,7 @@ private void testCancelDuringWaveRollback()
 
     while (!target.retired)
     {
-        runtime.flush(token, 8, 1);
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
         while (view.consumeNext()) {}
         if (MonoTime.currTime >= deadline)
             check(false, "rollback autonomous retirement timeout");

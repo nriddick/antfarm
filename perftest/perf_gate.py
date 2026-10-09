@@ -80,7 +80,7 @@ def main():
     p.add_argument('--repeats',type=int);p.add_argument('--max-attempts',type=int)
     p.add_argument('--batch',type=int,default=256);p.add_argument('--quota',type=int,default=16384);p.add_argument('--tier',choices=['small','bulk'],default='small')
     p.add_argument('--subset-percent',default='1,10,100');p.add_argument('--benchmark-ref')
-    p.add_argument('--root-hint',default='auto',help='Pass a fixed actor_churn root-hint (0..5) to both builds instead of the default derived policy; auto appends no argument')
+    p.add_argument('--root-hint',default='auto',help='Pass a fixed actor_churn root-hint (0..7; chunk 128>>k, or 32>>k on a pre-MAX_CHUNK-128 base) to both builds instead of the default derived policy; auto appends no argument')
     p.add_argument('--allow-benchmark-change',action='store_true',help='Explicitly allow different checkpoint benchmark sources; fixed source is safer')
     p.add_argument('--base-env',action='append',default=[],metavar='KEY=VALUE',help='Extra environment for base runs only (repeatable), e.g. MIMALLOC_* options; recorded per run')
     p.add_argument('--candidate-env',action='append',default=[],metavar='KEY=VALUE',help='Extra environment for candidate runs only (repeatable); with --control this screens a runtime setting on byte-identical binaries')
@@ -101,7 +101,7 @@ def main():
     if a.max_attempts<a.repeats:p.error('max-attempts must be >= repeats')
     if not -1<a.threshold<0:p.error('threshold must be a negative fraction between -1 and 0')
     if not 0<=a.cancel_fraction_tolerance<=1:p.error('cancel fraction tolerance must be in [0,1]')
-    if a.root_hint!='auto' and not (a.root_hint.isdigit() and 0<=int(a.root_hint)<=5):p.error('root-hint must be auto or 0..5')
+    if a.root_hint!='auto' and not (a.root_hint.isdigit() and 0<=int(a.root_hint)<=7):p.error('root-hint must be auto or 0..7')
     envs={}
     for label,items in (('base',a.base_env),('candidate',a.candidate_env)):
         envs[label]={}

@@ -1632,9 +1632,9 @@ void t23_late_attach_under_wrap()
 void t24_topology_hang_canary()
 {
     // Scale-down of the throughput grid cells that deadlocked at nc=4,
-    // ns=9/11 (body=1, batch=256, avgCost=0). Subscribe-before-write like
-    // the harness: hang here is the same failure mode whether or not it
-    // is wrap-during-subscribe.
+    // ns=9/11 (body=1, batch=256, runs of 32: avgCost=0 when MAX_CHUNK was
+    // 32). Subscribe-before-write like the harness: hang here is the same
+    // failure mode whether or not it is wrap-during-subscribe.
     foreach (ns; [9u, 11u])
     {
         enum NC = 4;
@@ -1680,7 +1680,7 @@ void t24_topology_hang_canary()
         {
             immutable remain = N - cursor;
             immutable share = remain / (ns - i);
-            pctx[i] = ProdCtx(f, batch.entries + cursor, share, Tier.small, BATCH, null, 0);
+            pctx[i] = ProdCtx(f, batch.entries + cursor, share, Tier.small, BATCH, null, avgCostForChunk(32));
             prodJobs[i] = new ProdJob(&pctx[i]);
             producers[i] = new Thread(&prodJobs[i].run);
             producers[i].start();

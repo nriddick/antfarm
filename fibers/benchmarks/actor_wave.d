@@ -434,7 +434,7 @@ private SweepResult runBenchmark(BenchmarkConfig config,
 
     auto lane = new FiberLane(farm);
     lane.flushBatch = 32;
-    lane.avgCost = 2;
+    lane.avgCost = avgCostForChunk(8);
     PoolOptions options;
     options.onlyLps = workerLps;
     options.managedWorker = fiberWorkerHooks();
@@ -568,7 +568,7 @@ void main(string[] args)
     config.warmupGenerations = positional.length > 3
         ? positional[3].to!size_t : 10;
     config.avgCost = positional.length > 4
-        ? positional[4].to!uint : 0;
+        ? positional[4].to!uint : avgCostForChunk(32);
     config.ringMiB = positional.length > 5
         ? positional[5].to!size_t : 8;
 

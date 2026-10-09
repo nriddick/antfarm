@@ -591,7 +591,7 @@ void testSeparateRanges()
     ConsumerView v;
     check(v.subscribe(f) == 0, "subscribe before separate-range write");
     auto tok = f.registerProducer(Tier.small);
-    check(f.write(headers[], bodies[], tok, 1) == N,
+    check(f.write(headers[], bodies[], tok, DEFAULT_AVG_COST) == N,
           "write separate header/body ranges");
 
     check(v.consumeNext(), "consume separate-range table");
@@ -1543,7 +1543,7 @@ void testActorWave()
     // actor has returned to idle, it cannot be admitted a second time while
     // its aggregate wave remains open.
     wave.begin(farm);
-    check(wave.publish!actorWaveProduce(handles[0 .. 1], token, 2) == 1,
+    check(wave.publish!actorWaveProduce(handles[0 .. 1], token, avgCostForChunk(8)) == 1,
         "single actor wave table publication");
     while (wave.handle.progress != 1)
     {
@@ -1560,7 +1560,7 @@ void testActorWave()
         "inbox send rejected without taking node from open wave");
     check(owners[0].requestRetire() == ActorRetireResult.waveOwned,
         "retirement rejected while actor belongs to open wave");
-    check(wave.publish!actorWaveProduce(handles[0 .. 1], token, 2) == 0
+    check(wave.publish!actorWaveProduce(handles[0 .. 1], token, avgCostForChunk(8)) == 0
             && wave.handle.failed,
         "completed table retains aggregate wave membership");
     auto overlapRejected = wave.seal();
@@ -1577,7 +1577,7 @@ void testActorWave()
         immutable candidatePast = offset + tableActors < actorCount
             ? offset + tableActors : actorCount;
         immutable written = wave.publish!actorWaveProduce(
-            handles[offset .. candidatePast], token, 2);
+            handles[offset .. candidatePast], token, avgCostForChunk(8));
         if (written == 0)
         {
             check(!wave.handle.failed, "wave publication backpressure only");
@@ -1624,7 +1624,7 @@ void testActorWave()
         immutable candidatePast = offset + tableActors < actorCount
             ? offset + tableActors : actorCount;
         immutable written = wave.publish!actorWaveObserve(
-            handles[offset .. candidatePast], token, 2);
+            handles[offset .. candidatePast], token, avgCostForChunk(8));
         if (written == 0)
         {
             check(!wave.handle.failed,
@@ -1657,7 +1657,7 @@ void testActorWave()
     ActorHandle!ActorWaveState[2] duplicate;
     duplicate[0] = handles[0];
     duplicate[1] = handles[0];
-    check(wave.publish!actorWaveProduce(duplicate[], token, 2) == 0,
+    check(wave.publish!actorWaveProduce(duplicate[], token, avgCostForChunk(8)) == 0,
         "duplicate actor rejected from wave");
     auto rejected = wave.seal();
     check(rejected.finished && rejected.failed
@@ -1731,7 +1731,7 @@ void testActorPayload()
     GC.disable();
     while (!owner.retired)
     {
-        actors.flush(token, 32, 2);
+        actors.flush(token, 32, avgCostForChunk(8));
         // Exercise coalescing while the actor is already queued or running.
         immutable wakeResult = oldHandle.wake();
         check(wakeResult == ActorWakeResult.coalesced
@@ -2017,7 +2017,7 @@ void testActorInbox()
     GC.disable();
     while (atomicLoad!(MemoryOrder.acq)(producersReady) != producerCount)
     {
-        actors.flush(token, 32, 2);
+        actors.flush(token, 32, avgCostForChunk(8));
         if (MonoTime.currTime >= deadline)
             fatal("actor inbox producer timeout");
         Thread.yield();
@@ -2028,7 +2028,7 @@ void testActorInbox()
     atomicStore!(MemoryOrder.rel)(releaseClosedPhase, 1);
     while (!owner.retired)
     {
-        actors.flush(token, 32, 2);
+        actors.flush(token, 32, avgCostForChunk(8));
         if (MonoTime.currTime >= deadline)
             fatal("actor inbox retirement timeout");
         Thread.yield();
@@ -2724,12 +2724,12 @@ void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label)
 void testCompactMixedBodies()
 {
     static immutable size_t[12] lens = [0, 1, 2, 7, 31, 3, 0, 5, 9, 1, 2, 47];
-    compactMixedCase(lens[], 1, "compact mixed body contract");
+    compactMixedCase(lens[], DEFAULT_AVG_COST, "compact mixed body contract");
     printf("testCompactMixedBodies OK\n"); fflush(stdout);
 }
 
-// Catches M7 (non-final run end read from the wrong Tindex entry): AvgCost 3
-// gives chunk 4, so 40 heterogeneous payloads form 10 claimed runs and nine
+// Catches M7 (non-final run end read from the wrong Tindex entry): chunk 4
+// (`avgCostForChunk(4)`), so 40 heterogeneous payloads form 10 claimed runs and nine
 // of them take runCompact's `endOff = Tindex[runend]` branch. The last
 // payload is zero-length, pinning the Tsize - END_PAD end rule at Plen 0.
 void testCompactMultiRunBodies()
@@ -2737,7 +2737,7 @@ void testCompactMultiRunBodies()
     static immutable size_t[40] lens = [
         3, 0, 5, 1, 9, 2, 0, 4, 7, 1, 1, 6, 0, 2, 13, 3, 5, 0, 1, 8,
         2, 2, 0, 11, 1, 4, 3, 0, 6, 1, 9, 2, 5, 0, 1, 3, 7, 2, 4, 0];
-    compactMixedCase(lens[], 3, "compact multi-run body contract");
+    compactMixedCase(lens[], avgCostForChunk(4), "compact multi-run body contract");
     printf("testCompactMultiRunBodies OK\n"); fflush(stdout);
 }
 

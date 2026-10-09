@@ -13,7 +13,7 @@ void main(string[] args)
 {
     immutable taskCount = args.length > 1 ? args[1].to!size_t : 1_000;
     immutable flushMax = args.length > 2 ? args[2].to!size_t : 256;
-    immutable avgCost = args.length > 3 ? args[3].to!uint : 0;
+    immutable avgCost = args.length > 3 ? args[3].to!uint : avgCostForChunk(32);
     immutable stackSize = args.length > 4 ? args[4].to!size_t : 0;
     // 0 = burst-spawn then drain (split create/run). 1 = flush during spawn
     // so Farm write overlaps the burst; still drains after.

@@ -271,7 +271,7 @@ void managedJoinCompletionRaceStress()
         size_t published;
         while (published != 2)
         {
-            published += backend.flush(token, 1, 1);
+            published += backend.flush(token, 1, DEFAULT_AVG_COST);
             if (published != 2) Thread.yield();
         }
         while (atomicLoad!(MemoryOrder.acq)(joinStarted) < round)
@@ -280,7 +280,7 @@ void managedJoinCompletionRaceStress()
         atomicStore!(MemoryOrder.rel)(gate, round);
         while (!backend.drained)
         {
-            if (backend.ready != 0) backend.flush(token, 2, 1);
+            if (backend.ready != 0) backend.flush(token, 2, DEFAULT_AVG_COST);
             Thread.yield();
         }
         assert(target.terminated && joiner.terminated);
@@ -340,7 +340,7 @@ void managedJoinFanoutCancellationStress()
         size_t published;
         while (published != width + 1)
         {
-            published += backend.flush(token, 1, 1);
+            published += backend.flush(token, 1, DEFAULT_AVG_COST);
             if (published != width + 1) Thread.yield();
         }
         immutable expectedStarted = cast(uint)(round * width);
@@ -357,7 +357,7 @@ void managedJoinFanoutCancellationStress()
 
         while (!backend.drained)
         {
-            if (backend.ready != 0) backend.flush(token, 32, 1);
+            if (backend.ready != 0) backend.flush(token, 32, DEFAULT_AVG_COST);
             Thread.yield();
         }
         assert(target.outcome == FiberOutcome.completed);
@@ -860,7 +860,7 @@ private final class ActorWaveStressProducer
                 immutable end = candidateEnd < actors.length
                     ? candidateEnd : actors.length;
                 immutable written = wave.publish!actorWaveStressOperation(
-                    actors[offset .. end], producer, 0);
+                    actors[offset .. end], producer, avgCostForChunk(32));
                 enforce(!wave.handle.failed,
                     "actor-wave stress publication failed");
                 if (written == 0)
@@ -944,7 +944,7 @@ void actorWaveGenerationStress()
     // polling deferred completion edges. Subsequent generations naturally
     // mix parked wakeups with valid preposted completions.
     immutable initiallyFlushed = backend.flush(
-        schedulerProducer, streamCount, 0);
+        schedulerProducer, streamCount, avgCostForChunk(32));
     enforce(initiallyFlushed == streamCount,
         "actor-wave stress initial Fiber publication failed");
 
@@ -983,7 +983,7 @@ void actorWaveGenerationStress()
         backend.pollGenerationTriggers();
         if (backend.ready != 0)
         {
-            if (backend.flush(schedulerProducer, 32, 0) == 0)
+            if (backend.flush(schedulerProducer, 32, avgCostForChunk(32)) == 0)
                 Thread.yield();
         }
         else
@@ -1130,7 +1130,7 @@ void main()
 
     while (backend.ready != 0)
     {
-        if (backend.flush(token, 256, 1) == 0) Thread.yield();
+        if (backend.flush(token, 256, DEFAULT_AVG_COST) == 0) Thread.yield();
     }
     while (backend.waiting != taskCount) Thread.yield();
 
@@ -1150,7 +1150,7 @@ void main()
 
     while (!backend.drained)
     {
-        if (backend.ready != 0 && backend.flush(token, 256, 1) == 0)
+        if (backend.ready != 0 && backend.flush(token, 256, DEFAULT_AVG_COST) == 0)
             Thread.yield();
     }
     atomicStore!(MemoryOrder.rel)(stopConsumers, 1);

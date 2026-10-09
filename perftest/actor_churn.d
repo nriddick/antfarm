@@ -883,12 +883,24 @@ private class Consumer
 
 // Root pump under the configured cost-hint policy: "auto" (the default)
 // passes no hint so the runtime derives one per table from its entry count
-// and the live consumer count; an explicit 0..5 keeps its literal
-// writeTracked meaning, which is how fixed-hint historical baselines
-// (root-hint=0) stay comparable across runtimes. The sentinel is local so
+// and the live consumer count; an explicit 0..MAX_AVG_COST keeps its literal
+// writeTracked meaning, so a fixed hint names a different chunk on runtimes
+// with different MAX_CHUNK (class k is chunk 32 >> k before MAX_CHUNK rose to
+// 128 and 128 >> k after). The sentinel is local so
 // this source also builds against pre-derivation runtimes; it is never
 // passed to pump.
 private enum uint rootHintAuto = uint.max;
+
+// Cost class of chunk 32 under the runtime being built, derived from
+// MAX_CHUNK so ActorRuntime.flush keeps the same claim size on runtimes with
+// either chunk ceiling (class 0 before MAX_CHUNK rose to 128, class 2 after).
+private uint chunk32CostOf()
+{
+    uint cost;
+    while ((MAX_CHUNK >> cost) > 32) ++cost;
+    return cost;
+}
+private enum uint chunk32Cost = chunk32CostOf();
 
 size_t pumpRoot(Park)(Park park, ref Token token, size_t batchLimit, uint hint)
 {
@@ -927,7 +939,7 @@ void main(string[] args)
     markThreadpoolThread();
     enforce(args.length >= 2 && args.length <= 13
             && (args[1] == "private-tracked" || args[1] == "tree-cont" || args[1] == "tree-slab" || args[1] == "tree-wait-slab" || args[1] == "tree-cont-slab" || args[1] == "tree-refill" || args[1] == "tree-refill-slab" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-slab|tree-wait-slab|tree-cont-slab|tree-refill|tree-refill-slab|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64|mimalloc-count] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..5]");
+        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-slab|tree-wait-slab|tree-cont-slab|tree-refill|tree-refill-slab|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64|mimalloc-count] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..7]");
     // Tree modes with their own run function, including the slab and refill
     // variants.
     immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined"
@@ -947,16 +959,15 @@ void main(string[] args)
     immutable treeWaitMode = args[1] == "tree-wait";
     immutable treeMode = args[1] == "tree" || treeWaitMode;
     // Root work-cost hint policy: the trailing argument after subset-percent.
-    // "auto" (default) publishes the runtime's derived hint; 0..5 pins the
-    // literal writeTracked class (root-hint=0 is the pre-G4 historical
-    // default, chunk 32).
+    // "auto" (default) publishes the runtime's derived hint; 0..MAX_AVG_COST pins the
+    // literal writeTracked class (chunk MAX_CHUNK >> class).
     immutable rootHintArg = args.length > (subsetMode ? 12 : 11)
         ? args[subsetMode ? 12 : 11] : "auto";
     uint rootHint = rootHintAuto;
     if (rootHintArg != "auto")
     {
         rootHint = to!uint(rootHintArg);
-        enforce(rootHint <= MAX_AVG_COST, "root-hint must be auto or 0..5");
+        enforce(rootHint <= MAX_AVG_COST, "root-hint must be auto or 0..MAX_AVG_COST");
     }
     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;
     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;
@@ -1186,7 +1197,7 @@ void main(string[] args)
                 immutable limit = count - published < batch
                     ? count : published + batch;
                 published += wave.publish!operate(handles[published .. limit],
-                    token, 0);
+                    token, chunk32Cost);
                 enforce(!wave.handle.failed, "wave publication failed");
                 consume();
                 enforce(MonoTime.currTime < deadline, "wave publication timed out");
@@ -1209,7 +1220,7 @@ void main(string[] args)
             size_t published;
             while (published < count)
             {
-                published += runtime.flush(token, batch, 0);
+                published += runtime.flush(token, batch, chunk32Cost);
                 consume();
                 enforce(MonoTime.currTime < deadline, "actor publication timed out");
             }
@@ -1235,7 +1246,7 @@ void main(string[] args)
             ActorReclaimResult result;
             while ((result = owner.reclaim()) == ActorReclaimResult.busy)
             {
-                runtime.flush(token, batch, 0);
+                runtime.flush(token, batch, chunk32Cost);
                 consume();
                 enforce(MonoTime.currTime < deadline, "actor reclamation timed out");
             }
