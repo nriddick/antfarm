@@ -1397,17 +1397,43 @@ void t22_avgcost_sharding()
     // The auto small-table threshold rule is normally off in the correctness
     // suites (AntFarm.create defaults smallThreshold to 64).  Turn it on and
     // write tables on both sides of each avgCost threshold with 8 consumers
-    // (sq = 3):
-    //   avgCost 0 -> chunk 32 -> threshold 96  (95 small, 97 sharded)
-    //   avgCost 1 -> chunk 16 -> threshold 48  (47 small, 49 sharded)
-    //   avgCost 2 -> chunk  8 -> threshold 24  (23 small, 25 sharded)
-    //   avgCost 3 -> chunk  4 -> threshold 16  (15 small, 17 sharded)
-    //   avgCost 5 -> chunk  1 -> threshold 16  (15 small, 17 sharded)
+    // (sq = 3), for every class 0 .. MAX_AVG_COST:
+    //   avgCost 0 -> chunk 128 -> threshold 256 (255 small, 257 sharded; 3 * 128 clamps to 256)
+    //   avgCost 1 -> chunk  64 -> threshold 192 (191 small, 193 sharded)
+    //   avgCost 2 -> chunk  32 -> threshold  96  (95 small, 97 sharded)
+    //   avgCost 3 -> chunk  16 -> threshold  48  (47 small, 49 sharded)
+    //   avgCost 4 -> chunk   8 -> threshold  24  (23 small, 25 sharded)
+    //   avgCost 5 -> chunk   4 -> threshold  16  (15 small, 17 sharded)
+    //   avgCost 6 -> chunk   2 -> threshold  16  (15 small, 17 sharded)
+    //   avgCost 7 -> chunk   1 -> threshold  16  (15 small, 17 sharded)
+    // Class 0 is the first with chunks of 128: the 255-entry table is claimed
+    // wholesale by shard 0 as two claims (128 and 127); the 257-entry table
+    // shards 86/86/85, one claim per shard.
     // Exact per-payload accounting must hold across every consumer geometry.
     auto f = AntFarm.create(2, 8, 8, 1, 0, 1, 4096, 0);
     scope (exit) f.destroy();
 
-    enum N = 400;
+    enum sq = 3;
+    static struct TableSpec
+    {
+        uint tlen;
+        uint avgCost;
+        Tier tier;
+    }
+    TableSpec[2 * (MAX_AVG_COST + 1)] specs;
+    size_t N;
+    foreach (avgCost; 0 .. MAX_AVG_COST + 1)
+    {
+        immutable want = sq * (MAX_CHUNK >> avgCost);
+        immutable threshold = want < 16 ? 16 : (want > 256 ? 256 : want);
+        // The classes 0 .. 2 tables (up to 257 entries) use the bulk tier;
+        // the small tier's 4096-word quota is reserved for the class 3 and
+        // smaller tables (49 entries and fewer).
+        immutable tier = threshold > 48 ? Tier.bulk : Tier.small;
+        specs[2 * avgCost] = TableSpec(threshold - 1, avgCost, tier);
+        specs[2 * avgCost + 1] = TableSpec(threshold + 1, avgCost, tier);
+        N += 2 * threshold;
+    }
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
@@ -1417,25 +1443,6 @@ void t22_avgcost_sharding()
         plen = 2;
     });
     scope (exit) freeBatch(batch);
-
-    static struct TableSpec
-    {
-        uint tlen;
-        uint avgCost;
-        Tier tier;
-    }
-    immutable TableSpec[] specs = [
-        TableSpec(95, 0, Tier.bulk),
-        TableSpec(97, 0, Tier.bulk),
-        TableSpec(47, 1, Tier.bulk),
-        TableSpec(49, 1, Tier.bulk),
-        TableSpec(23, 2, Tier.small),
-        TableSpec(25, 2, Tier.small),
-        TableSpec(15, 3, Tier.small),
-        TableSpec(17, 3, Tier.small),
-        TableSpec(15, 5, Tier.small),
-        TableSpec(17, 5, Tier.small),
-    ];
 
     enum NC = 8;
     Thread[NC] consumers;
@@ -1487,7 +1494,7 @@ void t25_single_shot_claim_contract()
     // primary/sweeper visits compete for the same table shard claims. Check
     // exact execution across ring reuse and the ST callback-visible Pcount,
     // including chunk size one where claim contention is greatest.
-    foreach (avgCost; [0U, 5U])
+    foreach (avgCost; [0U, avgCostForChunk(32), MAX_AVG_COST])
     {
         auto f = AntFarm.create(2, 8, 8, 1, 16384, 1, 4096, 0);
         scope (exit) f.destroy();

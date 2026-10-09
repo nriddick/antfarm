@@ -803,6 +803,25 @@ void rootBatchDeath(bool createZero, bool overLimit)
     check(park !is null);
     park.pump(token, overLimit ? 258 : 0);
 }
+long avgCostDeathWork(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
+{
+    return 1;
+}
+// avgCost MAX_AVG_COST is the largest accepted class (the round-trip is
+// covered by the Farm and torture suites); one past it must be fatal.
+void avgCostOverDeath()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    PayloadHeader header;
+    header.maxCs = header.done = 1;
+    header.plen = 1;
+    header.call = &avgCostDeathWork;
+    ulong[1] body;
+    PayloadEntry[1] entries = [PayloadEntry(&header, body[])];
+    farm.write(entries[], token, MAX_AVG_COST + 1);
+    // Reaching this point means the fatal contract was not enforced.
+}
 PrivateRootDisposition childBatchZero(scope ref PrivateBorrow!State, scope ref PrivateContext ctx)
     nothrow @nogc @system
 {
@@ -1172,6 +1191,8 @@ void deathHarness()
             check(diedWithMessage(modeName, "antfarm fatal: invalid private root batch limit"));
         check(diedWithMessage("batch-child-zero", "antfarm fatal: invalid private child batch limit"));
         writeln("PASS invalid configured and per-call batch limits are fatal");
+        check(diedWithMessage("avg-cost-over", "antfarm fatal: avgCost out of range"));
+        writeln("PASS avgCost above MAX_AVG_COST is fatal");
         check(diedWithMessage("destroy-live", "antfarm fatal: destroy nonempty private root park"));
         check(diedWithMessage("finish-with-active-child", "antfarm fatal: retire private actor with active child wave"));
         writeln("PASS destroy-live and finish-with-active-child are fatal");
@@ -10164,6 +10185,98 @@ void rootCostHintRule()
             }
 }
 
+// A child wave table publishes claims of exactly 32 entries (childAvgCost).
+// With a wholesale 256-member table and two consumers, the callback of member 0
+// holds its claim open until another thread has run a member, so that thread
+// owns the second claim: members [0, 32) must share one thread and [32, 64)
+// another. The literal 32 pins the chunk: a longer chunk folds the second claim
+// into the first, a shorter one hands the first claim's tail to the second.
+enum childChunkMembers = 256;
+shared ulong[childChunkMembers] childChunkOwner;
+shared ulong childChunkNextId;
+ulong childChunkId; // thread-local
+struct ChunkChild { size_t index; }
+void childChunkOperation(scope ref PrivateBorrow!ChunkChild b, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    if (childChunkId == 0) childChunkId = atomicFetchAdd(childChunkNextId, 1UL) + 1;
+    immutable me = childChunkId;
+    immutable i = b.value.index;
+    atomicStore!(MemoryOrder.rel)(childChunkOwner[i], me);
+    if (i != 0) return;
+    // Wait for another thread's member. On timeout fall through: the split
+    // check in the caller fails instead of the process hanging.
+    immutable deadline = MonoTime.currTime + 10.seconds;
+    for (;;)
+    {
+        foreach (j; 1 .. childChunkMembers)
+        {
+            immutable owner = atomicLoad!(MemoryOrder.acq)(childChunkOwner[j]);
+            if (owner != 0 && owner != me) return;
+        }
+        if (MonoTime.currTime > deadline) return;
+        pause();
+    }
+}
+struct ChunkParent { PrivateChildPark!ChunkChild* children; }
+PrivateRootDisposition chunkParentStep(scope ref PrivateBorrow!ChunkParent b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    if (b.value.children is null)
+    {
+        b.value.children = ctx.createChildren!ChunkChild(childChunkMembers, childChunkMembers);
+        check(b.value.children !is null);
+        foreach (i; 0 .. childChunkMembers)
+            check(b.value.children.spawn(ctx, ChunkChild(i)) == PrivateSpawnResult.spawned);
+        check(b.value.children.startFinal!childChunkOperation(ctx) == PrivateStartResult.started);
+        return PrivateRootDisposition.again;
+    }
+    return b.value.children.finished(ctx) ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
+}
+void childChunkSplit()
+{
+    auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 8192, uint.max);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    auto parent = PrivateRootPark!(ChunkParent, chunkParentStep).create(farm, 1);
+    check(parent !is null);
+    check(parent.spawn(ChunkParent(null)) == PrivateSpawnResult.spawned);
+    auto workers = new Workers(farm, 2);
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (parent.live)
+    {
+        parent.pump(token);
+        enforce(MonoTime.currTime < deadline, "child chunk split timeout");
+    }
+    workers.join();
+    immutable first = atomicLoad!(MemoryOrder.raw)(childChunkOwner[0]);
+    immutable second = atomicLoad!(MemoryOrder.raw)(childChunkOwner[32]);
+    check(first != 0 && second != 0 && first != second);
+    foreach (i; 0 .. 32) check(atomicLoad!(MemoryOrder.raw)(childChunkOwner[i]) == first);
+    foreach (i; 32 .. 64) check(atomicLoad!(MemoryOrder.raw)(childChunkOwner[i]) == second);
+    parent.destroy();
+}
+
+// Hardcoded pins for the derived root hint: a sharded or single-claim table
+// keeps the class of 32-entry runs (class 2), and the small-table splits land
+// on the classes of 16, 8, 4, 2 and 1 entries (3 .. 7).
+void rootCostHintPins()
+{
+    check(rootCostHintFor(0, 6, 64) == 2);
+    check(rootCostHintFor(1, 6, 64) == 2);
+    check(rootCostHintFor(64, 6, 64) == 2);
+    check(rootCostHintFor(256, 6, 64) == 2);
+    check(rootCostHintFor(1024, 8, 64) == 2);
+    check(rootCostHintFor(63, 6, 64) == 4);
+    check(rootCostHintFor(31, 6, 64) == 5);
+    check(rootCostHintFor(16, 6, 64) == 6);
+    check(rootCostHintFor(8, 6, 64) == 7);
+    check(rootCostHintFor(100, 6, 128) == 3);
+    check(rootCostHintFor(46, 64, 128) == 5);
+    check(rootCostHintFor(60, 1, 64) == 2);
+}
+
 // ===========================================================================
 // Cohort slab storage. Selectors: slab (all), slab-retire, slab-retain,
 // slab-refill, slab-continuation, slab-cancel, slab-idle, slab-create-fail,
@@ -11589,6 +11702,7 @@ void phaseSlab()
 void runSuite()
 {
     rootCostHintRule(); writeln("PASS derived root cost hint rule");
+    rootCostHintPins(); writeln("PASS derived root cost hint literal classes");
     phaseCancel();
     phaseRootTracking();
     phaseOutcomes();
@@ -11601,6 +11715,7 @@ void runSuite()
     phaseSubset();
     phaseEntryWord();
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
+    childChunkSplit(); writeln("PASS child wave tables claim 32 entries");
     version (AntfarmWriteAuditHooks)
     {
         explicitChildLimit();
@@ -11661,6 +11776,7 @@ void main(string[] args)
         case "batch-pump-zero": rootBatchDeath(false, false); return;
         case "batch-pump-over": rootBatchDeath(false, true); return;
         case "batch-child-zero": childBatchDeath(); return;
+        case "avg-cost-over": avgCostOverDeath(); return;
         case "reentrant-spawn":
             version (assert) reentrantDeath();
             return;

@@ -2440,6 +2440,187 @@ void testSameShardPlainWriteJoin()
     printf("PASS same-shard plain-write completion join\n"); fflush(stdout);
 }
 
+// Spec 7a chunk boundaries. A wholesale table (smallThreshold is uint.max) is
+// claimed in runs of `128 >> avgCost` entries by the consumers of shard 0. The
+// callback of entry 0 holds its run open until a second thread has executed an
+// entry of the table, so that thread owns the second claim and no thread can
+// take two runs. A table of three chunks must then split exactly as
+// [0, chunk) on one thread and [chunk, 2 * chunk) on the other: a smaller
+// chunk would hand the first run's tail to the second thread, and a larger
+// one would fold the second run into the first. The expected chunks below are
+// literals on purpose: they pin MAX_CHUNK = 128 and the default class.
+__gshared size_t g_chunkTableN;
+shared ulong[3 * 128] g_chunkOwner;
+shared uint g_chunkCalls;
+shared ulong g_chunkNextId;
+ulong t_chunkId; // thread-local: set once per consumer thread
+void chunkAbort() nothrow @nogc @system
+{
+    fprintf(stderr, "FAIL chunk boundary probe timed out\n");
+    import core.stdc.stdlib : abort;
+    abort();
+}
+bool chunkOtherThreadRan(ulong me) nothrow @nogc @system
+{
+    foreach (j; 1 .. atomicLoad!(MemoryOrder.raw)(g_chunkTableN))
+    {
+        immutable owner = atomicLoad!(MemoryOrder.acq)(g_chunkOwner[j]);
+        if (owner != 0 && owner != me) return true;
+    }
+    return false;
+}
+long chunkProbeWork(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+{
+    immutable i = cast(size_t) body[0];
+    immutable me = t_chunkId;
+    atomicStore!(MemoryOrder.rel)(g_chunkOwner[i], me);
+    if (i == 0)
+    {
+        immutable deadline = MonoTime.currTime + 10.seconds;
+        while (!chunkOtherThreadRan(me))
+        {
+            if (MonoTime.currTime > deadline) chunkAbort();
+            pause();
+        }
+    }
+    atomicFetchAdd!(MemoryOrder.rel)(g_chunkCalls, 1u);
+    return 1;
+}
+shared uint g_chunkHookDone;
+void chunkHookDone(void*) nothrow @nogc @system
+{
+    atomicStore!(MemoryOrder.rel)(g_chunkHookDone, 1u);
+}
+final class ChunkRig
+{
+    AntFarm* farm;
+    Token token;
+    shared uint stop, started;
+    Thread[2] threads;
+    PayloadHeader header;
+    ulong[3 * 128] ids;
+    PayloadEntry[3 * 128] entries;
+    PayloadHeader*[3 * 128] headerPtrs;
+    PayloadBody[3 * 128] bodies;
+    TableCompletionHook hook;
+
+    this()
+    {
+        farm = AntFarm.create(2, 8, 2, 0, 0, 1, 8192, uint.max);
+        token = farm.registerProducer(Tier.small);
+        foreach (i; 0 .. threads.length)
+        {
+            threads[i] = new Thread({
+                t_chunkId = atomicFetchAdd(g_chunkNextId, 1UL) + 1;
+                ConsumerView view;
+                if (view.subscribe(farm) < 0) chunkAbort();
+                scope(exit) view.unsubscribe();
+                atomicFetchAdd(started, 1u);
+                while (atomicLoad(stop) == 0)
+                    if (!view.consumeNext()) pause();
+                while (view.consumeNext()) {}
+            });
+            threads[i].start();
+        }
+        auto startDeadline = MonoTime.currTime + 10.seconds;
+        while (atomicLoad(started) < threads.length)
+            check(MonoTime.currTime < startDeadline, "chunk consumers did not start");
+        header.maxCs = header.done = 1;
+        header.plen = 1;
+        header.call = &chunkProbeWork;
+        hook = TableCompletionHook(null, &chunkHookDone);
+        foreach (i; 0 .. entries.length)
+        {
+            ids[i] = i;
+            bodies[i] = ids[i .. i + 1];
+            headerPtrs[i] = &header;
+            entries[i] = PayloadEntry(&header, bodies[i]);
+        }
+    }
+
+    void finish()
+    {
+        atomicStore(stop, 1u);
+        foreach (t; threads) t.join();
+        farm.unregisterProducer(token);
+        farm.destroy();
+    }
+
+    // Runs one table of `3 * chunk` entries through `write` and checks the
+    // split. `write` returns the entries admitted.
+    void expectSplit(size_t chunk, scope size_t delegate(size_t n) write,
+                     const(char)[] label)
+    {
+        immutable n = 3 * chunk;
+        atomicStore!(MemoryOrder.raw)(g_chunkTableN, n);
+        foreach (ref o; g_chunkOwner) atomicStore!(MemoryOrder.raw)(o, 0UL);
+        atomicStore!(MemoryOrder.raw)(g_chunkCalls, 0u);
+        atomicStore!(MemoryOrder.raw)(g_chunkHookDone, 0u);
+        check(write(n) == n, label);
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (atomicLoad!(MemoryOrder.acq)(g_chunkCalls) != n)
+            check(MonoTime.currTime < deadline, "chunk table timeout");
+        immutable first = atomicLoad!(MemoryOrder.raw)(g_chunkOwner[0]);
+        immutable second = atomicLoad!(MemoryOrder.raw)(g_chunkOwner[chunk]);
+        check(first != 0 && second != 0 && first != second, label);
+        foreach (i; 0 .. chunk)
+            check(atomicLoad!(MemoryOrder.raw)(g_chunkOwner[i]) == first, label);
+        foreach (i; chunk .. 2 * chunk)
+            check(atomicLoad!(MemoryOrder.raw)(g_chunkOwner[i]) == second, label);
+    }
+}
+void testChunkBoundariesPerClass()
+{
+    auto rig = new ChunkRig;
+    // Class k claims 128 >> k entries: classes 0 .. 7.
+    static immutable size_t[8] chunks = [128, 64, 32, 16, 8, 4, 2, 1];
+    foreach (avgCost; 0 .. chunks.length)
+        rig.expectSplit(chunks[avgCost],
+            (size_t n) => rig.farm.write(rig.entries[0 .. n], rig.token, cast(uint) avgCost),
+            "explicit avgCost chunk split");
+    rig.finish();
+    printf("PASS chunk boundaries for cost classes 0..7\n");
+    fflush(stdout);
+}
+// Every write overload without an avgCost argument publishes the default
+// class: claims of exactly 16 entries (the literal pins DEFAULT_AVG_COST = 3).
+void testDefaultAvgCostChunk()
+{
+    import std.algorithm.iteration : map;
+    auto rig = new ChunkRig;
+    enum chunk = 16;
+    rig.expectSplit(chunk, (size_t n) => rig.farm.write(rig.entries[0 .. n], rig.token),
+        "default write(PayloadEntry[]) chunk");
+    rig.expectSplit(chunk,
+        (size_t n) => rig.farm.write(iota(n).map!(i => rig.entries[i]), rig.token),
+        "default write(range) chunk");
+    rig.expectSplit(chunk,
+        (size_t n) => rig.farm.write(rig.headerPtrs[0 .. n], rig.bodies[0 .. n], rig.token),
+        "default write(headers, bodies) chunk");
+    rig.expectSplit(chunk,
+        (size_t n) => rig.farm.write(rig.header, rig.bodies[0 .. n], rig.token),
+        "default broadcast write chunk");
+    rig.expectSplit(chunk,
+        (size_t n) => rig.farm.write(rig.header, rig.bodies[0 .. n], 1UL, rig.token),
+        "default broadcast write(bodyWords) chunk");
+    rig.expectSplit(chunk,
+        (size_t n) => rig.farm.writeTracked(rig.header, rig.bodies[0 .. n], 1UL,
+            &rig.hook, rig.token),
+        "default writeTracked chunk");
+    auto doneDeadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad!(MemoryOrder.acq)(g_chunkHookDone) == 0)
+        check(MonoTime.currTime < doneDeadline, "default writeTracked hook did not run");
+    rig.finish();
+    printf("PASS default write overloads claim 16 entries\n");
+    fflush(stdout);
+}
+// Hardcoded pins for the class constants and the chunk-to-class helper.
+static assert(MAX_CHUNK == 128 && MAX_AVG_COST == 7 && DEFAULT_AVG_COST == 3);
+static assert(avgCostForChunk(128) == 0 && avgCostForChunk(1000) == 0);
+static assert(avgCostForChunk(32) == 2 && avgCostForChunk(16) == 3);
+static assert(avgCostForChunk(8) == 4 && avgCostForChunk(1) == 7);
+static assert(avgCostForChunk(0) == 7 && avgCostForChunk(24) == 3);
+
 // Regression: Wt reservation must be acq_rel (spec 5a, 9). P spends a quota
 // balance granted before Q drives the ring through several laps; the
 // consumer's callback reads ring body words plainly. With a release-only
@@ -3291,6 +3472,8 @@ void main(string[] args)
     testActorErasedAdapter();
     testActorInbox();
     testSameShardPlainWriteJoin();
+    testChunkBoundariesPerClass();
+    testDefaultAvgCostChunk();
     testCompactMixedBodies();
     testCompactMultiRunBodies();
     testCompactWraparound();
