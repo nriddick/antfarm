@@ -97,7 +97,7 @@ struct Cfg
     ulong n = 16_000_000;
     ulong qb = 0;      // 0 → segCap
     ulong qs = 4096;
-    uint avgCost = 1;  // chunk hint: MAX_CHUNK >> avgCost
+    uint avgCost = DEFAULT_AVG_COST;  // chunk hint: MAX_CHUNK >> avgCost
     uint small = 64;   // small-table threshold; 0 = auto clamp(sq*chunk,16,256)
     uint repeats = 3;
     uint grid;   // --grid N: single-phase small-producer grid size

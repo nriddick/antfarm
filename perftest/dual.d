@@ -93,7 +93,7 @@ struct Cfg
     uint body = 16;
     uint batch = 1;         // payloads per produce phase (small write size)
     uint consume = 1;       // consumeNext calls per produce phase; 0 = drain until empty
-    uint avgCost = 1;
+    uint avgCost = DEFAULT_AVG_COST;
     uint small = 64;
     ulong n = 4_000_000;
     uint repeats = 3;

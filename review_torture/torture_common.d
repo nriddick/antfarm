@@ -127,7 +127,7 @@ struct ProdCtx
     Tier tier;
     size_t maxBatch; // 0 = unlimited (write whole remainder)
     shared size_t* written; // optional progress
-    uint avgCost = 1;
+    uint avgCost = DEFAULT_AVG_COST;
 }
 
 void producerMain(ProdCtx* c)

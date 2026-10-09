@@ -397,6 +397,25 @@ enum bool DEFAULT_HUGE_PAGES = false;
 enum uint MAX_CHUNK = 128;
 /// log2(MAX_CHUNK); avgCost outside 0 .. MAX_AVG_COST is a caller error.
 enum uint MAX_AVG_COST = 7;
+/// Default `avgCost` of every public write overload: chunk 16, the latency-
+/// conserving middle of the range. Cheap uniform work opts into classes 0 .. 2
+/// (chunks 128, 64, 32); expensive work uses higher classes.
+enum uint DEFAULT_AVG_COST = 3;
+
+/// The `avgCost` class whose claims hold `chunk` entries (`MAX_CHUNK >>
+/// class == chunk`). Internal callers name the chunk they were tuned for so
+/// their claim splits do not move when `MAX_CHUNK` does.
+///
+/// A `chunk` that is not a power of two rounds down to the next smaller power
+/// of two (24 gives the class of 16). A `chunk` of 0 or 1 gives
+/// `MAX_AVG_COST` and a `chunk` of `MAX_CHUNK` or more gives 0. Usable at
+/// compile time, so `enum cls = avgCostForChunk(32);` is a constant.
+uint avgCostForChunk(uint chunk) pure nothrow @nogc @safe
+{
+    uint cost;
+    while (cost < MAX_AVG_COST && (MAX_CHUNK >> cost) > chunk) ++cost;
+    return cost;
+}
 /// Sentinel work-cost hint for callers that derive an effective class from
 /// the table they are about to publish instead of naming one. The private
 /// root pump uses it as its `avgCost` default; see `rootCostHintFor`.
@@ -1572,7 +1591,7 @@ struct AntFarm
     /// the token's private quota. `avgCost` is the producer's declared Call
     /// cost class, a log2 shift in 0 .. MAX_AVG_COST (spec 5b / 7a).
     ulong write(scope PayloadEntry[] payloads, ref Token tok,
-                uint avgCost = 3) nothrow @nogc @system
+                uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
     {
         return writeImpl(payloads, tok, avgCost, null);
     }
@@ -1580,7 +1599,7 @@ struct AntFarm
     /// ditto: forward range overload. `write` checkpoints the source for its
     /// sizing and emission passes and never advances the caller's checkpoint.
     ulong write(R)(scope R payloads, ref Token tok,
-                   uint avgCost = 3) nothrow @nogc @system
+                   uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
         if (isForwardRange!R && is(ElementType!R == PayloadEntry))
     {
         return writeImpl(payloads, tok, avgCost, null);
@@ -1590,7 +1609,7 @@ struct AntFarm
     /// positional and stops at the shorter range.  This overload is a lazy
     /// shim: it does not allocate or materialize `PayloadEntry` pairs.
     ulong write(HR, BR)(scope HR headers, scope BR bodies, ref Token tok,
-                        uint avgCost = 3) nothrow @nogc @system
+                        uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
         if (isForwardRange!HR && isForwardRange!BR &&
             (is(Unqual!(ElementType!HR) == PayloadHeader) ||
              is(ElementType!HR : const(PayloadHeader)*)) &&
@@ -1602,7 +1621,7 @@ struct AntFarm
     /// Broadcast one common header over a forward range of bodies. The
     /// common metadata is validated once per call rather than once per body.
     ulong write(BR)(const ref PayloadHeader header, scope BR bodies,
-                    ref Token tok, uint avgCost = 1) nothrow @nogc @system
+                    ref Token tok, uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
         return writeImpl(broadcastPayloads(header, bodies), tok, avgCost,
@@ -1614,7 +1633,7 @@ struct AntFarm
     /// element type is a runtime slice.
     ulong write(BR)(const ref PayloadHeader header, scope BR bodies,
                     ulong bodyWords, ref Token tok,
-                    uint avgCost = 1) nothrow @nogc @system
+                    uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
         return writeImpl(broadcastPayloads(header, bodies, bodyWords), tok,
@@ -1628,7 +1647,7 @@ struct AntFarm
     /// complete it before this function returns.
     ulong writeTracked(BR)(const ref PayloadHeader header, scope BR bodies,
                     ulong bodyWords, TableCompletionHook* completion,
-                    ref Token tok, uint avgCost = 3) nothrow @nogc @system
+                    ref Token tok, uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
         if (completion is null || !completion.valid)

@@ -52,7 +52,7 @@ struct Cfg
     bool runOversub = true;
     bool runAttr = false;
     bool runMailbox = false;
-    uint avgCost = 1;  // chunk hint for dump writes
+    uint avgCost = DEFAULT_AVG_COST;  // chunk hint for dump writes
     uint small = 64;   // small-table threshold; 0 = auto
     bool huge;         // --huge: MADV_HUGEPAGE on the magic-buffer mapping
 }
@@ -75,7 +75,7 @@ __gshared size_t g_cap;
 
 __gshared ulong g_spinNs;
 __gshared uint g_burstN;
-__gshared uint g_avgCost = 1;  // chunk hint for dump/sentinel writes
+__gshared uint g_avgCost = DEFAULT_AVG_COST;  // chunk hint for dump/sentinel writes
 __gshared uint g_small = 64;   // small-table threshold; 0 = auto
 __gshared shared(long) g_mbox; // 0 = empty; ticks of a mailbox sentinel
 
