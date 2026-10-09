@@ -212,27 +212,37 @@ reaches only about a quarter of that (342 vs 1,244 Mpps, with 11 consumers), so
 the aggregate rate comes from several producers filling the ring. Chunk 128 is
 worth about 6% over the default at this shape.
 
-### Compact single-threaded tables vs MT tables
+### Single-threaded table layouts vs MT tables
 
 A table of only single-threaded payloads (`Tmt == 0`, every payload
 `MaxCs == 1 && Done == 1`) stores each payload as a compact `[Call][Pbody]`
-record (SPEC 2f). A table containing a multi-threaded payload keeps the full
-`Phead` layout. Geometry, ignoring table overhead:
+record (SPEC 2f), or, when the accepted prefix shares one `Call`, as the bare
+`[Pbody]` with the `Call` stored once per table (SPEC 2g). A uniform table whose
+bodies also share one nonzero length drops Tindex as well. A table containing a
+multi-threaded payload keeps the full `Phead` layout. Geometry, ignoring table
+overhead:
 
 | Format | Ring words per entry | Entries per 4096-word small quota |
 | --- | --- | ---: |
+| Uniform `Call` and length, 1-word body | 1 (body) | ≈4096 |
+| Uniform `Call` and length, 16-word body | 16 | ≈256 |
+| Uniform `Call`, 1-word body | 2 (1 index + 1 body) | ≈2048 |
+| Uniform `Call`, 16-word body | 17 | ≈241 |
 | Compact ST, 1-word body | 3 (1 index + 1 `Call` + 1 body) | ≈1360 |
 | Compact ST, 16-word body | 18 | ≈227 |
 | MT full, 1-word body | 18 (1 index + 16 `Phead` + 1 body) | ≈227 |
 | MT full, 16-word body | 33 | ≈124 |
 
-Compact tables admit several times more entries per quota, which is why the
-per-object allocator geometry shifts in the private-remote churn cell (see
-[Allocators](#allocators)).
+Compact tables admit several times more entries per quota than the full layout,
+which is why the per-object allocator geometry shifts in the private-remote
+churn cell (see [Allocators](#allocators)); uniform tables admit up to three
+times more again.
 
-Today's benchmarks all build ST compact tables (the payload harnesses and actor
-layers set `MaxCs = Done = 1`), so every number here is a compact-path
-measurement. The MT path is exercised only by the correctness suite
+Today's benchmarks all build ST tables (the payload harnesses and actor layers
+set `MaxCs = Done = 1`). Unless a section says otherwise, its numbers were
+measured on the compact layout, before uniform tables (SPEC 2g) landed; the
+harnesses now publish uniform tables wherever a table's callbacks are shared
+(`throughput --mixed-calls` keeps the compact layout). The MT path is exercised only by the correctness suite
 (`antfarm_test`, `review_torture`), and this is not a pre-compact comparison.
 
 ## Public actors

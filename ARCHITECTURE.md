@@ -31,9 +31,11 @@ The hot API is `@nogc nothrow`. Payload callbacks receive a
 `PayloadHeader*` (the type is 128 bytes), a body of packed ulongs, and an
 iteration number. Multi-threaded payloads and mixed tables keep the full header
 in the ring. Tables whose payloads are all single-threaded store compact
-records without a ring header, so the callback instead sees a temporary
-consumer-local header: callbacks must not modify it or retain the pointer after
-returning ([SPEC.md section 2f](SPEC.md#2f-compact-st-tables)). A payload may be
+records without a ring header, or only the bodies when the table's payloads
+share one callback, so the callback instead sees a temporary consumer-local
+header: callbacks must not modify it or retain the pointer after returning
+([SPEC.md sections 2f](SPEC.md#2f-compact-st-tables) and
+[2g](SPEC.md#2g-uniform-call-st-tables)). A payload may be
 serial or countable/multiconsumer, but construction and completion policy stay
 with the caller.
 
@@ -211,17 +213,23 @@ within its producer's quota.
 
 A table spends its quota on fixed overhead plus a per-entry cost. The overhead
 is the table header and padding and grows with the table's work-shard count
-(eight ulongs per shard counter), which follows the consumer count. In a table
-whose payloads are all single-threaded, each entry costs one index word, one
-callback word, and its body words. Once an accepted prefix contains a
-multi-threaded payload, each entry instead carries the full 16-word payload
-header ahead of its body, and each multi-threaded entry also takes a second
-index word (the multi-threaded index). The number of entries admitted per quota therefore depends on the shard
-count, the body width, and whether any entry is multi-threaded. Do not copy a
-count from another configuration: compute it from the table layout in
-[SPEC.md section 2f](SPEC.md#2f-compact-st-tables), or probe the configuration
-you intend to run. `write() == 0` and a short accepted prefix are ordinary
-backpressure, and the surplus is written by a later call.
+(eight ulongs per shard counter), which follows the consumer count. The
+per-entry cost depends on what the accepted prefix of one `write` call shares:
+
+| Accepted prefix | Per-entry cost | Layout |
+| --- | --- | --- |
+| single-threaded, one callback, one nonzero body length | the body words | [SPEC 2g](SPEC.md#2g-uniform-call-st-tables), index-free |
+| single-threaded, one callback | one index word and the body words | [SPEC 2g](SPEC.md#2g-uniform-call-st-tables) |
+| single-threaded, several callbacks | one index word, one callback word and the body words | [SPEC 2f](SPEC.md#2f-compact-st-tables) |
+| contains a multi-threaded payload | one index word, the 16-word payload header and the body words, plus a second index word per multi-threaded entry | [SPEC 2e](SPEC.md#2e-table-layout) |
+
+A shared callback is stored once per table, and a shared length once more. A
+one-word body therefore costs 1, 2, 3 or 18 ring words per entry. The number of
+entries admitted per quota depends on the shard count, the body width, and which
+row the prefix falls in. Do not copy a count from another configuration:
+compute it from the table layouts in [SPEC.md](SPEC.md#2-data-layout), or probe
+the configuration you intend to run. `write() == 0` and a short accepted prefix
+are ordinary backpressure, and the surplus is written by a later call.
 
 - The ring should generally fit the intended LLC working set. Quotas and
   payload sizes remain in ulongs (8 bytes); only the ring size is in MiB.
@@ -242,7 +250,8 @@ backpressure, and the surplus is written by a later call.
   high-volume payload table walks and should be selected from measurements.
 
 Common-header and fixed-length writes reduce producer-side sizing overhead for
-homogeneous batches. They do not change the ring layout or consumer contract.
+homogeneous batches. They produce the same ring layout a `PayloadEntry` range
+with the same contents would, and do not change the consumer contract.
 
 ## One LLC and many LLCs
 

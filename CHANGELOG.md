@@ -32,7 +32,7 @@ validation and Fiber ThreadSanitizer migration remain limited as stated in
   exercise the real chain, with deterministic S1/S2 schedules and a leaf-reuse
   control. See [review_torture/FARM_ORDERING.md](review_torture/FARM_ORDERING.md).
 
-### Compact tables for single-threaded payloads
+### Compact and uniform tables for single-threaded payloads
 
 - A table whose payloads are all single-threaded is stored in a compact
   encoding without a per-payload ring header ([SPEC.md](SPEC.md#2f-compact-st-tables)).
@@ -51,6 +51,19 @@ validation and Fiber ThreadSanitizer migration remain limited as stated in
   comparable across this change. The change has one accepted regression in a
   six-consumer private cross-thread-free cell; it is an accepted trade-off, not
   a general slowdown.
+- **Uniform-callback tables.** A single-threaded table whose accepted prefix
+  shares one callback stores it once per table and each payload as its bare
+  body; when the bodies also share one nonzero length the table drops its
+  payload index too ([SPEC.md](SPEC.md#2g-uniform-call-st-tables)). A one-word
+  body costs 2 or 1 ring words instead of 3. Every `write` overload detects
+  this from the contents, and all actor tables use the index-free form. Tables
+  with several callbacks, multi-threaded payloads or empty bodies keep their
+  previous layout, and the callback header contract is the compact one above.
+- **Quota admission changed again.** Uniform tables admit up to three times
+  more entries per quota than compact ones, so actor and single-callback tables
+  are larger and split at different points. Entry counts from earlier sizing
+  guidance and benchmark tables measured on the compact layout do not carry
+  over.
 
 ### Public actors (1.7.0-rc.5 prerequisites and later)
 

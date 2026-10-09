@@ -22,9 +22,12 @@ you actually publish.
 
 Private root batches and the Farm quota are different knobs. The park's
 configured batch limit fixes how many root-table slots are reserved.
-`pump(token, limit)` may use a smaller limit; that does not add slots. How many
-private entries one table admits per quota depends on the Farm's shard count and
-the entry's body width; see
+`pump(token, limit)` may use a smaller limit; that does not add slots. Actor
+tables share one callback and one body width per table, so they use the
+index-free uniform layout ([SPEC 2g](../../SPEC.md#2g-uniform-call-st-tables)):
+a private root or child entry costs one ring word, a public flush entry two and
+a public wave entry three, plus fixed table overhead that grows with the Farm's
+shard count; see
 [How many entries fit a quota](../../ARCHITECTURE.md#how-many-entries-fit-a-quota).
 A larger configured batch is split into accepted prefixes. Child waves inherit
 the creating context's limit unless creation passes an override.
@@ -133,8 +136,8 @@ claim should keep the child batch limit at least the small-table threshold so
 tables shard across consumers.
 
 The Farm producer tier bounds actual admission. Its default small quota is 4096
-ulongs; how many private entries that admits in one table depends on the shard
-count and the entry's body width. A larger batch is split into accepted prefixes
+ulongs; that admits a little under 4096 one-word private entries in one table,
+less the table overhead for the shard count. A larger batch is split into accepted prefixes
 and requeued suffixes. To admit larger tables, configure a larger `quotaSmall`,
 or configure a bulk producer (`maxBulk` / `quotaBulk`) and register a
 `Tier.bulk` token. All quotas must still fit the Farm's segment and total
