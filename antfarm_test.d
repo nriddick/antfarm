@@ -334,7 +334,7 @@ void testArithmetic()
     check(sqcsOf(128) == 12, "sqcsOf(128)");
     check(sentinelOf(0) != sentinelOf(1), "sentinel distinct");
     check(sentinelOf(0) != 0, "sentinel nonzero");
-    // shard partition (spec 5e-e/f) sums to Tlen
+    // shard partition (spec 7a) sums to Tlen
     foreach (tlen; 64 .. 200)
         foreach (sq; 1 .. 13)
         {
@@ -993,7 +993,7 @@ void testWraparound()
 }
 
 // ---------------------------------------------------------------------
-// Test 5: subscription cap (spec 5a-a) and immediate reuse of slots
+// Test 5: subscription cap (spec 4c, 6b) and immediate reuse of slots
 // ---------------------------------------------------------------------
 
 void testSubscriptionCap()

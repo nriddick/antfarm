@@ -1,8 +1,24 @@
 /++
  + Private actors. Roots have scheduling custody in a single-
  + emitter park; children have one private parent and run only in its waves.
- + The emitter reads metadata, never actor state. See PRIVATE_ACTORS.md for
- + the @system borrowing contract.
+ + The emitter reads metadata, never actor state.
+ +
+ + Responsibility: the single-emitter root parks and parent-owned child
+ + cohorts, their scheduling metadata, and the typed result/outcome paths.
+ + It depends on `actors.actor` (allocator and test-hook seam) and `antfarm`.
+ + Canonical docs: docs/guide/private-actors.md,
+ + docs/guide/private-results-and-waits.md,
+ + docs/guide/outcomes-and-cancellation.md and
+ + docs/guide/sizing-and-allocation.md; the proofs are
+ + docs/design/private-actor-ordering.md and
+ + docs/design/private-actor-layout.md; docs/README.md is the map.
+ + Section map: public option/result types, PrivateBorrow/PrivateContext,
+ + shared Entry/ChildBase/Wave/RootRecord/Service machinery, PrivateRootPark,
+ + and the templated PrivateChildPark. The @system borrowing contract is in
+ + the private guide.
+ +
+ + The AntfarmActorTestHooks seams are production-elided: ordinary builds
+ + contain neither the hooks nor their branches.
  +/
 module actors.private_actor;
 
@@ -18,6 +34,7 @@ import core.lifetime : moveEmplace;
 import core.time : MonoTime;
 import std.traits : hasElaborateDestructor, hasNested, ReturnType;
 
+// ==== Section: public option and result types ====
 enum defaultPrivateBatchLimit = 256;
 
 private enum noDeadline = MonoTime.max;
@@ -178,6 +195,7 @@ template stateAllowed(T)
                 T a = void; T b = void; moveEmplace(a, b); }));
 }
 
+// ==== Section: PrivateBorrow and PrivateContext ====
 /// Valid only within the callback. Neither this borrow nor pointers/references
 /// into its state may escape. Initializers must not retain mutable aliases.
 struct PrivateBorrow(T)
@@ -319,6 +337,7 @@ public:
     }
 }
 
+// ==== Section: shared Entry/ChildBase/Wave/RootRecord/Service machinery ====
 // Child entries reach the Service through ChildBase.service; their word at
 // offset 16 is child-only metadata, never a Service pointer.
 private enum ChildStep : ubyte { done, waitChildren, doneRetire }
@@ -944,6 +963,7 @@ private struct RootBodies
     }
 }
 
+// ==== Section: PrivateRootPark ====
 /// Single-emitter scheduling custody for self-owned roots. spawn
 /// moves non-POD state (copies POD initializer bytes); it returns no
 /// actor handle. All methods on the park must be called by one emitter
@@ -1504,6 +1524,7 @@ private struct ResumeBodies
     }
 }
 
+// ==== Section: PrivateChildPark ====
 /// Opaque homogeneous cohort. The parent may create members and request a
 /// whole-cohort or subset wave, but can never borrow a child's state. There
 /// are no overlapping waves, external dispatches, removal, or reparenting.

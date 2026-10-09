@@ -1,6 +1,16 @@
 /++
  + Phase-oriented actor dispatch built from Ant Farm payload tables.
  +
+ + Responsibility: one bulk-synchronous phase over one or more physical
+ + tables, with a sealed, generation-tagged completion. It depends on
+ + `antfarm` and the package wave entry points in `actors.actor`.
+ + Canonical docs: docs/guide/public-actors.md#waves,
+ + docs/reference/actor-lifecycle.md and
+ + docs/design/public-actor-ordering.md; docs/README.md is the map.
+ + Section map: completion callback/hook/handle, ActorWave, then the private
+ + payload body range and callback. The AntfarmActorTestHooks seam is
+ + production-elided.
+ +
  + One ActorWave may publish several physical tables. Each table's
  + Tprogress-to-Tlen transition advances the wave once; sealing the wave
  + completes it when every published table has advanced. Actor operations
@@ -25,6 +35,7 @@ private enum uint waveSealedBit = 1U << 0;
 private enum uint waveFinishedBit = 1U << 1;
 private enum uint waveFailedBit = 1U << 2;
 
+// ==== Section: completion callback, hook and handle ====
 alias ActorWaveCompletionCallback = void function(void* context)
     nothrow @nogc @system;
 
@@ -104,6 +115,7 @@ struct ActorWaveHandle
     }
 }
 
+// ==== Section: ActorWave ====
 /// Stable, reusable owner of one actor-wave generation. `begin` and
 /// `publish` are single-orchestrator operations. Consumers may complete
 /// tables concurrently, and any number of observers may poll handles.
@@ -293,6 +305,7 @@ private:
     }
 }
 
+// ==== Section: private payload body range and callback ====
 private struct ActorWaveBodyRange(T)
 {
     ActorHandle!T[] actors_;

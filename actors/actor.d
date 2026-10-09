@@ -1,13 +1,25 @@
 /++
  + Non-GC actor activations for Ant Farm.
  +
+ + Responsibility: the public actor runtime, stable control slots,
+ + handles/owners, the callback borrow and context, the intrusive inbox and
+ + the ready queue. It depends on `antfarm` and `antfarm_allocation`;
+ + `actors.wave` and `actors.private_actor` build on it.
+ + Canonical docs: docs/guide/public-actors.md (usage),
+ + docs/reference/actor-lifecycle.md (contract) and
+ + docs/design/public-actor-ordering.md (proofs); docs/README.md is the map.
+ + Section map: allocator and result enums, node/context/borrow/handle/owner
+ + types, ActorRuntime (creation, wake/send/flush, lifecycle dispatch), then
+ + the slot, reclaim and wave-payload machinery used by the other modules.
+ + The AntfarmActorTestHooks seams are production-elided: ordinary builds
+ + contain neither the hooks nor their branches.
+ +
  + Actor state lives outside the ring in caller-allocator storage. The ring
  + carries only a stable control-slot address and generation to one permanent
  + trampoline. `ActorHandle` can request execution but cannot dereference the
  + state; only the trampoline can construct an `ActorBorrow` after winning the
  + slot's scheduled-to-running transition.
  +
- + See ACTOR_ROADMAP.md for the contract and its compatibility limits.
  + Construction is restricted to POD state, and the provided intrusive actor
  + inboxes are allocator-neutral with submission reservations. Adopted storage,
  + general placement construction, and aggregate retirement fences remain
@@ -23,6 +35,7 @@ import core.atomic : MemoryOrder, atomicExchange, atomicFetchAdd,
     atomicFetchSub, atomicLoad, atomicStore, cas, pause;
 import core.stdc.string : memcpy, memset;
 
+// ==== Section: allocator and result enums ====
 /// Non-GC allocation policy used for the runtime, stable slots, and actor
 /// state. `deallocate` must match `allocate`; both may be backed by an arena,
 /// in which case per-object deallocation may intentionally do nothing.
@@ -140,6 +153,7 @@ enum ActorReclaimResult : ubyte
     staleOwner,
 }
 
+// Test-only synchronization seams, elided in production builds.
 version (AntfarmActorTestHooks)
 {
     /// Deterministic synchronization seams for the out-of-tree actor torture
@@ -201,6 +215,7 @@ private enum uint inboxNodeFree = 0;
 private enum uint inboxNodeQueued = 1;
 private enum uint inboxNodeProcessing = 2;
 
+// ==== Section: node, context, borrow, handle and owner types ====
 /// Intrusive header for one caller-owned interaction. `payload` and `tag` are
 /// application fields; the node itself must remain stable from a successful
 /// send until the actor calls `complete`, `fail`, or `cancel`, or takes ownership
@@ -715,6 +730,7 @@ private struct ActorBodyRange
     }
 }
 
+// ==== Section: ActorRuntime (creation, wake/send/flush, lifecycle) ====
 /// Fixed-capacity non-GC actor runtime associated with one Farm. Runtime and
 /// slots use the supplied allocator and require explicit destruction.
 align(64) struct ActorRuntime
@@ -922,6 +938,7 @@ public:
             ActorRuntime.sizeof, ActorRuntime.alignof);
     }
 
+// ==== Section: slot, reclaim and wave-payload machinery ====
 private:
     // Only constant-size list operations run under this gate. Allocation,
     // deallocation, and all actor callbacks execute after it is released.

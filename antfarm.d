@@ -1,12 +1,24 @@
 /++
  + Ant Farm: an M:N concurrent queue with superlative scaling.
  +
+ + Responsibility: the fixed-memory ring, producer registration and quota,
+ + work tables, consumer claims and segment reclamation. It imports only
+ + `antfarm_allocation`; `antfarm_templates` and the actors build on it.
+ + Canonical docs: SPEC.md is the algorithm and memory-order contract,
+ + ARCHITECTURE.md is the layer and sizing guide, and docs/README.md is the
+ + documentation map.
+ + Section map: platform/mapping helpers, payload types and ranges, the
+ + AntFarm struct (construction, registration, production), then
+ + ConsumerView (claims, dispatch, reclamation helpers).
+ + The AntfarmWriteAuditHooks scheduling points are production-elided:
+ + ordinary builds contain neither the hook nor its call sites.
+ +
  + Implementation of SPEC.md. A circular buffer using the "magic buffer"
  + memory mapping, K segments with root/leaf reference tallies, quota-bounded
  + producers and sharded consumers. No CAS on hot paths; hot-path
  + synchronization is fetch-add / fetch-sub plus acquire/release load/store.
  + Cold-path CAS: ticket claim, last-releaser pulse, plantIfUnprotected
- + plant/retract (SPEC.md 2a, 3b, 5b). Retry loops reload fresh state;
+ + plant/retract (SPEC.md 4d, 6c, 6e). Retry loops reload fresh state;
  + their retries are bounded by the low-half/confirmation state settling,
  + not by back-and-forth noise. Strong CAS (spec 1).
  + Producer registration/deregistration uses a Farm-local blocking mutex;
@@ -210,6 +222,7 @@ version (Windows)
     }
 }
 
+// ==== Section: platform helpers and the magic-buffer mapping ====
 /// Farm-local blocking mutex for producer slot lifetime transitions only.
 /// Publication and consumption never acquire this lock.
 private struct ProducerMutex
@@ -359,7 +372,7 @@ private void unmapMagicBuffer(void* p, size_t bytes) nothrow @nogc @system
         munmap(p, 2 * bytes);
 }
 
-/// Spec 2a/5a: maximum number of simultaneous subscribed consumers.
+/// Spec 4c: maximum number of simultaneous subscribed consumers.
 enum MAX_CONSUMERS_LIMIT = 128;
 /// Negative `ConsumerView.subscribe` results (spec 4c, 6b). Every failure
 /// has already unwound its temporary pins; the view stays unsubscribed.
@@ -371,14 +384,14 @@ enum long SUBSCRIBE_FULL = -1;
 enum long SUBSCRIBE_RETRY = -2;
 /// Caller error: a null Farm, or a view that is already subscribed.
 enum long SUBSCRIBE_INVALID = -3;
-/// Spec 2a: preallocated leaf tallies per segment: ceiling square root of 128.
+/// Spec 2b: preallocated leaf tallies per segment: ceiling square root of 128.
 enum MAX_LEAVES = 12;
-/// Spec 5e-d default small-table threshold. 0 at construction selects the
+/// Spec 7a default small-table threshold. 0 at construction selects the
 /// auto rule so each shard gets at least one chunk.
 enum DEFAULT_SMALL_TABLE_THRESHOLD = 64;
 /// Default dual-ring backing. Huge pages are an explicit workload-tuned opt-in.
 enum bool DEFAULT_HUGE_PAGES = false;
-/// Spec 5e: chunk ceiling for the avgCost hint. write() publishes AvgCost
+/// Spec 7a: chunk ceiling for the avgCost hint. write() publishes AvgCost
 /// in Thead; consumers compute chunk = MAX_CHUNK >> AvgCost. Default
 /// AvgCost = 1 -> chunk 16, the midpoint of [1, 32].
 enum uint MAX_CHUNK = 32;
@@ -398,8 +411,8 @@ enum uint rootCostHintMaxSplits = 8;
  + Effective work-cost class for a default-hint table of `count` entries on
  + a farm whose configured small-table threshold is `smallThreshold`.
  + Consumers size a table's claims as `chunk = MAX_CHUNK >> avgCost` (spec
- + 5e-g), and a table below the small threshold is claimed wholesale by
- + shard 0 (spec 5e-d), so the cheapest class (`avgCost = 0`, chunk 32) can
+ + 7a), and a table below the small threshold is claimed wholesale by
+ + shard 0 (spec 7a), so the cheapest class (`avgCost = 0`, chunk 32) can
  + run every callback of a table of up to 32 entries inside one consumer
  + claim, serializing an expensive table (for example parents that each
  + allocate a child wave) on one worker.
@@ -423,7 +436,7 @@ uint rootCostHintFor(size_t count, ulong consumers, uint smallThreshold)
     pure nothrow @nogc @safe
 {
     if (count == 0) return 0;
-    // Sharded tables are already split across every shard (spec 5e-d), so
+    // Sharded tables are already split across every shard (spec 7a), so
     // only wholesale tables can collapse onto fewer claims than consumers.
     if (count >= (smallThreshold != 0 ? smallThreshold : DEFAULT_SMALL_TABLE_THRESHOLD))
         return 0;
@@ -458,26 +471,27 @@ uint ringMiBFromUlongs(ulong ringUlongs) nothrow @nogc @system
 /// Maximum supported number of segments K. Default create()/perftest K is 8.
 enum KMAX = 16;
 
-/// Spec 3b: producer ticket slot stride in ulongs. Each slot's hash sits on
+/// Spec 4d: producer ticket slot stride in ulongs. Each slot's hash sits on
 /// its own 64-byte cache line: tickets are shared mutable state under the
 /// registration CAS, and the buffer cannot align them beyond 8 bytes, so
 /// the stride (not the natural ulong size) must carry the isolation.
 private enum size_t PROD_SLOT_STRIDE = 8;
 
-/// Spec 5a: a subscriber reference lives in the most significant half of Rt.
+/// Spec 2b/6b: a subscriber reference lives in the most significant half of Rt.
 enum ulong SUB = 1UL << 32;
-/// Spec 2a/5b: Sub0 is a counted pin in units of 2^16, not a bit.
+/// Spec 2b/6c: Sub0 is a counted pin in units of 2^16, not a bit.
 enum ulong SUB0 = 1UL << 16;
 /// Mask for Rtlow (least significant half of Rt).
 enum ulong LOWMASK = 0xFFFF_FFFFUL;
 /// Mask for the active-consumer count bits within Rtlow (below the Sub0 bit).
 enum ulong COUNTMASK = SUB0 - 1;
-/// Spec 4a: Done and MaxCs are capped so packed 16-bit fields cannot wrap
+/// Spec 2d: Done and MaxCs are capped so packed 16-bit fields cannot wrap
 /// through write().
 enum uint MAX_PAYLOAD_ITERS = 512;
 
-// Audit-only scheduling points. Tests may pause a producer here without
-// changing quota or tally state; ordinary builds contain neither hook nor call.
+// Test-only scheduling points, elided in production builds. Tests may pause a
+// producer here without changing quota or tally state; ordinary builds contain
+// neither the hook nor its call sites.
 version (AntfarmWriteAuditHooks)
 {
     enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned, tablePublished, subscriberProbed, plantChecked, plantPublished }
@@ -491,7 +505,7 @@ private enum ulong SENTINEL_XOR = 0x9E37_79B9_7F4A_7C15UL;
 /// 64-bit sequence pointing at the start of the table (spec 5c/Thead).
 ulong sentinelOf(ulong seq) pure nothrow @nogc @safe { return seq ^ SENTINEL_XOR; }
 
-/// Spec 2a: square root with a minimum value of 1 for Cs <= 2, capped at the
+/// Spec 2b: square root with a minimum value of 1 for Cs <= 2, capped at the
 /// preallocated leaf count. ceil_sqrt(128) == 12.
 uint sqcsOf(ulong cs) pure nothrow @nogc @safe
 {
@@ -555,11 +569,12 @@ version (SdCheckEveryN)
 else
     enum uint SD_CHECK_EVERY_N = 1;
 
-/// Spec 4a: read-only type-erased transport words for Call's work. Constness
+// ==== Section: payload types and ranges ====
+/// Spec 2d: read-only type-erased transport words for Call's work. Constness
 /// protects the ring body, not an object reached through an encoded handle.
 alias PayloadBody = const(ulong)[];
 
-/// Spec 5f: decodes Pbody and executes an iteration of work.
+/// Spec 2d, 7c: decodes Pbody and executes an iteration of work.
 ///
 /// `head` is valid only for the duration of the call and must not be modified
 /// or retained. For a payload in a table of single-threaded payloads it points
@@ -589,7 +604,7 @@ struct TableCompletionHook
     }
 }
 
-/// Spec 5f: payload header, 16 ulongs (128 bytes) as laid out in the buffer.
+/// Spec 2d: payload header, 16 ulongs (128 bytes) as laid out in the buffer.
 /// Call sits immediately after Pcount: it is dereferenced only after a valid
 /// claim is acquired (by the consumer that just wrote Pcount), so it can
 /// share Pcount's cache line without adding cross-thread traffic; with the
@@ -625,7 +640,7 @@ private enum ulong PCOMPACT_LEN = 1;
 static assert(Callback.sizeof == ulong.sizeof);
 static assert(PCOMPACT_LEN < PHEAD_LEN);
 
-/// Spec 4a.
+/// Spec 2d.
 struct PayloadEntry
 {
     PayloadHeader* header;
@@ -845,10 +860,10 @@ auto broadcastPayloads(BR)(const ref PayloadHeader header, BR bodies,
     return PayloadBroadcastRange!(BR, true)(header, bodies, bodyWords);
 }
 
-/// Spec 3b: producer tiers.
+/// Spec 4d: producer tiers.
 enum Tier : ubyte { small, bulk }
 
-/// Spec 3b/4a: registration ticket carrying the producer's private quota.
+/// Spec 4d: registration ticket carrying the producer's private quota.
 /// The hash validates the slot; `farmId` binds the ticket to the Farm that
 /// issued it (a process-unique, never-reused identity), so a token presented
 /// to any other Farm is fatal at write and unregister; `quotaLeft` is the
@@ -926,7 +941,7 @@ struct Token
     }
 }
 
-/// Per-segment statistics (spec 2b). Padded to a cache line.
+/// Per-segment statistics (spec 2c). Padded to a cache line.
 struct SegStats
 {
     shared long es;     /// epoch currently occupying this segment; -1 = never written
@@ -939,7 +954,7 @@ struct SegStats
 static assert(SegStats.sizeof == 64);
 
 /// Table layout offsets (in ulongs, relative to the table's starting
-/// sequence), spec 4a:
+/// sequence), spec 2e:
 ///   [0..8)                 Thead: 0 Tsent, 1 Tnext, 2 Tmt<<32|Tlen,
 ///                          3 Cs, 4 SqCs, 5 Tsize, 6 AvgCost,
 ///                          7 optional TableCompletionHook pointer
@@ -955,7 +970,7 @@ private enum ulong THEAD_LEN = 8;
 private enum ulong PROG_PAD = 7;
 private enum ulong END_PAD = 7;
 
-/// Overflow-checked addition used by write() size math (spec 4a).
+/// Overflow-checked addition used by write() size math (spec 5b).
 private ulong addChecked(ulong a, ulong b, const(char)[] msg) nothrow @nogc @system
 {
     if (b > ulong.max - a) fatal(msg);
@@ -1030,9 +1045,10 @@ private shared(ulong)* prodSlotQuota(shared(ulong)* hashes, size_t i) nothrow @n
 /// (or by a since-destroyed Farm) can never validate against another.
 private shared ulong g_farmIssuance;
 
+// ==== Section: AntFarm (construction, registration, production) ====
 struct AntFarm
 {
-    // ---- immutable configuration (spec 1, 3) ----
+    // ---- immutable configuration (spec 1, 4a) ----
     ulong Ln;           /// buffer length in ulongs (power of 2)
     ulong Lmask;        /// Ln - 1
     uint K;             /// number of segments (power of 2)
@@ -1044,8 +1060,8 @@ struct AntFarm
     ulong quotaBulk;    /// Exi for bulk producers
     uint maxSmall;
     ulong quotaSmall;   /// Exi for small producers
-    ulong exmax;        /// Exmax: sum of all producer quotas (spec 3a)
-    /// Small-table threshold (spec 5e-d): 0 selects the auto rule
+    ulong exmax;        /// Exmax: sum of all producer quotas (spec 4a)
+    /// Small-table threshold (spec 7a): 0 selects the auto rule
     /// clamp(SqCs * Chunk, 16, 256); otherwise a fixed override.
     uint smallThreshold;
     /// Process-unique Farm identity, assigned once in create() from
@@ -1060,7 +1076,7 @@ struct AntFarm
     /// applied. Linux promotion remains kernel-controlled.
     bool usedLargePages;
 
-    // ---- farm-level mutable metadata (spec 2c), one cache line each ----
+    // ---- farm-level mutable metadata (spec 2a), one cache line each ----
     align(64) shared ulong Wt;      /// write tail sequence
     align(64) shared long Cf;       /// current number of subscribed consumers
     align(64) shared ulong Reqs_c;  /// consumer subscription counter; source of IDc
@@ -1068,12 +1084,12 @@ struct AntFarm
     align(64) shared long Prbulk;   /// current number of bulk producers
     align(64) shared long Prsm;     /// current number of small producers
 
-    // ---- producer tickets (spec 3b); 0 = free slot ----
+    // ---- producer tickets (spec 4d); 0 = free slot ----
     shared(ulong)* prodHashBulk;
     shared(ulong)* prodHashSmall;
     private ProducerMutex producerMutex;
 
-    // ---- segment metadata (spec 2a/2b) ----
+    // ---- segment metadata (spec 2b/2c) ----
     align(64) shared ulong[8][KMAX] Rt;              /// root tallies, one per segment
     align(64) shared long[8][KMAX * MAX_LEAVES] Lt;  /// leaf tallies
     align(64) SegStats[KMAX] stats;                  /// segment statistics
@@ -1095,7 +1111,7 @@ struct AntFarm
                            uint smallThreshold = DEFAULT_SMALL_TABLE_THRESHOLD,
                            bool hugePages = DEFAULT_HUGE_PAGES) nothrow @nogc @system
     {
-        // Construction constraints (spec 1/3b):
+        // Construction constraints (spec 1, 4a):
         //  - K is the useful power-of-two range [2, KMAX=16].
         //  - ringMiB >= 2 (Ln >= 2^18 ulongs); smaller rings were never
         //    studied and per-table header overhead would dominate. The upper
@@ -1103,7 +1119,7 @@ struct AntFarm
         //  - segCap = Ln/K has a floor so header/pad space never dominates a
         //    segment's capacity (subsumed by Ln >= 2^18 with K <= 16).
         //  - Exmax <= (K-1)*segCap so a full quota excursion is strictly
-        //    less than a lap (spec 3a safety argument).
+        //    less than a lap (spec 3 safety argument).
         //  - quotaRole > 0 iff maxRole > 0: an enabled role must declare a
         //    positive quota; a disabled role's quota is normalized to 0 and
         //    takes no part in Exmax.
@@ -1116,7 +1132,7 @@ struct AntFarm
         immutable segCap = ln / k;
         if (segCap < 2048) fatal("segment capacity too small");
         if (expectedConsumers == 0) fatal("expected consumers must be > 0");
-        // Quota-role rule (spec 3b): normalize disabled roles, validate
+        // Quota-role rule (spec 4d): normalize disabled roles, validate
         // enabled ones. Bulk auto-defaults to segCap when enabled with an
         // unspecified quota (legacy convenience); small fatals on 0.
         if (maxBulk == 0)
@@ -1180,7 +1196,7 @@ struct AntFarm
 
         foreach (i; 0 .. KMAX)
             atomicStore!(MemoryOrder.raw)(f.stats[i].es, -1L);
-        // Spec 2d: epoch 0's Rt is constructed with a dummy Sub0 value,
+        // Spec 4b: epoch 0's Rt is constructed with a dummy Sub0 value,
         // blocking producers from overwriting Seq 0 until consumers digest it.
         atomicStore!(MemoryOrder.raw)(f.Rt[0][0], SUB0);
         atomicStore!(MemoryOrder.raw)(f.stats[0].es, 0L);
@@ -1210,7 +1226,7 @@ struct AntFarm
     }
 
     // ------------------------------------------------------------------
-    // Registration (spec 5a-a, 5b-a, 3b)
+    // Registration (spec 4c, 4d, 6b, 6e)
     // ------------------------------------------------------------------
 
     /// fetch-inc Cf; on success fetch-inc Reqs_c and return it (the IDc).
@@ -1227,7 +1243,7 @@ struct AntFarm
     }
 
     /// Returns the previous Cf; when it returns 1 the caller is the last
-    /// unsubscriber (spec 5b-a).
+    /// unsubscriber (spec 6e).
     long sub_consumer() nothrow @nogc @system
     {
         immutable prev = atomicFetchSub!(MemoryOrder.raw)(Cf, 1);
@@ -1235,7 +1251,7 @@ struct AntFarm
         return prev;
     }
 
-    /// Spec 3b: allocate a ticketed slot. An invalid Token means the tier is full.
+    /// Spec 4d: allocate a ticketed slot. An invalid Token means the tier is full.
     Token registerProducer(Tier t) nothrow @nogc @system
     {
         producerMutex.lock();
@@ -1266,7 +1282,7 @@ struct AntFarm
         return Token.init;
     }
 
-    /// Spec 3b: a Token that does not match the live slot is fatal.
+    /// Spec 4d: a Token that does not match the live slot is fatal.
     void unregisterProducer(ref Token tok) nothrow @nogc @system
     {
         producerMutex.lock();
@@ -1293,7 +1309,7 @@ struct AntFarm
         tok.invalidate();
     }
 
-    /// Spec 4a: write() fatals unless tok matches a live slot of its tier
+    /// Spec 4d: write() fatals unless tok matches a live slot of its tier
     /// and its quota mirror does not exceed the farm's authoritative ledger.
     private void requireToken(ref Token tok) nothrow @nogc @system
     {
@@ -1322,7 +1338,7 @@ struct AntFarm
     private enum ulong SUB0MASK = LOWMASK ^ COUNTMASK;
 
     /// Plant one Sub0 on an incomplete epoch with count 0 and no pulse
-    /// (spec 2a). Retain the defensive post-CAS completeness recheck and
+    /// (spec 6c). Retain the defensive post-CAS completeness recheck and
     /// masked retract, although producer ownership rules out confirmation
     /// of its start epoch before this call returns.
     /// Producer-only: the caller's unpublished table prevents e from
@@ -1348,7 +1364,7 @@ struct AntFarm
         version (AntfarmWriteAuditHooks)
             if (writeAuditHook !is null)
                 writeAuditHook(&this, WriteAuditPhase.plantChecked, e, 0);
-        // Spec 2a: CAS the plant so a racing 0->1 cannot be straddled by a
+        // Spec 6c: CAS the plant so a racing 0->1 cannot be straddled by a
         // bare fetch_add(SUB0). Count or pulse appearing bails — the race
         // invalidated the plant. Not an open loop; strong CAS (spec 1).
         for (;;)
@@ -1361,7 +1377,7 @@ struct AntFarm
                 version (AntfarmWriteAuditHooks)
                     if (writeAuditHook !is null)
                         writeAuditHook(&this, WriteAuditPhase.plantPublished, e, 0);
-                // Spec 2a defensive post-CAS retract. Producer ownership
+                // Spec 6c defensive post-CAS retract. Producer ownership
                 // prevents confirmation during a supported plant; this check
                 // alone would not make an unpinned caller safe.
                 // Retract exactly the unit we planted. The full-word CAS is
@@ -1391,10 +1407,10 @@ struct AntFarm
     }
 
     // ------------------------------------------------------------------
-    // Production (spec 3, 4)
+    // Production (spec 5)
     // ------------------------------------------------------------------
 
-    /// Spec 3a: sweep contiguously-forward zero Rts from `anchor`.
+    /// Spec 5a: sweep contiguously-forward zero Rts from `anchor`.
     /// `anchor` is a fresh acquire-load of Wt for this grant. Reservations of
     /// Wt are acq_rel, so the load synchronizes with a published tail, and a
     /// later reservation spending this grant forwards the sweep's acquired
@@ -1476,13 +1492,13 @@ struct AntFarm
         }
     }
 
-    /// Spec 4. Writes as many of `payloads` as fit the caller's remaining
+    /// Spec 5b. Writes as many of `payloads` as fit the caller's remaining
     /// quota (carried inside `tok`); returns the number written. Returns 0
     /// (full) when backpressure is too high; callers retry or wait on
     /// consumers. `tok` is required, and is passed by reference so the farm
     /// can maintain the quota state; the caller must never inspect or copy
     /// the token's private quota. `avgCost` is the producer's declared Call
-    /// cost class, a log2 shift in 0 .. MAX_AVG_COST (spec 4a / 5e-g).
+    /// cost class, a log2 shift in 0 .. MAX_AVG_COST (spec 5b / 7a).
     ulong write(scope PayloadEntry[] payloads, ref Token tok,
                 uint avgCost = 1) nothrow @nogc @system
     {
@@ -1565,7 +1581,7 @@ struct AntFarm
         immutable sq = sqcsOf(cs);
 
         // Fit as many payloads as the quota and the table payload cap
-        // allow (spec 4a truncation, 2e).
+        // allow (spec 5b truncation, 2e).
         // Base size of every table: Thead + progress pads + Tcount + end pad.
         immutable base = THEAD_LEN + PROG_PAD + 1 + 7 + 8UL * sq + END_PAD;
         // Spec 2e: a committed table carries fewer than 2^31 payloads.
@@ -1692,7 +1708,7 @@ struct AntFarm
         static if (__traits(hasMember, R, "prepareTableFrontN"))
             if (!payloads.prepareTableFrontN(n)) return 0;
 
-        // Reserve space on the write tail (spec 3a, 4b, 9). acq_rel, not
+        // Reserve space on the write tail (spec 5a, 5c, 9). acq_rel, not
         // release: a producer spending retained quota without a fresh sweep
         // must acquire the reclamation history (consumer pin drops -> Rt
         // release -> zero-Rt sweep acquire) that other producers imported
@@ -1709,7 +1725,7 @@ struct AntFarm
         tok.quotaLeft -= size;
         syncQuota(tok);
 
-        // Segment/epoch transitions (spec 4b): initialize metadata for each
+        // Segment/epoch transitions (spec 2c): initialize metadata for each
         // crossed segment, release-storing Es last.
         foreach (e; eold + 1 .. enew + 1)
         {
@@ -1721,14 +1737,14 @@ struct AntFarm
             atomicStore!(MemoryOrder.rel)(stats[ki].es, cast(long) e);
         }
 
-        // Spec 4b/2a: a write that crossed past Ki made Ki unable to accept
+        // Spec 5c/6c: a write that crossed past Ki made Ki unable to accept
         // more tables. If no consumer ever entered it, last-releaser never
         // runs and Rt stays 0 — plant Sub0 so the next subscribe walk can
         // find it.
         foreach (e; eold + 1 .. enew + 1)
             plantIfUnprotected(e - 1);
 
-        // Write the table (spec 4a/4b). The magic buffer makes the linear
+        // Write the table (spec 5c/2e). The magic buffer makes the linear
         // address range contiguous even across the Ln wrap point. Ring words
         // are stored raw: consumers load-raw after acquiring Tsent, and a
         // later lap reuses the same physical words.
@@ -1742,7 +1758,7 @@ struct AntFarm
         storeRaw(w[3], cs);
         storeRaw(w[4], sq);
         storeRaw(w[5], size); // table size, accounted into the segment's Sd on completion
-        storeRaw(w[6], avgCost); // chunk hint: chunk = MAX_CHUNK >> avgCost (spec 5e-g)
+        storeRaw(w[6], avgCost); // chunk hint: chunk = MAX_CHUNK >> avgCost (spec 7a)
         storeRaw(w[7], cast(ulong) cast(void*) completion);
 
         storeRaw(w[progOff], 0);                          // Tprogress
@@ -1807,7 +1823,7 @@ struct AntFarm
 
         // The sentinel is store-released as the last value written, so that
         // consumers validating the expected sequence also validate the table
-        // contents (spec 4b).
+        // contents (spec 5c).
         atomicStore!(MemoryOrder.rel)(buf[wret & Lmask], sentinelOf(wret));
         version (AntfarmWriteAuditHooks)
             if (writeAuditHook !is null)
@@ -1816,21 +1832,22 @@ struct AntFarm
     }
 }
 
+// ==== Section: ConsumerView (claims, dispatch, reclamation) ====
 /// Unique, non-copyable cursor exclusively owned by one consumer at a time.
 ///
 /// Held pins are a contiguous epoch range [oldestEi, newestEi] (equal when
 /// freshly subscribed). newestEi is the position: the segment of the last
 /// validated table, or, when idle at Wt, the initialized frontier of
 /// nextSeq. oldestEi advances as confirmed prefix segments are released
-/// (5j). ltiRing[ki] is the leaf actually incremented at that physical
-/// slot; IDc nudges do not rewrite it. Confirmation (5j): Es[Ki]==Ei,
+/// (8). ltiRing[ki] is the leaf actually incremented at that physical
+/// slot; IDc nudges do not rewrite it. Confirmation (8): Es[Ki]==Ei,
 /// the next segment is initialized for Ei+1, and Seqt[Ki]+Sd[Ki] >= Seqt[Ki+1].
 ///
 /// Invariants:
 ///  - Every subscribed consumer always holds at least one pin; an idle
 ///    consumer advances newestEi onto nextSeq's initialized segment.
 ///  - The last *releaser* of an unconfirmed segment plants Sub0 via the
-///    last-releaser CAS (2a/5b). First consumer of a segment (count 0→1)
+///    last-releaser CAS (2b/6c). First consumer of a segment (count 0→1)
 ///    subtracts it.
 ///  - Farm-empty with everything confirmed still plants exactly one pulse,
 ///    using the same last-releaser helper on the confirmed position.
@@ -1839,7 +1856,7 @@ struct ConsumerView
     @disable this(this);
 
     AntFarm* F;
-    ulong IDc;          /// from F.Reqs_c; targeting hint, not a leaf retarget (5a/5h)
+    ulong IDc;          /// from F.Reqs_c; targeting hint, not a leaf retarget (4c/6a; nudges 7d/7e)
     ulong nextSeq;      /// sequence of the next table to read
     ulong oldestEi;     /// first still-held epoch
     ulong newestEi;     /// position epoch
@@ -1848,12 +1865,12 @@ struct ConsumerView
 
     /// Carried sweeper role: set when this consumer completed a shard of the
     /// previous table. Small tables concentrate all claims on shard 0
-    /// (5e-d), so under churn they may have no native consumer at all; a
+    /// (7a), so under churn they may have no native consumer at all; a
     /// carried sweeper sweeps a small next table regardless of its own
     /// shard assignment.
     bool sweeperNext;
 
-    /// Idle-path re-walk cursor (spec 5j): sequence up to which the current
+    /// Idle-path re-walk cursor (spec 8): sequence up to which the current
     /// position segment has been drained. A park resumes from here —
     /// O(new tables) per miss rather than O(tables in the segment). Reset
     /// when the position moves to a new segment.
@@ -1874,7 +1891,7 @@ struct ConsumerView
         return ltiRing[cast(uint)(ei & F.kMask)];
     }
 
-    /// Spec 5a. Returns the (non-negative) starting epoch on success, or
+    /// Spec 6b. Returns the (non-negative) starting epoch on success, or
     /// SUBSCRIBE_FULL, SUBSCRIBE_RETRY, or SUBSCRIBE_INVALID on failure.
     long subscribe(AntFarm* f) nothrow @nogc @system
     {
@@ -1882,7 +1899,7 @@ struct ConsumerView
         immutable idc = f.add_consumer();
         if (idc < 0) return idc;
 
-        // Spec 5a-b: derive the walk range from the write tail (the only
+        // Spec 6b: derive the walk range from the write tail (the only
         // unpinned read), then walk backwards pinning each slot with Sub
         // *before* inspecting Rtlow/Es. d=0 is the heuristic pin on the
         // frontier. bestSeg is the earliest Es among Rtlow != 0; else the
@@ -1918,7 +1935,7 @@ struct ConsumerView
         }
         immutable seg = bestSeg >= 0 ? cast(uint) bestSeg : cast(uint)(eg & f.kMask);
 
-        // Spec 5a-d: attach in place. Fail closed if the frontier was never written.
+        // Spec 6b: attach in place. Fail closed if the frontier was never written.
         immutable es = atomicLoad!(MemoryOrder.acq)(f.stats[seg].es);
         immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(f.stats[seg].sqcs);
         immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[seg].seqt);
@@ -1954,7 +1971,7 @@ struct ConsumerView
         IDc = cast(ulong) idc;
         immutable lti = cast(uint)(IDc % sq);
         incLeaf(seg, lti);
-        // Spec 5a-e: unwind every Sub. The 0→1 on Rt already retracted Sub0 if present.
+        // Spec 6b: unwind every Sub. The 0→1 on Rt already retracted Sub0 if present.
         foreach (i; 0 .. nPinned)
             atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
         nextSeq = seqt;
@@ -1967,7 +1984,7 @@ struct ConsumerView
         return es;
     }
 
-    /// Spec 5b. Confirmed prefix drops with a plain dec. Confirmed
+    /// Spec 6e. Confirmed prefix drops with a plain dec. Confirmed
     /// interiors do too; unconfirmed interiors use the last-releaser
     /// helper. The position uses the helper if unconfirmed or
     /// last-of-farm; a non-last confirmed position drops plain.
@@ -1999,15 +2016,15 @@ struct ConsumerView
 
     /// Consume one table if available. Returns false when no valid table is
     /// published at nextSeq yet; on that idle path the consumer migrates a
-    /// confirmed position onto the frontier (5c), then re-walks the oldest
-    /// unconfirmed epoch and the current position segment (5j).
+    /// confirmed position onto the frontier (6d), then re-walks the oldest
+    /// unconfirmed epoch and the current position segment (8).
     bool consumeNext() nothrow @nogc @system
     {
         if (!hasRef) return false;
         auto f = F;
         auto bp = f.buf;
         immutable idx = nextSeq & f.Lmask;
-        // Spec 5c: load-acquire the sentinel and validate location and value.
+        // Spec 6d: load-acquire the sentinel and validate location and value.
         if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(nextSeq))
         {
             migrateToFrontier();
@@ -2016,8 +2033,8 @@ struct ConsumerView
             return false;
         }
 
-        // Spec 5c: crossing a segment boundary advances newestEi; the old
-        // position stays held until the confirmed prefix reaches it (5j).
+        // Spec 6d: crossing a segment boundary advances newestEi; the old
+        // position stays held until the confirmed prefix reaches it (8).
         immutable ei = nextSeq >> f.segShift;
         immutable ki = cast(uint)(ei & f.kMask);
         if (ei != newestEi)
@@ -2038,12 +2055,12 @@ struct ConsumerView
             bool sweeper;
             if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
             {
-                // Spec 5e: primary path. Completing a shard gains the
-                // sweeper role (5i).
+                // Spec 7a: primary path. Completing a shard gains the
+                // sweeper role (7e).
                 sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
                                         progOff, tlen, tmt == 0, sq, myShi, false, false) & 1) != 0;
-                // Spec 5i carried role: small tables concentrate on shard 0
-                // (5e-d); a carried sweeper sweeps them regardless of Shi.
+                // Spec 7e carried role: small tables concentrate on shard 0
+                // (7a); a carried sweeper sweeps them regardless of Shi.
                 if (!sweeper && sweeperNext && tlen < smallThresh(sq, bp, idx) && myShi != 0)
                     sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
                                             progOff, tlen, tmt == 0, sq, 0, true, false) & 1) != 0;
@@ -2062,7 +2079,7 @@ struct ConsumerView
                 }
                 else
                 {
-                    // Spec 5g: secondary round-robin share of the MT payloads.
+                    // Spec 7c: secondary round-robin share of the MT payloads.
                     secondaryMt(bp, idx, tindexOff, tlen, tmt, sq);
                 }
                 sweeperNext = sweeper;
@@ -2072,7 +2089,7 @@ struct ConsumerView
                 // Complete table: cheap pre-checked MT pass only (MT
                 // payloads can outlive their shards' completion). Do not
                 // touch sweeperNext: a carried sweeper role must survive
-                // across already-complete tables (spec 5i).
+                // across already-complete tables (spec 7e).
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
         }
@@ -2088,7 +2105,7 @@ struct ConsumerView
     }
 
 private:
-    /// Spec 5e-g: chunk for this table from its published AvgCost. Cheap
+    /// Spec 7a: chunk for this table from its published AvgCost. Cheap
     /// classes get big chunks (claim amortization), expensive classes get
     /// small chunks (short visits, less leftover tail). Clamped so a
     /// corrupted header can never produce a zero chunk. All consumers read
@@ -2099,7 +2116,7 @@ private:
         return MAX_CHUNK >> (ac > MAX_AVG_COST ? MAX_AVG_COST : ac);
     }
 
-    /// Spec 5e-d: small-table threshold for this table. A nonzero farm
+    /// Spec 7a: small-table threshold for this table. A nonzero farm
     /// field is the fixed override (default 64); 0 selects the auto rule
     /// clamp(SqCs * Chunk, 16, 256), so a table shards iff it can give
     /// every shard at least one full chunk.
@@ -2110,7 +2127,7 @@ private:
         return t < 16 ? 16 : (t > 256 ? 256 : t);
     }
 
-    /// Spec 2a: take a count. Only the thread that observes 0→1 retracts Sub0.
+    /// Spec 6c: take a count. Only the thread that observes 0→1 retracts Sub0.
     void takeRootCount(uint ki) nothrow @nogc @system
     {
         immutable old = atomicFetchAdd!(MemoryOrder.rel)(F.Rt[ki][0], 1);
@@ -2119,7 +2136,7 @@ private:
             atomicFetchSub!(MemoryOrder.rel)(F.Rt[ki][0], extra);
     }
 
-    /// Spec 2a/5b last-releaser. Plant-then-dec-then-retract is not atomic
+    /// Spec 6c/6e last-releaser. Plant-then-dec-then-retract is not atomic
     /// (a racing 0→1 can clear Sub0 before the retract, underflowing
     /// Rtlow). One CAS: if count is 1, clear COUNTMASK and leave one Sub0
     /// (add a unit only if none is present); if > 1, old - 1 with Sub0
@@ -2181,7 +2198,7 @@ private:
             takeRootCount(ki);
     }
 
-    /// Decrement a held leaf tally with root propagation (spec 2a). Edge
+    /// Decrement a held leaf tally with root propagation (spec 2b). Edge
     /// transition (dec returns 1) repeats on Rt; underflows are fatal.
     /// `leavePulse` uses the last-releaser helper so an unconfirmed (or
     /// last-of-farm confirmed) drop never becomes visible as Rt == 0.
@@ -2207,7 +2224,7 @@ private:
     }
 
     /// Advance newestEi onto ei, pinning every epoch in (newestEi, ei]
-    /// so the held range stays contiguous. Increment-ahead (spec 2a)
+    /// so the held range stays contiguous. Increment-ahead (spec 2b)
     /// leaves no zero-gap. IDc % SqCs is the leaf for these new pins only.
     void moveRef(uint ki, ulong ei) nothrow @nogc @system
     {
@@ -2252,7 +2269,7 @@ private:
         sweepSeq = 0; // new position segment: re-walk from its first table
     }
 
-    /// Spec 5c: if the position is confirmed and nextSeq names an initialized
+    /// Spec 6d: if the position is confirmed and nextSeq names an initialized
     /// later epoch, advance newestEi onto that frontier. Always ≥1 pin.
     void migrateToFrontier() nothrow @nogc @system
     {
@@ -2271,7 +2288,7 @@ private:
         tryReleaseOldest();
     }
 
-    /// Spec 5j confirmation: Es[Ki]==Ei, Es[Ki+1]==Ei+1, and
+    /// Spec 6c/8 confirmation: Es[Ki]==Ei, Es[Ki+1]==Ei+1, and
     /// Seqt[Ki]+Sd[Ki] >= Seqt[Ki+1]. The Es match is required so a wrap
     /// that overwrote the slot is not "confirmed."
     bool confirmed(uint ki, ulong ei) nothrow @nogc @system
@@ -2403,7 +2420,7 @@ private:
         tryReleaseOldest();
     }
 
-    /// Spec 5h: when the number of consumers passing through an exhausted
+    /// Spec 7d: when the number of consumers passing through an exhausted
     /// shard significantly exceeds SqCs, nudge IDc by +1 so the next
     /// segment pin (and the next table's shard) land in a different bucket.
     /// Already-incremented leaves are not moved.
@@ -2414,11 +2431,11 @@ private:
             IDc += 1;
     }
 
-    /// Undersaturation repair, complementing 5h: a sweeper finding a
+    /// Undersaturation repair, complementing 7d: a sweeper finding a
     /// foreign shard with Z <= 1 (essentially no native traffic) nudges its
     /// IDc by the round-robin distance into that shard, patching the hole a
     /// pre-empted or unsubscribed native left behind. If a laggard native
-    /// later wakes and finds the shard overbalanced, the 5h oversaturation
+    /// later wakes and finds the shard overbalanced, the 7d oversaturation
     /// nudge moves it out again. Self-limiting: each entering sweeper's
     /// failed exit-claim raises the shard's Z, so the signal disappears
     /// after a couple of adopters. Already-incremented leaves stay put;
@@ -2431,7 +2448,7 @@ private:
         IDc += delta;
     }
 
-    /// Spec 5f: enter a payload. Claims bounded by MaxCs; calls bounded by
+    /// Spec 7c: enter a payload. Claims bounded by MaxCs; calls bounded by
     /// Done. With loopAll, keep executing iterations until the calls are
     /// exhausted (secondary/tertiary paths); otherwise execute at most one.
     void enterPayload(shared(ulong)* bp, ulong absIdx, bool loopAll) nothrow @nogc @system
@@ -2446,7 +2463,7 @@ private:
         immutable plen = loadRaw(bp[absIdx + 1]);
         auto fn = cast(Callback) loadRaw(bp[absIdx + 9]);
 
-        // Spec 5f: ST single-shot (MaxCs=1, Done=1). The shard Tcount claim
+        // Spec 7c: ST single-shot (MaxCs=1, Done=1). The shard Tcount claim
         // already assigned this index to one consumer; sweeper/re-walk use
         // the same counter, MT paths never walk ST payloads. Record that
         // unique claim without a second RMW. Keep the callback-visible
@@ -2512,13 +2529,13 @@ private:
         }
     }
 
-    /// Spec 5e: work claims on one shard, mapping it to a linear slice of
+    /// Spec 7a: work claims on one shard, mapping it to a linear slice of
     /// Tindex claimed by chunks on the shard's Tcount counter. With
     /// checkFirst (sweeps of foreign shards and re-walks), a plain load
     /// short-circuits fully-claimed shards without an RMW.
     ///
     /// Returns a bitmask: bit 0 set when this consumer added the final
-    /// completion sum for the shard (spec 5e-k): it adds Shlen to
+    /// completion sum for the shard (spec 7a): it adds Shlen to
     /// Tprogress, accounts the table's size into the segment's Sd if
     /// the table thereby completed, and gains the sweeper role. Bit 1 set
     /// when, sweeping a foreign shard, it found the shard starved
@@ -2527,12 +2544,12 @@ private:
                       ulong tcountOff, ulong progOff, uint tlen, bool compact, uint sq,
                       uint shi, bool checkFirst, bool allowAdopt) nothrow @nogc @system
     {
-        // Spec 5e-d/g: threshold and chunk come from the table's own
+        // Spec 7a: threshold and chunk come from the table's own
         // header (farm override or auto rule; AvgCost), so every consumer
         // agrees on sharding and shiter for this table.
         immutable thresh = smallThresh(sq, bp, tseqIdx);
         uint shstart, shlen, shbase;
-        // Spec 5e-d: small tables are claimed wholesale by shard 0 only.
+        // Spec 7a: small tables are claimed wholesale by shard 0 only.
         if (tlen < thresh)
         {
             if (shi != 0) return 0;
@@ -2542,7 +2559,7 @@ private:
         }
         else
         {
-            // Spec 5e-e/f.
+            // Spec 7a.
             shbase = tlen / sq;
             immutable shrm = tlen % sq;
             shlen = shi < shrm ? shbase + 1 : shbase;
@@ -2550,7 +2567,7 @@ private:
         }
         if (shlen == 0)
             return 0;
-        // Spec 5e-g/h. The table's published AvgCost determines chunk size.
+        // Spec 7a. The table's published AvgCost determines chunk size.
         immutable chunk = chunkOf(bp, tseqIdx);
         immutable shiter = (shlen + chunk - 1) / chunk;
         uint ownClaims = 0;
@@ -2574,7 +2591,7 @@ private:
         }
         for (;;)
         {
-            // Spec 5e-i.
+            // Spec 7a.
             immutable rawc = atomicFetchAdd!(MemoryOrder.raw)(*shc, 1UL << 32);
             if ((rawc >> 32) == 0xFFFF_FFFFUL) fatal("Tcount claims wrap");
             immutable x = cast(uint)(rawc >> 32);
@@ -2582,7 +2599,7 @@ private:
             {
                 immutable z = x - shiter;
                 if (!checkFirst)
-                    feedback(z, sq); // spec 5h: Z = X - Shiter
+                    feedback(z, sq); // spec 7d: Z = X - Shiter
                 else if (allowAdopt && tlen >= thresh && z <= 1)
                 {
                     adopt(shi, sq, tseq);
@@ -2590,7 +2607,7 @@ private:
                 }
                 return 0;
             }
-            // Spec 5e-j.
+            // Spec 7a.
             ++ownClaims;
             if (x == 0)
                 firstClaimant = true;
@@ -2651,7 +2668,7 @@ private:
                 }
                 return 1;
             }
-            // Spec 5e-m: first-claimant mid-tick yield. After a run that
+            // Spec 7b: first-claimant mid-tick yield. After a run that
             // did not complete the shard, the X==0 claimant may leave if
             // the shard is shared (claimsNow > ownClaims) and Tnext's
             // sentinel is already live. Sweeper/re-walk (checkFirst) never
@@ -2669,7 +2686,7 @@ private:
         }
     }
 
-    /// Spec 5g: secondary work claims. Round-robin assignment of the
+    /// Spec 7c: secondary work claims. Round-robin assignment of the
     /// multithreaded payloads by shard index, iterating each payload's
     /// internal counter.
     void secondaryMt(shared(ulong)* bp, ulong tseqIdx, ulong tindexOff,
