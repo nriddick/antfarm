@@ -9,7 +9,41 @@
 # `actor_torture`, `antfarm_test`). New tests stay on druntime threads and
 # atomics; this matrix itself is the Linux gate.
 
-.PHONY: check check-soak check-mimalloc farm-tsan run-farm-tsan perf-gate
+.PHONY: help check check-soak check-mimalloc farm-tsan run-farm-tsan perf-gate
+
+# `help` is the first rule, so name the default goal explicitly.
+.DEFAULT_GOAL := check
+
+define HELP_TEXT
+Ant Farm local targets (there is no CI). See CONTRIBUTING.md for details.
+
+Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Python 3):
+  make check               full matrix, LDC and DMD, stops at the first failure
+                           (bare `make` runs this)
+  make check-farm-ordering Farm ordering and leaf-reuse tests, LDC and DMD
+  make run-farm-tsan       Farm suite under ThreadSanitizer (LDC)
+  make -C actor_torture run run-dmd run-tsan
+                           public actor suite
+  make -C review_torture run run-tsan
+                           adversarial Farm suite
+  make -C private_actor_tests run run-dmd run-tsan doc-example death
+                           private actor suite, doc programs and death tests
+  make -C examples check   README payload program and the actor examples
+
+Longer or optional (not run by make check):
+  make check-soak          private-actor TSan loop for at least 121 s
+  make check-mimalloc      make check plus real mimalloc lanes (needs the submodule)
+  make -C actor_torture run-mimalloc-debug
+                           other allocator lanes (see actor_torture/Makefile)
+
+Performance (not part of make check; quiet Linux host, LDC, Python 3, mimalloc):
+  make perf-gate BASE=<sha> [CANDIDATE=<sha>]
+                           see perftest/README.md
+endef
+
+help:
+	$(info $(HELP_TEXT))
+	@true
 
 check:
 	./scripts/check.sh
