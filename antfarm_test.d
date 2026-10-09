@@ -674,13 +674,13 @@ void testPayloadRange()
 
 void testUniformRanges()
 {
-    // N and P exceed one 4096-word small-producer table even in the compact
-    // ST layout (3 words per one-word payload).
-    enum N = 1500;
+    // N and P exceed one 4096-word small-producer table even in the
+    // index-free uniform ST layout (1 word per one-word payload, SPEC 2g).
+    enum N = 5000;
     enum M = 24;
     enum F = 24;
     enum K = 8;
-    enum P = 1500;
+    enum P = 5000;
     allocCalls(N + M + F + K + P);
     scope (exit) freeCalls();
 
@@ -796,9 +796,16 @@ void testUniformRanges()
     foreach (i; 0 .. K)
         mtArgs[i] = tuple(cast(size_t)(N + M + F + i), 2UL);
     auto mtJobs = payloadRange!(testCb, 2, 2)(mtArgs[]);
-    check(f.write(mtJobs, tok) == K, "uniform MT index write");
-    check(mtJobs.popFrontN(K) == K, "uniform MT popFrontN");
-    while (v.consumeNext()) {}
+    // The quota left over from the uniform writes may admit only a prefix.
+    size_t mtWritten;
+    while (mtWritten < K)
+    {
+        immutable got = cast(size_t) f.write(mtJobs, tok);
+        check(got != 0, "uniform MT index write");
+        check(mtJobs.popFrontN(got) == got, "uniform MT popFrontN");
+        mtWritten += got;
+        while (v.consumeNext()) {}
+    }
 
     foreach (i; 0 .. N + M + F)
         check(g_calls[i] == 1, "uniform exact call count");
@@ -2729,6 +2736,37 @@ ulong compactTableSize(ulong n, ulong sumBody, ulong sq) pure nothrow @nogc @saf
     return 30 + 8 * sq + 2 * n + sumBody;
 }
 
+// Index-free uniform tables can be switched off for measurement (SPEC 2g).
+version (AntfarmNoIndexFree)
+    enum bool g_indexFree = false;
+else
+    enum bool g_indexFree = true;
+
+/// Thead word 6's high half (SPEC 2g): 0 per-payload Call, 1 uniform Call,
+/// 2 uniform Call and length.
+enum ulong KIND_PER_PAYLOAD = 0, KIND_UNIFORM = 1, KIND_UNIFORM_FIXED = 2;
+
+/// Exact uniform-call table size (SPEC 2g): Tcall plus a Tindex, or Tcall,
+/// Tblen and no Tindex when every body has the same nonzero length.
+ulong uniformTableSize(ulong n, ulong sumBody, ulong sq, bool sameLen)
+    pure nothrow @nogc @safe
+{
+    return sameLen && sumBody != 0 && g_indexFree
+        ? 30 + 8 * sq + 2 + sumBody
+        : 30 + 8 * sq + 1 + n + sumBody;
+}
+
+ulong uniformKind(ulong sumBody, bool sameLen) pure nothrow @nogc @safe
+{
+    return sameLen && sumBody != 0 && g_indexFree
+        ? KIND_UNIFORM_FIXED : KIND_UNIFORM;
+}
+
+ulong tableKindAt(AntFarm* f, ulong seq) nothrow @nogc @system
+{
+    return atomicLoad!(MemoryOrder.raw)(f.buf[(seq & f.Lmask) + 6]) >> 32;
+}
+
 long compactBodyCb(PayloadHeader* head, PayloadBody body, ulong iteration)
     nothrow @nogc @system
 {
@@ -2812,12 +2850,17 @@ long compactWrapCb(PayloadHeader* head, PayloadBody body, ulong iteration)
     nothrow @nogc @system
 {
     if (iteration != 0 || head.maxCs != 1 || head.done != 1
-        || body.length != 2 || head.plen != 2
+        || body.length < 2 || body.length > 3 || head.plen != body.length
         || atomicLoad!(MemoryOrder.raw)(head.pcount) != (1UL << 32))
+    {
         atomicFetchAdd!(MemoryOrder.raw)(g_compactWrapBad, 1L);
+        atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
+        return 1;
+    }
     immutable idx = body[0];
     if (idx >= g_compactWrapN
-        || body[1] != ((cast(ulong) idx) ^ 0xA5A5_A5A5_A5A5_A5A5UL))
+        || body[1] != ((cast(ulong) idx) ^ 0xA5A5_A5A5_A5A5_A5A5UL)
+        || (body.length == 3 && body[2] != ~cast(ulong) idx))
         atomicFetchAdd!(MemoryOrder.raw)(g_compactWrapBad, 1L);
     if (idx < g_compactWrapN)
         atomicFetchAdd(g_calls[idx], 1L);
@@ -2828,6 +2871,48 @@ long compactWrapCb(PayloadHeader* head, PayloadBody body, ulong iteration)
 void compactCompletion(void* context) nothrow @nogc @system
 {
     atomicFetchAdd!(MemoryOrder.raw)(g_compactCompletions, 1L);
+}
+
+// Second Calls with the same checks. Alternating one with its original
+// keeps a table's Calls non-uniform, so it stays compact (SPEC 2f) rather
+// than uniform (SPEC 2g); g_compactAltCalls shows each record's own Call ran.
+__gshared shared(long) g_compactAltCalls;
+
+long compactBodyCbAlt(PayloadHeader* head, PayloadBody body, ulong iteration)
+    nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(g_compactAltCalls, 1L);
+    return compactBodyCb(head, body, iteration);
+}
+
+long compactOneCbAlt(PayloadHeader* head, PayloadBody body, ulong iteration)
+    nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(g_compactAltCalls, 1L);
+    return compactOneCb(head, body, iteration);
+}
+
+long compactWrapCbAlt(PayloadHeader* head, PayloadBody body, ulong iteration)
+    nothrow @nogc @system
+{
+    atomicFetchAdd!(MemoryOrder.raw)(g_compactAltCalls, 1L);
+    return compactWrapCb(head, body, iteration);
+}
+
+long compactHeaderCbAlt(PayloadHeader* head, PayloadBody body, ulong iteration)
+    nothrow @nogc @system
+{
+    if (head.call != &compactHeaderCbAlt)
+        atomicFetchAdd!(MemoryOrder.raw)(g_compactHeaderBad, 1L);
+    atomicFetchAdd!(MemoryOrder.raw)(g_compactAltCalls, 1L);
+    if (head.maxCs != 1 || head.done != 1 || iteration != 0
+        || head.plen != body.length
+        || atomicLoad!(MemoryOrder.raw)(head.pcount) != (1UL << 32))
+        atomicFetchAdd!(MemoryOrder.raw)(g_compactHeaderBad, 1L);
+    if (body.length > 0)
+        atomicFetchAdd(g_calls[body[0]], 1L);
+    atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
+    return 1;
 }
 
 struct CompactBodies
@@ -2841,14 +2926,23 @@ struct CompactBodies
     void popFront() nothrow @nogc @safe { ++i; }
 }
 
-/// One heterogeneous compact table, drained by one consumer; checks exact
-/// geometry, Tmt == 0, per-payload body/length/header and exactly-once.
-void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label)
+/// One all-ST table, drained by one consumer; checks exact geometry,
+/// Tmt == 0, the kind, per-payload body/length/header and exactly-once.
+/// Alternating Calls make it compact (SPEC 2f); one Call makes it uniform
+/// (SPEC 2g), index-free when every length matches and is nonzero.
+void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label,
+                      bool uniformCall = false)
 {
     immutable N = lens.length;
     ulong totalBody;
     size_t zeros;
-    foreach (l; lens) { totalBody += l; if (l == 0) ++zeros; }
+    bool sameLen = true;
+    foreach (l; lens)
+    {
+        totalBody += l;
+        if (l == 0) ++zeros;
+        if (l != lens[0]) sameLen = false;
+    }
 
     allocCalls(N);
     scope (exit) freeCalls();
@@ -2862,6 +2956,7 @@ void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label)
     g_compactN = N;
     atomicStore!(MemoryOrder.raw)(g_compactZero, 0L);
     atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+    atomicStore!(MemoryOrder.raw)(g_compactAltCalls, 0L);
 
     size_t off;
     foreach (i; 0 .. N)
@@ -2869,7 +2964,7 @@ void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label)
         headers[i] = PayloadHeader.init;
         headers[i].maxCs = headers[i].done = 1;
         headers[i].plen = lens[i];
-        headers[i].call = &compactBodyCb;
+        headers[i].call = !uniformCall && (i & 1) ? &compactBodyCbAlt : &compactBodyCb;
         auto b = bodies[off .. off + lens[i]];
         foreach (k; 0 .. lens[i]) b[k] = compactWord(i, k);
         entries[i] = PayloadEntry(&headers[i], b);
@@ -2884,12 +2979,17 @@ void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label)
 
     immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
     check(f.write(entries[0 .. N], tok, avgCost) == N, label);
-    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + compactTableSize(N, totalBody, 1),
-        label);
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + (uniformCall
+            ? uniformTableSize(N, totalBody, 1, sameLen)
+            : compactTableSize(N, totalBody, 1)), label);
     check((atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 2]) >> 32) == 0, label);
+    check(tableKindAt(f, before) == (uniformCall
+            ? uniformKind(totalBody, sameLen) : KIND_PER_PAYLOAD), label);
 
     while (v.consumeNext()) {}
     check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, label);
+    check(atomicLoad!(MemoryOrder.raw)(g_compactAltCalls) == (uniformCall ? 0 : N / 2),
+        label);
     check(atomicLoad!(MemoryOrder.raw)(g_compactZero) == zeros, label);
     foreach (i; 0 .. N)
         if (lens[i] > 0)
@@ -2934,35 +3034,45 @@ Thread compactConsumerThread(ConsCtx* c, bool late)
     return new Thread({ consumerMain(c); });
 }
 
-// Exercises compact Plen derivation across multi-run tables and ring laps
-// under TSan (backup for M3/M4), with a lagging consumer.
-void testCompactWraparound()
+enum WrapLayout { compact, uniform, uniformFixed }
+
+// Exercises compact and uniform Plen derivation (and index-free strides)
+// across multi-run tables and ring laps under TSan (backup for M3/M4, U4,
+// U5), with a lagging consumer. `compact` alternates two Calls; `uniform`
+// shares one Call over 2- and 3-word bodies; `uniformFixed` shares one Call
+// over 2-word bodies.
+void testCompactWraparound(WrapLayout layout = WrapLayout.compact)
 {
     auto f = AntFarm.create(2, 8, 4, 0, 0, 4, 4096);
     scope (exit) f.destroy();
 
-    enum N = 160000;
+    // Enough payloads to lap the 2 MiB ring twice in every layout.
+    immutable size_t N = layout == WrapLayout.compact ? 160000 : 400000;
     enum NP = 3;
     enum NC = 4;
     allocCalls(N);
     scope (exit) freeCalls();
     auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
-    auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
+    auto bodies = cast(ulong*) malloc(N * 3 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
     scope (exit) { free(headers); free(bodies); free(entries); }
     check(headers !is null && bodies !is null && entries !is null, "compact wrap alloc");
 
     g_compactWrapN = N;
     atomicStore!(MemoryOrder.raw)(g_compactWrapBad, 0L);
+    atomicStore!(MemoryOrder.raw)(g_compactAltCalls, 0L);
     foreach (i; 0 .. N)
     {
+        immutable len = layout == WrapLayout.uniform && i % 3 == 0 ? 3 : 2;
         headers[i] = PayloadHeader.init;
         headers[i].maxCs = headers[i].done = 1;
-        headers[i].plen = 2;
-        headers[i].call = &compactWrapCb;
-        bodies[i * 2] = i;
-        bodies[i * 2 + 1] = cast(ulong) i ^ 0xA5A5_A5A5_A5A5_A5A5UL;
-        entries[i] = PayloadEntry(&headers[i], bodies[i * 2 .. i * 2 + 2]);
+        headers[i].plen = len;
+        headers[i].call = layout == WrapLayout.compact && (i & 1)
+            ? &compactWrapCbAlt : &compactWrapCb;
+        bodies[i * 3] = i;
+        bodies[i * 3 + 1] = cast(ulong) i ^ 0xA5A5_A5A5_A5A5_A5A5UL;
+        bodies[i * 3 + 2] = ~cast(ulong) i;
+        entries[i] = PayloadEntry(&headers[i], bodies[i * 3 .. i * 3 + len]);
     }
 
     auto deadline = MonoTime.currTime + 120.seconds;
@@ -2997,16 +3107,27 @@ void testCompactWraparound()
     foreach (i; 0 .. N)
         check(g_calls[i] == 1, "compact wraparound exact call count");
     check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N, "compact wraparound total");
-    printf("testCompactWraparound OK\n"); fflush(stdout);
+    check(atomicLoad!(MemoryOrder.raw)(g_compactAltCalls)
+            == (layout == WrapLayout.compact ? N / 2 : 0),
+        "compact wraparound ran each record's own Call");
+    printf("testCompactWraparound(%s) OK\n",
+        layout == WrapLayout.compact ? "compact".ptr
+            : layout == WrapLayout.uniform ? "uniform".ptr : "uniformFixed".ptr);
+    fflush(stdout);
 }
 
-// Catches M2 (writer miscounts compact size) and verifies the accepted
-// prefix is prepared/emitted exactly; zero admission leaves Wt untouched.
+// Catches M2 (writer miscounts compact size) and U2 (writer mis-sizes an
+// index-free table), and verifies the accepted prefix is prepared/emitted
+// exactly; zero admission leaves Wt untouched. The heterogeneous prefix
+// alternates Calls (compact, SPEC 2f); writeTracked and the broadcast
+// overload share one Call (uniform, SPEC 2g).
 void testCompactPartialAdmission()
 {
     enum N = 20;
     enum K = 10;
     enum Q = 68; // compact table of 10 one-word bodies: 38 + 3*10.
+    // Uniform table of 10 one-word bodies: 38 + 2 + 10 index-free.
+    immutable QU = uniformTableSize(K, K, 1, true);
 
     // Heterogeneous accepted prefix.
     {
@@ -3022,7 +3143,7 @@ void testCompactPartialAdmission()
             headers[i] = PayloadHeader.init;
             headers[i].maxCs = headers[i].done = 1;
             headers[i].plen = 1;
-            headers[i].call = &compactOneCb;
+            headers[i].call = (i & 1) ? &compactOneCbAlt : &compactOneCb;
             bodies[i] = i;
             entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
         }
@@ -3054,7 +3175,7 @@ void testCompactPartialAdmission()
         atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
         ulong[N] words;
         foreach (i; 0 .. N) words[i] = i;
-        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, QU);
         scope (exit) f.destroy();
         ConsumerView v;
         check(v.subscribe(f) == 0, "compact tracked subscribe");
@@ -3068,8 +3189,9 @@ void testCompactPartialAdmission()
         immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
         immutable got = f.writeTracked(h, CompactBodies(words.ptr, 0, N), 1, &hook, tok);
         check(got == K, "compact tracked partial admits exactly k");
-        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q,
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + QU,
             "compact tracked exact Wt advance");
+        check(tableKindAt(f, before) == uniformKind(K, true), "tracked table is uniform");
         while (v.consumeNext()) {}
         check(atomicLoad!(MemoryOrder.raw)(g_compactCompletions) == 1,
             "compact tracked completion hook once");
@@ -3087,7 +3209,7 @@ void testCompactPartialAdmission()
         size_t frontCalls, prepareCalls, prepared;
         bool permit = true;
         auto prep = PreparingBodyRange(words.ptr, 0, N, &frontCalls, &prepareCalls, &prepared, &permit);
-        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, QU);
         scope (exit) f.destroy();
         ConsumerView v;
         check(v.subscribe(f) == 0, "compact transactional subscribe");
@@ -3099,7 +3221,7 @@ void testCompactPartialAdmission()
         immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
         immutable got = f.write(h, prep, 1, tok);
         check(got == K, "compact transactional partial admits exactly k");
-        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q,
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + QU,
             "compact transactional exact Wt advance");
         check(prepared == K && prepareCalls == 1,
             "compact transactional prepared only the accepted prefix");
@@ -3141,7 +3263,7 @@ void testCompactQuotaBoundaries()
             headers[i] = PayloadHeader.init;
             headers[i].maxCs = headers[i].done = 1;
             headers[i].plen = 1;
-            headers[i].call = &compactOneCb;
+            headers[i].call = (i & 1) ? &compactOneCbAlt : &compactOneCb;
             bodies[i] = i;
             entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
         }
@@ -3174,7 +3296,7 @@ void testCompactQuotaBoundaries()
             headers[i] = PayloadHeader.init;
             headers[i].maxCs = headers[i].done = 1;
             headers[i].plen = 1;
-            headers[i].call = &compactOneCb;
+            headers[i].call = (i & 1) ? &compactOneCbAlt : &compactOneCb;
             bodies[i] = i;
             entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
         }
@@ -3224,17 +3346,19 @@ void testCompactQuotaBoundaries()
 }
 
 // Catches M1 (compact reader on an MT table) and M6a (writer emitting compact
-// records when m != 0): asserts the old 16-word header layout for Tmt != 0
-// and [Call][Pbody] for Tmt == 0.
+// records when m != 0): asserts the old 16-word header layout and kind 0 for
+// Tmt != 0, [Call][Pbody] and kind 0 for a two-Call Tmt == 0 table, and
+// Tcall in the Thead extension for a one-Call singleton (SPEC 2g).
 void testCompactOldLayout()
 {
     enum Q = 4096;
-    static immutable size_t[1] lens = [3];
+    static immutable size_t[2] lens = [3, 3];
     g_compactLens = lens.ptr;
-    g_compactN = 1;
+    g_compactN = 2;
     atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
     atomicStore!(MemoryOrder.raw)(g_compactMtCalls, 0L);
-    allocCalls(1);
+    atomicStore!(MemoryOrder.raw)(g_compactAltCalls, 0L);
+    allocCalls(2);
     scope (exit) freeCalls();
 
     auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
@@ -3264,6 +3388,7 @@ void testCompactOldLayout()
     immutable size = atomicLoad!(MemoryOrder.raw)(f.buf[start + 5]);
     check(size == 38 + 2 + 1 + 16 + 0 + 16 + 3, "mixed table full-format size");
     check((atomicLoad!(MemoryOrder.raw)(f.buf[start + 2]) >> 32) == 1, "mixed table Tmt != 0");
+    check(tableKindAt(f, before) == KIND_PER_PAYLOAD, "mixed table per-payload kind");
     immutable n = cast(size_t)(atomicLoad!(MemoryOrder.raw)(f.buf[start + 2]) & 0xFFFF_FFFFUL);
     check(n == 2, "mixed table Tlen");
     immutable poff0 = atomicLoad!(MemoryOrder.raw)(f.buf[start + 8]);
@@ -3285,17 +3410,57 @@ void testCompactOldLayout()
     check(atomicLoad!(MemoryOrder.raw)(f.buf[start + poff1 + 8]) == (1UL << 32),
         "mixed ST ring Pcount");
 
+    // Two Calls: compact [Call][Pbody] records.
+    ulong[3] altBody;
+    altBody[0] = 1;
+    altBody[1] = compactWord(1, 1);
+    altBody[2] = compactWord(1, 2);
+    PayloadHeader ah = sh;
+    ah.call = &compactBodyCbAlt;
+    PayloadEntry[2] twoCalls = [PayloadEntry(&sh, stBody[]), PayloadEntry(&ah, altBody[])];
     immutable before2 = atomicLoad!(MemoryOrder.raw)(f.Wt);
-    check(f.write(mixed[1 .. 2], tok) == 1, "compact singleton admitted");
+    check(f.write(twoCalls[], tok) == 2, "compact table admitted");
     immutable start2 = before2 & f.Lmask;
     check((atomicLoad!(MemoryOrder.raw)(f.buf[start2 + 2]) >> 32) == 0, "compact table Tmt == 0");
+    check(tableKindAt(f, before2) == KIND_PER_PAYLOAD, "compact table per-payload kind");
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before2 + compactTableSize(2, 6, 1),
+        "compact table size");
     immutable off = atomicLoad!(MemoryOrder.raw)(f.buf[start2 + 8]);
     check(atomicLoad!(MemoryOrder.raw)(f.buf[start2 + off]) == cast(ulong) cast(void*) &compactBodyCb,
         "compact Call at Tindex offset");
     check(atomicLoad!(MemoryOrder.raw)(f.buf[start2 + off + 1]) == stBody[0], "compact body at +1");
     check(atomicLoad!(MemoryOrder.raw)(f.buf[start2 + off + 2]) == stBody[1], "compact body at +2");
     check(atomicLoad!(MemoryOrder.raw)(f.buf[start2 + off + 3]) == stBody[2], "compact body at +3");
+    immutable off1 = atomicLoad!(MemoryOrder.raw)(f.buf[start2 + 9]);
+    check(off1 == off + 4, "compact second record follows the first");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start2 + off1]) == cast(ulong) cast(void*) &compactBodyCbAlt,
+        "compact second Call at Tindex offset");
     while (v.consumeNext()) {}
+    check(atomicLoad!(MemoryOrder.raw)(g_compactAltCalls) == 1, "compact table ran each Call");
+
+    // One Call: a uniform singleton (SPEC 2g).
+    immutable before3 = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(mixed[1 .. 2], tok) == 1, "uniform singleton admitted");
+    immutable start3 = before3 & f.Lmask;
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[start3 + 2]) >> 32) == 0, "uniform table Tmt == 0");
+    check(tableKindAt(f, before3) == uniformKind(3, true), "uniform singleton kind");
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before3 + uniformTableSize(1, 3, 1, true),
+        "uniform singleton size");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start3 + 8]) == cast(ulong) cast(void*) &compactBodyCb,
+        "uniform Tcall in the Thead extension");
+    static if (g_indexFree)
+    {
+        check(atomicLoad!(MemoryOrder.raw)(f.buf[start3 + 9]) == 3, "uniform Tblen");
+        immutable boff = 8 + 2 + 7 + 1 + 7 + 8; // no Tindex
+    }
+    else
+        immutable boff = atomicLoad!(MemoryOrder.raw)(f.buf[start3 + 9]);
+    // Thead 8 + Tcall + (Tblen or one Tindex entry) + pads, Tprogress, Tcount.
+    check(boff == 8 + 2 + 7 + 1 + 7 + 8, "uniform body follows Tcount");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start3 + boff]) == stBody[0], "uniform body at +0");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start3 + boff + 2]) == stBody[2], "uniform body at +2");
+    while (v.consumeNext()) {}
+    check(g_calls[0] == 3 && g_calls[1] == 1, "old-layout ST calls");
 
     v.unsubscribe();
     f.unregisterProducer(tok);
@@ -3308,8 +3473,11 @@ void testCompactOldLayout()
 void testCompactCallbackHeader()
 {
     enum N = 32;
-    foreach (round; 0 .. 2)
+    // Rounds 0/1: alternating Calls (compact); rounds 2/3: one Call
+    // (uniform, SPEC 2g), whose scratch header carries Tcall.
+    foreach (round; 0 .. 4)
     {
+        immutable uniformCall = round >= 2;
         allocCalls(N);
         scope (exit) freeCalls();
         auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
@@ -3317,19 +3485,21 @@ void testCompactCallbackHeader()
         auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
         scope (exit) { free(headers); free(bodies); free(entries); }
         atomicStore!(MemoryOrder.raw)(g_compactHeaderBad, 0L);
+        atomicStore!(MemoryOrder.raw)(g_compactAltCalls, 0L);
         foreach (i; 0 .. N)
         {
             headers[i] = PayloadHeader.init;
             headers[i].maxCs = headers[i].done = 1;
             headers[i].plen = 1;
-            headers[i].call = &compactHeaderCb;
+            headers[i].call = !uniformCall && (i & 1)
+                ? &compactHeaderCbAlt : &compactHeaderCb;
             bodies[i] = i;
             entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
         }
-        auto f = AntFarm.create(2, 8, round == 0 ? 1 : 4, 0, 0, 1, 4096);
+        auto f = AntFarm.create(2, 8, (round & 1) == 0 ? 1 : 4, 0, 0, 1, 4096);
         scope (exit) f.destroy();
         auto tok = f.registerProducer(Tier.small);
-        if (round == 0)
+        if ((round & 1) == 0)
         {
             ConsumerView v;
             check(v.subscribe(f) == 0, "compact header single subscribe");
@@ -3356,6 +3526,8 @@ void testCompactCallbackHeader()
         foreach (i; 0 .. N)
             check(g_calls[i] == 1, "compact header exact call count");
         check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N, "compact header total");
+        check(atomicLoad!(MemoryOrder.raw)(g_compactAltCalls) == (uniformCall ? 0 : N / 2),
+            "compact header each record's own Call");
         f.unregisterProducer(tok);
     }
     printf("testCompactCallbackHeader OK\n"); fflush(stdout);
@@ -3404,15 +3576,17 @@ void testCompactHeterogeneousRule()
     while (v.consumeNext()) {}
     check(atomicLoad!(MemoryOrder.raw)(g_compactMtCalls) == 1, "MT callback ran");
 
+    // An ST singleton is uniform (SPEC 2g) and costs what a compact
+    // singleton did: base + 2 + Plen.
     immutable before2 = atomicLoad!(MemoryOrder.raw)(f.Wt);
     check(f.write(both[1 .. 2], tok) == 1, "ST payload admitted alone compact");
     check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before2 + 95, "compact ST singleton size");
     immutable start = before2 & f.Lmask;
     check((atomicLoad!(MemoryOrder.raw)(f.buf[start + 2]) >> 32) == 0, "second table Tmt == 0");
-    immutable off = atomicLoad!(MemoryOrder.raw)(f.buf[start + 8]);
-    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + off]) == cast(ulong) cast(void*) &compactBodyCb,
-        "compact Call at Tindex offset");
-    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + off + 1]) == stBody[0], "compact body at +1");
+    check(tableKindAt(f, before2) == uniformKind(55, true), "ST singleton is uniform");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + 8]) == cast(ulong) cast(void*) &compactBodyCb,
+        "uniform Tcall in the Thead extension");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[start + 33]) == stBody[0], "uniform body after Tcount");
     while (v.consumeNext()) {}
     check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, "compact ST callback body");
 

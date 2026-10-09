@@ -940,6 +940,33 @@ void t17_write_size_wrap()
     immutable okBig = expectAbort(unsized, "unsizable");
     free(big);
 
+    // The same contract on the arithmetic fixed-length path: an MT common
+    // header with a caller-supplied length that wraps the per-payload unit
+    // (16 + 2 + bodyWords) must fatal, not divide by a wrapped zero unit.
+    PayloadHeader mh;
+    initPayloadHeader!countingCb(&mh, 2, 2);
+    PayloadBody[1] fixedBodies = [p[0 .. 1]];
+    bool okFixedWrap;
+    {
+        auto pid = fork();
+        if (pid == 0)
+        {
+            cast(void) f.write(mh, fixedBodies[], ulong.max - 17, tok);
+            _exit(0);
+        }
+        int st;
+        waitpid(pid, &st, 0);
+        immutable sig = st & 0x7f;
+        okFixedWrap = sig != 0 && sig != 0x7f && sig == SIGABRT;
+        if (!okFixedWrap)
+        {
+            char[112] buf;
+            auto n = snprintf(buf.ptr, buf.length, "fixed-wrap: st=%d sig=%d (want SIGABRT)",
+                st, sig);
+            defect("T17", buf[0 .. n]);
+        }
+    }
+
     // Per-tier sizing: a payload that fits only the bulk tier's quota
     // (singleton in (quotaSmall, quotaBulk]) must abort from a small-tier
     // producer - previously it cleared the farm-max check and then returned
@@ -960,7 +987,7 @@ void t17_write_size_wrap()
     free(mid);
     f.unregisterProducer(tok);
     f.destroy();
-    say((okWrap && okBig && okMidSmall && wrote == 1)
+    say((okWrap && okBig && okFixedWrap && okMidSmall && wrote == 1)
         ? "T17 fatal on wrap/unsizable/per-tier OK"
         : "T17 DEFECT confirmed");
     }

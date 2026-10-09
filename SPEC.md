@@ -10,6 +10,7 @@ Living spec, matching the implementation in this directory. The farmer metaphor 
   - [2d. Payload Layout](#2d-payload-layout)
   - [2e. Table Layout](#2e-table-layout)
   - [2f. Compact ST Tables](#2f-compact-st-tables)
+  - [2g. Uniform-Call ST Tables (prototype)](#2g-uniform-call-st-tables-prototype)
 - [3. Safety Invariants](#3-safety-invariants)
 - [4. Construction and Registration](#4-construction-and-registration)
   - [4a. Geometry and Quota Constraints](#4a-geometry-and-quota-constraints)
@@ -157,13 +158,13 @@ Producers commit a table `Ti` of Payloads up to `Exi` in total size, with sectio
 
 | Offset (ulongs from table start) | Contents |
 | --- | --- |
-| `[0 .. 8)` | Thead. Word 0 is `Tsent` (store-released last). 1 `Tnext`. 2 `Tmt<<32 \| Tlen`. 3 `Cs`. 4 `SqCs`. 5 `Tsize`. 6 `AvgCost`. 7 an optional stable `TableCompletionHook*` (zero for ordinary writes). |
-| `[8 .. 8+Tlen+Tmt)` | Tindex: dense index of where each Payload sits. Total index first, MT index second. `Tmt` is the number of multithreaded payloads actually written; `Tlen` the total. |
+| `[0 .. 8)` | Thead. Word 0 is `Tsent` (store-released last). 1 `Tnext`. 2 `Tmt<<32 \| Tlen`. 3 `Cs`. 4 `SqCs`. 5 `Tsize`. 6 `Tkind<<32 \| AvgCost` (`Tkind` is 0 except for uniform tables, 2g). 7 an optional stable `TableCompletionHook*` (zero for ordinary writes). |
+| `[8 .. 8+Tlen+Tmt)` | Tindex: dense index of where each Payload sits. Total index first, MT index second. `Tmt` is the number of multithreaded payloads actually written; `Tlen` the total. Uniform tables (2g) insert their Thead extension words before Tindex, and the index-free kind has no Tindex. |
 | + 7 | padding |
 | + 1 | `Tprogress`. When a `Ci` identifies itself adding the final completion sum for its shard, it increments `Tprogress` by the shard length with acquire/release ordering. |
 | + 7 | padding |
 | then | `Tcount`: combination claims/completions counters. Consumers fetch_add the 32 most significant bits as claims and 32 LSB as completions. There are `SqCs` such counters, each followed by 7 ulongs of padding. After any packed increment, if the field just incremented has wrapped to 0 the process fatals rather than continue with a corrupted counter. A committed table carries fewer than 2^31 payloads, so successful primary claims on one shard stay below 2^31 even in the `AvgCost` scenario that shrinks `Chunk` to a single payload per claim. Wrapping the 32-bit claims half therefore still requires pathological visitor accumulation on one shard; in the largest tables the table itself is pathologically large as well. |
-| then | the Payloads laid sequentially (compact `[Call][Pbody]` records when `Tmt == 0`, 2f). |
+| then | the Payloads laid sequentially (compact `[Call][Pbody]` records when `Tmt == 0`, 2f; bare `[Pbody]` records in uniform tables, 2g). |
 | last 7 | padding at the end of the table. |
 
 Tindex entries are payload offsets relative to the table start; `Tnext` and `Tsent` are absolute sequences.
@@ -174,7 +175,7 @@ Tindex entries are payload offsets relative to the table start; `Tnext` and `Tse
 
 ### 2f. Compact ST Tables
 
-A table whose committed payloads are all single-threaded (`Tmt == 0`) stores each payload as a compact record instead of `Phead` + `Pbody`:
+A table whose committed payloads are all single-threaded (`Tmt == 0`) and whose `Tkind` is 0 stores each payload as a compact record instead of `Phead` + `Pbody` (an all-ST table whose accepted prefix, within one write call, shares one `Call` is a uniform table instead, 2g):
 
 | Offset (ulongs from the Tindex entry) | Contents |
 | --- | --- |
@@ -185,13 +186,42 @@ Nothing else of `Phead` is stored. Thead, Tindex, Tprogress, Tcount and the end 
 
 **Why nothing else is needed.** `Tmt == 0` means every payload has `MaxCs == 1`, so `Done == 1` (2d) and every payload takes the ST single-shot path (7c). On that path the only mutable per-payload word is `Pcount`, and it is read by nothing but the running callback. Completion is table-level (Tcount, `Tprogress`, `Sd`, the hook). The Tcount claim makes the run's consumer the unique visitor of every payload in the run. No path takes over a claimed run, and secondary/tertiary visitors walk only the empty MT index. Callback return values are ignored, so there is no iterating payload.
 
-**Writer.** The writer selects the format once per table from the accepted prefix's `m`. Sizing uses `1 + Plen` per payload while the prefix is all-ST and `16 + Plen` once it contains an MT payload, so a heterogeneous range keeps its greedy accepted prefix. Records are raw-stored like every other ring word, and `Tsent` is still release-stored last. Quota, wrap, `prepareTableFrontN`, `writeTracked` rollback and publication are unchanged (5b, 5c).
+**Writer.** The writer selects the format once per table from the accepted prefix's `m` (and, for 2g, its Calls and lengths). Sizing uses `1 + Plen` per payload while the prefix is compact and `16 + Plen` once it contains an MT payload (2g gives the uniform sizes), so a heterogeneous range keeps its greedy accepted prefix. Records are raw-stored like every other ring word, and `Tsent` is still release-stored last. Quota, wrap, `prepareTableFrontN`, `writeTracked` rollback and publication are unchanged (5b, 5c).
 
-**Singleton contract check (5b.3).** An ST payload's singleton table is always compact, so its contract check uses the compact size (`base + 1 index + 1 Call + Plen`). MT payloads keep the full-header size. Compared with the full layout, an ST payload may be up to 15 words larger before `write()` fatals. Nothing previously legal becomes fatal, and `write() == 0` still means full. In a heterogeneous range, an ST payload that fits only as a compact singleton ends the accepted prefix after a preceding MT payload, because adding it would need the full format. After a quota refresh if needed, the next call starts its prefix with that payload as a compact table, possibly followed by more payloads.
+**Singleton contract check (5b.3).** An ST payload's singleton table is always compact-sized: it is written as a uniform table (2g), which costs exactly what the compact singleton costs, so its contract check uses the compact size, `base + 2 + Plen`. MT payloads keep the full-header size. Compared with the full layout, an ST payload may be up to 15 words larger before `write()` fatals. Nothing previously legal becomes fatal, and `write() == 0` still means full. In a heterogeneous range, an ST payload that fits only as a compact singleton ends the accepted prefix after a preceding MT payload, because adding it would need the full format. After a quota refresh if needed, the next call starts its prefix with that payload as an all-ST (uniform or compact) table, possibly followed by more payloads.
 
-**Reader.** Every consumer path (primary, carried sweeper, sweeper, oldest-trailing and current-position re-walks) reads `Tmt` from Thead word 2 and selects the compact interpretation once per claimed run, not per payload. The callback still receives a `PayloadHeader*`. For a compact record it points to a consumer-local stack copy holding the values the ST fast path exposed through the ring header: `MaxCs = Done = 1`, `Plen`, `Call`, claims 1, calls/completions 0. The invariant fields, including zero filler, are filled once per run, and `Plen` and `Call` once per payload. The run's payloads share the copy, so callbacks must not modify it, and they must not retain the pointer past return (a ring header pointer used to stay valid until the table was recycled). Tables with `Tmt != 0` keep the full layout and paths unchanged.
+**Reader.** Every consumer path (primary, carried sweeper, sweeper, oldest-trailing and current-position re-walks) reads `Tmt` from Thead word 2 and `Tkind` from word 6, and selects the compact interpretation once per claimed run, not per payload. The callback still receives a `PayloadHeader*`. For a compact record it points to a consumer-local stack copy holding the values the ST fast path exposed through the ring header: `MaxCs = Done = 1`, `Plen`, `Call`, claims 1, calls/completions 0. The invariant fields, including zero filler, are filled once per run, and `Plen` and `Call` once per payload. The run's payloads share the copy, so callbacks must not modify it, and they must not retain the pointer past return (a ring header pointer used to stay valid until the table was recycled). Tables with `Tmt != 0` keep the full layout and paths unchanged.
 
 **Known cost.** Compact tables admit several times more entries per quota, which shifts quota admission geometry and with it allocator cross-thread-free contention. At six consumers the private-remote churn cell moves against the full layout; that is an accepted trade-off, and the measured compact-path rates and allocator geometry are recorded in [PERFORMANCE.md](PERFORMANCE.md#allocators).
+
+### 2g. Uniform-Call ST Tables (prototype)
+
+**Prototype.** This layout is on the `proto/farm-st-uniform` branch for measurement and has not landed.
+
+An all-ST table (`Tmt == 0`) whose committed payloads all carry the same `Call` stores that `Call` once, in a Thead extension, and each payload as its bare `Pbody`. `Tkind`, the high half of Thead word 6, names the kind. The low half stays `AvgCost`, so the chunk rule (7a) reads it unchanged.
+
+| `Tkind` | Name | Extension (from word 8) | Tindex | Records |
+| --- | --- | --- | --- | --- |
+| 0 | per-payload `Call` | none | 2e / 2f | 2d `Phead` + `Pbody`, or 2f `[Call][Pbody]` |
+| 1 | uniform `Call` | `Tcall` | `Tlen` body offsets | `[Pbody]` |
+| 2 | uniform `Call` and length | `Tcall`, `Tblen >= 1` | none | `[Pbody]`, each `Tblen` words |
+
+A nonzero `Tkind` implies `Tmt == 0`; the MT readers (7c) rely on it, because they locate the MT index at `Tindex + Tlen`.
+
+Tprogress, Tcount and the end pad follow the extension and Tindex exactly as in 2e. In kind 1, `Plen_i = Tindex[i+1] - Tindex[i]`, and the last record ends at `Tsize - 7`. In kind 2, body `i` starts at the payload area start plus `i * Tblen`, and that start is the Tcount start plus `8 * SqCs`. A one-word body costs 2 ring words per entry in kind 1 (index and body) and 1 in kind 2, against 3 compact (2f) and 18 full (2d). Kind 0 tables are byte-identical to 2e/2f.
+
+**Detection.** The writer sizes every accepted prefix by the layout it would emit. Layouts only degrade as the prefix grows (kind 2 → kind 1 → compact → full), and each step costs more words, so the greedy accepted prefix rule of 2f still holds. A prefix of a uniform range is uniform. When the next payload would degrade the layout and no longer fits, the table keeps the layout it was sized with. Detection is per write call:
+
+- The `PayloadEntry` and pair forms compare each `Call` with the first.
+- The forms without a supplied body length compare each body length with the first. A zero first length keeps kind 1, so no table is index-free over empty bodies.
+- The common-header broadcast forms and `writeTracked` share their `Call` by construction.
+- The common-header form with a supplied body length (including `writeTracked`) is kind 2 by arithmetic, or kind 1 for length 0. Sizing never inspects a body front; emission fatals on a body of another length, as before.
+
+**Singleton contract (5b.3).** An ST singleton is a kind 2 table, or kind 1 when its body is empty. Either way it costs `base + 2 + Plen`, exactly the compact singleton, so the contract check and the set of legal payloads are unchanged.
+
+**Reader.** Every consumer path decodes `Tkind` once per table, alongside `Tmt`, and selects the record interpretation once per claimed run. The callback receives the same consumer-local scratch header as 2f: `MaxCs = Done = 1`, `Plen`, `Call = Tcall`, claims 1, calls/completions 0. `Call` is set once per run, and so is `Plen` in kind 2. The same lifetime rules apply: callbacks must not modify the header or retain it past return.
+
+**Why it is safe.** The Tcall, Tblen and kind words are written with relaxed stores before the `Tsent` release, like every other Thead word, and read with relaxed loads after the `Tsent` acquire (I4). Quota, wrap, `prepareTableFrontN`, `writeTracked` rollback and publication are unchanged (5b, 5c). Claims, completion and the hook are table-level as in 2f, so nothing per-payload is mutable.
 
 ---
 
@@ -298,7 +328,7 @@ The payload/table sizing contract, in order:
 
 1. `write()` validates every payload header before accepting it. `Done` and `MaxCs` are in 1..512. `MaxCs >= 1`, and `Done > 1` requires `MaxCs >= 2` (2d). Violations are fatal.
 2. Size arithmetic is overflow-checked before any compare to quota. If `body.length` would overflow when added to the payload-header length, or the running payload sum, candidate table size, or final table size would wrap, that is fatal. A wrapped candidate must never be compared to `Exi`.
-3. A payload that cannot fit in the *caller tier* maximum `Exi` is a caller error, not backpressure. If a singleton table containing only that payload — Thead, index slots, pads, Tcount words for the current `SqCs`, the payload, and the end pad — exceeds the caller's tier quota, `write()` fatals. An ST payload's singleton is a compact table (2f). The check is by caller tier, not `max(quotaBulk, quotaSmall)`, because a payload that only the other tier could ever publish would remain in a small producer's input range on future calls. Thus it's a contract failure that must be wrangled upstream, and `write() == 0` strictly means the farm is full for `Pi`'s purposes.
+3. A payload that cannot fit in the *caller tier* maximum `Exi` is a caller error, not backpressure. If a singleton table containing only that payload — Thead, index slots, pads, Tcount words for the current `SqCs`, the payload, and the end pad — exceeds the caller's tier quota, `write()` fatals. An ST payload's singleton costs what a compact table (2f) costs; it is written as a uniform table (2g). The check is by caller tier, not `max(quotaBulk, quotaSmall)`, because a payload that only the other tier could ever publish would remain in a small producer's input range on future calls. Thus it's a contract failure that must be wrangled upstream, and `write() == 0` strictly means the farm is full for `Pi`'s purposes.
 4. Multi-payload truncation to the caller's current `Exi` stays legal: if `Ti`'s size exceeds a depleted `Exi`, `Pi` attempts to refresh it, then keeps however many Payloads fit. The committed table also carries fewer than 2^31 payloads (2e); the sizing scan breaks at that bound exactly as it breaks on quota, so a longer input range is truncated, not fatal.
 
 At this level producers do nothing else to resolve fullness; they merely return commit lengths dwindling to 0. A stalled producer may subscribe a ConsumerView, drain, and retry (5a).
@@ -312,7 +342,7 @@ The ordered contract of a write:
 1. Reserve `Wt` with an acq_rel RMW; the returned `Wret` plus the reserved size gives `Wt'`, the sequence after this write. The acquire half imports other producers' reclamation history before any ring store (5a, 9).
 2. Deduct the reserved size from the checked quota grant; do not renew it.
 3. For every segment/epoch boundary the reservation crosses, initialize that segment's metadata (2c) and, for segments crossed *out of* that are incomplete, plant Sub0 protection via `plantIfUnprotected` (6c).
-4. Write the table parts described in 2d, or 2f for Tmt == 0, into the reserved space.
+4. Write the table parts described in 2d, or 2f/2g for Tmt == 0, into the reserved space.
 5. Release-store `Tsent` last; it is computed from `Wret`, and consumers validating the expected sentinel by its matching sequence also validate the following contents.
 
 All this comes before releasing the table's sentinel value. `Wt'`, or the sequence *after* the current `write()`, becomes those segments' `Seqt`, the first valid table for that segment. Otherwise `Seqt` would almost certainly point to a previous segment and backtracking is ill-advised. This way consumers and especially subscribers can seek forward using `Seqt` for orientation. Segment initialization zeroes `Sd` (2c). A `Tnext` equal to this `Wt'` therefore always names an initialized epoch.
@@ -507,7 +537,7 @@ The general MT entry order is the callback ordering that makes the accounting pr
 
 Callback return values are presently ignored by Farm accounting.
 
-The ST fast path is exactly `MaxCs == 1 && Done == 1` on a primary visit. The shard counter already assigns the payload to exactly one consumer: shard slices and their claimed runs are disjoint, and sweepers/re-walkers claim runs through the same counters. ST payloads never appear in the MT index, so secondary/tertiary visitors cannot enter them. The unique consumer therefore raw-stores `1UL << 32` to Pcount and executes `Call` without another admission RMW. This preserves the callback-visible claims value of one and calls/completions values of zero. In a compact table (2f) there is no ring `Phead`; the callback receives a consumer-local header with the same values. The store remains atomic because later ring laps reuse the same words. Table completion is tracked by Tcount/`Tprogress`; no ST completion depends on Pcount. Multi-threaded payloads, including `MaxCs > 1 && Done == 1`, keep the full packed fetch_add path.
+The ST fast path is exactly `MaxCs == 1 && Done == 1` on a primary visit. The shard counter already assigns the payload to exactly one consumer: shard slices and their claimed runs are disjoint, and sweepers/re-walkers claim runs through the same counters. ST payloads never appear in the MT index, so secondary/tertiary visitors cannot enter them. The unique consumer therefore raw-stores `1UL << 32` to Pcount and executes `Call` without another admission RMW. This preserves the callback-visible claims value of one and calls/completions values of zero. In a compact (2f) or uniform (2g) table there is no ring `Phead`; the callback receives a consumer-local header with the same values. The store remains atomic because later ring laps reuse the same words. Table completion is tracked by Tcount/`Tprogress`; no ST completion depends on Pcount. Multi-threaded payloads, including `MaxCs > 1 && Done == 1`, keep the full packed fetch_add path.
 
 This structures the consumer strategy such that exactly 1 consumer normally enters a single-threaded Payload, and ~`SqCs` consumers normally enter an MT payload. "Normally" is performance intuition, not a guarantee: `MaxCs`, races, and repeated visitors to the same shard determine actual admissions. Tertiary behavior is the sweeper role in 7e.
 
@@ -577,7 +607,7 @@ Atomic memory orders, in one place:
 | root-tally RMWs | release `fetch_add`/`fetch_sub` on `Rt` | acquire loads of `Rt` (producers, subscribers, last-releaser CAS) | prior ring reads by the counted consumer join the tally's release sequence |
 | write-tail reservation | acq_rel RMW on `Wt` | acquire probe used by quota logic and subscription; the acquire half of every later reservation | published tail position and bounded sweep anchor; each reserver's acquired reclamation history, handed to producers that later spend retained quota without sweeping |
 | leaf-tally RMWs | acq_rel on `Lt` | acq_rel edge decrement and release root update | a non-edge consumer's ring reads join the leaf release sequence carried by the last-on-leaf's `Rt` release |
-| table publication | release-store `Tsent` last | acquire-load and validate `Tsent` | raw-atomic Thead remainder, indexes, counters, payload header/body or compact `[Call][Pbody]` records (2f) |
+| table publication | release-store `Tsent` last | acquire-load and validate `Tsent` | raw-atomic Thead remainder, indexes, counters, payload header/body, compact `[Call][Pbody]` records (2f) or uniform `Tcall`/`Tblen` and `[Pbody]` records (2g) |
 | segment metadata publication | release-store `Es` last | acquire-load and validate expected `Es` | raw-atomic `Seqt`, `Cs`, `SqCs`, initial `Sd` |
 | table accounting join | acq_rel completion RMWs on `Shc`, then acq_rel RMW on `Tprogress` | acquire observation of `Tprogress == Tlen` | primary-run callback writes join within each shard, then across shards, before optional table-completion notification; all callbacks only for tracked ST single-shot tables |
 | producer reuses a segment | release root transition toward zero | acquire-load `Rt == 0` in quota sweep; then, for any other producer reusing the swept space, the acq_rel `Wt` reservation chain | prior consumers' ring accesses happen before reuse, including reuse by a producer spending quota granted before those accesses |
