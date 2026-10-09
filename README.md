@@ -1,9 +1,49 @@
-# Ant Farm 1.7.1-rc.1
+# Ant Farm
 
 Ant Farm is a fixed-memory M:N job distributor for D. Producers publish
 tables of work into a shared ring; any subscribed consumer may claim them.
 It is designed for unordered compute where work can appear on any thread and
 the next available worker should take it.
+
+**Status.** The current development line targets **1.8.0-rc.1**. It is
+release-candidate software: the public and private actor models are supported
+functionality, but source and ABI stability are not promised across release
+candidates, and actor state and results have the limits stated in their
+guides. The correctness gate is the local Linux `make check`; there is no CI.
+Windows (x64) is an intended target whose validation follows the release
+candidate. See [CHANGELOG.md](CHANGELOG.md)
+for what the candidate contains and its compatibility notes.
+
+## Quickstart (Linux)
+
+You need DMD 2.112+ or LDC 1.42+. From a clone of this repository, build and run
+a complete tracked program that distributes work to a public actor service:
+
+```text
+dmd -g -i -I. -Iexamples examples/public_service.d -of=/tmp/public_service
+ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
+```
+
+Expected output, with exit status 0:
+
+```text
+public service: 36 ordered replies, balance=234, workers=0, closing-callback-count=0
+```
+
+The `0` consumes on the calling thread; `/tmp/public_service 2` uses two worker
+threads and prints `workers=2` with the same counts. LDC works with the same
+command (`ldc2 -g -i -I. -Iexamples examples/public_service.d
+-of=/tmp/public_service`). If the program prints nothing or asserts, the toolchain
+is the first thing to check. [examples/README.md](examples/README.md) has the
+other programs and the Windows commands.
+
+## Where to go next
+
+| I want to... | Start with |
+| --- | --- |
+| **Run something** | [First payload](#first-payload) (the smallest complete program), then [examples/README.md](examples/README.md) for six actor programs and [threadpool/README.md](threadpool/README.md) for pinned workers. |
+| **Choose and use actors** | The [choice table](#choosing-the-work-representation) below, then the [public actor guide](actors/ACTOR_ROADMAP.md) or the [private actor guide](actors/PRIVATE_ACTORS.md), the shared [lifecycle contract](actors/LIFECYCLE.md), and the matching [example](examples/README.md). |
+| **Contribute** | [CONTRIBUTING.md](CONTRIBUTING.md) for `make check` and the change checklist, [ARCHITECTURE.md](ARCHITECTURE.md) for the layers, and [SPEC.md](SPEC.md) for the Farm algorithm and memory-order contract. |
 
 This repository contains four cooperating packages:
 
@@ -16,59 +56,40 @@ This repository contains four cooperating packages:
 
 Use `antfarm` alone, or add only the higher-level packages a workload needs.
 For the complete relationship and sizing rules, see
-[ARCHITECTURE.md](ARCHITECTURE.md). Current release work is tracked in
-[ROADMAP.md](ROADMAP.md).
+[ARCHITECTURE.md](ARCHITECTURE.md). Planned work is in [ROADMAP.md](ROADMAP.md).
 
-The [project writeup](writeup.md) connects the design, optimization history,
-and measured payload, Fiber, actor-wave, and complete-lifecycle results.
+### Choosing the work representation
+
+| Your work is... | Use | Example |
+| --- | --- | --- |
+| short, `nothrow @nogc`, no identity | a payload ([First payload](#first-payload)) | [iota_sum.d](examples/iota_sum.d) |
+| a stable identity that outside code addresses: a service with an inbox, several event sources | a **public actor** (`ActorOwner` / `ActorHandle`) | [public_service.d](examples/public_service.d) |
+| a phase run over an externally selected set of identities | a public **actor wave** | [public_wave.d](examples/public_wave.d) |
+| one exclusive computation tree under a single conductor, with typed joined results or non-POD state | a **private actor** hierarchy | [private_tree.d](examples/private_tree.d) |
+| per-request tracked roots with deadlines and cancellation | private actors with `tracking` | [request_deadline.d](examples/request_deadline.d) |
+| ordinary D exceptions, allocation, timers, or joins while waiting | a managed **Fiber** | [fibers/README.md](fibers/README.md) |
+
+A public endpoint may front a private tree; their lifetimes still drain
+separately. The shared contracts are in [actors/LIFECYCLE.md](actors/LIFECYCLE.md),
+and [ARCHITECTURE.md](ARCHITECTURE.md#choosing-the-work-representation) gives
+the longer comparison.
 
 ## Build and test
 
-DMD 2.112+ and LDC 1.42+ are supported on Windows x64 and Linux x86-64.
-
 ```text
 dub build
-ANTFARM_HUGE_PAGES=0 dub test --compiler=dmd
-ANTFARM_HUGE_PAGES=0 dub test --compiler=ldc2
-ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=dmd
-ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=ldc2
 ```
 
-Both commands run the root integration suite in `antfarm_test.d`. `dub test`
-also compiles and runs module `unittest` blocks; `dub run -c unittest` runs
-the suite alone. See [fibers/README.md](fibers/README.md#build-and-test)
-for the separate Fiber smoke and stress suites.
+builds the library. The full local correctness gate is `make check`; what it
+runs, its prerequisites, and the focused and optional lanes are in
+[CONTRIBUTING.md](CONTRIBUTING.md). Ordinary 4 KiB backing is the default;
+`ANTFARM_HUGE_PAGES=0` makes that choice explicit for a run. See
+[Memory backing](#memory-backing). The optional mimalloc v3 actor allocator is
+described in [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md); ordinary builds
+retain the C-runtime default and do not link it.
 
-Ordinary 4 KiB backing is the default. The environment override makes that
-choice explicit for tests even if the calling shell is configured otherwise.
-The actor runtime has a separate deterministic-interleaving and
-sustained-contention suite:
-
-```text
-make -C actor_torture run
-make -C actor_torture run-dmd
-make -C actor_torture run-tsan
-```
-
-The [performance benchmarks](perftest/README.md) cover payload throughput,
-actor dispatch, and Fiber lifecycle bookkeeping. The
-[complete actor lifecycle benchmark](perftest/LIFECYCLE.md) measures repeated
-creation, dispatch, retirement, and reclamation with the C-runtime and optional
-mimalloc policies, including wave batching and consumer placement.
-
-The actor runtime's optional mimalloc v3 adapter is documented in
-[ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md); ordinary builds retain the C-runtime
-default and do not link mimalloc. The real allocator lane uses the pinned
-submodule:
-
-```text
-git submodule update --init --recursive
-make -C actor_torture run-mimalloc
-make -C actor_torture run-mimalloc-debug
-```
-
-Dub's `mimalloc-v3` configuration also builds and links this pinned release
-archive; it does not require a system mimalloc installation.
+Performance measurement is a separate, quiet-host workflow described in
+[perftest/README.md](perftest/README.md); it is not part of `make check`.
 
 ## First payload
 
@@ -126,6 +147,16 @@ void main()
 }
 ```
 
+To run it, save the program as `/tmp/first_payload.d`, then from the
+repository root:
+
+```text
+dmd -g -i -I. /tmp/first_payload.d -of=/tmp/first_payload
+ANTFARM_HUGE_PAGES=0 /tmp/first_payload
+```
+
+It prints nothing and exits with status 0 once all 256 jobs have run.
+
 Things the example relies on:
 
 - `AntFarm.create` has nine parameters. Named arguments, as above, keep the
@@ -164,9 +195,8 @@ before `pool.shutdown()` returns. Only after that may the Farm be destroyed.
 The [private actor model](actors/PRIVATE_ACTORS.md) adds self-owned
 roots and exclusively parent-owned child cohorts. Blind parks emit dispatches;
 state is visible only inside the actor's authorized callback. See its
-[full-lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md) and ownership limits
-before choosing it over the public actor API. Its [documentation programs](actors/PRIVATE_ACTORS.md#api)
-are extracted and run by `make check`, including same-thread consumption and
+ownership limits before choosing it over the public actor API. Its
+[documentation programs](actors/PRIVATE_ACTORS.md#api) are extracted and run by `make check`, including same-thread consumption and
 joined results. The onboarding program
 [examples/private_tree.d](examples/private_tree.d) uses typed result ports, a
 child continuation, a subset wave, and a destructor. Shared setup, drain, and
@@ -280,7 +310,11 @@ contracts are in [ACTOR_ROADMAP.md](actors/ACTOR_ROADMAP.md) and
 The common-header and fixed-width forms are useful for homogeneous batches.
 They retain the same partial-write contract as `PayloadEntry[]`.
 
-The callback receives its copied body words read-only. That constness protects
+The `PayloadHeader*` a callback receives is valid only during the call and
+must not be modified or retained: for tables of single-threaded payloads it
+points to a temporary consumer-local copy, not to the ring.
+
+The callback receives its body words read-only. That constness protects
 the ring representation; it does not assert that an object named by a manually
 encoded handle is transitively immutable. Generated shims apply a separate,
 stricter policy: packed arguments may not contain unshared mutable aliases.
