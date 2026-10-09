@@ -120,7 +120,7 @@ single-consumer table keeps its exact prior claim sequence. An explicit
 Since `MAX_CHUNK` rose from 32 to 128, a given class names a run four times
 longer than it did, so a hint chosen as class `k` before now wants `k + 2`.
 The measured effect of the derived default is recorded in
-[PERFORMANCE.md](../../PERFORMANCE.md).
+[PERFORMANCE.md](../../PERFORMANCE.md#batch-limit-and-work-cost-hints).
 
 Child wave tables (`emit`, `emitSubset`, resume emits) always publish the class
 of 32-entry runs (class 2). Any child table below the small-table threshold is
@@ -143,7 +143,8 @@ producer-quota constraints.
 Larger batches amortize table overhead, but more roots wait behind one slow
 callback because a whole physical table returns together. Smaller batches limit
 that delay and reserve more table slots. The measured batch/quota/consumer
-trade-off is recorded in [PERFORMANCE.md](../../PERFORMANCE.md).
+trade-off is recorded in
+[PERFORMANCE.md](../../PERFORMANCE.md#batch-limit-and-work-cost-hints).
 
 ## Allocators
 
@@ -212,8 +213,9 @@ By default (`PrivateStateStorage.perObject`) a child `spawn` allocates its state
 through the root allocator, and retirement frees it on the retiring consumer. In
 tree workloads one parent callback allocates a whole cohort and several
 consumers free it. With mimalloc each of those frees is a remote free: a CAS on
-the owning page's shared free list; a large share of cache fills land there.
-Fresh measurements will be recorded in [PERFORMANCE.md](../../PERFORMANCE.md).
+the owning page's shared free list; a large share of cache fills land there. The
+measured cross-thread free counts and actor-mode rates are in
+[PERFORMANCE.md](../../PERFORMANCE.md#allocators).
 
 An opt-in cohort slab reserves every member's state when the cohort is created.
 The conductor below refills one slab cohort three times. Each refill reuses the
@@ -345,8 +347,8 @@ void main()
   reused, so allocator or sanitizer use-after-free detection no longer sees it.
   Debug builds check that `spawn` writes into a zeroed slot.
 
-Measurements, cross-thread free counts, and peak RSS will be recorded in
-[PERFORMANCE.md](../../PERFORMANCE.md).
+Measurements, cross-thread free counts, and peak RSS are recorded in
+[PERFORMANCE.md](../../PERFORMANCE.md#cohort-slab-vs-per-object).
 
 ## GC references
 

@@ -21,7 +21,8 @@ lane matrix, prerequisites, focused entry points, and optional lanes are in
 `make perf-gate BASE=<sha> CANDIDATE=<sha>` compares two committed refs on the
 same benchmark source and decides whether the candidate regresses beyond the
 project boundary. It is separate from `make check`. The method, the modes, and
-the decision rules are in [perftest/README.md](perftest/README.md).
+the decision rules are in [perftest/README.md](perftest/README.md); the measured
+numbers and the tuning guide are in [PERFORMANCE.md](PERFORMANCE.md).
 
 Changes to executable code or its layout can move performance even when the
 algorithm is unchanged, so treat a clean diff as no evidence of identical

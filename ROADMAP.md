@@ -10,9 +10,9 @@ part of its local gate.
 - Finish the documentation restructuring: every major rule has one named owner
   in [docs/README.md](docs/README.md), the local docs link check passes, and the
   three reader journeys work from the README.
-- Measure the RC performance numbers and write the root
-  [PERFORMANCE.md](PERFORMANCE.md) from fresh measurements at the RC commit.
-  Historical measurements stay archived outside the repository.
+- Re-measure at the cut commit and refresh the root
+  [PERFORMANCE.md](PERFORMANCE.md); its numbers are tied to the commit they
+  were taken at. Historical measurements stay archived outside the repository.
 - Run and record the local Linux `make check` at the RC revision with LDC and
   DMD, including the documentation-example and compiled-example lanes.
 - Cut the release: switch the version banners in [README.md](README.md) and

@@ -101,7 +101,7 @@ with huge pages enabled. Throughput cases showed no material median regression,
 six focused latency pairs showed no repeated busy-workload p99 regression, and
 extreme tails and saturated near-full behavior remained noisy, including in an
 identical-binary control. These measurements do not establish a hard latency
-bound. Fresh numbers are recorded in [PERFORMANCE.md](../PERFORMANCE.md).
+bound. The general performance context is in [PERFORMANCE.md](../PERFORMANCE.md).
 
 - `boundary_runoff.d`: one producer with quota 512, one consumer parked at
   epoch zero, and 512-word tables. The pre-`d6b2eff` automatic-renewal code

@@ -3,7 +3,7 @@
 Synthetic payload, actor, private-actor, and Fiber benchmarks, plus the
 optimization gate. This directory intentionally carries no measurements: the
 historical reports and the per-run result trees were archived outside the
-repository, and fresh numbers for the release candidate will be recorded in
+repository, and the committed measurements live in
 [PERFORMANCE.md](../PERFORMANCE.md). Everything below is a qualitative index of
 the harness, not evidence.
 
@@ -119,10 +119,12 @@ make perf-gate BASE=CANDIDATE_SHA PERF_GATE_ARGS=--control
 ```
 
 It needs a quiet Linux host with LDC, Python 3, and the pinned real mimalloc
-archive, and the output directory must not already exist. `PERF_GATE_OUTPUT` defaults to the fixed path `/tmp/antfarm-perf-gate`, which
-must not already exist; remove it (or pass another `--output`/`PERF_GATE_OUTPUT`)
-before rerunning. `PERF_GATE_ARGS` passes
-options such as `--archive`, `--boundary`, and `--root-hint`. Run the
+archive, and the output directory must not already exist. The current
+measurements and how to regenerate them are in
+[PERFORMANCE.md](../PERFORMANCE.md#method). `PERF_GATE_OUTPUT` defaults to the
+fixed path `/tmp/antfarm-perf-gate`, which must not already exist; remove it (or
+pass another `--output`/`PERF_GATE_OUTPUT`) before rerunning. `PERF_GATE_ARGS`
+passes options such as `--archive`, `--boundary`, and `--root-hint`. Run the
 correctness gate first and run timing serially, with no other heavy work on the
 host.
 

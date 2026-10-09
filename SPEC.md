@@ -191,7 +191,7 @@ Nothing else of `Phead` is stored. Thead, Tindex, Tprogress, Tcount and the end 
 
 **Reader.** Every consumer path (primary, carried sweeper, sweeper, oldest-trailing and current-position re-walks) reads `Tmt` from Thead word 2 and selects the compact interpretation once per claimed run, not per payload. The callback still receives a `PayloadHeader*`. For a compact record it points to a consumer-local stack copy holding the values the ST fast path exposed through the ring header: `MaxCs = Done = 1`, `Plen`, `Call`, claims 1, calls/completions 0. The invariant fields, including zero filler, are filled once per run, and `Plen` and `Call` once per payload. The run's payloads share the copy, so callbacks must not modify it, and they must not retain the pointer past return (a ring header pointer used to stay valid until the table was recycled). Tables with `Tmt != 0` keep the full layout and paths unchanged.
 
-**Known cost.** Compact tables admit several times more entries per quota, which shifts quota admission geometry and with it allocator cross-thread-free contention. At six consumers the private-remote churn cell moves against the full layout; that is an accepted trade-off, and fresh measurements will be recorded in [PERFORMANCE.md](PERFORMANCE.md).
+**Known cost.** Compact tables admit several times more entries per quota, which shifts quota admission geometry and with it allocator cross-thread-free contention. At six consumers the private-remote churn cell moves against the full layout; that is an accepted trade-off, and the measured compact-path rates and allocator geometry are recorded in [PERFORMANCE.md](PERFORMANCE.md#allocators).
 
 ---
 

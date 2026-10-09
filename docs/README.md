@@ -47,7 +47,7 @@ Three reading paths:
 | --- | --- |
 | [development/testing.md](development/testing.md) | run and understand the local correctness lanes and their limits |
 | [../perftest/README.md](../perftest/README.md) | run a benchmark and the committed-ref optimization gate |
-| [../PERFORMANCE.md](../PERFORMANCE.md) | find the performance numbers (measured at the release candidate) |
+| [../PERFORMANCE.md](../PERFORMANCE.md) | find the measured numbers, method, and tuning guide |
 
 ## Canonical ownership
 

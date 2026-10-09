@@ -45,6 +45,7 @@ commands.
 | **Run something** | [docs/guide/quickstart.md](docs/guide/quickstart.md), then [examples/README.md](examples/README.md) for six actor programs and [threadpool/README.md](threadpool/README.md) for pinned workers. |
 | **Choose and use actors** | The [choice table](#choosing-the-work-representation) below, then [docs/guide/choosing-work.md](docs/guide/choosing-work.md), the public actor guide [docs/guide/public-actors.md](docs/guide/public-actors.md) or the private actor guide [docs/guide/private-actors.md](docs/guide/private-actors.md), the shared [lifecycle contract](docs/reference/actor-lifecycle.md), and the matching [example](examples/README.md). |
 | **Contribute** | [CONTRIBUTING.md](CONTRIBUTING.md) for `make check` and the change checklist, [docs/development/testing.md](docs/development/testing.md) for the lane matrix, [ARCHITECTURE.md](ARCHITECTURE.md) for the layers, and [SPEC.md](SPEC.md) for the Farm algorithm and memory-order contract. |
+| **Measure performance** | [PERFORMANCE.md](PERFORMANCE.md) for the measured numbers, method, and tuning guide, then [perftest/README.md](perftest/README.md) for the harness and `make perf-gate`. |
 
 The full documentation map and the canonical owner of each rule are in
 [docs/README.md](docs/README.md).
