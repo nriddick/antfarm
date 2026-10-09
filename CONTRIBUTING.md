@@ -1,9 +1,38 @@
 # Contributing to Ant Farm
 
 Ant Farm is concurrent, `@nogc` code whose correctness rests on stated
-memory-order arguments. Changes are accepted on evidence: the local gate, tests
-that fail when the property they protect is broken, and, for executable changes,
-a performance comparison. There is no CI; the gate is a local command.
+memory-order arguments. Work proceeds through local iteration and pre-push
+hardening. Local iteration uses focused evidence to make useful progress;
+hardening establishes acceptance with the local gate, meaningful regression tests
+and applicable performance comparisons. There is no CI; the gate is a local command.
+
+## Local iteration (default)
+
+Batch related edits, then run the smallest useful check of the changed behavior:
+a build, focused test selector, reproducer, or inspection for a prose-only edit.
+Add a focused behavioral test when it helps establish the increment. Local commits,
+hand-offs and cherry-picks do not require the full gate, a compiler matrix, mutation
+campaigns, extended soaks or performance comparisons. Report those as deferred.
+
+Keep invariants and memory-order reasoning with the implementation. Fix defects
+that prevent the requested behavior from working; record unrelated bugs and
+optional improvements without chasing them. After a correction, rerun affected
+checks and reuse applicable evidence from other agents. Never claim an unrun check.
+
+## Hardening boundary
+
+Run hardening immediately before an authorized remote push, or when the user
+explicitly requests it. An explicit narrow review stays within its requested scope
+and does not establish pre-push clearance. Review the accumulated change using an
+explicit base and final candidate, not just the last commit. Apply the pre-push
+checklist below once to that candidate, reusing applicable evidence. If corrections
+invalidate a gate, rerun it on the final candidate; a new commit ID alone does not
+invalidate evidence for an identical tree and equivalent environment.
+
+Full matrices and adversarial work belong here. Select additional probes for the
+changed risks; do not repeat every historical mutation or soak by default. Finish
+when required checks pass and material blockers are resolved. Keep unrelated or
+optional findings separate. Hardening does not itself authorize a push.
 
 ## The correctness gate: `make check`
 
@@ -30,8 +59,7 @@ performance.
 
 ## Change checklist
 
-Before proposing a change that touches the Farm, actors, or the shared
-lifecycle:
+During implementation of changes to the Farm, actors, or shared lifecycle:
 
 - Read the normative text for the area first (see the ownership map in
   [docs/README.md](docs/README.md)), and keep the text and the code in step. A
@@ -41,12 +69,6 @@ lifecycle:
   [docs/design/public-actor-ordering.md](docs/design/public-actor-ordering.md)
   or [docs/design/private-actor-ordering.md](docs/design/private-actor-ordering.md)
   for actors. Do not weaken an ordering without the proof that replaces it.
-- Add a deterministic test for the property, and check it by mutation: break the
-  code (for example weaken the ordering, or remove the check) and confirm the
-  test fails; the suites' READMEs record the existing controls. A passing stress
-  run alone is not evidence of a memory-order argument.
-- Contract violations that must be fatal need a death test in
-  `private_actor_tests` or an equivalent that survives `-release`.
 - Keep the TSan lanes meaningful: do not add annotations that hide a weakened
   edge (see [review_torture/FARM_ORDERING.md](review_torture/FARM_ORDERING.md)).
 - New test code stays on druntime threads and atomics, and any new example is a
@@ -54,6 +76,15 @@ lifecycle:
 - If you change a documentation program, the README First payload, or an
   example, `make check` extracts and runs them. Mark partial code blocks as
   fragments.
+
+Before a remote push, also:
+
+- Ensure changed properties have deterministic tests, and check them by mutation:
+  break the code (for example weaken the ordering, or remove the check) and confirm the
+  test fails; the suites' READMEs record the existing controls. A passing stress
+  run alone is not evidence of a memory-order argument.
+- Contract violations that must be fatal need a death test in
+  `private_actor_tests` or an equivalent that survives `-release`.
 - Run `make check` with the final revision. If you changed executable code on a
   measured path, also run `make perf-gate`.
 - Do not claim a gate that was not run. Say which lanes passed, on which

@@ -1,8 +1,12 @@
 # Testing
 
 The correctness gate is local. There is no CI. [CONTRIBUTING.md](../../CONTRIBUTING.md)
-has the change checklist; this page is the lane matrix, prerequisites, and
-limitations.
+defines local iteration and pre-push hardening; this page is the lane matrix,
+prerequisites, and limitations. During iteration, select a focused check for the
+changed behavior. Run the full matrix at the hardening boundary, not after each
+increment or agent handoff. Bare `make` runs that full matrix, so use explicit
+focused targets during iteration. Reuse applicable evidence and rerun affected
+checks after corrections; record deferred checks rather than implying they passed.
 
 ## The correctness gate: `make check`
 
