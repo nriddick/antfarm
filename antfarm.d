@@ -393,10 +393,10 @@ enum DEFAULT_SMALL_TABLE_THRESHOLD = 64;
 enum bool DEFAULT_HUGE_PAGES = false;
 /// Spec 7a: chunk ceiling for the avgCost hint. write() publishes AvgCost
 /// in Thead; consumers compute chunk = MAX_CHUNK >> AvgCost. Default
-/// AvgCost = 1 -> chunk 16, the midpoint of [1, 32].
-enum uint MAX_CHUNK = 32;
+/// AvgCost = 3 -> chunk 16, a latency-conserving default between [1, 128].
+enum uint MAX_CHUNK = 128;
 /// log2(MAX_CHUNK); avgCost outside 0 .. MAX_AVG_COST is a caller error.
-enum uint MAX_AVG_COST = 5;
+enum uint MAX_AVG_COST = 7;
 /// Sentinel work-cost hint for callers that derive an effective class from
 /// the table they are about to publish instead of naming one. The private
 /// root pump uses it as its `avgCost` default; see `rootCostHintFor`.
@@ -412,8 +412,8 @@ enum uint rootCostHintMaxSplits = 8;
  + a farm whose configured small-table threshold is `smallThreshold`.
  + Consumers size a table's claims as `chunk = MAX_CHUNK >> avgCost` (spec
  + 7a), and a table below the small threshold is claimed wholesale by
- + shard 0 (spec 7a), so the cheapest class (`avgCost = 0`, chunk 32) can
- + run every callback of a table of up to 32 entries inside one consumer
+ + shard 0 (spec 7a), so the cheapest class (`avgCost = 0`, chunk 128) can
+ + run every callback of a table of up to 128 entries inside one consumer
  + claim, serializing an expensive table (for example parents that each
  + allocate a child wave) on one worker.
  +
@@ -1572,7 +1572,7 @@ struct AntFarm
     /// the token's private quota. `avgCost` is the producer's declared Call
     /// cost class, a log2 shift in 0 .. MAX_AVG_COST (spec 5b / 7a).
     ulong write(scope PayloadEntry[] payloads, ref Token tok,
-                uint avgCost = 1) nothrow @nogc @system
+                uint avgCost = 3) nothrow @nogc @system
     {
         return writeImpl(payloads, tok, avgCost, null);
     }
@@ -1580,7 +1580,7 @@ struct AntFarm
     /// ditto: forward range overload. `write` checkpoints the source for its
     /// sizing and emission passes and never advances the caller's checkpoint.
     ulong write(R)(scope R payloads, ref Token tok,
-                   uint avgCost = 1) nothrow @nogc @system
+                   uint avgCost = 3) nothrow @nogc @system
         if (isForwardRange!R && is(ElementType!R == PayloadEntry))
     {
         return writeImpl(payloads, tok, avgCost, null);
@@ -1590,7 +1590,7 @@ struct AntFarm
     /// positional and stops at the shorter range.  This overload is a lazy
     /// shim: it does not allocate or materialize `PayloadEntry` pairs.
     ulong write(HR, BR)(scope HR headers, scope BR bodies, ref Token tok,
-                        uint avgCost = 1) nothrow @nogc @system
+                        uint avgCost = 3) nothrow @nogc @system
         if (isForwardRange!HR && isForwardRange!BR &&
             (is(Unqual!(ElementType!HR) == PayloadHeader) ||
              is(ElementType!HR : const(PayloadHeader)*)) &&
@@ -1628,7 +1628,7 @@ struct AntFarm
     /// complete it before this function returns.
     ulong writeTracked(BR)(const ref PayloadHeader header, scope BR bodies,
                     ulong bodyWords, TableCompletionHook* completion,
-                    ref Token tok, uint avgCost = 1) nothrow @nogc @system
+                    ref Token tok, uint avgCost = 3) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
         if (completion is null || !completion.valid)
