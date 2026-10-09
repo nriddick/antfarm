@@ -3595,6 +3595,389 @@ void testCompactHeterogeneousRule()
     printf("testCompactHeterogeneousRule OK\n"); fflush(stdout);
 }
 
+// ---------------------------------------------------------------------
+// Uniform-call ST tables (SPEC 2g, prototype)
+// ---------------------------------------------------------------------
+
+/// Bodies for `lens`, word k of payload i = compactWord(i, k), plus one
+/// header per payload whose Call is `calls[i]`. Owned by the caller.
+struct UniformCase
+{
+    PayloadHeader* headers;
+    PayloadEntry* entries;
+    ulong* words;
+    ulong totalBody;
+
+    void build(const(size_t)[] lens, const(Callback)[] calls)
+    {
+        foreach (l; lens) totalBody += l;
+        headers = cast(PayloadHeader*) malloc(lens.length * PayloadHeader.sizeof);
+        entries = cast(PayloadEntry*) malloc(lens.length * PayloadEntry.sizeof);
+        words = cast(ulong*) malloc((totalBody + 1) * ulong.sizeof);
+        check(headers !is null && entries !is null && words !is null, "uniform case alloc");
+        size_t off;
+        foreach (i, l; lens)
+        {
+            headers[i] = PayloadHeader.init;
+            headers[i].maxCs = headers[i].done = 1;
+            headers[i].plen = l;
+            headers[i].call = calls[i];
+            foreach (k; 0 .. l) words[off + k] = compactWord(i, k);
+            entries[i] = PayloadEntry(&headers[i], words[off .. off + l]);
+            off += l;
+        }
+    }
+
+    void release() nothrow @nogc @system
+    {
+        free(headers);
+        free(entries);
+        free(words);
+    }
+}
+
+/// Write `entries` as one table on a fresh one-consumer farm, check the
+/// expected kind and exact size, drain it, and check bodies, the scratch
+/// header and that every payload ran its own Call exactly once.
+void uniformDetectCase(const(size_t)[] lens, const(Callback)[] calls,
+                       ulong kind, ulong size, const(char)[] label)
+{
+    immutable N = lens.length;
+    UniformCase c;
+    c.build(lens, calls);
+    scope (exit) c.release();
+    size_t alts, zeros;
+    foreach (i; 0 .. N)
+    {
+        if (calls[i] == &compactBodyCbAlt) ++alts;
+        if (lens[i] == 0) ++zeros;
+    }
+    allocCalls(N);
+    scope (exit) freeCalls();
+    g_compactLens = lens.ptr;
+    g_compactN = N;
+    atomicStore!(MemoryOrder.raw)(g_compactZero, 0L);
+    atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+    atomicStore!(MemoryOrder.raw)(g_compactAltCalls, 0L);
+
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope (exit) f.destroy();
+    ConsumerView v;
+    check(v.subscribe(f) == 0, label);
+    auto tok = f.registerProducer(Tier.small);
+    immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(c.entries[0 .. N], tok) == N, label);
+    check(tableKindAt(f, before) == kind, label);
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + size, label);
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 2]) >> 32) == 0, label);
+    if (kind != KIND_PER_PAYLOAD)
+        check(atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 8])
+                == cast(ulong) cast(void*) calls[0], label);
+    if (kind == KIND_UNIFORM_FIXED)
+        check(atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 9]) == lens[0], label);
+    while (v.consumeNext()) {}
+    check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, label);
+    check(atomicLoad!(MemoryOrder.raw)(g_compactZero) == zeros, label);
+    check(atomicLoad!(MemoryOrder.raw)(g_compactAltCalls) == alts, label);
+    foreach (i; 0 .. N)
+        if (lens[i] > 0)
+            check(g_calls[i] == 1, label);
+    check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N, label);
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+}
+
+// Runtime detection on PayloadEntry ranges. Catches U1 (reader treats a
+// non-uniform table as uniform), U3 (writer ignores a Call mismatch), U4
+// (writer ignores a length mismatch) and U2 (index-free mis-sizing).
+void testUniformDetection()
+{
+    alias A = compactBodyCb;
+    alias B = compactBodyCbAlt;
+    static immutable size_t[8] ones = 1;
+    static immutable size_t[8] threes = 3;
+    static immutable size_t[8] alt12 = [1, 2, 1, 2, 1, 2, 1, 2];
+    static immutable size_t[8] lastLong = [1, 1, 1, 1, 1, 1, 1, 2];
+    static immutable size_t[4] zeros = 0;
+    Callback[8] same = &A;
+    Callback[8] lastOther = &A;
+    lastOther[7] = &B;
+    Callback[8] firstOther = &A;
+    firstOther[0] = &B;
+    Callback[8] alternating;
+    foreach (i; 0 .. 8) alternating[i] = (i & 1) ? &B : &A;
+
+    uniformDetectCase(ones[], same[], uniformKind(8, true),
+        uniformTableSize(8, 8, 1, true), "uniform one-word Call and length");
+    uniformDetectCase(threes[], same[], uniformKind(24, true),
+        uniformTableSize(8, 24, 1, true), "uniform three-word Call and length");
+    uniformDetectCase(alt12[], same[], KIND_UNIFORM,
+        uniformTableSize(8, 12, 1, false), "uniform Call, mixed lengths");
+    uniformDetectCase(lastLong[], same[], KIND_UNIFORM,
+        uniformTableSize(8, 9, 1, false), "uniform Call, last length differs");
+    uniformDetectCase(zeros[], same[0 .. 4], KIND_UNIFORM,
+        uniformTableSize(4, 0, 1, true), "uniform Call, zero-length bodies stay indexed");
+    uniformDetectCase(ones[], alternating[], KIND_PER_PAYLOAD,
+        compactTableSize(8, 8, 1), "alternating Calls stay compact");
+    uniformDetectCase(ones[], lastOther[], KIND_PER_PAYLOAD,
+        compactTableSize(8, 8, 1), "last Call differs: compact");
+    uniformDetectCase(ones[], firstOther[], KIND_PER_PAYLOAD,
+        compactTableSize(8, 8, 1), "first Call differs: compact");
+    printf("testUniformDetection OK\n"); fflush(stdout);
+}
+
+// Explicit forms: broadcast without a length detects the length at run
+// time, broadcast with a length and writeTracked are uniform by
+// construction, and pairPayloads detects the Call at run time.
+void testUniformExplicitForms()
+{
+    enum N = 12;
+    static immutable size_t[N] ones = 1;
+    static immutable size_t[N] alt12 = [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2];
+    allocCalls(N);
+    scope (exit) freeCalls();
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope (exit) f.destroy();
+    ConsumerView v;
+    check(v.subscribe(f) == 0, "uniform forms subscribe");
+    auto tok = f.registerProducer(Tier.small);
+    PayloadHeader h = PayloadHeader.init;
+    h.maxCs = h.done = 1;
+    h.call = &compactBodyCb;
+    atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+    atomicStore!(MemoryOrder.raw)(g_compactZero, 0L);
+
+    ulong[2 * N] words;
+    PayloadBody[N] oneBodies, mixedBodies;
+    size_t off;
+    foreach (i; 0 .. N)
+    {
+        words[off] = i;
+        if (alt12[i] == 2) words[off + 1] = compactWord(i, 1);
+        mixedBodies[i] = words[off .. off + alt12[i]];
+        oneBodies[i] = words[off .. off + 1];
+        off += alt12[i];
+    }
+
+    void expect(ulong kind, ulong size, const(size_t)[] lens, ulong before,
+                const(char)[] label)
+    {
+        check(tableKindAt(f, before) == kind, label);
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + size, label);
+        g_compactLens = lens.ptr;
+        g_compactN = N;
+        while (v.consumeNext()) {}
+        check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, label);
+    }
+
+    ulong before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(h, oneBodies[], tok) == N, "broadcast one-word");
+    expect(uniformKind(N, true), uniformTableSize(N, N, 1, true), ones[], before,
+        "broadcast without length detects a uniform length");
+
+    before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(h, mixedBodies[], tok) == N, "broadcast mixed");
+    expect(KIND_UNIFORM, uniformTableSize(N, 18, 1, false), alt12[], before,
+        "broadcast without length, mixed lengths, stays indexed");
+
+    before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(h, oneBodies[], 1, tok) == N, "broadcast fixed");
+    expect(uniformKind(N, true), uniformTableSize(N, N, 1, true), ones[], before,
+        "broadcast with length");
+
+    TableCompletionHook hook = TableCompletionHook(null, &compactCompletion);
+    atomicStore!(MemoryOrder.raw)(g_compactCompletions, 0L);
+    before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.writeTracked(h, oneBodies[], 1, &hook, tok) == N, "tracked");
+    expect(uniformKind(N, true), uniformTableSize(N, N, 1, true), ones[], before,
+        "writeTracked");
+    check(atomicLoad!(MemoryOrder.raw)(g_compactCompletions) == 1, "uniform tracked hook once");
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 7])
+            == cast(ulong) cast(void*) &hook, "uniform tracked hook word");
+
+    PayloadHeader[N] hs = h;
+    before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(hs[], oneBodies[], tok) == N, "pair");
+    expect(uniformKind(N, true), uniformTableSize(N, N, 1, true), ones[], before,
+        "pairPayloads detects a uniform Call");
+
+    hs[5].call = &compactBodyCbAlt;
+    before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(hs[], oneBodies[], tok) == N, "pair mixed");
+    expect(KIND_PER_PAYLOAD, compactTableSize(N, N, 1), ones[], before,
+        "pairPayloads with two Calls stays compact");
+
+    foreach (i; 0 .. N) check(g_calls[i] == 6, "uniform forms exact calls");
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+    printf("testUniformExplicitForms OK\n"); fflush(stdout);
+}
+
+// Catches U5 (index-free stride or payload-area offset wrong), U6 (uniform
+// last Plen off by one) and U9 (scratch header Plen/Call not set): multi-run
+// tables in both uniform layouts, each claimed run starting mid-table.
+void testUniformMultiRunBodies()
+{
+    static immutable size_t[40] lens = [
+        3, 0, 5, 1, 9, 2, 0, 4, 7, 1, 1, 6, 0, 2, 13, 3, 5, 0, 1, 8,
+        2, 2, 0, 11, 1, 4, 3, 0, 6, 1, 9, 2, 5, 0, 1, 3, 7, 2, 4, 1];
+    compactMixedCase(lens[], avgCostForChunk(4), "uniform multi-run body contract", true);
+    static immutable size_t[12] mixed = [0, 1, 2, 7, 31, 3, 0, 5, 9, 1, 2, 47];
+    compactMixedCase(mixed[], DEFAULT_AVG_COST, "uniform single-run body contract", true);
+    static immutable size_t[300] threes = 3;
+    compactMixedCase(threes[], avgCostForChunk(4), "uniform fixed multi-run (chunk 4)", true);
+    compactMixedCase(threes[], 0, "uniform fixed multi-run (chunk 128)", true);
+    static immutable size_t[37] sevens = 7;
+    compactMixedCase(sevens[], avgCostForChunk(8), "uniform fixed partial last run", true);
+    printf("testUniformMultiRunBodies OK\n"); fflush(stdout);
+}
+
+// A prefix of a uniform range is uniform: the accepted prefix keeps the
+// layout it was sized with when the next payload would degrade it and no
+// longer fits. Catches U8 (the writer takes the rejected candidate's
+// layout). Also zero admission on a full ring leaves Wt untouched.
+void testUniformPartialAdmission()
+{
+    enum K = 10;
+    // Ten one-word bodies, index-free: 38 + 2 + 10 (indexed: 38 + 1 + 20).
+    immutable Q = uniformTableSize(K, K, 1, true);
+    static immutable size_t[K + 1] onesThenOne = 1;
+    static immutable size_t[K + 1] onesThenTwo = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2];
+    Callback[K + 1] same = &compactBodyCb;
+    Callback[K + 1] lastOther = &compactBodyCb;
+    lastOther[K] = &compactBodyCbAlt;
+
+    foreach (round; 0 .. 2)
+    {
+        const(size_t)[] lens = round == 0 ? onesThenOne[] : onesThenTwo[];
+        const(Callback)[] calls = round == 0 ? lastOther[] : same[];
+        immutable label = round == 0 ? "uniform prefix before a Call change"
+                                     : "uniform prefix before a length change";
+        UniformCase c;
+        c.build(lens, calls);
+        scope (exit) c.release();
+        allocCalls(K + 1);
+        scope (exit) freeCalls();
+        g_compactLens = lens.ptr;
+        g_compactN = K + 1;
+        atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+        atomicStore!(MemoryOrder.raw)(g_compactAltCalls, 0L);
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+        scope (exit) f.destroy();
+        ConsumerView v;
+        check(v.subscribe(f) == 0, label);
+        auto tok = f.registerProducer(Tier.small);
+        immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+        check(f.write(c.entries[0 .. K + 1], tok) == K, label);
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q, label);
+        check(tableKindAt(f, before) == uniformKind(K, true), label);
+        while (v.consumeNext()) {}
+        foreach (i; 0 .. K) check(g_calls[i] == 1, label);
+        check(g_calls[K] == 0, label);
+        // The rest goes out as its own (uniform singleton) table.
+        immutable before2 = atomicLoad!(MemoryOrder.raw)(f.Wt);
+        check(f.write(c.entries[K .. K + 1], tok) == 1, label);
+        check(tableKindAt(f, before2) == uniformKind(lens[K], true), label);
+        while (v.consumeNext()) {}
+        check(g_calls[K] == 1, label);
+        check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, label);
+        check(atomicLoad!(MemoryOrder.raw)(g_compactAltCalls) == (round == 0 ? 1 : 0), label);
+        v.unsubscribe();
+        f.unregisterProducer(tok);
+    }
+
+    // Zero admission: a parked consumer pins the ring, so uniform writes
+    // stop with write() == 0 and Wt unchanged; draining releases them.
+    {
+        enum N = 4096;
+        static immutable size_t[1] one = [1];
+        g_compactLens = one.ptr;
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto f = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+        scope (exit) f.destroy();
+        ConsumerView v;
+        check(v.subscribe(f) == 0, "uniform zero admission subscribe");
+        auto tok = f.registerProducer(Tier.small);
+        PayloadHeader h = PayloadHeader.init;
+        h.maxCs = h.done = 1;
+        h.call = &compactOneCb;
+        ulong[N] words;
+        foreach (i; 0 .. N) words[i] = i;
+        auto bodies = CompactBodies(words.ptr, 0, N);
+        size_t written, zeroes;
+        bool sawZero;
+        for (size_t round = 0; written < N * 100 && !sawZero; ++round)
+        {
+            auto b = bodies.save;
+            immutable wtBefore = atomicLoad!(MemoryOrder.raw)(f.Wt);
+            immutable got = f.write(h, b, 1, tok);
+            if (got == 0)
+            {
+                check(atomicLoad!(MemoryOrder.raw)(f.Wt) == wtBefore,
+                    "uniform zero admission leaves Wt untouched");
+                sawZero = true;
+            }
+            written += got;
+        }
+        check(sawZero, "uniform writes fill a pinned ring");
+        atomicStore!(MemoryOrder.raw)(g_totalCalls, 0L);
+        while (v.consumeNext()) {}
+        check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == written,
+            "uniform zero admission: every admitted payload ran");
+        check(f.write(h, bodies.save, 1, tok) > 0, "uniform write after drain");
+        while (v.consumeNext()) {}
+        v.unsubscribe();
+        f.unregisterProducer(tok);
+    }
+    printf("testUniformPartialAdmission OK\n"); fflush(stdout);
+}
+
+// Catches U2 and U4 sizing off-by-ones at the quota boundary, for both
+// uniform layouts.
+void testUniformQuotaBoundaries()
+{
+    static immutable size_t[11] ones = 1;
+    static immutable size_t[11] alt12 = [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1];
+    Callback[11] same = &compactBodyCb;
+    foreach (round; 0 .. 2)
+    {
+        const(size_t)[] lens = round == 0 ? ones[] : alt12[];
+        immutable sameLen = round == 0;
+        immutable Q = uniformTableSize(10, round == 0 ? 10 : 15, 1, sameLen);
+        foreach (n; 10 .. 12)
+        {
+            immutable label = round == 0 ? "uniform fixed quota boundary"
+                                         : "uniform indexed quota boundary";
+            UniformCase c;
+            c.build(lens[0 .. n], same[0 .. n]);
+            scope (exit) c.release();
+            allocCalls(n);
+            scope (exit) freeCalls();
+            g_compactLens = lens.ptr;
+            g_compactN = n;
+            atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+            auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
+            scope (exit) f.destroy();
+            ConsumerView v;
+            check(v.subscribe(f) == 0, label);
+            auto tok = f.registerProducer(Tier.small);
+            immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+            check(f.write(c.entries[0 .. n], tok) == 10, label);
+            check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q, label);
+            check(tableKindAt(f, before) == (sameLen ? uniformKind(10, true) : KIND_UNIFORM),
+                label);
+            while (v.consumeNext()) {}
+            foreach (i; 0 .. 10) check(g_calls[i] == 1, label);
+            if (n == 11) check(g_calls[10] == 0, label);
+            check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, label);
+            v.unsubscribe();
+            f.unregisterProducer(tok);
+        }
+    }
+    printf("testUniformQuotaBoundaries OK\n"); fflush(stdout);
+}
+
 void main(string[] args)
 {
     if (args.length > 1 && args[1] == "join-only")
@@ -3617,6 +4000,13 @@ void main(string[] args)
         testCompactOldLayout();
         testCompactCallbackHeader();
         testCompactHeterogeneousRule();
+        testUniformDetection();
+        testUniformExplicitForms();
+        testUniformMultiRunBodies();
+        testCompactWraparound(WrapLayout.uniform);
+        testCompactWraparound(WrapLayout.uniformFixed);
+        testUniformPartialAdmission();
+        testUniformQuotaBoundaries();
         printf("ALL COMPACT TESTS PASSED\n");
         return;
     }
@@ -3656,5 +4046,12 @@ void main(string[] args)
     testCompactOldLayout();
     testCompactCallbackHeader();
     testCompactHeterogeneousRule();
+    testUniformDetection();
+    testUniformExplicitForms();
+    testUniformMultiRunBodies();
+    testCompactWraparound(WrapLayout.uniform);
+    testCompactWraparound(WrapLayout.uniformFixed);
+    testUniformPartialAdmission();
+    testUniformQuotaBoundaries();
     printf("ALL TESTS PASSED\n");
 }
