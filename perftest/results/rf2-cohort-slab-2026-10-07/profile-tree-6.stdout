@@ -1,8 +1,0 @@
-batchLimit=256 tier=small quota_words=16384
-root_hint=auto root_cost_hint=0 root_hint_table=64 root_hint_claims=2
-mimalloc_version=30503
-mode=tree actors=16384 consumers=6 batch=256 warmups=5 state=16 stateAlign=8 allocator=mimalloc ringMiB=8 hugePages=false cpus=[0, 1, 2, 3, 4, 5, 6]
-rounds=10156 elapsed_s=3.000240 Mactor_cycles/s=55.460873 ns/actor_cycle=18.03 cycles/s=3385.06
-verified_actor_cycles=166477824 extra_parents_per_cycle=64 retirement=children_consumer_free phases=overlap
-peak_rss_kib=22164
-mi_threadpool=0 mi_page_reclaim_on_free=0 mi_page_full_retain=2 mi_page_max_reclaim=-1 mi_page_cross_thread_max_reclaim=32

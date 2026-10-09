@@ -31,8 +31,8 @@ public actor admission/generation/wake machinery from that narrower model.
 and child join, then return through the emitter's ready FIFO. Waiting roots
 release their physical Batch; the common child Entry stays 40 bytes. The emitter
 must continue pumping, and strict `finish` still rejects active child waves.
-Measurements and limitations are recorded in
-[PRIVATE_LIFECYCLE.md](../perftest/PRIVATE_LIFECYCLE.md).
+Limitations are in [the lifecycle contract](LIFECYCLE.md); fresh measurements
+will be recorded in [PERFORMANCE.md](../PERFORMANCE.md).
 
 **E2 ports slice 1 is done:** POD return values populate cohort-owned slots in
 spawn order; only the direct parent reads the joined `const(R)[]`. Slots survive
@@ -55,9 +55,7 @@ Members can wait, fold descendant results and finish within one enclosing wave,
 including subsets and `startFinal`. A custody counter and lazy enclosing-wave
 hold preserve lifetime; cleanup activations keep terminal destruction on
 consumers even when an emitter seal owns the final credit. Entry stays 40 bytes;
-continuation descriptors are reserved per cohort. The independent lifetime
-review, mutations, soak and perf evidence live in
-[the E2-4 results](../perftest/results/private-continuations-2026-10-05/).
+continuation descriptors are reserved per cohort.
 
 **F1 wave outcomes are done:** a member's `context.fail(code)` aggregates on
 the enclosing wave. After the join, `outcome` reports the count and one
@@ -71,9 +69,7 @@ Entry stays 40 bytes; a signal-only cohort grows to 368 bytes on 64-bit.
 non-retiring wave seals its published prefix; a `startFinal` wave retires the
 rest through cleanup tables on consumers. Resumptions are always delivered and
 no wait is cut short. `results` and the debug check use the dispatched prefix.
-A signal-only cohort grows to 376 bytes. The lifetime review, mutations, soak
-and perf evidence live in
-[the F2 results](../perftest/results/private-cancellation-2026-10-06/).
+A signal-only cohort grows to 376 bytes.
 
 **F3 root tracking, X1a and lazy deadlines are done:** the opt-in
 `PrivateRootOptions.tracking` gives each root slot a 32-byte record. Its
@@ -85,8 +81,7 @@ tracked root's `fail` is no longer fatal. Terminal roots hold their slot until
 there and a tracked drain must take outcomes. The F2 leftovers are closed: a
 root's `cancelled` reads its record, and C10 checks the tracked root status.
 Untracked parks gain one null branch per spawn, collection and cancel check,
-and 32 bytes. The control-word review, mutations, soak and perf evidence live
-in [the F3 results](../perftest/results/private-root-tracking-2026-10-06/).
+and 32 bytes.
 
 **RF2 opt-in cohort slabs are done:** `PrivateChildPark!(T, R,
 PrivateStateStorage.cohortSlab)` reserves one zeroed state slab per cohort,
@@ -97,13 +92,12 @@ Allocation failure moves from spawn to create. Code that never instantiates
 `cohortSlab` compiles to `.text` identical to before, and Entry stays 40
 bytes.
 
-With six consumers the slab cuts cross-thread frees in tree retirement by
-about 99% and measured +49–51% on tree and tree-wait and +32% on a refill
-workload. tree-cont is unchanged (-1%). Peak RSS did not change. Gate,
-counts, profiles, the lifetime review and soak evidence are in
-[the RF2 results](../perftest/results/rf2-cohort-slab-2026-10-07/README.md).
-The RF1 mimalloc option screen that preceded it is in
-[MIMALLOC.md](../perftest/MIMALLOC.md#option-screen-rf1). A general
+With six consumers the slab cuts cross-thread frees in tree retirement
+sharply and improves the tree, tree-wait, and refill workloads; tree-cont is
+unchanged. Peak RSS did not change. Gate, counts, and profile evidence were
+archived with the historical results; fresh numbers will be in
+[PERFORMANCE.md](../PERFORMANCE.md). The RF1 mimalloc option screen that
+preceded it made no runtime change. A general
 owner-batching reclamation domain remains a separate, later experiment.
 
 Next items are per-member retirement, concurrent subsets, non-POD results,
@@ -479,8 +473,7 @@ future adapter surface without weakening generation admission or retirement.
   global actor allocator adapter.
 - [ ] Characterize long-running resident-memory behavior.
 - [x] Benchmark the global adapter with sustained actor/wave churn before
-  evaluating explicit mimalloc heap/arena owners. See the
-  [allocator comparison](../perftest/MIMALLOC.md).
+  evaluating explicit mimalloc heap/arena owners.
 
 ### A4: integration and characterization
 

@@ -7937,7 +7937,7 @@ PrivateRootDisposition outcomeAuthorityStep(scope ref PrivateBorrow!AuthorityRoo
 // ---------------------------------------------------------------------------
 // F2 in-tree cancellation (design 170 §4, tests §12.2). Each deterministic
 // test names the mutation of actors/private_actor.d that it catches; the
-// results are recorded in perftest/results/private-cancellation-2026-10-06.
+// schedule below aborts only when that mutation is applied (normal runs pass).
 //
 // Most schedules use a lockstep consumer: a second thread runs callbacks only
 // while the emitter waits in lockstepDrain. Table publication, cancellation
@@ -9182,7 +9182,7 @@ void phaseCancel()
 // ---------------------------------------------------------------------------
 // F3 root tracking, deadlines and X1a (design 170 §5, tests §12.3). Each
 // deterministic test names the mutation of actors/private_actor.d it catches;
-// the results are recorded in perftest/results/private-root-tracking-2026-10-06.
+// the schedule below aborts only when that mutation is applied (normal runs pass).
 // Tracked parks hold every terminal root until takeOutcome, so each drain
 // pumps and takes outcomes; pumping alone never brings live to zero (T7).
 

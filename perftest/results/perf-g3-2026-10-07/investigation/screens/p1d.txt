@@ -1,6 +1,0 @@
-tree-cont0/6: medA=31.698 medB=31.843 paired median=+0.54% min=+0.17% max=+0.93%
-tree0/6: medA=54.499 medB=53.364 paired median=-1.76% min=-2.55% max=-1.21%
-tree-pipelined0/6: medA=31.733 medB=32.021 paired median=+0.93% min=+0.04% max=+1.24%
-private-remote0/6: medA=14.401 medB=14.571 paired median=+1.07% min=+0.71% max=+9.59%
-private0/6: medA=22.809 medB=22.589 paired median=-0.85% min=-1.28% max=+0.23%
-subset100/6: medA=87.256 medB=91.634 paired median=+0.48% min=-4.70% max=+5.53%

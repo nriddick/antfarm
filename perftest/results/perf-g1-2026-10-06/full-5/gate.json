@@ -1,6 +1,0 @@
-{
-  "exit_status": 2,
-  "threshold": -0.03,
-  "unavailable": {},
-  "interpretation": "Bootstrap interval is descriptive; at n=5 its median bounds are effectively min/max paired ratios. This is a conservative all-pairs threshold screen, not a calibrated 95% confidence guarantee. Inconclusive is not pass. Legacy mean fields include all attempts; use quiet fields and decision. Run correctness separately before timing."
-}

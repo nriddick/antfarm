@@ -1,4 +1,0 @@
-# Local executables, recordings and compiler intermediates are reproducible.
-*-churn
-*.data
-*.s

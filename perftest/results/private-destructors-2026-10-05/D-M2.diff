@@ -1,6 +1,0 @@
---- a/actors/private_actor.d
-+++ b/actors/private_actor.d
-@@ -512,0 +513 @@
-+        destroyState!T(entry);
-@@ -622 +622,0 @@
--            destroyState!T(entry);

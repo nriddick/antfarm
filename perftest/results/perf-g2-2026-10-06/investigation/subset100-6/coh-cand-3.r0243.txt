@@ -1,2 +1,0 @@
-r0243:u: controller=8.9M workers=306.3M
-   ctl: writeImpl=96%, clock_gettime=2%, currTime=1%, _D6actors13private_actor__T15PrivateRoot=1%

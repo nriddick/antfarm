@@ -1,3 +1,0 @@
-CI stalled mode=1 emitter=1 leafArrived=1 leafGo=1 leafDestroyed=1 leafReturned=1 midCalls=1
-FAIL cont final owner seam:0
-FAIL run=1 exit=-6

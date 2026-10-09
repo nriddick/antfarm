@@ -1,6 +1,0 @@
---- a/actors/private_actor.d
-+++ b/actors/private_actor.d
-@@ -881,2 +881 @@
--            else if (entry.state !is null)
--                retireMember!T(&entry);
-+            else if (entry.state !is null) { disposeChildren(&entry); freeMemory(service, entry.state, T.sizeof, T.alignof); entry.state = null; }

@@ -1,5 +1,0 @@
-batchLimit=256 tier=small quota_words=16384
-mimalloc_version=30503
-mode=dtor actors=4096 consumers=0 batch=256 warmups=5 state=16 stateAlign=8 allocator=mimalloc ringMiB=8 hugePages=false cpus=[0]
-rounds=28309 elapsed_s=3.000092 Mactor_cycles/s=38.650030 ns/actor_cycle=25.87 cycles/s=9436.04
-verified_actor_cycles=115974144 extra_parents_per_cycle=0 retirement=emitter_free phases=overlap

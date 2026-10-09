@@ -1,5 +1,0 @@
-batchLimit=256 tier=small quota_words=16384
-mimalloc_version=30503
-mode=tree-wait actors=16384 consumers=0 batch=256 warmups=5 state=16 stateAlign=8 allocator=mimalloc ringMiB=8 hugePages=false cpus=[0]
-rounds=11811 elapsed_s=3.000112 Mactor_cycles/s=64.501390 ns/actor_cycle=15.50 cycles/s=3936.85
-verified_actor_cycles=193593344 extra_parents_per_cycle=64 retirement=children_consumer_free phases=overlap

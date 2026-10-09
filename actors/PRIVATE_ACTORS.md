@@ -881,8 +881,8 @@ must still fit the Farm's segment and total producer-quota constraints.
 Larger batches amortize table overhead, but more roots wait behind one slow
 callback because a whole physical table returns together. Smaller batches
 limit that delay and reserve more table slots. See the recorded batch/quota/
-consumer sweep and default rationale in
-[PRIVATE_LIFECYCLE.md](../perftest/PRIVATE_LIFECYCLE.md).
+consumer sweep and default rationale were archived outside the repository;
+fresh guidance will be recorded in [PERFORMANCE.md](../PERFORMANCE.md).
 
 ## Ownership contract
 
@@ -986,8 +986,7 @@ state through the root allocator, and retirement frees it on the retiring
 consumer. In the tree workloads one parent callback allocates a whole cohort
 and several consumers free it. With mimalloc each of those frees is a remote
 free: a CAS on the owning page's shared free list. About half of tree/6 cache
-fills land there; see
-[the G3 measurements](../perftest/results/perf-g3-2026-10-07/README.md).
+fills land there.
 An opt-in cohort slab reserves every member's state when the cohort is
 created. The conductor below refills one slab cohort three times. Each refill
 reuses the slots that the previous retiring wave cleared:
@@ -1118,8 +1117,8 @@ void main()
   reused, so allocator or sanitizer use-after-free detection no longer sees
   it. Debug builds check that `spawn` writes into a zeroed slot.
 
-Measurements, cross-thread free counts and peak RSS are in
-[the RF2 results](../perftest/results/rf2-cohort-slab-2026-10-07/README.md).
+Measurements, cross-thread free counts, and peak RSS were archived with the
+historical results; fresh numbers will be in [PERFORMANCE.md](../PERFORMANCE.md).
 
 ## Publication and reclamation
 
@@ -1292,7 +1291,5 @@ wave completion weakness: progress equality was being treated as proof that
 all table hooks had stopped accessing the descriptor. Public waves now also
 hold a producer credit and release each table credit as its final access.
 Deterministic tests reproduce the old failure and verify descriptor reuse;
-see [ACTOR_MEMORYORDER.md](ACTOR_MEMORYORDER.md). See
-[PRIVATE_LIFECYCLE.md](../perftest/PRIVATE_LIFECYCLE.md) for measured throughput,
-thread counts, workload differences, and reproduction commands. These results
-are full lifecycle tests, not a general actor-system performance claim.
+see [ACTOR_MEMORYORDER.md](ACTOR_MEMORYORDER.md). These are full lifecycle
+tests, not a general actor-system performance claim.

@@ -1,1 +1,0 @@
-['/usr/bin/python3', 'perftest/perf_gate.py', '--base', 'fcbf122', '--output', '/home/nathan-riddick/pi_ground/.cydo/tasks/37/worktree/perftest/results/perf-g5-2026-10-07/boundary-6', '--candidate', '006e12c', '--boundary', '--consumers', '6', '--modes', 'actor,inbox,wave,subset', '--subset-percent', '100']

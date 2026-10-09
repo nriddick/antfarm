@@ -1,6 +1,0 @@
---- a/actors/private_actor.d
-+++ b/actors/private_actor.d
-@@ -258,2 +258 @@
--    static if (hasElaborateDestructor!T)
--        destroy!false(*cast(T*) entry.state);
-+    static if (hasElaborateDestructor!T) { import core.memory : GC; GC.removeRange(entry.state); destroy!false(*cast(T*) entry.state); }

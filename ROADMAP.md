@@ -14,8 +14,7 @@ The completed slices below ship in the 1.8.0-rc.1 candidate; no tag has been
 created for them yet. The Farm shard-completion join and public actor-wave completion credits landed
 in 1.7.0-rc.5 and are prerequisites for this release.
 
-See [the ownership contract](actors/PRIVATE_ACTORS.md) and
-[the lifecycle measurements](perftest/PRIVATE_LIFECYCLE.md).
+See [the ownership contract](actors/PRIVATE_ACTORS.md).
 
 - **E1 done:** root-only `waitChildren` resumes once after all direct waves and
   descendants join; `finishAfterChildren` retires after the join without another

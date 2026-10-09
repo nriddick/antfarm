@@ -1,495 +1,175 @@
-# Performance characterization
+# Performance harness
 
-For the original checkout versus optimized branch on the existing payload,
-Fiber, and actor-wave benchmarks, see [THROUGHPUT.md](THROUGHPUT.md).
-These historical measurements predate the mandatory quota sweeps and
-unconditional fresh-segment protection checks merged from the host audit.
-They are reference results for the revisions named in each report.
+Synthetic payload, actor, private-actor, and Fiber benchmarks, plus the
+optimization gate. This directory intentionally carries no measurements: the
+historical reports and the per-run result trees were archived outside the
+repository, and fresh numbers for the release candidate will be recorded in
+[PERFORMANCE.md](../PERFORMANCE.md). Everything below is a qualitative index of
+the harness, not evidence.
 
-## Sustained actor and wave churn
-
-`actor_churn.d` repeatedly creates a full cohort of actors, dispatches each
-exactly once, requests retirement, and reclaims every actor before the next
-cycle. Actor state is allocated and passed back to its allocator on every
-cycle. The Farm, runtime, owner/handle arrays, completion counters, wave
-descriptor, and consumer threads persist across cycles, so stable actor slots and wave generations
-are reused. There are no Fibers in this benchmark: it isolates the actor
-and wave lifecycle rather than Fiber orchestration.
+## Build
 
 ```sh
-make -C perftest actor_churn
-ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn actor 4096 3 0 256 5
-ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn wave 4096 3 0 256 5
-ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn actor 4096 3 6 256 5
-ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn wave 4096 3 6 256 5
+make -C perftest                 # throughput, dual, tail, actor_ready, actor_churn, scaling
+make -C perftest actor_churn_mimalloc   # plus the pinned real mimalloc archive
 ```
 
-Arguments are mode (`actor`, `inbox`, or `wave`), actors per cohort, minimum measured
-seconds, background consumers, publication batch, warm-up cycles,
-and optional allocator (`crt`, `mimalloc`, or `mimalloc64`). Autonomous
-publication batches are 1–256; wave publication accepts any positive batch,
-with the Farm splitting larger offered slices into physical tables.
-An optional final comma-separated CPU list pins the controller followed by
-each consumer; omit it or pass `-` to leave placement to the OS.
-These examples also show the defaults except that `actor`/`wave` is required.
-Zero background consumers means the controlling thread also consumes;
-otherwise there is one controlling producer plus the requested number of
-native consumer threads, continuously polling. No threads are
-created or joined inside the timed loop.
+The default toolchain is LDC `-O2 -release`; `DC` and `DFLAGS` override it. The
+benchmarks keep their correctness checks (`enforce`) in release builds. Set
+`ANTFARM_HUGE_PAGES=0` for ordinary pages unless a run is deliberately testing
+the huge-page path. `make -C perftest clean` removes the built binaries.
 
-The primary rate, `Mactor_cycles/s`, counts **complete actor lifetimes** in
-millions per second, including creation, dispatch, completion waiting,
-retirement, allocator reclamation, and verification. In wave mode,
-`cycles/s` also gives completed cohort waves per second. Every cycle ends with an exact callback
-count/generation check and zero live, ready, or stale actors. The benchmark
-also reports aggregate creation, dispatch, and retirement/reclamation/check
-times for the measured cycles. Warm-up, runtime setup, and final thread
-shutdown are excluded; the final measured cycle always completes, even if
-the requested duration has elapsed.
+## Payload benchmarks
 
-Each actor has 16 bytes of state on x86-64. Its callback increments a private
-completion counter and release-publishes the cycle number on a separate
-64-byte completion line. There is no contended global callback counter.
-Autonomous mode wakes the whole cohort, flushes batches, and waits for all
-callbacks. Wave mode starts one wave per cohort, publishes batches, seals
-the wave, and waits for aggregate completion and membership release. Both
-then retire and reclaim all actors. Inbox mode sends one caller-owned node per
-actor instead of waking it. The handler pops and completes the node; the sender
-acquires `available` before reusing that same node in the next cycle. This is a minimal-work, cohort-based
-allocation/reuse test; it does not model staggered lifetimes, simultaneous
-creators/reclaimers, or substantial application work.
+- **`throughput`** — synthetic payload publish/consume sweep over a 16 MiB
+  Farm. The default mode ranks a payload/table shape search; `--once` runs one
+  configuration and `--grid N` sweeps small-producer counts. `--constant-header`
+  and `--constant-callandlength` select the common-header and fixed-width write
+  forms; `--full-header-size` sizes the quota-fit check with the pre-compact
+  16-word header for comparisons against a runtime before SPEC 2f. Remaining
+  shape options (`--ln`, `--k`, `--ns`, `--nc`, `--nb`, `--qs`, `--qb`, `--ac`,
+  `--body`, `--batch`, `--small`, `--huge`, `--global-count`, `--sweep`,
+  `--repeats`) are documented in the file header.
+- **`dual`** — dual-role threads that register a producer and subscribe a
+  consumer, interleaving small writes with `consumeNext`. `--grid N` sweeps the
+  thread count; `--tier` and `--consume` shape the workload; the header and
+  full-size options are the same as `throughput`.
+- **`tail`** (with `placement`) — tail-latency harness on the repository's
+  threadpool. It prints every worker/processor assignment and the placement
+  options (`--no-pin`, `--mailbox`, `--spin`, `--samples`, `--idle-only`,
+  `--mid-only`, `--tlen`, `--nc`, `--ac`, `--attr`, `--repeats`, `--small`,
+  `--ln`, `--huge`). A drain run discards a missed backlog window rather than
+  reporting idle samples as latency.
 
-The Farm uses an 8 MiB ring, eight segments, one small producer, a
-16,384-word quota, and `avgCost=0`. Builds default to LDC `-O2 -release`.
-Correctness checks use `enforce` and remain enabled in release builds.
+All-single-threaded tables use the compact `[Call][Pbody]` record; payload
+benchmarks size their quota-fit check accordingly unless `--full-header-size`
+is passed.
 
-The normal build uses the C-runtime allocator: on Linux, each actor creation
-calls `aligned_alloc(64, roundedSize)` and reclamation calls `free`. D `new`
-is used only for persistent setup outside the timed loop. The optional
-`actor_churn_mimalloc` target links the pinned real mimalloc v3.5.3 library
-and defaults to the existing `actors.mimalloc` adapter. It can also select
-`crt` at runtime for a comparison within the same executable. See
-[MIMALLOC.md](MIMALLOC.md) for commands, alignment controls, and results.
-For the subsequent runtime improvements, larger wave offers, and consumer
-placement measurements, see [LIFECYCLE.md](LIFECYCLE.md).
+## Actor benchmarks
 
-### Private destructor churn
-
-`actor_churn dtor` uses non-copyable private state whose destructor increments
-its per-actor completion counter and publishes the cycle stamp. Its callback
-returns `finish`; every cycle drains the park and verifies exactly one owning
-destruction per actor. Moved-from `.init` destructors do nothing. It uses the
-same arguments, allocator and default emitter byte-reclamation policy as
-`private`:
-
-```sh
-ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn_mimalloc dtor 4096 3 6 256 5 mimalloc 0,1,2,3,4,5,6
-```
-
-### Sustained comparison
-
-Measured on 2026-09-24 on the Ryzen 5 5500 host described below, with LDC
-1.43.0 / LLVM 22.1.8, `-O2 -release`, and `ANTFARM_HUGE_PAGES=0`. The same
-`actor_churn.d` source was compiled against original checkout `8e988f6` and
-optimized runtime `e6ce4d1`. Each value is the median of three serial runs
-per revision, alternating revision order. Every run uses five warm-up
-cycles, at least three measured seconds, and publication batch 256.
-
-| Actors/cycle | Background consumers | Mode | Original million lifetimes/s | Optimized million lifetimes/s | Speedup |
-| ---: | ---: | --- | ---: | ---: | ---: |
-| 4,096 | 0 | Autonomous | 0.777 | 9.018 | 11.60× |
-| 4,096 | 0 | Wave | 0.811 | 9.809 | 12.10× |
-| 4,096 | 6 | Autonomous | 0.611 | 6.366 | 10.43× |
-| 4,096 | 6 | Wave | 0.626 | 7.931 | 12.68× |
-| 16,384 | 0 | Autonomous | 0.115 | 8.003 | 69.69× |
-| 16,384 | 0 | Wave | 0.117 | 8.670 | 73.86× |
-| 16,384 | 6 | Autonomous | 0.108 | 7.942 | 73.85× |
-| 16,384 | 6 | Wave | 0.109 | 8.243 | 75.75× |
-
-At 16,384 actors on one thread, autonomous-mode phase costs were:
-
-| Phase | Original ns/actor | Optimized ns/actor |
-| --- | ---: | ---: |
-| Creation | 8,408.86 | 61.94 |
-| Wake, publish, execute, await completion | 265.23 | 33.16 |
-| Retire, reclaim, verify | 33.69 | 29.63 |
-
-Creation no longer repeats the quadratic slot search on every refill.
-The autonomous dispatch phase also benefits from bounded ready snapshots.
-Wave mode bypasses that ready backlog for its work; its primary improvement
-here is actor creation. These are gains across repeated reuse, rather than
-just first-time initialization.
-
-The tiny callback and single creating/reclaiming thread do not benefit from
-adding six consumers. Those un-pinned runs were also noisier: optimized
-wave throughput at 16,384 actors ranged from 5.974 to 8.317 million lifetimes/s
-across the three samples, versus 8.645–8.695 on one thread. The median is not
-a latency guarantee or a claim about more substantial parallel actor work.
-
-All 48 timed comparison runs passed the per-cycle checks. Additional smoke
-runs passed with LDC debug, LDC release, and DMD release builds, including
-single-actor batches, non-divisible 257-actor cohorts, and six consumers.
-
-## Actor ready backlog
-
-`actor_ready.d` measures autonomous actor dispatch from a prequeued burst.
-One thread flushes batches and consumes the resulting Farm tables. Every
-callback increments its own actor's counter; the program checks exact counts
-and an empty ready queue after every round. Actor construction, waking,
-counter verification, and reclamation are outside the timed region.
-
-```sh
-make -C perftest actor_ready
-ANTFARM_HUGE_PAGES=0 ./perftest/actor_ready 4096 200 32
-ANTFARM_HUGE_PAGES=0 ./perftest/actor_ready 16384 100 32
-```
-
-Arguments are actor count, measured rounds, and flush batch (1–256). Five
-warm-up rounds precede measurement. The Farm uses an 8 MiB ring, eight
-segments, one consumer, one small producer with an 8,192-word quota, and
-`avgCost=0`. The default build is LDC `-O2 -release`.
-
-## Bounded snapshot comparison
-
-Measured on 2026-09-24 on a Ryzen 5 5500, Linux x86-64, LDC 1.43.0 / LLVM
-22.1.8, with `ANTFARM_HUGE_PAGES=0`. Each entry is the median of three runs,
-alternating the old and new binaries. Both binaries use this benchmark source;
-the baseline actor implementation is commit `8e988f6`. Batch size is 32.
-
-| Actors | Measured rounds | Before ns/actor | After ns/actor | Speedup |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 200,000 | 170.69 | 151.24 | 1.13× |
-| 32 | 20,000 | 27.86 | 27.25 | 1.02× |
-| 256 | 4,000 | 48.80 | 25.35 | 1.93× |
-| 4,096 | 200 | 485.91 | 27.79 | 17.49× |
-| 16,384 | 100 | 1,873.62 | 23.50 | 79.73× |
-
-Previously, every flush detached the whole ready list, selected its batch,
-then traversed and individually requeued the remaining actors. Draining `N`
-actors in batches of `B` incurred approximately `O(N²/B)` queue work. The
-bounded snapshot keeps the untouched chain in the runtime, protected by a
-short acquire/release drain gate, and removes at most `B` nodes per call.
-A complete burst now requires `O(N)` queue work. A contending flusher returns
-zero and retries; the gate is released before Farm publication. Selected
-actors rejected by Farm backpressure are still requeued.
-
-These are synthetic burst-drain measurements on one thread, not concurrent
-worker scaling or application throughput guarantees. Small bursts include
-proportionally more timing and Farm-table overhead. Compare the same actor
-count, round count, batch, compiler flags, and page mode on both revisions.
-
-The actor torture suite checks the corresponding ownership behavior under a
-forced drain handoff, concurrent wakes, partial publication, repeated full-Farm
-retries, four flushers, and two consumers. See
-[actor_torture/README.md](../actor_torture/README.md) and the
-[ready-queue ordering contract](../actors/ACTOR_MEMORYORDER.md#ready-queue-ownership).
-
-## Actor creation and Fiber lifecycle drains
-
-`scaling.d` isolates two bookkeeping costs without changing the DRuntime Fiber
-backend or its exception, suspension, and cleanup behavior:
-
-```sh
-make -C perftest scaling
-ANTFARM_HUGE_PAGES=0 ./perftest/scaling create 32768
-ANTFARM_HUGE_PAGES=0 ./perftest/scaling lifecycle 16384 32 handle
-ANTFARM_HUGE_PAGES=0 ./perftest/scaling lifecycle 16384 32 take
-```
-
-The creation mode times actor slot reservation and C-runtime state allocation
-for an initially empty runtime. Farm/runtime setup, owner-array allocation,
-and retirement/reclamation are outside the timed interval. Lifecycle modes
-precreate Fibers with 4 KiB stacks, then time only draining their admitted
-records. `handle` invokes a counting delegate; `take` also allocates the arrays
-returned by `takeLifecycleEvents`. Fiber creation, execution, terminal-record
-draining, and recycling are outside that interval.
-
-The following results were collected on the same host and compiler described
-above, with ordinary pages and LDC `-O2 -release`. Both binaries use the same
-`scaling.d` source; the baseline is `1615d31`. Values are median milliseconds
-from three alternating runs of each binary. Lifecycle batch size is 32.
-
-| Operation | Count | Before ms | After ms | Speedup |
-| --- | ---: | ---: | ---: | ---: |
-| Actor creation | 8,192 | 25.677 | 0.599 | 42.87× |
-| Actor creation | 16,384 | 140.206 | 1.202 | 116.64× |
-| Actor creation | 32,768 | 581.081 | 2.489 | 233.46× |
-| Lifecycle handler | 4,096 | 1.116 | 0.251 | 4.45× |
-| Lifecycle handler | 8,192 | 4.907 | 0.505 | 9.72× |
-| Lifecycle handler | 16,384 | 20.200 | 1.047 | 19.29× |
-| Lifecycle array drain | 16,384 | 20.332 | 1.452 | 14.00× |
-
-Actor creation previously restarted its vacant-slot search at zero, making
-initial population quadratic. Slots now come from an intrusive free list:
-slot bookkeeping is constant work per actor, with a short gate protecting
-concurrent list access. Allocator calls run outside that gate. Slot size stays
-128 bytes; the link occupies former padding. Allocation failures and foreign-
-thread reclamation return slots through the same list.
-
-Lifecycle drains previously walked the entire remaining list to obtain its
-length on every batch. The queue already counted its nodes while reversing
-the detached stack; that count now travels with the retained suffix. Draining
-`N` events in batches of `B` changes from `O(N²/B)` traversal to `O(N)` total
-traversal. The first detach still reverses the whole batch once. Handler
-failure retries retain the remaining count and assigned sequence numbers.
-
-Focused `perf` samples before the changes attributed 99.65% of user cycles to
-actor creation's search path at 32,768 actors, and 93.22% to lifecycle handling
-at 16,384 events with batch size 1. These probes characterize those operations,
-not overall application performance or concurrent allocator scalability.
-
-## Tail latency harness
-
-Build with `make -C perftest`. For a standalone tail build from the
-repository root (use `-of=tail` instead of `-of=tail.exe` outside Windows):
+### `actor_churn`
 
 ```text
-ldc2 -O2 -release -i -Ithreadpool/source -Iperftest perftest/tail.d antfarm.d antfarm_allocation.d -of=tail.exe
+actor_churn <mode> [actors=4096] [seconds=3] [consumers=0] [batch=256]
+  [warmups=5] [crt|mimalloc|mimalloc64|mimalloc-count]
+  [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384]
+  [subset-percent=100] [root-hint=auto|0..5]
 ```
 
-`tail` discovers topology through the repository's threadpool module. It assigns
-one logical processor per physical core first, preferring faster efficiency
-classes, then uses SMT siblings. The producer and optional mailbox poller use
-the next entries. It prints every group:LP assignment and warns when the
-requested layout reuses logical processors. `--no-pin` leaves placement to the
-OS. An eight-consumer run is not inherently oversubscribed on every host.
+Each cycle runs one complete cohort lifetime and checks zero live, ready, or
+stale actors. Modes:
 
-Mid-drain, mailbox and burst runs discard a missed backlog window before
-publishing the timed event. Those attempts increment `miss`, but do not enter
-the latency histogram or consume its warmup count. A workload which consistently
-misses the window may time out instead of reporting idle samples as backlog
-latency. This does not guarantee that the backlog remains nonempty throughout
-the subsequent timestamp and publication operations.
+| Mode | What it measures |
+| --- | --- |
+| `actor` | public cohort create / wake / execute / await / retire / reclaim |
+| `inbox` | the same with one caller-owned node per actor instead of a wake |
+| `wave` | the same through one sealed public `ActorWave` per cohort |
+| `private` | private root dispatch, terminal dispatch, and emitter-side free |
+| `private-remote` | the same, but root state is freed on consumers (allocation-locality control) |
+| `private-tracked` | tracked roots with per-root records, handles, and outcomes |
+| `tree`, `tree-wait` | private parents creating child cohorts; `tree-wait` uses `waitChildren` |
+| `tree-cont` | child continuations |
+| `tree-slab`, `tree-wait-slab`, `tree-cont-slab` | the tree modes with `PrivateStateStorage.cohortSlab` |
+| `tree-refill`, `tree-refill-slab` | one cohort refilled eight times (`spawn` → `startFinal` → `waitChildren`) |
+| `tree-pipelined` | root → middle → leaf result fold |
+| `tree-cancel` | cancellation workload; the dispatched fraction is part of the result |
+| `dtor` | non-copyable private state whose destructor publishes its completion |
+| `subset`, `subset-whole`, `subset-whole-unreserved` | subset waves at `subset-percent` (1, 10, or 100) |
 
-Historical [`results/latency.txt`](results/latency.txt) results predate these placement and sample-accounting
-fixes. They must not be relabeled as measurements from the corrected harness.
-Raw throughput uses a synthetic callback with batched counting, not useful
-payload processing. For Windows huge-page comparisons set `ANTFARM_HUGE_PAGES=1`
-and pass `--huge` from an account with the existing large-page privilege.
+`mimalloc-count` is a diagnostic allocator that is never used for timing: it
+prefixes each allocation with its allocating thread and reports cross-thread
+free counts at exit. `root-hint` is `auto` (the default, derived per root
+table) or a fixed Farm work-cost class `0..5`; see
+[the work-cost-hint rule](../docs/guide/sizing-and-allocation.md#work-cost-hints).
 
-## Compact ST tables (SPEC 2f)
+### `actor_ready`
 
-All-ST tables (`Tmt == 0`) store each payload as `[Call][Pbody]` (SPEC 2f).
-`throughput` and `dual` publish only ST payloads, so their quota-fit check
-sizes singleton tables with the one-word record. Pass `--full-header-size`
-to size with the old 16-word `PayloadHeader` when running these benches
-against a pre-2f runtime, which rejects any singleton larger than its tier
-quota as a fatal contract error.
+```text
+actor_ready <actors=4096> [rounds=200] [batch=32]
+```
 
-`digest.d` was retired with this change. It was a linear-chunk consume
-experiment that reimplemented the consumer over its own tables, shuffling
-Tindex in place and reading ring `PayloadHeader`s. It only published ST
-payloads, which the compact layout now covers: every configuration forms
-compact tables, which have no ring headers and whose record lengths come from
-Tindex order. See
-[results/farm-st-compact-2026-10-08](results/farm-st-compact-2026-10-08/README.md).
+Times autonomous actor dispatch from a prequeued burst, with actor
+construction, verification, and reclamation outside the timed region.
 
-**tree-cancel is not comparable across this change.** Cheaper publication
-lets more of each round's cancellable work be dispatched before cancellation
-lands (dispatched fraction 0.948 → 0.999 at six consumers), so each round does
-more work. A gate whose base predates SPEC 2f and whose candidate includes it
-reports tree-cancel/6 as `inconclusive_work`. That is expected and not a
-regression signal. Gates with both sides on the same layout compare normally.
+### `scaling`
 
-**private-remote/6 is allocator-contention bound.** Every root free is a
-cross-thread push onto the controller's mimalloc page free list. Throughput
-there tracks how those pushes collide, not Farm cost. It moves non-monotonically
-with the small-tier quota's table geometry: about ±8% across quotas for the
-full layout and about ±4% for the compact layout. It also *rises* when consumer
-callbacks are artificially slowed.
-Read changes in this cell against a matched-geometry control (see
-[private-remote-6](results/farm-st-compact-2026-10-08/private-remote-6/README.md)).
+```text
+scaling create <actors>
+scaling lifecycle <fibers> <batch> [handle|take]
+```
 
-## Private actor lifecycle experiment
+`create` times actor slot reservation and state allocation for an initially
+empty runtime. `lifecycle` times draining admitted Fiber lifecycle records;
+`handle` invokes a counting delegate and `take` also allocates the returned
+arrays.
 
-`actor_churn private` measures fresh allocation, one private root dispatch,
-terminal dispatch, and emitter-side free/recycling. `private-remote` instead
-frees root state on consumers as a diagnostic allocation-locality control.
-`actor_churn tree` creates private parents, each of which creates up to `batch`
-children inside its own dispatch and authorizes their terminal wave. The
-reported rate counts children; parent and cohort creation/free are included
-in elapsed time and reported separately as extra parents per cycle. This
-mode distributes creation across workers and changes allocation locality.
+## Optimization gate
 
-`tree-slab`, `tree-wait-slab` and `tree-cont-slab` repeat `tree`, `tree-wait`
-and `tree-cont` with `PrivateStateStorage.cohortSlab` child cohorts, each
-capped at exactly `capacity * T.sizeof`. `tree-refill` and `tree-refill-slab`
-measure reuse: each parent creates one cohort and refills it eight times
-(spawn all, `startFinal`, `waitChildren`), so one cohort lifetime serves eight
-full waves. The rate counts leaf lifetimes. These modes print
-`storage=perObject|cohortSlab`. The source also builds against runtimes
-without `PrivateStateStorage`; there the slab modes run per-object cohorts. A
-base/candidate gate on a slab mode therefore compares per-object storage
-(base) with slab storage (candidate) on the same harness. The diagnostic
-allocator `mimalloc-count`, which is never used for timing, prefixes each
-allocation with its allocating thread. It prints
-`alloc_calls free_calls cross_thread_frees cross_thread_free_bytes` at exit.
-
-See [PRIVATE_LIFECYCLE.md](PRIVATE_LIFECYCLE.md) for paired measurements and
-[the ownership contract](../actors/PRIVATE_ACTORS.md). All modes can run
-in one binary with the same Farm and allocator. For example:
+`perf_gate.py` is the standard committed-ref gate for optimization changes. It
+builds a base and a candidate in temporary detached worktrees, times clean
+matched pairs on identical benchmark source, and decides whether the candidate
+regresses beyond the project boundary.
 
 ```sh
-make -C perftest actor_churn_mimalloc
-ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn_mimalloc private 16384 2 5 256 5 mimalloc 0,1,2,3,4,5
-ANTFARM_HUGE_PAGES=0 ./perftest/actor_churn_mimalloc tree 16384 2 5 256 5 mimalloc 0,1,2,3,4,5
-python3 perftest/private_lifecycle_matrix.py --binary perftest/actor_churn_mimalloc --output /tmp/private-matrix
+make perf-gate BASE=BASE_SHA CANDIDATE=CANDIDATE_SHA
+make perf-gate BASE=CANDIDATE_SHA PERF_GATE_ARGS=--control
 ```
 
-The recorded September 25 matrix used mimalloc 3.5.0. New builds and the
-matrix script default to the current 3.5.3 pin; `--mimalloc-version 30500`
-checks a deliberately linked historical build. The script assumes this
-host's 0..11 CPU layout; adapt placement when changing hosts.
+It needs a quiet Linux host with LDC, Python 3, and the pinned real mimalloc
+archive, and the output directory must not already exist. `PERF_GATE_OUTPUT` defaults to the fixed path `/tmp/antfarm-perf-gate`, which
+must not already exist; remove it (or pass another `--output`/`PERF_GATE_OUTPUT`)
+before rerunning. `PERF_GATE_ARGS` passes
+options such as `--archive`, `--boundary`, and `--root-hint`. Run the
+correctness gate first and run timing serially, with no other heavy work on the
+host.
 
-The private modes accept any positive batch size that fits allocation sizing.
-Optional final arguments select the Farm producer tier (`small` or `bulk`) and
-its quota in ulongs (default `small 16384`, preserving the historical setup).
-A final `subset-percent` (subset modes only) or `root-hint` argument follows.
-`root-hint` is `auto` (default) or a fixed class `0..5` published for every
-root table. Every private-family mode prints
-`root_hint=… root_cost_hint=… root_hint_table=… root_hint_claims=…` for its
-nominal first root table, where `root_cost_hint` is the derived class under
-`auto` or the pinned class otherwise.
+Decision rules:
 
-### Batch size versus work-cost hints
+- Exit status is **0 pass, 1 regression, 2 inconclusive/error**. Inconclusive
+  is never a pass.
+- The regression boundary is **−3%** on the paired-median decision. Decisions
+  use clean paired ratios and a descriptive bootstrap median interval; legacy
+  mean/delta fields include contaminated attempts and cannot establish a pass.
+- Near the boundary, collect at least **20 process pairs** (`--boundary`) and a
+  **byte-identical control** (`--control`, which builds the base twice and
+  requires identical binary hashes). Individual pairs may fall below −3% while
+  the cell still passes if the paired-median interval's lower bound is above
+  −3%.
+- `tree-cancel` additionally requires valid dispatched fractions and no median
+  fraction change beyond the default tolerance; unequal cancellation work is
+  inconclusive.
+- Each run records CPU/load, placement, source/binary/archive hashes, and the
+  build commands; attach `gate.json`, `summary.json`, `metadata.json`, the build
+  logs, and `runs.jsonl` to the change or PR, or archive them. Do not commit them
+  to the repository.
 
-The root batch limit and the root table's work-cost hint interact. Consumers
-claim a table in runs of `MAX_CHUNK >> hint` entries (32 at class 0), and a
-table below the small-table threshold is claimed wholesale by shard 0, so a
-root table of at most 32 entries published at class 0 runs on **one** worker
-no matter how many consumers exist. A large batch limit shrinks the number of
-parents a tree mode needs (`parents = ceil(actors / batch)`), so batch 1024
-with 16,384 actors publishes 16-entry root tables whose parent callbacks —
-each allocating a 1,024-child wave — all landed on one worker: tree/6 fell to
-about 18 Mleaf/s. `pump` therefore derives its default hint per table now
-(`rootCostHintFor`, see
-[PRIVATE_ACTORS.md](../actors/PRIVATE_ACTORS.md#work-cost-hints)): only
-wholesale (sub-threshold) root tables are reclassed, so a 16-entry root table
-at six consumers derives class 4 (runs of two), which restored about 83
-Mleaf/s in the G4 gate (see `results/perf-g4-*`). Tables at least the small
-table threshold wide keep class 0; reclassing those, too, measured +31% on
-tree/6 at the default batch but also shifted tree-cancel's dispatched work
-fraction, so it stays out of the default.
+### Code-layout sensitivity at 0 consumers
 
-Guidance: with the default derived hint, choose the batch for table overhead
-and latency as before; the derived hint removes the small-table single-claim
-pathology automatically. Pass an explicit `root-hint` only to pin scheduling
-behavior for comparability — `root-hint=0` reproduces the pre-G4 fixed class
-0 baseline, and the gate accepts `--root-hint` to run fixed-hint cells.
-Larger batches still concentrate parent allocation ownership on fewer
-callbacks; if parent callbacks are expensive, prefer more parents (smaller
-batch) over hint tuning.
-`private_lifecycle_matrix.py --suite batch` sweeps root batch limit × quota ×
-consumer count; `--suite child` checks inherited child limits. Both use five
-warmup cycles, five repetitions and three-second measurement windows by default.
-
-G5 targeted public inlining passed the gate with no /0 layout waiver needed; see [results](results/perf-g5-2026-10-07/).
-
-RF1 screened mimalloc page-retention and reclaim options against unchanged defaults; no runtime change. See [MIMALLOC.md](MIMALLOC.md#option-screen-rf1) and [results](results/rf1-mimalloc-options-2026-10-07/README.md).
-
-RF2 adds opt-in cohort-slab child storage. The runtime-only default gate passes with `.text`-identical code. At six consumers tree, tree-wait and refill slab modes measured +32–51%; tree-cont is unchanged. See [results](results/rf2-cohort-slab-2026-10-07/README.md).
-
-## Optimization PR performance gate
-
-`perf_gate.py` is the standard gate for optimization PRs. The **−3% boundary
-is restored now that the host is quiet**. Inconclusive is never pass. Run
-correctness checks first, then run timing serially on a quiet host, with no
-other heavy jobs. This Linux gate requires LDC, Python 3, and the real pinned
-mimalloc 3.5.3 archive. It builds committed refs in temporary detached
-worktrees and removes them after building.
-
-```sh
-make perf-gate BASE=BASE_SHA CANDIDATE=CANDIDATE_SHA \
-  PERF_GATE_OUTPUT=perftest/results/optimization-001
-```
-
-The target is separate from `make check`. `PERF_GATE_ARGS` passes additional
-options, including `--archive /path/libmimalloc.a`. The archive defaults to
-`actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a` in the selected repository;
-`--repo` defaults to this checkout. Output directories must be new.
-
-Defaults cover every `actor_churn` mode at 0 and 6 consumers, with subset
-selections of 1%, 10%, and 100%, 16,384 actors, batch/quota 256/16,384, five
-warmups, three-second windows and five clean matched pairs per cell. Both
-revisions must use identical benchmark source; use `--benchmark-ref REF` to
-select a common source when needed. Unsupported modes are incomplete.
-
-Near the boundary, collect at least 20 process pairs and a byte-identical
-control. `--boundary` defaults to 20 pairs and rejects fewer; its default
-attempt limit is twice the pair count. `--control` independently builds the
-base twice, sets candidate to base, and requires identical binary hashes.
-The Make target also accepts control mode without `CANDIDATE`:
-`make perf-gate BASE=CANDIDATE_SHA PERF_GATE_ARGS=--control`.
-Both options can be combined. `--root-hint N` passes a fixed actor_churn
-root work-cost class to both builds (the default `auto` appends nothing and
-uses each runtime's derived default). For example:
-
-```sh
-python3 perftest/perf_gate.py --base BASE_SHA --candidate CANDIDATE_SHA \
-  --boundary --modes tree-wait --consumers 0 --output /tmp/boundary-001
-python3 perftest/perf_gate.py --base CANDIDATE_SHA --control \
-  --output /tmp/control-001
-```
-
-`--base-env KEY=VALUE` and `--candidate-env KEY=VALUE` (repeatable) add
-environment variables to one side's runs only. Combined with `--control`, they
-screen a process setting, such as a `MIMALLOC_*` option, on byte-identical
-binaries. Each run records its extra environment. `actor_churn` prints
-`peak_rss_kib` (VmHWM) and the effective screened mimalloc options at exit, and
-`summary.json` reports each side's median peak RSS. The benchmark-only
-`ANTFARM_CHURN_MI_THREADPOOL=1` hook calls `mi_thread_set_in_threadpool` first
-thing on the controller and on each consumer thread. See
-[MIMALLOC.md](MIMALLOC.md#option-screen-rf1).
-
-Exit codes are **0 pass, 1 regression, 2 inconclusive/error**. A known
-regression takes precedence over incomplete cells. Decisions use clean
-paired ratios and a descriptive bootstrap median interval. At the default
-five pairs, its bounds effectively equal the minimum/maximum paired ratios,
-so this acts as a conservative all-pairs threshold screen. In boundary mode
-(>=20 pairs), the decision tests the paired-median interval: individual pairs
-can fall below −3% while the cell still passes if the interval's lower bound
-is above −3%. The same interval decision applies to other repeat counts.
-Neither mode provides a calibrated 95% confidence guarantee.
-
-### Known limitation: code-layout sensitivity at 0 consumers
-
-A binary that differs only in unused code size can move every function
-(LDC's whole-program layout is size-driven) and measurably change
-single-threaded cells. In the G4 gate
-(`results/perf-g4-2026-10-07`), a byte-identical base/base control passed
-all four boundary cells while base plus ~2.1 KB of **never-executed** text
-(with the same hot-function alignment pattern as the real candidate)
-swung actor/0 by −5.09%, subset10/0 by −4.53% and subset100/0 by −4.12%
-over 20 pairs. When a regressing or near-boundary 0-consumer cell executes
-byte-identical semantics in both binaries, an inert-code control of this
-kind can attribute the swing to layout. The G4 waiver of actor/0, subset10/0, subset100/0 and
-tree-wait/0 on that evidence is a **one-off backed by control
-evidence, not a general precedent**: such a waiver still requires the
-20-pair candidate run, the byte-identical control, and the inert control
-to be recorded together.
-
-The gate alternates accepted-pair order and discards a whole pair if either
-run has outside-affinity mean CPU use above 10%, any outside CPU above 25%,
-or system busy time minus benchmark CPU above 0.25 core. Initial load is
-checked before builds. CPU placement, SMT sharing, frequency samples,
-governor availability, source/binary/archive hashes and build commands are
-recorded. `tree-cancel` additionally requires valid dispatched fractions and
-no median fraction change beyond the default 0.01 absolute tolerance;
-unequal cancellation work is inconclusive.
-
-Keep `gate.json`, `summary.json`, `metadata.json`, build logs and raw
-`runs.jsonl` evidence with the PR results. Quote `paired_median_delta` and
-its spread, or the `quiet_*` fields: legacy mean/delta fields include
-contaminated attempts and cannot establish a pass.
+A candidate that differs only in unused code size can move every function under
+LDC's size-driven whole-program layout and measurably change single-threaded
+(0-consumer) cells. When a near-boundary 0-consumer cell executes byte-identical
+semantics in both binaries, an inert-code control can attribute the swing to
+layout. Such a waiver is one-off and must record the ≥20-pair run, the
+byte-identical base/base control, and the inert-code control together; it is
+not a general precedent and does not relax the boundary.
 
 Gate decision and option tests run without builds or timing:
-`python3 -B -m unittest perftest/test_perf_gate.py`.
 
-### Known limitations
+```sh
+python3 -B -m unittest perftest/test_perf_gate.py
+```
 
-The [2026-10-06 identical controls](results/perf-g1-2026-10-06/control-analysis.md)
-showed one-sided shifts even at 20 balanced pairs: dtor/0 −1.40% and
-subset1/0 +0.85%, both inside the −3% boundary. CPU contamination rules also
-retained large throughput outliers. A passing screen does not establish an
-unbiased effect estimate; keep matched controls and inspect order and drift
-before attributing small gains or losses to code.
+## Sweep driver
+
+`private_lifecycle_matrix.py` runs pinned lifecycle, root-batch/quota/consumer,
+and child-limit sweeps over an `actor_churn_mimalloc` binary:
+
+```sh
+python3 perftest/private_lifecycle_matrix.py --binary perftest/actor_churn_mimalloc \
+  --suite batch --output /tmp/private-matrix
+```
+
+`--suite` is `lifecycle`, `batch`, or `child`; `--seconds`, `--repeats`, and
+`--mimalloc-version` shape the run. The output directory is written in place
+and contains `metadata.json`, `runs.jsonl`, and `summary.json`. Treat it as
+local evidence; nothing under it is checked in.

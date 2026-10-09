@@ -1,3 +1,0 @@
-Build: ldc2 -g -O1 -fsanitize=thread -d-version=TSan -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I. /tmp/private_late_owner_diag_extended.d antfarm.d antfarm_allocation.d actors/actor.d actors/wave.d actors/private_actor.d -of=/tmp/private_late_owner_diag_extended
-Exit: 0
-Elapsed: 16.076s

@@ -1,5 +1,0 @@
-batchLimit=256 tier=small quota_words=16384
-mimalloc_version=30503
-mode=private-remote actors=4096 consumers=0 batch=256 warmups=5 state=16 stateAlign=8 allocator=mimalloc ringMiB=8 hugePages=false cpus=[0]
-rounds=27295 elapsed_s=3.000084 Mactor_cycles/s=37.265732 ns/actor_cycle=26.83 cycles/s=9098.08
-verified_actor_cycles=111820800 extra_parents_per_cycle=0 retirement=consumer_free phases=overlap

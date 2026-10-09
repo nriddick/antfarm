@@ -1,8 +1,0 @@
-PASS dtor-root exactly-once consumer destruction: finish, finishAfterChildren, never-dispatched members
-PASS dtor-child startFinal plain/result members destroyed on consumers after op and result
-PASS dtor-order depth-3 postorder across disposal, startFinal and finishAfterChildren
-PASS dtor-failed-spawn caller-side destruction for capacityFull/waveActive/allocationFailed
-PASS dtor-moved-from per-spawn .init accounting and non-copyable owners via move
-PASS dtor-recursive non-POD chain destroyed deepest first
-PASS dtor-results slot written before ~T
-PASS dtor-gc rooted class references survive concurrent forced collection

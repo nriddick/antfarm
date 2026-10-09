@@ -67,7 +67,7 @@ run-farm-tsan: farm-tsan
 	./scripts/run-farm-tsan.sh
 
 # Standalone timing gate; intentionally outside the correctness matrix.
-PERF_GATE_OUTPUT ?= perftest/results/perf-gate
+PERF_GATE_OUTPUT ?= /tmp/antfarm-perf-gate
 PERF_GATE_ARGS ?=
 perf-gate:
 	python3 perftest/perf_gate.py --base $(BASE) $(if $(CANDIDATE),--candidate $(CANDIDATE)) --output $(PERF_GATE_OUTPUT) $(PERF_GATE_ARGS)

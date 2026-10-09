@@ -202,8 +202,8 @@ suite runs 3000 roots (300 under TSan).
 Each mutation below was applied alone to `actors/private_actor.d`, rebuilt
 with LDC and run on its selector on 2026-10-06; the source was restored
 afterwards. Every run aborted (SIGABRT) with the listed failure. The script and
-raw results are in
-[the F2 results](../perftest/results/private-cancellation-2026-10-06/).
+raw results were archived outside the repository; the deterministic schedules
+below remain the in-tree control.
 
 | Mutation | Selector | Observed failure |
 | --- | --- | --- |
@@ -255,8 +255,8 @@ one, that no root which observed `cancelled` and no handle that got
 Each mutation below was applied alone to a copy of the sources, built with
 LDC in debug and `-release`, and run on its selector on 2026-10-06. Both builds
 aborted (SIGABRT) with the listed failure. T7a mutates the test's drain loop,
-not the runtime. The script and raw results are in
-[the F3 results](../perftest/results/private-root-tracking-2026-10-06/).
+not the runtime. The script and raw results were archived outside the
+repository; the deterministic schedules below remain the in-tree control.
 
 | Mutation | Selector | Observed failure |
 | --- | --- | --- |

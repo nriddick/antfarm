@@ -1,6 +1,0 @@
-Runtime SHA256: 34abc0bc615910d574308c91c1d633f995f59d8aa45bed20d08f01059145929d
-Test SHA256: 6b411bb2b1a6e2576e0fb48ace6e27e72487d797eed454421266906000b5e33d
-Run: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 120 private_actor_tests/private_actor_tests death-negative-control
-Exit: 0
-Elapsed: 0.135s
-PASS death negative control: survivor and wrong-message child rejected

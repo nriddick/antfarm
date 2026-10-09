@@ -1,8 +1,0 @@
-Canonical runtime SHA256: 34abc0bc615910d574308c91c1d633f995f59d8aa45bed20d08f01059145929d
-Build: ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I. private_actor_tests/main.d antfarm.d antfarm_allocation.d actors/actor.d actors/wave.d actors/private_actor.d -of=/tmp/private-continuation-mutant-C-M6
-Build exit: 0
-Run: ANTFARM_HUGE_PAGES=0 TSAN_OPTIONS=history_size=7:halt_on_error=1 timeout 45 /tmp/private-continuation-mutant-C-M6 cont-done-tails
-Exit: -6
-Build+run elapsed: 25.467s
-FAIL cont interleave completion deadline:0
-timeout: the monitored command dumped core
