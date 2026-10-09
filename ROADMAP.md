@@ -2,7 +2,7 @@
 
 The current development line targets **1.8.0-rc.1**. The 1.7.0-rc.5 and
 1.7.1-rc.1 headings below are development milestones, not published releases;
-`CHANGELOG.md` lists what the candidate contains. Windows
+[CHANGELOG.md](CHANGELOG.md) lists what the candidate contains. Windows
 validation follows the release candidate and is not part of its local gate.
 
 ## 1.7.1-rc.1 private actors (development milestone)
