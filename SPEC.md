@@ -174,7 +174,7 @@ Tindex entries are payload offsets relative to the table start; `Tnext` and `Tse
 
 ### 2f. Compact ST Tables
 
-Landed (no longer a prototype). A table whose committed payloads are all single-threaded (`Tmt == 0`) stores each payload as a compact record instead of `Phead` + `Pbody`:
+A table whose committed payloads are all single-threaded (`Tmt == 0`) stores each payload as a compact record instead of `Phead` + `Pbody`:
 
 | Offset (ulongs from the Tindex entry) | Contents |
 | --- | --- |
@@ -190,6 +190,8 @@ Nothing else of `Phead` is stored. Thead, Tindex, Tprogress, Tcount and the end 
 **Singleton contract check (5b.3).** An ST payload's singleton table is always compact, so its contract check uses the compact size (`base + 1 index + 1 Call + Plen`). MT payloads keep the full-header size. Compared with the full layout, an ST payload may be up to 15 words larger before `write()` fatals. Nothing previously legal becomes fatal, and `write() == 0` still means full. In a heterogeneous range, an ST payload that fits only as a compact singleton ends the accepted prefix after a preceding MT payload, because adding it would need the full format. After a quota refresh if needed, the next call starts its prefix with that payload as a compact table, possibly followed by more payloads.
 
 **Reader.** Every consumer path (primary, carried sweeper, sweeper, oldest-trailing and current-position re-walks) reads `Tmt` from Thead word 2 and selects the compact interpretation once per claimed run, not per payload. The callback still receives a `PayloadHeader*`. For a compact record it points to a consumer-local stack copy holding the values the ST fast path exposed through the ring header: `MaxCs = Done = 1`, `Plen`, `Call`, claims 1, calls/completions 0. The invariant fields, including zero filler, are filled once per run, and `Plen` and `Call` once per payload. The run's payloads share the copy, so callbacks must not modify it, and they must not retain the pointer past return (a ring header pointer used to stay valid until the table was recycled). Tables with `Tmt != 0` keep the full layout and paths unchanged.
+
+**Known cost.** Compact tables admit several times more entries per quota, which shifts quota admission geometry and with it allocator cross-thread-free contention. At six consumers the private-remote churn cell measures about −4% against the full layout; that is an accepted trade-off (see [the farm-st-compact results](perftest/results/farm-st-compact-2026-10-08/README.md)).
 
 ---
 

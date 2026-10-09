@@ -24,7 +24,7 @@ The five prototype commits were replayed onto local main **0801c17** (which now 
 - `make check` passes at every replayed commit (includes dub test with LDC and DMD, `check-farm-ordering` with both compilers, and the Farm TSan lane in the new consistent configuration including `leaf_reuse`).
 - `make check-soak` passes (43 private-actor TSan loops in 121 s).
 - Farm TSan soak at the tip: **1170 full-lane loops plus 1170 `leaf_reuse` loops in 630 s, zero failures.**
-- The compact suite (wraparound with lagging readers, mixed bodies, partial admission, quota boundaries, old-layout, callback header, heterogeneous rule) passed **20/20** runs of `antfarm_test_tsan compact-only` under the new TSan configuration.
+- The compact suite (wraparound with lagging readers, mixed bodies, partial admission, quota boundaries, old-layout, callback header, heterogeneous rule) passed **20/20** runs of `antfarm_test_tsan compact-only` under the new TSan configuration. Known gap: `compact-only` under TSan does not catch a plain-store mutation of the compact ring words, because no test races an overwrite of those words against a lagging reader; the code stores and loads them as relaxed atomics as required.
 
 **Landing gate:** base 0801c17 against the landed tip 56b8eef, full actor_churn matrix at 0/6 consumers, five pairs — [land-gate](land-gate/), driver [run-land-gate.sh](run-land-gate.sh). **32 of 34 cells pass, all with gains in line with round 1** (0 consumers +8.6%..+70.5%; 6 consumers +0.6%..+227%). The two non-passing cells are the accepted ones: **private-remote/6 at −3.85%** (5 pairs; the 20-pair boundary run [land-boundary-6](land-boundary-6/) gives **−3.54%**, pairs −4.25..−3.02%, against **−0.08%** for the byte-identical control [land-control-6](land-control-6/) — consistent with round 1's −4.49% and inside the accepted ~−4.5% trade-off) and **tree-cancel/6 `inconclusive_work`** at −15.75% (dispatched-fraction change; not comparable across this change). No other cell regressed. Full tables in [Gate tables](#gate-tables) below.
 
@@ -132,6 +132,8 @@ Its regression test `testStaleQuotaReuse` (Farm TSan lane):
 
 The sibling-path audit (task 282) found no other confirmed producer ordering defect. It proved `acq_rel` sufficient for both ring and `stats` stores, given I1. The argument is now in SPEC 9.
 
+Historical: resolved on main by e4c489a / 1f6fade (S1/S2), included in the 0801c17 base. The text below records the state at the time of the round-1 investigation.
+
 Two pre-existing items are **suspected, not confirmed, and not fixed**:
 - **S1:** `subscribe` could pair an old `es`/`seqt` with a newer lap's `sqcs` and attach to a lapped epoch. The audit's proposed fix is acquire loads in subscribe plus release crossing stores.
 - **S2:** the producer's unpinned `plantIfUnprotected(e−1)` has an ABA hazard. If slot `e−1` is lapped between reservation and plant, a stray Sub0 can land. The audit's proposed mitigation is a post-CAS `es` recheck.
@@ -139,6 +141,8 @@ Two pre-existing items are **suspected, not confirmed, and not fixed**:
 Both are logic or liveness hazards on atomic objects, not data races. They need targeted tests before any change.
 
 ### TSan hook build discrepancy (deferred, not fixed)
+
+Historical: resolved on main by c202cc3 (TSan config), included in the 0801c17 base. The text below records the state at the time of the round-1 investigation.
 
 `antfarm.d` defines manual TSan hooks under `version (TSan)`:
 - `tsanRelease(Rt)` at every consumer pin drop (`decRef`).
