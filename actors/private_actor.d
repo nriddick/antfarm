@@ -35,15 +35,24 @@ import core.time : MonoTime;
 import std.traits : hasElaborateDestructor, hasNested, ReturnType;
 
 // ==== Section: public option and result types ====
+/// Default root batch limit: the maximum roots per physical table when a
+/// park does not override it (spec 7a-sized chunks keep per-table overhead
+/// bounded). See docs/guide/sizing-and-allocation.md.
 enum defaultPrivateBatchLimit = 256;
 
 private enum noDeadline = MonoTime.max;
 static assert(noDeadline == MonoTime.max);
 
+/// Per-cohort options accepted by PrivateContext.createChildren.
+/// See_Also:
+///     docs/guide/private-results-and-waits.md, docs/guide/sizing-and-allocation.md
 struct PrivateCohortOptions
 {
-    size_t batchLimit; // 0 inherits the creating context's effective limit
-    bool subsets;     // reserve selection and inverse-position storage
+    /// Maximum members per physical table; 0 inherits the creating
+    /// context's effective limit.
+    size_t batchLimit;
+    /// Reserve selection storage so startSubset can run on this cohort.
+    bool subsets;
 }
 
 /// Member state storage of a child cohort, fixed by its type. perObject (the
@@ -53,11 +62,51 @@ struct PrivateCohortOptions
 /// failure moves from spawn to create; Entry i always uses slot i. Retirement
 /// destroys and clears its slot, which spawn reuses only after the retiring
 /// wave's join. The slab is freed once, at cohort disposal.
-enum PrivateStateStorage : ubyte { perObject, cohortSlab }
+enum PrivateStateStorage : ubyte
+{
+    /// Allocate each member at spawn and free it at retirement (default).
+    perObject,
+    /// Reserve one zeroed slab of capacity * T.sizeof at create, under an
+    /// explicit slabByteLimit; see the enum comment above for the contract.
+    cohortSlab,
+}
 
-enum PrivateRootDisposition : ubyte { again, finish, waitChildren, finishAfterChildren }
-enum PrivateChildDisposition : ubyte { done, waitChildren }
+/// Disposition returned by a root step callback: what the park should do
+/// with this root after the activation returns. Terminal dispositions are
+/// cooperative: the library never interrupts a running callback.
+enum PrivateRootDisposition : ubyte
+{
+    /// Requeue this root for another activation.
+    again,
+    /// Terminal: this root finishes now. Fatal if a child wave it created is
+    /// still active (use waitChildren or finishAfterChildren instead).
+    finish,
+    /// Park this root until every child wave it created has joined, then run
+    /// exactly one later user callback.
+    waitChildren,
+    /// Terminal, with a join: children join first, then an internal consumer
+    /// cleanup dispatch runs with no further user callback.
+    finishAfterChildren,
+}
 
+/// Disposition of one child activation: finish this member, or park it until
+/// the child waves it created have joined (its operation is then re-entered
+/// as a continuation).
+enum PrivateChildDisposition : ubyte
+{
+    /// This member is finished; write its result (if any) and retire it when
+    /// the wave retires.
+    done,
+    /// Park this member until its child waves join, then re-enter the
+    /// operation as a continuation.
+    waitChildren,
+}
+
+/// One step of a resumable child operation: a result value paired with a
+/// disposition. Returned by continuation operations whose result type R is
+/// not void. The step is consumed by the wave; do not retain it.
+/// See_Also:
+///     docs/guide/private-results-and-waits.md (resumable child folds)
 struct PrivateChildStep(R)
 {
     static assert(!is(R == void), "void cohorts return PrivateChildDisposition");
@@ -67,6 +116,7 @@ private:
     R value_;
     PrivateChildDisposition disposition_;
 public:
+    /// Finish this member with `value` as its result.
     static PrivateChildStep done(R value) nothrow @nogc @system
     {
         PrivateChildStep step;
@@ -74,6 +124,9 @@ public:
         step.disposition_ = PrivateChildDisposition.done;
         return step;
     }
+
+    /// Park this member until its child waves join, then re-enter the
+    /// operation as a continuation.
     static PrivateChildStep waitChildren() nothrow @nogc @system
     {
         PrivateChildStep step;
@@ -96,20 +149,96 @@ private template opKind(T, R, alias operation)
         scope ref PrivateContext) nothrow @nogc @system), "operation must be nothrow @nogc");
 }
 
-enum PrivateSpawnResult : ubyte { spawned, capacityFull, allocationFailed, waveActive, retiring }
-enum PrivateStartResult : ubyte { started, empty, waveActive, retiring }
-enum PrivateRootReclamation : ubyte { emitter, consumer }
-
-struct PrivateRootOptions
+/// Typed spawn outcomes; none is fatal. A failed spawn leaves the park
+/// unchanged.
+enum PrivateSpawnResult : ubyte
 {
-    size_t batchLimit = defaultPrivateBatchLimit;
-    ActorAllocator allocator = ActorAllocator.cRuntime();
-    bool tracking; // per-root records: handles, cancel, deadlines, outcomes
+    /// The member (or root) was created and is queued or ready.
+    spawned,
+    /// The park is at its configured capacity.
+    capacityFull,
+    /// The allocator returned null (per-object storage only).
+    allocationFailed,
+    /// The cohort already has an active wave; spawn between waves.
+    waveActive,
+    /// The creating context is retiring and accepts no new members.
+    retiring,
 }
 
-enum PrivateOutcomeStatus : ubyte { completed, failed, cancelled }
-enum PrivateCancelCause : ubyte { none, requested, deadline }
-enum PrivateCancelResult : ubyte { requested, alreadyRequested, finished, staleHandle }
+/// Typed start outcomes for child waves; none is fatal. A rejected start
+/// preserves the last nonempty wave's outcome.
+enum PrivateStartResult : ubyte
+{
+    /// The wave was enqueued for publication by the emitter's pump.
+    started,
+    /// The cohort has no members (or the subset was empty).
+    empty,
+    /// The cohort already has an active wave; start between waves.
+    waveActive,
+    /// The creating context is retiring and starts no new waves.
+    retiring,
+}
+
+/// Which thread frees terminal root state (docs/guide/sizing-and-allocation.md).
+enum PrivateRootReclamation : ubyte
+{
+    /// The emitter frees terminal root state during collection (default).
+    emitter,
+    /// The consumer's terminal callback frees root state itself.
+    consumer,
+}
+
+/// Creation options for a PrivateRootPark.
+/// See_Also:
+///     docs/guide/private-actors.md, docs/guide/outcomes-and-cancellation.md
+struct PrivateRootOptions
+{
+    /// Maximum roots per physical table; 0 is fatal at create.
+    size_t batchLimit = defaultPrivateBatchLimit;
+    /// Allocator for the park, its entries and root state.
+    ActorAllocator allocator = ActorAllocator.cRuntime();
+    /// Keep per-root records: handles, cancellation, deadlines and outcomes
+    /// (which hold their slot until takeOutcome pops them).
+    bool tracking;
+}
+
+/// Terminal status of a tracked root, from its record's terminal transition.
+enum PrivateOutcomeStatus : ubyte
+{
+    /// The root completed its final activation without failing or being
+    /// cancelled.
+    completed,
+    /// The root reported a domain failure with context.fail.
+    failed,
+    /// A cancellation linearized before the root's terminal collection.
+    cancelled,
+}
+
+/// Why a tracked root was cancelled. none is only paired with a non-
+/// cancelled outcome.
+enum PrivateCancelCause : ubyte
+{
+    /// Not cancelled.
+    none,
+    /// PrivateRootHandle.requestCancel or PrivateRootPark.cancelAll.
+    requested,
+    /// A lazy deadline was observed after it expired.
+    deadline,
+}
+
+/// Typed result of PrivateRootHandle.requestCancel; never fatal.
+enum PrivateCancelResult : ubyte
+{
+    /// This call linearized the cancellation before the terminal collection.
+    requested,
+    /// The root is already cancelled (by an earlier request, cancelAll, or
+    /// an expired deadline).
+    alreadyRequested,
+    /// The root had already reached its terminal transition.
+    finished,
+    /// The handle is default, stale, or its outcome was taken.
+    staleHandle,
+}
 
 /// Identity of one tracked root generation. Copyable and non-owning.
 /// requestCancel may be called from any thread while the park exists (the
@@ -121,6 +250,7 @@ private:
     RootRecord* record_;
     ulong generation_;
 public:
+    /// True while this handle names a root generation (even a finished one).
     @property bool valid() const pure nothrow @nogc @safe { return record_ !is null; }
 
     /// Dense slot index, below the park's capacity. A recycled slot keeps its
@@ -156,6 +286,7 @@ public:
         }
     }
 
+    /// Identity comparison: same record and same generation.
     bool opEquals(const PrivateRootHandle other) const pure nothrow @nogc @safe
     {
         return record_ is other.record_ && generation_ == other.generation_;
@@ -165,25 +296,40 @@ public:
 /// One terminal tracked root, popped by takeOutcome in collection order.
 struct PrivateRootOutcome
 {
-    PrivateRootHandle root;      // identity; already stale when returned
+    /// Identity of the root; already stale when returned.
+    PrivateRootHandle root;
+    /// Terminal status of the root.
     PrivateOutcomeStatus status;
-    PrivateCancelCause cause;    // status == cancelled; none otherwise
-    uint code;                   // status == failed: the first root fail(code)
+    /// Why a cancelled root was cancelled; none for other statuses.
+    PrivateCancelCause cause;
+    /// For a failed root: the first fail(code) it reported.
+    uint code;
 }
 
 /// Snapshot of the last nonempty wave of a cohort, acquired after its join.
 struct PrivateWaveOutcome
 {
-    size_t participants;   // members selected by the last nonempty start/startFinal/startSubset
-    size_t dispatched;     // participant prefix that ran the operation (== participants unless truncated)
-    uint failures;         // number of fail() reports by participants during the wave
-    uint firstFailureCode; // valid iff failures != 0
-    size_t firstFailurePosition; // participant position (spawn index, or selection position for a subset)
-    bool cancelled;        // this wave's own scope was cancelled by its parent or a peer
+    /// Members selected by the last nonempty start/startFinal/startSubset.
+    size_t participants;
+    /// Participant prefix that ran the operation (== participants unless
+    /// truncated).
+    size_t dispatched;
+    /// Number of fail() reports by participants during the wave.
+    uint failures;
+    /// Valid iff failures != 0.
+    uint firstFailureCode;
+    /// Participant position (spawn index, or selection position for a subset).
+    size_t firstFailurePosition;
+    /// This wave's own scope was cancelled by its parent or a peer.
+    bool cancelled;
+    /// True when no participant failed and none was skipped by truncation.
     @property bool succeeded() const pure nothrow @nogc @safe
     { return failures == 0 && dispatched == participants; }
 }
 
+/// Internal: compile-time check that `T` is a usable private actor state
+/// type (not a class or interface, no nested aliasing, and a movable or
+/// nothrow @nogc destructible value).
 template stateAllowed(T)
 {
     enum stateAllowed = !is(T == class) && !is(T == interface)
@@ -198,6 +344,8 @@ template stateAllowed(T)
 // ==== Section: PrivateBorrow and PrivateContext ====
 /// Valid only within the callback. Neither this borrow nor pointers/references
 /// into its state may escape. Initializers must not retain mutable aliases.
+/// See_Also:
+///     docs/guide/private-actors.md (the @system borrowing contract)
 struct PrivateBorrow(T)
 {
 private:
@@ -205,12 +353,16 @@ private:
     this(T* state) nothrow @nogc @system { state_ = state; }
     @disable this(this);
 public:
+    /// The member state for the duration of this callback.
     @property ref T value() return nothrow @nogc @system { return *state_; }
 }
 
 /// Constructed only by a private dispatch. Child-park operations check this
 /// authority against the park's immutable parent identity.
 /// This context and references/pointers to it must not escape the callback.
+/// See_Also:
+///     docs/guide/private-actors.md, docs/guide/private-results-and-waits.md,
+///     docs/guide/outcomes-and-cancellation.md (fail, cancellation)
 struct PrivateContext
 {
 private:
@@ -241,6 +393,7 @@ public:
         if (retiring_) return null;
         return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, batchLimit_);
     }
+    /// ditto: explicit per-cohort batch limit; 0 is a fatal caller error.
     PrivateChildPark!(T, R)* createChildren(T, R = void,
         PrivateStateStorage storage = PrivateStateStorage.perObject)(size_t capacity, size_t childBatchLimit)
         nothrow @nogc @system
@@ -251,6 +404,9 @@ public:
         if (retiring_) return null;
         return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, childBatchLimit);
     }
+
+    /// ditto: per-cohort options. A batchLimit of 0 in `options` inherits
+    /// this context's effective limit; subsets reserves selection storage.
     PrivateChildPark!(T, R)* createChildren(T, R = void,
         PrivateStateStorage storage = PrivateStateStorage.perObject)(size_t capacity,
         PrivateCohortOptions options) nothrow @nogc @system
@@ -975,6 +1131,9 @@ private struct RootBodies
 /// With PrivateRootOptions.tracking, each root has a record: a handle for
 /// cancellation, an optional lazy deadline, and an outcome that holds the slot
 /// (and counts in live) until takeOutcome pops it.
+/// See_Also:
+///     docs/guide/private-actors.md (the root program),
+///     docs/guide/outcomes-and-cancellation.md (tracking and deadlines)
 struct PrivateRootPark(T, alias step,
     PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
 {
@@ -1000,6 +1159,13 @@ private:
     version (assert) bool entered_;
     @disable this(this);
 public:
+    /// Create a park over `farm` with `capacity` root slots, `batchLimit`
+    /// roots per physical table and `allocator` for the park's storage; no
+    /// tracking. A `batchLimit` of 0 is fatal. Returns null on a null farm,
+    /// invalid allocator, zero or overflowing capacity, or allocation
+    /// failure. All methods, including destroy, are single-emitter: one
+    /// thread at a time, without re-entry from callbacks or allocator
+    /// hooks. Release it with destroy().
     static PrivateRootPark* create(AntFarm* farm, size_t capacity,
         size_t batchLimit = defaultPrivateBatchLimit,
         ActorAllocator allocator = ActorAllocator.cRuntime()) nothrow @nogc @system
@@ -1007,6 +1173,11 @@ public:
         return create(farm, capacity, PrivateRootOptions(batchLimit, allocator, false));
     }
 
+    /// ditto: full options, including tracking. Same failure model: a zero
+    /// batchLimit is fatal; a null farm, invalid allocator, zero or
+    /// overflowing capacity, or an allocation failure returns null, and a
+    /// tracking capacity above uint.max returns null (tracked roots need a
+    /// dense record index).
     static PrivateRootPark* create(AntFarm* farm, size_t capacity, PrivateRootOptions options)
         nothrow @nogc @system
     {
@@ -1163,6 +1334,8 @@ public:
         scope(exit) { version (assert) entered_ = false; }
         collectCompletedImpl();
     }
+
+    /// Alias of collectCompleted.
     alias poll = collectCompleted;
 
 private:
@@ -1280,6 +1453,10 @@ public:
     {
         return pump(token, service_.batchLimit);
     }
+
+    /// ditto: pump at most `batchLimit` roots per table (0 or a value above
+    /// the configured limit is a fatal caller error) with an explicit work-
+    /// cost hint, or the derived default.
     size_t pump(ref Token token, size_t batchLimit, uint avgCost = rootCostHintAuto)
         nothrow @nogc @system
     {
@@ -1330,6 +1507,8 @@ public:
     /// On a tracked park a terminal root stays live until takeOutcome pops
     /// it, so a drain must pump and take outcomes.
     @property size_t live() const pure nothrow @nogc @safe { return live_; }
+
+    /// The configured root slot capacity.
     @property size_t capacity() const pure nothrow @nogc @safe { return capacity_; }
 
     /// Tracked parks only. Pops one terminal root's outcome in collection
@@ -1530,9 +1709,13 @@ private struct ResumeBodies
 /// are no overlapping waves, external dispatches, removal, or reparenting.
 /// storage selects per-member allocation or one reserved state slab; see
 /// PrivateStateStorage.
+/// See_Also:
+///     docs/guide/private-results-and-waits.md (results, subsets, folds)
 struct PrivateChildPark(T, R = void, PrivateStateStorage storage = PrivateStateStorage.perObject)
 {
+    /// Internal: this cohort has a non-void result port.
     enum hasResults = !is(R == void);
+    /// Internal: this cohort reserves the state slab at create.
     enum slab = storage == PrivateStateStorage.cohortSlab;
     static if (hasResults)
     {
@@ -1756,6 +1939,12 @@ public:
         return isSubset_ ? sel_[0 .. k_] : null;
     }
 
+    /// Add one member with initial state, under the parent's dispatch
+    /// authority. State moves on success: a POD initializer is byte-copied,
+    /// non-POD state is moved and its destructor runs at retirement. On a
+    /// typed failure the argument follows the normal language rules: the
+    /// by-value parameter is destroyed on return, and the caller destroys
+    /// nothing.
     PrivateSpawnResult spawn(scope ref PrivateContext context, T initial)
         nothrow @nogc @system
     {
@@ -1857,6 +2046,8 @@ public:
         publishWave(context);
         return PrivateStartResult.started;
     }
+    /// ditto: start with retire=true: members are freed after their final
+    /// activation and join, leaving an empty cohort.
     PrivateStartResult startFinal(alias operation)(scope ref PrivateContext context)
         nothrow @nogc @system
     {
