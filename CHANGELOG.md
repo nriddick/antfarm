@@ -97,6 +97,14 @@ are in [perftest/README.md](perftest/README.md).
 
 ### Compatibility notes and limits
 
+- `MAX_CHUNK` is 128 (was 32) and `avgCost` is `0 .. 7` (was `0 .. 5`). Every
+  `write` overload defaults to `DEFAULT_AVG_COST` (3), so the default run stays
+  16 entries, and cheap uniform work can opt into classes 0 through 2 (runs of
+  128, 64, 32). An explicit class `k` now means runs of `128 >> k`, four times
+  longer than before: source that named a class should add 2 (see
+  `avgCostForChunk`). The library's own callers (actor flush and waves, private
+  child waves, the derived root hint, the Fiber lanes) were moved so their runs
+  are unchanged.
 - The actor APIs are supported release-candidate functionality. Source and ABI
   stability are not promised between release candidates.
 - Public actor state and results are POD; private state may be non-POD.

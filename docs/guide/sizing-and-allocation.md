@@ -94,25 +94,38 @@ storage. Zero is fatal; overflowing member capacity returns null. Values above
 The trailing `avgCost` argument is the Farm work-cost class the table publishes
 (`write`'s `avgCost`, SPEC 7a): consumers claim a table in runs of
 `MAX_CHUNK >> avgCost` entries, and a table below the small-table threshold is
-claimed wholesale by shard 0. With no hint — the default `rootCostHintAuto` —
+claimed wholesale by shard 0. `MAX_CHUNK` is 128 and a class is `0 .. 7`
+(`MAX_AVG_COST`; anything higher is fatal), so the runs are 128, 64, 32, 16, 8,
+4, 2 or 1 entries. Every `write` overload defaults to `DEFAULT_AVG_COST` (3,
+runs of 16). Classes 0 through 2 (runs of 128, 64 and 32) are for very cheap
+uniform callbacks, where a larger run amortizes the claim; higher classes are
+for expensive callbacks, where a shorter run shortens each visit and the
+leftover tail. `avgCostForChunk(n)` returns the class for runs of `n` entries.
+A class below 3 is an opt-in: the default keeps the 16-entry run, and a table
+below the small-table threshold (64 by default) is one claim of its whole
+length whenever its run is at least as long as the table. With no hint — the default `rootCostHintAuto` —
 `pump` derives the class per table with `rootCostHintFor(count, live consumers,
 small threshold)`, where the consumer count is the farm's live subscribed-view
 count (`Cf`), which can include the emitter's own view. A table at least the
 small-table threshold wide is sharded across every shard and keeps the cheapest
-class; a wholesale table gets the cheapest class whose runs still split it into
-at least `min(count, clamp(consumers, 1, rootCostHintMaxSplits))` claims (class
-0 whenever it already provides that many). That lets a small expensive root
+class the derived hint names (runs of `rootCostHintMaxChunk`, 32 entries, which
+is class 2); a wholesale table gets the cheapest class from there whose runs
+still split it into at least `min(count, clamp(consumers, 1, rootCostHintMaxSplits))`
+claims (runs of 32 whenever they already provide that many). That lets a small expensive root
 table — for example parents that allocate a child wave each — occupy up to
 about consumer-count workers instead of one, while every sharded table and every
 single-consumer table keeps its exact prior claim sequence. An explicit
 `0 .. MAX_AVG_COST` hint is published unchanged and keeps its exact meaning;
-`pump(token, limit, 0)` is the pre-derivation fixed-hint behavior (runs of 32).
+`pump(token, limit, 2)` is the pre-derivation fixed-hint behavior (runs of 32).
+Since `MAX_CHUNK` rose from 32 to 128, a given class names a run four times
+longer than it did, so a hint chosen as class `k` before now wants `k + 2`.
 The measured effect of the derived default is recorded in
 [PERFORMANCE.md](../../PERFORMANCE.md).
 
-Child wave tables (`emit`, `emitSubset`, resume emits) always publish class 0.
-Any child table below the small-table threshold is claimed wholesale by shard 0,
-and one of at most 32 entries runs in a single class-0 claim on one worker: that
+Child wave tables (`emit`, `emitSubset`, resume emits) always publish the class
+of 32-entry runs (class 2). Any child table below the small-table threshold is
+claimed wholesale by shard 0, and one of at most 32 entries runs in a single
+claim on one worker: that
 includes every child table while the cohort's batch limit is 32 or less, as well
 as a small final partial table under a larger limit. Child waves take no
 cost-hint argument, so a caller whose child callbacks are too expensive for one

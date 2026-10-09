@@ -53,7 +53,7 @@ is passed.
 actor_churn <mode> [actors=4096] [seconds=3] [consumers=0] [batch=256]
   [warmups=5] [crt|mimalloc|mimalloc64|mimalloc-count]
   [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384]
-  [subset-percent=100] [root-hint=auto|0..5]
+  [subset-percent=100] [root-hint=auto|0..7]
 ```
 
 Each cycle runs one complete cohort lifetime and checks zero live, ready, or
@@ -79,8 +79,11 @@ stale actors. Modes:
 `mimalloc-count` is a diagnostic allocator that is never used for timing: it
 prefixes each allocation with its allocating thread and reports cross-thread
 free counts at exit. `root-hint` is `auto` (the default, derived per root
-table) or a fixed Farm work-cost class `0..5`; see
+table) or a fixed Farm work-cost class `0..7` (chunk `128 >> class`); see
 [the work-cost-hint rule](../docs/guide/sizing-and-allocation.md#work-cost-hints).
+A revision from before `MAX_CHUNK` rose to 128 has classes `0..5` of chunk
+`32 >> class`, so a fixed `root-hint` names a chunk four times larger on the
+newer revision: compare a base at class `k` with a candidate at class `k + 2`.
 
 ### `actor_ready`
 

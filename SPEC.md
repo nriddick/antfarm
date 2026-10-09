@@ -283,7 +283,7 @@ Arguments:
 
 - `Payloads` — a slice or forward range of `PayloadEntry` structs. `write()` saves independent checkpoints for sizing and emission and does not advance the caller's range.
 - `Token` — the caller's registration ticket (4d). Required; a mismatch is fatal. The Token is passed by reference; it carries the issuing Farm's `FarmId` and the caller's remaining quota as private fields, and the Farm mirrors the quota in a per-slot ledger so a forged ticket cannot exceed the granted excursion.
-- `AvgCost` — optional, default 1. The producer's declared `Call` cost class: a log2 shift in `0 .. log2(MAX_CHUNK)` published in Thead. 0 means `Call`s are very cheap (chunk stays at `MAX_CHUNK`, maximum claim amortization); larger values shrink the chunk (short visits, less tail). `write()` fatals on `AvgCost` out of range.
+- `AvgCost` — optional, default 3 (`DEFAULT_AVG_COST`, chunk 16). The producer's declared `Call` cost class: a log2 shift in `0 .. log2(MAX_CHUNK)` (`0 .. 7`) published in Thead. 0 means `Call`s are very cheap (chunk stays at `MAX_CHUNK`, maximum claim amortization); larger values shrink the chunk (short visits, less tail). Classes 0 through 2 (chunks 128, 64, 32) are for very cheap uniform work; the default suits ordinary work; higher classes suit expensive work. `write()` fatals on `AvgCost` out of range.
 
 Returns: the number of Payloads written.
 
@@ -467,7 +467,7 @@ Definitions first:
 - `(IDc + Tseq) % SqCs` yields `Ci`'s shard index `Shi` and counter `Shc`, exactly like its leaf index.
 - `Shbase = Tlen / SqCs`, `Shrm = Tlen % SqCs`, `Shlen = Shi < Shrm ? Shbase + 1 : Shbase`.
 - `Shstart = Shi * Shbase + (Shi < Shrm ? Shi : Shrm)`.
-- `Chunk = MAX_CHUNK >> AvgCost`, read from the table header word published by `write()`; `MAX_CHUNK = 32` so the default `AvgCost = 1` lands on 16, the midpoint of `[1, 32]`. Every consumer reads the same header word, so `Shiter` cannot disagree across visitors.
+- `Chunk = MAX_CHUNK >> AvgCost`, read from the table header word published by `write()`; `MAX_CHUNK = 128` so the default `AvgCost = 3` lands on 16, a latency-conserving default inside `[1, 128]`; `AvgCost` 0 through 2 give 128, 64 and 32. Every consumer reads the same header word, so `Shiter` cannot disagree across visitors.
 - `Shiter = ceil(Shlen / Chunk)`.
 - `X = fetch_add(Shc, 2^32) >> 32`; if the claims half wrapped to 0, fatal (10). `X` is the claimant's run index, or a signal that the shard is fully claimed.
 
@@ -641,8 +641,8 @@ Operational sections still mention a fatal guard at the point where it matters t
 
 - `MAX_CONSUMERS_LIMIT = 128`, `MAX_LEAVES = 12`.
 - `KMAX = 16`; `ringMiB` must be a power of two `>= 2` (so `Ln >= 2^18` ulongs) and `<= MAX_RING_MIB`; `segCap` floor 2048. These last two are characterized rather than tuned (11).
-- `MAX_CHUNK = 32`; small-table threshold default 64, auto rule `clamp(SqCs * Chunk, 16, 256)`.
-- Payload `Done` and `MaxCs` bounds: 1..512. `AvgCost` in `0 .. log2(MAX_CHUNK)`.
+- `MAX_CHUNK = 128`; default `AvgCost = 3` (chunk 16); small-table threshold default 64, auto rule `clamp(SqCs * Chunk, 16, 256)`.
+- Payload `Done` and `MaxCs` bounds: 1..512. `AvgCost` in `0 .. log2(MAX_CHUNK)` (`0 .. 7`).
 - Bulk quota auto-defaults to `segCap`; small quota fatals on 0.
 - Producer ticket slots are 64-byte strided.
 - The Farm must be allocated into 64-byte-aligned memory with manual lifetime. At the time of writing, D's garbage collector only guarantees 16-byte alignment, so the allocator is explicit.

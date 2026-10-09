@@ -37,7 +37,7 @@ reached with `import antfarm;`, `import antfarm_templates;`, or
 | Payload layout and callbacks | `PayloadBody`, `Callback`, `PayloadHeader`, `TableCompletionCallback`, `TableCompletionHook` | [SPEC.md](../../SPEC.md), [README First payload](../../README.md#first-payload) |
 | Payload range adapters | `pairPayloads`, `broadcastPayloads`, `PayloadPairRange`, `PayloadBroadcastRange` | [SPEC.md](../../SPEC.md) |
 | Consumers and views | `ConsumerView`, `ConsumerView.subscribe`, `ConsumerView.unsubscribe`, `ConsumerView.consumeNext` | [actor-lifecycle.md](actor-lifecycle.md#consumers-and-views) |
-| Work-cost hints | `rootCostHintAuto`, `rootCostHintFor`, `MAX_CHUNK`, `MAX_AVG_COST` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md) |
+| Work-cost hints | `rootCostHintAuto`, `rootCostHintFor`, `rootCostHintMaxSplits`, `rootCostHintMaxChunk`, `MAX_CHUNK`, `MAX_AVG_COST`, `DEFAULT_AVG_COST`, `avgCostForChunk` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md) |
 | Huge pages | `AntFarm.usedLargePages`, `DEFAULT_HUGE_PAGES`, `DEFAULT_SMALL_TABLE_THRESHOLD` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md#memory-backing) |
 
 ## Public actors

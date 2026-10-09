@@ -234,8 +234,10 @@ backpressure, and the surplus is written by a later call.
 - Producer capacity must cover every worker/control producer that can hold a
   token simultaneously.
 - Publish useful batches. Single-item writes pay table overhead every time.
-- `avgCost` controls consumer chunk size: cheap callbacks use a smaller value;
-  expensive callbacks use a larger value.
+- `avgCost` (0 through 7) controls consumer chunk size as `128 >> avgCost`:
+  the default 3 claims 16 entries at a time; very cheap uniform callbacks can
+  use 0 through 2 (chunks 128, 64, 32) to amortize claims; expensive callbacks
+  use a larger value for shorter visits.
 - Ordinary 4 KiB backing is the default. Huge pages are an explicit option for
   high-volume payload table walks and should be selected from measurements.
 

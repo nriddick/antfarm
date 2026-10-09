@@ -37,7 +37,8 @@ activations; it does not change DRuntime Fiber stack mappings.
 
 Reprofiled 2026-08-30 on the same Ryzen host with LDC 1.42 DUB release builds.
 Each row below is the median of three alternating runs of 500,000 Fibers with
-`flushBatch=256` and `avgCost=0`. The 4K run forced
+`flushBatch=256` and runs of 32 entries (`avgCost=0` when `MAX_CHUNK` was 32; now
+`avgCost=2`). The 4K run forced
 `ANTFARM_HUGE_PAGES=0`; the huge-page run forced `=1`.
 
 Live `/proc/<pid>/smaps` inspection verified the distinction after touching
@@ -123,8 +124,10 @@ never suspends should normally remain a payload.
 ## Worker topology sweep
 
 The following run used 100,000 warm empty Fibers and control-thread-produced
-payloads. The Fiber-oriented configuration was `flushBatch=256, avgCost=0`;
-the alternate payload configuration was `flushBatch=32, avgCost=2`.
+payloads. The Fiber-oriented configuration was `flushBatch=256` with runs of
+32 entries, and the alternate payload configuration was `flushBatch=32` with
+runs of 8. These were recorded as `avgCost=0` and `avgCost=2` while `MAX_CHUNK`
+was 32; the same runs are now `avgCost=2` and `avgCost=4`.
 
 | Topology | Fiber rate | Payload rate |
 | --- | ---: | ---: |
@@ -144,8 +147,10 @@ the serial payload ring.
 These measurements motivate the two starting presets exposed by the Fiber
 integration:
 
-- `fiberThroughput`: all logical processors, `flushBatch=256`, `avgCost=0`;
-- `payloadThroughput`: skip SMT siblings, `flushBatch=32`, `avgCost=2`.
+- `fiberThroughput`: all logical processors, `flushBatch=256`, `avgCost=2`
+  (runs of 32);
+- `payloadThroughput`: skip SMT siblings, `flushBatch=32`, `avgCost=4` (runs of
+  8).
 
 They are starting points, not portable policy. A mixed application should
 benchmark both with its actual body and wake pattern.
@@ -175,7 +180,8 @@ but helped the oversubscribed SMT case by removing idle contenders.
   predict a body that sleeps, waits, allocates, or performs substantial work.
 - Keep bare payloads as the default for short serial compute. Use Fibers for
   work that actually needs suspension or structured D control flow.
-- `flushBatch` and `avgCost` size a Farm table. Production pumps use
+- `flushBatch` and `avgCost` size a Farm table (`avgCost` is `0 .. 7`;
+  consumers claim `128 >> avgCost` entries at a time). Production pumps use
   `consumeNext` and finish or yield the claimed table; use shorter tables when
   a scheduler visit must be shorter.
 - Lower `flushBatch` when a responder must return to timer polling more often.
@@ -237,7 +243,8 @@ dub run -c benchmark_actor_wave --build=release --compiler=ldc2 -- 32768 200 0 2
   cache-padded private word and two cache-padded public words; its operation is
   only an identity projection through those lines. Arguments are actors per
   set, measured generations, maximum selected workers (`0` means all), warm-up
-  generations, `avgCost`, and Farm ring size in MiB (default 8, power of two).
+  generations, `avgCost` (default 2, runs of 32 entries), and Farm ring size in MiB
+  (default 8, power of two).
   `--smt` includes sibling logical processors after selecting one worker per
   physical core. `--sweep` recreates the Farm and worker pool for every prefix
   from one worker through that selected set, then prints a compact Mactor/s
@@ -282,7 +289,8 @@ to a normal cancellable FiberEvent wake after payload dispatch.
 
 A full worker-prefix sweep on 2026-09-02 used the same Ryzen 5 5500, an LDC
 release build, ordinary 4 KiB pages, the 8 MiB Farm ring, 32,768 actors per
-set, 200 measured generations after 20 warm-ups, and `avgCost=0`. The first
+set, 200 measured generations after 20 warm-ups, and runs of 32 entries
+(`avgCost=0` at the time, now `avgCost=2`). The first
 six workers select one logical processor from each physical core; workers
 7--12 add those cores' SMT siblings. This was one ordered characterization
 sweep rather than a median of independent runs:

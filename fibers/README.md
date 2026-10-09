@@ -69,7 +69,7 @@ subscribeOrThrow(consumer, farm);
 scope (exit) consumer.unsubscribe();
 
 domain.spawn(&fiberBody);
-drainUntilEmpty(domain, token, consumer, 256, 0);
+drainUntilEmpty(domain, token, consumer, 256, avgCostForChunk(32));
 
 auto completed = domain.takeCompletions();
 domain.releaseAll(completed);
@@ -165,8 +165,14 @@ lanes[0].spawn(&fiberBody);
 `applyFiberTopologyPreset` installs the managed-worker hooks and chooses a
 measured starting point:
 
-- `fiberThroughput`: all logical processors, `flushBatch=256`, `avgCost=0`.
-- `payloadThroughput`: skip SMT siblings, `flushBatch=32`, `avgCost=2`.
+- `fiberThroughput`: all logical processors, `flushBatch=256`, `avgCost=2`
+  (runs of 32 entries).
+- `payloadThroughput`: skip SMT siblings, `flushBatch=32`, `avgCost=4` (runs of
+  8 entries).
+
+`avgCost` is a Farm work-cost class, `0 .. 7`: consumers claim `128 >> avgCost`
+entries at a time, and the default is 3 (16). Lower classes are for very cheap
+uniform work, higher ones for expensive work.
 
 These are starting points measured on a Ryzen 5 5500, not portable guarantees.
 Mixed workloads should benchmark both.
