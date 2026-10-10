@@ -532,9 +532,12 @@ def aggregate_tail(parsed):
 
 FIBER_FIELDS = ("create_fibers_s", "run_fibers_s", "warm_run_fibers_s")
 SYS_ROOT = Path("/sys")
-# Cache sizes are for this host (Ryzen 5 5500); adjust for other CPUs.
-_FAKE_CACHES = ((1, "Data", "32K", True), (1, "Instruction", "32K", True),
-                (2, "Unified", "512K", True), (3, "Unified", "16M", False))
+# Cache sizes are for this host (Ryzen 5 5500); adjust for other CPUs. The
+# last field is the sharing scope: "smt" is one SMT-sibling set, "all" is
+# every CPU. The L3 entry used to be a False flag that fell through the
+# sibling branch, so the tree described one LLC per SMT pair instead of one.
+_FAKE_CACHES = ((1, "Data", "32K", "smt"), (1, "Instruction", "32K", "smt"),
+                (2, "Unified", "512K", "smt"), (3, "Unified", "16M", "all"))
 
 
 class TopologyError(Exception):
@@ -567,40 +570,80 @@ def _topmost_missing(path):
     return missing[-1] if missing else None
 
 
-def fake_topology_plan(sys_root=None):
-    """File plan for a /proc/cpuinfo-derived sysfs tree, or None if present."""
-    sys_root = SYS_ROOT if sys_root is None else sys_root
-    cpu_root = Path(sys_root) / "devices" / "system" / "cpu"
-    if (cpu_root / "present").exists():
-        return None
+def _format_cpu_list(cpus):
+    """Compact sysfs CPU list: [0, 1, 2, 8] -> "0-2,8"."""
+    out = []
+    start = prev = None
+    for cpu in sorted(set(cpus)):
+        if start is None:
+            start = prev = cpu
+        elif cpu == prev + 1:
+            prev = cpu
+        else:
+            out.append(f"{start}-{prev}" if start != prev else str(start))
+            start = prev = cpu
+    if start is not None:
+        out.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(out)
+
+
+def _parse_cpuinfo(text):
     procs = []
-    for block in Path("/proc/cpuinfo").read_text().strip().split("\n\n"):
+    for block in text.strip().split("\n\n"):
         fields = {k.strip(): v.strip()
                   for line in block.splitlines() if ":" in line
                   for k, v in [line.split(":", 1)]}
         if "processor" in fields:
             procs.append(fields)
-    n = len(procs)
+    return procs
+
+
+def fake_topology_plan(sys_root=None, cpuinfo=None, l3_groups=None):
+    """File plan for a /proc/cpuinfo-derived sysfs tree, or None if present.
+
+    SMT siblings key on `(physical package, core id)` and CPU lists are
+    formatted as ranges, so non-contiguous numbering and multi-package
+    layouts are described without assuming adjacency. `l3_groups` optionally
+    replaces the single all-CPU L3 set with explicit CPU groups, which a test
+    uses for a multi-CCD layout that `/proc/cpuinfo` cannot express.
+    """
+    sys_root = SYS_ROOT if sys_root is None else sys_root
+    cpu_root = Path(sys_root) / "devices" / "system" / "cpu"
+    if (cpu_root / "present").exists():
+        return None
+    if cpuinfo is None:
+        cpuinfo = Path("/proc/cpuinfo").read_text()
+    procs = _parse_cpuinfo(cpuinfo)
     siblings = {}
     for d in procs:
-        siblings.setdefault(int(d.get("core id", d["processor"])), []).append(int(d["processor"]))
-    allcpus = ",".join(str(d["processor"]) for d in procs)
-    plan = [(cpu_root / f, f"0-{n - 1}\n") for f in ("present", "possible", "online")]
+        package = int(d.get("physical id", "0"))
+        core = int(d.get("core id", d["processor"]))
+        siblings.setdefault((package, core), []).append(int(d["processor"]))
+    all_cpus = [int(d["processor"]) for d in procs]
+    l3_of_cpu = ({cpu: group for group in l3_groups for cpu in group}
+                 if l3_groups is not None else None)
+    plan = [(cpu_root / f, _format_cpu_list(all_cpus) + "\n")
+            for f in ("present", "possible", "online")]
     for d in procs:
         cpu = int(d["processor"])
+        package = int(d.get("physical id", "0"))
         core = int(d.get("core id", cpu))
-        sib = siblings[core]
+        sib = siblings[(package, core)]
         topo = cpu_root / f"cpu{cpu}" / "topology"
         plan += [(topo / "core_id", f"{core}\n"),
-                 (topo / "physical_package_id", f"{d.get('physical id', '0')}\n"),
-                 (topo / "thread_siblings_list", ",".join(map(str, sib)) + "\n"),
+                 (topo / "physical_package_id", f"{package}\n"),
+                 (topo / "thread_siblings_list", _format_cpu_list(sib) + "\n"),
                  (cpu_root / f"cpu{cpu}" / "online", "1\n")]
         cache = cpu_root / f"cpu{cpu}" / "cache"
-        for idx, (level, typ, size, share) in enumerate(_FAKE_CACHES):
-            shared = allcpus if share is None else ",".join(map(str, sib))
+        for idx, (level, typ, size, scope) in enumerate(_FAKE_CACHES):
+            if level == 3 and l3_of_cpu is not None:
+                shared = l3_of_cpu[cpu]
+            else:
+                shared = sib if scope == "smt" else all_cpus
             plan += [(cache / f"index{idx}" / key, value) for key, value in (
                 ("level", f"{level}\n"), ("type", f"{typ}\n"), ("size", f"{size}\n"),
-                ("coherency_line_size", "64\n"), ("shared_cpu_list", shared + "\n"),
+                ("coherency_line_size", "64\n"),
+                ("shared_cpu_list", _format_cpu_list(shared) + "\n"),
                 ("ways_of_associativity", "8\n"), ("id", f"{idx}\n"))]
     return plan
 

@@ -462,5 +462,82 @@ class DriverTests(unittest.TestCase):
         self.assertFalse(rpm._is_sysfs_mount(self.out, mounts))
 
 
+def _cpuinfo(rows):
+    """Synthetic /proc/cpuinfo from (processor, package, core) rows."""
+    blocks = []
+    for cpu, package, core in rows:
+        blocks.append("\n".join([
+            f"processor\t: {cpu}",
+            f"physical id\t: {package}",
+            f"core id\t\t: {core}",
+        ]))
+    return "\n\n".join(blocks) + "\n"
+
+
+def _l3_shares(plan):
+    indexes = {}
+    for path, text in plan:
+        if path.parent.name.startswith("index") and path.name in ("level", "shared_cpu_list"):
+            indexes.setdefault(path.parent, {})[path.name] = text.strip()
+    return sorted({v["shared_cpu_list"] for v in indexes.values()
+                   if v.get("level") == "3"})
+
+
+def _sibling_lists(plan):
+    return {path.parent.parent.name: text.strip()
+            for path, text in plan if path.name == "thread_siblings_list"}
+
+
+class FakeTopologyPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+
+    def ryzen5500(self):
+        # Linux numbers SMT as (0,6)..(5,11), one package.
+        return [(core + (6 if half else 0), 0, core)
+                for half in (False, True) for core in range(6)]
+
+    def zen3_5900xt(self):
+        # One package, 16 cores, sibling N+16 (the 5900XT's CCD numbering).
+        return [(cpu, 0, cpu % 16) for cpu in range(32)]
+
+    def l3_5900xt(self):
+        # Two CCDs; /proc/cpuinfo carries no CCD field, so it is explicit.
+        return [list(range(0, 8)) + list(range(16, 24)),
+                list(range(8, 16)) + list(range(24, 32))]
+
+    def two_packages_same_core(self):
+        # Core 0 exists on both packages; siblings must not merge across them.
+        return [(0, 0, 0), (1, 0, 0), (2, 1, 0), (3, 1, 0)]
+
+    def test_single_package_has_one_l3_set(self):
+        plan = rpm.fake_topology_plan(self.root, cpuinfo=_cpuinfo(self.ryzen5500()))
+        self.assertEqual(_l3_shares(plan), ["0-11"])
+
+    def test_two_l3_layout_is_non_contiguous(self):
+        plan = rpm.fake_topology_plan(self.root, cpuinfo=_cpuinfo(self.zen3_5900xt()),
+                                      l3_groups=self.l3_5900xt())
+        self.assertEqual(_l3_shares(plan), ["0-7,16-23", "8-15,24-31"])
+
+    def test_5900xt_siblings_are_n_plus_16(self):
+        plan = rpm.fake_topology_plan(self.root, cpuinfo=_cpuinfo(self.zen3_5900xt()),
+                                      l3_groups=self.l3_5900xt())
+        sibs = _sibling_lists(plan)
+        self.assertEqual(sibs["cpu0"], "0,16")
+        self.assertEqual(sibs["cpu8"], "8,24")
+
+    def test_siblings_group_by_package_and_core(self):
+        plan = rpm.fake_topology_plan(self.root, cpuinfo=_cpuinfo(self.two_packages_same_core()))
+        sibs = _sibling_lists(plan)
+        self.assertEqual(sibs["cpu0"], "0-1")
+        self.assertEqual(sibs["cpu2"], "2-3")
+
+    def test_cpu_list_format_is_compact_and_non_contiguous(self):
+        self.assertEqual(rpm._format_cpu_list([0, 1, 2, 8]), "0-2,8")
+        self.assertEqual(rpm._format_cpu_list([3]), "3")
+
+
 if __name__ == "__main__":
     unittest.main()
