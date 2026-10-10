@@ -79,7 +79,8 @@ TopologySnapshot parseSysfsTopology(
     string cpuRoot,
     string nodeRoot = null,
     string cpuCoreList = null,
-    string cpuAtomList = null)
+    string cpuAtomList = null,
+    const(ulong)[] affinity = null)
 {
     auto cpus = enumerateCpus(cpuRoot);
     enforce(cpus.length > 0, "threadpool: no CPUs found under " ~ cpuRoot);
@@ -155,6 +156,12 @@ TopologySnapshot parseSysfsTopology(
         procs[i] = p;
         idxOf[r.cpu] = i;
     }
+
+    // Discovery must not place work on a CPU the process may not run on, so
+    // intersect with the process affinity before any consumer reads the
+    // snapshot. Forbidden CPUs are parked, not removed, matching the offline
+    // handling that pool startup and placement already skip.
+    intersectAffinity(procs, affinity);
 
     // SMT: lowest lpIndex in thread_siblings is the primary; the rest are siblings.
     bool[ushort] smtMarked;
@@ -250,7 +257,37 @@ TopologySnapshot discoverLinux()
         "/sys/devices/system/cpu",
         "/sys/devices/system/node",
         "/sys/devices/cpu_core/cpus",
-        "/sys/devices/cpu_atom/cpus");
+        "/sys/devices/cpu_atom/cpus",
+        processAffinityKeys());
+}
+
+/// Allowed-processor keys for this process, or null when the query fails.
+/// A null result leaves discovery unrestricted, the pre-existing behaviour.
+private ulong[] processAffinityKeys()
+{
+    import core.sys.linux.sched :
+        CPU_ALLOC, CPU_ALLOC_SIZE, CPU_FREE, cpu_mask, sched_getaffinity;
+    import core.sys.posix.unistd : _SC_NPROCESSORS_CONF, sysconf;
+
+    auto conf = sysconf(_SC_NPROCESSORS_CONF);
+    auto count = conf > 0 ? cast(size_t) conf : size_t(1024);
+    auto setsize = CPU_ALLOC_SIZE(count);
+    auto set = CPU_ALLOC(count);
+    if (set is null) return null;
+    scope (exit) CPU_FREE(set);
+    if (sched_getaffinity(0, setsize, set) != 0) return null;
+
+    auto words = (cast(cpu_mask*) set)[0 .. setsize / cpu_mask.sizeof];
+    ulong[] keys;
+    foreach (w, word; words)
+        foreach (bit; 0 .. 64)
+            if ((word >> bit) & 1)
+            {
+                auto cpu = cast(ulong) w * 64 + bit;
+                if (cpu > ushort.max) break;
+                keys ~= cpu;
+            }
+    return keys;
 }
 
 private int indexOfDash(const(char)[] s)

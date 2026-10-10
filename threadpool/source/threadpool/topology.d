@@ -422,3 +422,32 @@ const(TopologySnapshot)* cachedSnapshot() @nogc nothrow
 {
     return gTopology;
 }
+
+/// Allowed-processor key: `(group << 16) | lpIndex`. Linux uses group 0.
+ulong affinityKey(ushort group, ushort lpIndex) @nogc nothrow
+{
+    return (cast(ulong) group << 16) | lpIndex;
+}
+
+/// Park every processor the process affinity does not allow. An empty
+/// `allowedKeys` imposes no restriction. Parking reuses the existing
+/// "unavailable at discovery" signal, so pool startup and placement already
+/// skip these processors and no consumer semantics change.
+void intersectAffinity(ref LogicalProcessor[] procs, const(ulong)[] allowedKeys)
+    @nogc nothrow
+{
+    if (allowedKeys.length == 0) return;
+    foreach (ref p; procs)
+    {
+        auto key = affinityKey(p.group, p.lpIndex);
+        bool allowed;
+        foreach (ok; allowedKeys)
+            if (ok == key)
+            {
+                allowed = true;
+                break;
+            }
+        if (!allowed)
+            p.parkedAtDiscovery = true;
+    }
+}

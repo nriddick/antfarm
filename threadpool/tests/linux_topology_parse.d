@@ -224,6 +224,30 @@ unittest
 
 unittest
 {
+    // Affinity intersection: forbidden CPUs are parked, not removed, so
+    // consumers that already skip parkedAtDiscovery keep their semantics.
+    auto root = writeTree(ryzen5500Cpus(), "0-11", "0-11", [ushort(0): "0-11"]);
+    scope (exit) rmdirRecurse(root);
+    immutable ulong[] allowed = [0, 1, 2, 3];
+    auto snap = parseSysfsTopology(buildPath(root, "cpu"), buildPath(root, "node"),
+        null, null, allowed);
+
+    assert(snap.logicalProcessorCount == 12, "forbidden CPUs stay in the snapshot");
+    assert(snap.groups.length == 1);
+    assert(snap.groups[0].activeProcessors == 4);
+    assert(snap.groups[0].activeMask == 0xF);
+    assert(snap.llcDomains[0].lpIndices.length == 12);
+    foreach (ref p; snap.processors)
+    {
+        if (p.lpIndex < 4)
+            assert(!p.parkedAtDiscovery);
+        else
+            assert(p.parkedAtDiscovery);
+    }
+}
+
+unittest
+{
     // Two CCDs, one NUMA: the LLC axis the laptop Windows dump cannot cover.
     TestCpu[] cpus;
     foreach (ccd; 0 .. 2)
