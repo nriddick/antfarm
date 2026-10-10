@@ -5,7 +5,7 @@ Farm. It owns suspendable task lifecycle; Ant Farm transports only runnable
 activations, and `threadpool` supplies pinned workers and wake policy when the
 scheduler is used concurrently.
 
-This document records the current 1.6 design and its synchronization
+This document records the current design and its synchronization
 invariants. Start with [README.md](README.md) for usage and
 [../ARCHITECTURE.md](../ARCHITECTURE.md) for the relationship between packages.
 
@@ -191,7 +191,7 @@ the next thread calls it. The handoff chain is explicit at every boundary.
 
 The Farm portion depends on the root implementation writing table contents
 before its release sentinel and consumers acquiring that sentinel before
-reading the body. Ant Farm 1.6 provides those edges.
+reading the body. Ant Farm provides those edges.
 
 ## Container ownership
 
@@ -255,7 +255,7 @@ optional `nothrow @nogc` notifier fires on an empty-to-nonempty mailbox edge so
 an external event loop can wake without running arbitrary handlers on workers.
 
 The multi-lane model and covering responder graph are implemented, but
-multi-LLC hardware validation remains a post-1.6 bridge. Current release
+multi-LLC hardware validation remains a later bridge. Current release
 evidence does not claim multi-LLC performance or failover guarantees.
 
 ## Completion, lifecycle records, and shutdown

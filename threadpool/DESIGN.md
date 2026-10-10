@@ -5,7 +5,7 @@ and lets an application associate its own state with LLC and NUMA locality. It
 does not own a task queue or define a work-stealing policy. A worker is a
 locator and execution context for application-owned work.
 
-This document records the current 1.6 design. Start with
+This document records the current design. Start with
 [README.md](README.md) for usage and [../ARCHITECTURE.md](../ARCHITECTURE.md)
 for composition with Ant Farm and `antfarm-fibers`.
 
@@ -292,5 +292,5 @@ the integration example. `benchmarks/live_hybrid.d` is hardware
 characterization, not an onboarding contract.
 
 Multi-LLC behavior is represented in the model and parser tests, but hardware
-validation remains a later bridge. No 1.6 performance or failover guarantee is
+validation remains a later bridge. No performance or failover guarantee is
 made from a single-LLC host.

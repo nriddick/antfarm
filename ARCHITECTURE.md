@@ -123,7 +123,7 @@ Use a managed Fiber when the work needs ordinary D exceptions, allocation,
 cancellation. A Fiber which never suspends is usually better represented as a
 payload.
 
-The project intentionally has no general parallel-loop abstraction in 1.7.
+The project intentionally has no general parallel-loop abstraction.
 Callers can construct countable Farm payloads directly when their ownership and
 completion contract is clear. A higher-level bounded parallel API may be
 designed later without preserving the removed experimental surface.
