@@ -1584,8 +1584,8 @@ void t23_late_attach_under_wrap()
     // Wt > Ln. Fail on watchdog, lost work, leftover Sub, or unprotected
     // incomplete segments.
     enum TRIALS = 3;
-    // Enough two-word ST payloads to wrap the 2 MiB ring several times even
-    // in the compact layout (SPEC 2f: 4 ring words per entry plus tables).
+    // Enough two-word ST payloads to wrap the 2 MiB ring even in the
+    // uniform layout (SPEC 2g kind 2: 2 ring words per entry plus tables).
     enum N = 160000;
     enum NP = 6;
     enum NLATE = 4;
