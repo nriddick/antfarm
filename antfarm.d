@@ -452,8 +452,9 @@ enum uint rootCostHintMaxChunk = 32;
  + reach the target at chunk 32 and keep it. `consumers` is the farm's live
  + subscribed-view count (`Cf`), which can include the emitter's own view; it
  + may change between tables, and each table's class follows it
- + independently. The shard count is an estimate, since a table's `SqCs`
- + follows its segment's consumer count. A farm using the auto threshold
+ + independently. The shard count is an estimate: a table's `SqCs` follows
+ + the live `Cf` at its own write, not its segment's consumer count. A farm
+ + using the auto threshold
  + rule (`smallThreshold == 0`) is classified against
  + DEFAULT_SMALL_TABLE_THRESHOLD, which may differ from the auto rule's
  + effective threshold; the result is still a valid class.
