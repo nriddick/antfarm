@@ -1,23 +1,19 @@
 # Ant Farm roadmap
 
-The current development line targets **1.8.0-rc.1**. This page lists remaining
+The current release candidate is **1.8.0-rc.1**. This page lists remaining
 and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
 no history here. Windows validation follows the release candidate and is not
 part of its local gate.
 
 ## 1.8.0-rc.1
 
-- Finish the documentation restructuring: every major rule has one named owner
-  in [docs/README.md](docs/README.md), the local docs link check passes, and the
-  three reader journeys work from the README.
-- Re-measure at the cut commit and refresh the root
-  [PERFORMANCE.md](PERFORMANCE.md); its numbers are tied to the commit they
-  were taken at. Historical measurements stay archived outside the repository.
+The candidate content is frozen in [CHANGELOG.md](CHANGELOG.md). What remains:
+
 - Run and record the local Linux `make check` at the RC revision with LDC and
-  DMD, including the documentation-example and compiled-example lanes.
-- Cut the release: switch the version banners in [README.md](README.md) and
-  [ARCHITECTURE.md](ARCHITECTURE.md) and the [CHANGELOG.md](CHANGELOG.md)
-  heading together with the tag.
+  DMD, including the documentation-example and compiled-example lanes. The
+  numbers in [PERFORMANCE.md](PERFORMANCE.md) are tied to the revision they were
+  taken at; historical measurements stay archived outside the repository.
+- Tag `v1.8.0-rc.1` at the recorded revision.
 
 ## Deferred after the RC
 

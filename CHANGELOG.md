@@ -1,11 +1,11 @@
 # Changelog
 
-## Unreleased — targeting 1.8.0-rc.1
+## 1.8.0-rc.1
 
-No `v1.8.0-rc.1` tag exists yet. This section describes the contents of the
-development line that will become the release candidate; when it is cut, this
-heading, the banners in [README.md](README.md) and
-[ARCHITECTURE.md](ARCHITECTURE.md), and the tag are switched together.
+This is the release candidate for the 1.8.0 line. The version banners in
+[README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md) and
+[ROADMAP.md](ROADMAP.md) name it; no `v1.8.0-rc.1` tag exists yet, and it is not
+a published release.
 
 Validation scope: the correctness gate is the local Linux `make check` (see
 [CONTRIBUTING.md](CONTRIBUTING.md)); there is no CI. The exact revision,
@@ -92,8 +92,24 @@ roles, configurable root and child batches, and fatal ownership checks. See
   `cancelChildren`, `cancelPeers`, tracked roots with `PrivateRootHandle`,
   lazy deadlines, `cancelAll` and `takeOutcome`.
 - Opt-in per-cohort state slab (`PrivateStateStorage.cohortSlab`).
+- A per-wave child work-cost hint: `start`, `startFinal` and `startSubset` take
+  an optional trailing `avgCost` class, so cheap leaf callbacks can claim larger
+  runs (for example `avgCostForChunk(128)`) while the default stays chunk 32.
+  A focused test pins the claim split.
 - Compiled examples and a shared lifecycle and shutdown guide
   ([docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md), [examples/](examples/README.md)).
+
+### Documentation
+
+- The README is an onboarding page with a quickstart, a work-representation
+  choice table and three reader journeys; [CONTRIBUTING.md](CONTRIBUTING.md)
+  separates local iteration from pre-push hardening.
+- `docs/` is split into guide, reference, design and development pages with one
+  named owner per rule in [docs/README.md](docs/README.md). `make check-docs`
+  validates tracked-Markdown links and heading anchors and checks that every
+  public declaration is documented; `make docs` builds the Ddoc API reference.
+- A forward-looking [ROADMAP.md](ROADMAP.md) and this changelog were added, and
+  the API and design pages carry current SPEC references.
 
 ### Performance work
 
@@ -121,7 +137,9 @@ are in [perftest/README.md](perftest/README.md).
   longer than before: source that named a class should add 2 (see
   `avgCostForChunk`). The library's own callers (actor flush and waves, private
   child waves, the derived root hint, the Fiber lanes) were moved so their runs
-  are unchanged.
+  are unchanged. Public actor flush and wave tables default to chunk 8, private
+  child-wave tables default to chunk 32, and the child wave starts take the
+  per-wave override above.
 - The actor APIs are supported release-candidate functionality. Source and ABI
   stability are not promised between release candidates.
 - Public actor state and results are POD; private state may be non-POD.

@@ -5,7 +5,7 @@ of work into a shared ring; any subscribed consumer may claim them. It is
 designed for unordered compute where work can appear on any thread and the next
 available worker should take it.
 
-**Status.** The current development line targets **1.8.0-rc.1**. It is
+**Status.** The current release candidate is **1.8.0-rc.1**. It is
 release-candidate software: the public and private actor models are supported
 functionality, but source and ABI stability are not promised across release
 candidates, and actor state and results have the limits stated in their guides.
