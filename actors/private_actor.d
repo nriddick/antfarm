@@ -26,7 +26,8 @@ import actors.actor : ActorAllocator;
 version (AntfarmActorTestHooks)
     import actors.actor : ActorTestPoint, actorTestPoint;
 import antfarm : AntFarm, Token, PayloadHeader, PayloadBody,
-    TableCompletionHook, avgCostForChunk, rootCostHintAuto, rootCostHintFor, fatal;
+    TableCompletionHook, avgCostForChunk, rootCostHintAuto, rootCostHintFor,
+    MAX_AVG_COST, fatal;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
     atomicFetchAdd, atomicFetchSub, cas;
 import core.stdc.string : memcpy, memset;
@@ -1990,7 +1991,8 @@ public:
     /// `avgCost` is the Farm work-cost class of every table in this wave
     /// (`0 .. MAX_AVG_COST`, consumers claim `MAX_CHUNK >> avgCost` entries at
     /// a time); the default claims 32. A cheap leaf callback can opt into a
-    /// larger chunk (for example `avgCostForChunk(128)`).
+    /// larger chunk (for example `avgCostForChunk(128)`). A class above
+    /// `MAX_AVG_COST` is a fatal caller error at the call.
     PrivateStartResult start(alias operation)(scope ref PrivateContext context, bool retire = false,
         uint avgCost = childAvgCost)
         nothrow @nogc @system
@@ -1998,6 +2000,7 @@ public:
         enum kind = opKind!(T, R, operation);
         enum producesResults = kind == OpKind.result || kind == OpKind.resultContinuation;
         authorized(context);
+        if (avgCost > MAX_AVG_COST) fatal("private child wave: avgCost out of range");
         if (context.retiring_) return PrivateStartResult.retiring;
         if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0) return PrivateStartResult.waveActive;
         if (count_ == 0) return PrivateStartResult.empty;
@@ -2028,6 +2031,7 @@ public:
         enum kind = opKind!(T, R, operation);
         enum producesResults = kind == OpKind.result || kind == OpKind.resultContinuation;
         authorized(context);
+        if (avgCost > MAX_AVG_COST) fatal("private child wave: avgCost out of range");
         if (sel_ is null) fatal("private child subset: storage not reserved");
         if (context.retiring_) return PrivateStartResult.retiring;
         if (atomicLoad!(MemoryOrder.acq)(base_.wave.active) != 0) return PrivateStartResult.waveActive;

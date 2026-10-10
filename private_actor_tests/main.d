@@ -845,6 +845,43 @@ void childBatchDeath()
     while (view.consumeNext()) {}
 }
 
+// The child-wave avgCost check runs at the start call, before the wave takes
+// credits; a distinct message keeps the later writeImpl fatal (which a
+// truncated wave never reaches) from masking a removed start check.
+enum ChildAvgCostStart { start, startFinal, startSubset }
+immutable uint[1] childAvgCostMembers = [0];
+PrivateRootDisposition childAvgCostOverStep(ChildAvgCostStart which)(
+    scope ref PrivateBorrow!State, scope ref PrivateContext ctx) nothrow @nogc @system
+{
+    auto children = ctx.createChildren!State(1, PrivateCohortOptions(0, true));
+    check(children !is null);
+    check(children.spawn(ctx, State.init) == PrivateSpawnResult.spawned);
+    final switch (which)
+    {
+        case ChildAvgCostStart.start:
+            children.start!authorityOperation(ctx, false, MAX_AVG_COST + 1); break;
+        case ChildAvgCostStart.startFinal:
+            children.startFinal!authorityOperation(ctx, MAX_AVG_COST + 1); break;
+        case ChildAvgCostStart.startSubset:
+            children.startSubset!authorityOperation(ctx, childAvgCostMembers[], MAX_AVG_COST + 1); break;
+    }
+    fprintf(stderr, "child avgCost misuse: survived\n");
+    return PrivateRootDisposition.waitChildren;
+}
+void childAvgCostOverDeath(ChildAvgCostStart which)()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    auto park = PrivateRootPark!(State, childAvgCostOverStep!which).create(farm, 1);
+    check(park !is null);
+    check(park.spawn(State.init) == PrivateSpawnResult.spawned);
+    park.pump(token);
+    while (view.consumeNext()) {}
+    // Reaching this point means the fatal contract was not enforced.
+}
+
 enum AuthorityMisuse { spawn, start, finished, defaultFinished, defaultCreate }
 struct AuthorityProbe { PrivateChildPark!State* children; AuthorityMisuse misuse; }
 struct AuthorityRoot { AuthorityProbe* probe; bool owner; }
@@ -1197,6 +1234,14 @@ void deathHarness()
         writeln("PASS invalid configured and per-call batch limits are fatal");
         check(diedWithMessage("avg-cost-over", "antfarm fatal: avgCost out of range"));
         writeln("PASS avgCost above MAX_AVG_COST is fatal");
+        foreach (modeName; ["child-avg-cost-start", "child-avg-cost-final", "child-avg-cost-subset"])
+        {
+            auto probe = probeDeath(modeName);
+            check(probe.status != 0);
+            check(probe.stderrText.canFind("antfarm fatal: private child wave: avgCost out of range"));
+            check(!probe.stderrText.canFind("child avgCost misuse: survived"));
+        }
+        writeln("PASS child-wave avgCost above MAX_AVG_COST is fatal at start, startFinal and startSubset");
         check(diedWithMessage("destroy-live", "antfarm fatal: destroy nonempty private root park"));
         check(diedWithMessage("finish-with-active-child", "antfarm fatal: retire private actor with active child wave"));
         writeln("PASS destroy-live and finish-with-active-child are fatal");
@@ -11823,6 +11868,9 @@ void main(string[] args)
         case "batch-pump-over": rootBatchDeath(false, true); return;
         case "batch-child-zero": childBatchDeath(); return;
         case "avg-cost-over": avgCostOverDeath(); return;
+        case "child-avg-cost-start": childAvgCostOverDeath!(ChildAvgCostStart.start)(); return;
+        case "child-avg-cost-final": childAvgCostOverDeath!(ChildAvgCostStart.startFinal)(); return;
+        case "child-avg-cost-subset": childAvgCostOverDeath!(ChildAvgCostStart.startSubset)(); return;
         case "reentrant-spawn":
             version (assert) reentrantDeath();
             return;
