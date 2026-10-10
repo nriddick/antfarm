@@ -159,6 +159,24 @@ are in [perftest/README.md](perftest/README.md).
   per-member retirement, concurrent subsets, non-POD results, adopted actor
   storage, and engine wake integration (see [ROADMAP.md](ROADMAP.md)).
 
+### Fixes
+
+- `--fake-topology` shares each L3 across every CPU instead of each SMT
+  pair, so the generated tree describes one LLC on the 5500 (it previously
+  described six). Siblings group by `(physical package, core id)`, CPU lists
+  are emitted as ranges, and an optional L3 group list describes a
+  multi-CCD layout, so a non-contiguous layout is described correctly
+  ([perftest/run_performance_md.py](perftest/run_performance_md.py)).
+- Threadpool topology discovery intersects the process affinity
+  (`sched_getaffinity` on Linux, `GetProcessAffinityMask` on Windows), so a
+  `taskset`- or cpuset-restricted process no longer plans placements on
+  forbidden CPUs. Forbidden CPUs are parked, the same signal consumers
+  already skip for offline CPUs
+  ([threadpool/source/threadpool/topology.d](threadpool/source/threadpool/topology.d)).
+- `private_lifecycle_matrix.py` includes the CPU list in its grouping key, so
+  runs pinned to different CPU sets no longer merge into one summary
+  ([perftest/private_lifecycle_matrix.py](perftest/private_lifecycle_matrix.py)).
+
 ## Development milestones
 
 These are not published releases; no tags were created for them.
