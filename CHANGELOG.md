@@ -104,6 +104,10 @@ are in [perftest/README.md](perftest/README.md).
 - A fast path for roots without deadlines, whole-wave callback policy selected
   once, derived work-cost hints for root tables, and targeted inlining of public
   retirement and reclamation.
+- The derived root hint now also splits sharded root tables: a table just above
+  the small-table threshold uses shorter claims until its shards provide about
+  one claim per consumer (up to eight), instead of one claim per shard. Tables
+  wide enough for 32-entry claims to reach that target are unchanged.
 - A cache-line placement experiment was a negative result and shipped nothing.
   One hint change landed with a documented one-off layout waiver.
 - An option screen for mimalloc page retention made no runtime change.

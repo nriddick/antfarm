@@ -109,15 +109,20 @@ below the small-table threshold (64 by default) is one claim of its whole
 length whenever its run is at least as long as the table. With no hint — the default `rootCostHintAuto` —
 `pump` derives the class per table with `rootCostHintFor(count, live consumers,
 small threshold)`, where the consumer count is the farm's live subscribed-view
-count (`Cf`), which can include the emitter's own view. A table at least the
-small-table threshold wide is sharded across every shard and keeps the cheapest
-class the derived hint names (runs of `rootCostHintMaxChunk`, 32 entries, which
-is class 2); a wholesale table gets the cheapest class from there whose runs
-still split it into at least `min(count, clamp(consumers, 1, rootCostHintMaxSplits))`
-claims (runs of 32 whenever they already provide that many). That lets a small expensive root
-table — for example parents that allocate a child wave each — occupy up to
-about consumer-count workers instead of one, while every sharded table and every
-single-consumer table keeps its exact prior claim sequence. An explicit
+count (`Cf`), which can include the emitter's own view. The derived class is
+the cheapest one, starting from runs of `rootCostHintMaxChunk` (32 entries,
+class 2), whose runs still split the table into at least `min(count,
+clamp(consumers, 1, rootCostHintMaxSplits))` claims. A wholesale table's claims
+are `ceil(count / run)`. A table at least the small-table threshold wide is
+sharded, and its claims are counted per shard over `sqcsOf(consumers)` shards.
+That lets an expensive root table, for example parents that allocate a child
+wave each, occupy up to about consumer-count workers instead of one. This holds
+both for a small wholesale table and for a sharded table just above the
+threshold, which would otherwise get only one claim per shard. A table wide
+enough that runs of 32 already provide the target keeps them, and so does every
+single-consumer table. At six consumers a 64-entry table therefore uses runs of
+16 (six claims over three shards), while a 256-entry table keeps runs of 32. An
+explicit
 `0 .. MAX_AVG_COST` hint is published unchanged and keeps its exact meaning;
 `pump(token, limit, 2)` is the pre-derivation fixed-hint behavior (runs of 32).
 Since `MAX_CHUNK` rose from 32 to 128, a given class names a run four times

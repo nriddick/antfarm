@@ -1449,10 +1449,10 @@ public:
     /// consumer policy frees it in the callback. Child frees run on consumers.
     /// With no cost hint (`rootCostHintAuto`, the default) the published hint
     /// is derived per table from its entry count and the live consumer count
-    /// (`rootCostHintFor`), so small root tables are split across enough
-    /// claims for the available consumers; an explicit 0 .. MAX_AVG_COST hint
-    /// is passed through unchanged and names claims of `MAX_CHUNK >> hint`
-    /// entries.
+    /// (`rootCostHintFor`), so a root table, wholesale or sharded, is split
+    /// across enough claims for the available consumers; an explicit
+    /// 0 .. MAX_AVG_COST hint is passed through unchanged and names claims of
+    /// `MAX_CHUNK >> hint` entries.
     size_t pump(ref Token token) nothrow @nogc @system
     {
         return pump(token, service_.batchLimit);

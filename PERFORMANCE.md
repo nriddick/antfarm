@@ -335,6 +335,11 @@ Root tables derive their claim class from the table width and live consumer
 count (`rootCostHintFor`), capped at 32-entry claims. Passing an explicit class
 overrides it. `tree` and `private` at 6 consumers:
 
+> **Stale.** This table predates uniform tables (SPEC 2g) and the sharded split
+> rule below. `tree` batch 256 auto now derives class 3 (64 entries, six claims
+> over three shards); the batch 1024 and `private` rows derive the same class
+> as before.
+
 | Shape | `root-hint` | Derived class | Table width | Claims | Mactor_cycles/s |
 | --- | --- | ---: | ---: | ---: | ---: |
 | `tree` batch 256 | auto | 2 | 64 | 2 | 56.91 [56.67, 57.13] |
@@ -351,8 +356,15 @@ The important case is the wide root table: a `tree` parent table at batch 1024
 holds 16 roots, and the derived hint splits it into 8 two-entry claims across
 the consumers (88.5 vs 18.3, about 4.8×). A fixed class 2 (32-entry claims) or a
 fixed class 0 (128-entry claims) makes the same 16-entry table a single claim on
-one worker. Above the 64-entry small-table threshold the derived hint keeps
-32-entry claims, so wide tables shard naturally.
+one worker. Above the 64-entry small-table threshold the derived hint counts
+claims per shard: a sharded table keeps 32-entry claims once they reach the
+target, and a table just above the threshold uses shorter claims instead of one
+claim per shard. On the uniform layout, 5 paired rounds, that took `tree` and
+`tree-wait` at 6 consumers from 59.6 to 74.4 (ratio 1.25 [1.22, 1.26]) and
+`tree-refill` from 72.7 to 76.9 (1.06). At 11 consumers `tree` went from 57.0 to
+83.2 (1.47), and at 2 consumers every measured mode stayed within ±1%. Its cost
+is `tree-slab` at 6 consumers, 0.98 [0.97, 0.98], because the slab parent is
+cheap enough that the extra claims cost more than they spread.
 
 Batch size for `private` is flat between 256 and 2048 (30.8 / 29.7 / 31.3); use
 the smallest batch that keeps the park's reservation affordable.
@@ -415,7 +427,9 @@ structured waits.
 - **Explicit work-cost hints.** Prefer `rootCostHintAuto` for private root
   tables. A fixed class is only for deliberately serializing or sharding: the
   batch-1024 tree case is about 4.8× slower with a fixed 32- or 128-entry claim
-  than with the derived 2-entry claim.
+  than with the derived 2-entry claim. A cheap-parent table just above the
+  small-table threshold (a slab `tree` at batch 256) is about 2% faster with
+  `pump(token, limit, 2)` than with the derived split.
 - **Huge pages.** On the headline configuration plus `--huge`
   (`ANTFARM_HUGE_PAGES=1`), huge pages are a modest win (1,302 vs 1,244 Mpps,
   +4.7%, with a wide spread) and neutral for actor work (`actor` 16.66 vs 16.61;

@@ -10132,16 +10132,27 @@ void phaseRootTracking()
 
 // G4: the derived default root work-cost hint. A table below the small
 // threshold is claimed wholesale by shard 0 in ceil(count / (MAX_CHUNK >>
-// hint)) claims, so the hint determines how many consumers can share one
-// small root table; a table at least the threshold wide is sharded and keeps
-// the cheapest class the hint ever names (chunk rootCostHintMaxChunk), so the
-// derived hint's claim splits do not follow MAX_CHUNK.
+// hint)) claims; a table at least the threshold wide is split over
+// sqcsOf(consumers) shards, each claimed in runs. The hint is the cheapest
+// class, never above chunk rootCostHintMaxChunk, whose claims reach
+// min(count, clamp(consumers, 1, rootCostHintMaxSplits)), so the claim
+// splits do not follow MAX_CHUNK and a table just above the threshold is
+// not left with one claim per shard.
 void rootCostHintRule()
 {
-    static uint claimCount(size_t count, uint hint) pure nothrow @nogc @safe
+    static size_t claimCount(size_t count, ulong consumers, uint threshold, uint hint)
+        pure nothrow @nogc @safe
     {
-        immutable chunk = MAX_CHUNK >> hint;
-        return cast(uint) ((count + chunk - 1) / chunk);
+        immutable chunk = cast(size_t) (MAX_CHUNK >> hint);
+        immutable effThresh = threshold != 0 ? threshold : DEFAULT_SMALL_TABLE_THRESHOLD;
+        immutable size_t shards = count >= effThresh ? sqcsOf(consumers) : 1;
+        size_t claims;
+        foreach (shard; 0 .. shards)
+        {
+            immutable len = count / shards + (shard < count % shards ? 1 : 0);
+            claims += (len + chunk - 1) / chunk;
+        }
+        return claims;
     }
     enum uint cheapest = avgCostForChunk(rootCostHintMaxChunk);
     check((MAX_CHUNK >> cheapest) == rootCostHintMaxChunk);
@@ -10152,21 +10163,25 @@ void rootCostHintRule()
     check(rootCostHintFor(16, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == avgCostForChunk(2));  // eight claims
     check(rootCostHintFor(31, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == avgCostForChunk(4));  // eight claims
     check(rootCostHintFor(63, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == avgCostForChunk(8));  // eight claims
-    check(rootCostHintFor(64, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == cheapest);  // sharded: cheapest class
+    // Sharded over sqcsOf(6) = 3 shards of 22/21/21: chunk 32 gives three
+    // claims, chunk 16 six.
+    check(rootCostHintFor(64, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == avgCostForChunk(16));
+    check(rootCostHintFor(128, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == cheapest);  // 3 x 2 claims
     check(rootCostHintFor(256, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == cheapest);
     check(rootCostHintFor(1024, 6, DEFAULT_SMALL_TABLE_THRESHOLD) == cheapest);
     check(rootCostHintFor(63, 6, 0) == avgCostForChunk(8));          // auto rule falls back to 64
+    check(rootCostHintFor(64, 6, 0) == avgCostForChunk(16));
     check(rootCostHintFor(64, 6, 128) == avgCostForChunk(8));        // wider threshold: 64 is wholesale
     check(rootCostHintFor(100, 6, 128) == avgCostForChunk(16));      // seven claims
     // Pins rootCostHintMaxSplits = 8: a 46-entry table needs chunk 4
     // (12 claims) to span eight target claims; with a bound of 6 chunk 8
     // (six claims) would already reach the target.
     check(rootCostHintFor(46, 64, 128) == avgCostForChunk(4));
-    foreach (immutable consumers; [0UL, 1, 2, 6, 8, 64])
+    foreach (immutable consumers; [0UL, 1, 2, 3, 6, 8, 12, 64])
         foreach (immutable threshold; [0U, 16U, DEFAULT_SMALL_TABLE_THRESHOLD, 128U, 256U])
             foreach (immutable count; [
-                1U, 2U, 7U, 8U, 9U, 15U, 16U, 17U, 31U, 32U, 33U, 63U, 64U,
-                100U, 127U, 128U, 255U, 256U, 257U, 1023U, 1024U])
+                1U, 2U, 7U, 8U, 9U, 15U, 16U, 17U, 31U, 32U, 33U, 63U, 64U, 65U,
+                96U, 100U, 127U, 128U, 129U, 192U, 255U, 256U, 257U, 1023U, 1024U])
             {
                 immutable hint = rootCostHintFor(count, consumers, threshold);
                 check(hint >= cheapest && hint <= MAX_AVG_COST);
@@ -10174,18 +10189,11 @@ void rootCostHintRule()
                     : consumers > rootCostHintMaxSplits ? cast(ulong) rootCostHintMaxSplits
                     : consumers;
                 immutable target = count < splits ? count : cast(size_t) splits;
-                // Sharded tables, and any table whose cheapest class already
-                // provides the target claims, keep the cheapest class.
-                immutable effThresh = threshold != 0 ? threshold : DEFAULT_SMALL_TABLE_THRESHOLD;
-                if (count >= effThresh || claimCount(count, cheapest) >= target)
-                    check(hint == cheapest);
-                else
-                {
-                    // The rule's guarantee: at least min(count, splits) claims
-                    // on a wholesale table, via the cheapest such class.
-                    check(claimCount(count, hint) >= target);
-                    check(claimCount(count, hint - 1) < target);
-                }
+                // The rule's guarantee: at least min(count, splits) claims,
+                // wholesale or sharded, via the cheapest such class.
+                check(claimCount(count, consumers, threshold, hint) >= target);
+                if (hint != cheapest)
+                    check(claimCount(count, consumers, threshold, hint - 1) < target);
                 // One consumer never needs more than the cheapest class.
                 if (consumers <= 1) check(hint == cheapest);
             }
@@ -10264,14 +10272,21 @@ void childChunkSplit()
     parent.destroy();
 }
 
-// Hardcoded pins for the derived root hint: a sharded or single-claim table
-// keeps the class of 32-entry runs (class 2), and the small-table splits land
-// on the classes of 16, 8, 4, 2 and 1 entries (3 .. 7).
+// Hardcoded pins for the derived root hint: a wide or single-claim table
+// keeps the class of 32-entry runs (class 2), the small-table splits land on
+// the classes of 16, 8, 4, 2 and 1 entries (3 .. 7), and a sharded table
+// just above the threshold splits its shards to reach the target.
 void rootCostHintPins()
 {
     check(rootCostHintFor(0, 6, 64) == 2);
     check(rootCostHintFor(1, 6, 64) == 2);
-    check(rootCostHintFor(64, 6, 64) == 2);
+    check(rootCostHintFor(64, 6, 64) == 3);
+    check(rootCostHintFor(64, 3, 64) == 3);
+    check(rootCostHintFor(64, 2, 64) == 2);
+    check(rootCostHintFor(64, 12, 64) == 4);
+    check(rootCostHintFor(96, 7, 64) == 4);
+    check(rootCostHintFor(128, 6, 64) == 2);
+    check(rootCostHintFor(192, 12, 64) == 2);
     check(rootCostHintFor(256, 6, 64) == 2);
     check(rootCostHintFor(1024, 8, 64) == 2);
     check(rootCostHintFor(63, 6, 64) == 4);
