@@ -1,6 +1,6 @@
 # Ant Farm architecture
 
-Ant Farm's current release candidate is 1.8.0-rc.1. It is one repository
+Ant Farm's current release candidate is 1.8.0-rc.2. It is one repository
 with four cooperating packages. They separate transport, worker placement,
 stateful identities, and suspendable control flow so an application can choose
 the narrowest representation for each kind of work.
@@ -262,7 +262,7 @@ owned by one locality.
 Current characterization hardware has one LLC. Multi-LLC validation is a
 bridge that must be crossed before topology-specific performance, loss of a
 native worker group, or remote-sweeper claims are treated as release evidence.
-It is not emulated away and it is not a blocker for the 1.8.0-rc.1
+It is not emulated away and it is not a blocker for the 1.8.0 release-candidate
 single-LLC contract.
 
 ## Shutdown order

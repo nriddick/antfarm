@@ -1,19 +1,16 @@
 # Ant Farm roadmap
 
-The current release candidate is **1.8.0-rc.1**. This page lists remaining
+The current release candidate is **1.8.0-rc.2**. This page lists remaining
 and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
 no history here. Windows validation follows the release candidate and is not
 part of its local gate.
 
-## 1.8.0-rc.1
+## 1.8.0-rc.2
 
-The candidate content is frozen in [CHANGELOG.md](CHANGELOG.md). What remains:
-
-- Run and record the local Linux `make check` at the RC revision with LDC and
-  DMD, including the documentation-example and compiled-example lanes. The
-  numbers in [PERFORMANCE.md](PERFORMANCE.md) are tied to the revision they were
-  taken at; historical measurements stay archived outside the repository.
-- Tag `v1.8.0-rc.1` at the recorded revision.
+The candidate content is frozen in [CHANGELOG.md](CHANGELOG.md). rc.2 adds only
+an example; its runtime is identical to rc.1, whose local Linux gate passed.
+The numbers in [PERFORMANCE.md](PERFORMANCE.md) are tied to the revision they
+were taken at and apply unchanged.
 
 ## Deferred after the RC
 

@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.8.0-rc.2
+
+Second release candidate. Its runtime is identical to 1.8.0-rc.1: no file in
+the Farm, actor, threadpool or fiber packages changed. The rc.1 local Linux
+validation therefore still applies. The examples lane, which builds and runs the
+new sample's headless tests, passes at this revision. Windows validation still
+follows the candidate.
 
 - Add a Conway's Game of Life [sample](examples/README.md#conways-game-of-life)
   demonstrating one private actor per cell, joined waves and application-owned
@@ -11,8 +17,8 @@
 
 This is the release candidate for the 1.8.0 line. The version banners in
 [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md) and
-[ROADMAP.md](ROADMAP.md) name it; no `v1.8.0-rc.1` tag exists yet, and it is not
-a published release.
+[ROADMAP.md](ROADMAP.md) name it; it is tagged `v1.8.0-rc.1` and was superseded
+by 1.8.0-rc.2.
 
 Validation scope: the correctness gate is the local Linux `make check` (see
 [CONTRIBUTING.md](CONTRIBUTING.md)); there is no CI. The exact revision,
