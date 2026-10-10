@@ -9,7 +9,9 @@
  + Second generation re-spawns from the recycling pool: zero GC allocation,
  + zero stack mmap per fiber.
  +/
-module benchmark_mt;
+// Package scope permits wake-batched admission to an explicit shared-domain
+// lane, without timing a per-task FiberLane.spawn wake broadcast.
+module antfarm_fibers.benchmark_mt;
 
 import antfarm;
 import antfarm_fibers;
@@ -26,6 +28,9 @@ void main(string[] args)
 {
     immutable taskCount = args.length > 1 ? args[1].to!size_t : 100_000;
 
+    // Optional shared-domain ring exercises persistent remote subscriptions.
+    immutable coverage = args.length > 2 && args[2] == "coverage";
+    auto domain = coverage ? new FiberDomain : null;
     auto topology = CacheAwarePool.topology();
     auto perLlc = new size_t[topology.llcCount];
     foreach (ref lp; topology.processors)
@@ -34,6 +39,9 @@ void main(string[] args)
             if (lp.parkedAtDiscovery) continue;
         perLlc[lp.llcIndex]++;
     }
+
+    size_t totalWorkers;
+    foreach (count; perLlc) totalWorkers += count;
 
     // Each worker on an LLC subscribes one consumer and registers one small
     // producer against its lane's farm; size both slot sets accordingly.
@@ -44,13 +52,15 @@ void main(string[] args)
     FiberLane[] lanes;
     foreach (i; 0 .. topology.llcCount)
     {
-        immutable slots = perLlc[i] == 0 ? 1 : perLlc[i];
+        immutable localSlots = perLlc[i] == 0 ? 1 : perLlc[i];
+        // A shared-domain lane can also have responders from its predecessor.
+        immutable slots = coverage ? totalWorkers : localSlots;
         immutable quotaHeadroom = (k - 1) * segCap / slots;
         immutable quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
         auto farm = AntFarm.create(ringMiBFromUlongs(ln), k, cast(uint) slots, 0, 0,
                                    cast(uint) slots, quotaSmall);
         farms ~= farm;
-        lanes ~= new FiberLane(farm);
+        lanes ~= coverage ? new FiberLane(domain, farm) : new FiberLane(farm);
     }
     scope (exit)
     {
@@ -63,15 +73,22 @@ void main(string[] args)
     auto pool = new CacheAwarePool(options);
     installFiberLanes(lanes, pool);
     pool.start();
-    foreach (lane; lanes)
-        lane.backend.reserve((taskCount + lanes.length - 1) / lanes.length);
-    writefln("workers: %s across %s LLC(s) hugePages=%s",
-             pool.workerCount, lanes.length, farms[0].usedLargePages);
+    if (coverage)
+        domain.reserve(taskCount);
+    else
+        foreach (lane; lanes)
+            lane.backend.reserve((taskCount + lanes.length - 1) / lanes.length);
+    writefln("workers: %s across %s LLC(s) hugePages=%s coverage=%s",
+             pool.workerCount, lanes.length, farms[0].usedLargePages, coverage);
 
     void burstSpawn()
     {
+        void function() body = { atomicFetchAdd(ran, 1L); };
         foreach (i; 0 .. taskCount)
-            lanes[i % lanes.length].backend.spawn({ atomicFetchAdd(ran, 1L); });
+        {
+            auto lane = lanes[i % lanes.length];
+            lane.backend.spawnOn(lane, body);
+        }
         pool.wakeAll();
     }
 

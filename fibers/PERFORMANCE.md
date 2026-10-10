@@ -19,6 +19,20 @@ The useful system comparison is whether Fibers and payloads can share pinned,
 topology-aware workers without blocking them, not whether an empty managed
 Fiber can beat a direct `Fiber.call`.
 
+## Remote coverage check
+
+`benchmark_mt` normally uses separate domains, so it does not exercise remote
+subscriptions even with multiple LLCs. Pass `coverage` after the task count to
+share a domain and install the remote coverage ring:
+
+```text
+ANTFARM_HUGE_PAGES=0 dub run -c benchmark_mt --build=release --compiler=ldc2 -- 100000 coverage
+```
+
+This needs at least two discovered LLCs to create remote edges. A synthetic
+topology can exercise the path on one LLC but is not multi-LLC performance
+evidence. Alternate revisions across repeated runs and report dispersion.
+
 ## Characterization host
 
 The results below were collected on a Ryzen 5 5500 with 12 logical processors,

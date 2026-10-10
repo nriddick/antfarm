@@ -247,12 +247,45 @@ worker keeps persistent Farm consumer and producer registrations. Selected
 responders poll timers, accept timer-bounded parks, and sweep Farm holes and
 leftovers; startup validates that every active lane has responder coverage.
 
+Responders retain one remote `ConsumerView` per covered lane. Every 16 local
+Farm pumps they visit the next remote, even when local consumption succeeds.
+With R remote views, each gets a `consumeNext()` attempt within at most 16×R
+local `consumeNext()` calls. Startup-barrier polls do not count. When local
+consumption misses, the worker scans from the same round-robin cursor until a remote succeeds or all have been attempted. The
+cursor advances on both success and failure. Empty views must still be pumped:
+a false return performs Farm frontier migration and leftover/reclamation work.
+The interval amortizes empty-remote polling over busy local work; it is a
+service guarantee in pump calls, not a wall-clock or throughput guarantee.
+
+The cursor and counter belong exclusively to the worker. Coverage edges stay
+fixed between managed start and stop; no Farm atomic or memory order changes.
+Repeated visits walk a finite backlog when a producer stalls on an old pin,
+then the Farm's idle re-walk releases confirmed prefix pins. One visit need not
+release a pin, and the current frontier remains protected. This assumes workers
+continue pumping and callbacks return or yield. A lagging view can still limit
+producer throughput; the rule prevents indefinite starvation, not backpressure.
+Persistent subscriptions avoid O(K) root walks, `Cf` churn and retry/full handling
+on reattachment (including the SPEC 6b fallback validation). All reclamation and
+Sub0 invariants remain those of SPEC 6b/6c/6e and 8.
+
+Managed stop runs after that worker's last pump/callback. It unsubscribes each
+remote view before unregistering its remote producer, then does the same for
+the local view. This also handles partial startup rollback. Pool shutdown/join
+must precede lane uninstallation and Farm destruction; unsubscribing preserves
+abandoned work through the existing Sub0 protocol and does not drain the domain.
+
 The default `broadcast` wake policy signals the pool for external admission,
 signal, cancellation, shutdown, and worker publication. Under
 `directorOwned`, lanes coalesce those reasons into a mailbox. The thread that
 owns `pool.director()` drains it and chooses which workers to signal. An
 optional `nothrow @nogc` notifier fires on an empty-to-nonempty mailbox edge so
 an external event loop can wake without running arbitrary handlers on workers.
+
+Successful Fiber publication relays `remoteReady` to covering lanes, including
+when the publishing worker also consumed local work. With `directorOwned`, the
+Director must act on those events. Direct Farm writes or direct backend use
+still require the embedding to arrange pool wakes; the pump-count bound does
+not wake a parked worker by itself.
 
 The multi-lane model and covering responder graph are implemented, but
 multi-LLC hardware validation remains a later bridge. Current release

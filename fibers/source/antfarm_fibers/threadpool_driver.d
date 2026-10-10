@@ -387,6 +387,10 @@ final class FiberWorkerState
     bool registered;
     bool responder;
     RemoteSweepState[] remotes;
+    // Worker-owned scheduling state: start/pump/stop are serial. No new
+    // shared state or memory-order edges are introduced.
+    private size_t nextRemote;
+    private uint localPumpsSinceRemote;
 }
 
 /// Install exactly one lane per LLC. Call before starting the pool and do not
@@ -567,6 +571,10 @@ private void fiberWorkerStart(WorkerSelf* worker)
     }
 }
 
+// One remote visit per 16 busy home pumps; with R subscriptions each is
+// visited within 16*R home pumps. Empty-home scans can only shorten the bound.
+private enum remoteServiceInterval = 16;
+
 private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
 {
     auto state = cast(FiberWorkerState) worker.context;
@@ -619,10 +627,26 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     bool remoteWork;
     if (state.responder && state.remotes.length != 0)
     {
+        if (!consumed || ++state.localPumpsSinceRemote >= remoteServiceInterval)
+        {
+            immutable attempts = consumed ? 1 : state.remotes.length;
+            state.localPumpsSinceRemote = 0;
+            foreach (_; 0 .. attempts)
+            {
+                auto remote = state.remotes[state.nextRemote];
+                // Rotate on misses AND successes. A busy view must not hide
+                // a later subscriber whose old pins block its Farm's writes.
+                if (++state.nextRemote == state.remotes.length)
+                    state.nextRemote = 0;
+                if (remote.consumer.consumeNext())
+                {
+                    consumed = true;
+                    break;
+                }
+            }
+        }
         foreach (remote; state.remotes)
         {
-            if (!consumed && remote.consumer.consumeNext())
-                consumed = true;
             immutable remoteReady = remote.lane.ready;
             if (remoteReady >= state.lane.flushBatch || remoteReady != 0)
             {
@@ -726,5 +750,165 @@ version (unittest)
         }
         producer.join();
         assert(atomicLoad!(MemoryOrder.acq)(notifications) == rounds);
+    }
+}
+
+version (unittest)
+{
+    // Drive the real managed pump on one thread: no timing, topology, pool or
+    // Fiber stack switch is involved in these transport-liveness regressions.
+    private final class RemoteServiceFixture
+    {
+        FiberWorkerState state;
+        WorkerSelf worker;
+        AntFarm*[] farms;
+        PayloadHeader header;
+        ulong[1] word = [7];
+        PayloadBody[1024] bodies;
+
+        this(size_t remoteCount)
+        {
+            // Module tests run before smoke main installs managed lanes.
+            assert(installedFiberPool is null && fiberCoverageControl is null);
+            state = new FiberWorkerState;
+            state.responder = true;
+            auto domain = new FiberDomain;
+            foreach (i; 0 .. remoteCount + 1)
+            {
+                auto farm = AntFarm.create(2, 8, 2, 0, 0, 2, 4096,
+                    DEFAULT_SMALL_TABLE_THRESHOLD, false);
+                farms ~= farm;
+                auto lane = new FiberLane(domain, farm);
+                atomicStore!(MemoryOrder.rel)(lane.control.coverageState,
+                    FiberCoverage.covered);
+                if (i == 0)
+                {
+                    state.lane = lane;
+                    subscribeOrThrow(state.consumer, farm);
+                    state.subscribed = true;
+                    state.producer = farm.registerProducer(Tier.small);
+                    state.registered = true;
+                    assert(state.producer.valid);
+                }
+                else
+                {
+                    auto remote = new RemoteSweepState;
+                    remote.lane = lane;
+                    state.lane.cover(lane);
+                    subscribeOrThrow(remote.consumer, farm);
+                    remote.subscribed = true;
+                    remote.producer = farm.registerProducer(Tier.small);
+                    remote.registered = true;
+                    assert(remote.producer.valid);
+                    state.remotes ~= remote;
+                }
+            }
+            worker.context = cast(void*) state;
+            header.maxCs = header.done = 1;
+            header.call = &noopRemoteService;
+            foreach (ref body; bodies) body = word[];
+        }
+
+        size_t write(size_t lane, size_t count = 1)
+        {
+            if (lane == 0)
+                return farms[0].write(header, bodies[0 .. count], 1,
+                    state.producer);
+            return farms[lane].write(header, bodies[0 .. count], 1,
+                state.remotes[lane - 1].producer);
+        }
+
+        void pump(bool busyLocal)
+        {
+            if (busyLocal) assert(write(0) == 1);
+            auto before = state.consumer.nextSeq;
+            fiberWorkerPump(&worker);
+            if (busyLocal)
+                assert(state.consumer.nextSeq > before,
+                    "fixture must keep the local consume successful");
+        }
+
+        void close()
+        {
+            fiberWorkerStop(&worker);
+            fiberWorkerStop(&worker); // Stop/rollback remains idempotent.
+            foreach (farm; farms)
+            {
+                assert(atomicLoad(farm.Cf) == 0);
+                farm.destroy();
+            }
+        }
+    }
+
+    private long noopRemoteService(PayloadHeader*, PayloadBody, ulong)
+        nothrow @nogc @system { return 0; }
+
+    unittest
+    {
+        import std.stdio : writefln;
+        auto fixture = new RemoteServiceFixture(2);
+        scope (exit) fixture.close();
+        ConsumerView native;
+        subscribeOrThrow(native, fixture.farms[2]);
+        scope (exit) native.unsubscribe();
+        size_t tables;
+        while (tables < 10_000)
+        {
+            auto admitted = fixture.write(2, 1024);
+            while (native.consumeNext()) {}
+            if (admitted == 0) break;
+            ++tables;
+        }
+        assert(tables > 0 && tables < 10_000);
+        assert(fixture.state.remotes[1].consumer.oldestEi == 0);
+        writefln("remote service: pinned at epoch %s after %s tables",
+            atomicLoad(fixture.farms[2].Wt) / fixture.farms[2].segCap, tables);
+        // Independent contract value, intentionally not derived from the
+        // implementation: weakening the service interval must fail this test.
+        enum bound = 16 * 2;
+        foreach (_; 0 .. bound) fixture.pump(true);
+        assert(fixture.state.remotes[1].consumer.nextSeq > 0,
+            "busy local lane starved its later remote past 16*R pumps");
+        foreach (_; 0 .. bound * (tables + 2)) fixture.pump(true);
+        auto admitted = fixture.write(2, 1024);
+        assert(admitted != 0, "bounded remote service must restore admission");
+        assert(fixture.state.remotes[1].consumer.oldestEi > 0);
+        writefln("remote service: admission resumed (%s entries)", admitted);
+        while (native.consumeNext()) {}
+    }
+
+    unittest
+    {
+        auto fixture = new RemoteServiceFixture(2);
+        scope (exit) fixture.close();
+        // Earlier remote is successful on every old-driver pump. The later
+        // remote must still be visited when local is empty.
+        foreach (_; 0 .. 64) assert(fixture.write(1) == 1);
+        assert(fixture.write(2) == 1);
+        foreach (_; 0 .. 2) fixture.pump(false);
+        assert(fixture.state.remotes[1].consumer.nextSeq > 0,
+            "remote round-robin must advance past a successful earlier view");
+    }
+
+    unittest
+    {
+        auto fixture = new RemoteServiceFixture(2);
+        scope (exit) fixture.close();
+        // An empty earlier remote must not hide a later view, even when
+        // native consumers have already completed that view's tables.
+        ConsumerView native;
+        subscribeOrThrow(native, fixture.farms[2]);
+        scope (exit) native.unsubscribe();
+        assert(fixture.write(2) == 1);
+        while (native.consumeNext()) {}
+        fixture.pump(false);
+        assert(fixture.state.remotes[1].consumer.nextSeq > 0);
+        // Stop with unconsumed work preserves Sub0 so a new view drains it.
+        assert(fixture.write(1) == 1);
+        fiberWorkerStop(&fixture.worker);
+        ConsumerView replacement;
+        subscribeOrThrow(replacement, fixture.farms[1]);
+        assert(replacement.consumeNext());
+        replacement.unsubscribe();
     }
 }

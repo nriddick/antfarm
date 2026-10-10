@@ -161,6 +161,11 @@ are in [perftest/README.md](perftest/README.md).
 
 ### Fixes
 
+- Fiber responders now service persistent remote subscriptions at least once
+  per 16×R local pumps for R covered lanes, rotating on success and failure.
+  Busy local work or an earlier busy remote can no longer indefinitely pin a
+  later remote Farm's epochs and stop its producers from admitting work.
+
 - `--fake-topology` shares each L3 across every CPU instead of each SMT
   pair, so the generated tree describes one LLC on the 5500 (it previously
   described six). Siblings group by `(physical package, core id)`, CPU lists
