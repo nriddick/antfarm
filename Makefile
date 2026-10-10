@@ -23,6 +23,7 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
   make check-docs          tracked Markdown relative links and anchors (no network)
                            plus the API reference symbol/coverage check (needs DMD)
   make check-farm-ordering Farm ordering and leaf-reuse tests, LDC and DMD
+                           plus the writeImpl raw ring-store check
   make run-farm-tsan       Farm suite under ThreadSanitizer (LDC)
   make -C actor_torture run run-dmd run-tsan
                            public actor suite
@@ -98,6 +99,7 @@ perf-gate:
 # Controlled subscription/reclamation schedules; hooks compile out normally.
 .PHONY: check-farm-ordering
 check-farm-ordering:
+	python3 scripts/check-ring-stores.py
 	ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm.d antfarm_allocation.d -of=antfarm_test_ordering
 	./antfarm_test_ordering
 	dmd -g -version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm.d antfarm_allocation.d -of=antfarm_test_ordering_dmd

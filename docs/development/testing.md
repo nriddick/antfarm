@@ -22,7 +22,7 @@ lists every target.
 | --- | --- | --- |
 | Docs links | `make check-docs`: tracked Markdown relative links and heading anchors (no network), plus `scripts/check-api-docs.py`, the API symbol/coverage check over the Ddoc of the public runtime modules | Python 3, DMD |
 | Root suite | `dub test` (module `unittest` blocks plus `antfarm_test.d`) | LDC, DMD |
-| Farm ordering | `make check-farm-ordering`: controlled subscription/reclamation schedules and the leaf-reuse test, with write-audit hooks | LDC, DMD |
+| Farm ordering | `make check-farm-ordering`: controlled subscription/reclamation schedules and the leaf-reuse test, with write-audit hooks, plus `scripts/check-ring-stores.py`, which rejects a plain (non-atomic) ring-word store in `writeImpl` | LDC, DMD, Python 3 |
 | Farm TSan | `make run-farm-tsan`: the root suite and `leaf_reuse.d` under ThreadSanitizer | LDC |
 | Actor torture | `actor_torture`: deterministic interleavings and sustained contention for the public actors | LDC, DMD, LDC TSan |
 | Review torture | `review_torture`: adversarial Farm tests | LDC, LDC TSan |
@@ -56,7 +56,7 @@ a release candidate and is not part of this gate.
 
 | Command | Use |
 | --- | --- |
-| `make check-farm-ordering` | the Farm ordering and leaf-reuse tests (LDC and DMD) |
+| `make check-farm-ordering` | the Farm ordering and leaf-reuse tests (LDC and DMD) and the raw ring-store check |
 | `make run-farm-tsan` | the Farm suite under ThreadSanitizer |
 | `make -C actor_torture run run-dmd run-tsan` | public actor suite |
 | `make -C review_torture run run-tsan` | adversarial Farm suite |
