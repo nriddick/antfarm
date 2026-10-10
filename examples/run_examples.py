@@ -38,6 +38,26 @@ def compile_example(compiler, flags, source, output):
     subprocess.run(cmd, cwd=root, check=True)
 
 
+def compile_termbox():
+    # termbox2 is a POSIX-only dependency; never execute this without a tty.
+    if os.name != "posix":
+        return
+    shim = build / "termbox_shim.o"
+    build.mkdir(exist_ok=True)
+    cmd = [os.environ.get("CC", "cc"), "-std=c99", "-O2", "-c",
+           "examples/life/termbox_shim.c", "-o", str(shim)]
+    print("==>", " ".join(cmd), flush=True)
+    subprocess.run(cmd, cwd=root, check=True)
+    return shim
+
+
+def compile_life_tui(compiler, flags, suffix, shim):
+    cmd = [compiler, *flags, "-i", "-I.", "-Iexamples",
+           "examples/life/tui.d", str(shim), f"-of={build / ('life' + suffix)}"]
+    print("==>", " ".join(cmd), flush=True)
+    subprocess.run(cmd, cwd=root, check=True)
+
+
 def run_example(binary, workers, sanitize=False):
     env = os.environ.copy()
     env["ANTFARM_HUGE_PAGES"] = "0"
@@ -94,11 +114,22 @@ def main():
         tsan_workers = ("0",) if name == "fiber_cancel_at" else ("0", "2")
         for workers in tsan_workers:
             run_example(output, workers, sanitize=True)
+    if os.name == "posix":
+        shim = compile_termbox()
+        for compiler, flags, suffix in configs:
+            compile_life_tui(compiler, flags, suffix, shim)
     print("PASS actor examples")
 
 
 if __name__ == "__main__":
     try:
-        main()
+        if len(sys.argv) > 1 and sys.argv[1] == "--life":
+            if os.name != "posix":
+                raise SystemExit("The Life terminal front end requires POSIX")
+            compiler = os.environ.get("DC", "ldc2")
+            flags = ("-O2", "-release") if compiler == "ldc2" else ("-O", "-release")
+            compile_life_tui(compiler, flags, "", compile_termbox())
+        else:
+            main()
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode or 1)
