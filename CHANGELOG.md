@@ -140,6 +140,12 @@ are in [perftest/README.md](perftest/README.md).
   are unchanged. Public actor flush and wave tables default to chunk 8, private
   child-wave tables default to chunk 32, and the child wave starts take the
   per-wave override above.
+- The 0-consumer private `subset` cells (10%, 100% and
+  `subset-whole-unreserved`) read 5–25% below the pre-RC commit d152004. This
+  is an accepted code-layout trade-off, not a cost of the child-wave cost
+  hint. Restoring the constant child class does not recover the subset cells,
+  and an inert-code control moves them by as much. The 6-consumer subset cells
+  are unchanged. Data: [PERFORMANCE.md](PERFORMANCE.md#private-actors).
 - The actor APIs are supported release-candidate functionality. Source and ABI
   stability are not promised between release candidates.
 - Public actor state and results are POD; private state may be non-POD.

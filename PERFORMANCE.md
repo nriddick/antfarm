@@ -333,6 +333,35 @@ tables centralize on one shard. The 0-consumer spread is largest on the subset
 and `tree` modes (for example `subset-whole` 385–504); it is host interference
 and layout sensitivity, not two regimes.
 
+**Accepted trade-off: 0-consumer subset cells against the pre-RC commit
+d152004.** Paired medians over 20 pairs, built from the d152004 benchmark
+source, in two independent sessions:
+
+| Cell | Paired median | Per-pair min to max, stddev |
+| --- | ---: | --- |
+| `subset` 10%/0 | −9.6%, −4.9% | −16.6% to +11.8%, 8.0 pp (second run) |
+| `subset` 100%/0 | −5.2%, −6.5% | −18.5% to +10.1%, 8.7 pp (first run) |
+| `subset-whole-unreserved`/0 | −20.5%, −24.7% | −25.5% to −0.6%, 8.4 pp (second run) |
+
+The byte-identical base/base controls stay within +3.1%. At 6 consumers the
+subset cells pass (+0.5%, +0.1%). The cause is code layout, not the per-wave
+child `avgCost` field load:
+
+- A probe that restores the constant child class on the write path recovers
+  neither subset cell: −6.5% and −6.6% against d152004. Against the RC, the
+  probe gives +1.6% and −4.9%.
+- On `subset-whole-unreserved`/0 the probe's effect changes sign with the
+  benchmark source: −11.4% against the RC on the RC's own benchmark source,
+  +15.7% on d152004's.
+- An inert-code control (the RC plus one unused, retained 198-byte function,
+  with no executed code changed) moves `subset-whole-unreserved`/0 by +32.0%
+  on d152004's benchmark source, back to the d152004 rate, and by −11.1% on
+  the RC's own. It also moves `subset` 10%/0 by +9.4%.
+
+These cells are noise-sensitive: per-pair stddev is 5–16 pp, and swings of
+±15–30% appear in the controls too. Subset is new in this release candidate,
+so no published release regresses.
+
 ### Cohort slab vs per-object
 
 The slab reserves every member's state at cohort creation, so retirement is one
