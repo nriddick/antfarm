@@ -211,7 +211,7 @@ def cpus_for(consumers):
 def churn(section, name, mode, consumers, *, actors=16384, seconds=3, batch=256,
           warmups=5, allocator="mimalloc", tier="small", quota=16384,
           subset_percent=None, root_hint=None, binary="actor_churn_mimalloc",
-          unpinned=False, env=None, public_hint=None, note=""):
+          unpinned=False, env=None, public_hint=None, child_hint=None, note=""):
     cmd = [str(PERFTEST / binary), mode, str(actors), str(seconds), str(consumers),
            str(batch), str(warmups), allocator,
            "-" if unpinned else cpus_for(consumers), tier, str(quota)]
@@ -227,6 +227,9 @@ def churn(section, name, mode, consumers, *, actors=16384, seconds=3, batch=256,
     if public_hint is not None:
         env = dict(env or {})
         env["ANTFARM_PUBLIC_HINT"] = str(public_hint)
+    if child_hint is not None:
+        env = dict(env or {})
+        env["ANTFARM_CHILD_HINT"] = str(child_hint)
     return case(section, name, cmd, env=env, note=note)
 
 
@@ -360,6 +363,13 @@ def cases_for(section, args):
         for batch in (256, 1024, 2048):
             C.append(churn("private_tuning", f"private_b{batch}", "private", 6,
                            batch=batch, note="batch-limit"))
+        # Per-wave child cost hint: the default chunk 32 against chunk 128
+        # (class 0) on the tree families.
+        for mode in ("tree", "tree-slab"):
+            C.append(churn("private_tuning", f"{mode}_child_default", mode, 6,
+                           note="child wave default (chunk 32)"))
+            C.append(churn("private_tuning", f"{mode}_child_h0", mode, 6,
+                           child_hint=0, note="child wave chunk 128 (class 0)"))
     elif section == "allocators":
         for mode in ("actor", "wave", "tree", "private-remote"):
             C.append(churn("allocators", f"{mode}_mimalloc", mode, 6,

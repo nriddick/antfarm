@@ -10232,7 +10232,7 @@ void childChunkOperation(scope ref PrivateBorrow!ChunkChild b, scope ref Private
         pause();
     }
 }
-struct ChunkParent { PrivateChildPark!ChunkChild* children; }
+struct ChunkParent { PrivateChildPark!ChunkChild* children; uint avgCost; }
 PrivateRootDisposition chunkParentStep(scope ref PrivateBorrow!ChunkParent b, scope ref PrivateContext ctx)
     nothrow @nogc @system
 {
@@ -10242,20 +10242,23 @@ PrivateRootDisposition chunkParentStep(scope ref PrivateBorrow!ChunkParent b, sc
         check(b.value.children !is null);
         foreach (i; 0 .. childChunkMembers)
             check(b.value.children.spawn(ctx, ChunkChild(i)) == PrivateSpawnResult.spawned);
-        check(b.value.children.startFinal!childChunkOperation(ctx) == PrivateStartResult.started);
+        check(b.value.children.startFinal!childChunkOperation(ctx, b.value.avgCost)
+            == PrivateStartResult.started);
         return PrivateRootDisposition.again;
     }
     return b.value.children.finished(ctx) ? PrivateRootDisposition.finish : PrivateRootDisposition.again;
 }
-void childChunkSplit()
+void childChunkSplitRun(uint avgCost, size_t chunk)
 {
+    foreach (ref owner; childChunkOwner) atomicStore!(MemoryOrder.raw)(owner, 0UL);
+    atomicStore!(MemoryOrder.raw)(childChunkNextId, 0UL);
     auto farm = AntFarm.create(2, 8, 2, 0, 0, 1, 8192, uint.max);
     scope(exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope(exit) farm.unregisterProducer(token);
     auto parent = PrivateRootPark!(ChunkParent, chunkParentStep).create(farm, 1);
     check(parent !is null);
-    check(parent.spawn(ChunkParent(null)) == PrivateSpawnResult.spawned);
+    check(parent.spawn(ChunkParent(null, avgCost)) == PrivateSpawnResult.spawned);
     auto workers = new Workers(farm, 2);
     auto deadline = MonoTime.currTime + 30.seconds;
     while (parent.live)
@@ -10265,11 +10268,21 @@ void childChunkSplit()
     }
     workers.join();
     immutable first = atomicLoad!(MemoryOrder.raw)(childChunkOwner[0]);
-    immutable second = atomicLoad!(MemoryOrder.raw)(childChunkOwner[32]);
+    immutable second = atomicLoad!(MemoryOrder.raw)(childChunkOwner[chunk]);
     check(first != 0 && second != 0 && first != second);
-    foreach (i; 0 .. 32) check(atomicLoad!(MemoryOrder.raw)(childChunkOwner[i]) == first);
-    foreach (i; 32 .. 64) check(atomicLoad!(MemoryOrder.raw)(childChunkOwner[i]) == second);
+    foreach (i; 0 .. chunk) check(atomicLoad!(MemoryOrder.raw)(childChunkOwner[i]) == first);
+    foreach (i; chunk .. 2 * chunk) check(atomicLoad!(MemoryOrder.raw)(childChunkOwner[i]) == second);
     parent.destroy();
+}
+void childChunkSplit()
+{
+    childChunkSplitRun(avgCostForChunk(32), 32);
+}
+// The per-wave override folds the two default 32-entry claims into one
+// 128-entry run, so members [0, 128) share a thread and [128, 256) another.
+void childChunkSplitOverride()
+{
+    childChunkSplitRun(avgCostForChunk(128), 128);
 }
 
 // Hardcoded pins for the derived root hint: a wide or single-claim table
@@ -11748,6 +11761,7 @@ void runSuite()
     phaseEntryWord();
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
     childChunkSplit(); writeln("PASS child wave tables claim 32 entries");
+    childChunkSplitOverride(); writeln("PASS child wave chunk override folds claims");
     version (AntfarmWriteAuditHooks)
     {
         explicitChildLimit();

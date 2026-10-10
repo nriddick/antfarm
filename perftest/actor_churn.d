@@ -6,7 +6,7 @@
 module actor_churn;
 
 import actors;
-import antfarm : ConsumerView, MAX_CHUNK, MAX_AVG_COST,
+import antfarm : ConsumerView, MAX_CHUNK, MAX_AVG_COST, avgCostForChunk,
     DEFAULT_SMALL_TABLE_THRESHOLD, fatal;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad, atomicStore, pause;
 import core.thread : Thread;
@@ -263,7 +263,8 @@ private PrivateRootDisposition treeActivate(bool waitChildren, bool slab = false
             if (actor.value.children.spawn(context,
                     State(actor.value.completions + i, actor.value.cycle)) != PrivateSpawnResult.spawned)
                 fatal("private child allocation failed");
-        if (actor.value.children.startFinal!privateOperate(context) != PrivateStartResult.started)
+        if (actor.value.children.startFinal!privateOperate(context, g_childHint)
+                != PrivateStartResult.started)
             fatal("private child wave failed");
         return waitChildren ? PrivateRootDisposition.waitChildren : PrivateRootDisposition.again;
     }
@@ -295,7 +296,7 @@ private void foldLaunch(bool slab)(scope ref PrivateBorrow!(FoldMid!slab) b, sco
         if (b.value.leaves.spawn(c, State(b.value.completions + i, b.value.cycle))
                 != PrivateSpawnResult.spawned)
             fatal("fold leaf spawn failed");
-    if (b.value.leaves.startFinal!foldLeaf(c) != PrivateStartResult.started)
+    if (b.value.leaves.startFinal!foldLeaf(c, g_childHint) != PrivateStartResult.started)
         fatal("fold leaf wave failed");
 }
 private ulong foldValue(bool slab)(scope ref PrivateBorrow!(FoldMid!slab) b, scope ref PrivateContext c)
@@ -341,7 +342,7 @@ private PrivateRootDisposition foldRoot(bool continuation, bool slab)(scope ref 
                 fatal("fold middle spawn failed");
         }
         static if (continuation)
-            auto started = b.value.mids.startFinal!(foldContinue!slab)(c);
+            auto started = b.value.mids.startFinal!(foldContinue!slab)(c, g_childHint);
         else
             auto started = b.value.mids.start!(foldLaunch!slab)(c);
         if (started != PrivateStartResult.started) fatal("fold middle wave failed");
@@ -350,7 +351,7 @@ private PrivateRootDisposition foldRoot(bool continuation, bool slab)(scope ref 
     static if (!continuation)
         if (b.value.phase == 2)
         {
-            if (b.value.mids.startFinal!(foldValue!slab)(c) != PrivateStartResult.started)
+            if (b.value.mids.startFinal!(foldValue!slab)(c, g_childHint) != PrivateStartResult.started)
                 fatal("fold result wave failed");
             return PrivateRootDisposition.waitChildren;
         }
@@ -500,7 +501,7 @@ private PrivateRootDisposition refillActivate(bool slab)(scope ref PrivateBorrow
         foreach (i; 0 .. count)
             if (children.spawn(c, State(completions + i, cycle)) != PrivateSpawnResult.spawned)
                 fatal("refill child spawn failed");
-        if (children.startFinal!privateOperate(c) != PrivateStartResult.started)
+        if (children.startFinal!privateOperate(c, g_childHint) != PrivateStartResult.started)
             fatal("refill wave failed");
         return PrivateRootDisposition.waitChildren;
     }
@@ -596,7 +597,7 @@ private PrivateRootDisposition cancelTreeActivate(scope ref PrivateBorrow!Cancel
                 if (children.spawn(c, CancelLeaf(completions + i, cycle, i == count / 2))
                         != PrivateSpawnResult.spawned)
                     fatal("cancel tree leaf spawn failed");
-            if (children.startFinal!cancelLeaf(c) != PrivateStartResult.started)
+            if (children.startFinal!cancelLeaf(c, g_childHint) != PrivateStartResult.started)
                 fatal("cancel tree wave failed");
             return PrivateRootDisposition.waitChildren;
         }
@@ -776,8 +777,8 @@ private PrivateRootDisposition subsetActivate(scope ref PrivateBorrow!SubsetStat
     if (atomicLoad!(MemoryOrder.acq)(s.control.requested) == s.completed)
         return PrivateRootDisposition.waitChildren;
     auto result = s.kind == SubsetKind.selected
-        ? s.children.startSubset!subsetOperate(context, s.members)
-        : s.children.start!subsetOperate(context);
+        ? s.children.startSubset!subsetOperate(context, s.members, g_childHint)
+        : s.children.start!subsetOperate(context, false, g_childHint);
     if (result != PrivateStartResult.started) fatal("subset benchmark wave failed");
     s.inFlight = true;
     return PrivateRootDisposition.waitChildren;
@@ -910,6 +911,23 @@ private uint publicHintFromEnv()
     return cast(uint) value;
 }
 
+// Child-wave work-cost class. Unset keeps the private-actor default (chunk
+// 32); a value pins MAX_CHUNK >> class. Option-screen hook for the per-wave
+// child cost hint on start/startFinal/startSubset.
+private uint g_childHint = avgCostForChunk(32);
+
+private uint childHintFromEnv()
+{
+    import core.stdc.stdlib : getenv, strtoul;
+    auto flag = getenv("ANTFARM_CHILD_HINT");
+    if (flag is null) return g_childHint;
+    char* end;
+    immutable value = strtoul(flag, &end, 10);
+    enforce(*end == 0 && value <= MAX_AVG_COST,
+        "ANTFARM_CHILD_HINT must be 0..MAX_AVG_COST");
+    return cast(uint) value;
+}
+
 size_t pumpRoot(Park)(Park park, ref Token token, size_t batchLimit, uint hint)
 {
     return hint == rootHintAuto ? park.pump(token, batchLimit)
@@ -978,6 +996,7 @@ void main(string[] args)
         enforce(rootHint <= MAX_AVG_COST, "root-hint must be auto or 0..MAX_AVG_COST");
     }
     immutable publicHint = publicHintFromEnv();
+    g_childHint = childHintFromEnv();
     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;
     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;
     immutable consumers = args.length > 4 ? to!uint(args[4]) : 0;
@@ -1026,8 +1045,8 @@ void main(string[] args)
         tier == Tier.bulk ? 1 : 0, tier == Tier.bulk ? quota : 0,
         tier == Tier.small ? 1 : 0, tier == Tier.small ? quota : 0);
     enforce(farm !is null, "Farm allocation failed");
-    writefln("batchLimit=%s tier=%s quota_words=%s public_hint=%s", batch, tierName, quota,
-        publicHint == publicHintDefault ? "default" : to!string(publicHint));
+    writefln("batchLimit=%s tier=%s quota_words=%s public_hint=%s child_hint=%s", batch, tierName,
+        quota, publicHint == publicHintDefault ? "default" : to!string(publicHint), g_childHint);
     // Effective root work-cost hint for this configuration's nominal first
     // root table (subset roots publish one entry; tree-family roots publish
     // min(batch, parents); private-family roots publish min(batch, actors)).

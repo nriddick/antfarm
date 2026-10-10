@@ -138,6 +138,12 @@ parent owns one `PrivateChildPark!(T, R)*` per cohort and may:
 - `children.startFinal!operation(context)` to run a terminal wave and retire
   every member after its final callback.
 
+The three wave starts take an optional trailing `avgCost` work-cost class for
+the wave's tables. The default claims 32 entries per run;
+`startFinal!operation(context, avgCostForChunk(128))` opts into larger claims
+for cheap callbacks. See
+[sizing-and-allocation.md](sizing-and-allocation.md#work-cost-hints).
+
 A third template argument selects member state storage:
 `PrivateChildPark!(T, R, PrivateStateStorage.cohortSlab)` reserves every
 member's state at creation instead of allocating it at spawn; see

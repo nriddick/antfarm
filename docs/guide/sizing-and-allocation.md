@@ -130,16 +130,19 @@ longer than it did, so a hint chosen as class `k` before now wants `k + 2`.
 The measured effect of the derived default is recorded in
 [PERFORMANCE.md](../../PERFORMANCE.md#batch-limit-and-work-cost-hints).
 
-Child wave tables (`emit`, `emitSubset`, resume emits) always publish the class
-of 32-entry runs (class 2). Any child table below the small-table threshold is
+Child wave tables (`emit`, `emitSubset`, resume emits) default to the class of
+32-entry runs (class 2). Any child table below the small-table threshold is
 claimed wholesale by shard 0, and one of at most 32 entries runs in a single
-claim on one worker: that
-includes every child table while the cohort's batch limit is 32 or less, as well
-as a small final partial table under a larger limit. Child waves take no
-cost-hint argument, so a caller whose child callbacks are too expensive for one
-claim should keep the child batch limit at least the small-table threshold so
-tables shard across consumers. Longer child claims were measured on the uniform
-layout and left as an opportunity, not the default; see
+claim on one worker: that includes every child table while the cohort's batch
+limit is 32 or less, as well as a small final partial table under a larger
+limit. `start`, `startFinal` and `startSubset` take an optional trailing
+`avgCost` argument that overrides the class for that wave only; the resume emit
+of a wave uses the wave's class. A caller whose child callbacks are cheap enough
+for one claim can pass a larger run, for example
+`startFinal!op(context, avgCostForChunk(128))`, and a caller whose callbacks are
+too expensive for one claim keeps the default and relies on the small-table
+threshold to shard tables across consumers. The measured default and override
+are recorded in
 [Defaults on uniform tables](../../PERFORMANCE.md#defaults-on-uniform-tables),
 which also records the public flush and wave claim, the root batch limit and the
 quota and threshold defaults with their overrides.

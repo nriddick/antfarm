@@ -90,7 +90,9 @@ The public `actor`, `inbox`, and `wave` modes call `ActorRuntime.flush` and
 fixed work-cost class `0..7` (chunk `128 >> class`) instead; unset keeps the
 runtime default. It is an option screen for the public-actor chunk, not a
 timing knob. The committed tables report both the default and chunk 32 (class
-2 at `MAX_CHUNK` 128).
+2 at `MAX_CHUNK` 128). `ANTFARM_CHILD_HINT` does the same for the private
+child-wave tables (`start`/`startFinal`/`startSubset`), which default to chunk
+32; set it to `0` for chunk 128.
 
 ### `actor_ready`
 

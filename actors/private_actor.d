@@ -1739,6 +1739,7 @@ private:
     size_t participants_, dispatched_;
     bool retire_, isSubset_;
     bool parentIsRoot_; // fixed at creation: the creating context had no enclosing wave
+    uint avgCost_; // work-cost class of every table in the last nonempty wave
     uint* sel_;
     size_t k_;
     PayloadHeader header_;
@@ -1853,6 +1854,7 @@ private:
         }
         park.capacity_ = capacity;
         park.batchLimit_ = batchLimit;
+        park.avgCost_ = childAvgCost;
         park.base_.parent = parent;
         park.base_.service = service;
         park.base_.root = parentIsRoot ? parent : ChildBase.fromWave(parent.enclosing).root;
@@ -1985,7 +1987,12 @@ public:
     /// joins descendant waves started by this operation. retire=true frees
     /// members after their final activation and join. Plain/result terminal
     /// callbacks cannot launch descendants; continuation callbacks can.
-    PrivateStartResult start(alias operation)(scope ref PrivateContext context, bool retire = false)
+    /// `avgCost` is the Farm work-cost class of every table in this wave
+    /// (`0 .. MAX_AVG_COST`, consumers claim `MAX_CHUNK >> avgCost` entries at
+    /// a time); the default claims 32. A cheap leaf callback can opt into a
+    /// larger chunk (for example `avgCostForChunk(128)`).
+    PrivateStartResult start(alias operation)(scope ref PrivateContext context, bool retire = false,
+        uint avgCost = childAvgCost)
         nothrow @nogc @system
     {
         enum kind = opKind!(T, R, operation);
@@ -2009,12 +2016,14 @@ public:
         header_.plen = 1;
         header_.call = retire ? &runChild!(operation, false, true)
             : &runChild!(operation, false, false);
+        avgCost_ = avgCost;
         publishWave(context);
         return PrivateStartResult.started;
     }
     /// Starts only the listed spawn-order indices. No subset retirement.
+    /// `avgCost` is the wave's Farm work-cost class, as in `start`.
     PrivateStartResult startSubset(alias operation)(scope ref PrivateContext context,
-        scope const(uint)[] members) nothrow @nogc @system
+        scope const(uint)[] members, uint avgCost = childAvgCost) nothrow @nogc @system
     {
         enum kind = opKind!(T, R, operation);
         enum producesResults = kind == OpKind.result || kind == OpKind.resultContinuation;
@@ -2047,15 +2056,18 @@ public:
         header_.plen = 1;
         header_.call = &runChild!(operation, true);
         base_.wave.emittable.emit = &emitSubset;
+        avgCost_ = avgCost;
         publishWave(context);
         return PrivateStartResult.started;
     }
     /// ditto: start with retire=true: members are freed after their final
-    /// activation and join, leaving an empty cohort.
-    PrivateStartResult startFinal(alias operation)(scope ref PrivateContext context)
+    /// activation and join, leaving an empty cohort. `avgCost` is the wave's
+    /// Farm work-cost class, as in `start`.
+    PrivateStartResult startFinal(alias operation)(scope ref PrivateContext context,
+        uint avgCost = childAvgCost)
         nothrow @nogc @system
     {
-        return start!operation(context, true);
+        return start!operation(context, true, avgCost);
     }
 private:
     // After active/retiring/empty rejection, before the enqueue release.
@@ -2113,7 +2125,7 @@ private:
         auto bodies = ChildBodies(park.entries_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
         immutable written = cast(size_t) park.base_.service.farm.writeTracked(
-            *header, bodies, 1, &wave.hook, token, childAvgCost);
+            *header, bodies, 1, &wave.hook, token, park.avgCost_);
         if (written == 0) releaseWave(wave); // producer hold still protects it
         park.cursor_ += written;
         if (park.cursor_ < park.count_) return false;
@@ -2132,7 +2144,7 @@ private:
         auto bodies = SubsetBodies(park.entries_, park.sel_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
         immutable written = cast(size_t) park.base_.service.farm.writeTracked(
-            park.header_, bodies, 1, &wave.hook, token, childAvgCost);
+            park.header_, bodies, 1, &wave.hook, token, park.avgCost_);
         if (written == 0) releaseWave(wave);
         park.cursor_ += written;
         if (park.cursor_ < park.k_) return false;
@@ -2167,7 +2179,7 @@ private:
         auto bodies = ResumeBodies(base, base.resumeHead, n);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
         immutable written = park.base_.service.farm.writeTracked(
-            park.header_, bodies, 1, &wave.hook, token, childAvgCost);
+            park.header_, bodies, 1, &wave.hook, token, park.avgCost_);
         if (written == 0) releaseWave(wave); // P still pins the park
         if (base.resumeCount != 0) return false;
         version (AntfarmActorTestHooks)
