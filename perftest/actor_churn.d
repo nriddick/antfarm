@@ -344,7 +344,7 @@ private PrivateRootDisposition foldRoot(bool continuation, bool slab)(scope ref 
         static if (continuation)
             auto started = b.value.mids.startFinal!(foldContinue!slab)(c, g_childHint);
         else
-            auto started = b.value.mids.start!(foldLaunch!slab)(c);
+            auto started = b.value.mids.start!(foldLaunch!slab)(c, false, g_childHint);
         if (started != PrivateStartResult.started) fatal("fold middle wave failed");
         return PrivateRootDisposition.waitChildren;
     }
