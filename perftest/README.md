@@ -85,6 +85,13 @@ A revision from before `MAX_CHUNK` rose to 128 has classes `0..5` of chunk
 `32 >> class`, so a fixed `root-hint` names a chunk four times larger on the
 newer revision: compare a base at class `k` with a candidate at class `k + 2`.
 
+The public `actor`, `inbox`, and `wave` modes call `ActorRuntime.flush` and
+`ActorWave.publish`, which default to chunk 8. `ANTFARM_PUBLIC_HINT` pins a
+fixed work-cost class `0..7` (chunk `128 >> class`) instead; unset keeps the
+runtime default. It is an option screen for the public-actor chunk, not a
+timing knob. The committed tables report both the default and chunk 32 (class
+2 at `MAX_CHUNK` 128).
+
 ### `actor_ready`
 
 ```text
@@ -92,7 +99,9 @@ actor_ready <actors=4096> [rounds=200] [batch=32]
 ```
 
 Times autonomous actor dispatch from a prequeued burst, with actor
-construction, verification, and reclamation outside the timed region.
+construction, verification, and reclamation outside the timed region. The
+flush uses the runtime default chunk (8); `ANTFARM_PUBLIC_HINT` pins a fixed
+work-cost class as in `actor_churn`.
 
 ### `scaling`
 

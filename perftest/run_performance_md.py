@@ -211,7 +211,7 @@ def cpus_for(consumers):
 def churn(section, name, mode, consumers, *, actors=16384, seconds=3, batch=256,
           warmups=5, allocator="mimalloc", tier="small", quota=16384,
           subset_percent=None, root_hint=None, binary="actor_churn_mimalloc",
-          unpinned=False, env=None, note=""):
+          unpinned=False, env=None, public_hint=None, note=""):
     cmd = [str(PERFTEST / binary), mode, str(actors), str(seconds), str(consumers),
            str(batch), str(warmups), allocator,
            "-" if unpinned else cpus_for(consumers), tier, str(quota)]
@@ -224,6 +224,9 @@ def churn(section, name, mode, consumers, *, actors=16384, seconds=3, batch=256,
             cmd.append(str(root_hint))
     elif root_hint is not None:
         cmd.append(str(root_hint))
+    if public_hint is not None:
+        env = dict(env or {})
+        env["ANTFARM_PUBLIC_HINT"] = str(public_hint)
     return case(section, name, cmd, env=env, note=note)
 
 
@@ -308,15 +311,24 @@ def cases_for(section, args):
                       [str(PERFTEST / "tail"), "--idle-only", "--samples", "10000",
                        "--repeats", "1"]))
     elif section == "public":
+        # Public flush/wave default to chunk 8 (ActorRuntime.flush / ActorWave
+        # .publish); ANTFARM_PUBLIC_HINT=2 pins chunk 32 at MAX_CHUNK 128.
         for mode in ("actor", "wave", "inbox"):
             for cons in (0, 6):
-                C.append(churn("public", f"{mode}_c{cons}", mode, cons,
-                               note="mimalloc"))
+                C.append(churn("public", f"{mode}_c{cons}_default", mode, cons,
+                               note="mimalloc, public flush/wave default chunk"))
+                C.append(churn("public", f"{mode}_c{cons}_chunk32", mode, cons,
+                               public_hint=2,
+                               note="mimalloc, public flush/wave chunk 32 (class 2)"))
         for cons in (1, 2, 4, 6, 11):
             C.append(churn("public", f"actor_curve_c{cons}", "actor", cons))
-        C.append(case("public", "actor_ready",
+        C.append(case("public", "actor_ready_default",
                       [str(PERFTEST / "actor_ready"), "16384", "200", "32"],
-                      note="autonomous flush from a prequeued burst"))
+                      note="autonomous flush from a prequeued burst, default chunk"))
+        C.append(case("public", "actor_ready_chunk32",
+                      [str(PERFTEST / "actor_ready"), "16384", "200", "32"],
+                      env={"ANTFARM_PUBLIC_HINT": "2"},
+                      note="autonomous flush from a prequeued burst, chunk 32 (class 2)"))
     elif section == "private":
         modes = [
             ("private", {}), ("private-remote", {}), ("private-tracked", {}),

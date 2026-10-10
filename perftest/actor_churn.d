@@ -891,16 +891,24 @@ private class Consumer
 // passed to pump.
 private enum uint rootHintAuto = uint.max;
 
-// Cost class of chunk 32 under the runtime being built, derived from
-// MAX_CHUNK so ActorRuntime.flush keeps the same claim size on runtimes with
-// either chunk ceiling (class 0 before MAX_CHUNK rose to 128, class 2 after).
-private uint chunk32CostOf()
+// Public flush/wave work-cost class. Unset keeps the runtime default
+// (ActorRuntime.flush / ActorWave.publish, chunk 8); a value pins
+// MAX_CHUNK >> class. Option-screen hook so one binary can compare the
+// default against an explicit class such as chunk 32 (class 2 at MAX_CHUNK
+// 128, class 0 before MAX_CHUNK rose to 128).
+private enum uint publicHintDefault = uint.max;
+
+private uint publicHintFromEnv()
 {
-    uint cost;
-    while ((MAX_CHUNK >> cost) > 32) ++cost;
-    return cost;
+    import core.stdc.stdlib : getenv, strtoul;
+    auto flag = getenv("ANTFARM_PUBLIC_HINT");
+    if (flag is null) return publicHintDefault;
+    char* end;
+    immutable value = strtoul(flag, &end, 10);
+    enforce(*end == 0 && value <= MAX_AVG_COST,
+        "ANTFARM_PUBLIC_HINT must be 0..MAX_AVG_COST");
+    return cast(uint) value;
 }
-private enum uint chunk32Cost = chunk32CostOf();
 
 size_t pumpRoot(Park)(Park park, ref Token token, size_t batchLimit, uint hint)
 {
@@ -969,6 +977,7 @@ void main(string[] args)
         rootHint = to!uint(rootHintArg);
         enforce(rootHint <= MAX_AVG_COST, "root-hint must be auto or 0..MAX_AVG_COST");
     }
+    immutable publicHint = publicHintFromEnv();
     immutable count = args.length > 2 ? to!size_t(args[2]) : 4096;
     immutable duration = args.length > 3 ? to!double(args[3]) : 3.0;
     immutable consumers = args.length > 4 ? to!uint(args[4]) : 0;
@@ -1017,7 +1026,8 @@ void main(string[] args)
         tier == Tier.bulk ? 1 : 0, tier == Tier.bulk ? quota : 0,
         tier == Tier.small ? 1 : 0, tier == Tier.small ? quota : 0);
     enforce(farm !is null, "Farm allocation failed");
-    writefln("batchLimit=%s tier=%s quota_words=%s", batch, tierName, quota);
+    writefln("batchLimit=%s tier=%s quota_words=%s public_hint=%s", batch, tierName, quota,
+        publicHint == publicHintDefault ? "default" : to!string(publicHint));
     // Effective root work-cost hint for this configuration's nominal first
     // root table (subset roots publish one entry; tree-family roots publish
     // min(batch, parents); private-family roots publish min(batch, actors)).
@@ -1142,6 +1152,13 @@ void main(string[] args)
             pause();
     }
 
+    size_t flushPublic(ActorRuntime* runtime, ref Token token, size_t maximum)
+    {
+        return publicHint == publicHintDefault
+            ? runtime.flush(token, maximum)
+            : runtime.flush(token, maximum, publicHint);
+    }
+
     void runCycle(bool measured)
     {
         ++cycle;
@@ -1196,8 +1213,9 @@ void main(string[] args)
             {
                 immutable limit = count - published < batch
                     ? count : published + batch;
-                published += wave.publish!operate(handles[published .. limit],
-                    token, chunk32Cost);
+                published += publicHint == publicHintDefault
+                    ? wave.publish!operate(handles[published .. limit], token)
+                    : wave.publish!operate(handles[published .. limit], token, publicHint);
                 enforce(!wave.handle.failed, "wave publication failed");
                 consume();
                 enforce(MonoTime.currTime < deadline, "wave publication timed out");
@@ -1220,7 +1238,7 @@ void main(string[] args)
             size_t published;
             while (published < count)
             {
-                published += runtime.flush(token, batch, chunk32Cost);
+                published += flushPublic(runtime, token, batch);
                 consume();
                 enforce(MonoTime.currTime < deadline, "actor publication timed out");
             }
@@ -1246,7 +1264,7 @@ void main(string[] args)
             ActorReclaimResult result;
             while ((result = owner.reclaim()) == ActorReclaimResult.busy)
             {
-                runtime.flush(token, batch, chunk32Cost);
+                flushPublic(runtime, token, batch);
                 consume();
                 enforce(MonoTime.currTime < deadline, "actor reclamation timed out");
             }

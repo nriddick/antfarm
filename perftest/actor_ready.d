@@ -7,10 +7,28 @@
 module actor_ready;
 
 import actors;
-import antfarm : ConsumerView, avgCostForChunk;
+import antfarm : ConsumerView, MAX_AVG_COST;
 import core.time : MonoTime, seconds;
 import std.conv : to;
 import std.stdio : writefln;
+
+// Public flush work-cost class. Unset keeps the runtime default (chunk 8);
+// a value pins MAX_CHUNK >> class. Option-screen hook so one binary can
+// compare the default against an explicit class such as chunk 32 (class 2 at
+// MAX_CHUNK 128, class 0 before MAX_CHUNK rose to 128).
+private enum uint publicHintDefault = uint.max;
+
+private uint publicHintFromEnv()
+{
+    import core.stdc.stdlib : getenv, strtoul;
+    auto flag = getenv("ANTFARM_PUBLIC_HINT");
+    if (flag is null) return publicHintDefault;
+    char* end;
+    immutable value = strtoul(flag, &end, 10);
+    if (*end != 0 || value > MAX_AVG_COST)
+        throw new Exception("ANTFARM_PUBLIC_HINT must be 0..MAX_AVG_COST");
+    return cast(uint) value;
+}
 
 private struct State
 {
@@ -30,6 +48,7 @@ void main(string[] args)
     immutable batch = args.length > 3 ? to!size_t(args[3]) : 32;
     if (count == 0 || rounds == 0 || batch == 0 || batch > 256)
         throw new Exception("actors/rounds must be positive; batch must be 1..256");
+    immutable publicHint = publicHintFromEnv();
 
     auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 8192);
     if (farm is null) throw new Exception("Farm allocation failed");
@@ -72,7 +91,9 @@ void main(string[] args)
         ulong roundFlushes;
         while (published < count)
         {
-            published += runtime.flush(token, batch, avgCostForChunk(32));
+            published += publicHint == publicHintDefault
+                ? runtime.flush(token, batch)
+                : runtime.flush(token, batch, publicHint);
             ++roundFlushes;
             while (view.consumeNext()) {}
             if (MonoTime.currTime >= deadline)
@@ -89,7 +110,8 @@ void main(string[] args)
         if (runtime.ready != 0) throw new Exception("ready backlog not drained");
     }
     immutable nanos = cast(double) elapsedTicks * 1e9 / MonoTime.ticksPerSecond;
-    writefln("actors=%s rounds=%s batch=%s ns/actor=%.2f Mactor/s=%.2f flushes=%s",
-        count, rounds, batch, nanos / (cast(double) count * rounds),
+    writefln("actors=%s rounds=%s batch=%s public_hint=%s ns/actor=%.2f Mactor/s=%.2f flushes=%s",
+        count, rounds, batch, publicHint == publicHintDefault ? "default" : to!string(publicHint),
+        nanos / (cast(double) count * rounds),
         cast(double) count * rounds * 1e3 / nanos, flushes);
 }
