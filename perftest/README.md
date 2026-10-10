@@ -41,7 +41,8 @@ the huge-page path. `make -C perftest clean` removes the built binaries.
   `--ln`, `--huge`). A drain run discards a missed backlog window rather than
   reporting idle samples as latency.
 
-All-single-threaded tables use the compact `[Call][Pbody]` record; payload
+Single-threaded tables use the uniform (2g) layout, or the compact 2f
+`[Call][Pbody]` record when the prefix has several callbacks; payload
 benchmarks size their quota-fit check accordingly unless `--full-header-size`
 is passed.
 
