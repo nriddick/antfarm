@@ -48,6 +48,12 @@ final class ExampleHost
             progress();
     }
 
+    /// Start a fresh progress deadline for another application request.
+    void resetDeadline()
+    {
+        deadline = MonoTime.currTime + 30.seconds;
+    }
+
     /// One consume or yield. Returning is not idle, not `live == 0`, and not
     /// wave completion. A stalled caller hits the deadline instead of hanging.
     void progress()

@@ -16,7 +16,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parent.parent
 build = Path(__file__).resolve().parent / ".build"
 examples = ("public_service", "public_wave", "private_tree",
-            "request_deadline", "fail_fast_fold", "fiber_cancel_at")
+            "request_deadline", "fail_fast_fold", "fiber_cancel_at", "life/headless")
 extra_includes = {
     # The fiber adapter example bridges to the separate antfarm-fibers package.
     "fiber_cancel_at": ("-Ifibers/source", "-Ithreadpool/source"),
@@ -82,12 +82,12 @@ def main():
     check_readme_programs()
     for name in examples:
         for compiler, flags, suffix in configs:
-            output = build / f"{name}{suffix}"
+            output = build / f"{name.replace('/', '_')}{suffix}"
             compile_example(compiler, flags, name, output)
             for workers in ("0", "2"):
                 run_example(output, workers)
         compiler, flags, suffix = tsan
-        output = build / f"{name}{suffix}"
+        output = build / f"{name.replace('/', '_')}{suffix}"
         compile_example(compiler, flags, name, output)
         # TSan fails at the sanitizer/runtime stack-switch boundary for
         # migrating DRuntime Fibers; see fibers/DESIGN.md "Validation boundary".
