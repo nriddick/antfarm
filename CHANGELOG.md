@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add a Conway's Game of Life [sample](examples/README.md#conways-game-of-life)
+  demonstrating one private actor per cell, joined waves and application-owned
+  double-buffered projections. Exact headless tests run in the examples lane;
+  the POSIX terminal front end uses vendored termbox2 v2.5.0.
+
 ## 1.8.0-rc.1
 
 This is the release candidate for the 1.8.0 line. The version banners in

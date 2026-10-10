@@ -64,3 +64,117 @@ because TSan fails at the stack switch for migrating DRuntime Fibers; see
 from the repository README and runs it with LDC and DMD in debug and release.
 Other README D blocks are fragments and are rejected by the extractor unless
 they say so. The repository `make check` includes that target.
+
+## Conway's Game of Life
+
+[life/backend.d](life/backend.d) demonstrates private-actor waves with one actor
+per cell on a toroidal board: the eight neighbour positions wrap at both edges.
+[life/headless.d](life/headless.d) checks exact blinkers, blocks, wrapped gliders,
+a seeded board against a single-threaded reference, and cancellation/restart.
+These tests run in the examples lane with 0 and 2 workers on LDC/DMD in debug
+and release, and on LDC with TSan. The backend uses only D and stays portable.
+
+The application owns two projection buffers. In generation g, all cell actors
+read buffer g%2 and each writes only its own slot of buffer (g+1)%2. The root
+calls `start!stepCell`, returns `waitChildren`, swaps buffers on resumption, and
+starts the next wave. The ordering chain is callback writes → Shc/Tprogress
+join → wave credits → root `waitChildren` resume → next start/publication →
+next wave's reads. The [private ordering proof](../docs/design/private-actor-ordering.md#root-child-join-ordering)
+explains those edges; no extra fences or runtime API are needed. The read buffer
+must never be written during a wave, and both buffers must outlive the cohort.
+
+`Life.step(n)` runs synchronously. `begin(n)` and `progress()` let the UI pump
+asynchronously. Each request creates one W×H cohort and runs n waves; the
+cohort is disposed when its tracked root finishes. The simulator reuses its
+Farm, root park, and buffers across requests. `current` is a read-only view
+available after drain; do not retain/read a view across another request, since
+the double buffer is reused. UI edits and rendering occur only between drained
+requests. The generation count and accumulated request timing expose gen/s and
+cells/s (including cohort creation and collection, excluding UI idle time).
+Clear/randomize reset the generation count and timing.
+
+### Terminal app (POSIX only)
+
+The [terminal front end](life/tui.d) links the vendored
+[termbox2 v2.5.0](../third_party/termbox2/README.md) through a small C shim and
+minimal D bindings. It requires a C compiler and a POSIX terminal; it is not
+built on Windows. The examples lane builds it with both D compilers in debug
+and release, but never runs it without a tty.
+
+From the repository root:
+
+```text
+make -C examples life
+ANTFARM_HUGE_PAGES=0 examples/.build/life 2
+
+# Use DMD instead of LDC:
+make -C examples life DC=dmd
+
+# Portable headless tests (also usable on Windows):
+dmd -g -i -I. -Iexamples examples/life/headless.d -of=life_headless
+ANTFARM_HUGE_PAGES=0 ./life_headless 0
+ANTFARM_HUGE_PAGES=0 ./life_headless 2
+```
+
+The optional argument is the worker count (default 2). Zero consumes on the UI
+thread. Live cells appear as `#`; the cursor marks the editing position. The
+status shows generation, measured gen/s, cells/s, worker count, pause state and
+target speed. Target speed is capped by actual simulation/rendering throughput.
+
+| Key | Action |
+| --- | --- |
+| Space | Pause/resume |
+| n | Pause and advance one generation |
+| r | Randomize |
+| c | Clear |
+| g | Insert a glider with its top-left corner at the cursor (wraps) |
+| Arrow keys | Move the cursor, wrapping at board edges |
+| Enter | Toggle the cell at the cursor |
+| + / - | Raise/lower target generations/s (1–240) |
+| q / Ctrl-C | Cancel the current request, drain and quit |
+
+The board uses the terminal dimensions at startup, with two rows reserved for
+status/help. Resizing clips/reveals the existing board without changing its
+simulation dimensions; restart to use a different board size. Edits received
+while a wave runs are queued until drain. The UI requests one generation at a
+time to keep input responsive; each request therefore pays cohort allocation
+cost. Quit uses the tracked root's cooperative `requestCancel`; an incomplete
+cancelled wave is discarded rather than promoted to the current projection.
+
+Shutdown follows the [lifecycle recipe](../docs/reference/actor-lifecycle.md#shutdown-order):
+pump, run consumers and take outcomes until drained; join/unsubscribe consumers;
+destroy the root park; unregister the producer; destroy the Farm. The simulator
+keeps its buffers alive throughout. The terminal is restored on normal exit and
+D exceptions. Runtime `fatal` aborts and externally forced termination cannot
+run D scope cleanup; if needed, recover the terminal with `stty sane` / `reset`.
+
+Per-cell actors make runtime overhead dominate this workload. Tiling would be
+the realistic design for throughput; this sample deliberately illustrates
+per-cell actors and wave joins.
+
+### Short headless timing sample
+
+Local Linux x86-64 sample with LDC 1.43.0 (DMD 2.113.0 / LLVM 22.1.8),
+`-O2 -release`, ordinary pages, seed 123456, 256×256 cells and 200 generations
+per request. Nine fresh-process runs per worker count, interleaved 0/2/6 on an
+unpinned, noisy host; focused checks were also compiling during measurement.
+Timing includes cohort creation, the waves and terminal root collection, but
+excludes Farm/worker startup and randomization. Standard deviation is the sample
+standard deviation across those nine runs. These are observations, not a
+performance gate or a comparison with a tiled implementation.
+
+| Workers | Gen/s median | Gen/s min–max | Gen/s stddev | Cells/s median | Cells/s min–max | Cells/s stddev |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1,631.3 | 1,548.9–1,681.4 | 40.2 | 106.91 M | 101.51–110.19 M | 2.63 M |
+| 2 | 2,707.4 | 2,588.0–2,841.3 | 75.2 | 177.43 M | 169.61–186.21 M | 4.93 M |
+| 6 | 4,079.4 | 3,317.7–4,301.2 | 282.8 | 267.35 M | 217.43–281.88 M | 18.54 M |
+
+Reproduce one run from the repository root:
+
+```text
+ldc2 -O2 -release -i -I. -Iexamples examples/life/headless.d -of=examples/.build/life_bench
+ANTFARM_HUGE_PAGES=0 examples/.build/life_bench 2 --bench 256 256 200
+```
+
+The terminal app uses one generation per request, so its repeated cohort
+allocation and rendering costs differ from these 200-generation batches.

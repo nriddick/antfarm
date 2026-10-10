@@ -96,6 +96,16 @@ A result must not refer to a resource its member's destructor releases. To
 transfer ownership, clear the owning field in `T` before returning the pointer
 as `R`. Result slots outlive member retirement and die with the cohort.
 
+## Peers' previous-wave projections
+
+The [Conway's Game of Life sample](../../examples/README.md#conways-game-of-life)
+is a worked example of application-owned double buffering: one private actor
+per cell reads the previous generation's neighbours and writes its own next
+projection slot. A root joins with `waitChildren` before swapping buffers and
+starting the next wave. The buffers outlive every cohort, and the application
+reads/edits them only after the tracked root drains. See the sample for the
+join-to-next-publication ordering argument and the POSIX terminal front end.
+
 ## Pipelined tree reduction
 
 A child-level parent launches grandchildren in wave g and folds their results
