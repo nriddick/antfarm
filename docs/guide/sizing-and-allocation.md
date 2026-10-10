@@ -138,7 +138,11 @@ includes every child table while the cohort's batch limit is 32 or less, as well
 as a small final partial table under a larger limit. Child waves take no
 cost-hint argument, so a caller whose child callbacks are too expensive for one
 claim should keep the child batch limit at least the small-table threshold so
-tables shard across consumers.
+tables shard across consumers. Longer child claims were measured on the uniform
+layout and left as an opportunity, not the default; see
+[Defaults on uniform tables](../../PERFORMANCE.md#defaults-on-uniform-tables),
+which also records the public flush and wave claim, the root batch limit and the
+quota and threshold defaults with their overrides.
 
 The Farm producer tier bounds actual admission. Its default small quota is 4096
 ulongs; that admits a little under 4096 one-word private entries in one table,
