@@ -49,6 +49,13 @@ are not promised yet.
   admission or retirement.
 - Long-running resident-memory characterization and Windows static/shared link
   coverage for the mimalloc adapter.
+- Early validation of the child-wave `avgCost` at `start`/`startFinal`/
+  `startSubset`. It is diagnostics only: `chunkOf` clamps the class and
+  `writeImpl` already fails fatally on an out-of-range value, except for a
+  wave truncated before its first table, which reports nothing. It was
+  deferred past rc.1 to keep the runtime identical to the hardened candidate.
+  The patch and its death tests are on the local branch
+  `followup/early-avgcost-check`.
 
 ## Post-RC platform and validation work
 
