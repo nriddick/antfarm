@@ -64,15 +64,15 @@ struct Topo
     uint avgCost = avgCostForChunk(32);
 }
 
-ushort[] pickLps(bool skipSmt, size_t workers)
+ProcessorId[] pickLps(bool skipSmt, size_t workers)
 {
     auto snap = CacheAwarePool.topology();
-    ushort[] lps;
+    ProcessorId[] lps;
     foreach (ref lp; snap.processors)
     {
         if (!snap.isEligible(lp)) continue;
         if (skipSmt && lp.smtSibling) continue;
-        lps ~= lp.lpIndex;
+        lps ~= ProcessorId.of(lp);
         if (workers != 0 && lps.length == workers) break;
     }
     return lps;
@@ -91,7 +91,7 @@ void waitUntil(bool delegate() done, string what)
 
 /// One FiberLane on this host's LLC map, `lps.length` pinned workers.
 /// Returns warm fiber drain /s and payload drain /s.
-Rate[2] runMtTopo(size_t n, Topo topo, ushort[] lps)
+Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
 {
     enum ln = 1 << 22;
     enum k = 8;
@@ -107,7 +107,7 @@ Rate[2] runMtTopo(size_t n, Topo topo, ushort[] lps)
 
     PoolOptions options;
     options.skipSmtSiblings = topo.skipSmt;
-    options.onlyLps = lps;
+    options.processors = lps;
     options.managedWorker = fiberWorkerHooks();
     auto pool = new CacheAwarePool(options);
     installFiberLanes([lane], pool);

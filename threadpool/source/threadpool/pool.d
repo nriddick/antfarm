@@ -6,6 +6,8 @@ import core.time : Duration, MonoTime, msecs;
 import std.exception : enforce;
 
 import threadpool.hybrid;
+import threadpool.pin : PinOutcome;
+import threadpool.resolution;
 import threadpool.stats;
 import threadpool.topology;
 import threadpool.worker;
@@ -24,13 +26,6 @@ else version (linux)
     import threadpool.sys.linux_wait;
 }
 
-enum PinScope : ubyte
-{
-    logicalProcessor,
-    l2Cluster,
-    llc,
-}
-
 /// Best-effort wake grid for idle workers. Late workers pull by default.
 struct Cadence
 {
@@ -45,13 +40,12 @@ struct PoolOptions
     bool enableECores    = true;
     bool highQosOnP      = true;
     bool ecoQosOnE       = true;
-    PinScope pinScope    = PinScope.logicalProcessor;
     uint pSpinIters      = 128;
     uint eSpinIters      = 16;
-    /// Match `lpIndex` in any group. Ignored when `onlyProcessors` is set.
-    const(ushort)[] onlyLps;
-    /// Match `(group, lp)`. Wins over `onlyLps` when non-empty.
-    const(ProcessorId)[] onlyProcessors;
+    /// Exact CPUs to consider, group-qualified. Empty = no CPU-list filter.
+    /// Build with `parseCpuList("0-7,16-23")` or topology helpers. Duplicates
+    /// collapse to one worker; `resolve().requests` reports them.
+    const(ProcessorId)[] processors;
     /// Called on the pinned worker. `true` = more work, `false` = idle.
     WorkerBody workerBody;
     /// Optional; called once on each pinned worker after its `workerBody`
@@ -357,6 +351,7 @@ final class CacheAwarePool
     private bool directorHeld;
     private uint driftSeq;
     private Throwable[] failures;
+    private PoolResolution lastResolution;
 
     this(PoolOptions options = PoolOptions.init)
     {
@@ -369,6 +364,23 @@ final class CacheAwarePool
         return discover();
     }
 
+    /// Preview: the resolution `start()` will use, without starting anything.
+    /// Discovers topology on first use (a setup operation).
+    PoolResolution resolve() const
+    {
+        auto snap = discover();
+        auto scope_ = osScopeOf(snap);
+        return resolvePool(snap, scope_, options);
+    }
+
+    /// After `start`: the resolution including each worker's `StartState` and
+    /// `PinOutcome`. After a failed start or a shutdown: the last attempt's
+    /// resolution. Null before the first `start`.
+    @property const(PoolResolution) resolution() const
+    {
+        return lastResolution;
+    }
+
     /// Not thread-safe vs another `start` / `shutdown`. One live pool.
     /// Call after registry setup (`install` / `setLabel` / `installExchange`).
     void start()
@@ -376,8 +388,6 @@ final class CacheAwarePool
         version (ThreadpoolOs)
         {
             enforce(atomicLoad(gRunning) == 0, "threadpool: a pool is already running");
-            enforce(options.pinScope == PinScope.logicalProcessor,
-                "threadpool: v1 only implements PinScope.logicalProcessor");
             enforce((options.workerBody is null && options.workerStop is null)
                     || options.managedWorker.pump is null,
                 "threadpool: workerBody/workerStop and managedWorker are mutually exclusive");
@@ -385,13 +395,13 @@ final class CacheAwarePool
                     || options.managedWorker.pump !is null,
                 "threadpool: managedWorker start/stop require a pump");
 
-            discover();
+            auto res = resolve();
+            lastResolution = res;
             snap = cachedSnapshot();
             enforce(snap !is null, "threadpool: topology not discovered");
-            auto selected = selectLps(*snap, options);
-            enforce(selected.length > 0, "threadpool: no logical processors selected");
-            enforce(selected.length <= snap.logicalProcessorCount,
-                "threadpool: worker count exceeds logical processors");
+            auto selected = res.workers;
+            enforce(selected.length > 0,
+                "threadpool: no logical processors selected; " ~ res.summary());
 
             ushort classCount = snap.classCount;
             if (classCount == 0) classCount = 1;
@@ -402,6 +412,7 @@ final class CacheAwarePool
             gManagedWorkerHooks = options.managedWorker;
             failures = null;
             gWorkers = new WorkerRec[](selected.length);
+            gPinOutcome = new PinOutcome[](selected.length);
             createWaitSlots(cast(uint) selected.length);
             resetWorkerHandshake();
             directorHeld = false;
@@ -410,8 +421,9 @@ final class CacheAwarePool
             gLivePool = this;
             try
             {
-                foreach (i, ref lp; selected)
+                foreach (i, id; selected)
                 {
+                    auto lp = snap.byId(id);
                     auto tc = tableClassIndex(lp.efficiencyClass, snap.maxEfficiencyClass, classCount);
                     auto isP = (classCount <= 1) || (tc == classP);
                     WorkerSelf self;
@@ -447,8 +459,10 @@ final class CacheAwarePool
                 while (atomicLoad(gPinDone) < cast(int) threads.length)
                     Thread.sleep(msecs(1));
 
+                lastResolution = res.withStart(gPinOutcome);
                 if (atomicLoad(gPinOk) != cast(int) threads.length)
-                    throw new Exception("threadpool: failed to pin one or more workers");
+                    throw new Exception("threadpool: failed to pin worker(s) "
+                        ~ lastResolution.pinFailures() ~ "; " ~ lastResolution.summary());
                 releaseWorkers();
             }
             catch (Exception e)
@@ -547,24 +561,9 @@ final class CacheAwarePool
         directorHeld = false;
     }
 
-    @property ushort llcCount() const @nogc nothrow
-    {
-        auto s = cachedSnapshot();
-        return s is null ? 0 : s.llcCount;
-    }
-
     @property ushort workerCount() const @nogc nothrow
     {
         return cast(ushort) threads.length;
-    }
-
-    const(LlcDomain) llc(ushort llcIndex) const
-    {
-        auto s = cachedSnapshot();
-        enforce(s !is null, "threadpool: topology not discovered");
-        auto d = s.domain(llcIndex);
-        enforce(d !is null, "threadpool: llcIndex out of range");
-        return *d;
     }
 
     const(LogicalProcessor)* currentThreadMapping() const @nogc nothrow
@@ -631,41 +630,11 @@ private:
     }
 }
 
-private LogicalProcessor[] selectLps(ref const(TopologySnapshot) snap, ref const PoolOptions opt)
+version (unittest)
+private PoolResolution resolveTest(ref const TopologySnapshot snap, PoolOptions opt)
 {
-    LogicalProcessor[] selected;
-    foreach (ref lp; snap.processors)
-    {
-        if (lp.affinityExcluded) continue;
-        if (opt.onlyProcessors.length)
-        {
-            bool wanted;
-            foreach (v; opt.onlyProcessors)
-                if (v.group == lp.group && v.lp == lp.lpIndex) { wanted = true; break; }
-            if (!wanted) continue;
-        }
-        else if (opt.onlyLps.length)
-        {
-            bool wanted;
-            foreach (v; opt.onlyLps)
-                if (v == lp.lpIndex) { wanted = true; break; }
-            if (!wanted) continue;
-        }
-        auto tc = tableClassIndex(lp.efficiencyClass, snap.maxEfficiencyClass, snap.classCount);
-        if (snap.classCount <= 1)
-        {
-            if (!opt.enablePCores) continue;
-        }
-        else
-        {
-            if (tc == classP && !opt.enablePCores) continue;
-            if (tc == classE && !opt.enableECores) continue;
-        }
-        if (opt.skipSmtSiblings && lp.smtSibling) continue;
-        if (lp.offlineAtDiscovery) continue;
-        selected ~= lp;
-    }
-    return selected;
+    auto scope_ = osScopeOf(snap);
+    return resolvePool(snap, scope_, opt);
 }
 
 unittest
@@ -680,28 +649,16 @@ unittest
     snap.processors = [a, b, c];
 
     PoolOptions all;
-    auto got = selectLps(snap, all);
-    assert(got.length == 3);
-
-    PoolOptions byLp;
-    byLp.onlyLps = [ushort(0)];
-    got = selectLps(snap, byLp);
-    assert(got.length == 2);
-    assert(got[0].group == 0 && got[0].lpIndex == 0);
-    assert(got[1].group == 1 && got[1].lpIndex == 0);
+    auto got = resolveTest(snap, all);
+    assert(got.workers == [ProcessorId(0, 0), ProcessorId(1, 0), ProcessorId(1, 1)]);
 
     PoolOptions byId;
-    byId.onlyProcessors = [ProcessorId(1, 0)];
-    got = selectLps(snap, byId);
-    assert(got.length == 1);
-    assert(got[0].group == 1 && got[0].lpIndex == 0);
-
-    PoolOptions both;
-    both.onlyLps = [ushort(0)];
-    both.onlyProcessors = [ProcessorId(1, 1)];
-    got = selectLps(snap, both);
-    assert(got.length == 1);
-    assert(got[0].group == 1 && got[0].lpIndex == 1);
+    byId.processors = [ProcessorId(1, 0)];
+    got = resolveTest(snap, byId);
+    assert(got.workers == [ProcessorId(1, 0)]);
+    assert(got[ProcessorId(0, 0)].reasons == Reject.notRequested);
+    assert(got[ProcessorId(1, 1)].reasons == Reject.notRequested);
+    assert(got.requests.length == 1 && got.requests[0].accepted);
 }
 
 unittest
@@ -717,9 +674,11 @@ unittest
     snap.processors = [live, parked, offline];
 
     PoolOptions opt;
-    auto got = selectLps(snap, opt);
-    assert(got.length == 2, "parking is informational; offline is skipped");
-    assert(got[0].lpIndex == 0 && got[1].lpIndex == 1);
+    auto got = resolveTest(snap, opt);
+    assert(got.workers == [ProcessorId(0, 0), ProcessorId(0, 1)],
+        "parking is informational; offline is skipped");
+    assert(got[ProcessorId(0, 1)].osParked && got[ProcessorId(0, 1)].accepted);
+    assert(got[ProcessorId(0, 2)].reasons == Reject.offline);
 }
 
 unittest
@@ -733,14 +692,19 @@ unittest
     snap.processors = [allowed, excluded];
 
     PoolOptions opt;
-    assert(selectLps(snap, opt).length == 1);
-    opt.onlyLps = [ushort(1)];
-    assert(selectLps(snap, opt).length == 0);
-    opt.onlyProcessors = [ProcessorId(0, 1)];
-    assert(selectLps(snap, opt).length == 0);
-    opt.onlyProcessors = [ProcessorId(0, 0), ProcessorId(0, 1)];
-    auto selected = selectLps(snap, opt);
-    assert(selected.length == 1 && selected[0].lpIndex == 0);
+    auto res = resolveTest(snap, opt);
+    assert(res.workers == [ProcessorId(0, 0)]);
+    assert(res[ProcessorId(0, 1)].reasons == Reject.osExcluded);
+    opt.processors = [ProcessorId(0, 1)];
+    res = resolveTest(snap, opt);
+    assert(res.workers.length == 0);
+    assert(res[ProcessorId(0, 0)].reasons == Reject.notRequested);
+    assert(res[ProcessorId(0, 1)].reasons == Reject.osExcluded,
+        "an explicitly listed CPU outside the OS scope stays excluded");
+    opt.processors = [ProcessorId(0, 0), ProcessorId(0, 1)];
+    res = resolveTest(snap, opt);
+    assert(res.workers == [ProcessorId(0, 0)]);
+    assert(res.requests[0].accepted && res.requests[1].known && !res.requests[1].accepted);
 }
 
 shared int gDirTicks;
@@ -756,11 +720,16 @@ unittest
     atomicStore(gDirTicks, 0);
     PoolOptions opt;
     opt.workerBody = &directorTestBody;
-    opt.onlyLps = [ushort(0)];
+    opt.processors = [ProcessorId(0, 0)];
     auto pool = new CacheAwarePool(opt);
+    assert(pool.resolution is null);
+    auto preview = pool.resolve();
     pool.start();
     scope (exit) pool.shutdown();
     assert(pool.workerCount >= 1);
+    assert(pool.resolution.started);
+    assert(pool.resolution.sameSelection(preview));
+    assert(pool.resolution[ProcessorId(0, 0)].start == StartState.pinned);
 
     auto d = pool.director();
     d.spin(8);
@@ -828,7 +797,7 @@ unittest
     atomicStore(gManagedPumps, 0);
     atomicStore(gManagedStops, 0);
     PoolOptions opt;
-    opt.onlyLps = [ushort(0)];
+    opt.processors = [ProcessorId(0, 0)];
     opt.managedWorker = ManagedWorkerHooks(
         &managedTestStart, &managedTestPump, &managedTestStop);
     auto pool = new CacheAwarePool(opt);

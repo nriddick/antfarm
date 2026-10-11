@@ -66,7 +66,7 @@ void runRace(bool managed, int boundary, bool stopRace = false,
     auto topology = CacheAwarePool.topology();
     auto lp = topology.processors[0];
     PoolOptions options;
-    options.onlyProcessors = [ProcessorId(lp.group, lp.lpIndex)];
+    options.processors = [ProcessorId(lp.group, lp.lpIndex)];
     if (managed) options.managedWorker = ManagedWorkerHooks(null, &managedPump, &stopped);
     else options.workerBody = &pump;
     auto pool = new CacheAwarePool(options);

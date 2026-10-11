@@ -1680,7 +1680,7 @@ void threadpoolSmoke()
     shared int ran;
     shared int observedLlc = -1;
     PoolOptions options;
-    options.onlyProcessors = [ProcessorId(selectedGroup, selectedLp)];
+    options.processors = [ProcessorId(selectedGroup, selectedLp)];
     options.managedWorker = fiberWorkerHooks();
     auto pool = new CacheAwarePool(options);
     installFiberLanes(lanes, pool);

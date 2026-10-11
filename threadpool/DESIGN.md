@@ -90,17 +90,43 @@ lifetime.
 
 `PoolOptions` filters the topology before start:
 
-- `onlyProcessors` selects exact `(group, lp)` identities;
-- otherwise `onlyLps` selects matching in-group LP numbers;
+- `processors` selects exact `(group, lp)` identities; build them with
+  `parseCpuList` or the topology helpers;
 - `enablePCores` and `enableECores` select classes;
-- `skipSmtSiblings` keeps the first LP of each physical core;
-- `pinScope` is currently required to be `logicalProcessor`.
+- `skipSmtSiblings` keeps the first LP of each physical core.
 
-The exact processor list wins over the shorthand LP list. Both platforms omit
-processors marked `affinityExcluded` by discovery, even when explicitly listed
-in the options. Windows OS parking alone does not exclude a worker; Linux also
-omits offline (`offlineAtDiscovery`) processors. The physical topology counts
-remain unchanged.
+Both platforms omit processors marked `affinityExcluded` by discovery, even
+when explicitly listed in the options. Windows OS parking alone does not
+exclude a worker; Linux also omits offline (`offlineAtDiscovery`) processors.
+The physical topology counts remain unchanged.
+
+### Resolution and disposition
+
+`resolvePool(snapshot, osScope, options)` is a pure function that produces a
+`PoolResolution`. `CacheAwarePool.resolve()` previews it without starting
+anything; `start()` uses the same function, so the preview equals the
+start-time selection. After `start`, `pool.resolution` adds each worker's
+`StartState` and `PinOutcome`; after a failed start or a shutdown it keeps the
+last attempt's report.
+
+The report covers everything that was considered:
+
+- `cpus`: every known CPU in snapshot order, with the union of every `Reject`
+  reason that applies (`osExcluded`, `offline`, `notRequested`,
+  `classDisabled`, `smtSecondary`) rather than the first one;
+- `requests`: one `RequestDisposition` per `processors` entry in request
+  order, marking unknown ids and duplicates (a duplicate never adds a worker);
+- `groups`: one `GroupDisposition` per physical group with physical,
+  eligible, accepted and started counts, and the reasons common to every
+  member of a group that has no workers;
+- `workers`: the accepted CPUs; the index is the `workerIndex`.
+
+Filtering is silent at start by design. `enforceRequested()` is the opt-in
+contract check: it throws `ResolutionException` naming every unknown, rejected
+(with reasons) or duplicate request. `toString` prints a group table and every
+CPU; `summary()` is one line and is included in start-failure messages.
+`acceptedCpus`, `rejectedCpus`, `acceptedGroups`, `rejectedGroups`,
+`unknownRequests` and `workersIn(llc)` separate the report for callers.
 
 Windows pinning checks the current single-group process mask before applying
 thread group affinity, which can otherwise widen a thread's allowed CPUs.
@@ -110,7 +136,8 @@ retain the existing unrestricted discovery behavior when no single mask can
 describe their affinity; this path still needs hardware validation.
 
 Start fails if no processor is selected, another pool is already live, or any
-worker cannot be pinned. The implementation does not silently continue with a
+worker cannot be pinned. The first message includes `summary()`; the pin
+message names each failing `g:lp` with its `PinOutcome`. The implementation does not silently continue with a
 migrating worker. Windows applies CPU-set affinity and optional performance or
 EcoQoS policy. Linux uses scheduler affinity and its native wait backend.
 
@@ -235,6 +262,9 @@ Two layouts are supported:
 - `BinAxis.llcAndClass`: one object per `(LLC, dense class)` pair.
 
 Workers call `home!T()` to find the slot for their pinned LLC and class.
+`home!T` is valid only on pool-managed threads and returns null elsewhere. It
+names the group the worker was assigned at start, not the CPU the thread is
+running on now: it does not follow re-pinning or OS migration.
 Control or producer threads call `at!T(llc, class)` for direct addressing.
 `search!T(label)` searches labeled slots in the current worker's NUMA-local LLC
 neighborhood; off a pool worker it searches the complete installed table.

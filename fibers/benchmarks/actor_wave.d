@@ -285,10 +285,10 @@ private final class TwoFiberRun
     }
 }
 
-private ushort[] pickWorkerLps(size_t maximum, bool includeSmt)
+private ProcessorId[] pickWorkerLps(size_t maximum, bool includeSmt)
 {
     auto topology = CacheAwarePool.topology();
-    ushort[] result;
+    ProcessorId[] result;
     immutable passes = includeSmt ? 2 : 1;
     foreach (pass; 0 .. passes)
     {
@@ -296,7 +296,7 @@ private ushort[] pickWorkerLps(size_t maximum, bool includeSmt)
         {
             if (!topology.isEligible(processor)) continue;
             if (processor.smtSibling != (pass == 1)) continue;
-            result ~= processor.lpIndex;
+            result ~= ProcessorId.of(processor);
             if (maximum != 0 && result.length == maximum)
                 return result;
         }
@@ -304,13 +304,13 @@ private ushort[] pickWorkerLps(size_t maximum, bool includeSmt)
     return result;
 }
 
-private size_t countSmtWorkers(scope const(ushort)[] workerLps)
+private size_t countSmtWorkers(scope const(ProcessorId)[] workerLps)
 {
     auto topology = CacheAwarePool.topology();
     size_t result;
-    foreach (lp; workerLps)
+    foreach (id; workerLps)
     {
-        auto processor = topology.byLp(0, lp);
+        auto processor = topology.byId(id);
         if (processor !is null && processor.smtSibling) ++result;
     }
     return result;
@@ -378,7 +378,7 @@ private struct SweepResult
 }
 
 private SweepResult runBenchmark(BenchmarkConfig config,
-        ushort[] workerLps)
+        ProcessorId[] workerLps)
 {
     immutable actorsPerSet = config.actorsPerSet;
     immutable measuredGenerations = config.measuredGenerations;
@@ -435,7 +435,7 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     lane.flushBatch = 32;
     lane.avgCost = avgCostForChunk(8);
     PoolOptions options;
-    options.onlyLps = workerLps;
+    options.processors = workerLps;
     options.managedWorker = fiberWorkerHooks();
     auto pool = new CacheAwarePool(options);
     installFiberLanes([lane], pool);
@@ -452,7 +452,7 @@ private SweepResult runBenchmark(BenchmarkConfig config,
         actorsPerSet, measuredGenerations, warmupGenerations);
     immutable smtWorkers = countSmtWorkers(workerLps);
     writefln("workers=%s smt-workers=%s worker-lps=%s avgCost=%s ring=%s MiB hugePages=%s state=%s bytes/actor",
-        workerLps.length, smtWorkers, workerLps, avgCost, ringMiB,
+        workerLps.length, smtWorkers, formatCpuList(workerLps), avgCost, ringMiB,
         farm.usedLargePages, ProjectionActor.sizeof);
 
     atomicStore!(MemoryOrder.raw)(publishedGeneration.value, 0UL);

@@ -18,6 +18,12 @@ release entry at merge.
 - `LogicalProcessor.offlineAtDiscovery` reports Linux offline CPUs.
   `TopologySnapshot` gains `byId`, `isEligible`, `processorsInLlc`,
   `eligibleProcessorsInLlc`, `eligibleLlcCount` and `processorsOfClass`.
+- `threadpool.resolution`: `resolvePool` and `PoolResolution` report every
+  known CPU (`Reject` reason union), every requested id (unknown, accepted,
+  duplicate) and every physical group (physical/eligible/accepted/started
+  counts). `CacheAwarePool.resolve()` previews start; `pool.resolution` keeps
+  the start result with each worker's `StartState` and `PinOutcome`.
+  `enforceRequested()` is the opt-in exact-request check.
 
 ### Breaking changes
 
@@ -33,6 +39,18 @@ release entry at merge.
   CPUs set `offlineAtDiscovery`, and OS-scope exclusion no longer sets the
   parked flag on either OS. Replace `version (linux) if (p.parkedAtDiscovery)
   continue;` with `if (!snapshot.isEligible(p)) continue;`.
+- X5: `PoolOptions.onlyLps` is removed and `onlyProcessors` is renamed
+  `processors`. Use `opt.processors = parseCpuList("0-7")` or a topology
+  helper; ids are group-qualified, so an LP number never matches in another
+  group. Duplicates collapse to one worker and are reported.
+- X6: `PinScope` and `PoolOptions.pinScope` are removed; only
+  `logicalProcessor` pinning ever existed. Delete the assignment.
+- X7: `CacheAwarePool.llcCount` and `CacheAwarePool.llc(i)` are removed. Use
+  `pool.resolution.physicalGroupCount` / `acceptedGroupCount` or
+  `CacheAwarePool.topology().llcDomains[i]`.
+- X8: start-failure messages changed text (types unchanged): an empty
+  selection carries `summary()`, a pin failure names each `g:lp` and its
+  `PinOutcome`.
 
 ## 1.8.0-rc.2
 

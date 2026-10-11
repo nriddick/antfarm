@@ -20,7 +20,7 @@ configuration "library" {
 configuration "unittest" {
 	targetType "executable"
 	mainSourceFile "tests/unittest_main.d"
-	sourceFiles "tests/topology_parse.d" "tests/linux_topology_parse.d"
+	sourceFiles "tests/topology_parse.d" "tests/linux_topology_parse.d" "tests/resolution.d"
 	stringImportPaths "tests"
 }
 

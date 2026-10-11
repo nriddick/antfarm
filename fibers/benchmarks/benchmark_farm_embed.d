@@ -39,31 +39,26 @@ final class PoolCons
     bool subscribed;
 }
 
-ushort[] pickLps(bool skipSmt, size_t workers)
+ProcessorId[] pickLps(bool skipSmt, size_t workers)
 {
     auto snap = CacheAwarePool.topology();
-    ushort[] lps;
+    ProcessorId[] lps;
     foreach (ref lp; snap.processors)
     {
         if (!snap.isEligible(lp)) continue;
         if (skipSmt && lp.smtSibling) continue;
-        lps ~= lp.lpIndex;
+        lps ~= ProcessorId.of(lp);
         if (workers != 0 && lps.length == workers) break;
     }
     return lps;
 }
 
-LogicalProcessor[] lpsToProcs(ushort[] lps)
+LogicalProcessor[] lpsToProcs(ProcessorId[] lps)
 {
     auto snap = CacheAwarePool.topology();
     LogicalProcessor[] outp;
     foreach (id; lps)
-        foreach (ref lp; snap.processors)
-            if (lp.lpIndex == id)
-            {
-                outp ~= lp;
-                break;
-            }
+        outp ~= *snap.byId(id);
     return outp;
 }
 
@@ -188,7 +183,7 @@ final class SpinWorker : Thread
     }
 }
 
-double runFarmSpin(size_t n, uint avgCost, ushort[] lps)
+double runFarmSpin(size_t n, uint avgCost, ProcessorId[] lps)
 {
     auto procs = lpsToProcs(lps);
     auto farm = makeFarm(cast(uint) procs.length);
@@ -247,7 +242,7 @@ void poolStop(WorkerSelf* w)
     w.context = null;
 }
 
-double runPool(size_t n, uint avgCost, ushort[] lps, bool spin)
+double runPool(size_t n, uint avgCost, ProcessorId[] lps, bool spin)
 {
     auto farm = makeFarm(cast(uint) lps.length);
     scope (exit) farm.destroy();
@@ -255,7 +250,7 @@ double runPool(size_t n, uint avgCost, ushort[] lps, bool spin)
     gPoolSpin = spin;
     atomicStore(gHits, 0);
     PoolOptions opt;
-    opt.onlyLps = lps;
+    opt.processors = lps;
     opt.managedWorker = ManagedWorkerHooks(&poolStart, &poolPump, &poolStop);
     auto pool = new CacheAwarePool(opt);
     pool.start();
@@ -264,7 +259,7 @@ double runPool(size_t n, uint avgCost, ushort[] lps, bool spin)
     return produceWait(farm, n, avgCost, pool);
 }
 
-double runFiberPump(size_t n, uint avgCost, ushort[] lps)
+double runFiberPump(size_t n, uint avgCost, ProcessorId[] lps)
 {
     auto farm = makeFarm(cast(uint) lps.length);
     scope (exit) farm.destroy();
@@ -272,7 +267,7 @@ double runFiberPump(size_t n, uint avgCost, ushort[] lps)
     lane.flushBatch = 256;
     lane.avgCost = avgCost;
     PoolOptions opt;
-    opt.onlyLps = lps;
+    opt.processors = lps;
     opt.managedWorker = fiberWorkerHooks();
     auto pool = new CacheAwarePool(opt);
     installFiberLanes([lane], pool);

@@ -91,6 +91,22 @@ void main()
 }
 ```
 
+Preview the selection before starting, or inspect it afterwards. Every known
+CPU, requested id and physical group is reported with the reasons it was or
+was not used:
+
+```d
+PoolOptions options;
+options.processors = parseCpuList("0-7,16-23");
+auto pool = new CacheAwarePool(options);
+auto plan = pool.resolve();      // what start() will use
+writeln(plan.summary());         // one line
+writeln(plan);                   // group table and every CPU
+plan.enforceRequested();         // optional: throw on unknown/rejected/duplicate ids
+pool.start();
+assert(pool.resolution.sameSelection(plan));
+```
+
 `shutdown()` stops every worker after its current `pump` call, runs
 `workerStop` once on each worker thread, and joins them. The pool owns no
 queue, so finish or cancel application work before calling it.
@@ -109,7 +125,8 @@ the slot to active and only calls the OS wake primitive if it was armed.
 
 Install one value per LLC before starting the pool. Workers use `home!T()` to
 find the value associated with their pinned processor; producer/control
-threads use `at!T(llcIndex)`.
+threads use `at!T(llcIndex)`. `home!T` returns null off pool threads and names
+the group assigned at start, not the CPU the thread is on now.
 
 ```d
 struct WorkBin

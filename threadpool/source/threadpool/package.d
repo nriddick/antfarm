@@ -13,8 +13,12 @@ public import threadpool.topology : TopologySnapshot, LogicalProcessor, LlcDomai
     PhysicalCore, L2Cluster, CacheInfo, discover, tableClassIndex, classE, classP,
     maxNumaLlcs, fillNumaLlcs, ProcessorId, parseCpuList, formatCpuList,
     CpuListException, GroupingSource;
-public import threadpool.pool : CacheAwarePool, PoolOptions, PinScope,
+public import threadpool.pool : CacheAwarePool, PoolOptions,
     Director, Selection, Cadence;
+public import threadpool.resolution : PoolResolution, resolvePool, Reject,
+    StartState, CpuDisposition, RequestDisposition, GroupDisposition,
+    ResolutionException, OsScope, OsScopeSource;
+public import threadpool.pin : PinOutcome;
 public import threadpool.hybrid : WorkerSelf, currentWorker, bindNumaNeighborhood,
     WorkerBody, WorkerStop, ManagedWorkerHooks, ManagedPumpResult, IdleKind;
 public import threadpool.bins : BinAxis, install, uninstall, setLabel, home, search, at;

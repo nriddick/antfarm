@@ -3,6 +3,7 @@ module threadpool.worker;
 import core.atomic;
 import core.thread;
 import threadpool.hybrid;
+import threadpool.pin : PinOutcome;
 import threadpool.topology;
 
 version (Windows)
@@ -28,6 +29,8 @@ shared int gRunFlag;
 shared int gWorkersGo;
 shared int gPinOk;
 shared int gPinDone;
+/// One slot per worker, written before that worker's `gPinDone` increment.
+__gshared PinOutcome[] gPinOutcome;
 
 struct SpawnSpec
 {
@@ -83,6 +86,7 @@ private void workerMain(SpawnSpec spec)
         bool pinned = pinToLogicalProcessor(pin);
         if (pinned && spec.applyQos)
             applyPowerThrottling(spec.ecoQos);
+        gPinOutcome[spec.self.workerIndex] = pinned ? PinOutcome.pinned : PinOutcome.osRejected;
         if (pinned)
             atomicFetchAdd(gPinOk, 1);
         atomicFetchAdd(gPinDone, 1);

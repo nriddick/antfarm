@@ -7,6 +7,15 @@ struct PinTarget
     ushort lpIndex;
 }
 
+/// Result of pinning a thread to one processor.
+enum PinOutcome : ubyte
+{
+    pinned,           /// the thread now runs only on the processor
+    unknownProcessor, /// the id names no discovered processor
+    outsideOsScope,   /// the processor is outside the frozen OS scope
+    osRejected,       /// the OS refused the affinity change
+}
+
 version (Windows)
 {
     import core.sys.windows.basetsd : ULONG_PTR;

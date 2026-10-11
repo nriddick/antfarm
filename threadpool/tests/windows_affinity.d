@@ -91,11 +91,8 @@ void main(string[] args)
     {
         enforce(!pinToLogicalProcessor(PinTarget(excluded.cpuSetId, excluded.group, excluded.lpIndex)),
             "direct pin widened process affinity");
-        options.onlyLps = allowed ~ excluded.lpIndex;
-        checkPool(options, mask, allowed.length);
-        options.onlyLps = [excluded.lpIndex];
-        foreach (lp; allowed) options.onlyProcessors ~= ProcessorId(groups[0], lp);
-        options.onlyProcessors ~= ProcessorId(excluded.group, excluded.lpIndex);
+        foreach (lp; allowed) options.processors ~= ProcessorId(groups[0], lp);
+        options.processors ~= ProcessorId(excluded.group, excluded.lpIndex);
         checkPool(options, mask, allowed.length);
     }
 
