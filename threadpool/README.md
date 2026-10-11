@@ -122,7 +122,8 @@ queue, so finish or cancel application work before calling it.
 The default policy after `start()` is `wait`. One owner thread controls the
 Director and may select workers by LLC, P/E class, or application label before
 choosing `spin`, `wait`, `sleep`, `sleepUntil`, or `cadence`. Other producer
-threads use `pool.wakeAll()` rather than acquiring Director ownership.
+threads use `pool.wakeAll()`, or `pool.wakeLlc(g)` for the workers assigned
+to one physical group, rather than acquiring Director ownership.
 
 After an idle result, a worker arms its wait slot and pumps again before it
 can sleep. Both worker lanes use this protocol; managed workers use the final
@@ -206,8 +207,8 @@ hooks for Fiber lanes.
 
 - First topology discovery, `install`, labels, pool start/shutdown, and
   Director policy changes require exclusive ownership.
-- `home`, `search`, `at`, exchange lookup, `currentWorker`, and `wakeAll` are
-  safe during the running phase.
+- `home`, `search`, `at`, exchange lookup, `currentWorker`, `wakeAll` and
+  `wakeLlc` are safe during the running phase.
 - Do not uninstall or relabel state while workers can still look it up.
 - Pinning failure is fatal; the pool never silently falls back to migrating
   workers.

@@ -555,6 +555,18 @@ final class CacheAwarePool
         }
     }
 
+    /// Wake every worker assigned to physical group `llc` (does not change
+    /// policy). Safe for producer threads; a group without workers is a no-op.
+    void wakeLlc(ushort llc) @nogc nothrow
+    {
+        version (ThreadpoolOs)
+        {
+            foreach (i, ref r; gWorkers)
+                if (r.llcIndex == llc)
+                    wakeWorker(cast(uint) i);
+        }
+    }
+
     void releaseDirector() @nogc nothrow
     {
         directorHeld = false;
@@ -762,6 +774,55 @@ unittest
         Thread.sleep(msecs(5));
     }
     assert(atomicLoad(gDirTicks) > 0, "worker body never ran");
+}
+
+shared int gLlcWakeTicks;
+shared int gLlcWakeGroup = -1;
+
+extern (D) bool llcWakeTestBody(WorkerSelf* w) @nogc nothrow
+{
+    atomicStore(gLlcWakeGroup, cast(int) w.llcIndex);
+    atomicFetchAdd(gLlcWakeTicks, 1);
+    return false;
+}
+
+unittest
+{
+    atomicStore(gLlcWakeTicks, 0);
+    PoolOptions opt;
+    opt.workerBody = &llcWakeTestBody;
+    opt.processors = [ProcessorId(0, 0)];
+    auto pool = new CacheAwarePool(opt);
+    pool.start();
+    scope (exit) pool.shutdown();
+
+    // Parked: the body ran and its final pre-park check, then nothing moved.
+    int parked()
+    {
+        foreach (_; 0 .. 200)
+        {
+            immutable seen = atomicLoad(gLlcWakeTicks);
+            Thread.sleep(msecs(20));
+            if (seen >= 2 && atomicLoad(gLlcWakeTicks) == seen)
+                return seen;
+        }
+        assert(false, "worker never parked");
+    }
+
+    immutable before = parked();
+    immutable group = cast(ushort) atomicLoad(gLlcWakeGroup);
+    pool.wakeLlc(cast(ushort)(group + 1));
+    Thread.sleep(msecs(20));
+    assert(atomicLoad(gLlcWakeTicks) == before,
+        "wakeLlc woke a worker assigned to another group");
+    pool.wakeLlc(group);
+    foreach (_; 0 .. 200)
+    {
+        if (atomicLoad(gLlcWakeTicks) > before)
+            break;
+        Thread.sleep(msecs(5));
+    }
+    assert(atomicLoad(gLlcWakeTicks) > before, "wakeLlc missed its group's worker");
 }
 
 shared int gManagedStarts;

@@ -7,6 +7,7 @@ import antfarm_fibers;
 import antfarm;
 import core.atomic;
 import service_plan_tests;
+import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
 import threadpool.resolution : PoolResolution;
 import core.thread : Fiber, Thread;
 import core.time : msecs;
@@ -2137,6 +2138,97 @@ void offResponderTimerSmoke(string test, FiberWakePolicy policy)
         test.toStringz, cast(uint) groups[1], slept, cast(uint) groups[0]);
 }
 
+__gshared ManagedWorkerHooks busyLaneFiberHooks;
+__gshared ushort busyLaneIdleGroup;
+shared bool busyLaneCounting;
+shared ulong busyLaneIdlePumps;
+shared ulong busyLaneBusyPumps;
+
+ManagedPumpResult busyLaneCountingPump(WorkerSelf* worker)
+{
+    if (atomicLoad(busyLaneCounting))
+    {
+        if (worker.llcIndex == busyLaneIdleGroup)
+            atomicFetchAdd(busyLaneIdlePumps, 1);
+        else
+            atomicFetchAdd(busyLaneBusyPumps, 1);
+    }
+    return busyLaneFiberHooks.pump(worker);
+}
+
+/// One run of W1's workload under `policy`: one shared domain, one worker
+/// and one lane per group, no edges, default responders (389's layout), and
+/// only the first lane loaded. Returns the idle group's pumps.
+ulong busyLanePumps(const PoolResolution full, FiberWakePolicy policy,
+                    out ulong busyPumps)
+{
+    import threadpool;
+
+    enum tasks = 64;
+    enum yields = 2_000;
+    immutable groups = firstTwoGroups(full);
+    busyLaneFiberHooks = fiberWorkerHooks();
+    busyLaneIdleGroup = groups[1];
+    PoolOptions options;
+    options.processors = [full.workersIn(groups[0])[0], full.workersIn(groups[1])[0]];
+    options.managedWorker = ManagedWorkerHooks(busyLaneFiberHooks.start,
+        &busyLaneCountingPump, busyLaneFiberHooks.stop);
+    auto pool = new CacheAwarePool(options);
+    auto plan = new FiberServicePlan(pool.resolve());
+    auto domain = new FiberDomain;
+    AntFarm*[] farms;
+    FiberLane[] lanes;
+    scope (exit) foreach (farm; farms) farm.destroy();
+    foreach (group; groups)
+    {
+        farms ~= farmFor(plan, group);
+        lanes ~= new FiberLane(domain, farms[$ - 1]);
+        lanes[$ - 1].wakePolicy = policy;
+        plan.bind(group, lanes[$ - 1]);
+    }
+    installFiberPlan(plan, pool);
+    scope (exit) uninstallFiberPlan();
+    pool.start();
+    assert(waitOpen(lanes));
+    // Startup pumps spin until finalization; count only the loaded phase.
+    atomicStore(busyLaneIdlePumps, 0UL);
+    atomicStore(busyLaneBusyPumps, 0UL);
+    atomicStore(busyLaneCounting, true);
+    FiberTask[] spawned;
+    foreach (_; 0 .. tasks)
+        spawned ~= lanes[0].spawn({
+            foreach (_; 0 .. yields) FiberDomain.yieldReady();
+        });
+    foreach (task; spawned) waitTerminated(task);
+    atomicStore(busyLaneCounting, false);
+    pool.shutdown();
+    assert(pool.workerFailures.length == 0);
+    foreach (task; spawned) assert(task.terminated);
+    assert(domain.drained);
+    domain.releaseAll(domain.takeCompletions());
+    busyPumps = atomicLoad(busyLaneBusyPumps);
+    return atomicLoad(busyLaneIdlePumps);
+}
+
+// W1 (2-LLC): under `servingGroups`, one busy lane does not wake the idle
+// group's worker; `broadcast` is measured alongside for contrast.
+void busyLaneWakeSmoke()
+{
+    import core.stdc.stdio : printf;
+
+    auto full = twoGroupResolution("W1 busy-lane wake isolation");
+    if (full is null) return;
+    ulong broadcastBusy, servingBusy;
+    immutable broadcastIdle = busyLanePumps(full, FiberWakePolicy.broadcast,
+        broadcastBusy);
+    immutable servingIdle = busyLanePumps(full, FiberWakePolicy.servingGroups,
+        servingBusy);
+    printf("W1 busy-lane wake isolation: idle-group pumps %llu servingGroups, "
+        ~ "%llu broadcast (busy-group pumps %llu, %llu)\n",
+        servingIdle, broadcastIdle, servingBusy, broadcastBusy);
+    assert(servingIdle < 64, "servingGroups woke the idle group's worker");
+}
+
 void fiberParitySmoke()
 {
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
@@ -2257,6 +2349,9 @@ void main()
     unstaffedLaneRescueSmoke();
     offResponderTimerSmoke("T1 off-responder timer, broadcast",
         FiberWakePolicy.broadcast);
+    busyLaneWakeSmoke();
+    offResponderTimerSmoke("W2 off-responder timer, servingGroups",
+        FiberWakePolicy.servingGroups);
 
     import core.stdc.stdio : printf;
     printf("fiber smoke passed\n");

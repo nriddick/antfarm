@@ -208,6 +208,13 @@ performance or failover claims.
 The default `FiberWakePolicy.broadcast` wakes the pool for external spawn,
 signal, cancellation, and cancelling shutdown.
 
+`FiberWakePolicy.servingGroups` (opt-in) wakes only the physical groups that
+serve the lane: its own group and its `rescue`/`assist` server groups. A fiber
+that arms a new earliest timer on a worker which is not a responder of its
+domain also wakes the groups hosting the domain's native lanes, so timers still
+reach a responder. With one busy lane on a shared domain, the other group's
+workers stay parked.
+
 `FiberWakePolicy.directorOwned` instead records coalesced wake events. The
 single thread that owns `pool.director()` consumes those events and selects
 which LLC, worker class, or label to signal. An optional `@nogc nothrow`

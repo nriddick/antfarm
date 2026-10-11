@@ -11,11 +11,15 @@ import threadpool;
 /// Who converts an external fiber readiness transition into a pool wake.
 /// `broadcast` preserves the eager compatibility behavior. `directorOwned`
 /// records events but leaves worker selection and signalling to the thread
-/// which owns threadpool's Director.
+/// which owns threadpool's Director. `servingGroups` (opt-in) wakes only the
+/// physical groups that serve the lane: its own group and its rescue/assist
+/// server groups; a newly armed earliest timer also wakes the groups hosting
+/// the domain's responders.
 enum FiberWakePolicy : ubyte
 {
     broadcast,
     directorOwned,
+    servingGroups,
 }
 
 /// Readiness classes accumulated for a Director-side policy loop.
@@ -130,6 +134,11 @@ final class FiberLane : FiberReadyLane
     // responders serve by an edge, and lanes whose responders serve this one.
     private FiberLane[] servedLanes_;
     private FiberLane[] servingLanes_;
+    // Plan-populated with the edge lists, for `servingGroups`: this lane's
+    // group plus its edge server groups, and the groups whose native lanes
+    // share this lane's domain (a superset of its responder hosts).
+    private ushort[] wakeGroups_;
+    private ushort[] timerWakeGroups_;
     private ushort group_ = ushort.max;
 
     @property private ref shared(uint) pendingWakeEvents() const return nothrow @nogc
@@ -259,6 +268,9 @@ final class FiberLane : FiberReadyLane
     {
         if (responderDomain is backend) return;
         noteWake(FiberWakeEvent.signalled, false);
+        if (wakePolicy == FiberWakePolicy.servingGroups && pool !is null)
+            foreach (g; timerWakeGroups_)
+                pool.wakeLlc(g);
     }
 
     size_t signal(Signal signal)
@@ -312,6 +324,27 @@ final class FiberLane : FiberReadyLane
             &control.pendingWakeEvents, 0u);
     }
 
+    // `servingGroups` completeness: every worker needed for progress after
+    // an event is woken, by this wake set or by an existing mechanism.
+    // - Ready or published work on this lane is consumed by native workers
+    //   of `group_` and by the responders of its rescue/assist server groups
+    //   (they flush `ready` and sweep the Farm): both are in `wakeGroups_`.
+    // - Timers: a responder of the domain arms its own deadline before it
+    //   parks; any other worker arming a new earliest timer calls
+    //   `noteTimerArmed`, which wakes `timerWakeGroups_`, every native group
+    //   of this domain. An expired timer is moved to its task's lane, whose
+    //   `noteExternalReady` wakes that lane's set.
+    // - Generation triggers: `enqueueGenerationTrigger` calls
+    //   `noteExternalReady` on every lane of the domain, so every native group
+    //   of the domain is woken, and every worker polls triggers.
+    // - Cancellation and shutdown: the Director applies them; a waiting task
+    //   becomes ready through `publishParkedWaiter`, i.e. this lane's
+    //   `noteExternalReady`. A ready or running task is already in service.
+    // - Remote-ready relay: the relay targets are `servingLanes_`, the lanes
+    //   of this lane's edge server groups (`bindPlanLanes`), and those groups
+    //   are in `wakeGroups_`. A relayed call therefore only records
+    //   `remoteReady` and adds no wake under `servingGroups`. A
+    //   `directorOwned` origin leaves its wakes to the Director.
     package void noteWake(FiberWakeEvent event, bool relay = true) nothrow @nogc
     {
         immutable bits = cast(uint) event;
@@ -332,8 +365,14 @@ final class FiberLane : FiberReadyLane
             }
             observed = atomicLoad!(MemoryOrder.acq)(control.pendingWakeEvents);
         }
-        if (wakePolicy == FiberWakePolicy.broadcast && pool !is null)
-            pool.wakeAll();
+        if (pool !is null)
+        {
+            if (wakePolicy == FiberWakePolicy.broadcast)
+                pool.wakeAll();
+            else if (wakePolicy == FiberWakePolicy.servingGroups && relay)
+                foreach (g; wakeGroups_)
+                    pool.wakeLlc(g);
+        }
         if (relay)
         {
             foreach (serving; servingLanes_)
@@ -472,6 +511,8 @@ void uninstallFiberPlan()
         lane.pool = null;
         lane.servedLanes_ = null;
         lane.servingLanes_ = null;
+        lane.wakeGroups_ = null;
+        lane.timerWakeGroups_ = null;
     }
     installedFiberLanes = null;
     installedFiberPool = null;
@@ -484,6 +525,8 @@ void uninstallFiberPlan()
 /// return them indexed by physical group.
 private FiberLane[] bindPlanLanes(FiberServicePlan plan)
 {
+    import std.algorithm.searching : canFind;
+
     immutable groups = plan.resolution.physicalGroupCount;
     auto lanes = new FiberLane[groups];
     foreach (ushort g; 0 .. groups)
@@ -495,11 +538,23 @@ private FiberLane[] bindPlanLanes(FiberServicePlan plan)
         lane.control.service = plan.service(g);
         lane.servedLanes_ = null;
         lane.servingLanes_ = null;
+        lane.wakeGroups_ = [g];
+        lane.timerWakeGroups_ = null;
     }
     foreach (ref e; plan.edges)
     {
         lanes[e.server].servedLanes_ ~= lanes[e.served];
         lanes[e.served].servingLanes_ ~= lanes[e.server];
+        if (!lanes[e.served].wakeGroups_.canFind(e.server))
+            lanes[e.served].wakeGroups_ ~= e.server;
+    }
+    foreach (lane; lanes)
+    {
+        if (lane is null) continue;
+        foreach (h, host; lanes)
+            if (host !is null && host.backend is lane.backend
+                && host.service == LaneService.native)
+                lane.timerWakeGroups_ ~= cast(ushort) h;
     }
     return lanes;
 }
@@ -920,6 +975,16 @@ version (unittest)
             plan.validate();
             bindPlanLanes(plan);
             assert(lanes[0].servedLanes_ == lanes[1 .. $]);
+            // servingGroups: a rescued group wakes itself and its server;
+            // only group 0 is native, so it hosts every responder.
+            immutable ushort[] zero = [0];
+            assert(lanes[0].wakeGroups_ == zero);
+            foreach (g, lane; lanes)
+            {
+                immutable ushort[] served = [cast(ushort) g, 0];
+                assert(g == 0 || lane.wakeGroups_ == served);
+                assert(lane.timerWakeGroups_ == zero);
+            }
             foreach (i, lane; lanes)
             {
                 auto farm = farms[i];

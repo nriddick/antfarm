@@ -257,7 +257,8 @@ advanced and its OS wait primitive is signalled.
 
 Producer threads do not need Director ownership. `pool.wakeAll()` is a
 thread-safe, non-owning notification which leaves each worker's idle policy
-unchanged. Work publication must occur before the wake in the application's
+unchanged; `pool.wakeLlc(g)` is the same notification for the workers
+assigned to physical group `g` only. Work publication must occur before the wake in the application's
 own queue or Farm synchronization protocol.
 
 Each worker owns one atomic ACTIVE/ARMED wait slot. After an idle pump it
@@ -335,8 +336,8 @@ that aliases one Farm into every slot is legal but deliberately cross-group:
 every accepted worker, including those of other groups, is then a consumer of
 that Farm. Threadpool cannot detect a raw `subscribe` on another group's Farm;
 `home!T` is native by construction and `at!T(llc)` is the explicit spelling
-for anything else. A producer publishes to the desired Farm and calls `wakeAll` or uses the
-Director to signal a narrower worker selection.
+for anything else. A producer publishes to the desired Farm and calls `wakeAll` or `wakeLlc(g)`,
+or uses the Director to signal a narrower worker selection.
 
 The pool does not infer Farm sizing. The application must reserve enough
 consumer slots for every native and covering consumer and enough producer slots
@@ -357,7 +358,7 @@ coverage rules. Those scheduler contracts live in
 | Director policy changes and selected signals | the sole Director owner |
 | `home`, `at`, `search`, and exchange lookup | concurrent during stable installation |
 | `currentWorker` | calling worker only |
-| `wakeAll` | concurrent producers |
+| `wakeAll`, `wakeLlc` | concurrent producers |
 | application objects found through registries | defined by the application |
 
 Do not relabel or uninstall state while workers can look it up. Do not start or

@@ -32,6 +32,7 @@ release entry at merge.
   scope first when no discovery has run yet (Windows captures lazily).
 - `perftest/actor_churn` parses its CPU argument with `parseCpuList`
   (`0,1-7`, `g:lp`) and reports the failing id and `PinOutcome`.
+- `pool.wakeLlc(g)` wakes only the workers assigned to physical group `g`.
 - `makeBins` builds a physical-group-indexed table from a resolution;
   `binStaffed!T(llc)` reports whether a group had accepted workers.
 - `hello_antfarm` exercises one Farm per accepted group and reports skipped
@@ -73,6 +74,11 @@ release entry at merge.
   former automatic ring measured 42% (one lane loaded) and 73% (both loaded)
   slower than no edges on two LLCs. `benchmark_mt` takes `private`, `shared`
   or `assist` to reproduce that A/B.
+- `FiberWakePolicy.servingGroups` (opt-in; `broadcast` stays the default)
+  wakes only the groups that serve a lane: its own group and its rescue/assist
+  server groups. A new earliest timer armed off-responder wakes the groups
+  hosting the domain's native lanes. On two LLCs with one busy lane, the idle
+  group's worker no longer pumps.
 - The single-lane benchmarks (`benchmark_farm_embed`, `benchmark_vs_druntime`,
   `benchmark_actor_wave`) draw their workers from one LLC group and print it:
   on multi-LLC hosts they are capped to one LLC's CPUs.

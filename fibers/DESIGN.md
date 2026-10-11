@@ -320,8 +320,11 @@ still require the embedding to arrange pool wakes; the pump-count bound does
 not wake a parked worker by itself.
 
 Native-only service, rescue edges and the explicit assist ring are validated
-on a two-LLC host (smoke L1-L3). The broadcast wake still reaches every pool
-worker, so selective wake by group remains pending. Current release evidence
+on a two-LLC host (smoke L1-L3). The default broadcast wake still reaches every
+pool worker. The opt-in `servingGroups` policy wakes only a lane's own group and
+its edge server groups, and a newly armed earliest timer wakes the groups
+hosting the domain's native lanes; it is validated on the two-LLC host (smoke
+W1-W2). Making it the default awaits a performance characterization. Current release evidence
 does not claim multi-LLC performance or failover guarantees.
 
 ## Completion, lifecycle records, and shutdown

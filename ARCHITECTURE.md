@@ -264,8 +264,9 @@ explicit `assistRing`, are experimental and opt-in for staffed groups. The
 plan derives each Farm's consumer and producer sizing from these edges.
 
 Native-only service, unused-group admission and rescue are validated on a
-two-LLC host (Ryzen 9 5900XT). Selective wake by group is pending: the default
-broadcast still wakes every worker. Topology-specific performance and
+two-LLC host (Ryzen 9 5900XT). The default broadcast wake still reaches
+every worker; the opt-in `FiberWakePolicy.servingGroups` wakes only the groups
+serving a lane. Topology-specific performance and
 lost-worker-group claims still need their own evidence before they are treated
 as release evidence.
 

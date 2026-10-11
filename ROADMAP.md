@@ -62,7 +62,8 @@ are not promised yet.
   fork/abort probes, and ThreadSanitizer is unavailable in the Windows LDC
   runtime (`Scoped EH not supported`).
 - Multi-LLC Fiber service: native-only service by default; rescue/assist
-  validated on the 2-LLC host; selective wake pending. Topology-specific
+  validated on the 2-LLC host; selective wake (`servingGroups`) is opt-in
+  until it is performance-characterized. Topology-specific
   performance and lost-worker-group claims still need their own evidence.
 - Fiber ThreadSanitizer migration remains a known external limitation at the
   DRuntime stack-switch boundary; the Fiber gate stays the DMD/LDC smoke,
