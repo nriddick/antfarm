@@ -28,7 +28,8 @@ release entry at merge.
   `OsScopeSource`, `inOsScope`, `liveOsMask`, `scopeOsToCallingThread`).
 - `pinProcessor(LogicalProcessor)` / `pinProcessor(ProcessorId)` return a
   `PinOutcome` (`pinned`, `unknownProcessor`, `outsideOsScope`, `osRejected`)
-  and validate every pin against the frozen scope on both OSes.
+  and validate every pin against the frozen scope on both OSes, capturing the
+  scope first when no discovery has run yet (Windows captures lazily).
 - `perftest/actor_churn` parses its CPU argument with `parseCpuList`
   (`0,1-7`, `g:lp`) and reports the failing id and `PinOutcome`.
 - `makeBins` builds a physical-group-indexed table from a resolution;

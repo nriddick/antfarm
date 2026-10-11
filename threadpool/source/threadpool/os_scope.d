@@ -78,8 +78,22 @@ void scopeOsToCallingThread()
         setScope(OsScopeSource.unrestricted, null);
 }
 
+/// Capture the scope now if nothing has yet: Windows captures lazily, so a
+/// `pinProcessor` before any discovery must not skip validation. The one-time
+/// capture allocates; every later call is a plain `@nogc` read.
+package(threadpool) void ensureOsScopeCaptured() @nogc nothrow
+{
+    if (gCaptured) return;
+    static void capture() nothrow
+    {
+        try cast(void) osScope();
+        catch (Exception) {}
+    }
+    (cast(void function() @nogc nothrow) &capture)();
+}
+
 /// Membership test used by pin validation. An unrestricted (or not yet
-/// captured) scope admits every id.
+/// captured) scope admits every id; `pinProcessor` captures first.
 bool inOsScope(ProcessorId id) @nogc nothrow
 {
     if (!gCaptured || gScope.source == OsScopeSource.unrestricted)
@@ -237,4 +251,32 @@ unittest
         if (i) assert(s.allowed[i - 1] < id);
     }
     assert(!inOsScope(ProcessorId(0, ushort.max)) || s.allowed[$ - 1] == ProcessorId(0, ushort.max));
+}
+
+unittest
+{
+    // A pin before any capture (Windows captures lazily) must capture and
+    // validate, not admit everything. Simulate "not yet captured" here.
+    import threadpool.pin : PinOutcome, pinProcessor;
+    import threadpool.topology : LogicalProcessor;
+
+    auto savedScope = gScope;
+    auto savedKeys = gKeys;
+    scope (exit)
+    {
+        gScope = savedScope;
+        gKeys = savedKeys;
+        gCaptured = true;
+    }
+    gCaptured = false;
+    gScope = OsScope.init;
+    gKeys = null;
+
+    LogicalProcessor outside;
+    outside.group = 0;
+    outside.lpIndex = ushort.max;
+    immutable outcome = pinProcessor(outside);
+    assert(gCaptured);
+    if (gScope.source != OsScopeSource.unrestricted)
+        assert(outcome == PinOutcome.outsideOsScope);
 }

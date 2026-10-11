@@ -1,6 +1,6 @@
 module threadpool.pin;
 
-import threadpool.os_scope : inOsScope;
+import threadpool.os_scope : ensureOsScopeCaptured, inOsScope;
 import threadpool.topology : LogicalProcessor, ProcessorId, cachedSnapshot, discover;
 
 version (Windows)
@@ -23,6 +23,7 @@ enum PinOutcome : ubyte
 /// exists.
 PinOutcome pinProcessor(ref const LogicalProcessor p) @nogc nothrow
 {
+    ensureOsScopeCaptured();
     if (!inOsScope(ProcessorId.of(p)))
         return PinOutcome.outsideOsScope;
     version (ThreadpoolOs)
