@@ -172,7 +172,16 @@ dub test --compiler=ldc2
 dub run -c hello
 dub run -c live-test
 dub run -c wait-races
+dub run -c affinity-test --compiler=dmd
+dub run -c affinity-test --compiler=ldc2
 ```
+
+The Windows `affinity-test` restricts its own process to two initially allowed
+CPUs and checks default/explicit worker selection, actual callback placement,
+direct pin rejection and startup cleanup after affinity narrows. An optional
+decimal mask can select another allowed subset (`-- 12288` selects LPs 12/13
+on a machine that permits them). Other platforms and multi-group processes
+print an explicit skip.
 
 - [examples/hello_topology.d](examples/hello_topology.d): topology only.
 - [examples/hello_antfarm.d](examples/hello_antfarm.d): one Farm per LLC.

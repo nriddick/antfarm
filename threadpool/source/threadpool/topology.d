@@ -34,6 +34,8 @@ struct LogicalProcessor
     bool   smtSibling;
     bool   parkedAtDiscovery;
     CacheInfo l1d, l1i, l2, l3;
+    /// Excluded by process affinity, independently of transient OS parking.
+    bool   affinityExcluded;
 }
 
 struct PhysicalCore
@@ -429,10 +431,9 @@ ulong affinityKey(ushort group, ushort lpIndex) @nogc nothrow
     return (cast(ulong) group << 16) | lpIndex;
 }
 
-/// Park every processor the process affinity does not allow. An empty
-/// `allowedKeys` imposes no restriction. Parking reuses the existing
-/// "unavailable at discovery" signal, so pool startup and placement already
-/// skip these processors and no consumer semantics change.
+/// Mark processors outside process affinity. An empty `allowedKeys` imposes
+/// no restriction. Also retain the parked flag for existing snapshot readers;
+/// Windows selection uses affinityExcluded to distinguish OS parking.
 void intersectAffinity(ref LogicalProcessor[] procs, const(ulong)[] allowedKeys)
     @nogc nothrow
 {
@@ -448,6 +449,9 @@ void intersectAffinity(ref LogicalProcessor[] procs, const(ulong)[] allowedKeys)
                 break;
             }
         if (!allowed)
+        {
+            p.affinityExcluded = true;
             p.parkedAtDiscovery = true;
+        }
     }
 }

@@ -72,8 +72,17 @@ lifetime.
 - `skipSmtSiblings` keeps the first LP of each physical core;
 - `pinScope` is currently required to be `logicalProcessor`.
 
-The exact processor list wins over the shorthand LP list. Linux also omits
-processors reported offline or unavailable by the discovery backend.
+The exact processor list wins over the shorthand LP list. Both platforms omit
+processors marked `affinityExcluded` by discovery, even when explicitly listed
+in the options. Windows OS parking alone does not exclude a worker; Linux also
+omits offline processors. The physical topology counts remain unchanged.
+
+Windows pinning checks the current single-group process mask before applying
+thread group affinity, which can otherwise widen a thread's allowed CPUs.
+If affinity narrows after discovery, pinning a now-excluded CPU fails and pool
+startup unwinds. Discover after configuring affinity. Multi-group processes
+retain the existing unrestricted discovery behavior when no single mask can
+describe their affinity; this path still needs hardware validation.
 
 Start fails if no processor is selected, another pool is already live, or any
 worker cannot be pinned. The implementation does not silently continue with a

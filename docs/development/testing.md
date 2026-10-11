@@ -69,6 +69,25 @@ Each suite has its own README with selectors and the seams it uses:
 [private_actor_tests](../../private_actor_tests/README.md), and
 [examples](../../examples/README.md).
 
+### Portable Python checks
+
+These focused checks run on Windows as well as Linux, without a D compiler or
+benchmark build. Run from the repository root with Python 3 and Git on PATH:
+
+```text
+python -B scripts/check-doc-links.py
+python -B -m unittest scripts/test_check_doc_links.py perftest/test_perf_gate.py perftest/test_run_performance_md.py perftest/test_private_lifecycle_matrix.py -v
+```
+
+Use `python3` instead of `python` if that is your interpreter's command name.
+Documentation fixtures live in a temporary repository; only the three symlink
+probes skip when the host cannot create file symlinks. Performance decision,
+parser, grouping and topology-fixture tests use synthetic inputs. The real
+process-group timeout and gate error-accounting integration probes require
+Linux and report skips elsewhere. The non-Linux gate-rejection probes skip on
+Linux; the Windows child-timeout probe skips elsewhere. These checks do not
+establish timing results or replace `make check`.
+
 ### Optional and longer lanes
 
 - `make check-soak` runs the private-actor TSan suite in a loop for at least 121

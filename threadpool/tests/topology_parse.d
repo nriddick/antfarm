@@ -385,4 +385,18 @@ unittest
     auto snap = parseWindowsTopology(cpu, null);
     assert(!snap.processors[0].parkedAtDiscovery);
     assert(snap.processors[1].parkedAtDiscovery);
+    assert(!snap.processors[1].affinityExcluded);
+}
+
+unittest
+{
+    ubyte[] cpu;
+    putCpuSet(cpu, 0, 0, 0, 0, 0, 1, 0x1);
+    putCpuSet(cpu, 0, 1, 1, 0, 0, 1, 0);
+    putCpuSet(cpu, 1, 0, 0, 0, 0, 1, 0);
+    auto snap = parseWindowsTopology(cpu, null, [affinityKey(0, 0)]);
+    assert(snap.processors[0].parkedAtDiscovery);
+    assert(!snap.processors[0].affinityExcluded);
+    assert(snap.processors[1].affinityExcluded);
+    assert(snap.processors[2].affinityExcluded);
 }

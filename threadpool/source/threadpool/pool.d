@@ -643,6 +643,7 @@ private LogicalProcessor[] selectLps(ref const(TopologySnapshot) snap, ref const
     LogicalProcessor[] selected;
     foreach (ref lp; snap.processors)
     {
+        if (lp.affinityExcluded) continue;
         if (opt.onlyProcessors.length)
         {
             bool wanted;
@@ -734,6 +735,27 @@ unittest
     {
         assert(got.length == 2);
     }
+}
+
+unittest
+{
+    TopologySnapshot snap;
+    snap.classCount = 1;
+    LogicalProcessor allowed, excluded;
+    allowed.lpIndex = 0;
+    excluded.lpIndex = 1;
+    excluded.affinityExcluded = true;
+    snap.processors = [allowed, excluded];
+
+    PoolOptions opt;
+    assert(selectLps(snap, opt).length == 1);
+    opt.onlyLps = [ushort(1)];
+    assert(selectLps(snap, opt).length == 0);
+    opt.onlyProcessors = [ProcessorId(0, 1)];
+    assert(selectLps(snap, opt).length == 0);
+    opt.onlyProcessors = [ProcessorId(0, 0), ProcessorId(0, 1)];
+    auto selected = selectLps(snap, opt);
+    assert(selected.length == 1 && selected[0].lpIndex == 0);
 }
 
 shared int gDirTicks;

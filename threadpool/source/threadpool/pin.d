@@ -9,12 +9,30 @@ struct PinTarget
 
 version (Windows)
 {
-    import core.sys.windows.winbase : GetCurrentThread, SetThreadAffinityMask;
+    import core.sys.windows.basetsd : ULONG_PTR;
+    import core.sys.windows.winbase : GetCurrentThread, SetThreadAffinityMask,
+        GetCurrentProcess, GetProcessAffinityMask;
     import core.sys.windows.windef : BOOL, FALSE, HANDLE, TRUE;
     import threadpool.sys.win_bindings;
 
     bool pinToLogicalProcessor(PinTarget t) @nogc nothrow
     {
+        if (t.lpIndex >= 64) return false;
+        // Group affinity can widen a thread beyond the process mask. Check
+        // before changing CPU sets, including when discovery has been cached.
+        ushort[64] groups;
+        ushort count = cast(ushort) groups.length;
+        auto process = GetCurrentProcess();
+        if (!GetProcessGroupAffinity(process, &count, groups.ptr)) return false;
+        if (count == 1)
+        {
+            if (t.group != groups[0]) return false;
+            ULONG_PTR processMask, systemMask;
+            if (!GetProcessAffinityMask(process, &processMask, &systemMask)) return false;
+            if (processMask != 0 && (processMask & (cast(ULONG_PTR) 1 << t.lpIndex)) == 0)
+                return false;
+        }
+
         resolveOptionalApis();
         auto self = GetCurrentThread();
 

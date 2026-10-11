@@ -19,6 +19,34 @@ benchmarks keep their correctness checks (`enforce`) in release builds. Set
 `ANTFARM_HUGE_PAGES=0` for ordinary pages unless a run is deliberately testing
 the huge-page path. `make -C perftest clean` removes the built binaries.
 
+On Windows, first build the Release allocator with
+`actor_torture/run-mimalloc-windows.ps1 -Configuration Release` (see
+[the allocator recipe](../actor_torture/README.md)), then run
+`./perftest/build-windows.ps1` from the repository root. This builds the same
+seven harnesses with LDC `-O2 -release` and the static release CRT. The report
+driver resolves `.exe` paths on Windows and terminates a timed-out process tree
+with `taskkill`; it does not synthesize Linux CPU accounting.
+
+For the multithreaded Fiber benchmark, the report driver uses the full
+creation-plus-drain duration. Workers run during creation, so the raw harness's
+legacy `run` rate counts the entire burst against only the remaining drain
+time and is not valid throughput. Raw readouts remain available for diagnosis;
+the report's `total_fibers_s` and `warm_total_fibers_s` use the complete burst.
+
+To extend the report to larger thread counts without rerunning the default
+matrix:
+
+```powershell
+python perftest/run_performance_md.py --sections dual,private --runs 5 --dual-threads 12,18,20 --private-consumers 11,17,19 --out .build/performance-high-threads
+```
+
+Dual-role counts are total worker threads. Private actor counts exclude the
+controller, so the example measures 12, 18, and 20 total threads in both
+sections. Private workers are pinned to LPs 1 through N and the controller
+to LP 0; choose counts whose CPU lists exist and are allowed on the host.
+Omitting these options keeps the original matrix. The six-thread dual tuning
+cells are included only when `--dual-threads` includes 6.
+
 ## Payload benchmarks
 
 - **`throughput`** — synthetic payload publish/consume sweep over a 16 MiB
@@ -170,11 +198,18 @@ layout. Such a waiver is one-off and must record the ≥20-pair run, the
 byte-identical base/base control, and the inert-code control together; it is
 not a general precedent and does not relax the boundary.
 
-Gate decision and option tests run without builds or timing:
+Gate decision and option tests run without builds or timing, including on
+Windows:
 
 ```sh
 python3 -B -m unittest perftest/test_perf_gate.py
 ```
+
+The real timing gate still requires Linux and rejects other hosts before
+creating output or starting builds. Only its Linux error-accounting integration
+probe is skipped on Windows; the mocked decisions and options remain covered.
+See [portable Python checks](../docs/development/testing.md#portable-python-checks)
+for the combined documentation, parser, topology-fixture and grouping suite.
 
 ## Sweep driver
 

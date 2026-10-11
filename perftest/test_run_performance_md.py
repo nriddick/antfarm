@@ -18,9 +18,11 @@ import pathlib
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 def _pid_alive(pid):
@@ -80,6 +82,7 @@ idle        6  2048      -   2000    340ns    5.2us    7.4us   11.2us      0    
 """
 
 FIBER_MT_OUT = """\
+workers: 12 across 1 LLC(s) hugePages=false coverage=false
 create: 100000 fibers in 0.012345 s: 8100300.49 fibers/s
 run:    100000 fibers in 0.008540 s: 11710150.36 fibers/s
 create (warm pool): 100000 fibers in 0.001000 s: 100000000.00 fibers/s
@@ -230,7 +233,9 @@ class TailTests(unittest.TestCase):
 class FiberTests(unittest.TestCase):
     def test_multithread_run_line(self):
         d = rpm.parse_fiber(FIBER_MT_OUT)
-        self.assertEqual(d["metric"], 11710150.36)
+        self.assertAlmostEqual(d["metric"], 100000 / (0.012345 + 0.008540))
+        self.assertEqual(d["metric_kind"], "spawn_and_drain")
+        self.assertAlmostEqual(d["warm_total_fibers_s"], 100000 / (0.001000 + 0.000900))
         self.assertEqual(d["run_fibers_s"], 11710150.36)
         self.assertEqual(d["create_fibers_s"], 8100300.49)
         self.assertEqual(d["warm_run_fibers_s"], 111111111.11)
@@ -242,6 +247,19 @@ class FiberTests(unittest.TestCase):
         self.assertEqual(d["create_fibers_s"], 4444444.44)
         self.assertEqual(d["warm_run_fibers_s"], 5263157.89)
 
+    def test_mt_completed_during_spawn_does_not_report_infinite_throughput(self):
+        out = FIBER_MT_OUT.replace("0.008540", "0.000000")
+        self.assertAlmostEqual(rpm.parse_fiber(out)["metric"], 100000 / 0.012345)
+
+    def test_mt_incomplete_timing_is_rejected(self):
+        out = "\n".join(FIBER_MT_OUT.splitlines()[0:1] + FIBER_MT_OUT.splitlines()[2:])
+        with self.assertRaisesRegex(ValueError, "complete multithread"):
+            rpm.parse_fiber(out)
+
+    def test_mt_mismatched_counts_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "timing/count"):
+            rpm.parse_fiber(FIBER_MT_OUT.replace("run:    100000", "run:    99999"))
+
     def test_truncated_line_raises(self):
         # The `run` line is present but lost its rate column.
         with self.assertRaises(ValueError):
@@ -252,7 +270,46 @@ class FiberTests(unittest.TestCase):
             rpm.parse_fiber("create: 100000 fibers in 0.012345 s: 8100300.49 fibers/s\n")
 
 
+class MatrixTests(unittest.TestCase):
+    def test_default_matrix_is_unchanged(self):
+        args = rpm.build_parser().parse_args([])
+        self.assertEqual(len(rpm.cases_for("dual", args)), 9)
+        self.assertEqual(len(rpm.cases_for("private", args)), 38)
+
+    def test_custom_dual_threads(self):
+        args = rpm.build_parser().parse_args(["--dual-threads", "12,18,20,20"])
+        cells = rpm.cases_for("dual", args)
+        self.assertEqual([c["name"] for c in cells], ["nd12", "nd18", "nd20"])
+        for cell, count in zip(cells, (12, 18, 20)):
+            self.assertEqual(cell["cmd"][cell["cmd"].index("--nd") + 1], str(count))
+
+    def test_private_counts_exclude_controller(self):
+        args = rpm.build_parser().parse_args(["--private-consumers", "11,17,19"])
+        cells = rpm.cases_for("private", args)
+        self.assertEqual(len(cells), 57)
+        for cell in cells:
+            consumers = int(cell["cmd"][4])
+            self.assertIn(consumers, (11, 17, 19))
+            self.assertEqual(cell["cmd"][8], ",".join(map(str, range(consumers + 1))))
+        self.assertEqual(cells[-1]["name"], "subset-whole-unreserved_c19")
+
+    def test_invalid_thread_counts(self):
+        for value in ("", "-1", "1,x", "1,,2"):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                rpm.build_parser().parse_args(["--private-consumers", value])
+        with self.assertRaises(SystemExit):
+            rpm.main(["--dual-threads", "0"])
+
+
 class ParserMapTests(unittest.TestCase):
+    def test_windows_executable_uses_the_same_parser(self):
+        self.assertIs(rpm.parser_for(["actor_churn_mimalloc.exe"]), rpm.parse_churn)
+        self.assertIs(rpm.parser_for(["tail.exe"]), rpm.parse_tail)
+
+    def test_benchmark_paths_have_the_native_executable_suffix(self):
+        expected = "throughput.exe" if os.name == "nt" else "throughput"
+        self.assertEqual(pathlib.Path(rpm.benchmark_path("throughput")).name, expected)
+
     def test_each_binary_maps_to_its_parser(self):
         self.assertIs(rpm.PARSERS["throughput"], rpm.parse_throughput)
         self.assertIs(rpm.PARSERS["dual"], rpm.parse_dual)
@@ -281,6 +338,12 @@ class DriverTests(unittest.TestCase):
         self.out = pathlib.Path(self.tmp.name)
         self.raw = self.out / "raw"
         self.raw.mkdir()
+        # Exercise real fixture creation/cleanup without reading the host's /proc.
+        plan = rpm.fake_topology_plan
+        patch = mock.patch.object(rpm, "fake_topology_plan", side_effect=lambda root:
+                                  plan(root, cpuinfo=_cpuinfo([(0, 0, 0), (1, 0, 1)])))
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def cell(self):
         return {"section": "scaling", "name": "cell",
@@ -324,6 +387,13 @@ class DriverTests(unittest.TestCase):
         self.assertFalse(rpm.cell_is_cached({**cached, "status": "failed"}, cell, 1))
         self.assertFalse(rpm.cell_is_cached({**cached, "values": []}, cell, 1))
 
+    def test_mt_cache_requires_full_burst_metric(self):
+        cell = {**self.cell(), "section": "fibers", "name": "benchmark_mt"}
+        cached = {"status": "ok", "values": [1.0], "cmd": cell["cmd"], "cwd": None, "env": {}}
+        self.assertFalse(rpm.cell_is_cached(cached, cell, 1))
+        cached["config"] = {"metric_kind": "spawn_and_drain"}
+        self.assertTrue(rpm.cell_is_cached(cached, cell, 1))
+
     def test_bytes_output_is_decoded(self):
         class FakeProc:
             pid = 424242
@@ -343,6 +413,46 @@ class DriverTests(unittest.TestCase):
         self.assertIn("\ufffd", out)
         self.assertEqual(err, "err")
 
+    def test_windows_timeout_cleanup_targets_only_the_child_tree(self):
+        proc = mock.Mock(pid=424242)
+        proc.poll.return_value = None
+        with mock.patch.object(rpm.os, "name", "nt"), \
+                mock.patch.object(rpm.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            rpm.kill_process_group(proc)
+        run.assert_called_once_with(["taskkill", "/PID", "424242", "/T", "/F"],
+                                    capture_output=True, text=True, timeout=15)
+        proc.wait.assert_called_once_with(timeout=5)
+
+    def test_failed_tree_termination_reaps_leader_and_reports_failure(self):
+        proc = mock.Mock(pid=424242)
+        proc.poll.return_value = None
+        with mock.patch.object(rpm.os, "name", "nt"), \
+                mock.patch.object(rpm.subprocess, "run", return_value=mock.Mock(
+                    returncode=1, stderr="access denied")):
+            with self.assertRaisesRegex(RuntimeError, "access denied"):
+                rpm.kill_process_group(proc)
+        proc.kill.assert_called_once_with()
+        proc.wait.assert_called_once_with(timeout=5)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows taskkill")
+    def test_windows_timeout_reaps_real_child(self):
+        out, err, rc = rpm.run_cmd(
+            [sys.executable, "-c", "import time; print('started', flush=True); time.sleep(30)"],
+            str(self.out), dict(os.environ), 2)
+        self.assertEqual(rc, "timeout", err)
+        self.assertIn("started", out)
+        self.assertIsNone(rpm._CURRENT_PROC["proc"])
+
+    def test_cleanup_does_not_target_an_exited_process(self):
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        with mock.patch.object(rpm.subprocess, "run") as run:
+            rpm.kill_process_group(proc)
+        run.assert_not_called()
+        proc.wait.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "linux", "requires Linux process groups and /proc")
     def test_timeout_kills_process_group(self):
         bash = shutil.which("bash")
         if bash is None:

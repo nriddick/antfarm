@@ -25,6 +25,7 @@ Placement choosePlacement(ref const TopologySnapshot topology, uint count)
     foreach (siblings; [false, true])
         foreach (ref p; processors)
         {
+            if (p.affinityExcluded) continue;
             version (linux)
                 if (p.parkedAtDiscovery) continue; // Outside this process's allowed CPUs.
             if (p.smtSibling == siblings)
