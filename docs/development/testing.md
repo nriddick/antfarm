@@ -33,8 +33,9 @@ lists every target.
 on how the calling shell is configured.
 
 Not covered by `make check` (run these yourself when you change those packages):
-the `threadpool` and `fibers` suites (`dub test` in each package; see
-[../../threadpool/README.md](../../threadpool/README.md) and
+the `threadpool` and `fibers` suites (`dub test` in each package, or
+`dub run -c unittest` in `fibers`, which also runs that package's module
+unittests; see [../../threadpool/README.md](../../threadpool/README.md) and
 [../../fibers/README.md](../../fibers/README.md)), the review-torture
 write-protection (`allwrite`) targets, and `examples/iota_sum.d`. Performance is
 not part of it either (see `make perf-gate`). Windows is validated by hand after

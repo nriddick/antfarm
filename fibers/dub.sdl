@@ -16,6 +16,9 @@ configuration "unittest" {
     targetType "executable"
     // Correctness suites: keep assert checks in release builds too.
     buildRequirements "requireContracts"
+    // Compile this package's module unittests (e.g. the remote-service
+    // fixtures) under any build type, so `dub run -c unittest` runs them.
+    buildOptions "unittests"
     mainSourceFile "tests/smoke.d"
     sourceFiles "tests/service_plan.d"
     importPaths "tests"

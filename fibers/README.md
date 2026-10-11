@@ -42,10 +42,13 @@ ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=ldc2
 ANTFARM_HUGE_PAGES=0 dub run -c stress --compiler=ldc2 --build=release
 ```
 
-Both `dub test` and `dub run -c unittest` run the smoke executable
-(`tests/smoke.d`), covering lifecycle backlog, cancellation,
-generation-trigger contention, and worker integration; `dub test` also runs
-module `unittest` blocks first. The `stress` configuration runs
+Both `dub test` and `dub run -c unittest` run this package's module
+`unittest` blocks (including the remote-service fixtures in
+`threadpool_driver.d`) and then the smoke executable (`tests/smoke.d`),
+covering lifecycle backlog, cancellation, generation-trigger contention, and
+worker integration. The `unittest` configuration compiles those blocks under
+any build type, so Dub prints a warning about `buildOptions "unittests"`.
+The `stress` configuration runs
 `tests/stress.d`. Each suite prints a final `passed` line. Both configurations
 require contracts, so their `assert` checks stay enabled even with
 `--build=release`.
