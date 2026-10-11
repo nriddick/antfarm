@@ -159,6 +159,10 @@ extern (Windows) @nogc nothrow
         USHORT* GroupCount,
         USHORT* GroupArray);
 
+    BOOL GetThreadGroupAffinity(
+        HANDLE hThread,
+        GROUP_AFFINITY* GroupAffinity);
+
     void GetCurrentProcessorNumberEx(PROCESSOR_NUMBER* ProcNumber);
 }
 

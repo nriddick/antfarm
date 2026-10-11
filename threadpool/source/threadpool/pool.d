@@ -6,6 +6,7 @@ import core.time : Duration, MonoTime, msecs;
 import std.exception : enforce;
 
 import threadpool.hybrid;
+import threadpool.os_scope : OsScope, osScope;
 import threadpool.pin : PinOutcome;
 import threadpool.resolution;
 import threadpool.stats;
@@ -369,7 +370,7 @@ final class CacheAwarePool
     PoolResolution resolve() const
     {
         auto snap = discover();
-        auto scope_ = osScopeOf(snap);
+        auto scope_ = osScope();
         return resolvePool(snap, scope_, options);
     }
 
@@ -446,9 +447,7 @@ final class CacheAwarePool
 
                     SpawnSpec spec;
                     spec.self = self;
-                    spec.cpuSetId = lp.cpuSetId;
-                    spec.group = lp.group;
-                    spec.lpIndex = lp.lpIndex;
+                    spec.processor = lp;
                     spec.ecoQos = !isP && options.ecoQosOnE;
                     spec.applyQos = isP ? options.highQosOnP : options.ecoQosOnE;
                     if (isP && options.highQosOnP)
@@ -633,8 +632,8 @@ private:
 version (unittest)
 private PoolResolution resolveTest(ref const TopologySnapshot snap, PoolOptions opt)
 {
-    auto scope_ = osScopeOf(snap);
-    return resolvePool(snap, scope_, opt);
+    OsScope unrestricted;
+    return resolvePool(snap, unrestricted, opt);
 }
 
 unittest

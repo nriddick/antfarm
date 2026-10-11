@@ -128,12 +128,36 @@ CPU; `summary()` is one line and is included in start-failure messages.
 `acceptedCpus`, `rejectedCpus`, `acceptedGroups`, `rejectedGroups`,
 `unknownRequests` and `workersIn(llc)` separate the report for callers.
 
-Windows pinning checks the current single-group process mask before applying
-thread group affinity, which can otherwise widen a thread's allowed CPUs.
-If affinity narrows after discovery, pinning a now-excluded CPU fails and pool
-startup unwinds. Discover after configuring affinity. Multi-group processes
-retain the existing unrestricted discovery behavior when no single mask can
-describe their affinity; this path still needs hardware validation.
+### OS scope
+
+Eligibility is frozen to one process-level OS scope (`threadpool.os_scope`):
+
+| | Linux | Windows |
+|---|---|---|
+| Scope | the launch mask, read by `sched_getaffinity` in a module constructor before `main` (what `taskset`, `numactl` or a cgroup cpuset produced at exec) | the single-group process affinity mask at first discovery; a multi-group process is `unrestricted` |
+| `OsScopeSource` | `processLaunch` | `processAffinity` |
+| Refresh | none | none |
+| Pin validation | `pinProcessor` rejects CPUs outside the scope (`outsideOsScope`); the kernel's cpuset check still applies (`osRejected`) | `pinProcessor` rejects CPUs outside the scope (`outsideOsScope`); the live process-mask recheck still applies (`osRejected`) |
+
+The scope is never a thread's current mask unless the program opts in with
+`scopeOsToCallingThread()` (source `callingThread`), which is allowed only
+before the first `discover()`. A program that narrows `main`'s mask before
+discovery either calls it or filters with `PoolOptions.processors`.
+`liveOsMask()` reports what the OS says now, for diagnostics only.
+
+`pinProcessor(LogicalProcessor)` (`@nogc`) and `pinProcessor(ProcessorId)`
+(looks the id up first; `unknownProcessor` if absent) are the only pin
+functions, and pool workers use the same path. A pin outside the frozen scope
+never happens, including a raw pin from application code, so this library
+cannot escape a launch `taskset`. If the OS narrows affinity after discovery
+the scope does not shrink; the next pin fails with `osRejected` and pool
+startup unwinds with that outcome in `pool.resolution`. Windows group affinity
+can otherwise widen a thread beyond the process mask, which the recheck
+prevents. Cgroup cpusets are honoured at launch (the launch mask is already a
+subset) and enforced live by the kernel; dynamic cpuset tracking is deferred.
+Windows job-object hard affinity shows up in the process mask. Multi-group
+Windows processes stay unrestricted; that path still needs hardware
+validation.
 
 Start fails if no processor is selected, another pool is already live, or any
 worker cannot be pinned. The first message includes `summary()`; the pin

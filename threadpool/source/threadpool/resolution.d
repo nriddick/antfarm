@@ -10,54 +10,10 @@ module threadpool.resolution;
 
 import std.algorithm.iteration : filter;
 
+import threadpool.os_scope : OsScope, OsScopeSource;
 import threadpool.pin : PinOutcome;
 import threadpool.pool : PoolOptions;
 import threadpool.topology;
-
-/// Where the OS scope came from.
-enum OsScopeSource : ubyte
-{
-    processLaunch,    /// Linux: sched_getaffinity captured before main
-    processAffinity,  /// Windows: single-group process mask at discovery
-    callingThread,    /// the discovering thread's mask
-    unrestricted,     /// no restriction reported
-}
-
-/// The process-level set of CPUs the OS allows.
-struct OsScope
-{
-    OsScopeSource source;
-    /// Sorted; empty iff `source == unrestricted`.
-    const(ProcessorId)[] allowed;
-}
-
-/// Scope recorded in a snapshot's `affinityExcluded` flags.
-OsScope osScopeOf(ref const TopologySnapshot snap)
-{
-    OsScope s;
-    bool restricted;
-    ProcessorId[] allowed;
-    foreach (ref p; snap.processors)
-    {
-        if (p.affinityExcluded)
-            restricted = true;
-        else
-            allowed ~= ProcessorId.of(p);
-    }
-    if (!restricted)
-    {
-        s.source = OsScopeSource.unrestricted;
-        return s;
-    }
-    import std.algorithm.sorting : sort;
-    allowed.sort();
-    version (Windows)
-        s.source = OsScopeSource.processAffinity;
-    else
-        s.source = OsScopeSource.callingThread;
-    s.allowed = allowed;
-    return s;
-}
 
 /// Why a known processor is not a worker. Several reasons may apply.
 /// `none` = accepted.

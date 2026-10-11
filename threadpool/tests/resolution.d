@@ -6,6 +6,7 @@ import std.algorithm : count, canFind;
 import std.array : array;
 import std.string : lineSplitter;
 
+import threadpool.os_scope : OsScope, OsScopeSource;
 import threadpool.pool : PoolOptions;
 import threadpool.resolution;
 import threadpool.topology;
@@ -66,10 +67,11 @@ private TopologySnapshot hybrid()
     return assemble(procs, 1);
 }
 
+/// Resolve with an unrestricted scope: exclusion comes from snapshot flags.
 private PoolResolution resolveOf(ref const TopologySnapshot snap, PoolOptions opt)
 {
-    auto s = osScopeOf(snap);
-    return resolvePool(snap, s, opt);
+    OsScope unrestricted;
+    return resolvePool(snap, unrestricted, opt);
 }
 
 /// The pre-resolution `selectLps` (onlyProcessors branch; onlyLps empty), kept
@@ -222,7 +224,8 @@ unittest
     // R6: group disposition on two-LLC hardware with LLC1 excluded.
     auto snap = f1((ushort lp) => (lp % 16) >= 8);
     PoolOptions opt;
-    auto res = resolveOf(snap, opt);
+    auto launch = OsScope(OsScopeSource.processLaunch, parseCpuList("0-7,16-23"));
+    auto res = resolvePool(snap, launch, opt);
     assert(res.physicalGroupCount == 2);
     assert(res.acceptedGroupCount == 1);
     assert(res.groups[0].physical == 16 && res.groups[0].eligible == 16
@@ -238,8 +241,14 @@ unittest
     assert(res.rejectedCpus(Reject.osExcluded).array.length == 16);
     assert(res.acceptedCpus.array.length == 16);
     assert(!res.started);
-    assert(res.osScope.source != OsScopeSource.unrestricted);
+    assert(res.osScope.source == OsScopeSource.processLaunch);
     assert(res.osScope.allowed == parseCpuList("0-7,16-23"));
+
+    // The scope alone excludes, even when the snapshot carries no flags.
+    auto unflagged = f1();
+    auto byScope = resolvePool(unflagged, launch, opt);
+    assert(byScope.workers == res.workers);
+    assert(byScope.groups[1].common == Reject.osExcluded);
 }
 
 unittest

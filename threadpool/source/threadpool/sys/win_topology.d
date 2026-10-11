@@ -7,6 +7,7 @@ import core.stdc.string : memcpy;
 import std.algorithm : sort;
 import std.exception : enforce;
 
+import threadpool.os_scope : osScopeKeys;
 import threadpool.topology;
 import threadpool.sys.win_bindings;
 
@@ -581,33 +582,5 @@ TopologySnapshot discoverWindows()
     enforce(slpOk && slpGot > 0, "threadpool: GetLogicalProcessorInformationEx failed");
 
     return parseWindowsTopology(cpuBuf[0 .. cpuGot], slpBuf[0 .. slpGot],
-        processAffinityKeys());
-}
-
-/// Process affinity keys, or null when the process spans more than one
-/// processor group or the query fails. The mask only applies within the one
-/// group the process lives in; multi-group processes stay unrestricted,
-/// matching GetProcessAffinityMask's own zero-mask behaviour.
-private ulong[] processAffinityKeys()
-{
-    import core.sys.windows.basetsd : ULONG_PTR;
-    import core.sys.windows.winbase : GetCurrentProcess, GetProcessAffinityMask;
-
-    ushort[64] groups;
-    ushort count = cast(ushort) groups.length;
-    if (GetProcessGroupAffinity(GetCurrentProcess(), &count, groups.ptr) == 0)
-        return null;
-    if (count != 1)
-        return null;
-
-    ULONG_PTR processMask, systemMask;
-    if (GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask) == 0)
-        return null;
-    if (processMask == 0)
-        return null;
-    ulong[] keys;
-    foreach (bit; 0 .. 64)
-        if (processMask & (cast(ULONG_PTR) 1 << bit))
-            keys ~= affinityKey(groups[0], cast(ushort) bit);
-    return keys;
+        osScopeKeys());
 }

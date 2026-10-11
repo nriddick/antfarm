@@ -9,6 +9,7 @@ import std.file : dirEntries, exists, isDir, readText, SpanMode;
 import std.path : baseName, buildPath;
 import std.string : split, strip;
 
+import threadpool.os_scope : osScopeKeys;
 import threadpool.topology;
 
 /// Linux cpulist: "0-11", "0,6", "0-3,8-11". Empty / missing → no CPUs.
@@ -263,36 +264,7 @@ TopologySnapshot discoverLinux()
         "/sys/devices/system/node",
         "/sys/devices/cpu_core/cpus",
         "/sys/devices/cpu_atom/cpus",
-        processAffinityKeys());
-}
-
-/// Allowed-processor keys for this process, or null when the query fails.
-/// A null result leaves discovery unrestricted, the pre-existing behaviour.
-private ulong[] processAffinityKeys()
-{
-    import core.sys.linux.sched :
-        CPU_ALLOC, CPU_ALLOC_SIZE, CPU_FREE, cpu_mask, sched_getaffinity;
-    import core.sys.posix.unistd : _SC_NPROCESSORS_CONF, sysconf;
-
-    auto conf = sysconf(_SC_NPROCESSORS_CONF);
-    auto count = conf > 0 ? cast(size_t) conf : size_t(1024);
-    auto setsize = CPU_ALLOC_SIZE(count);
-    auto set = CPU_ALLOC(count);
-    if (set is null) return null;
-    scope (exit) CPU_FREE(set);
-    if (sched_getaffinity(0, setsize, set) != 0) return null;
-
-    auto words = (cast(cpu_mask*) set)[0 .. setsize / cpu_mask.sizeof];
-    ulong[] keys;
-    foreach (w, word; words)
-        foreach (bit; 0 .. 64)
-            if ((word >> bit) & 1)
-            {
-                auto cpu = cast(ulong) w * 64 + bit;
-                if (cpu > ushort.max) break;
-                keys ~= cpu;
-            }
-    return keys;
+        osScopeKeys());
 }
 
 private int indexOfDash(const(char)[] s)

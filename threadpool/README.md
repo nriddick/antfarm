@@ -55,6 +55,14 @@ assert(formatCpuList(topology.processorsInLlc(0)) == "0-7,16-23"); // on a 5900X
 auto eligible = topology.eligibleProcessorsInLlc(0); // in OS scope and online
 ```
 
+Worker eligibility uses a frozen, process-level OS scope: on Linux the CPU
+mask the process was launched with (`taskset -c 0-7 ./app`), on Windows the
+process affinity mask at first discovery. Narrowing `main`'s own mask later
+does not change it; call `scopeOsToCallingThread()` before the first
+`discover()` to opt into the calling thread's mask instead. Pin threads with
+`pinProcessor(id)`; a CPU outside the scope returns
+`PinOutcome.outsideOsScope` instead of escaping the launch restriction.
+
 ## Start workers
 
 The smallest pool provides a `WorkerBody`. Returning `true` asks the worker to
@@ -204,7 +212,14 @@ dub run -c live-test
 dub run -c wait-races
 dub run -c affinity-test --compiler=dmd
 dub run -c affinity-test --compiler=ldc2
+dub run -c scope-test --compiler=ldc2
 ```
+
+The Linux `scope-test` re-executes itself under `taskset -c` (one physical
+group's CPUs on a multi-LLC host, otherwise half the CPUs) and checks the
+frozen launch scope, that narrowing `main` before discovery does not shrink
+it, `outsideOsScope`/`unknownProcessor` pin outcomes and the default pool's
+resolution. Other platforms print a skip.
 
 The Windows `affinity-test` restricts its own process to two initially allowed
 CPUs and checks default/explicit worker selection, actual callback placement,

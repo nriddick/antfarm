@@ -17,8 +17,10 @@ public import threadpool.pool : CacheAwarePool, PoolOptions,
     Director, Selection, Cadence;
 public import threadpool.resolution : PoolResolution, resolvePool, Reject,
     StartState, CpuDisposition, RequestDisposition, GroupDisposition,
-    ResolutionException, OsScope, OsScopeSource;
-public import threadpool.pin : PinOutcome;
+    ResolutionException;
+public import threadpool.os_scope : OsScope, OsScopeSource, osScope,
+    scopeOsToCallingThread, inOsScope, liveOsMask;
+public import threadpool.pin : PinOutcome, pinProcessor;
 public import threadpool.hybrid : WorkerSelf, currentWorker, bindNumaNeighborhood,
     WorkerBody, WorkerStop, ManagedWorkerHooks, ManagedPumpResult, IdleKind;
 public import threadpool.bins : BinAxis, install, uninstall, setLabel, home, search, at;

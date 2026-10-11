@@ -11,7 +11,6 @@ import std.conv : to;
 import std.exception : enforce;
 import std.stdio : writefln, writeln;
 import threadpool;
-import threadpool.pin : PinTarget, pinToLogicalProcessor;
 import threadpool.sys.win_bindings : GetProcessGroupAffinity,
     GetCurrentProcessorNumberEx, PROCESSOR_NUMBER;
 
@@ -89,8 +88,8 @@ void main(string[] args)
 
     if (excluded !is null)
     {
-        enforce(!pinToLogicalProcessor(PinTarget(excluded.cpuSetId, excluded.group, excluded.lpIndex)),
-            "direct pin widened process affinity");
+        enforce(pinProcessor(*excluded) == PinOutcome.outsideOsScope,
+            "direct pin widened the frozen OS scope");
         foreach (lp; allowed) options.processors ~= ProcessorId(groups[0], lp);
         options.processors ~= ProcessorId(excluded.group, excluded.lpIndex);
         checkPool(options, mask, allowed.length);
@@ -99,6 +98,9 @@ void main(string[] args)
     if (allowed.length > 1)
     {
         enforce(SetProcessAffinityMask(process, cast(ULONG_PTR)(1UL << allowed[0])) != 0);
+        // Still inside the frozen scope, but the live OS mask refuses it.
+        enforce(pinProcessor(ProcessorId(groups[0], allowed[1])) == PinOutcome.osRejected,
+            "live process-mask narrowing was not reported as osRejected");
         auto stale = new CacheAwarePool;
         bool rejected;
         try { stale.start(); }

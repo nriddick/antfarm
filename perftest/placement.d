@@ -1,15 +1,15 @@
 module placement;
 
-import threadpool.topology : LogicalProcessor, TopologySnapshot;
-public import threadpool.pin : PinTarget, pinToLogicalProcessor;
+import threadpool.topology : LogicalProcessor, ProcessorId, TopologySnapshot;
+public import threadpool.pin : PinOutcome, pinProcessor;
 import std.algorithm.sorting : sort;
 import std.exception : enforce;
 import core.stdc.stdio : printf;
 
 struct Placement
 {
-    PinTarget[] consumers;
-    PinTarget producer, mailbox;
+    ProcessorId[] consumers;
+    ProcessorId producer, mailbox;
     bool reused;
 }
 
@@ -21,17 +21,17 @@ Placement choosePlacement(ref const TopologySnapshot topology, uint count)
     sort!((a, b) => a.efficiencyClass != b.efficiencyClass
         ? a.efficiencyClass > b.efficiencyClass
         : (a.group != b.group ? a.group < b.group : a.lpIndex < b.lpIndex))(processors);
-    PinTarget[] order;
+    ProcessorId[] order;
     foreach (siblings; [false, true])
         foreach (ref p; processors)
         {
             if (!topology.isEligible(p)) continue;
             if (p.smtSibling == siblings)
-                order ~= PinTarget(p.cpuSetId, p.group, p.lpIndex);
+                order ~= ProcessorId.of(p);
         }
     enforce(order.length != 0, "no logical processors discovered");
     Placement result;
-    result.consumers = new PinTarget[count];
+    result.consumers = new ProcessorId[count];
     foreach (i; 0 .. count) result.consumers[i] = order[i % order.length];
     result.producer = order[count % order.length];
     result.mailbox = order[(cast(size_t) count + 1) % order.length];
@@ -43,10 +43,10 @@ void printPlacement(ref const Placement p)
 {
     printf("placement nc=%u consumers(group:LP)=", cast(uint) p.consumers.length);
     foreach (i, cpu; p.consumers)
-        printf("%s%u:%u", i ? ",".ptr : "".ptr, cast(uint) cpu.group, cast(uint) cpu.lpIndex);
+        printf("%s%u:%u", i ? ",".ptr : "".ptr, cast(uint) cpu.group, cast(uint) cpu.lp);
     printf(" producer=%u:%u mailbox=%u:%u%s\n", cast(uint) p.producer.group,
-        cast(uint) p.producer.lpIndex, cast(uint) p.mailbox.group,
-        cast(uint) p.mailbox.lpIndex, p.reused ? " (LP reuse)".ptr : "".ptr);
+        cast(uint) p.producer.lp, cast(uint) p.mailbox.group,
+        cast(uint) p.mailbox.lp, p.reused ? " (LP reuse)".ptr : "".ptr);
 }
 
 unittest
@@ -66,9 +66,9 @@ unittest
     slow.group = 1;
     topology.processors ~= slow;
     auto p = choosePlacement(topology, 2);
-    assert(p.consumers[0].lpIndex == 0 && p.consumers[1].lpIndex == 2);
-    assert(p.producer.group == 1 && p.producer.lpIndex == 0);
-    assert(p.mailbox.group == 0 && p.mailbox.lpIndex == 1);
+    assert(p.consumers == [ProcessorId(0, 0), ProcessorId(0, 2)]);
+    assert(p.producer == ProcessorId(1, 0));
+    assert(p.mailbox == ProcessorId(0, 1));
     assert(!p.reused);
     assert(choosePlacement(topology, 5).reused);
 }

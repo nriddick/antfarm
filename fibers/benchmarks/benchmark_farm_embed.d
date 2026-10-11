@@ -170,11 +170,7 @@ final class SpinWorker : Thread
 
     void entry()
     {
-        PinTarget t;
-        t.cpuSetId = lp.cpuSetId;
-        t.group = lp.group;
-        t.lpIndex = lp.lpIndex;
-        pinToLogicalProcessor(t);
+        pinProcessor(lp);
         ConsumerView v;
         subscribeOrThrow(v, farm);
         while (atomicLoad(gStop) == 0)

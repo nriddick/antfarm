@@ -11,7 +11,7 @@ module tail;
 
 import antfarm;
 import placement;
-import threadpool.topology : discover;
+import threadpool.topology : discover, ProcessorId;
 import core.atomic;
 import core.memory : GC;
 import core.thread;
@@ -221,7 +221,7 @@ struct Row
 struct ConsCtx
 {
     AntFarm* f;
-    PinTarget cpu;
+    ProcessorId cpu;
     bool doPin;
 }
 
@@ -239,15 +239,15 @@ final class ConsJob
 
 final class MboxJob
 {
-    PinTarget cpu;
+    ProcessorId cpu;
     bool doPin;
-    this(PinTarget cpu, bool doPin) { this.cpu = cpu; this.doPin = doPin; }
+    this(ProcessorId cpu, bool doPin) { this.cpu = cpu; this.doPin = doPin; }
     void run() { mailboxMain(cpu, doPin); }
 }
 
 void consumerMain(ConsCtx* c)
 {
-    if (c.doPin && !pinToLogicalProcessor(c.cpu))
+    if (c.doPin && pinProcessor(c.cpu) != PinOutcome.pinned)
         atomicStore(g_pinOk, 0);
     ConsumerView v;
     if (v.subscribe(c.f) < 0)
@@ -347,7 +347,7 @@ FarmSet startFarm(Cfg cfg, uint nc)
     waitReady(nc, MonoTime.currTime + 5.seconds);
     if (cfg.pin)
     {
-        if (!pinToLogicalProcessor(placement.producer))
+        if (pinProcessor(placement.producer) != PinOutcome.pinned)
             atomicStore(g_pinOk, 0);
     }
     return s;
@@ -550,9 +550,9 @@ Row runMid(Cfg cfg, uint nc, uint tlen, ulong spinNs)
     return r;
 }
 
-void mailboxMain(PinTarget cpu, bool doPin)
+void mailboxMain(ProcessorId cpu, bool doPin)
 {
-    if (doPin && !pinToLogicalProcessor(cpu))
+    if (doPin && pinProcessor(cpu) != PinOutcome.pinned)
         atomicStore(g_pinOk, 0);
     atomicFetchAdd(g_ready, 1);
     while (atomicLoad!(MemoryOrder.acq)(g_go) == 0) {}

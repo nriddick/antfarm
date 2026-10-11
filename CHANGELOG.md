@@ -24,6 +24,13 @@ release entry at merge.
   counts). `CacheAwarePool.resolve()` previews start; `pool.resolution` keeps
   the start result with each worker's `StartState` and `PinOutcome`.
   `enforceRequested()` is the opt-in exact-request check.
+- `threadpool.os_scope`: one frozen, process-level OS scope (`osScope`,
+  `OsScopeSource`, `inOsScope`, `liveOsMask`, `scopeOsToCallingThread`).
+- `pinProcessor(LogicalProcessor)` / `pinProcessor(ProcessorId)` return a
+  `PinOutcome` (`pinned`, `unknownProcessor`, `outsideOsScope`, `osRejected`)
+  and validate every pin against the frozen scope on both OSes.
+- `perftest/actor_churn` parses its CPU argument with `parseCpuList`
+  (`0,1-7`, `g:lp`) and reports the failing id and `PinOutcome`.
 
 ### Breaking changes
 
@@ -51,6 +58,15 @@ release entry at merge.
 - X8: start-failure messages changed text (types unchanged): an empty
   selection carries `summary()`, a pin failure names each `g:lp` and its
   `PinOutcome`.
+- X9: the Linux OS scope is the launch mask captured before `main`, not the
+  mask of whichever thread discovers first. A program that narrows `main`'s
+  mask before discovery calls `scopeOsToCallingThread()` first or filters with
+  `PoolOptions.processors`. Windows is unchanged.
+- X10: `pinToLogicalProcessor` and `PinTarget` are removed. Use
+  `pinProcessor(p)` for a `LogicalProcessor` or `pinProcessor(id)`, and test
+  `== PinOutcome.pinned`. Pins outside the frozen scope now fail on both OSes
+  (`outsideOsScope`): an explicit CPU list outside a launch `taskset` fails
+  loudly instead of escaping it.
 
 ## 1.8.0-rc.2
 

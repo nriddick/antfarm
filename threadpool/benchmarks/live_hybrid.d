@@ -32,12 +32,10 @@ struct ConsJob
     bool eco;
     void run()
     {
-        PinTarget t;
-        t.cpuSetId = lp.cpuSetId;
-        t.group = lp.group;
-        t.lpIndex = lp.lpIndex;
-        if (!pinToLogicalProcessor(t))
-            fprintf(stderr, "pin failed lp=%u group=%u\n", lp.lpIndex, lp.group);
+        auto outcome = pinProcessor(lp);
+        if (outcome != PinOutcome.pinned)
+            fprintf(stderr, "pin failed lp=%u group=%u outcome=%u\n", lp.lpIndex, lp.group,
+                cast(uint) outcome);
         applyPowerThrottling(eco);
         ConsumerView v;
         if (v.subscribe(f) < 0)

@@ -1,11 +1,12 @@
 module threadpool.pin;
 
-struct PinTarget
-{
-    uint   cpuSetId;
-    ushort group;
-    ushort lpIndex;
-}
+import threadpool.os_scope : inOsScope;
+import threadpool.topology : LogicalProcessor, ProcessorId, cachedSnapshot, discover;
+
+version (Windows)
+    version = ThreadpoolOs;
+version (linux)
+    version = ThreadpoolOs;
 
 /// Result of pinning a thread to one processor.
 enum PinOutcome : ubyte
@@ -16,6 +17,39 @@ enum PinOutcome : ubyte
     osRejected,       /// the OS refused the affinity change
 }
 
+/// Pin the calling thread to `p`. Validates against the frozen OS scope on
+/// both platforms first, then pins (Windows: CPU-set preference plus a 1-LP
+/// group mask; Linux: a `sched_setaffinity` singleton). No unchecked variant
+/// exists.
+PinOutcome pinProcessor(ref const LogicalProcessor p) @nogc nothrow
+{
+    if (!inOsScope(ProcessorId.of(p)))
+        return PinOutcome.outsideOsScope;
+    version (ThreadpoolOs)
+        return pinOs(p) ? PinOutcome.pinned : PinOutcome.osRejected;
+    else
+        return PinOutcome.osRejected;
+}
+
+/// Look `id` up in the discovered topology (discovering it on first use), then
+/// pin as above. An id the snapshot does not know is `unknownProcessor`.
+PinOutcome pinProcessor(ProcessorId id) nothrow
+{
+    auto snap = cachedSnapshot();
+    if (snap is null)
+    {
+        try
+            cast(void) discover();
+        catch (Exception)
+            return PinOutcome.unknownProcessor;
+        snap = cachedSnapshot();
+    }
+    auto p = snap.byId(id);
+    if (p is null)
+        return PinOutcome.unknownProcessor;
+    return pinProcessor(*p);
+}
+
 version (Windows)
 {
     import core.sys.windows.basetsd : ULONG_PTR;
@@ -24,7 +58,7 @@ version (Windows)
     import core.sys.windows.windef : BOOL, FALSE, HANDLE, TRUE;
     import threadpool.sys.win_bindings;
 
-    bool pinToLogicalProcessor(PinTarget t) @nogc nothrow
+    private bool pinOs(ref const LogicalProcessor t) @nogc nothrow
     {
         if (t.lpIndex >= 64) return false;
         // Group affinity can widen a thread beyond the process mask. Check
@@ -89,7 +123,7 @@ else version (linux)
     import core.sys.linux.sched :
         CPU_ALLOC, CPU_ALLOC_SIZE, CPU_FREE, cpu_mask, cpu_set_t, sched_setaffinity;
 
-    bool pinToLogicalProcessor(PinTarget t) @nogc nothrow
+    private bool pinOs(ref const LogicalProcessor t) @nogc nothrow
     {
         // Use a dynamically sized CPU set so machines with more than the
         // legacy 1024-CPU cpu_set_t can still pin by system CPU number.

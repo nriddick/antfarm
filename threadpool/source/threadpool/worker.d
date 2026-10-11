@@ -35,9 +35,8 @@ __gshared PinOutcome[] gPinOutcome;
 struct SpawnSpec
 {
     WorkerSelf self;
-    uint       cpuSetId;
-    ushort     group;
-    ushort     lpIndex;
+    /// Into the published topology snapshot; lives for the process.
+    const(LogicalProcessor)* processor;
     bool       ecoQos;
     bool       applyQos;
 }
@@ -79,14 +78,11 @@ private void workerMain(SpawnSpec spec)
 {
     version (ThreadpoolOs)
     {
-        PinTarget pin;
-        pin.cpuSetId = spec.cpuSetId;
-        pin.group = spec.group;
-        pin.lpIndex = spec.lpIndex;
-        bool pinned = pinToLogicalProcessor(pin);
+        auto outcome = pinProcessor(*spec.processor);
+        bool pinned = outcome == PinOutcome.pinned;
         if (pinned && spec.applyQos)
             applyPowerThrottling(spec.ecoQos);
-        gPinOutcome[spec.self.workerIndex] = pinned ? PinOutcome.pinned : PinOutcome.osRejected;
+        gPinOutcome[spec.self.workerIndex] = outcome;
         if (pinned)
             atomicFetchAdd(gPinOk, 1);
         atomicFetchAdd(gPinDone, 1);
