@@ -23,13 +23,27 @@ import antfarm;
 import antfarm_fibers;
 import core.atomic;
 import core.thread : Thread;
-import core.time : MonoTime;
+import core.time : Duration, MonoTime;
 import std.conv : to;
 import std.exception : enforce;
 import std.stdio : writefln;
 import threadpool;
 
 shared long ran;
+
+/// Print one timed phase. A phase whose work had already finished when its
+/// timer started, or a zero interval, has no rate: report it as such
+/// instead of dividing by (almost) nothing.
+void report(string label, size_t count, Duration elapsed, bool measurable = true)
+{
+    immutable seconds = cast(double) elapsed.total!"nsecs" / 1_000_000_000.0;
+    if (!measurable || seconds == 0)
+        writefln("%s %s fibers: not measurable (finished before the timer started)",
+                 label, count);
+    else
+        writefln("%s %s fibers in %.6f s: %.2f fibers/s",
+                 label, count, seconds, count / seconds);
+}
 
 void main(string[] args)
 {
@@ -100,31 +114,29 @@ void main(string[] args)
         pool.wakeAll();
     }
 
-    void waitDrained()
+    bool allDrained()
     {
-        for (;;)
-        {
-            bool allDrained = true;
-            foreach (lane; lanes)
-                if (!lane.drained) { allDrained = false; break; }
-            if (allDrained) return;
-            Thread.yield();
-        }
+        foreach (lane; lanes)
+            if (!lane.drained) return false;
+        return true;
     }
 
+    void waitDrained()
+    {
+        while (!allDrained())
+            Thread.yield();
+    }
+
+    // Workers may drain the burst while it is still being spawned; then the
+    // run phase measured nothing.
     auto createStart = MonoTime.currTime;
     burstSpawn();
     auto runStart = MonoTime.currTime;
+    immutable runMeasurable = !allDrained();
     waitDrained();
     auto end = MonoTime.currTime;
-    auto createSeconds = cast(double)(runStart - createStart).total!("nsecs")
-        / 1_000_000_000.0;
-    auto runSeconds = cast(double)(end - runStart).total!("nsecs")
-        / 1_000_000_000.0;
-    writefln("create: %s fibers in %.6f s: %.2f fibers/s",
-             taskCount, createSeconds, taskCount / createSeconds);
-    writefln("run:    %s fibers in %.6f s: %.2f fibers/s",
-             taskCount, runSeconds, taskCount / runSeconds);
+    report("create:", taskCount, runStart - createStart);
+    report("run:   ", taskCount, end - runStart, runMeasurable);
 
     // Second generation: every spawn recycles a pooled task/fiber/stack.
     foreach (lane; lanes)
@@ -132,16 +144,12 @@ void main(string[] args)
     auto warmCreateStart = MonoTime.currTime;
     burstSpawn();
     auto warmRunStart = MonoTime.currTime;
+    immutable warmRunMeasurable = !allDrained();
     waitDrained();
     auto warmEnd = MonoTime.currTime;
-    auto warmCreateSeconds = cast(double)(warmRunStart - warmCreateStart)
-        .total!("nsecs") / 1_000_000_000.0;
-    auto warmRunSeconds = cast(double)(warmEnd - warmRunStart)
-        .total!("nsecs") / 1_000_000_000.0;
-    writefln("create (warm pool): %s fibers in %.6f s: %.2f fibers/s",
-             taskCount, warmCreateSeconds, taskCount / warmCreateSeconds);
-    writefln("run    (warm pool): %s fibers in %.6f s: %.2f fibers/s",
-             taskCount, warmRunSeconds, taskCount / warmRunSeconds);
+    report("create (warm pool):", taskCount, warmRunStart - warmCreateStart);
+    report("run    (warm pool):", taskCount, warmEnd - warmRunStart,
+           warmRunMeasurable);
 
     assert(atomicLoad(ran) == 2 * taskCount, "fiber executions lost");
     pool.shutdown();
