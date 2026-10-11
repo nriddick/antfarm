@@ -39,6 +39,22 @@ release entry at merge.
   resolutions; `perftest/placement` records each role's LLC and core, reports
   `crossesLlc` and accepts an optional LLC filter (default order unchanged).
 
+### Fiber service plans
+
+- `FiberLane` separates planned service (`lane.service`: `LaneService`
+  `native`, `rescued`, `unstaffed`, `disabled`, `absent`) from runtime
+  admission (`lane.state`: `FiberLaneState` `pending`, `open`, `closed`,
+  `stopped`, `failed`), and reports `lane.group` and `lane.liveServers`.
+  Refused spawns throw the typed `FiberLaneUnavailable` (state, service,
+  group).
+- Fixed: queued work on another lane of the same domain no longer fails the
+  pool at startup. The startup check is lane-local (`lane.ready` or
+  `lane.published` on a lane that did not open), not the domain-wide `active`
+  count.
+- Fixed: a lane no longer reports itself served after pool shutdown. When its
+  last server stops it becomes `stopped`, and a later spawn throws instead of
+  stranding an undrainable task.
+
 ### Breaking changes
 
 - X1: `ProcessorId` moved to `threadpool.topology`; `threadpool.pool` no longer
@@ -79,6 +95,14 @@ release entry at merge.
   `install(makeBins!C(res, ...), res)` (or `install(bins, res, classCount)`)
   with `res = pool.resolve()`; the table must have one slot per physical group
   and non-null slots for accepted groups.
+- X12: spawning on a lane planned without service (no accepted workers and no
+  rescue) throws `FiberLaneUnavailable` before the pool starts, and spawning
+  after every server of a lane stopped throws too. Catch
+  `FiberLaneUnavailable`, or plan a rescue.
+- X13: the responder requirement is per domain, not per lane (a relaxation):
+  a staffed lane whose own workers are all non-responders opens when another
+  lane of its domain has a responder. Some configurations that failed now
+  pass.
 
 ## 1.8.0-rc.2
 

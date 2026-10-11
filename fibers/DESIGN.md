@@ -245,7 +245,23 @@ embedding policy.
 The intended concurrent layout installs one `FiberLane` per LLC. Each managed
 worker keeps persistent Farm consumer and producer registrations. Selected
 responders poll timers, accept timer-bounded parks, and sweep Farm holes and
-leftovers; startup validates that every active lane has responder coverage.
+leftovers.
+
+Each lane has a planned service, decided before start from the pool
+resolution (`native`, `rescued`, `unstaffed`, `disabled`, `absent`), and a
+runtime `FiberLaneState`. Served lanes start `pending` and admit work before
+start; unserved lanes start `closed` and refuse it. When the last planned
+worker finishes managed start, each served lane becomes `open` if its domain
+has at least one responder (timers are domain-wide) and the lane has a live
+server, and `failed` otherwise; the pumps then throw. Queued work on a lane
+that did not open fails startup; the check reads only that lane's
+accumulator and published count. Managed stop decrements `liveServers` on
+the worker's home lane and on every lane it served; the last stop moves a
+`pending` or `open` lane to `stopped`, and later spawns throw
+`FiberLaneUnavailable`. A spawn racing the last server's stop is not locked
+out: it can strand its task, visible afterwards as `state == stopped` with
+`domain.active` still counting it. Close domain admission and drain before
+`pool.shutdown`.
 
 Responders retain one remote `ConsumerView` per covered lane. Every 16 local
 Farm pumps they visit the next remote, even when local consumption succeeds.

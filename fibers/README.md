@@ -178,8 +178,11 @@ These are starting points measured on a Ryzen 5 5500, not portable guarantees.
 Mixed workloads should benchmark both.
 
 Each worker keeps a persistent Farm consumer and producer token. Size every
-lane's Farm for its native workers plus covering sweepers. Installation forms
-a coverage barrier: a lane with workers but no responder fails explicitly.
+lane's Farm for its native workers plus covering sweepers. A lane without
+accepted workers or a covering lane refuses spawns with
+`FiberLaneUnavailable`, before and after start. A domain whose served lanes
+have no responder fails explicitly (`lane.state == failed`), and a lane whose
+servers all stopped is `stopped` and refuses spawns.
 Multi-LLC hardware validation remains required before making topology-specific
 performance or failover claims.
 

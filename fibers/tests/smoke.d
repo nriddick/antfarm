@@ -1835,6 +1835,140 @@ void threadpoolSmoke()
         assert(atomicLoad(farm.Cf) == 0, "fiber lane leaked a consumer");
 }
 
+FiberLaneUnavailable refusedSpawn(FiberLane lane)
+{
+    try lane.spawn({});
+    catch (FiberLaneUnavailable refused) return refused;
+    return null;
+}
+
+void waitTerminated(FiberTask task)
+{
+    import core.time : msecs;
+    foreach (_; 0 .. 400)
+    {
+        if (task.terminated) return;
+        Thread.sleep(msecs(5));
+    }
+}
+
+// L4: stopping the last server closes admission instead of stranding work.
+void admissionAfterStopSmoke()
+{
+    import threadpool;
+
+    auto topology = CacheAwarePool.topology();
+    ProcessorId cpu;
+    ushort group;
+    bool found;
+    foreach (ref lp; topology.processors)
+    {
+        if (!topology.isEligible(lp)) continue;
+        cpu = ProcessorId.of(lp);
+        group = lp.llcIndex;
+        found = true;
+        break;
+    }
+    assert(found);
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
+                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
+    scope (exit) farm.destroy();
+    auto lane = new FiberLane(farm);
+    auto lanes = new FiberLane[topology.llcCount];
+    lanes[group] = lane;
+    PoolOptions options;
+    options.processors = [cpu];
+    options.managedWorker = fiberWorkerHooks();
+    auto pool = new CacheAwarePool(options);
+    installFiberLanes(lanes, pool);
+    scope (exit) uninstallFiberLanes();
+    assert(lane.group == group && lane.service == LaneService.native);
+    assert(lane.state == FiberLaneState.pending);
+
+    pool.start();
+    auto task = lane.spawn({});
+    waitTerminated(task);
+    assert(task.terminated);
+    assert(lane.state == FiberLaneState.open && lane.liveServers == 1);
+    pool.shutdown();
+    assert(pool.workerFailures.length == 0);
+    assert(lane.state == FiberLaneState.stopped && lane.liveServers == 0);
+
+    immutable active = lane.domain.active;
+    auto refused = refusedSpawn(lane);
+    assert(refused !is null && refused.state == FiberLaneState.stopped);
+    assert(refused.service == LaneService.native && refused.group == group);
+    assert(lane.domain.active == active);
+    lane.domain.releaseAll(lane.domain.takeCompletions());
+}
+
+// L2a (2-LLC): work pre-admitted to a staffed lane runs even when another
+// lane of the same domain has no workers. 389 "explicit-away": one explicit
+// edge (the unused lane covers the staffed one) suppresses the ring, so
+// nothing serves the unused lane.
+void preAdmissionUnusedGroupSmoke()
+{
+    import core.stdc.stdio : printf;
+    import threadpool;
+
+    auto snapshot = discover();
+    auto scope_ = osScope();
+    auto full = resolvePool(snapshot, scope_, PoolOptions.init);
+    if (full.acceptedGroupCount < 2)
+    {
+        printf("SKIP L2a pre-admission with an unused group (needs 2 LLCs)\n");
+        return;
+    }
+    ushort[] accepted;
+    foreach (ref g; full.acceptedGroups) accepted ~= g.llcIndex;
+    immutable g0 = accepted[0];
+    immutable g1 = accepted[1];
+    auto workers = full.workersIn(g0);
+
+    auto domain = new FiberDomain;
+    AntFarm*[] farms;
+    FiberLane[] lanes;
+    foreach (_; 0 .. full.physicalGroupCount)
+    {
+        auto farm = AntFarm.create(2, 8, cast(uint) workers.length, 0, 0,
+            cast(uint) workers.length + 1, 4096,
+            DEFAULT_SMALL_TABLE_THRESHOLD, false);
+        farms ~= farm;
+        lanes ~= new FiberLane(domain, farm);
+    }
+    scope (exit)
+        foreach (farm; farms) farm.destroy();
+    lanes[g1].cover(lanes[g0]);
+
+    PoolOptions options;
+    options.processors = workers;
+    options.managedWorker = fiberWorkerHooks();
+    auto pool = new CacheAwarePool(options);
+    installFiberLanes(lanes, pool);
+    scope (exit) uninstallFiberLanes();
+    assert(lanes[g0].service == LaneService.native);
+    assert(lanes[g1].service == LaneService.unstaffed);
+    assert(lanes[g1].state == FiberLaneState.closed);
+    auto refused = refusedSpawn(lanes[g1]);
+    assert(refused !is null && refused.state == FiberLaneState.closed
+        && refused.service == LaneService.unstaffed && refused.group == g1);
+
+    shared int ran;
+    auto task = lanes[g0].spawn({ atomicFetchAdd(ran, 1); });
+    pool.start();
+    waitTerminated(task);
+    assert(task.terminated, "pre-admitted work on the staffed lane did not run");
+    assert(lanes[g0].state == FiberLaneState.open);
+    assert(refusedSpawn(lanes[g1]) !is null);
+    pool.shutdown();
+    assert(pool.workerFailures.length == 0);
+    assert(task.terminated && atomicLoad(ran) == 1);
+    assert(domain.drained);
+    domain.releaseAll(domain.takeCompletions());
+    printf("L2a pre-admission with an unused group: %u workers in group %u\n",
+        cast(uint) workers.length, cast(uint) g0);
+}
+
 void fiberParitySmoke()
 {
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
@@ -1949,6 +2083,8 @@ void main()
     syncPrimitiveSmoke();
     sharedSignalAndTimerCancellationSmoke();
     threadpoolSmoke();
+    admissionAfterStopSmoke();
+    preAdmissionUnusedGroupSmoke();
 
     import core.stdc.stdio : printf;
     printf("fiber smoke passed\n");
