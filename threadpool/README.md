@@ -37,10 +37,23 @@ void main()
 }
 ```
 
-`llcIndex` is a dense, process-wide index suitable for addressing an array. It
-is not a raw Windows cache index or Linux sysfs cache id. Higher
-`efficiencyClass` values identify the faster class when the OS exposes hybrid
-classes.
+`llcIndex` is a dense, process-wide index over physical groups (last-level
+sharing domains), suitable for addressing an array. It is not a raw Windows
+cache index or Linux sysfs cache id. `LlcDomain.source` says how each group was
+formed: `l3`, or a fallback (`l2Fallback`, `singletonFallback`,
+`cpuSetLlcIndex`) that is not a real CCD. Higher `efficiencyClass` values
+identify the faster class when the OS exposes hybrid classes.
+
+CPUs are identified by `ProcessorId(group, lp)` everywhere: Windows processor
+group plus group-relative LP, or group 0 and the CPU number on Linux. Domain
+membership lists are `ProcessorId[] processors`. `parseCpuList` and
+`formatCpuList` convert to and from the `0-7,16-23` / `g:a-b` text form:
+
+```d
+auto ccd0 = parseCpuList("0-7,16-23");          // group 0
+assert(formatCpuList(topology.processorsInLlc(0)) == "0-7,16-23"); // on a 5900X
+auto eligible = topology.eligibleProcessorsInLlc(0); // in OS scope and online
+```
 
 ## Start workers
 

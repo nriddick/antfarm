@@ -45,11 +45,35 @@ The model records:
 - physical core, L2 cluster, LLC, NUMA node, and package membership;
 - cache sizes and line sizes where the OS reports them;
 - efficiency class and the dense P/E table class;
-- parked state at discovery where available.
+- OS-scope exclusion (`affinityExcluded`), Linux offline state
+  (`offlineAtDiscovery`) and informational Windows CPU-set parking
+  (`parkedAtDiscovery`).
 
-`llcIndex` is a process-wide dense index used to address arrays. It is not a
-raw Windows cache id or a Linux sysfs identifier. Processor groups and sockets
-which reuse an OS-local cache number therefore do not alias in the table.
+`llcIndex` is a process-wide dense index over the discovered physical groups
+(last-level sharing domains), used to address arrays. It is not a raw Windows
+cache id or a Linux sysfs identifier. Processor groups and sockets which reuse
+an OS-local cache number therefore do not alias in the table. Physical groups
+never disappear or renumber because of OS scope or pool filters.
+
+Each `LlcDomain` records its `GroupingSource`: `l3` for a shared L3,
+`l2Fallback` or `singletonFallback` when Linux reports no L3 (or no shared
+cache), and `cpuSetLlcIndex` when Windows has no L3 record and the CPU-set
+`LastLevelCacheIndex` is used. `TopologySnapshot.groupingSource` is the weakest
+source present. A group is a CCD only when its source is `l3` on a chiplet
+part; callers that mean "CCD" should check the source.
+
+The CPU identity is `ProcessorId(group, lp)`: the Windows processor group and
+the group-relative LP number, or group 0 and the system CPU number on Linux.
+Its text form is `g:lp`. The membership lists of `PhysicalCore`, `LlcDomain`,
+`NumaNode` and `Package` are group-qualified `processors` arrays sorted by
+`(group, lp)`; `processorsInLlc`, `eligibleProcessorsInLlc` and
+`processorsOfClass` return the same identity. `parseCpuList` reads
+`0-7,16-23` (group 0) and `g:a-b`, preserving order and duplicates;
+`formatCpuList` prints the canonical form back.
+
+A processor is eligible (`isEligible`) when it is inside the OS scope and, on
+Linux, online at discovery. Windows parking never makes a processor
+ineligible.
 
 `efficiencyClass` preserves the OS value. `tableClassIndex` reduces the
 topology to the package's dense P/E table classes; higher efficiency class is
@@ -75,7 +99,8 @@ lifetime.
 The exact processor list wins over the shorthand LP list. Both platforms omit
 processors marked `affinityExcluded` by discovery, even when explicitly listed
 in the options. Windows OS parking alone does not exclude a worker; Linux also
-omits offline processors. The physical topology counts remain unchanged.
+omits offline (`offlineAtDiscovery`) processors. The physical topology counts
+remain unchanged.
 
 Windows pinning checks the current single-group process mask before applying
 thread group affinity, which can otherwise widen a thread's allowed CPUs.

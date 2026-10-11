@@ -70,8 +70,7 @@ ushort[] pickLps(bool skipSmt, size_t workers)
     ushort[] lps;
     foreach (ref lp; snap.processors)
     {
-        version (linux)
-            if (lp.parkedAtDiscovery) continue;
+        if (!snap.isEligible(lp)) continue;
         if (skipSmt && lp.smtSibling) continue;
         lps ~= lp.lpIndex;
         if (workers != 0 && lps.length == workers) break;

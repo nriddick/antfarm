@@ -185,7 +185,9 @@ unittest
     assert(snap.numaNodes.length == 1);
     assert(snap.llcDomains[0].l3SizeBytes == 16 * 1024 * 1024);
     assert(snap.llcDomains[0].lineSize == 64);
-    assert(snap.llcDomains[0].lpIndices.length == 12);
+    assert(snap.llcDomains[0].processors == parseCpuList("0-11"));
+    assert(snap.llcDomains[0].source == GroupingSource.l3);
+    assert(snap.groupingSource == GroupingSource.l3);
     assert(snap.llcDomains[0].eCoreIndices.length == 0);
     assert(snap.l2Clusters.length == 6);
 
@@ -200,6 +202,8 @@ unittest
         assert(p.l2.sizeBytes == 512 * 1024);
         assert(p.l3.sizeBytes == 16 * 1024 * 1024);
         assert(!p.parkedAtDiscovery);
+        assert(!p.offlineAtDiscovery);
+        assert(snap.isEligible(p));
         if (p.lpIndex < 6)
         {
             assert(!p.smtSibling, "lowest sibling is the primary");
@@ -224,8 +228,8 @@ unittest
 
 unittest
 {
-    // Affinity intersection: forbidden CPUs are parked, not removed, so
-    // consumers that already skip parkedAtDiscovery keep their semantics.
+    // Affinity intersection: forbidden CPUs are marked affinityExcluded and
+    // ineligible, not removed and not parked.
     auto root = writeTree(ryzen5500Cpus(), "0-11", "0-11", [ushort(0): "0-11"]);
     scope (exit) rmdirRecurse(root);
     immutable ulong[] allowed = [0, 1, 2, 3];
@@ -236,13 +240,15 @@ unittest
     assert(snap.groups.length == 1);
     assert(snap.groups[0].activeProcessors == 4);
     assert(snap.groups[0].activeMask == 0xF);
-    assert(snap.llcDomains[0].lpIndices.length == 12);
+    assert(snap.llcDomains[0].processors.length == 12);
+    assert(snap.eligibleProcessorsInLlc(0) == parseCpuList("0-3"));
+    assert(snap.eligibleLlcCount == 1);
     foreach (ref p; snap.processors)
     {
-        if (p.lpIndex < 4)
-            assert(!p.parkedAtDiscovery);
-        else
-            assert(p.parkedAtDiscovery);
+        assert(!p.parkedAtDiscovery);
+        assert(!p.offlineAtDiscovery);
+        assert(p.affinityExcluded == (p.lpIndex >= 4));
+        assert(snap.isEligible(p) == (p.lpIndex < 4));
     }
 }
 
@@ -395,12 +401,8 @@ unittest
         }
     }
 
-    auto pLps = snap.pLps();
-    auto eLps = snap.eLps();
-    pLps.sort();
-    eLps.sort();
-    assert(pLps == [ushort(0), 1, 2, 3]);
-    assert(eLps == [ushort(4), 5, 6, 7]);
+    assert(snap.processorsOfClass(classP) == parseCpuList("0-3"));
+    assert(snap.processorsOfClass(classE) == parseCpuList("4-7"));
 }
 
 unittest
@@ -491,6 +493,106 @@ unittest
             assert(s.coreIndex == i);
         }
     }
+}
+
+unittest
+{
+    // F1: 5900XT-shaped two-CCD tree. 32 LPs, SMT sibling N+16, L3 sets
+    // {0-7,16-23} and {8-15,24-31}, one NUMA node.
+    auto root = writeTree(ryzen5900Cpus(), "0-31", "0-31", [ushort(0): "0-31"]);
+    scope (exit) rmdirRecurse(root);
+    auto snap = parseSysfsTopology(buildPath(root, "cpu"), buildPath(root, "node"));
+    assert(snap.llcCount == 2);
+    assert(snap.logicalProcessorCount == 32);
+    assert(snap.groupingSource == GroupingSource.l3);
+    assert(snap.llcDomains[0].source == GroupingSource.l3);
+    assert(snap.llcDomains[1].source == GroupingSource.l3);
+    assert(snap.processorsInLlc(0) == parseCpuList("0-7,16-23"));
+    assert(snap.processorsInLlc(1) == parseCpuList("8-15,24-31"));
+    assert(snap.eligibleLlcCount == 2);
+    assert(snap.numaNodes.length == 1);
+    assert(snap.numaNodes[0].processors == parseCpuList("0-31"));
+    assert(snap.packages[0].processors == parseCpuList("0-31"));
+    foreach (ref c; snap.cores)
+        assert(c.processors == [ProcessorId(0, c.coreIndex),
+            ProcessorId(0, cast(ushort)(c.coreIndex + 16))]);
+    foreach (ref p; snap.processors)
+        assert(p.smtSibling == (p.lpIndex >= 16));
+}
+
+unittest
+{
+    // F2: an offline CPU is ineligible but neither parked nor OS-excluded.
+    auto cpus = ryzen5900Cpus();
+    cpus[5].online = false;
+    assert(cpus[5].cpu == 5);
+    auto root = writeTree(cpus, "0-31", "0-4,6-31", [ushort(0): "0-31"]);
+    scope (exit) rmdirRecurse(root);
+    auto snap = parseSysfsTopology(buildPath(root, "cpu"), buildPath(root, "node"));
+    auto p = snap.byId(ProcessorId(0, 5));
+    assert(p !is null);
+    assert(p.offlineAtDiscovery);
+    assert(!p.affinityExcluded);
+    assert(!p.parkedAtDiscovery);
+    assert(!snap.isEligible(*p));
+    assert(snap.groups[0].activeProcessors == 31);
+    assert(snap.eligibleProcessorsInLlc(0) == parseCpuList("0-4,6-7,16-23"));
+}
+
+unittest
+{
+    // F3: no L3 groups by shared L2; no caches at all gives singletons.
+    // Same shapes as the 380 audit fixtures (4 CPUs, SMT pairs (0,2),(1,3)).
+    TestCpu[] l2Only, bare;
+    foreach (i; 0 .. 4)
+    {
+        TestCpu c;
+        c.cpu = cast(ushort) i;
+        c.core = cast(ushort)(i % 2);
+        c.siblings = i % 2 == 0 ? "0,2" : "1,3";
+        bare ~= c;
+        c.caches = [TestCache(2, "Unified", "512K", 64, 8, c.siblings, c.core)];
+        l2Only ~= c;
+    }
+    auto l2Root = writeTree(l2Only, "0-3", "0-3", [ushort(0): "0-3"]);
+    scope (exit) rmdirRecurse(l2Root);
+    auto l2 = parseSysfsTopology(buildPath(l2Root, "cpu"), buildPath(l2Root, "node"));
+    assert(l2.llcCount == 2);
+    assert(l2.groupingSource == GroupingSource.l2Fallback);
+    foreach (ref d; l2.llcDomains)
+        assert(d.source == GroupingSource.l2Fallback);
+    assert(l2.processorsInLlc(l2.byId(ProcessorId(0, 0)).llcIndex) == parseCpuList("0,2"));
+
+    auto bareRoot = writeTree(bare, "0-3", "0-3", [ushort(0): "0-3"]);
+    scope (exit) rmdirRecurse(bareRoot);
+    auto single = parseSysfsTopology(buildPath(bareRoot, "cpu"), buildPath(bareRoot, "node"));
+    assert(single.llcCount == 4);
+    assert(single.groupingSource == GroupingSource.singletonFallback);
+    foreach (ref d; single.llcDomains)
+    {
+        assert(d.source == GroupingSource.singletonFallback);
+        assert(d.processors.length == 1);
+    }
+}
+
+private TestCpu[] ryzen5900Cpus()
+{
+    TestCpu[] cpus;
+    foreach (cpu; 0 .. 32)
+    {
+        auto core = cast(ushort)(cpu % 16);
+        auto ccd = core / 8;
+        auto sibs = format("%s,%s", core, core + 16);
+        TestCpu c;
+        c.cpu = cast(ushort) cpu;
+        c.core = core;
+        c.siblings = sibs;
+        c.omitOnlineFile = cpu == 0;
+        c.caches = zen3Caches(sibs, core, ccd == 0 ? "0-7,16-23" : "8-15,24-31");
+        c.caches[3].id = cast(ushort) ccd;
+        cpus ~= c;
+    }
+    return cpus;
 }
 
 private bool looksLikeRyzen5500(ref const TopologySnapshot snap)

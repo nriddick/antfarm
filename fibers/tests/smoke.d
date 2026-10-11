@@ -1668,8 +1668,7 @@ void threadpoolSmoke()
     bool found;
     foreach (ref lp; topology.processors)
     {
-        version (linux)
-            if (lp.parkedAtDiscovery) continue;
+        if (!topology.isEligible(lp)) continue;
         selectedLp = lp.lpIndex;
         selectedGroup = lp.group;
         selectedLlc = lp.llcIndex;

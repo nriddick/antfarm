@@ -97,14 +97,16 @@ void dump(const(TopologySnapshot) s)
         " line=", s.cacheLineSize);
     foreach (ref p; s.processors)
     {
-        writefln("  lp=%s group=%s core=%s llc=%s llcInGroup=%s eff=%s smtSib=%s parked=%s cpuSet=%s l2=%s l3=%s mod=%s",
+        writefln("  lp=%s group=%s core=%s llc=%s llcInGroup=%s eff=%s smtSib=%s parked=%s offline=%s eligible=%s cpuSet=%s l2=%s l3=%s mod=%s",
             p.lpIndex, p.group, p.coreIndex, p.llcIndex, p.llcIndexInGroup,
-            p.efficiencyClass, p.smtSibling, p.parkedAtDiscovery, p.cpuSetId,
+            p.efficiencyClass, p.smtSibling, p.parkedAtDiscovery, p.offlineAtDiscovery,
+            s.isEligible(p), p.cpuSetId,
             p.l2.sizeBytes, p.l3.sizeBytes, p.moduleIndex);
     }
     foreach (ref d; s.llcDomains)
-        writefln("  domain %s l3=%s lps=%s pCores=%s eCores=%s",
-            d.llcIndex, d.l3SizeBytes, d.lpIndices, d.pCoreIndices, d.eCoreIndices);
+        writefln("  domain %s source=%s l3=%s cpus=%s pCores=%s eCores=%s",
+            d.llcIndex, d.source, d.l3SizeBytes, formatCpuList(d.processors),
+            d.pCoreIndices, d.eCoreIndices);
 }
 
 bool looksLikeSisyphus(const(TopologySnapshot) s)

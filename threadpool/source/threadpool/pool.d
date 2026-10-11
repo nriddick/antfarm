@@ -31,13 +31,6 @@ enum PinScope : ubyte
     llc,
 }
 
-/// One logical processor in a Windows processor group. Linux `group` is 0.
-struct ProcessorId
-{
-    ushort group;
-    ushort lp;
-}
-
 /// Best-effort wake grid for idle workers. Late workers pull by default.
 struct Cadence
 {
@@ -669,10 +662,7 @@ private LogicalProcessor[] selectLps(ref const(TopologySnapshot) snap, ref const
             if (tc == classE && !opt.enableECores) continue;
         }
         if (opt.skipSmtSiblings && lp.smtSibling) continue;
-        version (linux)
-        {
-            if (lp.parkedAtDiscovery) continue;
-        }
+        if (lp.offlineAtDiscovery) continue;
         selected ~= lp;
     }
     return selected;
@@ -718,23 +708,18 @@ unittest
 {
     TopologySnapshot snap;
     snap.classCount = 1;
-    LogicalProcessor live, parked;
+    LogicalProcessor live, parked, offline;
     live.lpIndex = 0;
     parked.lpIndex = 1;
     parked.parkedAtDiscovery = true;
-    snap.processors = [live, parked];
+    offline.lpIndex = 2;
+    offline.offlineAtDiscovery = true;
+    snap.processors = [live, parked, offline];
 
     PoolOptions opt;
     auto got = selectLps(snap, opt);
-    version (linux)
-    {
-        assert(got.length == 1);
-        assert(got[0].lpIndex == 0);
-    }
-    else
-    {
-        assert(got.length == 2);
-    }
+    assert(got.length == 2, "parking is informational; offline is skipped");
+    assert(got[0].lpIndex == 0 && got[1].lpIndex == 1);
 }
 
 unittest

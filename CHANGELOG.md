@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.8.0 (unreleased)
+
+Open for the life of the long-lived `1.8.0-rc` branch; it becomes the 1.8.0
+release entry at merge.
+
+### Threadpool CPU groups
+
+- `ProcessorId(group, lp)` is the one CPU identity, now in
+  `threadpool.topology` with `of`, `(group, lp)` ordering and the `g:lp` text
+  form. `parseCpuList` reads `0-7,16-23` and `g:a-b` lists (ordered, duplicates
+  kept, `CpuListException` with the offending offset); `formatCpuList` prints
+  them back.
+- Each `LlcDomain` records a `GroupingSource` (`l3`, `l2Fallback`,
+  `singletonFallback`, `cpuSetLlcIndex`), and `TopologySnapshot.groupingSource`
+  is the weakest one present, so fallback shards are not mistaken for CCDs.
+- `LogicalProcessor.offlineAtDiscovery` reports Linux offline CPUs.
+  `TopologySnapshot` gains `byId`, `isEligible`, `processorsInLlc`,
+  `eligibleProcessorsInLlc`, `eligibleLlcCount` and `processorsOfClass`.
+
+### Breaking changes
+
+- X1: `ProcessorId` moved to `threadpool.topology`; `threadpool.pool` no longer
+  declares it. Import it from `threadpool` or `threadpool.topology`.
+- X2: `TopologySnapshot.lpsInLlc`, `pLps` and `eLps` are removed. Use
+  `processorsInLlc(i)`, `eligibleProcessorsInLlc(i)` or
+  `processorsOfClass(classP / classE)`.
+- X3: `PhysicalCore`, `LlcDomain`, `NumaNode` and `Package` `lpIndices: ushort[]`
+  became `processors: ProcessorId[]`, sorted by `(group, lp)`. Print them with
+  `formatCpuList`.
+- X4: `parkedAtDiscovery` now means Windows CPU-set parking only. Linux offline
+  CPUs set `offlineAtDiscovery`, and OS-scope exclusion no longer sets the
+  parked flag on either OS. Replace `version (linux) if (p.parkedAtDiscovery)
+  continue;` with `if (!snapshot.isEligible(p)) continue;`.
+
 ## 1.8.0-rc.2
 
 Second release candidate. Its runtime is identical to 1.8.0-rc.1: no file in

@@ -146,7 +146,7 @@ TopologySnapshot parseSysfsTopology(
         p.packageIndex = r.pkg;
         p.numaIndex = numaOf.get(r.cpu, cast(ushort) 0);
         p.moduleIndex = ushort.max;
-        p.parkedAtDiscovery = !r.online;
+        p.offlineAtDiscovery = !r.online;
         p.l1d = r.l1d;
         p.l1i = r.l1i;
         p.l2 = r.l2;
@@ -159,8 +159,7 @@ TopologySnapshot parseSysfsTopology(
 
     // Discovery must not place work on a CPU the process may not run on, so
     // intersect with the process affinity before any consumer reads the
-    // snapshot. Forbidden CPUs are parked, not removed, matching the offline
-    // handling that pool startup and placement already skip.
+    // snapshot. Forbidden CPUs are marked affinityExcluded, not removed.
     intersectAffinity(procs, affinity);
 
     // SMT: lowest lpIndex in thread_siblings is the primary; the rest are siblings.
@@ -185,13 +184,18 @@ TopologySnapshot parseSysfsTopology(
     // Fall back to L2 share, then a singleton, so every LP gets a shard.
     ushort nextLlc;
     ushort[string] llcOfSet;
+    GroupingSource[] sourceOfLlc;
     foreach (ref r; raws)
     {
         auto share = r.hasL3 ? r.l3Share : (r.hasL2 ? r.l2Share : [r.cpu]);
         share = uniqueSorted(share);
         auto k = setKey(share);
         if (k !in llcOfSet)
+        {
             llcOfSet[k] = nextLlc++;
+            sourceOfLlc ~= r.hasL3 ? GroupingSource.l3
+                : (r.hasL2 ? GroupingSource.l2Fallback : GroupingSource.singletonFallback);
+        }
         auto lp = &procs[idxOf[r.cpu]];
         lp.llcIndex = llcOfSet[k];
         lp.llcIndexInGroup = r.hasL3 ? r.l3Id : lp.llcIndex;
@@ -239,7 +243,7 @@ TopologySnapshot parseSysfsTopology(
     foreach (ref p; procs)
     {
         if (p.lpIndex > maxCpu) maxCpu = p.lpIndex;
-        if (p.parkedAtDiscovery) continue;
+        if (p.offlineAtDiscovery || p.affinityExcluded) continue;
         active++;
         if (p.lpIndex < 64)
             mask |= 1UL << p.lpIndex;
@@ -248,7 +252,8 @@ TopologySnapshot parseSysfsTopology(
     pg.activeProcessors = active;
     pg.activeMask = mask;
 
-    return assembleSnapshot("linux", procs, clusters, [pg], nextLlc, maxLine);
+    return assembleSnapshot("linux", procs, clusters, [pg], nextLlc, maxLine,
+        sourceOfLlc);
 }
 
 TopologySnapshot discoverLinux()

@@ -35,8 +35,7 @@ void main(string[] args)
     auto perLlc = new size_t[topology.llcCount];
     foreach (ref lp; topology.processors)
     {
-        version (linux)
-            if (lp.parkedAtDiscovery) continue;
+        if (!topology.isEligible(lp)) continue;
         perLlc[lp.llcIndex]++;
     }
 

@@ -11,8 +11,9 @@ module threadpool;
 
 public import threadpool.topology : TopologySnapshot, LogicalProcessor, LlcDomain,
     PhysicalCore, L2Cluster, CacheInfo, discover, tableClassIndex, classE, classP,
-    maxNumaLlcs, fillNumaLlcs;
-public import threadpool.pool : CacheAwarePool, PoolOptions, PinScope, ProcessorId,
+    maxNumaLlcs, fillNumaLlcs, ProcessorId, parseCpuList, formatCpuList,
+    CpuListException, GroupingSource;
+public import threadpool.pool : CacheAwarePool, PoolOptions, PinScope,
     Director, Selection, Cadence;
 public import threadpool.hybrid : WorkerSelf, currentWorker, bindNumaNeighborhood,
     WorkerBody, WorkerStop, ManagedWorkerHooks, ManagedPumpResult, IdleKind;

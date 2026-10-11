@@ -15,9 +15,9 @@ void main()
 
     foreach (ref d; t.llcDomains)
     {
-        writefln("  LLC %s  size %s KiB  line %s  LPs %s  P-cores %s  E-cores %s",
+        writefln("  LLC %s  size %s KiB  line %s  CPUs %s  P-cores %s  E-cores %s",
             d.llcIndex, d.l3SizeBytes / 1024, d.lineSize,
-            d.lpIndices, d.pCoreIndices, d.eCoreIndices);
+            formatCpuList(d.processors), d.pCoreIndices, d.eCoreIndices);
     }
 
     writeln();

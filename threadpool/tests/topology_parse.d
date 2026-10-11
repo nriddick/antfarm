@@ -157,6 +157,11 @@ unittest
     assert(snap.cacheLineSize == 64);
     assert(snap.classCount == 2);
     assert(snap.maxEfficiencyClass == 1);
+    assert(snap.groupingSource == GroupingSource.l3);
+    assert(snap.llcDomains[0].source == GroupingSource.l3);
+    assert(snap.processorsInLlc(0) == parseCpuList("0-19"));
+    assert(snap.processorsOfClass(classP) == parseCpuList("0-11"));
+    assert(snap.processorsOfClass(classE) == parseCpuList("12-19"));
 
     uint smtP, eCores;
     foreach (ref p; snap.processors)
@@ -256,6 +261,10 @@ unittest
     foreach (v; llcG1)
         assert(v == llcG1[0]);
     assert(llcG0[0] != llcG1[0], "group-relative LastLevelCacheIndex must not alias two L3s");
+    assert(snap.groupingSource == GroupingSource.l3);
+    assert(snap.processorsInLlc(llcG0[0]) == parseCpuList("0:0-3"));
+    assert(snap.processorsInLlc(llcG1[0]) == parseCpuList("1:0-3"));
+    assert(snap.numaNodes[0].processors == parseCpuList("0-3,1:0-3"));
 
     auto numaLlcs = snap.llcsInNuma(0);
     numaLlcs.sort();
@@ -315,6 +324,9 @@ unittest
         putCpuSet(cpu, 0, cast(ubyte) lp, cast(ubyte) lp, lp < 2 ? 0 : 1, 0, 1);
     auto snap = parseWindowsTopology(cpu, null);
     assert(snap.llcCount == 2);
+    assert(snap.groupingSource == GroupingSource.cpuSetLlcIndex);
+    foreach (ref d; snap.llcDomains)
+        assert(d.source == GroupingSource.cpuSetLlcIndex);
     assert(snap.processors[0].llcIndex == snap.processors[1].llcIndex);
     assert(snap.processors[2].llcIndex == snap.processors[3].llcIndex);
     assert(snap.processors[0].llcIndex != snap.processors[2].llcIndex);
@@ -397,6 +409,11 @@ unittest
     auto snap = parseWindowsTopology(cpu, null, [affinityKey(0, 0)]);
     assert(snap.processors[0].parkedAtDiscovery);
     assert(!snap.processors[0].affinityExcluded);
+    assert(snap.isEligible(snap.processors[0]), "parking is informational");
     assert(snap.processors[1].affinityExcluded);
+    assert(!snap.processors[1].parkedAtDiscovery);
+    assert(!snap.isEligible(snap.processors[1]));
     assert(snap.processors[2].affinityExcluded);
+    foreach (ref p; snap.processors)
+        assert(!p.offlineAtDiscovery);
 }

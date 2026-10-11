@@ -294,8 +294,7 @@ private ushort[] pickWorkerLps(size_t maximum, bool includeSmt)
     {
         foreach (ref processor; topology.processors)
         {
-            version (linux)
-                if (processor.parkedAtDiscovery) continue;
+            if (!topology.isEligible(processor)) continue;
             if (processor.smtSibling != (pass == 1)) continue;
             result ~= processor.lpIndex;
             if (maximum != 0 && result.length == maximum)
