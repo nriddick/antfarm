@@ -5,6 +5,7 @@ module service_plan_tests;
 
 import antfarm;
 import antfarm_fibers;
+import core.stdc.stdio : printf;
 import std.algorithm : any, canFind;
 import threadpool.os_scope : OsScope;
 import threadpool.pool : PoolOptions;
@@ -77,6 +78,8 @@ void defaultPlanIsNativeOnly()
         assert(r.smallProducerSlots == res.workersIn(g).length);
         assert(r.foreignConsumers == 0 && r.foreignProducers == 0);
     }
+    printf("P1 default plan is native-only: no edges, %u and %u native views\n",
+        plan.requirement(0).consumerViews, plan.requirement(1).consumerViews);
 }
 
 // P2: a disabled group's lane is closed after a plan-only install.
@@ -103,6 +106,7 @@ void disabledGroupIsClosed()
     assert(refused !is null && refused.state == FiberLaneState.closed
         && refused.service == LaneService.disabled && refused.group == 1);
     assert(domain.active == 0);
+    printf("P2 disabled group: lane 1 closed, spawn refused\n");
 }
 
 // P3: every problem is reported together.
@@ -162,6 +166,8 @@ void invalidPlanReportsEveryProblem()
     assert(reports(problems2, "rescue 0->1 serves group 1, which has no bound lane"));
     assert(reports(problems2, "group 2 is disabled but has 2 accepted workers and no bound lane"));
     assert(reports(problems2, "assist 0->0 is a self-edge"));
+    printf("P3 invalid plans: %u and %u problems reported together\n",
+        cast(uint) problems.length, cast(uint) problems2.length);
 }
 
 // P4: a rescued group needs one view and one slot per worker of its rescuer.
@@ -184,6 +190,8 @@ void rescueSizing()
     auto text = new char[0];
     plan.toString((const(char)[] s) { text ~= s; });
     assert(text.canFind("rescue<-0") && text.canFind("rescue->1"));
+    printf("P4 rescue sizing: group 1 needs %u foreign views and %u slots\n",
+        r.foreignConsumers, r.smallProducerSlots);
 }
 
 // P5: assistRing is the explicit spelling of the former automatic ring.
@@ -209,6 +217,8 @@ void assistRingEdges()
     auto split = new FiberServicePlan(synthetic([4, 6])).assistRing([0, 1]);
     split.bind(0, new FiberLane(farm0)).bind(1, new FiberLane(farm1));
     assert(reports(split.problems, "spans two Fiber domains"));
+    printf("P5 assistRing: edges 0->1 and 1->0, foreign views %u and %u\n",
+        plan.requirement(0).foreignConsumers, plan.requirement(1).foreignConsumers);
 }
 
 void servicePlanTests()

@@ -1849,6 +1849,7 @@ void waitTerminated(FiberTask task)
 // L4: stopping the last server closes admission instead of stranding work.
 void admissionAfterStopSmoke()
 {
+    import core.stdc.stdio : printf;
     import threadpool;
 
     auto topology = CacheAwarePool.topology();
@@ -1892,6 +1893,8 @@ void admissionAfterStopSmoke()
     assert(refused.service == LaneService.native && refused.group == group);
     assert(lane.domain.active == active);
     lane.domain.releaseAll(lane.domain.takeCompletions());
+    printf("L4 admission after stop: lane %u stopped, spawn refused\n",
+        cast(uint) group);
 }
 
 /// The unfiltered default resolution, or null after printing SKIP when it
