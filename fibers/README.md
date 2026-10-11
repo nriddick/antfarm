@@ -132,35 +132,49 @@ edges automatically. A custom scheduler pump must call
 
 ## Bind lanes to the cache-aware pool
 
-The intended concurrent embedding uses one `FiberLane` per LLC and one shared
-`FiberDomain` for application-wide lifecycle ownership.
+The intended concurrent embedding binds one `FiberLane` to each accepted LLC
+group of the pool and shares one `FiberDomain` for application-wide lifecycle
+ownership. A `FiberServicePlan` makes that binding explicit and derives each
+Farm's sizing before the Farms exist. This fragment assumes a `makeFarm`
+helper that takes the consumer and producer counts:
 
 ```d
-auto topology = CacheAwarePool.topology();
+enum preset = FiberTopologyPreset.fiberThroughput;
+PoolOptions options;
+applyFiberTopologyPreset(preset, null, options);   // worker selection first
+auto pool = new CacheAwarePool(options);
+
+auto plan = new FiberServicePlan(pool.resolve());
 auto domain = new FiberDomain;
 AntFarm*[] farms;
 FiberLane[] lanes;
-
-foreach (llc; 0 .. topology.llcCount)
+foreach (ref group; plan.resolution.acceptedGroups)
 {
-    immutable workers = workersOnLlc(topology, llc);
-    auto farm = makeFarm(workers);
+    auto need = plan.requirement(group.llcIndex);
+    auto farm = makeFarm(need.consumerViews, need.smallProducerSlots);
     farms ~= farm;
     lanes ~= new FiberLane(domain, farm);
+    plan.bind(group.llcIndex, lanes[$ - 1]);
 }
+applyFiberTopologyPreset(preset, lanes, options);  // then lane batching
 
-PoolOptions options;
-applyFiberTopologyPreset(
-    FiberTopologyPreset.fiberThroughput, lanes, options);
-
-auto pool = new CacheAwarePool(options);
-installFiberLanes(lanes, pool);
-scope (exit) uninstallFiberLanes();
+installFiberPlan(plan, pool);   // validates; throws FiberPlanException
+scope (exit) uninstallFiberPlan();
 pool.start();
 scope (exit) pool.shutdown();
 
 lanes[0].spawn(&fiberBody);
 ```
+
+Service is native-only by default: each lane is consumed by the accepted
+workers of its own group, even when lanes share a domain. Cross-group
+consumers exist only through explicit edges on the plan. `rescue(g, by)`
+serves a group with no accepted workers. `assist(g, by)` and
+`assistRing(groups)` are experimental and opt-in: they add consumers to
+staffed groups. `plan.problems()` lists every mistake together, and
+`plan.toString` prints the per-group service, edges and sizing. Groups
+without accepted workers may stay unbound (`absent`), and `disable(g)` closes
+a group whose workers then idle.
 
 `applyFiberTopologyPreset` installs the managed-worker hooks and chooses a
 measured starting point:
@@ -177,12 +191,12 @@ uniform work, higher ones for expensive work.
 These are starting points measured on a Ryzen 5 5500, not portable guarantees.
 Mixed workloads should benchmark both.
 
-Each worker keeps a persistent Farm consumer and producer token. Size every
-lane's Farm for its native workers plus covering sweepers. A lane without
-accepted workers or a covering lane refuses spawns with
-`FiberLaneUnavailable`, before and after start. A domain whose served lanes
-have no responder fails explicitly (`lane.state == failed`), and a lane whose
-servers all stopped is `stopped` and refuses spawns.
+Each worker keeps a persistent Farm consumer and producer token, and each
+responder of a serving group one more of each per served lane:
+`plan.requirement(g)` counts them. An unstaffed or disabled lane refuses
+spawns with `FiberLaneUnavailable`, before and after start. A domain whose
+served lanes have no responder fails explicitly (`lane.state == failed`), and
+a lane whose servers all stopped is `stopped` and refuses spawns.
 Multi-LLC hardware validation remains required before making topology-specific
 performance or failover claims.
 

@@ -255,15 +255,19 @@ with the same contents would, and do not change the consumer contract.
 
 ## One LLC and many LLCs
 
-The software model supports one lane per LLC and shared domain-wide Fiber
-lifecycle. Covering responders form a sweep graph so runnable work is not
-owned by one locality.
+A `FiberServicePlan` binds one lane to each accepted LLC group of the pool
+resolution, and lanes may share one domain-wide Fiber lifecycle. Service is
+native-only by default: domain membership adds no cross-group consumers. A
+group without accepted workers is either refused (`unstaffed`, spawns throw)
+or served through an explicit `rescue` edge. `assist` edges, including the
+explicit `assistRing`, are experimental and opt-in for staffed groups. The
+plan derives each Farm's consumer and producer sizing from these edges.
 
-Current characterization hardware has one LLC. Multi-LLC validation is a
-bridge that must be crossed before topology-specific performance, loss of a
-native worker group, or remote-sweeper claims are treated as release evidence.
-It is not emulated away and it is not a blocker for the 1.8.0 release-candidate
-single-LLC contract.
+Native-only service, unused-group admission and rescue are validated on a
+two-LLC host (Ryzen 9 5900XT). Selective wake by group is pending: the default
+broadcast still wakes every worker. Topology-specific performance and
+lost-worker-group claims still need their own evidence before they are treated
+as release evidence.
 
 ## Shutdown order
 

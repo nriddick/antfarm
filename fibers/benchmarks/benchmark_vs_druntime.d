@@ -8,7 +8,10 @@
  +
  + After the ST table, the same binary sweeps Ant Farm + threadpool worker
  + sets on this machine (SMT on/off, 1..N LPs, flush/avgCost) and reports
- + warm fiber drain and bare-payload drain against that ST baseline.
+ + warm fiber drain and bare-payload drain against that ST baseline. The
+ + worker sets come from one LLC group (the group of the first eligible CPU),
+ + because the single lane binds to one group: on multi-LLC hosts they are
+ + capped to one LLC's CPUs.
  +/
 module benchmark_vs_druntime;
 
@@ -64,18 +67,29 @@ struct Topo
     uint avgCost = avgCostForChunk(32);
 }
 
+/// Up to `workers` (0 = all) eligible CPUs of ONE LLC group, the group of the
+/// first eligible CPU. A Fiber plan binds the single lane to one group, so on
+/// multi-LLC hosts these runs are capped to that group's CPUs.
 ProcessorId[] pickLps(bool skipSmt, size_t workers)
 {
     auto snap = CacheAwarePool.topology();
     ProcessorId[] lps;
-    foreach (ref lp; snap.processors)
+    foreach (id; snap.eligibleProcessorsInLlc(firstEligibleGroup()))
     {
-        if (!snap.isEligible(lp)) continue;
-        if (skipSmt && lp.smtSibling) continue;
-        lps ~= ProcessorId.of(lp);
+        if (skipSmt && snap.byId(id).smtSibling) continue;
+        lps ~= id;
         if (workers != 0 && lps.length == workers) break;
     }
     return lps;
+}
+
+/// The LLC group of the first eligible CPU: the one group these runs use.
+ushort firstEligibleGroup()
+{
+    auto snap = CacheAwarePool.topology();
+    foreach (ref lp; snap.processors)
+        if (snap.isEligible(lp)) return lp.llcIndex;
+    throw new Exception("no eligible logical processors");
 }
 
 void waitUntil(bool delegate() done, string what)
@@ -110,10 +124,12 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
     options.processors = lps;
     options.managedWorker = fiberWorkerHooks();
     auto pool = new CacheAwarePool(options);
-    installFiberLanes([lane], pool);
-    scope (exit) uninstallFiberLanes();
+    immutable group = CacheAwarePool.topology().byId(lps[0]).llcIndex;
+    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane), pool);
+    scope (exit) uninstallFiberPlan();
     pool.start();
     scope (exit) pool.shutdown();
+    writefln("    group %s: %s", group, pool.resolution.summary());
     lane.backend.reserve(n);
 
     void burst()
@@ -350,6 +366,8 @@ void main(string[] args)
     writefln("topology: %s LLC(s), %s LP(s), %s P-cores, hugePages=%s",
              snap.llcCount, snap.logicalProcessorCount, snap.pCoreCount,
              farm.usedLargePages);
+    writefln("MT worker sets: LLC group %s only (one lane, one group)",
+             firstEligibleGroup());
 
     Topo[] topos = [
         Topo("1-worker", false, 1),

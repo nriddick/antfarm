@@ -7,6 +7,7 @@ import core.atomic;
 import core.thread : Thread;
 import core.time : MonoTime, hours, seconds;
 import std.exception : enforce;
+import service_plan_tests : synthetic;
 
 enum taskCount = 256;
 shared int subscribed;
@@ -693,7 +694,11 @@ void remoteSweeperStress()
     auto domain = new FiberDomain;
     auto laneA = new FiberLane(domain, farmA);
     auto laneB = new FiberLane(domain, farmB);
-    laneA.cover(laneB);
+    // Group 0 (A) has the two covering workers and rescues group 1 (B), which
+    // has no native consumer.
+    installFiberPlan(new FiberServicePlan(synthetic([2, 0]))
+        .bind(0, laneA).bind(1, laneB).rescue(1, 0), null);
+    scope (exit) uninstallFiberPlan();
     shared uint ran;
     FiberTask[] tasks;
     tasks.reserve(tasksPerLane * 2);

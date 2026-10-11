@@ -13,6 +13,10 @@
  +
  + `--smt` adds sibling logical processors after the physical-core set.
  + `--sweep` runs every worker-count prefix of the selected topology.
+ +
+ + Workers come from one LLC group (the group of the first eligible CPU),
+ + because the single lane binds to one group: on multi-LLC hosts runs are
+ + capped to one LLC's CPUs.
  +/
 module actor_wave;
 
@@ -285,6 +289,8 @@ private final class TwoFiberRun
     }
 }
 
+/// Eligible CPUs of one LLC group (that of the first eligible CPU), physical
+/// cores first, then SMT siblings.
 private ProcessorId[] pickWorkerLps(size_t maximum, bool includeSmt)
 {
     auto topology = CacheAwarePool.topology();
@@ -292,16 +298,23 @@ private ProcessorId[] pickWorkerLps(size_t maximum, bool includeSmt)
     immutable passes = includeSmt ? 2 : 1;
     foreach (pass; 0 .. passes)
     {
-        foreach (ref processor; topology.processors)
+        foreach (id; topology.eligibleProcessorsInLlc(firstEligibleGroup()))
         {
-            if (!topology.isEligible(processor)) continue;
-            if (processor.smtSibling != (pass == 1)) continue;
-            result ~= ProcessorId.of(processor);
+            if (topology.byId(id).smtSibling != (pass == 1)) continue;
+            result ~= id;
             if (maximum != 0 && result.length == maximum)
                 return result;
         }
     }
     return result;
+}
+
+private ushort firstEligibleGroup()
+{
+    auto topology = CacheAwarePool.topology();
+    foreach (ref processor; topology.processors)
+        if (topology.isEligible(processor)) return processor.llcIndex;
+    throw new Exception("no eligible logical processors");
 }
 
 private size_t countSmtWorkers(scope const(ProcessorId)[] workerLps)
@@ -438,10 +451,12 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     options.processors = workerLps;
     options.managedWorker = fiberWorkerHooks();
     auto pool = new CacheAwarePool(options);
-    installFiberLanes([lane], pool);
-    scope (exit) uninstallFiberLanes();
+    immutable group = CacheAwarePool.topology().byId(workerLps[0]).llcIndex;
+    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane), pool);
+    scope (exit) uninstallFiberPlan();
     pool.start();
     scope (exit) pool.shutdown();
+    writefln("worker group %s (one LLC): %s", group, pool.resolution.summary());
 
     // Keep workers polling for this throughput characterization. Parking and
     // wake policy are a separate effect that would dominate short waves.

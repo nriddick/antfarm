@@ -54,6 +54,23 @@ release entry at merge.
 - Fixed: a lane no longer reports itself served after pool shutdown. When its
   last server stops it becomes `stopped`, and a later spawn throws instead of
   stranding an undrainable task.
+- `FiberServicePlan` (`antfarm_fibers.service_plan`) binds one lane per
+  physical group of a `PoolResolution`, plans each group's `LaneService`, and
+  derives each Farm's `FarmRequirement` (native, foreign and external consumer
+  views and small producer slots) before the Farms exist. `rescue` serves a
+  group with no accepted workers; `assist` and `assistRing` are experimental,
+  opt-in edges for staffed groups; `disable` closes a group; `external`
+  declares non-pool participants. `problems()` reports every mistake together,
+  and `validate()` throws `FiberPlanException`. `installFiberPlan(plan, pool)`
+  is the single, validated installer (`pool = null` for plan-only tests);
+  `uninstallFiberPlan()` removes it.
+- Shared Fiber domains no longer add cross-LLC consumers implicitly. The
+  former automatic ring measured 42% (one lane loaded) and 73% (both loaded)
+  slower than no edges on two LLCs. `benchmark_mt` takes `private`, `shared`
+  or `assist` to reproduce that A/B.
+- The single-lane benchmarks (`benchmark_farm_embed`, `benchmark_vs_druntime`,
+  `benchmark_actor_wave`) draw their workers from one LLC group and print it:
+  on multi-LLC hosts they are capped to one LLC's CPUs.
 
 ### Breaking changes
 
@@ -103,6 +120,17 @@ release entry at merge.
   a staffed lane whose own workers are all non-responders opens when another
   lane of its domain has a responder. Some configurations that failed now
   pass.
+- X14: `installFiberLanes`, `uninstallFiberLanes`, `installRemoteCoverageRing`
+  and `FiberLane.bindPool` are removed, and there is no automatic coverage
+  ring. Build `new FiberServicePlan(pool.resolve())`, size Farms from
+  `plan.requirement(g)`, `bind(g, lane)` each accepted group, then
+  `installFiberPlan(plan, pool)` / `uninstallFiberPlan()`; re-install the plan
+  to move it to another pool with the same selection. Use `assistRing(groups)`
+  to reproduce the old ring and `rescue` for unstaffed groups. Single-lane
+  benchmarks restrict their workers to one group.
+- X15: `FiberCoverage`, `lane.coverage`, `cover`, `coveredLanes` and
+  `coveringLanes` are removed. Use `lane.state`, `lane.service` and
+  `lane.liveServers` for lane health and `plan.edges` for the service graph.
 
 ## 1.8.0-rc.2
 

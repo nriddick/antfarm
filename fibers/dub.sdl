@@ -17,6 +17,8 @@ configuration "unittest" {
     // Correctness suites: keep assert checks in release builds too.
     buildRequirements "requireContracts"
     mainSourceFile "tests/smoke.d"
+    sourceFiles "tests/service_plan.d"
+    importPaths "tests"
 }
 
 configuration "stress" {
@@ -24,6 +26,8 @@ configuration "stress" {
     // Correctness suites: keep assert checks in release builds too.
     buildRequirements "requireContracts"
     mainSourceFile "tests/stress.d"
+    sourceFiles "tests/service_plan.d"
+    importPaths "tests"
 }
 
 configuration "hello" {

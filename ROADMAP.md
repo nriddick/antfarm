@@ -61,9 +61,9 @@ are not promised yet.
   is not claimed until it is run. Known limits: T01 and T17 are POSIX-only
   fork/abort probes, and ThreadSanitizer is unavailable in the Windows LDC
   runtime (`Scoped EH not supported`).
-- Multi-LLC hardware validation. The software model supports one lane per LLC,
-  but current characterization hardware has one LLC; topology-specific
-  performance, lost-worker-group and remote-sweeper claims wait for that bridge.
+- Multi-LLC Fiber service: native-only service by default; rescue/assist
+  validated on the 2-LLC host; selective wake pending. Topology-specific
+  performance and lost-worker-group claims still need their own evidence.
 - Fiber ThreadSanitizer migration remains a known external limitation at the
   DRuntime stack-switch boundary; the Fiber gate stays the DMD/LDC smoke,
   release, deterministic-migration and repeated-stress matrix.

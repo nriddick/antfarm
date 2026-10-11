@@ -62,15 +62,16 @@ payloads and suspendable Fibers remain separate work representations.
 
 `FiberLane` owns locality and transport state:
 
-- its preferred LLC and Ant Farm;
+- its physical group (bound by a `FiberServicePlan`) and Ant Farm;
 - its runnable publication accumulator;
-- local consumers and responder/sweeper coverage;
+- its planned service, runtime admission state and service edges;
 - batching parameters and its wake mailbox.
 
 A task belongs to one domain. Each runnable generation is assigned a preferred
 lane, but any eligible consumer may resume it. One domain can attach multiple
-lanes before admission. `FiberBackend` remains a compatibility alias for
-`FiberDomain`.
+lanes before admission. Domain membership implies no cross-lane service:
+lanes sharing a domain are each served natively unless the plan adds an
+edge. `FiberBackend` remains a compatibility alias for `FiberDomain`.
 
 `FiberTask` owns one DRuntime `Fiber`, scheduler state, a retained failure,
 intrusive queue links, stack-size class, and migration diagnostics. Cold spawn
@@ -199,8 +200,9 @@ reading the body. Ant Farm provides those edges.
   Flush detaches it before Farm publication.
 - `waitNext` belongs either to `WaitSet` or the recycle freelist, never both
   for a live generation. Wait stripes and the recycle pool use separate locks.
-- Consumers and producer tokens are persistent and worker-owned. Remote
-  responders register and destroy their covering views on that same worker.
+- Consumers and producer tokens are persistent and worker-owned. Responders
+  serving a lane by an edge register and destroy those views on that same
+  worker.
 - Cancellation requests live in a GC-visible handle array protected by the
   request mutex. Only the domain's Director swaps and applies it.
 - Managed-join inbound-list and waiter-membership state occupy separate aligned
@@ -242,10 +244,22 @@ embedding policy.
 
 ## Pool integration and wake ownership
 
-The intended concurrent layout installs one `FiberLane` per LLC. Each managed
-worker keeps persistent Farm consumer and producer registrations. Selected
-responders poll timers, accept timer-bounded parks, and sweep Farm holes and
-leftovers.
+The intended concurrent layout binds one `FiberLane` to each accepted LLC
+group through a `FiberServicePlan`, built from `pool.resolve()` and installed
+by `installFiberPlan`, the only installer. The plan is validated as a whole
+(`problems()`), must select the same workers as the pool, and installs the
+lanes as a physical-group-indexed bin table. Each managed worker keeps
+persistent Farm consumer and producer registrations on its own group's lane.
+Selected responders poll timers, accept timer-bounded parks, and sweep Farm
+holes and leftovers.
+
+Service is native-only by default. A lane gets foreign consumers only through
+an explicit plan edge: `rescue` for a group with no accepted workers, or the
+experimental, opt-in `assist` (and `assistRing`) for a staffed group. Every
+responder of the serving group then holds one more view and one more small
+producer token on the served Farm, which `FarmRequirement` counts. Edges are
+one hop and same-domain only. A disabled group's workers idle without Farm
+registrations.
 
 Each lane has a planned service, decided before start from the pool
 resolution (`native`, `rescued`, `unstaffed`, `disabled`, `absent`), and a
@@ -263,7 +277,8 @@ out: it can strand its task, visible afterwards as `state == stopped` with
 `domain.active` still counting it. Close domain admission and drain before
 `pool.shutdown`.
 
-Responders retain one remote `ConsumerView` per covered lane. Every 16 local
+Responders retain one remote `ConsumerView` per lane they serve by an edge.
+Every 16 local
 Farm pumps they visit the next remote, even when local consumption succeeds.
 With R remote views, each gets a `consumeNext()` attempt within at most 16×R
 local `consumeNext()` calls. Startup-barrier polls do not count. When local
@@ -273,7 +288,7 @@ a false return performs Farm frontier migration and leftover/reclamation work.
 The interval amortizes empty-remote polling over busy local work; it is a
 service guarantee in pump calls, not a wall-clock or throughput guarantee.
 
-The cursor and counter belong exclusively to the worker. Coverage edges stay
+The cursor and counter belong exclusively to the worker. Service edges stay
 fixed between managed start and stop; no Farm atomic or memory order changes.
 Repeated visits walk a finite backlog when a producer stalls on an old pin,
 then the Farm's idle re-walk releases confirmed prefix pins. One visit need not
@@ -297,15 +312,17 @@ owns `pool.director()` drains it and chooses which workers to signal. An
 optional `nothrow @nogc` notifier fires on an empty-to-nonempty mailbox edge so
 an external event loop can wake without running arbitrary handlers on workers.
 
-Successful Fiber publication relays `remoteReady` to covering lanes, including
+Successful Fiber publication relays `remoteReady` to the lanes serving it by
+an edge, including
 when the publishing worker also consumed local work. With `directorOwned`, the
 Director must act on those events. Direct Farm writes or direct backend use
 still require the embedding to arrange pool wakes; the pump-count bound does
 not wake a parked worker by itself.
 
-The multi-lane model and covering responder graph are implemented, but
-multi-LLC hardware validation remains a later bridge. Current release
-evidence does not claim multi-LLC performance or failover guarantees.
+Native-only service, rescue edges and the explicit assist ring are validated
+on a two-LLC host (smoke L1-L3). The broadcast wake still reaches every pool
+worker, so selective wake by group remains pending. Current release evidence
+does not claim multi-LLC performance or failover guarantees.
 
 ## Completion, lifecycle records, and shutdown
 
@@ -337,7 +354,10 @@ reaches a scheduler boundary.
 Smoke and stress coverage includes forced migration, GC retention across
 migration, park/wake and timer/cancel races, generation reuse, joins,
 cancellation cutoff behavior, lifecycle backpressure and retry, cross-lane
-wakes, responder coverage, and repeated concurrent drain.
+wakes, per-domain responder validation, lane admission states, service-plan
+validation, and repeated concurrent drain. The two-LLC live tests (no-edge
+shared domain, unused-group pre-admission, rescue) print SKIP on single-LLC
+hosts.
 
 ThreadSanitizer is not currently evidence for migrating DRuntime Fibers: a
 matching instrumented runtime fails at the sanitizer/runtime stack-switch

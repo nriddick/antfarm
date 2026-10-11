@@ -1,13 +1,19 @@
 /++ Multithreaded fiber throughput benchmark.
  +
- + One FiberLane per LLC, workers driven by the threadpool managed-worker
- + hooks. The control thread burst-spawns round-robin across lanes (waking the
+ + One FiberLane per accepted LLC group, workers driven by the threadpool
+ + managed-worker hooks. The control thread burst-spawns round-robin across lanes (waking the
  + pool once per burst — per-spawn wakeAll would measure futex traffic, not
  + the scheduler), then waits for every lane to drain. Fibers never suspend,
  + so no cross-worker fiber migration occurs.
  +
  + Second generation re-spawns from the recycling pool: zero GC allocation,
  + zero stack mmap per fiber.
+ +
+ + Usage: benchmark_mt [tasks] [private|shared|assist]
+ +   private  (default) one domain per lane;
+ +   shared   one domain over every lane, native service only (no edges);
+ +   assist   one domain plus an explicit `assistRing` over the accepted
+ +            groups, the former automatic ring: the A/B against `shared`.
  +/
 // Package scope permits wake-batched admission to an explicit shared-domain
 // lane, without timing a per-task FiberLane.spawn wake broadcast.
@@ -19,6 +25,7 @@ import core.atomic;
 import core.thread : Thread;
 import core.time : MonoTime;
 import std.conv : to;
+import std.exception : enforce;
 import std.stdio : writefln;
 import threadpool;
 
@@ -28,57 +35,59 @@ void main(string[] args)
 {
     immutable taskCount = args.length > 1 ? args[1].to!size_t : 100_000;
 
-    // Optional shared-domain ring exercises persistent remote subscriptions.
-    immutable coverage = args.length > 2 && args[2] == "coverage";
-    auto domain = coverage ? new FiberDomain : null;
-    auto topology = CacheAwarePool.topology();
-    auto perLlc = new size_t[topology.llcCount];
-    foreach (ref lp; topology.processors)
-    {
-        if (!topology.isEligible(lp)) continue;
-        perLlc[lp.llcIndex]++;
-    }
+    immutable mode = args.length > 2 ? args[2] : "private";
+    enforce(mode == "private" || mode == "shared" || mode == "assist",
+        "usage: benchmark_mt [tasks] [private|shared|assist]");
+    immutable sharedDomain = mode != "private";
+    auto domain = sharedDomain ? new FiberDomain : null;
 
-    size_t totalWorkers;
-    foreach (count; perLlc) totalWorkers += count;
+    PoolOptions options;
+    options.managedWorker = fiberWorkerHooks();
+    auto pool = new CacheAwarePool(options);
+    auto plan = new FiberServicePlan(pool.resolve());
+    ushort[] groups;
+    foreach (ref group; plan.resolution.acceptedGroups)
+        groups ~= group.llcIndex;
+    // Assist edges add persistent remote consumers and producers.
+    if (mode == "assist")
+        plan.assistRing(groups);
 
-    // Each worker on an LLC subscribes one consumer and registers one small
-    // producer against its lane's farm; size both slot sets accordingly.
+    // Size each Farm from the plan: one consumer view and one small producer
+    // per native worker, plus one of each per assisting worker.
     enum ln = 1 << 22;
     enum k = 8;
     enum segCap = ln / k;
     AntFarm*[] farms;
     FiberLane[] lanes;
-    foreach (i; 0 .. topology.llcCount)
-    {
-        immutable localSlots = perLlc[i] == 0 ? 1 : perLlc[i];
-        // A shared-domain lane can also have responders from its predecessor.
-        immutable slots = coverage ? totalWorkers : localSlots;
-        immutable quotaHeadroom = (k - 1) * segCap / slots;
-        immutable quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
-        auto farm = AntFarm.create(ringMiBFromUlongs(ln), k, cast(uint) slots, 0, 0,
-                                   cast(uint) slots, quotaSmall);
-        farms ~= farm;
-        lanes ~= coverage ? new FiberLane(domain, farm) : new FiberLane(farm);
-    }
     scope (exit)
     {
-        uninstallFiberLanes();
+        uninstallFiberPlan();
         foreach (farm; farms) farm.destroy();
     }
+    foreach (group; groups)
+    {
+        auto requirement = plan.requirement(group);
+        immutable slots = requirement.smallProducerSlots;
+        immutable quotaHeadroom = (k - 1) * segCap / slots;
+        immutable quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
+        auto farm = AntFarm.create(ringMiBFromUlongs(ln), k,
+                                   requirement.consumerViews, 0, 0,
+                                   slots, quotaSmall);
+        farms ~= farm;
+        lanes ~= sharedDomain ? new FiberLane(domain, farm) : new FiberLane(farm);
+        plan.bind(group, lanes[$ - 1]);
+    }
 
-    PoolOptions options;
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    installFiberLanes(lanes, pool);
+    installFiberPlan(plan, pool);
     pool.start();
-    if (coverage)
+    if (sharedDomain)
         domain.reserve(taskCount);
     else
         foreach (lane; lanes)
             lane.backend.reserve((taskCount + lanes.length - 1) / lanes.length);
-    writefln("workers: %s across %s LLC(s) hugePages=%s coverage=%s",
-             pool.workerCount, lanes.length, farms[0].usedLargePages, coverage);
+    writefln("workers: %s across %s LLC group(s) hugePages=%s mode=%s edges=%s",
+             pool.workerCount, lanes.length, farms[0].usedLargePages, mode,
+             plan.edges.length);
 
     void burstSpawn()
     {

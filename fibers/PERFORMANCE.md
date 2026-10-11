@@ -19,19 +19,27 @@ The useful system comparison is whether Fibers and payloads can share pinned,
 topology-aware workers without blocking them, not whether an empty managed
 Fiber can beat a direct `Fiber.call`.
 
-## Remote coverage check
+## Assist-ring A/B
 
-`benchmark_mt` normally uses separate domains, so it does not exercise remote
-subscriptions even with multiple LLCs. Pass `coverage` after the task count to
-share a domain and install the remote coverage ring:
+`benchmark_mt` binds one lane to each accepted LLC group through a
+`FiberServicePlan`. Its second argument selects the domain and service layout:
+
+- `private` (default): one domain per lane.
+- `shared`: one domain over every lane, native service only, with no edges.
+  This is the default service of a shared domain.
+- `assist`: one domain plus an explicit `assistRing` over the accepted groups,
+  the former automatic coverage ring with persistent remote subscriptions.
 
 ```text
-ANTFARM_HUGE_PAGES=0 dub run -c benchmark_mt --build=release --compiler=ldc2 -- 100000 coverage
+ANTFARM_HUGE_PAGES=0 dub run -c benchmark_mt --build=release --compiler=ldc2 -- 100000 shared
+ANTFARM_HUGE_PAGES=0 dub run -c benchmark_mt --build=release --compiler=ldc2 -- 100000 assist
 ```
 
-This needs at least two discovered LLCs to create remote edges. A synthetic
-topology can exercise the path on one LLC but is not multi-LLC performance
-evidence. Alternate revisions across repeated runs and report dispersion.
+Compare `shared` with `assist`; both use the same domain semantics. The ring
+needs at least two accepted groups to create edges. On a two-LLC Ryzen 9
+5900XT, an instrumented two-worker probe measured the ring 42% (one lane
+loaded) and 73% (both loaded) slower than no edges. That is prior evidence,
+not a gate. Alternate modes across repeated runs and report dispersion.
 
 ## Characterization host
 
@@ -199,8 +207,9 @@ but helped the oversubscribed SMT case by removing idle contenders.
   `consumeNext` and finish or yield the claimed table; use shorter tables when
   a scheduler visit must be shorter.
 - Lower `flushBatch` when a responder must return to timer polling more often.
-- Size Farm consumer and producer capacity for native workers, covering
-  sweepers, and every control producer that can hold a registration.
+- Size Farm consumer and producer capacity from `plan.requirement(g)` (native
+  workers plus the workers of any serving group), plus every control producer
+  that can hold a registration.
 - Call `FiberDomain.reserve(n)` before a known live burst to avoid roots-array
   reallocations.
 - Treat huge pages as a payload-oriented opt-in and benchmark Fiber-only lanes
@@ -246,9 +255,14 @@ dub run -c benchmark_actor_wave --build=release --compiler=ldc2 -- 32768 200 0 2
 ```
 
 - `benchmark` characterizes cold/warm creation and single-thread drain.
-- `benchmark_mt` measures concurrent Fiber drain.
+- `benchmark_mt` measures concurrent Fiber drain, one lane per accepted LLC
+  group; see the assist-ring A/B above.
 - `benchmark_vs_druntime` compares DRuntime, managed Fibers, bare payloads, and
-  worker topologies.
+  worker topologies. Its single lane binds to one LLC group, so its worker
+  sets come from the group of the first eligible CPU (`benchmark_farm_embed`
+  and `benchmark_actor_wave` do the same). On multi-LLC hosts these runs are
+  capped to one LLC's CPUs and are not comparable to earlier all-CPU runs
+  there.
 - `benchmark_farm_embed` isolates direct Farm, threadpool, and Fiber-pump
   embedding cost on the same payload.
 - `benchmark_actor_wave` compares one Fiber producing two actor waves against
@@ -263,7 +277,8 @@ dub run -c benchmark_actor_wave --build=release --compiler=ldc2 -- 32768 200 0 2
   physical core. `--sweep` recreates the Farm and worker pool for every prefix
   from one worker through that selected set, then prints a compact Mactor/s
   summary. The positional worker maximum caps the sweep; zero uses every
-  available physical worker, or every logical processor with `--smt`.
+  available physical worker of the first eligible LLC group, or every logical
+  processor of that group with `--smt`.
 
 ### Actor-wave optimization checkpoint
 
