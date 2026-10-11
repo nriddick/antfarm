@@ -71,7 +71,7 @@ A task belongs to one domain. Each runnable generation is assigned a preferred
 lane, but any eligible consumer may resume it. One domain can attach multiple
 lanes before admission. Domain membership implies no cross-lane service:
 lanes sharing a domain are each served natively unless the plan adds an
-edge. `FiberBackend` remains a compatibility alias for `FiberDomain`.
+edge.
 
 `FiberTask` owns one DRuntime `Fiber`, scheduler state, a retained failure,
 intrusive queue links, stack-size class, and migration diagnostics. Cold spawn
@@ -315,7 +315,7 @@ an external event loop can wake without running arbitrary handlers on workers.
 Successful Fiber publication relays `remoteReady` to the lanes serving it by
 an edge, including
 when the publishing worker also consumed local work. With `directorOwned`, the
-Director must act on those events. Direct Farm writes or direct backend use
+Director must act on those events. Direct Farm writes or direct domain use
 still require the embedding to arrange pool wakes; the pump-count bound does
 not wake a parked worker by itself.
 

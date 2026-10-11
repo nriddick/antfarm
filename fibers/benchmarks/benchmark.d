@@ -21,7 +21,7 @@ void main(string[] args)
 
     auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 16_384);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     backend.reserve(taskCount);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);

@@ -84,7 +84,7 @@ void main(string[] args)
         domain.reserve(taskCount);
     else
         foreach (lane; lanes)
-            lane.backend.reserve((taskCount + lanes.length - 1) / lanes.length);
+            lane.domain.reserve((taskCount + lanes.length - 1) / lanes.length);
     writefln("workers: %s across %s LLC group(s) hugePages=%s mode=%s edges=%s",
              pool.workerCount, lanes.length, farms[0].usedLargePages, mode,
              plan.edges.length);
@@ -95,7 +95,7 @@ void main(string[] args)
         foreach (i; 0 .. taskCount)
         {
             auto lane = lanes[i % lanes.length];
-            lane.backend.spawnOn(lane, body);
+            lane.domain.spawnOn(lane, body);
         }
         pool.wakeAll();
     }
@@ -128,7 +128,7 @@ void main(string[] args)
 
     // Second generation: every spawn recycles a pooled task/fiber/stack.
     foreach (lane; lanes)
-        lane.backend.releaseAll(lane.backend.takeCompletions());
+        lane.domain.releaseAll(lane.domain.takeCompletions());
     auto warmCreateStart = MonoTime.currTime;
     burstSpawn();
     auto warmRunStart = MonoTime.currTime;

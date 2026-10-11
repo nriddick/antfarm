@@ -142,6 +142,10 @@ release entry at merge.
 - X15: `FiberCoverage`, `lane.coverage`, `cover`, `coveredLanes` and
   `coveringLanes` are removed. Use `lane.state`, `lane.service` and
   `lane.liveServers` for lane health and `plan.edges` for the service graph.
+- X16: the `FiberBackend` alias is removed and the `FiberLane.backend` field
+  is renamed `domain`; the former `domain` property merges into the field.
+  Replace `FiberBackend` with `FiberDomain` and `lane.backend` with
+  `lane.domain`.
 
 ## 1.8.0-rc.2
 

@@ -85,7 +85,7 @@ void cancellationOwnershipSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     backend.enableLifecycleEvents();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
@@ -175,7 +175,7 @@ void manualSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -184,9 +184,9 @@ void manualSmoke()
 
     auto task = backend.spawn({
         atomicFetchAdd(steps, 1);
-        FiberBackend.await(42);
+        FiberDomain.await(42);
         atomicFetchAdd(steps, 1);
-        FiberBackend.yieldReady();
+        FiberDomain.yieldReady();
         atomicFetchAdd(steps, 1);
     });
 
@@ -219,7 +219,7 @@ void defaultBatchSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -244,7 +244,7 @@ void recycleSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -316,7 +316,7 @@ void externalJoinSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -386,7 +386,7 @@ void fiberJoinSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -394,7 +394,7 @@ void fiberJoinSmoke()
     scope (exit) view.unsubscribe();
 
     FiberJoinResult joined;
-    auto target = backend.spawn({ FiberBackend.await(0x4A01); });
+    auto target = backend.spawn({ FiberDomain.await(0x4A01); });
     auto targetHandle = target.handle;
     auto joiner = backend.spawn({ joined = targetHandle.joinFiber(); });
     auto flushed = backend.flush(token);
@@ -420,7 +420,7 @@ void fiberJoinSmoke()
     backend.releaseAll(completed);
 
     FiberJoinResult timedJoin;
-    auto timedTarget = backend.spawn({ FiberBackend.await(0x4A02); });
+    auto timedTarget = backend.spawn({ FiberDomain.await(0x4A02); });
     auto timedHandle = timedTarget.handle;
     auto timedJoiner = backend.spawn({
         timedJoin = timedHandle.joinFiber(msecs(1));
@@ -450,7 +450,7 @@ void fiberJoinSmoke()
     backend.releaseAll(completed);
 
     FiberJoinResult timerCancelledJoin;
-    auto earlyTarget = backend.spawn({ FiberBackend.await(0x4A04); });
+    auto earlyTarget = backend.spawn({ FiberDomain.await(0x4A04); });
     auto earlyHandle = earlyTarget.handle;
     auto earlyJoiner = backend.spawn({
         timerCancelledJoin = earlyHandle.joinFiber(msecs(100));
@@ -480,7 +480,7 @@ void fiberJoinSmoke()
     backend.releaseAll(completed);
 
     shared int joinCleanup;
-    auto cancelTarget = backend.spawn({ FiberBackend.await(0x4A03); });
+    auto cancelTarget = backend.spawn({ FiberDomain.await(0x4A03); });
     auto cancelHandle = cancelTarget.handle;
     auto cancelledJoiner = backend.spawn({
         scope (exit) atomicFetchAdd(joinCleanup, 1);
@@ -523,7 +523,7 @@ void fiberJoinSmoke()
     assert(completed.length == 1 && completed[0] is self);
     backend.release(self);
 
-    auto otherBackend = new FiberBackend(farm);
+    auto otherBackend = new FiberDomain(farm);
     auto foreignTarget = otherBackend.spawn({});
     auto foreignHandle = foreignTarget.handle;
     FiberJoinStatus foreignStatus;
@@ -555,7 +555,7 @@ void cancellationSemanticsSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -592,7 +592,7 @@ void cancellationSemanticsSmoke()
     done = backend.takeCompletions();
     backend.release(replacement);
 
-    auto ready = backend.spawn({ FiberBackend.yieldReady(); });
+    auto ready = backend.spawn({ FiberDomain.yieldReady(); });
     flushed = backend.flush(token);
     assert(flushed == 1);
     consumed = view.consumeNext();
@@ -612,7 +612,7 @@ void cancellationSemanticsSmoke()
     shared int runningEntered;
     auto running = backend.spawn({
         atomicStore!(MemoryOrder.rel)(runningEntered, 1);
-        while (!FiberBackend.currentCancellationRequested()) Thread.yield();
+        while (!FiberDomain.currentCancellationRequested()) Thread.yield();
     });
     flushed = backend.flush(token);
     assert(flushed == 1);
@@ -646,7 +646,7 @@ void cancellationSemanticsSmoke()
 
     auto cleanupFailure = backend.spawn({
         scope (failure) throw new Exception("cleanup failure");
-        FiberBackend.await(0xCA11);
+        FiberDomain.await(0xCA11);
     });
     flushed = backend.flush(token);
     assert(flushed == 1);
@@ -673,7 +673,7 @@ void lifecycleEventSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     backend.enableLifecycleEvents();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
@@ -704,7 +704,7 @@ void lifecycleEventSmoke()
 
     auto failed = backend.spawn({
         scope (failure) throw new Exception("event cleanup failure");
-        FiberBackend.await(0xE7E7);
+        FiberDomain.await(0xE7E7);
     });
     flushed = backend.flush(token);
     assert(flushed == 1);
@@ -783,7 +783,7 @@ void lifecycleRetentionSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     bool invalidLimit;
     try backend.enableLifecycleEvents(3);
     catch (Exception) invalidLimit = true;
@@ -850,7 +850,7 @@ void lifecycleRetentionSmoke()
     assert(completed.length == 3);
     backend.releaseAll(completed);
 
-    auto handlerBackend = new FiberBackend(farm);
+    auto handlerBackend = new FiberDomain(farm);
     handlerBackend.enableLifecycleEvents(8);
     auto handledTask = handlerBackend.spawn({});
     flushed = handlerBackend.flush(token);
@@ -1175,7 +1175,7 @@ void migrationSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
 
@@ -1186,22 +1186,22 @@ void migrationSmoke()
         // `box` is deliberately not stored outside the fiber: across each
         // suspension its only root is on the suspended stack.
         auto box = new MigrationBox(41);
-        identities[0] = FiberBackend.currentWorkerIdentity();
-        FiberBackend.yieldReady();
+        identities[0] = FiberDomain.currentWorkerIdentity();
+        FiberDomain.yieldReady();
         assert(box.value++ == 41);
-        identities[1] = FiberBackend.currentWorkerIdentity();
-        FiberBackend.await(77);
+        identities[1] = FiberDomain.currentWorkerIdentity();
+        FiberDomain.await(77);
         assert(box.value++ == 42);
-        identities[2] = FiberBackend.currentWorkerIdentity();
-        FiberBackend.sleepFor(msecs(2));
+        identities[2] = FiberDomain.currentWorkerIdentity();
+        FiberDomain.sleepFor(msecs(2));
         assert(box.value++ == 43);
-        identities[3] = FiberBackend.currentWorkerIdentity();
+        identities[3] = FiberDomain.currentWorkerIdentity();
         scope (exit)
         {
             preservedValue = box.value;
-            identities[4] = FiberBackend.currentWorkerIdentity();
+            identities[4] = FiberDomain.currentWorkerIdentity();
         }
-        FiberBackend.await(88); // cancellation wakes and unwinds this wait
+        FiberDomain.await(88); // cancellation wakes and unwinds this wait
     });
 
     auto flushed = backend.flush(token);
@@ -1248,7 +1248,7 @@ void migrationSmoke()
     // An exception retained by druntime must cross back from a migrated
     // fiber without escaping the @nogc/nothrow Ant Farm callback.
     auto failed = backend.spawn({
-        FiberBackend.yieldReady();
+        FiberDomain.yieldReady();
         throw new Exception("failure after migration");
     });
     flushed = backend.flush(token);
@@ -1301,11 +1301,11 @@ void wakePolicySmoke()
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
-    auto flushed = lane.backend.flush(token);
+    auto flushed = lane.domain.flush(token);
     assert(flushed == 1);
     auto consumed = view.consumeNext();
     assert(consumed);
-    auto completions = lane.backend.takeCompletions();
+    auto completions = lane.domain.takeCompletions();
     assert(completions.length == 1);
 }
 
@@ -1315,7 +1315,7 @@ void mixedPayloadSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -1328,7 +1328,7 @@ void mixedPayloadSmoke()
     foreach (_; 0 .. count)
         tasks ~= backend.spawn({
             atomicFetchAdd(fiberRuns, 1);
-            FiberBackend.yieldReady();
+            FiberDomain.yieldReady();
             atomicFetchAdd(fiberRuns, 1);
         });
 
@@ -1365,7 +1365,7 @@ void mixedPayloadSmoke()
         assert(task.outcome == FiberOutcome.completed);
 }
 
-void drainUntil(FiberBackend backend, ref Token token, ref ConsumerView view,
+void drainUntil(FiberDomain backend, ref Token token, ref ConsumerView view,
                 size_t waitFor = 0)
 {
     foreach (spin; 0 .. 200_000)
@@ -1408,7 +1408,7 @@ void syncPrimitiveSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -1572,7 +1572,7 @@ void sharedSignalAndTimerCancellationSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -1583,10 +1583,10 @@ void sharedSignalAndTimerCancellationSmoke()
     FiberTask[] tasks;
     foreach (_; 0 .. count)
         tasks ~= backend.spawn({
-            FiberBackend.await(1234);
+            FiberDomain.await(1234);
             atomicFetchAdd(resumed, 1);
         });
-    auto timer = backend.spawn({ FiberBackend.sleepFor(hours(1)); });
+    auto timer = backend.spawn({ FiberDomain.sleepFor(hours(1)); });
 
     while (backend.ready != 0)
     {
@@ -1708,7 +1708,7 @@ void threadpoolSmoke()
     assert(atomicLoad(enteredFailure) == 1);
     assert(failed.outcome == FiberOutcome.failed);
     assert(failed.exception !is null && failed.exception.msg == "fiber failure");
-    auto outcomes = lanes[selectedLlc].backend.takeCompletions();
+    auto outcomes = lanes[selectedLlc].domain.takeCompletions();
     assert(outcomes.length >= 1);
 
     // The managed pump hands its nearest deadline to the default wait policy;
@@ -1720,7 +1720,7 @@ void threadpoolSmoke()
     MonoTime timerEnd;
     auto timed = lanes[selectedLlc].spawn({
         timerStart = MonoTime.currTime;
-        FiberBackend.sleepFor(msecs(30));
+        FiberDomain.sleepFor(msecs(30));
         timerEnd = MonoTime.currTime;
     });
     foreach (_; 0 .. 400)
@@ -1731,7 +1731,7 @@ void threadpoolSmoke()
     pool3.shutdown();
     assert(timed.outcome == FiberOutcome.completed);
     assert(timerEnd - timerStart >= msecs(20));
-    auto timedCompletions = lanes[selectedLlc].backend.takeCompletions();
+    auto timedCompletions = lanes[selectedLlc].domain.takeCompletions();
     assert(timedCompletions.length == 1 && timedCompletions[0] is timed);
 
     // A custom selector which chooses no responder fails the lane's domain
@@ -1778,23 +1778,23 @@ void threadpoolSmoke()
     auto cancelToken = cancelFarm.registerProducer(Tier.small);
     while (cancelView.consumeNext()) {}
     bool cleaned;
-    auto cancelled = cancelLane.backend.spawn({
+    auto cancelled = cancelLane.domain.spawn({
         scope (exit) cleaned = true;
-        FiberBackend.await(999);
+        FiberDomain.await(999);
     });
-    auto cancelFlushed = cancelLane.backend.flush(cancelToken);
+    auto cancelFlushed = cancelLane.domain.flush(cancelToken);
     assert(cancelFlushed == 1);
     auto cancelConsumed = cancelView.consumeNext();
     assert(cancelConsumed);
-    assert(cancelLane.backend.waiting == 1);
+    assert(cancelLane.domain.waiting == 1);
     cancelLane.beginShutdown(true);
-    cancelFlushed = cancelLane.backend.flush(cancelToken);
+    cancelFlushed = cancelLane.domain.flush(cancelToken);
     assert(cancelFlushed == 1);
     cancelConsumed = cancelView.consumeNext();
     assert(cancelConsumed);
     assert(cancelled.outcome == FiberOutcome.cancelled && cleaned);
     assert(cancelLane.drained);
-    auto cancelledCompletions = cancelLane.backend.takeCompletions();
+    auto cancelledCompletions = cancelLane.domain.takeCompletions();
     assert(cancelledCompletions.length == 1);
     cancelView.unsubscribe();
     cancelFarm.unregisterProducer(cancelToken);
@@ -1817,14 +1817,14 @@ void threadpoolSmoke()
         Thread.sleep(msecs(5));
     }
     pool5.shutdown();
-    assert(fatalTask.terminated && fatalLane.backend.fatal);
+    assert(fatalTask.terminated && fatalLane.domain.fatal);
     assert(pool5.workerFailures.length == 1);
     assert(cast(Error) pool5.workerFailures[0] !is null
         && pool5.workerFailures[0].msg == "managed fatal");
-    auto fatalCompletions = fatalLane.backend.takeCompletions();
+    auto fatalCompletions = fatalLane.domain.takeCompletions();
     auto fatalEvents = fatalLane.takeLifecycleEvents();
     assert(fatalCompletions.length == 1 && fatalEvents.length == 3);
-    fatalLane.backend.release(fatalTask);
+    fatalLane.domain.release(fatalTask);
     foreach (farm; farms)
         assert(atomicLoad(farm.Cf) == 0, "fiber lane leaked a consumer");
 }
@@ -2234,7 +2234,7 @@ void fiberParitySmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;

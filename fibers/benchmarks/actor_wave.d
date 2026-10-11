@@ -488,7 +488,7 @@ private SweepResult runBenchmark(BenchmarkConfig config,
         one.cooperativeYields, oneTask.resumeCount,
         oneTask.migrationCount);
     farm.unregisterProducer(one.producer);
-    lane.backend.releaseAll(lane.backend.takeCompletions());
+    lane.domain.releaseAll(lane.domain.takeCompletions());
 
     atomicStore!(MemoryOrder.raw)(publishedGeneration.value, 0UL);
     auto producerA = farm.registerProducer(Tier.small);
@@ -518,7 +518,7 @@ private SweepResult runBenchmark(BenchmarkConfig config,
         cast(double) one.elapsedNsecs / two.elapsedNsecs);
     farm.unregisterProducer(two.producers[0]);
     farm.unregisterProducer(two.producers[1]);
-    lane.backend.releaseAll(lane.backend.takeCompletions());
+    lane.domain.releaseAll(lane.domain.takeCompletions());
 
     writefln("\npublished generation=%s active-public=%s",
         expectedGeneration, expectedGeneration & 1UL);

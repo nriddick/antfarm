@@ -260,7 +260,7 @@ final class FiberServicePlan
             if (lanes[e.served] is null)
                 p ~= format("%s serves group %s, which has no bound lane", name, e.served);
             else if (lanes[e.server] !is null
-                && lanes[e.server].backend !is lanes[e.served].backend)
+                && lanes[e.server].domain !is lanes[e.served].domain)
                 p ~= format("%s spans two Fiber domains", name);
         }
         foreach (ushort g; 0 .. cast(ushort) lanes.length)
@@ -279,10 +279,10 @@ final class FiberServicePlan
             if (!isServed(planned) && (lane.ready != 0 || lane.published != 0))
                 p ~= format("group %s's lane is %s but already has queued work", g, planned);
             if (lane.group != ushort.max && isServed(lane.service) && !isServed(planned)
-                && lane.backend.active != 0)
+                && lane.domain.active != 0)
                 p ~= format("group %s's lane was served (%s, group %s) and its domain has"
                     ~ " %s active tasks; this plan leaves it %s",
-                    g, lane.service, lane.group, lane.backend.active, planned);
+                    g, lane.service, lane.group, lane.domain.active, planned);
         }
         return p;
     }
@@ -327,8 +327,8 @@ final class FiberServicePlan
                 farmSlots = format("%s", lane.farm.maxSmall);
                 size_t d = domains.length;
                 foreach (i, known; domains)
-                    if (known is lane.backend) d = i;
-                if (d == domains.length) domains ~= lane.backend;
+                    if (known is lane.domain) d = i;
+                if (d == domains.length) domains ~= lane.domain;
                 domain = format("d%s", d);
             }
             formattedWrite(w, "  %-5s  %-6s  %-9s  %-6s  %-16s  %-16s  %-5s  %-5s  %-10s  %-10s  %s\n",

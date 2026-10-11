@@ -233,7 +233,7 @@ struct TaskHandle
     /// blocking their worker.
     FiberJoinResult join() const nothrow @nogc
     {
-        if (FiberBackend.currentTask !is null)
+        if (FiberDomain.currentTask !is null)
             return FiberJoinResult(
                 TaskHandle(cast(FiberTask) slot, generation, diagnosticId),
                 FiberJoinStatus.wouldBlock);
@@ -253,7 +253,7 @@ struct TaskHandle
     /// same generation remains live after the timeout.
     FiberJoinResult join(Duration timeout) const nothrow @nogc
     {
-        if (FiberBackend.currentTask !is null)
+        if (FiberDomain.currentTask !is null)
             return FiberJoinResult(
                 TaskHandle(cast(FiberTask) slot, generation, diagnosticId),
                 FiberJoinStatus.wouldBlock);
@@ -294,7 +294,7 @@ struct TaskHandle
     {
         auto initial = poll();
         if (initial.status != FiberJoinStatus.pending) return initial;
-        auto waiter = FiberBackend.currentTask;
+        auto waiter = FiberDomain.currentTask;
         if (waiter is null)
             return FiberJoinResult(
                 TaskHandle(cast(FiberTask) slot, generation, diagnosticId),
@@ -537,7 +537,7 @@ align(64) private struct PublishDrainControl
 }
 static assert(PublishDrainControl.sizeof == cacheLineSize);
 
-align(64) private struct FiberBackendControl
+align(64) private struct FiberDomainControl
 {
     shared int accepting;
     ubyte[60] acceptingPadding;
@@ -552,10 +552,10 @@ align(64) private struct FiberBackendControl
     shared long lifecycleReservationCount;
     ubyte[56] lifecycleReservationPadding;
 }
-static assert(FiberBackendControl.sizeof == 6 * cacheLineSize);
-static assert(FiberBackendControl.managedJoinWaiterCount.offsetof
+static assert(FiberDomainControl.sizeof == 6 * cacheLineSize);
+static assert(FiberDomainControl.managedJoinWaiterCount.offsetof
     == 4 * cacheLineSize);
-static assert(FiberBackendControl.lifecycleReservationCount.offsetof
+static assert(FiberDomainControl.lifecycleReservationCount.offsetof
     == 5 * cacheLineSize);
 
 align(64) private struct LifecycleQueueControl
@@ -585,7 +585,7 @@ final class FiberTask
     private FiberTaskControl* control;
     private FiberJoinControl* joinControl;
     private FiberManagedJoinControl* managedJoinControl;
-    package FiberBackend backend;
+    package FiberDomain backend;
     package FiberReadyLane readyLane;
     package Fiber fiber;
     package Signal waitSignal;
@@ -700,14 +700,14 @@ final class FiberTask
     @property private ref shared(uint) joinState() const return nothrow @nogc
     { return (cast(FiberJoinControl*) joinControl).state; }
 
-    this(FiberBackend backend, FiberReadyLane readyLane,
+    this(FiberDomain backend, FiberReadyLane readyLane,
          void delegate() body, size_t stackSize = 0)
     {
         initializeTask(backend, readyLane, stackSize);
         fiber = stackSize == 0 ? new Fiber(body) : new Fiber(body, stackSize);
     }
 
-    this(FiberBackend backend, FiberReadyLane readyLane,
+    this(FiberDomain backend, FiberReadyLane readyLane,
          void function() body, size_t stackSize = 0)
     {
         initializeTask(backend, readyLane, stackSize);
@@ -738,7 +738,7 @@ final class FiberTask
         atomicStore!(MemoryOrder.raw)(control.outcomeState, FiberOutcome.pending);
     }
 
-    private void initializeTask(FiberBackend backend, FiberReadyLane readyLane,
+    private void initializeTask(FiberDomain backend, FiberReadyLane readyLane,
                                 size_t stackSize)
     {
         initializeControl();
@@ -1609,7 +1609,7 @@ class FiberReadyLane
 /// responsibility.
 final class FiberDomain
 {
-    private FiberBackendControl* control;
+    private FiberDomainControl* control;
     private WaitSet waits;
     private TimerSet timers;
     private FiberReadyLane[] readyLanes;
@@ -1636,23 +1636,23 @@ final class FiberDomain
     private static FiberTask currentTask;
 
     @property private ref shared(int) accepting() const return nothrow @nogc
-    { return (cast(FiberBackendControl*) control).accepting; }
+    { return (cast(FiberDomainControl*) control).accepting; }
     @property private ref shared(long) activeCount() const return nothrow @nogc
-    { return (cast(FiberBackendControl*) control).activeCount; }
+    { return (cast(FiberDomainControl*) control).activeCount; }
     @property private ref shared(ulong) timerSequence() const return nothrow @nogc
-    { return (cast(FiberBackendControl*) control).timerSequence; }
+    { return (cast(FiberDomainControl*) control).timerSequence; }
     @property private ref shared(int) fatalState() const return nothrow @nogc
-    { return (cast(FiberBackendControl*) control).fatalState; }
+    { return (cast(FiberDomainControl*) control).fatalState; }
     @property private ref shared(long) managedJoinWaiterCount() const
         return nothrow @nogc
-    { return (cast(FiberBackendControl*) control).managedJoinWaiterCount; }
+    { return (cast(FiberDomainControl*) control).managedJoinWaiterCount; }
     @property private ref shared(long) lifecycleReservationCount() const
         return nothrow @nogc
-    { return (cast(FiberBackendControl*) control).lifecycleReservationCount; }
+    { return (cast(FiberDomainControl*) control).lifecycleReservationCount; }
 
     this()
     {
-        control = allocateCacheLine!FiberBackendControl();
+        control = allocateCacheLine!FiberDomainControl();
         atomicStore!(MemoryOrder.raw)(control.accepting, 1);
         directorMutex = new Mutex;
         directorThread = Thread.getThis();
@@ -3019,10 +3019,6 @@ final class FiberSemaphore
         return false;
     }
 }
-
-/// Source-compatible name for the former one-Farm scheduler owner. New code
-/// may construct `FiberDomain()` and attach multiple `FiberLane`s.
-alias FiberBackend = FiberDomain;
 
 /// Subscribe a unique ConsumerView and keep the failure check in optimized
 /// builds. The caller must unsubscribe the same instance.

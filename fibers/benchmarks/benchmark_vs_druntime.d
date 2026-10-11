@@ -130,19 +130,19 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
     pool.start();
     scope (exit) pool.shutdown();
     writefln("    group %s: %s", group, pool.resolution.summary());
-    lane.backend.reserve(n);
+    lane.domain.reserve(n);
 
     void burst()
     {
         foreach (_; 0 .. n)
-            lane.backend.spawn({ atomicFetchAdd(mtHits, 1L); });
+            lane.domain.spawn({ atomicFetchAdd(mtHits, 1L); });
         pool.wakeAll();
     }
 
     atomicStore(mtHits, 0);
     burst();
     waitUntil(() => lane.drained, topo.name ~ " cold drain");
-    lane.backend.releaseAll(lane.backend.takeCompletions());
+    lane.domain.releaseAll(lane.domain.takeCompletions());
 
     atomicStore(mtHits, 0);
     burst();
@@ -150,7 +150,7 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
     waitUntil(() => lane.drained, topo.name ~ " warm drain");
     immutable fiberSec = (MonoTime.currTime - t0).total!"nsecs" / 1e9;
     assert(atomicLoad(mtHits) == n);
-    lane.backend.releaseAll(lane.backend.takeCompletions());
+    lane.domain.releaseAll(lane.domain.takeCompletions());
 
     atomicStore(mtHits, 0);
     PayloadHeader header;
@@ -213,7 +213,7 @@ void main(string[] args)
 
     auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 16_384);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     backend.reserve(n);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);

@@ -16,7 +16,7 @@ shared int completedNormally;
 
 struct NotifierContext
 {
-    FiberBackend backend;
+    FiberDomain backend;
     FiberTask[] tasks;
     size_t lane;
     size_t width;
@@ -24,7 +24,7 @@ struct NotifierContext
 
 struct TimerCancellationRaceContext
 {
-    FiberBackend backend;
+    FiberDomain backend;
     shared TaskHandle handle;
     MonoTime expireAt;
     shared uint command;
@@ -56,7 +56,7 @@ void handleReuseStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
@@ -120,7 +120,7 @@ void shutdownAdmissionStress()
     scope (exit) view.unsubscribe();
     foreach (round; 0 .. 50)
     {
-        auto backend = new FiberBackend(farm);
+        auto backend = new FiberDomain(farm);
         shared int start;
         shared long admitted;
         Thread[4] producers;
@@ -167,7 +167,7 @@ void cancellationReturnRaceStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     shared uint entered;
     shared uint gate;
     shared int stop;
@@ -235,7 +235,7 @@ void managedJoinCompletionRaceStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     shared int stop;
     Thread[2] consumers;
     foreach (ref consumer; consumers)
@@ -301,7 +301,7 @@ void managedJoinFanoutCancellationStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     shared int stop;
     Thread[4] consumers;
     foreach (ref consumer; consumers)
@@ -379,7 +379,7 @@ void timerCancellationRaceStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
@@ -445,7 +445,7 @@ void timerCancellationRaceStress()
     size_t readyWins;
     foreach (round; 1 .. rounds + 1)
     {
-        auto task = backend.spawn({ FiberBackend.sleepFor(hours(1)); });
+        auto task = backend.spawn({ FiberDomain.sleepFor(hours(1)); });
         auto flushed = backend.flush(token);
         assert(flushed == 1);
         auto consumed = view.consumeNext();
@@ -503,7 +503,7 @@ void lifecycleRetentionStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     backend.enableLifecycleEvents(retentionLimit);
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
@@ -910,7 +910,7 @@ void actorWaveGenerationStress()
     auto runtime = ActorRuntime.create(farm, totalActors);
     enforce(runtime !is null,
         "actor-wave stress runtime allocation failed");
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
 
     auto results = new ActorWaveStressResult[totalActors];
     auto owners = new ActorOwner!ActorWaveStressState[totalActors];
@@ -1052,7 +1052,7 @@ void syncPrimitiveStress()
     auto farm = AntFarm.create(4, 8, 2, 0, 0, 1, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -1099,7 +1099,7 @@ void main()
     auto farm = AntFarm.create(4, 8, 4, 0, 0, 1, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
+    auto backend = new FiberDomain(farm);
     backend.enableLifecycleEvents();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
@@ -1109,7 +1109,7 @@ void main()
     {
         immutable key = cast(Signal) i + 1;
         tasks ~= backend.spawn({
-            FiberBackend.await(key);
+            FiberDomain.await(key);
             atomicFetchAdd(completedNormally, 1);
         });
     }

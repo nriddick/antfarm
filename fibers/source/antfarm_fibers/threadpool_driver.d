@@ -122,7 +122,8 @@ private FiberDomain responderDomain;
 final class FiberLane : FiberReadyLane
 {
     private FiberLaneControl* control;
-    FiberBackend backend;
+    /// The scheduler domain that owns this lane's tasks.
+    FiberDomain domain;
     private CacheAwarePool pool;
     size_t flushBatch = 32;
     uint avgCost = avgCostForChunk(8);
@@ -176,8 +177,6 @@ final class FiberLane : FiberReadyLane
         return atomicLoad!(MemoryOrder.acq)(control.responderCount);
     }
 
-    @property FiberDomain domain() nothrow @nogc { return backend; }
-
     this(AntFarm* farm, size_t accumulatorCapacity = 65_536)
     {
         super(farm);
@@ -185,8 +184,8 @@ final class FiberLane : FiberReadyLane
         control.service = LaneService.absent;
         // Retained for source compatibility; intrusive queues are unbounded.
         cast(void) accumulatorCapacity;
-        backend = new FiberDomain;
-        backend.attachReadyLane(this);
+        domain = new FiberDomain;
+        domain.attachReadyLane(this);
     }
 
     /// Attach this LLC-local transport to an existing scheduler domain.
@@ -197,8 +196,8 @@ final class FiberLane : FiberReadyLane
             throw new Exception("antfarm_fibers: FiberLane requires a domain");
         control = allocateCacheLine!FiberLaneControl();
         control.service = LaneService.absent;
-        backend = domain;
-        backend.attachReadyLane(this);
+        this.domain = domain;
+        domain.attachReadyLane(this);
     }
 
     ~this() nothrow @nogc { freeCacheLine(control); }
@@ -215,7 +214,7 @@ final class FiberLane : FiberReadyLane
     FiberTask spawn(void delegate() body, size_t stackSize = 0)
     {
         enforceAdmission();
-        auto task = backend.spawnOn(this, body, stackSize);
+        auto task = domain.spawnOn(this, body, stackSize);
         noteWake(FiberWakeEvent.spawned);
         return task;
     }
@@ -223,7 +222,7 @@ final class FiberLane : FiberReadyLane
     FiberTask spawn(void function() body, size_t stackSize = 0)
     {
         enforceAdmission();
-        auto task = backend.spawnOn(this, body, stackSize);
+        auto task = domain.spawnOn(this, body, stackSize);
         noteWake(FiberWakeEvent.spawned);
         return task;
     }
@@ -231,7 +230,7 @@ final class FiberLane : FiberReadyLane
     TaskHandle spawnHandle(void delegate() body, size_t stackSize = 0)
     {
         enforceAdmission();
-        auto handle = backend.spawnHandleOn(this, body, stackSize);
+        auto handle = domain.spawnHandleOn(this, body, stackSize);
         noteWake(FiberWakeEvent.spawned);
         return handle;
     }
@@ -239,19 +238,19 @@ final class FiberLane : FiberReadyLane
     TaskHandle spawnHandle(void function() body, size_t stackSize = 0)
     {
         enforceAdmission();
-        auto handle = backend.spawnHandleOn(this, body, stackSize);
+        auto handle = domain.spawnHandleOn(this, body, stackSize);
         noteWake(FiberWakeEvent.spawned);
         return handle;
     }
 
     void enableLifecycleEvents(size_t retentionLimit = defaultLifecycleRetention)
     {
-        backend.enableLifecycleEvents(retentionLimit);
+        domain.enableLifecycleEvents(retentionLimit);
     }
 
     FiberLifecycleEvent[] takeLifecycleEvents(size_t maximum = size_t.max)
     {
-        return backend.takeLifecycleEvents(maximum);
+        return domain.takeLifecycleEvents(maximum);
     }
 
     protected override void noteExternalReady() nothrow @nogc
@@ -266,7 +265,7 @@ final class FiberLane : FiberReadyLane
     // it) would leave a parked responder unaware of the earlier deadline.
     protected override void noteTimerArmed() nothrow @nogc
     {
-        if (responderDomain is backend) return;
+        if (responderDomain is domain) return;
         noteWake(FiberWakeEvent.signalled, false);
         if (wakePolicy == FiberWakePolicy.servingGroups && pool !is null)
             foreach (g; timerWakeGroups_)
@@ -275,7 +274,7 @@ final class FiberLane : FiberReadyLane
 
     size_t signal(Signal signal)
     {
-        return backend.signal(signal);
+        return domain.signal(signal);
     }
 
     bool cancel(FiberTask task)
@@ -296,7 +295,7 @@ final class FiberLane : FiberReadyLane
 
     CancellationSubmission requestCancel(TaskHandle handle)
     {
-        immutable submitted = backend.requestCancel(handle);
+        immutable submitted = domain.requestCancel(handle);
         if (submitted == CancellationSubmission.queued)
             noteWake(FiberWakeEvent.cancelled);
         return submitted;
@@ -306,12 +305,12 @@ final class FiberLane : FiberReadyLane
     /// names the exact generation which was submitted.
     CancellationApplication[] drainCancellationRequests()
     {
-        return backend.drainCancellationRequests();
+        return domain.drainCancellationRequests();
     }
 
     void beginShutdown(bool cancelActive = false)
     {
-        backend.beginShutdown(cancelActive);
+        domain.beginShutdown(cancelActive);
         if (cancelActive) noteWake(FiberWakeEvent.shutdown);
     }
 
@@ -405,7 +404,7 @@ final class FiberLane : FiberReadyLane
         }
     }
 
-    @property bool drained() const nothrow @nogc { return backend.drained; }
+    @property bool drained() const nothrow @nogc { return domain.drained; }
 }
 
 /// Apply a measured workload preset before constructing/starting the pool.
@@ -552,7 +551,7 @@ private FiberLane[] bindPlanLanes(FiberServicePlan plan)
     {
         if (lane is null) continue;
         foreach (h, host; lanes)
-            if (host !is null && host.backend is lane.backend
+            if (host !is null && host.domain is lane.domain
                 && host.service == LaneService.native)
                 lane.timerWakeGroups_ ~= cast(ushort) h;
     }
@@ -594,7 +593,7 @@ private void finalizeFiberLanes() nothrow @nogc
         {
             bool domainResponder;
             foreach (other; installedFiberLanes)
-                if (other !is null && other.backend is lane.backend
+                if (other !is null && other.domain is lane.domain
                     && atomicLoad!(MemoryOrder.acq)(
                         other.control.responderCount) != 0)
                     domainResponder = true;
@@ -721,7 +720,7 @@ private void fiberWorkerStart(WorkerSelf* worker)
     if (state.responder)
     {
         atomicFetchAdd!(MemoryOrder.rel)(state.lane.control.responderCount, 1u);
-        responderDomain = state.lane.backend;
+        responderDomain = state.lane.domain;
     }
     noteServerStarted(state.lane);
     foreach (remote; state.remotes)
@@ -780,14 +779,14 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     }
 
     immutable timersWoken = state.responder
-        ? state.lane.backend.pollTimers() : 0;
+        ? state.lane.domain.pollTimers() : 0;
     bool consumed = state.consumer.consumeNext();
     immutable triggersDelivered =
-        state.lane.backend.pollGenerationTriggers();
-    if (state.lane.backend.pendingEvents != 0)
+        state.lane.domain.pollGenerationTriggers();
+    if (state.lane.domain.pendingEvents != 0)
         state.lane.noteWake(FiberWakeEvent.lifecycle);
-    if (state.lane.backend.fatal)
-        throw state.lane.backend.fatalException;
+    if (state.lane.domain.fatal)
+        throw state.lane.domain.fatalException;
     size_t flushed;
     immutable ready = state.lane.ready;
     if (state.lane.flushBatch == 0)
@@ -849,7 +848,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
         return ManagedPumpResult.again;
     long deadline;
     return state.responder
-        && state.lane.backend.nextTimerDeadline(deadline)
+        && state.lane.domain.nextTimerDeadline(deadline)
         ? ManagedPumpResult.until(deadline) : ManagedPumpResult.idle;
 }
 
