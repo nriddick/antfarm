@@ -31,6 +31,12 @@ release entry at merge.
   and validate every pin against the frozen scope on both OSes.
 - `perftest/actor_churn` parses its CPU argument with `parseCpuList`
   (`0,1-7`, `g:lp`) and reports the failing id and `PinOutcome`.
+- `makeBins` builds a physical-group-indexed table from a resolution;
+  `binStaffed!T(llc)` reports whether a group had accepted workers.
+- `hello_antfarm` exercises one Farm per accepted group and reports skipped
+  groups; `hello_topology` prints the OS scope, eligibility and the default
+  resolutions; `perftest/placement` records each role's LLC and core, reports
+  `crossesLlc` and accepts an optional LLC filter (default order unchanged).
 
 ### Breaking changes
 
@@ -67,6 +73,11 @@ release entry at merge.
   `== PinOutcome.pinned`. Pins outside the frozen scope now fail on both OSes
   (`outsideOsScope`): an explicit CPU list outside a launch `taskset` fails
   loudly instead of escaping it.
+- X11: `bins.install(bins)` and `install(bins, llcCount, classCount)` are
+  removed and `BinAxis` is no longer exported. Use
+  `install(makeBins!C(res, ...), res)` (or `install(bins, res, classCount)`)
+  with `res = pool.resolve()`; the table must have one slot per physical group
+  and non-null slots for accepted groups.
 
 ## 1.8.0-rc.2
 

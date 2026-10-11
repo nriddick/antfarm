@@ -131,20 +131,27 @@ the slot to active and only calls the OS wake primitive if it was armed.
 
 ## Install LLC-local state
 
-Install one value per LLC before starting the pool. Workers use `home!T()` to
-find the value associated with their pinned processor; producer/control
-threads use `at!T(llcIndex)`. `home!T` returns null off pool threads and names
-the group assigned at start, not the CPU the thread is on now.
+Install one value per physical group (LLC) before starting the pool. The
+table is keyed by `llcIndex` and never compacted: build it with `makeBins` from
+the pool's resolution and install it with that resolution, which checks the
+length and that every group with accepted workers has a slot. Workers use
+`home!T()` to find the value associated with their pinned processor;
+producer/control threads use `at!T(llcIndex)`. `home!T` returns null off pool
+threads and names the group assigned at start, not the CPU the thread is on
+now.
 
 ```d
-struct WorkBin
+final class WorkBin
 {
     // Queue, Farm pointer, counters, or other application-owned state.
+    this(uint consumers) { /* size for this group's workers */ }
 }
 
-auto topology = CacheAwarePool.topology();
-auto bins = new WorkBin[](topology.llcCount);
-install(bins);
+auto pool = new CacheAwarePool(options);
+auto res = pool.resolve();
+auto bins = makeBins!WorkBin(res, (ref const g) =>
+    g.isAccepted ? new WorkBin(g.accepted) : null); // null: no workers there
+install(bins, res);
 scope (exit) uninstall!WorkBin();
 
 bool pump(WorkerSelf* worker) nothrow @nogc @system
@@ -155,7 +162,10 @@ bool pump(WorkerSelf* worker) nothrow @nogc @system
 }
 ```
 
-`search`, labels, and the exchange APIs extend lookup beyond the home LLC.
+`binStaffed!T(llc)` says whether a group had accepted workers in the
+validating resolution. `install(bins, res, classCount)` installs one value per
+(group, P/E class). `search`, labels, and the exchange APIs extend lookup
+beyond the home LLC.
 Install, label, and uninstall only during exclusive setup/teardown; lookup is
 concurrent after installation.
 
@@ -229,7 +239,8 @@ on a machine that permits them). Other platforms and multi-group processes
 print an explicit skip.
 
 - [examples/hello_topology.d](examples/hello_topology.d): topology only.
-- [examples/hello_antfarm.d](examples/hello_antfarm.d): one Farm per LLC.
+- [examples/hello_antfarm.d](examples/hello_antfarm.d): one Farm per accepted
+  physical group, each exercised; groups without workers are reported.
 - [benchmarks/live_hybrid.d](benchmarks/live_hybrid.d): P-only versus P+E
   characterization; treat it as a benchmark, not onboarding.
 

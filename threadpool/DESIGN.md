@@ -280,10 +280,20 @@ ARMED value with futex. Spurious returns always lead back to a work check.
 The bin registry is parameterized by the installed type, so unrelated
 application components can install independent tables.
 
-Two layouts are supported:
+Tables are keyed by the physical `llcIndex` and validated against a
+`PoolResolution`; there is no unvalidated install. Two layouts are supported:
 
-- `BinAxis.llc`: one object per dense LLC index;
-- `BinAxis.llcAndClass`: one object per `(LLC, dense class)` pair.
+- `install(bins, res)`: one object per physical group, so `bins.length` must
+  equal `res.physicalGroupCount`;
+- `install(bins, res, classCount)`: one object per `(group, dense class)` pair,
+  `bins.length == physicalGroupCount * classCount`.
+
+For class or pointer types, every slot an accepted worker resolves to must be
+non-null; groups without accepted workers may hold null. A compacted table
+(one slot per accepted group) or a missing slot is rejected with the groups
+named. `makeBins!T(res, make)` builds a correctly sized table, calling `make`
+once per physical group with its `GroupDisposition`. The install records which
+groups were accepted, readable as `binStaffed!T(llc)`.
 
 Workers call `home!T()` to find the slot for their pinned LLC and class.
 `home!T` is valid only on pool-managed threads and returns null elsewhere. It
@@ -291,7 +301,8 @@ names the group the worker was assigned at start, not the CPU the thread is
 running on now: it does not follow re-pinning or OS migration.
 Control or producer threads call `at!T(llc, class)` for direct addressing.
 `search!T(label)` searches labeled slots in the current worker's NUMA-local LLC
-neighborhood; off a pool worker it searches the complete installed table.
+neighborhood, which may include groups without accepted workers; off a pool
+worker it searches the complete installed table.
 
 The registry stores references to caller-owned arrays. It does not allocate
 those objects in LLC- or NUMA-local memory and does not synchronize their
@@ -316,9 +327,15 @@ setup-only, with the same lifetime rules as LLC bins.
 
 ## Ant Farm embedding
 
-The usual non-Fiber embedding installs one Farm-bearing object per LLC. Each
-worker then owns a persistent `ConsumerView` and calls `consumeNext()` from its
-pump. A producer publishes to the desired Farm and calls `wakeAll` or uses the
+The usual non-Fiber embedding installs one Farm-bearing object per accepted
+physical group, sized for that group's workers (`res.workersIn(g).length` or
+`GroupDisposition.accepted` native consumers). Each worker then owns a
+persistent `ConsumerView` and calls `consumeNext()` from its pump. A table
+that aliases one Farm into every slot is legal but deliberately cross-group:
+every accepted worker, including those of other groups, is then a consumer of
+that Farm. Threadpool cannot detect a raw `subscribe` on another group's Farm;
+`home!T` is native by construction and `at!T(llc)` is the explicit spelling
+for anything else. A producer publishes to the desired Farm and calls `wakeAll` or uses the
 Director to signal a narrower worker selection.
 
 The pool does not infer Farm sizing. The application must reserve enough

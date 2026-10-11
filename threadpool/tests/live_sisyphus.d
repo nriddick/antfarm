@@ -140,14 +140,18 @@ int main()
             assert(p.efficiencyClass == 0);
     }
 
-    auto c1s = new LiveC1[](s.llcCount);
-    auto c2s = new LiveC2[](s.llcCount);
-    auto bags = new WorkBag[](s.llcCount);
+    PoolOptions liveOpt;
+    liveOpt.workerBody = &liveBody;
+    auto livePool = new CacheAwarePool(liveOpt);
+    auto res = livePool.resolve();
+    auto c1s = makeBins!LiveC1(res, (ref const g) => LiveC1.init);
+    auto c2s = makeBins!LiveC2(res, (ref const g) => LiveC2.init);
+    auto bags = makeBins!WorkBag(res, (ref const g) => WorkBag.init);
     bags[0].pLeft = 1;
     bags[0].eLeft = 1;
-    install(c1s);
-    install(c2s);
-    install(bags);
+    install(c1s, res);
+    install(c2s, res);
+    install(bags, res);
     setLabel!LiveC1(cast(ushort) 0, "llc0");
     scope (exit)
     {
@@ -157,9 +161,7 @@ int main()
     }
 
     {
-        PoolOptions opt;
-        opt.workerBody = &liveBody;
-        auto pool = new CacheAwarePool(opt);
+        auto pool = livePool;
         pool.start();
         scope (exit) pool.shutdown();
         assert(pool.workerCount == 20);

@@ -340,14 +340,14 @@ FarmSet startFarm(Cfg cfg, uint nc)
 
     foreach (i; 0 .. nc)
     {
-        s.jobs[i] = new ConsJob(ConsCtx(s.f, placement.consumers[i], cfg.pin));
+        s.jobs[i] = new ConsJob(ConsCtx(s.f, placement.consumers[i].id, cfg.pin));
         s.consumers[i] = new Thread(&s.jobs[i].run);
         s.consumers[i].start();
     }
     waitReady(nc, MonoTime.currTime + 5.seconds);
     if (cfg.pin)
     {
-        if (pinProcessor(placement.producer) != PinOutcome.pinned)
+        if (pinProcessor(placement.producer.id) != PinOutcome.pinned)
             atomicStore(g_pinOk, 0);
     }
     return s;
@@ -582,7 +582,7 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
     auto s = startFarm(cfg, nc);
     auto topology = discover();
     auto placement = choosePlacement(topology, nc);
-    auto mj = new MboxJob(placement.mailbox, cfg.pin);
+    auto mj = new MboxJob(placement.mailbox.id, cfg.pin);
     auto mth = new Thread(&mj.run);
     mth.start();
     waitReady(nc + 1, MonoTime.currTime + 5.seconds);

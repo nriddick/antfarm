@@ -402,7 +402,24 @@ void installFiberLanes(FiberLane[] lanes, CacheAwarePool pool = null)
         fiberCoverageControl = allocateCacheLine!FiberCoverageControl();
     installRemoteCoverageRing(lanes);
     resetFiberCoverage(pool);
-    install!FiberLane(lanes);
+    // Stopgap until the Fiber service plan replaces this installer: bins now
+    // require a resolution-validated, physical-group-sized table. Callers
+    // that pass fewer lanes (single-lane benchmarks) get null slots for the
+    // remaining groups, which the install rejects only if those groups have
+    // accepted workers. Remove with installFiberLanes.
+    PoolResolution resolution;
+    if (pool !is null)
+        resolution = pool.resolve();
+    else
+    {
+        auto snapshot = discover();
+        auto scope_ = osScope();
+        resolution = resolvePool(snapshot, scope_, PoolOptions.init);
+    }
+    auto table = lanes.dup;
+    if (table.length < resolution.physicalGroupCount)
+        table.length = resolution.physicalGroupCount;
+    install!FiberLane(table, resolution);
 }
 
 /// Default sweeper graph: for each shared domain with two or more lanes and
