@@ -2080,6 +2080,63 @@ void unstaffedLaneRescueSmoke()
         cast(uint) groups[1], cast(uint) workers, cast(uint) groups[0]);
 }
 
+// 2-LLC: the domain's only responder is in another group than the lane whose
+// fiber arms a new earliest timer while that responder is parked without a
+// deadline. The armed timer must still wake it and fire on time.
+void offResponderTimerSmoke(string test, FiberWakePolicy policy)
+{
+    import core.stdc.stdio : printf;
+    import core.time : MonoTime;
+    import std.string : toStringz;
+    import threadpool;
+
+    auto full = twoGroupResolution(test);
+    if (full is null) return;
+    immutable groups = firstTwoGroups(full);
+    PoolOptions options;
+    options.processors = [full.workersIn(groups[0])[0], full.workersIn(groups[1])[0]];
+    options.managedWorker = fiberWorkerHooks();
+    auto pool = new CacheAwarePool(options);
+    auto plan = new FiberServicePlan(pool.resolve());
+    auto domain = new FiberDomain;
+    AntFarm*[] farms;
+    FiberLane[] lanes;
+    scope (exit) foreach (farm; farms) farm.destroy();
+    foreach (group; groups)
+    {
+        farms ~= farmFor(plan, group);
+        lanes ~= new FiberLane(domain, farms[$ - 1]);
+        lanes[$ - 1].wakePolicy = policy;
+        plan.bind(group, lanes[$ - 1]);
+    }
+    lanes[1].responderSelector = (WorkerSelf*) => false;
+    installFiberPlan(plan, pool);
+    scope (exit) uninstallFiberPlan();
+    pool.start();
+    assert(waitOpen(lanes));
+    assert(lanes[0].responders == 1 && lanes[1].responders == 0);
+
+    shared long sleptMs = -1;
+    auto task = lanes[1].spawn({
+        // Outlast every wake caused by the spawn and its publication, so
+        // the responder is parked without a deadline when the timer arms.
+        Thread.sleep(msecs(50));
+        immutable before = MonoTime.currTime;
+        FiberDomain.sleepFor(msecs(20));
+        atomicStore(sleptMs, (MonoTime.currTime - before).total!"msecs");
+    });
+    waitTerminated(task);
+    pool.shutdown();
+    assert(pool.workerFailures.length == 0);
+    assert(task.terminated, "a timer armed away from the responder never fired");
+    immutable slept = atomicLoad(sleptMs);
+    assert(slept >= 20 && slept < 250, "the off-responder timer fired late");
+    assert(domain.drained);
+    domain.releaseAll(domain.takeCompletions());
+    printf("%s: group %u timer fired after %lld ms, responder in group %u\n",
+        test.toStringz, cast(uint) groups[1], slept, cast(uint) groups[0]);
+}
+
 void fiberParitySmoke()
 {
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
@@ -2198,6 +2255,8 @@ void main()
     sharedDomainNoEdgesSmoke();
     preAdmissionUnusedGroupSmoke();
     unstaffedLaneRescueSmoke();
+    offResponderTimerSmoke("T1 off-responder timer, broadcast",
+        FiberWakePolicy.broadcast);
 
     import core.stdc.stdio : printf;
     printf("fiber smoke passed\n");

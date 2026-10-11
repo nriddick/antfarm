@@ -327,8 +327,9 @@ struct TaskHandle
             {
                 auto backend = waiter.backend;
                 immutable seq = atomicFetchAdd(backend.timerSequence, 1UL);
+                bool earliest;
                 try
-                    backend.timers.insert(waiter, deadline.ticks, seq);
+                    earliest = backend.timers.insert(waiter, deadline.ticks, seq);
                 catch (Throwable failure)
                 {
                     target.removeManagedJoinWaiter(waiter);
@@ -339,6 +340,8 @@ struct TaskHandle
                 // Completion can detach and wake us before timer insertion.
                 if (!target.hasManagedJoinWaiter(waiter, generation))
                     backend.timers.remove(waiter);
+                else if (earliest)
+                    waiter.readyLane.noteTimerArmed();
             }
             Fiber.yield();
             if (waiter.cancellationRequested) throw new FiberCancelled;
@@ -1201,7 +1204,8 @@ final class TimerSet
         }
     }
 
-    void insert(FiberTask task, long deadlineTicks, ulong sequence)
+    /// Returns true when the new entry became the earliest deadline.
+    bool insert(FiberTask task, long deadlineTicks, ulong sequence)
     {
         synchronized (mutex)
         {
@@ -1209,6 +1213,7 @@ final class TimerSet
             task.timerIndex = entries.length;
             entries ~= TimerEntry(deadlineTicks, sequence, task);
             siftUp(task.timerIndex);
+            return task.timerIndex == 0;
         }
     }
 
@@ -1507,6 +1512,12 @@ class FiberReadyLane
     /// flow (signal, timer, cancellation, or a cross-lane join completion).
     /// Threadpool lanes override this to wake their own responder set.
     protected void noteExternalReady() nothrow @nogc {}
+
+    /// Called by a running fiber of this lane after it armed its domain's
+    /// earliest timer deadline. No ready transition happens until the timer
+    /// is polled, so threadpool lanes override this to wake a worker which
+    /// polls the domain's timers.
+    protected void noteTimerArmed() nothrow @nogc {}
 
     /// Publish up to `maximum` accumulated activations using a caller-owned
     /// producer token for this lane's Farm.
@@ -2131,7 +2142,8 @@ final class FiberDomain
         task.waitSignal = key;
         if (!backend.waits.insert(task, key))
             throw new FiberCancelled;
-        backend.timers.insert(task, deadline.ticks, seq);
+        if (backend.timers.insert(task, deadline.ticks, seq))
+            task.readyLane.noteTimerArmed();
         // Cancellation may have removed the waiter just before this insert.
         // In that ordering it could not remove a not-yet-present heap entry;
         // close the registration handshake from the running fiber side.

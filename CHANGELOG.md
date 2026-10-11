@@ -54,6 +54,11 @@ release entry at merge.
 - Fixed: a lane no longer reports itself served after pool shutdown. When its
   last server stops it becomes `stopped`, and a later spawn throws instead of
   stranding an undrainable task.
+- Fixed: a timer armed by a fiber running on a non-responder worker (a custom
+  `responderSelector`) now wakes the domain's responders when it becomes the
+  earliest deadline. Before, a parked responder could miss it until an
+  unrelated wake. `FiberReadyLane` gains the `noteTimerArmed` hook; a
+  responder arming its own timer adds no wake.
 - `FiberServicePlan` (`antfarm_fibers.service_plan`) binds one lane per
   physical group of a `PoolResolution`, plans each group's `LaneService`, and
   derives each Farm's `FarmRequirement` (native, foreign and external consumer

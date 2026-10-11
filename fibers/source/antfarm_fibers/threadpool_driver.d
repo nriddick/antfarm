@@ -108,6 +108,9 @@ private __gshared FiberLane[] installedFiberLanes; // index == physical group
 private __gshared CacheAwarePool installedFiberPool;
 private __gshared FiberServicePlan installedFiberPlan;
 private __gshared FiberStartControl* fiberStartControl;
+// Thread-local: the domain this managed worker polls timers for, if it is a
+// responder; null on every other thread.
+private FiberDomain responderDomain;
 
 /// One scheduler/farm pairing, bound to a physical group by a
 /// `FiberServicePlan`. The caller owns the farm lifetime and must keep it
@@ -245,6 +248,17 @@ final class FiberLane : FiberReadyLane
     protected override void noteExternalReady() nothrow @nogc
     {
         noteWake(FiberWakeEvent.signalled);
+    }
+
+    // A responder of this domain needs no wake for a timer its own fiber
+    // armed: the fiber ran inside that worker's pump, which then returns
+    // `again`, and the pump before it parks reads `nextTimerDeadline` into
+    // `until`. Any other worker (a custom `responderSelector` that excludes
+    // it) would leave a parked responder unaware of the earlier deadline.
+    protected override void noteTimerArmed() nothrow @nogc
+    {
+        if (responderDomain is backend) return;
+        noteWake(FiberWakeEvent.signalled, false);
     }
 
     size_t signal(Signal signal)
@@ -650,7 +664,10 @@ private void fiberWorkerStart(WorkerSelf* worker)
     }
     atomicFetchAdd!(MemoryOrder.rel)(state.lane.control.startedWorkers, 1u);
     if (state.responder)
+    {
         atomicFetchAdd!(MemoryOrder.rel)(state.lane.control.responderCount, 1u);
+        responderDomain = state.lane.backend;
+    }
     noteServerStarted(state.lane);
     foreach (remote; state.remotes)
         noteServerStarted(remote.lane);
@@ -785,6 +802,7 @@ private void fiberWorkerStop(WorkerSelf* worker)
 {
     auto state = cast(FiberWorkerState) worker.context;
     if (state is null) return;
+    responderDomain = null;
     if (state.live)
     {
         // First, so admission closes as early as possible after the last pump.
