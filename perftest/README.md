@@ -10,7 +10,7 @@ the harness, not evidence.
 ## Build
 
 ```sh
-make -C perftest                 # throughput, dual, tail, actor_ready, actor_churn, scaling
+make -C perftest                 # throughput, dual, tail, actor_ready, actor_churn, scaling, offccd, c2c
 make -C perftest actor_churn_mimalloc   # plus the pinned real mimalloc archive
 ```
 

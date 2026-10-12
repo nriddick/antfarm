@@ -13,9 +13,9 @@ MIMALLOC_LIBRARY := $(ROOT)/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a
 MIMALLOC_VERSION ?= -d-version=AntfarmMimallocV3
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
-.PHONY: all run run-once run-once-constant-header run-once-constant-callandlength dual-run dual-grid-run dual-run-constant-header dual-run-constant-callandlength tail-run grid-run run-grid run-huge run-once-huge dual-run-huge tail-run-huge clean
+.PHONY: all run run-once run-once-constant-header run-once-constant-callandlength dual-run dual-grid-run dual-run-constant-header dual-run-constant-callandlength tail-run grid-run run-grid run-huge run-once-huge dual-run-huge tail-run-huge offccd-plan offccd-smoke clean
 
-all: throughput dual tail actor_ready actor_churn scaling
+all: throughput dual tail actor_ready actor_churn scaling offccd c2c
 
 actor_churn: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOOL_SOURCES)
 	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source \
@@ -41,6 +41,12 @@ throughput: throughput.d $(FARM_SOURCES)
 
 tail: tail.d placement.d $(FARM_SOURCES) $(wildcard $(ROOT)/threadpool/source/threadpool/*.d) $(wildcard $(ROOT)/threadpool/source/threadpool/sys/*.d)
 	$(DC) $(DFLAGS) -i -I$(ROOT)/threadpool/source tail.d $(FARM_SOURCES) -of=$@
+
+offccd: offccd.d placement.d $(FARM_SOURCES) $(THREADPOOL_SOURCES)
+	$(DC) $(DFLAGS) -i -I$(ROOT)/threadpool/source offccd.d $(FARM_SOURCES) -of=$@
+
+c2c: c2c.d placement.d $(THREADPOOL_SOURCES)
+	$(DC) $(DFLAGS) -i -I$(ROOT)/threadpool/source c2c.d -of=$@
 
 dual: dual.d $(FARM_SOURCES)
 	$(DC) $(DFLAGS) dual.d $(FARM_SOURCES) -of=$@
@@ -89,5 +95,11 @@ dual-run-huge: dual
 tail-run-huge: tail
 	./tail --huge | tee last_tail_huge.txt
 
+offccd-plan: offccd
+	./offccd --plan-only --off-c 8
+
+offccd-smoke: offccd c2c
+	python3 -B offccd_sweep.py --suite smoke --out /tmp/offccd-smoke-$$$$
+
 clean:
-	rm -f throughput tail dual actor_ready actor_churn actor_churn_mimalloc scaling *.o
+	rm -f throughput tail dual actor_ready actor_churn actor_churn_mimalloc scaling offccd c2c *.o
