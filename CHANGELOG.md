@@ -18,6 +18,8 @@ release entry at merge.
 - `LogicalProcessor.offlineAtDiscovery` reports Linux offline CPUs.
   `TopologySnapshot` gains `byId`, `isEligible`, `processorsInLlc`,
   `eligibleProcessorsInLlc`, `eligibleLlcCount` and `processorsOfClass`.
+- `TopologySnapshot.cores` is sorted by each core's first `ProcessorId`.
+  Before, its order depended on associative-array iteration.
 - `threadpool.resolution`: `resolvePool` and `PoolResolution` report every
   known CPU (`Reject` reason union), every requested id (unknown, accepted,
   duplicate) and every physical group (physical/eligible/accepted/started

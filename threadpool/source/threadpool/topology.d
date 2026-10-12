@@ -221,6 +221,7 @@ struct LogicalProcessor
     bool   offlineAtDiscovery;
 }
 
+/// One physical core. `TopologySnapshot.cores` is sorted by `processors[0]`.
 struct PhysicalCore
 {
     ushort coreIndex;
@@ -532,6 +533,7 @@ TopologySnapshot assembleSnapshot(
             c.processors ~= ProcessorId.of(procs[i]);
         cores ~= c;
     }
+    cores.sort!((a, b) => a.processors[0] < b.processors[0]);
 
     ushort maxLlc = llcCount;
     foreach (ref p; procs)
@@ -728,4 +730,28 @@ unittest
     import std.format : format;
     assert(format("%s", P(1, 12)) == "1:12");
     assert(P(0, 9) < P(1, 0) && P(1, 0) < P(1, 1));
+}
+
+unittest
+{
+    // C3: cores are sorted by their first processor, whatever the input order.
+    alias P = ProcessorId;
+    LogicalProcessor[] procs;
+    foreach_reverse (i; 0 .. 32)
+    {
+        LogicalProcessor p;
+        p.lpIndex = cast(ushort) i;
+        p.coreIndex = cast(ushort)(i % 16);
+        p.llcIndex = cast(ushort)(i % 16 / 8);
+        p.smtSibling = i >= 16;
+        procs ~= p;
+    }
+    auto snap = assembleSnapshot("synthetic", procs, null, null, 2, 64,
+        [GroupingSource.l3, GroupingSource.l3]);
+    assert(snap.cores.length == 16);
+    foreach (i, ref c; snap.cores)
+    {
+        assert(c.coreIndex == i);
+        assert(c.processors == [P(0, cast(ushort) i), P(0, cast(ushort)(i + 16))]);
+    }
 }
