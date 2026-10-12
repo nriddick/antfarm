@@ -649,12 +649,12 @@ final class FarmHost
     // ---- publication with the control token (+ wake in park mode) ----------
 
     /// `runtime.flush(token, maximum)`, waking parked workers when it wrote.
-    /// After `close()` or `abandon()` these abort rather than throwing
-    /// `FarmHostException`.
+    /// Aborts rather than throwing `FarmHostException` once the host is not
+    /// open: after `close()`, after `abandon()`, or after a worker failure.
     size_t flush(ActorRuntime* runtime, size_t maximum = 32) @nogc nothrow
     {
         if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
-            fatal("FarmHost.flush after close/abandon");
+            fatal("FarmHost.flush after close/abandon or worker failure");
         version (assert) assertControl();
         immutable n = runtime.flush(token_, maximum);
         if (n != 0 && parkMode_) pool_.wakeAll();
@@ -662,13 +662,13 @@ final class FarmHost
     }
 
     /// `park.pump(token)`, waking parked workers when any table (child or
-    /// root) was written. Returns the root count, as `pump` does.
-    /// After `close()` or `abandon()` these abort rather than throwing
-    /// `FarmHostException`.
+    /// root) was written. Returns the root count, as `pump` does. Aborts
+    /// rather than throwing `FarmHostException` once the host is not open:
+    /// after `close()`, after `abandon()`, or after a worker failure.
     size_t pump(Park)(Park* park) @nogc nothrow
     {
         if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
-            fatal("FarmHost.pump after close/abandon");
+            fatal("FarmHost.pump after close/abandon or worker failure");
         version (assert) assertControl();
         immutable count = park.pumpCounted(token_);
         if (count.tables != 0 && parkMode_) pool_.wakeAll();
@@ -677,12 +677,13 @@ final class FarmHost
 
     /// Publish every actor into `wave`, waking after each accepted prefix and
     /// stepping on backpressure. False if the wave failed (seal it anyway,
-    /// as with `ActorWave.publish`). After `close()` or `abandon()` these
-    /// abort rather than throwing `FarmHostException`.
+    /// as with `ActorWave.publish`). Aborts rather than throwing
+    /// `FarmHostException` once the host is not open: after `close()`, after
+    /// `abandon()`, or after a worker failure.
     bool publish(alias operation, T)(ref ActorWave wave, scope ActorHandle!T[] actors)
     {
         if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
-            fatal("FarmHost.publish after close/abandon");
+            fatal("FarmHost.publish after close/abandon or worker failure");
         version (assert) assertControl();
         size_t offset;
         while (offset < actors.length)
@@ -903,21 +904,24 @@ final class FarmHost
     /// leave non-daemon workers running when the control thread exits.
     /// Use `close()` directly when a refused drain should remain retryable.
     ///
-    /// The abandon-on-failure path is cleanup-only (`scope(success)` /
-    /// `scope(exit)`). Do not use `scope(failure)` or `catch` here. Under
-    /// LDC -O1 and above, a catch that runs while an exception is already
-    /// unwinding (this function called from a `scope(exit)` guard, `close()`
-    /// throwing because work is undrained) is skipped. The host would stay
-    /// open and its non-daemon workers would hang process exit. This form
-    /// still abandons, and the close error still chains onto the in-flight
-    /// exception.
+    /// The abandon-on-failure path is cleanup-only: one `scope(exit)` guard
+    /// that calls `abandon()`. Do not use `scope(failure)` or `catch` here.
+    /// Under LDC -O1 and above, a guard that runs while an exception is
+    /// already unwinding (this function called from a `scope(exit)` guard,
+    /// `close()` throwing because work is undrained) can be skipped, leaving
+    /// the host open and its non-daemon workers hanging process exit. Keep the
+    /// abandon call in the first guard to run and unconditioned: `abandon()`
+    /// is idempotent, so it is a no-op once close() has already closed the
+    /// host, and gating it on a later-declared success flag only makes it
+    /// skippable.
     void closeOrAbandon()
     {
-        // closed is set only when close() returns. scope(exit) then abandons
-        // on every other exit, including a throw from close() during unwind.
-        bool closed;
-        scope (success) closed = true;
-        scope (exit) if (!closed) abandon();
+        // Unconditional: abandon() is a no-op once close() has closed the
+        // host, and this guard must run even when close() throws from a
+        // scope(exit) during unwinding. Gating it on a scope(success) flag
+        // declared after it makes this the outer guard, which LDC -O1 skips
+        // in that case.
+        scope (exit) abandon();
         close();
     }
 

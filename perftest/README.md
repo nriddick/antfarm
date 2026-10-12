@@ -145,6 +145,15 @@ timing knob. The committed tables report both the default and chunk 32 (class
 child-wave tables (`start`/`startFinal`/`startSubset`), which default to chunk
 32; set it to `0` for chunk 128.
 
+`ANTFARM_CHURN_HOST=1` swaps the benchmark's hand-written consumer loop for a
+`FarmHost` that owns the Farm, the control token and the pinned consumers. It
+needs the small tier, `consumers > 0` and a CPU list naming the controller
+followed by one CPU per consumer (`cpus.length == consumers + 1`); any other
+combination is rejected. The host runs `WorkerIdle.spin` and uses the
+benchmark's `k = 8`, `ringMiB = 8` and `quota-words`. Unset, the benchmark
+drives its own consumers. The host path is the comparison side of
+[the tuning guidance](../docs/guide/hosting.md#performance-and-tuning).
+
 ### `actor_ready`
 
 ```text

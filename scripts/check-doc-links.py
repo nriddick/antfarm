@@ -124,7 +124,7 @@ def anchor_slug(text):
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)  # inline links/images
     text = re.sub(r"!?\[([^\]]*)\]\[[^\]]*\]", r"\1", text)  # reference links
     text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"[`*_]", "", text).lower()
+    text = re.sub(r"[`*]", "", text).lower()
     text = "".join(c for c in text if c.isalnum() or c in "_- ")
     return text.replace(" ", "-")
 

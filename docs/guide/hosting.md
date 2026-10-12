@@ -177,7 +177,7 @@ A host's consumers run on the threadpool's worker loop, not a loop you
 wrote. On one measured host, that cost was invisible except where consumers
 were the bottleneck and often found nothing.
 
-The comparison ran [perftest/actor_churn](../../perftest/README.md#actorchurn)
+The comparison ran [perftest/actor_churn](../../perftest/README.md#actor_churn)
 on each workload twice: with `ANTFARM_CHURN_HOST=1`, where a `FarmHost` owns
 the Farm, the control token and the pinned consumers, and without it, on the
 benchmark's own hand-written consumers. The controller and every consumer CPU
@@ -213,11 +213,15 @@ What to tune:
   the same Farm miss less often. `actor` and `wave` were unaffected at the
   same worker counts, so size by measurement, not by core count.
 - **The idle policy**: `FarmHostOptions.idle` selects `WorkerIdle.park` (the
-  default: park after `FarmHostOptions.idleTimeout`, 1 ms, until the host's
-  publication wrappers wake the worker) or `WorkerIdle.spin`; the spin count
-  is `FarmHostOptions.pool.pSpinIters` (and `eSpinIters` on efficiency-class
+  default: after its final empty check the worker parks at once, for up to
+  `FarmHostOptions.idleTimeout`, 1 ms, or until the host's publication
+  wrappers wake it) or `WorkerIdle.spin`; the spin count is
+  `FarmHostOptions.pool.pSpinIters` (and `eSpinIters` on efficiency-class
   workers). The measurement above used `spin` with the default counts; `park`
-  trades the spin burn for park-and-wake latency and was not measured here.
+  avoids the spin burn at the cost of wake latency. The publication wrappers
+  wake a parked worker at once, so their latency stays small; a raw-token
+  publication that no wrapper announces waits up to `idleTimeout` for the
+  worker to recheck. `park` was not measured here.
 - **A hand-written consumer loop** on the raw Farm, for maximum throughput on
   consumer-bound fine-grained workloads, as the benchmark's non-host path
   does: subscribe a `ConsumerView`, then loop
@@ -227,5 +231,5 @@ What to tune:
 To measure on your own machine, run the same command with and without the
 variable (`ANTFARM_CHURN_HOST=1` needs the small tier, `consumers > 0` and a
 CPU list naming the controller followed by each consumer);
-[perftest/README.md](../../perftest/README.md#actorchurn) has the full
+[perftest/README.md](../../perftest/README.md#actor_churn) has the full
 argument list.
