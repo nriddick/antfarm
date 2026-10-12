@@ -53,7 +53,15 @@ void createWaitSlots(uint n)
 
 void destroyWaitSlots()
 {
-    foreach (ref slot; gWait)
+    // Drop the published slice before CloseHandle so a wakeWorker that
+    // reloads gWait cannot SetEvent a handle this function is about to
+    // close and the OS may reuse. A caller that already holds the old
+    // slice can still race; FarmHost drains in-flight wakes first.
+    auto slots = gWait;
+    auto stop = gStopEvent;
+    gWait = null;
+    gStopEvent = null;
+    foreach (ref slot; slots)
     {
         if (slot.workEvent !is null)
         {
@@ -61,24 +69,23 @@ void destroyWaitSlots()
             slot.workEvent = null;
         }
     }
-    if (gStopEvent !is null)
-    {
-        CloseHandle(gStopEvent);
-        gStopEvent = null;
-    }
-    gWait = null;
+    if (stop !is null)
+        CloseHandle(stop);
 }
 
 void wakeWorker(uint workerIndex) @nogc nothrow
 {
-    if (gWait.length == 0 || workerIndex >= gWait.length) return;
+    // One load: length and pointer stay paired, and the local keeps the
+    // slot array alive if destroyWaitSlots nulls gWait during this call.
+    auto slots = gWait;
+    if (workerIndex >= slots.length) return;
+    auto slot = &slots[workerIndex];
     // Even ACTIVE -> ACTIVE publishes into the worker's next arming RMW.
-    if (atomicExchange!(MemoryOrder.acq_rel)(
-            &gWait[workerIndex].wakeWord, ACTIVE) != ARMED) return;
+    if (atomicExchange!(MemoryOrder.acq_rel)(&slot.wakeWord, ACTIVE) != ARMED) return;
     if (pWakeByAddressSingle !is null)
-        pWakeByAddressSingle(cast(void*)&gWait[workerIndex].wakeWord);
-    else if (gWait[workerIndex].workEvent !is null)
-        SetEvent(gWait[workerIndex].workEvent);
+        pWakeByAddressSingle(cast(void*)&slot.wakeWord);
+    else if (slot.workEvent !is null)
+        SetEvent(slot.workEvent);
 }
 
 void wakeAllForStop() @nogc nothrow

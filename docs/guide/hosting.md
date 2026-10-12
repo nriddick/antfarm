@@ -116,7 +116,9 @@ wake and are picked up within `idleTimeout`, or call `host.wake()`.
 `idleTimeout = Duration.max` parks until woken, so raw-token users must then
 call `wake()`. `WorkerIdle.spin` never parks and burns every worker's CPU
 for the host's life. `wake()` may be called from any thread while the host is
-open, but not concurrently with `close()` or `abandon()`.
+open. It may overlap `close()`, `abandon()` or a worker-failure shutdown:
+teardown stores a non-open state and waits for in-flight wakes before
+stopping the pool.
 
 ## Deadlines and failures
 

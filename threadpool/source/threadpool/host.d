@@ -302,6 +302,7 @@ enum HostState : ubyte
     failed,    /// a pool worker failed; only close()/abandon() remain
     closed,    /// close() completed the ordered teardown
     abandoned, /// abandon() stopped the consumers and leaked the rest
+    stopping,  /// teardown has published non-open; in-flight wake() calls are draining
 }
 
 /// One emitter or service attached to the host Farm, driven by `step()`.
@@ -384,7 +385,9 @@ private void hostPoolStopped() nothrow
  + is in `step`/`waitUntil` (or an extra-token holder flushes): the host has
  + no background emitter. Control-thread methods are checked by `assert` in
  + debug builds. `plan`, `farm`, `state` and `wake` may be called from any
- + thread while the host is open; `wake` must not race `close()`/`abandon()`.
+ + thread while the host is open. `wake` may overlap `close()`, `abandon()`
+ + or a worker-failure shutdown: teardown stores a non-open state, then
+ + waits until in-flight `wake` calls have returned, before stopping the pool.
  +
  + Runtimes and parks from `createRuntime`/`createPark` belong to the host and
  + are destroyed by `close()`, after the consumer join. There is no
@@ -660,12 +663,20 @@ final class FarmHost
         return true;
     }
 
-    /// Wake parked workers. Any thread while the host is open; must not race
-    /// `close()`/`abandon()`. No-op without workers, in spin mode, or once
-    /// the host is not open.
+    /// Wake parked workers. Any thread while the host is open. A call that
+    /// overlaps `close()`, `abandon()` or a worker-failure shutdown is a
+    /// no-op once teardown has stored a non-open state, and an in-flight
+    /// call finishes before the pool's wait slots are destroyed. No-op
+    /// without workers, in spin mode, or once the host is not open.
     void wake() @nogc nothrow
     {
-        if (parkMode_ && atomicLoad!(MemoryOrder.acq)(state_) == HostState.open)
+        if (!parkMode_) return;
+        // Increment before the state load so teardown's drain cannot miss
+        // a wake that has already decided the host is open. Both sides are
+        // seq_cst so that decision and the drain observe one order.
+        atomicOp!"+="(wakers_, 1u);
+        scope (exit) atomicOp!"-="(wakers_, 1u);
+        if (atomicLoad!(MemoryOrder.seq)(state_) == HostState.open)
             pool_.wakeAll();
     }
 
@@ -792,7 +803,7 @@ final class FarmHost
         immutable current = state;
         if (current == HostState.closed || current == HostState.abandoned)
             return;
-        if (current == HostState.failed)
+        if (current == HostState.failed || current == HostState.stopping)
         {
             abandon();
             return;
@@ -818,6 +829,9 @@ final class FarmHost
             throw new FarmHostException("FarmHost.close: not drained: " ~ offenders.join("; ")
                 ~ (hasParks ? "; join every thread that may call requestCancel before close" : ""));
 
+        // Non-open before the pool is torn down, so a concurrent wake()
+        // either finishes first or does not call wakeAll.
+        publishShutdown(HostState.stopping);
         auto failures = stopConsumers();
         Throwable[] errors;
         foreach_reverse (ref a; attachments_)
@@ -878,6 +892,10 @@ final class FarmHost
         immutable current = state;
         if (current == HostState.closed || current == HostState.abandoned)
             return;
+        if (current == HostState.open)
+            publishShutdown(HostState.stopping);
+        else
+            drainWakers(); // failed or stopping: state is already non-open
         cast(void) stopConsumers();
         if (affinityChanged_)
             cast(void) restoreCallingThread(previousAffinity_);
@@ -909,6 +927,7 @@ private:
     bool claimed_, poolRunning_, parkMode_, affinityChanged_;
     ThreadAffinity previousAffinity_;
     shared HostState state_;
+    shared uint wakers_; // in-flight wake() calls; drained before pool shutdown
     Owned[] owned_;
     HostAttachment[] attachments_;
     uint runtimes_, parks_, extraSmall_, extraBulk_;
@@ -1002,9 +1021,25 @@ private:
 
     void failed()
     {
+        // failed before stop, so wake() stops calling wakeAll and the
+        // drain below waits out any call that already passed the check.
+        publishShutdown(HostState.failed);
         auto failures = stopConsumers();
-        atomicStore!(MemoryOrder.rel)(state_, HostState.failed);
         throw new FarmHostFailed("FarmHost: pool workers failed: " ~ messages(failures), failures);
+    }
+
+    /// Store a non-open state, then wait until every wake() that could
+    /// still call wakeAll has returned. Control thread only.
+    void publishShutdown(HostState next) @nogc nothrow
+    {
+        atomicStore!(MemoryOrder.seq)(state_, next);
+        drainWakers();
+    }
+
+    void drainWakers() @nogc nothrow
+    {
+        while (atomicLoad!(MemoryOrder.seq)(wakers_) != 0)
+            Thread.yield();
     }
 
     // Constructor unwinding, strictly in reverse.

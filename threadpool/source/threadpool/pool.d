@@ -548,11 +548,14 @@ final class CacheAwarePool
     }
 
     /// Wake every worker (does not change policy). Safe for producer threads.
+    /// Loads the worker slice once so a concurrent shutdown cannot tear
+    /// the length away from the pointer between the bound and the index.
     void wakeAll() @nogc nothrow
     {
         version (ThreadpoolOs)
         {
-            foreach (i; 0 .. gWorkers.length)
+            auto workers = gWorkers;
+            foreach (i; 0 .. workers.length)
                 wakeWorker(cast(uint) i);
         }
     }
