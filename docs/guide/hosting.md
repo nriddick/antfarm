@@ -137,6 +137,12 @@ host is then `failed`, and only `close()` (which acts as `abandon()`) remains.
 After `FarmHostFailed`, the caller stays confined until `close()` or
 `abandon()` restores affinity.
 
+`FarmHostFailed.workerFailures` contains owned diagnostic snapshots, so an
+assertion's thread-local error object is never used after its worker exits.
+The Error/Exception distinction is preserved; the original subclass, chain
+and stack trace are not. See the [worker failure capture contract](../../threadpool/DESIGN.md#managed-worker-hooks)
+for message/file limits and `sourceType`/`truncated` fields.
+
 ## Teardown
 
 `close()` first checks, with no side effects:

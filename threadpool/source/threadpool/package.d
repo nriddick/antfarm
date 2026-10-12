@@ -29,3 +29,4 @@ public import threadpool.exchange : installExchange, uninstallExchange, exchange
     exchangeTo, exchangeCount, atExchange, setExchangeLabel, exchangeSearch,
     installExchangePairs;
 public import threadpool.stats : PoolStats;
+public import threadpool.failure : WorkerFailure;

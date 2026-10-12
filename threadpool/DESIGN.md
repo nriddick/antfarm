@@ -212,8 +212,18 @@ would otherwise settle.
   absolute `MonoTime` deadline.
 
 Managed callbacks may allocate and throw. An escaping failure stops the worker
-system and is retained in `workerFailures()` after shutdown. The Fiber package
-uses managed hooks to hold persistent Farm registrations and timer state.
+system. Both this lane and FarmHost capture the first failure immediately into
+storage allocated before the worker starts: druntime errors can live in TLS
+and be overwritten by a later stop-hook error or invalidated at thread exit.
+After shutdown joins the workers, `workerFailures()` returns owned
+`WorkerFailure!Error` or `WorkerFailure!Exception` diagnostics. They preserve
+the Error/Exception distinction, original type name (`sourceType`), source
+line, message (up to 1024 bytes) and file name (up to 512 bytes). `truncated`
+reports either limit being exceeded. They do not retain the original object,
+subclass, exception chain or stack trace. Recording is `@nogc nothrow`; the
+worker alone writes its snapshot and the controller reads only after join.
+The Fiber package uses managed hooks to hold persistent Farm registrations
+and timer state.
 
 ## Worker lifecycle
 

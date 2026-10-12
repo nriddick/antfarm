@@ -4,6 +4,7 @@ import core.atomic;
 import core.time : MonoTime;
 import core.thread : Thread;
 import threadpool.stats;
+import threadpool.failure : FailureCapture;
 import threadpool.topology : TopologySnapshot, fillNumaLlcs, maxNumaLlcs;
 
 version (Windows)
@@ -54,7 +55,7 @@ struct WorkerRec
     bool   hasNumber;
     long   number;
     string label;
-    Throwable failure;
+    FailureCapture failure;
 
     shared uint  kind = IdleKind.wait;
     shared uint  spinIters = 64;

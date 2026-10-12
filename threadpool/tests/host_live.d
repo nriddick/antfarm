@@ -16,9 +16,31 @@ import actors;
 import antfarm;
 import threadpool.host;
 import threadpool.hybrid : WorkerSelf;
-import threadpool.os_scope : liveOsMask;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.topology : ProcessorId, formatCpuList;
+
+// Windows liveOsMask reports process affinity, not the caller's group mask.
+ProcessorId[] liveCallerMask()
+{
+    version (Windows)
+    {
+        import core.sys.windows.winbase : GetCurrentThread;
+        import threadpool.sys.win_bindings : GROUP_AFFINITY, GetThreadGroupAffinity;
+        GROUP_AFFINITY affinity;
+        enforce(GetThreadGroupAffinity(GetCurrentThread(), &affinity) != 0,
+            "query caller affinity");
+        ProcessorId[] result;
+        foreach (ushort lp; 0 .. 64)
+            if (affinity.Mask & (1UL << lp))
+                result ~= ProcessorId(affinity.Group, lp);
+        return result;
+    }
+    else
+    {
+        import threadpool.os_scope : liveOsMask;
+        return liveOsMask();
+    }
+}
 
 // ---- public actor: a ledger answering inbox requests ----------------------
 
@@ -278,15 +300,23 @@ version (assert)
     void workerFailure()
     {
         auto host = new FarmHost(guarded(2));
+        scope (exit) host.closeOrAbandon();
         auto runtime = host.createRuntime(1);
         auto owner = runtime.createActor!(Ledger, failing)(Ledger(0));
         enforce(owner.handle.wake() == ActorWakeResult.queued, "wake");
         auto e = expectThrow!FarmHostFailed(() => host.waitUntil(() => false), "assert in a callback");
         enforce(e.workerFailures.length != 0
             && e.workerFailures[0].msg == "host-test: injected actor failure", e.msg);
+        import threadpool.failure : WorkerFailure;
+        auto diagnostic = cast(WorkerFailure!Error) e.workerFailures[0];
+        enforce(diagnostic !is null && diagnostic.sourceType == "core.exception.AssertError",
+            "owned worker error diagnostic");
         enforce(host.state == HostState.failed, "failed state");
         expectThrow!FarmHostException(() => host.step(), "step after failure");
         host.close(); // acts like abandon: no second throw
+        enforce(diagnostic.msg == "host-test: injected actor failure"
+            && diagnostic.file.canFind("host_live.d") && diagnostic.line != 0,
+            "worker diagnostic remains valid after close");
         enforce(host.state == HostState.abandoned, "close after failure abandons");
         writeln("PASS 5.3: an assert in a worker callback becomes FarmHostFailed; close() leaks quietly");
     }
@@ -305,7 +335,7 @@ void singleton()
 {
     // A second host with workers is rejected without disturbing the first.
     auto first = new FarmHost(guarded(2));
-    auto confined = liveOsMask();
+    auto confined = liveCallerMask();
     FarmHostException e;
     foreach (attempt; 0 .. 2) // a rejection must not release the first host's claim
     {
@@ -313,7 +343,7 @@ void singleton()
         enforce(e.msg.canFind("another FarmHost owns the pool"), e.msg);
     }
     enforce(first.state == HostState.open && !first.pool.stopRequested, "first host untouched");
-    enforce(liveOsMask() == confined, "caller placement untouched");
+    enforce(liveCallerMask() == confined, "caller placement untouched");
     auto noWorkers = new FarmHost(guarded(0)); // workers 0 starts no pool
     noWorkers.close();
     publicReplies(first);
@@ -357,14 +387,14 @@ void startupFailure()
 
 void abandonLive()
 {
-    auto before = liveOsMask();
+    auto before = liveCallerMask();
     auto host = new FarmHost(guarded(2));
     auto runtime = host.createRuntime(1);
     auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
     enforce(owner.valid, "live actor");
     host.abandon();
     enforce(host.state == HostState.abandoned && host.pool.workerCount == 0, "consumers stopped");
-    enforce(liveOsMask() == before, "affinity restored");
+    enforce(liveCallerMask() == before, "affinity restored");
     host.abandon(); // idempotent
     auto next = new FarmHost(guarded(2));
     next.close();
@@ -443,7 +473,7 @@ void failurePairing()
 {
     foreach (applicationFailure; [false, true])
     {
-        auto before = liveOsMask();
+        auto before = liveCallerMask();
         FarmHost escaped;
         bool refused;
         try
@@ -470,7 +500,7 @@ void failurePairing()
         }
         enforce(refused, "undrained close throws");
         enforce(escaped.state == HostState.abandoned, "abandoned");
-        enforce(liveOsMask() == before, "affinity restored");
+        enforce(liveCallerMask() == before, "affinity restored");
         escaped.close();
         auto next = new FarmHost(guarded(2)); // claim released
         next.close();
@@ -577,15 +607,16 @@ void workersTwo()
 
 void confineCaller()
 {
-    auto before = liveOsMask();
+    auto before = liveCallerMask();
     auto host = new FarmHost(guarded(2));
+    scope (exit) host.closeOrAbandon();
     enforce(host.plan.caller == CallerPlacement.confine, "confine by default");
-    auto during = liveOsMask();
+    auto during = liveCallerMask();
     enforce(during == sorted(host.plan.callerCpus),
         "caller mask {" ~ formatCpuList(during) ~ "} is plan.callerCpus {"
         ~ formatCpuList(host.plan.callerCpus) ~ "}");
     host.close();
-    enforce(liveOsMask() == before, "caller mask restored after close");
+    enforce(liveCallerMask() == before, "caller mask restored after close");
     writeln("PASS 4: caller confined to {", formatCpuList(during), "} and restored to {",
         formatCpuList(before), "}");
 }

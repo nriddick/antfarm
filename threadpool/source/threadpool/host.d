@@ -347,8 +347,8 @@ private bool tHostSubscribed; // TLS: this worker holds a live view
 private void noteWorkerFailure(WorkerSelf* self, Throwable failure) @nogc nothrow
 {
     if (failure is null || self is null) return;
-    if (self.workerIndex < gWorkers.length && gWorkers[self.workerIndex].failure is null)
-        gWorkers[self.workerIndex].failure = failure;
+    if (self.workerIndex < gWorkers.length)
+        gWorkers[self.workerIndex].failure.record(failure);
     requestStop();
 }
 
@@ -469,7 +469,7 @@ final class FarmHost
 
         director_ = Director.init;
         plan_ = preview(options);
-        version (assert) control_ = Thread.getThis();
+        control_ = Thread.getThis();
         parkMode_ = plan_.workers != 0 && options.idle == WorkerIdle.park;
         scope (failure) undoConstruction();
 
@@ -974,9 +974,11 @@ private:
     Owned[] owned_;
     HostAttachment[] attachments_;
     uint runtimes_, parks_, extraSmall_, extraBulk_;
-    version (assert) Thread control_;
+    // Keep layout and initialization identical across assertion modes: clients
+    // can instantiate templates against a release-built threadpool library.
+    Thread control_;
 
-    version (assert) void assertControl() @nogc nothrow
+    void assertControl() @nogc nothrow
     {
         assert(Thread.getThis() is control_, "FarmHost: control-thread method called from another thread");
     }

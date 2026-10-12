@@ -209,7 +209,9 @@ options.managedWorker = ManagedWorkerHooks(&start, &pump, &stop);
 ```
 
 Escaping worker failures stop the pool and are available through
-`workerFailures()` after shutdown. `antfarm-fibers` supplies its own managed
+`workerFailures()` after shutdown as owned, bounded diagnostics, not the
+original throwable objects (see [failure capture](DESIGN.md#managed-worker-hooks)).
+`antfarm-fibers` supplies its own managed
 hooks for Fiber lanes.
 
 ## Thread-safety rules

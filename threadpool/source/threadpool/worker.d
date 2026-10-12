@@ -114,7 +114,6 @@ private void managedWorkerLoop(ref WorkerSelf self)
 {
     auto hooks = gManagedWorkerHooks;
     bool started;
-    Throwable failure;
     try
     {
         if (hooks.start !is null)
@@ -142,7 +141,7 @@ private void managedWorkerLoop(ref WorkerSelf self)
     }
     catch (Throwable t)
     {
-        failure = t;
+        gWorkers[self.workerIndex].failure.record(t);
         requestStop();
     }
     if (started && hooks.stop !is null)
@@ -151,12 +150,9 @@ private void managedWorkerLoop(ref WorkerSelf self)
             hooks.stop(&self);
         catch (Throwable t)
         {
-            if (failure is null)
-                failure = t;
+            gWorkers[self.workerIndex].failure.record(t);
             requestStop();
         }
     }
     self.context = null;
-    if (failure !is null && self.workerIndex < gWorkers.length)
-        gWorkers[self.workerIndex].failure = failure;
 }

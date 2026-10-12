@@ -437,6 +437,8 @@ final class CacheAwarePool
                     self.isP = isP;
                     bindNumaNeighborhood(self, *snap);
 
+                    import threadpool.failure : FailureCapture;
+                    gWorkers[i].failure = new FailureCapture;
                     gWorkers[i].group = lp.group;
                     gWorkers[i].lpIndex = lp.lpIndex;
                     gWorkers[i].llcIndex = lp.llcIndex;
@@ -490,8 +492,8 @@ final class CacheAwarePool
             requestStop();
             joinAll();
             foreach (ref rec; gWorkers)
-                if (rec.failure !is null)
-                    failures ~= rec.failure;
+                if (rec.failure !is null && rec.failure.value !is null)
+                    failures ~= rec.failure.value;
             destroyWaitSlots();
             gWorkers = null;
             gWorkerBody = null;
@@ -605,8 +607,9 @@ final class CacheAwarePool
         return copyCounters();
     }
 
-    /// Failures captured from managed worker lifecycle hooks after all workers
-    /// have joined. Call after `shutdown`.
+    /// Owned `WorkerFailure!Error` / `WorkerFailure!Exception` diagnostics from
+    /// worker failures. Call after `shutdown`. Message/file are bounded copies;
+    /// original subclasses, chains and stack traces are not retained.
     Throwable[] workerFailures()
     {
         enforce(atomicLoad(gRunning) == 0,
@@ -892,6 +895,42 @@ void managedTestStop(WorkerSelf* w)
     assert(w.context !is null);
     assert(*cast(uint*) w.context == w.workerIndex);
     atomicFetchAdd(gManagedStops, 1);
+}
+
+ManagedPumpResult managedTlsFailure(WorkerSelf*)
+{
+    import core.exception : onAssertErrorMsg;
+    onAssertErrorMsg("pump.d", 31, "managed TLS failure");
+    return ManagedPumpResult.idle();
+}
+
+void managedTlsStop(WorkerSelf*)
+{
+    import core.exception : onAssertErrorMsg;
+    // Overwrites the same TLS Error before this worker even exits.
+    onAssertErrorMsg("stop.d", 47, "later stop failure");
+}
+
+unittest
+{
+    import threadpool.failure : WorkerFailure;
+    PoolOptions opt;
+    opt.processors = [ProcessorId(0, 0)];
+    opt.managedWorker = ManagedWorkerHooks(null, &managedTlsFailure, &managedTlsStop, null);
+    auto pool = new CacheAwarePool(opt);
+    pool.start();
+    foreach (_; 0 .. 200)
+    {
+        if (pool.stopRequested) break;
+        Thread.sleep(msecs(5));
+    }
+    pool.shutdown();
+    auto failures = pool.workerFailures();
+    assert(failures.length == 1);
+    auto failure = cast(WorkerFailure!Error) failures[0];
+    assert(failure !is null && failure.msg == "managed TLS failure");
+    assert(failure.file == "pump.d" && failure.line == 31);
+    assert(failure.sourceType == "core.exception.AssertError");
 }
 
 unittest
