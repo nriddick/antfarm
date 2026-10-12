@@ -170,3 +170,62 @@ alone. Hosts with `workers == 0` start no pool and can coexist.
 A caller-driven `FiberDomain` joins the same host with
 `antfarm_fibers.host.attachFiberDomain(host, new FiberDomain(host.farm))`.
 [examples/fiber_cancel_at.d](../../examples/fiber_cancel_at.d) shows it.
+
+## Performance and tuning
+
+A host's consumers run on the threadpool's worker loop, not a loop you
+wrote. On one measured host, that cost was invisible except where consumers
+were the bottleneck and often found nothing.
+
+The comparison ran [perftest/actor_churn](../../perftest/README.md#actorchurn)
+on each workload twice: with `ANTFARM_CHURN_HOST=1`, where a `FarmHost` owns
+the Farm, the control token and the pinned consumers, and without it, on the
+benchmark's own hand-written consumers. The controller and every consumer CPU
+sat in one LLC of a Ryzen 9 5900XT; each configuration was measured as twenty
+paired runs and reported as throughput change (negative is slower than the
+hand-written loop) with a bootstrap confidence interval. These numbers are
+from one host, not a universal constant; re-measure on yours.
+
+The differences for `actor` and `wave` at 2 and 6 workers, and for `private`
+and `tree` at 2 workers, were within the comparison boundary or in
+`FarmHost`'s favor. The fine-grained private modes at 6 workers were slower:
+
+| Mode | Throughput change | Bootstrap CI |
+| --- | --- | --- |
+| `private` | -7.8% | [-8.1, -7.6] |
+| `tree` | -7.1% | [-8.0, -5.9] |
+
+The cause is the idle path. A hand-written consumer that finds nothing does
+one `pause()` and retries. A pool worker that finds nothing arms its wait slot
+with an atomic exchange (`prepareWorkerWait`), consumes a second time, and
+only then applies the idle policy: under `WorkerIdle.spin` — the policy the
+benchmark selects, matching the hand-written loop's always-polling behavior —
+it spins `PoolOptions.pSpinIters` times (128 by default on performance-class
+workers), each iteration a `pause` plus an `atomicFetchAdd` on a
+process-wide spin counter, before the loop starts over. The exchange, the
+second consume and the spin bookkeeping cost throughput only where consumers
+are the bottleneck and miss often: many workers on private- and tree-style
+fine-grained workloads.
+
+What to tune:
+
+- **Fewer workers** when consumers are the bottleneck: fewer consumers polling
+  the same Farm miss less often. `actor` and `wave` were unaffected at the
+  same worker counts, so size by measurement, not by core count.
+- **The idle policy**: `FarmHostOptions.idle` selects `WorkerIdle.park` (the
+  default: park after `FarmHostOptions.idleTimeout`, 1 ms, until the host's
+  publication wrappers wake the worker) or `WorkerIdle.spin`; the spin count
+  is `FarmHostOptions.pool.pSpinIters` (and `eSpinIters` on efficiency-class
+  workers). The measurement above used `spin` with the default counts; `park`
+  trades the spin burn for park-and-wake latency and was not measured here.
+- **A hand-written consumer loop** on the raw Farm, for maximum throughput on
+  consumer-bound fine-grained workloads, as the benchmark's non-host path
+  does: subscribe a `ConsumerView`, then loop
+  `if (!view.consumeNext()) pause();`. You then own the pinning, the producer
+  token and the teardown that the host otherwise provides.
+
+To measure on your own machine, run the same command with and without the
+variable (`ANTFARM_CHURN_HOST=1` needs the small tier, `consumers > 0` and a
+CPU list naming the controller followed by each consumer);
+[perftest/README.md](../../perftest/README.md#actorchurn) has the full
+argument list.

@@ -430,6 +430,10 @@ private void hostStop(WorkerSelf*) @nogc nothrow
  + `FarmHost.preview()` call: first topology discovery is an unlocked setup
  + operation, including for hosts with `workers == 0`. `preview()` warms
  + that discovery even when it throws `FarmHostPlanException`.
+ +
+ + For maximum throughput on consumer-bound fine-grained workloads, a
+ + hand-written consumer loop on the raw Farm can beat the host's pool
+ + workers; see docs/guide/hosting.md (performance and tuning).
  +/
 final class FarmHost
 {

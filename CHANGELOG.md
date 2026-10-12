@@ -140,6 +140,11 @@ release entry at merge.
   - write `scope (exit) host.closeOrAbandon();`;
   - pool workers are non-daemon threads, so a host with workers left open
     hangs process exit.
+- Measured cost of those workers (one LLC on a Ryzen 9 5900XT,
+  `perftest/actor_churn` with `ANTFARM_CHURN_HOST=1` vs hand-written
+  consumers): within the comparison boundary or ahead everywhere measured
+  except `private` (-7.8%) and `tree` (-7.1%) at 6 workers; tuning guidance
+  in [docs/guide/hosting.md](docs/guide/hosting.md#performance-and-tuning).
 - See [docs/guide/hosting.md](docs/guide/hosting.md).
 - `antfarm_fibers.host.attachFiberDomain(host, domain)` drives a caller-owned
   `FiberDomain` from the host's steps. It gates `close()` on `domain.drained`
