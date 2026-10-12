@@ -16,6 +16,7 @@ module t19_flood_lap;
 import antfarm_templates;
 import torture_common;
 import core.atomic;
+import core.lifetime : move;
 import core.thread;
 import core.time;
 import core.stdc.stdio;
@@ -293,9 +294,9 @@ void testQuotaResetRejected()
                 Fields fld;
             }
             Overlay ov;
-            ov.tok = tok;
+            move(tok, ov.tok);
             ov.fld.quotaLeft = f.quotaSmall; // exceed the remaining ledger
-            auto forged = ov.tok;
+            auto forged = move(ov.tok);
             cast(void) f.write((&e)[0 .. 1], forged);
             _exit(0); // failure: forged quota was accepted
         }

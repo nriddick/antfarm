@@ -1,6 +1,7 @@
 module threadpool.pool;
 
 import core.atomic;
+import core.lifetime : move;
 import core.thread;
 import core.time : Duration, MonoTime, msecs;
 import std.exception : enforce;
@@ -279,19 +280,18 @@ private:
     }
 }
 
-/// Single-owner idle-policy handle. Copy transfers; the source is emptied.
+/// Single-owner idle-policy handle, move-only like Ant Farm's producer
+/// `Token` and actor owners: copying and lvalue assignment do not compile.
+/// Transfer with `move` (std.algorithm or core.lifetime); lending should
+/// take the handle by `ref`. `opAssign` accepts only an rvalue and
+/// overwrites are releasing. The source of a `move` is emptied.
 struct Director
 {
     private CacheAwarePool pool;
 
     @disable this();
     @disable this(this);
-
-    this(ref return scope Director rhs)
-    {
-        pool = rhs.pool;
-        rhs.pool = null;
-    }
+    @disable this(ref return scope Director);
 
     ~this()
     {
@@ -747,6 +747,16 @@ unittest
     assert(pool.resolution[ProcessorId(0, 0)].start == StartState.pinned);
 
     auto d = pool.director();
+    // The single-owner handle is move-only: a copy (explicit, by-value
+    // parameter, or through a range algorithm) must not compile; an
+    // explicit move transfers and empties the source.
+    static assert(!__traits(compiles, { auto copy = d; }));
+    static assert(!__traits(compiles,
+    {
+        void takesByValue(Director taken) {}
+        takesByValue(d);
+    }));
+    static assert(__traits(compiles, { auto moved = move(d); }));
     d.spin(8);
     bool second;
     try
@@ -755,7 +765,7 @@ unittest
         second = true;
     assert(second, "second director() must fail while one is held");
 
-    auto d2 = d;
+    auto d2 = move(d);
     d2.wait();
     bool dead;
     try

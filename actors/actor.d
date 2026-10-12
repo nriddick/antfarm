@@ -33,6 +33,7 @@ import antfarm_allocation : allocateAligned64, freeAligned64;
 import antfarm : avgCostForChunk, fatal;
 import core.atomic : MemoryOrder, atomicExchange, atomicFetchAdd,
     atomicFetchSub, atomicLoad, atomicStore, cas, pause;
+import core.lifetime : move;
 import core.stdc.string : memcpy, memset;
 
 // Cost class of the public flush table: claims of 8 entries.
@@ -616,22 +617,18 @@ struct ActorErasedHandle
 
 /// Move-only, type-erased retirement and reclamation authority. This is the
 /// owner form intended for a resident engine registry spanning reloadable
-/// module types.
+/// module types. Ownership transfer is explicit: copy and lvalue assignment
+/// do not compile; use `move` (std.algorithm or core.lifetime) to transfer,
+/// or pass the owner by `ref` to lend it.
 struct ActorErasedOwner
 {
     private ActorSlot* slot_;
     private ulong generation_;
 
-    /// Transfer-only copy, matching Ant Farm's producer Token convention.
-    this(ref ActorErasedOwner src) pure nothrow @nogc @system
-    {
-        slot_ = src.slot_;
-        generation_ = src.generation_;
-        src.slot_ = null;
-        src.generation_ = 0;
-    }
+    @disable this(ref typeof(this));
 
-    /// Transfer-only assignment; overwriting a live owner is fatal.
+    /// Move-assignment from an explicit `move` source (an rvalue).
+    /// Overwriting a live owner is fatal.
     ref ActorErasedOwner opAssign(ActorErasedOwner src)
         nothrow @nogc @system
     {
@@ -691,6 +688,14 @@ struct ActorErasedOwner
 }
 
 /// Move-only authority for retiring and reclaiming one actor generation.
+/// The owner is not copyable: copying one (including through a range
+/// algorithm that takes elements by value) is a compile error, and a copy
+/// would silently invalidate the source. Transfer ownership with
+/// `move` (std.algorithm or core.lifetime), or lend with a `ref` parameter;
+/// iterate owner arrays with `foreach (ref o; owners)`. `opAssign` accepts
+/// only an rvalue, so `owner = otherOwner` does not compile either; write
+/// `owner = move(otherOwner)`. Overwriting a live owner with a moved value
+/// is fatal.
 /// See_Also:
 ///     docs/guide/public-actors.md, docs/reference/actor-lifecycle.md (the
 ///     drain and shutdown obligations)
@@ -699,16 +704,10 @@ struct ActorOwner(T)
     private ActorSlot* slot_;
     private ulong generation_;
 
-    /// Transfer-only copy, matching Ant Farm's producer Token convention.
-    this(ref ActorOwner src) pure nothrow @nogc @system
-    {
-        slot_ = src.slot_;
-        generation_ = src.generation_;
-        src.slot_ = null;
-        src.generation_ = 0;
-    }
+    @disable this(ref typeof(this));
 
-    /// Transfer-only assignment; overwriting a live owner is fatal.
+    /// Move-assignment from an explicit `move` source (an rvalue).
+    /// Overwriting a live owner is fatal.
     ref ActorOwner opAssign(ActorOwner src) nothrow @nogc @system
     {
         if (slot_ !is null)
@@ -959,7 +958,7 @@ align(64) struct ActorRuntime
         result.generation_ = erased.generation_;
         erased.slot_ = null;
         erased.generation_ = 0;
-        return result;
+        return move(result);
     }
 
 private:
@@ -1008,7 +1007,7 @@ private:
         ActorErasedOwner result;
         result.slot_ = slot;
         result.generation_ = generation;
-        return result;
+        return move(result);
     }
 
 public:

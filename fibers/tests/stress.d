@@ -4,6 +4,7 @@ import antfarm;
 import actors;
 import antfarm_fibers;
 import core.atomic;
+import core.lifetime : move;
 import core.thread : Thread;
 import core.time : MonoTime, hours, seconds;
 import std.exception : enforce;
@@ -841,7 +842,7 @@ private final class ActorWaveStressProducer
             ActorHandle!ActorWaveStressState[] actors, size_t generations)
     {
         this.farm = farm;
-        this.producer = producer;
+        this.producer = move(producer);
         this.actors = actors;
         this.generations = generations;
         trigger = new ActorWaveTrigger(domain);
@@ -940,7 +941,7 @@ void actorWaveGenerationStress()
         enforce(producer.valid,
             "actor-wave stress wave producer registration failed");
         jobs[stream] = new ActorWaveStressProducer(domain, farm,
-            producer, sets[stream], generations);
+            move(producer), sets[stream], generations);
         tasks[stream] = domain.spawn(&jobs[stream].run);
     }
 

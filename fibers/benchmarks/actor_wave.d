@@ -24,6 +24,7 @@ import antfarm;
 import actors;
 import antfarm_fibers;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad, atomicStore;
+import core.lifetime : move;
 import core.time : MonoTime, minutes;
 import std.conv : to;
 import std.exception : enforce;
@@ -102,7 +103,7 @@ private final class OneFiberRun
             ActorHandle!ProjectionActor[][] sets, uint avgCost)
     {
         this.farm = farm;
-        this.producer = producer;
+        this.producer = move(producer);
         this.sets = sets;
         this.avgCost = avgCost;
         foreach (ref trigger; triggers)
@@ -191,8 +192,8 @@ private final class TwoFiberRun
             ActorHandle!ProjectionActor[][] sets, uint avgCost)
     {
         this.farm = farm;
-        producers[0] = producerA;
-        producers[1] = producerB;
+        producers[0] = move(producerA);
+        producers[1] = move(producerB);
         this.sets = sets;
         this.avgCost = avgCost;
         foreach (ref trigger; triggers)
@@ -480,7 +481,8 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     atomicStore!(MemoryOrder.raw)(publishedGeneration.value, 0UL);
     auto oneProducer = farm.registerProducer(Tier.small);
     enforce(oneProducer.valid, "one-Fiber producer registration failed");
-    auto one = new OneFiberRun(lane.domain, farm, oneProducer, sets, avgCost);
+    auto one = new OneFiberRun(lane.domain, farm, move(oneProducer), sets,
+        avgCost);
     auto oneTask = lane.spawn({
         one.run(warmupGenerations, measuredGenerations);
     });
@@ -502,8 +504,8 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     auto producerB = farm.registerProducer(Tier.small);
     enforce(producerA.valid && producerB.valid,
         "two-Fiber producer registration failed");
-    auto two = new TwoFiberRun(lane.domain, farm, producerA, producerB,
-        sets, avgCost);
+    auto two = new TwoFiberRun(lane.domain, farm, move(producerA),
+        move(producerB), sets, avgCost);
     auto taskA = lane.spawn({
         two.runSet(0, warmupGenerations, measuredGenerations);
     });

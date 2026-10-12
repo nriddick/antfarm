@@ -1025,14 +1025,15 @@ enum Tier : ubyte
 /// Tickets start with no quota. Every grant follows an acquire probe of Wt
 /// and a successful forward-segment sweep; writes only spend that grant.
 ///
-/// Tokens are single-owner: copying is a *transfer*. The copy constructor
-/// copies tier/slot/farmId/quotaLeft, release-stores the valid hash
-/// *last* (so a reader that acquire-loads a valid hash is guaranteed to
-/// see the other fields), then clears the source's hash so at most one
-/// live token exists per slot and a stale copy fails requireToken.
-/// Assignment takes the argument by value, which routes through the same
-/// transfer copy. Assigning over a still-valid token is fatal: it would lose
-/// the only handle to a registered slot. Unregister the old token first.
+/// Tokens are single-owner and move-only: copying and lvalue assignment do
+/// not compile, because a copy would silently leave two tokens for one
+/// registered slot. Transfer a token explicitly with `move` (std.algorithm
+/// or core.lifetime), or lend it with a `ref` parameter. `opAssign` accepts
+/// only an rvalue (`token = move(other)`), and assigning over a still-valid
+/// token is fatal: it would lose the only handle to a registered slot.
+/// Unregister the old token first. A token handed to another thread must
+/// travel through a synchronization mechanism; the farm's own checks do
+/// not order the receiving thread's first reads of the transferred fields.
 struct Token
 {
     /// The issuing tier; selects the quota validated on every write.
@@ -1050,6 +1051,8 @@ struct Token
     /// True while this token is registered with its Farm.
     bool valid() const pure nothrow @nogc @safe { return hash != 0; }
 
+    @disable this(ref typeof(this));
+
     private this(Tier t, uint s, ulong h, ulong fid, ulong grant) pure nothrow @nogc @safe
     {
         tier = t;
@@ -1066,22 +1069,8 @@ struct Token
         quotaLeft = 0;
     }
 
-    /// Transfer-only copy: the source is consumed. The destination's valid
-    /// hash is release-stored last so a reader that acquire-loads the hash
-    /// also sees tier/slot/farmId/quotaLeft; the source hash is then cleared.
-    this(ref Token src) nothrow @nogc @system
-    {
-        tier = src.tier;
-        slot = src.slot;
-        farmId = src.farmId;
-        quotaLeft = src.quotaLeft;
-        atomicStore!(MemoryOrder.rel)(*cast(shared ulong*) &hash, src.hash);
-        atomicStore!(MemoryOrder.raw)(*cast(shared ulong*) &src.hash, 0UL);
-    }
-
-    /// Transfer-only assignment: the by-value argument was already moved
-    /// into this temporary by the copy constructor above. The destination
-    /// must be invalid (default or unregistered).
+    /// Move-assignment from an explicit `move` source (an rvalue). The
+    /// destination must be invalid (default or unregistered).
     ref Token opAssign(Token src) nothrow @nogc @system
     {
         if (valid)
@@ -1476,9 +1465,8 @@ struct AntFarm
             immutable h = mixToken(cast(uint) i, reqs);
             if (cas!(MemoryOrder.raw, MemoryOrder.raw)(prodSlot(hashes, i), 0UL, h))
             {
-                auto tok = Token(t, cast(uint) i, h, farmId, 0);
                 atomicStore!(MemoryOrder.raw)(*prodSlotQuota(hashes, i), 0UL);
-                return tok;
+                return Token(t, cast(uint) i, h, farmId, 0);
             }
         }
         fatal("producer slot missing");

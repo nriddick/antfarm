@@ -10,6 +10,7 @@ import antfarm_templates;
 import actors;
 import antfarm_allocation : allocateAligned64, freeAligned64;
 import core.atomic;
+import core.lifetime : move;
 import core.memory : GC;
 import core.thread;
 import core.time;
@@ -2276,6 +2277,76 @@ class CrossFarmWorker
         }
     }
 }
+void testTokenMoveOnly()
+{
+    // A copy (explicit, by-value parameter, or through an algorithm that
+    // takes elements by value) must not compile: the copy-then-invalidate
+    // of the old transfer-on-copy token silently invalidated the source.
+    static assert(!__traits(compiles,
+    {
+        Token src;
+        Token dst = src;
+    }));
+    static assert(!__traits(compiles,
+    {
+        Token src;
+        Token dst;
+        dst = src;
+    }));
+    static assert(!__traits(compiles,
+    {
+        void takesByValue(Token taken) {}
+        Token src;
+        takesByValue(src);
+    }));
+    // Transfer is explicit: move into a local or an rvalue parameter, and
+    // move-assignment into an invalid destination, all compile.
+    static assert(__traits(compiles,
+    {
+        Token src;
+        Token dst = move(src);
+        Token dst2;
+        dst2 = move(src);
+        void takesByValue(Token taken) {}
+        takesByValue(move(dst));
+    }));
+
+    enum N = 4;
+    allocCalls(N);
+    scope (exit) freeCalls();
+
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    scope (exit) { free(headers); free(bodies); free(entries); }
+    foreach (i; 0 .. N)
+        entries[i] = payloadEntryRuntime!testCb(
+            &headers[i], bodies[i * 2 .. i * 2 + 2], 1, 1, i, 1);
+
+    auto f = AntFarm.create(2, 8, 2, 1, 8192, 4, 2048);
+    scope (exit) f.destroy();
+    ConsumerView v;
+    check(v.subscribe(f) >= 0, "subscribe for move-only token test");
+
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "move-only test registers a token");
+    Token moved = move(tok);
+    check(!tok.valid, "move consumes the source token");
+    check(moved.valid, "moved-into token stays valid");
+    check(f.write(entries[0 .. N], moved) == N, "write with moved token");
+    while (v.consumeNext()) {}
+    Token reassigned;
+    reassigned = move(moved);
+    check(!moved.valid, "move-assignment consumes its source");
+    check(reassigned.valid, "move-assignment destination valid");
+    check(f.write(entries[0 .. N], reassigned) == N,
+        "write with reassigned token");
+    while (v.consumeNext()) {}
+    f.unregisterProducer(reassigned);
+    check(!reassigned.valid, "unregistered moved token invalid");
+    v.unsubscribe();
+    printf("testTokenMoveOnly OK\n"); fflush(stdout);
+}
 void testCrossFarmProvenance()
 {
     enum N = 8;
@@ -2317,7 +2388,7 @@ void testCrossFarmProvenance()
 
     // Token transfer stays a same-farm transfer: the source is consumed and
     // the destination carries the provenance.
-    Token ta2 = ta;
+    Token ta2 = move(ta);
     check(!ta.valid, "transfer consumes source");
     check(ta2.valid, "transfer destination valid");
     check(fa.write(entries[0 .. 2], ta2) == 2, "write with transferred token");
@@ -4018,6 +4089,7 @@ void main(string[] args)
     testSpannedTables();
     testSmallTableChurn();
     testMultiSmallProducers();
+    testTokenMoveOnly();
     testCrossFarmProvenance();
     testStaleQuotaReuse();
     testActorWave();

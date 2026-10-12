@@ -11,6 +11,7 @@ import antfarm_allocation : allocateAligned64, freeAligned64;
 version (AntfarmMimallocV3)
     import actors.mimalloc : mimallocV3ActorAllocator;
 import core.atomic;
+import core.lifetime : move;
 import core.memory : GC;
 import core.stdc.stdio : fflush, fprintf, printf, stderr, stdout;
 import core.stdc.stdlib : abort, free, malloc;
@@ -996,7 +997,7 @@ private final class TestModuleGeneration
         foreach (ref slot; actors_)
         {
             if (slot.valid) continue;
-            slot = owner;
+            slot = move(owner);
             ++actorCount_;
             return;
         }
@@ -2751,6 +2752,100 @@ private void testNodeOutcomes()
     fflush(stdout);
 }
 
+private struct OwnerProbeState
+{
+    ulong* activations;
+}
+
+private void ownerProbeActor(scope ref ActorBorrow!OwnerProbeState actor,
+        scope ref ActorContext) nothrow @nogc @system
+{
+    ++*actor.value.activations;
+}
+
+private void testOwnerMoveOnly()
+{
+    // Copy and lvalue assignment must not compile: a range algorithm that
+    // takes elements by value (owners.all!(o => o.retired)) silently
+    // invalidated owners[0] under the old transfer-on-copy owners.
+    static assert(!__traits(compiles,
+    {
+        ActorOwner!OwnerProbeState src;
+        ActorOwner!OwnerProbeState dst = src;
+    }));
+    static assert(!__traits(compiles,
+    {
+        ActorOwner!OwnerProbeState src;
+        ActorOwner!OwnerProbeState dst;
+        dst = src;
+    }));
+    static assert(!__traits(compiles,
+    {
+        void takesByValue(T)(T taken) {}
+        ActorOwner!OwnerProbeState src;
+        takesByValue(src);
+    }));
+    static assert(!__traits(compiles,
+    {
+        ActorErasedOwner src;
+        ActorErasedOwner dst = src;
+    }));
+    // Transfer is explicit: move into a local or an invalid destination,
+    // for both the typed and the erased owner.
+    static assert(__traits(compiles,
+    {
+        ActorOwner!OwnerProbeState src;
+        ActorOwner!OwnerProbeState dst = move(src);
+        ActorOwner!OwnerProbeState reassigned;
+        reassigned = move(src);
+        ActorErasedOwner erasedSrc;
+        ActorErasedOwner erasedDst = move(erasedSrc);
+    }));
+
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    check(farm !is null, "move-only owner Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "move-only owner runtime allocation");
+    OwnerProbeState output;
+    ulong activations;
+    output.activations = &activations;
+    auto owner = runtime.createActor!(OwnerProbeState, ownerProbeActor)(
+        output);
+    check(owner.valid, "move-only owner creation");
+
+    ActorOwner!OwnerProbeState moved = move(owner);
+    check(!owner.valid, "move consumes the source owner");
+    check(moved.valid, "moved-into owner stays valid");
+    check(!moved.retired, "moved owner still addresses its actor");
+
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "move-only owner subscribe");
+    auto handle = moved.handle;
+    check(handle.wake() == ActorWakeResult.queued,
+        "wake through the moved owner's handle");
+    while (activations == 0)
+    {
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
+        while (view.consumeNext()) {}
+    }
+    check(moved.requestRetire() == ActorRetireResult.requested,
+        "retire through a moved owner");
+    while (!moved.retired)
+    {
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
+        while (view.consumeNext()) {}
+    }
+    check(moved.reclaim() == ActorReclaimResult.reclaimed,
+        "reclaim through a moved owner");
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    runtime.destroy();
+    printf("actor move-only owners OK\n");
+    fflush(stdout);
+}
+
 // -------------------------------------------------------------------------
 // F4b public actor cancel-mode retirement
 // -------------------------------------------------------------------------
@@ -3637,6 +3732,7 @@ void main()
 {
     testDeterministicInterleavings();
     testNodeOutcomes();
+    testOwnerMoveOnly();
     testCancelModeRetirement();
     testCompletionCallbackRunsAfterFinished();
     testAggregateModuleUnloadFence();

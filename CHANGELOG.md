@@ -114,6 +114,20 @@ release entry at merge.
 
 ### Breaking changes
 
+- X0: `Token` (`antfarm`), `ActorOwner!T` and `ActorErasedOwner` (`actors`),
+  and `threadpool.Director` are now move-only. Their transfer-on-copy
+  constructors (which emptied the source) are disabled with
+  `@disable this(ref typeof(this))`, because Phobos algorithms that take
+  elements by value silently invalidated owners (for example
+  `owners.all!(o => o.retired)` emptied `owners[0]`). Copying an owner or a
+  token, assigning an lvalue (`owner = other`), and passing one to a
+  by-value parameter no longer compile. Transfer ownership with `move`
+  (`std.algorithm` or `core.lifetime`), lend with a `ref` parameter, and
+  iterate owner arrays with `foreach (ref o; owners)`. `opAssign` still
+  accepts an rvalue (`owner = move(other)`) and still fatals when it would
+  overwrite a live owner or token. Returning by value, array default
+  initialization and `new ActorOwner!T[n]` are unchanged.
+
 - X1: `ProcessorId` moved to `threadpool.topology`; `threadpool.pool` no longer
   declares it. Import it from `threadpool` or `threadpool.topology`.
 - X2: `TopologySnapshot.lpsInLlc`, `pLps` and `eLps` are removed. Use
