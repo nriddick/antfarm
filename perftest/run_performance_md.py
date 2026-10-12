@@ -181,9 +181,19 @@ def parse_fiber(out: str) -> dict:
         m = re.search(pat, out, re.M)
         if m:
             d[label] = _num(m[1])
-    if "run_fibers_s" not in d:
-        raise ValueError("no fiber metric")
     for label, suffix in (("total_fibers_s", ""), ("warm_total_fibers_s", r"\s+\(warm pool\)")):
+        total_prefix = r"^total" + suffix + r"\s*:"
+        total = re.search(total_prefix + r"\s+(\d+) fibers in ([\d.]+) s:", out, re.M)
+        if re.search(total_prefix, out, re.M):
+            if not total:
+                raise ValueError("invalid fiber burst timing/count")
+            count, seconds = int(total[1]), float(total[2])
+            stage_counts = re.findall(r"^(?:create|run)" + suffix + r"\s*:\s+(\d+) fibers", out, re.M)
+            if count <= 0 or seconds <= 0 or any(int(n) != count for n in stage_counts):
+                raise ValueError("invalid fiber burst timing/count")
+            d[label] = count / seconds
+            continue
+        # Compatibility with older logs that printed both numeric phases.
         stages = [re.search(r"^" + stage + suffix + r"\s*:\s+(\d+) fibers in ([\d.]+) s:", out, re.M)
                   for stage in ("create", "run")]
         if all(stages):
@@ -195,10 +205,12 @@ def parse_fiber(out: str) -> dict:
             d[label] = count / seconds
     if re.search(r"^workers:", out, re.M):
         # MT workers can drain during spawn. N / residual drain time overstates
-        # throughput; the full burst includes both printed timing intervals.
+        # throughput; prefer the measured full burst, even without a drain rate.
         if "total_fibers_s" not in d or "warm_total_fibers_s" not in d:
             raise ValueError("no complete multithread fiber burst timings")
         return d | {"metric": d["total_fibers_s"], "metric_kind": "spawn_and_drain"}
+    if "run_fibers_s" not in d:
+        raise ValueError("no fiber metric")
     return d | {"metric": d["run_fibers_s"], "metric_kind": "drain"}
 
 

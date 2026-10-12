@@ -810,15 +810,19 @@ unittest
             if (seen >= 2 && atomicLoad(gLlcWakeTicks) == seen)
                 return seen;
         }
-        assert(false, "worker never parked");
+        return -1;
     }
 
     immutable before = parked();
+    if (before < 0)
+    {
+        pool.shutdown();
+        assert(false, "worker never parked");
+    }
     immutable group = cast(ushort) atomicLoad(gLlcWakeGroup);
     pool.wakeLlc(cast(ushort)(group + 1));
     Thread.sleep(msecs(20));
-    assert(atomicLoad(gLlcWakeTicks) == before,
-        "wakeLlc woke a worker assigned to another group");
+    immutable stayedParked = atomicLoad(gLlcWakeTicks) == before;
     pool.wakeLlc(group);
     foreach (_; 0 .. 200)
     {
@@ -826,7 +830,11 @@ unittest
             break;
         Thread.sleep(msecs(5));
     }
-    assert(atomicLoad(gLlcWakeTicks) > before, "wakeLlc missed its group's worker");
+    immutable woke = atomicLoad(gLlcWakeTicks) > before;
+    // AssertError need not unwind the stack; stop the worker before asserting.
+    pool.shutdown();
+    assert(stayedParked, "wakeLlc woke a worker assigned to another group");
+    assert(woke, "wakeLlc missed its group's worker");
 }
 
 shared int gManagedStarts;

@@ -1,6 +1,10 @@
 Windows multi-LLC RC verification - 2026-10-11
 =============================================
 
+Follow-up 2026-10-12: WML-01 through WML-04 have local fixes with passing
+targeted Windows validation. See the follow-up section at the end. The original
+observations below are retained as historical evidence, not current failures.
+
 Revision and environment
 ------------------------
 Fast-forwarded 1.8.0-rc from 091edc9 to origin/1.8.0-rc at
@@ -183,3 +187,73 @@ Not tested / not claimed
   evidence, not a new run of those extended lanes.
 - New smoke timing numbers are functional evidence only, not publishable
   performance comparisons. Existing PERFORMANCE.md measurements were untouched.
+
+Fix follow-up - 2026-10-12
+==========================
+Base: 10a0706, same Windows host and compilers as above.
+All four findings are addressed locally; no commit or push in this fix pass.
+Logs: .build/windows-fixes-2026-10-12/results.json and adjacent named logs.
+The serial driver is .build/validate-windows-fixes.py.
+
+WML-01 resolved: dynamically resolved Win32 function-pointer aliases now use
+extern (Windows), matching the exported APIs. The previous implicit D linkage
+miscalled WaitOnAddress under DMD. Corrected all seven optional Win32 aliases,
+not only the wait entry point. The LLC wake test explicitly shuts down before
+assertions so an AssertError cannot strand a worker.
+
+Control: an isolated import-path override restored the wrong linkage only for
+FnWaitOnAddress. DMD's pool unit test failed with "worker never parked" and
+exited nonzero in about six seconds without being killed. The unchanged fixed
+production sources pass the complete threadpool suite with both compilers.
+See abi-negative-control.log. No mutant was applied to the production tree.
+
+WML-02 resolved: actor-wave initialization of its align(64) ProjectionActor
+local moved into a non-inlined helper. The data layout, actor behavior, and
+timed workload are unchanged. DMD's original failure occurred after both Fiber
+runs and actor retirement, during automatic Director destruction. A local
+exception-address/map probe identified CacheAwarePool.releaseDirector; manual
+destruction worked but automatic cleanup used an invalid receiver. Shortening
+the Director lifetime or changing the benchmark's return convention did not
+help; separating the over-aligned local from that frame did. This is a targeted
+workaround for DMD 2.112 Win64 cleanup code generation, not a scheduler rewrite.
+
+Both compilers now pass debug and release actor-wave sweeps for 1, 2, 3, and 4
+workers (100 actors per set, 3 measured generations, 1 warmup). The DMD debug
+and release original four-worker reproducer also passed before the full sweep.
+
+WML-03 resolved: benchmark_mt emits explicit cold and warm full-burst timings
+with nanosecond decimal precision. The report prefers those totals; numeric
+legacy phase logs still work. A non-measurable residual drain rate no longer
+prevents reporting a measured full burst. Missing/invalid totals are not
+invented or silently replaced, and total/phase count mismatches are rejected.
+
+New deterministic parser tests cover cold, warm, and both unmeasurable phases,
+explicit-total precedence, invalid totals, and refusal when neither a total
+nor complete legacy timing is available. Eight live MT runs (both compilers;
+private at 1 and 1000 tasks, shared and assist at 1000) passed through the actual
+report parser. Several produced a non-measurable warm drain and still parsed.
+
+WML-04 resolved: offccd_sweep uses one native executable-path helper for
+metadata hashes, benchmark cells, calibration, and the topology probe.
+Cross-platform fixtures supply both suffixed and extensionless files with
+different contents and verify that execution and hashing select the same
+native files. The rebuilt Windows smoke sweep's offccd and c2c hashes matched
+independent SHA-256 reads of the actual .exe files.
+
+Final targeted verification
+---------------------------
+- 38 serial validation commands passed. Python: 183 tests, 178 passed and the
+  same five expected skips. Documentation links, API Ddoc coverage and the
+  ring-store audit passed.
+- Root and threadpool unit suites passed with DMD and LDC. Wait-races, live
+  topology, ordinary affinity and restricted E-core affinity passed on both.
+- Fiber smoke/module tests and stress passed in debug and release on both.
+- The actor-wave sweeps and all eight MT output/parser integrations passed.
+- All nine LDC Windows performance harnesses rebuilt. The live off-LLC smoke
+  sweep completed with native executable hashes; remote cells remained skipped
+  on this one-LLC machine.
+- The negative ABI control failed as intended and exited without hanging.
+
+Linux make check, TSan, perf-gate, real Windows multi-group/multi-LLC execution,
+the POSIX terminal app, and long soaks remain deferred as above. These are
+correctness/smoke checks, not fresh published performance measurements.

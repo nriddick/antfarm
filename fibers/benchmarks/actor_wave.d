@@ -390,6 +390,18 @@ private struct SweepResult
     double ratio;
 }
 
+// DMD 2.112 Win64 misaddresses automatic Director cleanup when this over-aligned
+// local shares runBenchmark's frame. Keep initialization out of that frame.
+pragma(inline, false)
+private ActorOwner!ProjectionActor createProjectionActor(ActorRuntime* runtime, ulong seed)
+{
+    ProjectionActor initial;
+    initial.privateState.value = seed;
+    initial.publicState[0].value = seed;
+    initial.publicState[1].value = seed;
+    return runtime.createActor!(ProjectionActor, dormantActor)(initial);
+}
+
 private SweepResult runBenchmark(BenchmarkConfig config,
         ProcessorId[] workerLps)
 {
@@ -429,13 +441,8 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     auto setB = new ActorHandle!ProjectionActor[actorsPerSet];
     foreach (i; 0 .. totalActors)
     {
-        ProjectionActor initial;
         immutable seed = cast(ulong) i + 1;
-        initial.privateState.value = seed;
-        initial.publicState[0].value = seed;
-        initial.publicState[1].value = seed;
-        owners[i] = runtime.createActor!(ProjectionActor, dormantActor)(
-            initial);
+        owners[i] = createProjectionActor(runtime, seed);
         enforce(owners[i].valid, "actor allocation failed");
         if (i < actorsPerSet)
             setA[i] = owners[i].handle;

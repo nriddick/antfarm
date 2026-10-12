@@ -5,11 +5,14 @@ Run: python3 -B -m unittest perftest/test_offccd_sweep.py
 Driver output is synthetic; nothing is built or timed.
 """
 import contextlib
+import hashlib
 import importlib.util
 import io
 import pathlib
+import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -63,6 +66,26 @@ def cell_by(summary, cid):
 
 
 class SuiteTests(unittest.TestCase):
+    def test_executable_hashes_match_native_launch_paths(self):
+        for host, suffix in (('win32', '.exe'), ('linux', '')):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(sweep.sys, 'platform', host), \
+                    mock.patch.object(sweep, 'try_cmd', return_value=(1, '')):
+                root = pathlib.Path(d)
+                expected = {}
+                for name in ('offccd', 'c2c'):
+                    payload = (name + host).encode()
+                    (root / (name + suffix)).write_bytes(payload)
+                    (root / (name + ('' if suffix else '.exe'))).write_bytes(b'wrong binary')
+                    expected[name] = hashlib.sha256(payload).hexdigest()
+                self.assertEqual(sweep.host_metadata(d, 1, None, None)['binaries'], expected)
+                cell = sweep.suite_cells('smoke')[0]
+                self.assertEqual(sweep.offccd_argv(cell, d, 100, 1)[0], str(root / ('offccd' + suffix)))
+                with mock.patch.object(sweep, 'run_cmd', return_value=('', '', 0)) as run:
+                    sweep.run_calib(sweep.suite_cells('calib')[0],
+                                    SimpleNamespace(bin_dir=d, timeout=1), root)
+                self.assertEqual(run.call_args.args[0][0], str(root / ('c2c' + suffix)))
+
     def test_counts_match_plan(self):
         expected = {'calib': 3, 'main-c': 72, 'main-p': 64, 'combined': 12, 'ctl-equal': 4,
                     'ctl-small': 39, 'ctl-pack': 12, 'ctl-mirror': 28, 'ctl-rolesplit': 8,
@@ -94,7 +117,8 @@ class SuiteTests(unittest.TestCase):
     def test_argv_carries_combo(self):
         c = sweep.suite_cells('main-c')[0]
         argv = sweep.offccd_argv(c, '/bin', 300, 7)
-        self.assertEqual(argv[0], str(pathlib.Path('/bin') / 'offccd'))
+        expected = 'offccd.exe' if sys.platform == 'win32' else 'offccd'
+        self.assertEqual(argv[0], str(pathlib.Path('/bin') / expected))
         for flag in ('--cost', '--batch', '--mode', '--layout', '--window-ms', '--seed', '--off-c'):
             self.assertIn(flag, argv)
 

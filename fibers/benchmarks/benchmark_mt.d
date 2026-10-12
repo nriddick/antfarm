@@ -41,7 +41,7 @@ void report(string label, size_t count, Duration elapsed, bool measurable = true
         writefln("%s %s fibers: not measurable (finished before the timer started)",
                  label, count);
     else
-        writefln("%s %s fibers in %.6f s: %.2f fibers/s",
+        writefln("%s %s fibers in %.9f s: %.2f fibers/s",
                  label, count, seconds, count / seconds);
 }
 
@@ -137,6 +137,7 @@ void main(string[] args)
     auto end = MonoTime.currTime;
     report("create:", taskCount, runStart - createStart);
     report("run:   ", taskCount, end - runStart, runMeasurable);
+    report("total: ", taskCount, end - createStart);
 
     // Second generation: every spawn recycles a pooled task/fiber/stack.
     foreach (lane; lanes)
@@ -150,6 +151,7 @@ void main(string[] args)
     report("create (warm pool):", taskCount, warmRunStart - warmCreateStart);
     report("run    (warm pool):", taskCount, warmEnd - warmRunStart,
            warmRunMeasurable);
+    report("total  (warm pool):", taskCount, warmEnd - warmCreateStart);
 
     assert(atomicLoad(ran) == 2 * taskCount, "fiber executions lost");
     pool.shutdown();

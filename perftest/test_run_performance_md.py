@@ -231,6 +231,41 @@ class TailTests(unittest.TestCase):
 
 
 class FiberTests(unittest.TestCase):
+    def test_mt_explicit_totals_accept_unmeasurable_drain(self):
+        for cold, warm in ((True, False), (False, True), (True, True)):
+            with self.subTest(cold=cold, warm=warm):
+                lines = FIBER_MT_OUT.splitlines()
+                for i, line in enumerate(lines):
+                    if (cold and line.startswith("run:")) or (warm and line.startswith("run ")):
+                        lines[i] = line.split(":", 1)[0] + ": 100000 fibers: not measurable (finished before the timer started)"
+                lines += ["total: 100000 fibers in 0.020885000 s: 4788125.00 fibers/s",
+                          "total  (warm pool): 100000 fibers in 0.001900000 s: 52631578.95 fibers/s"]
+                parsed = rpm.parse_fiber("\n".join(lines))
+                self.assertAlmostEqual(parsed["metric"], 100000 / 0.020885)
+                self.assertAlmostEqual(parsed["warm_total_fibers_s"], 100000 / 0.0019)
+                self.assertEqual(parsed["metric_kind"], "spawn_and_drain")
+                if cold:
+                    self.assertNotIn("run_fibers_s", parsed)
+                if warm:
+                    self.assertNotIn("warm_run_fibers_s", parsed)
+
+    def test_mt_explicit_total_takes_precedence_over_phase_rounding(self):
+        out = FIBER_MT_OUT + "\ntotal: 100000 fibers in 0.020885123 s: 1 fibers/s\n"
+        self.assertAlmostEqual(rpm.parse_fiber(out)["metric"], 100000 / 0.020885123)
+
+    def test_mt_invalid_explicit_total_is_not_replaced_by_legacy_phases(self):
+        for total in ("99999 fibers in 0.02 s: 1 fibers/s",
+                      "100000 fibers in 0.000000000 s: 1 fibers/s",
+                      "100000 fibers: not measurable (finished before the timer started)"):
+            with self.subTest(total=total), self.assertRaisesRegex(ValueError, "timing/count"):
+                rpm.parse_fiber(FIBER_MT_OUT + "\ntotal: " + total + "\n")
+
+    def test_mt_unmeasurable_drain_without_total_is_rejected(self):
+        out = FIBER_MT_OUT.replace("run:    100000 fibers in 0.008540 s: 11710150.36 fibers/s",
+                                  "run: 100000 fibers: not measurable (finished before the timer started)")
+        with self.assertRaisesRegex(ValueError, "complete multithread"):
+            rpm.parse_fiber(out)
+
     def test_multithread_run_line(self):
         d = rpm.parse_fiber(FIBER_MT_OUT)
         self.assertAlmostEqual(d["metric"], 100000 / (0.012345 + 0.008540))

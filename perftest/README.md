@@ -23,15 +23,20 @@ On Windows, first build the Release allocator with
 `actor_torture/run-mimalloc-windows.ps1 -Configuration Release` (see
 [the allocator recipe](../actor_torture/README.md)), then run
 `./perftest/build-windows.ps1` from the repository root. This builds the same
-seven harnesses with LDC `-O2 -release` and the static release CRT. The report
+nine harnesses with LDC `-O2 -release` and the static release CRT. The report
 driver resolves `.exe` paths on Windows and terminates a timed-out process tree
 with `taskkill`; it does not synthesize Linux CPU accounting.
+The off-LLC sweep also resolves `.exe` paths for both execution and the binary
+hashes in its metadata.
 
 For the multithreaded Fiber benchmark, the report driver uses the full
 creation-plus-drain duration. Workers run during creation, so the raw harness's
 legacy `run` rate counts the entire burst against only the remaining drain
 time and is not valid throughput. Raw readouts remain available for diagnosis;
 the report's `total_fibers_s` and `warm_total_fibers_s` use the complete burst.
+The harness prints explicit `total` and `total (warm pool)` timings, including
+when a residual `run` phase is not measurable. The parser prefers these totals
+and accepts older logs only when both numeric phase timings are available.
 
 To extend the report to larger thread counts without rerunning the default
 matrix:

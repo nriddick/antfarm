@@ -5,6 +5,20 @@
 Open for the life of the long-lived `1.8.0-rc` branch; it becomes the 1.8.0
 release entry at merge.
 
+### Windows verification fixes
+
+- Optional Win32 function pointers now retain Windows linkage. DMD x64 workers
+  previously busy-looped instead of parking through `WaitOnAddress`. The LLC
+  wake regression test now shuts down before reporting a failed assertion.
+- The actor-wave benchmark isolates over-aligned actor initialization from
+  its cleanup frame, avoiding a DMD 2.112 Win64 `Director` destruction crash
+  without changing actor layout or the measured workload.
+- The MT Fiber benchmark prints explicit cold and warm creation-plus-drain
+  timings. The performance report accepts these even when a residual drain
+  phase is not measurable, while retaining support for older numeric logs.
+- The off-LLC sweep uses native executable paths for both execution and
+  metadata hashing, fixing missing Windows `.exe` hashes.
+
 ### Threadpool CPU groups
 
 - `ProcessorId(group, lp)` is the one CPU identity, now in

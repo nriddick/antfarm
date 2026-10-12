@@ -156,9 +156,13 @@ def suite_cells(name, mirror_llc=1):
     return cells
 
 
+def executable_path(bin_dir, name):
+    return P(bin_dir) / (name + '.exe' if sys.platform == 'win32' else name)
+
+
 def offccd_argv(c, bin_dir, window_ms, seed):
     lb = c['labels']
-    return [str(P(bin_dir) / 'offccd')] + c['args'] + [
+    return [str(executable_path(bin_dir, 'offccd'))] + c['args'] + [
         '--cost', lb['cost'], '--batch', str(lb['batch']), '--mode', lb['mode'],
         '--layout', lb['layout'], '--window-ms', str(window_ms), '--seed', str(seed)]
 
@@ -294,7 +298,8 @@ def host_metadata(bin_dir, seed, host_note, perf):
     def per_cpu(name):
         return {c: read_text(f'/sys/devices/system/cpu/cpu{c}/cpufreq/{name}', 'unavailable')
                 for c in cpus}
-    binaries = {n: sha(P(bin_dir) / n) for n in ('offccd', 'c2c') if (P(bin_dir) / n).exists()}
+    binaries = {n: sha(path) for n in ('offccd', 'c2c')
+                if (path := executable_path(bin_dir, n)).is_file()}
     tools = {}
     for tool in ('ldc2', 'dmd'):
         rc, out = try_cmd([tool, '--version'])
@@ -362,7 +367,7 @@ def skip_row(c, reason, cpu_model_):
 
 
 def run_calib(c, a, out_dir):
-    argv = [str(P(a.bin_dir) / 'c2c')] + c['args']
+    argv = [str(executable_path(a.bin_dir, 'c2c'))] + c['args']
     out, err, rc = run_cmd(argv, max(a.timeout, 600))
     lines = []
     for ln in out.splitlines():
@@ -400,7 +405,7 @@ def run_suites(a):
     dump_meta()
 
     # The first driver run: the plan, whose topology the runner records.
-    probe_out, _, _ = run_cmd([str(P(a.bin_dir) / 'offccd'), '--plan-only', '--off-c', '1'], a.timeout)
+    probe_out, _, _ = run_cmd([str(executable_path(a.bin_dir, 'offccd')), '--plan-only', '--off-c', '1'], a.timeout)
     first = parse_driver(probe_out) or {}
     topo = first.get('topology')
     meta['topology'] = topo
