@@ -7,10 +7,11 @@ module private_tree;
 
 import antfarm;
 import actors;
-import example_host;
+import threadpool.host;
 import core.atomic : MemoryOrder, atomicLoad;
 import core.lifetime : move;
 import core.stdc.stdlib : malloc;
+import core.time : seconds;
 import std.conv : to;
 import std.stdio : writeln;
 
@@ -112,12 +113,13 @@ PrivateRootDisposition reduce(scope ref PrivateBorrow!Tree actor,
 
 void main(string[] args)
 {
-    uint workers = args.length > 1 ? to!uint(args[1]) : 0;
-    auto host = new ExampleHost(workers);
-    auto token = host.farm.registerProducer(Tier.small);
-    if (!token.valid) fatal("producer registration failed");
-    auto park = PrivateRootPark!(Tree, reduce).create(host.farm, 1);
-    if (park is null) fatal("root park allocation failed");
+    FarmHostOptions hostOptions;
+    hostOptions.workers = args.length > 1 ? to!uint(args[1]) : 0;
+    hostOptions.waitTimeout = 30.seconds; // example policy: a stuck drain fails instead of hanging
+    auto host = new FarmHost(hostOptions);
+    scope (exit) host.close();
+    scope (failure) host.abandon();
+    auto park = host.createPark!(Tree, reduce)(1);
 
     auto scratch = cast(ulong*) malloc(ulong.sizeof);
     if (scratch is null) fatal("scratch allocation failed");
@@ -129,23 +131,13 @@ void main(string[] args)
     if (park.spawn(move(tree)) != PrivateSpawnResult.spawned)
         fatal("root spawn failed");
 
-    // pump publishes root activations only. Zero does not mean the folders
-    // or leaves are idle, and it is not a reason to stop. live includes
-    // waiting roots and notification tails; drain until collection drops it.
-    uint zeroPumps;
-    while (park.live != 0)
-    {
-        if (park.pump(token) == 0) ++zeroPumps;
-        host.progress();
-    }
+    // Each step pumps the park. pump counts root activations only: zero does
+    // not mean the folders or leaves are idle, so the wait never infers idle.
+    // live includes waiting roots and notification tails; drain until
+    // collection drops it.
+    host.waitUntil(() => park.live == 0);
     if (total != 40 || callbacks != 2 || atomicLoad!(MemoryOrder.acq)(freed) != 1)
         fatal("private tree result mismatch");
-
-    host.stopConsumers();
-    park.destroy();
-    park = null; // destroy(park) would not free the park
-    host.farm.unregisterProducer(token);
-    host.farm.destroy();
     writeln("private tree: subset fold 40, root callbacks=", callbacks,
-        ", workers=", workers, ", pumps publishing zero roots=", zeroPumps);
+        ", workers=", host.plan.workers);
 }

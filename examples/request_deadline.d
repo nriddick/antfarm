@@ -11,7 +11,7 @@ module request_deadline;
 
 import antfarm;
 import actors;
-import example_host;
+import threadpool.host;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;
 import std.conv : to;
@@ -43,16 +43,17 @@ PrivateRootDisposition serve(scope ref PrivateBorrow!Request request,
 
 void main(string[] args)
 {
-    uint workers = args.length > 1 ? to!uint(args[1]) : 0;
-    auto host = new ExampleHost(workers);
-    auto token = host.farm.registerProducer(Tier.small);
-    if (!token.valid) fatal("producer registration failed");
+    FarmHostOptions hostOptions;
+    hostOptions.workers = args.length > 1 ? to!uint(args[1]) : 0;
+    hostOptions.waitTimeout = 30.seconds; // example policy: a stuck drain fails instead of hanging
+    auto host = new FarmHost(hostOptions);
+    scope (exit) host.close();
+    scope (failure) host.abandon();
 
     enum requestCount = 6;
     PrivateRootOptions options;
     options.tracking = true;
-    auto park = PrivateRootPark!(Request, serve).create(host.farm, requestCount, options);
-    if (park is null) fatal("root park allocation failed");
+    auto park = host.createPark!(Request, serve)(requestCount, options);
 
     PrivateRootHandle[requestCount] roots;
     // id 3 was already past its deadline at spawn; a lazy deadline becomes
@@ -67,7 +68,7 @@ void main(string[] args)
     }
 
     // Request id 2 is cancelled from another thread. The handle is only valid
-    // while the park exists, so join the canceller before park.destroy().
+    // while the park exists, so join the canceller before host.close().
     PrivateCancelResult cancelResult;
     auto canceller = new Thread({
         cancelResult = roots[2].requestCancel();
@@ -77,16 +78,13 @@ void main(string[] args)
     if (cancelResult != PrivateCancelResult.requested)
         fatal("external cancel was not requested");
 
-    // Drain: pump publishes, consumers run, and takeOutcome recycles the
+    // Drain: each step pumps, consumers run, and takeOutcome recycles the
     // terminal slot. A tracked root stays live until its outcome is taken, so
-    // takeOutcome belongs in the shutdown loop. pump() == 0 is not idle.
+    // takeOutcome belongs in the wait predicate. pump() == 0 is not idle.
     PrivateRootOutcome[requestCount] outcomes;
     size_t collected;
     bool cancelledAll;
-    while (park.live != 0)
-    {
-        park.pump(token);
-        host.progress();
+    host.waitUntil(() {
         PrivateRootOutcome outcome;
         while (park.takeOutcome(outcome))
         {
@@ -103,7 +101,8 @@ void main(string[] args)
                 fatal("cancelAll did not cancel the two long requests");
             cancelledAll = true;
         }
-    }
+        return park.live == 0;
+    });
 
     alias S = PrivateOutcomeStatus;
     alias C = PrivateCancelCause;
@@ -115,12 +114,8 @@ void main(string[] args)
         || outcomes[5].status != S.cancelled || outcomes[5].cause != C.requested)
         fatal("unexpected request outcomes");
 
-    // Workers first, then the park. Every canceller is already joined.
-    host.stopConsumers();
-    park.destroy();
-    park = null;
-    host.farm.unregisterProducer(token);
-    host.farm.destroy();
+    // Every canceller is already joined; host.close() stops the workers,
+    // then destroys the park.
     writeln("request service: completed, failed 501, requested, deadline,"
-        ~ " cancelAll, workers=", workers);
+        ~ " cancelAll, workers=", host.plan.workers);
 }
