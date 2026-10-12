@@ -474,7 +474,10 @@ struct ActorBorrow(T)
     package T* state_;
     @disable this(this);
 
-    /// The actor state for the duration of this callback.
+    /// The actor state for the duration of this callback. Field access
+    /// through `actor.value.field` needs no parentheses; binding the state
+    /// to a reference does: `ref T s = actor.value;` does not compile, while
+    /// `ref T s = actor.value();` and `auto p = &actor.value();` do.
     @property ref T value() return nothrow @nogc @system
     {
         return *state_;
@@ -853,6 +856,9 @@ struct ActorErasedAdapter
     /// Invalid metadata, capacity exhaustion, or allocator failure returns an
     /// invalid owner. The handler and any module code it calls must remain
     /// resident until the returned owner has retired and been reclaimed.
+    /// The state lives in allocator-owned storage the garbage collector
+    /// does not scan; keep any GC allocation reachable from it alive
+    /// elsewhere, or use non-GC memory.
     ActorErasedOwner createActor(scope const(void)* initialState,
             size_t stateSize, size_t stateAlignment,
             ActorErasedHandler handler) nothrow @nogc @system
@@ -993,7 +999,11 @@ align(64) struct ActorRuntime
     }
 
     /// Allocate and copy-construct POD actor state. Returns an invalid owner
-    /// when capacity or allocator storage is unavailable.
+    /// when capacity or allocator storage is unavailable. The copy lives in
+    /// allocator-owned storage the garbage collector does not scan: POD
+    /// state holding GC slices or pointers compiles, but the actor does not
+    /// keep those allocations alive. Keep them reachable elsewhere for the
+    /// actor's lifetime, or store non-GC memory in actor state.
     ActorOwner!T createActor(T, alias handler)(T initial)
         nothrow @nogc @system
     {

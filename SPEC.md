@@ -289,7 +289,7 @@ Registration is how that invariant is enforced. The Farm preallocates two 64-byt
 
 `write()` takes the Token by reference and fatals if the token's `FarmId` is not the receiving Farm's, if the hash does not match the live slot, or if the token's private quota mirror exceeds the farm's ledger for that slot. Unregistered threads therefore cannot call `write()` and cannot bypass `Exmax`, a registered caller cannot forge a fresh quota past its grant by mutating the token, and a token registered on one Farm — including a since-destroyed Farm whose identity is never reissued — is fatal on every other Farm. The slot hash alone does not prove ownership: two Farms with identical registration histories derive identical hashes, so provenance is a separate deterministic field, not another probabilistic check.
 
-Tokens are single-owner and transfer-only: copying consumes the source (the copy constructor release-stores the valid hash last, then clears the source's hash), so at most one live token exists per slot and a stale copy fails `requireToken`. When a producer leaves, it can pass its quota along only by transferring the Token; there is no undocumented inherited quota.
+Tokens are single-owner and move-only: copying does not compile (the transfer-on-copy constructor is disabled with `@disable this(ref typeof(this))`), so at most one live token exists per slot and a stale copy fails `requireToken`. When a producer leaves, it can pass its quota along only by transferring the Token with an explicit `move`; there is no undocumented inherited quota.
 
 ---
 

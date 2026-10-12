@@ -37,6 +37,12 @@ things cooperate:
   cohort tree. Neither creates threads: the program supplies whatever pump and
   consumers it wants, here the on-thread consumer or the example host.
 
+Whatever the shape, submitted work only makes progress while some thread
+holds a producer `Token` and keeps calling `runtime.flush(token)` (or the
+private actor `pump`): `wake` and `send` queue an actor; they do not execute
+it. The token is move-only, so hand it to exactly one pumper with `move` or
+share it by `ref`.
+
 Completion is the application's to observe. The Farm has no "all done" signal,
 `consumeNext() == false` is not completion, and `pump() == 0` is not a drain.
 The examples count their own callbacks or watch a platform-specific predicate.

@@ -19,8 +19,9 @@ Sizing numbers and allocator rules are in
 ## Tokens and Farm provenance
 
 Register a token on the Farm that will publish the work. Keep it exclusive to
-one active producer, pass it by reference, and unregister it. Copying transfers
-ownership. Dropping a token does not unregister it. Assigning over a
+one active producer, pass it by reference, and unregister it. Tokens are
+move-only: copying does not compile; transfer one explicitly with `move`.
+Dropping a token does not unregister it. Assigning over a
 still-registered token is fatal.
 
 Each Farm has a process-unique `farmId` that is never reissued. The token stores
