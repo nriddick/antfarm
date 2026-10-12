@@ -1897,6 +1897,124 @@ void admissionAfterStopSmoke()
         cast(uint) group);
 }
 
+/// A one-worker pool over the first eligible CPU with one lane bound to its group.
+struct OneLanePool
+{
+    import threadpool : CacheAwarePool;
+
+    CacheAwarePool pool;
+    FiberLane lane;
+    ushort group;
+}
+
+OneLanePool oneLanePool(AntFarm* farm, bool boundPool)
+{
+    import threadpool;
+
+    auto topology = CacheAwarePool.topology();
+    ProcessorId cpu;
+    ushort group;
+    bool found;
+    foreach (ref lp; topology.processors)
+    {
+        if (!topology.isEligible(lp)) continue;
+        cpu = ProcessorId.of(lp);
+        group = lp.llcIndex;
+        found = true;
+        break;
+    }
+    assert(found);
+    auto lane = new FiberLane(farm);
+    PoolOptions options;
+    options.processors = [cpu];
+    options.managedWorker = fiberWorkerHooks();
+    auto pool = new CacheAwarePool(options);
+    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane),
+        boundPool ? pool : null);
+    return OneLanePool(pool, lane, group);
+}
+
+// L5: a shutdown that beats every start hook leaves no server to retire the
+// lane; shutdown itself must, so a later spawn throws instead of stranding.
+void admissionAfterEarlyShutdownSmoke()
+{
+    import core.stdc.stdio : printf;
+
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
+                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
+    scope (exit) farm.destroy();
+    // The race is between the worker reaching its start hook and the
+    // shutdown; either outcome must leave the lane unavailable.
+    foreach (round; 0 .. 100)
+    {
+        auto fixture = oneLanePool(farm, true);
+        auto lane = fixture.lane;
+        assert(lane.state == FiberLaneState.pending);
+        fixture.pool.start();
+        fixture.pool.shutdown();
+        assert(fixture.pool.workerFailures.length == 0);
+        assert(lane.liveServers == 0);
+        assert(lane.state == FiberLaneState.stopped,
+            "a lane whose pool stopped must not stay pending");
+        immutable active = lane.domain.active;
+        assert(refusedSpawn(lane) !is null);
+        assert(lane.domain.active == active);
+        uninstallFiberPlan();
+    }
+    printf("L5 admission after early shutdown: 100 start/shutdown rounds, spawn refused\n");
+}
+
+// L6: a failing start hook stops the pool; its lane has no server and must
+// close as soon as the failure is known, not only at the caller's shutdown.
+void admissionAfterStartFailureSmoke()
+{
+    import core.stdc.stdio : printf;
+
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
+                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
+    scope (exit) farm.destroy();
+    // A custom responder selector without a bound pool makes the start hook
+    // throw before it counts a server.
+    auto fixture = oneLanePool(farm, false);
+    scope (exit) uninstallFiberPlan();
+    auto lane = fixture.lane;
+    lane.responderSelector = (WorkerSelf*) => true;
+    assert(lane.state == FiberLaneState.pending);
+
+    fixture.pool.start();
+    foreach (_; 0 .. 2_000)
+    {
+        if (lane.state != FiberLaneState.pending) break;
+        Thread.sleep(msecs(1));
+    }
+    assert(lane.state == FiberLaneState.stopped,
+        "a start failure left its lane pending before shutdown");
+    assert(refusedSpawn(lane) !is null);
+    fixture.pool.shutdown();
+    assert(fixture.pool.workerFailures.length == 1);
+    assert(lane.liveServers == 0 && lane.state == FiberLaneState.stopped);
+    assert(refusedSpawn(lane) !is null);
+    printf("L6 admission after start failure: lane %u stopped, spawn refused\n",
+        cast(uint) fixture.group);
+}
+
+// L7: uninstalling a plan whose pool never started retires its lanes.
+void admissionAfterUninstallSmoke()
+{
+    import core.stdc.stdio : printf;
+
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
+                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
+    scope (exit) farm.destroy();
+    auto fixture = oneLanePool(farm, true);
+    assert(fixture.lane.state == FiberLaneState.pending);
+    uninstallFiberPlan();
+    assert(fixture.lane.state == FiberLaneState.stopped);
+    assert(refusedSpawn(fixture.lane) !is null);
+    printf("L7 admission after uninstall: lane %u stopped, spawn refused\n",
+        cast(uint) fixture.group);
+}
+
 /// The unfiltered default resolution, or null after printing SKIP when it
 /// has fewer than two accepted groups.
 PoolResolution twoGroupResolution(string test)
@@ -2346,6 +2464,9 @@ void main()
     sharedSignalAndTimerCancellationSmoke();
     threadpoolSmoke();
     admissionAfterStopSmoke();
+    admissionAfterEarlyShutdownSmoke();
+    admissionAfterStartFailureSmoke();
+    admissionAfterUninstallSmoke();
     servicePlanTests();
     sharedDomainNoEdgesSmoke();
     preAdmissionUnusedGroupSmoke();

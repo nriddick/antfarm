@@ -382,14 +382,26 @@ final class FiberLane : FiberReadyLane
     // Admission is a single acquire load; nothing is locked against stop.
     // `pending` is only set by `installFiberPlan` (setup thread, before
     // start) and `open` only once a server has started. A lane leaves
-    // `pending`/`open` for `stopped` only in the stop hook of its last live
-    // server, which runs after that worker's final pump. A spawn which loads
-    // `pending`/`open` therefore strands its task only if its push lands
-    // after the final pump of every live server: it raced the last server's
-    // stop, i.e. a `pool.shutdown` the caller started before closing domain
-    // admission. That is the documented race; afterwards `state == stopped`
-    // and `domain.active` still counts the task. The required order is
-    // Director `beginShutdown` -> drain -> `pool.shutdown`.
+    // `pending`/`open` for `stopped` by CAS, in exactly these places:
+    //   - the stop hook of its last live server, after that worker's final
+    //     pump;
+    //   - `retireUnservedLanes`, for a `pending` lane with no live server,
+    //     when a worker's start hook fails, when the pool has stopped
+    //     (`poolStopped`, after every worker joined, so also a shutdown that
+    //     beat every start hook) and on `uninstallFiberPlan`.
+    // Each CAS is `acq_rel` and publishes `stopped` to the acquire load here,
+    // so a spawn that begins after a transition completed throws. A spawn
+    // which loaded `pending`/`open` before it strands its task only if its
+    // push lands after the final pump of every live server (or, for a lane
+    // that never had a server, after the transition): it raced the last
+    // server's stop or the pool's failure/shutdown, i.e. a `pool.shutdown`
+    // the caller started before closing domain admission. That is the
+    // documented race; afterwards `state == stopped` and `domain.active`
+    // still counts the task. The required order is Director `beginShutdown`
+    // -> drain -> `pool.shutdown`. The only `pending` -> `stopped` CAS that
+    // can precede a server start is the failure path, in a pool that is
+    // already stopping; a late server of such a lane leaves it `stopped` (its
+    // finalizing/stop CASes expect `pending`/`open`) and its pump throws.
     private void enforceAdmission()
     {
         final switch (state)
@@ -500,9 +512,11 @@ void installFiberPlan(FiberServicePlan plan, CacheAwarePool pool)
 }
 
 /// Remove the installed plan after every worker has stopped. Lanes keep their
-/// group, service and final state for inspection.
+/// group, service and final state for inspection; a lane that never had a
+/// server ends `stopped`, not `pending`.
 void uninstallFiberPlan()
 {
+    retireUnservedLanes();
     uninstall!FiberLane();
     foreach (lane; installedFiberLanes)
     {
@@ -645,14 +659,52 @@ private void noteServerStopped(FiberLane lane) nothrow @nogc
     }
 }
 
+/// Move every `pending` lane which has no live server to `stopped`: no server
+/// will serve it, so a later spawn throws `FiberLaneUnavailable` instead of
+/// being stranded. A lane with a live server keeps its state; that server's
+/// stop hook retires it.
+private void retireUnservedLanes() nothrow @nogc
+{
+    foreach (lane; installedFiberLanes)
+    {
+        if (lane is null) continue;
+        if (atomicLoad!(MemoryOrder.acq)(lane.control.liveServers) != 0)
+            continue;
+        int expected = FiberLaneState.pending;
+        cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
+            &lane.control.state, &expected, cast(int) FiberLaneState.stopped);
+    }
+}
+
+/// `ManagedWorkerHooks.poolStopped`: every worker has joined, so a lane
+/// still `pending` never had a server (a shutdown beat every start hook, or
+/// a start failed) and will not get one.
+private void fiberPoolStopped() nothrow @nogc
+{
+    retireUnservedLanes();
+}
+
 /// Managed lifecycle hooks suitable for `PoolOptions.managedWorker`.
 ManagedWorkerHooks fiberWorkerHooks()
 {
     return ManagedWorkerHooks(&fiberWorkerStart, &fiberWorkerPump,
-                              &fiberWorkerStop);
+                              &fiberWorkerStop, &fiberPoolStopped);
 }
 
 private void fiberWorkerStart(WorkerSelf* worker)
+{
+    try
+        startFiberWorker(worker);
+    catch (Throwable failure)
+    {
+        // The pool is about to stop (the failure escapes to the worker loop):
+        // do not leave a lane without a server `pending`.
+        retireUnservedLanes();
+        throw failure;
+    }
+}
+
+private void startFiberWorker(WorkerSelf* worker)
 {
     auto lane = home!FiberLane();
     if (lane is null)

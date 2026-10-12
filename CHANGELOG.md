@@ -56,7 +56,12 @@ release entry at merge.
   count.
 - Fixed: a lane no longer reports itself served after pool shutdown. When its
   last server stops it becomes `stopped`, and a later spawn throws instead of
-  stranding an undrainable task.
+  stranding an undrainable task. A served lane that never had a server (a
+  shutdown right after `start`, a worker's start hook failing, or an
+  uninstalled plan) also becomes `stopped` instead of staying `pending`.
+- `ManagedWorkerHooks.poolStopped` (optional) runs once on the shutting-down
+  thread after every worker has joined, even if none started. The fiber hooks
+  use it to retire lanes that no server stopped.
 - Fixed: a timer armed by a fiber running on a non-responder worker (a custom
   `responderSelector`) now wakes the domain's responders when it becomes the
   earliest deadline. Before, a parked responder could miss it until an

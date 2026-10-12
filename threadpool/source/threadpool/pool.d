@@ -496,6 +496,8 @@ final class CacheAwarePool
             gWorkers = null;
             gWorkerBody = null;
             gWorkerStop = null;
+            if (gManagedWorkerHooks.poolStopped !is null)
+                gManagedWorkerHooks.poolStopped();
             gManagedWorkerHooks = ManagedWorkerHooks.init;
             directorHeld = false;
             threads.length = 0;
@@ -632,6 +634,8 @@ private:
             gWorkers = null;
             gWorkerBody = null;
             gWorkerStop = null;
+            if (gManagedWorkerHooks.poolStopped !is null)
+                gManagedWorkerHooks.poolStopped();
             gManagedWorkerHooks = ManagedWorkerHooks.init;
             directorHeld = false;
             threads.length = 0;
@@ -828,6 +832,13 @@ unittest
 shared int gManagedStarts;
 shared int gManagedPumps;
 shared int gManagedStops;
+shared int gManagedPoolStopped;
+
+void managedTestPoolStopped() nothrow
+{
+    assert(atomicLoad(gManagedStops) == atomicLoad(gManagedStarts));
+    atomicFetchAdd(gManagedPoolStopped, 1);
+}
 
 void managedTestStart(WorkerSelf* w)
 {
@@ -856,10 +867,12 @@ unittest
     atomicStore(gManagedStarts, 0);
     atomicStore(gManagedPumps, 0);
     atomicStore(gManagedStops, 0);
+    atomicStore(gManagedPoolStopped, 0);
     PoolOptions opt;
     opt.processors = [ProcessorId(0, 0)];
     opt.managedWorker = ManagedWorkerHooks(
-        &managedTestStart, &managedTestPump, &managedTestStop);
+        &managedTestStart, &managedTestPump, &managedTestStop,
+        &managedTestPoolStopped);
     auto pool = new CacheAwarePool(opt);
     pool.start();
     foreach (_; 0 .. 200)
@@ -870,6 +883,8 @@ unittest
     }
     pool.shutdown();
 
+    assert(atomicLoad(gManagedPoolStopped) == 1,
+        "poolStopped runs once, after every worker has joined");
     assert(atomicLoad(gManagedStarts) == 1);
     assert(atomicLoad(gManagedPumps) == 1);
     assert(atomicLoad(gManagedStops) == 1,

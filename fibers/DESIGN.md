@@ -272,10 +272,14 @@ that did not open fails startup; the check reads only that lane's
 accumulator and published count. Managed stop decrements `liveServers` on
 the worker's home lane and on every lane it served; the last stop moves a
 `pending` or `open` lane to `stopped`, and later spawns throw
-`FiberLaneUnavailable`. A spawn racing the last server's stop is not locked
-out: it can strand its task, visible afterwards as `state == stopped` with
-`domain.active` still counting it. Close domain admission and drain before
-`pool.shutdown`.
+`FiberLaneUnavailable`. A `pending` lane with no live server also becomes
+`stopped` when a worker's start hook fails, when the pool has stopped
+(`ManagedWorkerHooks.poolStopped`, which runs even if shutdown beat every
+start hook) and when the plan is uninstalled. A spawn racing the last
+server's stop, or the failure or shutdown that retires a server-less lane, is
+not locked out: it can strand its task, visible afterwards as
+`state == stopped` with `domain.active` still counting it. Close domain
+admission and drain before `pool.shutdown`.
 
 Responders retain one remote `ConsumerView` per lane they serve by an edge.
 Every 16 local

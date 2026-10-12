@@ -174,7 +174,9 @@ concurrent after installation.
 
 Use `PoolOptions.managedWorker` when workers need allocation, exceptions, or
 persistent per-worker state. `start` runs once on the pinned worker, `pump`
-runs repeatedly, and `stop` is paired with every successful start.
+runs repeatedly, and `stop` is paired with every successful start. The
+optional `poolStopped` runs once on the shutting-down thread after every worker
+has joined, even if no worker ever started.
 
 ```d
 void start(WorkerSelf* worker)

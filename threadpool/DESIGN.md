@@ -199,6 +199,10 @@ does not call its body again.
 `ManagedWorkerHooks` provides `start`, `pump`, and `stop` callbacks on the
 pinned worker. A successful start is paired with exactly one stop on that same
 thread. `WorkerSelf.context` is reserved for caller-owned persistent state.
+The optional `poolStopped` callback runs once per run on the thread that calls
+`shutdown` (or whose `start` failed), after every worker has joined, even when
+no worker reached `start`; use it to settle state that only a worker's stop
+would otherwise settle.
 
 `pump` returns `ManagedPumpResult`:
 
