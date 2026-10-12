@@ -16,7 +16,9 @@ import std.array : split;
 import std.exception : enforce;
 import std.math : isFinite;
 import std.stdio : writefln;
+import threadpool.host : CallerPlacement, FarmHost, FarmHostOptions, WorkerIdle;
 import threadpool.pin : PinOutcome, pinProcessor;
+import threadpool.pool : PoolOptions;
 import threadpool.topology : ProcessorId, parseCpuList;
 
 version (AntfarmMimallocV3)
@@ -1054,9 +1056,34 @@ void main(string[] args)
     immutable tier = tierName == "small" ? Tier.small : Tier.bulk;
     immutable quota = args.length > 10 ? to!ulong(args[10]) : 16384;
     enforce(quota > 0, "quota must be positive");
-    auto farm = AntFarm.create(8, 8, consumers ? consumers : 1,
-        tier == Tier.bulk ? 1 : 0, tier == Tier.bulk ? quota : 0,
-        tier == Tier.small ? 1 : 0, tier == Tier.small ? quota : 0);
+    // ANTFARM_CHURN_HOST=1 (small tier, pinned consumers only): a FarmHost owns the
+    // Farm, the control token and the pinned spinning consumers that the
+    // hand-written block below otherwise creates.
+    import core.stdc.stdlib : getenv;
+    immutable hostSwitch = getenv("ANTFARM_CHURN_HOST") !is null && getenv("ANTFARM_CHURN_HOST")[0] == '1';
+    immutable useHost = hostSwitch && tier == Tier.small && consumers > 0 && cpus.length == consumers + 1;
+    enforce(!hostSwitch || useHost, "ANTFARM_CHURN_HOST=1 needs the small tier, consumers > 0 and a CPU list");
+    FarmHost host;
+    AntFarm* farm;
+    if (useHost)
+    {
+        FarmHostOptions hostOptions;
+        hostOptions.workers = consumers;
+        hostOptions.caller = CallerPlacement.unchanged; // the controller is already pinned
+        hostOptions.idle = WorkerIdle.spin;
+        hostOptions.pool = PoolOptions.init;
+        hostOptions.pool.processors = cpus[1 .. $];
+        hostOptions.farm.ringMiB = 8;
+        hostOptions.farm.k = 8;
+        hostOptions.farm.quotaSmall = quota;
+        host = new FarmHost(hostOptions);
+        farm = host.farm;
+        writefln("farm_host=1 %s", host.plan.summary());
+    }
+    else
+        farm = AntFarm.create(8, 8, consumers ? consumers : 1,
+            tier == Tier.bulk ? 1 : 0, tier == Tier.bulk ? quota : 0,
+            tier == Tier.small ? 1 : 0, tier == Tier.small ? quota : 0);
     enforce(farm !is null, "Farm allocation failed");
     writefln("batchLimit=%s tier=%s quota_words=%s public_hint=%s child_hint=%s", batch, tierName,
         quota, publicHint == publicHintDefault ? "default" : to!string(publicHint), g_childHint);
@@ -1078,7 +1105,7 @@ void main(string[] args)
     }
     version (AntfarmMimallocV3)
         if (allocatorName != "crt") writefln("mimalloc_version=%s", mi_version());
-    scope (exit) farm.destroy();
+    scope (exit) { if (host !is null) host.close(); else farm.destroy(); }
     immutable noRuntime = privateMode || treeMode || subsetMode || foldTreeMode || trackedMode;
     auto runtime = noRuntime ? null : ActorRuntime.create(farm, count, allocator);
     enforce(noRuntime || runtime !is null, "actor runtime allocation failed");
@@ -1103,9 +1130,14 @@ void main(string[] args)
     auto completions = new Completion[count];
     auto nodes = inboxMode ? new ActorInboxNode[count] : null;
     foreach (ref node; nodes) node.initialize();
-    auto token = farm.registerProducer(tier);
-    enforce(token.valid, "producer registration failed");
-    scope (exit) farm.unregisterProducer(token);
+    Token ownToken;
+    if (!useHost)
+    {
+        ownToken = farm.registerProducer(tier);
+        enforce(ownToken.valid, "producer registration failed");
+    }
+    scope (exit) if (!useHost) farm.unregisterProducer(ownToken);
+    ref Token token = useHost ? host.token : ownToken;
     ConsumerView view;
     if (consumers == 0)
         enforce(view.subscribe(farm) >= 0, "consumer subscription failed");
@@ -1119,7 +1151,7 @@ void main(string[] args)
         foreach (thread; threads)
             if (thread !is null) thread.join();
     }
-    foreach (i; 0 .. consumers)
+    foreach (i; 0 .. (useHost ? 0 : consumers))
     {
         jobs[i] = cpus.length == 0
             ? new Consumer(farm, ProcessorId.init, true)

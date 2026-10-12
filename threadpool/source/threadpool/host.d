@@ -22,7 +22,8 @@ import actors : ActorAllocator, ActorHandle, ActorReclaimResult, ActorRetireMode
     PrivateRootReclamation;
 import antfarm : AntFarm, ConsumerView, FarmCreateError, FarmCreateFailure, Tier, Token,
     DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, SUBSCRIBE_RETRY;
-import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
+import threadpool.hybrid : ManagedWorkerHooks, WorkerSelf, gWorkers;
+import threadpool.worker : requestStop;
 import threadpool.os_scope : OsScope, OsScopeSource, osScope;
 import threadpool.pin : PinOutcome, ThreadAffinity, confineCallingThread, restoreCallingThread;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
@@ -328,53 +329,76 @@ private ConsumerView tHostView; // TLS: one cursor per worker
 
 version (FarmHostTestHooks)
 {
-    import threadpool.worker : gRunFlag;
-
-    /// Test-only (version FarmHostTestHooks): the worker index whose start
-    /// hook throws, or -1. Every other worker then waits for the pool to stop
-    /// and throws without subscribing, as a worker that exits before its
-    /// start hook would never count.
+    /// Test-only (version FarmHostTestHooks): the worker index whose first
+    /// visit records a start failure and stops the pool, or -1. Every other
+    /// worker idles until the pool stops without subscribing, as a worker
+    /// that exits before subscribing would never count.
     __gshared int hostTestFailStart = -1;
+    /// Allocated on the control thread before start(); workers only store it.
+    __gshared Throwable hostTestStartFailure;
 }
 
-private void hostStart(WorkerSelf* self)
-{
-    import std.format : format;
+// Subscribe failures cannot throw from workerBody (@nogc nothrow). The
+// constructor's startup wait ends on this counter or on pool stop.
+private shared uint gHostStartFailed;
+private shared long gHostSubscribeResult;
+private bool tHostSubscribed; // TLS: this worker holds a live view
 
+private void noteWorkerFailure(WorkerSelf* self, Throwable failure) @nogc nothrow
+{
+    if (failure is null || self is null) return;
+    if (self.workerIndex < gWorkers.length && gWorkers[self.workerIndex].failure is null)
+        gWorkers[self.workerIndex].failure = failure;
+    requestStop();
+}
+
+// The entire worker hot path. workerBody has no start hook, so the first
+// visit subscribes; a failure increments gHostStartFailed and stops the
+// pool. An Error from a callback (an assert in a debug build) is recorded
+// on the worker and stops the pool, which step/waitUntil surface as
+// FarmHostFailed. The TLS flag is one predictable branch after the first visit.
+private bool hostBody(WorkerSelf* self) @nogc nothrow
+{
     version (FarmHostTestHooks)
     {
         if (hostTestFailStart >= 0)
         {
             if (self.workerIndex == hostTestFailStart)
-                throw new FarmHostException("FarmHost test hook: injected start failure");
-            while (atomicLoad!(MemoryOrder.acq)(gRunFlag) != 0)
-                Thread.yield();
-            throw new FarmHostException("FarmHost test hook: stopped before subscribing");
+                noteWorkerFailure(self, hostTestStartFailure);
+            return false;
         }
     }
-
-    long result;
-    do result = tHostView.subscribe(gHostFarm);
-    while (result == SUBSCRIBE_RETRY);
-    if (result < 0)
-        throw new FarmHostException(format("FarmHost worker could not subscribe (%s)", result));
-    atomicOp!"+="(gHostSubscribed, 1u);
+    if (!tHostSubscribed)
+    {
+        if (gHostFarm is null)
+            return false;
+        long result;
+        do result = tHostView.subscribe(gHostFarm);
+        while (result == SUBSCRIBE_RETRY);
+        if (result < 0)
+        {
+            atomicStore(gHostSubscribeResult, result);
+            atomicOp!"+="(gHostStartFailed, 1u);
+            requestStop();
+            return false;
+        }
+        tHostSubscribed = true;
+        atomicOp!"+="(gHostSubscribed, 1u);
+    }
+    try
+        return tHostView.consumeNext();
+    catch (Throwable t)
+    {
+        noteWorkerFailure(self, t);
+        return false;
+    }
 }
 
-// The entire worker hot path.
-private ManagedPumpResult hostPump(WorkerSelf*)
+private void hostStop(WorkerSelf*) @nogc nothrow
 {
-    return tHostView.consumeNext() ? ManagedPumpResult.again() : ManagedPumpResult.idle();
-}
-
-private void hostStop(WorkerSelf*)
-{
+    if (!tHostSubscribed) return;
     tHostView.unsubscribe();
-}
-
-private void hostPoolStopped() nothrow
-{
-    gHostFarm = null; // every worker has joined
+    tHostSubscribed = false;
 }
 
 /++
@@ -951,15 +975,31 @@ private:
 
     void startWorkers(FarmHostOptions options)
     {
+        import std.format : format;
+
         if (!cas(&gHostClaimed, false, true))
             throw new FarmHostException("FarmHost: another FarmHost owns the pool [" ~ plan_.summary() ~ "]");
         claimed_ = true;
         gHostFarm = farm_;
         atomicStore(gHostSubscribed, 0u);
+        atomicStore(gHostStartFailed, 0u);
+        atomicStore(gHostSubscribeResult, 0);
+        version (FarmHostTestHooks)
+        {
+            if (hostTestFailStart >= 0)
+                hostTestStartFailure = new FarmHostException(
+                    "FarmHost test hook: injected start failure");
+        }
 
         auto poolOptions = options.pool;
         poolOptions.processors = plan_.workerSelection.workers.dup;
-        poolOptions.managedWorker = ManagedWorkerHooks(&hostStart, &hostPump, &hostStop, &hostPoolStopped);
+        // workerBody/workerStop, not the managed lane: the hot path is one
+        // bool return. Subscribe is lazy (no start hook). User hooks were
+        // rejected by the plan; clear them so a copied options struct cannot
+        // select both lanes.
+        poolOptions.workerBody = &hostBody;
+        poolOptions.workerStop = &hostStop;
+        poolOptions.managedWorker = ManagedWorkerHooks.init;
         auto pool = new CacheAwarePool(poolOptions);
         try
             pool.start();
@@ -973,13 +1013,21 @@ private:
         if (!plan_.workerSelection.sameSelection(pool_.resolution))
             throw new FarmHostException("FarmHost: started workers {" ~ formatCpuList(pool_.resolution.workers)
                 ~ "} differ from the plan [" ~ plan_.summary() ~ "]");
-        // A failing start or pump stops the pool; later workers then exit
-        // before their start hook, so stop also ends the wait.
-        while (atomicLoad!(MemoryOrder.acq)(gHostSubscribed) < plan_.workers && !pool_.stopRequested)
+        // A subscribe failure or a worker Error stops the pool; workers
+        // that have not visited yet then exit without subscribing, so stop
+        // also ends the wait. The counter covers a failure that has been
+        // published but whose stop has not yet been observed.
+        while (atomicLoad!(MemoryOrder.acq)(gHostSubscribed) < plan_.workers
+            && !pool_.stopRequested
+            && atomicLoad!(MemoryOrder.acq)(gHostStartFailed) == 0)
             Thread.yield();
-        if (pool_.stopRequested)
+        if (pool_.stopRequested || atomicLoad(gHostStartFailed) != 0)
         {
             auto failures = stopConsumers();
+            if (failures.length == 0 && atomicLoad(gHostStartFailed) != 0)
+                failures ~= new FarmHostException(format(
+                    "FarmHost worker could not subscribe (%s)",
+                    atomicLoad(gHostSubscribeResult)));
             throw new FarmHostFailed("FarmHost: workers failed to start: " ~ messages(failures), failures);
         }
         if (options.idle == WorkerIdle.spin)
@@ -1015,6 +1063,8 @@ private:
         if (!claimed_) return;
         gHostFarm = null;
         atomicStore(gHostSubscribed, 0u);
+        atomicStore(gHostStartFailed, 0u);
+        atomicStore(gHostSubscribeResult, 0);
         claimed_ = false;
         atomicStore!(MemoryOrder.rel)(gHostClaimed, false);
     }
