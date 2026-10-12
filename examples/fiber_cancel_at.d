@@ -47,8 +47,7 @@ void main(string[] args)
     hostOptions.workers = args.length > 1 ? to!uint(args[1]) : 0;
     hostOptions.waitTimeout = 30.seconds; // example policy: a stuck drain fails instead of hanging
     auto host = new FarmHost(hostOptions);
-    scope (exit) host.close();
-    scope (failure) host.abandon();
+    scope (exit) host.closeOrAbandon();
     // The domain's timers, triggers and flush run in every host step; its
     // tasks run on the host's consumers.
     auto domain = new FiberDomain(host.farm);

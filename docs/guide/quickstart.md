@@ -27,7 +27,10 @@ the Windows commands.
 `main` built a `FarmHost` (`threadpool.host`): one Farm, the calling thread's
 producer token, and, for a nonzero argument, pinned pool workers in one LLC.
 It created the actor runtime through the host, waited for each reply with
-`host.waitUntil`, and `scope (exit) host.close()` ran the shutdown order.
+`host.waitUntil`, and
+`scope (exit) host.closeOrAbandon();` ran the shutdown order. If `close()`
+throws because work is undrained, `closeOrAbandon()` stops the consumers before
+the error propagates.
 Underneath, an `AntFarm` is a fixed-memory work distributor, not a thread pool.
 Three things cooperate:
 

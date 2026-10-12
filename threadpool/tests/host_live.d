@@ -437,31 +437,79 @@ void useAfterClose()
     writeln("PASS 5.10: use after close throws FarmHostException; close/abandon are no-ops");
 }
 
-// The documented pairing: on an exception with live work, abandon runs first
-// and the close that follows does nothing, so the process can exit.
+// The teardown guard abandons when close refuses undrained work, both
+// during application failure and during ordinary scope exit.
 void failurePairing()
 {
-    auto before = liveOsMask();
-    FarmHost escaped;
-    try
+    foreach (applicationFailure; [false, true])
     {
-        auto host = new FarmHost(guarded(2));
-        scope (exit) host.close();
-        scope (failure) host.abandon();
-        escaped = host;
-        auto runtime = host.createRuntime(1);
-        auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
-        enforce(owner.valid, "live actor");
-        throw new Exception("host-test: application failure");
+        auto before = liveOsMask();
+        FarmHost escaped;
+        bool refused;
+        try
+        {
+            auto host = new FarmHost(guarded(2));
+            scope (exit) host.closeOrAbandon();
+            escaped = host;
+            auto runtime = host.createRuntime(1);
+            auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
+            enforce(owner.valid, "live actor");
+            if (applicationFailure)
+                throw new Exception("host-test: application failure");
+        }
+        catch (Exception e)
+        {
+            bool foundApplicationFailure;
+            for (Throwable error = e; error !is null; error = error.next)
+            {
+                refused |= error.msg.canFind("not drained: runtime#0 live=1");
+                foundApplicationFailure |= error.msg == "host-test: application failure";
+            }
+            enforce(refused && foundApplicationFailure == applicationFailure,
+                "close refusal and any application failure propagate");
+        }
+        enforce(refused, "undrained close throws");
+        enforce(escaped.state == HostState.abandoned, "abandoned");
+        enforce(liveOsMask() == before, "affinity restored");
+        escaped.close();
+        auto next = new FarmHost(guarded(2)); // claim released
+        next.close();
     }
-    catch (Exception e)
-        enforce(e.msg == "host-test: application failure" && e.next is null, "the original exception alone");
-    enforce(escaped.state == HostState.abandoned, "abandoned");
-    enforce(liveOsMask() == before, "affinity restored");
-    escaped.close();
-    auto next = new FarmHost(guarded(2)); // claim released
-    next.close();
-    writeln("PASS 5.11: scope (exit) close + scope (failure) abandon leaves an abandoned host and a free pool");
+    writeln("PASS 5.11: closeOrAbandon preserves errors, restores affinity and frees the pool");
+}
+
+// Re-execute main with a live actor and return normally. A timeout detects
+// non-daemon workers left alive by an incorrectly placed failure guard.
+void undrainedExit()
+{
+    import std.file : thisExePath;
+    import std.process : Config, kill, spawnProcess, tryWait, wait;
+    import std.stdio : File, stdin;
+
+    auto output = File.tmpfile();
+    scope (exit) output.close();
+    auto child = spawnProcess([thisExePath, "--undrained-exit"], stdin, output, output,
+        null, Config.retainStdout | Config.retainStderr);
+    auto result = tryWait(child);
+    immutable deadline = MonoTime.currTime + 10.seconds;
+    while (!result.terminated && MonoTime.currTime < deadline)
+    {
+        Thread.sleep(10.msecs);
+        result = tryWait(child);
+    }
+    if (!result.terminated)
+    {
+        kill(child, 9);
+        wait(child);
+        enforce(false, "main returning with an undrained host hung at exit");
+    }
+    output.seek(0);
+    string diagnostic;
+    foreach (line; output.byLine())
+        diagnostic ~= line;
+    enforce(result.status != 0 && diagnostic.canFind("not drained: runtime#0 live=1"),
+        "undrained main exits with the close error: " ~ diagnostic);
+    writeln("PASS 5.12: main returning undrained exits with an error instead of hanging");
 }
 
 // ---- cases -----------------------------------------------------------------
@@ -547,8 +595,17 @@ bool workersFit()
     return true;
 }
 
-int main()
+int main(string[] args)
 {
+    if (args.length == 2 && args[1] == "--undrained-exit")
+    {
+        auto host = new FarmHost(guarded(2));
+        scope (exit) host.closeOrAbandon();
+        auto runtime = host.createRuntime(1);
+        auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
+        enforce(owner.valid, "live actor");
+        return 0; // close refuses; closeOrAbandon must stop the workers
+    }
     workersZero();
     closeBeforeDrain();
     timeoutThenCancel(0);
@@ -569,5 +626,6 @@ int main()
     startupFailure();
     abandonLive();
     failurePairing();
+    undrainedExit();
     return 0;
 }

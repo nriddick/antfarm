@@ -21,8 +21,10 @@ Every program runs on a [`FarmHost`](../threadpool/source/threadpool/host.d) (`t
 From the repository root, with DMD or LDC. The same command works on Windows
 x64 and Linux x86-64. Pass `0` to consume on the calling thread, or a worker
 count N for N pinned pool workers in one LLC, with the calling thread confined
-beside them. A machine with fewer than N + 1 usable CPUs in one LLC rejects N
-with a `FarmHostPlanException` that explains why:
+beside them. A machine with fewer than N accepted worker CPUs in one LLC
+rejects N with a `FarmHostPlanException` that explains why. Exactly N accepted
+CPUs is allowed. If no free CPU remains for the caller (including SMT siblings),
+it shares worker CPUs and the plan adds a note:
 
 ```text
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=public_service

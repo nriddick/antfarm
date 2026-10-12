@@ -33,8 +33,7 @@ private void patterns(uint workers)
 {
     // One host serves both simulators; declared first, it closes last.
     auto host = new FarmHost(workers);
-    scope (exit) host.close();
-    scope (failure) host.abandon();
+    scope (exit) host.closeOrAbandon();
     auto life = new Life(host, 8, 8);
     scope(exit) life.close();
     life.setCell(2, 3, true);
@@ -111,8 +110,7 @@ void main(string[] args)
     {
         enforce(args.length == 6, "usage: life_headless WORKERS --bench WIDTH HEIGHT GENERATIONS");
         auto host = new FarmHost(workers);
-        scope (exit) host.close();
-        scope (failure) host.abandon();
+        scope (exit) host.closeOrAbandon();
         auto life = new Life(host, to!uint(args[3]), to!uint(args[4]));
         scope(exit) life.close();
         life.randomize(123456);

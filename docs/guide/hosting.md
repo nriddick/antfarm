@@ -9,7 +9,7 @@ around its actors:
 - a progress loop with an opt-in deadline;
 - the documented shutdown order.
 
-A `std.concurrency` port needs three lines of setup and a `scope` pair.
+A `std.concurrency` port needs three lines of setup and a teardown guard.
 The module lives in the threadpool package, which depends on `antfarm`.
 `import threadpool;` does not re-export it.
 
@@ -35,8 +35,7 @@ void add(scope ref ActorBorrow!Counter actor, scope ref ActorContext context)
 void main()
 {
     auto host = new FarmHost(2);    // two pinned workers in one LLC
-    scope (exit) host.close();      // ordered teardown
-    scope (failure) host.abandon(); // on an exception: stop consumers first
+    scope (exit) host.closeOrAbandon();
 
     auto runtime = host.createRuntime(1);
     auto owner = runtime.createActor!(Counter, add)(Counter(0));
@@ -60,11 +59,11 @@ Build it with `-Ithreadpool/source` beside `-I.`, as every program in
 | `receive` | `host.waitUntil(() => node.available)` |
 | join, thread exit | `host.retire(owners...)`, then `close()` |
 
-Declare `scope (exit) host.close();` and then `scope (failure)
-host.abandon();`, in that order. On an exception, `abandon` runs first and
-stops the consumers. The `close` that follows is a no-op. Without the
-pair, an exception with live work leaves the host open. Pool workers are
-non-daemon threads, so a host with workers that is neither closed nor
+Use `scope (exit) host.closeOrAbandon();`.
+The exit guard always tries ordered teardown. If `close()` throws,
+`closeOrAbandon()` stops the consumers with `abandon()` before the error
+propagates. This also covers normal return with undrained work. Pool workers
+are non-daemon threads, so a host with workers that is neither closed nor
 abandoned hangs process exit.
 
 ## Placement

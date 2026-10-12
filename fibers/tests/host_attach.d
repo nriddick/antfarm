@@ -17,8 +17,7 @@ void hostAttachSmoke()
     options.workers = 0;
     options.waitTimeout = 10.seconds;
     auto host = new FarmHost(options);
-    scope (exit) host.close();
-    scope (failure) host.abandon();
+    scope (exit) host.closeOrAbandon();
     auto domain = new FiberDomain(host.farm);
     attachFiberDomain(host, domain);
 

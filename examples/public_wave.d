@@ -48,8 +48,7 @@ void main(string[] args)
     hostOptions.workers = args.length > 1 ? to!uint(args[1]) : 0;
     hostOptions.waitTimeout = 30.seconds; // example policy: a stuck drain fails instead of hanging
     auto host = new FarmHost(hostOptions);
-    scope (exit) host.close();
-    scope (failure) host.abandon();
+    scope (exit) host.closeOrAbandon();
 
     // External selection may span runtimes. The wave requires the same Farm
     // and matching state size/alignment, not one ActorRuntime.

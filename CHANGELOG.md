@@ -136,7 +136,7 @@ release entry at merge.
 - `FarmHost` rules:
   - one host with workers owns the process's pool, so a second one is
     rejected;
-  - write `scope (exit) host.close(); scope (failure) host.abandon();`;
+  - write `scope (exit) host.closeOrAbandon();`;
   - pool workers are non-daemon threads, so a host with workers left open
     hangs process exit.
 - See [docs/guide/hosting.md](docs/guide/hosting.md).
@@ -252,7 +252,9 @@ release entry at merge.
 - X20: the examples no longer ship `ExampleHost` (`examples/example_host.d`);
   they run on `FarmHost`. Their worker argument now means N pinned pool
   workers in one LLC (0 still consumes on the calling thread). A machine with
-  fewer than N + 1 usable CPUs in one LLC gets a `FarmHostPlanException`.
+  fewer than N accepted worker CPUs in one LLC gets a `FarmHostPlanException`.
+  Exactly N accepted CPUs is allowed; when no free CPU remains for the caller
+  (including SMT siblings), it shares worker CPUs and the plan adds a note.
   Build them with `-Ithreadpool/source`.
 
 ## 1.8.0-rc.2

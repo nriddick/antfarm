@@ -49,8 +49,7 @@ void main(string[] args)
     // No wait deadline: the UI steps the host in its frame loop. Declared
     // before the simulator, the host closes after it.
     auto host = new FarmHost(workers);
-    scope (exit) host.close();
-    scope (failure) host.abandon();
+    scope (exit) host.closeOrAbandon();
     auto life = new Life(host, cast(uint) tb_width(), cast(uint) (tb_height() - 2));
     scope(exit) life.close();
     life.randomize(unpredictableSeed);

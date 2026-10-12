@@ -391,15 +391,17 @@ private void hostPoolStopped() nothrow
  + destructor; write
  + ---
  + auto host = new FarmHost(options);
- + scope (exit) host.close();
- + scope (failure) host.abandon();
+ + scope (exit) host.closeOrAbandon();
  + ---
- + in that order, so a failure abandons first (stopping the consumers) and the
- + close that follows is a no-op. Pool workers are non-daemon threads: a host
- + with workers left open (neither closed nor abandoned) hangs process exit.
+ + so a refused close abandons (stopping the consumers) before its exception
+ + propagates, including on normal return with undrained work.
+ + Pool workers are non-daemon threads: a host with workers left open
+ + (neither closed nor abandoned) hangs process exit.
  + While it has workers, a host owns the process's single `CacheAwarePool`; a
  + second host with workers, or one started beside an application pool, is
- + rejected.
+ + rejected. Before concurrent construction or preview calls, complete one
+ + `FarmHost.preview()` call: first topology discovery is an unlocked setup
+ + operation, including for hosts with `workers == 0`.
  +/
 final class FarmHost
 {
@@ -613,6 +615,8 @@ final class FarmHost
     // ---- publication with the control token (+ wake in park mode) ----------
 
     /// `runtime.flush(token, maximum)`, waking parked workers when it wrote.
+    /// After close, publication uses an invalid token and aborts rather than
+    /// throwing `FarmHostException`.
     size_t flush(ActorRuntime* runtime, size_t maximum = 32) @nogc nothrow
     {
         version (assert) assertControl();
@@ -623,6 +627,8 @@ final class FarmHost
 
     /// `park.pump(token)`, waking parked workers when any table (child or
     /// root) was written. Returns the root count, as `pump` does.
+    /// After close, publication uses an invalid token and aborts rather than
+    /// throwing `FarmHostException`.
     size_t pump(Park)(Park* park) @nogc nothrow
     {
         version (assert) assertControl();
@@ -633,7 +639,8 @@ final class FarmHost
 
     /// Publish every actor into `wave`, waking after each accepted prefix and
     /// stepping on backpressure. False if the wave failed (seal it anyway,
-    /// as with `ActorWave.publish`).
+    /// as with `ActorWave.publish`). After close, publication uses an invalid
+    /// token and aborts rather than throwing `FarmHostException`.
     bool publish(alias operation, T)(ref ActorWave wave, scope ActorHandle!T[] actors)
     {
         version (assert) assertControl();
@@ -667,7 +674,8 @@ final class FarmHost
     /// One step: emit every runtime, park and attachment, wake parked workers
     /// if anything was published, then one `consumeNext` on the caller's view
     /// (a yield when it found nothing, or without a view). Never infers idle.
-    /// Throws `FarmHostFailed` if a pool worker failed (state `failed`).
+    /// Throws `FarmHostFailed` if a pool worker failed (state `failed`). The
+    /// caller stays confined until `close()` or `abandon()` restores affinity.
     void step()
     {
         requireOpen("step");
@@ -688,7 +696,8 @@ final class FarmHost
     /// `while (!done()) step();` with the failure check and the opt-in
     /// `waitTimeout` deadline, fresh for this call. `done` runs on the control
     /// thread before every step and may drain `takeOutcome`. Throws
-    /// `FarmHostTimeout` (host still open) or `FarmHostFailed`.
+    /// `FarmHostTimeout` (host still open) or `FarmHostFailed`. After a worker
+    /// failure, caller affinity stays confined until `close()` or `abandon()`.
     void waitUntil(scope bool delegate() done)
     {
         waitUntil(done, plan_.options.waitTimeout);
@@ -833,6 +842,17 @@ final class FarmHost
             throw new FarmHostFailed("FarmHost.close: pool workers failed: " ~ messages(failures), failures);
         if (errors.length)
             throw new FarmHostException("FarmHost.close: " ~ messages(errors), errors[0]);
+    }
+
+    /// Try ordered teardown with `close()`. If it throws, call `abandon()`
+    /// to stop consumers and restore affinity, then rethrow the close error.
+    /// Use `scope (exit) host.closeOrAbandon();` so undrained work cannot
+    /// leave non-daemon workers running when the control thread exits.
+    /// Use `close()` directly when a refused drain should remain retryable.
+    void closeOrAbandon()
+    {
+        scope (failure) abandon();
+        close();
     }
 
     /// Stop consumers, restore the caller's affinity, unregister the control
