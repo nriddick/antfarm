@@ -112,6 +112,15 @@ release entry at merge.
   outcomes into run status. `perftest/offccd_sweep.py` runs and summarizes the
   suites.
 
+### Farm host
+
+- `AntFarm.tryCreate` is `create` without aborting: it returns null and a
+  `FarmCreateError` (`kind`, `osError`, static `detail`) for bad geometry, an
+  invalid `ANTFARM_HUGE_PAGES`, mutex, mapping or allocation failure, after
+  releasing everything it acquired. `AntFarm.checkGeometry` runs the same
+  geometry checks with no side effects (quota sums are now overflow-checked).
+  `create` is unchanged and still aborts, with the same messages.
+
 ### Breaking changes
 
 - X0: `Token` (`antfarm`), `ActorOwner!T` and `ActorErasedOwner` (`actors`),

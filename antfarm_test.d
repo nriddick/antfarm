@@ -324,6 +324,93 @@ void testRingSizeUnits()
     printf("testRingSizeUnits OK\n"); fflush(stdout);
 }
 
+void testCheckGeometry()
+{
+    void rejects(FarmCreateError e, string detail, string what)
+    {
+        check(e.kind == FarmCreateFailure.geometry, what);
+        check(e.detail == detail, what);
+        check(e.osError == 0, what);
+    }
+    enum kMsg = "K must be a power of 2 in [2, KMAX]";
+    enum ringMsg = "ringMiB must be a power of 2 >= 2 (the ring size is in MiB, not ulongs)";
+    enum exmaxMsg = "Exmax exceeds K-1 segments' capacities";
+    check(AntFarm.checkGeometry(8, 8, 4, 2, 0, 16, 4096).kind == FarmCreateFailure.none,
+        "create defaults accepted");
+    check(AntFarm.checkGeometry(8, 8, 4, 2, 0, 16, 4096) == FarmCreateError.init,
+        "accepted geometry is FarmCreateError.init");
+    rejects(AntFarm.checkGeometry(8, 1, 4, 0, 0, 1, 4096), kMsg, "k 1");
+    rejects(AntFarm.checkGeometry(8, 3, 4, 0, 0, 1, 4096), kMsg, "k 3");
+    rejects(AntFarm.checkGeometry(8, KMAX * 2, 4, 0, 0, 1, 4096), kMsg, "k > KMAX");
+    rejects(AntFarm.checkGeometry(1, 8, 4, 0, 0, 1, 4096), ringMsg, "ringMiB below minimum");
+    rejects(AntFarm.checkGeometry(6, 8, 4, 0, 0, 1, 4096), ringMsg, "ringMiB not a power of 2");
+    rejects(AntFarm.checkGeometry(MAX_RING_MIB * 2, 8, 4, 0, 0, 1, 4096),
+        "ringMiB exceeds MAX_RING_MIB (the ring size is in MiB, not ulongs)", "ringMiB above maximum");
+    // "segment capacity too small" is subsumed: MIN_RING_MIB with KMAX
+    // segments still gives 2^14 ulongs per segment.
+    check(AntFarm.checkGeometry(MIN_RING_MIB, KMAX, 1, 0, 0, 1, 64).kind == FarmCreateFailure.none,
+        "smallest ring with KMAX segments");
+    rejects(AntFarm.checkGeometry(8, 8, 0, 0, 0, 1, 4096), "expected consumers must be > 0", "consumers 0");
+    rejects(AntFarm.checkGeometry(8, 8, 4, 0, 0, 1, 0), "small quota must be > 0", "small quota 0");
+    rejects(AntFarm.checkGeometry(8, 8, 4, 0, 0, 0, 4096), "no producer capacity configured", "no producers");
+    // 2 MiB, K 8: segCap 32768 ulongs, so Exmax may be at most 7 * 32768.
+    check(AntFarm.checkGeometry(2, 8, 1, 0, 0, 1, 7 * 32768).kind == FarmCreateFailure.none,
+        "Exmax at (K-1)*segCap");
+    rejects(AntFarm.checkGeometry(2, 8, 1, 0, 0, 1, 7 * 32768 + 1), exmaxMsg, "Exmax above (K-1)*segCap");
+    rejects(AntFarm.checkGeometry(2, 8, 1, 1, 0, 1, 6 * 32768 + 1), exmaxMsg,
+        "auto bulk quota (segCap) counts toward Exmax");
+    // "quota exceeds Exmax" needs a wrapped Exmax; overflow is rejected first.
+    rejects(AntFarm.checkGeometry(8, 8, 4, 0, 0, uint.max, ulong.max), exmaxMsg, "small product overflow");
+    rejects(AntFarm.checkGeometry(8, 8, 4, 2, ulong.max / 2 + 1, 0, 0), exmaxMsg, "bulk product overflow");
+    rejects(AntFarm.checkGeometry(8, 8, 4, 1, ulong.max, 1, 1), exmaxMsg, "quota sum overflow");
+    rejects(AntFarm.checkGeometry(8, 8, 4, uint.max, 1, 1, 1), exmaxMsg,
+        "producer count sum does not wrap to zero");
+    // Disabled tiers are normalized before validation.
+    check(AntFarm.checkGeometry(8, 8, 4, 0, ulong.max, 1, 4096).kind == FarmCreateFailure.none,
+        "disabled bulk quota ignored");
+    check(AntFarm.checkGeometry(8, 8, 4, 1, 0, 0, ulong.max).kind == FarmCreateFailure.none,
+        "disabled small quota ignored");
+    printf("testCheckGeometry OK\n"); fflush(stdout);
+}
+
+void testTryCreate()
+{
+    FarmCreateError error;
+    check(AntFarm.tryCreate(8, 3, 4, 0, 0, 1, 4096, DEFAULT_SMALL_TABLE_THRESHOLD, false, &error) is null,
+        "tryCreate rejects K 3");
+    check(error.kind == FarmCreateFailure.geometry, "tryCreate geometry kind");
+    check(error.detail == "K must be a power of 2 in [2, KMAX]", "tryCreate geometry detail");
+    check(AntFarm.tryCreate(8, 8, 0) is null, "tryCreate without an error pointer");
+
+    version (Posix)
+    {
+        import core.stdc.stdlib : getenv;
+        import core.sys.posix.stdlib : setenv, unsetenv;
+        import std.string : fromStringz, toStringz;
+        auto saved = getenv("ANTFARM_HUGE_PAGES");
+        immutable savedValue = saved is null ? null : fromStringz(saved).idup;
+        setenv("ANTFARM_HUGE_PAGES", "bogus", 1);
+        auto bogus = AntFarm.tryCreate(2, 8, 1, 0, 0, 1, 4096,
+            DEFAULT_SMALL_TABLE_THRESHOLD, false, &error);
+        if (savedValue is null) unsetenv("ANTFARM_HUGE_PAGES");
+        else setenv("ANTFARM_HUGE_PAGES", savedValue.toStringz, 1);
+        check(bogus is null, "tryCreate rejects ANTFARM_HUGE_PAGES=bogus");
+        check(error.kind == FarmCreateFailure.hugePagesSetting, "hugePagesSetting kind");
+        check(error.detail == "ANTFARM_HUGE_PAGES must be 0 or 1", "hugePagesSetting detail");
+    }
+
+    auto f = AntFarm.tryCreate(2, 8, 1, 0, 0, 1, 4096, DEFAULT_SMALL_TABLE_THRESHOLD, false, &error);
+    check(f !is null, "tryCreate success");
+    check(error == FarmCreateError.init, "tryCreate success clears the error");
+    check(f.Ln == 2UL << ULONGS_PER_MIB_SHIFT && f.maxSmall == 1 && f.quotaSmall == 4096,
+        "tryCreate geometry");
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "tryCreate Farm registers a producer");
+    f.unregisterProducer(tok);
+    f.destroy();
+    printf("testTryCreate OK\n"); fflush(stdout);
+}
+
 void testArithmetic()
 {
     check(sqcsOf(1) == 1, "sqcsOf(1)");
@@ -4072,6 +4159,8 @@ void main(string[] args)
     }
     testMagicWrap();
     testRingSizeUnits();
+    testCheckGeometry();
+    testTryCreate();
     testArithmetic();
     testSweptQuotaBalance();
     testProducerLifecycleChurn();
