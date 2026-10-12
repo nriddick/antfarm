@@ -120,8 +120,9 @@ release entry at merge.
   - it creates runtimes and parks (`createRuntime`, `createPark`) and drives
     them from `step` / `waitUntil`;
   - `waitUntil` takes an opt-in deadline (`waitTimeout`);
-  - `close()` runs the documented shutdown order, and `abandon()` is the
-    escape hatch.
+  - `close()` runs the documented shutdown order, `abandon()` is the
+    escape hatch, and `closeOrAbandon()` is the scope-exit form (it
+    abandons when `close()` throws, including an undrained normal return).
 - `FarmHost` defaults:
   - workers come from one LLC (`HostGroups.span` is the labelled cross-group
     opt-in), with `skipSmtSiblings` on;
@@ -148,7 +149,9 @@ release entry at merge.
   invalid `ANTFARM_HUGE_PAGES`, mutex, mapping or allocation failure, after
   releasing everything it acquired. `AntFarm.checkGeometry` runs the same
   geometry checks with no side effects (quota sums are now overflow-checked).
-  `create` is unchanged and still aborts, with the same messages.
+  `create` keeps its checks and messages, and now also aborts when a
+  quota sum or product overflows (those arguments used to wrap and could
+  be accepted).
 - `ActorRuntime.quiescent` is true exactly when `destroy` would not abort (no
   live actor, nothing queued, including the internal ready words).
 - `PrivateRootPark.pumpCounted` returns `PrivatePumpCount` (`roots`, as `pump`
@@ -256,6 +259,9 @@ release entry at merge.
   Exactly N accepted CPUs is allowed; when no free CPU remains for the caller
   (including SMT siblings), it shares worker CPUs and the plan adds a note.
   Build them with `-Ithreadpool/source`.
+- X21: `AntFarm.create` aborts when a quota sum or product overflows.
+  Those arguments used to wrap and could be accepted. `tryCreate` reports
+  the same overflow as a geometry error instead of aborting.
 
 ## 1.8.0-rc.2
 

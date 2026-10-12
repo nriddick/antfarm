@@ -100,7 +100,7 @@ reached with `import antfarm;`, `import antfarm_templates;`,
 | Options and placement plan | `FarmHost`, `FarmHost.preview`, `FarmHostOptions`, `FarmHostPlan`, `FarmHostPlan.summary`, `HostParticipants`, `HostGroups`, `CallerPlacement`, `WorkerIdle`, `FarmSizing`, `autoWorkers`, `defaultHostPoolOptions` | [hosting.md](../guide/hosting.md#placement) |
 | Progress, waits and publication | `FarmHost.step`, `FarmHost.waitUntil`, `FarmHost.token`, `FarmHost.flush`, `FarmHost.pump`, `FarmHost.publish`, `FarmHost.wake` | [hosting.md](../guide/hosting.md#progress-and-waking) |
 | Host-owned infrastructure | `FarmHost.createRuntime`, `FarmHost.createPark`, `FarmHost.attach`, `HostAttachment`, `FarmHost.registerProducer`, `FarmHost.unregisterProducer` | [hosting.md](../guide/hosting.md#setup) |
-| Retirement, teardown and failures | `FarmHost.retire`, `FarmHost.close`, `FarmHost.abandon`, `HostState`, `FarmHostException`, `FarmHostPlanException`, `FarmHostTimeout`, `FarmHostFailed` | [hosting.md](../guide/hosting.md#teardown) |
+| Retirement, teardown and failures | `FarmHost.retire`, `FarmHost.close`, `FarmHost.closeOrAbandon`, `FarmHost.abandon`, `HostState`, `FarmHostException`, `FarmHostPlanException`, `FarmHostTimeout`, `FarmHostFailed` | [hosting.md](../guide/hosting.md#teardown) |
 
 ## Contracts
 
