@@ -849,9 +849,22 @@ final class FarmHost
     /// Use `scope (exit) host.closeOrAbandon();` so undrained work cannot
     /// leave non-daemon workers running when the control thread exits.
     /// Use `close()` directly when a refused drain should remain retryable.
+    ///
+    /// The abandon-on-failure path is cleanup-only (`scope(success)` /
+    /// `scope(exit)`). Do not use `scope(failure)` or `catch` here. Under
+    /// LDC -O1 and above, a catch that runs while an exception is already
+    /// unwinding (this function called from a `scope(exit)` guard, `close()`
+    /// throwing because work is undrained) is skipped. The host would stay
+    /// open and its non-daemon workers would hang process exit. This form
+    /// still abandons, and the close error still chains onto the in-flight
+    /// exception.
     void closeOrAbandon()
     {
-        scope (failure) abandon();
+        // closed is set only when close() returns. scope(exit) then abandons
+        // on every other exit, including a throw from close() during unwind.
+        bool closed;
+        scope (success) closed = true;
+        scope (exit) if (!closed) abandon();
         close();
     }
 
