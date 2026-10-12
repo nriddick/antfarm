@@ -482,12 +482,24 @@ void failurePairing()
 // non-daemon workers left alive by an incorrectly placed failure guard.
 void undrainedExit()
 {
-    import std.file : thisExePath;
-    import std.process : Config, kill, spawnProcess, tryWait, wait;
+    import std.file : remove, tempDir, thisExePath;
+    import std.format : format;
+    import std.path : buildPath;
+    import std.process : Config, kill, spawnProcess, thisProcessID, tryWait, wait;
     import std.stdio : File, stdin;
 
-    auto output = File.tmpfile();
-    scope (exit) output.close();
+    // Not File.tmpfile(): the MSVC CRT creates that in the drive root and
+    // can fail for a non-elevated user. A file under tempDir() is portable.
+    static uint childSeq;
+    auto path = buildPath(tempDir(),
+        format("antfarm-host-live-%s-%s.log", thisProcessID, childSeq++));
+    auto output = File(path, "w+");
+    scope (exit)
+    {
+        output.close();
+        try remove(path);
+        catch (Exception) {}
+    }
     auto child = spawnProcess([thisExePath, "--undrained-exit"], stdin, output, output,
         null, Config.retainStdout | Config.retainStderr);
     auto result = tryWait(child);

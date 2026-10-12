@@ -69,8 +69,13 @@ abandoned hangs process exit.
 ## Placement
 
 `FarmHost.preview(options)` returns the `FarmHostPlan` that the constructor
-will execute. It changes nothing. `plan.summary()` prints it in one line, and
-`plan.notes` lists every compromise. The defaults are:
+will execute. It changes nothing, but it does warm topology and OS-scope
+discovery, including when it throws `FarmHostPlanException`. Call it once
+before concurrent construction or preview: that first discovery is an
+unlocked setup operation. On Linux a racing first call is benign; on
+Windows it can spuriously refuse the caller with `outsideOsScope`.
+`plan.summary()` prints the plan in one line, and `plan.notes` lists every
+compromise. The defaults are:
 
 - **One physical group.** Workers come from the accepted LLC with the most
   accepted CPUs. The host never spills into another group: asking for more
@@ -129,6 +134,8 @@ the host stays open with its consumers running. Escalate, for example with
 or `abandon()`. A worker failure, such as an `assert` in a callback in a debug
 build, surfaces as `FarmHostFailed` from the next `step` or `waitUntil`. The
 host is then `failed`, and only `close()` (which acts as `abandon()`) remains.
+After `FarmHostFailed`, the caller stays confined until `close()` or
+`abandon()` restores affinity.
 
 ## Teardown
 

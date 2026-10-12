@@ -217,8 +217,10 @@ version (Windows)
             CloseHandle(section);
             return v1;
         }
+        // Capture GetLastError before CloseHandle, which may overwrite it.
+        auto failed = mapFailedWin(error, "antfarm: MapViewOfFileEx large-page dual map failed");
         CloseHandle(section);
-        return mapFailedWin(error, "antfarm: MapViewOfFileEx large-page dual map failed");
+        return failed;
     }
 }
 
@@ -333,16 +335,23 @@ private void* mapMagicBuffer(size_t bytes, bool hugePages, ref FarmCreateError e
 
         auto v1 = pMapViewOfFile3(section, null, p, 0, bytes,
             MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, null, 0);
+        if (v1 is null)
+        {
+            // Capture before the second map or CloseHandle overwrites it.
+            mapFailedWin(error, "antfarm: MapViewOfFile3 dual map failed");
+            CloseHandle(section);
+            VirtualFree(p, 0, MEM_RELEASE);
+            VirtualFree(cast(char*) p + bytes, 0, MEM_RELEASE);
+            return null;
+        }
         auto v2 = pMapViewOfFile3(section, null, cast(char*) p + bytes, 0, bytes,
             MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, null, 0);
-        if (v1 is null || v2 is null)
+        if (v2 is null)
         {
             mapFailedWin(error, "antfarm: MapViewOfFile3 dual map failed");
             CloseHandle(section);
-            if (v1 !is null) UnmapViewOfFile(v1);
-            else VirtualFree(p, 0, MEM_RELEASE);
-            if (v2 !is null) UnmapViewOfFile(v2);
-            else VirtualFree(cast(char*) p + bytes, 0, MEM_RELEASE);
+            UnmapViewOfFile(v1);
+            VirtualFree(cast(char*) p + bytes, 0, MEM_RELEASE);
             return null;
         }
         CloseHandle(section);

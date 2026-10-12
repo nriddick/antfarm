@@ -428,13 +428,16 @@ private void hostStop(WorkerSelf*) @nogc nothrow
  + second host with workers, or one started beside an application pool, is
  + rejected. Before concurrent construction or preview calls, complete one
  + `FarmHost.preview()` call: first topology discovery is an unlocked setup
- + operation, including for hosts with `workers == 0`.
+ + operation, including for hosts with `workers == 0`. `preview()` warms
+ + that discovery even when it throws `FarmHostPlanException`.
  +/
 final class FarmHost
 {
     /// What the constructor will do with `options`: discovers topology and
     /// the frozen OS scope (a threadpool setup operation), then plans as the
-    /// overload below. Throws `FarmHostPlanException`.
+    /// overload below. Throws `FarmHostPlanException`. A throwing preview
+    /// still completes discovery, so it warms the cache for a later
+    /// constructor or a SKIP probe such as `workersFit()`.
     static FarmHostPlan preview(const FarmHostOptions options = FarmHostOptions.init)
     {
         const snap = CacheAwarePool.topology();
@@ -720,6 +723,8 @@ final class FarmHost
     void step()
     {
         requireOpen("step");
+        if (!token_.valid)
+            throw new FarmHostException("control token was moved out of host.token");
         size_t published;
         foreach (ref o; owned_)
             published += o.emit(token_);

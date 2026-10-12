@@ -255,7 +255,8 @@ release entry at merge.
 - X20: the examples no longer ship `ExampleHost` (`examples/example_host.d`);
   they run on `FarmHost`. Their worker argument now means N pinned pool
   workers in one LLC (0 still consumes on the calling thread). A machine with
-  fewer than N accepted worker CPUs in one LLC gets a `FarmHostPlanException`.
+  fewer than N accepted worker CPUs (one per core by default:
+  `skipSmtSiblings`) in one LLC gets a `FarmHostPlanException`.
   Exactly N accepted CPUs is allowed; when no free CPU remains for the caller
   (including SMT siblings), it shares worker CPUs and the plan adds a note.
   Build them with `-Ithreadpool/source`.
