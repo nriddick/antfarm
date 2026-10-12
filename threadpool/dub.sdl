@@ -21,7 +21,8 @@ configuration "library" {
 configuration "unittest" {
 	targetType "executable"
 	mainSourceFile "tests/unittest_main.d"
-	sourceFiles "tests/topology_parse.d" "tests/linux_topology_parse.d" "tests/resolution.d"
+	sourceFiles "tests/topology_parse.d" "tests/linux_topology_parse.d" "tests/resolution.d" \
+		"tests/synthetic_topology.d" "tests/host_plan.d"
 	stringImportPaths "tests"
 }
 
