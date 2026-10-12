@@ -13,12 +13,19 @@
  +/
 module threadpool.host;
 
-import core.time : Duration, msecs;
+import core.atomic : MemoryOrder, atomicLoad, atomicOp, atomicStore, cas;
+import core.thread : Thread;
+import core.time : Duration, MonoTime, msecs;
 
-import antfarm : AntFarm, FarmCreateError, FarmCreateFailure,
-    DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT;
+import actors : ActorAllocator, ActorHandle, ActorReclaimResult, ActorRetireMode,
+    ActorRetireResult, ActorRuntime, ActorWave, PrivateRootOptions, PrivateRootPark,
+    PrivateRootReclamation;
+import antfarm : AntFarm, ConsumerView, FarmCreateError, FarmCreateFailure, Tier, Token,
+    DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, SUBSCRIBE_RETRY;
+import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
 import threadpool.os_scope : OsScope, OsScopeSource, osScope;
-import threadpool.pool : CacheAwarePool, PoolOptions;
+import threadpool.pin : PinOutcome, ThreadAffinity, confineCallingThread, restoreCallingThread;
+import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.resolution : PoolResolution, Reject, reasonsText, resolvePool;
 import threadpool.topology : ProcessorId, TopologySnapshot, formatCpuList;
 
@@ -288,7 +295,80 @@ class FarmHostFailed : FarmHostException
     }
 }
 
-/// One Farm, its control token and its consumers. See the module header.
+/// Lifecycle of a `FarmHost`. Non-exhaustive: do not `final switch` on it.
+enum HostState : ubyte
+{
+    open,      /// running: consumers live, every method usable
+    failed,    /// a pool worker failed; only close()/abandon() remain
+    closed,    /// close() completed the ordered teardown
+    abandoned, /// abandon() stopped the consumers and leaked the rest
+}
+
+/// One emitter or service attached to the host Farm, driven by `step()`.
+struct HostAttachment
+{
+    string name; /// for reports
+    /// Run by step() on the control thread with the host token. Returns items
+    /// published (drives the park-mode wake). May throw; the host stays open.
+    size_t delegate(ref Token token) emit;
+    /// close() precondition. Null = always drained.
+    bool delegate() drained;
+    /// After consumers stop, before runtimes/parks/Farm are destroyed. May be null.
+    void delegate() finish;
+}
+
+// Worker hooks: CacheAwarePool takes context-free function pointers, so the
+// host's worker state is process-global, owned by whichever host holds
+// gHostClaimed (taken before any of the others is written).
+private shared bool gHostClaimed;
+private __gshared AntFarm* gHostFarm;
+private shared uint gHostSubscribed;
+private ConsumerView tHostView; // TLS: one cursor per worker
+
+private void hostStart(WorkerSelf*)
+{
+    import std.format : format;
+
+    long result;
+    do result = tHostView.subscribe(gHostFarm);
+    while (result == SUBSCRIBE_RETRY);
+    if (result < 0)
+        throw new FarmHostException(format("FarmHost worker could not subscribe (%s)", result));
+    atomicOp!"+="(gHostSubscribed, 1u);
+}
+
+// The entire worker hot path.
+private ManagedPumpResult hostPump(WorkerSelf*)
+{
+    return tHostView.consumeNext() ? ManagedPumpResult.again() : ManagedPumpResult.idle();
+}
+
+private void hostStop(WorkerSelf*)
+{
+    tHostView.unsubscribe();
+}
+
+private void hostPoolStopped() nothrow
+{
+    gHostFarm = null; // every worker has joined
+}
+
+/++
+ + One Farm, its control token and its consumers: N pinned pool workers on
+ + one LLC by default, or the calling thread alone (`workers == 0`).
+ +
+ + The constructing thread is the control thread. Work advances only while it
+ + is in `step`/`waitUntil` (or an extra-token holder flushes): the host has
+ + no background emitter. Control-thread methods are checked by `assert` in
+ + debug builds. `plan`, `farm`, `state` and `wake` may be called from any
+ + thread while the host is open; `wake` must not race `close()`/`abandon()`.
+ +
+ + Runtimes and parks from `createRuntime`/`createPark` belong to the host and
+ + are destroyed by `close()`, after the consumer join. Write
+ + `scope (exit) host.close();`: there is no destructor. While it has workers,
+ + a host owns the process's single `CacheAwarePool`; a second host with
+ + workers, or one started beside an application pool, is rejected.
+ +/
 final class FarmHost
 {
     /// What the constructor will do with `options`: discovers topology and
@@ -308,6 +388,584 @@ final class FarmHost
         const FarmHostOptions options)
     {
         return planFor(snap, scope_, options);
+    }
+
+    /// Plan, create the Farm, register the control token, start and subscribe
+    /// workers, place the caller. All or nothing: on any throw, everything
+    /// created so far is undone in reverse order. Throws
+    /// `FarmHostPlanException` (nothing created), `FarmHostFailed` (a worker
+    /// failed to start) or `FarmHostException`.
+    this(FarmHostOptions options = FarmHostOptions.init)
+    {
+        import std.format : format;
+
+        director_ = Director.init;
+        plan_ = preview(options);
+        version (assert) control_ = Thread.getThis();
+        parkMode_ = plan_.workers != 0 && options.idle == WorkerIdle.park;
+        scope (failure) undoConstruction();
+
+        FarmCreateError error;
+        const f = options.farm;
+        farm_ = AntFarm.tryCreate(f.ringMiB, f.k, plan_.expectedConsumers, plan_.maxBulk,
+            f.quotaBulk, plan_.maxSmall, f.quotaSmall, f.smallThreshold, f.hugePages, &error);
+        if (farm_ is null)
+            throw new FarmHostException(format("FarmHost: Farm creation failed (%s%s): %s [%s]",
+                error.kind, error.osError ? format(", os error %s", error.osError) : "",
+                error.detail, plan_.summary()));
+        token_ = farm_.registerProducer(Tier.small);
+        if (!token_.valid)
+            throw new FarmHostException("FarmHost: control token registration failed");
+        if (plan_.callerConsumes)
+        {
+            long result;
+            do result = view_.subscribe(farm_);
+            while (result == SUBSCRIBE_RETRY);
+            if (result < 0)
+                throw new FarmHostException(format("FarmHost: caller view could not subscribe (%s)", result));
+            viewSubscribed_ = true;
+        }
+        if (plan_.workers != 0)
+            startWorkers(options);
+        if (plan_.caller != CallerPlacement.unchanged)
+        {
+            immutable outcome = confineCallingThread(plan_.callerCpus, previousAffinity_);
+            affinityChanged_ = previousAffinity_.captured;
+            if (outcome != PinOutcome.pinned)
+                throw new FarmHostException(format("FarmHost: caller %s to {%s} failed: %s [%s]",
+                    plan_.caller, formatCpuList(plan_.callerCpus), outcome, plan_.summary()));
+        }
+        atomicStore!(MemoryOrder.rel)(state_, HostState.open);
+    }
+
+    /// Default options with `workers` set.
+    this(uint workers)
+    {
+        FarmHostOptions options;
+        options.workers = workers;
+        this(options);
+    }
+
+    // ---- inspection --------------------------------------------------------
+
+    /// The plan this host was built from. Any thread.
+    @property const(FarmHostPlan) plan() const @nogc nothrow
+    {
+        return plan_;
+    }
+
+    /// The host Farm, fixed for the host's life. Any thread.
+    @property AntFarm* farm() @nogc nothrow
+    {
+        return farm_;
+    }
+
+    /// Current lifecycle state (an acquire load). Any thread.
+    @property HostState state() const @nogc nothrow
+    {
+        return atomicLoad!(MemoryOrder.acq)(state_);
+    }
+
+    // ---- control-thread token ---------------------------------------------
+
+    /// The host-owned control token. Pass it by ref
+    /// (`runtime.flush(host.token)`); do not `move` it out. Publications
+    /// through it skip the park-mode wake: they are picked up within
+    /// `idleTimeout`, or call `wake()`.
+    @property ref Token token() return @nogc nothrow
+    {
+        return token_;
+    }
+
+    /// An extra producer, counted against `FarmSizing.extraSmallProducers`
+    /// or `bulkProducers`. Move-only; return it with `unregisterProducer`
+    /// before `close()`. Throws when the tier's planned slots are used up.
+    Token registerProducer(Tier tier = Tier.small)
+    {
+        import std.format : format;
+
+        requireOpen("registerProducer");
+        immutable planned = tier == Tier.small
+            ? plan_.options.farm.extraSmallProducers : plan_.options.farm.bulkProducers;
+        auto outstanding = tier == Tier.small ? &extraSmall_ : &extraBulk_;
+        if (*outstanding >= planned)
+            throw new FarmHostException(format("FarmHost.registerProducer: all %s planned %s "
+                ~ "producer slots are in use (FarmSizing)", planned, tier));
+        auto result = farm_.registerProducer(tier);
+        if (!result.valid)
+            throw new FarmHostException(format("FarmHost.registerProducer: %s registration failed", tier));
+        ++*outstanding;
+        return result;
+    }
+
+    /// Return a token from `registerProducer`. Throws on an invalid token.
+    void unregisterProducer(ref Token token)
+    {
+        requireOpen("unregisterProducer");
+        if (!token.valid)
+            throw new FarmHostException("FarmHost.unregisterProducer: invalid token");
+        immutable tier = token.tier;
+        farm_.unregisterProducer(token);
+        if (tier == Tier.small) --extraSmall_;
+        else --extraBulk_;
+    }
+
+    // ---- host-owned infrastructure ------------------------------------------
+
+    /// An `ActorRuntime` on the host Farm, flushed by `step()` and destroyed
+    /// by `close()` after the consumer join. The pointer is borrowed: never
+    /// destroy it yourself.
+    ActorRuntime* createRuntime(size_t capacity,
+        ActorAllocator allocator = ActorAllocator.cRuntime())
+    {
+        import std.format : format;
+
+        requireOpen("createRuntime");
+        auto runtime = ActorRuntime.create(farm_, capacity, allocator);
+        if (runtime is null)
+            throw new FarmHostException(format("FarmHost.createRuntime(%s): invalid capacity "
+                ~ "or allocation failure", capacity));
+        immutable name = format("runtime#%s", runtimes_++);
+        owned_ ~= Owned(
+            (ref Token token) {
+                size_t total;
+                foreach (_; 0 .. flushRounds)
+                {
+                    immutable n = runtime.flush(token);
+                    total += n;
+                    if (n == 0) break;
+                }
+                return total;
+            },
+            () => runtime.quiescent ? null
+                : format("%s live=%s ready=%s", name, runtime.live, runtime.ready),
+            () { runtime.destroy(); });
+        return runtime;
+    }
+
+    /// A `PrivateRootPark` on the host Farm, pumped by `step()` and destroyed
+    /// by `close()` after the consumer join. The pointer is borrowed. The
+    /// host never calls `takeOutcome`: drain tracked outcomes in a
+    /// `waitUntil` predicate. Throws on `batchLimit == 0` or allocation failure.
+    PrivateRootPark!(T, step, reclamation)* createPark(T, alias step,
+        PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)(
+        size_t capacity, PrivateRootOptions options = PrivateRootOptions.init)
+    {
+        import std.format : format;
+
+        requireOpen("createPark");
+        if (options.batchLimit == 0)
+            throw new FarmHostException("FarmHost.createPark: batchLimit must be > 0");
+        auto park = PrivateRootPark!(T, step, reclamation).create(farm_, capacity, options);
+        if (park is null)
+            throw new FarmHostException(format("FarmHost.createPark(%s): invalid capacity "
+                ~ "or allocation failure", capacity));
+        immutable name = format("park#%s", parks_++);
+        immutable tracked = options.tracking;
+        owned_ ~= Owned(
+            (ref Token token) => park.pumpCounted(token).tables,
+            () => park.live == 0 ? null
+                : format("%s live=%s%s", name, park.live, tracked ? " (tracked: drain takeOutcome)" : ""),
+            () { park.destroy(); },
+            true);
+        return park;
+    }
+
+    /// Drive `attachment` from every `step()`; see `HostAttachment`.
+    void attach(HostAttachment attachment)
+    {
+        requireOpen("attach");
+        attachments_ ~= attachment;
+    }
+
+    // ---- publication with the control token (+ wake in park mode) ----------
+
+    /// `runtime.flush(token, maximum)`, waking parked workers when it wrote.
+    size_t flush(ActorRuntime* runtime, size_t maximum = 32) @nogc nothrow
+    {
+        version (assert) assertControl();
+        immutable n = runtime.flush(token_, maximum);
+        if (n != 0 && parkMode_) pool_.wakeAll();
+        return n;
+    }
+
+    /// `park.pump(token)`, waking parked workers when any table (child or
+    /// root) was written. Returns the root count, as `pump` does.
+    size_t pump(Park)(Park* park) @nogc nothrow
+    {
+        version (assert) assertControl();
+        immutable count = park.pumpCounted(token_);
+        if (count.tables != 0 && parkMode_) pool_.wakeAll();
+        return count.roots;
+    }
+
+    /// Publish every actor into `wave`, waking after each accepted prefix and
+    /// stepping on backpressure. False if the wave failed (seal it anyway,
+    /// as with `ActorWave.publish`).
+    bool publish(alias operation, T)(ref ActorWave wave, scope ActorHandle!T[] actors)
+    {
+        version (assert) assertControl();
+        size_t offset;
+        while (offset < actors.length)
+        {
+            immutable written = wave.publish!operation(actors[offset .. $], token_);
+            if (written != 0)
+            {
+                offset += written;
+                if (parkMode_) pool_.wakeAll();
+                continue;
+            }
+            if (wave.handle.failed) return false;
+            step();
+        }
+        return true;
+    }
+
+    /// Wake parked workers. Any thread while the host is open; must not race
+    /// `close()`/`abandon()`. No-op without workers, in spin mode, or once
+    /// the host is not open.
+    void wake() @nogc nothrow
+    {
+        if (parkMode_ && atomicLoad!(MemoryOrder.acq)(state_) == HostState.open)
+            pool_.wakeAll();
+    }
+
+    // ---- progress -----------------------------------------------------------
+
+    /// One step: emit every runtime, park and attachment, wake parked workers
+    /// if anything was published, then one `consumeNext` on the caller's view
+    /// (a yield when it found nothing, or without a view). Never infers idle.
+    /// Throws `FarmHostFailed` if a pool worker failed (state `failed`).
+    void step()
+    {
+        requireOpen("step");
+        size_t published;
+        foreach (ref o; owned_)
+            published += o.emit(token_);
+        foreach (ref a; attachments_)
+            if (a.emit !is null)
+                published += a.emit(token_);
+        if (published != 0 && parkMode_)
+            pool_.wakeAll();
+        if (poolRunning_ && pool_.stopRequested)
+            failed();
+        if (!viewSubscribed_ || !view_.consumeNext())
+            Thread.yield();
+    }
+
+    /// `while (!done()) step();` with the failure check and the opt-in
+    /// `waitTimeout` deadline, fresh for this call. `done` runs on the control
+    /// thread before every step and may drain `takeOutcome`. Throws
+    /// `FarmHostTimeout` (host still open) or `FarmHostFailed`.
+    void waitUntil(scope bool delegate() done)
+    {
+        waitUntil(done, plan_.options.waitTimeout);
+    }
+
+    /// ditto, with an explicit deadline for this call (`Duration.max` = none).
+    void waitUntil(scope bool delegate() done, Duration timeout)
+    {
+        import std.format : format;
+
+        requireOpen("waitUntil");
+        immutable bounded = timeout != Duration.max;
+        immutable deadline = bounded ? MonoTime.currTime + timeout : MonoTime.max;
+        while (!done())
+        {
+            if (poolRunning_ && pool_.stopRequested)
+                failed();
+            if (bounded && MonoTime.currTime >= deadline)
+                throw new FarmHostTimeout(format("FarmHost.waitUntil: not done after %s; the host "
+                    ~ "is still open (escalate, wait again, or abandon)", timeout), timeout);
+            step();
+        }
+    }
+
+    /// Request retirement of every owner (drain mode), wait until all are
+    /// retired, then reclaim all. Senders must be quiescent. Throws
+    /// `FarmHostException` naming the owner index and result on a rejected
+    /// request or a failed reclaim (`busy`: a wave still holds the owner;
+    /// wait for its `completion.finished` first).
+    void retire(Owners...)(ref Owners owners)
+    {
+        retire(ActorRetireMode.drain, owners);
+    }
+
+    /// ditto, in `mode`.
+    void retire(Owners...)(ActorRetireMode mode, ref Owners owners)
+    {
+        import std.format : format;
+
+        requireOpen("retire");
+        foreach (i, ref owner; owners)
+        {
+            immutable result = owner.requestRetire(mode);
+            if (result != ActorRetireResult.requested && result != ActorRetireResult.alreadyRetired)
+                throw new FarmHostException(format("FarmHost.retire: owner %s: request %s", i, result));
+        }
+        waitUntil(() {
+            foreach (ref owner; owners)
+                if (!owner.retired) return false;
+            return true;
+        });
+        foreach (i, ref owner; owners)
+        {
+            immutable result = owner.reclaim();
+            if (result != ActorReclaimResult.reclaimed)
+                throw new FarmHostException(format("FarmHost.retire: owner %s: reclaim %s", i, result));
+        }
+    }
+
+    // ---- advanced -----------------------------------------------------------
+
+    /// The pool; null when `workers == 0`. Do not call start/shutdown on it.
+    @property CacheAwarePool pool()
+    {
+        return pool_;
+    }
+
+    /// The pool's single Director, held for the host's life (cadence, labels,
+    /// idle policy). Empty when `workers == 0`. Lend it; do not `move` it out.
+    @property ref Director director() return
+    {
+        return director_;
+    }
+
+    // ---- teardown -----------------------------------------------------------
+
+    /// Ordered teardown: stop consumers, finish attachments, destroy parks and
+    /// runtimes, restore the caller's affinity, unregister the token, destroy
+    /// the Farm. Throws `FarmHostException` with no side effects when anything
+    /// is not drained (the host stays open and usable). After a worker failure
+    /// (state `failed`) it acts like `abandon()` and does not throw again.
+    /// Errors in later cleanup stages are rethrown after every stage ran.
+    void close()
+    {
+        import std.array : join;
+        import std.format : format;
+
+        if (state == HostState.failed)
+        {
+            abandon();
+            return;
+        }
+        requireOpen("close");
+        string[] offenders;
+        bool hasParks;
+        foreach (ref o; owned_)
+        {
+            hasParks |= o.park;
+            if (auto why = o.busy())
+                offenders ~= why;
+        }
+        foreach (ref a; attachments_)
+            if (a.drained !is null && !a.drained())
+                offenders ~= a.name ~ " not drained";
+        if (extraSmall_ + extraBulk_ != 0)
+            offenders ~= format("%s extra producer token%s outstanding (unregisterProducer first)",
+                extraSmall_ + extraBulk_, extraSmall_ + extraBulk_ == 1 ? "" : "s");
+        if (!token_.valid)
+            offenders ~= "the control token was moved out of host.token";
+        if (offenders.length)
+            throw new FarmHostException("FarmHost.close: not drained: " ~ offenders.join("; ")
+                ~ (hasParks ? "; join every thread that may call requestCancel before close" : ""));
+
+        auto failures = stopConsumers();
+        Throwable[] errors;
+        foreach_reverse (ref a; attachments_)
+            if (a.finish !is null)
+            {
+                try a.finish();
+                catch (Exception e) errors ~= e;
+            }
+        foreach_reverse (ref o; owned_)
+            o.destroy();
+        owned_ = null;
+        attachments_ = null;
+        if (affinityChanged_ && !restoreCallingThread(previousAffinity_))
+            errors ~= new FarmHostException("FarmHost.close: the caller's affinity could not be restored");
+        affinityChanged_ = false;
+        farm_.unregisterProducer(token_);
+        farm_.destroy();
+        farm_ = null;
+        releaseClaim();
+        atomicStore!(MemoryOrder.rel)(state_, HostState.closed);
+        if (failures.length)
+            throw new FarmHostFailed("FarmHost.close: pool workers failed: " ~ messages(failures), failures);
+        if (errors.length)
+            throw new FarmHostException("FarmHost.close: " ~ messages(errors), errors[0]);
+    }
+
+    /// Stop consumers, restore the caller's affinity, unregister the control
+    /// token, and leak every runtime, park, attachment and the Farm. For a
+    /// drain that will never finish. External views must already be
+    /// unsubscribed. A no-op once closed or abandoned.
+    void abandon()
+    {
+        version (assert) assertControl();
+        immutable current = state;
+        if (current == HostState.closed || current == HostState.abandoned)
+            return;
+        cast(void) stopConsumers();
+        if (affinityChanged_)
+            cast(void) restoreCallingThread(previousAffinity_);
+        affinityChanged_ = false;
+        if (token_.valid)
+            farm_.unregisterProducer(token_);
+        releaseClaim();
+        atomicStore!(MemoryOrder.rel)(state_, HostState.abandoned);
+    }
+
+private:
+    enum flushRounds = 4;
+
+    struct Owned
+    {
+        size_t delegate(ref Token) emit;
+        string delegate() busy; // null when destroy would not abort
+        void delegate() destroy;
+        bool park;
+    }
+
+    FarmHostPlan plan_;
+    AntFarm* farm_;
+    Token token_;
+    ConsumerView view_;
+    bool viewSubscribed_;
+    CacheAwarePool pool_;
+    Director director_;
+    bool claimed_, poolRunning_, parkMode_, affinityChanged_;
+    ThreadAffinity previousAffinity_;
+    shared HostState state_;
+    Owned[] owned_;
+    HostAttachment[] attachments_;
+    uint runtimes_, parks_, extraSmall_, extraBulk_;
+    version (assert) Thread control_;
+
+    version (assert) void assertControl() @nogc nothrow
+    {
+        assert(Thread.getThis() is control_, "FarmHost: control-thread method called from another thread");
+    }
+
+    void requireOpen(string what)
+    {
+        version (assert) assertControl();
+        immutable current = state;
+        if (current == HostState.failed)
+            throw new FarmHostException("FarmHost." ~ what ~ ": host failed: a pool worker failed; "
+                ~ "only close() or abandon() remain");
+        if (current != HostState.open)
+            throw new FarmHostException("FarmHost." ~ what ~ ": host is " ~ stateText(current));
+    }
+
+    void startWorkers(FarmHostOptions options)
+    {
+        if (!cas(&gHostClaimed, false, true))
+            throw new FarmHostException("FarmHost: another FarmHost owns the pool [" ~ plan_.summary() ~ "]");
+        claimed_ = true;
+        gHostFarm = farm_;
+        atomicStore(gHostSubscribed, 0u);
+
+        auto poolOptions = options.pool;
+        poolOptions.processors = plan_.workerSelection.workers.dup;
+        poolOptions.managedWorker = ManagedWorkerHooks(&hostStart, &hostPump, &hostStop, &hostPoolStopped);
+        auto pool = new CacheAwarePool(poolOptions);
+        try
+            pool.start();
+        catch (Exception e)
+            throw new FarmHostException("FarmHost: pool start failed: " ~ e.msg
+                ~ " [" ~ plan_.summary() ~ "]", e);
+        // Only a pool this constructor started is ever shut down.
+        pool_ = pool;
+        poolRunning_ = true;
+        director_ = pool_.director();
+        if (!plan_.workerSelection.sameSelection(pool_.resolution))
+            throw new FarmHostException("FarmHost: started workers {" ~ formatCpuList(pool_.resolution.workers)
+                ~ "} differ from the plan [" ~ plan_.summary() ~ "]");
+        // A failing start or pump stops the pool; later workers then exit
+        // before their start hook, so stop also ends the wait.
+        while (atomicLoad!(MemoryOrder.acq)(gHostSubscribed) < plan_.workers && !pool_.stopRequested)
+            Thread.yield();
+        if (pool_.stopRequested)
+        {
+            auto failures = stopConsumers();
+            throw new FarmHostFailed("FarmHost: workers failed to start: " ~ messages(failures), failures);
+        }
+        if (options.idle == WorkerIdle.spin)
+            director_.spin();
+        else if (options.idleTimeout == Duration.max)
+            director_.wait();
+        else
+            director_.sleep(options.idleTimeout);
+    }
+
+    /// Join the workers (if this host's pool still runs) and unsubscribe the
+    /// caller view. Returns the pool's worker failures.
+    Throwable[] stopConsumers()
+    {
+        Throwable[] failures;
+        if (poolRunning_)
+        {
+            director_ = Director.init; // releases the director flag before shutdown
+            pool_.shutdown();
+            poolRunning_ = false;
+            failures = pool_.workerFailures();
+        }
+        if (viewSubscribed_)
+        {
+            view_.unsubscribe();
+            viewSubscribed_ = false;
+        }
+        return failures;
+    }
+
+    void releaseClaim()
+    {
+        if (!claimed_) return;
+        gHostFarm = null;
+        atomicStore(gHostSubscribed, 0u);
+        claimed_ = false;
+        atomicStore!(MemoryOrder.rel)(gHostClaimed, false);
+    }
+
+    void failed()
+    {
+        auto failures = stopConsumers();
+        atomicStore!(MemoryOrder.rel)(state_, HostState.failed);
+        throw new FarmHostFailed("FarmHost: pool workers failed: " ~ messages(failures), failures);
+    }
+
+    // Constructor unwinding, strictly in reverse.
+    void undoConstruction()
+    {
+        if (affinityChanged_)
+            cast(void) restoreCallingThread(previousAffinity_);
+        affinityChanged_ = false;
+        cast(void) stopConsumers();
+        releaseClaim();
+        if (farm_ !is null)
+        {
+            if (token_.valid)
+                farm_.unregisterProducer(token_);
+            farm_.destroy();
+            farm_ = null;
+        }
+        atomicStore!(MemoryOrder.rel)(state_, HostState.closed);
+    }
+
+    static string stateText(HostState s)
+    {
+        import std.conv : to;
+
+        return s.to!string;
+    }
+
+    static string messages(const(Throwable)[] errors)
+    {
+        string s;
+        foreach (i, e; errors)
+            s ~= (i ? "; " : "") ~ e.msg;
+        return s.length ? s : "(no failure recorded)";
     }
 }
 
