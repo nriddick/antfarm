@@ -164,6 +164,13 @@ release entry at merge.
 - X16 follow-up: `FiberTask.backend` is now `FiberTask.domain`; the remaining
   locals, parameters and test fields holding a `FiberDomain` follow it, and
   `FiberJoinStatus.wrongBackend` becomes `wrongDomain`.
+- X17: `assembleSnapshot` takes a new required last parameter,
+  `const(GroupingSource)[] sourceOfLlc` (one entry per LLC); each `LlcDomain`
+  records it and `TopologySnapshot.groupingSource` is the weakest. Callers
+  that build snapshots by hand pass `GroupingSource.l3` per group.
+- X18: `TimerSet.insert` returns `bool` (true when the new entry became the
+  earliest deadline) instead of `void`; a responder arming an earlier timer
+  uses it to wake the domain's other responders.
 
 ## 1.8.0-rc.2
 
