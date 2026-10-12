@@ -16,7 +16,7 @@ which runs DMD's Ddoc generator into the ignored `.build/docs/` directory
 Windows included, with the raw command:
 
 ```sh
-dmd -D -Dd.build\docs -o- -version=AntfarmMimallocV3 -I. antfarm.d antfarm_templates.d actors\package.d actors\actor.d actors\wave.d actors\private_actor.d actors\mimalloc.d
+dmd -D -Dd.build\docs -o- -version=AntfarmMimallocV3 -I. -Ithreadpool\source antfarm.d antfarm_templates.d actors\package.d actors\actor.d actors\wave.d actors\private_actor.d actors\mimalloc.d threadpool\source\threadpool\host.d
 ```
 
 Ddoc omits declarations that carry no doc comment, so the generated pages
@@ -24,14 +24,14 @@ cover every public declaration of the runtime modules. `make check-docs`
 verifies that: every symbol named in the Symbol column of the table on this
 page exists in the DMD declaration inventory, and every public declaration
 in those modules carries a non-empty Ddoc comment. The public surface is
-reached with `import antfarm;`, `import antfarm_templates;`, or
-`import actors;`.
+reached with `import antfarm;`, `import antfarm_templates;`,
+`import actors;`, or `import threadpool.host;`.
 
 ## Farm
 
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Ring construction, tuning and destruction | `AntFarm.create`, `AntFarm.destroy`, `MIN_RING_MIB`, `MAX_RING_MIB`, `ringMiBFromUlongs` | [ARCHITECTURE.md](../../ARCHITECTURE.md#sizing-one-farm) |
+| Ring construction, tuning and destruction | `AntFarm.create`, `AntFarm.tryCreate`, `AntFarm.checkGeometry`, `FarmCreateError`, `FarmCreateFailure`, `AntFarm.destroy`, `MIN_RING_MIB`, `MAX_RING_MIB`, `ringMiBFromUlongs` | [ARCHITECTURE.md](../../ARCHITECTURE.md#sizing-one-farm) |
 | Producer tickets and registration | `Token`, `Token.valid`, `Tier`, `AntFarm.registerProducer`, `AntFarm.unregisterProducer`, `SUBSCRIBE_FULL`, `SUBSCRIBE_RETRY`, `SUBSCRIBE_INVALID` | [actor-lifecycle.md](actor-lifecycle.md#tokens-and-farm-provenance) |
 | Writing payload tables | `AntFarm.write`, `AntFarm.writeTracked`, `PayloadEntry` | [actor-lifecycle.md](actor-lifecycle.md) |
 | Payload layout and callbacks | `PayloadBody`, `Callback`, `PayloadHeader`, `TableCompletionCallback`, `TableCompletionHook` | [SPEC.md](../../SPEC.md), [README First payload](../../README.md#first-payload) |
@@ -44,7 +44,7 @@ reached with `import antfarm;`, `import antfarm_templates;`, or
 
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Runtime and slot capacity | `ActorRuntime.create`, `ActorRuntime.capacity`, `ActorRuntime.live`, `ActorRuntime.ready`, `ActorRuntime.flush`, `ActorRuntime.destroy`, `ActorRuntime.erasedAdapter` | [public-actors.md](../guide/public-actors.md) |
+| Runtime and slot capacity | `ActorRuntime.create`, `ActorRuntime.capacity`, `ActorRuntime.live`, `ActorRuntime.ready`, `ActorRuntime.quiescent`, `ActorRuntime.flush`, `ActorRuntime.destroy`, `ActorRuntime.erasedAdapter` | [public-actors.md](../guide/public-actors.md) |
 | Ownership and identity | `ActorOwner`, `ActorOwner.handle`, `ActorOwner.intoErased`, `ActorHandle` | [public-actors.md](../guide/public-actors.md) |
 | Callback borrow and context | `ActorBorrow`, `ActorContext`, `ActorContext.popInbox` | [design/public-actor-ordering.md](../design/public-actor-ordering.md) |
 | Inbox nodes and outcomes | `ActorInboxNode`, `ActorInboxNode.initialize`, `ActorInboxNode.payloadAs`, `ActorInboxNode.complete`, `ActorInboxNode.fail`, `ActorInboxNode.cancel`, `ActorInboxNode.completeAndWake`, `ActorInboxNode.failAndWake`, `ActorInboxNode.cancelAndWake`, `ActorNodeOutcome` | [public-actors.md](../guide/public-actors.md#inbox) |
@@ -64,7 +64,7 @@ reached with `import antfarm;`, `import antfarm_templates;`, or
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
 | Root park and options | `PrivateRootPark`, `PrivateRootOptions`, `defaultPrivateBatchLimit`, `PrivateRootReclamation` | [private-actors.md](../guide/private-actors.md) |
-| Root scheduling | `PrivateRootPark.spawn`, `PrivateRootPark.collectCompleted`, `PrivateRootPark.pump`, `PrivateRootPark.live`, `PrivateRootPark.destroy` | [private-actors.md](../guide/private-actors.md) |
+| Root scheduling | `PrivateRootPark.spawn`, `PrivateRootPark.collectCompleted`, `PrivateRootPark.pump`, `PrivateRootPark.pumpCounted`, `PrivatePumpCount`, `PrivateRootPark.live`, `PrivateRootPark.destroy` | [private-actors.md](../guide/private-actors.md) |
 | Root dispositions | `PrivateRootDisposition` | [private-actors.md](../guide/private-actors.md#the-cohort-api) |
 | Child cohort park | `PrivateChildPark`, `PrivateCohortOptions`, `PrivateStateStorage` | [private-results-and-waits.md](../guide/private-results-and-waits.md) |
 | Cohort waves and results | `PrivateChildPark.spawn`, `PrivateChildPark.start`, `PrivateChildPark.startSubset`, `PrivateChildPark.startFinal`, `PrivateChildPark.finished`, `PrivateChildPark.outcome`, `PrivateChildPark.results`, `PrivateChildPark.subsetMembers`, `PrivateWaveOutcome` | [private-results-and-waits.md](../guide/private-results-and-waits.md) |
@@ -92,6 +92,15 @@ reached with `import antfarm;`, `import antfarm_templates;`, or
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
 | Function adaptation | `payloadEntry`, `payloadEntryRuntime`, `callbackFor`, `initPayloadHeader`, `payloadRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [README First payload](../../README.md#first-payload) |
+
+## Farm host
+
+| Topic | Symbols | Explanation |
+| --- | --- | --- |
+| Options and placement plan | `FarmHost`, `FarmHost.preview`, `FarmHostOptions`, `FarmHostPlan`, `FarmHostPlan.summary`, `HostParticipants`, `HostGroups`, `CallerPlacement`, `WorkerIdle`, `FarmSizing`, `autoWorkers`, `defaultHostPoolOptions` | [hosting.md](../guide/hosting.md#placement) |
+| Progress, waits and publication | `FarmHost.step`, `FarmHost.waitUntil`, `FarmHost.token`, `FarmHost.flush`, `FarmHost.pump`, `FarmHost.publish`, `FarmHost.wake` | [hosting.md](../guide/hosting.md#progress-and-waking) |
+| Host-owned infrastructure | `FarmHost.createRuntime`, `FarmHost.createPark`, `FarmHost.attach`, `HostAttachment`, `FarmHost.registerProducer`, `FarmHost.unregisterProducer` | [hosting.md](../guide/hosting.md#setup) |
+| Retirement, teardown and failures | `FarmHost.retire`, `FarmHost.close`, `FarmHost.abandon`, `HostState`, `FarmHostException`, `FarmHostPlanException`, `FarmHostTimeout`, `FarmHostFailed` | [hosting.md](../guide/hosting.md#teardown) |
 
 ## Contracts
 

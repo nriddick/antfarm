@@ -114,6 +114,35 @@ release entry at merge.
 
 ### Farm host
 
+- `threadpool.host.FarmHost` hosts actors with no hand-written pool code:
+  - it owns one Farm, the constructing thread's producer `Token`, and N pinned
+    `CacheAwarePool` workers, each consuming through its own `ConsumerView`;
+  - it creates runtimes and parks (`createRuntime`, `createPark`) and drives
+    them from `step` / `waitUntil`;
+  - `waitUntil` takes an opt-in deadline (`waitTimeout`);
+  - `close()` runs the documented shutdown order, and `abandon()` is the
+    escape hatch.
+- `FarmHost` defaults:
+  - workers come from one LLC (`HostGroups.span` is the labelled cross-group
+    opt-in), with `skipSmtSiblings` on;
+  - the caller is confined to the home group's free CPUs and restored on
+    close;
+  - idle workers park with a 1 ms timeout, and the host's publication
+    wrappers wake them;
+  - there is no wait deadline.
+- `FarmHost.preview` returns the `FarmHostPlan` (workers, caller CPUs,
+  participants, sizing, notes) without starting anything. Plan problems throw
+  `FarmHostPlanException` instead of aborting.
+- `FarmHost` rules:
+  - one host with workers owns the process's pool, so a second one is
+    rejected;
+  - write `scope (exit) host.close(); scope (failure) host.abandon();`;
+  - pool workers are non-daemon threads, so a host with workers left open
+    hangs process exit.
+- See [docs/guide/hosting.md](docs/guide/hosting.md).
+- `antfarm_fibers.host.attachFiberDomain(host, domain)` drives a caller-owned
+  `FiberDomain` from the host's steps. It gates `close()` on `domain.drained`
+  and releases completions after the consumer join.
 - `AntFarm.tryCreate` is `create` without aborting: it returns null and a
   `FarmCreateError` (`kind`, `osError`, static `detail`) for bad geometry, an
   invalid `ANTFARM_HUGE_PAGES`, mutex, mapping or allocation failure, after
@@ -129,7 +158,6 @@ release entry at merge.
   failure stopped this running pool. `threadpool.pin.confineCallingThread`
   restricts the calling thread to a CPU set and captures its previous
   affinity in a `ThreadAffinity`; `restoreCallingThread` puts it back.
-- The threadpool dub package now depends on `antfarm` (packaging only so far).
 
 ### Breaking changes
 
@@ -218,6 +246,14 @@ release entry at merge.
 - X18: `TimerSet.insert` returns `bool` (true when the new entry became the
   earliest deadline) instead of `void`; a responder arming an earlier timer
   uses it to wake the domain's other responders.
+- X19: the threadpool dub package now depends on the `antfarm` package (for
+  `threadpool.host`). `import threadpool;` does not re-export the host and
+  stays independent of actors.
+- X20: the examples no longer ship `ExampleHost` (`examples/example_host.d`);
+  they run on `FarmHost`. Their worker argument now means N pinned pool
+  workers in one LLC (0 still consumes on the calling thread). A machine with
+  fewer than N + 1 usable CPUs in one LLC gets a `FarmHostPlanException`.
+  Build them with `-Ithreadpool/source`.
 
 ## 1.8.0-rc.2
 

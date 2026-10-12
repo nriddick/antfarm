@@ -41,6 +41,7 @@ COVERAGE_MODULES = [
     "actors/actor.d",
     "actors/wave.d",
     "actors/private_actor.d",
+    "threadpool/source/threadpool/host.d",
 ]
 
 # Everything compiled for the inventory; the index may name symbols here.
@@ -67,7 +68,8 @@ def compile_inventory(scratch):
             "check-api-docs: dmd not found on PATH; "
             "install DMD to run the API doc check")
     arguments = ["-c", "-o-", "-D", "-Dd.", "-X", "-Xf=api.json",
-                 "-version=AntfarmMimallocV3", "-I" + str(ROOT)]
+                 "-version=AntfarmMimallocV3", "-I" + str(ROOT),
+                 "-I" + str(ROOT / "threadpool/source")]
     arguments += [str(ROOT / m) for m in INDEX_MODULES]
     try:
         result = subprocess.run(["dmd"] + arguments, cwd=scratch,
@@ -166,10 +168,14 @@ def is_public(member, protections=None):
 
 def is_required(member, protections=None):
     name = member.get("name", "")
+    # A type whose fields have destructors gets a compiler-generated `~this`
+    # alias with no source line; there is nothing to document.
+    generated_dtor = name == "~this" and "line" not in member
     return (is_public(member, protections)
             and member.get("kind") in DOCUMENTED_KINDS
             and member.get("kind") not in SKIPPED_KINDS
-            and not name.startswith("__"))
+            and not name.startswith("__")
+            and not generated_dtor)
 
 
 def is_documented(member):
