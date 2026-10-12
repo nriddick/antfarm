@@ -21,7 +21,7 @@ import actors : ActorAllocator, ActorHandle, ActorReclaimResult, ActorRetireMode
     ActorRetireResult, ActorRuntime, ActorWave, PrivateRootOptions, PrivateRootPark,
     PrivateRootReclamation;
 import antfarm : AntFarm, ConsumerView, FarmCreateError, FarmCreateFailure, Tier, Token,
-    DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, SUBSCRIBE_RETRY;
+    DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, SUBSCRIBE_RETRY, fatal;
 import threadpool.hybrid : ManagedWorkerHooks, WorkerSelf, gWorkers;
 import threadpool.worker : requestStop;
 import threadpool.os_scope : OsScope, OsScopeSource, osScope;
@@ -642,10 +642,12 @@ final class FarmHost
     // ---- publication with the control token (+ wake in park mode) ----------
 
     /// `runtime.flush(token, maximum)`, waking parked workers when it wrote.
-    /// After close, publication uses an invalid token and aborts rather than
-    /// throwing `FarmHostException`.
+    /// After `close()` or `abandon()` these abort rather than throwing
+    /// `FarmHostException`.
     size_t flush(ActorRuntime* runtime, size_t maximum = 32) @nogc nothrow
     {
+        if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
+            fatal("FarmHost.flush after close/abandon");
         version (assert) assertControl();
         immutable n = runtime.flush(token_, maximum);
         if (n != 0 && parkMode_) pool_.wakeAll();
@@ -654,10 +656,12 @@ final class FarmHost
 
     /// `park.pump(token)`, waking parked workers when any table (child or
     /// root) was written. Returns the root count, as `pump` does.
-    /// After close, publication uses an invalid token and aborts rather than
-    /// throwing `FarmHostException`.
+    /// After `close()` or `abandon()` these abort rather than throwing
+    /// `FarmHostException`.
     size_t pump(Park)(Park* park) @nogc nothrow
     {
+        if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
+            fatal("FarmHost.pump after close/abandon");
         version (assert) assertControl();
         immutable count = park.pumpCounted(token_);
         if (count.tables != 0 && parkMode_) pool_.wakeAll();
@@ -666,10 +670,12 @@ final class FarmHost
 
     /// Publish every actor into `wave`, waking after each accepted prefix and
     /// stepping on backpressure. False if the wave failed (seal it anyway,
-    /// as with `ActorWave.publish`). After close, publication uses an invalid
-    /// token and aborts rather than throwing `FarmHostException`.
+    /// as with `ActorWave.publish`). After `close()` or `abandon()` these
+    /// abort rather than throwing `FarmHostException`.
     bool publish(alias operation, T)(ref ActorWave wave, scope ActorHandle!T[] actors)
     {
+        if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
+            fatal("FarmHost.publish after close/abandon");
         version (assert) assertControl();
         size_t offset;
         while (offset < actors.length)
