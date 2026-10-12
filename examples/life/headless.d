@@ -2,6 +2,7 @@ module life.headless;
 
 import life.backend;
 import actors : PrivateOutcomeStatus;
+import threadpool.host : FarmHost;
 import std.conv : to;
 import std.exception : enforce;
 import std.stdio : writefln, writeln;
@@ -30,7 +31,11 @@ private ubyte[] reference(const(ubyte)[] input, uint width, uint height)
 
 private void patterns(uint workers)
 {
-    auto life = new Life(8, 8, workers);
+    // One host serves both simulators; declared first, it closes last.
+    auto host = new FarmHost(workers);
+    scope (exit) host.close();
+    scope (failure) host.abandon();
+    auto life = new Life(host, 8, 8);
     scope(exit) life.close();
     life.setCell(2, 3, true);
     life.setCell(3, 3, true);
@@ -86,7 +91,7 @@ private void patterns(uint workers)
     enforce(life.current == before && life.generation == generation, "zero-generation request");
 
     // Degenerate tori count the eight wrapped neighbour positions separately.
-    auto tiny = new Life(1, 2, workers);
+    auto tiny = new Life(host, 1, 2);
     scope(exit) tiny.close();
     tiny.setCell(0, 0, true);
     auto small = tiny.current.dup;
@@ -105,12 +110,16 @@ void main(string[] args)
     if (args.length > 2 && args[2] == "--bench")
     {
         enforce(args.length == 6, "usage: life_headless WORKERS --bench WIDTH HEIGHT GENERATIONS");
-        auto life = new Life(to!uint(args[3]), to!uint(args[4]), workers);
+        auto host = new FarmHost(workers);
+        scope (exit) host.close();
+        scope (failure) host.abandon();
+        auto life = new Life(host, to!uint(args[3]), to!uint(args[4]));
         scope(exit) life.close();
         life.randomize(123456);
         life.step(to!ulong(args[5]));
-        writefln("workers=%s generations=%s gen/s=%.3f cells/s=%.3f", workers,
-            life.generation, life.generationsPerSecond, life.cellsPerSecond);
+        writefln("workers=%s generations=%s gen/s=%.3f cells/s=%.3f; %s", workers,
+            life.generation, life.generationsPerSecond, life.cellsPerSecond,
+            host.plan.summary());
     }
     else patterns(workers);
 }

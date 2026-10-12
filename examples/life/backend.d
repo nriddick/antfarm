@@ -2,7 +2,7 @@ module life.backend;
 
 import antfarm;
 import actors;
-import example_host;
+import threadpool.host : FarmHost;
 import core.time : MonoTime;
 import std.exception : enforce;
 import std.random : Random, uniform;
@@ -88,12 +88,12 @@ private PrivateRootDisposition runWave(scope ref PrivateBorrow!Run actor,
 }
 
 // Each request owns one cohort. App-owned buffers outlive all cohorts and
-// remain rooted by this simulator until the tracked root has drained.
+// remain rooted by this simulator until the tracked root has drained. The
+// host is borrowed and may serve several simulators; it owns the park.
 final class Life
 {
     private Board* board;
-    private ExampleHost host;
-    private Token token;
+    private FarmHost host_;
     private PrivateRootPark!(Run, runWave)* park;
     private PrivateRootHandle root;
     private MonoTime started;
@@ -101,28 +101,24 @@ final class Life
     private double elapsed;
     private ulong timedGenerations;
     private bool running;
-    immutable uint workers;
     PrivateOutcomeStatus lastStatus;
 
-    this(uint width, uint height, uint workerCount = 0)
+    this(FarmHost host, uint width, uint height)
     {
         enforce(width > 0 && height > 0
             && cast(ulong) width * height <= uint.max, "invalid Life board dimensions");
-        workers = workerCount;
+        host_ = host;
         board = new Board;
         board.width = width;
         board.height = height;
         foreach (ref projection; board.projections)
             projection = new ubyte[cast(size_t) width * height];
-        host = new ExampleHost(workers);
-        token = host.farm.registerProducer(Tier.small);
-        if (!token.valid) fatal("Life producer registration failed");
         PrivateRootOptions options;
         options.tracking = true;
-        park = PrivateRootPark!(Run, runWave).create(host.farm, 1, options);
-        if (park is null) fatal("Life root park allocation failed");
+        park = host.createPark!(Run, runWave)(1, options);
     }
 
+    @property FarmHost host() { return host_; }
     @property bool busy() const { return running; }
     @property uint width() const { return board.width; }
     @property uint height() const { return board.height; }
@@ -149,7 +145,6 @@ final class Life
     {
         enforce(park !is null && !running, "Life request requires an idle simulator");
         if (generations == 0) return;
-        host.resetDeadline();
         started = MonoTime.currTime;
         initialGeneration = board.generation;
         if (park.spawn(Run(board, generations), root) != PrivateSpawnResult.spawned)
@@ -157,12 +152,12 @@ final class Life
         running = true;
     }
 
-    // UI thread pumps and takes outcomes; workers only run callbacks.
+    // The UI thread steps the host (which pumps) and takes outcomes; workers
+    // only run callbacks.
     void progress()
     {
         if (!running) return;
-        park.pump(token);
-        host.progress();
+        host_.step();
         PrivateRootOutcome outcome;
         if (park.takeOutcome(outcome))
         {
@@ -210,17 +205,14 @@ final class Life
             cell = cast(ubyte) uniform(0, 2, random);
     }
 
+    // Cancel and drain, including takeOutcome. Destroys nothing: the host's
+    // close() stops the consumers and then destroys the park. Buffers remain
+    // alive throughout.
     void close()
     {
         if (park is null) return;
         cancel();
         while (busy) progress();
-        // Drain includes takeOutcome, then join/unsubscribe, destroy park,
-        // unregister producer, destroy Farm. Buffers remain alive throughout.
-        host.stopConsumers();
-        park.destroy();
         park = null;
-        host.farm.unregisterProducer(token);
-        host.farm.destroy();
     }
 }

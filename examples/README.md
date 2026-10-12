@@ -111,13 +111,14 @@ ANTFARM_HUGE_PAGES=0 examples/.build/life 2
 make -C examples life DC=dmd
 
 # Portable headless tests (also usable on Windows):
-dmd -g -i -I. -Iexamples examples/life/headless.d -of=life_headless
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/life/headless.d -of=life_headless
 ANTFARM_HUGE_PAGES=0 ./life_headless 0
 ANTFARM_HUGE_PAGES=0 ./life_headless 2
 ```
 
-The optional argument is the worker count (default 2). Zero consumes on the UI
-thread. Live cells appear as `#`; the cursor marks the editing position. The
+The optional argument is the number of pinned pool workers (default 2), all in
+one LLC with the UI thread confined beside them. Zero consumes on the UI thread.
+`life_headless` defaults to 0, and its two simulators share one `FarmHost`. Live cells appear as `#`; the cursor marks the editing position. The
 status shows generation, measured gen/s, cells/s, worker count, pause state and
 target speed. Target speed is capped by actual simulation/rendering throughput.
 
@@ -142,9 +143,10 @@ cost. Quit uses the tracked root's cooperative `requestCancel`; an incomplete
 cancelled wave is discarded rather than promoted to the current projection.
 
 Shutdown follows the [lifecycle recipe](../docs/reference/actor-lifecycle.md#shutdown-order):
-pump, run consumers and take outcomes until drained; join/unsubscribe consumers;
-destroy the root park; unregister the producer; destroy the Farm. The simulator
-keeps its buffers alive throughout. The terminal is restored on normal exit and
+`Life.close` cancels and drains (pump, run consumers, take outcomes); the shared
+`FarmHost`'s `close` then joins the consumers, destroys the root parks,
+unregisters the producer and destroys the Farm. The simulator keeps its buffers
+alive throughout. The terminal is restored on normal exit and
 D exceptions. Runtime `fatal` aborts and externally forced termination cannot
 run D scope cleanup; if needed, recover the terminal with `stty sane` / `reset`.
 
@@ -161,7 +163,9 @@ unpinned, noisy host; focused checks were also compiling during measurement.
 Timing includes cohort creation, the waves and terminal root collection, but
 excludes Farm/worker startup and randomization. Standard deviation is the sample
 standard deviation across those nine runs. These are observations, not a
-performance gate or a comparison with a tiled implementation.
+performance gate or a comparison with a tiled implementation. They were taken
+with the former unpinned example host and have not been re-measured on
+`FarmHost` (pinned workers in one LLC).
 
 | Workers | Gen/s median | Gen/s min–max | Gen/s stddev | Cells/s median | Cells/s min–max | Cells/s stddev |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -172,7 +176,7 @@ performance gate or a comparison with a tiled implementation.
 Reproduce one run from the repository root:
 
 ```text
-ldc2 -O2 -release -i -I. -Iexamples examples/life/headless.d -of=examples/.build/life_bench
+ldc2 -O2 -release -i -I. -Iexamples -Ithreadpool/source examples/life/headless.d -of=examples/.build/life_bench
 ANTFARM_HUGE_PAGES=0 examples/.build/life_bench 2 --bench 256 256 200
 ```
 

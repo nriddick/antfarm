@@ -56,7 +56,7 @@ def compile_termbox():
 
 
 def compile_life_tui(compiler, flags, suffix, shim):
-    cmd = [compiler, *flags, "-i", "-I.", "-Iexamples",
+    cmd = [compiler, *flags, "-i", *includes,
            "examples/life/tui.d", str(shim), f"-of={build / ('life' + suffix)}"]
     print("==>", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=root, check=True)
