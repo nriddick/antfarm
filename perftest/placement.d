@@ -8,6 +8,7 @@ import std.algorithm.sorting : sort;
 import std.algorithm.iteration : uniq;
 import std.array : array;
 import std.conv : to;
+import std.json : JSONValue;
 import std.exception : enforce;
 import core.stdc.stdio : printf;
 
@@ -105,6 +106,40 @@ struct RolePlan
     PlacedThread controller;
 }
 
+/// Eligible SMT primaries of physical group `llc` in `(group, lp)` order,
+/// restricted to `cpus` when it is non-empty.
+ProcessorId[] eligiblePrimaries(ref const TopologySnapshot t, ushort llc,
+    const(ProcessorId)[] cpus = null)
+{
+    ProcessorId[] r;
+    foreach (id; t.eligibleProcessorsInLlc(llc))
+        if (!t.byId(id).smtSibling && (cpus.length == 0 || cpus.canFind(id)))
+            r ~= id;
+    return r;
+}
+
+/// Eligible SMT siblings on `id`'s core, restricted to `cpus` when it is
+/// non-empty. `t.cores` is sorted and each core lists its processors in LP
+/// order, so the result order is stable.
+ProcessorId[] eligibleSiblings(ref const TopologySnapshot t, ProcessorId id,
+    const(ProcessorId)[] cpus = null)
+{
+    ProcessorId[] r;
+    foreach (ref c; t.cores)
+    {
+        if (!c.processors.canFind(id)) continue;
+        foreach (o; c.processors)
+        {
+            auto p = t.byId(o);
+            if (o != id && p.smtSibling && t.isEligible(*p)
+                && (cpus.length == 0 || cpus.canFind(o)))
+                r ~= o;
+        }
+        break;
+    }
+    return r;
+}
+
 // Home and off-CCD roles on eligible SMT primaries of two physical groups,
 // never reusing a CPU and never re-placing a role that does not fit: such a
 // request comes back `!ok` with a reason. Unlike `choosePlacement`, off
@@ -133,17 +168,10 @@ RolePlan planRoles(ref const TopologySnapshot t, in RoleRequest r)
     if (bad.length)
         return skip("cpus-not-eligible: " ~ formatCpuList(bad.sort().uniq.array));
 
-    bool allowed(ProcessorId id)
-    {
-        return r.cpus.length == 0 || r.cpus.canFind(id);
-    }
-
     ProcessorId[][] prim;
     prim.length = t.llcCount;
     foreach (ushort l; 0 .. t.llcCount)
-        foreach (id; t.eligibleProcessorsInLlc(l))
-            if (!t.byId(id).smtSibling && allowed(id))
-                prim[l] ~= id;
+        prim[l] = eligiblePrimaries(t, l, r.cpus);
 
     immutable wantOff = r.offP + r.offC > 0;
     if (wantOff && plan.singleLlc)
@@ -203,24 +231,14 @@ RolePlan planRoles(ref const TopologySnapshot t, in RoleRequest r)
     foreach (i; 0 .. r.offC) add("consumer", "off", remote[i]);
     foreach (i; 0 .. r.offP) add("producer", "off", remote[$ - 1 - i]);
 
-    // The first eligible, allowed SMT sibling on id's core. `t.cores` is sorted
-    // and each core lists its processors in LP order, so the pick is stable.
     bool sib(ProcessorId id, out ProcessorId s)
     {
-        foreach (ref c; t.cores)
-        {
-            if (!c.processors.canFind(id)) continue;
-            foreach (o; c.processors)
+        foreach (o; eligibleSiblings(t, id, r.cpus))
+            if (o !in used)
             {
-                auto p = t.byId(o);
-                if (o != id && p.smtSibling && t.isEligible(*p) && allowed(o) && o !in used)
-                {
-                    s = o;
-                    return true;
-                }
+                s = o;
+                return true;
             }
-            return false;
-        }
         return false;
     }
     if (r.smtC > homeConsumers.length || r.smtP > homeProducers.length)
@@ -267,6 +285,98 @@ RolePlan planRoles(ref const TopologySnapshot t, in RoleRequest r)
             plan.crossesLlc = true;
     plan.ok = true;
     return plan;
+}
+
+/// Text form `g:lp`.
+string cpuText(ProcessorId id)
+{
+    return id.group.to!string ~ ":" ~ id.lp.to!string;
+}
+
+/// The topology object shared by the `c2c` and `offccd` JSON reports.
+/// `liveMask` must be read before the calling thread pins itself.
+JSONValue topologyJson(ref const TopologySnapshot t, ref const RolePlan plan,
+    const(ProcessorId)[] liveMask)
+{
+    import threadpool.os_scope : OsScopeSource, osScope;
+
+    auto scope_ = osScope();
+    JSONValue j;
+    j["os"] = t.os;
+    j["llc_count"] = t.llcCount;
+    j["eligible_llc_count"] = t.eligibleLlcCount();
+    j["grouping_source"] = t.groupingSource.to!string;
+    j["ccd_labelled"] = t.groupingSource == GroupingSource.l3;
+    j["os_scope"] = JSONValue(["source": JSONValue(scope_.source.to!string),
+        "allowed": JSONValue(formatCpuList(scope_.allowed))]);
+    j["live_os_mask"] = formatCpuList(liveMask);
+    j["scope_drift"] = scope_.source != OsScopeSource.unrestricted
+        && liveMask != scope_.allowed;
+    JSONValue[] llcs;
+    foreach (ushort l; 0 .. t.llcCount)
+    {
+        auto eligible = t.eligibleProcessorsInLlc(l);
+        auto prim = eligiblePrimaries(t, l);
+        JSONValue d;
+        d["llc"] = l;
+        d["source"] = t.llcDomains[l].source.to!string;
+        d["l3_bytes"] = t.llcDomains[l].l3SizeBytes;
+        d["processors"] = formatCpuList(t.processorsInLlc(l));
+        d["eligible"] = formatCpuList(eligible);
+        d["eligible_primaries"] = prim.length;
+        d["eligible_siblings"] = eligible.length - prim.length;
+        llcs ~= d;
+    }
+    j["llcs"] = llcs;
+    j["home_llc"] = plan.home;
+    j["remote_llc"] = plan.remote >= 0 ? JSONValue(plan.remote) : JSONValue(null);
+    j["single_llc"] = plan.singleLlc;
+    j["crosses_llc"] = plan.crossesLlc;
+    return j;
+}
+
+/// One planned thread as JSON (drivers add pin and observation fields).
+JSONValue threadJson(ref const PlacedThread th)
+{
+    JSONValue j;
+    j["role"] = th.role;
+    j["loc"] = th.loc;
+    j["idx"] = th.idx;
+    j["cpu"] = cpuText(th.cpu.id);
+    j["group"] = th.cpu.id.group;
+    j["lp"] = th.cpu.id.lp;
+    j["core"] = th.cpu.core;
+    j["llc"] = th.cpu.llc;
+    j["smt"] = th.smt;
+    return j;
+}
+
+/// The plan as JSON: status, per-role CPU lists and the threads.
+JSONValue planJson(ref const RolePlan plan)
+{
+    JSONValue j;
+    j["ok"] = plan.ok;
+    j["reason"] = plan.reason.length ? JSONValue(plan.reason) : JSONValue(null);
+    j["home_llc"] = plan.home;
+    j["remote_llc"] = plan.remote >= 0 ? JSONValue(plan.remote) : JSONValue(null);
+    j["single_llc"] = plan.singleLlc;
+    j["ccd_labelled"] = plan.ccdLabelled;
+    j["crosses_llc"] = plan.crossesLlc;
+    j["controller_shares_core"] = plan.controllerSharesCore;
+    ProcessorId[][string] byKey;
+    JSONValue[] threads;
+    foreach (th; plan.threads)
+    {
+        byKey[th.loc ~ "-" ~ th.role] ~= th.cpu.id;
+        threads ~= threadJson(th);
+    }
+    JSONValue lists = JSONValue(string[string].init);
+    foreach (k, ids; byKey)
+        lists[k] = formatCpuList(ids.sort().array);
+    j["cpus"] = lists;
+    j["threads"] = threads;
+    j["controller"] = plan.ok ? threadJson(plan.controller) : JSONValue(null);
+    return j;
 }
 
 struct PinVerdict
