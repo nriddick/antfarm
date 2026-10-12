@@ -68,6 +68,23 @@ cells are included only when `--dual-threads` includes 6.
   `--mid-only`, `--tlen`, `--nc`, `--ac`, `--attr`, `--repeats`, `--small`,
   `--ln`, `--huge`). A drain run discards a missed backlog window rather than
   reporting idle samples as latency.
+- **`offccd`**, **`c2c`** and **`offccd_sweep.py`** — off-CCD scaling for one
+  Farm. `offccd` pins a home group (default two producers and five consumers)
+  on one L3 group and adds off-CCD consumers or producers on another, in
+  streaming or phased (publish-then-consume) mode, and prints one JSON object
+  per run: per-thread pin outcome and observed CPU, per-role counters, rates,
+  shares and, phased, a claim scan of each round's tables. `c2c` calibrates
+  core-to-core ping-pong, contended RMW and one-shot pull. Both place roles on
+  eligible primaries per L3 group from the threadpool snapshot
+  (`placement.planRoles`); a request that does not fit, a single eligible L3
+  group, or a non-L3 grouping (a fallback shard is not a CCD) is reported as
+  skipped with a reason, and a refused or moved pin makes the run invalid.
+  `offccd_sweep.py` runs the suites (`calib`, `main-c`, `main-p`, `combined`,
+  `ctl-*`, `smt`, `layouts`, `perf`, `lat`, `smoke`) in seeded interleaved
+  rounds with top-ups for noisy cells and writes an evidence directory
+  (metadata, raw runs, summary). Its numbers belong in the evidence store, not
+  here. `make -C perftest offccd-plan` prints the plan; `offccd-smoke` runs the
+  validation suite.
 
 Single-threaded tables use the uniform (2g) layout, or the compact 2f
 `[Call][Pbody]` record when the prefix has several callbacks; payload

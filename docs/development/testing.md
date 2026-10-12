@@ -77,7 +77,7 @@ benchmark build. Run from the repository root with Python 3 and Git on PATH:
 
 ```text
 python -B scripts/check-doc-links.py
-python -B -m unittest scripts/test_check_doc_links.py perftest/test_perf_gate.py perftest/test_run_performance_md.py perftest/test_private_lifecycle_matrix.py -v
+python -B -m unittest scripts/test_check_doc_links.py perftest/test_perf_gate.py perftest/test_run_performance_md.py perftest/test_private_lifecycle_matrix.py perftest/test_offccd_sweep.py -v
 ```
 
 Use `python3` instead of `python` if that is your interpreter's command name.

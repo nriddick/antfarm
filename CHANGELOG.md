@@ -85,6 +85,14 @@ release entry at merge.
   `benchmark_actor_wave`) draw their workers from one LLC group and print it:
   on multi-LLC hosts they are capped to one LLC's CPUs.
 
+### Performance tooling
+
+- `perftest/offccd` and `perftest/c2c` measure off-CCD consumer/producer
+  scaling of one Farm and core-to-core latency from the threadpool's eligible
+  L3 groups; `placement.planRoles` plans them and `pinVerdict` turns pin
+  outcomes into run status. `perftest/offccd_sweep.py` runs and summarizes the
+  suites.
+
 ### Breaking changes
 
 - X1: `ProcessorId` moved to `threadpool.topology`; `threadpool.pool` no longer
