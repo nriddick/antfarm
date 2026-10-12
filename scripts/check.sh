@@ -53,8 +53,9 @@ run dub test --compiler=dmd
 # optimized LDC is what catches closeOrAbandon skipping abandon (LDC -O1+).
 run dub test :threadpool --compiler=ldc2
 run dub test :threadpool --compiler=dmd
-run dub test :fibers --compiler=ldc2
-run dub test :fibers --compiler=dmd
+# Package name is antfarm-fibers (directory fibers/); :fibers does not resolve.
+run dub test :antfarm-fibers --compiler=ldc2
+run dub test :antfarm-fibers --compiler=dmd
 run dub run :threadpool -c confine-test --compiler=ldc2
 run taskset -c 0-3 dub run :threadpool -c confine-test --compiler=ldc2
 # One LLC (this 5900XT: LPs 0-7,16-23). SKIP worker cases fails unless
