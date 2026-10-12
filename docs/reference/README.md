@@ -47,7 +47,7 @@ reached with `import antfarm;`, `import antfarm_templates;`, or
 | Runtime and slot capacity | `ActorRuntime.create`, `ActorRuntime.capacity`, `ActorRuntime.live`, `ActorRuntime.ready`, `ActorRuntime.flush`, `ActorRuntime.destroy`, `ActorRuntime.erasedAdapter` | [public-actors.md](../guide/public-actors.md) |
 | Ownership and identity | `ActorOwner`, `ActorOwner.handle`, `ActorOwner.intoErased`, `ActorHandle` | [public-actors.md](../guide/public-actors.md) |
 | Callback borrow and context | `ActorBorrow`, `ActorContext`, `ActorContext.popInbox` | [design/public-actor-ordering.md](../design/public-actor-ordering.md) |
-| Inbox nodes and outcomes | `ActorInboxNode`, `ActorInboxNode.initialize`, `ActorInboxNode.complete`, `ActorInboxNode.fail`, `ActorInboxNode.cancel`, `ActorNodeOutcome` | [public-actors.md](../guide/public-actors.md#inbox) |
+| Inbox nodes and outcomes | `ActorInboxNode`, `ActorInboxNode.initialize`, `ActorInboxNode.complete`, `ActorInboxNode.fail`, `ActorInboxNode.cancel`, `ActorInboxNode.completeAndWake`, `ActorInboxNode.failAndWake`, `ActorInboxNode.cancelAndWake`, `ActorNodeOutcome` | [public-actors.md](../guide/public-actors.md#inbox) |
 | Wake and send statuses | `ActorWakeResult`, `ActorSendResult` | [actor-lifecycle.md](actor-lifecycle.md) |
 | Retirement and reclamation | `ActorRetireMode`, `ActorRetireResult`, `ActorOwner.requestRetire`, `ActorOwner.reclaim`, `ActorReclaimResult` | [actor-lifecycle.md](actor-lifecycle.md) |
 | Type-erased resident adapter | `ActorErasedAdapter`, `ActorErasedOwner`, `ActorErasedHandle`, `ActorErasedBorrow`, `ActorErasedHandler` | [public-actors.md](../guide/public-actors.md#resident-type-erased-adapter) |

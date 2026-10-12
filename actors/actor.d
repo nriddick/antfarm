@@ -339,6 +339,48 @@ struct ActorInboxNode
         atomicStore!(MemoryOrder.rel)(state_, inboxNodeFree);
     }
 
+    // The completion variants that also schedule the sender: the release
+    // store inside the completion happens before the wake, so a sender
+    // activation published by the wake observes `available` and the
+    // recorded outcome. Passing a reply target here would grow the node
+    // and fix one sender per node, so the sender handle travels in the
+    // payload instead.
+
+    /// Complete this node as `complete` would, then schedule `sender` with
+    /// the same contract as `ActorHandle.wake`. Accepts `ActorHandle!U`
+    /// for any `U`, and the erased handle. Returns the wake result;
+    /// `staleHandle` and `closed` report a sender that no longer accepts
+    /// activation, not a lost reply. Read every payload field before this
+    /// call; the node must not be touched afterwards, because the woken
+    /// sender may reuse it as soon as it observes availability.
+    ActorWakeResult completeAndWake(H)(H sender) nothrow @nogc @system
+        if (is(H == ActorErasedHandle) || is(H == ActorHandle!U, U))
+    {
+        complete();
+        return sender.wake();
+    }
+
+    /// Fail this node as `fail` would (same 24-bit code limit), then
+    /// schedule `sender`. Same ordering and after-call contract as
+    /// `completeAndWake`; the failure code is observable to the woken
+    /// sender through `failureCode`.
+    ActorWakeResult failAndWake(H)(H sender, uint code) nothrow @nogc @system
+        if (is(H == ActorErasedHandle) || is(H == ActorHandle!U, U))
+    {
+        fail(code);
+        return sender.wake();
+    }
+
+    /// Cancel this node as `cancel` would, then schedule `sender`. Same
+    /// ordering and after-call contract as `completeAndWake`; the woken
+    /// sender observes `ActorNodeOutcome.cancelled`.
+    ActorWakeResult cancelAndWake(H)(H sender) nothrow @nogc @system
+        if (is(H == ActorErasedHandle) || is(H == ActorHandle!U, U))
+    {
+        cancel();
+        return sender.wake();
+    }
+
     /// Read after available acquired completion for this interaction, before
     /// reusing or transferring the node. Initialization alone is not a reply.
     @property ActorNodeOutcome outcome() const nothrow @nogc @system
@@ -625,6 +667,7 @@ struct ActorErasedOwner
     private ActorSlot* slot_;
     private ulong generation_;
 
+    /// Copying is disabled: transfer ownership with an explicit `move`.
     @disable this(ref typeof(this));
 
     /// Move-assignment from an explicit `move` source (an rvalue).
@@ -704,6 +747,7 @@ struct ActorOwner(T)
     private ActorSlot* slot_;
     private ulong generation_;
 
+    /// Copying is disabled: transfer ownership with an explicit `move`.
     @disable this(ref typeof(this));
 
     /// Move-assignment from an explicit `move` source (an rvalue).

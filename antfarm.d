@@ -1051,6 +1051,7 @@ struct Token
     /// True while this token is registered with its Farm.
     bool valid() const pure nothrow @nogc @safe { return hash != 0; }
 
+    /// Copying is disabled: transfer ownership with an explicit `move`.
     @disable this(ref typeof(this));
 
     private this(Tier t, uint s, ulong h, ulong fid, ulong grant) pure nothrow @nogc @safe

@@ -2847,6 +2847,193 @@ private void testOwnerMoveOnly()
 }
 
 // -------------------------------------------------------------------------
+// Request/reply completion with an integrated sender wake
+// -------------------------------------------------------------------------
+
+private struct RequestReplyResult
+{
+    int roundsDone;
+    int errors;
+    int activationsWithoutReply;
+    uint wakeResults; // bitmask of the wake results the replier observed
+}
+
+private struct RequestReplySenderState
+{
+    RequestReplyMessage* message;
+    ActorHandle!RequestReplyReplierState replier;
+    RequestReplyResult* output;
+}
+
+private struct RequestReplyReplierState
+{
+    RequestReplyResult* output;
+}
+
+private struct RequestReplyMessage
+{
+    ActorInboxNode node;
+    ActorHandle!RequestReplySenderState sender;
+    long request;
+    long reply;
+    int sentSeen;
+    ActorNodeOutcome expected;
+}
+
+private void requestReplySender(
+        scope ref ActorBorrow!RequestReplySenderState actor,
+        scope ref ActorContext) nothrow @nogc @system
+{
+    RequestReplyMessage* message = actor.value.message;
+    RequestReplyResult* output = actor.value.output;
+    if (!message.sentSeen)
+    {
+        immutable result = actor.value.replier.send(&message.node);
+        if (result == ActorSendResult.queued
+                || result == ActorSendResult.coalesced)
+            message.sentSeen = 1;
+        else
+            ++output.errors;
+        // No republish: every later activation of this actor must come
+        // from the replier's completeAndWake/failAndWake/cancelAndWake.
+        return;
+    }
+    if (!message.node.available)
+    {
+        ++output.activationsWithoutReply;
+        return;
+    }
+    if (message.node.outcome != message.expected)
+        ++output.errors;
+    else if (message.expected == ActorNodeOutcome.completed
+            && message.reply != message.request + 1)
+        ++output.errors;
+    else if (message.expected == ActorNodeOutcome.failed
+            && message.node.failureCode != 7)
+        ++output.errors;
+    message.sentSeen = 0;
+    ++output.roundsDone;
+}
+
+private void requestReplyReplier(
+        scope ref ActorBorrow!RequestReplyReplierState actor,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    auto node = context.popInbox();
+    if (node is null) return;
+    RequestReplyMessage* message = cast(RequestReplyMessage*) node.payload;
+    ActorWakeResult woken;
+    final switch (message.expected)
+    {
+    case ActorNodeOutcome.completed:
+        message.reply = message.request + 1;
+        woken = node.completeAndWake(message.sender);
+        break;
+    case ActorNodeOutcome.failed:
+        woken = node.failAndWake(message.sender, 7);
+        break;
+    case ActorNodeOutcome.cancelled:
+        woken = node.cancelAndWake(message.sender);
+        break;
+    }
+    actor.value.output.wakeResults |= 1U << woken;
+}
+
+private void testRequestReplyWake()
+{
+    // The completion-with-wake variants accept both handle forms and
+    // reject types that are not actor handles.
+    static assert(__traits(compiles,
+    {
+        RequestReplyMessage message;
+        ActorHandle!RequestReplySenderState handle;
+        message.node.completeAndWake(handle);
+        message.node.completeAndWake(handle.erased);
+        message.node.failAndWake(handle, 1);
+        message.node.failAndWake(handle.erased, 1);
+        message.node.cancelAndWake(handle);
+        message.node.cancelAndWake(handle.erased);
+    }));
+    static assert(!__traits(compiles,
+    {
+        struct NotAHandle { void wake() {} }
+        RequestReplyMessage message;
+        NotAHandle notAHandle;
+        message.node.completeAndWake(notAHandle);
+    }));
+
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    check(farm !is null, "request/reply Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 2);
+    check(runtime !is null, "request/reply runtime allocation");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "request/reply producer registration");
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "request/reply subscribe");
+
+    RequestReplyResult output;
+    RequestReplyMessage message;
+    message.node.initialize(&message, 0);
+    auto replierOwner =
+        runtime.createActor!(RequestReplyReplierState, requestReplyReplier)(
+            RequestReplyReplierState(&output));
+    auto senderOwner =
+        runtime.createActor!(RequestReplySenderState, requestReplySender)(
+            RequestReplySenderState(&message, replierOwner.handle, &output));
+    check(replierOwner.valid && senderOwner.valid,
+        "request/reply actor creation");
+    message.sender = senderOwner.handle;
+    auto senderHandle = senderOwner.handle;
+
+    immutable long[3] requests = [41, -1, 0];
+    immutable ActorNodeOutcome[3] outcomes = [
+        ActorNodeOutcome.completed, ActorNodeOutcome.failed,
+        ActorNodeOutcome.cancelled];
+    foreach (round; 0 .. 3)
+    {
+        message.node.initialize(&message, cast(ulong) round);
+        message.request = requests[round];
+        message.expected = outcomes[round];
+        check(senderHandle.wake() == ActorWakeResult.queued,
+            "request/reply round wake");
+        auto deadline = MonoTime.currTime + 15.seconds;
+        while (output.roundsDone == round)
+        {
+            runtime.flush(token, 8, DEFAULT_AVG_COST);
+            while (view.consumeNext()) {}
+            check(MonoTime.currTime < deadline,
+                "request/reply round timeout");
+            Thread.yield();
+        }
+    }
+    check(output.errors == 0, "request/reply outcomes and replies");
+    check(output.activationsWithoutReply == 0,
+        "completeAndWake scheduled the sender only after completion");
+    check(output.wakeResults == 1U << ActorWakeResult.queued,
+        "request/reply wake results");
+
+    check(replierOwner.requestRetire() == ActorRetireResult.requested,
+        "request/reply replier retirement");
+    check(senderOwner.requestRetire() == ActorRetireResult.requested,
+        "request/reply sender retirement");
+    while (!replierOwner.retired || !senderOwner.retired)
+    {
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
+        while (view.consumeNext()) {}
+    }
+    check(replierOwner.reclaim() == ActorReclaimResult.reclaimed,
+        "request/reply replier reclaim");
+    check(senderOwner.reclaim() == ActorReclaimResult.reclaimed,
+        "request/reply sender reclaim");
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    runtime.destroy();
+    printf("actor request/reply completeAndWake OK\n");
+    fflush(stdout);
+}
+
+// -------------------------------------------------------------------------
 // F4b public actor cancel-mode retirement
 // -------------------------------------------------------------------------
 
@@ -3733,6 +3920,7 @@ void main()
     testDeterministicInterleavings();
     testNodeOutcomes();
     testOwnerMoveOnly();
+    testRequestReplyWake();
     testCancelModeRetirement();
     testCompletionCallbackRunsAfterFinished();
     testAggregateModuleUnloadFence();

@@ -280,6 +280,13 @@ validation and Fiber ThreadSanitizer migration remain limited as stated in
 
 ### Public actors (1.7.0-rc.5 prerequisites and later)
 
+- `ActorInboxNode.completeAndWake(sender)`, `failAndWake(sender, code)` and
+  `cancelAndWake(sender)` complete a request/reply interaction and then
+  schedule the sender, so the sender actor observes the reply without a
+  manual `sender.wake()` (a missing wake used to hang the sender silently).
+  They accept `ActorHandle!U` for any `U` and `ActorErasedHandle`, and return
+  the `ActorWakeResult`. The completion store happens before the wake.
+
 - Public wave completion keeps its descriptor alive until each holder's last
   access: a producer hold and one credit per admitted table replace the old
   progress-equality fence. `finished` still does not join the optional
