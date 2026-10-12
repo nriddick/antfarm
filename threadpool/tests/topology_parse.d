@@ -147,6 +147,109 @@ private void putPackageRecord(ref ubyte[] b, ulong mask, ushort group)
     putU16(b, 0);
 }
 
+/// Synthetic Windows buffers: two full groups, including LP 63 in each.
+/// No discovery, pinning, or worker startup is performed by these checks.
+void checkFullProcessorGroups()
+{
+    import threadpool.os_scope : OsScope;
+    import threadpool.pool : PoolOptions;
+    import threadpool.resolution : resolvePool, Reject;
+
+    ubyte[] cpu, slp;
+    foreach (g; 0 .. 2)
+    {
+        foreach (lp; 0 .. 64)
+            putCpuSet(cpu, cast(ushort) g, cast(ubyte) lp,
+                cast(ubyte)(lp / 2), 0, cast(ubyte) g, 1);
+        putCacheRecord(slp, 3, ulong.max, cast(ushort) g, 32 * 1024 * 1024);
+        putPackageRecord(slp, ulong.max, cast(ushort) g);
+    }
+    // RelationGroup with two PROCESSOR_GROUP_INFO records (48 bytes each).
+    putU32(slp, 4);
+    putU32(slp, 32 + 2 * 48);
+    putU16(slp, 2);
+    putU16(slp, 2);
+    putZeros(slp, 20);
+    foreach (_; 0 .. 2)
+    {
+        putU8(slp, 64);
+        putU8(slp, 64);
+        putZeros(slp, 38);
+        putU64(slp, ulong.max);
+    }
+
+    auto snap = parseWindowsTopology(cpu, slp);
+    assert(snap.logicalProcessorCount == 128);
+    assert(snap.groupCount == 2 && snap.cores.length == 64);
+    assert(snap.llcCount == 2 && snap.packages.length == 2);
+    assertCoresSorted(snap);
+    foreach (g; 0 .. 2)
+    {
+        assert(snap.groups[g].activeProcessors == 64);
+        assert(snap.groups[g].activeMask == ulong.max);
+        auto ids = snap.processorsInLlc(cast(ushort) g);
+        assert(ids.length == 64);
+        assert(ids[0] == ProcessorId(cast(ushort) g, 0));
+        assert(ids[$ - 1] == ProcessorId(cast(ushort) g, 63));
+        assert(snap.byId(ids[$ - 1]).l3.sizeBytes == 32 * 1024 * 1024);
+        assert(snap.byId(ids[$ - 1]).smtSibling);
+    }
+    PoolOptions opt;
+    OsScope unrestricted;
+    auto res = resolvePool(snap, unrestricted, opt);
+    assert(res.workers.length == 128 && res.acceptedGroupCount == 2);
+    opt.skipSmtSiblings = true;
+    res = resolvePool(snap, unrestricted, opt);
+    assert(res.workers.length == 64);
+    assert(res[ProcessorId(1, 63)].reasons == Reject.smtSecondary);
+
+    auto restricted = parseWindowsTopology(cpu, slp,
+        [affinityKey(0, 63), affinityKey(1, 0), affinityKey(1, 63)]);
+    assert(restricted.logicalProcessorCount == 128);
+    assert(restricted.eligibleProcessorsInLlc(0) == [ProcessorId(0, 63)]);
+    assert(restricted.eligibleProcessorsInLlc(1) == [ProcessorId(1, 0), ProcessorId(1, 63)]);
+    opt = PoolOptions.init;
+    opt.processors = parseCpuList("0:63,1:63,1:63,0:0,2:0");
+    res = resolvePool(restricted, unrestricted, opt);
+    assert(res.workers == [ProcessorId(0, 63), ProcessorId(1, 63)]);
+    assert(res.requests[2].duplicate && res.requests[2].accepted);
+    assert(res[ProcessorId(0, 0)].reasons == Reject.osExcluded);
+    assert(res.requests[4].unknown);
+    assert(parseCpuList(formatCpuList(res.workers)) == res.workers);
+}
+
+/// An LLC is not necessarily confined to one Windows processor group.
+void checkCacheAcrossProcessorGroups()
+{
+    ubyte[] cpu, slp;
+    putCpuSet(cpu, 0, 63, 31, 0, 0, 1);
+    putCpuSet(cpu, 1, 0, 0, 0, 0, 1);
+    putU32(slp, 2); // RelationCache, two GROUP_AFFINITY entries.
+    putU32(slp, 72);
+    putU8(slp, 3);
+    putU8(slp, 12);
+    putU16(slp, 64);
+    putU32(slp, 32 * 1024 * 1024);
+    putU32(slp, 0);
+    putZeros(slp, 18);
+    putU16(slp, 2);
+    foreach (g; 0 .. 2)
+    {
+        putU64(slp, g == 0 ? 1UL << 63 : 1UL);
+        putU16(slp, cast(ushort) g);
+        putZeros(slp, 6);
+    }
+    auto snap = parseWindowsTopology(cpu, slp);
+    assert(snap.groupCount == 2 && snap.llcCount == 1);
+    assert(snap.groupingSource == GroupingSource.l3);
+    assert(snap.processorsInLlc(0) == [ProcessorId(0, 63), ProcessorId(1, 0)]);
+    foreach (ref p; snap.processors)
+        assert(p.l3.sizeBytes == 32 * 1024 * 1024 && p.llcIndex == 0);
+}
+
+unittest { checkFullProcessorGroups(); }
+unittest { checkCacheAcrossProcessorGroups(); }
+
 // `TopologySnapshot.cores` is sorted by each core's first ProcessorId.
 private void assertCoresSorted(ref const TopologySnapshot snap)
 {

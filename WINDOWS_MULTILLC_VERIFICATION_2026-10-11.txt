@@ -1,0 +1,185 @@
+Windows multi-LLC RC verification - 2026-10-11
+=============================================
+
+Revision and environment
+------------------------
+Fast-forwarded 1.8.0-rc from 091edc9 to origin/1.8.0-rc at
+ff751c70b4ad93ef4ddec014506ebb306c516cc8. The checkout was clean before sync.
+No production fixes, commits, or pushes were made during this verification.
+The local additions are two synthetic Windows topology tests and this report.
+
+Windows 11 x64, build 26200; Intel Core i7-12700H, 20 logical processors,
+6 SMT P cores and 8 E cores, one LLC, one processor group.
+DMD 2.112.1; LDC 1.42.0. Native checks used ANTFARM_HUGE_PAGES=0.
+Logs and serial verification drivers are under the ignored directory
+.build/windows-multillc-ff751c7. The drivers themselves are
+.build/verify-multillc.py and .build/verify-multillc-extra.py.
+
+Result: NOT a clean Windows validation. Four findings follow. Passing LDC
+checks do not cover the DMD failures, and this is not the Linux make check gate.
+
+WML-01 [P1] DMD idle worker busy-loops instead of parking
+-------------------------------------------------------
+Reproduce from threadpool:
+  dub test --compiler=dmd
+
+All three attempts failed at source/threadpool/pool.d:813, "worker never
+parked", in the new wakeLlc unittest (starts at line 793). After reporting
+1/8 modules FAILED, the process did not exit. The first attempt was terminated
+at 240 seconds; two repeats were terminated at 45 seconds each.
+
+An independent, non-unittest executable also reproduces the idle problem:
+one CacheAwarePool worker on ProcessorId(0, 0), default wait policy, and a
+callback that atomically increments a counter and returns false. After ten
+20-ms observations DMD had about 5.9 million callback invocations and 2.9
+million park attempts. The policy remained IdleKind.wait (3), and startup
+reported pinned. An unmatched wakeLlc was unnecessary for the counter to
+continue increasing. Explicit shutdown completed in this isolated probe.
+
+The equivalent LDC executable parked at two callbacks. A wake for another LLC
+left the count at two; a matching wake raised it to four. Three pool lifecycles
+passed. LDC's complete threadpool unit suite also passed.
+
+Impact: idle DMD workers can consume a CPU; the unit failure also hangs a test
+invocation unless it has an external timeout. This is not merely a too-short
+unit-test deadline. Root cause and introduction point are not yet established.
+Investigate hybrid.d:285 applyIdlePolicy and sys/win_wait.d:102 parkWorker,
+including DMD argument passing and the wait API outcome. Keep the cleanup/hang
+symptom separate until its cause is established.
+
+Evidence: threadpool-dmd-unit.log, threadpool-dmd-repeat-1.log,
+threadpool-dmd-repeat-2.log, wake_probe.d, wake-probe-dmd-run.log,
+wake-probe-dmd-counters.log, wake-probe-ldc2-run.log.
+
+WML-02 [P2] Actor-wave benchmark crashes under DMD
+------------------------------------------------
+Reproduce from fibers:
+  dub run -c benchmark_actor_wave --compiler=dmd --build=release -- 100 3 4 1
+
+Both release attempts exited with -1073741819 (0xC0000005, access violation).
+Release with one worker (100 3 1 1) and debug with four workers (100 3 4 1)
+failed the same way. These are valid, small inputs accepted by the CLI.
+The identical four-worker release case passed under LDC.
+
+Relevant entry points: fibers/benchmarks/actor_wave.d main at line 544 and
+runBenchmark. No crash stack or root cause was established. Do not infer that
+the entire Fiber scheduler is broken: its smoke/stress suites and the other
+benchmark modes below passed under DMD. This blocks DMD actor-wave validation.
+
+Evidence: fibers-dmd-benchmark_actor_wave.log, actor-wave-dmd-release-4.log,
+actor-wave-dmd-release-1.log, actor-wave-dmd-debug-4.log,
+fibers-ldc2-benchmark_actor_wave.log.
+
+WML-03 [P2] Performance report rejects valid MT Fiber output
+-----------------------------------------------------------
+fibers/benchmarks/benchmark_mt.d:37 report() now prints "not measurable
+(finished before the timer started)" instead of a numeric drain interval when
+the workers drain a burst during spawning. This is a legitimate benchmark
+outcome, not a failed runtime operation.
+
+Observed with:
+  cd fibers
+  dub run -c benchmark_mt --compiler=ldc2 --build=release -- 1000 assist
+
+The saved output includes:
+  run    (warm pool): 1000 fibers: not measurable (finished before the timer started)
+
+Feeding that exact successful output to parse_fiber in
+perftest/run_performance_md.py raises:
+  ValueError: no complete multithread fiber burst timings
+
+The parser requires numeric create/run intervals for both cold and warm bursts
+(lines 186-200); it also requires a numeric cold drain rate (lines 184-185).
+Thus either burst can break the report depending on scheduling and workload.
+Existing Python parser tests passed but do not cover this real output.
+
+Suggested follow-up: emit an explicit numeric end-to-end burst duration even
+when the residual drain rate is not meaningful, and teach the report parser
+that format. Do not invent a zero drain time from a message that omits timing.
+
+Evidence: fibers-ldc2-mt-assist.log and fiber-parser-repro.log.
+
+WML-04 [P3] Windows offccd sweep omits executable hashes
+-------------------------------------------------------
+Reproduce from the root after perftest/build-windows.ps1:
+  python -B perftest/offccd_sweep.py --suite smoke --out NEW_DIRECTORY --runs 1 --topup-runs 0 --window-ms 100 --timeout 30 --bin-dir perftest
+
+The sweep successfully runs offccd.exe and c2c.exe, but metadata.json contains
+"binaries": {}. host_metadata at perftest/offccd_sweep.py:297 checks extensionless
+paths with Path.exists(), which does not find these Windows .exe files.
+Windows process launch accepts the extensionless commands, so execution
+success masks the metadata omission.
+
+Impact: saved Windows runs cannot identify the actual measured executables by
+hash. Resolve the executable path once, including .exe on Windows, and reuse
+it for execution and metadata; add a Windows-style file fixture.
+Evidence: offccd-sweep-smoke.log and offccd-smoke/metadata.json.
+
+Passing verification
+--------------------
+- Python portable checks: 178 tests, 173 passed and five expected skips.
+  Modules: test_check_doc_links, test_perf_gate, test_run_performance_md,
+  test_private_lifecycle_matrix, test_offccd_sweep. Skips are the unavailable
+  symlink probes and Linux-only process-group/gate integration checks.
+- Documentation links, public API Ddoc coverage, and ring-store audit passed.
+- Root and fibers dub test passed with DMD and LDC.
+- Threadpool dub test passed with LDC; DMD failed as WML-01.
+- Threadpool hello, wait-races (including Windows event fallback), live-test,
+  affinity-test, and affinity-test restricted to E-core mask 12288 passed
+  with both compilers.
+- Fiber unittest and stress configurations passed in debug and release with
+  both compilers, including existing synthetic service-plan fixtures.
+- MT Fiber private, shared, and assist modes passed with 1000 tasks on both
+  compilers. Their report integration is separately broken as WML-03.
+- Fiber farm-embed and vs-druntime benchmarks passed with 1000 tasks on both
+  compilers. Actor-wave passed only with LDC, as described in WML-02.
+- iota_sum and hello_antfarm compiled and ran with both compilers.
+- All nine Windows performance harnesses built with the LDC build script.
+  New offccd and c2c also compiled with DMD.
+- offccd stream/phased small local runs passed on both compilers, with matching
+  produced/consumed totals and observed CPUs matching requested pins. Remote
+  requests correctly returned skipped/single-llc.
+- c2c pingpong, rmw, and pull local cases passed on both compilers. Unavailable
+  cross-LLC cases were explicitly skipped, not counted as measured results.
+- The LDC offccd Python smoke sweep ran three local cells successfully,
+  skipped eight remote cells on this one-LLC host, and completed its c2c
+  calibration. Executable hashing remains broken as WML-04.
+
+Synthetic Windows processor-group coverage added
+------------------------------------------------
+threadpool/tests/topology_parse.d now includes two focused fixtures:
+- 128 logical processors in two complete 64-LP groups, with separate LLCs and
+  packages, SMT pairs, LP 63 high mask bits, repeated group-relative LP/core
+  numbers, and relation-group records. Checks parsing, group-qualified lookup,
+  full and SMT-filtered pool resolution, sparse affinity eligibility, duplicate
+  requests, excluded/unknown CPUs, accepted group count, and CPU-list roundtrip.
+- One L3 relationship spanning two processor groups, including bit 63 in group
+  zero and bit zero in group one; checks unified LLC membership and cache size.
+
+Both pure fixtures passed when compiled and run independently with DMD and
+LDC. They also passed as part of the full LDC threadpool unit suite. The DMD
+full suite remains failed because of WML-01. No synthetic test invokes a real
+pin operation or starts a worker on a nonexistent CPU.
+
+Recommendation: YES to these plumbing tests. Keep real multi-group execution
+and real cross-LLC scheduler behavior explicitly unvalidated. Windows processor
+groups are bounded by logical processors, not physical core count; >64 logical
+processors is the relevant boundary. Microsoft documents different default
+cross-group affinity behavior beginning with Windows 11 / Server 2022:
+https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups
+
+Not tested / not claimed
+------------------------
+- Real Windows multi-group discovery, process scope, pinning, wake routing,
+  cross-LLC Fiber rescue/assist, NUMA effects, or throughput on >64 LP hardware.
+  The current Windows multi-group process-scope fallback remains unrestricted;
+  synthetic CPU parsing does not validate that OS-policy decision.
+- Linux sysfs discovery, Linux scope-test, futex behavior, TSan, perf counters,
+  perf-gate, complete make check, and Linux integration. Defer to the Linux host.
+- The POSIX terminal Game of Life app and other POSIX-only interaction paths.
+- Long soak/torture matrices, allocator/large-page privilege variants, and a
+  fresh full PERFORMANCE.md measurement campaign. Root Farm/actor source was
+  unchanged in this remote range; the previous Windows report is historical
+  evidence, not a new run of those extended lanes.
+- New smoke timing numbers are functional evidence only, not publishable
+  performance comparisons. Existing PERFORMANCE.md measurements were untouched.
