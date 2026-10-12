@@ -147,9 +147,22 @@ private void putPackageRecord(ref ubyte[] b, ulong mask, ushort group)
     putU16(b, 0);
 }
 
+// `TopologySnapshot.cores` is sorted by each core's first ProcessorId.
+private void assertCoresSorted(ref const TopologySnapshot snap)
+{
+    assert(snap.cores.length != 0);
+    foreach (i, ref c; snap.cores)
+    {
+        assert(c.processors.length != 0);
+        if (i != 0)
+            assert(snap.cores[i - 1].processors[0] < c.processors[0]);
+    }
+}
+
 unittest
 {
     auto snap = parseWindowsTopology(cpuSetsBlob, slpiexBlob);
+    assertCoresSorted(snap);
     assert(snap.llcCount == 1);
     assert(snap.logicalProcessorCount == 20);
     assert(snap.pCoreCount == 6);
@@ -243,6 +256,7 @@ unittest
     auto cpu = makeTwoGroupLlcCpuSets();
     auto slp = makeTwoGroupLlcSlpiex();
     auto snap = parseWindowsTopology(cpu, slp);
+    assertCoresSorted(snap);
     assert(snap.llcCount == 2);
     assert(snap.logicalProcessorCount == 8);
     assert(snap.groupCount >= 1);

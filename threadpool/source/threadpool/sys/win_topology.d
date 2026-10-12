@@ -458,6 +458,8 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
             c.processors ~= ProcessorId.of(procs[i]);
         cores ~= c;
     }
+    // `lpsByCore` is an associative array; match assembleSnapshot's order.
+    cores.sort!((a, b) => a.processors[0] < b.processors[0]);
 
     LlcDomain[] domains;
     domains.length = nextLlc;
