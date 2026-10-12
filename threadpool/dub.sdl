@@ -56,8 +56,10 @@ configuration "confine-test" {
     mainSourceFile "tests/confine_live.d"
 }
 
-// Live FarmHost regression: `dub run -c host-test`. Needs three accepted
-// CPUs in one LLC for the worker cases (SKIP otherwise).
+// Live FarmHost regression: `dub run -c host-test`. Needs two accepted
+// worker CPUs in one LLC (one per core by default), or three for a free
+// caller CPU. Prints SKIP and exits 0 otherwise; check.sh treats that SKIP
+// as a failure unless ALLOW_HOST_SKIP=1.
 configuration "host-test" {
     targetType "executable"
     mainSourceFile "tests/host_live.d"
