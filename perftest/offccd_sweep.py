@@ -377,6 +377,15 @@ def run_calib(c, a, out_dir):
     return dict(cell=c['id'], argv=argv, rc=rc, lines=len(lines), stderr=err[-2000:])
 
 
+def mirror_group(topo):
+    """Pure: the group the mirror controls use as home, or None. Only the
+    plan's own remote group qualifies, and never on a single-LLC scope, where
+    a "mirror" would be a second home-only run."""
+    if not topo or topo.get('single_llc'):
+        return None
+    return topo.get('remote_llc')
+
+
 def run_suites(a):
     out = P(a.out)
     if out.exists():
@@ -396,13 +405,7 @@ def run_suites(a):
     topo = first.get('topology')
     meta['topology'] = topo
     dump_meta()
-    mirror_llc = None
-    if topo:
-        if topo.get('remote_llc') is not None:
-            mirror_llc = topo['remote_llc']
-        else:
-            others = [d['llc'] for d in topo.get('llcs', []) if d['llc'] != topo.get('home_llc')]
-            mirror_llc = others[0] if others else None
+    mirror_llc = mirror_group(topo)
 
     cells = []
     for s in a.suites:
@@ -591,10 +594,13 @@ def group_cells(rows):
             known = plans.get(r['cell'], set())
             key = (r['cell'], next(iter(known)) if len(known) == 1 else '')
         g = cells.setdefault(key, dict(id=r['cell'], labels=r['labels'], plan=key[1], runs=[],
-                                       skipped=[], invalid={}, scope_drift=0, subwindow_spread_runs=0))
+                                       skipped=[], invalid={}, scope_drift=0, subwindow_spread_runs=0,
+                                       crossing_runs=0))
         status = res.get('status')
         if status == 'ok':
             g['runs'].append(run_metrics(res))
+            if (res.get('topology') or {}).get('crosses_llc'):
+                g['crossing_runs'] += 1
             if (res.get('topology') or {}).get('scope_drift'):
                 g['scope_drift'] += 1
         elif status == 'skipped':
@@ -639,10 +645,12 @@ def summarize(rows, calib, meta, cv_threshold=0.03, range_threshold=0.06):
                           n=len(g['runs']), invalid=g['invalid'], stats=st,
                           subwindow_spread_runs=sum(1 for m in g['runs']
                                                     if (m.get('subwindow_spread') or 0) > 0.10),
-                          scope_drift=g['scope_drift']))
+                          scope_drift=g['scope_drift'], crossing_runs=g['crossing_runs']))
     off = [c for c in cells if c['labels']['sweep'] in OFF_SWEEPS and
            (c['labels']['k'] or c['labels']['sweep'] in ('mirror', 'rolesplit'))]
-    off_measured = [c for c in off if c['status'] == 'ok']
+    # Only a run that placed threads on a second group measures off-CCD: the
+    # mirror controls at k=0 are home-only runs on the other group.
+    off_measured = [c for c in off if c['status'] == 'ok' and c['crossing_runs']]
     skip_reasons = sorted({c['reason'] for c in off if c['status'] == 'skipped' and c['reason']})
     topo = meta.get('topology') or {}
     summary = dict(

@@ -173,30 +173,37 @@ RolePlan planRoles(ref const TopologySnapshot t, in RoleRequest r)
     foreach (ushort l; 0 .. t.llcCount)
         prim[l] = eligiblePrimaries(t, l, r.cpus);
 
-    immutable wantOff = r.offP + r.offC > 0;
-    if (wantOff && plan.singleLlc)
-        return skip("single-llc");
-    if (wantOff && !plan.ccdLabelled)
-        return skip("grouping-not-l3");
-
-    if (r.homeLlc >= 0)
+    // The home and remote groups are chosen before any skip, so a skipped plan
+    // still names the group the run would have used (the first eligible LLC
+    // with the most allowed primaries unless `homeLlc` asks for one).
+    immutable explicitHome = r.homeLlc >= 0;
+    bool homeUsable = true;
+    if (explicitHome)
     {
-        if (r.homeLlc >= t.llcCount || prim[r.homeLlc].length == 0)
-            return skip(plan.singleLlc ? "single-llc" : "home-llc-not-eligible");
-        plan.home = cast(ushort) r.homeLlc;
+        homeUsable = r.homeLlc < t.llcCount && prim[r.homeLlc].length != 0;
+        if (r.homeLlc < t.llcCount)
+            plan.home = cast(ushort) r.homeLlc;
     }
     else
     {
         foreach (ushort l; 0 .. t.llcCount)
             if (prim[l].length > prim[plan.home].length)
                 plan.home = l;
-        if (prim.length == 0 || prim[plan.home].length == 0)
-            return skip("insufficient-primaries");
+        homeUsable = prim.length != 0 && prim[plan.home].length != 0;
     }
     foreach (ushort l; 0 .. t.llcCount)
         if (l != plan.home && prim[l].length
             && (plan.remote < 0 || prim[l].length > prim[plan.remote].length))
             plan.remote = l;
+
+    immutable wantOff = r.offP + r.offC > 0;
+    if (wantOff && plan.singleLlc)
+        return skip("single-llc");
+    if (wantOff && !plan.ccdLabelled)
+        return skip("grouping-not-l3");
+    if (!homeUsable)
+        return skip(!explicitHome ? "insufficient-primaries"
+            : plan.singleLlc ? "single-llc" : "home-llc-not-eligible");
     if (wantOff && plan.remote < 0)
         return skip("no-remote-primaries");
 
@@ -559,6 +566,35 @@ unittest
         foreach (th; p.threads ~ p.controller)
             assert(t.isEligible(*t.byId(th.cpu.id)));
         assertNoReuse(p);
+    }
+}
+
+unittest
+{
+    // (b2) The skipped plan names the group the run would have used: with
+    // LLC0 outside the scope (taskset -c 8-15,24-31) the only eligible group
+    // is 1, so it is the home and no group is a remote. With LLC1 outside it
+    // is group 0.
+    bool llc0(ushort lp) { return lp % 16 < 8; }
+    bool llc1(ushort lp) { return lp % 16 >= 8; }
+    foreach (ushort only; [0, 1])
+    {
+        auto t = only == 1 ? fake5900(&llc0) : fake5900(&llc1);
+        assert(t.eligibleLlcCount() == 1);
+        foreach (req; [RoleRequest(2, 5, 0, 0, 0, 1), RoleRequest(2, 5, 0, 0, 1, 0)])
+        {
+            auto p = planRoles(t, req);
+            assert(!p.ok && p.reason == "single-llc" && p.singleLlc);
+            assert(p.home == only, "home is the eligible group, not group 0");
+            assert(p.remote == -1);
+        }
+        // An explicit home on the excluded group keeps the group it was asked for.
+        auto mirror = planRoles(t, RoleRequest(2, 5, 0, 0, 0, 1, 0, 0, 1 - only));
+        assert(!mirror.ok && mirror.reason == "single-llc" && mirror.home == 1 - only);
+        auto ok = planRoles(t, RoleRequest(2, 5));
+        assert(ok.ok && ok.home == only && ok.remote == -1);
+        foreach (th; ok.threads ~ ok.controller)
+            assert(th.cpu.llc == only);
     }
 }
 

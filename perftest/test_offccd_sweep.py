@@ -19,7 +19,14 @@ spec.loader.exec_module(sweep)
 
 TOPO = dict(grouping_source='l3', os_scope=dict(source='processLaunch', allowed='0-31'),
             eligible_llc_count=2, llc_count=2, single_llc=False, home_llc=0, remote_llc=1,
-            scope_drift=False)
+            scope_drift=False, crosses_llc=True)
+
+LLCS = [dict(llc=0), dict(llc=1)]
+# `offccd --plan-only --off-c 1` under taskset -c 0-7,16-23 and 8-15,24-31:
+# one eligible group, which is the home; there is no remote.
+FIRST_L3_ONLY = dict(TOPO, eligible_llc_count=1, single_llc=True, home_llc=0, remote_llc=None,
+                     llcs=LLCS)
+SECOND_L3_ONLY = dict(FIRST_L3_ONLY, home_llc=1)
 
 
 def result(rate, status='ok', reason=None, cpus=None, topology=None, mhz=4600.0,
@@ -74,6 +81,15 @@ class SuiteTests(unittest.TestCase):
         self.assertTrue(all(c.get('skip') == 'single-llc' for c in cells
                             if c['labels']['arm'] == 'mirror'))
         self.assertTrue(all('skip' not in c for c in cells if c['labels']['arm'] == 'main'))
+
+    def test_mirror_group_follows_the_plan_remote(self):
+        self.assertEqual(sweep.mirror_group(TOPO), 1)
+        self.assertEqual(sweep.mirror_group(dict(TOPO, home_llc=1, remote_llc=0)), 0)
+        self.assertIsNone(sweep.mirror_group(None))
+        # A single-LLC plan has no remote; the other physical group is not a mirror.
+        for topo in (FIRST_L3_ONLY, SECOND_L3_ONLY):
+            self.assertIsNone(sweep.mirror_group(topo))
+        self.assertIsNone(sweep.mirror_group(dict(SECOND_L3_ONLY, remote_llc=0)))
 
     def test_argv_carries_combo(self):
         c = sweep.suite_cells('main-c')[0]
@@ -181,6 +197,38 @@ class RenderTests(unittest.TestCase):
         self.assertIn('| k off-C | total C | SqCs | agg Mitems/s', md)
         self.assertIn('PBO off', md)
         self.assertIn('cross-llc (single-llc)', md)
+
+    def test_single_llc_scope_is_never_measured_off_ccd(self):
+        # Either one-L3 restriction: the mirror cells are skipped (no mirror
+        # group), so a k=0 cell cannot stand in for an off-CCD measurement.
+        for topo in (FIRST_L3_ONLY, SECOND_L3_ONLY):
+            mirror = sweep.mirror_group(topo)
+            rows = [row('main-k0', result(100.0, topology=dict(topo, crosses_llc=False)), k=0),
+                    row('main-k1', result(None, 'skipped', 'single-llc', topology=topo), k=1)]
+            for c in sweep.suite_cells('ctl-mirror', mirror):
+                rows.append(row(c['id'], result(None, 'skipped', 'single-llc', topology=topo),
+                                sweep_='mirror', k=c['labels']['k'], arm='mirror'))
+            s = sweep.summarize(rows, [], dict(topology=topo))
+            self.assertFalse(s['off_ccd_measured'])
+            self.assertEqual(s['off_ccd_skip_reasons'], ['single-llc'])
+            self.assertIn('single-LLC host: off-CCD sweeps not measured',
+                          sweep.render_markdown(s))
+
+    def test_home_only_mirror_run_does_not_count_as_off_ccd(self):
+        # The pre-fix runner picked the only eligible group as the "mirror" and
+        # recorded its k=0 cells as ok home-only runs.
+        topo = dict(SECOND_L3_ONLY, crosses_llc=False)
+        rows = [row('mirror-k0', result(100.0, topology=topo), sweep_='mirror', k=0, arm='mirror'),
+                row('mirror-k1', result(None, 'skipped', 'single-llc', topology=topo),
+                    sweep_='mirror', k=1, arm='mirror')]
+        s = sweep.summarize(rows, [], dict(topology=topo))
+        self.assertFalse(s['off_ccd_measured'])
+        self.assertIn('single-LLC host', sweep.render_markdown(s))
+
+    def test_two_llc_off_runs_are_measured(self):
+        rows = [row('k0', result(100.0, topology=dict(TOPO, crosses_llc=False)), k=0),
+                row('k1', result(90.0), k=1)]
+        self.assertTrue(sweep.summarize(rows, [], dict(topology=TOPO))['off_ccd_measured'])
 
     def test_host_note_in_metadata(self):
         with tempfile.TemporaryDirectory() as d, \
