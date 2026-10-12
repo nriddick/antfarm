@@ -120,6 +120,16 @@ release entry at merge.
   releasing everything it acquired. `AntFarm.checkGeometry` runs the same
   geometry checks with no side effects (quota sums are now overflow-checked).
   `create` is unchanged and still aborts, with the same messages.
+- `ActorRuntime.quiescent` is true exactly when `destroy` would not abort (no
+  live actor, nothing queued, including the internal ready words).
+- `PrivateRootPark.pumpCounted` returns `PrivatePumpCount` (`roots`, as `pump`
+  returns, and `tables`, every table written including child-wave and resume
+  tables), so an emitter can tell a child-only publication from an idle pump.
+- `CacheAwarePool.stopRequested` reports, with one acquire load, that a worker
+  failure stopped this running pool. `threadpool.pin.confineCallingThread`
+  restricts the calling thread to a CPU set and captures its previous
+  affinity in a `ThreadAffinity`; `restoreCallingThread` puts it back.
+- The threadpool dub package now depends on `antfarm` (packaging only so far).
 
 ### Breaking changes
 

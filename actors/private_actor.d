@@ -243,6 +243,13 @@ enum PrivateCancelResult : ubyte
     staleHandle,
 }
 
+/// `PrivateRootPark.pumpCounted`'s result.
+struct PrivatePumpCount
+{
+    size_t roots;  /// root activations, as `pump` returns
+    size_t tables; /// tables written: child waves, resumes and roots
+}
+
 /// Identity of one tracked root generation. Copyable and non-owning.
 /// requestCancel may be called from any thread while the park exists (the
 /// one exception to single-emitter park access); after destroy it is
@@ -583,8 +590,9 @@ private struct ChildBase
 private struct Emittable
 {
     Emittable* next;
-    // Returns true only when publication is sealed; can destroy the owner on return.
-    bool function(Emittable*, ref Token) nothrow @nogc @system emit;
+    // Returns true only when publication is sealed; can destroy the owner on
+    // return. Adds one to `tables` per table it wrote.
+    bool function(Emittable*, ref Token, ref size_t tables) nothrow @nogc @system emit;
 }
 
 private struct Wave
@@ -959,7 +967,8 @@ private struct Service
         }
     }
 
-    void pump(ref Token token) nothrow @nogc @system
+    // Returns the number of tables written.
+    size_t pump(ref Token token) nothrow @nogc @system
     {
         auto fresh = cast(Emittable*) atomicExchange!(MemoryOrder.acq_rel)(&incoming, cast(shared(Emittable)*) null);
         while (fresh !is null)
@@ -1001,18 +1010,20 @@ private struct Service
             }
         }
         // One pass, one table per descriptor: backpressure never blocks a worker.
+        size_t tables;
         auto current = waiting;
         waiting = null;
         while (current !is null)
         {
             auto next = current.next;
-            if (!current.emit(current, token))
+            if (!current.emit(current, token, tables))
             {
                 current.next = waiting;
                 waiting = current;
             }
             current = next;
         }
+        return tables;
     }
 }
 
@@ -1464,11 +1475,30 @@ public:
     size_t pump(ref Token token, size_t batchLimit, uint avgCost = rootCostHintAuto)
         nothrow @nogc @system
     {
+        size_t tables;
+        return pumpRoots(token, batchLimit, avgCost, tables);
+    }
+
+    /// `pump(token)` that also counts every table it wrote: the child-wave
+    /// and resume tables of the service pass plus the root table, if any.
+    /// `roots` is what `pump` returns. `tables == 0` means nothing was
+    /// published; `roots == 0 && tables != 0` is a child-only publication,
+    /// which still needs parked consumers woken. Emitter only, like `pump`.
+    PrivatePumpCount pumpCounted(ref Token token) nothrow @nogc @system
+    {
+        PrivatePumpCount count;
+        count.roots = pumpRoots(token, service_.batchLimit, rootCostHintAuto, count.tables);
+        return count;
+    }
+
+    private size_t pumpRoots(ref Token token, size_t batchLimit, uint avgCost,
+        ref size_t tables) nothrow @nogc @system
+    {
         enter();
         scope(exit) { version (assert) entered_ = false; }
         if (batchLimit == 0 || batchLimit > service_.batchLimit) fatal("invalid private root batch limit");
         collectCompletedImpl();
-        service_.pump(token);
+        tables = service_.pump(token);
         if (spare_ is null || ready_ is null) return 0;
         auto batch = spare_;
         spare_ = batch.next;
@@ -1503,6 +1533,7 @@ public:
             batch.next = spare_;
             spare_ = batch;
         }
+        else ++tables;
         return n;
     }
 
@@ -2105,7 +2136,7 @@ private:
     {
         return cast(PrivateChildPark*) ChildBase.fromWave(wave);
     }
-    static bool emit(Emittable* emittable, ref Token token) nothrow @nogc @system
+    static bool emit(Emittable* emittable, ref Token token, ref size_t tables) nothrow @nogc @system
     {
         auto wave = cast(Wave*) emittable;
         auto park = fromWave(wave);
@@ -2127,6 +2158,7 @@ private:
         immutable written = cast(size_t) park.base_.service.farm.writeTracked(
             *header, bodies, 1, &wave.hook, token, park.avgCost_);
         if (written == 0) releaseWave(wave); // producer hold still protects it
+        else ++tables;
         park.cursor_ += written;
         if (park.cursor_ < park.count_) return false;
         version (AntfarmActorTestHooks)
@@ -2134,7 +2166,7 @@ private:
         releaseWave(wave); // seal: last access, including park and its owner
         return true;
     }
-    static bool emitSubset(Emittable* emittable, ref Token token) nothrow @nogc @system
+    static bool emitSubset(Emittable* emittable, ref Token token, ref size_t tables) nothrow @nogc @system
     {
         auto wave = cast(Wave*) emittable;
         auto park = fromWave(wave);
@@ -2146,6 +2178,7 @@ private:
         immutable written = cast(size_t) park.base_.service.farm.writeTracked(
             park.header_, bodies, 1, &wave.hook, token, park.avgCost_);
         if (written == 0) releaseWave(wave);
+        else ++tables;
         park.cursor_ += written;
         if (park.cursor_ < park.k_) return false;
         version (AntfarmActorTestHooks)
@@ -2170,7 +2203,7 @@ private:
         releaseWave(wave); // seal: last park access
         return true;
     }
-    static bool emitResume(Emittable* emittable, ref Token token) nothrow @nogc @system
+    static bool emitResume(Emittable* emittable, ref Token token, ref size_t tables) nothrow @nogc @system
     {
         auto base = cast(ChildBase*) (cast(ubyte*) emittable - ChildBase.resume.offsetof);
         auto park = cast(PrivateChildPark*) base;
@@ -2181,6 +2214,7 @@ private:
         immutable written = park.base_.service.farm.writeTracked(
             park.header_, bodies, 1, &wave.hook, token, park.avgCost_);
         if (written == 0) releaseWave(wave); // P still pins the park
+        else ++tables;
         if (base.resumeCount != 0) return false;
         version (AntfarmActorTestHooks)
             actorTestPoint(ActorTestPoint.privateResumeBeforeUnschedule, null);

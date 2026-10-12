@@ -569,6 +569,17 @@ final class CacheAwarePool
         }
     }
 
+    /// True once a worker failure (or `shutdown`) requested stop on this
+    /// running pool: one acquire load. False for a pool that is not the live
+    /// pool: never started, already shut down, or rejected by `start`.
+    @property bool stopRequested() const @nogc nothrow
+    {
+        version (ThreadpoolOs)
+            return gLivePool is this && atomicLoad!(MemoryOrder.acq)(gRunFlag) == 0;
+        else
+            return false;
+    }
+
     void releaseDirector() @nogc nothrow
     {
         directorHeld = false;

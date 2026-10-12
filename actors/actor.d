@@ -980,6 +980,17 @@ align(64) struct ActorRuntime
         return cast(size_t) atomicLoad!(MemoryOrder.acq)(liveCount);
     }
 
+    /// True when `destroy` would not abort: no live actor and nothing queued
+    /// for publication (the same acquire loads `destroy` checks). Consumers
+    /// must still be joined before `destroy`; this proves only the counts.
+    @property bool quiescent() const nothrow @nogc @system
+    {
+        return atomicLoad!(MemoryOrder.acq)(liveCount) == 0
+            && atomicLoad!(MemoryOrder.acq)(readyCount) == 0
+            && atomicLoad!(MemoryOrder.acq)(readyHeadWord) == 0
+            && readyCarryWord == 0;
+    }
+
     /// Diagnostic counter of payload arrivals whose actor generation had
     /// already moved on; grows only under handle misuse or recycling races.
     @property ulong staleActivations() const nothrow @nogc @system

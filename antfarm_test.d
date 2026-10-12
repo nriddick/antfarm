@@ -1782,6 +1782,42 @@ void testActorWave()
     printf("testActorWave OK\n"); fflush(stdout);
 }
 
+void testRuntimeQuiescent()
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope (exit) farm.destroy();
+    auto actors = ActorRuntime.create(farm, 1);
+    check(actors !is null, "quiescent runtime allocation");
+    check(actors.quiescent, "empty runtime is quiescent");
+
+    auto owner = actors.createActor!(ActorCounterState, actorCounter)(
+        ActorCounterState(0, 3));
+    check(owner.valid, "quiescent actor creation");
+    check(!actors.quiescent, "a live actor is not quiescent");
+    check(owner.handle.wake() == ActorWakeResult.queued, "quiescent actor wake");
+    check(actors.ready == 1 && !actors.quiescent, "a queued actor is not quiescent");
+
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "quiescent consumer subscribe");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "quiescent producer registration");
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (!owner.retired)
+    {
+        actors.flush(token);
+        while (view.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            fatal("quiescent actor retirement timeout");
+    }
+    check(!actors.quiescent, "a retired, unreclaimed actor is still live");
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    check(owner.reclaim() == ActorReclaimResult.reclaimed, "quiescent actor reclaim");
+    check(actors.quiescent, "reclaimed runtime with joined consumers is quiescent");
+    actors.destroy();
+    printf("testRuntimeQuiescent OK\n"); fflush(stdout);
+}
+
 void testActorPayload()
 {
     enum consumerCount = 4;
@@ -4182,6 +4218,7 @@ void main(string[] args)
     testCrossFarmProvenance();
     testStaleQuotaReuse();
     testActorWave();
+    testRuntimeQuiescent();
     testActorPayload();
     testActorErasedAdapter();
     testActorInbox();
