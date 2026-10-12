@@ -7,6 +7,7 @@ import antfarm_fibers;
 import antfarm;
 import core.atomic;
 import service_plan_tests;
+import host_attach_tests;
 import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
 import threadpool.resolution : PoolResolution;
 import core.thread : Fiber, Thread;
@@ -2468,6 +2469,7 @@ void main()
     admissionAfterStartFailureSmoke();
     admissionAfterUninstallSmoke();
     servicePlanTests();
+    hostAttachSmoke();
     sharedDomainNoEdgesSmoke();
     preAdmissionUnusedGroupSmoke();
     unstaffedLaneRescueSmoke();

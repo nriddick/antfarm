@@ -10,7 +10,8 @@ module fiber_cancel_at;
 import antfarm;
 import actors;
 import antfarm_fibers;
-import example_host;
+import antfarm_fibers.host : attachFiberDomain;
+import threadpool.host;
 import core.time : MonoTime, msecs, seconds;
 import std.conv : to;
 import std.stdio : writeln;
@@ -42,16 +43,20 @@ void cancelAt(FiberDomain domain, PrivateRootHandle root, MonoTime deadline)
 
 void main(string[] args)
 {
-    uint workers = args.length > 1 ? to!uint(args[1]) : 0;
-    auto host = new ExampleHost(workers);
-    auto token = host.farm.registerProducer(Tier.small);
-    if (!token.valid) fatal("producer registration failed");
+    FarmHostOptions hostOptions;
+    hostOptions.workers = args.length > 1 ? to!uint(args[1]) : 0;
+    hostOptions.waitTimeout = 30.seconds; // example policy: a stuck drain fails instead of hanging
+    auto host = new FarmHost(hostOptions);
+    scope (exit) host.close();
+    scope (failure) host.abandon();
+    // The domain's timers, triggers and flush run in every host step; its
+    // tasks run on the host's consumers.
     auto domain = new FiberDomain(host.farm);
+    attachFiberDomain(host, domain);
 
     PrivateRootOptions options;
     options.tracking = true;
-    auto park = PrivateRootPark!(Worker, poll).create(host.farm, 1, options);
-    if (park is null) fatal("root park allocation failed");
+    auto park = host.createPark!(Worker, poll)(1, options);
     PrivateRootHandle root;
     // The root's own lazy deadline is far away; the fiber is the prompt timer.
     if (park.spawn(Worker(0), root, MonoTime.currTime + 5.seconds)
@@ -59,32 +64,22 @@ void main(string[] args)
         fatal("root spawn failed");
     cancelAt(domain, root, MonoTime.currTime + 50.msecs);
 
-    // Drive both emitters until the root is collected and the fiber terminal.
-    // Zero from either pump is not idle, so the condition is the two drains.
+    // Each step drives both emitters. Zero from either pump is not idle, so
+    // the condition is the two drains.
     PrivateRootOutcome outcome;
-    while (park.live != 0 || !domain.drained)
-    {
-        park.pump(token);
-        domain.pollTimers();
-        domain.pollGenerationTriggers();
-        domain.flush(token);
-        host.progress();
+    host.waitUntil(() {
         PrivateRootOutcome taken;
         while (park.takeOutcome(taken))
             outcome = taken;
-    }
+        return park.live == 0 && domain.drained;
+    });
 
     if (outcome.status != PrivateOutcomeStatus.cancelled
             || outcome.cause != PrivateCancelCause.requested)
         fatal("fiber cancelAt did not cancel the root");
 
-    // Recycle the terminal fiber before the Farm goes away.
-    domain.releaseAll(domain.takeCompletions());
-    host.stopConsumers();
-    park.destroy();
-    park = null;
-    host.farm.unregisterProducer(token);
-    host.farm.destroy();
+    // host.close() recycles the terminal fiber (the attachment's finish)
+    // after the consumers stop and before the Farm goes away.
     writeln("fiber cancelAt: sleeping fiber requested root cancellation"
-        ~ ", workers=", workers);
+        ~ ", workers=", host.plan.workers);
 }
