@@ -7,6 +7,7 @@ module host_live;
 import core.atomic : atomicLoad, atomicOp, atomicStore;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, msecs, seconds;
+import std.algorithm.searching : canFind;
 import std.algorithm.sorting : sort;
 import std.exception : enforce;
 import std.stdio : writeln;
@@ -14,7 +15,9 @@ import std.stdio : writeln;
 import actors;
 import antfarm;
 import threadpool.host;
+import threadpool.hybrid : WorkerSelf;
 import threadpool.os_scope : liveOsMask;
+import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.topology : ProcessorId, formatCpuList;
 
 // ---- public actor: a ledger answering inbox requests ----------------------
@@ -202,6 +205,265 @@ void rawToken(FarmHost host)
     host.retire(owner);
 }
 
+
+// ---- failure paths ---------------------------------------------------------
+
+/// The exception `run` throws, which must be (or derive from) E.
+E expectThrow(E : Throwable)(scope void delegate() run, string what)
+{
+    try
+        run();
+    catch (E e)
+        return e;
+    throw new Exception("expected " ~ E.stringof ~ ": " ~ what);
+}
+
+// Never pops its inbox until cancelled, so a drain retirement never ends.
+struct Stubborn
+{
+    uint activations;
+}
+
+void stubborn(scope ref ActorBorrow!Stubborn actor, scope ref ActorContext context)
+    nothrow @nogc @system
+{
+    ++actor.value.activations;
+    if (context.cancelling)
+        cast(void) context.cancelInbox();
+}
+
+void closeBeforeDrain()
+{
+    auto host = new FarmHost(guarded(0));
+    auto runtime = host.createRuntime(1);
+    auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
+    auto e = expectThrow!FarmHostException(() => host.close(), "close with a live actor");
+    enforce(e.msg.canFind("runtime#0 live=1"), e.msg);
+    enforce(host.state == HostState.open, "close before drain leaves the host open");
+    publicReplies(host); // still usable
+    host.retire(owner);
+    host.close();
+    enforce(host.state == HostState.closed, "closed after the drain");
+    writeln("PASS 5.1: close before the drain throws, leaves the host usable, then closes");
+}
+
+void timeoutThenCancel(uint workers)
+{
+    auto options = guarded(workers);
+    options.waitTimeout = 50.msecs;
+    auto host = new FarmHost(options);
+    auto runtime = host.createRuntime(1);
+    auto owner = runtime.createActor!(Stubborn, stubborn)(Stubborn(0));
+    ActorInboxNode node;
+    node.initialize(null, 0);
+    enforce(owner.handle.send(&node) == ActorSendResult.queued, "send");
+    enforce(owner.requestRetire() == ActorRetireResult.requested, "drain request");
+    auto e = expectThrow!FarmHostTimeout(() => host.waitUntil(() => owner.retired), "drain that never ends");
+    enforce(e.waited == 50.msecs && host.state == HostState.open, "timeout leaves the host open");
+    enforce(owner.requestRetire(ActorRetireMode.cancel) == ActorRetireResult.requested, "cancel request");
+    host.waitUntil(() => owner.retired);
+    enforce(node.available && node.outcome == ActorNodeOutcome.cancelled, "cancelled node");
+    enforce(owner.reclaim() == ActorReclaimResult.reclaimed, "reclaim");
+    host.close();
+    writeln("PASS 5.2: workers ", workers, ": FarmHostTimeout keeps the host open; cancel escalation drains");
+}
+
+version (assert)
+{
+    void failing(scope ref ActorBorrow!Ledger, scope ref ActorContext) nothrow @nogc @system
+    {
+        assert(false, "host-test: injected actor failure");
+    }
+
+    void workerFailure()
+    {
+        auto host = new FarmHost(guarded(2));
+        auto runtime = host.createRuntime(1);
+        auto owner = runtime.createActor!(Ledger, failing)(Ledger(0));
+        enforce(owner.handle.wake() == ActorWakeResult.queued, "wake");
+        auto e = expectThrow!FarmHostFailed(() => host.waitUntil(() => false), "assert in a callback");
+        enforce(e.workerFailures.length != 0
+            && e.workerFailures[0].msg == "host-test: injected actor failure", e.msg);
+        enforce(host.state == HostState.failed, "failed state");
+        expectThrow!FarmHostException(() => host.step(), "step after failure");
+        host.close(); // acts like abandon: no second throw
+        enforce(host.state == HostState.abandoned, "close after failure abandons");
+        writeln("PASS 5.3: an assert in a worker callback becomes FarmHostFailed; close() leaks quietly");
+    }
+}
+
+shared uint gUserPumps;
+
+bool userBody(WorkerSelf*) nothrow @nogc @system
+{
+    import core.atomic : atomicOp;
+    atomicOp!"+="(gUserPumps, 1u);
+    return false;
+}
+
+void singleton()
+{
+    // A second host with workers is rejected without disturbing the first.
+    auto first = new FarmHost(guarded(2));
+    auto confined = liveOsMask();
+    FarmHostException e;
+    foreach (attempt; 0 .. 2) // a rejection must not release the first host's claim
+    {
+        e = expectThrow!FarmHostException(() { new FarmHost(guarded(2)); }, "second host");
+        enforce(e.msg.canFind("another FarmHost owns the pool"), e.msg);
+    }
+    enforce(first.state == HostState.open && !first.pool.stopRequested, "first host untouched");
+    enforce(liveOsMask() == confined, "caller placement untouched");
+    auto noWorkers = new FarmHost(guarded(0)); // workers 0 starts no pool
+    noWorkers.close();
+    publicReplies(first);
+    first.close();
+    writeln("PASS 5.4a: a second FarmHost(2) is rejected; the first keeps working and closes");
+
+    // A user-started pool is rejected and neither shut down nor disturbed.
+    PoolOptions options;
+    options.processors = [first.plan.workerSelection.workers[0]];
+    options.workerBody = &userBody;
+    auto user = new CacheAwarePool(options);
+    user.start();
+    {
+        auto director = user.director();
+        director.spin();
+        e = expectThrow!FarmHostException(() { new FarmHost(guarded(2)); }, "host beside a user pool");
+        enforce(e.msg.canFind("a pool is already running"), e.msg);
+        immutable before = atomicLoad(gUserPumps);
+        Thread.sleep(20.msecs);
+        enforce(!user.stopRequested && atomicLoad(gUserPumps) > before, "user pool still running");
+    }
+    user.shutdown();
+    auto after = new FarmHost(guarded(2)); // the claim was released by the rejection
+    after.close();
+    writeln("PASS 5.4b: a FarmHost beside a user-started pool is rejected; that pool keeps running");
+}
+
+void startupFailure()
+{
+    import threadpool.host : hostTestFailStart;
+
+    hostTestFailStart = 0;
+    auto e = expectThrow!FarmHostFailed(() { new FarmHost(guarded(2)); }, "start hook failure");
+    hostTestFailStart = -1;
+    enforce(e.workerFailures.canFind!(f => f.msg == "FarmHost test hook: injected start failure"), e.msg);
+    auto host = new FarmHost(guarded(2)); // claim, pool and globals were undone
+    publicReplies(host);
+    host.close();
+    writeln("PASS 5.4c: a worker start failure ends the startup wait (no deadlock) and undoes everything");
+}
+
+void abandonLive()
+{
+    auto before = liveOsMask();
+    auto host = new FarmHost(guarded(2));
+    auto runtime = host.createRuntime(1);
+    auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
+    enforce(owner.valid, "live actor");
+    host.abandon();
+    enforce(host.state == HostState.abandoned && host.pool.workerCount == 0, "consumers stopped");
+    enforce(liveOsMask() == before, "affinity restored");
+    host.abandon(); // idempotent
+    auto next = new FarmHost(guarded(2));
+    next.close();
+    writeln("PASS 5.5: abandon() with a live actor stops consumers, restores affinity, frees the pool");
+}
+
+void extraProducers()
+{
+    auto options = guarded(0);
+    options.farm.extraSmallProducers = 1;
+    auto host = new FarmHost(options);
+    auto token = host.registerProducer();
+    enforce(token.valid, "extra producer");
+    expectThrow!FarmHostException(() { cast(void) host.registerProducer(); }, "beyond extraSmallProducers");
+    expectThrow!FarmHostException(() { cast(void) host.registerProducer(Tier.bulk); }, "no bulk tier");
+    auto e = expectThrow!FarmHostException(() => host.close(), "outstanding producer");
+    enforce(e.msg.canFind("extra producer token outstanding") && host.state == HostState.open, e.msg);
+    host.unregisterProducer(token);
+    host.close();
+    writeln("PASS 5.6: an outstanding extra producer blocks close(); planned slots are enforced");
+}
+
+void parkBatchZero()
+{
+    auto host = new FarmHost(guarded(0));
+    PrivateRootOptions options;
+    options.batchLimit = 0;
+    expectThrow!FarmHostException(() { host.createPark!(Root, rootStep)(1, options); }, "batchLimit 0");
+    host.close();
+    writeln("PASS 5.7: createPark with batchLimit 0 throws instead of aborting");
+}
+
+void retireWaveOwned()
+{
+    auto host = new FarmHost(guarded(0));
+    auto runtime = host.createRuntime(1);
+    ulong cell;
+    auto owner = runtime.createActor!(Phase, unusedWake)(Phase(&cell));
+    ActorHandle!Phase[1] handles = [owner.handle];
+    ActorWave wave;
+    wave.begin(host.farm);
+    enforce(host.publish!advance(wave, handles[]), "publish");
+    auto completion = wave.seal();
+    // Not stepped yet: the wave still holds the owner.
+    auto e = expectThrow!FarmHostException(() => host.retire(owner), "retire a wave-held owner");
+    enforce(e.msg.canFind("owner 0") && e.msg.canFind("waveOwned"), e.msg);
+    host.waitUntil(() => completion.finished);
+    host.retire(owner);
+    host.close();
+    writeln("PASS 5.8: retiring a wave-held owner names the owner and result");
+}
+
+void planErrorCreatesNothing()
+{
+    expectThrow!FarmHostPlanException(() { new FarmHost(guarded(100_000)); }, "impossible worker count");
+    auto host = new FarmHost(guarded(0));
+    host.close();
+    writeln("PASS 5.9: a plan error creates nothing; FarmHost(0) follows");
+}
+
+void useAfterClose()
+{
+    auto host = new FarmHost(guarded(0));
+    host.close();
+    expectThrow!FarmHostException(() => host.step(), "step after close");
+    expectThrow!FarmHostException(() { host.createRuntime(1); }, "createRuntime after close");
+    host.close(); // closing a terminal host is a no-op
+    host.abandon();
+    enforce(host.state == HostState.closed, "still closed");
+    writeln("PASS 5.10: use after close throws FarmHostException; close/abandon are no-ops");
+}
+
+// The documented pairing: on an exception with live work, abandon runs first
+// and the close that follows does nothing, so the process can exit.
+void failurePairing()
+{
+    auto before = liveOsMask();
+    FarmHost escaped;
+    try
+    {
+        auto host = new FarmHost(guarded(2));
+        scope (exit) host.close();
+        scope (failure) host.abandon();
+        escaped = host;
+        auto runtime = host.createRuntime(1);
+        auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
+        enforce(owner.valid, "live actor");
+        throw new Exception("host-test: application failure");
+    }
+    catch (Exception e)
+        enforce(e.msg == "host-test: application failure" && e.next is null, "the original exception alone");
+    enforce(escaped.state == HostState.abandoned, "abandoned");
+    enforce(liveOsMask() == before, "affinity restored");
+    escaped.close();
+    auto next = new FarmHost(guarded(2)); // claim released
+    next.close();
+    writeln("PASS 5.11: scope (exit) close + scope (failure) abandon leaves an abandoned host and a free pool");
+}
+
 // ---- cases -----------------------------------------------------------------
 
 FarmHostOptions guarded(uint workers)
@@ -288,11 +550,24 @@ bool workersFit()
 int main()
 {
     workersZero();
+    closeBeforeDrain();
+    timeoutThenCancel(0);
+    extraProducers();
+    parkBatchZero();
+    retireWaveOwned();
+    planErrorCreatesNothing();
+    useAfterClose();
     if (!workersFit())
         return 0;
     writeln(FarmHost.preview(guarded(2)).summary());
     workersTwo();
     confineCaller();
     rawTokenPickup();
+    timeoutThenCancel(2);
+    version (assert) workerFailure();
+    singleton();
+    startupFailure();
+    abandonLive();
+    failurePairing();
     return 0;
 }

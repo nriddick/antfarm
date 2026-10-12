@@ -325,9 +325,32 @@ private __gshared AntFarm* gHostFarm;
 private shared uint gHostSubscribed;
 private ConsumerView tHostView; // TLS: one cursor per worker
 
-private void hostStart(WorkerSelf*)
+version (FarmHostTestHooks)
+{
+    import threadpool.worker : gRunFlag;
+
+    /// Test-only (version FarmHostTestHooks): the worker index whose start
+    /// hook throws, or -1. Every other worker then waits for the pool to stop
+    /// and throws without subscribing, as a worker that exits before its
+    /// start hook would never count.
+    __gshared int hostTestFailStart = -1;
+}
+
+private void hostStart(WorkerSelf* self)
 {
     import std.format : format;
+
+    version (FarmHostTestHooks)
+    {
+        if (hostTestFailStart >= 0)
+        {
+            if (self.workerIndex == hostTestFailStart)
+                throw new FarmHostException("FarmHost test hook: injected start failure");
+            while (atomicLoad!(MemoryOrder.acq)(gRunFlag) != 0)
+                Thread.yield();
+            throw new FarmHostException("FarmHost test hook: stopped before subscribing");
+        }
+    }
 
     long result;
     do result = tHostView.subscribe(gHostFarm);
@@ -364,10 +387,19 @@ private void hostPoolStopped() nothrow
  + thread while the host is open; `wake` must not race `close()`/`abandon()`.
  +
  + Runtimes and parks from `createRuntime`/`createPark` belong to the host and
- + are destroyed by `close()`, after the consumer join. Write
- + `scope (exit) host.close();`: there is no destructor. While it has workers,
- + a host owns the process's single `CacheAwarePool`; a second host with
- + workers, or one started beside an application pool, is rejected.
+ + are destroyed by `close()`, after the consumer join. There is no
+ + destructor; write
+ + ---
+ + auto host = new FarmHost(options);
+ + scope (exit) host.close();
+ + scope (failure) host.abandon();
+ + ---
+ + in that order, so a failure abandons first (stopping the consumers) and the
+ + close that follows is a no-op. Pool workers are non-daemon threads: a host
+ + with workers left open (neither closed nor abandoned) hangs process exit.
+ + While it has workers, a host owns the process's single `CacheAwarePool`; a
+ + second host with workers, or one started beside an application pool, is
+ + rejected.
  +/
 final class FarmHost
 {
@@ -684,8 +716,9 @@ final class FarmHost
     /// Request retirement of every owner (drain mode), wait until all are
     /// retired, then reclaim all. Senders must be quiescent. Throws
     /// `FarmHostException` naming the owner index and result on a rejected
-    /// request or a failed reclaim (`busy`: a wave still holds the owner;
-    /// wait for its `completion.finished` first).
+    /// request (`waveOwned`: a wave still holds the owner; wait for its
+    /// `completion.finished` first) or a failed reclaim (`busy` when a racing
+    /// retirement finished while a wave still held aggregate membership).
     void retire(Owners...)(ref Owners owners)
     {
         retire(ActorRetireMode.drain, owners);
@@ -738,13 +771,19 @@ final class FarmHost
     /// the Farm. Throws `FarmHostException` with no side effects when anything
     /// is not drained (the host stays open and usable). After a worker failure
     /// (state `failed`) it acts like `abandon()` and does not throw again.
-    /// Errors in later cleanup stages are rethrown after every stage ran.
+    /// A no-op once closed or abandoned. Errors in later cleanup stages are
+    /// rethrown after every stage ran. A host with workers that is never
+    /// closed or abandoned hangs process exit (non-daemon pool threads).
     void close()
     {
         import std.array : join;
         import std.format : format;
 
-        if (state == HostState.failed)
+        version (assert) assertControl();
+        immutable current = state;
+        if (current == HostState.closed || current == HostState.abandoned)
+            return;
+        if (current == HostState.failed)
         {
             abandon();
             return;
@@ -798,8 +837,8 @@ final class FarmHost
 
     /// Stop consumers, restore the caller's affinity, unregister the control
     /// token, and leak every runtime, park, attachment and the Farm. For a
-    /// drain that will never finish. External views must already be
-    /// unsubscribed. A no-op once closed or abandoned.
+    /// drain that will never finish, and for `scope (failure)`. External
+    /// views must already be unsubscribed. A no-op once closed or abandoned.
     void abandon()
     {
         version (assert) assertControl();

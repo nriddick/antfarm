@@ -61,6 +61,7 @@ configuration "confine-test" {
 configuration "host-test" {
     targetType "executable"
     mainSourceFile "tests/host_live.d"
+    versions "FarmHostTestHooks"
 }
 
 // Live hardware binary: `dub run -c live-test` (not `dub test`).
