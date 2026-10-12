@@ -2921,7 +2921,7 @@ private void requestReplyReplier(
 {
     auto node = context.popInbox();
     if (node is null) return;
-    RequestReplyMessage* message = cast(RequestReplyMessage*) node.payload;
+    RequestReplyMessage* message = node.payloadAs!RequestReplyMessage;
     ActorWakeResult woken;
     final switch (message.expected)
     {

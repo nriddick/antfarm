@@ -302,6 +302,15 @@ struct ActorInboxNode
         return atomicLoad!(MemoryOrder.acq)(state_) == inboxNodeFree;
     }
 
+    /// The application payload as a pointer to `T`. A plain cast of
+    /// `payload`: the caller owns the storage and the layout, so no size
+    /// or alignment is checked here (a debug-only size check would change
+    /// the node layout between debug and release builds).
+    T* payloadAs(T)() return nothrow @nogc @system
+    {
+        return cast(T*) payload;
+    }
+
     /// Return a node handed to the actor by `ActorContext.popInbox` to its
     /// caller-defined free state. Read/process payload fields before this
     /// release; another producer may reuse them after observing availability.

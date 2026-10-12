@@ -286,6 +286,8 @@ validation and Fiber ThreadSanitizer migration remain limited as stated in
   manual `sender.wake()` (a missing wake used to hang the sender silently).
   They accept `ActorHandle!U` for any `U` and `ActorErasedHandle`, and return
   the `ActorWakeResult`. The completion store happens before the wake.
+- `ActorInboxNode.payloadAs!T` is a plain cast of the node payload to `T*`,
+  replacing the hand-written `cast(Request*) node.payload` at every read.
 
 - Public wave completion keeps its descriptor alive until each holder's last
   access: a producer hold and one credit per admitted table replace the old

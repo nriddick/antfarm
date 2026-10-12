@@ -34,7 +34,7 @@ void serve(scope ref ActorBorrow!Ledger actor, scope ref ActorContext context)
     {
         auto node = context.popInbox();
         if (node is null) break;
-        auto request = cast(Request*) node.payload;
+        auto request = node.payloadAs!Request;
         actor.value.balance += request.delta;
         request.balance = actor.value.balance;
         node.complete(); // last payload access; release makes the node reusable
