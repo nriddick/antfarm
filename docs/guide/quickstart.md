@@ -4,7 +4,7 @@ You need DMD 2.112+ or LDC 1.42+. From a clone of the repository, build and run
 a complete tracked program that distributes work to a public actor service:
 
 ```text
-dmd -g -i -I. -Iexamples examples/public_service.d -of=/tmp/public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
 ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
 ```
 
@@ -15,11 +15,12 @@ public service: 36 ordered replies, balance=234, workers=0, closing-callback-cou
 ```
 
 The trailing `0` consumes on the calling thread; `/tmp/public_service 2` uses
-two worker threads and prints `workers=2` with the same counts. LDC works with
-the same command (`ldc2 -g -i -I. -Iexamples examples/public_service.d
--of=/tmp/public_service`). If the program prints nothing or aborts, check the
-toolchain first. [../../examples/README.md](../../examples/README.md) lists the other
-programs and the Windows commands.
+two pinned pool workers in one LLC and prints `workers=2` with the same counts.
+LDC works with the same command (`ldc2 -g -i -I. -Iexamples -Ithreadpool/source
+examples/public_service.d -of=/tmp/public_service`). If the program prints
+nothing or aborts, check the toolchain first.
+[../../examples/README.md](../../examples/README.md) lists the other programs and
+the Windows commands.
 
 ## What just happened
 
@@ -35,7 +36,8 @@ things cooperate:
 - **Actors** add execution state above the distributor. A public actor owns
   POD state and a caller-owned inbox; a private hierarchy owns a parent-owned
   cohort tree. Neither creates threads: the program supplies whatever pump and
-  consumers it wants, here the on-thread consumer or the example host.
+  consumers it wants, here a `FarmHost` with the on-thread consumer or pinned
+  pool workers.
 
 Whatever the shape, submitted work only makes progress while some thread
 holds a producer `Token` and keeps calling `runtime.flush(token)` (or the

@@ -12,7 +12,7 @@ Complete programs for the two actor models. Read these with
 | [fail_fast_fold.d](fail_fast_fold.d) | `context.fail` + `cancelPeers` fail-fast, the wave aggregate after the join, and explicit root propagation |
 | [fiber_cancel_at.d](fiber_cancel_at.d) | Example bridge from `FiberDomain.sleepUntil` to `PrivateRootHandle.requestCancel` (not library API) |
 
-[example_host.d](example_host.d) is scaffolding: a same-thread consumer or a few druntime workers, plus a progress deadline. It is not a production scheduler. It does not treat `consumeNext() == false` or `pump() == 0` as idle.
+Every program runs on a [`FarmHost`](../threadpool/source/threadpool/host.d) (`threadpool.host`): one Farm, the caller's producer token, and pinned pool workers on one LLC, with the ordered teardown in `close()`. Each sets an explicit 30 s `waitTimeout` as example policy, so a stuck drain fails instead of hanging. `waitUntil` ends only on the program's predicate: it never treats `consumeNext() == false` or `pump() == 0` as idle.
 
 `iota_sum.d` remains the threadpool payload example. It is not part of this actor lane.
 
@@ -20,31 +20,33 @@ Complete programs for the two actor models. Read these with
 
 From the repository root, with DMD or LDC. The same command works on Windows
 x64 and Linux x86-64. Pass `0` to consume on the calling thread, or a worker
-count to use that many druntime threads:
+count N for N pinned pool workers in one LLC, with the calling thread confined
+beside them. A machine with fewer than N + 1 usable CPUs in one LLC rejects N
+with a `FarmHostPlanException` that explains why:
 
 ```text
-dmd -g -i -I. -Iexamples examples/public_service.d -of=public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=public_service
 ANTFARM_HUGE_PAGES=0 ./public_service 0
 
-ldc2 -g -i -I. -Iexamples examples/public_wave.d -of=public_wave
+ldc2 -g -i -I. -Iexamples -Ithreadpool/source examples/public_wave.d -of=public_wave
 ANTFARM_HUGE_PAGES=0 ./public_wave 2
 
-dmd -g -i -I. -Iexamples examples/private_tree.d -of=private_tree
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/private_tree.d -of=private_tree
 ANTFARM_HUGE_PAGES=0 ./private_tree 0
 ```
 
 The outcomes and cancellation programs use the same command:
 
 ```text
-dmd -g -i -I. -Iexamples examples/request_deadline.d -of=request_deadline
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/request_deadline.d -of=request_deadline
 ANTFARM_HUGE_PAGES=0 ./request_deadline 0
 
-dmd -g -i -I. -Iexamples examples/fail_fast_fold.d -of=fail_fast_fold
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/fail_fast_fold.d -of=fail_fast_fold
 ANTFARM_HUGE_PAGES=0 ./fail_fast_fold 0
 ```
 
 The fiber `cancelAt` adapter links the separate fibers package, so add the
-fibers and threadpool import paths:
+fibers import path too:
 
 ```text
 ldc2 -g -i -I. -Iexamples -Ifibers/source -Ithreadpool/source \
@@ -58,7 +60,7 @@ unset. In cmd.exe set it with `set ANTFARM_HUGE_PAGES=0` before the run.
 
 `make -C examples check` is the Linux matrix: LDC and DMD, debug and release,
 each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
-threaded programs. `fiber_cancel_at` runs under TSan with 0 workers only,
+threaded programs. Every program run has a 300 s timeout. `fiber_cancel_at` runs under TSan with 0 workers only,
 because TSan fails at the stack switch for migrating DRuntime Fibers; see
 [fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary). That target also extracts the complete First payload program
 from the repository README and runs it with LDC and DMD in debug and release.
@@ -164,8 +166,8 @@ Timing includes cohort creation, the waves and terminal root collection, but
 excludes Farm/worker startup and randomization. Standard deviation is the sample
 standard deviation across those nine runs. These are observations, not a
 performance gate or a comparison with a tiled implementation. They were taken
-with the former unpinned example host and have not been re-measured on
-`FarmHost` (pinned workers in one LLC).
+before the examples moved to `FarmHost`, with unpinned druntime workers, and
+have not been re-measured with pinned workers in one LLC.
 
 | Workers | Gen/s median | Gen/s min–max | Gen/s stddev | Cells/s median | Cells/s min–max | Cells/s stddev |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
