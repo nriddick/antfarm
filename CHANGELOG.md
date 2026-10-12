@@ -146,6 +146,9 @@ release entry at merge.
   is renamed `domain`; the former `domain` property merges into the field.
   Replace `FiberBackend` with `FiberDomain` and `lane.backend` with
   `lane.domain`.
+- X16 follow-up: `FiberTask.backend` is now `FiberTask.domain`; the remaining
+  locals, parameters and test fields holding a `FiberDomain` follow it, and
+  `FiberJoinStatus.wrongBackend` becomes `wrongDomain`.
 
 ## 1.8.0-rc.2
 

@@ -47,7 +47,7 @@ enum FiberJoinStatus : ubyte
     cancelled,
     timedOut,
     wouldBlock,
-    wrongBackend,
+    wrongDomain,
     staleHandle,
 }
 
@@ -112,7 +112,7 @@ enum FiberLifecycleKind : ubyte
 }
 
 /// Immutable snapshot copied out of the ordered lifecycle lane. `sequence` is
-/// backend-local and assigned by the Director-side drain in queue order.
+/// domain-local and assigned by the Director-side drain in queue order.
 struct FiberLifecycleEvent
 {
     ulong sequence;
@@ -276,7 +276,7 @@ struct TaskHandle
     }
 
     /// Suspend the current managed Fiber without blocking its worker until a
-    /// task in the same backend terminates. Completion registration and the
+    /// task in the same domain terminates. Completion registration and the
     /// terminal recheck are one target-list transaction, so no wake is lost.
     FiberJoinResult joinFiber()
     {
@@ -304,10 +304,10 @@ struct TaskHandle
             return FiberJoinResult(
                 TaskHandle(target, generation, diagnosticId),
                 FiberJoinStatus.wouldBlock);
-        if (target !is null && target.backend !is waiter.backend)
+        if (target !is null && target.domain !is waiter.domain)
             return FiberJoinResult(
                 TaskHandle(target, generation, diagnosticId),
-                FiberJoinStatus.wrongBackend);
+                FiberJoinStatus.wrongDomain);
 
         while (true)
         {
@@ -325,21 +325,21 @@ struct TaskHandle
             }
             if (timed)
             {
-                auto backend = waiter.backend;
-                immutable seq = atomicFetchAdd(backend.timerSequence, 1UL);
+                auto domain = waiter.domain;
+                immutable seq = atomicFetchAdd(domain.timerSequence, 1UL);
                 bool earliest;
                 try
-                    earliest = backend.timers.insert(waiter, deadline.ticks, seq);
+                    earliest = domain.timers.insert(waiter, deadline.ticks, seq);
                 catch (Throwable failure)
                 {
                     target.removeManagedJoinWaiter(waiter);
-                    backend.timers.remove(waiter);
-                    backend.restoreRunningAfterWaitSetupFailure(waiter);
+                    domain.timers.remove(waiter);
+                    domain.restoreRunningAfterWaitSetupFailure(waiter);
                     throw failure;
                 }
                 // Completion can detach and wake us before timer insertion.
                 if (!target.hasManagedJoinWaiter(waiter, generation))
-                    backend.timers.remove(waiter);
+                    domain.timers.remove(waiter);
                 else if (earliest)
                     waiter.readyLane.noteTimerArmed();
             }
@@ -505,7 +505,7 @@ static assert(FiberJoinControl.sizeof % cacheLineSize == 0);
 /// First line owns this task's inbound managed-join list. The second line is
 /// this task's outbound membership when it joins another task. Raw task words
 /// are safe outside GC scans because every participating task remains an
-/// active backend root until the membership is detached.
+/// active domain root until the membership is detached.
 align(64) private struct FiberManagedJoinControl
 {
     shared int gate;
@@ -585,7 +585,7 @@ final class FiberTask
     private FiberTaskControl* control;
     private FiberJoinControl* joinControl;
     private FiberManagedJoinControl* managedJoinControl;
-    package FiberDomain backend;
+    package FiberDomain domain;
     package FiberReadyLane readyLane;
     package Fiber fiber;
     package Signal waitSignal;
@@ -608,7 +608,7 @@ final class FiberTask
     package ulong payloadWord;
     /// Requested stack size; recycled tasks keep their original stack.
     package size_t stackSize;
-    /// Position in the backend's roots array; maintained under rootsMutex so
+    /// Position in the domain's roots array; maintained under rootsMutex so
     /// completion draining is an O(1) swap-removal per task.
     package size_t rootsIndex;
     /// Double-release guard for the recycling pool (pool mutex held).
@@ -700,17 +700,17 @@ final class FiberTask
     @property private ref shared(uint) joinState() const return nothrow @nogc
     { return (cast(FiberJoinControl*) joinControl).state; }
 
-    this(FiberDomain backend, FiberReadyLane readyLane,
+    this(FiberDomain domain, FiberReadyLane readyLane,
          void delegate() body, size_t stackSize = 0)
     {
-        initializeTask(backend, readyLane, stackSize);
+        initializeTask(domain, readyLane, stackSize);
         fiber = stackSize == 0 ? new Fiber(body) : new Fiber(body, stackSize);
     }
 
-    this(FiberDomain backend, FiberReadyLane readyLane,
+    this(FiberDomain domain, FiberReadyLane readyLane,
          void function() body, size_t stackSize = 0)
     {
-        initializeTask(backend, readyLane, stackSize);
+        initializeTask(domain, readyLane, stackSize);
         fiber = stackSize == 0 ? new Fiber(body) : new Fiber(body, stackSize);
     }
 
@@ -738,17 +738,17 @@ final class FiberTask
         atomicStore!(MemoryOrder.raw)(control.outcomeState, FiberOutcome.pending);
     }
 
-    private void initializeTask(FiberDomain backend, FiberReadyLane readyLane,
+    private void initializeTask(FiberDomain domain, FiberReadyLane readyLane,
                                 size_t stackSize)
     {
         initializeControl();
         initializeJoinControl();
         managedJoinControl = allocateCacheLine!FiberManagedJoinControl();
-        this.backend = backend;
+        this.domain = domain;
         this.readyLane = readyLane;
         this.stackSize = stackSize;
         payloadWord = cast(ulong) cast(void*) this;
-        if (backend.lifecycleEventsEnabled) ensureLifecycleNodes();
+        if (domain.lifecycleEventsEnabled) ensureLifecycleNodes();
     }
 
     private void initializeJoinControl() nothrow @nogc
@@ -863,7 +863,7 @@ final class FiberTask
         atomicStore!(MemoryOrder.raw)(managedJoinControl.headWord,
             cast(size_t) cast(void*) waiter);
         atomicFetchAdd!(MemoryOrder.rel)(managedJoinControl.waiterCount, 1u);
-        atomicFetchAdd!(MemoryOrder.rel)(backend.managedJoinWaiterCount, 1L);
+        atomicFetchAdd!(MemoryOrder.rel)(domain.managedJoinWaiterCount, 1L);
         return true;
     }
 
@@ -917,7 +917,7 @@ final class FiberTask
         immutable previousCount = atomicFetchSub!(MemoryOrder.rel)(
             managedJoinControl.waiterCount, 1u);
         assert(previousCount != 0);
-        atomicFetchSub!(MemoryOrder.rel)(backend.managedJoinWaiterCount, 1L);
+        atomicFetchSub!(MemoryOrder.rel)(domain.managedJoinWaiterCount, 1L);
         return true;
     }
 
@@ -1596,7 +1596,7 @@ class FiberReadyLane
         if (body.length != 1) return 0;
         auto task = cast(FiberTask) cast(void*) body[0];
         task.readyLane.noteEntered();
-        task.backend.resume(task);
+        task.domain.resume(task);
         return 1;
     }
 
@@ -1630,7 +1630,7 @@ final class FiberDomain
     private TaskHandle[] cancellationRequests;
     private Mutex rootsMutex;
     private FiberTask[] roots; // keep tasks alive while only ring pointers exist
-    private bool backendRooted; // roots this owner while roots[] is nonempty
+    private bool domainRooted; // roots this owner while roots[] is nonempty
     private Mutex poolMutex;
     private FiberTask[size_t] pool; // stack size → freelist of terminated tasks
     private static FiberTask currentTask;
@@ -1714,7 +1714,7 @@ final class FiberDomain
     package FiberReadyLane laneFor(TaskHandle handle) nothrow @nogc
     {
         auto task = handle.slot;
-        return task !is null && task.backend is this
+        return task !is null && task.domain is this
             && task.generation == handle.generation
             ? task.readyLane : null;
     }
@@ -1910,7 +1910,7 @@ final class FiberDomain
         synchronized (admissionMutex)
         {
             if (atomicLoad!(MemoryOrder.acq)(accepting) == 0)
-                throw new Exception("antfarm_fibers: backend is shutting down");
+                throw new Exception("antfarm_fibers: domain is shutting down");
             if (lifecycleEventsEnabled)
             {
                 immutable reserved = lifecycleReserved;
@@ -1985,12 +1985,12 @@ final class FiberDomain
             }
             synchronized (rootsMutex)
             {
-                if (!backendRooted)
+                if (!domainRooted)
                 {
                     // The Farm stores task addresses as integer payload words,
                     // so root this GC owner before the first such publication.
                     GC.addRoot(cast(void*) this);
-                    backendRooted = true;
+                    domainRooted = true;
                 }
                 task.rootsIndex = roots.length;
                 task.rootedFlag = true;
@@ -2043,8 +2043,8 @@ final class FiberDomain
 
     private void releaseOne(FiberTask task)
     {
-        assert(task !is null && task.backend is this && task.terminated,
-            "antfarm_fibers: only terminated tasks of this backend can be released");
+        assert(task !is null && task.domain is this && task.terminated,
+            "antfarm_fibers: only terminated tasks of this domain can be released");
         assert(atomicLoad!(MemoryOrder.acq)(task.completionTaken) != 0
             && atomicLoad!(MemoryOrder.acq)(task.pendingLifecycleEvents) == 0
             && atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) == 0
@@ -2108,7 +2108,7 @@ final class FiberDomain
         if (task.cancellationRequested)
             throw new FiberCancelled;
         task.waitSignal = signal;
-        if (!task.backend.waits.insert(task, signal))
+        if (!task.domain.waits.insert(task, signal))
             throw new FiberCancelled;
         Fiber.yield();
         if (task.cancellationRequested)
@@ -2136,19 +2136,19 @@ final class FiberDomain
         assert(task !is null && task.fiber is Fiber.getThis());
         if (task.cancellationRequested)
             throw new FiberCancelled;
-        auto backend = task.backend;
-        immutable seq = atomicFetchAdd(backend.timerSequence, 1UL);
+        auto domain = task.domain;
+        immutable seq = atomicFetchAdd(domain.timerSequence, 1UL);
         immutable key = timerSignalBit | (seq & ~internalSignalMask);
         task.waitSignal = key;
-        if (!backend.waits.insert(task, key))
+        if (!domain.waits.insert(task, key))
             throw new FiberCancelled;
-        if (backend.timers.insert(task, deadline.ticks, seq))
+        if (domain.timers.insert(task, deadline.ticks, seq))
             task.readyLane.noteTimerArmed();
         // Cancellation may have removed the waiter just before this insert.
         // In that ordering it could not remove a not-yet-present heap entry;
         // close the registration handshake from the running fiber side.
         if (task.cancellationRequested)
-            backend.timers.remove(task);
+            domain.timers.remove(task);
         Fiber.yield();
         if (task.cancellationRequested)
             throw new FiberCancelled;
@@ -2299,7 +2299,7 @@ final class FiberDomain
     CancellationSubmission requestCancel(TaskHandle handle)
     {
         auto task = handle.slot;
-        if (task is null || task.backend !is this || handle.generation == 0
+        if (task is null || task.domain !is this || handle.generation == 0
             || task.generation != handle.generation)
             return CancellationSubmission.staleHandle;
         synchronized (cancellationRequestMutex)
@@ -2344,7 +2344,7 @@ final class FiberDomain
         auto task = currentTask;
         if (task is null)
             return CancellationResult.staleHandle;
-        return task.backend.applyCancellation(task.handle, false);
+        return task.domain.applyCancellation(task.handle, false);
     }
 
     /// Director-only synchronous cancellation, used for shutdown and for
@@ -2375,7 +2375,7 @@ final class FiberDomain
     {
         auto task = handle.slot;
         immutable requestedGeneration = handle.generation;
-        if (task is null || task.backend !is this || requestedGeneration == 0
+        if (task is null || task.domain !is this || requestedGeneration == 0
             || task.generation != requestedGeneration)
             return CancellationResult.staleHandle;
 
@@ -2483,9 +2483,9 @@ final class FiberDomain
         immutable previousTask = atomicFetchSub!(MemoryOrder.acq_rel)(
             task.lifecycleReservations, cast(ubyte) count);
         assert(previousTask >= count);
-        immutable previousBackend = atomicFetchSub!(MemoryOrder.acq_rel)(
+        immutable previousDomain = atomicFetchSub!(MemoryOrder.acq_rel)(
             lifecycleReservationCount, cast(long) count);
-        assert(previousBackend >= count);
+        assert(previousDomain >= count);
     }
 
     /// Reject future spawns. With cancellation, request cancellation for all
@@ -2534,7 +2534,7 @@ final class FiberDomain
     }
 
     /// Drain terminal tasks for control-thread reporting and release the
-    /// backend's GC roots. Returned tasks remain alive while the caller holds
+    /// domain's GC roots. Returned tasks remain alive while the caller holds
     /// them and expose their outcome/exception.
     FiberTask[] takeCompletions(size_t maximum = size_t.max)
     {
@@ -2580,10 +2580,10 @@ final class FiberDomain
         moved.rootsIndex = i;
         roots.length = roots.length - 1;
         task.rootedFlag = false;
-        if (roots.length == 0 && backendRooted)
+        if (roots.length == 0 && domainRooted)
         {
             GC.removeRoot(cast(void*) this);
-            backendRooted = false;
+            domainRooted = false;
         }
     }
 
@@ -2752,8 +2752,8 @@ final class FiberDomain
             word = atomicLoad!(MemoryOrder.raw)(
                 waiter.managedJoinControl.nextWord);
             FiberTask.clearManagedJoinMembership(waiter);
-            waiter.backend.timers.remove(waiter);
-            waiter.backend.makeWaiterReady(waiter);
+            waiter.domain.timers.remove(waiter);
+            waiter.domain.makeWaiterReady(waiter);
         }
     }
 
@@ -2845,7 +2845,7 @@ final class FiberEvent
     void wait()
     {
         auto task = FiberDomain.currentTask;
-        if (task is null || task.backend !is domain)
+        if (task is null || task.domain !is domain)
             throw new Exception(
                 "antfarm_fibers: FiberEvent.wait requires a managed fiber of this domain");
         while (true)
@@ -2925,7 +2925,7 @@ final class FiberGenerationTrigger
     void waitNext()
     {
         auto task = FiberDomain.currentTask;
-        if (task is null || task.backend !is domain_)
+        if (task is null || task.domain !is domain_)
             throw new Exception(
                 "antfarm_fibers: generation trigger requires a managed fiber of this domain");
         immutable target = awaited_ + 1;
@@ -2979,7 +2979,7 @@ final class FiberSemaphore
     void wait()
     {
         auto task = FiberDomain.currentTask;
-        if (task is null || task.backend !is domain)
+        if (task is null || task.domain !is domain)
             throw new Exception(
                 "antfarm_fibers: FiberSemaphore.wait requires a managed fiber of this domain");
         while (true)

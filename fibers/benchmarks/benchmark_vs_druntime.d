@@ -213,8 +213,8 @@ void main(string[] args)
 
     auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 16_384);
     scope (exit) farm.destroy();
-    auto backend = new FiberDomain(farm);
-    backend.reserve(n);
+    auto domain = new FiberDomain(farm);
+    domain.reserve(n);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView consumer;
@@ -239,13 +239,13 @@ void main(string[] args)
     {
         atomicStore(ran, 0);
         auto t0 = MonoTime.currTime;
-        foreach (_; 0 .. n) backend.spawn(dg);
+        foreach (_; 0 .. n) domain.spawn(dg);
         note(createName, n, t0);
         t0 = MonoTime.currTime;
-        drainUntilEmpty(backend, token, consumer, flushMax, avgCostForChunk(32));
+        drainUntilEmpty(domain, token, consumer, flushMax, avgCostForChunk(32));
         note(runName, n, t0);
         assert(atomicLoad(ran) == expected);
-        backend.releaseAll(backend.takeCompletions());
+        domain.releaseAll(domain.takeCompletions());
     }
 
     farmComplete({ workFn(); }, "antfarm fiber create", "antfarm fiber run", n);

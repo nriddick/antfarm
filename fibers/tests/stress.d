@@ -16,7 +16,7 @@ shared int completedNormally;
 
 struct NotifierContext
 {
-    FiberDomain backend;
+    FiberDomain domain;
     FiberTask[] tasks;
     size_t lane;
     size_t width;
@@ -24,7 +24,7 @@ struct NotifierContext
 
 struct TimerCancellationRaceContext
 {
-    FiberDomain backend;
+    FiberDomain domain;
     shared TaskHandle handle;
     MonoTime expireAt;
     shared uint command;
@@ -42,9 +42,9 @@ Thread notifierThread(NotifierContext* context)
         for (size_t i = context.lane; i < taskCount; i += context.width)
         {
             if ((i & 1) == 0)
-                assert(context.backend.requestCancel(context.tasks[i])
+                assert(context.domain.requestCancel(context.tasks[i])
                     == CancellationSubmission.queued);
-            context.backend.signal(cast(Signal) i + 1);
+            context.domain.signal(cast(Signal) i + 1);
         }
     });
 }
@@ -56,21 +56,21 @@ void handleReuseStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberDomain(farm);
+    auto domain = new FiberDomain(farm);
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
 
-    auto first = backend.spawn({});
-    auto flushed = backend.flush(token);
+    auto first = domain.spawn({});
+    auto flushed = domain.flush(token);
     assert(flushed == 1);
     // This table contains exactly one Fiber activation.
     auto consumed = view.consumeNext();
     assert(consumed);
-    auto completed = backend.takeCompletions();
+    auto completed = domain.takeCompletions();
     assert(completed.length == 1);
     auto oldHandle = first.handle;
-    backend.release(first);
+    domain.release(first);
 
     shared int stop;
     shared int violation;
@@ -93,15 +93,15 @@ void handleReuseStress()
     reader.start();
     foreach (i; 0 .. 2_000)
     {
-        auto task = backend.spawn({});
+        auto task = domain.spawn({});
         assert(task is first);
-        flushed = backend.flush(token);
+        flushed = domain.flush(token);
         assert(flushed == 1);
         consumed = view.consumeNext();
         assert(consumed);
-        completed = backend.takeCompletions();
+        completed = domain.takeCompletions();
         assert(completed.length == 1 && completed[0] is task);
-        backend.release(task);
+        domain.release(task);
     }
     atomicStore!(MemoryOrder.rel)(stop, 1);
     reader.join();
@@ -120,7 +120,7 @@ void shutdownAdmissionStress()
     scope (exit) view.unsubscribe();
     foreach (round; 0 .. 50)
     {
-        auto backend = new FiberDomain(farm);
+        auto domain = new FiberDomain(farm);
         shared int start;
         shared long admitted;
         Thread[4] producers;
@@ -132,7 +132,7 @@ void shutdownAdmissionStress()
                 {
                     try
                     {
-                        backend.spawn({});
+                        domain.spawn({});
                         atomicFetchAdd(admitted, 1L);
                     }
                     catch (Exception)
@@ -143,17 +143,17 @@ void shutdownAdmissionStress()
         }
         atomicStore!(MemoryOrder.rel)(start, 1);
         Thread.yield();
-        backend.beginShutdown(true);
+        domain.beginShutdown(true);
         foreach (producer; producers) producer.join();
         foreach (spin; 0 .. 1_000_000)
         {
-            if (backend.ready != 0) backend.flush(token);
+            if (domain.ready != 0) domain.flush(token);
             view.consumeNext();
-            if (backend.drained) break;
+            if (domain.drained) break;
             Thread.yield();
         }
-        assert(backend.drained);
-        auto completed = backend.takeCompletions();
+        assert(domain.drained);
+        auto completed = domain.takeCompletions();
         assert(completed.length == cast(size_t)
             atomicLoad!(MemoryOrder.acq)(admitted));
     }
@@ -167,7 +167,7 @@ void cancellationReturnRaceStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberDomain(farm);
+    auto domain = new FiberDomain(farm);
     shared uint entered;
     shared uint gate;
     shared int stop;
@@ -188,28 +188,28 @@ void cancellationReturnRaceStress()
 
     foreach (round; 1 .. rounds + 1)
     {
-        auto task = backend.spawn({
+        auto task = domain.spawn({
             atomicStore!(MemoryOrder.rel)(entered, round);
             while (atomicLoad!(MemoryOrder.acq)(gate) < round) Thread.yield();
         });
-        auto flushed = backend.flush(token);
+        auto flushed = domain.flush(token);
         assert(flushed == 1);
         while (atomicLoad!(MemoryOrder.acq)(entered) < round) Thread.yield();
         CancellationResult cancellation;
         if ((round & 1) == 0)
         {
-            cancellation = backend.directorCancelDetailed(task.handle);
+            cancellation = domain.directorCancelDetailed(task.handle);
             assert(cancellation == CancellationResult.requestedRunning);
             atomicStore!(MemoryOrder.rel)(gate, round);
         }
         else
         {
             atomicStore!(MemoryOrder.rel)(gate, round);
-            cancellation = backend.directorCancelDetailed(task.handle);
+            cancellation = domain.directorCancelDetailed(task.handle);
             assert(cancellation == CancellationResult.requestedRunning
                 || cancellation == CancellationResult.alreadyTerminal);
         }
-        while (!backend.drained) Thread.yield();
+        while (!domain.drained) Thread.yield();
         if (cancellation == CancellationResult.alreadyTerminal)
         {
             assert(task.outcome == FiberOutcome.completed);
@@ -221,9 +221,9 @@ void cancellationReturnRaceStress()
             assert(task.cancellationDisposition
                 == CancellationDisposition.resultAbrogated);
         }
-        auto completed = backend.takeCompletions();
+        auto completed = domain.takeCompletions();
         assert(completed.length == 1 && completed[0] is task);
-        backend.release(task);
+        domain.release(task);
     }
 }
 
@@ -235,7 +235,7 @@ void managedJoinCompletionRaceStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberDomain(farm);
+    auto domain = new FiberDomain(farm);
     shared int stop;
     Thread[2] consumers;
     foreach (ref consumer; consumers)
@@ -261,34 +261,34 @@ void managedJoinCompletionRaceStress()
     foreach (round; 1 .. rounds + 1)
     {
         FiberJoinStatus joinedStatus;
-        auto target = backend.spawn({
+        auto target = domain.spawn({
             while (atomicLoad!(MemoryOrder.acq)(gate) < round) Thread.yield();
         });
         auto targetHandle = target.handle;
-        auto joiner = backend.spawn({
+        auto joiner = domain.spawn({
             atomicStore!(MemoryOrder.rel)(joinStarted, round);
             joinedStatus = targetHandle.joinFiber().status;
         });
         size_t published;
         while (published != 2)
         {
-            published += backend.flush(token, 1, DEFAULT_AVG_COST);
+            published += domain.flush(token, 1, DEFAULT_AVG_COST);
             if (published != 2) Thread.yield();
         }
         while (atomicLoad!(MemoryOrder.acq)(joinStarted) < round)
             Thread.yield();
         // Completion may now win before, during, or after waiter insertion.
         atomicStore!(MemoryOrder.rel)(gate, round);
-        while (!backend.drained)
+        while (!domain.drained)
         {
-            if (backend.ready != 0) backend.flush(token, 2, DEFAULT_AVG_COST);
+            if (domain.ready != 0) domain.flush(token, 2, DEFAULT_AVG_COST);
             Thread.yield();
         }
         assert(target.terminated && joiner.terminated);
         assert(joinedStatus == FiberJoinStatus.completed);
-        auto completed = backend.takeCompletions();
+        auto completed = domain.takeCompletions();
         assert(completed.length == 2);
-        backend.releaseAll(completed);
+        domain.releaseAll(completed);
     }
 }
 
@@ -301,7 +301,7 @@ void managedJoinFanoutCancellationStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberDomain(farm);
+    auto domain = new FiberDomain(farm);
     shared int stop;
     Thread[4] consumers;
     foreach (ref consumer; consumers)
@@ -326,14 +326,14 @@ void managedJoinFanoutCancellationStress()
     shared uint started;
     foreach (round; 1 .. rounds + 1)
     {
-        auto target = backend.spawn({
+        auto target = domain.spawn({
             while (atomicLoad!(MemoryOrder.acq)(gate) < round) Thread.yield();
         });
         auto handle = target.handle;
         FiberTask[] joiners;
         joiners.reserve(width);
         foreach (_; 0 .. width)
-            joiners ~= backend.spawn({
+            joiners ~= domain.spawn({
                 atomicFetchAdd(started, 1u);
                 cast(void) handle.joinFiber();
             });
@@ -341,7 +341,7 @@ void managedJoinFanoutCancellationStress()
         size_t published;
         while (published != width + 1)
         {
-            published += backend.flush(token, 1, DEFAULT_AVG_COST);
+            published += domain.flush(token, 1, DEFAULT_AVG_COST);
             if (published != width + 1) Thread.yield();
         }
         immutable expectedStarted = cast(uint)(round * width);
@@ -350,24 +350,24 @@ void managedJoinFanoutCancellationStress()
 
         if ((round & 1) == 0)
             foreach (i, joiner; joiners)
-                if ((i & 1) == 0) backend.directorCancel(joiner.handle);
+                if ((i & 1) == 0) domain.directorCancel(joiner.handle);
         atomicStore!(MemoryOrder.rel)(gate, round);
         if ((round & 1) != 0)
             foreach (i, joiner; joiners)
-                if ((i & 1) == 0) backend.directorCancel(joiner.handle);
+                if ((i & 1) == 0) domain.directorCancel(joiner.handle);
 
-        while (!backend.drained)
+        while (!domain.drained)
         {
-            if (backend.ready != 0) backend.flush(token, 32, DEFAULT_AVG_COST);
+            if (domain.ready != 0) domain.flush(token, 32, DEFAULT_AVG_COST);
             Thread.yield();
         }
         assert(target.outcome == FiberOutcome.completed);
         foreach (joiner; joiners)
             assert(joiner.outcome == FiberOutcome.completed
                 || joiner.outcome == FiberOutcome.cancelled);
-        auto completed = backend.takeCompletions();
+        auto completed = domain.takeCompletions();
         assert(completed.length == width + 1);
-        backend.releaseAll(completed);
+        domain.releaseAll(completed);
     }
 }
 
@@ -379,13 +379,13 @@ void timerCancellationRaceStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberDomain(farm);
+    auto domain = new FiberDomain(farm);
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
 
     TimerCancellationRaceContext context;
-    context.backend = backend;
+    context.domain = domain;
     context.expireAt = MonoTime.currTime + hours(2);
     auto canceller = new Thread({
         foreach (round; 1 .. rounds + 1)
@@ -404,7 +404,7 @@ void timerCancellationRaceStress()
                     Thread.yield();
                 }
             auto handle = cast(TaskHandle) context.handle;
-            auto submitted = context.backend.requestCancel(handle);
+            auto submitted = context.domain.requestCancel(handle);
             assert(submitted == CancellationSubmission.queued);
             atomicStore!(MemoryOrder.rel)(context.submissionDone, round);
         }
@@ -426,7 +426,7 @@ void timerCancellationRaceStress()
                     Thread.yield();
                 }
             }
-            auto expired = context.backend.pollTimers(context.expireAt);
+            auto expired = context.domain.pollTimers(context.expireAt);
             atomicStore!(MemoryOrder.rel)(context.expiredCount,
                 cast(uint) expired);
             atomicStore!(MemoryOrder.rel)(context.timerDone, round);
@@ -445,17 +445,17 @@ void timerCancellationRaceStress()
     size_t readyWins;
     foreach (round; 1 .. rounds + 1)
     {
-        auto task = backend.spawn({ FiberDomain.sleepFor(hours(1)); });
-        auto flushed = backend.flush(token);
+        auto task = domain.spawn({ FiberDomain.sleepFor(hours(1)); });
+        auto flushed = domain.flush(token);
         assert(flushed == 1);
         auto consumed = view.consumeNext();
-        assert(consumed && backend.waiting == 1 && backend.ready == 0);
+        assert(consumed && domain.waiting == 1 && domain.ready == 0);
 
         context.handle = cast(shared TaskHandle) task.handle;
         atomicStore!(MemoryOrder.rel)(context.command, round);
         while (atomicLoad!(MemoryOrder.acq)(context.submissionDone) < round)
             Thread.yield();
-        auto applications = backend.drainCancellationRequests();
+        auto applications = domain.drainCancellationRequests();
         assert(applications.length == 1);
         atomicStore!(MemoryOrder.rel)(context.cancellationResult,
             cast(int) applications[0].result);
@@ -473,21 +473,21 @@ void timerCancellationRaceStress()
             ++readyWins;
         else
             assert(false, "timer/cancellation race returned an impossible phase");
-        assert(backend.waiting == 0 && backend.ready == 1);
+        assert(domain.waiting == 0 && domain.ready == 1);
         long unusedDeadline;
-        auto timerRemains = backend.nextTimerDeadline(unusedDeadline);
+        auto timerRemains = domain.nextTimerDeadline(unusedDeadline);
         assert(!timerRemains);
 
-        flushed = backend.flush(token);
+        flushed = domain.flush(token);
         assert(flushed == 1);
         consumed = view.consumeNext();
-        assert(consumed && task.terminated && backend.drained);
+        assert(consumed && task.terminated && domain.drained);
         assert(task.outcome == FiberOutcome.cancelled);
         assert(task.cancellationDisposition
             == CancellationDisposition.acknowledged);
-        auto completed = backend.takeCompletions();
+        auto completed = domain.takeCompletions();
         assert(completed.length == 1 && completed[0] is task);
-        backend.release(task);
+        domain.release(task);
     }
     assert(waitingWins != 0 && readyWins != 0);
 }
@@ -503,8 +503,8 @@ void lifecycleRetentionStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto backend = new FiberDomain(farm);
-    backend.enableLifecycleEvents(retentionLimit);
+    auto domain = new FiberDomain(farm);
+    domain.enableLifecycleEvents(retentionLimit);
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
@@ -523,7 +523,7 @@ void lifecycleRetentionStress()
             {
                 try
                 {
-                    backend.spawn({});
+                    domain.spawn({});
                     ++produced;
                     atomicFetchAdd(admitted, 1u);
                 }
@@ -548,25 +548,25 @@ void lifecycleRetentionStress()
         Thread.yield();
     ulong previousSequence;
     while (atomicLoad!(MemoryOrder.acq)(producersDone) != producerCount
-        || !backend.drained || backend.pendingEvents != 0)
+        || !domain.drained || domain.pendingEvents != 0)
     {
-        if (backend.ready != 0) backend.flush(token);
+        if (domain.ready != 0) domain.flush(token);
         view.consumeNext();
-        auto events = backend.takeLifecycleEvents(3);
+        auto events = domain.takeLifecycleEvents(3);
         foreach (event; events)
         {
             assert(event.sequence == previousSequence + 1);
             previousSequence = event.sequence;
         }
-        assert(backend.lifecycleReserved <= retentionLimit);
+        assert(domain.lifecycleReserved <= retentionLimit);
         if (events.length == 0) Thread.yield();
     }
     assert(atomicLoad!(MemoryOrder.acq)(admitted) == totalTasks);
     assert(atomicLoad!(MemoryOrder.acq)(backpressured) != 0);
-    assert(backend.lifecycleReserved == 0 && backend.pendingEvents == 0);
-    auto completed = backend.takeCompletions();
+    assert(domain.lifecycleReserved == 0 && domain.pendingEvents == 0);
+    auto completed = domain.takeCompletions();
     assert(completed.length == totalTasks);
-    backend.releaseAll(completed);
+    domain.releaseAll(completed);
 }
 
 void sharedDomainLaneStress()
@@ -910,7 +910,7 @@ void actorWaveGenerationStress()
     auto runtime = ActorRuntime.create(farm, totalActors);
     enforce(runtime !is null,
         "actor-wave stress runtime allocation failed");
-    auto backend = new FiberDomain(farm);
+    auto domain = new FiberDomain(farm);
 
     auto results = new ActorWaveStressResult[totalActors];
     auto owners = new ActorOwner!ActorWaveStressState[totalActors];
@@ -939,16 +939,16 @@ void actorWaveGenerationStress()
         auto producer = farm.registerProducer(Tier.small);
         enforce(producer.valid,
             "actor-wave stress wave producer registration failed");
-        jobs[stream] = new ActorWaveStressProducer(backend, farm,
+        jobs[stream] = new ActorWaveStressProducer(domain, farm,
             producer, sets[stream], generations);
-        tasks[stream] = backend.spawn(&jobs[stream].run);
+        tasks[stream] = domain.spawn(&jobs[stream].run);
     }
 
     // Publish the initial Fiber activation table before starting consumers.
     // Its Fibers each publish and seal a wave before the director begins
     // polling deferred completion edges. Subsequent generations naturally
     // mix parked wakeups with valid preposted completions.
-    immutable initiallyFlushed = backend.flush(
+    immutable initiallyFlushed = domain.flush(
         schedulerProducer, streamCount, avgCostForChunk(32));
     enforce(initiallyFlushed == streamCount,
         "actor-wave stress initial Fiber publication failed");
@@ -983,12 +983,12 @@ void actorWaveGenerationStress()
     }
 
     auto deadline = MonoTime.currTime + 20.seconds;
-    while (!backend.drained)
+    while (!domain.drained)
     {
-        backend.pollGenerationTriggers();
-        if (backend.ready != 0)
+        domain.pollGenerationTriggers();
+        if (domain.ready != 0)
         {
-            if (backend.flush(schedulerProducer, 32, avgCostForChunk(32)) == 0)
+            if (domain.flush(schedulerProducer, 32, avgCostForChunk(32)) == 0)
                 Thread.yield();
         }
         else
@@ -996,7 +996,7 @@ void actorWaveGenerationStress()
         if (MonoTime.currTime >= deadline)
             enforce(false, "actorWaveGenerationStress: drain stalled");
     }
-    backend.pollGenerationTriggers();
+    domain.pollGenerationTriggers();
     atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
     foreach (consumer; consumers) consumer.join();
     consumersJoined = true;
@@ -1023,7 +1023,7 @@ void actorWaveGenerationStress()
             "actor-wave stress did not produce the expected physical tables");
         farm.unregisterProducer(jobs[stream].producer);
     }
-    backend.releaseAll(backend.takeCompletions());
+    domain.releaseAll(domain.takeCompletions());
     farm.unregisterProducer(schedulerProducer);
 
     foreach (i; 0 .. totalActors)
@@ -1052,26 +1052,26 @@ void syncPrimitiveStress()
     auto farm = AntFarm.create(4, 8, 2, 0, 0, 1, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberDomain(farm);
+    auto domain = new FiberDomain(farm);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
     subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
 
-    auto sem = new FiberSemaphore(backend, 0);
+    auto sem = new FiberSemaphore(domain, 0);
     shared uint ran;
     foreach (_; 0 .. waiters)
-        backend.spawn({
+        domain.spawn({
             sem.wait();
             atomicFetchAdd(ran, 1u);
         });
 
     auto spinStart = MonoTime.currTime;
     ulong spins;
-    while (backend.waiting != waiters)
+    while (domain.waiting != waiters)
     {
-        backend.flush(token);
+        domain.flush(token);
         if (!view.consumeNext())
             Thread.yield();
         ++spins;
@@ -1080,9 +1080,9 @@ void syncPrimitiveStress()
             assert(false, "syncPrimitiveStress: waiters stalled");
     }
     sem.post(waiters);
-    while (!backend.drained)
+    while (!domain.drained)
     {
-        backend.flush(token);
+        domain.flush(token);
         if (!view.consumeNext())
             Thread.yield();
         ++spins;
@@ -1091,7 +1091,7 @@ void syncPrimitiveStress()
             assert(false, "syncPrimitiveStress: drain stalled");
     }
     assert(atomicLoad(ran) == waiters);
-    backend.releaseAll(backend.takeCompletions());
+    domain.releaseAll(domain.takeCompletions());
 }
 
 void main()
@@ -1099,8 +1099,8 @@ void main()
     auto farm = AntFarm.create(4, 8, 4, 0, 0, 1, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto backend = new FiberDomain(farm);
-    backend.enableLifecycleEvents();
+    auto domain = new FiberDomain(farm);
+    domain.enableLifecycleEvents();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
 
@@ -1108,7 +1108,7 @@ void main()
     foreach (i; 0 .. taskCount)
     {
         immutable key = cast(Signal) i + 1;
-        tasks ~= backend.spawn({
+        tasks ~= domain.spawn({
             FiberDomain.await(key);
             atomicFetchAdd(completedNormally, 1);
         });
@@ -1133,35 +1133,35 @@ void main()
     while (atomicLoad!(MemoryOrder.acq)(subscribed) != consumers.length)
         Thread.yield();
 
-    while (backend.ready != 0)
+    while (domain.ready != 0)
     {
-        if (backend.flush(token, 256, DEFAULT_AVG_COST) == 0) Thread.yield();
+        if (domain.flush(token, 256, DEFAULT_AVG_COST) == 0) Thread.yield();
     }
-    while (backend.waiting != taskCount) Thread.yield();
+    while (domain.waiting != taskCount) Thread.yield();
 
     // Cancellation and signal delivery compete over the same wait registry.
     Thread[4] notifiers;
     NotifierContext[4] notifierContexts;
     foreach (n; 0 .. notifiers.length)
     {
-        notifierContexts[n] = NotifierContext(backend, tasks, n, notifiers.length);
+        notifierContexts[n] = NotifierContext(domain, tasks, n, notifiers.length);
         notifiers[n] = notifierThread(&notifierContexts[n]);
         notifiers[n].start();
     }
     foreach (thread; notifiers) thread.join();
 
-    auto applications = backend.drainCancellationRequests();
+    auto applications = domain.drainCancellationRequests();
     assert(applications.length == taskCount / 2);
 
-    while (!backend.drained)
+    while (!domain.drained)
     {
-        if (backend.ready != 0 && backend.flush(token, 256, DEFAULT_AVG_COST) == 0)
+        if (domain.ready != 0 && domain.flush(token, 256, DEFAULT_AVG_COST) == 0)
             Thread.yield();
     }
     atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
     foreach (thread; consumers) thread.join();
 
-    auto outcomes = backend.takeCompletions();
+    auto outcomes = domain.takeCompletions();
     assert(outcomes.length == taskCount);
     size_t cancelled, succeeded;
     foreach (task; outcomes)
@@ -1173,7 +1173,7 @@ void main()
     assert(cancelled == taskCount / 2);
     assert(succeeded == taskCount / 2);
     assert(atomicLoad(completedNormally) == taskCount / 2);
-    auto events = backend.takeLifecycleEvents();
+    auto events = domain.takeLifecycleEvents();
     size_t admittedEvents, cancellationEvents, terminalEvents, failureEvents;
     ubyte[ulong] phase;
     foreach (event; events)
@@ -1209,7 +1209,7 @@ void main()
     assert(cancellationEvents == taskCount / 2);
     assert(terminalEvents == taskCount);
     assert(failureEvents == 0);
-    assert(backend.lifecycleReserved == 0);
+    assert(domain.lifecycleReserved == 0);
 
     handleReuseStress();
     shutdownAdmissionStress();
