@@ -907,6 +907,9 @@ void run(ref RolePlan plan, ref JSONValue out_)
                 failure = g_threads[k].role == "consumer" ? "subscribe-failed" : "register-failed";
             if (failure.length) break;
         }
+    // A setup failure leaves threads unpinned or unobserved, which the pin
+    // verdict would report as a mismatch; the setup reason is the cause.
+    immutable setupFailure = failure;
     immutable cf = atomicLoad(f.Cf);
 
     JSONValue agg, phased, scanJ;
@@ -1220,6 +1223,8 @@ void run(ref RolePlan plan, ref JSONValue out_)
         "ln": JSONValue(f.Ln)]);
     out_["threads"] = threadsJson(n, mhz);
 
+    if (setupFailure.length)
+        return finish("invalid", setupFailure);
     if (!verdict.ok)
         return finish("invalid", verdict.reason);
     if (failure.length)

@@ -681,7 +681,7 @@ def summarize_calib(lines):
         if ln.get('status') == 'skipped':
             out['skipped'].append(dict(kind=kind, reason=ln.get('reason'),
                                        what=ln.get('class') or ln.get('config') or ln.get('direction')))
-        elif kind == 'pingpong-class':
+        elif kind == 'pingpong-class' and ln.get('status') == 'ok':
             out['pingpong'][ln['class']] = ln.get('oneway_ns_over_pair_medians')
         elif kind == 'rmw' and ln.get('status') == 'ok':
             out['rmw'].append(dict(config=ln['config'], mops=ln['mops'], ns_per_op=ln['ns_per_op']))

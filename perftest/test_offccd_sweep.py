@@ -230,6 +230,16 @@ class RenderTests(unittest.TestCase):
                 row('k1', result(90.0), k=1)]
         self.assertTrue(sweep.summarize(rows, [], dict(topology=TOPO))['off_ccd_measured'])
 
+    def test_invalid_pingpong_class_is_not_a_measurement(self):
+        calib = [dict(kind='pingpong-class', status='invalid', reason='no-valid-pairs',
+                      **{'class': 'intra-llc'}, pairs=3, oneway_ns_over_pair_medians=dict(n=0)),
+                 dict(kind='pingpong-class', status='ok', **{'class': 'cross-llc'},
+                      oneway_ns_over_pair_medians=dict(median=60.0, min=59.0, max=61.0, stddev=1.0, n=3))]
+        cal = sweep.summarize_calib(calib)
+        self.assertEqual(sorted(cal['pingpong']), ['cross-llc'])
+        self.assertEqual(cal['invalid'], ['no-valid-pairs'])
+        self.assertNotIn('cross_intra_ratio', cal)
+
     def test_host_note_in_metadata(self):
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(sweep, 'try_cmd', return_value=(1, '')):

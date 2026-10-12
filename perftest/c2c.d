@@ -335,12 +335,17 @@ void runPingpong(ref const Opts o, ProcessorId[] home, ProcessorId[] remote, boo
                 medians[cls] ~= j["oneway_ns"]["median"].floating;
         }
         auto summary = spread(medians.get(cls, null));
+        // A class whose every pair was invalid has nothing to summarize.
+        immutable valid = medians.get(cls, null).length != 0;
         JSONValue j;
         j["kind"] = "pingpong-class";
-        j["status"] = "ok";
+        j["status"] = valid ? "ok" : "invalid";
+        j["reason"] = valid ? JSONValue(null) : JSONValue("no-valid-pairs");
         j["class"] = cls;
         j["pairs"] = list.length;
         j["oneway_ns_over_pair_medians"] = summary;
+        if (!valid)
+            g_anyInvalid = true;
         emit(j);
     }
 }
