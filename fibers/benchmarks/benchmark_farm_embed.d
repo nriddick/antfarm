@@ -8,6 +8,10 @@
  + (2) is Ant Farm-specific throughput. (3) isolates the pool. (4) is the
  + fiber embedding. Page backing follows Ant Farm's default or the
  + ANTFARM_HUGE_PAGES override.
+ +
+ + Every scene draws its workers from one LLC group (the group of the first
+ + eligible CPU), because (4) binds its single lane to one group. On
+ + multi-LLC hosts the scenes are therefore capped to one LLC's CPUs.
  +/
 module benchmark_farm_embed;
 
@@ -39,32 +43,37 @@ final class PoolCons
     bool subscribed;
 }
 
-ushort[] pickLps(bool skipSmt, size_t workers)
+/// Up to `workers` (0 = all) eligible CPUs of ONE LLC group, the group of the
+/// first eligible CPU. A Fiber plan binds the single lane to one group, so on
+/// multi-LLC hosts these runs are capped to that group's CPUs.
+ProcessorId[] pickLps(bool skipSmt, size_t workers)
 {
     auto snap = CacheAwarePool.topology();
-    ushort[] lps;
-    foreach (ref lp; snap.processors)
+    ProcessorId[] lps;
+    foreach (id; snap.eligibleProcessorsInLlc(firstEligibleGroup()))
     {
-        version (linux)
-            if (lp.parkedAtDiscovery) continue;
-        if (skipSmt && lp.smtSibling) continue;
-        lps ~= lp.lpIndex;
+        if (skipSmt && snap.byId(id).smtSibling) continue;
+        lps ~= id;
         if (workers != 0 && lps.length == workers) break;
     }
     return lps;
 }
 
-LogicalProcessor[] lpsToProcs(ushort[] lps)
+/// The LLC group of the first eligible CPU: the one group these runs use.
+ushort firstEligibleGroup()
+{
+    auto snap = CacheAwarePool.topology();
+    foreach (ref lp; snap.processors)
+        if (snap.isEligible(lp)) return lp.llcIndex;
+    throw new Exception("no eligible logical processors");
+}
+
+LogicalProcessor[] lpsToProcs(ProcessorId[] lps)
 {
     auto snap = CacheAwarePool.topology();
     LogicalProcessor[] outp;
     foreach (id; lps)
-        foreach (ref lp; snap.processors)
-            if (lp.lpIndex == id)
-            {
-                outp ~= lp;
-                break;
-            }
+        outp ~= *snap.byId(id);
     return outp;
 }
 
@@ -176,11 +185,7 @@ final class SpinWorker : Thread
 
     void entry()
     {
-        PinTarget t;
-        t.cpuSetId = lp.cpuSetId;
-        t.group = lp.group;
-        t.lpIndex = lp.lpIndex;
-        pinToLogicalProcessor(t);
+        pinProcessor(lp);
         ConsumerView v;
         subscribeOrThrow(v, farm);
         while (atomicLoad(gStop) == 0)
@@ -189,7 +194,7 @@ final class SpinWorker : Thread
     }
 }
 
-double runFarmSpin(size_t n, uint avgCost, ushort[] lps)
+double runFarmSpin(size_t n, uint avgCost, ProcessorId[] lps)
 {
     auto procs = lpsToProcs(lps);
     auto farm = makeFarm(cast(uint) procs.length);
@@ -248,7 +253,7 @@ void poolStop(WorkerSelf* w)
     w.context = null;
 }
 
-double runPool(size_t n, uint avgCost, ushort[] lps, bool spin)
+double runPool(size_t n, uint avgCost, ProcessorId[] lps, bool spin)
 {
     auto farm = makeFarm(cast(uint) lps.length);
     scope (exit) farm.destroy();
@@ -256,7 +261,7 @@ double runPool(size_t n, uint avgCost, ushort[] lps, bool spin)
     gPoolSpin = spin;
     atomicStore(gHits, 0);
     PoolOptions opt;
-    opt.onlyLps = lps;
+    opt.processors = lps;
     opt.managedWorker = ManagedWorkerHooks(&poolStart, &poolPump, &poolStop);
     auto pool = new CacheAwarePool(opt);
     pool.start();
@@ -265,7 +270,7 @@ double runPool(size_t n, uint avgCost, ushort[] lps, bool spin)
     return produceWait(farm, n, avgCost, pool);
 }
 
-double runFiberPump(size_t n, uint avgCost, ushort[] lps)
+double runFiberPump(size_t n, uint avgCost, ProcessorId[] lps)
 {
     auto farm = makeFarm(cast(uint) lps.length);
     scope (exit) farm.destroy();
@@ -273,13 +278,15 @@ double runFiberPump(size_t n, uint avgCost, ushort[] lps)
     lane.flushBatch = 256;
     lane.avgCost = avgCost;
     PoolOptions opt;
-    opt.onlyLps = lps;
+    opt.processors = lps;
     opt.managedWorker = fiberWorkerHooks();
     auto pool = new CacheAwarePool(opt);
-    installFiberLanes([lane], pool);
-    scope (exit) uninstallFiberLanes();
+    immutable group = CacheAwarePool.topology().byId(lps[0]).llcIndex;
+    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane), pool);
+    scope (exit) uninstallFiberPlan();
     pool.start();
     scope (exit) pool.shutdown();
+    writefln("  fiber lane on group %s: %s", group, pool.resolution.summary());
     atomicStore(gHits, 0);
     return produceWait(farm, n, avgCost, pool);
 }
@@ -314,7 +321,8 @@ void main(string[] args)
     {
         auto lps = pickLps(scene.skipSmt, scene.workers);
         if (lps.length == 0) continue;
-        writefln("\n%s  workers=%s", scene.name, lps.length);
+        writefln("\n%s  workers=%s group=%s cpus=%s", scene.name, lps.length,
+                 firstEligibleGroup(), formatCpuList(lps));
         stdout.flush();
         auto spin = runFarmSpin(n, avgCost, lps);
         report("farm spin consumeNext", n, spin);

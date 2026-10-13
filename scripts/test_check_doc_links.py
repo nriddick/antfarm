@@ -5,9 +5,11 @@ Creates a temporary git repository, copies the checker into it, stages the
 fixtures, and asserts the exit status for each case. Run directly, or from
 `make check-docs` alongside the checker.
 """
+import errno
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -17,17 +19,23 @@ CHECKER = HERE / "check-doc-links.py"
 
 
 def run(cwd, *args):
-    return subprocess.run(args, cwd=str(cwd), capture_output=True, text=True)
+    return subprocess.run(args, cwd=str(cwd), capture_output=True, text=True,
+                          check=True)
 
 
 class LinkProbes(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix="check-doc-links-")
-        cls.root = pathlib.Path(cls.tmp)
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
+        cls.root = pathlib.Path(cls.tmp) / "repo"
+        cls.root.mkdir()
+        cls.outside = pathlib.Path(cls.tmp) / "outside.txt"
+        cls.outside.write_text("outside the repository\n")
         run(cls.root, "git", "init", "-q")
         run(cls.root, "git", "config", "user.email", "probe@example.invalid")
         run(cls.root, "git", "config", "user.name", "probe")
+        run(cls.root, "git", "config", "core.symlinks", "true")
         (cls.root / "scripts").mkdir()
         shutil.copy2(CHECKER, cls.root / "scripts" / "check-doc-links.py")
         (cls.root / "README.md").write_text("# Root\n")
@@ -45,18 +53,26 @@ class LinkProbes(unittest.TestCase):
         (cls.root / "untracked-dir").mkdir()
         (cls.root / "docs" / "guide").mkdir(parents=True)
         (cls.root / "docs" / "guide" / "x.md").write_text("# x\n")
-        (cls.root / "outside-link").symlink_to("/etc/passwd")
         run(cls.root, "git", "add", "README.md", "probe.md", "target.md",
             "docs/guide/x.md")
         run(cls.root, "git", "commit", "-q", "-m", "fixtures")
 
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
+    def outside_symlink(self, name):
+        link = self.root / name
+        try:
+            link.symlink_to(self.outside)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EPERM, errno.ENOSYS, errno.ENOTSUP) \
+                    or getattr(exc, "winerror", None) == 1314:
+                self.skipTest(f"file symlinks unavailable: {exc}")
+            raise
+        self.addCleanup(link.unlink)
 
     def check(self, text, expected):
         (self.root / "probe.md").write_text("# Probe\n\n" + text + "\n")
-        result = run(self.root, "python3", "-B", "scripts/check-doc-links.py")
+        result = subprocess.run(
+            [sys.executable, "-B", "scripts/check-doc-links.py"], cwd=self.root,
+            capture_output=True, text=True)
         if result.returncode != expected:
             self.fail(f"expected exit {expected}, got {result.returncode}\n"
                       f"{result.stdout}{result.stderr}")
@@ -71,12 +87,15 @@ class LinkProbes(unittest.TestCase):
         self.check("[x](untracked.txt)", 1)
 
     def test_04_relative_escape_file(self):
-        self.check("[x](../../etc/passwd)", 1)
+        self.check("[x](../outside.txt)", 1)
 
     def test_05_absolute_file(self):
-        self.check("[x](/etc/passwd)", 1)
+        # Markdown root-relative form, without a Windows drive-letter scheme.
+        target = self.outside.as_posix().removeprefix(self.outside.drive)
+        self.check(f"[x](<{target}>)", 1)
 
     def test_06_untracked_symlink_outside(self):
+        self.outside_symlink("outside-link")
         self.check("[x](outside-link)", 1)
 
     def test_07_untracked_directory(self):
@@ -104,6 +123,7 @@ class LinkProbes(unittest.TestCase):
         self.check("[x](../../)", 1)
 
     def test_15_tracked_symlink_outside(self):
+        self.outside_symlink("outside-link")
         run(self.root, "git", "add", "outside-link")
         try:
             self.check("[x](outside-link)", 1)
@@ -147,10 +167,7 @@ class LinkProbes(unittest.TestCase):
         self.check("[x](target.md?query=1#setext-heading)", 0)
 
     def test_27_tracked_markdown_symlink_outside(self):
-        outside = self.root / "outside.md"
-        if outside.is_symlink() or outside.exists():
-            outside.unlink()
-        outside.symlink_to("/etc/passwd")
+        self.outside_symlink("outside.md")
         run(self.root, "git", "add", "outside.md")
         try:
             self.check("[x](outside.md)", 1)

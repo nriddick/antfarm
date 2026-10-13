@@ -4,17 +4,22 @@ module antfarm_fibers.threadpool_driver;
 import antfarm;
 import antfarm_fibers.cacheline;
 import antfarm_fibers.scheduler;
+import antfarm_fibers.service_plan;
 import core.atomic;
 import threadpool;
 
 /// Who converts an external fiber readiness transition into a pool wake.
 /// `broadcast` preserves the eager compatibility behavior. `directorOwned`
 /// records events but leaves worker selection and signalling to the thread
-/// which owns threadpool's Director.
+/// which owns threadpool's Director. `servingGroups` (opt-in) wakes only the
+/// physical groups that serve the lane: its own group and its rescue/assist
+/// server groups; a newly armed earliest timer also wakes the groups hosting
+/// the domain's responders.
 enum FiberWakePolicy : ubyte
 {
     broadcast,
     directorOwned,
+    servingGroups,
 }
 
 /// Readiness classes accumulated for a Director-side policy loop.
@@ -30,12 +35,37 @@ enum FiberWakeEvent : uint
     remoteReady  = 1 << 6,
 }
 
-enum FiberCoverage : int
+/// Runtime admission and liveness of a lane, separate from its planned
+/// `LaneService`. `pending` and `open` admit work; the others refuse it.
+enum FiberLaneState : int
 {
-    noResponder = -2,
-    noWorkers = -1,
-    pending = 0,
-    covered = 1,
+    pending = 0,  /// installed; served lanes admit work before start
+    open = 1,     /// every planned server started and the domain has a responder
+    closed = -1,  /// planned without service (unstaffed or disabled)
+    stopped = -2, /// every server that started has stopped
+    failed = -3,  /// served, but no responder in its domain or no live server
+}
+
+/// Thrown by `FiberLane.spawn*` when the lane does not admit work.
+class FiberLaneUnavailable : Exception
+{
+    FiberLaneState state;  /// the lane state that refused admission
+    LaneService service;   /// the lane's planned service
+    ushort group;          /// the lane's physical group, ushort.max if not installed
+
+    this(FiberLaneState state, LaneService service, ushort group,
+         string file = __FILE__, size_t line = __LINE__)
+    {
+        import std.conv : to;
+
+        this.state = state;
+        this.service = service;
+        this.group = group;
+        super("antfarm_fibers: lane unavailable (state " ~ state.to!string
+            ~ ", service " ~ service.to!string ~ ", group "
+            ~ (group == ushort.max ? "none" : group.to!string) ~ ")",
+            file, line);
+    }
 }
 
 /// Starting points for the two observed workload extremes. They tune only
@@ -62,30 +92,38 @@ align(64) private struct FiberLaneControl
     ubyte[60] padding;
     shared uint startedWorkers;
     shared uint responderCount;
-    shared int coverageState;
-    ubyte[52] coveragePadding;
+    shared int state;          // FiberLaneState
+    shared uint liveServers;   // started-and-not-stopped native and edge servers
+    LaneService service;       // setup-time only, before the pool starts
+    ubyte[47] statePadding;
 }
 static assert(FiberLaneControl.sizeof == 2 * cacheLineSize);
 
-align(64) private struct FiberCoverageControl
+align(64) private struct FiberStartControl
 {
     shared uint startedWorkers;
     shared int invalidActiveLane;
     shared int ready;
     ubyte[52] padding;
 }
-static assert(FiberCoverageControl.sizeof == cacheLineSize);
+static assert(FiberStartControl.sizeof == cacheLineSize);
 
-private __gshared FiberLane[] installedFiberLanes;
+private __gshared FiberLane[] installedFiberLanes; // index == physical group
 private __gshared CacheAwarePool installedFiberPool;
-private __gshared FiberCoverageControl* fiberCoverageControl;
+private __gshared FiberServicePlan installedFiberPlan;
+private __gshared FiberStartControl* fiberStartControl;
+// Thread-local: the domain this managed worker polls timers for, if it is a
+// responder; null on every other thread.
+private FiberDomain responderDomain;
 
-/// One scheduler/farm pairing installed on an LLC bin. The caller owns the
-/// farm lifetime and must keep it alive until the pool has stopped.
+/// One scheduler/farm pairing, bound to a physical group by a
+/// `FiberServicePlan`. The caller owns the farm lifetime and must keep it
+/// alive until the pool has stopped.
 final class FiberLane : FiberReadyLane
 {
     private FiberLaneControl* control;
-    FiberBackend backend;
+    /// The scheduler domain that owns this lane's tasks.
+    FiberDomain domain;
     private CacheAwarePool pool;
     size_t flushBatch = 32;
     uint avgCost = avgCostForChunk(8);
@@ -93,16 +131,40 @@ final class FiberLane : FiberReadyLane
     FiberResponderSelector responderSelector;
     private FiberWakeNotifier wakeNotifier;
     private void* wakeNotifierContext;
-    private FiberLane[] coveredLanes_;
-    private FiberLane[] coveringLanes_;
+    // Plan-populated, fixed from install until uninstall: lanes this lane's
+    // responders serve by an edge, and lanes whose responders serve this one.
+    private FiberLane[] servedLanes_;
+    private FiberLane[] servingLanes_;
+    // Plan-populated with the edge lists, for `servingGroups`: this lane's
+    // group plus its edge server groups, and the groups whose native lanes
+    // share this lane's domain (a superset of its responder hosts).
+    private ushort[] wakeGroups_;
+    private ushort[] timerWakeGroups_;
+    private ushort group_ = ushort.max;
 
     @property private ref shared(uint) pendingWakeEvents() const return nothrow @nogc
     { return (cast(FiberLaneControl*) control).pendingWakeEvents; }
 
-    @property FiberCoverage coverage() const nothrow @nogc
+    /// Runtime admission state; see `FiberLaneState`.
+    @property FiberLaneState state() const nothrow @nogc
     {
-        return cast(FiberCoverage) atomicLoad!(MemoryOrder.acq)(
-            control.coverageState);
+        return cast(FiberLaneState) atomicLoad!(MemoryOrder.acq)(control.state);
+    }
+
+    /// Planned service, set at installation; `absent` until installed.
+    @property LaneService service() const nothrow @nogc
+    {
+        return control.service;
+    }
+
+    /// Physical group this lane is installed for; ushort.max until installed.
+    @property ushort group() const nothrow @nogc { return group_; }
+
+    /// Servers (native workers and edge responders) that started and have
+    /// not stopped.
+    @property uint liveServers() const nothrow @nogc
+    {
+        return atomicLoad!(MemoryOrder.acq)(control.liveServers);
     }
 
     @property uint managedWorkers() const nothrow @nogc
@@ -115,47 +177,15 @@ final class FiberLane : FiberReadyLane
         return atomicLoad!(MemoryOrder.acq)(control.responderCount);
     }
 
-    @property FiberDomain domain() nothrow @nogc { return backend; }
-
-    /// Remote Farms this lane's responders also consume and flush.
-    @property FiberLane[] coveredLanes() nothrow @nogc { return coveredLanes_; }
-
-    /// Lanes whose responders sweep this Farm when native workers are absent
-    /// or delayed.
-    @property FiberLane[] coveringLanes() nothrow @nogc { return coveringLanes_; }
-
-    /// Setup-time only: this lane's responders become persistent remote
-    /// consumers of `lane`. Both lanes must share a `FiberDomain`.
-    void cover(FiberLane lane)
-    {
-        if (lane is null)
-            throw new Exception("antfarm_fibers: cannot cover a null lane");
-        if (lane is this)
-            throw new Exception("antfarm_fibers: a lane cannot cover itself");
-        if (lane.backend !is backend)
-            throw new Exception(
-                "antfarm_fibers: remote sweepers must share a domain");
-        addCoverage(lane);
-    }
-
-    package void addCoverage(FiberLane lane)
-    {
-        foreach (existing; coveredLanes_)
-            if (existing is lane) return;
-        coveredLanes_ ~= lane;
-        foreach (existing; lane.coveringLanes_)
-            if (existing is this) return;
-        lane.coveringLanes_ ~= this;
-    }
-
     this(AntFarm* farm, size_t accumulatorCapacity = 65_536)
     {
         super(farm);
         control = allocateCacheLine!FiberLaneControl();
+        control.service = LaneService.absent;
         // Retained for source compatibility; intrusive queues are unbounded.
         cast(void) accumulatorCapacity;
-        backend = new FiberDomain;
-        backend.attachReadyLane(this);
+        domain = new FiberDomain;
+        domain.attachReadyLane(this);
     }
 
     /// Attach this LLC-local transport to an existing scheduler domain.
@@ -165,21 +195,12 @@ final class FiberLane : FiberReadyLane
         if (domain is null)
             throw new Exception("antfarm_fibers: FiberLane requires a domain");
         control = allocateCacheLine!FiberLaneControl();
-        backend = domain;
-        backend.attachReadyLane(this);
+        control.service = LaneService.absent;
+        this.domain = domain;
+        domain.attachReadyLane(this);
     }
 
     ~this() nothrow @nogc { freeCacheLine(control); }
-
-    /// Associate the lane with its worker pool so external readiness changes
-    /// wake workers without taking ownership of Director policy.
-    void bindPool(CacheAwarePool pool)
-    {
-        if (installedFiberLanes.length != 0 && installedFiberPool !is pool)
-            resetFiberCoverage(pool);
-        else
-            this.pool = pool;
-    }
 
     /// Configure the empty-to-nonempty mailbox edge notification. Setup-time
     /// only: do not replace the hook/context while producers or workers run.
@@ -192,44 +213,44 @@ final class FiberLane : FiberReadyLane
 
     FiberTask spawn(void delegate() body, size_t stackSize = 0)
     {
-        enforceSpawnCoverage();
-        auto task = backend.spawnOn(this, body, stackSize);
+        enforceAdmission();
+        auto task = domain.spawnOn(this, body, stackSize);
         noteWake(FiberWakeEvent.spawned);
         return task;
     }
 
     FiberTask spawn(void function() body, size_t stackSize = 0)
     {
-        enforceSpawnCoverage();
-        auto task = backend.spawnOn(this, body, stackSize);
+        enforceAdmission();
+        auto task = domain.spawnOn(this, body, stackSize);
         noteWake(FiberWakeEvent.spawned);
         return task;
     }
 
     TaskHandle spawnHandle(void delegate() body, size_t stackSize = 0)
     {
-        enforceSpawnCoverage();
-        auto handle = backend.spawnHandleOn(this, body, stackSize);
+        enforceAdmission();
+        auto handle = domain.spawnHandleOn(this, body, stackSize);
         noteWake(FiberWakeEvent.spawned);
         return handle;
     }
 
     TaskHandle spawnHandle(void function() body, size_t stackSize = 0)
     {
-        enforceSpawnCoverage();
-        auto handle = backend.spawnHandleOn(this, body, stackSize);
+        enforceAdmission();
+        auto handle = domain.spawnHandleOn(this, body, stackSize);
         noteWake(FiberWakeEvent.spawned);
         return handle;
     }
 
     void enableLifecycleEvents(size_t retentionLimit = defaultLifecycleRetention)
     {
-        backend.enableLifecycleEvents(retentionLimit);
+        domain.enableLifecycleEvents(retentionLimit);
     }
 
     FiberLifecycleEvent[] takeLifecycleEvents(size_t maximum = size_t.max)
     {
-        return backend.takeLifecycleEvents(maximum);
+        return domain.takeLifecycleEvents(maximum);
     }
 
     protected override void noteExternalReady() nothrow @nogc
@@ -237,9 +258,23 @@ final class FiberLane : FiberReadyLane
         noteWake(FiberWakeEvent.signalled);
     }
 
+    // A responder of this domain needs no wake for a timer its own fiber
+    // armed: the fiber ran inside that worker's pump, which then returns
+    // `again`, and the pump before it parks reads `nextTimerDeadline` into
+    // `until`. Any other worker (a custom `responderSelector` that excludes
+    // it) would leave a parked responder unaware of the earlier deadline.
+    protected override void noteTimerArmed() nothrow @nogc
+    {
+        if (responderDomain is domain) return;
+        noteWake(FiberWakeEvent.signalled, false);
+        if (wakePolicy == FiberWakePolicy.servingGroups && pool !is null)
+            foreach (g; timerWakeGroups_)
+                pool.wakeLlc(g);
+    }
+
     size_t signal(Signal signal)
     {
-        return backend.signal(signal);
+        return domain.signal(signal);
     }
 
     bool cancel(FiberTask task)
@@ -260,7 +295,7 @@ final class FiberLane : FiberReadyLane
 
     CancellationSubmission requestCancel(TaskHandle handle)
     {
-        immutable submitted = backend.requestCancel(handle);
+        immutable submitted = domain.requestCancel(handle);
         if (submitted == CancellationSubmission.queued)
             noteWake(FiberWakeEvent.cancelled);
         return submitted;
@@ -270,12 +305,12 @@ final class FiberLane : FiberReadyLane
     /// names the exact generation which was submitted.
     CancellationApplication[] drainCancellationRequests()
     {
-        return backend.drainCancellationRequests();
+        return domain.drainCancellationRequests();
     }
 
     void beginShutdown(bool cancelActive = false)
     {
-        backend.beginShutdown(cancelActive);
+        domain.beginShutdown(cancelActive);
         if (cancelActive) noteWake(FiberWakeEvent.shutdown);
     }
 
@@ -288,6 +323,27 @@ final class FiberLane : FiberReadyLane
             &control.pendingWakeEvents, 0u);
     }
 
+    // `servingGroups` completeness: every worker needed for progress after
+    // an event is woken, by this wake set or by an existing mechanism.
+    // - Ready or published work on this lane is consumed by native workers
+    //   of `group_` and by the responders of its rescue/assist server groups
+    //   (they flush `ready` and sweep the Farm): both are in `wakeGroups_`.
+    // - Timers: a responder of the domain arms its own deadline before it
+    //   parks; any other worker arming a new earliest timer calls
+    //   `noteTimerArmed`, which wakes `timerWakeGroups_`, every native group
+    //   of this domain. An expired timer is moved to its task's lane, whose
+    //   `noteExternalReady` wakes that lane's set.
+    // - Generation triggers: `enqueueGenerationTrigger` calls
+    //   `noteExternalReady` on every lane of the domain, so every native group
+    //   of the domain is woken, and every worker polls triggers.
+    // - Cancellation and shutdown: the Director applies them; a waiting task
+    //   becomes ready through `publishParkedWaiter`, i.e. this lane's
+    //   `noteExternalReady`. A ready or running task is already in service.
+    // - Remote-ready relay: the relay targets are `servingLanes_`, the lanes
+    //   of this lane's edge server groups (`bindPlanLanes`), and those groups
+    //   are in `wakeGroups_`. A relayed call therefore only records
+    //   `remoteReady` and adds no wake under `servingGroups`. A
+    //   `directorOwned` origin leaves its wakes to the Director.
     package void noteWake(FiberWakeEvent event, bool relay = true) nothrow @nogc
     {
         immutable bits = cast(uint) event;
@@ -308,30 +364,59 @@ final class FiberLane : FiberReadyLane
             }
             observed = atomicLoad!(MemoryOrder.acq)(control.pendingWakeEvents);
         }
-        if (wakePolicy == FiberWakePolicy.broadcast && pool !is null)
-            pool.wakeAll();
+        if (pool !is null)
+        {
+            if (wakePolicy == FiberWakePolicy.broadcast)
+                pool.wakeAll();
+            else if (wakePolicy == FiberWakePolicy.servingGroups && relay)
+                foreach (g; wakeGroups_)
+                    pool.wakeLlc(g);
+        }
         if (relay)
         {
-            foreach (covering; coveringLanes_)
-                covering.noteWake(FiberWakeEvent.remoteReady, false);
+            foreach (serving; servingLanes_)
+                serving.noteWake(FiberWakeEvent.remoteReady, false);
         }
     }
 
-    private void enforceSpawnCoverage()
+    // Admission is a single acquire load; nothing is locked against stop.
+    // `pending` is only set by `installFiberPlan` (setup thread, before
+    // start) and `open` only once a server has started. A lane leaves
+    // `pending`/`open` for `stopped` by CAS, in exactly these places:
+    //   - the stop hook of its last live server, after that worker's final
+    //     pump;
+    //   - `retireUnservedLanes`, for a `pending` lane with no live server,
+    //     when a worker's start hook fails, when the pool has stopped
+    //     (`poolStopped`, after every worker joined, so also a shutdown that
+    //     beat every start hook) and on `uninstallFiberPlan`.
+    // Each CAS is `acq_rel` and publishes `stopped` to the acquire load here,
+    // so a spawn that begins after a transition completed throws. A spawn
+    // which loaded `pending`/`open` before it strands its task only if its
+    // push lands after the final pump of every live server (or, for a lane
+    // that never had a server, after the transition): it raced the last
+    // server's stop or the pool's failure/shutdown, i.e. a `pool.shutdown`
+    // the caller started before closing domain admission. That is the
+    // documented race; afterwards `state == stopped` and `domain.active`
+    // still counts the task. The required order is Director `beginShutdown`
+    // -> drain -> `pool.shutdown`. The only `pending` -> `stopped` CAS that
+    // can precede a server start is the failure path, in a pool that is
+    // already stopping; a late server of such a lane leaves it `stopped` (its
+    // finalizing/stop CASes expect `pending`/`open`) and its pump throws.
+    private void enforceAdmission()
     {
-        final switch (coverage)
+        final switch (state)
         {
-        case FiberCoverage.noWorkers:
-            throw new Exception("antfarm_fibers: lane has no managed workers");
-        case FiberCoverage.noResponder:
-            throw new Exception("antfarm_fibers: lane has no responder/sweeper");
-        case FiberCoverage.pending:
-        case FiberCoverage.covered:
+        case FiberLaneState.pending:
+        case FiberLaneState.open:
             return;
+        case FiberLaneState.closed:
+        case FiberLaneState.stopped:
+        case FiberLaneState.failed:
+            throw new FiberLaneUnavailable(state, service, group_);
         }
     }
 
-    @property bool drained() const nothrow @nogc { return backend.drained; }
+    @property bool drained() const nothrow @nogc { return domain.drained; }
 }
 
 /// Apply a measured workload preset before constructing/starting the pool.
@@ -386,6 +471,8 @@ final class FiberWorkerState
     bool subscribed;
     bool registered;
     bool responder;
+    bool live; // counted in liveServers of the home lane and every remote
+    bool idle; // disabled group: never registered, never serves
     RemoteSweepState[] remotes;
     // Worker-owned scheduling state: start/pump/stop are serial. No new
     // shared state or memory-order edges are introduced.
@@ -393,117 +480,246 @@ final class FiberWorkerState
     private uint localPumpsSinceRemote;
 }
 
-/// Install exactly one lane per LLC. Call before starting the pool and do not
-/// uninstall until every worker has stopped.
-void installFiberLanes(FiberLane[] lanes, CacheAwarePool pool = null)
+/// Validate `plan` and install it: the plan's lanes become the
+/// physical-group-indexed `FiberLane` bin table, each lane's served and
+/// serving lanes come from `plan.edges`, and every lane gets its planned
+/// service and initial state (`pending` when served, `closed` otherwise).
+/// Call before starting the pool and do not uninstall until every worker has
+/// stopped. Installing replaces any installed plan.
+///
+/// With a pool, the plan's resolution must select the same workers as
+/// `pool.resolve()`. `pool is null` is the plan-only form for tests that drive
+/// lanes without a pool; it is fully validated, only the pool comparison is
+/// skipped, and each lane opens when its first server starts.
+void installFiberPlan(FiberServicePlan plan, CacheAwarePool pool)
 {
-    installedFiberLanes = lanes.dup;
-    if (fiberCoverageControl is null)
-        fiberCoverageControl = allocateCacheLine!FiberCoverageControl();
-    installRemoteCoverageRing(lanes);
-    resetFiberCoverage(pool);
-    install!FiberLane(lanes);
+    if (plan is null)
+        throw new Exception("antfarm_fibers: installFiberPlan needs a plan");
+    plan.validate();
+    if (pool !is null && !plan.resolution.sameSelection(pool.resolve()))
+        throw new FiberPlanException([
+            "the plan's resolution (" ~ plan.resolution.summary()
+            ~ ") does not select the pool's workers (" ~ pool.resolve().summary()
+            ~ "); build the plan from pool.resolve()"]);
+    if (installedFiberPlan !is null)
+        uninstallFiberPlan();
+    installedFiberLanes = bindPlanLanes(plan);
+    installedFiberPlan = plan;
+    if (fiberStartControl is null)
+        fiberStartControl = allocateCacheLine!FiberStartControl();
+    resetLaneRuntime(pool);
+    install!FiberLane(installedFiberLanes.dup, plan.resolution);
 }
 
-/// Default sweeper graph: for each shared domain with two or more lanes and
-/// no explicit `cover` edges, responders of lane i also sweep lane i+1
-/// (wrapping). Private one-lane domains are left uncovered.
-void installRemoteCoverageRing(FiberLane[] lanes)
+/// Remove the installed plan after every worker has stopped. Lanes keep their
+/// group, service and final state for inspection; a lane that never had a
+/// server ends `stopped`, not `pending`.
+void uninstallFiberPlan()
 {
-    auto seen = new bool[lanes.length];
-    foreach (i, lane; lanes)
-    {
-        if (lane is null || seen[i]) continue;
-        FiberLane[] group;
-        bool explicitGraph;
-        foreach (j, other; lanes)
-        {
-            if (other is null || other.backend !is lane.backend) continue;
-            seen[j] = true;
-            group ~= other;
-            if (other.coveredLanes.length != 0) explicitGraph = true;
-        }
-        if (explicitGraph || group.length < 2) continue;
-        foreach (g, member; group)
-            member.addCoverage(group[(g + 1) % group.length]);
-    }
-}
-
-void uninstallFiberLanes()
-{
+    retireUnservedLanes();
     uninstall!FiberLane();
-    installedFiberLanes = null;
-    installedFiberPool = null;
-    freeCacheLine(fiberCoverageControl);
-    fiberCoverageControl = null;
-}
-
-private void resetFiberCoverage(CacheAwarePool pool)
-{
-    installedFiberPool = pool;
-    if (fiberCoverageControl !is null)
-    {
-        atomicStore!(MemoryOrder.raw)(fiberCoverageControl.startedWorkers, 0u);
-        atomicStore!(MemoryOrder.raw)(fiberCoverageControl.invalidActiveLane, 0);
-        atomicStore!(MemoryOrder.raw)(fiberCoverageControl.ready, 0);
-    }
     foreach (lane; installedFiberLanes)
     {
+        if (lane is null) continue;
+        lane.pool = null;
+        lane.servedLanes_ = null;
+        lane.servingLanes_ = null;
+        lane.wakeGroups_ = null;
+        lane.timerWakeGroups_ = null;
+    }
+    installedFiberLanes = null;
+    installedFiberPool = null;
+    installedFiberPlan = null;
+    freeCacheLine(fiberStartControl);
+    fiberStartControl = null;
+}
+
+/// Bind every lane of a validated plan (group, service and edge lists) and
+/// return them indexed by physical group.
+private FiberLane[] bindPlanLanes(FiberServicePlan plan)
+{
+    import std.algorithm.searching : canFind;
+
+    immutable groups = plan.resolution.physicalGroupCount;
+    auto lanes = new FiberLane[groups];
+    foreach (ushort g; 0 .. groups)
+    {
+        auto lane = plan.laneOf(g);
+        lanes[g] = lane;
+        if (lane is null) continue;
+        lane.group_ = g;
+        lane.control.service = plan.service(g);
+        lane.servedLanes_ = null;
+        lane.servingLanes_ = null;
+        lane.wakeGroups_ = [g];
+        lane.timerWakeGroups_ = null;
+    }
+    foreach (ref e; plan.edges)
+    {
+        lanes[e.server].servedLanes_ ~= lanes[e.served];
+        lanes[e.served].servingLanes_ ~= lanes[e.server];
+        if (!lanes[e.served].wakeGroups_.canFind(e.server))
+            lanes[e.served].wakeGroups_ ~= e.server;
+    }
+    foreach (lane; lanes)
+    {
+        if (lane is null) continue;
+        foreach (h, host; lanes)
+            if (host !is null && host.domain is lane.domain
+                && host.service == LaneService.native)
+                lane.timerWakeGroups_ ~= cast(ushort) h;
+    }
+    return lanes;
+}
+
+/// Setup-time: bind `pool` and reset every installed lane's runtime state.
+private void resetLaneRuntime(CacheAwarePool pool)
+{
+    installedFiberPool = pool;
+    atomicStore!(MemoryOrder.raw)(fiberStartControl.startedWorkers, 0u);
+    atomicStore!(MemoryOrder.raw)(fiberStartControl.invalidActiveLane, 0);
+    atomicStore!(MemoryOrder.raw)(fiberStartControl.ready, 0);
+    foreach (lane; installedFiberLanes)
+    {
+        if (lane is null) continue;
         lane.pool = pool;
         atomicStore!(MemoryOrder.raw)(lane.control.startedWorkers, 0u);
         atomicStore!(MemoryOrder.raw)(lane.control.responderCount, 0u);
-        atomicStore!(MemoryOrder.rel)(lane.control.coverageState,
-            FiberCoverage.pending);
+        atomicStore!(MemoryOrder.raw)(lane.control.liveServers, 0u);
+        atomicStore!(MemoryOrder.rel)(lane.control.state,
+            isServed(lane.control.service)
+                ? FiberLaneState.pending : FiberLaneState.closed);
     }
 }
 
-private bool laneHasSweeper(FiberLane lane) nothrow @nogc
-{
-    if (atomicLoad!(MemoryOrder.acq)(lane.control.responderCount) != 0)
-        return true;
-    foreach (covering; lane.coveringLanes)
-        if (atomicLoad!(MemoryOrder.acq)(covering.control.responderCount) != 0)
-            return true;
-    return false;
-}
-
-private void finalizeFiberCoverage() nothrow @nogc
+/// Run once by the last managed start. A served lane opens when its domain
+/// has at least one responder (timers are domain-wide) and it has a live
+/// server; otherwise it fails. Queued work on a lane that did not open is a
+/// lane-local check: another lane's work in the same domain is not this
+/// lane's problem.
+private void finalizeFiberLanes() nothrow @nogc
 {
     bool invalidActiveLane;
     foreach (lane; installedFiberLanes)
     {
-        immutable workers = atomicLoad!(MemoryOrder.acq)(
-            lane.control.startedWorkers);
-        FiberCoverage state;
-        if (laneHasSweeper(lane))
-            state = FiberCoverage.covered;
-        else if (workers == 0)
-            state = FiberCoverage.noWorkers;
-        else
-            state = FiberCoverage.noResponder;
-        atomicStore!(MemoryOrder.rel)(lane.control.coverageState, state);
-        if (state == FiberCoverage.noWorkers && lane.backend.active != 0)
+        if (lane is null) continue;
+        if (isServed(lane.control.service))
+        {
+            bool domainResponder;
+            foreach (other; installedFiberLanes)
+                if (other !is null && other.domain is lane.domain
+                    && atomicLoad!(MemoryOrder.acq)(
+                        other.control.responderCount) != 0)
+                    domainResponder = true;
+            immutable live = atomicLoad!(MemoryOrder.acq)(
+                lane.control.liveServers) != 0;
+            immutable next = domainResponder && live
+                ? FiberLaneState.open : FiberLaneState.failed;
+            // A server that already stopped (shutdown racing start) moved
+            // the lane to `stopped`; keep that.
+            int expected = FiberLaneState.pending;
+            cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
+                &lane.control.state, &expected, cast(int) next);
+        }
+        if (lane.state != FiberLaneState.open
+            && (lane.ready != 0 || lane.published != 0))
             invalidActiveLane = true;
     }
-    atomicStore!(MemoryOrder.rel)(fiberCoverageControl.invalidActiveLane,
+    atomicStore!(MemoryOrder.rel)(fiberStartControl.invalidActiveLane,
         invalidActiveLane ? 1 : 0);
-    atomicStore!(MemoryOrder.rel)(fiberCoverageControl.ready, 1);
+    atomicStore!(MemoryOrder.rel)(fiberStartControl.ready, 1);
+}
+
+/// Count a started server on `lane`. Without a pool there is no
+/// finalization, so the first server opens a pending lane directly.
+private void noteServerStarted(FiberLane lane) nothrow @nogc
+{
+    atomicFetchAdd!(MemoryOrder.acq_rel)(lane.control.liveServers, 1u);
+    if (installedFiberPool is null)
+    {
+        int expected = FiberLaneState.pending;
+        cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
+            &lane.control.state, &expected, cast(int) FiberLaneState.open);
+    }
+}
+
+/// The last live server of a pending or open lane moves it to `stopped`, so
+/// later spawns throw instead of stranding work. `closed` and `failed` keep
+/// their diagnosis.
+private void noteServerStopped(FiberLane lane) nothrow @nogc
+{
+    if (atomicFetchSub!(MemoryOrder.acq_rel)(lane.control.liveServers, 1u) != 1)
+        return;
+    int observed = atomicLoad!(MemoryOrder.acq)(lane.control.state);
+    while (observed == FiberLaneState.pending || observed == FiberLaneState.open)
+    {
+        if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(&lane.control.state,
+                &observed, cast(int) FiberLaneState.stopped))
+            break;
+    }
+}
+
+/// Move every `pending` lane which has no live server to `stopped`: no server
+/// will serve it, so a later spawn throws `FiberLaneUnavailable` instead of
+/// being stranded. A lane with a live server keeps its state; that server's
+/// stop hook retires it.
+private void retireUnservedLanes() nothrow @nogc
+{
+    foreach (lane; installedFiberLanes)
+    {
+        if (lane is null) continue;
+        if (atomicLoad!(MemoryOrder.acq)(lane.control.liveServers) != 0)
+            continue;
+        int expected = FiberLaneState.pending;
+        cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
+            &lane.control.state, &expected, cast(int) FiberLaneState.stopped);
+    }
+}
+
+/// `ManagedWorkerHooks.poolStopped`: every worker has joined, so a lane
+/// still `pending` never had a server (a shutdown beat every start hook, or
+/// a start failed) and will not get one.
+private void fiberPoolStopped() nothrow @nogc
+{
+    retireUnservedLanes();
 }
 
 /// Managed lifecycle hooks suitable for `PoolOptions.managedWorker`.
 ManagedWorkerHooks fiberWorkerHooks()
 {
     return ManagedWorkerHooks(&fiberWorkerStart, &fiberWorkerPump,
-                              &fiberWorkerStop);
+                              &fiberWorkerStop, &fiberPoolStopped);
 }
 
 private void fiberWorkerStart(WorkerSelf* worker)
+{
+    try
+        startFiberWorker(worker);
+    catch (Throwable failure)
+    {
+        // The pool is about to stop (the failure escapes to the worker loop):
+        // do not leave a lane without a server `pending`.
+        retireUnservedLanes();
+        throw failure;
+    }
+}
+
+private void startFiberWorker(WorkerSelf* worker)
 {
     auto lane = home!FiberLane();
     if (lane is null)
         throw new Exception("antfarm_fibers: no FiberLane installed for worker LLC");
     auto state = new FiberWorkerState;
     state.lane = *lane;
+    if (state.lane.service == LaneService.disabled)
+    {
+        // A disabled group's workers idle: no Farm registration, no service,
+        // not responders. They still count towards finalization.
+        state.idle = true;
+        worker.context = cast(void*) state;
+        noteWorkerStarted();
+        return;
+    }
     state.responder = state.lane.responderSelector is null
         || state.lane.responderSelector(worker);
     if (installedFiberPool is null && state.lane.responderSelector !is null)
@@ -525,7 +741,7 @@ private void fiberWorkerStart(WorkerSelf* worker)
     {
         try
         {
-            foreach (remoteLane; state.lane.coveredLanes)
+            foreach (remoteLane; state.lane.servedLanes_)
             {
                 auto sweep = new RemoteSweepState;
                 sweep.lane = remoteLane;
@@ -554,21 +770,27 @@ private void fiberWorkerStart(WorkerSelf* worker)
     }
     atomicFetchAdd!(MemoryOrder.rel)(state.lane.control.startedWorkers, 1u);
     if (state.responder)
+    {
         atomicFetchAdd!(MemoryOrder.rel)(state.lane.control.responderCount, 1u);
-    if (installedFiberPool is null)
-    {
-        // Without the pool object the default selector makes every started
-        // worker a responder, so the lane validates immediately.
-        atomicStore!(MemoryOrder.rel)(state.lane.control.coverageState,
-            FiberCoverage.covered);
+        responderDomain = state.lane.domain;
     }
-    else
-    {
-        immutable started = atomicFetchAdd!(MemoryOrder.acq_rel)(
-            fiberCoverageControl.startedWorkers, 1u) + 1;
-        if (started == installedFiberPool.workerCount)
-            finalizeFiberCoverage();
-    }
+    noteServerStarted(state.lane);
+    foreach (remote; state.remotes)
+        noteServerStarted(remote.lane);
+    state.live = true;
+    noteWorkerStarted();
+}
+
+/// The last managed start of a bound pool finalizes every installed lane. Each
+/// starter's lane counts precede its acq_rel increment, so the finalizer sees
+/// them all.
+private void noteWorkerStarted() nothrow @nogc
+{
+    if (installedFiberPool is null) return;
+    immutable started = atomicFetchAdd!(MemoryOrder.acq_rel)(
+        fiberStartControl.startedWorkers, 1u) + 1;
+    if (started == installedFiberPool.workerCount)
+        finalizeFiberLanes();
 }
 
 // One remote visit per 16 busy home pumps; with R subscriptions each is
@@ -581,37 +803,42 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     if (state is null)
         throw new Exception("antfarm_fibers: worker state is missing");
 
-    if (installedFiberPool !is null && fiberCoverageControl !is null
-        && atomicLoad!(MemoryOrder.acq)(fiberCoverageControl.ready) == 0)
+    if (state.idle)
+        return ManagedPumpResult.idle;
+
+    if (installedFiberPool !is null && fiberStartControl !is null
+        && atomicLoad!(MemoryOrder.acq)(fiberStartControl.ready) == 0)
         return ManagedPumpResult.again;
 
-    if (fiberCoverageControl !is null
+    if (fiberStartControl !is null
         && atomicLoad!(MemoryOrder.acq)(
-            fiberCoverageControl.invalidActiveLane) != 0)
+            fiberStartControl.invalidActiveLane) != 0)
         throw new Exception(
-            "antfarm_fibers: runnable work exists on a lane with no managed workers");
+            "antfarm_fibers: runnable work is queued on a lane that did not open");
 
-    final switch (state.lane.coverage)
+    final switch (state.lane.state)
     {
-    case FiberCoverage.pending:
+    case FiberLaneState.pending:
         return ManagedPumpResult.again;
-    case FiberCoverage.noResponder:
-        throw new Exception("antfarm_fibers: active lane has no responder/sweeper");
-    case FiberCoverage.noWorkers:
+    case FiberLaneState.failed:
+        throw new Exception(
+            "antfarm_fibers: lane failed: no responder in its domain or no live server");
+    case FiberLaneState.closed:
+    case FiberLaneState.stopped:
         throw new Exception("antfarm_fibers: worker entered an unavailable lane");
-    case FiberCoverage.covered:
+    case FiberLaneState.open:
         break;
     }
 
     immutable timersWoken = state.responder
-        ? state.lane.backend.pollTimers() : 0;
+        ? state.lane.domain.pollTimers() : 0;
     bool consumed = state.consumer.consumeNext();
     immutable triggersDelivered =
-        state.lane.backend.pollGenerationTriggers();
-    if (state.lane.backend.pendingEvents != 0)
+        state.lane.domain.pollGenerationTriggers();
+    if (state.lane.domain.pendingEvents != 0)
         state.lane.noteWake(FiberWakeEvent.lifecycle);
-    if (state.lane.backend.fatal)
-        throw state.lane.backend.fatalException;
+    if (state.lane.domain.fatal)
+        throw state.lane.domain.fatalException;
     size_t flushed;
     immutable ready = state.lane.ready;
     if (state.lane.flushBatch == 0)
@@ -665,7 +892,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
 
     // consumeNext() is false at a hole or at Wt. Neither means the farm is
     // empty while published-but-not-entered activations remain, or while a
-    // covered remote lane still has transport. Table size (flushBatch) bounds
+    // served remote lane still has transport. Table size (flushBatch) bounds
     // a visit; a claimed table is consumed according to the Farm contract.
     if (timersWoken != 0 || triggersDelivered != 0
         || consumed || flushed != 0 || remoteWork
@@ -673,7 +900,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
         return ManagedPumpResult.again;
     long deadline;
     return state.responder
-        && state.lane.backend.nextTimerDeadline(deadline)
+        && state.lane.domain.nextTimerDeadline(deadline)
         ? ManagedPumpResult.until(deadline) : ManagedPumpResult.idle;
 }
 
@@ -681,6 +908,15 @@ private void fiberWorkerStop(WorkerSelf* worker)
 {
     auto state = cast(FiberWorkerState) worker.context;
     if (state is null) return;
+    responderDomain = null;
+    if (state.live)
+    {
+        // First, so admission closes as early as possible after the last pump.
+        state.live = false;
+        noteServerStopped(state.lane);
+        foreach (remote; state.remotes)
+            noteServerStopped(remote.lane);
+    }
     foreach (remote; state.remotes)
     {
         if (remote.subscribed)
@@ -769,18 +1005,42 @@ version (unittest)
         this(size_t remoteCount)
         {
             // Module tests run before smoke main installs managed lanes.
-            assert(installedFiberPool is null && fiberCoverageControl is null);
+            assert(installedFiberPool is null && fiberStartControl is null);
             state = new FiberWorkerState;
             state.responder = true;
             auto domain = new FiberDomain;
+            FiberLane[] lanes;
             foreach (i; 0 .. remoteCount + 1)
             {
-                auto farm = AntFarm.create(2, 8, 2, 0, 0, 2, 4096,
+                farms ~= AntFarm.create(2, 8, 2, 0, 0, 2, 4096,
                     DEFAULT_SMALL_TABLE_THRESHOLD, false);
-                farms ~= farm;
-                auto lane = new FiberLane(domain, farm);
-                atomicStore!(MemoryOrder.rel)(lane.control.coverageState,
-                    FiberCoverage.covered);
+                lanes ~= new FiberLane(domain, farms[i]);
+            }
+            // Group 0 holds the one worker and rescues every other group.
+            auto plan = new FiberServicePlan(
+                fixtureResolution(cast(ushort)(remoteCount + 1)));
+            foreach (g, lane; lanes)
+                plan.bind(cast(ushort) g, lane);
+            foreach (g; 1 .. remoteCount + 1)
+                plan.rescue(cast(ushort) g, 0);
+            plan.validate();
+            bindPlanLanes(plan);
+            assert(lanes[0].servedLanes_ == lanes[1 .. $]);
+            // servingGroups: a rescued group wakes itself and its server;
+            // only group 0 is native, so it hosts every responder.
+            immutable ushort[] zero = [0];
+            assert(lanes[0].wakeGroups_ == zero);
+            foreach (g, lane; lanes)
+            {
+                immutable ushort[] served = [cast(ushort) g, 0];
+                assert(g == 0 || lane.wakeGroups_ == served);
+                assert(lane.timerWakeGroups_ == zero);
+            }
+            foreach (i, lane; lanes)
+            {
+                auto farm = farms[i];
+                atomicStore!(MemoryOrder.rel)(lane.control.state,
+                    FiberLaneState.open);
                 if (i == 0)
                 {
                     state.lane = lane;
@@ -794,7 +1054,6 @@ version (unittest)
                 {
                     auto remote = new RemoteSweepState;
                     remote.lane = lane;
-                    state.lane.cover(lane);
                     subscribeOrThrow(remote.consumer, farm);
                     remote.subscribed = true;
                     remote.producer = farm.registerProducer(Tier.small);
@@ -842,6 +1101,28 @@ version (unittest)
 
     private long noopRemoteService(PayloadHeader*, PayloadBody, ulong)
         nothrow @nogc @system { return 0; }
+
+    // Group 0 has one accepted CPU; every other group's one CPU is excluded.
+    private PoolResolution fixtureResolution(ushort groups)
+    {
+        import threadpool.os_scope : OsScope;
+        import threadpool.topology : GroupingSource, LogicalProcessor,
+            TopologySnapshot, assembleSnapshot;
+
+        LogicalProcessor[] processors;
+        foreach (ushort g; 0 .. groups)
+        {
+            LogicalProcessor p;
+            p.lpIndex = p.coreIndex = p.llcIndex = g;
+            p.affinityExcluded = g != 0;
+            processors ~= p;
+        }
+        auto snapshot = new TopologySnapshot;
+        *snapshot = assembleSnapshot("synthetic", processors, null, null,
+            groups, 64, new GroupingSource[groups]);
+        OsScope unrestricted;
+        return resolvePool(*snapshot, unrestricted, PoolOptions.init);
+    }
 
     unittest
     {

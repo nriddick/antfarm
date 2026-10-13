@@ -42,11 +42,15 @@ void destroyWaitSlots()
 
 void wakeWorker(uint workerIndex) @nogc nothrow
 {
-    if (gWait.length == 0 || workerIndex >= gWait.length) return;
+    // One load: a concurrent destroyWaitSlots can null gWait between a
+    // length check and the index, which is an ArrayIndexError. The local
+    // keeps the old array alive for this call.
+    auto slots = gWait;
+    if (workerIndex >= slots.length) return;
+    auto word = &slots[workerIndex].wakeWord;
     // Even ACTIVE -> ACTIVE publishes into the worker's next arming RMW.
-    if (atomicExchange!(MemoryOrder.acq_rel)(
-            &gWait[workerIndex].wakeWord, ACTIVE) != ARMED) return;
-    futexWake(&gWait[workerIndex].wakeWord, 1);
+    if (atomicExchange!(MemoryOrder.acq_rel)(word, ACTIVE) != ARMED) return;
+    futexWake(word, 1);
 }
 
 void wakeAllForStop() @nogc nothrow

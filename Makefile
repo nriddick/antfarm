@@ -84,11 +84,11 @@ run-farm-tsan: farm-tsan
 # adapter appears in the reference without a C dependency.
 DOCS_SOURCES := antfarm.d antfarm_templates.d \
 	actors/package.d actors/actor.d actors/wave.d actors/private_actor.d \
-	actors/mimalloc.d
+	actors/mimalloc.d threadpool/source/threadpool/host.d
 DOCS_DIR := .build/docs
 
 docs:
-	dmd -D -Dd$(DOCS_DIR) -o- -version=AntfarmMimallocV3 -I. $(DOCS_SOURCES)
+	dmd -D -Dd$(DOCS_DIR) -o- -version=AntfarmMimallocV3 -I. -Ithreadpool/source $(DOCS_SOURCES)
 
 # Standalone timing gate; intentionally outside the correctness matrix.
 PERF_GATE_OUTPUT ?= /tmp/antfarm-perf-gate

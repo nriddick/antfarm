@@ -19,8 +19,9 @@ Sizing numbers and allocator rules are in
 ## Tokens and Farm provenance
 
 Register a token on the Farm that will publish the work. Keep it exclusive to
-one active producer, pass it by reference, and unregister it. Copying transfers
-ownership. Dropping a token does not unregister it. Assigning over a
+one active producer, pass it by reference, and unregister it. Tokens are
+move-only: copying does not compile; transfer one explicitly with `move`.
+Dropping a token does not unregister it. Assigning over a
 still-registered token is fatal.
 
 Each Farm has a process-unique `farmId` that is never reissued. The token stores
@@ -63,8 +64,9 @@ and someone must consume.
 Keep the emitter pumping while private roots sit in `waitChildren`. A pump that
 returns 0 can still have child work, waiting roots, or a notification tail in
 flight. Stopping there hangs. Completion does not wake a sleeping emitter; an
-empty wake list is not a sleep handshake. The programs in `examples/` spin or
-yield under an application deadline. That deadline is not a library facility.
+empty wake list is not a sleep handshake. The programs in `examples/` step a
+`FarmHost` in `waitUntil` under an opt-in deadline. That deadline is not an
+actor-library facility.
 
 Public `flush` returning 0 means the ready snapshot was empty, publication hit
 Farm backpressure, or another flusher held the snapshot. Those cases are not
@@ -174,8 +176,9 @@ consumer may still be inside the actor trampoline after reclaim or `live == 0`,
 so join workers and unsubscribe every view before destroying a runtime or park.
 Unregistering an already-quiescent producer and unsubscribing an already-
 quiescent consumer may happen in either order, but both must finish before the
-Farm is destroyed. The examples stop consumers, destroy the runtime or park,
-unregister, then destroy the Farm.
+Farm is destroyed. `FarmHost.close()` (`threadpool.host`), which the examples
+use, performs this order: it stops consumers, destroys the runtimes and parks,
+unregisters, then destroys the Farm.
 
 1. Stop admitting new application work. For a public service, stop senders, then
    `requestRetire`. Retirement closes admission. The default drain lets handlers
@@ -211,9 +214,9 @@ A public endpoint may front a private hierarchy. Drain the private park to
 join those consumers before destroying either runtime or park. Neither count
 covers the other.
 
-The example host's deadline is application policy for a stuck drain. The library
-will not cancel a callback that never returns, a root that always returns
-`again`, or an inbox that is never popped.
+`FarmHost.waitUntil` takes an opt-in timeout; that deadline is application
+policy for a stuck drain. The library will not cancel a callback that never
+returns, a root that always returns `again`, or an inbox that is never popped.
 
 ## Ranked misuse hazards
 
@@ -227,7 +230,7 @@ race, or a use of freed memory.
 | 2 | Progress and shutdown. Stop the emitter too soon, block every consumer while waiting for child work, treat node completion or `live == 0` as infrastructure quiescence, or free hook context after `finished`. | Destroying a Farm with live consumers or tickets, a runtime with live or queued actors, or a park with live roots. | A lost pump or a missing consumer hangs. `pump() == 0`, `consumeNext() == false`, `finished`, and `closing` do not mean what a shutdown loop wants. |
 | 3 | Token used on the wrong Farm. | Fatal at `write` and `unregisterProducer`. `flush` and `pump` catch it only when they publish something. A since-destroyed Farm's id is never reissued, so a leftover ticket cannot match a new Farm. | `Token.valid` does not report provenance. An empty `flush` or `pump` returns before `write`. The slot hash matches across Farms with the same registration history; only `farmId` distinguishes them. |
 | 4 | Assuming thread, allocator, or state properties the API does not enforce. A non-thread-safe allocator, thread-affine data in state that migrates across consumers, concurrent use of one private park, re-entering a park from a callback. | Alignment above 64 on the default allocator fails the allocation (null), not a later checked fault. Unauthorized private contexts, active-child `finish`, bad batch overrides, and subset index errors are fatal. Park reentry is fatal only in assertion builds. | POD checks are not transitive ownership. The reentry guard is not a lock. Release builds do not diagnose park reentry. |
-| 5 | Overload and nontermination left as application policy. Unbounded inbox growth, an endless `again` or empty wait, a callback that never returns, a child that never finishes. | Ring, runtime capacity, and private cohort capacity are finite. Exhaustion is a typed status or backpressure, not an automatic cancel. | No mailbox byte cap or public deadline. Private cancellation is cooperative: a callback that ignores `cancelled` runs to completion. Private deadlines are lazy, observed only by checks and emission, and need a tracked park, as do root handles and `cancelAll`. An actor that never pops its inbox can refuse retirement forever, even in cancel mode: the library never discards nodes. The example host deadline is not part of the library. |
+| 5 | Overload and nontermination left as application policy. Unbounded inbox growth, an endless `again` or empty wait, a callback that never returns, a child that never finishes. | Ring, runtime capacity, and private cohort capacity are finite. Exhaustion is a typed status or backpressure, not an automatic cancel. | No mailbox byte cap or public deadline. Private cancellation is cooperative: a callback that ignores `cancelled` runs to completion. Private deadlines are lazy, observed only by checks and emission, and need a tracked park, as do root handles and `cancelAll`. An actor that never pops its inbox can refuse retirement forever, even in cancel mode: the library never discards nodes. `FarmHost.waitUntil` takes an opt-in timeout; the actor library has none. |
 
 Other mistakes that fail late or not at all: dropping an owner or token skips
 cleanup; a type-erased create checks size and alignment, not the semantic type;

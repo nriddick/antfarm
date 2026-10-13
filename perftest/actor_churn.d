@@ -16,7 +16,10 @@ import std.array : split;
 import std.exception : enforce;
 import std.math : isFinite;
 import std.stdio : writefln;
-import threadpool.pin : PinTarget, pinToLogicalProcessor;
+import threadpool.host : CallerPlacement, FarmHost, FarmHostOptions, WorkerIdle;
+import threadpool.pin : PinOutcome, pinProcessor;
+import threadpool.pool : PoolOptions;
+import threadpool.topology : ProcessorId, parseCpuList;
 
 version (AntfarmMimallocV3)
 {
@@ -363,7 +366,7 @@ private PrivateRootDisposition foldRoot(bool continuation, bool slab)(scope ref 
 
 private void runFoldTree(bool continuation, bool slab = false)(AntFarm* farm, ActorAllocator allocator,
     ref Token token, ref ConsumerView view, string mode, Completion[] completions, double duration,
-    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ProcessorId)[] cpus,
     uint rootHint)
 {
     immutable count = completions.length;
@@ -419,7 +422,7 @@ private void runFoldTree(bool continuation, bool slab = false)(AntFarm* farm, Ac
 // parent finishes.
 private void runTree(bool waitChildren, bool slab)(AntFarm* farm, ActorAllocator allocator,
     ref Token token, ref ConsumerView view, string mode, Completion[] completions, double duration,
-    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ProcessorId)[] cpus,
     uint rootHint)
 {
     immutable count = completions.length;
@@ -509,7 +512,7 @@ private PrivateRootDisposition refillActivate(bool slab)(scope ref PrivateBorrow
 
 private void runRefill(bool slab)(AntFarm* farm, ActorAllocator allocator, ref Token token,
     ref ConsumerView view, string mode, Completion[] completions, double duration,
-    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ProcessorId)[] cpus,
     uint rootHint)
 {
     immutable count = completions.length;
@@ -611,7 +614,7 @@ private PrivateRootDisposition cancelTreeActivate(scope ref PrivateBorrow!Cancel
 
 private void runCancelTree(AntFarm* farm, ActorAllocator allocator, ref Token token,
     ref ConsumerView view, string mode, Completion[] completions, double duration,
-    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ProcessorId)[] cpus,
     uint rootHint)
 {
     immutable count = completions.length;
@@ -675,7 +678,7 @@ private PrivateRootDisposition trackedActivate(scope ref PrivateBorrow!State act
 
 private void runTracked(AntFarm* farm, ActorAllocator allocator, ref Token token,
     ref ConsumerView view, string mode, Completion[] completions, double duration,
-    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ProcessorId)[] cpus,
     uint rootHint)
 {
     immutable count = completions.length;
@@ -786,7 +789,7 @@ private PrivateRootDisposition subsetActivate(scope ref PrivateBorrow!SubsetStat
 
 private void runSubset(AntFarm* farm, ActorAllocator allocator, ref Token token,
     ref ConsumerView view, string mode, size_t count, double duration, uint consumers,
-    size_t batch, size_t warmups, string allocatorName, const(ushort)[] cpus, uint percent,
+    size_t batch, size_t warmups, string allocatorName, const(ProcessorId)[] cpus, uint percent,
     uint rootHint)
 {
     auto kind = mode == "subset" ? SubsetKind.selected
@@ -856,17 +859,28 @@ private class Consumer
     AntFarm* farm;
     shared int started;
     shared int stop;
-    int cpu;
+    ProcessorId cpu;
+    bool unpinned;
+    PinOutcome pin;
 
-    this(AntFarm* farm, int cpu) { this.farm = farm; this.cpu = cpu; }
+    this(AntFarm* farm, ProcessorId cpu, bool unpinned)
+    {
+        this.farm = farm;
+        this.cpu = cpu;
+        this.unpinned = unpinned;
+    }
 
     void run()
     {
         markThreadpoolThread();
-        if (cpu >= 0 && !pinToLogicalProcessor(PinTarget(0, 0, cast(ushort) cpu)))
+        if (!unpinned)
         {
-            atomicStore!(MemoryOrder.rel)(started, -1);
-            return;
+            pin = pinProcessor(cpu);
+            if (pin != PinOutcome.pinned)
+            {
+                atomicStore!(MemoryOrder.rel)(started, -1);
+                return;
+            }
         }
         ConsumerView view;
         if (view.subscribe(farm) < 0)
@@ -965,7 +979,7 @@ void main(string[] args)
     markThreadpoolThread();
     enforce(args.length >= 2 && args.length <= 13
             && (args[1] == "private-tracked" || args[1] == "tree-cont" || args[1] == "tree-slab" || args[1] == "tree-wait-slab" || args[1] == "tree-cont-slab" || args[1] == "tree-refill" || args[1] == "tree-refill-slab" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-slab|tree-wait-slab|tree-cont-slab|tree-refill|tree-refill-slab|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64|mimalloc-count] [controller-cpu,consumer-cpus|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..7]");
+        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-slab|tree-wait-slab|tree-cont-slab|tree-refill|tree-refill-slab|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64|mimalloc-count] [controller-cpu,consumer-cpus (parseCpuList: 0,1-7 or g:lp; ordered)|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..7]");
     // Tree modes with their own run function, including the slab and refill
     // variants.
     immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined"
@@ -1011,14 +1025,15 @@ void main(string[] args)
             && ((privateMode || treeMode || foldTreeMode || trackedMode || subsetMode)
                 || args.length <= (subsetMode ? 12 : 11)),
         "actors/seconds/batch must be positive; consumers must be 0..64; actor batch must be <=256; root-hint is only for private-family modes");
-    ushort[] cpus;
+    ProcessorId[] cpus;
     if (args.length > 8 && args[8] != "-")
     {
-        foreach (cpu; args[8].split(",")) cpus ~= cpu.to!ushort;
+        cpus = parseCpuList(args[8]);
         enforce(cpus.length == consumers + 1,
             "CPU list must name the controller followed by each consumer");
-        enforce(pinToLogicalProcessor(PinTarget(0, 0, cpus[0])),
-            "controller CPU pin failed");
+        immutable controllerPin = pinProcessor(cpus[0]);
+        enforce(controllerPin == PinOutcome.pinned,
+            "controller CPU " ~ cpus[0].to!string ~ " pin failed: " ~ controllerPin.to!string);
     }
     scope (exit) reportProcess(allocatorName);
     auto allocator = ActorAllocator.cRuntime();
@@ -1041,9 +1056,34 @@ void main(string[] args)
     immutable tier = tierName == "small" ? Tier.small : Tier.bulk;
     immutable quota = args.length > 10 ? to!ulong(args[10]) : 16384;
     enforce(quota > 0, "quota must be positive");
-    auto farm = AntFarm.create(8, 8, consumers ? consumers : 1,
-        tier == Tier.bulk ? 1 : 0, tier == Tier.bulk ? quota : 0,
-        tier == Tier.small ? 1 : 0, tier == Tier.small ? quota : 0);
+    // ANTFARM_CHURN_HOST=1 (small tier, pinned consumers only): a FarmHost owns the
+    // Farm, the control token and the pinned spinning consumers that the
+    // hand-written block below otherwise creates.
+    import core.stdc.stdlib : getenv;
+    immutable hostSwitch = getenv("ANTFARM_CHURN_HOST") !is null && getenv("ANTFARM_CHURN_HOST")[0] == '1';
+    immutable useHost = hostSwitch && tier == Tier.small && consumers > 0 && cpus.length == consumers + 1;
+    enforce(!hostSwitch || useHost, "ANTFARM_CHURN_HOST=1 needs the small tier, consumers > 0 and a CPU list");
+    FarmHost host;
+    AntFarm* farm;
+    if (useHost)
+    {
+        FarmHostOptions hostOptions;
+        hostOptions.workers = consumers;
+        hostOptions.caller = CallerPlacement.unchanged; // the controller is already pinned
+        hostOptions.idle = WorkerIdle.spin;
+        hostOptions.pool = PoolOptions.init;
+        hostOptions.pool.processors = cpus[1 .. $];
+        hostOptions.farm.ringMiB = 8;
+        hostOptions.farm.k = 8;
+        hostOptions.farm.quotaSmall = quota;
+        host = new FarmHost(hostOptions);
+        farm = host.farm;
+        writefln("farm_host=1 %s", host.plan.summary());
+    }
+    else
+        farm = AntFarm.create(8, 8, consumers ? consumers : 1,
+            tier == Tier.bulk ? 1 : 0, tier == Tier.bulk ? quota : 0,
+            tier == Tier.small ? 1 : 0, tier == Tier.small ? quota : 0);
     enforce(farm !is null, "Farm allocation failed");
     writefln("batchLimit=%s tier=%s quota_words=%s public_hint=%s child_hint=%s", batch, tierName,
         quota, publicHint == publicHintDefault ? "default" : to!string(publicHint), g_childHint);
@@ -1065,7 +1105,7 @@ void main(string[] args)
     }
     version (AntfarmMimallocV3)
         if (allocatorName != "crt") writefln("mimalloc_version=%s", mi_version());
-    scope (exit) farm.destroy();
+    scope (exit) { if (host !is null) host.close(); else farm.destroy(); }
     immutable noRuntime = privateMode || treeMode || subsetMode || foldTreeMode || trackedMode;
     auto runtime = noRuntime ? null : ActorRuntime.create(farm, count, allocator);
     enforce(noRuntime || runtime !is null, "actor runtime allocation failed");
@@ -1090,9 +1130,14 @@ void main(string[] args)
     auto completions = new Completion[count];
     auto nodes = inboxMode ? new ActorInboxNode[count] : null;
     foreach (ref node; nodes) node.initialize();
-    auto token = farm.registerProducer(tier);
-    enforce(token.valid, "producer registration failed");
-    scope (exit) farm.unregisterProducer(token);
+    Token ownToken;
+    if (!useHost)
+    {
+        ownToken = farm.registerProducer(tier);
+        enforce(ownToken.valid, "producer registration failed");
+    }
+    scope (exit) if (!useHost) farm.unregisterProducer(ownToken);
+    ref Token token = useHost ? host.token : ownToken;
     ConsumerView view;
     if (consumers == 0)
         enforce(view.subscribe(farm) >= 0, "consumer subscription failed");
@@ -1106,15 +1151,19 @@ void main(string[] args)
         foreach (thread; threads)
             if (thread !is null) thread.join();
     }
-    foreach (i; 0 .. consumers)
+    foreach (i; 0 .. (useHost ? 0 : consumers))
     {
-        jobs[i] = new Consumer(farm, cpus.length == 0 ? -1 : cast(int) cpus[i + 1]);
+        jobs[i] = cpus.length == 0
+            ? new Consumer(farm, ProcessorId.init, true)
+            : new Consumer(farm, cpus[i + 1], false);
         threads[i] = new Thread(&jobs[i].run);
         threads[i].start();
         while (atomicLoad!(MemoryOrder.acq)(jobs[i].started) == 0)
             Thread.yield();
         enforce(atomicLoad!(MemoryOrder.acq)(jobs[i].started) == 1,
-            "worker pin or subscription failed");
+            jobs[i].unpinned || jobs[i].pin == PinOutcome.pinned
+                ? "consumer subscription failed"
+                : "consumer CPU " ~ jobs[i].cpu.to!string ~ " pin failed: " ~ jobs[i].pin.to!string);
     }
 
     if (subsetMode)

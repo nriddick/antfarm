@@ -38,6 +38,8 @@ perftest/actor_ready
 perftest/actor_churn
 perftest/actor_churn_mimalloc
 perftest/scaling
+perftest/offccd
+perftest/c2c
 private_actor_tests/private_actor_tests
 private_actor_tests/private_actor_tests_dmd
 private_actor_tests/private_actor_tests_release

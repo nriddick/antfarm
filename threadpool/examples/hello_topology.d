@@ -12,25 +12,38 @@ void main()
         "  E-cores ", t.eCoreCount,
         "  logical processors ", t.logicalProcessorCount,
         "  cache line ", t.cacheLineSize, " B");
+    auto scope_ = osScope();
+    writeln("os scope ", scope_.source, "  allowed ",
+        scope_.source == OsScopeSource.unrestricted ? "all" : formatCpuList(scope_.allowed),
+        "  grouping source ", t.groupingSource);
 
     foreach (ref d; t.llcDomains)
     {
-        writefln("  LLC %s  size %s KiB  line %s  LPs %s  P-cores %s  E-cores %s",
-            d.llcIndex, d.l3SizeBytes / 1024, d.lineSize,
-            d.lpIndices, d.pCoreIndices, d.eCoreIndices);
+        writefln("  LLC %s  source %s  size %s KiB  line %s  CPUs %s  eligible %s  P-cores %s  E-cores %s",
+            d.llcIndex, d.source, d.l3SizeBytes / 1024, d.lineSize,
+            formatCpuList(d.processors), formatCpuList(t.eligibleProcessorsInLlc(d.llcIndex)),
+            d.pCoreIndices, d.eCoreIndices);
     }
 
     writeln();
-    writeln("lp  group  core  llc  numa  class  smtSib  l2KiB  l3KiB  module");
+    writeln("cpu    core  llc  numa  class  smtSib  elig  offline  osExcl  parked  l2KiB  l3KiB  module");
     foreach (ref p; t.processors)
     {
-        writefln("%2s  %5s  %4s  %3s  %4s  %5s  %6s  %5s  %5s  %6s",
-            p.lpIndex, p.group, p.coreIndex, p.llcIndex, p.numaIndex,
-            p.efficiencyClass, p.smtSibling,
+        writefln("%-5s  %4s  %3s  %4s  %5s  %6s  %4s  %7s  %6s  %6s  %5s  %5s  %6s",
+            ProcessorId.of(p), p.coreIndex, p.llcIndex, p.numaIndex,
+            p.efficiencyClass, p.smtSibling, t.isEligible(p), p.offlineAtDiscovery,
+            p.affinityExcluded, p.parkedAtDiscovery,
             p.l2.sizeBytes / 1024, p.l3.sizeBytes / 1024, p.moduleIndex);
     }
 
+    writeln("\ndefault pool resolution:");
+    writeln(new CacheAwarePool(PoolOptions.init).resolve());
+    PoolOptions noSmt;
+    noSmt.skipSmtSiblings = true;
+    writeln("skipSmtSiblings pool resolution:");
+    writeln(new CacheAwarePool(noSmt).resolve());
+
     if (auto here = t.current())
-        writefln("\nthis thread is on LP %s, LLC %s, NUMA %s, efficiencyClass %s",
-            here.lpIndex, here.llcIndex, here.numaIndex, here.efficiencyClass);
+        writefln("this thread is on CPU %s, LLC %s, NUMA %s, efficiencyClass %s",
+            ProcessorId.of(*here), here.llcIndex, here.numaIndex, here.efficiencyClass);
 }

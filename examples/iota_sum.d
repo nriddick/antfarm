@@ -53,30 +53,24 @@ void stopWorker(WorkerSelf* w) nothrow @nogc @system
 
 void main()
 {
-    auto topo = CacheAwarePool.topology();
-
     PoolOptions opt;
     opt.skipSmtSiblings = true;
     opt.workerBody = &pump;
     opt.workerStop = &stopWorker;
+    auto pool = new CacheAwarePool(opt);
+    auto res = pool.resolve();
 
-    uint ncons;
-    foreach (ref p; topo.processors)
-    {
-        if (opt.skipSmtSiblings && p.smtSibling) continue;
-        ++ncons;
-    }
-
+    // Every accepted worker subscribes, so size the Farm for all of them.
+    immutable ncons = cast(uint) res.workers.length;
     auto f = AntFarm.create(2, 8, ncons, 0, 0, 1, 4096);
     scope (exit) f.destroy();
 
-    auto bins = new FarmBin[](topo.llcCount);
-    foreach (ref b; bins)
-        b.farm = f;
-    install(bins);
+    // Deliberately one Farm across all groups: every accepted worker is a
+    // consumer, including foreign groups.
+    auto bins = makeBins!FarmBin(res, (ref const g) => FarmBin(f));
+    install(bins, res);
     scope (exit) uninstall!FarmBin();
 
-    auto pool = new CacheAwarePool(opt);
     pool.start();
     scope (exit) pool.shutdown();
     pool.director().spin();

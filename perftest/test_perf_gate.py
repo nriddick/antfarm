@@ -146,13 +146,14 @@ class GateCase(unittest.TestCase):
         argv = ['perf_gate.py', '--repo', str(self.repo), '--output', str(out)] + list(args)
         patches = [
             mock.patch.object(sys, 'argv', argv),
+            mock.patch.object(perf_gate, 'require_linux'),
             mock.patch.object(perf_gate, 'command', fake_command),
             mock.patch.object(perf_gate, 'cpuinfo', lambda: cpuinfo),
             mock.patch.object(perf_gate, 'runone', fake_runone),
             mock.patch.object(perf_gate.subprocess, 'run', fake_run),
-            mock.patch.object(perf_gate.os, 'sched_getaffinity', lambda pid: set(range(8))),
-            mock.patch.object(perf_gate.os, 'sched_setaffinity', lambda pid, cpus: None),
-            mock.patch.object(perf_gate.os, 'getloadavg', lambda: (load, load, load)),
+            mock.patch.object(perf_gate.os, 'sched_getaffinity', lambda pid: set(range(8)), create=True),
+            mock.patch.object(perf_gate.os, 'sched_setaffinity', lambda pid, cpus: None, create=True),
+            mock.patch.object(perf_gate.os, 'getloadavg', lambda: (load, load, load), create=True),
         ]
         with contextlib.ExitStack() as stack:
             for p in patches:
@@ -280,7 +281,8 @@ class UsageValidationTests(GateCase):
         with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(io.StringIO()), \
                 mock.patch.object(sys, 'argv', ['perf_gate.py', '--repo', str(self.repo),
                                                 '--output', str(existing)] + FAST), \
-                mock.patch.object(perf_gate.os, 'sched_getaffinity', lambda pid: set(range(8))), \
+                mock.patch.object(perf_gate, 'require_linux'), \
+                mock.patch.object(perf_gate.os, 'sched_getaffinity', lambda pid: set(range(8)), create=True), \
                 mock.patch.object(perf_gate, 'cpuinfo', lambda: [
                     dict(processor=str(i), **{'physical id': '0', 'core id': str(i)})
                     for i in range(8)]):
@@ -681,6 +683,7 @@ class TreeCancelTests(GateCase):
 class ScriptEntryPointTests(unittest.TestCase):
     """Run the script for real; failures must exit 2, never 1 or 0."""
 
+    @unittest.skipUnless(sys.platform == 'linux', 'requires Linux CPU affinity and /proc accounting')
     def test_internal_error_exits_two_and_writes_gate_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)
@@ -700,11 +703,62 @@ class ScriptEntryPointTests(unittest.TestCase):
             self.assertEqual(json.loads((out / 'summary.json').read_text()), [])
 
     def test_usage_error_exits_two(self):
-        proc = subprocess.run([sys.executable, str(HERE / 'perf_gate.py'), '--base', 'x',
-                               '--output', '/nonexistent-dir/never-created'],
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp) / 'never-created'
+            proc = subprocess.run([sys.executable, str(HERE / 'perf_gate.py'),
+                                   '--output', str(out)],
+                                  capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn('--base', proc.stderr)
+            self.assertFalse(out.exists())
+
+    def test_help_is_available_without_linux_accounting(self):
+        proc = subprocess.run([sys.executable, str(HERE / 'perf_gate.py'), '--help'],
                               capture_output=True, text=True, timeout=60)
-        self.assertEqual(proc.returncode, 2)
-        self.assertFalse(pathlib.Path('/nonexistent-dir').exists())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('--boundary', proc.stdout)
+
+    def test_unsupported_host_rejected_before_side_effects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp) / 'never-created'
+            with mock.patch.object(sys, 'platform', 'win32'), \
+                    mock.patch.object(sys, 'argv', ['perf_gate.py', '--output', str(out)] + FAST), \
+                    mock.patch.object(perf_gate, 'command') as command, \
+                    mock.patch.object(perf_gate, 'cpuinfo') as cpuinfo:
+                with self.assertRaises(SystemExit) as caught, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    perf_gate.main()
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn('requires Linux', err.getvalue())
+                command.assert_not_called()
+                cpuinfo.assert_not_called()
+            self.assertFalse(out.exists())
+
+    @unittest.skipIf(sys.platform == 'linux', 'exercises the non-Linux CLI rejection')
+    def test_unsupported_host_exits_two_without_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp) / 'never-created'
+            proc = subprocess.run([sys.executable, str(HERE / 'perf_gate.py'),
+                                   '--output', str(out)] + FAST,
+                                  capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn('requires Linux', proc.stderr)
+            self.assertNotIn('Traceback', proc.stderr)
+            self.assertFalse(out.exists())
+
+    @unittest.skipIf(sys.platform == 'linux', 'exercises the non-Linux CLI rejection')
+    def test_unsupported_host_preserves_existing_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            gate = out / 'gate.json'
+            gate.write_bytes(b'previous evidence\n')
+            proc = subprocess.run([sys.executable, str(HERE / 'perf_gate.py'),
+                                   '--output', str(out)] + FAST,
+                                  capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn('requires Linux', proc.stderr)
+            self.assertEqual(gate.read_bytes(), b'previous evidence\n')
+            self.assertEqual(list(out.iterdir()), [gate])
 
 
 if __name__ == '__main__':

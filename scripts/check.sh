@@ -49,6 +49,37 @@ fi
 
 run dub test --compiler=ldc2
 run dub test --compiler=dmd
+# Threadpool and fibers are not covered by the root dub test. host-test on
+# optimized LDC is what catches closeOrAbandon skipping abandon (LDC -O1+).
+run dub test :threadpool --compiler=ldc2
+run dub test :threadpool --compiler=dmd
+# Package name is antfarm-fibers (directory fibers/); :fibers does not resolve.
+run dub test :antfarm-fibers --compiler=ldc2
+run dub test :antfarm-fibers --compiler=dmd
+run dub run :threadpool -c confine-test --compiler=ldc2
+run taskset -c 0-3 dub run :threadpool -c confine-test --compiler=ldc2
+# One LLC (this 5900XT: LPs 0-7,16-23). SKIP worker cases fails unless
+# ALLOW_HOST_SKIP=1. timeout so an exit hang fails the lane.
+host_test() {
+    local compiler="$1"
+    shift
+    local log
+    log=$(mktemp)
+    echo "==> timeout 300 taskset -c 0-7,16-23 dub run :threadpool -c host-test --compiler=${compiler} $*"
+    if ! timeout 300 taskset -c 0-7,16-23 dub run :threadpool -c host-test --compiler="$compiler" "$@" | tee "$log"; then
+        rm -f "$log"
+        return 1
+    fi
+    if [[ "${ALLOW_HOST_SKIP:-}" != "1" ]] && grep -q "SKIP worker cases" "$log"; then
+        echo "host-test SKIP is a failure (set ALLOW_HOST_SKIP=1 to allow)" >&2
+        rm -f "$log"
+        return 1
+    fi
+    rm -f "$log"
+}
+host_test ldc2
+host_test dmd
+host_test ldc2 --build=release
 run "${make_cmd[@]}" check-docs
 run "${make_cmd[@]}" check-farm-ordering
 run "${make_cmd[@]}" run-farm-tsan

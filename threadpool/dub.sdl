@@ -6,6 +6,7 @@ targetType "library"
 targetPath "bin"
 sourcePaths "source"
 importPaths "source"
+dependency "antfarm" path=".."
 
 toolchainRequirements {
 	dmd ">=2.112.0"
@@ -20,7 +21,8 @@ configuration "library" {
 configuration "unittest" {
 	targetType "executable"
 	mainSourceFile "tests/unittest_main.d"
-	sourceFiles "tests/topology_parse.d" "tests/linux_topology_parse.d"
+	sourceFiles "tests/topology_parse.d" "tests/linux_topology_parse.d" "tests/resolution.d" \
+		"tests/synthetic_topology.d" "tests/host_plan.d"
 	stringImportPaths "tests"
 }
 
@@ -34,6 +36,40 @@ configuration "hello" {
 configuration "wait-races" {
     targetType "executable"
     mainSourceFile "tests/wait_races.d"
+}
+
+configuration "affinity-test" {
+    targetType "executable"
+    mainSourceFile "tests/windows_affinity.d"
+}
+
+// Linux frozen-OS-scope regression; re-executes itself under taskset.
+configuration "scope-test" {
+    targetType "executable"
+    mainSourceFile "tests/os_scope_live.d"
+}
+
+// Linux caller confine/restore and stopRequested: `dub run -c confine-test`,
+// also under `taskset -c 0-3`.
+configuration "confine-test" {
+    targetType "executable"
+    mainSourceFile "tests/confine_live.d"
+}
+
+// Live FarmHost regression: `dub run -c host-test`. Needs two accepted
+// worker CPUs in one LLC (one per core by default), or three for a free
+// caller CPU. Prints SKIP and exits 0 otherwise; check.sh treats that SKIP
+// as a failure unless ALLOW_HOST_SKIP=1.
+configuration "host-test" {
+    targetType "executable"
+    mainSourceFile "tests/host_live.d"
+    versions "FarmHostTestHooks"
+}
+
+// wake() racing a worker-failure shutdown: `dub run -c wakefail`.
+configuration "wakefail" {
+    targetType "executable"
+    mainSourceFile "tests/wakefail.d"
 }
 
 // Live hardware binary: `dub run -c live-test` (not `dub test`).

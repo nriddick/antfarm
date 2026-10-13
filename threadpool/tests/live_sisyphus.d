@@ -97,14 +97,16 @@ void dump(const(TopologySnapshot) s)
         " line=", s.cacheLineSize);
     foreach (ref p; s.processors)
     {
-        writefln("  lp=%s group=%s core=%s llc=%s llcInGroup=%s eff=%s smtSib=%s parked=%s cpuSet=%s l2=%s l3=%s mod=%s",
+        writefln("  lp=%s group=%s core=%s llc=%s llcInGroup=%s eff=%s smtSib=%s parked=%s offline=%s eligible=%s cpuSet=%s l2=%s l3=%s mod=%s",
             p.lpIndex, p.group, p.coreIndex, p.llcIndex, p.llcIndexInGroup,
-            p.efficiencyClass, p.smtSibling, p.parkedAtDiscovery, p.cpuSetId,
+            p.efficiencyClass, p.smtSibling, p.parkedAtDiscovery, p.offlineAtDiscovery,
+            s.isEligible(p), p.cpuSetId,
             p.l2.sizeBytes, p.l3.sizeBytes, p.moduleIndex);
     }
     foreach (ref d; s.llcDomains)
-        writefln("  domain %s l3=%s lps=%s pCores=%s eCores=%s",
-            d.llcIndex, d.l3SizeBytes, d.lpIndices, d.pCoreIndices, d.eCoreIndices);
+        writefln("  domain %s source=%s l3=%s cpus=%s pCores=%s eCores=%s",
+            d.llcIndex, d.source, d.l3SizeBytes, formatCpuList(d.processors),
+            d.pCoreIndices, d.eCoreIndices);
 }
 
 bool looksLikeSisyphus(const(TopologySnapshot) s)
@@ -138,14 +140,18 @@ int main()
             assert(p.efficiencyClass == 0);
     }
 
-    auto c1s = new LiveC1[](s.llcCount);
-    auto c2s = new LiveC2[](s.llcCount);
-    auto bags = new WorkBag[](s.llcCount);
+    PoolOptions liveOpt;
+    liveOpt.workerBody = &liveBody;
+    auto livePool = new CacheAwarePool(liveOpt);
+    auto res = livePool.resolve();
+    auto c1s = makeBins!LiveC1(res, (ref const g) => LiveC1.init);
+    auto c2s = makeBins!LiveC2(res, (ref const g) => LiveC2.init);
+    auto bags = makeBins!WorkBag(res, (ref const g) => WorkBag.init);
     bags[0].pLeft = 1;
     bags[0].eLeft = 1;
-    install(c1s);
-    install(c2s);
-    install(bags);
+    install(c1s, res);
+    install(c2s, res);
+    install(bags, res);
     setLabel!LiveC1(cast(ushort) 0, "llc0");
     scope (exit)
     {
@@ -155,9 +161,7 @@ int main()
     }
 
     {
-        PoolOptions opt;
-        opt.workerBody = &liveBody;
-        auto pool = new CacheAwarePool(opt);
+        auto pool = livePool;
         pool.start();
         scope (exit) pool.shutdown();
         assert(pool.workerCount == 20);

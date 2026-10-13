@@ -9,8 +9,9 @@ module fail_fast_fold;
 
 import antfarm;
 import actors;
-import example_host;
+import threadpool.host;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad;
+import core.time : seconds;
 import std.conv : to;
 import std.stdio : writeln;
 
@@ -85,15 +86,15 @@ PrivateRootDisposition fold(scope ref PrivateBorrow!Fold actor,
 
 void main(string[] args)
 {
-    uint workers = args.length > 1 ? to!uint(args[1]) : 0;
-    auto host = new ExampleHost(workers);
-    auto token = host.farm.registerProducer(Tier.small);
-    if (!token.valid) fatal("producer registration failed");
+    FarmHostOptions hostOptions;
+    hostOptions.workers = args.length > 1 ? to!uint(args[1]) : 0;
+    hostOptions.waitTimeout = 30.seconds; // example policy: a stuck drain fails instead of hanging
+    auto host = new FarmHost(hostOptions);
+    scope (exit) host.closeOrAbandon();
 
     PrivateRootOptions options;
     options.tracking = true;
-    auto park = PrivateRootPark!(Fold, fold).create(host.farm, 1, options);
-    if (park is null) fatal("root park allocation failed");
+    auto park = host.createPark!(Fold, fold)(1, options);
 
     shared uint ran;
     ulong total;
@@ -106,14 +107,12 @@ void main(string[] args)
     // Root-to-application output stays application-owned; read it only after
     // the root terminal outcome is taken. A tracked drain pumps and takes.
     PrivateRootOutcome outcome;
-    while (park.live != 0)
-    {
-        park.pump(token);
-        host.progress();
+    host.waitUntil(() {
         PrivateRootOutcome taken;
         while (park.takeOutcome(taken))
             outcome = taken;
-    }
+        return park.live == 0;
+    });
 
     immutable leafRuns = atomicLoad!(MemoryOrder.acq)(ran);
     if (outcome.status != PrivateOutcomeStatus.failed || outcome.code != 7)
@@ -123,12 +122,7 @@ void main(string[] args)
     if (failures != 1 || dispatched < 5 || leafRuns != dispatched)
         fatal("fold aggregate mismatch");
 
-    host.stopConsumers();
-    park.destroy();
-    park = null;
-    host.farm.unregisterProducer(token);
-    host.farm.destroy();
     writeln("fail-fast fold: code=", outcome.code, ", failures=", failures,
         ", dispatched=", dispatched, "/8, leaves run=", leafRuns,
-        ", workers=", workers);
+        ", workers=", host.plan.workers);
 }

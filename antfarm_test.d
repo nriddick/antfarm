@@ -10,6 +10,7 @@ import antfarm_templates;
 import actors;
 import antfarm_allocation : allocateAligned64, freeAligned64;
 import core.atomic;
+import core.lifetime : move;
 import core.memory : GC;
 import core.thread;
 import core.time;
@@ -321,6 +322,93 @@ void testRingSizeUnits()
     check(ringMiBFromUlongs(1UL << 18) == 2, "2^18 ulongs is 2 MiB");
     check(ringMiBFromUlongs(1UL << 20) == 8, "2^20 ulongs is 8 MiB");
     printf("testRingSizeUnits OK\n"); fflush(stdout);
+}
+
+void testCheckGeometry()
+{
+    void rejects(FarmCreateError e, string detail, string what)
+    {
+        check(e.kind == FarmCreateFailure.geometry, what);
+        check(e.detail == detail, what);
+        check(e.osError == 0, what);
+    }
+    enum kMsg = "K must be a power of 2 in [2, KMAX]";
+    enum ringMsg = "ringMiB must be a power of 2 >= 2 (the ring size is in MiB, not ulongs)";
+    enum exmaxMsg = "Exmax exceeds K-1 segments' capacities";
+    check(AntFarm.checkGeometry(8, 8, 4, 2, 0, 16, 4096).kind == FarmCreateFailure.none,
+        "create defaults accepted");
+    check(AntFarm.checkGeometry(8, 8, 4, 2, 0, 16, 4096) == FarmCreateError.init,
+        "accepted geometry is FarmCreateError.init");
+    rejects(AntFarm.checkGeometry(8, 1, 4, 0, 0, 1, 4096), kMsg, "k 1");
+    rejects(AntFarm.checkGeometry(8, 3, 4, 0, 0, 1, 4096), kMsg, "k 3");
+    rejects(AntFarm.checkGeometry(8, KMAX * 2, 4, 0, 0, 1, 4096), kMsg, "k > KMAX");
+    rejects(AntFarm.checkGeometry(1, 8, 4, 0, 0, 1, 4096), ringMsg, "ringMiB below minimum");
+    rejects(AntFarm.checkGeometry(6, 8, 4, 0, 0, 1, 4096), ringMsg, "ringMiB not a power of 2");
+    rejects(AntFarm.checkGeometry(MAX_RING_MIB * 2, 8, 4, 0, 0, 1, 4096),
+        "ringMiB exceeds MAX_RING_MIB (the ring size is in MiB, not ulongs)", "ringMiB above maximum");
+    // "segment capacity too small" is subsumed: MIN_RING_MIB with KMAX
+    // segments still gives 2^14 ulongs per segment.
+    check(AntFarm.checkGeometry(MIN_RING_MIB, KMAX, 1, 0, 0, 1, 64).kind == FarmCreateFailure.none,
+        "smallest ring with KMAX segments");
+    rejects(AntFarm.checkGeometry(8, 8, 0, 0, 0, 1, 4096), "expected consumers must be > 0", "consumers 0");
+    rejects(AntFarm.checkGeometry(8, 8, 4, 0, 0, 1, 0), "small quota must be > 0", "small quota 0");
+    rejects(AntFarm.checkGeometry(8, 8, 4, 0, 0, 0, 4096), "no producer capacity configured", "no producers");
+    // 2 MiB, K 8: segCap 32768 ulongs, so Exmax may be at most 7 * 32768.
+    check(AntFarm.checkGeometry(2, 8, 1, 0, 0, 1, 7 * 32768).kind == FarmCreateFailure.none,
+        "Exmax at (K-1)*segCap");
+    rejects(AntFarm.checkGeometry(2, 8, 1, 0, 0, 1, 7 * 32768 + 1), exmaxMsg, "Exmax above (K-1)*segCap");
+    rejects(AntFarm.checkGeometry(2, 8, 1, 1, 0, 1, 6 * 32768 + 1), exmaxMsg,
+        "auto bulk quota (segCap) counts toward Exmax");
+    // "quota exceeds Exmax" needs a wrapped Exmax; overflow is rejected first.
+    rejects(AntFarm.checkGeometry(8, 8, 4, 0, 0, uint.max, ulong.max), exmaxMsg, "small product overflow");
+    rejects(AntFarm.checkGeometry(8, 8, 4, 2, ulong.max / 2 + 1, 0, 0), exmaxMsg, "bulk product overflow");
+    rejects(AntFarm.checkGeometry(8, 8, 4, 1, ulong.max, 1, 1), exmaxMsg, "quota sum overflow");
+    rejects(AntFarm.checkGeometry(8, 8, 4, uint.max, 1, 1, 1), exmaxMsg,
+        "producer count sum does not wrap to zero");
+    // Disabled tiers are normalized before validation.
+    check(AntFarm.checkGeometry(8, 8, 4, 0, ulong.max, 1, 4096).kind == FarmCreateFailure.none,
+        "disabled bulk quota ignored");
+    check(AntFarm.checkGeometry(8, 8, 4, 1, 0, 0, ulong.max).kind == FarmCreateFailure.none,
+        "disabled small quota ignored");
+    printf("testCheckGeometry OK\n"); fflush(stdout);
+}
+
+void testTryCreate()
+{
+    FarmCreateError error;
+    check(AntFarm.tryCreate(8, 3, 4, 0, 0, 1, 4096, DEFAULT_SMALL_TABLE_THRESHOLD, false, &error) is null,
+        "tryCreate rejects K 3");
+    check(error.kind == FarmCreateFailure.geometry, "tryCreate geometry kind");
+    check(error.detail == "K must be a power of 2 in [2, KMAX]", "tryCreate geometry detail");
+    check(AntFarm.tryCreate(8, 8, 0) is null, "tryCreate without an error pointer");
+
+    version (Posix)
+    {
+        import core.stdc.stdlib : getenv;
+        import core.sys.posix.stdlib : setenv, unsetenv;
+        import std.string : fromStringz, toStringz;
+        auto saved = getenv("ANTFARM_HUGE_PAGES");
+        immutable savedValue = saved is null ? null : fromStringz(saved).idup;
+        setenv("ANTFARM_HUGE_PAGES", "bogus", 1);
+        auto bogus = AntFarm.tryCreate(2, 8, 1, 0, 0, 1, 4096,
+            DEFAULT_SMALL_TABLE_THRESHOLD, false, &error);
+        if (savedValue is null) unsetenv("ANTFARM_HUGE_PAGES");
+        else setenv("ANTFARM_HUGE_PAGES", savedValue.toStringz, 1);
+        check(bogus is null, "tryCreate rejects ANTFARM_HUGE_PAGES=bogus");
+        check(error.kind == FarmCreateFailure.hugePagesSetting, "hugePagesSetting kind");
+        check(error.detail == "ANTFARM_HUGE_PAGES must be 0 or 1", "hugePagesSetting detail");
+    }
+
+    auto f = AntFarm.tryCreate(2, 8, 1, 0, 0, 1, 4096, DEFAULT_SMALL_TABLE_THRESHOLD, false, &error);
+    check(f !is null, "tryCreate success");
+    check(error == FarmCreateError.init, "tryCreate success clears the error");
+    check(f.Ln == 2UL << ULONGS_PER_MIB_SHIFT && f.maxSmall == 1 && f.quotaSmall == 4096,
+        "tryCreate geometry");
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "tryCreate Farm registers a producer");
+    f.unregisterProducer(tok);
+    f.destroy();
+    printf("testTryCreate OK\n"); fflush(stdout);
 }
 
 void testArithmetic()
@@ -1694,6 +1782,42 @@ void testActorWave()
     printf("testActorWave OK\n"); fflush(stdout);
 }
 
+void testRuntimeQuiescent()
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope (exit) farm.destroy();
+    auto actors = ActorRuntime.create(farm, 1);
+    check(actors !is null, "quiescent runtime allocation");
+    check(actors.quiescent, "empty runtime is quiescent");
+
+    auto owner = actors.createActor!(ActorCounterState, actorCounter)(
+        ActorCounterState(0, 3));
+    check(owner.valid, "quiescent actor creation");
+    check(!actors.quiescent, "a live actor is not quiescent");
+    check(owner.handle.wake() == ActorWakeResult.queued, "quiescent actor wake");
+    check(actors.ready == 1 && !actors.quiescent, "a queued actor is not quiescent");
+
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "quiescent consumer subscribe");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "quiescent producer registration");
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (!owner.retired)
+    {
+        actors.flush(token);
+        while (view.consumeNext()) {}
+        if (MonoTime.currTime >= deadline)
+            fatal("quiescent actor retirement timeout");
+    }
+    check(!actors.quiescent, "a retired, unreclaimed actor is still live");
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+    check(owner.reclaim() == ActorReclaimResult.reclaimed, "quiescent actor reclaim");
+    check(actors.quiescent, "reclaimed runtime with joined consumers is quiescent");
+    actors.destroy();
+    printf("testRuntimeQuiescent OK\n"); fflush(stdout);
+}
+
 void testActorPayload()
 {
     enum consumerCount = 4;
@@ -2276,6 +2400,76 @@ class CrossFarmWorker
         }
     }
 }
+void testTokenMoveOnly()
+{
+    // A copy (explicit, by-value parameter, or through an algorithm that
+    // takes elements by value) must not compile: the copy-then-invalidate
+    // of the old transfer-on-copy token silently invalidated the source.
+    static assert(!__traits(compiles,
+    {
+        Token src;
+        Token dst = src;
+    }));
+    static assert(!__traits(compiles,
+    {
+        Token src;
+        Token dst;
+        dst = src;
+    }));
+    static assert(!__traits(compiles,
+    {
+        void takesByValue(Token taken) {}
+        Token src;
+        takesByValue(src);
+    }));
+    // Transfer is explicit: move into a local or an rvalue parameter, and
+    // move-assignment into an invalid destination, all compile.
+    static assert(__traits(compiles,
+    {
+        Token src;
+        Token dst = move(src);
+        Token dst2;
+        dst2 = move(src);
+        void takesByValue(Token taken) {}
+        takesByValue(move(dst));
+    }));
+
+    enum N = 4;
+    allocCalls(N);
+    scope (exit) freeCalls();
+
+    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
+    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
+    scope (exit) { free(headers); free(bodies); free(entries); }
+    foreach (i; 0 .. N)
+        entries[i] = payloadEntryRuntime!testCb(
+            &headers[i], bodies[i * 2 .. i * 2 + 2], 1, 1, i, 1);
+
+    auto f = AntFarm.create(2, 8, 2, 1, 8192, 4, 2048);
+    scope (exit) f.destroy();
+    ConsumerView v;
+    check(v.subscribe(f) >= 0, "subscribe for move-only token test");
+
+    auto tok = f.registerProducer(Tier.small);
+    check(tok.valid, "move-only test registers a token");
+    Token moved = move(tok);
+    check(!tok.valid, "move consumes the source token");
+    check(moved.valid, "moved-into token stays valid");
+    check(f.write(entries[0 .. N], moved) == N, "write with moved token");
+    while (v.consumeNext()) {}
+    Token reassigned;
+    reassigned = move(moved);
+    check(!moved.valid, "move-assignment consumes its source");
+    check(reassigned.valid, "move-assignment destination valid");
+    check(f.write(entries[0 .. N], reassigned) == N,
+        "write with reassigned token");
+    while (v.consumeNext()) {}
+    f.unregisterProducer(reassigned);
+    check(!reassigned.valid, "unregistered moved token invalid");
+    v.unsubscribe();
+    printf("testTokenMoveOnly OK\n"); fflush(stdout);
+}
 void testCrossFarmProvenance()
 {
     enum N = 8;
@@ -2317,7 +2511,7 @@ void testCrossFarmProvenance()
 
     // Token transfer stays a same-farm transfer: the source is consumed and
     // the destination carries the provenance.
-    Token ta2 = ta;
+    Token ta2 = move(ta);
     check(!ta.valid, "transfer consumes source");
     check(ta2.valid, "transfer destination valid");
     check(fa.write(entries[0 .. 2], ta2) == 2, "write with transferred token");
@@ -4001,6 +4195,8 @@ void main(string[] args)
     }
     testMagicWrap();
     testRingSizeUnits();
+    testCheckGeometry();
+    testTryCreate();
     testArithmetic();
     testSweptQuotaBalance();
     testProducerLifecycleChurn();
@@ -4018,9 +4214,11 @@ void main(string[] args)
     testSpannedTables();
     testSmallTableChurn();
     testMultiSmallProducers();
+    testTokenMoveOnly();
     testCrossFarmProvenance();
     testStaleQuotaReuse();
     testActorWave();
+    testRuntimeQuiescent();
     testActorPayload();
     testActorErasedAdapter();
     testActorInbox();

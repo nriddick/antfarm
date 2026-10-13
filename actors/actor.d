@@ -33,6 +33,7 @@ import antfarm_allocation : allocateAligned64, freeAligned64;
 import antfarm : avgCostForChunk, fatal;
 import core.atomic : MemoryOrder, atomicExchange, atomicFetchAdd,
     atomicFetchSub, atomicLoad, atomicStore, cas, pause;
+import core.lifetime : move;
 import core.stdc.string : memcpy, memset;
 
 // Cost class of the public flush table: claims of 8 entries.
@@ -301,6 +302,15 @@ struct ActorInboxNode
         return atomicLoad!(MemoryOrder.acq)(state_) == inboxNodeFree;
     }
 
+    /// The application payload as a pointer to `T`. A plain cast of
+    /// `payload`: the caller owns the storage and the layout, so no size
+    /// or alignment is checked here (a debug-only size check would change
+    /// the node layout between debug and release builds).
+    T* payloadAs(T)() return nothrow @nogc @system
+    {
+        return cast(T*) payload;
+    }
+
     /// Return a node handed to the actor by `ActorContext.popInbox` to its
     /// caller-defined free state. Read/process payload fields before this
     /// release; another producer may reuse them after observing availability.
@@ -336,6 +346,48 @@ struct ActorInboxNode
         version (AntfarmActorTestHooks)
             actorTestPoint(ActorTestPoint.actorNodeBeforeCompletionStore, &this);
         atomicStore!(MemoryOrder.rel)(state_, inboxNodeFree);
+    }
+
+    // The completion variants that also schedule the sender: the release
+    // store inside the completion happens before the wake, so a sender
+    // activation published by the wake observes `available` and the
+    // recorded outcome. Passing a reply target here would grow the node
+    // and fix one sender per node, so the sender handle travels in the
+    // payload instead.
+
+    /// Complete this node as `complete` would, then schedule `sender` with
+    /// the same contract as `ActorHandle.wake`. Accepts `ActorHandle!U`
+    /// for any `U`, and the erased handle. Returns the wake result;
+    /// `staleHandle` and `closed` report a sender that no longer accepts
+    /// activation, not a lost reply. Read every payload field before this
+    /// call; the node must not be touched afterwards, because the woken
+    /// sender may reuse it as soon as it observes availability.
+    ActorWakeResult completeAndWake(H)(H sender) nothrow @nogc @system
+        if (is(H == ActorErasedHandle) || is(H == ActorHandle!U, U))
+    {
+        complete();
+        return sender.wake();
+    }
+
+    /// Fail this node as `fail` would (same 24-bit code limit), then
+    /// schedule `sender`. Same ordering and after-call contract as
+    /// `completeAndWake`; the failure code is observable to the woken
+    /// sender through `failureCode`.
+    ActorWakeResult failAndWake(H)(H sender, uint code) nothrow @nogc @system
+        if (is(H == ActorErasedHandle) || is(H == ActorHandle!U, U))
+    {
+        fail(code);
+        return sender.wake();
+    }
+
+    /// Cancel this node as `cancel` would, then schedule `sender`. Same
+    /// ordering and after-call contract as `completeAndWake`; the woken
+    /// sender observes `ActorNodeOutcome.cancelled`.
+    ActorWakeResult cancelAndWake(H)(H sender) nothrow @nogc @system
+        if (is(H == ActorErasedHandle) || is(H == ActorHandle!U, U))
+    {
+        cancel();
+        return sender.wake();
     }
 
     /// Read after available acquired completion for this interaction, before
@@ -422,7 +474,10 @@ struct ActorBorrow(T)
     package T* state_;
     @disable this(this);
 
-    /// The actor state for the duration of this callback.
+    /// The actor state for the duration of this callback. Field access
+    /// through `actor.value.field` needs no parentheses; binding the state
+    /// to a reference does: `ref T s = actor.value;` does not compile, while
+    /// `ref T s = actor.value();` and `auto p = &actor.value();` do.
     @property ref T value() return nothrow @nogc @system
     {
         return *state_;
@@ -616,22 +671,19 @@ struct ActorErasedHandle
 
 /// Move-only, type-erased retirement and reclamation authority. This is the
 /// owner form intended for a resident engine registry spanning reloadable
-/// module types.
+/// module types. Ownership transfer is explicit: copy and lvalue assignment
+/// do not compile; use `move` (std.algorithm or core.lifetime) to transfer,
+/// or pass the owner by `ref` to lend it.
 struct ActorErasedOwner
 {
     private ActorSlot* slot_;
     private ulong generation_;
 
-    /// Transfer-only copy, matching Ant Farm's producer Token convention.
-    this(ref ActorErasedOwner src) pure nothrow @nogc @system
-    {
-        slot_ = src.slot_;
-        generation_ = src.generation_;
-        src.slot_ = null;
-        src.generation_ = 0;
-    }
+    /// Copying is disabled: transfer ownership with an explicit `move`.
+    @disable this(ref typeof(this));
 
-    /// Transfer-only assignment; overwriting a live owner is fatal.
+    /// Move-assignment from an explicit `move` source (an rvalue).
+    /// Overwriting a live owner is fatal.
     ref ActorErasedOwner opAssign(ActorErasedOwner src)
         nothrow @nogc @system
     {
@@ -691,6 +743,14 @@ struct ActorErasedOwner
 }
 
 /// Move-only authority for retiring and reclaiming one actor generation.
+/// The owner is not copyable: copying one (including through a range
+/// algorithm that takes elements by value) is a compile error, and a copy
+/// would silently invalidate the source. Transfer ownership with
+/// `move` (std.algorithm or core.lifetime), or lend with a `ref` parameter;
+/// iterate owner arrays with `foreach (ref o; owners)`. `opAssign` accepts
+/// only an rvalue, so `owner = otherOwner` does not compile either; write
+/// `owner = move(otherOwner)`. Overwriting a live owner with a moved value
+/// is fatal.
 /// See_Also:
 ///     docs/guide/public-actors.md, docs/reference/actor-lifecycle.md (the
 ///     drain and shutdown obligations)
@@ -699,16 +759,11 @@ struct ActorOwner(T)
     private ActorSlot* slot_;
     private ulong generation_;
 
-    /// Transfer-only copy, matching Ant Farm's producer Token convention.
-    this(ref ActorOwner src) pure nothrow @nogc @system
-    {
-        slot_ = src.slot_;
-        generation_ = src.generation_;
-        src.slot_ = null;
-        src.generation_ = 0;
-    }
+    /// Copying is disabled: transfer ownership with an explicit `move`.
+    @disable this(ref typeof(this));
 
-    /// Transfer-only assignment; overwriting a live owner is fatal.
+    /// Move-assignment from an explicit `move` source (an rvalue).
+    /// Overwriting a live owner is fatal.
     ref ActorOwner opAssign(ActorOwner src) nothrow @nogc @system
     {
         if (slot_ !is null)
@@ -801,6 +856,9 @@ struct ActorErasedAdapter
     /// Invalid metadata, capacity exhaustion, or allocator failure returns an
     /// invalid owner. The handler and any module code it calls must remain
     /// resident until the returned owner has retired and been reclaimed.
+    /// The state lives in allocator-owned storage the garbage collector
+    /// does not scan; keep any GC allocation reachable from it alive
+    /// elsewhere, or use non-GC memory.
     ActorErasedOwner createActor(scope const(void)* initialState,
             size_t stateSize, size_t stateAlignment,
             ActorErasedHandler handler) nothrow @nogc @system
@@ -922,6 +980,17 @@ align(64) struct ActorRuntime
         return cast(size_t) atomicLoad!(MemoryOrder.acq)(liveCount);
     }
 
+    /// True when `destroy` would not abort: no live actor and nothing queued
+    /// for publication (the same acquire loads `destroy` checks). Consumers
+    /// must still be joined before `destroy`; this proves only the counts.
+    @property bool quiescent() const nothrow @nogc @system
+    {
+        return atomicLoad!(MemoryOrder.acq)(liveCount) == 0
+            && atomicLoad!(MemoryOrder.acq)(readyCount) == 0
+            && atomicLoad!(MemoryOrder.acq)(readyHeadWord) == 0
+            && readyCarryWord == 0;
+    }
+
     /// Diagnostic counter of payload arrivals whose actor generation had
     /// already moved on; grows only under handle misuse or recycling races.
     @property ulong staleActivations() const nothrow @nogc @system
@@ -941,7 +1010,11 @@ align(64) struct ActorRuntime
     }
 
     /// Allocate and copy-construct POD actor state. Returns an invalid owner
-    /// when capacity or allocator storage is unavailable.
+    /// when capacity or allocator storage is unavailable. The copy lives in
+    /// allocator-owned storage the garbage collector does not scan: POD
+    /// state holding GC slices or pointers compiles, but the actor does not
+    /// keep those allocations alive. Keep them reachable elsewhere for the
+    /// actor's lifetime, or store non-GC memory in actor state.
     ActorOwner!T createActor(T, alias handler)(T initial)
         nothrow @nogc @system
     {
@@ -959,7 +1032,7 @@ align(64) struct ActorRuntime
         result.generation_ = erased.generation_;
         erased.slot_ = null;
         erased.generation_ = 0;
-        return result;
+        return move(result);
     }
 
 private:
@@ -1008,7 +1081,7 @@ private:
         ActorErasedOwner result;
         result.slot_ = slot;
         result.generation_ = generation;
-        return result;
+        return move(result);
     }
 
 public:

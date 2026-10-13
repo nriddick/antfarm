@@ -13,6 +13,10 @@
  +
  + `--smt` adds sibling logical processors after the physical-core set.
  + `--sweep` runs every worker-count prefix of the selected topology.
+ +
+ + Workers come from one LLC group (the group of the first eligible CPU),
+ + because the single lane binds to one group: on multi-LLC hosts runs are
+ + capped to one LLC's CPUs.
  +/
 module actor_wave;
 
@@ -20,6 +24,7 @@ import antfarm;
 import actors;
 import antfarm_fibers;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad, atomicStore;
+import core.lifetime : move;
 import core.time : MonoTime, minutes;
 import std.conv : to;
 import std.exception : enforce;
@@ -98,7 +103,7 @@ private final class OneFiberRun
             ActorHandle!ProjectionActor[][] sets, uint avgCost)
     {
         this.farm = farm;
-        this.producer = producer;
+        this.producer = move(producer);
         this.sets = sets;
         this.avgCost = avgCost;
         foreach (ref trigger; triggers)
@@ -187,8 +192,8 @@ private final class TwoFiberRun
             ActorHandle!ProjectionActor[][] sets, uint avgCost)
     {
         this.farm = farm;
-        producers[0] = producerA;
-        producers[1] = producerB;
+        producers[0] = move(producerA);
+        producers[1] = move(producerB);
         this.sets = sets;
         this.avgCost = avgCost;
         foreach (ref trigger; triggers)
@@ -285,19 +290,19 @@ private final class TwoFiberRun
     }
 }
 
-private ushort[] pickWorkerLps(size_t maximum, bool includeSmt)
+/// Eligible CPUs of one LLC group (that of the first eligible CPU), physical
+/// cores first, then SMT siblings.
+private ProcessorId[] pickWorkerLps(size_t maximum, bool includeSmt)
 {
     auto topology = CacheAwarePool.topology();
-    ushort[] result;
+    ProcessorId[] result;
     immutable passes = includeSmt ? 2 : 1;
     foreach (pass; 0 .. passes)
     {
-        foreach (ref processor; topology.processors)
+        foreach (id; topology.eligibleProcessorsInLlc(firstEligibleGroup()))
         {
-            version (linux)
-                if (processor.parkedAtDiscovery) continue;
-            if (processor.smtSibling != (pass == 1)) continue;
-            result ~= processor.lpIndex;
+            if (topology.byId(id).smtSibling != (pass == 1)) continue;
+            result ~= id;
             if (maximum != 0 && result.length == maximum)
                 return result;
         }
@@ -305,13 +310,21 @@ private ushort[] pickWorkerLps(size_t maximum, bool includeSmt)
     return result;
 }
 
-private size_t countSmtWorkers(scope const(ushort)[] workerLps)
+private ushort firstEligibleGroup()
+{
+    auto topology = CacheAwarePool.topology();
+    foreach (ref processor; topology.processors)
+        if (topology.isEligible(processor)) return processor.llcIndex;
+    throw new Exception("no eligible logical processors");
+}
+
+private size_t countSmtWorkers(scope const(ProcessorId)[] workerLps)
 {
     auto topology = CacheAwarePool.topology();
     size_t result;
-    foreach (lp; workerLps)
+    foreach (id; workerLps)
     {
-        auto processor = topology.byLp(0, lp);
+        auto processor = topology.byId(id);
         if (processor !is null && processor.smtSibling) ++result;
     }
     return result;
@@ -378,8 +391,20 @@ private struct SweepResult
     double ratio;
 }
 
+// DMD 2.112 Win64 misaddresses automatic Director cleanup when this over-aligned
+// local shares runBenchmark's frame. Keep initialization out of that frame.
+pragma(inline, false)
+private ActorOwner!ProjectionActor createProjectionActor(ActorRuntime* runtime, ulong seed)
+{
+    ProjectionActor initial;
+    initial.privateState.value = seed;
+    initial.publicState[0].value = seed;
+    initial.publicState[1].value = seed;
+    return runtime.createActor!(ProjectionActor, dormantActor)(initial);
+}
+
 private SweepResult runBenchmark(BenchmarkConfig config,
-        ushort[] workerLps)
+        ProcessorId[] workerLps)
 {
     immutable actorsPerSet = config.actorsPerSet;
     immutable measuredGenerations = config.measuredGenerations;
@@ -417,13 +442,8 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     auto setB = new ActorHandle!ProjectionActor[actorsPerSet];
     foreach (i; 0 .. totalActors)
     {
-        ProjectionActor initial;
         immutable seed = cast(ulong) i + 1;
-        initial.privateState.value = seed;
-        initial.publicState[0].value = seed;
-        initial.publicState[1].value = seed;
-        owners[i] = runtime.createActor!(ProjectionActor, dormantActor)(
-            initial);
+        owners[i] = createProjectionActor(runtime, seed);
         enforce(owners[i].valid, "actor allocation failed");
         if (i < actorsPerSet)
             setA[i] = owners[i].handle;
@@ -436,13 +456,15 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     lane.flushBatch = 32;
     lane.avgCost = avgCostForChunk(8);
     PoolOptions options;
-    options.onlyLps = workerLps;
+    options.processors = workerLps;
     options.managedWorker = fiberWorkerHooks();
     auto pool = new CacheAwarePool(options);
-    installFiberLanes([lane], pool);
-    scope (exit) uninstallFiberLanes();
+    immutable group = CacheAwarePool.topology().byId(workerLps[0]).llcIndex;
+    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane), pool);
+    scope (exit) uninstallFiberPlan();
     pool.start();
     scope (exit) pool.shutdown();
+    writefln("worker group %s (one LLC): %s", group, pool.resolution.summary());
 
     // Keep workers polling for this throughput characterization. Parking and
     // wake policy are a separate effect that would dominate short waves.
@@ -453,13 +475,14 @@ private SweepResult runBenchmark(BenchmarkConfig config,
         actorsPerSet, measuredGenerations, warmupGenerations);
     immutable smtWorkers = countSmtWorkers(workerLps);
     writefln("workers=%s smt-workers=%s worker-lps=%s avgCost=%s ring=%s MiB hugePages=%s state=%s bytes/actor",
-        workerLps.length, smtWorkers, workerLps, avgCost, ringMiB,
+        workerLps.length, smtWorkers, formatCpuList(workerLps), avgCost, ringMiB,
         farm.usedLargePages, ProjectionActor.sizeof);
 
     atomicStore!(MemoryOrder.raw)(publishedGeneration.value, 0UL);
     auto oneProducer = farm.registerProducer(Tier.small);
     enforce(oneProducer.valid, "one-Fiber producer registration failed");
-    auto one = new OneFiberRun(lane.domain, farm, oneProducer, sets, avgCost);
+    auto one = new OneFiberRun(lane.domain, farm, move(oneProducer), sets,
+        avgCost);
     auto oneTask = lane.spawn({
         one.run(warmupGenerations, measuredGenerations);
     });
@@ -474,15 +497,15 @@ private SweepResult runBenchmark(BenchmarkConfig config,
         one.cooperativeYields, oneTask.resumeCount,
         oneTask.migrationCount);
     farm.unregisterProducer(one.producer);
-    lane.backend.releaseAll(lane.backend.takeCompletions());
+    lane.domain.releaseAll(lane.domain.takeCompletions());
 
     atomicStore!(MemoryOrder.raw)(publishedGeneration.value, 0UL);
     auto producerA = farm.registerProducer(Tier.small);
     auto producerB = farm.registerProducer(Tier.small);
     enforce(producerA.valid && producerB.valid,
         "two-Fiber producer registration failed");
-    auto two = new TwoFiberRun(lane.domain, farm, producerA, producerB,
-        sets, avgCost);
+    auto two = new TwoFiberRun(lane.domain, farm, move(producerA),
+        move(producerB), sets, avgCost);
     auto taskA = lane.spawn({
         two.runSet(0, warmupGenerations, measuredGenerations);
     });
@@ -504,7 +527,7 @@ private SweepResult runBenchmark(BenchmarkConfig config,
         cast(double) one.elapsedNsecs / two.elapsedNsecs);
     farm.unregisterProducer(two.producers[0]);
     farm.unregisterProducer(two.producers[1]);
-    lane.backend.releaseAll(lane.backend.takeCompletions());
+    lane.domain.releaseAll(lane.domain.takeCompletions());
 
     writefln("\npublished generation=%s active-public=%s",
         expectedGeneration, expectedGeneration & 1UL);

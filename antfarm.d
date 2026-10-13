@@ -35,6 +35,8 @@
 module antfarm;
 
 import core.atomic;
+import core.checkedint : addu, mulu;
+import core.stdc.errno : errno;
 import core.stdc.stdio : fprintf, stderr, snprintf;
 import core.stdc.stdlib : abort, free, getenv;
 import core.stdc.string : memset;
@@ -151,33 +153,32 @@ version (Windows)
         return GetLastError() == 0;
     }
 
-    private void fatalWin(const(char)[] msg) nothrow @nogc @system
+    /// Record a mapping failure with the current GetLastError; `create`
+    /// appends it to the fatal message as "(GetLastError=N)".
+    private void* mapFailedWin(ref FarmCreateError error, string detail) nothrow @nogc @system
     {
-        char[160] buf = void;
-        auto n = snprintf(buf.ptr, buf.length, "%.*s (GetLastError=%u)",
-            cast(int) msg.length, msg.ptr, GetLastError());
-        if (n < 0) n = 0;
-        if (n > buf.length) n = buf.length;
-        fatal(buf[0 .. n]);
+        error = FarmCreateError(FarmCreateFailure.mapping, cast(int) GetLastError(), detail);
+        error.winLastError = true;
+        return null;
     }
 
     /// This SKU rejects MapViewOfFile3(MEM_REPLACE_PLACEHOLDER | MEM_LARGE_PAGES)
     /// (ERROR_INVALID_PARAMETER). Dual MapViewOfFileEx with FILE_MAP_LARGE_PAGES works.
-    private void* mapMagicBufferWindowsLarge(size_t bytes) nothrow @nogc @system
+    private void* mapMagicBufferWindowsLarge(size_t bytes, ref FarmCreateError error) nothrow @nogc @system
     {
         if (!enableLockPages())
-            fatal("antfarm: SeLockMemoryPrivilege not held. Grant Lock Pages in Memory to this user, log off, and retry (see README)");
+            return mapFailed(error, "antfarm: SeLockMemoryPrivilege not held. Grant Lock Pages in Memory to this user, log off, and retry (see README)");
         if (pGetLargePageMinimum is null)
-            fatal("antfarm: GetLargePageMinimum unavailable");
+            return mapFailed(error, "antfarm: GetLargePageMinimum unavailable");
         auto lp = pGetLargePageMinimum();
         if (lp == 0 || (bytes % lp) != 0)
-            fatal("antfarm: ring size is not a multiple of the large-page minimum");
+            return mapFailed(error, "antfarm: ring size is not a multiple of the large-page minimum");
 
         auto section = CreateFileMappingW(INVALID_HANDLE_VALUE, null,
             PAGE_READWRITE | SEC_COMMIT | SEC_LARGE_PAGES_FLAG,
             cast(DWORD)(bytes >> 32), cast(DWORD) bytes, null);
         if (section is null)
-            fatalWin("antfarm: CreateFileMapping SEC_LARGE_PAGES failed");
+            return mapFailedWin(error, "antfarm: CreateFileMapping SEC_LARGE_PAGES failed");
 
         foreach (attempt; 0 .. 16)
         {
@@ -216,9 +217,10 @@ version (Windows)
             CloseHandle(section);
             return v1;
         }
+        // Capture GetLastError before CloseHandle, which may overwrite it.
+        auto failed = mapFailedWin(error, "antfarm: MapViewOfFileEx large-page dual map failed");
         CloseHandle(section);
-        fatalWin("antfarm: MapViewOfFileEx large-page dual map failed");
-        return null;
+        return failed;
     }
 }
 
@@ -231,7 +233,7 @@ private struct ProducerMutex
     {
         // An SRW lock is pointer-sized and initialized to zero (SRWLOCK_INIT).
         private void* state;
-        void initialize() nothrow @nogc @system {}
+        int initialize() nothrow @nogc @system { return 0; }
         void destroy() nothrow @nogc @system {}
         void lock() nothrow @nogc @system { AcquireSRWLockExclusive(&state); }
         void unlock() nothrow @nogc @system { ReleaseSRWLockExclusive(&state); }
@@ -239,10 +241,10 @@ private struct ProducerMutex
     else version (Posix)
     {
         private pthread_mutex_t state;
-        void initialize() nothrow @nogc @system
+        /// 0, or the pthread error code.
+        int initialize() nothrow @nogc @system
         {
-            if (pthread_mutex_init(&state, null) != 0)
-                fatal("producer mutex initialization failed");
+            return pthread_mutex_init(&state, null);
         }
         void destroy() nothrow @nogc @system
         {
@@ -273,10 +275,11 @@ private void afAlignedFree(void* p) nothrow @nogc @system
 }
 
 /// `ANTFARM_HUGE_PAGES=0` forces 4K; `=1` forces huge pages. Unset or empty
-/// keeps `requested`. Any other value is fatal so a typo cannot silently
-/// select the wrong backing.
-private bool wantHugePages(bool requested) nothrow @nogc @system
+/// keeps `requested`. Any other value clears `valid` so a typo cannot
+/// silently select the wrong backing (`create` makes that fatal).
+private bool wantHugePages(bool requested, out bool valid) nothrow @nogc @system
 {
+    valid = true;
     auto e = getenv("ANTFARM_HUGE_PAGES");
     if (e is null || e[0] == 0) return requested;
     if (e[1] == 0)
@@ -284,45 +287,74 @@ private bool wantHugePages(bool requested) nothrow @nogc @system
         if (e[0] == '0') return false;
         if (e[0] == '1') return true;
     }
-    fatal("ANTFARM_HUGE_PAGES must be 0 or 1");
+    valid = false;
     return requested;
 }
 
-/// Dual-map `bytes` so `[0, bytes)` aliases `[bytes, 2*bytes)`.
-private void* mapMagicBuffer(size_t bytes, bool hugePages) nothrow @nogc @system
+private void* mapFailed(ref FarmCreateError error, string detail, int osError = 0)
+    nothrow @nogc @safe
+{
+    error = FarmCreateError(FarmCreateFailure.mapping, osError, detail);
+    return null;
+}
+
+/// Dual-map `bytes` so `[0, bytes)` aliases `[bytes, 2*bytes)`. Null plus
+/// `error` on failure, with every partial reservation, view and handle released.
+private void* mapMagicBuffer(size_t bytes, bool hugePages, ref FarmCreateError error)
+    nothrow @nogc @system
 {
     version (Windows)
     {
         resolveWinMapApis();
         if (pVirtualAlloc2 is null || pMapViewOfFile3 is null)
-            fatal("antfarm: VirtualAlloc2/MapViewOfFile3 unavailable (need Windows 10 1803+)");
+            return mapFailed(error, "antfarm: VirtualAlloc2/MapViewOfFile3 unavailable (need Windows 10 1803+)");
 
         if (hugePages)
-            return mapMagicBufferWindowsLarge(bytes);
+            return mapMagicBufferWindowsLarge(bytes, error);
 
         auto p = pVirtualAlloc2(null, null, 2 * bytes,
             MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, null, 0);
         if (p is null)
-            fatalWin("antfarm: VirtualAlloc2 placeholder reserve failed");
+            return mapFailedWin(error, "antfarm: VirtualAlloc2 placeholder reserve failed");
         if (!VirtualFree(p, bytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
-            fatalWin("antfarm: VirtualFree placeholder split failed");
-
+        {
+            mapFailedWin(error, "antfarm: VirtualFree placeholder split failed");
+            VirtualFree(p, 0, MEM_RELEASE);
+            return null;
+        }
+        // Two placeholders now: [p, p+bytes) and [p+bytes, p+2*bytes).
         auto section = CreateFileMappingW(INVALID_HANDLE_VALUE, null, PAGE_READWRITE,
             cast(DWORD)(bytes >> 32), cast(DWORD) bytes, null);
         if (section is null)
-            fatalWin("antfarm: CreateFileMapping failed");
+        {
+            mapFailedWin(error, "antfarm: CreateFileMapping failed");
+            VirtualFree(p, 0, MEM_RELEASE);
+            VirtualFree(cast(char*) p + bytes, 0, MEM_RELEASE);
+            return null;
+        }
 
         auto v1 = pMapViewOfFile3(section, null, p, 0, bytes,
             MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, null, 0);
+        if (v1 is null)
+        {
+            // Capture before the second map or CloseHandle overwrites it.
+            mapFailedWin(error, "antfarm: MapViewOfFile3 dual map failed");
+            CloseHandle(section);
+            VirtualFree(p, 0, MEM_RELEASE);
+            VirtualFree(cast(char*) p + bytes, 0, MEM_RELEASE);
+            return null;
+        }
         auto v2 = pMapViewOfFile3(section, null, cast(char*) p + bytes, 0, bytes,
             MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, null, 0);
-        CloseHandle(section);
-        if (v1 is null || v2 is null)
+        if (v2 is null)
         {
-            if (v1 !is null) UnmapViewOfFile(v1);
-            if (v2 !is null) UnmapViewOfFile(v2);
-            fatalWin("antfarm: MapViewOfFile3 dual map failed");
+            mapFailedWin(error, "antfarm: MapViewOfFile3 dual map failed");
+            CloseHandle(section);
+            UnmapViewOfFile(v1);
+            VirtualFree(cast(char*) p + bytes, 0, MEM_RELEASE);
+            return null;
         }
+        CloseHandle(section);
         return v1;
     }
     else version (Posix)
@@ -332,29 +364,37 @@ private void* mapMagicBuffer(size_t bytes, bool hugePages) nothrow @nogc @system
         snprintf(name.ptr, name.length, "/antfarm-%d-%d", cast(int) getpid(),
                  atomicFetchAdd!(MemoryOrder.raw)(shmCounter, 1));
         int fd = shm_open(name.ptr, O_RDWR | O_CREAT | O_EXCL, 384); // 0600
-        if (fd < 0) fatal("shm_open failed");
+        if (fd < 0) return mapFailed(error, "shm_open failed", errno);
         shm_unlink(name.ptr);
-        if (ftruncate(fd, cast(off_t) bytes) != 0) fatal("ftruncate failed");
+        void* posixFailed(void* reserved, string detail)
+        {
+            immutable osError = errno;
+            if (reserved !is null) munmap(reserved, 2 * bytes);
+            if (fd >= 0) close(fd);
+            return mapFailed(error, detail, osError);
+        }
+        if (ftruncate(fd, cast(off_t) bytes) != 0) return posixFailed(null, "ftruncate failed");
         void* p = mmap(null, 2 * bytes, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (p == MAP_FAILED) fatal("mmap reserve failed");
+        if (p == MAP_FAILED) return posixFailed(null, "mmap reserve failed");
         if (mmap(p, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED)
-            fatal("mmap first half failed");
+            return posixFailed(p, "mmap first half failed");
         if (mmap(cast(char*) p + bytes, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0)
                 == MAP_FAILED)
-            fatal("mmap second half failed");
+            return posixFailed(p, "mmap second half failed");
         close(fd);
+        fd = -1;
 
         if (hugePages)
         {
             version (linux)
             {
                 if (madvise(p, bytes, MADV_HUGEPAGE) != 0)
-                    fatal("madvise first half huge pages failed");
+                    return posixFailed(p, "madvise first half huge pages failed");
                 if (madvise(cast(char*) p + bytes, bytes, MADV_HUGEPAGE) != 0)
-                    fatal("madvise second half huge pages failed");
+                    return posixFailed(p, "madvise second half huge pages failed");
             }
             else
-                fatal("huge pages only supported on Linux");
+                return posixFailed(p, "huge pages only supported on Linux");
         }
         return p;
     }
@@ -1025,14 +1065,15 @@ enum Tier : ubyte
 /// Tickets start with no quota. Every grant follows an acquire probe of Wt
 /// and a successful forward-segment sweep; writes only spend that grant.
 ///
-/// Tokens are single-owner: copying is a *transfer*. The copy constructor
-/// copies tier/slot/farmId/quotaLeft, release-stores the valid hash
-/// *last* (so a reader that acquire-loads a valid hash is guaranteed to
-/// see the other fields), then clears the source's hash so at most one
-/// live token exists per slot and a stale copy fails requireToken.
-/// Assignment takes the argument by value, which routes through the same
-/// transfer copy. Assigning over a still-valid token is fatal: it would lose
-/// the only handle to a registered slot. Unregister the old token first.
+/// Tokens are single-owner and move-only: copying and lvalue assignment do
+/// not compile, because a copy would silently leave two tokens for one
+/// registered slot. Transfer a token explicitly with `move` (std.algorithm
+/// or core.lifetime), or lend it with a `ref` parameter. `opAssign` accepts
+/// only an rvalue (`token = move(other)`), and assigning over a still-valid
+/// token is fatal: it would lose the only handle to a registered slot.
+/// Unregister the old token first. A token handed to another thread must
+/// travel through a synchronization mechanism; the farm's own checks do
+/// not order the receiving thread's first reads of the transferred fields.
 struct Token
 {
     /// The issuing tier; selects the quota validated on every write.
@@ -1050,6 +1091,9 @@ struct Token
     /// True while this token is registered with its Farm.
     bool valid() const pure nothrow @nogc @safe { return hash != 0; }
 
+    /// Copying is disabled: transfer ownership with an explicit `move`.
+    @disable this(ref typeof(this));
+
     private this(Tier t, uint s, ulong h, ulong fid, ulong grant) pure nothrow @nogc @safe
     {
         tier = t;
@@ -1066,22 +1110,8 @@ struct Token
         quotaLeft = 0;
     }
 
-    /// Transfer-only copy: the source is consumed. The destination's valid
-    /// hash is release-stored last so a reader that acquire-loads the hash
-    /// also sees tier/slot/farmId/quotaLeft; the source hash is then cleared.
-    this(ref Token src) nothrow @nogc @system
-    {
-        tier = src.tier;
-        slot = src.slot;
-        farmId = src.farmId;
-        quotaLeft = src.quotaLeft;
-        atomicStore!(MemoryOrder.rel)(*cast(shared ulong*) &hash, src.hash);
-        atomicStore!(MemoryOrder.raw)(*cast(shared ulong*) &src.hash, 0UL);
-    }
-
-    /// Transfer-only assignment: the by-value argument was already moved
-    /// into this temporary by the copy constructor above. The destination
-    /// must be invalid (default or unregistered).
+    /// Move-assignment from an explicit `move` source (an rvalue). The
+    /// destination must be invalid (default or unregistered).
     ref Token opAssign(Token src) nothrow @nogc @system
     {
         if (valid)
@@ -1229,6 +1259,34 @@ private shared(ulong)* prodSlotQuota(shared(ulong)* hashes, size_t i) nothrow @n
 /// (or by a since-destroyed Farm) can never validate against another.
 private shared ulong g_farmIssuance;
 
+/// Why `AntFarm.tryCreate` (or `AntFarm.checkGeometry`) failed.
+/// Non-exhaustive: do not `final switch` on it.
+enum FarmCreateFailure : ubyte
+{
+    none,             /// no failure
+    geometry,         /// ring size, K, consumer count or producer quotas rejected
+    hugePagesSetting, /// `ANTFARM_HUGE_PAGES` is set to something other than 0 or 1
+    mutex,            /// the producer mutex could not be initialized
+    mapping,          /// the dual-mapped ring could not be created
+    allocation,       /// Farm or producer-ticket storage could not be allocated
+}
+
+/// The failure `AntFarm.tryCreate` reports and `AntFarm.checkGeometry`
+/// returns. `FarmCreateError.init` (kind `none`) means success.
+struct FarmCreateError
+{
+    FarmCreateFailure kind; /// what failed
+    int osError;            /// errno / GetLastError, 0 when not an OS failure
+    string detail;          /// static text; the message `create` passes to fatal
+    private bool winLastError; // create appends "(GetLastError=osError)"
+}
+
+/// Normalized geometry shared by checkGeometry and tryCreate.
+private struct FarmGeometry
+{
+    ulong ln, segCap, quotaBulk, quotaSmall, exmax;
+}
+
 // ==== Section: AntFarm (construction, registration, production) ====
 /// One fixed-capacity Farm: the dual-mapped ring plus its quota, tally and
 /// statistics state. Create it with create() and release it with destroy();
@@ -1302,92 +1360,129 @@ struct AntFarm
     /// `ANTFARM_HUGE_PAGES=1` to opt into the platform huge-page path.
     /// Distinct Farms may be created concurrently. Windows mapping API
     /// initialization is process-locked; the mapping/allocation work is local.
+    /// Every failure `tryCreate` reports is fatal here, with the same message.
     static AntFarm* create(uint ringMiB = 8, uint k = 8, uint expectedConsumers = 4,
                            uint maxBulk = 2, ulong quotaBulk = 0,
                            uint maxSmall = 16, ulong quotaSmall = 4096,
                            uint smallThreshold = DEFAULT_SMALL_TABLE_THRESHOLD,
                            bool hugePages = DEFAULT_HUGE_PAGES) nothrow @nogc @system
     {
-        // Construction constraints (spec 1, 4a):
-        //  - K is the useful power-of-two range [2, KMAX=16].
-        //  - ringMiB >= 2 (Ln >= 2^18 ulongs); smaller rings were never
-        //    studied and per-table header overhead would dominate. The upper
-        //    bound mainly catches a legacy caller passing a length in ulongs.
-        //  - segCap = Ln/K has a floor so header/pad space never dominates a
-        //    segment's capacity (subsumed by Ln >= 2^18 with K <= 16).
-        //  - Exmax <= (K-1)*segCap so a full quota excursion is strictly
-        //    less than a lap (spec 3 safety argument).
-        //  - quotaRole > 0 iff maxRole > 0: an enabled role must declare a
-        //    positive quota; a disabled role's quota is normalized to 0 and
-        //    takes no part in Exmax.
-        if (k < 2 || k > KMAX || (k & (k - 1)) != 0) fatal("K must be a power of 2 in [2, KMAX]");
-        if (ringMiB < MIN_RING_MIB || (ringMiB & (ringMiB - 1)) != 0)
-            fatal("ringMiB must be a power of 2 >= 2 (the ring size is in MiB, not ulongs)");
-        if (ringMiB > MAX_RING_MIB)
-            fatal("ringMiB exceeds MAX_RING_MIB (the ring size is in MiB, not ulongs)");
-        immutable ln = cast(ulong) ringMiB << ULONGS_PER_MIB_SHIFT;
-        immutable segCap = ln / k;
-        if (segCap < 2048) fatal("segment capacity too small");
-        if (expectedConsumers == 0) fatal("expected consumers must be > 0");
-        // Quota-role rule (spec 4d): normalize disabled roles, validate
-        // enabled ones. Bulk auto-defaults to segCap when enabled with an
-        // unspecified quota (legacy convenience); small fatals on 0.
-        if (maxBulk == 0)
-            quotaBulk = 0;
-        else if (quotaBulk == 0)
-            quotaBulk = segCap;
-        if (maxSmall == 0)
-            quotaSmall = 0;
-        else if (quotaSmall == 0)
-            fatal("small quota must be > 0");
-        if (maxBulk + maxSmall == 0) fatal("no producer capacity configured");
-        immutable exmax = cast(ulong) maxBulk * quotaBulk + cast(ulong) maxSmall * quotaSmall;
-        if (maxBulk > 0 && quotaBulk > exmax) fatal("quota exceeds Exmax");
-        if (maxSmall > 0 && quotaSmall > exmax) fatal("quota exceeds Exmax");
-        if (exmax > (k - 1) * segCap) fatal("Exmax exceeds K-1 segments' capacities");
+        FarmCreateError error;
+        auto f = tryCreate(ringMiB, k, expectedConsumers, maxBulk, quotaBulk,
+            maxSmall, quotaSmall, smallThreshold, hugePages, &error);
+        if (f is null)
+        {
+            version (Windows)
+            {
+                if (error.winLastError)
+                {
+                    char[160] buf = void;
+                    auto n = snprintf(buf.ptr, buf.length, "%.*s (GetLastError=%u)",
+                        cast(int) error.detail.length, error.detail.ptr, cast(uint) error.osError);
+                    if (n < 0) n = 0;
+                    if (n > buf.length) n = buf.length;
+                    fatal(buf[0 .. n]);
+                }
+            }
+            fatal(error.detail);
+        }
+        return f;
+    }
 
-        immutable bytes = segCap * k * 8;
-        hugePages = wantHugePages(hugePages);
-        auto p = mapMagicBuffer(bytes, hugePages);
+    /// `create` without aborting: returns null and fills `*error` (when
+    /// non-null) on any failure, with every partial mapping, mutex and
+    /// allocation released. Arguments are exactly `create`'s. Failure kinds
+    /// are geometry (see `checkGeometry`), an invalid `ANTFARM_HUGE_PAGES`,
+    /// producer mutex initialization, ring mapping and allocation.
+    static AntFarm* tryCreate(uint ringMiB = 8, uint k = 8, uint expectedConsumers = 4,
+                              uint maxBulk = 2, ulong quotaBulk = 0,
+                              uint maxSmall = 16, ulong quotaSmall = 4096,
+                              uint smallThreshold = DEFAULT_SMALL_TABLE_THRESHOLD,
+                              bool hugePages = DEFAULT_HUGE_PAGES,
+                              FarmCreateError* error = null) nothrow @nogc @system
+    {
+        FarmCreateError local;
+        auto err = error is null ? &local : error;
+        FarmGeometry g;
+        *err = normalizeGeometry(ringMiB, k, expectedConsumers, maxBulk, quotaBulk,
+            maxSmall, quotaSmall, g);
+        if (err.kind != FarmCreateFailure.none) return null;
+
+        bool hugeSettingValid;
+        hugePages = wantHugePages(hugePages, hugeSettingValid);
+        if (!hugeSettingValid)
+        {
+            *err = FarmCreateError(FarmCreateFailure.hugePagesSetting, 0,
+                "ANTFARM_HUGE_PAGES must be 0 or 1");
+            return null;
+        }
+        immutable bytes = g.segCap * k * 8;
+        auto p = mapMagicBuffer(bytes, hugePages, *err);
+        if (p is null) return null;
 
         auto mem = afAlignedAlloc(AntFarm.sizeof);
-        if (mem is null) fatal("alloc failed");
+        if (mem is null)
+        {
+            unmapMagicBuffer(p, bytes);
+            *err = FarmCreateError(FarmCreateFailure.allocation, 0, "alloc failed");
+            return null;
+        }
         auto f = cast(AntFarm*) mem;
         *f = AntFarm.init;
-        f.producerMutex.initialize();
-        f.Ln = ln;
-        f.Lmask = ln - 1;
-        f.K = k;
-        f.kMask = k - 1;
-        uint sh = 0;
-        while ((1UL << sh) < segCap) ++sh;
-        f.segShift = sh;
-        f.segCap = segCap;
-        f.expectedConsumers = expectedConsumers;
-        f.maxBulk = maxBulk;
-        f.quotaBulk = quotaBulk;
-        f.maxSmall = maxSmall;
-        f.quotaSmall = quotaSmall;
-        f.exmax = exmax;
-        f.smallThreshold = smallThreshold;
-        f.farmId = atomicFetchAdd!(MemoryOrder.raw)(g_farmIssuance, 1UL) + 1;
+        if (immutable mutexError = f.producerMutex.initialize())
+        {
+            afAlignedFree(mem);
+            unmapMagicBuffer(p, bytes);
+            *err = FarmCreateError(FarmCreateFailure.mutex, mutexError,
+                "producer mutex initialization failed");
+            return null;
+        }
+        // From here f.releaseStorage() unwinds everything acquired so far.
         f.buf = cast(shared(ulong)*) p;
         f.bufBytes = bytes;
         f.usedLargePages = hugePages;
+        f.Ln = g.ln;
+        f.Lmask = g.ln - 1;
+        f.K = k;
+        f.kMask = k - 1;
+        uint sh = 0;
+        while ((1UL << sh) < g.segCap) ++sh;
+        f.segShift = sh;
+        f.segCap = g.segCap;
+        f.expectedConsumers = expectedConsumers;
+        f.maxBulk = maxBulk;
+        f.quotaBulk = g.quotaBulk;
+        f.maxSmall = maxSmall;
+        f.quotaSmall = g.quotaSmall;
+        f.exmax = g.exmax;
+        f.smallThreshold = smallThreshold;
+        f.farmId = atomicFetchAdd!(MemoryOrder.raw)(g_farmIssuance, 1UL) + 1;
         if (maxBulk > 0)
         {
             // 64-aligned so slot 0's line cannot bleed into an unrelated
             // heap chunk; zeroed because aligned_alloc does not zero.
             f.prodHashBulk = cast(shared(ulong)*)
                 afAlignedAlloc(maxBulk * PROD_SLOT_STRIDE * 8);
-            if (f.prodHashBulk is null) fatal("alloc producer tickets failed");
+            if (f.prodHashBulk is null)
+            {
+                f.releaseStorage();
+                *err = FarmCreateError(FarmCreateFailure.allocation, 0,
+                    "alloc producer tickets failed");
+                return null;
+            }
             memset(cast(void*) f.prodHashBulk, 0, maxBulk * PROD_SLOT_STRIDE * 8);
         }
         if (maxSmall > 0)
         {
             f.prodHashSmall = cast(shared(ulong)*)
                 afAlignedAlloc(maxSmall * PROD_SLOT_STRIDE * 8);
-            if (f.prodHashSmall is null) fatal("alloc producer tickets failed");
+            if (f.prodHashSmall is null)
+            {
+                f.releaseStorage();
+                *err = FarmCreateError(FarmCreateFailure.allocation, 0,
+                    "alloc producer tickets failed");
+                return null;
+            }
             memset(cast(void*) f.prodHashSmall, 0, maxSmall * PROD_SLOT_STRIDE * 8);
         }
 
@@ -1401,6 +1496,72 @@ struct AntFarm
         atomicStore!(MemoryOrder.raw)(f.stats[0].cs, cast(ulong) expectedConsumers);
         atomicStore!(MemoryOrder.raw)(f.stats[0].sqcs, cast(ulong) sqcsOf(expectedConsumers));
         return f;
+    }
+
+    /// Validate geometry exactly as `create`/`tryCreate` do, with no side
+    /// effects. `kind == FarmCreateFailure.none` means the arguments are
+    /// accepted; otherwise `detail` is the message `create` would abort with.
+    /// Quota sums and products are overflow-checked.
+    static FarmCreateError checkGeometry(uint ringMiB, uint k, uint expectedConsumers,
+        uint maxBulk, ulong quotaBulk, uint maxSmall, ulong quotaSmall)
+        pure nothrow @nogc @safe
+    {
+        FarmGeometry g;
+        return normalizeGeometry(ringMiB, k, expectedConsumers, maxBulk, quotaBulk,
+            maxSmall, quotaSmall, g);
+    }
+
+    private static FarmCreateError normalizeGeometry(uint ringMiB, uint k,
+        uint expectedConsumers, uint maxBulk, ulong quotaBulk, uint maxSmall,
+        ulong quotaSmall, out FarmGeometry g) pure nothrow @nogc @safe
+    {
+        static FarmCreateError reject(string detail) pure nothrow @nogc @safe
+        {
+            return FarmCreateError(FarmCreateFailure.geometry, 0, detail);
+        }
+        // Construction constraints (spec 1, 4a):
+        //  - K is the useful power-of-two range [2, KMAX=16].
+        //  - ringMiB >= 2 (Ln >= 2^18 ulongs); smaller rings were never
+        //    studied and per-table header overhead would dominate. The upper
+        //    bound mainly catches a legacy caller passing a length in ulongs.
+        //  - segCap = Ln/K has a floor so header/pad space never dominates a
+        //    segment's capacity (subsumed by Ln >= 2^18 with K <= 16).
+        //  - Exmax <= (K-1)*segCap so a full quota excursion is strictly
+        //    less than a lap (spec 3 safety argument).
+        //  - quotaRole > 0 iff maxRole > 0: an enabled role must declare a
+        //    positive quota; a disabled role's quota is normalized to 0 and
+        //    takes no part in Exmax.
+        if (k < 2 || k > KMAX || (k & (k - 1)) != 0) return reject("K must be a power of 2 in [2, KMAX]");
+        if (ringMiB < MIN_RING_MIB || (ringMiB & (ringMiB - 1)) != 0)
+            return reject("ringMiB must be a power of 2 >= 2 (the ring size is in MiB, not ulongs)");
+        if (ringMiB > MAX_RING_MIB)
+            return reject("ringMiB exceeds MAX_RING_MIB (the ring size is in MiB, not ulongs)");
+        immutable ln = cast(ulong) ringMiB << ULONGS_PER_MIB_SHIFT;
+        immutable segCap = ln / k;
+        if (segCap < 2048) return reject("segment capacity too small");
+        if (expectedConsumers == 0) return reject("expected consumers must be > 0");
+        // Quota-role rule (spec 4d): normalize disabled roles, validate
+        // enabled ones. Bulk auto-defaults to segCap when enabled with an
+        // unspecified quota (legacy convenience); small rejects 0.
+        if (maxBulk == 0)
+            quotaBulk = 0;
+        else if (quotaBulk == 0)
+            quotaBulk = segCap;
+        if (maxSmall == 0)
+            quotaSmall = 0;
+        else if (quotaSmall == 0)
+            return reject("small quota must be > 0");
+        if (cast(ulong) maxBulk + maxSmall == 0) return reject("no producer capacity configured");
+        bool overflow;
+        immutable exmax = addu(mulu(cast(ulong) maxBulk, quotaBulk, overflow),
+            mulu(cast(ulong) maxSmall, quotaSmall, overflow), overflow);
+        // An overflowing sum certainly exceeds (K-1)*segCap.
+        if (overflow) return reject("Exmax exceeds K-1 segments' capacities");
+        if (maxBulk > 0 && quotaBulk > exmax) return reject("quota exceeds Exmax");
+        if (maxSmall > 0 && quotaSmall > exmax) return reject("quota exceeds Exmax");
+        if (exmax > (k - 1) * segCap) return reject("Exmax exceeds K-1 segments' capacities");
+        g = FarmGeometry(ln, segCap, quotaBulk, quotaSmall, exmax);
+        return FarmCreateError.init;
     }
 
     /// Release the Farm. Fatal unless every consumer has unsubscribed and
@@ -1417,6 +1578,13 @@ struct AntFarm
         foreach (i; 0 .. maxSmall)
             if (prodHashSmall !is null && atomicLoad!(MemoryOrder.raw)(*prodSlot(prodHashSmall, i)) != 0)
                 fatal("destroy with live small ticket");
+        releaseStorage();
+    }
+
+    /// Free the ticket arrays, unmap the ring, destroy the mutex and free
+    /// the Farm itself. Shared by destroy and tryCreate's unwinding.
+    private void releaseStorage() nothrow @nogc @system
+    {
         if (prodHashBulk !is null)
             afAlignedFree(cast(void*) prodHashBulk);
         if (prodHashSmall !is null)
@@ -1476,9 +1644,8 @@ struct AntFarm
             immutable h = mixToken(cast(uint) i, reqs);
             if (cas!(MemoryOrder.raw, MemoryOrder.raw)(prodSlot(hashes, i), 0UL, h))
             {
-                auto tok = Token(t, cast(uint) i, h, farmId, 0);
                 atomicStore!(MemoryOrder.raw)(*prodSlotQuota(hashes, i), 0UL);
-                return tok;
+                return Token(t, cast(uint) i, h, farmId, 0);
             }
         }
         fatal("producer slot missing");

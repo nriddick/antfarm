@@ -66,9 +66,9 @@ void main()
         while (view.consumeNext()) {}
     }
     if (total != 30) fatal("joined result mismatch");
+    view.unsubscribe(); // consumers stop before the park is destroyed
     park.destroy();
     park = null;
-    view.unsubscribe();
     farm.unregisterProducer(token);
     farm.destroy();
 }
@@ -221,8 +221,8 @@ void main()
         while (view.consumeNext()) {}
     }
     if (total != 60) fatal("child fold mismatch");
-    park.destroy();
     view.unsubscribe();
+    park.destroy();
     farm.unregisterProducer(token);
     farm.destroy();
 }
@@ -321,8 +321,8 @@ void main()
         while (view.consumeNext()) {}
     }
     if (total != 20) fatal("subset total mismatch");
-    park.destroy();
     view.unsubscribe();
+    park.destroy();
     farm.unregisterProducer(token);
     farm.destroy();
 }

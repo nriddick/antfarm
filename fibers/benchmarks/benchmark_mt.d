@@ -1,13 +1,19 @@
 /++ Multithreaded fiber throughput benchmark.
  +
- + One FiberLane per LLC, workers driven by the threadpool managed-worker
- + hooks. The control thread burst-spawns round-robin across lanes (waking the
+ + One FiberLane per accepted LLC group, workers driven by the threadpool
+ + managed-worker hooks. The control thread burst-spawns round-robin across lanes (waking the
  + pool once per burst — per-spawn wakeAll would measure futex traffic, not
  + the scheduler), then waits for every lane to drain. Fibers never suspend,
  + so no cross-worker fiber migration occurs.
  +
  + Second generation re-spawns from the recycling pool: zero GC allocation,
  + zero stack mmap per fiber.
+ +
+ + Usage: benchmark_mt [tasks] [private|shared|assist]
+ +   private  (default) one domain per lane;
+ +   shared   one domain over every lane, native service only (no edges);
+ +   assist   one domain plus an explicit `assistRing` over the accepted
+ +            groups, the former automatic ring: the A/B against `shared`.
  +/
 // Package scope permits wake-batched admission to an explicit shared-domain
 // lane, without timing a per-task FiberLane.spawn wake broadcast.
@@ -17,69 +23,85 @@ import antfarm;
 import antfarm_fibers;
 import core.atomic;
 import core.thread : Thread;
-import core.time : MonoTime;
+import core.time : Duration, MonoTime;
 import std.conv : to;
+import std.exception : enforce;
 import std.stdio : writefln;
 import threadpool;
 
 shared long ran;
 
+/// Print one timed phase. A phase whose work had already finished when its
+/// timer started, or a zero interval, has no rate: report it as such
+/// instead of dividing by (almost) nothing.
+void report(string label, size_t count, Duration elapsed, bool measurable = true)
+{
+    immutable seconds = cast(double) elapsed.total!"nsecs" / 1_000_000_000.0;
+    if (!measurable || seconds == 0)
+        writefln("%s %s fibers: not measurable (finished before the timer started)",
+                 label, count);
+    else
+        writefln("%s %s fibers in %.9f s: %.2f fibers/s",
+                 label, count, seconds, count / seconds);
+}
+
 void main(string[] args)
 {
     immutable taskCount = args.length > 1 ? args[1].to!size_t : 100_000;
 
-    // Optional shared-domain ring exercises persistent remote subscriptions.
-    immutable coverage = args.length > 2 && args[2] == "coverage";
-    auto domain = coverage ? new FiberDomain : null;
-    auto topology = CacheAwarePool.topology();
-    auto perLlc = new size_t[topology.llcCount];
-    foreach (ref lp; topology.processors)
-    {
-        version (linux)
-            if (lp.parkedAtDiscovery) continue;
-        perLlc[lp.llcIndex]++;
-    }
+    immutable mode = args.length > 2 ? args[2] : "private";
+    enforce(mode == "private" || mode == "shared" || mode == "assist",
+        "usage: benchmark_mt [tasks] [private|shared|assist]");
+    immutable sharedDomain = mode != "private";
+    auto domain = sharedDomain ? new FiberDomain : null;
 
-    size_t totalWorkers;
-    foreach (count; perLlc) totalWorkers += count;
+    PoolOptions options;
+    options.managedWorker = fiberWorkerHooks();
+    auto pool = new CacheAwarePool(options);
+    auto plan = new FiberServicePlan(pool.resolve());
+    ushort[] groups;
+    foreach (ref group; plan.resolution.acceptedGroups)
+        groups ~= group.llcIndex;
+    // Assist edges add persistent remote consumers and producers.
+    if (mode == "assist")
+        plan.assistRing(groups);
 
-    // Each worker on an LLC subscribes one consumer and registers one small
-    // producer against its lane's farm; size both slot sets accordingly.
+    // Size each Farm from the plan: one consumer view and one small producer
+    // per native worker, plus one of each per assisting worker.
     enum ln = 1 << 22;
     enum k = 8;
     enum segCap = ln / k;
     AntFarm*[] farms;
     FiberLane[] lanes;
-    foreach (i; 0 .. topology.llcCount)
-    {
-        immutable localSlots = perLlc[i] == 0 ? 1 : perLlc[i];
-        // A shared-domain lane can also have responders from its predecessor.
-        immutable slots = coverage ? totalWorkers : localSlots;
-        immutable quotaHeadroom = (k - 1) * segCap / slots;
-        immutable quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
-        auto farm = AntFarm.create(ringMiBFromUlongs(ln), k, cast(uint) slots, 0, 0,
-                                   cast(uint) slots, quotaSmall);
-        farms ~= farm;
-        lanes ~= coverage ? new FiberLane(domain, farm) : new FiberLane(farm);
-    }
     scope (exit)
     {
-        uninstallFiberLanes();
+        uninstallFiberPlan();
         foreach (farm; farms) farm.destroy();
     }
+    foreach (group; groups)
+    {
+        auto requirement = plan.requirement(group);
+        immutable slots = requirement.smallProducerSlots;
+        immutable quotaHeadroom = (k - 1) * segCap / slots;
+        immutable quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
+        auto farm = AntFarm.create(ringMiBFromUlongs(ln), k,
+                                   requirement.consumerViews, 0, 0,
+                                   slots, quotaSmall);
+        farms ~= farm;
+        lanes ~= sharedDomain ? new FiberLane(domain, farm) : new FiberLane(farm);
+        plan.bind(group, lanes[$ - 1]);
+    }
 
-    PoolOptions options;
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    installFiberLanes(lanes, pool);
+    installFiberPlan(plan, pool);
     pool.start();
-    if (coverage)
+    if (sharedDomain)
         domain.reserve(taskCount);
     else
         foreach (lane; lanes)
-            lane.backend.reserve((taskCount + lanes.length - 1) / lanes.length);
-    writefln("workers: %s across %s LLC(s) hugePages=%s coverage=%s",
-             pool.workerCount, lanes.length, farms[0].usedLargePages, coverage);
+            lane.domain.reserve((taskCount + lanes.length - 1) / lanes.length);
+    writefln("workers: %s across %s LLC group(s) hugePages=%s mode=%s edges=%s",
+             pool.workerCount, lanes.length, farms[0].usedLargePages, mode,
+             plan.edges.length);
 
     void burstSpawn()
     {
@@ -87,53 +109,49 @@ void main(string[] args)
         foreach (i; 0 .. taskCount)
         {
             auto lane = lanes[i % lanes.length];
-            lane.backend.spawnOn(lane, body);
+            lane.domain.spawnOn(lane, body);
         }
         pool.wakeAll();
     }
 
-    void waitDrained()
+    bool allDrained()
     {
-        for (;;)
-        {
-            bool allDrained = true;
-            foreach (lane; lanes)
-                if (!lane.drained) { allDrained = false; break; }
-            if (allDrained) return;
-            Thread.yield();
-        }
+        foreach (lane; lanes)
+            if (!lane.drained) return false;
+        return true;
     }
 
+    void waitDrained()
+    {
+        while (!allDrained())
+            Thread.yield();
+    }
+
+    // Workers may drain the burst while it is still being spawned; then the
+    // run phase measured nothing.
     auto createStart = MonoTime.currTime;
     burstSpawn();
     auto runStart = MonoTime.currTime;
+    immutable runMeasurable = !allDrained();
     waitDrained();
     auto end = MonoTime.currTime;
-    auto createSeconds = cast(double)(runStart - createStart).total!("nsecs")
-        / 1_000_000_000.0;
-    auto runSeconds = cast(double)(end - runStart).total!("nsecs")
-        / 1_000_000_000.0;
-    writefln("create: %s fibers in %.6f s: %.2f fibers/s",
-             taskCount, createSeconds, taskCount / createSeconds);
-    writefln("run:    %s fibers in %.6f s: %.2f fibers/s",
-             taskCount, runSeconds, taskCount / runSeconds);
+    report("create:", taskCount, runStart - createStart);
+    report("run:   ", taskCount, end - runStart, runMeasurable);
+    report("total: ", taskCount, end - createStart);
 
     // Second generation: every spawn recycles a pooled task/fiber/stack.
     foreach (lane; lanes)
-        lane.backend.releaseAll(lane.backend.takeCompletions());
+        lane.domain.releaseAll(lane.domain.takeCompletions());
     auto warmCreateStart = MonoTime.currTime;
     burstSpawn();
     auto warmRunStart = MonoTime.currTime;
+    immutable warmRunMeasurable = !allDrained();
     waitDrained();
     auto warmEnd = MonoTime.currTime;
-    auto warmCreateSeconds = cast(double)(warmRunStart - warmCreateStart)
-        .total!("nsecs") / 1_000_000_000.0;
-    auto warmRunSeconds = cast(double)(warmEnd - warmRunStart)
-        .total!("nsecs") / 1_000_000_000.0;
-    writefln("create (warm pool): %s fibers in %.6f s: %.2f fibers/s",
-             taskCount, warmCreateSeconds, taskCount / warmCreateSeconds);
-    writefln("run    (warm pool): %s fibers in %.6f s: %.2f fibers/s",
-             taskCount, warmRunSeconds, taskCount / warmRunSeconds);
+    report("create (warm pool):", taskCount, warmRunStart - warmCreateStart);
+    report("run    (warm pool):", taskCount, warmEnd - warmRunStart,
+           warmRunMeasurable);
+    report("total  (warm pool):", taskCount, warmEnd - warmCreateStart);
 
     assert(atomicLoad(ran) == 2 * taskCount, "fiber executions lost");
     pool.shutdown();

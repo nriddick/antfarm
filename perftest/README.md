@@ -10,7 +10,7 @@ the harness, not evidence.
 ## Build
 
 ```sh
-make -C perftest                 # throughput, dual, tail, actor_ready, actor_churn, scaling
+make -C perftest                 # throughput, dual, tail, actor_ready, actor_churn, scaling, offccd, c2c
 make -C perftest actor_churn_mimalloc   # plus the pinned real mimalloc archive
 ```
 
@@ -18,6 +18,39 @@ The default toolchain is LDC `-O2 -release`; `DC` and `DFLAGS` override it. The
 benchmarks keep their correctness checks (`enforce`) in release builds. Set
 `ANTFARM_HUGE_PAGES=0` for ordinary pages unless a run is deliberately testing
 the huge-page path. `make -C perftest clean` removes the built binaries.
+
+On Windows, first build the Release allocator with
+`actor_torture/run-mimalloc-windows.ps1 -Configuration Release` (see
+[the allocator recipe](../actor_torture/README.md)), then run
+`./perftest/build-windows.ps1` from the repository root. This builds the same
+nine harnesses with LDC `-O2 -release` and the static release CRT. The report
+driver resolves `.exe` paths on Windows and terminates a timed-out process tree
+with `taskkill`; it does not synthesize Linux CPU accounting.
+The off-LLC sweep also resolves `.exe` paths for both execution and the binary
+hashes in its metadata.
+
+For the multithreaded Fiber benchmark, the report driver uses the full
+creation-plus-drain duration. Workers run during creation, so the raw harness's
+legacy `run` rate counts the entire burst against only the remaining drain
+time and is not valid throughput. Raw readouts remain available for diagnosis;
+the report's `total_fibers_s` and `warm_total_fibers_s` use the complete burst.
+The harness prints explicit `total` and `total (warm pool)` timings, including
+when a residual `run` phase is not measurable. The parser prefers these totals
+and accepts older logs only when both numeric phase timings are available.
+
+To extend the report to larger thread counts without rerunning the default
+matrix:
+
+```powershell
+python perftest/run_performance_md.py --sections dual,private --runs 5 --dual-threads 12,18,20 --private-consumers 11,17,19 --out .build/performance-high-threads
+```
+
+Dual-role counts are total worker threads. Private actor counts exclude the
+controller, so the example measures 12, 18, and 20 total threads in both
+sections. Private workers are pinned to LPs 1 through N and the controller
+to LP 0; choose counts whose CPU lists exist and are allowed on the host.
+Omitting these options keeps the original matrix. The six-thread dual tuning
+cells are included only when `--dual-threads` includes 6.
 
 ## Payload benchmarks
 
@@ -40,6 +73,23 @@ the huge-page path. `make -C perftest clean` removes the built binaries.
   `--mid-only`, `--tlen`, `--nc`, `--ac`, `--attr`, `--repeats`, `--small`,
   `--ln`, `--huge`). A drain run discards a missed backlog window rather than
   reporting idle samples as latency.
+- **`offccd`**, **`c2c`** and **`offccd_sweep.py`** — off-CCD scaling for one
+  Farm. `offccd` pins a home group (default two producers and five consumers)
+  on one L3 group and adds off-CCD consumers or producers on another, in
+  streaming or phased (publish-then-consume) mode, and prints one JSON object
+  per run: per-thread pin outcome and observed CPU, per-role counters, rates,
+  shares and, phased, a claim scan of each round's tables. `c2c` calibrates
+  core-to-core ping-pong, contended RMW and one-shot pull. Both place roles on
+  eligible primaries per L3 group from the threadpool snapshot
+  (`placement.planRoles`); a request that does not fit, a single eligible L3
+  group, or a non-L3 grouping (a fallback shard is not a CCD) is reported as
+  skipped with a reason, and a refused or moved pin makes the run invalid.
+  `offccd_sweep.py` runs the suites (`calib`, `main-c`, `main-p`, `combined`,
+  `ctl-*`, `smt`, `layouts`, `perf`, `lat`, `smoke`) in seeded interleaved
+  rounds with top-ups for noisy cells and writes an evidence directory
+  (metadata, raw runs, summary). Its numbers belong in the evidence store, not
+  here. `make -C perftest offccd-plan` prints the plan; `offccd-smoke` runs the
+  validation suite.
 
 Single-threaded tables use the uniform (2g) layout, or the compact 2f
 `[Call][Pbody]` record when the prefix has several callbacks; payload
@@ -94,6 +144,15 @@ timing knob. The committed tables report both the default and chunk 32 (class
 2 at `MAX_CHUNK` 128). `ANTFARM_CHILD_HINT` does the same for the private
 child-wave tables (`start`/`startFinal`/`startSubset`), which default to chunk
 32; set it to `0` for chunk 128.
+
+`ANTFARM_CHURN_HOST=1` swaps the benchmark's hand-written consumer loop for a
+`FarmHost` that owns the Farm, the control token and the pinned consumers. It
+needs the small tier, `consumers > 0` and a CPU list naming the controller
+followed by one CPU per consumer (`cpus.length == consumers + 1`); any other
+combination is rejected. The host runs `WorkerIdle.spin` and uses the
+benchmark's `k = 8`, `ringMiB = 8` and `quota-words`. Unset, the benchmark
+drives its own consumers. The host path is the comparison side of
+[the tuning guidance](../docs/guide/hosting.md#performance-and-tuning).
 
 ### `actor_ready`
 
@@ -170,11 +229,18 @@ layout. Such a waiver is one-off and must record the ≥20-pair run, the
 byte-identical base/base control, and the inert-code control together; it is
 not a general precedent and does not relax the boundary.
 
-Gate decision and option tests run without builds or timing:
+Gate decision and option tests run without builds or timing, including on
+Windows:
 
 ```sh
 python3 -B -m unittest perftest/test_perf_gate.py
 ```
+
+The real timing gate still requires Linux and rejects other hosts before
+creating output or starting builds. Only its Linux error-accounting integration
+probe is skipped on Windows; the mocked decisions and options remain covered.
+See [portable Python checks](../docs/development/testing.md#portable-python-checks)
+for the combined documentation, parser, topology-fixture and grouping suite.
 
 ## Sweep driver
 

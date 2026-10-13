@@ -4,6 +4,7 @@ import core.atomic;
 import core.time : MonoTime;
 import core.thread : Thread;
 import threadpool.stats;
+import threadpool.failure : FailureCapture;
 import threadpool.topology : TopologySnapshot, fillNumaLlcs, maxNumaLlcs;
 
 version (Windows)
@@ -54,7 +55,7 @@ struct WorkerRec
     bool   hasNumber;
     long   number;
     string label;
-    Throwable failure;
+    FailureCapture failure;
 
     shared uint  kind = IdleKind.wait;
     shared uint  spinIters = 64;
@@ -88,11 +89,19 @@ __gshared WorkerStop gWorkerStop;
 /// GC-enabled, throwing lifecycle lane. A completed `start` is paired with
 /// exactly one `stop` on the same pinned worker. `pump` has the same retry/idle
 /// result convention as `WorkerBody`.
+///
+/// `poolStopped` runs once per pool run, on the thread that calls `shutdown`
+/// (or on which `start` fails), after every worker has joined: every `stop`
+/// that will ever run has returned. It runs even when no worker reached
+/// `start`, e.g. a shutdown right after `start` or a start failure, so
+/// per-run state that only a worker's `stop` would settle can still be
+/// settled.
 struct ManagedWorkerHooks
 {
     void function(WorkerSelf* w) start;
     ManagedPumpResult function(WorkerSelf* w) pump;
     void function(WorkerSelf* w) stop;
+    void function() nothrow poolStopped;
 }
 
 /// Result of one managed worker visit. `deadlineTicks` uses `MonoTime.ticks`

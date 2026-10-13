@@ -2,6 +2,7 @@ module life.tui;
 
 import life.backend;
 import life.termbox;
+import threadpool.host : FarmHost;
 import core.stdc.errno : EINTR;
 import core.time : MonoTime, msecs;
 import std.algorithm : max, min;
@@ -24,7 +25,7 @@ private void render(Life life, uint x, uint y, bool paused, uint speed)
                 TB_DEFAULT, TB_DEFAULT) == 0, "termbox cell failed");
     auto status = format("gen %s | %.1f gen/s | %.0f cells/s | workers %s | %s | speed %s",
         life.generation, life.generationsPerSecond, life.cellsPerSecond,
-        life.workers, paused ? "paused" : "running", speed);
+        life.host.plan.workers, paused ? "paused" : "running", speed);
     auto help = "space pause  n step  r random  c clear  g glider  arrows move  enter toggle  +/- speed  q quit";
     foreach (row, line; [status, help])
         foreach (column, ch; line)
@@ -45,7 +46,11 @@ void main(string[] args)
     scope(exit) tb_shutdown();
     enforce(tb_init() == 0, "termbox initialization failed (a POSIX tty is required)");
     enforce(tb_width() > 0 && tb_height() > 2, "terminal must have at least three rows");
-    auto life = new Life(cast(uint) tb_width(), cast(uint) (tb_height() - 2), workers);
+    // No wait deadline: the UI steps the host in its frame loop. Declared
+    // before the simulator, the host closes after it.
+    auto host = new FarmHost(workers);
+    scope (exit) host.closeOrAbandon();
+    auto life = new Life(host, cast(uint) tb_width(), cast(uint) (tb_height() - 2));
     scope(exit) life.close();
     life.randomize(unpredictableSeed);
     uint x, y;

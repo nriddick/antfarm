@@ -11,13 +11,22 @@ module threadpool;
 
 public import threadpool.topology : TopologySnapshot, LogicalProcessor, LlcDomain,
     PhysicalCore, L2Cluster, CacheInfo, discover, tableClassIndex, classE, classP,
-    maxNumaLlcs, fillNumaLlcs;
-public import threadpool.pool : CacheAwarePool, PoolOptions, PinScope, ProcessorId,
+    maxNumaLlcs, fillNumaLlcs, ProcessorId, parseCpuList, formatCpuList,
+    CpuListException, GroupingSource;
+public import threadpool.pool : CacheAwarePool, PoolOptions,
     Director, Selection, Cadence;
+public import threadpool.resolution : PoolResolution, resolvePool, Reject,
+    StartState, CpuDisposition, RequestDisposition, GroupDisposition,
+    ResolutionException, reasonsText;
+public import threadpool.os_scope : OsScope, OsScopeSource, osScope,
+    scopeOsToCallingThread, inOsScope, liveOsMask;
+public import threadpool.pin : PinOutcome, pinProcessor;
 public import threadpool.hybrid : WorkerSelf, currentWorker, bindNumaNeighborhood,
     WorkerBody, WorkerStop, ManagedWorkerHooks, ManagedPumpResult, IdleKind;
-public import threadpool.bins : BinAxis, install, uninstall, setLabel, home, search, at;
+public import threadpool.bins : makeBins, install, uninstall, binStaffed, setLabel, home,
+    search, at;
 public import threadpool.exchange : installExchange, uninstallExchange, exchangeHome,
     exchangeTo, exchangeCount, atExchange, setExchangeLabel, exchangeSearch,
     installExchangePairs;
 public import threadpool.stats : PoolStats;
+public import threadpool.failure : WorkerFailure;

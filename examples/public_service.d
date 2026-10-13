@@ -7,7 +7,8 @@ module public_service;
 
 import antfarm;
 import actors;
-import example_host;
+import threadpool.host;
+import core.time : seconds;
 import std.conv : to;
 import std.stdio : writeln;
 
@@ -34,7 +35,7 @@ void serve(scope ref ActorBorrow!Ledger actor, scope ref ActorContext context)
     {
         auto node = context.popInbox();
         if (node is null) break;
-        auto request = cast(Request*) node.payload;
+        auto request = node.payloadAs!Request;
         actor.value.balance += request.delta;
         request.balance = actor.value.balance;
         node.complete(); // last payload access; release makes the node reusable
@@ -47,12 +48,12 @@ void serve(scope ref ActorBorrow!Ledger actor, scope ref ActorContext context)
 
 void main(string[] args)
 {
-    uint workers = args.length > 1 ? to!uint(args[1]) : 0;
-    auto host = new ExampleHost(workers);
-    auto token = host.farm.registerProducer(Tier.small);
-    if (!token.valid) fatal("producer registration failed");
-    auto runtime = ActorRuntime.create(host.farm, 1);
-    if (runtime is null) fatal("runtime allocation failed");
+    FarmHostOptions hostOptions;
+    hostOptions.workers = args.length > 1 ? to!uint(args[1]) : 0;
+    hostOptions.waitTimeout = 30.seconds; // example policy: a stuck drain fails instead of hanging
+    auto host = new FarmHost(hostOptions);
+    scope (exit) host.closeOrAbandon();
+    auto runtime = host.createRuntime(1);
 
     uint closingCallbacks;
     auto owner = runtime.createActor!(Ledger, serve)(Ledger(0, 0, &closingCallbacks));
@@ -87,11 +88,7 @@ void main(string[] args)
         }
         foreach (i; 0 .. nodes.length)
         {
-            while (!nodes[i].available)
-            {
-                runtime.flush(token);
-                host.progress();
-            }
+            host.waitUntil(() => nodes[i].available);
             // available is an acquire of complete's release. The reply is
             // visible; the node may now be reused. Do not read it earlier.
             if (nodes[i].outcome != ActorNodeOutcome.completed
@@ -110,11 +107,7 @@ void main(string[] args)
         fatal("retirement rejected");
     if (handle.send(&nodes[0]) != ActorSendResult.closed)
         fatal("send after admission close was accepted");
-    while (!owner.retired)
-    {
-        runtime.flush(token);
-        host.progress();
-    }
+    host.waitUntil(() => owner.retired);
     if (owner.reclaim() != ActorReclaimResult.reclaimed)
         fatal("reclaim failed");
     // valid() only checks that this copy still holds a slot and generation.
@@ -123,14 +116,10 @@ void main(string[] args)
             || handle.send(&nodes[0]) != ActorSendResult.staleHandle)
         fatal("stale handle check failed");
 
-    // Consumers can stop only after the actor drain. Then the runtime, the
-    // token, and the Farm, in that order.
-    host.stopConsumers();
-    runtime.destroy();
-    host.farm.unregisterProducer(token);
-    host.farm.destroy();
+    // host.close() (scope exit) stops the consumers, then destroys the
+    // runtime, unregisters the token and destroys the Farm, in that order.
     if (expected != 234)
         fatal("ledger total mismatch");
     writeln("public service: 36 ordered replies, balance=", expected,
-        ", workers=", workers, ", closing-callback-count=", closingCallbacks);
+        ", workers=", host.plan.workers, ", closing-callback-count=", closingCallbacks);
 }

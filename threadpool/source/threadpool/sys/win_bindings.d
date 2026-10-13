@@ -159,26 +159,31 @@ extern (Windows) @nogc nothrow
         USHORT* GroupCount,
         USHORT* GroupArray);
 
+    BOOL GetThreadGroupAffinity(
+        HANDLE hThread,
+        GROUP_AFFINITY* GroupAffinity);
+
     void GetCurrentProcessorNumberEx(PROCESSOR_NUMBER* ProcNumber);
 }
 
-alias FnSetThreadSelectedCpuSets = BOOL function(
+// Dynamically loaded entry points need Win32 linkage too, including on x64.
+alias FnSetThreadSelectedCpuSets = extern (Windows) BOOL function(
     HANDLE thread, const(uint)* cpuSetIds, uint count) @nogc nothrow;
 
-alias FnGetThreadSelectedCpuSets = BOOL function(
+alias FnGetThreadSelectedCpuSets = extern (Windows) BOOL function(
     HANDLE thread, uint* cpuSetIds, uint count, uint* required) @nogc nothrow;
 
-alias FnSetThreadInformation = BOOL function(
+alias FnSetThreadInformation = extern (Windows) BOOL function(
     HANDLE thread, uint threadInformationClass, void* info, uint size) @nogc nothrow;
 
-alias FnSetThreadSelectedCpuSetMasks = BOOL function(
+alias FnSetThreadSelectedCpuSetMasks = extern (Windows) BOOL function(
     HANDLE thread, GROUP_AFFINITY* masks, ushort count) @nogc nothrow;
 
-alias FnWaitOnAddress = BOOL function(
+alias FnWaitOnAddress = extern (Windows) BOOL function(
     void* address, void* compareAddress, size_t addressSize, uint dwMilliseconds) @nogc nothrow;
 
-alias FnWakeByAddressSingle = void function(void* address) @nogc nothrow;
-alias FnWakeByAddressAll = void function(void* address) @nogc nothrow;
+alias FnWakeByAddressSingle = extern (Windows) void function(void* address) @nogc nothrow;
+alias FnWakeByAddressAll = extern (Windows) void function(void* address) @nogc nothrow;
 
 __gshared FnSetThreadSelectedCpuSets pSetThreadSelectedCpuSets;
 __gshared FnGetThreadSelectedCpuSets pGetThreadSelectedCpuSets;

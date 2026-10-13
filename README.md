@@ -5,13 +5,13 @@ of work into a shared ring; any subscribed consumer may claim them. It is
 designed for unordered compute where work can appear on any thread and the next
 available worker should take it.
 
-**Status.** The current release candidate is **1.8.0-rc.2**. It is
-release-candidate software: the public and private actor models are supported
-functionality, but source and ABI stability are not promised across release
-candidates, and actor state and results have the limits stated in their guides.
+**Status.** The current release is **1.8.0**. The public and private actor models
+are supported functionality; actor state and results have the limits stated in
+their guides. Actor source and ABI stability remain subject to the
+[promotion gates](ROADMAP.md#actor-api-promotion-gates).
 The correctness gate is the local Linux `make check`; there is no CI. Windows
-(x64) is an intended target whose validation follows the release candidate. See
-[CHANGELOG.md](CHANGELOG.md) for what the candidate contains and its
+(x64) is an intended target with separate manual validation. See
+[CHANGELOG.md](CHANGELOG.md) for what the release contains and its
 compatibility notes.
 
 ## Quickstart (Linux)

@@ -9,8 +9,13 @@ page shows how to use the public API. Complete programs are under
 
 An `ActorOwner` controls retirement and reclamation, while its copyable
 `ActorHandle` is the identity used to wake, send to, or phase-dispatch the
-actor. State is a separate allocation, POD for public actors, owned through an
-`ActorAllocator`.
+actor. Owners (and producer `Token`s) are move-only: copying one, assigning
+an lvalue, or passing one to a by-value parameter does not compile, because
+`owners.all!(o => o.retired)` taking elements by value would silently
+invalidate `owners[0]`. Transfer ownership with `move` (std.algorithm or
+core.lifetime), lend with a `ref` parameter, and iterate owner arrays with
+`foreach (ref o; owners)`. State is a separate allocation, POD for public
+actors, owned through an `ActorAllocator`.
 
 ```d
 import actors;
@@ -40,6 +45,16 @@ must consume. `flush(token, limit)` publishes up to a bounded ready snapshot
 (default 32, cap 256) as Farm tables; a `0` return is empty, backpressured, or
 contended, and those are not distinguished.
 
+Binding the borrowed state to a reference needs the call form:
+`ref T s = actor.value;` does not compile, while `ref Body s =
+actor.value();` and `auto p = &actor.value();` do (verified on DMD and
+LDC). Reading and mutating through `actor.value.field` works as written
+above. Actor state is copied into allocator-owned storage the garbage
+collector does not scan: a POD state that contains GC slices or pointers
+compiles, but those allocations are not kept alive by the actor. Keep them
+reachable elsewhere for the actor's lifetime, or store non-GC memory
+(malloc, arenas, the allocator adapters) in actor state.
+
 The compiled form of this path is
 [../../examples/public_service.d](../../examples/public_service.d):
 
@@ -54,7 +69,18 @@ The built-in inbox is an accumulator-style interaction protocol. Any producer
 may `initialize` freshly allocated storage and `send` the node; the actor is
 the only consumer. A successful send owns the node until the actor calls
 `complete`, `fail(code)`, or `cancel`, or consumes its storage. A wake is only
-a coalescing notification, not one unit of work.
+a coalescing notification, not one unit of work. Read the payload through
+`node.payloadAs!Request` (a plain cast of `payload` to `Request*`) instead of
+a hand-written cast.
+
+For request/reply, `completeAndWake(sender)`, `failAndWake(sender, code)`
+and `cancelAndWake(sender)` complete the node and then schedule the sender,
+returning the `ActorWakeResult`. Without them the receiver had to call
+`sender.wake()` by hand, and a missing wake hung the sender silently. The
+sender handle travels in the payload (any `ActorHandle!U` or the erased
+handle is accepted); the node does not store a reply target. The completion
+store happens before the wake, so the woken sender observes `available` and
+the recorded outcome; do not touch the node after the call.
 
 Read and write payload fields before the terminal call. After `available`
 acquire-observes completion for this interaction, read `outcome`

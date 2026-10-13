@@ -93,6 +93,23 @@ make -C actor_torture run-mimalloc-tsan
 
 The real TSan lane requires Clang for mimalloc and LDC for the D test binary.
 
+On Windows x64, with CMake, Visual Studio and the D compiler on PATH, run
+the static allocator lanes from the repository root:
+
+```powershell
+./actor_torture/run-mimalloc-windows.ps1 -Compiler dmd -Configuration Debug
+./actor_torture/run-mimalloc-windows.ps1 -Compiler ldc2 -Configuration Debug
+./actor_torture/run-mimalloc-windows.ps1 -Compiler ldc2 -Configuration Release
+```
+
+`-CMake` accepts a full path to CMake when it is not on PATH. Debug uses
+unoptimized allocator code and `MI_DEBUG=FULL`, with the static release CRT
+(`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`, D `-mscrtlib=libcmt`).
+Using CMake's default Debug CRT instead introduces an unresolved
+`__imp__CrtDbgReport` dependency. The script builds separate Debug/Release
+archives, links the real allocator, and runs the full actor suite including
+cross-thread frees. It does not modify the pinned submodule.
+
 The ordinary library build contains neither the deterministic hook branches
 nor a mimalloc link dependency. The Makefile builds the pinned static source
 with allocator override disabled. The root Dub configuration `mimalloc-v3`

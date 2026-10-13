@@ -45,11 +45,35 @@ The model records:
 - physical core, L2 cluster, LLC, NUMA node, and package membership;
 - cache sizes and line sizes where the OS reports them;
 - efficiency class and the dense P/E table class;
-- parked state at discovery where available.
+- OS-scope exclusion (`affinityExcluded`), Linux offline state
+  (`offlineAtDiscovery`) and informational Windows CPU-set parking
+  (`parkedAtDiscovery`).
 
-`llcIndex` is a process-wide dense index used to address arrays. It is not a
-raw Windows cache id or a Linux sysfs identifier. Processor groups and sockets
-which reuse an OS-local cache number therefore do not alias in the table.
+`llcIndex` is a process-wide dense index over the discovered physical groups
+(last-level sharing domains), used to address arrays. It is not a raw Windows
+cache id or a Linux sysfs identifier. Processor groups and sockets which reuse
+an OS-local cache number therefore do not alias in the table. Physical groups
+never disappear or renumber because of OS scope or pool filters.
+
+Each `LlcDomain` records its `GroupingSource`: `l3` for a shared L3,
+`l2Fallback` or `singletonFallback` when Linux reports no L3 (or no shared
+cache), and `cpuSetLlcIndex` when Windows has no L3 record and the CPU-set
+`LastLevelCacheIndex` is used. `TopologySnapshot.groupingSource` is the weakest
+source present. A group is a CCD only when its source is `l3` on a chiplet
+part; callers that mean "CCD" should check the source.
+
+The CPU identity is `ProcessorId(group, lp)`: the Windows processor group and
+the group-relative LP number, or group 0 and the system CPU number on Linux.
+Its text form is `g:lp`. The membership lists of `PhysicalCore`, `LlcDomain`,
+`NumaNode` and `Package` are group-qualified `processors` arrays sorted by
+`(group, lp)`; `processorsInLlc`, `eligibleProcessorsInLlc` and
+`processorsOfClass` return the same identity. `parseCpuList` reads
+`0-7,16-23` (group 0) and `g:a-b`, preserving order and duplicates;
+`formatCpuList` prints the canonical form back.
+
+A processor is eligible (`isEligible`) when it is inside the OS scope and, on
+Linux, online at discovery. Windows parking never makes a processor
+ineligible.
 
 `efficiencyClass` preserves the OS value. `tableClassIndex` reduces the
 topology to the package's dense P/E table classes; higher efficiency class is
@@ -66,17 +90,78 @@ lifetime.
 
 `PoolOptions` filters the topology before start:
 
-- `onlyProcessors` selects exact `(group, lp)` identities;
-- otherwise `onlyLps` selects matching in-group LP numbers;
+- `processors` selects exact `(group, lp)` identities; build them with
+  `parseCpuList` or the topology helpers;
 - `enablePCores` and `enableECores` select classes;
-- `skipSmtSiblings` keeps the first LP of each physical core;
-- `pinScope` is currently required to be `logicalProcessor`.
+- `skipSmtSiblings` keeps the first LP of each physical core.
 
-The exact processor list wins over the shorthand LP list. Linux also omits
-processors reported offline or unavailable by the discovery backend.
+Both platforms omit processors marked `affinityExcluded` by discovery, even
+when explicitly listed in the options. Windows OS parking alone does not
+exclude a worker; Linux also omits offline (`offlineAtDiscovery`) processors.
+The physical topology counts remain unchanged.
+
+### Resolution and disposition
+
+`resolvePool(snapshot, osScope, options)` is a pure function that produces a
+`PoolResolution`. `CacheAwarePool.resolve()` previews it without starting
+anything; `start()` uses the same function, so the preview equals the
+start-time selection. After `start`, `pool.resolution` adds each worker's
+`StartState` and `PinOutcome`; after a failed start or a shutdown it keeps the
+last attempt's report.
+
+The report covers everything that was considered:
+
+- `cpus`: every known CPU in snapshot order, with the union of every `Reject`
+  reason that applies (`osExcluded`, `offline`, `notRequested`,
+  `classDisabled`, `smtSecondary`) rather than the first one;
+- `requests`: one `RequestDisposition` per `processors` entry in request
+  order, marking unknown ids and duplicates (a duplicate never adds a worker);
+- `groups`: one `GroupDisposition` per physical group with physical,
+  eligible, accepted and started counts, and the reasons common to every
+  member of a group that has no workers;
+- `workers`: the accepted CPUs; the index is the `workerIndex`.
+
+Filtering is silent at start by design. `enforceRequested()` is the opt-in
+contract check: it throws `ResolutionException` naming every unknown, rejected
+(with reasons) or duplicate request. `toString` prints a group table and every
+CPU; `summary()` is one line and is included in start-failure messages.
+`acceptedCpus`, `rejectedCpus`, `acceptedGroups`, `rejectedGroups`,
+`unknownRequests` and `workersIn(llc)` separate the report for callers.
+
+### OS scope
+
+Eligibility is frozen to one process-level OS scope (`threadpool.os_scope`):
+
+| | Linux | Windows |
+|---|---|---|
+| Scope | the launch mask, read by `sched_getaffinity` in a module constructor before `main` (what `taskset`, `numactl` or a cgroup cpuset produced at exec) | the single-group process affinity mask at first discovery; a multi-group process is `unrestricted` |
+| `OsScopeSource` | `processLaunch` | `processAffinity` |
+| Refresh | none | none |
+| Pin validation | `pinProcessor` rejects CPUs outside the scope (`outsideOsScope`); the kernel's cpuset check still applies (`osRejected`) | `pinProcessor` rejects CPUs outside the scope (`outsideOsScope`); the live process-mask recheck still applies (`osRejected`) |
+
+The scope is never a thread's current mask unless the program opts in with
+`scopeOsToCallingThread()` (source `callingThread`), which is allowed only
+before the first `discover()`. A program that narrows `main`'s mask before
+discovery either calls it or filters with `PoolOptions.processors`.
+`liveOsMask()` reports what the OS says now, for diagnostics only.
+
+`pinProcessor(LogicalProcessor)` (`@nogc`) and `pinProcessor(ProcessorId)`
+(looks the id up first; `unknownProcessor` if absent) are the only pin
+functions, and pool workers use the same path. A pin outside the frozen scope
+never happens, including a raw pin from application code, so this library
+cannot escape a launch `taskset`. If the OS narrows affinity after discovery
+the scope does not shrink; the next pin fails with `osRejected` and pool
+startup unwinds with that outcome in `pool.resolution`. Windows group affinity
+can otherwise widen a thread beyond the process mask, which the recheck
+prevents. Cgroup cpusets are honoured at launch (the launch mask is already a
+subset) and enforced live by the kernel; dynamic cpuset tracking is deferred.
+Windows job-object hard affinity shows up in the process mask. Multi-group
+Windows processes stay unrestricted; that path still needs hardware
+validation.
 
 Start fails if no processor is selected, another pool is already live, or any
-worker cannot be pinned. The implementation does not silently continue with a
+worker cannot be pinned. The first message includes `summary()`; the pin
+message names each failing `g:lp` with its `PinOutcome`. The implementation does not silently continue with a
 migrating worker. Windows applies CPU-set affinity and optional performance or
 EcoQoS policy. Linux uses scheduler affinity and its native wait backend.
 
@@ -114,6 +199,10 @@ does not call its body again.
 `ManagedWorkerHooks` provides `start`, `pump`, and `stop` callbacks on the
 pinned worker. A successful start is paired with exactly one stop on that same
 thread. `WorkerSelf.context` is reserved for caller-owned persistent state.
+The optional `poolStopped` callback runs once per run on the thread that calls
+`shutdown` (or whose `start` failed), after every worker has joined, even when
+no worker reached `start`; use it to settle state that only a worker's stop
+would otherwise settle.
 
 `pump` returns `ManagedPumpResult`:
 
@@ -123,8 +212,18 @@ thread. `WorkerSelf.context` is reserved for caller-owned persistent state.
   absolute `MonoTime` deadline.
 
 Managed callbacks may allocate and throw. An escaping failure stops the worker
-system and is retained in `workerFailures()` after shutdown. The Fiber package
-uses managed hooks to hold persistent Farm registrations and timer state.
+system. Both this lane and FarmHost capture the first failure immediately into
+storage allocated before the worker starts: druntime errors can live in TLS
+and be overwritten by a later stop-hook error or invalidated at thread exit.
+After shutdown joins the workers, `workerFailures()` returns owned
+`WorkerFailure!Error` or `WorkerFailure!Exception` diagnostics. They preserve
+the Error/Exception distinction, original type name (`sourceType`), source
+line, message (up to 1024 bytes) and file name (up to 512 bytes). `truncated`
+reports either limit being exceeded. They do not retain the original object,
+subclass, exception chain or stack trace. Recording is `@nogc nothrow`; the
+worker alone writes its snapshot and the controller reads only after join.
+The Fiber package uses managed hooks to hold persistent Farm registrations
+and timer state.
 
 ## Worker lifecycle
 
@@ -172,7 +271,8 @@ advanced and its OS wait primitive is signalled.
 
 Producer threads do not need Director ownership. `pool.wakeAll()` is a
 thread-safe, non-owning notification which leaves each worker's idle policy
-unchanged. Work publication must occur before the wake in the application's
+unchanged; `pool.wakeLlc(g)` is the same notification for the workers
+assigned to physical group `g` only. Work publication must occur before the wake in the application's
 own queue or Farm synchronization protocol.
 
 Each worker owns one atomic ACTIVE/ARMED wait slot. After an idle pump it
@@ -195,15 +295,29 @@ ARMED value with futex. Spurious returns always lead back to a work check.
 The bin registry is parameterized by the installed type, so unrelated
 application components can install independent tables.
 
-Two layouts are supported:
+Tables are keyed by the physical `llcIndex` and validated against a
+`PoolResolution`; there is no unvalidated install. Two layouts are supported:
 
-- `BinAxis.llc`: one object per dense LLC index;
-- `BinAxis.llcAndClass`: one object per `(LLC, dense class)` pair.
+- `install(bins, res)`: one object per physical group, so `bins.length` must
+  equal `res.physicalGroupCount`;
+- `install(bins, res, classCount)`: one object per `(group, dense class)` pair,
+  `bins.length == physicalGroupCount * classCount`.
+
+For class or pointer types, every slot an accepted worker resolves to must be
+non-null; groups without accepted workers may hold null. A compacted table
+(one slot per accepted group) or a missing slot is rejected with the groups
+named. `makeBins!T(res, make)` builds a correctly sized table, calling `make`
+once per physical group with its `GroupDisposition`. The install records which
+groups were accepted, readable as `binStaffed!T(llc)`.
 
 Workers call `home!T()` to find the slot for their pinned LLC and class.
+`home!T` is valid only on pool-managed threads and returns null elsewhere. It
+names the group the worker was assigned at start, not the CPU the thread is
+running on now: it does not follow re-pinning or OS migration.
 Control or producer threads call `at!T(llc, class)` for direct addressing.
 `search!T(label)` searches labeled slots in the current worker's NUMA-local LLC
-neighborhood; off a pool worker it searches the complete installed table.
+neighborhood, which may include groups without accepted workers; off a pool
+worker it searches the complete installed table.
 
 The registry stores references to caller-owned arrays. It does not allocate
 those objects in LLC- or NUMA-local memory and does not synchronize their
@@ -228,10 +342,16 @@ setup-only, with the same lifetime rules as LLC bins.
 
 ## Ant Farm embedding
 
-The usual non-Fiber embedding installs one Farm-bearing object per LLC. Each
-worker then owns a persistent `ConsumerView` and calls `consumeNext()` from its
-pump. A producer publishes to the desired Farm and calls `wakeAll` or uses the
-Director to signal a narrower worker selection.
+The usual non-Fiber embedding installs one Farm-bearing object per accepted
+physical group, sized for that group's workers (`res.workersIn(g).length` or
+`GroupDisposition.accepted` native consumers). Each worker then owns a
+persistent `ConsumerView` and calls `consumeNext()` from its pump. A table
+that aliases one Farm into every slot is legal but deliberately cross-group:
+every accepted worker, including those of other groups, is then a consumer of
+that Farm. Threadpool cannot detect a raw `subscribe` on another group's Farm;
+`home!T` is native by construction and `at!T(llc)` is the explicit spelling
+for anything else. A producer publishes to the desired Farm and calls `wakeAll` or `wakeLlc(g)`,
+or uses the Director to signal a narrower worker selection.
 
 The pool does not infer Farm sizing. The application must reserve enough
 consumer slots for every native and covering consumer and enough producer slots
@@ -252,7 +372,7 @@ coverage rules. Those scheduler contracts live in
 | Director policy changes and selected signals | the sole Director owner |
 | `home`, `at`, `search`, and exchange lookup | concurrent during stable installation |
 | `currentWorker` | calling worker only |
-| `wakeAll` | concurrent producers |
+| `wakeAll`, `wakeLlc` | concurrent producers |
 | application objects found through registries | defined by the application |
 
 Do not relabel or uninstall state while workers can look it up. Do not start or

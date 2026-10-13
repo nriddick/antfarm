@@ -741,6 +741,60 @@ version (AntfarmWriteAuditHooks)
         writeln("PASS inherited child limit 5 emits 10 grandchild tables");
     }
 }
+struct CountedLeaf { ulong* output; }
+void countedLeafStep(scope ref PrivateBorrow!CountedLeaf b, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    ++*b.value.output;
+}
+struct CountedRoot { PrivateChildPark!CountedLeaf* leaves; ulong* outputs; }
+PrivateRootDisposition countedRootStep(scope ref PrivateBorrow!CountedRoot b, scope ref PrivateContext ctx)
+    nothrow @nogc @system
+{
+    if (b.value.leaves is null)
+    {
+        b.value.leaves = ctx.createChildren!CountedLeaf(4);
+        check(b.value.leaves !is null);
+        foreach (i; 0 .. 4)
+            check(b.value.leaves.spawn(ctx, CountedLeaf(b.value.outputs + i)) == PrivateSpawnResult.spawned);
+        check(b.value.leaves.start!countedLeafStep(ctx) == PrivateStartResult.started);
+        return PrivateRootDisposition.waitChildren;
+    }
+    return PrivateRootDisposition.finish;
+}
+// pumpCounted reports child-wave tables that pump's root count omits.
+void pumpCountedTables()
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
+    scope(exit) farm.destroy();
+    auto park = PrivateRootPark!(CountedRoot, countedRootStep).create(farm, 1);
+    check(park !is null);
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    ulong[4] outputs;
+    check(park.spawn(CountedRoot(null, outputs.ptr)) == PrivateSpawnResult.spawned);
+    size_t roots, tables, childOnly;
+    auto deadline = MonoTime.currTime + 30.seconds;
+    while (park.live)
+    {
+        immutable count = park.pumpCounted(token);
+        check(count.tables >= (count.roots != 0 ? 1 : 0));
+        roots += count.roots;
+        tables += count.tables;
+        if (count.roots == 0 && count.tables != 0) ++childOnly;
+        while (view.consumeNext()) {}
+        enforce(MonoTime.currTime < deadline, "pumpCounted progress timeout");
+    }
+    view.unsubscribe();
+    park.destroy();
+    foreach (x; outputs) check(x == 1);
+    check(roots == 2); // the initial activation and the resume after children
+    check(tables > roots);
+    check(childOnly >= 1);
+}
+
 void configuredBatches()
 {
     foreach (limit; [1UL, 255, 256, 257, 1024, 4096])
@@ -11759,6 +11813,7 @@ void runSuite()
     phaseSlab();
     phaseSubset();
     phaseEntryWord();
+    pumpCountedTables(); writeln("PASS pumpCounted counts child-only publications");
     configuredBatches(); writeln("PASS configured root and child limits, overflow and quota splitting");
     childChunkSplit(); writeln("PASS child wave tables claim 32 entries");
     childChunkSplitOverride(); writeln("PASS child wave chunk override folds claims");

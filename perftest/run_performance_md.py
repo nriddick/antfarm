@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate the raw numbers behind PERFORMANCE.md.
 
-Runs the committed perftest binaries (and the Fiber benchmarks) over a fixed
+Runs the built perftest binaries (and the Fiber benchmarks) over a fixed
 matrix, writes every raw process output and a machine-readable summary to an
 output directory. Nothing here is checked in: point --out at an ignored or
 scratch path.
@@ -35,6 +35,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PERFTEST = ROOT / "perftest"
 MIMALLOC = ROOT / "actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a"
+if os.name == "nt":
+    MIMALLOC = ROOT / "actor_torture/.build/mimalloc-v3.5.3-windows-release/lib/mimalloc.lib"
 
 
 # ---------------------------------------------------------------- parsing
@@ -179,9 +181,37 @@ def parse_fiber(out: str) -> dict:
         m = re.search(pat, out, re.M)
         if m:
             d[label] = _num(m[1])
+    for label, suffix in (("total_fibers_s", ""), ("warm_total_fibers_s", r"\s+\(warm pool\)")):
+        total_prefix = r"^total" + suffix + r"\s*:"
+        total = re.search(total_prefix + r"\s+(\d+) fibers in ([\d.]+) s:", out, re.M)
+        if re.search(total_prefix, out, re.M):
+            if not total:
+                raise ValueError("invalid fiber burst timing/count")
+            count, seconds = int(total[1]), float(total[2])
+            stage_counts = re.findall(r"^(?:create|run)" + suffix + r"\s*:\s+(\d+) fibers", out, re.M)
+            if count <= 0 or seconds <= 0 or any(int(n) != count for n in stage_counts):
+                raise ValueError("invalid fiber burst timing/count")
+            d[label] = count / seconds
+            continue
+        # Compatibility with older logs that printed both numeric phases.
+        stages = [re.search(r"^" + stage + suffix + r"\s*:\s+(\d+) fibers in ([\d.]+) s:", out, re.M)
+                  for stage in ("create", "run")]
+        if all(stages):
+            create, run = stages
+            count = int(create[1])
+            seconds = float(create[2]) + float(run[2])
+            if count <= 0 or count != int(run[1]) or seconds <= 0:
+                raise ValueError("invalid fiber burst timing/count")
+            d[label] = count / seconds
+    if re.search(r"^workers:", out, re.M):
+        # MT workers can drain during spawn. N / residual drain time overstates
+        # throughput; prefer the measured full burst, even without a drain rate.
+        if "total_fibers_s" not in d or "warm_total_fibers_s" not in d:
+            raise ValueError("no complete multithread fiber burst timings")
+        return d | {"metric": d["total_fibers_s"], "metric_kind": "spawn_and_drain"}
     if "run_fibers_s" not in d:
         raise ValueError("no fiber metric")
-    return d | {"metric": d["run_fibers_s"]}
+    return d | {"metric": d["run_fibers_s"], "metric_kind": "drain"}
 
 
 PARSERS = {
@@ -208,11 +238,15 @@ def cpus_for(consumers):
     return "-" if consumers == 0 else ",".join(str(i) for i in range(consumers + 1))
 
 
+def benchmark_path(name):
+    return str(PERFTEST / (name + ".exe" if os.name == "nt" else name))
+
+
 def churn(section, name, mode, consumers, *, actors=16384, seconds=3, batch=256,
           warmups=5, allocator="mimalloc", tier="small", quota=16384,
           subset_percent=None, root_hint=None, binary="actor_churn_mimalloc",
           unpinned=False, env=None, public_hint=None, child_hint=None, note=""):
-    cmd = [str(PERFTEST / binary), mode, str(actors), str(seconds), str(consumers),
+    cmd = [benchmark_path(binary), mode, str(actors), str(seconds), str(consumers),
            str(batch), str(warmups), allocator,
            "-" if unpinned else cpus_for(consumers), tier, str(quota)]
     if mode.startswith("subset"):
@@ -235,7 +269,7 @@ def churn(section, name, mode, consumers, *, actors=16384, seconds=3, batch=256,
 
 def tp(section, name, *, nc, nb=1, ns=0, body=16, batch=80, ac=None, n=None,
        ln=None, k=None, write=None, huge=False, small=None, env=None, note=""):
-    cmd = [str(PERFTEST / "throughput"), "--once", "--nc", str(nc), "--nb", str(nb),
+    cmd = [benchmark_path("throughput"), "--once", "--nc", str(nc), "--nb", str(nb),
            "--ns", str(ns), "--body", str(body), "--batch", str(batch), "--repeats", "1"]
     if ac is not None:
         cmd += ["--ac", str(ac)]
@@ -256,7 +290,7 @@ def tp(section, name, *, nc, nb=1, ns=0, body=16, batch=80, ac=None, n=None,
 
 def dcase(section, name, *, nd, body=16, batch=256, consume=1, ac=None, n=None,
           tier=None, huge=False, note=""):
-    cmd = [str(PERFTEST / "dual"), "--nd", str(nd), "--body", str(body),
+    cmd = [benchmark_path("dual"), "--nd", str(nd), "--body", str(body),
            "--batch", str(batch), "--consume", str(consume), "--repeats", "1"]
     if ac is not None:
         cmd += ["--ac", str(ac)]
@@ -301,17 +335,18 @@ def cases_for(section, args):
             C.append(churn("pinning", f"{mode}_c6_pinned", mode, 6))
             C.append(churn("pinning", f"{mode}_c6_unpinned", mode, 6, unpinned=True))
     elif section == "dual":
-        for nd in (1, 2, 4, 6, 8, 11):
+        for nd in args.dual_threads:
             C.append(dcase("dual", f"nd{nd}", nd=nd, batch=256, ac=3))
-        C.append(dcase("dual", "nd6_b256_ac0", nd=6, batch=256, ac=0))
-        C.append(dcase("dual", "nd6_b2048_ac0", nd=6, batch=2048, ac=0))
-        C.append(dcase("dual", "nd6_b256_ac3", nd=6, batch=256, ac=3))
+        if 6 in args.dual_threads:
+            C.append(dcase("dual", "nd6_b256_ac0", nd=6, batch=256, ac=0))
+            C.append(dcase("dual", "nd6_b2048_ac0", nd=6, batch=2048, ac=0))
+            C.append(dcase("dual", "nd6_b256_ac3", nd=6, batch=256, ac=3))
     elif section == "tail":
         C.append(case("tail", "mid_default",
-                      [str(PERFTEST / "tail"), "--mid-only", "--samples", "10000",
-                       "--repeats", "1"], note="pinned, synthesized sysfs topology"))
+                      [benchmark_path("tail"), "--mid-only", "--samples", "10000",
+                       "--repeats", "1"], note="pinned, discovered topology"))
         C.append(case("tail", "idle_default",
-                      [str(PERFTEST / "tail"), "--idle-only", "--samples", "10000",
+                      [benchmark_path("tail"), "--idle-only", "--samples", "10000",
                        "--repeats", "1"]))
     elif section == "public":
         # Public flush/wave default to chunk 8 (ActorRuntime.flush / ActorWave
@@ -326,10 +361,10 @@ def cases_for(section, args):
         for cons in (1, 2, 4, 6, 11):
             C.append(churn("public", f"actor_curve_c{cons}", "actor", cons))
         C.append(case("public", "actor_ready_default",
-                      [str(PERFTEST / "actor_ready"), "16384", "200", "32"],
+                      [benchmark_path("actor_ready"), "16384", "200", "32"],
                       note="autonomous flush from a prequeued burst, default chunk"))
         C.append(case("public", "actor_ready_chunk32",
-                      [str(PERFTEST / "actor_ready"), "16384", "200", "32"],
+                      [benchmark_path("actor_ready"), "16384", "200", "32"],
                       env={"ANTFARM_PUBLIC_HINT": "2"},
                       note="autonomous flush from a prequeued burst, chunk 32 (class 2)"))
     elif section == "private":
@@ -344,7 +379,7 @@ def cases_for(section, args):
             ("subset-whole", {}), ("subset-whole-unreserved", {}),
         ]
         for mode, kw in modes:
-            for cons in (0, 6):
+            for cons in args.private_consumers:
                 tag = mode
                 if "subset_percent" in kw:
                     tag = f"{mode}{kw['subset_percent']}"
@@ -395,9 +430,9 @@ def cases_for(section, args):
                       cwd=str(ROOT / "fibers")))
     elif section == "scaling":
         C.append(case("scaling", "create_16384",
-                      [str(PERFTEST / "scaling"), "create", "16384"]))
+                      [benchmark_path("scaling"), "create", "16384"]))
         C.append(case("scaling", "lifecycle_16384_b32",
-                      [str(PERFTEST / "scaling"), "lifecycle", "16384", "32", "handle"]))
+                      [benchmark_path("scaling"), "lifecycle", "16384", "32", "handle"]))
     return C
 
 
@@ -425,8 +460,17 @@ def _as_text(value):
 
 
 def kill_process_group(proc):
-    """SIGTERM then SIGKILL the child's process group and reap the leader."""
+    """Terminate the child's process tree and reap the leader."""
     if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        result = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                capture_output=True, text=True, timeout=15)
+        if result.returncode != 0 and proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+            raise RuntimeError("taskkill could not terminate the process tree: " + result.stderr.strip())
+        proc.wait(timeout=5)
         return
     for sig, wait in ((signal.SIGTERM, 2), (signal.SIGKILL, 5)):
         try:
@@ -487,6 +531,8 @@ def run_cmd(cmd, cwd, env, timeout):
 
 def parser_for(cmd):
     name = Path(cmd[0]).name
+    if name.endswith(".exe"):
+        name = name[:-4]
     return PARSERS["dub_fiber" if cmd[0].startswith("dub") else name]
 
 
@@ -495,6 +541,9 @@ def cell_is_cached(prev, cell, runs):
     if prev is None or prev.get("status") != "ok":
         return False
     if len(prev.get("values", [])) < runs:
+        return False
+    if cell["section"] == "fibers" and cell["name"] == "benchmark_mt" \
+            and prev.get("config", {}).get("metric_kind") != "spawn_and_drain":
         return False
     return (prev.get("cmd") == cell["cmd"] and prev.get("cwd") == cell["cwd"]
             and prev.get("env", {}) == cell["env"])
@@ -530,7 +579,8 @@ def aggregate_tail(parsed):
     return out
 
 
-FIBER_FIELDS = ("create_fibers_s", "run_fibers_s", "warm_run_fibers_s")
+FIBER_FIELDS = ("create_fibers_s", "run_fibers_s", "warm_run_fibers_s",
+                "total_fibers_s", "warm_total_fibers_s")
 SYS_ROOT = Path("/sys")
 # Cache sizes are for this host (Ryzen 5 5500); adjust for other CPUs. The
 # last field is the sharing scope: "smt" is one SMT-sibling set, "all" is
@@ -752,8 +802,8 @@ def host_metadata():
     return {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "uname": platform.uname()._asdict(),
-        "cpu_model": model.group(1) if model else None,
-        "logical_cpus": len(re.findall(r"^processor\s*:", cpuinfo, re.M)),
+        "cpu_model": model.group(1) if model else platform.processor(),
+        "logical_cpus": len(re.findall(r"^processor\s*:", cpuinfo, re.M)) or os.cpu_count(),
         "loadavg_before": read("/proc/loadavg"),
         "governor": [read(f"/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_governor")
                      for i in range(12)],
@@ -769,6 +819,16 @@ def host_metadata():
     }
 
 
+def thread_counts(value):
+    try:
+        counts = [int(part) for part in value.split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected comma-separated integer counts") from None
+    if not counts or any(count < 0 for count in counts):
+        raise argparse.ArgumentTypeError("counts must be nonnegative")
+    return list(dict.fromkeys(counts))
+
+
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -776,6 +836,10 @@ def build_parser():
     ap.add_argument("--sections", default=",".join(ALL_SECTIONS))
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--best-n", type=int, default=2_000_000_000)
+    ap.add_argument("--dual-threads", type=thread_counts, default=[1, 2, 4, 6, 8, 11],
+                    help="comma-separated total dual-role thread counts")
+    ap.add_argument("--private-consumers", type=thread_counts, default=[0, 6],
+                    help="comma-separated private actor consumer counts; adds one controller")
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("--no-resume", action="store_true",
                     help="rerun cells even if summary.json already has them")
@@ -792,6 +856,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.runs < 1:
         ap.error("--runs must be at least 1")
+    if 0 in args.dual_threads:
+        ap.error("--dual-threads counts must be positive")
     sections = list(dict.fromkeys(s for s in args.sections.split(",") if s))
     for s in sections:
         if s not in ALL_SECTIONS:

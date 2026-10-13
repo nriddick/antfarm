@@ -6,8 +6,9 @@ module public_wave;
 
 import antfarm;
 import actors;
-import example_host;
+import threadpool.host;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore;
+import core.time : seconds;
 import std.conv : to;
 import std.stdio : writeln;
 
@@ -22,31 +23,6 @@ void unusedWake(scope ref ActorBorrow!Phase, scope ref ActorContext) nothrow @no
 void advance(scope ref ActorBorrow!Phase actor) nothrow @nogc @system
 {
     *actor.value.cell += 1;
-}
-
-bool retire(T)(ref ActorOwner!T owner) nothrow @nogc @system
-{
-    immutable result = owner.requestRetire();
-    return result == ActorRetireResult.requested || result == ActorRetireResult.alreadyRetired;
-}
-
-// Seal even if this returns false: a failed publish still owns a generation.
-bool publishSelected(ref ActorWave wave, ActorHandle!Phase[] actors,
-        ref Token token, ExampleHost host)
-{
-    size_t offset;
-    while (offset < actors.length)
-    {
-        immutable written = wave.publish!advance(actors[offset .. $], token);
-        if (written == 0)
-        {
-            if (wave.handle.failed) return false;
-            host.progress();
-            continue;
-        }
-        offset += written;
-    }
-    return true;
 }
 
 struct HookState
@@ -68,16 +44,16 @@ void onWave(void* context) nothrow @nogc @system
 
 void main(string[] args)
 {
-    uint workers = args.length > 1 ? to!uint(args[1]) : 0;
-    auto host = new ExampleHost(workers);
-    auto token = host.farm.registerProducer(Tier.small);
-    if (!token.valid) fatal("producer registration failed");
+    FarmHostOptions hostOptions;
+    hostOptions.workers = args.length > 1 ? to!uint(args[1]) : 0;
+    hostOptions.waitTimeout = 30.seconds; // example policy: a stuck drain fails instead of hanging
+    auto host = new FarmHost(hostOptions);
+    scope (exit) host.closeOrAbandon();
 
     // External selection may span runtimes. The wave requires the same Farm
     // and matching state size/alignment, not one ActorRuntime.
-    auto runtimeA = ActorRuntime.create(host.farm, 2);
-    auto runtimeB = ActorRuntime.create(host.farm, 1);
-    if (runtimeA is null || runtimeB is null) fatal("runtime allocation failed");
+    auto runtimeA = host.createRuntime(2);
+    auto runtimeB = host.createRuntime(1);
 
     ulong[3] values;
     auto selectedA = runtimeA.createActor!(Phase, unusedWake)(Phase(&values[0]));
@@ -96,10 +72,11 @@ void main(string[] args)
 
     ActorWave wave;
     wave.begin(host.farm, ActorWaveCompletionHook(&hook, &onWave));
-    immutable admitted = publishSelected(wave, selected[], token, host);
+    // publish steps on backpressure and returns false if the wave failed.
+    // Seal even then: a failed publish still owns a generation.
+    immutable admitted = host.publish!advance(wave, selected[]);
     auto completion = wave.seal();
-    while (!completion.finished)
-        host.progress();
+    host.waitUntil(() => completion.finished);
     if (!admitted || completion.failed)
         fatal("wave admission or completion failed");
 
@@ -107,8 +84,7 @@ void main(string[] args)
     // ActorWave, and do not begin again, until the hook's last access.
     if (values[0] != 1 || values[1] != 1 || values[2] != 0)
         fatal("selected writes were not visible at finished");
-    while (atomicLoad!(MemoryOrder.acq)(hookReturned) == 0)
-        host.progress();
+    host.waitUntil(() => atomicLoad!(MemoryOrder.acq)(hookReturned) != 0);
     if (atomicLoad!(MemoryOrder.acq)(hookObserved) != hook.marker)
         fatal("hook context was not published by its last access");
 
@@ -116,34 +92,16 @@ void main(string[] args)
     wave.begin(host.farm);
     if (completion.valid || completion.finished)
         fatal("wave reuse left the old handle looking current");
-    if (!publishSelected(wave, selected[], token, host))
+    if (!host.publish!advance(wave, selected[]))
         fatal("second wave admission failed");
     auto second = wave.seal();
-    while (!second.finished)
-        host.progress();
+    host.waitUntil(() => second.finished);
     if (second.failed || values[0] != 2 || values[1] != 2 || values[2] != 0)
         fatal("dependent wave mismatch");
 
-    // Owners are move-only. Do not put them in an array: copying transfers
-    // the authority and leaves the source unable to observe retirement.
-    if (!retire(selectedA) || !retire(unselected) || !retire(selectedB))
-        fatal("retirement rejected");
-    while (!selectedA.retired || !unselected.retired || !selectedB.retired)
-    {
-        runtimeA.flush(token);
-        runtimeB.flush(token);
-        host.progress();
-    }
-    if (selectedA.reclaim() != ActorReclaimResult.reclaimed
-            || unselected.reclaim() != ActorReclaimResult.reclaimed
-            || selectedB.reclaim() != ActorReclaimResult.reclaimed)
-        fatal("reclaim failed");
-
-    host.stopConsumers();
-    runtimeA.destroy();
-    runtimeB.destroy();
-    host.farm.unregisterProducer(token);
-    host.farm.destroy();
+    // Owners are move-only: retire takes them by ref (never copy them into an
+    // array). It requests retirement of each, waits for all, reclaims all.
+    host.retire(selectedA, unselected, selectedB);
     writeln("public wave: two runtimes, hook joined after finished, workers=",
-        workers);
+        host.plan.workers);
 }

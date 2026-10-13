@@ -33,8 +33,9 @@ lists every target.
 on how the calling shell is configured.
 
 Not covered by `make check` (run these yourself when you change those packages):
-the `threadpool` and `fibers` suites (`dub test` in each package; see
-[../../threadpool/README.md](../../threadpool/README.md) and
+the `threadpool` and `fibers` suites (`dub test` in each package, or
+`dub run -c unittest` in `fibers`, which also runs that package's module
+unittests; see [../../threadpool/README.md](../../threadpool/README.md) and
 [../../fibers/README.md](../../fibers/README.md)), the review-torture
 write-protection (`allwrite`) targets, and `examples/iota_sum.d`. Performance is
 not part of it either (see `make perf-gate`). Windows is validated by hand after
@@ -68,6 +69,25 @@ Each suite has its own README with selectors and the seams it uses:
 [review_torture](../../review_torture/README.md),
 [private_actor_tests](../../private_actor_tests/README.md), and
 [examples](../../examples/README.md).
+
+### Portable Python checks
+
+These focused checks run on Windows as well as Linux, without a D compiler or
+benchmark build. Run from the repository root with Python 3 and Git on PATH:
+
+```text
+python -B scripts/check-doc-links.py
+python -B -m unittest scripts/test_check_doc_links.py perftest/test_perf_gate.py perftest/test_run_performance_md.py perftest/test_private_lifecycle_matrix.py perftest/test_offccd_sweep.py -v
+```
+
+Use `python3` instead of `python` if that is your interpreter's command name.
+Documentation fixtures live in a temporary repository; only the three symlink
+probes skip when the host cannot create file symlinks. Performance decision,
+parser, grouping and topology-fixture tests use synthetic inputs. The real
+process-group timeout and gate error-accounting integration probes require
+Linux and report skips elsewhere. The non-Linux gate-rejection probes skip on
+Linux; the Windows child-timeout probe skips elsewhere. These checks do not
+establish timing results or replace `make check`.
 
 ### Optional and longer lanes
 

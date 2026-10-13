@@ -17,10 +17,14 @@ root = Path(__file__).resolve().parent.parent
 build = Path(__file__).resolve().parent / ".build"
 examples = ("public_service", "public_wave", "private_tree",
             "request_deadline", "fail_fast_fold", "fiber_cancel_at", "life/headless")
+# Every program runs its actors on threadpool.host.FarmHost.
+includes = ("-I.", "-Iexamples", "-Ithreadpool/source")
 extra_includes = {
     # The fiber adapter example bridges to the separate antfarm-fibers package.
-    "fiber_cancel_at": ("-Ifibers/source", "-Ithreadpool/source"),
+    "fiber_cancel_at": ("-Ifibers/source",),
 }
+# A stuck example fails the run instead of hanging it.
+run_timeout = 300
 configs = (
     ("ldc2", ("-g",), ""),
     ("ldc2", ("-O2", "-release"), "_release"),
@@ -31,7 +35,7 @@ tsan = ("ldc2", ("-g", "-O1", "-fsanitize=thread", "-d-version=TSan"), "_tsan")
 
 
 def compile_example(compiler, flags, source, output):
-    cmd = [compiler, *flags, "-i", "-I.", "-Iexamples",
+    cmd = [compiler, *flags, "-i", *includes,
            *extra_includes.get(source, ()),
            f"examples/{source}.d", f"-of={output}"]
     print("==>", " ".join(cmd), flush=True)
@@ -52,7 +56,7 @@ def compile_termbox():
 
 
 def compile_life_tui(compiler, flags, suffix, shim):
-    cmd = [compiler, *flags, "-i", "-I.", "-Iexamples",
+    cmd = [compiler, *flags, "-i", *includes,
            "examples/life/tui.d", str(shim), f"-of={build / ('life' + suffix)}"]
     print("==>", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=root, check=True)
@@ -65,7 +69,7 @@ def run_example(binary, workers, sanitize=False):
         env["TSAN_OPTIONS"] = "history_size=7:halt_on_error=1"
     cmd = [str(binary), workers]
     print("==>", " ".join(cmd), flush=True)
-    subprocess.run(cmd, cwd=root, env=env, check=True)
+    subprocess.run(cmd, cwd=root, env=env, check=True, timeout=run_timeout)
 
 
 def check_readme_programs():
@@ -94,7 +98,8 @@ def check_readme_programs():
         env = os.environ.copy()
         env["ANTFARM_HUGE_PAGES"] = "0"
         print("==>", output, flush=True)
-        subprocess.run([str(output)], cwd=root, env=env, check=True)
+        subprocess.run([str(output)], cwd=root, env=env, check=True,
+                       timeout=run_timeout)
 
 
 def main():
@@ -133,3 +138,7 @@ if __name__ == "__main__":
             main()
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode or 1)
+    except subprocess.TimeoutExpired as error:
+        print(f"FAIL timed out after {error.timeout} s: {' '.join(error.cmd)}",
+              file=sys.stderr, flush=True)
+        sys.exit(1)

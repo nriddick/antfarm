@@ -21,8 +21,8 @@ void main(string[] args)
 
     auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 16_384);
     scope (exit) farm.destroy();
-    auto backend = new FiberBackend(farm);
-    backend.reserve(taskCount);
+    auto domain = new FiberDomain(farm);
+    domain.reserve(taskCount);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView consumer;
@@ -35,16 +35,16 @@ void main(string[] args)
     void burst(bool recycle)
     {
         if (recycle)
-            backend.releaseAll(backend.takeCompletions());
+            domain.releaseAll(domain.takeCompletions());
         auto createStart = MonoTime.currTime;
         foreach (_; 0 .. taskCount)
         {
-            backend.spawn({ atomicFetchAdd(ran, 1L); }, stackSize);
-            if (pipeline && backend.ready >= flushMax)
-                backend.flush(token, flushMax, avgCost);
+            domain.spawn({ atomicFetchAdd(ran, 1L); }, stackSize);
+            if (pipeline && domain.ready >= flushMax)
+                domain.flush(token, flushMax, avgCost);
         }
         auto runStart = MonoTime.currTime;
-        drainUntilEmpty(backend, token, consumer, flushMax, avgCost);
+        drainUntilEmpty(domain, token, consumer, flushMax, avgCost);
         auto end = MonoTime.currTime;
         auto createSeconds = cast(double)(runStart - createStart).total!("nsecs")
             / 1_000_000_000.0;

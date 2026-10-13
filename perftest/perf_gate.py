@@ -6,8 +6,13 @@ Example: ./perf_gate.py --repo /path/antfarm --base BASE --candidate TIP \
 Use --benchmark-ref to compile identical benchmark source against both runtimes.
 Unsupported API combinations fail explicitly; never substitute another benchmark.
 """
-import argparse,hashlib,json,os,pathlib,random,re,resource,statistics,subprocess,sys,tempfile,time
+import argparse,hashlib,json,os,pathlib,random,re,statistics,subprocess,sys,tempfile,time
 P=pathlib.Path
+
+
+def require_linux(parser):
+    if sys.platform != 'linux':
+        parser.error('performance timing gate requires Linux (/proc, sysfs and CPU affinity)')
 
 def sha(path):return hashlib.sha256(P(path).read_bytes()).hexdigest()
 def command(cmd,**kw):return subprocess.check_output(cmd,text=True,**kw)
@@ -28,6 +33,7 @@ def ticks():
     return result
 
 def cpuusage():
+    import resource
     r=resource.getrusage(resource.RUSAGE_CHILDREN);return r.ru_utime+r.ru_stime
 
 def runone(cmd,cpus,seconds,child_affinity=None,env=None):
@@ -87,7 +93,9 @@ def main():
     p.add_argument('--optimization',choices=['O2','O3'],default='O2');p.add_argument('--initial-load-limit',type=float,default=1.0)
     p.add_argument('--threshold',type=float,default=-.03)
     p.add_argument('--cancel-fraction-tolerance',type=float,default=.01,help='Max absolute median dispatched-fraction change before cancellation timing is inconclusive')
-    a=p.parse_args();a.repo=a.repo.resolve();a.output=a.output.resolve()
+    a=p.parse_args()
+    require_linux(p)
+    a.repo=a.repo.resolve();a.output=a.output.resolve()
     a.archive=(a.archive or a.repo/'actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a').resolve()
     if a.repeats is None:a.repeats=20 if a.boundary else 5
     if a.max_attempts is None:a.max_attempts=max(10,2*a.repeats)

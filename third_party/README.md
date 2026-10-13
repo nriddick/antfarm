@@ -24,6 +24,12 @@ initialized submodule fails the build instead of selecting a system library.
 Select it directly with `dub build --config=mimalloc-v3`, or from a dependent
 package with `subConfiguration "antfarm" "mimalloc-v3"` in its `dub.sdl`.
 
+For Windows full-debug allocator verification, use
+`actor_torture/run-mimalloc-windows.ps1 -Configuration Debug -Compiler ldc2`
+(or `dmd`). It keeps `MI_DEBUG=FULL` and debug code generation while selecting
+the static release CRT paired with the D executable. See the
+[actor test instructions](../actor_torture/README.md) for both configurations.
+
 To update the pin deliberately:
 
 1. Check out a reviewed v3 release in `third_party/mimalloc`.

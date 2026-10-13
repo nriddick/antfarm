@@ -24,6 +24,7 @@ Three reading paths:
 | Page | Read it to |
 | --- | --- |
 | [quickstart.md](guide/quickstart.md) | build and run a tracked program in a few minutes |
+| [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown |
 | [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, or Fiber |
 | [public-actors.md](guide/public-actors.md) | create, address, wake, retire and reclaim public actors and waves |
 | [private-actors.md](guide/private-actors.md) | own a private root tree: roots, cohorts, dispatch, retirement |
@@ -57,6 +58,7 @@ Three reading paths:
 | Layers, sizing one Farm, entries per quota, shutdown order | [ARCHITECTURE.md](../ARCHITECTURE.md) |
 | Work-representation and public/private actor choice | [guide/choosing-work.md](guide/choosing-work.md) |
 | Runnable programs and their commands | [examples/README.md](../examples/README.md) |
+| FarmHost setup, placement, idle and wake, control-thread rule, close and abandon | [guide/hosting.md](guide/hosting.md) |
 | Actor API topic index and the generated reference command | [reference/README.md](reference/README.md) |
 | Actor authority, completion, storage, drain and shutdown contracts shared by both models | [reference/actor-lifecycle.md](reference/actor-lifecycle.md) |
 | Public actor creation, inbox, retirement and wave API | [guide/public-actors.md](guide/public-actors.md) |

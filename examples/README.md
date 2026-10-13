@@ -12,7 +12,7 @@ Complete programs for the two actor models. Read these with
 | [fail_fast_fold.d](fail_fast_fold.d) | `context.fail` + `cancelPeers` fail-fast, the wave aggregate after the join, and explicit root propagation |
 | [fiber_cancel_at.d](fiber_cancel_at.d) | Example bridge from `FiberDomain.sleepUntil` to `PrivateRootHandle.requestCancel` (not library API) |
 
-[example_host.d](example_host.d) is scaffolding: a same-thread consumer or a few druntime workers, plus a progress deadline. It is not a production scheduler. It does not treat `consumeNext() == false` or `pump() == 0` as idle.
+Every program runs on a [`FarmHost`](../threadpool/source/threadpool/host.d) (`threadpool.host`): one Farm, the caller's producer token, and pinned pool workers on one LLC, with the ordered teardown in `close()`. Each sets an explicit 30 s `waitTimeout` as example policy, so a stuck drain fails instead of hanging. `waitUntil` ends only on the program's predicate: it never treats `consumeNext() == false` or `pump() == 0` as idle.
 
 `iota_sum.d` remains the threadpool payload example. It is not part of this actor lane.
 
@@ -20,31 +20,36 @@ Complete programs for the two actor models. Read these with
 
 From the repository root, with DMD or LDC. The same command works on Windows
 x64 and Linux x86-64. Pass `0` to consume on the calling thread, or a worker
-count to use that many druntime threads:
+count N for N pinned pool workers in one LLC, with the calling thread confined
+beside them. A machine with fewer than N accepted worker CPUs (one per
+core by default: `skipSmtSiblings`) in one LLC rejects N with a
+`FarmHostPlanException` that explains why. Exactly N accepted
+CPUs is allowed. If no free CPU remains for the caller (including SMT siblings),
+it shares worker CPUs and the plan adds a note:
 
 ```text
-dmd -g -i -I. -Iexamples examples/public_service.d -of=public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=public_service
 ANTFARM_HUGE_PAGES=0 ./public_service 0
 
-ldc2 -g -i -I. -Iexamples examples/public_wave.d -of=public_wave
+ldc2 -g -i -I. -Iexamples -Ithreadpool/source examples/public_wave.d -of=public_wave
 ANTFARM_HUGE_PAGES=0 ./public_wave 2
 
-dmd -g -i -I. -Iexamples examples/private_tree.d -of=private_tree
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/private_tree.d -of=private_tree
 ANTFARM_HUGE_PAGES=0 ./private_tree 0
 ```
 
 The outcomes and cancellation programs use the same command:
 
 ```text
-dmd -g -i -I. -Iexamples examples/request_deadline.d -of=request_deadline
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/request_deadline.d -of=request_deadline
 ANTFARM_HUGE_PAGES=0 ./request_deadline 0
 
-dmd -g -i -I. -Iexamples examples/fail_fast_fold.d -of=fail_fast_fold
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/fail_fast_fold.d -of=fail_fast_fold
 ANTFARM_HUGE_PAGES=0 ./fail_fast_fold 0
 ```
 
 The fiber `cancelAt` adapter links the separate fibers package, so add the
-fibers and threadpool import paths:
+fibers import path too:
 
 ```text
 ldc2 -g -i -I. -Iexamples -Ifibers/source -Ithreadpool/source \
@@ -58,7 +63,7 @@ unset. In cmd.exe set it with `set ANTFARM_HUGE_PAGES=0` before the run.
 
 `make -C examples check` is the Linux matrix: LDC and DMD, debug and release,
 each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
-threaded programs. `fiber_cancel_at` runs under TSan with 0 workers only,
+threaded programs. Every program run has a 300 s timeout. `fiber_cancel_at` runs under TSan with 0 workers only,
 because TSan fails at the stack switch for migrating DRuntime Fibers; see
 [fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary). That target also extracts the complete First payload program
 from the repository README and runs it with LDC and DMD in debug and release.
@@ -111,13 +116,14 @@ ANTFARM_HUGE_PAGES=0 examples/.build/life 2
 make -C examples life DC=dmd
 
 # Portable headless tests (also usable on Windows):
-dmd -g -i -I. -Iexamples examples/life/headless.d -of=life_headless
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/life/headless.d -of=life_headless
 ANTFARM_HUGE_PAGES=0 ./life_headless 0
 ANTFARM_HUGE_PAGES=0 ./life_headless 2
 ```
 
-The optional argument is the worker count (default 2). Zero consumes on the UI
-thread. Live cells appear as `#`; the cursor marks the editing position. The
+The optional argument is the number of pinned pool workers (default 2), all in
+one LLC with the UI thread confined beside them. Zero consumes on the UI thread.
+`life_headless` defaults to 0, and its two simulators share one `FarmHost`. Live cells appear as `#`; the cursor marks the editing position. The
 status shows generation, measured gen/s, cells/s, worker count, pause state and
 target speed. Target speed is capped by actual simulation/rendering throughput.
 
@@ -142,9 +148,10 @@ cost. Quit uses the tracked root's cooperative `requestCancel`; an incomplete
 cancelled wave is discarded rather than promoted to the current projection.
 
 Shutdown follows the [lifecycle recipe](../docs/reference/actor-lifecycle.md#shutdown-order):
-pump, run consumers and take outcomes until drained; join/unsubscribe consumers;
-destroy the root park; unregister the producer; destroy the Farm. The simulator
-keeps its buffers alive throughout. The terminal is restored on normal exit and
+`Life.close` cancels and drains (pump, run consumers, take outcomes); the shared
+`FarmHost`'s `close` then joins the consumers, destroys the root parks,
+unregisters the producer and destroys the Farm. The simulator keeps its buffers
+alive throughout. The terminal is restored on normal exit and
 D exceptions. Runtime `fatal` aborts and externally forced termination cannot
 run D scope cleanup; if needed, recover the terminal with `stty sane` / `reset`.
 
@@ -161,7 +168,9 @@ unpinned, noisy host; focused checks were also compiling during measurement.
 Timing includes cohort creation, the waves and terminal root collection, but
 excludes Farm/worker startup and randomization. Standard deviation is the sample
 standard deviation across those nine runs. These are observations, not a
-performance gate or a comparison with a tiled implementation.
+performance gate or a comparison with a tiled implementation. They were taken
+before the examples moved to `FarmHost`, with unpinned druntime workers, and
+have not been re-measured with pinned workers in one LLC.
 
 | Workers | Gen/s median | Gen/s min–max | Gen/s stddev | Cells/s median | Cells/s min–max | Cells/s stddev |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -172,7 +181,7 @@ performance gate or a comparison with a tiled implementation.
 Reproduce one run from the repository root:
 
 ```text
-ldc2 -O2 -release -i -I. -Iexamples examples/life/headless.d -of=examples/.build/life_bench
+ldc2 -O2 -release -i -I. -Iexamples -Ithreadpool/source examples/life/headless.d -of=examples/.build/life_bench
 ANTFARM_HUGE_PAGES=0 examples/.build/life_bench 2 --bench 256 256 200
 ```
 

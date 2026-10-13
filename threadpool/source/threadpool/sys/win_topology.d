@@ -7,6 +7,7 @@ import core.stdc.string : memcpy;
 import std.algorithm : sort;
 import std.exception : enforce;
 
+import threadpool.os_scope : osScopeKeys;
 import threadpool.topology;
 import threadpool.sys.win_bindings;
 
@@ -176,6 +177,7 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
 
     ushort nextLlc;
     ushort[ulong] llcOfLp;
+    GroupingSource[] sourceOfLlc;
     bool assignedFromCache;
 
     walkSlpiex(slpiex, (rel, payload, recSize) {
@@ -185,6 +187,7 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
         if (level != 3) return;
         auto masks = decodeCacheMasks(payload);
         auto llc = nextLlc++;
+        sourceOfLlc ~= GroupingSource.l3;
         assignedFromCache = true;
         foreach (m; masks)
         {
@@ -200,12 +203,16 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
     {
         llcOfLp = llcOfLp.init;
         nextLlc = 0;
+        sourceOfLlc = null;
         ushort[ulong] clusterToDense;
         foreach (ref p; procs)
         {
             auto ck = (cast(ulong) p.group << 8) | p.llcIndexInGroup;
             if (ck !in clusterToDense)
+            {
                 clusterToDense[ck] = nextLlc++;
+                sourceOfLlc ~= GroupingSource.cpuSetLlcIndex;
+            }
             llcOfLp[lpKey(p.group, p.lpIndex)] = clusterToDense[ck];
         }
     }
@@ -218,7 +225,10 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
             if (k in llcOfLp) continue;
             auto ck = (cast(ulong) p.group << 8) | p.llcIndexInGroup;
             if (ck !in clusterToDense)
+            {
                 clusterToDense[ck] = nextLlc++;
+                sourceOfLlc ~= GroupingSource.cpuSetLlcIndex;
+            }
             llcOfLp[k] = clusterToDense[ck];
         }
     }
@@ -418,9 +428,8 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
         }
     }
 
-    // Forbidden CPUs are parked, not removed, matching the offline handling
-    // that pool startup and placement already skip. Single-group processes
-    // only: a multi-group process stays unrestricted, matching
+    // Forbidden CPUs are marked affinityExcluded, not removed. Single-group
+    // processes only: a multi-group process stays unrestricted, matching
     // GetProcessAffinityMask.
     intersectAffinity(procs, affinity);
 
@@ -446,20 +455,28 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
         c.efficiencyClass = p0.efficiencyClass;
         c.smt = idxs.length > 1;
         foreach (i; idxs)
-            c.lpIndices ~= procs[i].lpIndex;
+            c.processors ~= ProcessorId.of(procs[i]);
         cores ~= c;
     }
+    // `lpsByCore` is an associative array; match assembleSnapshot's order.
+    cores.sort!((a, b) => a.processors[0] < b.processors[0]);
 
     LlcDomain[] domains;
     domains.length = nextLlc;
+    GroupingSource weakest = GroupingSource.l3;
     foreach (i; 0 .. nextLlc)
+    {
         domains[i].llcIndex = cast(ushort) i;
+        domains[i].source = sourceOfLlc[i];
+        if (sourceOfLlc[i] > weakest)
+            weakest = sourceOfLlc[i];
+    }
     bool[ulong] coreOnDomain;
     foreach (ref p; procs)
     {
         if (p.llcIndex >= domains.length) continue;
         auto d = &domains[p.llcIndex];
-        d.lpIndices ~= p.lpIndex;
+        d.processors ~= ProcessorId.of(p);
         if (p.l3.sizeBytes) d.l3SizeBytes = p.l3.sizeBytes;
         if (p.l3.lineSize) d.lineSize = p.l3.lineSize;
         auto ck = (cast(ulong) p.group << 16) | p.coreIndex;
@@ -472,7 +489,7 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
     }
     foreach (ref d; domains)
     {
-        d.lpIndices.sort();
+        d.processors.sort();
         d.pCoreIndices.sort();
         d.eCoreIndices.sort();
     }
@@ -488,8 +505,10 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
             n.numaIndex = p.numaIndex;
             numa ~= n;
         }
-        numa[numaIdx[p.numaIndex]].lpIndices ~= p.lpIndex;
+        numa[numaIdx[p.numaIndex]].processors ~= ProcessorId.of(p);
     }
+    foreach (ref n; numa)
+        n.processors.sort();
 
     Package[] packages;
     size_t[ushort] pkgIdx;
@@ -502,8 +521,10 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
             pkg.packageIndex = p.packageIndex;
             packages ~= pkg;
         }
-        packages[pkgIdx[p.packageIndex]].lpIndices ~= p.lpIndex;
+        packages[pkgIdx[p.packageIndex]].processors ~= ProcessorId.of(p);
     }
+    foreach (ref pkg; packages)
+        pkg.processors.sort();
 
     ushort pCores, eCores;
     foreach (ref c; cores)
@@ -522,6 +543,7 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
     snap.groupCount = cast(ushort) groups.length;
     snap.maxEfficiencyClass = maxClass;
     snap.classCount = classCount;
+    snap.groupingSource = weakest;
     snap.processors = procs;
     snap.cores = cores;
     snap.l2Clusters = clusters;
@@ -562,33 +584,5 @@ TopologySnapshot discoverWindows()
     enforce(slpOk && slpGot > 0, "threadpool: GetLogicalProcessorInformationEx failed");
 
     return parseWindowsTopology(cpuBuf[0 .. cpuGot], slpBuf[0 .. slpGot],
-        processAffinityKeys());
-}
-
-/// Process affinity keys, or null when the process spans more than one
-/// processor group or the query fails. The mask only applies within the one
-/// group the process lives in; multi-group processes stay unrestricted,
-/// matching GetProcessAffinityMask's own zero-mask behaviour.
-private ulong[] processAffinityKeys()
-{
-    import core.sys.windows.basetsd : ULONG_PTR;
-    import core.sys.windows.winbase : GetCurrentProcess, GetProcessAffinityMask;
-
-    ushort[64] groups;
-    ushort count = cast(ushort) groups.length;
-    if (GetProcessGroupAffinity(GetCurrentProcess(), &count, groups.ptr) == 0)
-        return null;
-    if (count != 1)
-        return null;
-
-    ULONG_PTR processMask, systemMask;
-    if (GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask) == 0)
-        return null;
-    if (processMask == 0)
-        return null;
-    ulong[] keys;
-    foreach (bit; 0 .. 64)
-        if (processMask & (cast(ULONG_PTR) 1 << bit))
-            keys ~= affinityKey(groups[0], cast(ushort) bit);
-    return keys;
+        osScopeKeys());
 }
