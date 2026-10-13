@@ -1,9 +1,9 @@
 # Changelog
 
-## 1.8.0 (unreleased)
+## 1.8.0
 
-Open for the life of the long-lived `1.8.0-rc` branch; it becomes the 1.8.0
-release entry at merge.
+This release includes the changes developed on the `1.8.0-rc` branch since
+1.8.0-rc.2. See the breaking changes below before upgrading.
 
 ### Windows verification fixes
 

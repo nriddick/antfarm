@@ -1,21 +1,20 @@
 # Ant Farm roadmap
 
-The current release candidate is **1.8.0-rc.2**. This page lists remaining
+The current release is **1.8.0**. This page lists remaining
 and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
-no history here. Windows validation follows the release candidate and is not
+no history here. Windows validation is separate and is not
 part of its local gate.
 
-## 1.8.0-rc.2
+## 1.8.0
 
-The candidate content is frozen in [CHANGELOG.md](CHANGELOG.md). rc.2 adds only
-an example; its runtime is identical to rc.1, whose local Linux gate passed.
-The numbers in [PERFORMANCE.md](PERFORMANCE.md) are tied to the revision they
-were taken at and apply unchanged.
+The release content is recorded in [CHANGELOG.md](CHANGELOG.md), including the
+changes since rc.2. The numbers in [PERFORMANCE.md](PERFORMANCE.md) remain tied
+to the revisions at which they were measured.
 
-## Deferred after the RC
+## Deferred after 1.8.0
 
 Committed compatibility limits and features that are deliberately not in the
-RC. The actor API is supported release-candidate functionality; these surfaces
+release. The actor API is supported functionality; these surfaces
 are not promised yet.
 
 - Typed root-to-application outputs (X1b). Put them in application storage
@@ -54,7 +53,7 @@ are not promised yet.
   The patch and its death tests are on the local branch
   `followup/early-avgcost-check`.
 
-## Post-RC platform and validation work
+## Platform and validation work
 
 - Windows x64 validation by hand: root, threadpool and Fiber unit tests, the
   review torture and T19 flood/lap suites, and allocator pairing. A Windows pass
@@ -75,7 +74,7 @@ are not promised yet.
 
 ## Actor API promotion gates
 
-The release-candidate compatibility limits are lifted only when all of these
+The actor source and ABI compatibility limits are lifted only when all of these
 hold (the current implementation satisfies most of them; the list is the bar for
 a stability promise):
 
