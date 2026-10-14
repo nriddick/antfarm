@@ -22,10 +22,9 @@ lists every target.
 | --- | --- | --- |
 | Docs links | `make check-docs`: tracked Markdown relative links and heading anchors (no network), plus `scripts/check-api-docs.py`, the API symbol/coverage check over the Ddoc of the public runtime modules | Python 3, DMD |
 | Root suite | `dub test` (module `unittest` blocks plus `tests/farm/antfarm_test.d`) | LDC, DMD |
-| Threadpool suite | `dub test :threadpool` | LDC, DMD |
-| FarmHost suite | `dub test :farmhost` (placement tests on synthetic snapshots) | LDC, DMD |
+| Threadpool suite | `dub test :threadpool` (including the FarmHost placement tests on synthetic snapshots) | LDC, DMD |
 | Fiber suite | `dub test :ant_fibers` (smoke suite and module unittests) | LDC, DMD |
-| Threadpool and FarmHost affinity | `dub run :threadpool -c confine-test` with full and small affinity masks; `dub run :farmhost -c host-test` with the configured host mask | LDC for confine; LDC debug/release and DMD for host |
+| Threadpool affinity | `dub run :threadpool -c confine-test` with full and small affinity masks; `dub run :threadpool -c host-test` with the configured host mask | LDC for confine; LDC debug/release and DMD for host |
 | Farm ordering | `make -C tests/farm check-farm-ordering`: controlled subscription/reclamation schedules and the leaf-reuse test, with write-audit hooks, plus `scripts/check-ring-stores.py`, which rejects a plain (non-atomic) ring-word store in `writeImpl` | LDC, DMD, Python 3 |
 | Farm TSan | `make -C tests/farm run-farm-tsan`: the root suite and `leaf_reuse.d` under ThreadSanitizer | LDC |
 | Actor torture | `tests/actors`: deterministic interleavings and sustained contention for the public actors | LDC, DMD, LDC TSan |
@@ -34,7 +33,7 @@ lists every target.
 | Examples | `examples/`: the First payload program extracted from [quickstart.md](../guide/quickstart.md#first-payload), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
 
 `make check-quick` runs the root unit suite, `make -C tests/farm run`
-(including `sweep_cursor`), threadpool and FarmHost unit suites, fiber smoke suite, and
+(including `sweep_cursor`), threadpool unit suite, fiber smoke suite, and
 `python3 examples/run_examples.py --ldc-only`. The examples include the quickstart
 payload and actor/headless programs in LDC debug and release with 0 and 2
 workers; the terminal front end is omitted. This target needs the LDC toolchain
@@ -55,7 +54,6 @@ tests to one LLC, supply that LLC's allowed CPUs in `CHECK_ONE_LLC_CPUS`.
 on how the calling shell is configured.
 
 For focused package checks, see [../../threadpool/README.md](../../threadpool/README.md),
-[../../farmhost/README.md](../../farmhost/README.md)
 and [../../ant_fibers/README.md](../../ant_fibers/README.md).
 
 Not covered by `make check` (select relevant focused checks during iteration and
@@ -141,9 +139,8 @@ interpreter and arguments.
 
 | Lane | Native coverage |
 | --- | --- |
-| `packages` | Root, threadpool, FarmHost and Fiber unit/smoke suites via Dub |
-| `threadpool` | Process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release |
-| `farmhost` | FarmHost lifecycle (`host-test`); also optimized LDC host tests |
+| `packages` | Root, threadpool and Fiber unit/smoke suites via Dub |
+| `threadpool` | Process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release, FarmHost lifecycle; also optimized LDC host tests |
 | `ordering` | Raw ring-store audit, controlled Farm ordering and leaf reuse |
 | `review` | Plain torture suite, sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
 | `actors` | Public actor deterministic/contention suite with the mimalloc stub |

@@ -7,7 +7,7 @@ module public_service;
 
 import antfarm;
 import antfarm.actors;
-import farmhost;
+import threadpool.host;
 import core.time : seconds;
 import std.conv : to;
 import std.stdio : writeln;

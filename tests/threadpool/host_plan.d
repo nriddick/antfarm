@@ -1,13 +1,13 @@
-module farmhost.tests.host_plan;
+module threadpool.tests.host_plan;
 
 // Pure FarmHost placement tests on synthetic snapshots; no OS calls, any
-// host. Inside package farmhost so host-only facts (caller CPUs,
+// host. Inside package threadpool so host-only facts (caller CPUs,
 // participants, notes) are reachable through the package-only planHost.
 
 import std.algorithm : all, any, canFind;
 import std.array : array;
 
-import farmhost;
+import threadpool.host;
 import threadpool.hybrid : WorkerSelf;
 import threadpool.pool : PoolOptions;
 import threadpool.resolution : PoolResolution, Reject;

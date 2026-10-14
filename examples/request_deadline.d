@@ -11,7 +11,7 @@ module request_deadline;
 
 import antfarm;
 import antfarm.actors;
-import farmhost;
+import threadpool.host;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;
 import std.conv : to;

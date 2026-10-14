@@ -9,7 +9,6 @@ ACTOR_SOURCES := $(ROOT)/antfarm/actors/package.d $(ROOT)/antfarm/actors/actor.d
 FIBER_SOURCES := $(wildcard $(ROOT)/ant_fibers/source/ant_fibers/*.d)
 THREADPOOL_SOURCES := $(wildcard $(ROOT)/threadpool/source/threadpool/*.d) \
 	$(wildcard $(ROOT)/threadpool/source/threadpool/sys/*.d)
-FARMHOST_SOURCES := $(ROOT)/farmhost/source/farmhost/package.d
 MIMALLOC_LIBRARY := $(ROOT)/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a
 MIMALLOC_VERSION ?= -d-version=AntfarmMimallocV3
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
@@ -18,15 +17,15 @@ MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
 all: throughput dual tail actor_ready actor_churn scaling offccd c2c
 
-actor_churn: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOOL_SOURCES) $(FARMHOST_SOURCES)
-	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/farmhost/source \
+actor_churn: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOOL_SOURCES)
+	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source \
 		actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) -of=$@
 
 $(MIMALLOC_LIBRARY): $(ROOT)/third_party/mimalloc/CMakeLists.txt
 	$(MAKE) -C $(ROOT)/tests/actors .build/mimalloc-v3.5.3/libmimalloc.a
 
-actor_churn_mimalloc: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOOL_SOURCES) $(FARMHOST_SOURCES) $(MIMALLOC_LIBRARY)
-	$(DC) $(DFLAGS) $(MIMALLOC_VERSION) -i -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/farmhost/source actor_churn.d \
+actor_churn_mimalloc: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOOL_SOURCES) $(MIMALLOC_LIBRARY)
+	$(DC) $(DFLAGS) $(MIMALLOC_VERSION) -i -I$(ROOT) -I$(ROOT)/threadpool/source actor_churn.d \
 		$(FARM_SOURCES) $(ACTOR_SOURCES) $(MIMALLOC_LIBRARY) \
 		$(MIMALLOC_SYSTEM_LIBS) -of=$@
 

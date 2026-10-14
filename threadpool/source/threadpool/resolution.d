@@ -359,7 +359,7 @@ final class PoolResolution
     /// workers: every other accepted CPU becomes `Reject.notSelected`.
     /// Workers keep snapshot (start) order and are renumbered. Ids in
     /// `chosen` that this resolution did not accept are ignored.
-    PoolResolution narrowedTo(const(ProcessorId)[] chosen) const
+    package PoolResolution narrowedTo(const(ProcessorId)[] chosen) const
     {
         auto c = cpus.dup;
         ProcessorId[] kept;

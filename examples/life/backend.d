@@ -2,7 +2,7 @@ module life.backend;
 
 import antfarm;
 import antfarm.actors;
-import farmhost : FarmHost;
+import threadpool.host : FarmHost;
 import core.time : MonoTime;
 import std.exception : enforce;
 import std.random : Random, uniform;

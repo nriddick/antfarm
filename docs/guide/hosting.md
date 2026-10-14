@@ -1,6 +1,6 @@
 # Run actors on a FarmHost
 
-`FarmHost` (`import farmhost;`) owns what every actor program needs
+`FarmHost` (`import threadpool.host;`) owns what every actor program needs
 around its actors:
 - one Farm sized for its participants;
 - the calling thread's producer `Token`;
@@ -10,14 +10,14 @@ around its actors:
 - the documented shutdown order.
 
 A `std.concurrency` port needs three lines of setup and a teardown guard.
-It is the [farmhost](../../farmhost/README.md) package, which depends on
-`antfarm` and `threadpool`; `import threadpool;` does not provide it.
+The module lives in the threadpool package, which depends on `antfarm`.
+`import threadpool;` does not re-export it.
 
 ## Setup
 
 ```d
 import antfarm.actors;
-import farmhost;
+import threadpool.host;
 import std.stdio : writeln;
 
 struct Counter { long total; }
@@ -49,7 +49,7 @@ void main()
 }
 ```
 
-Build it with `-Ithreadpool/source -Ifarmhost/source` beside `-I.`, as every program in
+Build it with `-Ithreadpool/source` beside `-I.`, as every program in
 [examples/](../../examples/README.md) does.
 
 | std.concurrency | FarmHost |

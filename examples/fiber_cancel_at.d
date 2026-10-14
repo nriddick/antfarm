@@ -11,7 +11,7 @@ import antfarm;
 import antfarm.actors;
 import ant_fibers;
 import ant_fibers.host : attachFiberDomain;
-import farmhost;
+import threadpool.host;
 import core.time : MonoTime, msecs, seconds;
 import std.conv : to;
 import std.stdio : writeln;

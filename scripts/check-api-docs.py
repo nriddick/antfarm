@@ -41,7 +41,7 @@ COVERAGE_MODULES = [
     "antfarm/actors/actor.d",
     "antfarm/actors/wave.d",
     "antfarm/actors/private_actor.d",
-    "farmhost/source/farmhost/package.d",
+    "threadpool/source/threadpool/host.d",
 ]
 
 # Everything compiled for the inventory; the index may name symbols here.
@@ -69,8 +69,7 @@ def compile_inventory(scratch):
             "install DMD to run the API doc check")
     arguments = ["-c", "-o-", "-D", "-Dd.", "-X", "-Xf=api.json",
                  "-version=AntfarmMimallocV3", "-I" + str(ROOT),
-                 "-I" + str(ROOT / "threadpool/source"),
-                 "-I" + str(ROOT / "farmhost/source")]
+                 "-I" + str(ROOT / "threadpool/source")]
     arguments += [str(ROOT / m) for m in INDEX_MODULES]
     try:
         result = subprocess.run(["dmd"] + arguments, cwd=scratch,

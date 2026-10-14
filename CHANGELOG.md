@@ -19,20 +19,17 @@ the migration table below.
   collide with the source directory.
 - The Fiber package has one name, `ant_fibers`: dub subpackage, directory and
   module root. Its diagnostics start with `ant_fibers:`.
-- `FarmHost` is its own subpackage, `farmhost`, which depends on `antfarm` and
-  `threadpool`. `threadpool` no longer depends on `antfarm`. `ant_fibers`
-  depends on `farmhost` for `ant_fibers.host`. `CacheAwarePool.start(PoolResolution)`
-  and `PoolResolution.narrowedTo`, which `FarmHost` uses, are now public.
+- `FarmHost` stays in the threadpool package as `threadpool.host`, and
+  `threadpool` still depends on `antfarm`.
 - Every test suite lives under `tests/` (`farm`, `actors`, `private`,
-  `threadpool`, `farmhost`, `ant_fibers`). The package dub configurations
+  `threadpool`, `ant_fibers`). The package dub configurations
   reference `../tests/<package>/`, so `dub test :<package>` and
   `dub run :<package> -c <config>` work as before.
 - Performance tools live under `tools/perf/`, including the Fiber benchmarks
   in `tools/perf/ant_fibers/` (still `dub run :ant_fibers -c benchmark*`).
   `tools/grant_lock_pages.d` is the Windows privilege helper.
 - Design notes live under `docs/design/`; the Fiber performance notes are a
-  section of [PERFORMANCE.md](PERFORMANCE.md#fibers). `farmhost` has its own
-  [README](farmhost/README.md).
+  section of [PERFORMANCE.md](PERFORMANCE.md#fibers).
 - `make docs` keeps source paths; start at `.build/docs/antfarm/package.html`.
 
 ### Migration table
@@ -50,12 +47,7 @@ the migration table below.
 | `fibers/`, `-Ifibers/source` | `ant_fibers/`, `-Iant_fibers/source` |
 | `import antfarm_fibers;`, `antfarm_fibers.*` | `import ant_fibers;`, `ant_fibers.*` |
 | Fiber diagnostic prefix `antfarm_fibers:` | `ant_fibers:` |
-| `import threadpool.host;` | `import farmhost;` |
-| `FarmHost` via the `antfarm:threadpool` dub package | dub `antfarm:farmhost`; without dub add `-Ifarmhost/source` |
-| `threadpool` depends on `antfarm` | `threadpool` stands alone; `farmhost` depends on both |
-| `package(threadpool)` `CacheAwarePool.start(PoolResolution)`, `package` `PoolResolution.narrowedTo` | public |
-| `dub run :threadpool -c host-test`, `-c wakefail` | `dub run :farmhost -c host-test`, `-c wakefail` |
-| FarmHost placement tests in `dub test :threadpool` | `dub test :farmhost` |
+| `import threadpool.host;` (`FarmHost`) | unchanged: `threadpool.host` |
 | `review_torture/` and `antfarm_test.d` | `tests/farm/` |
 | `make farm-tsan`, `make run-farm-tsan`, `make check-farm-ordering` | `make -C tests/farm farm-tsan`, `run-farm-tsan`, `check-farm-ordering` |
 | `actor_torture/`, binaries `actor_torture*` | `tests/actors/`, binaries `actors_torture*` |
@@ -63,7 +55,6 @@ the migration table below.
 | `actor_torture/run-mimalloc-windows.ps1` | `tests/actors/run-mimalloc-windows.ps1` |
 | `private_actor_tests/`, binaries `private_actor_tests*` | `tests/private/`, binaries `private_tests*` |
 | `threadpool/tests/` | `tests/threadpool/` |
-| `threadpool/tests/host_live.d`, `host_plan.d`, `wakefail.d` | `tests/farmhost/` (module `farmhost.tests.host_plan`) |
 | `fibers/tests/` | `tests/ant_fibers/` |
 | `perftest/`, `make -C perftest` | `tools/perf/`, `make -C tools/perf` |
 | `fibers/benchmarks/` | `tools/perf/ant_fibers/` |
@@ -73,7 +64,6 @@ the migration table below.
 | `fibers/DESIGN.md` | `docs/design/ant_fibers.md` |
 | `fibers/PERFORMANCE.md` | the Fibers section of `PERFORMANCE.md` |
 | `make docs` entry `.build/docs/antfarm.html` | `.build/docs/antfarm/package.html` |
-| `check-windows.py`: `host-test` in the `threadpool` lane | new `farmhost` lane |
 | CHANGELOG sections 1.8.0 and earlier | `docs/releases/1.8.md`, `docs/releases/1.7-and-earlier.md` |
 
 ## 1.8.1

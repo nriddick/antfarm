@@ -84,7 +84,7 @@ The compiled form of this path is
 [../../examples/public_service.d](../../examples/public_service.d):
 
 ```text
-dmd -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/public_service.d -of=/tmp/public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
 ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
 ```
 

@@ -153,7 +153,7 @@ def main():
             else:source=(scratch/'tools/perf/actor_churn.d').read_text()
             available[label]=set(re.findall(r'args\[1\] == "([a-z-]+)"',source))
             binary=a.output/(label+'-churn');binaries[label]=binary
-            cmd=['ldc2','-'+a.optimization,'-release','-d-version=AntfarmMimallocV3','-i','-I.','-Ithreadpool/source','-Ifarmhost/source','tools/perf/actor_churn.d','antfarm/package.d','antfarm/allocation.d','antfarm/actors/package.d','antfarm/actors/actor.d','antfarm/actors/wave.d','antfarm/actors/private_actor.d','antfarm/actors/mimalloc.d',str(a.archive),'-L-lpthread','-L-lrt','-L-latomic','-of='+str(binary)]
+            cmd=['ldc2','-'+a.optimization,'-release','-d-version=AntfarmMimallocV3','-i','-I.','-Ithreadpool/source','tools/perf/actor_churn.d','antfarm/package.d','antfarm/allocation.d','antfarm/actors/package.d','antfarm/actors/actor.d','antfarm/actors/wave.d','antfarm/actors/private_actor.d','antfarm/actors/mimalloc.d',str(a.archive),'-L-lpthread','-L-lrt','-L-latomic','-of='+str(binary)]
             with (a.output/(label+'-build.log')).open('w') as log:subprocess.run(cmd,cwd=scratch,stdout=log,stderr=log,check=True)
             meta['builds'][label]=dict(revision=revision,command=cmd,sha256=sha(binary),benchmark_sha256=hashlib.sha256(source.encode()).hexdigest(),modes=sorted(available[label]))
             try:meta['builds'][label]['elf_header']=command(['readelf','-h',str(binary)])

@@ -32,8 +32,8 @@ lane matrix, prerequisites, focused entry points, and optional lanes are in
 [docs/development/testing.md](docs/development/testing.md).
 
 For a portable local iteration check, run `make check-quick`. It runs the root
-unit tests, plain review-torture suite, threadpool and FarmHost unit tests, fiber
-smoke suite, and LDC debug/release examples. It needs the LDC toolchain (including Dub), Python
+unit tests, plain review-torture suite, threadpool unit tests, fiber smoke suite,
+and LDC debug/release examples. It needs the LDC toolchain (including Dub), Python
 3, GNU make and Bash; it uses neither DMD nor TSan. `make check` retains the full
 matrix and remains the correctness gate.
 

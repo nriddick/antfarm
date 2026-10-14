@@ -6,6 +6,7 @@ targetType "library"
 targetPath "bin"
 sourcePaths "source"
 importPaths "source"
+dependency "antfarm" path=".."
 
 toolchainRequirements {
 	dmd ">=2.112.0"
@@ -21,7 +22,7 @@ configuration "unittest" {
 	targetType "executable"
 	mainSourceFile "../tests/threadpool/unittest_main.d"
 	sourceFiles "../tests/threadpool/topology_parse.d" "../tests/threadpool/linux_topology_parse.d" "../tests/threadpool/resolution.d" \
-		"../tests/threadpool/synthetic_topology.d"
+		"../tests/threadpool/synthetic_topology.d" "../tests/threadpool/host_plan.d"
 	stringImportPaths "../tests/threadpool"
 }
 
@@ -53,6 +54,22 @@ configuration "scope-test" {
 configuration "confine-test" {
     targetType "executable"
     mainSourceFile "../tests/threadpool/confine_live.d"
+}
+
+// Live FarmHost regression: `dub run -c host-test`. Needs two accepted
+// worker CPUs in one LLC (one per core by default), or three for a free
+// caller CPU. Prints SKIP and exits 0 otherwise; check.sh treats that SKIP
+// as a failure unless ALLOW_HOST_SKIP=1.
+configuration "host-test" {
+    targetType "executable"
+    mainSourceFile "../tests/threadpool/host_live.d"
+    versions "FarmHostTestHooks"
+}
+
+// wake() racing a worker-failure shutdown: `dub run -c wakefail`.
+configuration "wakefail" {
+    targetType "executable"
+    mainSourceFile "../tests/threadpool/wakefail.d"
 }
 
 // Live hardware binary: `dub run -c live-test` (not `dub test`).

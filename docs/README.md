@@ -18,7 +18,7 @@ with its owning page; leave the path as soon as the layer fits your workload.
    Leave here for short `@nogc` fan-out.
 3. **Host plumbing (10 min).** Run [public_service.d](../examples/public_service.d)
    with `2` workers using the [quickstart](guide/quickstart.md#run-the-public-service),
-   then read [FarmHost setup](guide/hosting.md#setup). Import `farmhost`.
+   then read [FarmHost setup](guide/hosting.md#setup). Import `threadpool.host`.
 4. **Pick a representation (15 min).** Use the table in
    [choosing-work.md](guide/choosing-work.md) to choose the next program.
 5. **Use that layer.** Public identities: [public_service.d](../examples/public_service.d)
@@ -101,8 +101,8 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | Farm ordering audit and real-atomic TSan lanes | [design/farm-ordering.md](design/farm-ordering.md) |
 | Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |
 | Fiber scheduler model and invariants | [design/ant_fibers.md](design/ant_fibers.md) |
-| Test suites (`tests/farm`, `tests/actors`, `tests/private`, `tests/threadpool`, `tests/farmhost`, `tests/ant_fibers`) | each suite's README and [development/testing.md](development/testing.md) |
+| Test suites (`tests/farm`, `tests/actors`, `tests/private`, `tests/threadpool`, `tests/ant_fibers`) | each suite's README and [development/testing.md](development/testing.md) |
 | Benchmark harness and optimization gate | [tools/perf/README.md](../tools/perf/README.md) |
 | What changed in each candidate and its compatibility notes | [CHANGELOG.md](../CHANGELOG.md) (current and latest release), [releases/](releases/) (older) |
 | Remaining and deferred work | [ROADMAP.md](../ROADMAP.md) |
-| Threadpool, FarmHost and Fibers package entries | [threadpool/README.md](../threadpool/README.md), [farmhost/README.md](../farmhost/README.md), [ant_fibers/README.md](../ant_fibers/README.md) |
+| Threadpool (with FarmHost) and Fibers package entries | [threadpool/README.md](../threadpool/README.md), [ant_fibers/README.md](../ant_fibers/README.md) |

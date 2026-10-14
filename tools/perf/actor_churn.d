@@ -16,7 +16,7 @@ import std.array : split;
 import std.exception : enforce;
 import std.math : isFinite;
 import std.stdio : writefln;
-import farmhost : CallerPlacement, FarmHost, FarmHostOptions, WorkerIdle;
+import threadpool.host : CallerPlacement, FarmHost, FarmHostOptions, WorkerIdle;
 import threadpool.pin : PinOutcome, pinProcessor;
 import threadpool.pool : PoolOptions;
 import threadpool.topology : ProcessorId, parseCpuList;

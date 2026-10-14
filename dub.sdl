@@ -15,7 +15,6 @@ toolchainRequirements {
 }
 
 subPackage "threadpool"
-subPackage "farmhost"
 subPackage "ant_fibers"
 
 configuration "library" {

@@ -16,7 +16,7 @@ which runs DMD's Ddoc generator into the ignored `.build/docs/` directory
 Windows included, with the raw command:
 
 ```sh
-dmd -D -Dd.build\docs -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool\source -Ifarmhost\source antfarm\package.d antfarm\templates.d antfarm\actors\package.d antfarm\actors\actor.d antfarm\actors\wave.d antfarm\actors\private_actor.d antfarm\actors\mimalloc.d farmhost\source\farmhost\package.d
+dmd -D -Dd.build\docs -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool\source antfarm\package.d antfarm\templates.d antfarm\actors\package.d antfarm\actors\actor.d antfarm\actors\wave.d antfarm\actors\private_actor.d antfarm\actors\mimalloc.d threadpool\source\threadpool\host.d
 ```
 
 Ddoc omits declarations that carry no doc comment, so the generated pages
@@ -25,7 +25,7 @@ verifies that: every symbol named in the Symbol column of the table on this
 page exists in the DMD declaration inventory, and every public declaration
 in those modules carries a non-empty Ddoc comment. The public surface is
 reached with `import antfarm;`, `import antfarm.templates;`,
-`import antfarm.actors;`, or `import farmhost;`.
+`import antfarm.actors;`, or `import threadpool.host;`.
 
 ## Actor package imports
 

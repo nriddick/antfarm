@@ -12,11 +12,11 @@ Supported targets are Windows x64 (Windows 10 1803+) and Linux x86-64 with DMD
 2.112+ or LDC 1.42+.
 
 To run actors on pinned workers without writing the hooks yourself, use
-`FarmHost` from the separate [farmhost](../farmhost/README.md) package
-(`import farmhost;`). It owns one Farm, the caller's token and the workers,
+`FarmHost` in `threadpool.host` (`import threadpool.host;`; not re-exported by
+`import threadpool;`). It owns one Farm, the caller's token and the workers,
 places them on one LLC, and tears down in order; see
-[../docs/guide/hosting.md](../docs/guide/hosting.md). The threadpool package
-itself does not depend on Ant Farm.
+[../docs/guide/hosting.md](../docs/guide/hosting.md). Because of it, the
+threadpool dub package depends on the `antfarm` package.
 
 ## See this machine
 
@@ -251,7 +251,17 @@ dub run -c affinity-test --compiler=dmd
 dub run -c affinity-test --compiler=ldc2
 dub run -c scope-test --compiler=ldc2
 dub run -c confine-test --compiler=ldc2
+dub run -c host-test --compiler=ldc2
+dub run -c wakefail --compiler=ldc2
 ```
+
+`dub test` includes the pure FarmHost placement tests on synthetic snapshots,
+on any host. `host-test` is the live FarmHost regression: it needs two accepted
+worker CPUs in one LLC (one per core by default), or three for a free caller
+CPU, and prints SKIP and exits 0 otherwise; `make check` treats that SKIP as a
+failure unless `ALLOW_HOST_SKIP=1`. `wakefail` races `wake()` against a
+worker-failure shutdown. The test sources live in
+[../tests/threadpool/](../tests/threadpool/).
 
 The Linux `scope-test` re-executes itself under `taskset -c` (one physical
 group's CPUs on a multi-LLC host, otherwise half the CPUs) and checks the

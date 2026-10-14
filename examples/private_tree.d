@@ -7,7 +7,7 @@ module private_tree;
 
 import antfarm;
 import antfarm.actors;
-import farmhost;
+import threadpool.host;
 import core.atomic : MemoryOrder, atomicLoad;
 import core.lifetime : move;
 import core.stdc.stdlib : malloc;

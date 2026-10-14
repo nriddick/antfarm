@@ -9,7 +9,7 @@ import core.atomic : atomicLoad, atomicStore;
 import core.time : MonoTime, msecs, seconds;
 import std.algorithm.searching : canFind;
 import std.stdio : writeln;
-import farmhost;
+import threadpool.host;
 
 void hostAttachSmoke()
 {

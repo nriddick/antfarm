@@ -176,7 +176,7 @@ consumer may still be inside the actor trampoline after reclaim or `live == 0`,
 so join workers and unsubscribe every view before destroying a runtime or park.
 Unregistering an already-quiescent producer and unsubscribing an already-
 quiescent consumer may happen in either order, but both must finish before the
-Farm is destroyed. `FarmHost.close()` (`farmhost`), which the examples
+Farm is destroyed. `FarmHost.close()` (`threadpool.host`), which the examples
 use, performs this order: it stops consumers, destroys the runtimes and parks,
 unregisters, then destroys the Farm.
 

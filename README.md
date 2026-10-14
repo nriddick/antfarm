@@ -17,7 +17,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release and compatibility notes.
 You need DMD 2.112+ or LDC 1.42+. From a clone, run this public actor service:
 
 ```text
-dmd -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/public_service.d -of=/tmp/public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
 ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
 ```
 
@@ -41,8 +41,8 @@ second program.
 `consumeNext()` is no completion signal: count your own completions. Contract
 violations abort the process through `fatal()`; `canFit` and the `SUBSCRIBE_*`
 codes provide recoverable checks on the core Farm path. The threadpool
-`Director` supplies waiting. `FarmHost` is the separate `farmhost` package
-(`import farmhost;`), not part of `import threadpool;`.
+`Director` supplies waiting. `FarmHost` needs `import threadpool.host;`;
+`import threadpool;` does not re-export it.
 
 ## Choosing the work representation
 
@@ -63,10 +63,9 @@ A public endpoint may front a private tree; their lifetimes drain separately.
 - [Documentation map](docs/README.md): the seven-step path from First payload
   to workers, representation choice, sizing, and local checks.
 - [Examples](examples/README.md): complete actor programs and Windows commands;
-  [threadpool](threadpool/README.md), [farmhost](farmhost/README.md),
-  [actors](antfarm/actors/README.md), and [Fibers](ant_fibers/README.md) are the
-  package entries. The Fiber Dub package is
-  `ant_fibers` (`dub test :ant_fibers`).
+  [threadpool](threadpool/README.md), [actors](antfarm/actors/README.md), and
+  [Fibers](ant_fibers/README.md) are the package entries. The Fiber Dub package
+  is `ant_fibers` (`dub test :ant_fibers`).
 - [Using Ant Farm well](docs/guide/using-it-well.md): correctness and tuning rules,
   linked to their owning pages.
 - [CONTRIBUTING.md](CONTRIBUTING.md): start with `make check-quick`; the full local

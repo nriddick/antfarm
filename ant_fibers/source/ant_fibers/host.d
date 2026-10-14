@@ -10,7 +10,7 @@ module ant_fibers.host;
 
 import antfarm : Token;
 import ant_fibers.scheduler : FiberDomain;
-import farmhost : FarmHost, HostAttachment;
+import threadpool.host : FarmHost, HostAttachment;
 
 /// Drive `domain` from every `host.step()`: `pollTimers`,
 /// `pollGenerationTriggers`, then `flush(host.token)`. `close()` refuses
