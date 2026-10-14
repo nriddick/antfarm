@@ -15,7 +15,7 @@
 module c2c;
 
 import placement;
-import threadpool.os_scope : liveOsMask;
+import threadpool.pin : liveOsMask;
 import threadpool.topology : CpuListException, ProcessorId, TopologySnapshot, discover,
     parseCpuList;
 

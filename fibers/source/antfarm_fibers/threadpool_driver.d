@@ -1115,7 +1115,6 @@ version (unittest)
     // Group 0 has one accepted CPU; every other group's one CPU is excluded.
     private PoolResolution fixtureResolution(ushort groups)
     {
-        import threadpool.os_scope : OsScope;
         import threadpool.topology : GroupingSource, LogicalProcessor,
             TopologySnapshot, assembleSnapshot;
 
@@ -1130,8 +1129,7 @@ version (unittest)
         auto snapshot = new TopologySnapshot;
         *snapshot = assembleSnapshot("synthetic", processors, null, null,
             groups, 64, new GroupingSource[groups]);
-        OsScope unrestricted;
-        return resolvePool(*snapshot, unrestricted, PoolOptions.init);
+        return resolvePool(*snapshot, PoolOptions.init);
     }
 
     unittest

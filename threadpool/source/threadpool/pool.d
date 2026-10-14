@@ -7,7 +7,6 @@ import core.time : Duration, MonoTime, msecs;
 import std.exception : enforce;
 
 import threadpool.hybrid;
-import threadpool.os_scope : OsScope, osScope;
 import threadpool.pin : PinOutcome;
 import threadpool.resolution;
 import threadpool.stats;
@@ -372,8 +371,7 @@ final class CacheAwarePool
     PoolResolution resolve() const
     {
         auto snap = discover();
-        auto scope_ = osScope();
-        return resolvePool(snap, scope_, options);
+        return resolvePool(snap, options);
     }
 
     /// After `start`: the resolution including each worker's `StartState` and
@@ -667,8 +665,7 @@ private:
 version (unittest)
 private PoolResolution resolveTest(ref const TopologySnapshot snap, PoolOptions opt)
 {
-    OsScope unrestricted;
-    return resolvePool(snap, unrestricted, opt);
+    return resolvePool(snap, opt);
 }
 
 unittest

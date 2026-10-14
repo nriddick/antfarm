@@ -2148,8 +2148,7 @@ PoolResolution twoGroupResolution(string test)
     import threadpool;
 
     auto snapshot = discover();
-    auto scope_ = osScope();
-    auto full = resolvePool(snapshot, scope_, PoolOptions.init);
+    auto full = resolvePool(snapshot, PoolOptions.init);
     if (full.acceptedGroupCount >= 2) return full;
     printf("SKIP %s (needs 2 LLCs)\n", test.toStringz);
     return null;

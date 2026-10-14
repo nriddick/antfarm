@@ -4,13 +4,13 @@ module threadpool.resolution;
  * Pool resolution: which known CPU becomes a worker, and why every other CPU,
  * request and physical group does not.
  *
- * `resolvePool` is a pure function of (frozen snapshot, OS scope, options), so
- * `CacheAwarePool.resolve()` previews exactly what `start()` will use.
+ * `resolvePool` is a pure function of (frozen snapshot, options), so
+ * `CacheAwarePool.resolve()` previews exactly what `start()` will use. The OS
+ * scope comes from the snapshot (`osScopeSource`, `osScopeAllowed`).
  */
 
 import std.algorithm.iteration : filter;
 
-import threadpool.os_scope : OsScope, OsScopeSource;
 import threadpool.pin : PinOutcome;
 import threadpool.pool : PoolOptions;
 import threadpool.topology;
@@ -86,8 +86,9 @@ struct GroupDisposition
 /// A selection report. Immutable after construction; safe to share.
 final class PoolResolution
 {
-    const(TopologySnapshot)* topology;     /// the snapshot resolved against
-    OsScope osScope;                       /// the scope resolved against
+    /// The snapshot resolved against; its `osScopeSource` and
+    /// `osScopeAllowed` are the OS scope used.
+    const(TopologySnapshot)* topology;
     const(CpuDisposition)[]     cpus;      /// snapshot order: every known CPU
     const(RequestDisposition)[] requests;  /// request order: every requested id
     const(GroupDisposition)[]   groups;    /// index == llcIndex: every physical group
@@ -96,12 +97,11 @@ final class PoolResolution
     private const(ProcessorId)[][] workersByGroup;
     private bool startComplete;
 
-    private this(const(TopologySnapshot)* topology, OsScope osScope,
+    private this(const(TopologySnapshot)* topology,
         const(CpuDisposition)[] cpus, const(RequestDisposition)[] requests,
         const(ProcessorId)[] workers, bool startComplete)
     {
         this.topology = topology;
-        this.osScope = osScope;
         this.cpus = cpus;
         this.requests = requests;
         this.workers = workers;
@@ -250,8 +250,7 @@ final class PoolResolution
             if (!(c.reasons & (Reject.osExcluded | Reject.offline)))
                 eligible++;
         formattedWrite(w, "threadpool resolution: os scope %s {%s}; %s known, %s eligible, %s accepted\n",
-            osScope.source, osScope.source == OsScopeSource.unrestricted
-                ? "all" : formatCpuList(osScope.allowed),
+            topology.osScopeSource, scopeText(),
             cpus.length, eligible, workers.length);
         formattedWrite(w, "  physical groups %s (source %s), accepted groups %s, workers %s%s\n",
             physicalGroupCount, topology.groupingSource, acceptedGroupCount,
@@ -315,8 +314,7 @@ final class PoolResolution
             else if (r.unknown) unknown++;
         }
         auto s = format("os scope %s {%s}; %s known, %s eligible, %s accepted; groups %s physical, %s accepted",
-            osScope.source, osScope.source == OsScopeSource.unrestricted
-                ? "all" : formatCpuList(osScope.allowed),
+            topology.osScopeSource, scopeText(),
             cpus.length, eligible, workers.length, physicalGroupCount, acceptedGroupCount);
         if (requests.length)
             s ~= format("; %s requested (%s unknown, %s duplicate)", requests.length, unknown, duplicate);
@@ -343,7 +341,7 @@ final class PoolResolution
             d.start = o == PinOutcome.pinned ? StartState.pinned : StartState.pinFailed;
             if (o != PinOutcome.pinned) all = false;
         }
-        return new PoolResolution(topology, osScope, c, requests, workers, all);
+        return new PoolResolution(topology, c, requests, workers, all);
     }
 
     /// `"id (outcome)"` for every worker whose pin failed.
@@ -354,6 +352,12 @@ final class PoolResolution
             if (c.start == StartState.pinFailed)
                 r ~= (r.length ? ", " : "") ~ idText(c.id) ~ " (" ~ pinText(c.pin) ~ ")";
         return r;
+    }
+
+    private string scopeText() const
+    {
+        return topology.osScopeSource == OsScopeSource.unrestricted
+            ? "all" : formatCpuList(topology.osScopeAllowed);
     }
 
     private const(CpuDisposition)* findCpu(ProcessorId id) const @nogc nothrow
@@ -386,11 +390,10 @@ class ResolutionException : Exception
     }
 }
 
-/// Resolve `options` against `snap` and `scope_`. Pure: no OS calls. A CPU is
-/// OS-excluded when the snapshot marks it `affinityExcluded` or a restricted
-/// `scope_` does not list it.
-PoolResolution resolvePool(ref const TopologySnapshot snap, ref const OsScope scope_,
-                           in PoolOptions options)
+/// Resolve `options` against `snap`. Pure: no OS calls. A CPU is OS-excluded
+/// when the snapshot marks it `affinityExcluded` or is outside its OS scope
+/// (`snap.inOsScope`), so a hand-built snapshot may set either.
+PoolResolution resolvePool(ref const TopologySnapshot snap, in PoolOptions options)
 {
     auto cpus = new CpuDisposition[](snap.processors.length);
     ProcessorId[] workers;
@@ -408,7 +411,7 @@ PoolResolution resolvePool(ref const TopologySnapshot snap, ref const OsScope sc
         d.osParked = p.parkedAtDiscovery;
 
         Reject r;
-        if (p.affinityExcluded || !inScope(scope_, id))
+        if (p.affinityExcluded || !snap.inOsScope(id))
             r |= Reject.osExcluded;
         if (p.offlineAtDiscovery)
             r |= Reject.offline;
@@ -447,7 +450,7 @@ PoolResolution resolvePool(ref const TopologySnapshot snap, ref const OsScope sc
             }
     }
 
-    return new PoolResolution([snap].ptr, scope_, cpus, requests, workers, false);
+    return new PoolResolution([snap].ptr, cpus, requests, workers, false);
 }
 
 /// `"osExcluded,smtSecondary"`, or `"-"` for none.
@@ -471,12 +474,6 @@ private string idText(T)(T v)
 {
     import std.format : format;
     return format("%s", v);
-}
-
-private bool inScope(ref const OsScope s, ProcessorId id) @nogc nothrow pure
-{
-    if (s.source == OsScopeSource.unrestricted) return true;
-    return contains(s.allowed, id);
 }
 
 private bool contains(const(ProcessorId)[] ids, ProcessorId id) @nogc nothrow pure

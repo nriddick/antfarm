@@ -151,7 +151,6 @@ private void putPackageRecord(ref ubyte[] b, ulong mask, ushort group)
 /// No discovery, pinning, or worker startup is performed by these checks.
 void checkFullProcessorGroups()
 {
-    import threadpool.os_scope : OsScope;
     import threadpool.pool : PoolOptions;
     import threadpool.resolution : resolvePool, Reject;
 
@@ -195,11 +194,10 @@ void checkFullProcessorGroups()
         assert(snap.byId(ids[$ - 1]).smtSibling);
     }
     PoolOptions opt;
-    OsScope unrestricted;
-    auto res = resolvePool(snap, unrestricted, opt);
+    auto res = resolvePool(snap, opt);
     assert(res.workers.length == 128 && res.acceptedGroupCount == 2);
     opt.skipSmtSiblings = true;
-    res = resolvePool(snap, unrestricted, opt);
+    res = resolvePool(snap, opt);
     assert(res.workers.length == 64);
     assert(res[ProcessorId(1, 63)].reasons == Reject.smtSecondary);
 
@@ -210,7 +208,7 @@ void checkFullProcessorGroups()
     assert(restricted.eligibleProcessorsInLlc(1) == [ProcessorId(1, 0), ProcessorId(1, 63)]);
     opt = PoolOptions.init;
     opt.processors = parseCpuList("0:63,1:63,1:63,0:0,2:0");
-    res = resolvePool(restricted, unrestricted, opt);
+    res = resolvePool(restricted, opt);
     assert(res.workers == [ProcessorId(0, 63), ProcessorId(1, 63)]);
     assert(res.requests[2].duplicate && res.requests[2].accepted);
     assert(res[ProcessorId(0, 0)].reasons == Reject.osExcluded);

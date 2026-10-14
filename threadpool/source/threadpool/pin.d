@@ -1,6 +1,6 @@
 module threadpool.pin;
 
-import threadpool.os_scope : ensureOsScopeCaptured, inOsScope;
+import threadpool.os_scope : ensureOsScopeCaptured, inFrozenScope, liveMaskIds;
 import threadpool.topology : LogicalProcessor, ProcessorId, cachedSnapshot, discover;
 
 version (Windows)
@@ -24,7 +24,7 @@ enum PinOutcome : ubyte
 PinOutcome pinProcessor(ref const LogicalProcessor p) @nogc nothrow
 {
     ensureOsScopeCaptured();
-    if (!inOsScope(ProcessorId.of(p)))
+    if (!inFrozenScope(ProcessorId.of(p)))
         return PinOutcome.outsideOsScope;
     version (ThreadpoolOs)
         return pinOs(p) ? PinOutcome.pinned : PinOutcome.osRejected;
@@ -99,13 +99,22 @@ PinOutcome confineCallingThread(const(ProcessorId)[] cpus, out ThreadAffinity pr
     {
         if (snap.byId(id) is null)
             return PinOutcome.unknownProcessor;
-        if (!inOsScope(id))
+        if (!inFrozenScope(id))
             return PinOutcome.outsideOsScope;
     }
     version (ThreadpoolOs)
         return confineOs(cpus, previous) ? PinOutcome.pinned : PinOutcome.osRejected;
     else
         return PinOutcome.osRejected;
+}
+
+/// Diagnostics only: what the OS reports right now (Linux: the calling
+/// thread's mask; Windows: the process mask). Never feeds eligibility, which
+/// uses the scope frozen in the snapshot. Empty when the query fails or the
+/// process spans several Windows groups.
+ProcessorId[] liveOsMask()
+{
+    return liveMaskIds();
 }
 
 /// Restore an affinity captured by `confineCallingThread` on this thread.

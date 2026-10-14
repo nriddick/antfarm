@@ -259,7 +259,6 @@ version (unittest)
 {
     import threadpool.pool : PoolOptions;
     import threadpool.resolution : resolvePool;
-    import threadpool.os_scope : OsScope;
     import threadpool.topology;
 
     /// Two physical groups of two CPUs each; `excludeGroup1` puts group 1
@@ -279,8 +278,7 @@ version (unittest)
         }
         auto snap = assembleSnapshot("synthetic", procs, null, null, 2, 64,
             [GroupingSource.l3, GroupingSource.l3]);
-        OsScope unrestricted;
-        return resolvePool(snap, unrestricted, PoolOptions.init);
+        return resolvePool(snap, PoolOptions.init);
     }
 }
 
@@ -432,8 +430,7 @@ unittest
     }
     auto snap = assembleSnapshot("synthetic", procs, null, null, 2, 64,
         [GroupingSource.l3, GroupingSource.l3]);
-    OsScope unrestricted;
-    auto plan = resolvePool(snap, unrestricted, PoolOptions.init);
+    auto plan = resolvePool(snap, PoolOptions.init);
     install(makeBins!Bin(plan, (ref const GroupDisposition g) =>
         g.isAccepted ? new Bin(g.llcIndex) : null), plan);
     scope (exit) uninstall!Bin();

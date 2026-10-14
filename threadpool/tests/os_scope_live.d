@@ -71,12 +71,8 @@ int child(ProcessorId[] expected)
     import core.sys.linux.sched : CPU_ALLOC, CPU_ALLOC_SIZE, CPU_FREE, cpu_mask,
         sched_setaffinity;
 
-    // 1. The launch mask was captured before main.
-    auto scope_ = osScope();
-    assert(scope_.source == OsScopeSource.processLaunch);
-    assert(scope_.allowed == expected, "frozen scope differs from the taskset set");
-
-    // 2. Narrow main before discovery: the scope must not follow it.
+    // 1-2. The launch mask was captured before main: narrow main before
+    // discovery, and the snapshot's scope must not follow it.
     assert(cachedSnapshotIsNull(), "discovery ran before the first-caller check");
     {
         auto lp = expected[0].lp;
@@ -91,12 +87,16 @@ int child(ProcessorId[] expected)
     }
     assert(liveOsMask() == [expected[0]], "liveOsMask must report main's narrowed mask");
     auto snap = discover();
+    assert(snap.osScopeSource == OsScopeSource.processLaunch);
+    assert(snap.osScopeAllowed == expected, "frozen scope differs from the taskset set");
     ProcessorId[] eligible;
     foreach (ref p; snap.processors)
+    {
+        assert(p.affinityExcluded == !snap.inOsScope(ProcessorId.of(p)));
         if (snap.isEligible(p))
             eligible ~= ProcessorId.of(p);
+    }
     assert(eligible == expected, "discovery followed the first caller's mask");
-    assert(osScope().allowed == expected);
 
     bool late;
     try

@@ -7,7 +7,6 @@ import std.array : array;
 
 import threadpool.host;
 import threadpool.hybrid : WorkerSelf;
-import threadpool.os_scope : OsScope, OsScopeSource;
 import threadpool.pool : PoolOptions;
 import threadpool.resolution : Reject;
 import threadpool.topology;
@@ -15,16 +14,14 @@ import synthetic_topology;
 
 private FarmHostPlan planOf(ref const TopologySnapshot snap, FarmHostOptions options)
 {
-    OsScope unrestricted;
-    return FarmHost.preview(snap, unrestricted, options);
+    return FarmHost.preview(snap, options);
 }
 
 /// The plan exception's problems, or null when planning succeeded.
-private const(string)[] problemsOf(ref const TopologySnapshot snap, FarmHostOptions options,
-    OsScope scope_ = OsScope.init)
+private const(string)[] problemsOf(ref const TopologySnapshot snap, FarmHostOptions options)
 {
     try
-        cast(void) FarmHost.preview(snap, scope_, options);
+        cast(void) FarmHost.preview(snap, options);
     catch (FarmHostPlanException e)
         return e.problems;
     return null;
@@ -213,10 +210,12 @@ unittest
 {
     // 11: a launch scope restricted to group 0 notes the unused group.
     auto snap = f1();
-    auto launch = OsScope(OsScopeSource.processLaunch, parseCpuList("0-7,16-23"));
+    auto launch = f1();
+    launch.osScopeSource = OsScopeSource.processLaunch;
+    launch.osScopeAllowed = parseCpuList("0-7,16-23");
     FarmHostOptions options;
     options.workers = 4;
-    auto plan = FarmHost.preview(snap, launch, options);
+    auto plan = FarmHost.preview(launch, options);
     assert(plan.farmGroup == 0);
     assert(plan.notes.any!(n => n.canFind("group 1 not used") && n.canFind("osExcluded")));
     auto text = plan.summary();

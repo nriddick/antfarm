@@ -1,5 +1,7 @@
 module threadpool.topology;
 
+import threadpool.os_scope : frozenOsScope, scopeToCallingThread;
+
 /// One logical processor: Windows processor group plus group-relative LP
 /// number. Linux uses group 0 and the system CPU number. Text form `g:lp`.
 struct ProcessorId
@@ -279,6 +281,32 @@ struct ProcGroup
     ulong  activeMask;
 }
 
+/// Where a snapshot's OS scope came from. May gain members (e.g. a Windows
+/// multi-group or CPU-set source); do not `final switch` on it.
+enum OsScopeSource : ubyte
+{
+    processLaunch,    /// Linux: sched_getaffinity captured before main (module constructor)
+    processAffinity,  /// Windows: single-group process mask at discovery
+    callingThread,    /// explicit opt-in via `scopeOsToCallingThread()`
+    unrestricted,     /// query failed, or multi-group Windows process (deferred)
+}
+
+/// The machine as discovered once per process, with the OS scope frozen
+/// beside it.
+///
+/// The OS scope is the process-level set of CPUs the OS allows. Linux has no
+/// process affinity, only per-thread masks inherited at `clone`, so the scope
+/// is the **launch mask**, captured before `main` runs: what `taskset`,
+/// `numactl` or a cgroup cpuset produced at exec. Windows uses the
+/// single-group **process** affinity mask at first discovery; a multi-group
+/// process stays unrestricted. `scopeOsToCallingThread()` opts into the
+/// calling thread's mask instead.
+///
+/// Discovery marks CPUs outside the scope `affinityExcluded`, and every
+/// `pinProcessor` call rejects them with `PinOutcome.outsideOsScope`. The
+/// scope never refreshes: a later OS narrowing surfaces as a failed pin
+/// (`PinOutcome.osRejected`), and it never widens. `liveOsMask()`
+/// (`threadpool.pin`) reports the live mask for diagnostics.
 struct TopologySnapshot
 {
     string os;
@@ -301,6 +329,25 @@ struct TopologySnapshot
     NumaNode[]         numaNodes;
     Package[]          packages;
     ProcGroup[]        groups;
+
+    /// Provenance of the OS scope frozen with this snapshot.
+    OsScopeSource osScopeSource = OsScopeSource.unrestricted;
+    /// CPUs the OS scope allows. Discovery guarantees: sorted by
+    /// `(group, lp)`, no duplicates, empty iff `osScopeSource ==
+    /// unrestricted`. May name CPUs absent from `processors` (reported,
+    /// never used). Hand-built snapshots may set it to restrict resolution.
+    const(ProcessorId)[] osScopeAllowed;
+
+    /// `id` is inside this snapshot's OS scope. Always true when
+    /// unrestricted. Works for ids absent from `processors`. A linear scan;
+    /// pin validation uses its own index.
+    bool inOsScope(ProcessorId id) const @nogc nothrow pure
+    {
+        if (osScopeSource == OsScopeSource.unrestricted) return true;
+        foreach (v; osScopeAllowed)
+            if (v == id) return true;
+        return false;
+    }
 
     const(LogicalProcessor)* byLp(ushort group, ushort lpIndex) const @nogc nothrow
     {
@@ -348,10 +395,11 @@ struct TopologySnapshot
         return byLp(id.group, id.lp);
     }
 
-    /// Inside the frozen OS scope and (Linux) online at discovery.
+    /// Inside the frozen OS scope (neither `affinityExcluded` nor outside
+    /// `osScopeAllowed`) and (Linux) online at discovery.
     bool isEligible(ref const LogicalProcessor p) const @nogc nothrow
     {
-        return !p.affinityExcluded && !p.offlineAtDiscovery;
+        return !p.affinityExcluded && inOsScope(ProcessorId.of(p)) && !p.offlineAtDiscovery;
     }
 
     /// Every processor of a physical group, sorted by `(group, lp)`.
@@ -473,26 +521,37 @@ const(TopologySnapshot) discover()
     {
         import threadpool.sys.win_topology : discoverWindows;
 
-        auto snap = discoverWindows();
-        auto heap = new TopologySnapshot;
-        *heap = snap;
-        gTopology = heap;
-        return *gTopology;
+        return publish(discoverWindows());
     }
     else version (linux)
     {
         import threadpool.sys.linux_topology : discoverLinux;
 
-        auto snap = discoverLinux();
-        auto heap = new TopologySnapshot;
-        *heap = snap;
-        gTopology = heap;
-        return *gTopology;
+        return publish(discoverLinux());
     }
     else
     {
         throw new Error("threadpool: topology discovery is not implemented in v1");
     }
+}
+
+private const(TopologySnapshot) publish(TopologySnapshot snap)
+{
+    // The parsers marked affinityExcluded from the same frozen capture.
+    snap.osScopeAllowed = frozenOsScope(snap.osScopeSource);
+    auto heap = new TopologySnapshot;
+    *heap = snap;
+    gTopology = heap;
+    return *gTopology;
+}
+
+/// Setup only, before the first `discover()`: replace the launch scope with
+/// the calling thread's current mask. Throws if discovery already ran.
+void scopeOsToCallingThread()
+{
+    if (cachedSnapshot() !is null)
+        throw new Exception("threadpool: scopeOsToCallingThread() must run before topology discovery");
+    scopeToCallingThread();
 }
 
 /// Build the derived arrays (cores, LLC domains, NUMA, packages, counts)

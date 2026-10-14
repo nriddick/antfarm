@@ -30,10 +30,9 @@ ManagedPumpResult throwOnce(WorkerSelf*)
 
 ProcessorId[] scopeCpus()
 {
-    auto scope_ = osScope();
-    if (scope_.source != OsScopeSource.unrestricted)
-        return scope_.allowed.dup;
     auto snap = discover();
+    if (snap.osScopeSource != OsScopeSource.unrestricted)
+        return snap.osScopeAllowed.dup;
     ProcessorId[] eligible;
     foreach (ref p; snap.processors)
         if (snap.isEligible(p))
@@ -64,7 +63,7 @@ void confineAndRestore(const(ProcessorId)[] cpus)
     foreach (ref p; snap.processors)
     {
         auto id = ProcessorId.of(p);
-        if (inOsScope(id)) continue;
+        if (snap.inOsScope(id)) continue;
         enforce(confineCallingThread([cpus[0], id], untouched) == PinOutcome.outsideOsScope
             && !untouched.captured, "out-of-scope CPU rejected before capture");
         writeln("PASS confine rejects out-of-scope ", formatCpuList([id]));

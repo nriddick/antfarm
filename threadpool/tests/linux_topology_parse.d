@@ -585,10 +585,9 @@ unittest
         assert(core.moduleIndex != ushort.max);
     }
 
-    OsScope unrestricted;
     PoolOptions opt;
     opt.skipSmtSiblings = false;
-    auto res = resolvePool(snap, unrestricted, opt);
+    auto res = resolvePool(snap, opt);
     assert(res.groups.length == 2);
     assert(res.groups[0].physical == 15);
     assert(res.groups[1].physical == 16);
@@ -615,9 +614,8 @@ unittest
     assert(snap.l2Clusters.length == 0);
     assert(snap.llcsInNuma(0).length == 0);
     assert(snap.byId(ProcessorId(0, 0)).llcIndex == noLlcIndex);
-    OsScope unrestricted;
     PoolOptions opt;
-    auto res = resolvePool(snap, unrestricted, opt);
+    auto res = resolvePool(snap, opt);
     assert(res.groups.length == 0);
     assert(res.workers.length == 0);
     assert(res[ProcessorId(0, 0)].reasons & Reject.offline);

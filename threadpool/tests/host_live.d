@@ -37,7 +37,7 @@ ProcessorId[] liveCallerMask()
     }
     else
     {
-        import threadpool.os_scope : liveOsMask;
+        import threadpool.pin : liveOsMask;
         return liveOsMask();
     }
 }

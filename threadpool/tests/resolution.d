@@ -6,7 +6,6 @@ import std.algorithm : count, canFind;
 import std.array : array;
 import std.string : lineSplitter;
 
-import threadpool.os_scope : OsScope, OsScopeSource;
 import threadpool.pool : PoolOptions;
 import threadpool.resolution;
 import threadpool.topology;
@@ -23,11 +22,10 @@ private TopologySnapshot hybrid()
     return assemble(procs, 1);
 }
 
-/// Resolve with an unrestricted scope: exclusion comes from snapshot flags.
+/// Resolve with the fixture's unrestricted scope: exclusion comes from snapshot flags.
 private PoolResolution resolveOf(ref const TopologySnapshot snap, PoolOptions opt)
 {
-    OsScope unrestricted;
-    return resolvePool(snap, unrestricted, opt);
+    return resolvePool(snap, opt);
 }
 
 /// The pre-resolution `selectLps` (onlyProcessors branch; onlyLps empty), kept
@@ -179,9 +177,10 @@ unittest
 {
     // R6: group disposition on two-LLC hardware with LLC1 excluded.
     auto snap = f1((ushort lp) => (lp % 16) >= 8);
+    snap.osScopeSource = OsScopeSource.processLaunch;
+    snap.osScopeAllowed = parseCpuList("0-7,16-23");
     PoolOptions opt;
-    auto launch = OsScope(OsScopeSource.processLaunch, parseCpuList("0-7,16-23"));
-    auto res = resolvePool(snap, launch, opt);
+    auto res = resolvePool(snap, opt);
     assert(res.physicalGroupCount == 2);
     assert(res.acceptedGroupCount == 1);
     assert(res.groups[0].physical == 16 && res.groups[0].eligible == 16
@@ -197,14 +196,23 @@ unittest
     assert(res.rejectedCpus(Reject.osExcluded).array.length == 16);
     assert(res.acceptedCpus.array.length == 16);
     assert(!res.started);
-    assert(res.osScope.source == OsScopeSource.processLaunch);
-    assert(res.osScope.allowed == parseCpuList("0-7,16-23"));
+    assert(res.topology.osScopeSource == OsScopeSource.processLaunch);
+    assert(res.topology.osScopeAllowed == parseCpuList("0-7,16-23"));
+    assert(res.summary.canFind("os scope processLaunch {0-7,16-23}"), res.summary);
 
     // The scope alone excludes, even when the snapshot carries no flags.
     auto unflagged = f1();
-    auto byScope = resolvePool(unflagged, launch, opt);
+    unflagged.osScopeSource = OsScopeSource.processLaunch;
+    unflagged.osScopeAllowed = parseCpuList("0-7,16-23");
+    auto byScope = resolvePool(unflagged, opt);
     assert(byScope.workers == res.workers);
     assert(byScope.groups[1].common == Reject.osExcluded);
+    assert(byScope.groups[1].eligible == 0);
+    assert(unflagged.inOsScope(ProcessorId(0, 0)) && !unflagged.inOsScope(ProcessorId(0, 8)));
+    assert(unflagged.inOsScope(ProcessorId(0, 23)) && !unflagged.inOsScope(ProcessorId(0, 999)));
+    assert(!unflagged.isEligible(*unflagged.byId(ProcessorId(0, 8))));
+    assert(unflagged.eligibleProcessorsInLlc(1).length == 0 && unflagged.eligibleLlcCount == 1);
+    assert(f1().inOsScope(ProcessorId(0, 999)), "unrestricted admits unknown ids");
 }
 
 unittest

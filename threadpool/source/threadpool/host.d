@@ -24,7 +24,6 @@ import antfarm : AntFarm, ConsumerView, FarmCreateError, FarmCreateFailure, Tier
     DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, SUBSCRIBE_RETRY, fatal;
 import threadpool.hybrid : ManagedWorkerHooks, WorkerSelf, gWorkers;
 import threadpool.worker : requestStop;
-import threadpool.os_scope : OsScope, OsScopeSource, osScope;
 import threadpool.pin : PinOutcome, ThreadAffinity, confineCallingThread, restoreCallingThread;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.resolution : PoolResolution, Reject, reasonsText, resolvePool;
@@ -437,25 +436,22 @@ private void hostStop(WorkerSelf*) @nogc nothrow
  +/
 final class FarmHost
 {
-    /// What the constructor will do with `options`: discovers topology and
-    /// the frozen OS scope (a threadpool setup operation), then plans as the
-    /// overload below. Throws `FarmHostPlanException`. A throwing preview
+    /// What the constructor will do with `options`: discovers topology (a
+    /// threadpool setup operation), then plans as the overload below. Throws `FarmHostPlanException`. A throwing preview
     /// still completes discovery, so it warms the cache for a later
     /// constructor or a SKIP probe such as `workersFit()`.
     static FarmHostPlan preview(const FarmHostOptions options = FarmHostOptions.init)
     {
         const snap = CacheAwarePool.topology();
-        const scope_ = osScope();
-        return preview(snap, scope_, options);
+        return preview(snap, options);
     }
 
-    /// The plan for an explicit snapshot and OS scope: deterministic, no OS
-    /// queries (the test seam, like `resolvePool`). Throws
-    /// `FarmHostPlanException` listing every problem found.
-    static FarmHostPlan preview(ref const TopologySnapshot snap, ref const OsScope scope_,
-        const FarmHostOptions options)
+    /// The plan for an explicit snapshot, whose OS scope fields apply:
+    /// deterministic, no OS queries (the test seam, like `resolvePool`).
+    /// Throws `FarmHostPlanException` listing every problem found.
+    static FarmHostPlan preview(ref const TopologySnapshot snap, const FarmHostOptions options)
     {
-        return planFor(snap, scope_, options);
+        return planFor(snap, options);
     }
 
     /// Plan, create the Farm, register the control token, start and subscribe
@@ -1147,8 +1143,7 @@ private:
     }
 }
 
-private FarmHostPlan planFor(ref const TopologySnapshot snap, ref const OsScope scope_,
-    const FarmHostOptions options)
+private FarmHostPlan planFor(ref const TopologySnapshot snap, const FarmHostOptions options)
 {
     import std.algorithm.searching : canFind;
     import std.format : format;
@@ -1166,7 +1161,7 @@ private FarmHostPlan planFor(ref const TopologySnapshot snap, ref const OsScope 
     if (options.idle == WorkerIdle.park && options.idleTimeout <= Duration.zero)
         problems ~= "idleTimeout must be positive (Duration.max parks until woken)";
 
-    const candidates = resolvePool(snap, scope_, options.pool);
+    const candidates = resolvePool(snap, options.pool);
     immutable callerConsumes = options.callerConsumes || options.workers == 0;
     auto caller = CallerPlacement.unchanged;
     const(ProcessorId)[] callerCpus;
@@ -1260,7 +1255,7 @@ private FarmHostPlan planFor(ref const TopologySnapshot snap, ref const OsScope 
     if (problems.length)
         throw new FarmHostPlanException(problems);
 
-    const(PoolResolution) selection = chosen.length ? reresolve(snap, scope_, options.pool, chosen, problems) : null;
+    const(PoolResolution) selection = chosen.length ? reresolve(snap, options.pool, chosen, problems) : null;
     if (problems.length)
         throw new FarmHostPlanException(problems);
 
@@ -1377,14 +1372,13 @@ private string groupWhy(const PoolResolution candidates, ushort g)
 }
 
 /// Resolve `chosen` as the exact worker set; its order is the start order.
-private const(PoolResolution) reresolve(ref const TopologySnapshot snap, ref const OsScope scope_,
-    const PoolOptions pool, const(ProcessorId)[] chosen, ref string[] problems)
+private const(PoolResolution) reresolve(ref const TopologySnapshot snap, const PoolOptions pool, const(ProcessorId)[] chosen, ref string[] problems)
 {
     import std.algorithm.sorting : sort;
 
     PoolOptions exact = pool;
     exact.processors = chosen.dup;
-    auto selection = resolvePool(snap, scope_, exact);
+    auto selection = resolvePool(snap, exact);
     auto want = chosen.dup;
     auto got = selection.workers.dup;
     want.sort();
