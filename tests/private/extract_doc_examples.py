@@ -11,10 +11,10 @@ import re
 
 root = Path(__file__).resolve().parent
 sources = (
-    root.parent / "docs/guide/private-actors.md",
-    root.parent / "docs/guide/private-results-and-waits.md",
-    root.parent / "docs/guide/outcomes-and-cancellation.md",
-    root.parent / "docs/guide/sizing-and-allocation.md",
+    root.parents[1] / "docs/guide/private-actors.md",
+    root.parents[1] / "docs/guide/private-results-and-waits.md",
+    root.parents[1] / "docs/guide/outcomes-and-cancellation.md",
+    root.parents[1] / "docs/guide/sizing-and-allocation.md",
 )
 programs = []
 for source in sources:

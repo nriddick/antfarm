@@ -7,7 +7,7 @@
  + cursor, polls after the first resume at the parked table instead of
  + re-walking every table of E.
  +
- +   make -C review_torture run
+ +   make -C tests/farm run
  +/
 module sweep_cursor;
 

@@ -1,4 +1,4 @@
-module private_actor_tests;
+module private_tests;
 import antfarm.actors;
 import antfarm;
 import antfarm.allocation : allocateAligned64, freeAligned64;

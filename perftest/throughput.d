@@ -163,7 +163,7 @@ struct ConsCtx
 // Module-level classes (not function-nested): a nested class keeps `_outer`
 // pointing at the creating stack frame.  Jobs live in a stable array and
 // threads take `&jobs[i].run` so a loop-local cannot alias every worker to
-// the last context (see review_torture/torture_tests.d).
+// the last context (see tests/farm/torture_tests.d).
 final class ProdJob
 {
     ProdCtx* c;

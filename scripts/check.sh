@@ -78,7 +78,7 @@ fi
 
 if [[ "$quick" -eq 1 ]]; then
     run dub test --compiler=ldc2
-    run "${make_cmd[@]}" -C review_torture run DC=ldc2
+    run "${make_cmd[@]}" -C tests/farm run DC=ldc2
     run dub test :threadpool --compiler=ldc2
     run dub test :farmhost --compiler=ldc2
     run dub test :ant_fibers --compiler=ldc2
@@ -88,12 +88,12 @@ if [[ "$quick" -eq 1 ]]; then
 fi
 
 if [[ "$soak" -eq 1 ]]; then
-    run "${make_cmd[@]}" -C private_actor_tests private_actor_tests_tsan
+    run "${make_cmd[@]}" -C tests/private private_tests_tsan
     soak_started=$SECONDS
     soak_runs=0
     # One extra second keeps the integer clock from shortening the 120s minimum.
     while (( SECONDS - soak_started < 121 )); do
-        run env TSAN_OPTIONS=history_size=7:halt_on_error=1 ./private_actor_tests/private_actor_tests_tsan
+        run env TSAN_OPTIONS=history_size=7:halt_on_error=1 ./tests/private/private_tests_tsan
         soak_runs=$((soak_runs + 1))
     done
     echo "PASS private actor TSan soak: $soak_runs loops in $((SECONDS - soak_started)) seconds"
@@ -139,11 +139,11 @@ host_test ldc2
 host_test dmd
 host_test ldc2 --build=release
 run "${make_cmd[@]}" check-docs
-run "${make_cmd[@]}" check-farm-ordering
-run "${make_cmd[@]}" run-farm-tsan
-run "${make_cmd[@]}" -C actor_torture run run-dmd run-tsan death
-run "${make_cmd[@]}" -C review_torture run run-tsan
-run "${make_cmd[@]}" -C private_actor_tests run run-dmd run-tsan doc-example death
+run "${make_cmd[@]}" -C tests/farm check-farm-ordering
+run "${make_cmd[@]}" -C tests/farm run-farm-tsan
+run "${make_cmd[@]}" -C tests/actors run run-dmd run-tsan death
+run "${make_cmd[@]}" -C tests/farm run run-tsan
+run "${make_cmd[@]}" -C tests/private run run-dmd run-tsan doc-example death
 run "${make_cmd[@]}" -C examples check
 
 if [[ "$mimalloc" -eq 1 ]]; then
@@ -151,7 +151,7 @@ if [[ "$mimalloc" -eq 1 ]]; then
         echo "check-mimalloc: third_party/mimalloc is not populated" >&2
         exit 1
     fi
-    run "${make_cmd[@]}" -C actor_torture run-mimalloc run-mimalloc-tsan
+    run "${make_cmd[@]}" -C tests/actors run-mimalloc run-mimalloc-tsan
 fi
 
 echo "ALL CHECKS PASSED"

@@ -141,7 +141,7 @@ struct DualCtx
 
 // Module-level (not function-nested) so `_outer` cannot dangle. Threads
 // take `&jobs[i].run` from a stable array — a loop-local delegate would
-// alias every worker to the last DualCtx (see review_torture/torture_tests.d).
+// alias every worker to the last DualCtx (see tests/farm/torture_tests.d).
 final class DualJob
 {
     DualCtx* c;

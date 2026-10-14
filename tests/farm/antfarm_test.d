@@ -2376,7 +2376,7 @@ void testProducerLifecycleChurn()
 // Cross-Farm provenance, positive side: with every token now carrying its
 // issuing Farm's identity, independent Farms must keep working normally --
 // ordinary writes, token transfer, slot reuse after unregister, and
-// concurrent operation. (The fatal side lives in the private_actor_tests
+// concurrent operation. (The fatal side lives in the tests/private
 // death harness: cross-farm-write / cross-farm-flush / cross-farm-unregister.)
 class CrossFarmWorker
 {

@@ -7,12 +7,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $buildDir = Join-Path $PSScriptRoot ('.build/mimalloc-v3.5.3-windows-' + $Configuration.ToLowerInvariant())
 $libraryDir = Join-Path $buildDir 'lib'
 $debugLevel = if ($Configuration -eq 'Debug') { 'FULL' } else { 'OFF' }
 $libraryName = if ($Configuration -eq 'Debug') { 'mimalloc-debug.lib' } else { 'mimalloc.lib' }
-$binary = Join-Path $buildDir ('actor_torture_' + $Compiler + '.exe')
+$binary = Join-Path $buildDir ('actors_torture_' + $Compiler + '.exe')
 $previousHugePages = $env:ANTFARM_HUGE_PAGES
 
 Push-Location $repoRoot
@@ -34,7 +34,7 @@ try {
     $compilerArgs = @('-g', '-I.', '-mscrtlib=libcmt',
         ($versionFlag + 'AntfarmActorTestHooks'),
         ($versionFlag + 'AntfarmMimallocV3'), ($versionFlag + 'AntfarmMimallocReal'),
-        'actor_torture/actor_torture.d', 'antfarm/package.d', 'antfarm/allocation.d',
+        'tests/actors/actors_torture.d', 'antfarm/package.d', 'antfarm/allocation.d',
         'antfarm/templates.d', 'antfarm/actors/package.d', 'antfarm/actors/actor.d', 'antfarm/actors/wave.d',
         'antfarm/actors/private_actor.d', 'antfarm/actors/mimalloc.d', (Join-Path $libraryDir $libraryName),
         ('-of=' + $binary))

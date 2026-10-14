@@ -2,9 +2,9 @@ param([string] $Compiler = 'ldc2')
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$archive = Join-Path $root 'actor_torture/.build/mimalloc-v3.5.3-windows-release/lib/mimalloc.lib'
+$archive = Join-Path $root 'tests/actors/.build/mimalloc-v3.5.3-windows-release/lib/mimalloc.lib'
 if (-not (Test-Path -LiteralPath $archive)) {
-    throw 'Build the Release allocator with actor_torture/run-mimalloc-windows.ps1 first.'
+    throw 'Build the Release allocator with tests/actors/run-mimalloc-windows.ps1 first.'
 }
 $farm = @('antfarm/package.d', 'antfarm/allocation.d')
 $actors = @('antfarm/actors/package.d', 'antfarm/actors/actor.d', 'antfarm/actors/wave.d',

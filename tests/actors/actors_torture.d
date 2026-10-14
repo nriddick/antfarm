@@ -3,7 +3,7 @@
  + antfarm.actors.actor. Build with AntfarmActorTestHooks and, for the allocator
  + contract test, AntfarmMimallocV3.
  +/
-module actor_torture;
+module actors_torture;
 
 import antfarm;
 import antfarm.actors;
@@ -22,7 +22,7 @@ import core.time : MonoTime, seconds;
 
 version (AntfarmActorTestHooks) {}
 else static assert(false,
-    "actor_torture requires AntfarmActorTestHooks");
+    "actors_torture requires AntfarmActorTestHooks");
 
 private void check(bool condition, const(char)* message)
 {
@@ -4046,7 +4046,7 @@ private void testCancelModeRetirement()
 }
 
 // -------------------------------------------------------------------------
-// Child-process diagnostics: `actor_torture death` re-executes
+// Child-process diagnostics: `actors_torture death` re-executes
 // /proc/self/exe as "child:<mode>" once per childCases row and checks the
 // exit status and stderr. Rows describe fatal sites (abort) and debug
 // diagnostics (warn); silent rows prove a path stays quiet.

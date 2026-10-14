@@ -31,7 +31,7 @@ BASE_SHA = 'a' * 40
 CAND_SHA = 'b' * 40
 REFS = {'BASE': BASE_SHA, BASE_SHA: BASE_SHA, 'CAND': CAND_SHA, CAND_SHA: CAND_SHA,
         'ALIAS': BASE_SHA, 'HEAD': BASE_SHA}
-ARCHIVE_REL = 'actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a'
+ARCHIVE_REL = 'tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a'
 BASE_RATE = 1000.0
 
 

@@ -34,9 +34,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PERFTEST = ROOT / "perftest"
-MIMALLOC = ROOT / "actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a"
+MIMALLOC = ROOT / "tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a"
 if os.name == "nt":
-    MIMALLOC = ROOT / "actor_torture/.build/mimalloc-v3.5.3-windows-release/lib/mimalloc.lib"
+    MIMALLOC = ROOT / "tests/actors/.build/mimalloc-v3.5.3-windows-release/lib/mimalloc.lib"
 
 
 # ---------------------------------------------------------------- parsing

@@ -77,7 +77,7 @@ def boot_ci(ratios):
 def main():
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--repo',type=P,default=P(__file__).resolve().parent.parent);p.add_argument('--base',required=True);p.add_argument('--candidate')
-    p.add_argument('--archive',type=P,help='Defaults to REPO/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a');p.add_argument('--output',type=P,required=True)
+    p.add_argument('--archive',type=P,help='Defaults to REPO/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a');p.add_argument('--output',type=P,required=True)
     p.add_argument('--boundary',action='store_true',help='Require >=20 clean matched pairs (default 20)')
     p.add_argument('--control',action='store_true',help='Compare base to itself and require byte-identical binaries')
     p.add_argument('--modes',default='actor,wave,inbox,private,private-remote,tree,tree-wait,tree-cont,tree-pipelined,dtor,subset,subset-whole,subset-whole-unreserved,tree-cancel,private-tracked')
@@ -96,7 +96,7 @@ def main():
     a=p.parse_args()
     require_linux(p)
     a.repo=a.repo.resolve();a.output=a.output.resolve()
-    a.archive=(a.archive or a.repo/'actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a').resolve()
+    a.archive=(a.archive or a.repo/'tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a').resolve()
     if a.repeats is None:a.repeats=20 if a.boundary else 5
     if a.max_attempts is None:a.max_attempts=max(10,2*a.repeats)
     if a.boundary and a.repeats<20:p.error('boundary mode requires >=20 repeats')

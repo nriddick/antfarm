@@ -1,7 +1,7 @@
 /++
  + Adversarial torture suite for antfarm (SPEC.md).
  +
- +   make -C review_torture run
+ +   make -C tests/farm run
  +
  + Exit 0 = all green. Exit 2 = correctness green, defect probes confirmed.
  + Abort/1 = correctness failure.

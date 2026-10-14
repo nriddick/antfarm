@@ -229,7 +229,7 @@ struct ConsCtx
 // `_outer` on the creating stack frame, and startFarm returns while the
 // workers are still running.  Jobs live in FarmSet.jobs; threads take
 // `&jobs[i].run` so a loop-local cannot alias every worker to the last
-// context (see review_torture/torture_tests.d).
+// context (see tests/farm/torture_tests.d).
 final class ConsJob
 {
     ConsCtx c;

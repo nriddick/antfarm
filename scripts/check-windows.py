@@ -91,22 +91,22 @@ class Checks:
     def ordering(self):
         self.run([sys.executable, "-B", "scripts/check-ring-stores.py"])
         for name, versions in (("farm_ordering", ("AntfarmWriteAuditHooks",)), ("leaf_reuse", ())):
-            self.build_run(name, ["review_torture/" + name + ".d",
+            self.build_run(name, ["tests/farm/" + name + ".d",
                                  "antfarm/package.d", "antfarm/allocation.d"], versions)
 
     def review(self):
-        common = ["review_torture/torture_common.d", "antfarm/package.d",
+        common = ["tests/farm/torture_common.d", "antfarm/package.d",
                   "antfarm/allocation.d", "antfarm/templates.d"]
-        self.build_run("torture", ["review_torture/torture_tests.d", *common])
-        self.build_run("sweep_cursor", ["review_torture/sweep_cursor.d", *common],
+        self.build_run("torture", ["tests/farm/torture_tests.d", *common])
+        self.build_run("sweep_cursor", ["tests/farm/sweep_cursor.d", *common],
                        ("AntfarmSweepStats",))
         if not self.args.quick:
-            self.build_run("t19", ["review_torture/t19_flood_lap.d", *common])
-            self.build_run("concurrent_create", ["review_torture/concurrent_create.d",
+            self.build_run("t19", ["tests/farm/t19_flood_lap.d", *common])
+            self.build_run("concurrent_create", ["tests/farm/concurrent_create.d",
                                                  "antfarm/package.d", "antfarm/allocation.d"])
 
     def actors(self):
-        self.build_run("actors", ["actor_torture/actor_torture.d", "antfarm/package.d",
+        self.build_run("actors", ["tests/actors/actors_torture.d", "antfarm/package.d",
                                   "antfarm/allocation.d", "antfarm/templates.d",
                                   "antfarm/actors/package.d", "antfarm/actors/actor.d", "antfarm/actors/wave.d",
                                   "antfarm/actors/private_actor.d", "antfarm/actors/mimalloc.d"],
@@ -115,10 +115,10 @@ class Checks:
     def private(self):
         sources = ["antfarm/package.d", "antfarm/allocation.d", "antfarm/actors/actor.d",
                    "antfarm/actors/wave.d", "antfarm/actors/private_actor.d"]
-        self.build_run("private", ["private_actor_tests/main.d", *sources],
+        self.build_run("private", ["tests/private/main.d", *sources],
                        ("AntfarmWriteAuditHooks", "AntfarmActorTestHooks"))
-        self.run([sys.executable, "-B", "private_actor_tests/extract_doc_examples.py"])
-        for source in sorted((ROOT / "private_actor_tests/.doc-examples").glob("private_doc_*.d")):
+        self.run([sys.executable, "-B", "tests/private/extract_doc_examples.py"])
+        for source in sorted((ROOT / "tests/private/.doc-examples").glob("private_doc_*.d")):
             self.build_run(source.stem, [source, *sources])
 
     def examples(self):

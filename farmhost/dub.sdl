@@ -21,7 +21,7 @@ configuration "library" {
 // Default `dub test`: pure placement tests on synthetic snapshots.
 configuration "unittest" {
 	targetType "library"
-	sourceFiles "../tests/farmhost/host_plan.d" "../threadpool/tests/synthetic_topology.d"
+	sourceFiles "../tests/farmhost/host_plan.d" "../tests/threadpool/synthetic_topology.d"
 }
 
 // Live FarmHost regression: `dub run -c host-test`. Needs two accepted
