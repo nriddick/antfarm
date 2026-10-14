@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.8.1 (unreleased)
+
+### Breaking changes: two threadpool CPU-query surfaces
+
+Threadpool had four overlapping ways to ask which CPUs a program may use:
+`TopologySnapshot`, `OsScope`, `PoolResolution` and `FarmHostPlan`. Two
+remain. `TopologySnapshot` is the machine plus the frozen OS scope, and
+`PoolResolution` is the per-option disposition of every CPU, request and
+group. The retired symbols are removed outright, with no deprecation
+aliases.
+
+- The OS scope is part of the snapshot: `TopologySnapshot.osScopeSource`,
+  `osScopeAllowed` (sorted, empty when unrestricted, may name CPUs the
+  snapshot does not know) and `inOsScope(id)`. `discover()` fills them from
+  the same frozen capture that sets `affinityExcluded`. `isEligible` also
+  consults the scope list, which makes no difference for discovered
+  snapshots.
+- `resolvePool(snap, options)` drops the `OsScope` argument. A CPU is
+  `osExcluded` when flagged or outside `snap`'s scope, so a hand-built
+  snapshot remains the whole test seam.
+- `Reject.notSelected` (new): the CPU passed every filter, but a placement
+  policy above the pool (FarmHost group choice, worker count, caller
+  reservation) left it out. It is never combined with another reason, and
+  `resolvePool` never sets it. `Reject.all` is now `0x3F`; use it rather than
+  a literal mask. `GroupDisposition.candidates` (new) counts filter-passing
+  CPUs (accepted plus `notSelected`), and the report's group table prints it.
+- `FarmHost.resolve(options)` / `FarmHost.resolve(snap, options)` replace
+  `preview`. They return one `PoolResolution`: the workers are accepted,
+  every other filter-passing CPU is `notSelected`, and the requests stay the
+  user's `options.pool.processors`. The result is never null, including with
+  `workers == 0`. The same problems throw, and a throwing call still warms
+  discovery.
+- A live `FarmHost` has `resolution` (the started selection, which is
+  `host.pool.resolution`: the pool now starts from the host's selection),
+  `callerCpus`, `summary()` and `toString()`. Caller CPUs and Farm sizing are
+  only visible on a live host.
+- `FarmHostPlanException` is renamed `FarmHostResolveException`. Its message
+  prefix is now `FarmHost options rejected: `.
+
+| Old | New |
+| --- | --- |
+| `struct OsScope`, `osScope()` | `discover()` (or `CacheAwarePool.topology()`), then `.osScopeSource` / `.osScopeAllowed` |
+| `OsScope.source` / `OsScope.allowed` | `snap.osScopeSource` / `snap.osScopeAllowed` |
+| `threadpool.os_scope.OsScopeSource` | `threadpool.topology.OsScopeSource` (also `import threadpool;`) |
+| `inOsScope(id)` | `snap.inOsScope(id)` |
+| `threadpool.os_scope.scopeOsToCallingThread` | `threadpool.topology.scopeOsToCallingThread` (also `import threadpool;`) |
+| `threadpool.os_scope.liveOsMask` | `threadpool.pin.liveOsMask` (also `import threadpool;`) |
+| `resolvePool(snap, scope_, options)` | `resolvePool(snap, options)`; fakes set `snap.osScopeSource` / `snap.osScopeAllowed` (`OsScope unrestricted;` just goes away) |
+| `PoolResolution.osScope` | `res.topology.osScopeSource` / `res.topology.osScopeAllowed` |
+| `FarmHost.preview(options)` | `FarmHost.resolve(options)` → `PoolResolution` |
+| `FarmHost.preview(snap, scope_, options)` | `FarmHost.resolve(snap, options)`, with the scope on the snapshot |
+| `host.plan` | `host.resolution`, `host.callerCpus`, `host.summary()`, `host.toString` |
+| `FarmHostPlan.options` | the options you passed |
+| `.candidates` | `resolution`: `candidates.isAccepted(id)` ⇔ `(resolution[id].reasons & ~Reject.notSelected) == Reject.none`; per group `groups[g].candidates` |
+| `.workerSelection`, `.workerSelection.workers` | `resolution`, `resolution.workers` (same workers, same start order; non-workers carry their real reason or `notSelected` instead of `notRequested`) |
+| `.workers` | `resolution.workers.length` |
+| `.groups` | `resolution.acceptedGroups` |
+| `.farmGroup` | `HostGroups.span(llcs)`: `llcs[0]`; otherwise the single group in `resolution.acceptedGroups` |
+| `.crossGroup` | `resolution.acceptedGroupCount > 1` |
+| `.caller` | `options.workers == 0 ? CallerPlacement.unchanged : options.caller` |
+| `.callerCpus` | `host.callerCpus` (live host only) |
+| `.callerSharesWorkerCpu` | `host.callerCpus` intersects `resolution.workers` |
+| `.callerConsumes` | `options.callerConsumes \|\| options.workers == 0` |
+| `.participants` (`HostParticipants`, removed) | printed by `host.summary()`: native = workers in the home group, foreign = the rest, external = `callerConsumes + farm.extraConsumers`, small = `1 + farm.extraSmallProducers`, bulk = `farm.bulkProducers` |
+| `.expectedConsumers` / `.maxSmall` / `.maxBulk` | `workers + external` / `1 + extraSmallProducers` / `bulkProducers` |
+| `.notes` | `host.toString`; as data, `GroupDisposition` (`common`, `candidates` vs `accepted`) and `host.callerCpus` |
+| `.summary()` / `.toString` | `host.summary()` / `host.toString` (`FarmHost.resolve(o).summary()` before construction, worker part only) |
+| `FarmHostPlanException` | `FarmHostResolveException` |
+
 ## 1.8.0
 
 This release includes the changes developed on the `1.8.0-rc` branch since

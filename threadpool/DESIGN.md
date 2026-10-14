@@ -102,10 +102,11 @@ The physical topology counts remain unchanged.
 
 ### Resolution and disposition
 
-`resolvePool(snapshot, osScope, options)` is a pure function that produces a
-`PoolResolution`. `CacheAwarePool.resolve()` previews it without starting
-anything; `start()` uses the same function, so the preview equals the
-start-time selection. After `start`, `pool.resolution` adds each worker's
+`resolvePool(snapshot, options)` is a pure function that produces a
+`PoolResolution`; the OS scope comes from the snapshot, so a hand-built
+snapshot is the whole test seam. `CacheAwarePool.resolve()` previews it
+without starting anything; `start()` uses the same function, so the preview
+equals the start-time selection. After `start`, `pool.resolution` adds each worker's
 `StartState` and `PinOutcome`; after a failed start or a shutdown it keeps the
 last attempt's report.
 
@@ -117,9 +118,19 @@ The report covers everything that was considered:
 - `requests`: one `RequestDisposition` per `processors` entry in request
   order, marking unknown ids and duplicates (a duplicate never adds a worker);
 - `groups`: one `GroupDisposition` per physical group with physical,
-  eligible, accepted and started counts, and the reasons common to every
-  member of a group that has no workers;
+  eligible, candidates, accepted and started counts, and the reasons common
+  to every member of a group that has no workers;
 - `workers`: the accepted CPUs; the index is the `workerIndex`.
+
+`Reject.notSelected` is a policy reason, not a filter: the CPU passed every
+filter, but a placement policy above the pool left it out. `resolvePool`
+never sets it and it is never combined with another reason. `FarmHost`
+narrows its filter-only resolution to the CPUs it chose, so one resolution
+answers both "would the filters allow it?" (`reasons & ~notSelected` is
+`none`) and "is it a worker?". `GroupDisposition.candidates` counts the
+filter-passing CPUs (accepted plus `notSelected`); a group with candidates
+but no workers was eligible but not chosen. The host's pool starts from that
+narrowed resolution, so `host.pool.resolution is host.resolution`.
 
 Filtering is silent at start by design. `enforceRequested()` is the opt-in
 contract check: it throws `ResolutionException` naming every unknown, rejected
@@ -130,7 +141,11 @@ CPU; `summary()` is one line and is included in start-failure messages.
 
 ### OS scope
 
-Eligibility is frozen to one process-level OS scope (`threadpool.os_scope`):
+Eligibility is frozen to one process-level OS scope, carried by the snapshot
+as `osScopeSource` and `osScopeAllowed` (sorted, empty when unrestricted; it
+may name CPUs the snapshot does not know). Discovery marks every processor
+outside it `affinityExcluded` from the same capture, and
+`TopologySnapshot.inOsScope(id)` tests one id:
 
 | | Linux | Windows |
 |---|---|---|
@@ -143,7 +158,8 @@ The scope is never a thread's current mask unless the program opts in with
 `scopeOsToCallingThread()` (source `callingThread`), which is allowed only
 before the first `discover()`. A program that narrows `main`'s mask before
 discovery either calls it or filters with `PoolOptions.processors`.
-`liveOsMask()` reports what the OS says now, for diagnostics only.
+`liveOsMask()` (`threadpool.pin`) reports what the OS says now, for
+diagnostics only.
 
 `pinProcessor(LogicalProcessor)` (`@nogc`) and `pinProcessor(ProcessorId)`
 (looks the id up first; `unknownProcessor` if absent) are the only pin

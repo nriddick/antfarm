@@ -68,9 +68,13 @@ auto eligible = topology.eligibleProcessorsInLlc(0); // in OS scope and online
 
 Worker eligibility uses a frozen, process-level OS scope: on Linux the CPU
 mask the process was launched with (`taskset -c 0-7 ./app`), on Windows the
-process affinity mask at first discovery. Narrowing `main`'s own mask later
+process affinity mask at first discovery. The snapshot carries it:
+`topology.osScopeSource` says where it came from and `topology.osScopeAllowed`
+lists the allowed CPUs (empty when unrestricted), and
+`topology.inOsScope(id)` tests one id. Narrowing `main`'s own mask later
 does not change it; call `scopeOsToCallingThread()` before the first
-`discover()` to opt into the calling thread's mask instead. Pin threads with
+`discover()` to opt into the calling thread's mask instead. `liveOsMask()`
+reports the live mask for diagnostics only. Pin threads with
 `pinProcessor(id)`; a CPU outside the scope returns
 `PinOutcome.outsideOsScope` instead of escaping the launch restriction.
 

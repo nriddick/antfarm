@@ -23,9 +23,9 @@ x64 and Linux x86-64. Pass `0` to consume on the calling thread, or a worker
 count N for N pinned pool workers in one LLC, with the calling thread confined
 beside them. A machine with fewer than N accepted worker CPUs (one per
 core by default: `skipSmtSiblings`) in one LLC rejects N with a
-`FarmHostPlanException` that explains why. Exactly N accepted
+`FarmHostResolveException` that explains why. Exactly N accepted
 CPUs is allowed. If no free CPU remains for the caller (including SMT siblings),
-it shares worker CPUs and the plan adds a note:
+it shares worker CPUs and the host adds a note:
 
 ```text
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=public_service
