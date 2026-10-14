@@ -530,6 +530,7 @@ private struct WavePinResult
 {
     ulong waveCalls;
     ulong autonomousCalls;
+    ulong inboxNodes;
 }
 
 private struct WavePinState
@@ -538,9 +539,14 @@ private struct WavePinState
 }
 
 private void wavePinDormant(scope ref ActorBorrow!WavePinState actor,
-        scope ref ActorContext) nothrow @nogc @system
+        scope ref ActorContext context) nothrow @nogc @system
 {
     ++actor.value.result.autonomousCalls;
+    while (auto node = context.popInbox())
+    {
+        ++actor.value.result.inboxNodes;
+        node.complete();
+    }
 }
 
 private void wavePinOperation(scope ref ActorBorrow!WavePinState actor)
@@ -582,6 +588,125 @@ private final class WaveRacePublisher
         farm.unregisterProducer(token);
         atomicStore!(MemoryOrder.rel)(done, 1);
     }
+}
+
+/// Force either a signal in the CAS/owner-store gap, or an accepted sender
+/// whose zero-owner check preceded admission and whose signal follows it.
+private void testWaveSignalRace(bool send, bool lateSender = false)
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 2, 256);
+    check(farm !is null, "wave signal Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "wave signal runtime allocation");
+    scope (exit) runtime.destroy();
+    WavePinResult output;
+    auto owner = runtime.createActor!(WavePinState, wavePinDormant)(
+        WavePinState(&output));
+    check(owner.valid, "wave signal actor allocation");
+    auto handle = owner.handle;
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "wave signal subscribe");
+    scope (exit) view.unsubscribe();
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "wave signal producer token");
+    scope (exit) farm.unregisterProducer(token);
+    auto deadline = MonoTime.currTime + 15.seconds;
+    ActorInboxNode node;
+    node.initialize(null);
+    ActorSendResult sent;
+    Thread sender;
+    if (lateSender)
+    {
+        g_hookNode = &node;
+        // Release/acquire hook flags publish the selected seam and join the
+        // sender's owner check before wave admission, then resume its signal.
+        atomicStore!(MemoryOrder.rel)(g_hookTarget,
+            cast(int) ActorTestPoint.submissionReserved);
+        atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+        atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+        setActorTestHook(&blockingActorHook);
+        sender = new Thread({ sent = handle.send(&node); });
+        sender.start();
+        waitFlag(g_hookArrived, deadline, "wave late sender reservation timeout");
+    }
+    else
+    {
+        // The hook's release/acquire flags order our signal strictly after
+        // lifecycle reservation and before the publisher's owner store.
+        atomicStore!(MemoryOrder.rel)(g_waveReserveArrived, 0);
+        atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 0);
+        setActorTestHook(&waveReserveHook);
+    }
+    auto publisher = new WaveRacePublisher(farm, handle);
+    auto thread = new Thread(&publisher.run);
+    thread.start();
+    if (lateSender)
+    {
+        waitFlag(publisher.published, deadline, "wave late sender publication timeout");
+        atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+        sender.join();
+    }
+    else
+    {
+        waitFlag(g_waveReserveArrived, deadline, "wave signal reservation timeout");
+        if (send) sent = handle.send(&node);
+        else check(handle.wake() == ActorWakeResult.coalesced,
+            "wave reservation wake coalesces");
+        atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 1);
+        waitFlag(publisher.published, deadline, "wave signal publication timeout");
+    }
+    setActorTestHook(null);
+    g_hookNode = null;
+    if (send) check(sent == ActorSendResult.coalesced,
+        "wave reservation send coalesces");
+    check(publisher.written == 1, "wave signal member admitted");
+    // Join the publisher before reading its completion handle; consumption
+    // remains on this thread so the post-wave activation cannot run early.
+    atomicStore!(MemoryOrder.rel)(publisher.sealRequested, 1);
+    thread.join();
+    while (!publisher.completion.finished)
+    {
+        while (view.consumeNext()) {}
+        check(MonoTime.currTime < deadline, "wave signal completion timeout");
+    }
+    check(output.waveCalls == 1 && output.autonomousCalls == 0,
+        "wave operation completes before autonomous activation");
+    check(runtime.ready == 1, "wave signal queues post-wave activation");
+    while (output.autonomousCalls == 0)
+    {
+        runtime.flush(token, 1, avgCostForChunk(32));
+        while (view.consumeNext()) {}
+        check(MonoTime.currTime < deadline, "wave signal autonomous timeout");
+    }
+    check(output.autonomousCalls == 1 && output.inboxNodes == (send ? 1 : 0),
+        "wave signal honoured exactly once");
+    if (send) check(node.available && node.outcome == ActorNodeOutcome.completed,
+        "wave signal send completed");
+    check(!publisher.completion.failed,
+        "benign wave signal must not fail the completed wave");
+    check(publisher.completion.interrupted,
+        "wave records the observed signal independently of failure");
+    if (lateSender)
+    {
+        auto old = publisher.completion;
+        publisher.wave.begin(farm);
+        check(!old.valid && !old.interrupted && !old.failed && !old.finished,
+            "reused wave invalidates old outcome observations");
+        auto fresh = publisher.wave.handle;
+        check(!fresh.interrupted && !fresh.failed,
+            "new generation clears sticky outcomes");
+        ActorHandle!WavePinState[2] duplicates = [handle, handle];
+        check(publisher.wave.publish!wavePinOperation(duplicates[], token) == 0,
+            "duplicate wave member rejected");
+        auto rejected = publisher.wave.seal();
+        check(rejected.finished && rejected.failed && !rejected.interrupted,
+            "duplicate rejection remains structural failure");
+    }
+    check(owner.requestRetire() == ActorRetireResult.requested && owner.retired,
+        "wave signal actor retires after drain");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed, "wave signal reclaim");
+    printf("actor wave signal race OK (send=%d late=%d)\n", send, lateSender);
 }
 
 private void testWaveMembershipPinsRetiredActor()
@@ -667,8 +792,9 @@ private void testWaveMembershipPinsRetiredActor()
     waitFlag(publisher.done, deadline, "wave-race seal timeout");
     thread.join();
     setActorTestHook(null);
-    check(publisher.completion.finished && publisher.completion.failed,
-        "raced retirement finishes the sealed wave as failed");
+    check(publisher.completion.finished && !publisher.completion.failed
+            && publisher.completion.interrupted,
+        "raced retirement finishes the sealed wave as interrupted");
     check(quarantine.count == 3, "actor state, slots and runtime quarantined");
     foreach (i; 0 .. quarantine.count)
     {
@@ -951,6 +1077,9 @@ private void testDeterministicInterleavings()
     testCloseBoundary(ActorTestPoint.activationSignalled);
     testContendedNodeClaimDuringClose();
     testReleasedReservationIsQuiescent();
+    testWaveSignalRace(false);
+    testWaveSignalRace(true);
+    testWaveSignalRace(true, true);
     testWaveCompletionCreditPinsDescriptor(false);
     testWaveCompletionCreditPinsDescriptor(true);
     testWaveMembershipPinsRetiredActor();
@@ -3778,8 +3907,9 @@ private void testCancelDuringWaveAdmission()
     atomicStore!(MemoryOrder.rel)(publisher.sealRequested, 1);
     waitFlag(publisher.done, deadline, "admission wave seal timeout");
     publisherThread.join();
-    check(publisher.completion.finished && publisher.completion.failed,
-        "interrupted wave finishes failed");
+    check(publisher.completion.finished && !publisher.completion.failed
+            && publisher.completion.interrupted,
+        "cancelled wave finishes interrupted without structural failure");
     check(owner.reclaim() == ActorReclaimResult.reclaimed,
         "admission reclaim after wave release");
     view.unsubscribe();
@@ -3915,8 +4045,33 @@ private void testCancelModeRetirement()
     fflush(stdout);
 }
 
-void main()
+void main(string[] args)
 {
+    if (args.length == 2)
+    {
+        switch (args[1])
+        {
+        case "--wave-wake": testWaveSignalRace(false); break;
+        case "--wave-send": testWaveSignalRace(true); break;
+        case "--wave-late-send": testWaveSignalRace(true, true); break;
+        case "--waves":
+            testWaveSignalRace(false);
+            testWaveSignalRace(true);
+            testWaveSignalRace(true, true);
+            testWaveCompletionCreditPinsDescriptor(false);
+            testWaveCompletionCreditPinsDescriptor(true);
+            testWaveMembershipPinsRetiredActor();
+            testWaveReleaseAllowsImmediateReuse();
+            testCompletionCallbackRunsAfterFinished();
+            testCancelDuringWaveAdmission();
+            testCancelDuringWaveRollback();
+            break;
+        default: check(false, "unknown actor torture selector");
+        }
+        printf("SELECTED ACTOR TORTURE TESTS PASSED\n");
+        return;
+    }
+    check(args.length == 1, "expected at most one actor torture selector");
     testDeterministicInterleavings();
     testNodeOutcomes();
     testOwnerMoveOnly();

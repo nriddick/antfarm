@@ -139,8 +139,17 @@ Observing `completion.finished` with acquire semantics and confirming
 orchestrator may publish a dependent wave. It does not join an optional
 completion hook: do not reuse that wave storage or free the hook context until
 the hook's last access, and an old hook must not touch a descriptor that has
-been `begin`ned again. `failed` is structural or control-path interference, not
-a domain error, and it does not roll back earlier tables.
+been `begin`ned again. `failed` means structural admission rejection (stale,
+non-idle, duplicate, or wrong-Farm handles), not a domain error; it does not
+roll back earlier tables.
+
+`completion.interrupted` is a separate sticky diagnostic: a wave operation
+completed but observed a concurrent wake, send, or retirement request and handed
+it to autonomous dispatch after its borrow ended. Such a race does not set
+`failed`. Both flags can be set if another table's admission fails. `finished`
+joins the wave operations, not the resulting autonomous work; a dependent wave
+still requires idle members. Requests arriving after an operation's exit
+transition need not set `interrupted`.
 
 Actors in the same wave run in parallel and must not consume one another's
 intermediate writes. For cross-actor reads, keep private mutable actor state

@@ -241,8 +241,28 @@ While `waveOwnerWord` is nonzero, ordinary `wake`, `send`, and retirement
 requests return `waveOwned`; a rejected send never claims its inbox node. A
 wake/send that linearized in the narrow reservation race before membership
 publication sets `PENDING` on the already-scheduled actor. The wave operation
-retains exclusive entry, reports failure, and materializes that pending
-autonomous activation after its borrow ends.
+retains exclusive entry, sets the sticky `INTERRUPTED` status bit, and
+materializes that pending autonomous activation after its borrow ends. The same
+outcome applies when the operation observes a racing retirement request;
+retirement/cancel mode is preserved. `ActorWaveHandle.interrupted` reports this
+observed handoff, while `failed` is reserved for structural admission rejection
+(stale, non-idle, duplicate, or foreign actors). The bits are independent: a
+later table's rejected admission can leave both set. Neither bit rolls back
+operations. `FINISHED` joins wave operations, not the autonomous work handed off
+by them. Signals arriving after the exit CAS need not set `INTERRUPTED`.
+
+Moving the owner store before the lifecycle CAS cannot close admission: a sender
+or waker may already have observed zero owner and signal after both. In
+particular, an accepted sender must still publish and signal its inbox node.
+The separate outcome avoids changing that inbox contract or the membership pin.
+
+The payload callback sets `INTERRUPTED` through the existing acquire/release
+status CAS loop before its physical table releases its credit. Admission sets
+`FAILED` while the producer credit remains held. These RMWs preserve concurrent
+sticky bits; the final credit's acquire joins every status writer before the
+final release store of `FINISHED`. Thus no status update can be overwritten by
+that store. The handle's acquire status load and generation double-check match
+`failed`; `begin` clears both outcomes for the next generation.
 
 ## Inbox and close chart
 
@@ -686,8 +706,9 @@ actor writes -> shard joins -> table hook -> final wave credit -> FINISHED -> wa
 
 Release/acquire ordering across that chain makes actor writes visible to a waiter
 that observes the finished wave. The final credit belongs either to the sealer or
-to a table hook. A failed operation marks the wave failed and must prevent
-publication of its prospective shared state.
+to a table hook. Structural admission rejection marks the wave failed and must
+prevent publication of its prospective shared state. An interrupted operation
+still completed; its observed control request is handed to autonomous dispatch.
 
 `ActorWaveHandle` is the authoritative, pollable completion object. A thread or
 Fiber may spin briefly, park, or arrange a notification, then acquire and

@@ -1822,7 +1822,8 @@ package void releaseActorWaveMembership(ActorSlot* slot, void* waveOwner)
 /// Execute a wave's phase-specific operation under the reservation made
 /// before table publication. False means another actor control path requested
 /// wake/send/retirement during the operation; the operation still completed,
-/// and that request is handed back to the autonomous ready queue.
+/// and that request is handed back to the autonomous ready queue. The wave
+/// reports this as interrupted, not as a structural admission failure.
 ///
 /// Unlike autonomous dispatch, the wave keeps the lifecycle in `scheduled`
 /// while the callback runs. The wave reservation is the unique source of a

@@ -34,6 +34,7 @@ version (AntfarmActorTestHooks)
 private enum uint waveSealedBit = 1U << 0;
 private enum uint waveFinishedBit = 1U << 1;
 private enum uint waveFailedBit = 1U << 2;
+private enum uint waveInterruptedBit = 1U << 3;
 // Cost class of a published wave table: claims of 8 entries.
 private enum uint publishAvgCost = avgCostForChunk(8);
 
@@ -93,8 +94,9 @@ struct ActorWaveHandle
             && (status & waveFinishedBit) != 0;
     }
 
-    /// True when a wave operation observed a stale, non-idle or foreign
-    /// actor and the wave should be discarded after draining.
+    /// True when admission rejected a stale, non-idle, duplicate or foreign
+    /// actor; discard the wave after draining. Observed wake/send/retirement
+    /// interference sets interrupted instead, and does not fail an operation.
     @property bool failed() const nothrow @nogc @system
     {
         if (wave_ is null || generation_ == 0) return false;
@@ -103,6 +105,23 @@ struct ActorWaveHandle
         immutable status = atomicLoad!(MemoryOrder.acq)(wave_.status_);
         immutable after = atomicLoad!(MemoryOrder.acq)(wave_.generation_);
         return after == generation_ && (status & waveFailedBit) != 0;
+    }
+
+    /// True when an executed operation observed a concurrent wake, send or
+    /// retirement request and handed it to autonomous dispatch after its
+    /// borrow ended. Sticky for this generation; independent of failed.
+    /// Finished does not join that autonomous work. Requests arriving after
+    /// the operation's exit transition need not set this diagnostic bit.
+    @property bool interrupted() const nothrow @nogc @system
+    {
+        if (wave_ is null || generation_ == 0) return false;
+        // Match failed's acquire generation sandwich: reject a reused handle
+        // and acquire the status publication for this observed generation.
+        immutable before = atomicLoad!(MemoryOrder.acq)(wave_.generation_);
+        if (before != generation_) return false;
+        immutable status = atomicLoad!(MemoryOrder.acq)(wave_.status_);
+        immutable after = atomicLoad!(MemoryOrder.acq)(wave_.generation_);
+        return after == generation_ && (status & waveInterruptedBit) != 0;
     }
 
     /// Tables completed by the observed generation so far.
@@ -265,6 +284,10 @@ public:
     }
 
 private:
+    // Call only while holding the producer credit or before the payload's
+    // table credit is released. The acq_rel CAS preserves concurrent sticky
+    // bits; the credit release/acquire chain joins every update before the
+    // final FINISHED release store. No status writer may outlive its credit.
     void setStatusBits(uint bits) nothrow @nogc @system
     {
         auto observed = atomicLoad!(MemoryOrder.acq)(status_);
@@ -409,7 +432,7 @@ private long actorWavePayloadCallback(T, alias operation)(PayloadHeader*,
     if (slot is null || wave is null)
         fatal("actor wave payload identity corrupt");
     if (!dispatchActorWavePayload!(T, operation)(slot, generation))
-        wave.failActor();
+        wave.setStatusBits(waveInterruptedBit);
     return 1;
 }
 

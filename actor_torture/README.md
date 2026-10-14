@@ -19,6 +19,11 @@ Coverage includes:
   released, and a popped-but-uncompleted inbox node;
 - proof in the sender and popped-node cases that the actor can be reclaimed
   first while the remaining engine claim still forbids the simulated unload;
+- wake and send in the wave lifecycle-CAS/owner-store gap, plus a sender
+  admitted before the wave and signalled after owner publication: the wave
+  completes with `interrupted && !failed`, and exactly one later activation
+  honours the signal (and completes the sent node). Descriptor reuse clears
+  outcomes and rejects old handles; duplicate admission still sets `failed`;
 - a wave-reservation/retirement race proving that aggregate membership pins a
   retired actor and its runtime until the open wave is sealed;
 - immediate reuse of a released wave member as another wave's head, proving
@@ -81,6 +86,13 @@ make -C actor_torture run
 make -C actor_torture run-dmd
 make -C actor_torture run-tsan
 ```
+
+For the wave lifecycle and outcome checks only, build with `make -C
+actor_torture` and run `actor_torture/actor_torture --waves`. The individual
+signal regressions accept `--wave-wake`, `--wave-send`, and `--wave-late-send`.
+Each fails against the old dispatch-to-`failed` mapping after verifying the
+operation and autonomous signal both ran, at "benign wave signal must not fail
+the completed wave".
 
 After initializing submodules, run the real mimalloc lanes with:
 
