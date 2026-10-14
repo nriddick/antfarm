@@ -27,6 +27,21 @@ in those modules carries a non-empty Ddoc comment. The public surface is
 reached with `import antfarm;`, `import antfarm_templates;`,
 `import actors;`, or `import threadpool.host;`.
 
+## Actor package imports
+
+`import actors;` re-exports three modules:
+
+| Module | Contents |
+| --- | --- |
+| `actors.actor` | public `ActorRuntime`, `ActorOwner`, `ActorHandle`, `ActorBorrow`, `ActorContext`, `ActorInboxNode`, `ActorAllocator`, and result enums |
+| `actors.wave` | public `ActorWave`, `ActorWaveHandle`, and completion hooks |
+| `actors.private_actor` | `PrivateRootPark`, `PrivateChildPark`, `PrivateContext`, `PrivateBorrow`, options, dispositions and outcome enums |
+
+`actors.mimalloc` is an optional adapter for the pinned mimalloc v3 allocator;
+it is not part of the `actors` package re-export. See
+[sizing-and-allocation.md](../guide/sizing-and-allocation.md#the-mimalloc-v3-adapter)
+for its setup and import.
+
 ## Farm
 
 | Topic | Symbols | Explanation |

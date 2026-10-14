@@ -1,62 +1,31 @@
 # Contributing to Ant Farm
 
 Ant Farm is concurrent, `@nogc` code whose correctness rests on stated
-memory-order arguments. Work proceeds through local iteration and pre-push
-hardening. Local iteration uses focused evidence to make useful progress;
-hardening establishes acceptance with the local gate, meaningful regression tests
-and applicable performance comparisons. There is no CI; the gate is a local command.
-The active CyDo session controls routing and delegation; project guidance specifies
-correctness obligations, not an additional planning, review or verification pipeline.
+memory-order arguments. Read the owning document for the area you are changing,
+keep its rules and the implementation in step, and use the checklist below to
+prepare your contribution. There is no CI; the correctness gate is a local
+command.
 
-## Local iteration (default)
-
-Batch related edits, then run the smallest useful check of the changed behavior:
-a build, focused test selector, reproducer, or inspection for a prose-only edit.
-Add a focused behavioral test when it helps establish the increment. Local commits,
-hand-offs and cherry-picks do not require the full gate, a compiler matrix, mutation
-campaigns, extended soaks or performance comparisons. Report those as deferred.
-
-Keep invariants and memory-order reasoning with the implementation. Fix defects
-that prevent the requested behavior from working; record unrelated bugs and
-optional improvements without chasing them. After a correction, rerun affected
-checks and reuse applicable evidence from other agents. Never claim an unrun check.
-
-## Hardening boundary
-
-In `crew`, hardening runs before an authorized remote push or on explicit request.
-Its Astra assessor reviews, runs checks, fixes material defects and validates the
-result directly; do not add a separate reviewer, verifier or implementation handoff.
-The standalone `harden` session provides the same complete assessment when selected
-explicitly. `iterate` keeps its Sonnet/Opus/Sol workflow and does not automatically
-start hardening; Sol satisfies any applicable pre-push project checks directly.
-
-For pre-push scope, assess the accumulated change using an explicit base and final
-candidate, not just the last commit. Apply the checklist below once, reusing
-applicable evidence. An explicit narrow review stays within its requested scope
-and does not establish pre-push clearance. If corrections invalidate a gate, rerun
-it on the final candidate; a new commit ID alone does not invalidate evidence for
-an identical tree and equivalent environment.
-
-Full matrices and adversarial work belong here. Select additional probes for the
-changed risks; do not repeat every historical mutation or soak by default. Finish
-when required checks pass and material blockers are resolved. Keep unrelated or
-optional findings separate. Hardening does not itself authorize a push.
-
-General TSan soaks share a **600-second collective budget** for the requested change
-or hardening pass, including all commands, agents, retries and correction rounds.
-Record consumed time and use only the remainder; a handoff or new candidate does
-not reset the budget. Hardening/concurrency work may use narrowly tailored TSan
-checks for concrete hypotheses, each capped at **300 seconds**. Enforce deadlines
-for the whole run and child processes; timeout is not PASS. These are ceilings,
-not required durations, and no soak is mandatory merely because hardening runs.
+During development, batch related edits and run the smallest useful check of
+the changed behavior. Local commits do not require the full gate; report checks
+that remain deferred. Before pushing, establish the applicable gate evidence
+for the accumulated change. Agent session routing, local iteration, hardening,
+TSan budgets and mutation selection are defined in
+[docs/development/agent-workflow.md](docs/development/agent-workflow.md).
 
 ## The correctness gate: `make check`
 
-```text
-make check
+Run these commands from the repository root:
+
+```sh
+make check-quick SHELL="$(command -v bash)"
+make check SHELL="$(command -v bash)"
 ```
 
-It stops at the first failure, prints `ALL CHECKS PASSED` on success, and must be
+GNU make and the check scripts need Bash. Pass `SHELL` explicitly on hosts
+without `/bin/sh`, including when invoking a sub-suite's makefile directly.
+
+`make check` stops at the first failure, prints `ALL CHECKS PASSED` on success, and must be
 run from the repository root on Linux x86-64. Bare `make` runs it too. The full
 lane matrix, prerequisites, focused entry points, and optional lanes are in
 [docs/development/testing.md](docs/development/testing.md).
@@ -107,13 +76,12 @@ During implementation of changes to the Farm, actors, or shared lifecycle:
   example, `make check` extracts and runs them. Mark partial code blocks as
   fragments.
 
-For the pre-push scope, satisfy these obligations within the same assessment:
+Before pushing, satisfy these obligations for the accumulated change:
 
 - Use meaningful deterministic regression tests for changed properties where
-  feasible. Select a focused mutation only when needed to demonstrate detection
-  of a concrete changed risk, such as a weakened ordering; do not rerun historical
-  mutation catalogs or require mutation testing for every change. A passing stress
-  run alone is not evidence of a memory-order argument.
+  feasible. A passing stress run alone is not evidence of a memory-order argument.
+  The agent process's focused mutation policy is in
+  [docs/development/agent-workflow.md](docs/development/agent-workflow.md#mutation-selection).
 - Contract violations that must be fatal need a death test in
   `private_actor_tests` or an equivalent that survives `-release`.
 - Establish `make check` evidence for the final candidate when runtime, tests,
@@ -126,6 +94,19 @@ For the pre-push scope, satisfy these obligations within the same assessment:
 
 Commit message and trailer conventions are the maintainer's; follow the style of
 recent commits (`git log`).
+
+## Adding a test lane
+
+Add the lane's target to the root [Makefile](Makefile) and register it in
+[scripts/check.sh](scripts/check.sh) when it belongs in the full correctness
+gate. Update `make help` so contributors can find it. Decide whether it belongs
+in `make check-quick` too: that target dispatches to `scripts/check.sh --quick`,
+whose quick branch runs the portable LDC-only checks. Keep its toolchain
+requirements consistent with the description above.
+
+Document the command, coverage, prerequisites and limitations in
+[docs/development/testing.md](docs/development/testing.md), including whether
+it runs in the full gate, the quick check, or only on explicit selection.
 
 ## Documentation map and ownership
 

@@ -1,13 +1,12 @@
 # Testing
 
 The correctness gate is local. There is no CI. [CONTRIBUTING.md](../../CONTRIBUTING.md)
-defines local iteration and pre-push hardening; this page is the lane matrix,
-prerequisites, and limitations. During iteration, select a focused check for the
-changed behavior. Run the applicable full matrix for pre-push hardening; a narrow
-explicit assessment runs only its scoped checks. Do not run the matrix after each
-increment or agent handoff. Bare `make` runs that full matrix, so use explicit
-focused targets during iteration. Reuse applicable evidence and rerun affected
-checks after corrections; record deferred checks rather than implying they passed.
+explains how to contribute; this page is the lane matrix, prerequisites and
+limitations. During development, select a focused check for the changed behavior.
+Bare `make` runs the full matrix, so use explicit focused targets during iteration.
+Record deferred checks rather than implying they passed. The CyDo agent process
+for local iteration, evidence reuse and pre-push hardening is in
+[agent-workflow.md](agent-workflow.md).
 
 ## The correctness gate: `make check`
 
@@ -114,7 +113,7 @@ establish timing results or replace `make check`.
 - `make check-soak` runs the private-actor TSan suite in a loop for at least 121
   seconds. It builds only that target and does not run the matrix first. It is
   optional and counts against the 600-second collective general TSan soak budget
-  in [CONTRIBUTING.md](../../CONTRIBUTING.md#hardening-boundary); wrap it in a
+  in [agent-workflow.md](agent-workflow.md#hardening-boundary); wrap it in a
   watchdog using the remaining budget. Targeted hardening/concurrency TSan runs
   are capped at 300 seconds each. Reuse applicable correctness-gate evidence;
   invoking a soak does not itself require another `make check` run.
