@@ -18,8 +18,8 @@ root = Path(__file__).resolve().parent.parent
 build = Path(__file__).resolve().parent / ".build"
 examples = ("public_service", "public_wave", "private_tree",
             "request_deadline", "fail_fast_fold", "fiber_cancel_at", "life/headless")
-# Every program runs its actors on threadpool.host.FarmHost.
-includes = ("-I.", "-Iexamples", "-Ithreadpool/source")
+# Every program runs its actors on farmhost.FarmHost.
+includes = ("-I.", "-Iexamples", "-Ithreadpool/source", "-Ifarmhost/source")
 extra_includes = {
     # The fiber adapter example bridges to the separate ant_fibers package.
     "fiber_cancel_at": ("-Iant_fibers/source",),

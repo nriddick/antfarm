@@ -10,10 +10,10 @@
  + choice. Spanning groups is an explicit opt-in (`HostGroups.span`),
  + labelled `crossGroup` in `FarmHost.summary`.
  +
- + This module is not re-exported by `import threadpool;`; it depends on the
- + `antfarm` package. Import it as `import threadpool.host;`.
+ + This is the `farmhost` package; it depends on `antfarm` and `threadpool`.
+ + Import it as `import farmhost;`.
  +/
-module threadpool.host;
+module farmhost;
 
 import core.atomic : MemoryOrder, atomicLoad, atomicOp, atomicStore, cas;
 import core.thread : Thread;
@@ -155,7 +155,7 @@ struct FarmHostOptions
 /// Internal: the full host placement `planHost` computes. The public views
 /// are `FarmHost.resolve`, `resolution`, `callerCpus`, `summary` and
 /// `toString`.
-package(threadpool) final class HostPlan
+package(farmhost) final class HostPlan
 {
     const FarmHostOptions options;     /// as given
     const PoolResolution  candidates;  /// user filters over every group
@@ -1177,7 +1177,7 @@ private:
 
 /// The host placement for `options` on `snap`; throws
 /// `FarmHostResolveException` listing every problem found.
-package(threadpool) HostPlan planHost(ref const TopologySnapshot snap, const FarmHostOptions options)
+package(farmhost) HostPlan planHost(ref const TopologySnapshot snap, const FarmHostOptions options)
 {
     import std.algorithm.searching : canFind;
     import std.format : format;

@@ -14,7 +14,7 @@ import std.stdio : writeln;
 
 import antfarm.actors;
 import antfarm;
-import threadpool.host;
+import farmhost;
 import threadpool.hybrid : WorkerSelf;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.topology : ProcessorId, formatCpuList;
@@ -374,7 +374,7 @@ void singleton()
 
 void startupFailure()
 {
-    import threadpool.host : hostTestFailStart;
+    import farmhost : hostTestFailStart;
 
     hostTestFailStart = 0;
     auto e = expectThrow!FarmHostFailed(() { new FarmHost(guarded(2)); }, "start hook failure");

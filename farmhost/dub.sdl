@@ -1,0 +1,41 @@
+name "farmhost"
+description "FarmHost: one Ant Farm and its pinned threadpool workers"
+authors "Nathan Riddick"
+license "BSL-1.0"
+targetType "library"
+targetPath "bin"
+sourcePaths "source"
+importPaths "source"
+dependency "antfarm" path=".."
+dependency "threadpool" path="../threadpool"
+
+toolchainRequirements {
+	dmd ">=2.112.0"
+	ldc ">=1.42.0"
+}
+
+configuration "library" {
+	targetType "library"
+}
+
+// Default `dub test`: pure placement tests on synthetic snapshots.
+configuration "unittest" {
+	targetType "library"
+	sourceFiles "../tests/farmhost/host_plan.d" "../threadpool/tests/synthetic_topology.d"
+}
+
+// Live FarmHost regression: `dub run -c host-test`. Needs two accepted
+// worker CPUs in one LLC (one per core by default), or three for a free
+// caller CPU. Prints SKIP and exits 0 otherwise; check.sh treats that SKIP
+// as a failure unless ALLOW_HOST_SKIP=1.
+configuration "host-test" {
+    targetType "executable"
+    mainSourceFile "../tests/farmhost/host_live.d"
+    versions "FarmHostTestHooks"
+}
+
+// wake() racing a worker-failure shutdown: `dub run -c wakefail`.
+configuration "wakefail" {
+    targetType "executable"
+    mainSourceFile "../tests/farmhost/wakefail.d"
+}

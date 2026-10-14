@@ -19,7 +19,8 @@ Ant Farm local targets (there is no CI). See CONTRIBUTING.md for details.
 Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Python 3):
   make check               full matrix, LDC and DMD, stops at the first failure
                            (bare `make` runs this)
-  make check-quick         root, review torture, threadpool, fiber smoke, examples
+  make check-quick         root, review torture, threadpool, farmhost, fiber smoke,
+                           examples
                            (LDC toolchain including Dub and Python 3; no DMD/TSan)
   make check-docs          tracked Markdown relative links and anchors (no network)
                            plus the API reference symbol/coverage check (needs DMD)
@@ -99,11 +100,11 @@ run-farm-tsan: farm-tsan
 # adapter appears in the reference without a C dependency.
 DOCS_SOURCES := antfarm/package.d antfarm/templates.d \
 	antfarm/actors/package.d antfarm/actors/actor.d antfarm/actors/wave.d antfarm/actors/private_actor.d \
-	antfarm/actors/mimalloc.d threadpool/source/threadpool/host.d
+	antfarm/actors/mimalloc.d farmhost/source/farmhost/package.d
 DOCS_DIR := .build/docs
 
 docs:
-	dmd -D -Dd$(DOCS_DIR) -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool/source $(DOCS_SOURCES)
+	dmd -D -Dd$(DOCS_DIR) -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool/source -Ifarmhost/source $(DOCS_SOURCES)
 
 # Standalone timing gate; intentionally outside the correctness matrix.
 PERF_GATE_OUTPUT ?= /tmp/antfarm-perf-gate

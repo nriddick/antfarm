@@ -392,7 +392,7 @@ final class CacheAwarePool
     /// Start the workers of `planned`, a resolution against the discovered
     /// snapshot (FarmHost passes its narrowed selection, so
     /// `pool.resolution` reports its `notSelected` CPUs).
-    package(threadpool) void start(PoolResolution planned)
+    void start(PoolResolution planned)
     {
         version (ThreadpoolOs)
         {

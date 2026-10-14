@@ -10,7 +10,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / ".build/windows-check"
-LANES = ("packages", "threadpool", "ordering", "review", "actors", "private", "examples")
+LANES = ("packages", "threadpool", "farmhost", "ordering", "review", "actors", "private", "examples")
 QUICK_LANES = ("packages", "review", "examples")
 HARDWARE_SKIPS = ("SKIP worker cases", "SKIP affinity regression", "SKIP confine-test")
 
@@ -75,15 +75,18 @@ class Checks:
         self.run([binary, *arguments])
 
     def packages(self):
-        for package in (None, ":threadpool", ":ant_fibers"):
+        for package in (None, ":threadpool", ":farmhost", ":ant_fibers"):
             self.dub("test", package)
 
     def threadpool(self):
-        for config in ("affinity-test", "confine-test", "wait-races", "host-test"):
+        for config in ("affinity-test", "confine-test", "wait-races"):
             self.dub("run", ":threadpool", "-c", config)
         self.dub("run", ":threadpool", "-c", "wait-races", "--build=release")
+
+    def farmhost(self):
+        self.dub("run", ":farmhost", "-c", "host-test")
         if self.compiler == "ldc2":
-            self.dub("run", ":threadpool", "-c", "host-test", "--build=release")
+            self.dub("run", ":farmhost", "-c", "host-test", "--build=release")
 
     def ordering(self):
         self.run([sys.executable, "-B", "scripts/check-ring-stores.py"])

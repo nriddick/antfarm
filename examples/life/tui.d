@@ -2,7 +2,7 @@ module life.tui;
 
 import life.backend;
 import life.termbox;
-import threadpool.host : FarmHost;
+import farmhost : FarmHost;
 import core.stdc.errno : EINTR;
 import core.time : MonoTime, msecs;
 import std.algorithm : max, min;
