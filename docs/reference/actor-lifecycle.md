@@ -218,6 +218,16 @@ covers the other.
 policy for a stuck drain. The library will not cancel a callback that never
 returns, a root that always returns `again`, or an inbox that is never popped.
 
+### With Fibers and lane mappings
+
+For a full stack, seal admitted actor waves and let orchestrating Fibers observe
+completion, including any completion hook's last access. Signal or
+cooperatively cancel indefinite Fiber waiters, drain runnable work and
+completion/lifecycle records, and release completed Fiber tasks before joining
+the pool. After the join, uninstall lane/bin mappings before destroying their
+Farms. The application must bound shutdown of user code that never reaches a
+scheduler boundary.
+
 ## Ranked misuse hazards
 
 Guards below are fatal in debug and release unless the row says otherwise.

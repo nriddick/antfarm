@@ -32,7 +32,7 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
                            adversarial Farm suite
   make -C private_actor_tests run run-dmd run-tsan doc-example death
                            private actor suite, doc programs and death tests
-  make -C examples check   README payload program and the actor examples
+  make -C examples check   quickstart payload program and the actor examples
 
 Reference (needs DMD):
   make docs               generate the HTML API reference into .build/docs/

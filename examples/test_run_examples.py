@@ -17,7 +17,7 @@ class ExamplesMatrixTest(unittest.TestCase):
         test_build = Path(tempfile.gettempdir())
         with mock.patch.object(examples.os, "name", platform), \
                 mock.patch.object(examples, "build", test_build), \
-                mock.patch.object(examples, "check_readme_programs"), \
+                mock.patch.object(examples, "check_quickstart_programs"), \
                 mock.patch.object(examples, "compile_example") as compile_example, \
                 mock.patch.object(examples, "run_example") as run_example, \
                 mock.patch.object(examples, "compile_termbox"), \
@@ -50,6 +50,37 @@ class ExamplesMatrixTest(unittest.TestCase):
             self.assertEqual({call.args[0] for call in builds}, {compiler})
             self.assertEqual(len(runs), 4 * len(examples.examples))
             self.assertEqual(terminal_builds, 0)
+
+
+class QuickstartExtractionTest(unittest.TestCase):
+    def test_extracts_and_runs_first_payload_from_quickstart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory)
+            with mock.patch.object(examples, "build", build), \
+                    mock.patch.object(examples.subprocess, "run") as run, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                examples.check_quickstart_programs(examples.configs)
+            source = build / "quickstart_payload.d"
+            program = source.read_text()
+            self.assertEqual(program.count("void main"), 1)
+            self.assertIn("payloadRange!addSquare", program)
+            self.assertIn("first payload: 256 squares summed to", program)
+            self.assertEqual(run.call_count, 2 * len(examples.configs))
+            for compile_call, execute_call in zip(run.call_args_list[::2],
+                                                  run.call_args_list[1::2]):
+                self.assertIn(str(source), compile_call.args[0])
+                self.assertEqual(execute_call.kwargs["env"]["ANTFARM_HUGE_PAGES"], "0")
+                self.assertEqual(execute_call.kwargs["timeout"], examples.run_timeout)
+
+    def test_rejects_unmarked_fragment_in_quickstart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = root / "docs/guide/quickstart.md"
+            page.parent.mkdir(parents=True)
+            page.write_text("```d\nimport antfarm;\n```\n")
+            with mock.patch.object(examples, "root", root), \
+                    self.assertRaisesRegex(SystemExit, "neither a complete program"):
+                examples.check_quickstart_programs(())
 
 
 if __name__ == "__main__":

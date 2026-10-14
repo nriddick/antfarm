@@ -45,4 +45,5 @@ void main()
     if (auto here = t.current())
         writefln("this thread is on CPU %s, LLC %s, NUMA %s, efficiencyClass %s",
             ProcessorId.of(*here), here.llcIndex, here.numaIndex, here.efficiencyClass);
+    writeln("hello_topology: discovered cache topology and compared worker selections");
 }

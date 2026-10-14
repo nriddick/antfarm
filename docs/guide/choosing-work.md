@@ -23,9 +23,19 @@ A public endpoint may front a private tree: write an external result buffer or
 channel at the boundary. Their lifetimes still drain separately, and callers of
 the service never receive identities for the internal actors.
 
-The longer layer comparison is in
-[ARCHITECTURE.md](../../ARCHITECTURE.md#choosing-the-work-representation); the
-Farm rules are in [SPEC.md](../../SPEC.md).
+A payload can expose independent iterations through its header. Autonomous
+actor handlers receive an exclusive callback-local borrow and may request
+republishing through `ActorContext`; wave operations receive only the borrow,
+and the same actor cannot belong to overlapping unfinished waves. Fibers add
+`scope(exit)`, application signals, and cooperative cancellation; a Fiber that
+never suspends is usually better represented as a payload.
+
+The project intentionally has no general parallel-loop abstraction.
+Callers can construct countable Farm payloads directly when their ownership and
+completion contract is clear. A higher-level bounded parallel API may be
+designed later without preserving the removed experimental surface.
+
+The Farm rules are in [SPEC.md](../../SPEC.md).
 
 ## Public or private actors
 

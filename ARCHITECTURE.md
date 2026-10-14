@@ -103,33 +103,9 @@ not retain TLS-derived state across suspension.
 
 ## Choosing the work representation
 
-Use a bare payload when the work is short, `nothrow @nogc`, and cannot suspend.
-This is the lowest-overhead path and permits a payload to expose independent
-iterations through its header.
-
-Use an autonomous actor when work is organized around a stable identity with
-explicit non-GC state lifetime, coalesced activation, or an intrusive inbox.
-The actor handler receives an exclusive callback-local borrow and may request
-republishing through `ActorContext`; the owner retains retirement authority,
-and the handler cannot suspend.
-
-Use an actor wave when many idle actors should run the same phase operation
-and a later phase must see the completed phase as one generation. A wave
-operation receives only the exclusive borrow, not `ActorContext`, and the same
-actor cannot belong to overlapping unfinished waves.
-
-Use a managed Fiber when the work needs ordinary D exceptions, allocation,
-`scope(exit)`, timer sleep, application signals, joins, or cooperative
-cancellation. A Fiber which never suspends is usually better represented as a
-payload.
-
-The project intentionally has no general parallel-loop abstraction.
-Callers can construct countable Farm payloads directly when their ownership and
-completion contract is clear. A higher-level bounded parallel API may be
-designed later without preserving the removed experimental surface.
-
-The full work-representation table and the public-vs-private actor comparison
-are in [docs/guide/choosing-work.md](docs/guide/choosing-work.md).
+Use the [work-representation guide](docs/guide/choosing-work.md) to choose
+payloads, public actors, actor waves, private hierarchies, or Fibers. It owns
+the comparison and the public-vs-private decision.
 
 ## The `iota_sum` path
 
@@ -150,8 +126,9 @@ example. It exercises the complete non-Fiber path:
    then uninstall the bins and destroy the Farm.
 
 The source remains a real example rather than a README-only snippet. Build it
-with the command in the README. The Linux `make check` matrix does not compile
-it; that matrix does compile and run the actor programs under
+with the command in [First payload](docs/guide/quickstart.md#first-payload).
+The Linux `make check` matrix does not compile it; that matrix does compile
+and run the actor programs under
 [examples/](examples/README.md).
 
 ## The actor-wave path
@@ -224,7 +201,8 @@ per-entry cost depends on what the accepted prefix of one `write` call shares:
 | contains a multi-threaded payload | one index word, the 16-word payload header and the body words, plus a second index word per multi-threaded entry | [SPEC 2e](SPEC.md#2e-table-layout) |
 
 A shared callback is stored once per table, and a shared length once more. A
-one-word body therefore costs 1, 2, 3 or 18 ring words per entry. The number of
+one-word body therefore costs 1, 2 or 3 ring words in an all-ST table,
+or 18 for an ST entry and 19 for an MT entry in a full table. The number of
 entries admitted per quota depends on the shard count, the body width, and which
 row the prefix falls in. Do not copy a count from another configuration:
 compute it from the table layouts in [SPEC.md](SPEC.md#2-data-layout), or probe
@@ -234,27 +212,14 @@ Use `AntFarm.canFit(header, bodyWords, tier)` to pre-check one payload's singlet
 cost against its tier quota; its answer uses the current consumer-count snapshot
 and can change as consumers join or leave (see [SPEC 5b.3](SPEC.md#5b-write-call-and-return)).
 
-- The ring should generally fit the intended LLC working set. Quotas and
-  payload sizes remain in ulongs (8 bytes); only the ring size is in MiB.
-  `ringMiBFromUlongs` converts a former ulong length exactly.
-- Four or eight segments are the characterized choices.
-- `expectedConsumers` seeds the first epoch's leaf sharding; later epochs use
-  the live count. The hard limit is `MAX_CONSUMERS_LIMIT` (128) simultaneously
-  subscribed views, beyond which `subscribe()` returns `SUBSCRIBE_FULL`. A
-  count far from reality costs performance, never safety.
-- Producer capacity must cover every worker/control producer that can hold a
-  token simultaneously.
-- Publish useful batches. Single-item writes pay table overhead every time.
-- `avgCost` (0 through 7) controls consumer chunk size as `128 >> avgCost`:
-  the default 3 claims 16 entries at a time; very cheap uniform callbacks can
-  use 0 through 2 (chunks 128, 64, 32) to amortize claims; expensive callbacks
-  use a larger value for shorter visits.
-- Ordinary 4 KiB backing is the default. Huge pages are an explicit option for
-  high-volume payload table walks and should be selected from measurements.
+Quotas and payload sizes are in ulongs (8 bytes); only the ring size is in MiB.
+`ringMiBFromUlongs` converts a former ulong length exactly.
+`expectedConsumers` seeds the first epoch's leaf sharding; later epochs use
+the live count. The hard limit is `MAX_CONSUMERS_LIMIT` (128) simultaneously
+subscribed views, beyond which `subscribe()` returns `SUBSCRIBE_FULL`.
 
-Common-header and fixed-length writes reduce producer-side sizing overhead for
-homogeneous batches. They produce the same ring layout a `PayloadEntry` range
-with the same contents would, and do not change the consumer contract.
+For ring, tier, batch, work-cost, and page-backing decisions, use
+[the sizing guide](docs/guide/sizing-and-allocation.md).
 
 ## One LLC and many LLCs
 
@@ -275,35 +240,9 @@ as release evidence.
 
 ## Shutdown order
 
-For a full stack:
-
-1. Stop admitting application work.
-2. Seal admitted actor waves and let their orchestrating Fibers observe
-   completion. If a wave installed a completion hook, do not reuse or destroy
-   that wave storage until the hook's last access.
-3. Stop actor inbox senders. A public service calls `requestRetire` (drain)
-   and may escalate with `requestRetire(ActorRetireMode.cancel)` after an
-   application deadline; handlers then call `context.cancelInbox()` while
-   `context.cancelling`. A private park drains with `pump` or
-   `collectCompleted` until `live == 0`, or calls `cancelAll()` first; a
-   tracked park must also take outcomes. Do not destroy runtimes or parks yet.
-   `pump() == 0` is not that drain. The full recipe is
-   [docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md#shutdown-recipe).
-4. Signal or cooperatively cancel other indefinite Fiber waiters.
-5. Drain runnable work and completion/lifecycle records.
-6. Release completed Fiber tasks.
-7. Shut down and join the worker pool. Its `workerStop` hooks unsubscribe
-   worker-owned consumers before `shutdown()` returns.
-8. Uninstall lane/bin mappings.
-9. Unsubscribe any control-thread consumers. Together with the worker
-   unsubscribe in step 7, this is what gets every consumer out of the trampoline.
-10. Destroy actor runtimes, and call `park.destroy()` on each drained private
-    park. `destroy(park)` does not free the park.
-11. Unregister producer tokens.
-12. Destroy Farms only after no consumer or producer can touch them.
-
-The owning application remains responsible for bounded shutdown of user code
-that never reaches a scheduler boundary.
+Stop admission and drain while producers and consumers can still make progress.
+Then follow the canonical [shutdown order](docs/reference/actor-lifecycle.md#shutdown-order),
+including the Fiber steps there; `FarmHost.close()` implements the host's teardown.
 
 ## Maintainer documents
 

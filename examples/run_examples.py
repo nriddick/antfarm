@@ -4,7 +4,7 @@
 Runs on Windows and Linux without a shell. Windows omits TSan and the POSIX
 terminal front end. This is also the Linux `make check` examples lane.
 
-Every ```d block in README.md must be a complete program (`void main`) or
+Every ```d block in docs/guide/quickstart.md must be a complete program (`void main`) or
 contain the word fragment. Complete programs are compiled and run here.
 """
 import argparse
@@ -73,26 +73,26 @@ def run_example(binary, workers, sanitize=False):
     subprocess.run(cmd, cwd=root, env=env, check=True, timeout=run_timeout)
 
 
-def check_readme_programs(selected_configs):
-    text = (root / "README.md").read_text()
+def check_quickstart_programs(selected_configs):
+    text = (root / "docs/guide/quickstart.md").read_text()
     blocks = re.findall(r"```d\n(.*?)\n```", text, re.S)
     if not blocks:
-        raise SystemExit("README.md has no ```d blocks")
+        raise SystemExit("docs/guide/quickstart.md has no ```d blocks")
     programs = []
     for index, block in enumerate(blocks):
         if "void main" in block:
             programs.append(block)
         elif "fragment" not in block:
             raise SystemExit(
-                f"README.md ```d block {index} is neither a complete program "
+                f"docs/guide/quickstart.md ```d block {index} is neither a complete program "
                 "nor marked as a fragment")
     if len(programs) != 1:
         raise SystemExit(
-            f"expected one complete README program, found {len(programs)}")
-    source = build / "readme_payload.d"
+            f"expected one complete quickstart program, found {len(programs)}")
+    source = build / "quickstart_payload.d"
     source.write_text(programs[0] + "\n")
     for compiler, flags, suffix in selected_configs:
-        output = executable_path(f"readme_payload{suffix}")
+        output = executable_path(f"quickstart_payload{suffix}")
         cmd = [compiler, *flags, "-i", "-I.", str(source), f"-of={output}"]
         print("==>", " ".join(cmd), flush=True)
         subprocess.run(cmd, cwd=root, check=True)
@@ -114,7 +114,7 @@ def main(ldc_only=False, compiler=None):
     if ldc_only:
         selected_configs = configs[:2]
     build.mkdir(exist_ok=True)
-    check_readme_programs(selected_configs)
+    check_quickstart_programs(selected_configs)
     for name in examples:
         for compiler, flags, suffix in selected_configs:
             output = executable_path(f"{name.replace('/', '_')}{suffix}")

@@ -66,8 +66,8 @@ each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
 threaded programs. Every program run has a 300 s timeout. `fiber_cancel_at` still runs under TSan with 0 workers only; Fiber migration
 under TSan is covered by the dedicated Fiber TSan smoke suite instead (see
 [fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary)). That target also extracts the complete First payload program
-from the repository README and runs it with LDC and DMD in debug and release.
-Other README D blocks are fragments and are rejected by the extractor unless
+from [the quickstart guide](../docs/guide/quickstart.md#first-payload) and runs it with LDC and DMD in debug and release.
+Other quickstart D blocks are fragments and are rejected by the extractor unless
 they say so. The repository `make check` includes that target.
 
 The same runner supports native Windows x64 without make or Bash:

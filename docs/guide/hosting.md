@@ -161,14 +161,9 @@ for message/file limits and `sourceType`/`truncated` fields.
 - no extra producer is outstanding.
 
 If any check fails, it throws and the host stays usable: drain and call it
-again. Otherwise it runs the
-[shutdown order](../reference/actor-lifecycle.md#shutdown-order):
-1. joins the consumers;
-2. finishes the attachments;
-3. destroys parks and runtimes;
-4. restores the caller's affinity;
-5. unregisters the token;
-6. destroys the Farm.
+again. Otherwise it performs the canonical
+[shutdown order](../reference/actor-lifecycle.md#shutdown-order), finishing
+attachments and restoring caller affinity as part of teardown.
 
 `abandon()` stops the consumers, restores affinity and leaks everything that
 did not drain. After `abandon()` or a failed host, call `leak()` on any

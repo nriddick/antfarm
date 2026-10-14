@@ -1,10 +1,11 @@
 # Contributing to Ant Farm
 
-Ant Farm is concurrent, `@nogc` code whose correctness rests on stated
-memory-order arguments. Read the owning document for the area you are changing,
-keep its rules and the implementation in step, and use the checklist below to
-prepare your contribution. There is no CI; the correctness gate is a local
-command.
+Start with `make check-quick SHELL=/usr/bin/bash` for local iteration.
+A local Linux run on 2026-10-14 took **97.209 seconds** (about 1 min 37 s) on
+an AMD Ryzen 9 5900XT with 32 allowed logical CPUs and LDC 1.43.0. Ant Farm is
+concurrent, `@nogc` code whose correctness rests on stated memory-order
+arguments. Read the owning document for the area you change, keep its rules
+and implementation in step, and use the checklist below. There is no CI.
 
 During development, batch related edits and run the smallest useful check of
 the changed behavior. Local commits do not require the full gate; report checks
@@ -78,7 +79,7 @@ During implementation of changes to the Farm, actors, or shared lifecycle:
   edge (see [review_torture/FARM_ORDERING.md](review_torture/FARM_ORDERING.md)).
 - New test code stays on druntime threads and atomics, and any new example is a
   compile target in `examples/run_examples.py`.
-- If you change a documentation program, the README First payload, or an
+- If you change a documentation program, the quickstart First payload, or an
   example, `make check` extracts and runs them. Mark partial code blocks as
   fragments.
 

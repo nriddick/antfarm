@@ -4,26 +4,48 @@ This is the map of the repository's documentation and the canonical owner of
 each rule. Each rule is stated in full in exactly one place; other pages
 summarize it and link. Update the owner first, then the pages that link to it.
 
-Three reading paths:
+## Run something
 
-- **Run something.** [README quickstart](../README.md#quickstart-linux) →
-  [docs/guide/quickstart.md](guide/quickstart.md) →
-  [examples/README.md](../examples/README.md).
-- **Choose and use actors.**
-  [docs/guide/choosing-work.md](guide/choosing-work.md) →
-  [docs/guide/public-actors.md](guide/public-actors.md) or
-  [docs/guide/private-actors.md](guide/private-actors.md) →
-  [docs/reference/actor-lifecycle.md](reference/actor-lifecycle.md) → the
-  matching example.
-- **Contribute.** [CONTRIBUTING.md](../CONTRIBUTING.md) →
-  [docs/development/testing.md](development/testing.md) →
-  [ARCHITECTURE.md](../ARCHITECTURE.md) and [SPEC.md](../SPEC.md).
+Start with First payload, then follow these steps. Each step pairs a program
+with its owning page; leave the path as soon as the layer fits your workload.
+
+1. **See it work (5 min).** Run [First payload](guide/quickstart.md#first-payload)
+   on one thread and read the [quickstart model](guide/quickstart.md#what-just-happened).
+   Learn the token, published count, cursor, and application completion counter.
+2. **Add threads (10 min).** Run [iota_sum.d](../examples/iota_sum.d) with
+   `-Ithreadpool/source` using its [command](guide/quickstart.md#first-payload),
+   then read [Start workers](../threadpool/README.md#start-workers).
+   Leave here for short `@nogc` fan-out.
+3. **Host plumbing (10 min).** Run [public_service.d](../examples/public_service.d)
+   with `2` workers using the [quickstart](guide/quickstart.md#run-the-public-service),
+   then read [FarmHost setup](guide/hosting.md#setup). Import `threadpool.host`.
+4. **Pick a representation (15 min).** Use the table in
+   [choosing-work.md](guide/choosing-work.md) to choose the next program.
+5. **Use that layer.** Public identities: [public_service.d](../examples/public_service.d)
+   and [public_wave.d](../examples/public_wave.d), then [public actors](guide/public-actors.md)
+   and the [hazards table](reference/actor-lifecycle.md#ranked-misuse-hazards).
+   Private trees: [private_tree.d](../examples/private_tree.d) and
+   [request_deadline.d](../examples/request_deadline.d), then
+   [private actors](guide/private-actors.md) and [outcomes](guide/outcomes-and-cancellation.md).
+   Fibers: [hello_fibers.d](../fibers/examples/hello_fibers.d), then
+   [Fibers through handles, joins, and cancellation](../fibers/README.md#handles-joins-and-cancellation).
+   Leave here if the chosen layer supplies what you need.
+6. **Size it.** Read [Sizing one Farm](../ARCHITECTURE.md#sizing-one-farm) and
+   [work-cost hints](guide/sizing-and-allocation.md#work-cost-hints).
+   When ready to measure, run the default [throughput shape](../perftest/README.md#payload-benchmarks)
+   once. The [usage rules](guide/using-it-well.md) collect the checks to remember.
+7. **Trust it.** Run `make check-quick`, then read
+   [testing](development/testing.md) for what it covers and the deferred lanes.
+
+For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
+[ARCHITECTURE.md](../ARCHITECTURE.md) and [SPEC.md](../SPEC.md).
 
 ## Guides
 
 | Page | Read it to |
 | --- | --- |
-| [quickstart.md](guide/quickstart.md) | build and run a tracked program in a few minutes |
+| [quickstart.md](guide/quickstart.md) | run a public service and the single-threaded First payload |
+| [using-it-well.md](guide/using-it-well.md) | check correctness and tuning rules before building on the Farm |
 | [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown |
 | [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, or Fiber |
 | [public-actors.md](guide/public-actors.md) | create, address, wake, retire and reclaim public actors and waves |
@@ -56,9 +78,10 @@ Three reading paths:
 | Topic | Owner |
 | --- | --- |
 | Farm algorithm, table layout, compact ST tables, callback header, memory-order contract | [SPEC.md](../SPEC.md) |
-| Layers, sizing one Farm, entries per quota, shutdown order | [ARCHITECTURE.md](../ARCHITECTURE.md) |
+| Layers, sizing formulas and entries per quota | [ARCHITECTURE.md](../ARCHITECTURE.md) |
 | Work-representation and public/private actor choice | [guide/choosing-work.md](guide/choosing-work.md) |
-| Runnable programs and their commands | [examples/README.md](../examples/README.md) |
+| First payload and the initial producer/consumer/actor model | [guide/quickstart.md](guide/quickstart.md) |
+| Runnable actor programs and their commands | [examples/README.md](../examples/README.md) |
 | FarmHost setup, placement, idle and wake, control-thread rule, close and abandon | [guide/hosting.md](guide/hosting.md) |
 | Actor API topic index and the generated reference command | [reference/README.md](reference/README.md) |
 | Actor authority, completion, storage, drain and shutdown contracts shared by both models | [reference/actor-lifecycle.md](reference/actor-lifecycle.md) |
@@ -66,7 +89,7 @@ Three reading paths:
 | Private roots, cohorts, dispatch and retirement API | [guide/private-actors.md](guide/private-actors.md) |
 | Private result ports, subsets, continuations and folds | [guide/private-results-and-waits.md](guide/private-results-and-waits.md) |
 | Domain failure, outcomes, deadlines and cancellation | [guide/outcomes-and-cancellation.md](guide/outcomes-and-cancellation.md) |
-| Actor quotas, batches, work-cost hints, allocators and slabs | [guide/sizing-and-allocation.md](guide/sizing-and-allocation.md) |
+| Farm and actor sizing decisions, tiers, batches, work-cost hints, allocators and slabs | [guide/sizing-and-allocation.md](guide/sizing-and-allocation.md) |
 | Public actor and wave memory-order proofs | [design/public-actor-ordering.md](design/public-actor-ordering.md) |
 | Private join, outcome and cancellation proofs | [design/private-actor-ordering.md](design/private-actor-ordering.md) |
 | Private Entry/Service/cohort layout and slab reuse proof | [design/private-actor-layout.md](design/private-actor-layout.md) |

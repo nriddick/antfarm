@@ -30,11 +30,11 @@ lists every target.
 | Actor torture | `actor_torture`: deterministic interleavings and sustained contention for the public actors | LDC, DMD, LDC TSan |
 | Review torture | `review_torture`: adversarial Farm tests | LDC, LDC TSan |
 | Private actors | `private_actor_tests`: unit suite, the extracted private-actor documentation programs, and the fatal-death harness | LDC, DMD, LDC TSan |
-| Examples | `examples/`: the First payload program extracted from [README.md](../../README.md), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
+| Examples | `examples/`: the First payload program extracted from [quickstart.md](../guide/quickstart.md#first-payload), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
 
 `make check-quick` runs the root unit suite, `make -C review_torture run`
 (including `sweep_cursor`), threadpool unit suite, fiber smoke suite, and
-`python3 examples/run_examples.py --ldc-only`. The examples include the README
+`python3 examples/run_examples.py --ldc-only`. The examples include the quickstart
 payload and actor/headless programs in LDC debug and release with 0 and 2
 workers; the terminal front end is omitted. This target needs the LDC toolchain
 (including Dub), Python 3, GNU make and Bash, without DMD, a TSan runtime or a C
@@ -110,7 +110,7 @@ cancellation and exception unwinding). The full smoke run includes both checks.
 | `make -C actor_torture run run-dmd run-tsan` | public actor suite |
 | `make -C review_torture run run-tsan` | adversarial Farm suite |
 | `make -C private_actor_tests run run-dmd run-tsan doc-example death` | private actor suite, documentation programs and death tests |
-| `make -C examples check` | example programs and the README program |
+| `make -C examples check` | example programs and the quickstart program |
 
 Each suite has its own README with selectors and the seams it uses:
 [actor_torture](../../actor_torture/README.md),
@@ -145,7 +145,7 @@ interpreter and arguments.
 | `review` | Plain torture suite, sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
 | `actors` | Public actor deterministic/contention suite with the mimalloc stub |
 | `private` | Private actor suite and six extracted documentation programs |
-| `examples` | README payload and actor/headless examples in debug/release with 0 and 2 workers |
+| `examples` | quickstart payload and actor/headless examples in debug/release with 0 and 2 workers |
 
 The runner forces `ANTFARM_HUGE_PAGES=0`, keeps generated binaries and Dub's
 home under `.build/windows-check/`, and uses local dependencies without registry
@@ -226,7 +226,7 @@ performance.
 
 `make check` extracts and runs two kinds of Markdown program:
 
-- The complete First payload program in [README.md](../../README.md), by
+- The complete First payload program in [quickstart.md](../guide/quickstart.md#first-payload), by
   `examples/run_examples.py`.
 - The six complete private-actor programs in the
   [private-actor guides](../guide/private-actors.md), by

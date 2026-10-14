@@ -8,17 +8,19 @@ allocator options.
 
 ## Farm setup and tier choice
 
-`AntFarm.create` takes ring size in MiB, not ulongs. `ringMiB` is a power of
-two, at least 2. Producer quotas are ulongs. `expectedConsumers` is a sharding
-hint; the hard cap is 128 subscribed views. Invalid geometry or an impossible
-quota budget is fatal at construction. Defaults are enough for a first
-program; tune only after the sizing model, not by guessing.
+Start with the defaults, then choose the ring for the LLC working set and quota
+for a phase's burst. Four or eight segments are the characterized choices. Use the parameter meanings and quota formula in
+[Sizing one Farm](../../ARCHITECTURE.md#sizing-one-farm) before tuning.
 
-The budget is the sum of simultaneous grants, `maxBulk * quotaBulk +
-maxSmall * quotaSmall`. It must fit in `k - 1` segments. A tier left at
-`max* = 0` is disabled. One active producer needs one slot of the tier it
-registers. Register a bulk token only when a small quota cannot admit the batch
-you actually publish.
+A tier left at `max* = 0` is disabled. Size each enabled tier for every thread
+that can hold one of its tokens simultaneously, including workers that publish.
+Register a bulk token only when the small quota cannot admit the batch you
+actually publish; adding bulk capacity also reserves more of the total budget.
+
+Publish useful batches: single-item writes pay table overhead every time.
+Common-header and fixed-length writes reduce producer sizing overhead for
+homogeneous batches. They emit the same layout as equivalent `PayloadEntry`
+ranges and leave the consumer contract unchanged.
 
 Private root batches and the Farm quota are different knobs. The park's
 configured batch limit fixes how many root-table slots are reserved.
