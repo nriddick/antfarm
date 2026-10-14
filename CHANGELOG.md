@@ -2,6 +2,67 @@
 
 ## 1.8.1 (unreleased)
 
+1.8.1 intentionally breaks the threadpool CPU-query API, with no deprecation
+aliases; see the migration table below.
+
+### Fixes and additions
+
+- `AntFarm.canFit(header, bodyWords, tier)` (new) reports whether one
+  singleton payload fits a producer tier's quota at the live consumer count.
+  It never fatals and reserves nothing; a later `write` still validates.
+- `canFit` and `write` share one table base-size helper; `write` codegen is
+  unchanged.
+- An idle consumer held behind a stalled older epoch no longer re-walks every
+  table of that epoch on each poll. The oldest-trailing sweep resumes at a
+  per-consumer cursor (review torture T27: 764 tables per poll, now 764 then
+  1).
+- [PERFORMANCE.md](PERFORMANCE.md) records `checkFreshWriteSegments` as a
+  deliberately kept tripwire cost.
+- `accepted(ActorWakeResult)`, `accepted(ActorSendResult)` and
+  `accepted(ActorRetireResult)` (new, UFCS) name the results that admitted a
+  request.
+- `ActorWaveHandle.interrupted` (new) reports a wake, send or retirement
+  admitted across the wave owner's publication gap. Such a benign race no
+  longer sets `failed` (see Compatibility notes).
+- Assertion builds print `antfarm warning: ActorOwner dropped without
+  reclaim` to stderr when a live `ActorOwner` leaves scope; release builds
+  have no destructor. `ActorOwner.leak()` (new) is the deliberate opt-out.
+- The four `PrivateContext.createChildren` overloads share one
+  implementation; signatures, attributes and generated code are unchanged.
+- `make -C actor_torture death` is a public child-process harness: rows
+  expect an abort with its exact message, a warning, or silence, and cover
+  the public actor and wave fatal sites. `make check` runs it.
+- `FiberSemaphore.wait` returns a permit acquired during registration, and an
+  auto-reset `FiberEvent.wait` restores a consumed set, when cancellation wins
+  before the waiter resumes. Previously another waiter could be stranded.
+- TSan builds keep a sanitizer context per fiber task, so a suspended fiber
+  can migrate between threads without underflowing TSan's shadow stack.
+- Managed worker pumps drain queued remote cancellation requests, serialized
+  with admission and recycling; release and shutdown stay Director-only. The
+  pump counts applied requests without allocating, and
+  `drainCancellationRequests()` still returns per-request results.
+- Offline Linux CPUs stay discoverable with `noLlcIndex` and no longer form
+  their own fallback LLC domains.
+- Pool start on Windows throws `threadpool: WaitOnAddress unavailable (need
+  Windows 10 1803+)` instead of parking workers through a null pointer.
+- [threadpool/README.md](threadpool/README.md) notes that CFS bandwidth
+  quotas are not detected; size quota-limited pools explicitly.
+- `scripts/check.sh` no longer needs `/bin/sh`, derives its CPU-pinned lanes
+  from the process affinity (`CHECK_SMALL_CPUS` / `CHECK_ONE_LLC_CPUS`
+  override; empty counts as unset; `--print-cpus` shows the choice), and
+  `make check-quick` runs an LDC-only subset.
+- Test harness only: the `delayed-final-credit` and `ports-poll-visibility`
+  workers in private_actor_tests unsubscribe before waiting. Their inactive
+  consumer view retained a ring pin, a circular wait that could hang the
+  test. The suite's progress deadlines are uniform 60 s hang timeouts.
+
+### Compatibility notes
+
+- `ActorWaveHandle.failed` now means a structural admission rejection only.
+  A wake, send or retirement admitted across the wave owner's publication gap
+  used to set `failed`; it now sets `interrupted` and does not fail the
+  operation.
+
 ### Breaking changes: two threadpool CPU-query surfaces
 
 Threadpool had four overlapping ways to ask which CPUs a program may use:
