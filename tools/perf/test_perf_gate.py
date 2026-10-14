@@ -57,6 +57,8 @@ class GateCase(unittest.TestCase):
         self.repo = self.tmp / 'repo'
         (self.repo / pathlib.Path(ARCHIVE_REL).parent).mkdir(parents=True)
         (self.repo / ARCHIVE_REL).write_bytes(b'default-archive')
+        (self.repo / 'antfarm').mkdir()
+        (self.repo / 'antfarm/package.d').write_text('module antfarm;')
         self.n_out = 0
 
     def out(self):
@@ -64,19 +66,21 @@ class GateCase(unittest.TestCase):
         return self.tmp / ('out%d' % self.n_out)
 
     def gate(self, args, rate=None, sources=None, bench_sources=None, build=None,
-             load=0.1, fail_build=False):
+             load=0.1, fail_build=False, layouts=None):
         """Run perf_gate.main() with everything external faked.
 
         rate(version, mode, consumers, percent, n) -> dict overriding the fake
         row for the n-th (0-based) run of that version in that cell.
         sources: revision sha -> actor_churn.d text; bench_sources: ref -> text.
         build(label, revision, serial) -> bytes written as the binary.
+        layouts: revision sha -> perf_gate.LAYOUTS key (default 'package').
         """
         r = Result()
         r.runs, r.builds, r.adds, r.removes, r.scratch = [], [], [], [], []
         default_source = source_for(ALL_MODES)
         sources = sources or {}
         bench_sources = bench_sources or {}
+        layouts = layouts or {}
         rate = rate or rel(1.0)
         counters = {}
         build = build or (lambda label, revision, serial: b'binary-' + revision.encode())
@@ -91,13 +95,21 @@ class GateCase(unittest.TestCase):
                 return REFS[ref] + '\n'
             if cmd[:3] == ['git', 'worktree', 'add']:
                 scratch = pathlib.Path(cmd[4])
-                (scratch / 'tools/perf').mkdir(parents=True)
-                (scratch / 'tools/perf/actor_churn.d').write_text(
-                    sources.get(cmd[5], default_source))
                 r.adds.append(scratch)
+                scratch.mkdir()
+                if layouts.get(cmd[5]) == 'unknown':
+                    return ''
+                layout = perf_gate.LAYOUTS[layouts.get(cmd[5], 'package')]
+                for name in (layout['marker'], layout['benchmark']):
+                    (scratch / name).parent.mkdir(parents=True, exist_ok=True)
+                (scratch / layout['marker']).write_text('')
+                (scratch / layout['benchmark']).write_text(sources.get(cmd[5], default_source))
                 return ''
+            if cmd[:3] == ['git', 'ls-tree', '--name-only']:
+                return perf_gate.LAYOUTS[layouts.get(REFS[cmd[3]], 'package')]['marker'] + '\n'
             if cmd[:2] == ['git', 'show']:
-                ref = cmd[2].split(':', 1)[0]
+                ref, path = cmd[2].split(':', 1)
+                self.assertEqual(path, perf_gate.LAYOUTS[layouts.get(REFS[ref], 'package')]['benchmark'])
                 return bench_sources.get(ref, default_source)
             if cmd[0] == 'ldc2':
                 return 'LDC fake'
@@ -115,7 +127,9 @@ class GateCase(unittest.TestCase):
                 raise subprocess.CalledProcessError(1, cmd)
             binary = pathlib.Path(next(x for x in cmd if x.startswith('-of='))[4:])
             label = binary.name.split('-')[0]
-            r.builds.append(dict(label=label, cmd=cmd, cwd=kw['cwd']))
+            benchmark = next(x for x in cmd if x.endswith('actor_churn.d'))
+            r.builds.append(dict(label=label, cmd=cmd, cwd=kw['cwd'],
+                                 source=(pathlib.Path(kw['cwd']) / benchmark).read_text()))
             serial = len(r.builds) - 1
             rev = REFS[self.refs[label]]
             binary.write_bytes(build(label, rev, serial))
@@ -471,9 +485,28 @@ class ArchiveTests(GateCase):
         archive = other_repo / ARCHIVE_REL
         archive.parent.mkdir(parents=True)
         archive.write_bytes(b'other-repo-archive')
+        (other_repo / 'antfarm').mkdir()
+        (other_repo / 'antfarm/package.d').write_text('')
         self.repo = other_repo
         r = self.gate(FAST)
         self.assertEqual(self.build_archives(r), {archive.resolve()})
+
+    def test_default_archive_follows_a_flat_repo_layout(self):
+        flat_repo = self.tmp / 'flat-repo'
+        archive = flat_repo / 'actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a'
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(b'flat-archive')
+        (flat_repo / 'antfarm.d').write_text('')
+        self.repo = flat_repo
+        r = self.gate(FAST)
+        self.assertEqual(self.build_archives(r), {archive.resolve()})
+
+    def test_repo_without_a_known_layout_is_an_error(self):
+        unknown = self.tmp / 'unknown-repo'
+        unknown.mkdir()
+        self.repo = unknown
+        with self.assertRaises(RuntimeError):
+            self.gate(FAST)
 
 
 class ControlTests(GateCase):
@@ -575,6 +608,150 @@ class BenchmarkSourceTests(GateCase):
         sources = {BASE_SHA: source_for(ALL_MODES), CAND_SHA: source_for(ALL_MODES, '// changed')}
         r = self.gate(FAST + ['--allow-benchmark-change'], sources=sources)
         self.assert_exit_recorded(r, 0)
+
+
+FLAT_CHURN = source_for(ALL_MODES, 'import actors;\nimport actors.mimalloc : mimallocV3ActorAllocator;\n')
+PACKAGE_CHURN = source_for(ALL_MODES, 'import antfarm.actors;\n'
+                           'import antfarm.actors.mimalloc : mimallocV3ActorAllocator;\n')
+
+
+class ModuleMapTests(unittest.TestCase):
+    def test_flat_imports_map_to_the_package_layout_and_back(self):
+        flat = ('module actor_churn;\nimport actors;\nimport antfarm : Token, fatal;\n'
+                'import antfarm_templates, antfarm_allocation : freeAligned64;\n'
+                '    import actors.mimalloc : mimallocV3ActorAllocator;\n'
+                'import threadpool.host : FarmHost;\nimport fibers = antfarm_fibers.scheduler;\n')
+        package, renames = perf_gate.map_modules(flat, 'flat', 'package')
+        self.assertEqual(package, (
+            'module actor_churn;\nimport antfarm.actors;\nimport antfarm : Token, fatal;\n'
+            'import antfarm.templates, antfarm.allocation : freeAligned64;\n'
+            '    import antfarm.actors.mimalloc : mimallocV3ActorAllocator;\n'
+            'import threadpool.host : FarmHost;\nimport fibers = ant_fibers.scheduler;\n'))
+        self.assertEqual(renames, ['actors -> antfarm.actors', 'antfarm_allocation -> antfarm.allocation',
+                                   'antfarm_fibers -> ant_fibers', 'antfarm_templates -> antfarm.templates'])
+        back, reverse = perf_gate.map_modules(package, 'package', 'flat')
+        self.assertEqual(back, flat)
+        self.assertEqual(len(reverse), 4)
+
+    def test_same_layout_and_unrelated_names_are_untouched(self):
+        text = 'import actorsx;\nimport antfarm;\nimport my.actors;\nauto x = actors.count;\n'
+        self.assertEqual(perf_gate.map_modules(text, 'package', 'package'), (text, []))
+        self.assertEqual(perf_gate.map_modules(text, 'flat', 'package'), (text, []))
+
+    def test_selected_symbols_are_not_renamed(self):
+        text = 'import antfarm.actors : actors, antfarm_templates;\n'
+        self.assertEqual(perf_gate.map_modules(text, 'package', 'flat')[0],
+                         'import actors : actors, antfarm_templates;\n')
+
+    def test_layout_detection_uses_the_marker_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaises(RuntimeError):
+                perf_gate.tree_layout(root)
+            (root / 'antfarm.d').write_text('')
+            self.assertEqual(perf_gate.tree_layout(root), 'flat')
+            (root / 'antfarm').mkdir()
+            (root / 'antfarm/package.d').write_text('')
+            self.assertEqual(perf_gate.tree_layout(root), 'package')
+
+
+class LayoutTests(GateCase):
+    FLAT_BASE = {BASE_SHA: 'flat'}
+    SOURCES = {BASE_SHA: FLAT_CHURN, CAND_SHA: PACKAGE_CHURN}
+
+    def builds(self, r):
+        return {b['label']: b for b in r.builds}
+
+    def test_each_revision_builds_with_its_own_layout(self):
+        r = self.gate(FAST, sources=self.SOURCES, layouts=self.FLAT_BASE)
+        self.assert_exit_recorded(r, 0)
+        builds = self.builds(r)
+        base, cand = builds['base']['cmd'], builds['candidate']['cmd']
+        self.assertIn('perftest/actor_churn.d', base)
+        self.assertIn('antfarm.d', base)
+        self.assertIn('antfarm_allocation.d', base)
+        self.assertIn('actors/mimalloc.d', base)
+        self.assertFalse([x for x in base if x.startswith(('antfarm/', 'tools/'))])
+        self.assertIn('tools/perf/actor_churn.d', cand)
+        self.assertIn('antfarm/actors/mimalloc.d', cand)
+        self.assertFalse([x for x in cand if x.startswith(('actors/', 'perftest/'))])
+        self.assertEqual(builds['base']['source'], FLAT_CHURN)
+        meta = self.load(r, 'metadata.json')['builds']
+        self.assertEqual((meta['base']['layout'], meta['candidate']['layout']), ('flat', 'package'))
+        self.assertEqual(meta['base']['module_renames'], [])
+
+    def test_cross_layout_sources_differing_only_in_imports_are_the_same_benchmark(self):
+        r = self.gate(FAST, sources=self.SOURCES, layouts=self.FLAT_BASE)
+        meta = self.load(r, 'metadata.json')['builds']
+        self.assertEqual(meta['base']['benchmark_sha256'], meta['candidate']['benchmark_sha256'])
+        self.assertNotEqual(meta['base']['compiled_benchmark_sha256'],
+                            meta['candidate']['compiled_benchmark_sha256'])
+        self.assertTrue(r.runs)
+
+    def test_cross_layout_sources_differing_beyond_imports_still_differ(self):
+        sources = {BASE_SHA: FLAT_CHURN, CAND_SHA: PACKAGE_CHURN + '// changed\n'}
+        r = self.gate(FAST, sources=sources, layouts=self.FLAT_BASE)
+        self.assert_exit_recorded(r, 2)
+        self.assertIn('benchmark sources differ', self.load(r, 'gate.json')['reason'])
+        self.assertEqual(r.runs, [])
+
+    def test_package_benchmark_ref_is_mapped_onto_a_flat_base(self):
+        r = self.gate(FAST + ['--benchmark-ref', 'CAND'], layouts=self.FLAT_BASE,
+                      bench_sources={'CAND': PACKAGE_CHURN})
+        self.assert_exit_recorded(r, 0)
+        builds = self.builds(r)
+        self.assertEqual(builds['base']['source'], FLAT_CHURN)
+        self.assertEqual(builds['candidate']['source'], PACKAGE_CHURN)
+        meta = self.load(r, 'metadata.json')['builds']
+        self.assertEqual(meta['base']['module_renames'], ['antfarm.actors -> actors'])
+        self.assertEqual(meta['base']['benchmark_layout'], 'package')
+        self.assertEqual(meta['candidate']['module_renames'], [])
+
+    def test_flat_benchmark_ref_is_mapped_onto_a_package_candidate(self):
+        r = self.gate(FAST + ['--benchmark-ref', 'BASE'], layouts=self.FLAT_BASE,
+                      bench_sources={'BASE': FLAT_CHURN})
+        self.assert_exit_recorded(r, 0)
+        builds = self.builds(r)
+        self.assertEqual(builds['base']['source'], FLAT_CHURN)
+        self.assertEqual(builds['candidate']['source'], PACKAGE_CHURN)
+        meta = self.load(r, 'metadata.json')['builds']
+        self.assertEqual(meta['candidate']['module_renames'], ['actors -> antfarm.actors'])
+
+    def test_unknown_revision_layout_fails_and_removes_scratch(self):
+        with self.assertRaises(RuntimeError):
+            self.gate(FAST, layouts={BASE_SHA: 'unknown'})
+        scratch = list(pathlib.Path(tempfile.gettempdir()).glob('perf-gate-base-*'))
+        self.assertEqual(scratch, [])
+
+
+class BuildOnlyTests(GateCase):
+    def test_build_only_builds_both_sides_and_measures_nothing(self):
+        r = self.gate(FAST + ['--build-only'])
+        self.assert_exit_recorded(r, 0)
+        self.assertEqual([b['label'] for b in r.builds], ['base', 'candidate'])
+        self.assertEqual(r.runs, [])
+        self.assertTrue(self.load(r, 'gate.json')['build_only'])
+        self.assertEqual(self.load(r, 'summary.json'), [])
+        self.assert_scratch_cleaned(r)
+
+    def test_build_only_ignores_host_load_and_cpu_choice(self):
+        r = self.gate(['--base', 'BASE', '--candidate', 'CAND', '--cpus', '0,99',
+                       '--consumers', '5', '--build-only'], load=5.0)
+        self.assert_exit_recorded(r, 0)
+        self.assertEqual(len(r.builds), 2)
+
+    def test_build_only_still_reports_a_nonidentical_control(self):
+        r = self.gate(['--base', 'BASE', '--control', '--build-only'],
+                      build=lambda label, revision, serial: b'binary-%d' % serial)
+        self.assert_exit_recorded(r, 2)
+        self.assertEqual(r.runs, [])
+
+    def test_build_only_crosses_layouts(self):
+        r = self.gate(FAST + ['--build-only'], layouts={BASE_SHA: 'flat'},
+                      sources={BASE_SHA: FLAT_CHURN, CAND_SHA: PACKAGE_CHURN})
+        self.assert_exit_recorded(r, 0)
+        meta = self.load(r, 'metadata.json')['builds']
+        self.assertEqual((meta['base']['layout'], meta['candidate']['layout']), ('flat', 'package'))
 
 
 class UnavailableModeTests(GateCase):

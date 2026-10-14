@@ -199,6 +199,15 @@ passes options such as `--archive`, `--boundary`, and `--root-hint`. Run the
 correctness gate first and run timing serially, with no other heavy work on the
 host.
 
+Either ref may predate the 1.8.2 layout (`antfarm.d`, `actors/` and
+`perftest/actor_churn.d` at the root). The gate detects each checkout's layout
+and builds it with that layout's paths. It maps the benchmark's imports between
+layouts (`actors` and `antfarm.actors`, and so on), so one benchmark source
+still counts as identical on both sides. `metadata.json` records each side's
+layout and any renames. `PERF_GATE_ARGS=--build-only` builds both sides,
+writes the metadata and build logs, and stops before measuring; it skips the
+host-load and CPU checks.
+
 Decision rules:
 
 - Exit status is **0 pass, 1 regression, 2 inconclusive/error**. Inconclusive

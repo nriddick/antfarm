@@ -5,6 +5,9 @@ Example: ./perf_gate.py --repo /path/antfarm --base BASE --candidate TIP \
  --archive /path/libmimalloc.a --output /tmp/gate-001 --modes actor,wave,private
 Use --benchmark-ref to compile identical benchmark source against both runtimes.
 Unsupported API combinations fail explicitly; never substitute another benchmark.
+Each revision builds with its own repository layout (flat before 1.8.2, the
+antfarm package after); benchmark imports are mapped between layouts.
+--build-only builds both revisions and stops before any measurement.
 """
 import argparse,hashlib,json,os,pathlib,random,re,statistics,subprocess,sys,tempfile,time
 P=pathlib.Path
@@ -13,6 +16,48 @@ P=pathlib.Path
 def require_linux(parser):
     if sys.platform != 'linux':
         parser.error('performance timing gate requires Linux (/proc, sysfs and CPU affinity)')
+
+# Repository layouts. Before 1.8.2 the runtime sat at the root (antfarm.d,
+# actors/) with the benchmark in perftest/; 1.8.2 made it the antfarm package
+# and moved the benchmark to tools/perf/.
+LAYOUTS=dict(
+    package=dict(marker='antfarm/package.d',benchmark='tools/perf/actor_churn.d',
+        archive='tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a',
+        sources=['antfarm/package.d','antfarm/allocation.d','antfarm/actors/package.d','antfarm/actors/actor.d',
+            'antfarm/actors/wave.d','antfarm/actors/private_actor.d','antfarm/actors/mimalloc.d']),
+    flat=dict(marker='antfarm.d',benchmark='perftest/actor_churn.d',
+        archive='actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a',
+        sources=['antfarm.d','antfarm_allocation.d','actors/package.d','actors/actor.d',
+            'actors/wave.d','actors/private_actor.d','actors/mimalloc.d']))
+# Flat module name -> package module name (and submodules); inverted for package -> flat.
+MODULE_MAP={'actors':'antfarm.actors','antfarm_templates':'antfarm.templates',
+    'antfarm_allocation':'antfarm.allocation','antfarm_fibers':'ant_fibers'}
+
+def find_layout(has,where):
+    for name,layout in LAYOUTS.items():
+        if has(layout['marker']):return name
+    raise RuntimeError(f'{where}: unknown repository layout (neither antfarm/package.d nor antfarm.d)')
+
+def tree_layout(root):return find_layout(lambda marker:(P(root)/marker).is_file(),root)
+
+def ref_layout(repo,ref):
+    present=command(['git','ls-tree','--name-only',ref,'--',*(x['marker'] for x in LAYOUTS.values())],cwd=repo).split()
+    return find_layout(present.__contains__,ref)
+
+def map_modules(source,origin,target):
+    """Rewrite the imported module names in D `source` from layout `origin` to
+    layout `target`. Returns the text and the sorted renames applied."""
+    if origin==target:return source,[]
+    table=MODULE_MAP if target=='package' else {new:old for old,new in MODULE_MAP.items()}
+    applied=set()
+    def module(m):
+        name=m.group(0)
+        for old,new in table.items():
+            if name==old or name.startswith(old+'.'):
+                applied.add(old+' -> '+new);return new+name[len(old):]
+        return name
+    def imports(m):return m.group(1)+re.sub(r'(?<![\w.])[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*',module,m.group(2))
+    return re.sub(r'(\bimport\s+)([^;:]+)',imports,source),sorted(applied)
 
 def sha(path):return hashlib.sha256(P(path).read_bytes()).hexdigest()
 def command(cmd,**kw):return subprocess.check_output(cmd,text=True,**kw)
@@ -77,7 +122,7 @@ def boot_ci(ratios):
 def main():
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--repo',type=P,default=P(__file__).resolve().parents[2]);p.add_argument('--base',required=True);p.add_argument('--candidate')
-    p.add_argument('--archive',type=P,help='Defaults to REPO/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a');p.add_argument('--output',type=P,required=True)
+    p.add_argument('--archive',type=P,help="Defaults to the REPO layout's archive: tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a (actor_torture/.build/... before 1.8.2)");p.add_argument('--output',type=P,required=True)
     p.add_argument('--boundary',action='store_true',help='Require >=20 clean matched pairs (default 20)')
     p.add_argument('--control',action='store_true',help='Compare base to itself and require byte-identical binaries')
     p.add_argument('--modes',default='actor,wave,inbox,private,private-remote,tree,tree-wait,tree-cont,tree-pipelined,dtor,subset,subset-whole,subset-whole-unreserved,tree-cancel,private-tracked')
@@ -92,11 +137,11 @@ def main():
     p.add_argument('--candidate-env',action='append',default=[],metavar='KEY=VALUE',help='Extra environment for candidate runs only (repeatable); with --control this screens a runtime setting on byte-identical binaries')
     p.add_argument('--optimization',choices=['O2','O3'],default='O2');p.add_argument('--initial-load-limit',type=float,default=1.0)
     p.add_argument('--threshold',type=float,default=-.03)
+    p.add_argument('--build-only',action='store_true',help='Build base and candidate, record metadata and stop: no host-load or CPU checks, no measurements')
     p.add_argument('--cancel-fraction-tolerance',type=float,default=.01,help='Max absolute median dispatched-fraction change before cancellation timing is inconclusive')
     a=p.parse_args()
     require_linux(p)
     a.repo=a.repo.resolve();a.output=a.output.resolve()
-    a.archive=(a.archive or a.repo/'tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a').resolve()
     if a.repeats is None:a.repeats=20 if a.boundary else 5
     if a.max_attempts is None:a.max_attempts=max(10,2*a.repeats)
     if a.boundary and a.repeats<20:p.error('boundary mode requires >=20 repeats')
@@ -118,14 +163,16 @@ def main():
             if not eq or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',key) or key=='ANTFARM_HUGE_PAGES':p.error('environment must be KEY=VALUE and cannot override ANTFARM_HUGE_PAGES')
             envs[label][key]=value
     pins=list(map(int,a.cpus.split(',')));profiles=list(map(int,a.consumers.split(',')))
-    if not pins or len(set(pins))!=len(pins) or not set(pins)<=os.sched_getaffinity(0):p.error('invalid CPU affinity')
-    if any(n<0 or n>=len(pins) for n in profiles):p.error('one controller plus consumers required')
     full_affinity=set(os.sched_getaffinity(0))
     topo=cpuinfo();cores={int(x['processor']):(x['physical id'],x['core id']) for x in topo}
-    for n in profiles:
-        if len(set(cores[c] for c in pins[1:n+1]))!=n:p.error('consumers must occupy distinct physical cores')
+    if not a.build_only:
+        if not pins or len(set(pins))!=len(pins) or not set(pins)<=full_affinity:p.error('invalid CPU affinity')
+        if any(n<0 or n>=len(pins) for n in profiles):p.error('one controller plus consumers required')
+        for n in profiles:
+            if len(set(cores[c] for c in pins[1:n+1]))!=n:p.error('consumers must occupy distinct physical cores')
     if a.output.exists():p.error('output must be new (avoid overwriting evidence)')
     a.output.mkdir(parents=True)
+    a.archive=(a.archive or a.repo/LAYOUTS[tree_layout(a.repo)]['archive']).resolve()
     def dump(name,obj):(a.output/name).write_text(json.dumps(obj,indent=2)+'\n')
     governors={}
     for c in pins:
@@ -134,28 +181,37 @@ def main():
     initial_load=os.getloadavg()
     meta=dict(arguments={k:str(v) if isinstance(v,P) else v for k,v in vars(a).items()},topology=topo,governors=governors,
         aslr=P('/proc/sys/kernel/randomize_va_space').read_text().strip() if P('/proc/sys/kernel/randomize_va_space').exists() else 'unavailable',
-        initial_load=initial_load,controller_shares_core_with=[c for c in pins[1:max(profiles)+1] if cores[c]==cores[pins[0]]],compiler=command(['ldc2','--version']),archive_sha256=sha(a.archive),builds={},
+        initial_load=initial_load,controller_shares_core_with=[] if a.build_only else [c for c in pins[1:max(profiles)+1] if cores[c]==cores[pins[0]]],compiler=command(['ldc2','--version']),archive_sha256=sha(a.archive),builds={},
         note='Five warmup cycles. Serial builds/runs. Own benchmark sources unless benchmark-ref. Loadavg includes benchmark self-load; admission uses initial load, exclusion uses CPU accounting.')
     dump('metadata.json',meta)
-    if initial_load[0]>a.initial_load_limit:
+    if initial_load[0]>a.initial_load_limit and not a.build_only:
         dump('failure.json',dict(reason='initial host load exceeds limit',load=initial_load))
         dump('summary.json',[]);dump('gate.json',dict(exit_status=2,reason='initial host load exceeds limit'));return 2
     binaries={};available={}
+    benchmark_layout=ref_layout(a.repo,a.benchmark_ref) if a.benchmark_ref else None
     for label,ref in [('base',a.base),('candidate',a.candidate)]:
         revision=command(['git','rev-parse',ref+'^{commit}'],cwd=a.repo).strip()
         scratch=P(tempfile.mkdtemp(prefix='perf-gate-'+label+'-'));scratch.rmdir()
         created=False
         try:
             command(['git','worktree','add','--detach',str(scratch),revision],cwd=a.repo);created=True
+            layout=tree_layout(scratch);benchmark=LAYOUTS[layout]['benchmark']
             if a.benchmark_ref:
-                source=command(['git','show',a.benchmark_ref+':tools/perf/actor_churn.d'],cwd=a.repo)
-                (scratch/'tools/perf/actor_churn.d').write_text(source)
-            else:source=(scratch/'tools/perf/actor_churn.d').read_text()
-            available[label]=set(re.findall(r'args\[1\] == "([a-z-]+)"',source))
+                origin=benchmark_layout
+                source=command(['git','show',a.benchmark_ref+':'+LAYOUTS[origin]['benchmark']],cwd=a.repo)
+            else:origin=layout;source=(scratch/benchmark).read_text()
+            compiled,renames=map_modules(source,origin,layout)
+            if renames:print(f'{label}: benchmark imports mapped {origin} -> {layout} layout: '+', '.join(renames),flush=True)
+            if a.benchmark_ref:(scratch/benchmark).write_text(compiled)
+            available[label]=set(re.findall(r'args\[1\] == "([a-z-]+)"',compiled))
             binary=a.output/(label+'-churn');binaries[label]=binary
-            cmd=['ldc2','-'+a.optimization,'-release','-d-version=AntfarmMimallocV3','-i','-I.','-Ithreadpool/source','tools/perf/actor_churn.d','antfarm/package.d','antfarm/allocation.d','antfarm/actors/package.d','antfarm/actors/actor.d','antfarm/actors/wave.d','antfarm/actors/private_actor.d','antfarm/actors/mimalloc.d',str(a.archive),'-L-lpthread','-L-lrt','-L-latomic','-of='+str(binary)]
+            cmd=['ldc2','-'+a.optimization,'-release','-d-version=AntfarmMimallocV3','-i','-I.','-Ithreadpool/source',benchmark,*LAYOUTS[layout]['sources'],str(a.archive),'-L-lpthread','-L-lrt','-L-latomic','-of='+str(binary)]
             with (a.output/(label+'-build.log')).open('w') as log:subprocess.run(cmd,cwd=scratch,stdout=log,stderr=log,check=True)
-            meta['builds'][label]=dict(revision=revision,command=cmd,sha256=sha(binary),benchmark_sha256=hashlib.sha256(source.encode()).hexdigest(),modes=sorted(available[label]))
+            # benchmark_sha256 hashes the source in package-layout form, so the
+            # same benchmark compares equal across layouts.
+            meta['builds'][label]=dict(revision=revision,layout=layout,benchmark_layout=origin,module_renames=renames,command=cmd,sha256=sha(binary),
+                benchmark_sha256=hashlib.sha256(map_modules(source,origin,'package')[0].encode()).hexdigest(),
+                compiled_benchmark_sha256=hashlib.sha256(compiled.encode()).hexdigest(),modes=sorted(available[label]))
             try:meta['builds'][label]['elf_header']=command(['readelf','-h',str(binary)])
             except (OSError,subprocess.SubprocessError):meta['builds'][label]['elf_header']='unavailable'
             dump('metadata.json',meta)
@@ -170,6 +226,10 @@ def main():
         dump('summary.json',[])
         dump('gate.json',dict(exit_status=2,reason='benchmark sources differ; use --benchmark-ref for a common source, or explicitly --allow-benchmark-change'))
         return 2
+    if a.build_only:
+        dump('summary.json',[])
+        dump('gate.json',dict(exit_status=0,build_only=True,reason='build-only: both revisions built; no measurements'))
+        return 0
     observed_pins=set(pins[:max(profiles)+1])
     spare=sorted(full_affinity-observed_pins)
     if not spare:
