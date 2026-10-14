@@ -27,6 +27,11 @@ aliases; see the migration table below.
 - Assertion builds print `antfarm warning: ActorOwner dropped without
   reclaim` to stderr when a live `ActorOwner` leaves scope; release builds
   have no destructor. `ActorOwner.leak()` (new) is the deliberate opt-out.
+- Actor slot creation and `FiberDomain.release` enforce load-bearing
+  invariants with fatal diagnostics in debug and release builds. Redundant
+  actor retirement and test-hook diagnostics stay assertion-build-only.
+- Private child allocation rollback and callback completion share their
+  cleanup paths; behaviour is unchanged.
 - The four `PrivateContext.createChildren` overloads share one
   implementation; signatures, attributes and generated code are unchanged.
 - `make -C actor_torture death` is a public child-process harness: rows
@@ -43,6 +48,7 @@ aliases; see the migration table below.
   `drainCancellationRequests()` still returns per-request results.
 - Offline Linux CPUs stay discoverable with `noLlcIndex` and no longer form
   their own fallback LLC domains.
+- Threadpool shares topology scans, selection loops and teardown paths.
 - Pool start on Windows throws `threadpool: WaitOnAddress unavailable (need
   Windows 10 1803+)` instead of parking workers through a null pointer.
 - [threadpool/README.md](threadpool/README.md) notes that CFS bandwidth
@@ -58,6 +64,8 @@ aliases; see the migration table below.
 
 ### Compatibility notes
 
+- Threadpool no longer has the Windows event-wait fallback. `WaitOnAddress`
+  is required, with Windows 10 1803+ as the supported floor.
 - `ActorWaveHandle.failed` now means a structural admission rejection only.
   A wake, send or retirement admitted across the wave owner's publication gap
   used to set `failed`; it now sets `interrupted` and does not fail the
