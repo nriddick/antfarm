@@ -399,9 +399,7 @@ public:
         nothrow @nogc @system
         if (storage == PrivateStateStorage.perObject)
     {
-        if (actor_ is null) fatal("private child park: unauthorized context");
-        if (retiring_) return null;
-        return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, batchLimit_);
+        return newCohort!(T, R, storage)(capacity, PrivateCohortOptions.init);
     }
     /// ditto: explicit per-cohort batch limit; 0 is a fatal caller error.
     PrivateChildPark!(T, R)* createChildren(T, R = void,
@@ -409,10 +407,7 @@ public:
         nothrow @nogc @system
         if (storage == PrivateStateStorage.perObject)
     {
-        if (actor_ is null) fatal("private child park: unauthorized context");
-        if (childBatchLimit == 0) fatal("invalid private child batch limit");
-        if (retiring_) return null;
-        return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, childBatchLimit);
+        return newCohort!(T, R, storage, true)(capacity, PrivateCohortOptions(childBatchLimit));
     }
 
     /// ditto: per-cohort options. A batchLimit of 0 in `options` inherits
@@ -422,10 +417,7 @@ public:
         PrivateCohortOptions options) nothrow @nogc @system
         if (storage == PrivateStateStorage.perObject)
     {
-        if (actor_ is null) fatal("private child park: unauthorized context");
-        if (retiring_) return null;
-        return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity,
-            options.batchLimit == 0 ? batchLimit_ : options.batchLimit, options.subsets);
+        return newCohort!(T, R, storage)(capacity, options);
     }
     /// cohortSlab only. slabByteLimit is the explicit cap on the state slab of
     /// capacity * T.sizeof bytes reserved here; null if that product overflows
@@ -435,9 +427,19 @@ public:
         PrivateCohortOptions options, size_t slabByteLimit) nothrow @nogc @system
         if (storage == PrivateStateStorage.cohortSlab)
     {
+        return newCohort!(T, R, storage)(capacity, options, slabByteLimit);
+    }
+    // explicitLimit: options.batchLimit came from the caller and 0 is fatal.
+    private PrivateChildPark!(T, R, storage)* newCohort(T, R, PrivateStateStorage storage,
+        bool explicitLimit = false)(size_t capacity, PrivateCohortOptions options,
+        size_t slabByteLimit = 0) nothrow @nogc @system
+    {
         if (actor_ is null) fatal("private child park: unauthorized context");
+        static if (explicitLimit)
+            if (options.batchLimit == 0) fatal("invalid private child batch limit");
         if (retiring_) return null;
-        if (capacity > size_t.max / T.sizeof || capacity * T.sizeof > slabByteLimit) return null;
+        static if (storage == PrivateStateStorage.cohortSlab)
+            if (capacity > size_t.max / T.sizeof || capacity * T.sizeof > slabByteLimit) return null;
         return PrivateChildPark!(T, R, storage).create(actor_, service, enclosing_ is null, capacity,
             options.batchLimit == 0 ? batchLimit_ : options.batchLimit, options.subsets);
     }
