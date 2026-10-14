@@ -14,7 +14,8 @@ import threadpool;
 /// which owns threadpool's Director. `servingGroups` (opt-in) wakes only the
 /// physical groups that serve the lane: its own group and its rescue/assist
 /// server groups; a newly armed earliest timer also wakes the groups hosting
-/// the domain's responders.
+/// the domain's responders. Queued cancellation wakes service under every
+/// policy, without waiting for the Director.
 enum FiberWakePolicy : ubyte
 {
     broadcast,
@@ -258,6 +259,16 @@ final class FiberLane : FiberReadyLane
         noteWake(FiberWakeEvent.signalled);
     }
 
+    protected override void noteCancellationRequested() nothrow @nogc
+    {
+        noteWake(FiberWakeEvent.cancelled);
+        // Queued cancellation is serviced by workers even when ordinary
+        // readiness notifications belong to the Director. The domain fans this
+        // hook out to every lane, including cross-lane cancellation targets.
+        if (wakePolicy == FiberWakePolicy.directorOwned && pool !is null)
+            pool.wakeAll();
+    }
+
     // A responder of this domain needs no wake for a timer its own fiber
     // armed: the fiber ran inside that worker's pump, which then returns
     // `again`, and the pump before it parks reads `nextTimerDeadline` into
@@ -295,13 +306,10 @@ final class FiberLane : FiberReadyLane
 
     CancellationSubmission requestCancel(TaskHandle handle)
     {
-        immutable submitted = domain.requestCancel(handle);
-        if (submitted == CancellationSubmission.queued)
-            noteWake(FiberWakeEvent.cancelled);
-        return submitted;
+        return domain.requestCancel(handle);
     }
 
-    /// Director-side application of all queued remote requests. Each result
+    /// Apply queued remote requests from any thread. Each returned result
     /// names the exact generation which was submitted.
     CancellationApplication[] drainCancellationRequests()
     {
@@ -336,9 +344,9 @@ final class FiberLane : FiberReadyLane
     // - Generation triggers: `enqueueGenerationTrigger` calls
     //   `noteExternalReady` on every lane of the domain, so every native group
     //   of the domain is woken, and every worker polls triggers.
-    // - Cancellation and shutdown: the Director applies them; a waiting task
-    //   becomes ready through `publishParkedWaiter`, i.e. this lane's
-    //   `noteExternalReady`. A ready or running task is already in service.
+    // - Cancellation requests wake all domain lanes; any pump can apply them.
+    //   A waiting task also wakes its destination lane after becoming ready.
+    //   Shutdown remains Director-owned. A ready/running task is in service.
     // - Remote-ready relay: the relay targets are `servingLanes_`, the lanes
     //   of this lane's edge server groups (`bindPlanLanes`), and those groups
     //   are in `wakeGroups_`. A relayed call therefore only records
@@ -830,6 +838,8 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
         break;
     }
 
+    immutable cancellationsApplied =
+        state.lane.domain.drainCancellationRequests().length;
     immutable timersWoken = state.responder
         ? state.lane.domain.pollTimers() : 0;
     bool consumed = state.consumer.consumeNext();
@@ -894,7 +904,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     // empty while published-but-not-entered activations remain, or while a
     // served remote lane still has transport. Table size (flushBatch) bounds
     // a visit; a claimed table is consumed according to the Farm contract.
-    if (timersWoken != 0 || triggersDelivered != 0
+    if (cancellationsApplied != 0 || timersWoken != 0 || triggersDelivered != 0
         || consumed || flushed != 0 || remoteWork
         || state.lane.ready != 0 || state.lane.published != 0)
         return ManagedPumpResult.again;

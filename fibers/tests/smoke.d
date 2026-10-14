@@ -6,6 +6,7 @@ extern(C) __gshared string[] rt_options = ["testmode=run-main"];
 import antfarm_fibers;
 import antfarm;
 import core.atomic;
+import core.stdc.stdio : printf;
 import service_plan_tests;
 import host_attach_tests;
 import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
@@ -96,7 +97,7 @@ void cancellationOwnershipSmoke()
 
     shared int nonDirectorRejected;
     auto intruder = new Thread({
-        try cast(void) domain.drainCancellationRequests();
+        try domain.releaseAll(null);
         catch (Exception)
             atomicStore(nonDirectorRejected, 1);
     });
@@ -137,6 +138,51 @@ void cancellationOwnershipSmoke()
             ++cancellationEvents;
     assert(cancellationEvents == 1);
     auto remoteHandle = remote.handle;
+    domain.releaseAll(domain.takeCompletions());
+
+    // Two worker-style drainers and the Director can contend for one batch.
+    // Queue more duplicates than the 8-bit CANCEL field can represent: only
+    // one external application may win, with all later requests coalescing.
+    auto concurrent = domain.spawn({});
+    foreach (_; 0 .. 512)
+        assert(domain.requestCancel(concurrent.handle)
+            == CancellationSubmission.queued);
+    shared int go;
+    CancellationApplication[] left, right;
+    auto firstDrainer = new Thread({
+        while (atomicLoad(go) == 0) Thread.yield();
+        left = domain.drainCancellationRequests();
+    });
+    auto secondDrainer = new Thread({
+        while (atomicLoad(go) == 0) Thread.yield();
+        right = domain.drainCancellationRequests();
+    });
+    firstDrainer.start();
+    secondDrainer.start();
+    atomicStore(go, 1);
+    auto direct = domain.directorCancelDetailed(concurrent.handle);
+    firstDrainer.join();
+    secondDrainer.join();
+    assert(left.length + right.length == 512);
+    size_t winners = direct == CancellationResult.wonBeforeEntry ? 1 : 0;
+    assert(direct == CancellationResult.wonBeforeEntry
+        || direct == CancellationResult.alreadyRequested);
+    foreach (batch; [left, right])
+        foreach (application; batch)
+        {
+            assert(application.task == concurrent.handle);
+            if (application.result == CancellationResult.wonBeforeEntry)
+                ++winners;
+            else assert(application.result == CancellationResult.alreadyRequested);
+        }
+    assert(winners == 1 && domain.pendingCancellationRequests == 0);
+    drainUntilEmpty(domain, token, view);
+    assert(concurrent.outcome == FiberOutcome.cancelled);
+    events = domain.takeLifecycleEvents();
+    cancellationEvents = 0;
+    foreach (event; events)
+        if (event.kind == FiberLifecycleKind.cancellation) ++cancellationEvents;
+    assert(cancellationEvents == 1);
     domain.releaseAll(domain.takeCompletions());
 
     auto replacement = domain.spawn({});
@@ -1935,6 +1981,69 @@ OneLanePool oneLanePool(AntFarm* farm, bool boundPool)
     return OneLanePool(pool, lane, group);
 }
 
+// T9: the constructing Director only joins the requesting third thread while
+// the pool worker must apply cancellation and unwind the parked fiber itself.
+void workerCancellationSmoke()
+{
+    import core.time : MonoTime;
+    foreach (policy; [FiberWakePolicy.broadcast, FiberWakePolicy.servingGroups,
+                     FiberWakePolicy.directorOwned])
+    foreach (throughLane; [false, true])
+    {
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
+                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
+        scope (exit) farm.destroy();
+        auto fixture = oneLanePool(farm, true);
+        scope (exit) uninstallFiberPlan();
+        fixture.lane.wakePolicy = policy;
+        shared int observedCancellation;
+        auto task = fixture.lane.spawn({
+            try FiberDomain.await(0xCA09);
+            catch (FiberCancelled cancelled)
+            {
+                atomicStore(observedCancellation, 1);
+                throw cancelled;
+            }
+        });
+        auto handle = task.handle;
+        shared int succeeded;
+        auto requester = new Thread({
+            immutable deadline = MonoTime.currTime + msecs(2_000);
+            while (fixture.lane.domain.waiting != 1
+                && MonoTime.currTime < deadline)
+                Thread.sleep(msecs(1));
+            if (fixture.lane.domain.waiting != 1) return;
+            // Let the idle worker park; correctness also covers a request
+            // arriving between its final pump and parking.
+            Thread.sleep(msecs(10));
+            immutable submitted = throughLane
+                ? fixture.lane.requestCancel(handle)
+                : fixture.lane.domain.requestCancel(handle);
+            if (submitted != CancellationSubmission.queued) return;
+            auto joined = handle.join(msecs(2_000));
+            if (joined.status == FiberJoinStatus.timedOut)
+                printf("T9: remote join timed out; observed cancellation = %d\n",
+                    atomicLoad(observedCancellation));
+            if (joined.status == FiberJoinStatus.cancelled
+                && joined.outcome == FiberOutcome.cancelled
+                && atomicLoad(observedCancellation) == 1)
+                atomicStore(succeeded, 1);
+        });
+        fixture.pool.start();
+        requester.start();
+        requester.join(); // No Director service while cancellation is pending.
+        immutable passed = atomicLoad(succeeded) == 1;
+        // Cleanup also makes a pre-fix timeout finite rather than stranding a
+        // live fiber or leaking the domain root after the failed assertion.
+        if (!passed) fixture.lane.beginShutdown(true);
+        waitTerminated(task);
+        fixture.pool.shutdown();
+        assert(fixture.pool.workerFailures.length == 0);
+        fixture.lane.domain.releaseAll(fixture.lane.domain.takeCompletions());
+        assert(passed, "worker cancellation bounded wait expired without Director service");
+    }
+}
+
 // L5: a shutdown that beats every start hook leaves no server to retire the
 // lane; shutdown itself must, so a later spawn throws instead of stranding.
 void admissionAfterEarlyShutdownSmoke()
@@ -2442,8 +2551,25 @@ void fiberParitySmoke()
     domain.releaseAll(domain.takeCompletions());
 }
 
-void main()
+void main(string[] args)
 {
+    if (args.length == 2 && args[1] == "--worker-cancellation-only")
+    {
+        workerCancellationSmoke();
+        printf("worker cancellation smoke passed\n");
+        return;
+    }
+    if (args.length == 2 && args[1] == "--cancellation-only")
+    {
+        workerCancellationSmoke();
+        cancellationOwnershipSmoke();
+        cancellationSemanticsSmoke();
+        fiberJoinSmoke();
+        sharedSignalAndTimerCancellationSmoke();
+        printf("cancellation smoke passed\n");
+        return;
+    }
+    workerCancellationSmoke();
     uxHelpersSmoke();
     cancellationOwnershipSmoke();
     manualSmoke();

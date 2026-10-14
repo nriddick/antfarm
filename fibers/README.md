@@ -234,7 +234,12 @@ slot with its generation and refuses stale reuse.
 - `handle.join()` and timed join block an external OS thread.
 - `handle.joinFiber()` and timed Fiber join suspend a managed Fiber.
 - `requestCancel(handle)` queues a generation-specific request.
-- The Director calls `drainCancellationRequests()` to apply queued requests.
+- Any thread may call `drainCancellationRequests()` to apply queued requests.
+  The managed threadpool pump does this automatically, including waking parked
+  workers under `directorOwned`; the constructing thread need not poll.
+  An explicit drain returns only the requests it applied, since another worker
+  may already have drained them. Observe task outcomes or lifecycle records
+  when the pump owns delivery.
 
 Cancellation is cooperative. A running body that never reaches a scheduler
 boundary cannot be forcibly unwound.
@@ -251,6 +256,11 @@ slice or one bare payload callback is ordinary thread-local use. Pinning is a
 separate application policy; the general scheduler does not infer it.
 
 ## Lifecycle and shutdown
+
+The constructing thread is the domain's Director. `release`, `releaseAll`,
+`beginShutdown`, and synchronous `directorCancel` remain Director-only; draining
+queued requests does not transfer that role. Release waits for in-flight request
+application and refuses release while queued requests remain.
 
 `beginShutdown(false)` stops admission and drains cooperative work.
 `beginShutdown(true)` also requests cancellation and wakes indefinite waiters
