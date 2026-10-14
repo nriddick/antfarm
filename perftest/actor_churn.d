@@ -5,7 +5,7 @@
  +/
 module actor_churn;
 
-import actors;
+import antfarm.actors;
 import antfarm : ConsumerView, MAX_CHUNK, MAX_AVG_COST, avgCostForChunk,
     DEFAULT_SMALL_TABLE_THRESHOLD, fatal;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad, atomicStore, pause;
@@ -23,7 +23,7 @@ import threadpool.topology : ProcessorId, parseCpuList;
 
 version (AntfarmMimallocV3)
 {
-    import actors.mimalloc : mimallocV3ActorAllocator;
+    import antfarm.actors.mimalloc : mimallocV3ActorAllocator;
     import core.stdc.config : c_long;
     private extern(C) int mi_version() nothrow @nogc @system;
     private extern(C) void mi_thread_set_in_threadpool() nothrow @nogc @system;

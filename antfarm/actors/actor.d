@@ -3,8 +3,8 @@
  +
  + Responsibility: the public actor runtime, stable control slots,
  + handles/owners, the callback borrow and context, the intrusive inbox and
- + the ready queue. It depends on `antfarm` and `antfarm_allocation`;
- + `actors.wave` and `actors.private_actor` build on it.
+ + the ready queue. It depends on `antfarm` and `antfarm.allocation`;
+ + `antfarm.actors.wave` and `antfarm.actors.private_actor` build on it.
  + Canonical docs: docs/guide/public-actors.md (usage),
  + docs/reference/actor-lifecycle.md (contract) and
  + docs/design/public-actor-ordering.md (proofs); docs/README.md is the map.
@@ -25,11 +25,11 @@
  + general placement construction, and aggregate retirement fences remain
  + deferred.
  +/
-module actors.actor;
+module antfarm.actors.actor;
 
 public import antfarm : AntFarm, PayloadBody, PayloadHeader, Tier, Token;
 
-import antfarm_allocation : allocateAligned64, freeAligned64;
+import antfarm.allocation : allocateAligned64, freeAligned64;
 import antfarm : avgCostForChunk, fatal;
 import core.atomic : MemoryOrder, atomicExchange, atomicFetchAdd,
     atomicFetchSub, atomicLoad, atomicStore, cas, pause;

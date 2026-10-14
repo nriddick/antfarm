@@ -3,12 +3,12 @@
  + topology and compare the performance-core set with all physical cores.
  +
  + From the threadpool directory:
- +   dmd -g -i benchmarks/live_hybrid.d ../antfarm.d ../antfarm_templates.d -Isource "-oflive_hybrid.exe"
+ +   dmd -g -i benchmarks/live_hybrid.d ../antfarm/package.d ../antfarm/templates.d -Isource "-oflive_hybrid.exe"
  +/
 module live_hybrid;
 
 import antfarm;
-import antfarm_templates;
+import antfarm.templates;
 import core.atomic;
 import core.thread;
 import core.time;

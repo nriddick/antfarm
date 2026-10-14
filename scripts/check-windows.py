@@ -89,29 +89,29 @@ class Checks:
         self.run([sys.executable, "-B", "scripts/check-ring-stores.py"])
         for name, versions in (("farm_ordering", ("AntfarmWriteAuditHooks",)), ("leaf_reuse", ())):
             self.build_run(name, ["review_torture/" + name + ".d",
-                                 "antfarm.d", "antfarm_allocation.d"], versions)
+                                 "antfarm/package.d", "antfarm/allocation.d"], versions)
 
     def review(self):
-        common = ["review_torture/torture_common.d", "antfarm.d",
-                  "antfarm_allocation.d", "antfarm_templates.d"]
+        common = ["review_torture/torture_common.d", "antfarm/package.d",
+                  "antfarm/allocation.d", "antfarm/templates.d"]
         self.build_run("torture", ["review_torture/torture_tests.d", *common])
         self.build_run("sweep_cursor", ["review_torture/sweep_cursor.d", *common],
                        ("AntfarmSweepStats",))
         if not self.args.quick:
             self.build_run("t19", ["review_torture/t19_flood_lap.d", *common])
             self.build_run("concurrent_create", ["review_torture/concurrent_create.d",
-                                                 "antfarm.d", "antfarm_allocation.d"])
+                                                 "antfarm/package.d", "antfarm/allocation.d"])
 
     def actors(self):
-        self.build_run("actors", ["actor_torture/actor_torture.d", "antfarm.d",
-                                  "antfarm_allocation.d", "antfarm_templates.d",
-                                  "actors/package.d", "actors/actor.d", "actors/wave.d",
-                                  "actors/private_actor.d", "actors/mimalloc.d"],
+        self.build_run("actors", ["actor_torture/actor_torture.d", "antfarm/package.d",
+                                  "antfarm/allocation.d", "antfarm/templates.d",
+                                  "antfarm/actors/package.d", "antfarm/actors/actor.d", "antfarm/actors/wave.d",
+                                  "antfarm/actors/private_actor.d", "antfarm/actors/mimalloc.d"],
                        ("AntfarmActorTestHooks", "AntfarmMimallocV3", "AntfarmMimallocStub"))
 
     def private(self):
-        sources = ["antfarm.d", "antfarm_allocation.d", "actors/actor.d",
-                   "actors/wave.d", "actors/private_actor.d"]
+        sources = ["antfarm/package.d", "antfarm/allocation.d", "antfarm/actors/actor.d",
+                   "antfarm/actors/wave.d", "antfarm/actors/private_actor.d"]
         self.build_run("private", ["private_actor_tests/main.d", *sources],
                        ("AntfarmWriteAuditHooks", "AntfarmActorTestHooks"))
         self.run([sys.executable, "-B", "private_actor_tests/extract_doc_examples.py"])

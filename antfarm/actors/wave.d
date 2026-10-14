@@ -3,7 +3,7 @@
  +
  + Responsibility: one bulk-synchronous phase over one or more physical
  + tables, with a sealed, generation-tagged completion. It depends on
- + `antfarm` and the package wave entry points in `actors.actor`.
+ + `antfarm` and the package wave entry points in `antfarm.actors.actor`.
  + Canonical docs: docs/guide/public-actors.md#waves,
  + docs/reference/actor-lifecycle.md and
  + docs/design/public-actor-ordering.md; docs/README.md is the map.
@@ -17,19 +17,19 @@
  + are phase-specific and receive only a callback-local ActorBorrow, so they
  + cannot republish or retire themselves through ActorContext.
  +/
-module actors.wave;
+module antfarm.actors.wave;
 
-public import actors.actor : ActorBorrow, ActorHandle;
+public import antfarm.actors.actor : ActorBorrow, ActorHandle;
 
 import antfarm : AntFarm, PayloadBody, PayloadHeader, TableCompletionHook,
     Tier, Token, avgCostForChunk, fatal;
-import actors.actor : ActorSlot, cancelActorWavePayload,
+import antfarm.actors.actor : ActorSlot, cancelActorWavePayload,
     dispatchActorWavePayload, releaseActorWaveMembership,
     reserveActorWavePayload;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicFetchSub, atomicLoad,
     atomicStore, cas;
 version (AntfarmActorTestHooks)
-    import actors.actor : ActorTestPoint, actorTestPoint;
+    import antfarm.actors.actor : ActorTestPoint, actorTestPoint;
 
 private enum uint waveSealedBit = 1U << 0;
 private enum uint waveFinishedBit = 1U << 1;

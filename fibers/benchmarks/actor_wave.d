@@ -21,7 +21,7 @@
 module actor_wave;
 
 import antfarm;
-import actors;
+import antfarm.actors;
 import antfarm_fibers;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad, atomicStore;
 import core.lifetime : move;

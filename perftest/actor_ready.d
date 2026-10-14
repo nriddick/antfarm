@@ -6,7 +6,7 @@
  +/
 module actor_ready;
 
-import actors;
+import antfarm.actors;
 import antfarm : ConsumerView, MAX_AVG_COST;
 import core.time : MonoTime, seconds;
 import std.conv : to;

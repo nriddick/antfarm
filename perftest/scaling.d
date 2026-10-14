@@ -4,7 +4,7 @@
  +/
 module scaling;
 
-import actors;
+import antfarm.actors;
 import antfarm;
 import antfarm_fibers;
 import core.time : MonoTime;

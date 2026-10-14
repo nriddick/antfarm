@@ -11,7 +11,7 @@
  +/
 module sweep_cursor;
 
-import antfarm_templates;
+import antfarm.templates;
 import torture_common;
 import core.atomic;
 import core.thread;

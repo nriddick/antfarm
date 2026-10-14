@@ -14,8 +14,8 @@ dub.selections.json
 .obj
 antfarm_test*
 !antfarm_test.d
-/antfarm
-grant_lock_pages
+/bin/
+tools/grant_lock_pages
 review_torture/torture_tests
 review_torture/torture_tests_tsan
 review_torture/torture_tests_dmd

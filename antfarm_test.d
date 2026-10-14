@@ -1,14 +1,14 @@
 /++
- + Tests for the Ant Farm. Run: dmd -g -O -inline antfarm.d antfarm_templates.d antfarm_test.d -of=antfarm_test && ./antfarm_test
+ + Tests for the Ant Farm. Run: dmd -g -O -inline antfarm/package.d antfarm/templates.d antfarm_test.d -of=antfarm_test && ./antfarm_test
  +/
 module antfarm_test;
 
 // Run the main correctness suite after imported module unittests as well.
 extern(C) __gshared string[] rt_options = ["testmode=run-main"];
 
-import antfarm_templates;
-import actors;
-import antfarm_allocation : allocateAligned64, freeAligned64;
+import antfarm.templates;
+import antfarm.actors;
+import antfarm.allocation : allocateAligned64, freeAligned64;
 import core.atomic;
 import core.lifetime : move;
 import core.memory : GC;

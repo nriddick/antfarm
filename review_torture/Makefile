@@ -11,10 +11,10 @@ all: torture_tests t19 sweep_cursor
 
 allwrite: write_protection_allwrite boundary_runoff_allwrite
 
-write_protection_allwrite: write_protection.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
+write_protection_allwrite: write_protection.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d
 	$(DC) $(DFLAGS) -d-version=AntfarmWriteAuditHooks $^ -of=$@
 
-boundary_runoff_allwrite: boundary_runoff.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d
+boundary_runoff_allwrite: boundary_runoff.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d
 	$(DC) $(DFLAGS) $^ -of=$@
 
 run-allwrite: allwrite
@@ -22,14 +22,14 @@ run-allwrite: allwrite
 	./boundary_runoff_allwrite pulse
 	./write_protection_allwrite
 
-torture_tests: torture_common.d torture_tests.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d
-	$(DC) $(DFLAGS) torture_common.d torture_tests.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=$@
+torture_tests: torture_common.d torture_tests.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d
+	$(DC) $(DFLAGS) torture_common.d torture_tests.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=$@
 
-t19: torture_common.d t19_flood_lap.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d
-	$(DC) $(DFLAGS) torture_common.d t19_flood_lap.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=$@
+t19: torture_common.d t19_flood_lap.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d
+	$(DC) $(DFLAGS) torture_common.d t19_flood_lap.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=$@
 
-sweep_cursor: torture_common.d sweep_cursor.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d
-	$(DC) $(DFLAGS) -d-version=AntfarmSweepStats torture_common.d sweep_cursor.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=$@
+sweep_cursor: torture_common.d sweep_cursor.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d
+	$(DC) $(DFLAGS) -d-version=AntfarmSweepStats torture_common.d sweep_cursor.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=$@
 
 run: torture_tests sweep_cursor
 	./torture_tests
@@ -39,23 +39,23 @@ run-t19: t19
 	./t19
 
 run-tsan:
-	$(DC) -g -O1 -fsanitize=thread -d-version=TSan torture_common.d torture_tests.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=torture_tests_tsan
+	$(DC) -g -O1 -fsanitize=thread -d-version=TSan torture_common.d torture_tests.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=torture_tests_tsan
 	TSAN_OPTIONS='$(TSAN_OPTIONS)' ./torture_tests_tsan
 
 run-t19-tsan:
-	$(DC) -g -O1 -fsanitize=thread -d-version=TSan torture_common.d t19_flood_lap.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=t19_tsan
+	$(DC) -g -O1 -fsanitize=thread -d-version=TSan torture_common.d t19_flood_lap.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=t19_tsan
 	TSAN_OPTIONS='$(TSAN_OPTIONS)' ./t19_tsan
 
 run-dmd:
-	dmd -g -checkaction=context torture_common.d torture_tests.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=torture_tests_dmd
+	dmd -g -checkaction=context torture_common.d torture_tests.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=torture_tests_dmd
 	./torture_tests_dmd
 
 run-t19-dmd:
-	dmd -g -checkaction=context torture_common.d t19_flood_lap.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=t19_dmd
+	dmd -g -checkaction=context torture_common.d t19_flood_lap.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=t19_dmd
 	./t19_dmd
 
 baseline:
-	$(DC) $(DFLAGS) $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d $(ROOT)/antfarm_test.d -of=../antfarm_test_review
+	$(DC) $(DFLAGS) $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d $(ROOT)/antfarm_test.d -of=../antfarm_test_review
 	../antfarm_test_review
 
 clean:

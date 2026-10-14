@@ -3,7 +3,7 @@
  +/
 module torture_common;
 
-import antfarm_templates;
+import antfarm.templates;
 import core.atomic;
 import core.thread;
 import core.time;

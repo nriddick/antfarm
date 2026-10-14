@@ -1,14 +1,14 @@
 /++
- + Optional mimalloc v3 allocation policy for `actors.actor`.
+ + Optional mimalloc v3 allocation policy for `antfarm.actors.actor`.
  +
  + Compile this module with `AntfarmMimallocV3` and link the mimalloc C
  + library. The default Ant Farm build has no mimalloc dependency.
  +/
-module actors.mimalloc;
+module antfarm.actors.mimalloc;
 
 version (AntfarmMimallocV3)
 {
-    public import actors.actor : ActorAllocator;
+    public import antfarm.actors.actor : ActorAllocator;
 
     // Keep the binding deliberately narrow. These are public C ABI functions
     // in mimalloc v3; no mimalloc headers or allocator-private types enter the

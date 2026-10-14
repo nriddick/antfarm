@@ -1,7 +1,7 @@
 module stress;
 
 import antfarm;
-import actors;
+import antfarm.actors;
 import antfarm_fibers;
 import core.atomic;
 import core.lifetime : move;

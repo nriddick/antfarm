@@ -6,7 +6,7 @@
 module public_service;
 
 import antfarm;
-import actors;
+import antfarm.actors;
 import threadpool.host;
 import core.time : seconds;
 import std.conv : to;

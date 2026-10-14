@@ -69,7 +69,7 @@ def main():
                     compiler=subprocess.check_output(['ldc2', '--version'], text=True),
                     base=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                     working_tree_diff=subprocess.check_output(['git', 'diff', '--',
-                        'actors/private_actor.d', 'perftest/actor_churn.d'], text=True))
+                        'antfarm/actors/private_actor.d', 'perftest/actor_churn.d'], text=True))
     (a.output / 'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
     rows = []
     with (a.output / 'runs.jsonl').open('w') as out:

@@ -1,15 +1,15 @@
 /++
  + Deterministic interleaving and sustained-contention tests for
- + actors.actor. Build with AntfarmActorTestHooks and, for the allocator
+ + antfarm.actors.actor. Build with AntfarmActorTestHooks and, for the allocator
  + contract test, AntfarmMimallocV3.
  +/
 module actor_torture;
 
 import antfarm;
-import actors;
-import antfarm_allocation : allocateAligned64, freeAligned64;
+import antfarm.actors;
+import antfarm.allocation : allocateAligned64, freeAligned64;
 version (AntfarmMimallocV3)
-    import actors.mimalloc : mimallocV3ActorAllocator;
+    import antfarm.actors.mimalloc : mimallocV3ActorAllocator;
 import core.atomic;
 import core.lifetime : move;
 import core.memory : GC;

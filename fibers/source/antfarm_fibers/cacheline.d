@@ -2,7 +2,7 @@ module antfarm_fibers.cacheline;
 
 import core.exception : onOutOfMemoryError;
 import core.stdc.string : memset;
-import antfarm_allocation : allocateAligned64, freeAligned64;
+import antfarm.allocation : allocateAligned64, freeAligned64;
 
 package enum cacheLineSize = 64;
 

@@ -36,7 +36,7 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
 
 Reference (needs DMD):
   make docs               generate the HTML API reference into .build/docs/
-                          (ignored; open .build/docs/antfarm.html first)
+                          (ignored; open .build/docs/antfarm/package.html first)
 
 Windows integration (native x64, Dub, Python 3, LDC and DMD; no Bash or TSan):
   make check-windows      native Windows matrix (WINDOWS_CHECK_ARGS selects lanes)
@@ -80,29 +80,30 @@ check-soak:
 check-mimalloc:
 	./scripts/check.sh --mimalloc
 
-FARM_TSAN_SOURCES := antfarm.d antfarm_allocation.d antfarm_templates.d \
-	actors/package.d actors/actor.d actors/wave.d actors/private_actor.d actors/mimalloc.d \
+FARM_TSAN_SOURCES := antfarm/package.d antfarm/allocation.d antfarm/templates.d \
+	antfarm/actors/package.d antfarm/actors/actor.d antfarm/actors/wave.d antfarm/actors/private_actor.d antfarm/actors/mimalloc.d \
 	antfarm_test.d
 
 # ThreadSanitizer build of the Farm suite. Part of `make check`.
 farm-tsan: $(FARM_TSAN_SOURCES) review_torture/leaf_reuse.d
 	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I. $(FARM_TSAN_SOURCES) -of=antfarm_test_tsan
-	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I. review_torture/leaf_reuse.d antfarm.d antfarm_allocation.d -of=antfarm_test_leaf_tsan
+	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I. review_torture/leaf_reuse.d antfarm/package.d antfarm/allocation.d -of=antfarm_test_leaf_tsan
 
 run-farm-tsan: farm-tsan
 	./scripts/run-farm-tsan.sh
 
 # Generated HTML API reference. DMD creates the -Dd output directory
 # itself, so the recipe is a single dmd exec with no shell metacharacters.
+# -op keeps source paths, so the two package.d files get separate pages.
 # mimalloc is included with its own version so the optional allocator
 # adapter appears in the reference without a C dependency.
-DOCS_SOURCES := antfarm.d antfarm_templates.d \
-	actors/package.d actors/actor.d actors/wave.d actors/private_actor.d \
-	actors/mimalloc.d threadpool/source/threadpool/host.d
+DOCS_SOURCES := antfarm/package.d antfarm/templates.d \
+	antfarm/actors/package.d antfarm/actors/actor.d antfarm/actors/wave.d antfarm/actors/private_actor.d \
+	antfarm/actors/mimalloc.d threadpool/source/threadpool/host.d
 DOCS_DIR := .build/docs
 
 docs:
-	dmd -D -Dd$(DOCS_DIR) -o- -version=AntfarmMimallocV3 -I. -Ithreadpool/source $(DOCS_SOURCES)
+	dmd -D -Dd$(DOCS_DIR) -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool/source $(DOCS_SOURCES)
 
 # Standalone timing gate; intentionally outside the correctness matrix.
 PERF_GATE_OUTPUT ?= /tmp/antfarm-perf-gate
@@ -114,11 +115,11 @@ perf-gate:
 .PHONY: check-farm-ordering
 check-farm-ordering:
 	python3 scripts/check-ring-stores.py
-	ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm.d antfarm_allocation.d -of=antfarm_test_ordering
+	ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm/package.d antfarm/allocation.d -of=antfarm_test_ordering
 	./antfarm_test_ordering
-	dmd -g -version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm.d antfarm_allocation.d -of=antfarm_test_ordering_dmd
+	dmd -g -version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm/package.d antfarm/allocation.d -of=antfarm_test_ordering_dmd
 	./antfarm_test_ordering_dmd
-	ldc2 -g -O1 -I. review_torture/leaf_reuse.d antfarm.d antfarm_allocation.d -of=antfarm_test_leaf
+	ldc2 -g -O1 -I. review_torture/leaf_reuse.d antfarm/package.d antfarm/allocation.d -of=antfarm_test_leaf
 	./antfarm_test_leaf
-	dmd -g -I. review_torture/leaf_reuse.d antfarm.d antfarm_allocation.d -of=antfarm_test_leaf_dmd
+	dmd -g -I. review_torture/leaf_reuse.d antfarm/package.d antfarm/allocation.d -of=antfarm_test_leaf_dmd
 	./antfarm_test_leaf_dmd

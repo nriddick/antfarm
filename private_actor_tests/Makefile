@@ -1,7 +1,7 @@
 ROOT := ..
 DC ?= ldc2
 DFLAGS ?= -g -O1
-SOURCES := main.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/actors/actor.d $(ROOT)/actors/wave.d $(ROOT)/actors/private_actor.d
+SOURCES := main.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/actors/actor.d $(ROOT)/antfarm/actors/wave.d $(ROOT)/antfarm/actors/private_actor.d
 .PHONY: doc-example death run run-dmd run-tsan run-death run-death-dmd clean
 private_actor_tests: $(SOURCES) Makefile
 	$(DC) $(DFLAGS) -d-version=AntfarmWriteAuditHooks -d-version=AntfarmActorTestHooks -I$(ROOT) $(SOURCES) -of=$@

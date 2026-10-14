@@ -24,7 +24,7 @@
  +     is applied, so narrowing (`int` to `ubyte`) and mutable-to-immutable
  +     pointer conversions are compile errors.
  +
- + `antfarm_templates` publicly imports `antfarm`, so importing this
+ + `antfarm.templates` publicly imports `antfarm`, so importing this
  + module also brings in `AntFarm`, `ConsumerView`, `PayloadHeader`,
  + `PayloadEntry`, `Token`, and `Tier`.
  +
@@ -39,7 +39,7 @@
  + rule (notably `string`), the body stores the reference, not the referred
  + data. The referred data must stay alive until the job executes.
  +/
-module antfarm_templates;
+module antfarm.templates;
 
 public import antfarm;
 import core.atomic;
@@ -83,7 +83,7 @@ template paramOffset(alias fn, size_t i, bool withIteration = false)
 Callback callbackFor(alias fn, bool withIteration = false)() nothrow @nogc @system
 {
     static assert(validSignature!(fn, withIteration),
-        "antfarm_templates: unsupported function signature");
+        "antfarm.templates: unsupported function signature");
     return &callbackImpl!(fn, withIteration);
 }
 
@@ -92,7 +92,7 @@ void initPayloadHeader(alias fn, bool withIteration = false)(
     PayloadHeader* h, uint maxCs, uint done) nothrow @nogc @system
 {
     static assert(validSignature!(fn, withIteration),
-        "antfarm_templates: unsupported function signature");
+        "antfarm.templates: unsupported function signature");
     if (h is null) fatal("initPayloadHeader: null header");
     *h = PayloadHeader.init;
     h.maxCs = maxCs;
@@ -112,7 +112,7 @@ PayloadEntry payloadEntry(alias fn, uint maxCs = 1, uint done = 1,
         && argsConvert!(fn, withIteration, Args))
 {
     static assert(validSignature!(fn, withIteration),
-        "antfarm_templates: unsupported function signature");
+        "antfarm.templates: unsupported function signature");
     if (header is null) fatal("payloadEntry: null header");
     if (buf.length < packedLen!(fn, withIteration))
         fatal("payloadEntry: body buffer too small");
@@ -130,7 +130,7 @@ PayloadEntry payloadEntryRuntime(alias fn, bool withIteration = false, Args...)(
         && argsConvert!(fn, withIteration, Args))
 {
     static assert(validSignature!(fn, withIteration),
-        "antfarm_templates: unsupported function signature");
+        "antfarm.templates: unsupported function signature");
     if (header is null) fatal("payloadEntryRuntime: null header");
     if (buf.length < packedLen!(fn, withIteration))
         fatal("payloadEntryRuntime: body buffer too small");
@@ -164,7 +164,7 @@ struct PayloadArgRangeImpl(alias fn, bool withIteration, AR)
     if (isInputRange!AR)
 {
     static assert(validSignature!(fn, withIteration),
-        "antfarm_templates: unsupported function signature");
+        "antfarm.templates: unsupported function signature");
 
     private AR args;
     private PayloadHeader hdr;
@@ -203,7 +203,7 @@ struct PayloadArgRangeImpl(alias fn, bool withIteration, AR)
         else
         {
             static assert(packedParams!(fn, withIteration).length == 1,
-                "antfarm_templates: payloadRange elements must be a "
+                "antfarm.templates: payloadRange elements must be a "
                 ~ "std.typecons.Tuple matching " ~ fullyQualifiedName!fn
                 ~ "'s packed parameters");
             packArgsImpl!(fn, withIteration)(bodyBuf, args.front);
@@ -303,20 +303,20 @@ private template validSignature(alias fn, bool withIteration)
     static if (withIteration)
     {
         static assert(Parameters!fn.length > 0 && is(Parameters!fn[$ - 1] == ulong),
-            "antfarm_templates: withIteration = true requires the function's last parameter to be ulong");
+            "antfarm.templates: withIteration = true requires the function's last parameter to be ulong");
         static assert(__traits(getParameterStorageClasses, fn, Parameters!fn.length - 1).length == 0,
-            "antfarm_templates: withIteration = true requires the trailing ulong iteration parameter to be plain by-value");
+            "antfarm.templates: withIteration = true requires the trailing ulong iteration parameter to be plain by-value");
     }
     static assert(validParams!(fn, withIteration, 0),
-        "antfarm_templates: unsupported function parameter");
+        "antfarm.templates: unsupported function parameter");
     alias P = Parameters!fn;
     alias RT = ReturnType!fn;
     static assert(is(typeof(fn) : RT function(P) nothrow @nogc @system) ||
                   is(typeof(&fn) : RT function(P) nothrow @nogc @system),
-        "antfarm_templates: function must be a function or function pointer callable as nothrow @nogc @system (delegates are not supported)");
+        "antfarm.templates: function must be a function or function pointer callable as nothrow @nogc @system (delegates are not supported)");
     static if (!is(RT == void))
         static assert(is(RT : long),
-            "antfarm_templates: function return type must be void or convertible to long");
+            "antfarm.templates: function return type must be void or convertible to long");
     enum bool validSignature = true;
 }
 
@@ -326,15 +326,15 @@ private template validParams(alias fn, bool withIteration, size_t i)
     static if (i < P.length)
     {
         static assert(__traits(getParameterStorageClasses, fn, i).length == 0,
-            "antfarm_templates: parameters must be plain by-value (no ref/out/lazy/in/scope/return)");
+            "antfarm.templates: parameters must be plain by-value (no ref/out/lazy/in/scope/return)");
         static assert(__traits(isPOD, P[i]),
-            "antfarm_templates: parameter type must be POD");
+            "antfarm.templates: parameter type must be POD");
         static assert(!hasUnsharedAliasing!(P[i]),
-            "antfarm_templates: parameter type has unshared aliasing (mutable pointer/dynamic array); pass plain value types or immutable data such as string");
+            "antfarm.templates: parameter type has unshared aliasing (mutable pointer/dynamic array); pass plain value types or immutable data such as string");
         static assert(P[i].alignof <= 8,
-            "antfarm_templates: parameter type alignment > 8 is not supported by the ulong body packing");
+            "antfarm.templates: parameter type alignment > 8 is not supported by the ulong body packing");
         static assert(validParams!(fn, withIteration, i + 1),
-            "antfarm_templates: unsupported function parameter type");
+            "antfarm.templates: unsupported function parameter type");
         enum bool validParams = true;
     }
     else
@@ -345,7 +345,7 @@ private long callbackImpl(alias fn, bool withIteration = false)(
     PayloadHeader* head, PayloadBody body, ulong iteration) nothrow @nogc @system
 {
     static assert(validSignature!(fn, withIteration),
-        "antfarm_templates: unsupported function signature");
+        "antfarm.templates: unsupported function signature");
     if (body.length < packedLen!(fn, withIteration))
         fatal("antfarm callback: body too short");
     static if (withIteration)
@@ -406,7 +406,7 @@ private void packArgsImpl(alias fn, bool withIteration = false, size_t i = 0,
     {
         alias T = P[i];
         static assert(is(Args[i] : T),
-            "antfarm_templates: argument " ~ i.stringof ~ " of type "
+            "antfarm.templates: argument " ~ i.stringof ~ " of type "
             ~ Args[i].stringof ~ " does not implicitly convert to "
             ~ fullyQualifiedName!fn ~ "'s parameter type " ~ T.stringof
             ~ " (no narrowing, and no mutable aliases into immutable/shared"

@@ -1,4 +1,4 @@
-module antfarm_allocation;
+module antfarm.allocation;
 
 import core.stdc.stdlib : free, malloc;
 

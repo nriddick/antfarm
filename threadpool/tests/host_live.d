@@ -12,7 +12,7 @@ import std.algorithm.sorting : sort;
 import std.exception : enforce;
 import std.stdio : writeln;
 
-import actors;
+import antfarm.actors;
 import antfarm;
 import threadpool.host;
 import threadpool.hybrid : WorkerSelf;

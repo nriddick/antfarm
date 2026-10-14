@@ -36,18 +36,18 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # Modules whose public surface must carry Ddoc comments.
 COVERAGE_MODULES = [
-    "antfarm.d",
-    "antfarm_templates.d",
-    "actors/actor.d",
-    "actors/wave.d",
-    "actors/private_actor.d",
+    "antfarm/package.d",
+    "antfarm/templates.d",
+    "antfarm/actors/actor.d",
+    "antfarm/actors/wave.d",
+    "antfarm/actors/private_actor.d",
     "threadpool/source/threadpool/host.d",
 ]
 
 # Everything compiled for the inventory; the index may name symbols here.
 INDEX_MODULES = COVERAGE_MODULES + [
-    "actors/package.d",
-    "actors/mimalloc.d",
+    "antfarm/actors/package.d",
+    "antfarm/actors/mimalloc.d",
 ]
 
 # Kinds that carry a user-visible name and must be documented.
@@ -241,8 +241,9 @@ def main():
 
     coverage = {}
     for module in api:
-        if os.path.basename(module.get("file", "")) not in {
-                os.path.basename(m) for m in COVERAGE_MODULES}:
+        # Full paths: several modules are package.d files.
+        if os.path.normpath(ROOT / module.get("file", "")) not in {
+                os.path.normpath(ROOT / m) for m in COVERAGE_MODULES}:
             continue
         protections = scan_protections(ROOT / module["file"])
         required = 0

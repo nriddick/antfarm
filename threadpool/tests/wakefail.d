@@ -10,7 +10,7 @@ import core.thread : Thread;
 import core.time : Duration, seconds;
 import std.conv : to;
 import std.stdio : stderr, writeln;
-import actors, antfarm, threadpool.host;
+import antfarm.actors, antfarm, threadpool.host;
 
 struct Ledger { long balance; }
 void failing(scope ref ActorBorrow!Ledger, scope ref ActorContext) nothrow @nogc @system

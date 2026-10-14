@@ -8,7 +8,7 @@
 module fiber_cancel_at;
 
 import antfarm;
-import actors;
+import antfarm.actors;
 import antfarm_fibers;
 import antfarm_fibers.host : attachFiberDomain;
 import threadpool.host;

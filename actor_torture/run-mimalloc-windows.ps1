@@ -34,9 +34,9 @@ try {
     $compilerArgs = @('-g', '-I.', '-mscrtlib=libcmt',
         ($versionFlag + 'AntfarmActorTestHooks'),
         ($versionFlag + 'AntfarmMimallocV3'), ($versionFlag + 'AntfarmMimallocReal'),
-        'actor_torture/actor_torture.d', 'antfarm.d', 'antfarm_allocation.d',
-        'antfarm_templates.d', 'actors/package.d', 'actors/actor.d', 'actors/wave.d',
-        'actors/private_actor.d', 'actors/mimalloc.d', (Join-Path $libraryDir $libraryName),
+        'actor_torture/actor_torture.d', 'antfarm/package.d', 'antfarm/allocation.d',
+        'antfarm/templates.d', 'antfarm/actors/package.d', 'antfarm/actors/actor.d', 'antfarm/actors/wave.d',
+        'antfarm/actors/private_actor.d', 'antfarm/actors/mimalloc.d', (Join-Path $libraryDir $libraryName),
         ('-of=' + $binary))
     & $Compiler @compilerArgs
     if ($LASTEXITCODE -ne 0) { throw 'actor torture compilation failed' }

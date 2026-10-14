@@ -1,7 +1,7 @@
 module private_actor_tests;
-import actors;
+import antfarm.actors;
 import antfarm;
-import antfarm_allocation : allocateAligned64, freeAligned64;
+import antfarm.allocation : allocateAligned64, freeAligned64;
 import core.atomic;
 import core.thread : Thread;
 import core.time : MonoTime, msecs, seconds, usecs;
@@ -471,7 +471,7 @@ PrivateRootDisposition batchParentStep(scope ref PrivateBorrow!BatchParent b, sc
 }
 
 // Private Batch is module-private, so Batch.sizeof is unreachable here.
-// Authorized layout in actors/private_actor.d (locked there by
+// Authorized layout in antfarm/actors/private_actor.d (locked there by
 // static assert(Batch.sizeof == 6 * size_t.sizeof)):
 //   TableCompletionHook hook; // context + call, two pointers
 //   Batch* next;
@@ -2810,7 +2810,7 @@ static assert(!__traits(hasMember, PVoidCohort, "startFinalSubset"));           
 // read, polling (again/finished) read, late spawn keeps length, void wave
 // clears, startFinal results survive member retirement, empty start keeps
 // them, refill then new results, both reclamation policies, allocation balance.
-// Catching mutations (each applied by hand to actors/private_actor.d):
+// Catching mutations (each applied by hand to antfarm/actors/private_actor.d):
 //   P-M1 result length derived from the live member count instead of the
 //        count stored at start. Applied three ways:
 //        (a) `results` returns results_[0 .. count_]: fails first at
@@ -3955,7 +3955,7 @@ void phasePorts()
 // calling thread and are counted separately (review 89, finding 5).
 // Raw flags never supply a happens-before edge: log reads happen only after
 // the library's join (park.live == 0 or a callback after `waitChildren`).
-// Mutations are applied by hand to actors/private_actor.d; see each test.
+// Mutations are applied by hand to antfarm/actors/private_actor.d; see each test.
 // ===========================================================================
 import core.lifetime : move;
 import core.memory : GC;
@@ -4073,7 +4073,7 @@ struct DtHarness
 // two members and returns finishAfterChildren (cleanup activation destroys
 // children, then the root). Kind 2: creates two members, never starts them,
 // `finish`es (members destroyed by disposal while never dispatched).
-// Catching mutations (each applied alone to actors/private_actor.d):
+// Catching mutations (each applied alone to antfarm/actors/private_actor.d):
 //   D-M1b runRoot's finish branch deletes `destroyState!T(entry);`: "dtor-root
 //         stored exactly once" (observed: count 0).
 //   D-M2  runRoot deletes `destroyState!T(entry);` and PrivateRootPark.reclaim
@@ -5099,7 +5099,7 @@ void phaseDtor()
 // as in the ports tests; the expected wave of a member is the number of times
 // the test's model says it has run. Every deterministic test names the
 // mutations it catches (Q-M*); each was applied by hand to
-// actors/private_actor.d and the outcome recorded in the evidence file.
+// antfarm/actors/private_actor.d and the outcome recorded in the evidence file.
 // ===========================================================================
 
 struct SbMember { ulong* ran; uint index, wave; }
@@ -8031,7 +8031,7 @@ PrivateRootDisposition outcomeAuthorityStep(scope ref PrivateBorrow!AuthorityRoo
 
 // ---------------------------------------------------------------------------
 // F2 in-tree cancellation (design 170 §4, tests §12.2). Each deterministic
-// test names the mutation of actors/private_actor.d that it catches; the
+// test names the mutation of antfarm/actors/private_actor.d that it catches; the
 // schedule below aborts only when that mutation is applied (normal runs pass).
 //
 // Most schedules use a lockstep consumer: a second thread runs callbacks only
@@ -9276,7 +9276,7 @@ void phaseCancel()
 
 // ---------------------------------------------------------------------------
 // F3 root tracking, deadlines and X1a (design 170 §5, tests §12.3). Each
-// deterministic test names the mutation of actors/private_actor.d it catches;
+// deterministic test names the mutation of antfarm/actors/private_actor.d it catches;
 // the schedule below aborts only when that mutation is applied (normal runs pass).
 // Tracked parks hold every terminal root until takeOutcome, so each drain
 // pumps and takes outcomes; pumping alone never brings live to zero (T7).
@@ -10384,7 +10384,7 @@ void rootCostHintPins()
 // slab-refill, slab-continuation, slab-cancel, slab-idle, slab-create-fail,
 // slab-gc, slab-reclaim, slab-results, slab-per-object; death modes are
 // slab-unauthorized, slab-active-dispose and slab-dirty-slot (slab-death).
-// Each case names the mutation of actors/private_actor.d it catches.
+// Each case names the mutation of antfarm/actors/private_actor.d it catches.
 // Allocation checks use a pointer+size+alignment ledger. It is single-threaded
 // except where a lockstep acquire publishes the consumer's frees.
 // ===========================================================================

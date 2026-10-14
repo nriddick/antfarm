@@ -5,7 +5,7 @@
  +
  + Responsibility: the single-emitter root parks and parent-owned child
  + cohorts, their scheduling metadata, and the typed result/outcome paths.
- + It depends on `actors.actor` (allocator and test-hook seam) and `antfarm`.
+ + It depends on `antfarm.actors.actor` (allocator and test-hook seam) and `antfarm`.
  + Canonical docs: docs/guide/private-actors.md,
  + docs/guide/private-results-and-waits.md,
  + docs/guide/outcomes-and-cancellation.md and
@@ -20,11 +20,11 @@
  + The AntfarmActorTestHooks seams are production-elided: ordinary builds
  + contain neither the hooks nor their branches.
  +/
-module actors.private_actor;
+module antfarm.actors.private_actor;
 
-import actors.actor : ActorAllocator;
+import antfarm.actors.actor : ActorAllocator;
 version (AntfarmActorTestHooks)
-    import actors.actor : ActorTestPoint, actorTestPoint;
+    import antfarm.actors.actor : ActorTestPoint, actorTestPoint;
 import antfarm : AntFarm, Token, PayloadHeader, PayloadBody,
     TableCompletionHook, avgCostForChunk, rootCostHintAuto, rootCostHintFor, fatal;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,

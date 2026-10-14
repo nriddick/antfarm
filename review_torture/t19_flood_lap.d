@@ -13,7 +13,7 @@
  +/
 module t19_flood_lap;
 
-import antfarm_templates;
+import antfarm.templates;
 import torture_common;
 import core.atomic;
 import core.lifetime : move;

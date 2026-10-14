@@ -3,10 +3,11 @@ description "Ant Farm M:N jobs, cache-aware threadpool, and colocated Fiber sche
 authors "Nathan Riddick"
 license "BSL-1.0"
 targetType "library"
+// Build outputs go under bin/: an executable named antfarm would collide
+// with the antfarm/ source directory.
+targetPath "bin"
 importPaths "."
-sourceFiles "antfarm.d" "antfarm_allocation.d" "antfarm_templates.d" \
-    "actors/package.d" "actors/actor.d" \
-    "actors/wave.d" "actors/private_actor.d" "actors/mimalloc.d"
+sourcePaths "antfarm"
 
 toolchainRequirements {
 	dmd ">=2.112.0"

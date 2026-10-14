@@ -8,7 +8,7 @@
 module fail_fast_fold;
 
 import antfarm;
-import actors;
+import antfarm.actors;
 import threadpool.host;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad;
 import core.time : seconds;

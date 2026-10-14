@@ -512,7 +512,7 @@ struct ScanResult
     bool progressOk = true, executorOk = true;
 }
 
-// Executor check (antfarm.d writeImpl/consumeNext): a table's sequence is the
+// Executor check (antfarm/package.d writeImpl/consumeNext): a table's sequence is the
 // Wt value its write reserved, its Tsent word holds sentinelOf(seq), and Tnext
 // is seq + Tsize, so walking Tnext from the pre-PUBLISH Wt visits exactly the
 // round's tables and lands on the post-round Wt. Offsets follow the table

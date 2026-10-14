@@ -5,7 +5,7 @@
 module public_wave;
 
 import antfarm;
-import actors;
+import antfarm.actors;
 import threadpool.host;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore;
 import core.time : seconds;

@@ -3,7 +3,7 @@
  +
  + Responsibility: the fixed-memory ring, producer registration and quota,
  + work tables, consumer claims and segment reclamation. It imports only
- + `antfarm_allocation`; `antfarm_templates` and the actors build on it.
+ + `antfarm.allocation`; `antfarm.templates` and the actors build on it.
  + Canonical docs: SPEC.md is the algorithm and memory-order contract,
  + ARCHITECTURE.md is the layer and sizing guide, and docs/README.md is the
  + documentation map.
@@ -40,7 +40,7 @@ import core.stdc.errno : errno;
 import core.stdc.stdio : fprintf, stderr, snprintf;
 import core.stdc.stdlib : abort, free, getenv;
 import core.stdc.string : memset;
-import antfarm_allocation : allocateAligned64, freeAligned64;
+import antfarm.allocation : allocateAligned64, freeAligned64;
 import std.range.primitives : ElementType, empty, front, hasLength,
     isForwardRange, isInputRange, popFront, popFrontN, save;
 import std.traits : Unqual;
