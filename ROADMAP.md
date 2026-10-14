@@ -64,9 +64,13 @@ are not promised yet.
   validated on the 2-LLC host; selective wake (`servingGroups`) is opt-in
   until it is performance-characterized. Topology-specific
   performance and lost-worker-group claims still need their own evidence.
-- Fiber ThreadSanitizer migration remains a known external limitation at the
-  DRuntime stack-switch boundary; the Fiber gate stays the DMD/LDC smoke,
-  release, deterministic-migration and repeated-stress matrix.
+- Fiber ThreadSanitizer: migration is covered. The scheduler keeps a TSan
+  context per task behind an uninstrumented switch bridge, which assumes the
+  standard, uninstrumented DRuntime
+  ([testing](docs/development/testing.md)). What remains limited: the TSan
+  smoke disables DRuntime's parallel GC marking, whose mark stack TSan
+  reports, and runs outside `make check`; the Fiber gate stays the DMD/LDC
+  smoke, release, deterministic-migration and repeated-stress matrix.
 - Profile multi-producer cold Fiber admission before deciding whether stack
   preparation or moving `mmap` outside the admission lock is justified.
 - Add higher-level synchronization or task-group facilities only in response to
