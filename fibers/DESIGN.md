@@ -149,8 +149,8 @@ event beneath an older generation.
 
 Arbitrary threads request cancellation by appending a GC-visible
 `(slot, generation)` handle to the domain control queue. Any thread may call
-`drainCancellationRequests()`; the managed threadpool pump does so at the start
-of each service pass. The constructing thread remains the Director: synchronous
+`drainCancellationRequests()`; the managed threadpool pump runs the same drain,
+counting instead of allocating results, at the start of each service pass. The constructing thread remains the Director: synchronous
 `directorCancel`, `release`, `releaseAll`, and `beginShutdown` are Director-only.
 The currently executing Fiber may cancel itself directly. Cancellation is
 cooperative: a body that never reaches a scheduler boundary cannot be forcibly

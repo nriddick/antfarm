@@ -2388,14 +2388,28 @@ final class FiberDomain
     }
 
     /// Apply a snapshot of queued requests from any thread. Concurrent drains
-    /// serialize; each caller receives only the requests it applied. The managed
-    /// pump discards these results; lifecycle records retain accepted cancels.
+    /// serialize; each caller receives only the requests it applied.
     CancellationApplication[] drainCancellationRequests()
+    {
+        CancellationApplication[] results;
+        applyCancellationRequests(&results);
+        return results;
+    }
+
+    /// Same drain without per-request results; returns how many requests it
+    /// applied and allocates nothing. The managed pump and other discarding
+    /// callers use this; lifecycle records retain accepted cancels.
+    package(antfarm_fibers) size_t drainCancellationRequestsCounted()
+    {
+        return applyCancellationRequests(null);
+    }
+
+    private size_t applyCancellationRequests(CancellationApplication[]* results)
     {
         // Empty service passes cost one acquire load, no lock or allocation.
         // A racing append publishes before waking the pump; the pool arms its
         // wait before a final service pass, so that race cannot lose a wake.
-        if (pendingCancellationRequests == 0) return null;
+        if (pendingCancellationRequests == 0) return 0;
         synchronized (admissionMutex)
         {
             // Serialize external CANCEL adds (at most one plus cancelCurrent),
@@ -2408,11 +2422,15 @@ final class FiberDomain
                 cancellationRequests = null;
                 atomicStore!(MemoryOrder.rel)(control.cancellationRequestCount, 0);
             }
-            auto results = new CancellationApplication[requests.length];
+            if (results !is null)
+                *results = new CancellationApplication[requests.length];
             foreach (i, handle; requests)
-                results[i] = CancellationApplication(
-                    handle, applyCancellation(handle, true));
-            return results;
+            {
+                immutable result = applyCancellation(handle, true);
+                if (results !is null)
+                    (*results)[i] = CancellationApplication(handle, result);
+            }
+            return requests.length;
         }
     }
 
@@ -2499,6 +2517,9 @@ final class FiberDomain
         if (external && ph == Phase.waiting)
         {
             // First or later: WaitSet/join-list remove is exactly-once.
+            // Plain waitSignal read: the owner writes it before insert's
+            // waiting add (acquired by addCtrl above) and rechecks
+            // cancellation before any rewrite; recycle holds admissionMutex.
             auto target = task.managedJoinTarget();
             immutable removed = target !is null
                 ? target.removeManagedJoinWaiter(task)
@@ -2584,7 +2605,7 @@ final class FiberDomain
     void beginShutdown(bool cancelActive = false)
     {
         requireDirector();
-        cast(void) drainCancellationRequests();
+        cast(void) drainCancellationRequestsCounted();
         synchronized (admissionMutex)
             atomicStore!(MemoryOrder.rel)(accepting, 0);
         if (!cancelActive) return;
@@ -3174,7 +3195,7 @@ void drainUntilEmpty(FiberDomain domain, ref Token token,
     while (!domain.drained)
     {
         if (domain.pendingCancellationRequests != 0)
-            cast(void) domain.drainCancellationRequests();
+            cast(void) domain.drainCancellationRequestsCounted();
         domain.pollGenerationTriggers();
         domain.pollTimers();
         immutable flushed = domain.flush(token, flushBatch, avgCost);
@@ -3312,5 +3333,34 @@ version (unittest)
         long unused;
         auto hasDeadline = timers.nextDeadline(unused);
         assert(!hasDeadline);
+    }
+
+    unittest
+    {
+        // The pump's counted drain applies queued requests without
+        // allocating on the worker.
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
+                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
+        scope (exit) farm.destroy();
+        auto domain = new FiberDomain(farm);
+        auto token = farm.registerProducer(Tier.small);
+        scope (exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        subscribeOrThrow(view, farm);
+        scope (exit) view.unsubscribe();
+        auto first = domain.spawn({});
+        auto second = domain.spawn({});
+        assert(domain.requestCancel(first.handle) == CancellationSubmission.queued);
+        assert(domain.requestCancel(first.handle) == CancellationSubmission.queued);
+        assert(domain.requestCancel(second.handle) == CancellationSubmission.queued);
+        immutable before = GC.allocatedInCurrentThread;
+        immutable applied = domain.drainCancellationRequestsCounted();
+        assert(GC.allocatedInCurrentThread == before);
+        assert(applied == 3 && domain.pendingCancellationRequests == 0);
+        assert(domain.drainCancellationRequestsCounted() == 0);
+        drainUntilEmpty(domain, token, view);
+        assert(first.outcome == FiberOutcome.cancelled);
+        assert(second.outcome == FiberOutcome.cancelled);
+        domain.releaseAll(domain.takeCompletions());
     }
 }

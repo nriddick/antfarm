@@ -839,7 +839,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     }
 
     immutable cancellationsApplied =
-        state.lane.domain.drainCancellationRequests().length;
+        state.lane.domain.drainCancellationRequestsCounted();
     immutable timersWoken = state.responder
         ? state.lane.domain.pollTimers() : 0;
     bool consumed = state.consumer.consumeNext();
