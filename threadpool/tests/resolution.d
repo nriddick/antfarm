@@ -1,6 +1,7 @@
-module resolution_tests;
+module threadpool.tests.resolution;
 
 // Pure resolution tests on synthetic snapshots; no OS calls, any host.
+// Inside package threadpool so the package-only narrowedTo is reachable.
 
 import std.algorithm : count, canFind;
 import std.array : array;
@@ -278,4 +279,70 @@ unittest
     assert(text.canFind("osExcluded,notRequested,smtSecondary"));
     assert(res.summary.canFind("4 accepted"));
     assert(res.summary.count('\n') == 0);
+}
+
+unittest
+{
+    // R9: narrowing keeps one disposition per CPU, request and group;
+    // notSelected is exclusive and separates policy from filters.
+    auto snap = f1((ushort lp) => lp == 3);
+    PoolOptions opt;
+    opt.skipSmtSiblings = true;
+    opt.processors = parseCpuList("0-3,9,999");
+    auto full = resolvePool(snap, opt);
+    assert(full.workers == parseCpuList("0-2,9"));
+    foreach (ref c; full.cpus)
+        assert(!(c.reasons & Reject.notSelected), "resolvePool never sets notSelected");
+    foreach (ref g; full.groups)
+        assert(g.candidates == g.accepted);
+
+    auto narrow = full.narrowedTo(parseCpuList("2,0"));
+    assert(narrow.workers == parseCpuList("0,2"), "snapshot order, not chosen order");
+    assert(narrow[ProcessorId(0, 0)].workerIndex == 0 && narrow[ProcessorId(0, 2)].workerIndex == 1);
+    assert(narrow[ProcessorId(0, 1)].reasons == Reject.notSelected);
+    assert(narrow[ProcessorId(0, 9)].reasons == Reject.notSelected);
+    assert(narrow[ProcessorId(0, 1)].workerIndex == uint.max);
+    assert(narrow[ProcessorId(0, 3)].reasons == full[ProcessorId(0, 3)].reasons, "filters kept");
+    assert(narrow.cpus.length == full.cpus.length);
+    foreach (ref c; narrow.cpus)
+    {
+        assert(c.reasons == Reject.notSelected || !(c.reasons & Reject.notSelected));
+        assert(((c.reasons & ~Reject.notSelected) == Reject.none) == full.isAccepted(c.id));
+    }
+    assert(narrow.rejectedCpus(Reject.notSelected).array.length == 2);
+    assert(narrow.rejectedCpus(cast(Reject)(Reject.all & ~Reject.notSelected)).array.length
+        == full.rejectedCpus.array.length);
+
+    // Requests stay the user's filter list.
+    assert(narrow.requests.length == full.requests.length);
+    assert(narrow.requests[0].accepted && !narrow.requests[1].accepted);
+    assert(narrow.requests[4].known && !narrow.requests[4].accepted);
+    assert(narrow.requests[5].unknown);
+    bool threw;
+    try
+        narrow.enforceRequested();
+    catch (ResolutionException e)
+        threw = e.msg.canFind("0:1 rejected (notSelected)") && e.msg.canFind("0:9 rejected (notSelected)");
+    assert(threw);
+
+    // Group 1 passed the filters but supplies no worker.
+    assert(narrow.groups[0].candidates == 3 && narrow.groups[0].accepted == 2);
+    assert(narrow.groups[1].candidates == 1 && narrow.groups[1].accepted == 0);
+    assert(narrow.groups[1].common == Reject.none, "mixed notSelected and filter reasons");
+    assert(narrow.acceptedGroupCount == 1 && narrow.workersIn(1).length == 0);
+    assert(reasonsText(Reject.notSelected) == "notSelected");
+    import std.conv : to;
+    assert(narrow.to!string.canFind("candidates"));
+
+    // Nothing chosen: every filter-passing CPU is notSelected.
+    auto none = full.narrowedTo(null);
+    assert(none.workers.length == 0);
+    assert(none.rejectedCpus(Reject.notSelected).array.length == full.workers.length);
+    assert(none.groups[1].common == Reject.none && none.groups[1].candidates == 1);
+
+    // A group whose every CPU is a candidate but none chosen.
+    auto homogeneous = f1();
+    auto plain = resolvePool(homogeneous, PoolOptions.init);
+    auto home = plain.narrowedTo(plain.workersIn(0));
+    assert(home.groups[1].candidates == 16 && home.groups[1].common == Reject.notSelected);
 }
