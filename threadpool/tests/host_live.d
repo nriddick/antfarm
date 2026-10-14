@@ -353,7 +353,7 @@ void singleton()
 
     // A user-started pool is rejected and neither shut down nor disturbed.
     PoolOptions options;
-    options.processors = [first.plan.workerSelection.workers[0]];
+    options.processors = [first.resolution.workers[0]];
     options.workerBody = &userBody;
     auto user = new CacheAwarePool(options);
     user.start();
@@ -451,10 +451,10 @@ void retireWaveOwned()
 
 void planErrorCreatesNothing()
 {
-    expectThrow!FarmHostPlanException(() { new FarmHost(guarded(100_000)); }, "impossible worker count");
+    expectThrow!FarmHostResolveException(() { new FarmHost(guarded(100_000)); }, "impossible worker count");
     auto host = new FarmHost(guarded(0));
     host.close();
-    writeln("PASS 5.9: a plan error creates nothing; FarmHost(0) follows");
+    writeln("PASS 5.9: a resolve error creates nothing; FarmHost(0) follows");
 }
 
 void useAfterClose()
@@ -596,7 +596,11 @@ void workersTwo()
     auto options = guarded(2);
     options.idleTimeout = Duration.max;
     auto host = new FarmHost(options);
-    enforce(host.plan.workers == 2 && !host.plan.crossGroup, "two workers in one group");
+    enforce(host.resolution.workers.length == 2 && host.resolution.acceptedGroupCount == 1,
+        "two workers in one group");
+    enforce(host.resolution is host.pool.resolution && host.resolution.started,
+        "the host's resolution is the started pool's");
+    enforce(host.summary().canFind("2 workers"), host.summary());
     publicReplies(host);
     privateTree(host);
     childOnlyWake(host);
@@ -613,11 +617,11 @@ void confineCaller()
     auto before = liveCallerMask();
     auto host = new FarmHost(guarded(2));
     scope (exit) host.closeOrAbandon();
-    enforce(host.plan.caller == CallerPlacement.confine, "confine by default");
+    enforce(host.callerCpus.length != 0, "confine by default");
     auto during = liveCallerMask();
-    enforce(during == sorted(host.plan.callerCpus),
-        "caller mask {" ~ formatCpuList(during) ~ "} is plan.callerCpus {"
-        ~ formatCpuList(host.plan.callerCpus) ~ "}");
+    enforce(during == sorted(host.callerCpus),
+        "caller mask {" ~ formatCpuList(during) ~ "} is callerCpus {"
+        ~ formatCpuList(host.callerCpus) ~ "}");
     host.close();
     enforce(liveCallerMask() == before, "caller mask restored after close");
     writeln("PASS 4: caller confined to {", formatCpuList(during), "} and restored to {",
@@ -635,8 +639,8 @@ void rawTokenPickup()
 bool workersFit()
 {
     try
-        cast(void) FarmHost.preview(guarded(2));
-    catch (FarmHostPlanException e)
+        cast(void) FarmHost.resolve(guarded(2));
+    catch (FarmHostResolveException e)
     {
         writeln("SKIP worker cases: ", e.msg);
         return false;
@@ -666,7 +670,7 @@ int main(string[] args)
     useAfterClose();
     if (!workersFit())
         return 0;
-    writeln(FarmHost.preview(guarded(2)).summary());
+    writeln(FarmHost.resolve(guarded(2)).summary());
     workersTwo();
     confineCaller();
     rawTokenPickup();

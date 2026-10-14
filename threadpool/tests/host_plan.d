@@ -1,6 +1,8 @@
-module host_plan_tests;
+module threadpool.tests.host_plan;
 
-// Pure FarmHost plan tests on synthetic snapshots; no OS calls, any host.
+// Pure FarmHost placement tests on synthetic snapshots; no OS calls, any
+// host. Inside package threadpool so host-only facts (caller CPUs,
+// participants, notes) are reachable through the package-only planHost.
 
 import std.algorithm : all, any, canFind;
 import std.array : array;
@@ -8,21 +10,21 @@ import std.array : array;
 import threadpool.host;
 import threadpool.hybrid : WorkerSelf;
 import threadpool.pool : PoolOptions;
-import threadpool.resolution : Reject;
+import threadpool.resolution : PoolResolution, Reject;
 import threadpool.topology;
 import synthetic_topology;
 
-private FarmHostPlan planOf(ref const TopologySnapshot snap, FarmHostOptions options)
+private HostPlan planOf(ref const TopologySnapshot snap, FarmHostOptions options)
 {
-    return FarmHost.preview(snap, options);
+    return planHost(snap, options);
 }
 
-/// The plan exception's problems, or null when planning succeeded.
+/// The resolve exception's problems, or null when resolving succeeded.
 private const(string)[] problemsOf(ref const TopologySnapshot snap, FarmHostOptions options)
 {
     try
-        cast(void) FarmHost.preview(snap, options);
-    catch (FarmHostPlanException e)
+        cast(void) FarmHost.resolve(snap, options);
+    catch (FarmHostResolveException e)
         return e.problems;
     return null;
 }
@@ -44,7 +46,7 @@ unittest
     auto lopsided = f1((ushort lp) => lp == 0 || lp == 1);
     plan = planOf(lopsided, options);
     assert(plan.farmGroup == 1 && plan.groups == [ushort(1)]);
-    assert(plan.workerSelection.workers.all!(id => llcOf(lopsided, id) == 1));
+    assert(plan.resolution.workers.all!(id => llcOf(lopsided, id) == 1));
 }
 
 unittest
@@ -55,7 +57,7 @@ unittest
     options.groups = HostGroups.only(1);
     auto plan = planOf(snap, options);
     assert(plan.farmGroup == 1 && plan.groups == [ushort(1)]);
-    assert(plan.workerSelection.workers == parseCpuList("8-14"));
+    assert(plan.resolution.workers == parseCpuList("8-14"));
     assert(plan.callerCpus == parseCpuList("15,24-31"));
 
     auto noGroup1 = f1((ushort lp) => (lp % 16) >= 8);
@@ -74,15 +76,15 @@ unittest
     auto plan = planOf(snap, options);
     assert(plan.farmGroup == 1 && plan.groups == [ushort(1), ushort(0)]);
     assert(plan.crossGroup);
-    assert(plan.participants.nativeConsumers == 7 && plan.participants.foreignConsumers == 8);
-    assert(plan.workerSelection.workers == parseCpuList("0-14"));
+    assert(plan.nativeConsumers == 7 && plan.foreignConsumers == 8);
+    assert(plan.resolution.workers == parseCpuList("0-14"));
     assert(plan.callerCpus == parseCpuList("15,24-31"));
 
     // Explicit n fills the home group first.
     options.workers = 10;
     plan = planOf(snap, options);
-    assert(plan.workerSelection.workers == parseCpuList("0-1,8-15"));
-    assert(plan.participants.nativeConsumers == 8 && plan.participants.foreignConsumers == 2);
+    assert(plan.resolution.workers == parseCpuList("0-1,8-15"));
+    assert(plan.nativeConsumers == 8 && plan.foreignConsumers == 2);
     assert(plan.callerCpus == parseCpuList("24-31") && !plan.callerSharesWorkerCpu);
 
     // Windows: a span may not cross processor groups yet.
@@ -104,11 +106,11 @@ unittest
     auto snap = f1();
     auto plan = planOf(snap, FarmHostOptions.init);
     assert(plan.workers == 7);
-    assert(plan.workerSelection.workers == parseCpuList("0-6"));
+    assert(plan.resolution.workers == parseCpuList("0-6"));
     assert(plan.caller == CallerPlacement.confine);
     assert(plan.callerCpus == parseCpuList("7,16-23"));
     assert(!plan.callerSharesWorkerCpu);
-    assert(plan.participants.nativeConsumers == 7 && plan.participants.externalConsumers == 0);
+    assert(plan.nativeConsumers == 7 && plan.externalConsumers == 0);
     assert(plan.expectedConsumers == 7 && plan.maxSmall == 1 && plan.maxBulk == 0);
 
     FarmHostOptions pin;
@@ -199,11 +201,11 @@ unittest
     options.workers = 0;
     options.farm.extraSmallProducers = 2;
     auto plan = planOf(snap, options);
-    assert(plan.workers == 0 && plan.workerSelection is null);
+    assert(plan.workers == 0 && plan.resolution.workers.length == 0);
     assert(plan.callerConsumes && plan.caller == CallerPlacement.unchanged);
     assert(plan.callerCpus.length == 0 && plan.groups.length == 0);
     assert(plan.expectedConsumers == 1 && plan.maxSmall == 3);
-    assert(plan.participants.externalConsumers == 1 && plan.participants.smallProducers == 3);
+    assert(plan.externalConsumers == 1 && plan.maxSmall == 3);
 }
 
 unittest
@@ -215,7 +217,7 @@ unittest
     launch.osScopeAllowed = parseCpuList("0-7,16-23");
     FarmHostOptions options;
     options.workers = 4;
-    auto plan = FarmHost.preview(launch, options);
+    auto plan = planOf(launch, options);
     assert(plan.farmGroup == 0);
     assert(plan.notes.any!(n => n.canFind("group 1 not used") && n.canFind("osExcluded")));
     auto text = plan.summary();
@@ -232,6 +234,45 @@ unittest
     assert(FarmHostOptions.init.pool.skipSmtSiblings);
     auto snap = f1();
     auto plan = planOf(snap, FarmHostOptions.init);
-    assert(plan.workerSelection.workers.all!(id => !snap.byId(id).smtSibling));
+    assert(plan.resolution.workers.all!(id => !snap.byId(id).smtSibling));
     assert(plan.candidates[ProcessorId(0, 16)].reasons == Reject.smtSecondary);
+    assert(plan.resolution[ProcessorId(0, 16)].reasons == Reject.smtSecondary);
+}
+
+unittest
+{
+    // 13: FarmHost.resolve is the host's selection: workers accepted, every
+    // other filter-passing CPU notSelected, filters and user requests kept.
+    auto snap = f1();
+    auto res = FarmHost.resolve(snap, FarmHostOptions.init);
+    auto plan = planOf(snap, FarmHostOptions.init);
+    assert(res.workers == plan.resolution.workers && res.workers == parseCpuList("0-6"));
+    assert(res[ProcessorId(0, 7)].reasons == Reject.notSelected, "caller reservation");
+    assert(res[ProcessorId(0, 8)].reasons == Reject.notSelected, "group not chosen");
+    assert(res[ProcessorId(0, 16)].reasons == Reject.smtSecondary, "filter reason kept");
+    assert(res.requests.length == 0);
+    assert(res.groups[0].candidates == 8 && res.groups[0].accepted == 7);
+    assert(res.groups[1].candidates == 8 && res.groups[1].accepted == 0);
+    assert(res.groups[1].common == Reject.none, "notSelected primaries, smtSecondary siblings");
+    assert(res.acceptedGroupCount == 1 && !res.started);
+    foreach (ref c; res.cpus)
+        assert(((c.reasons & ~Reject.notSelected) == Reject.none) == plan.candidates.isAccepted(c.id));
+
+    // A user CPU list stays the request list; chosen-but-unrequested is impossible.
+    FarmHostOptions listed;
+    listed.workers = 2;
+    listed.pool.processors = parseCpuList("8-11");
+    res = FarmHost.resolve(snap, listed);
+    assert(res.workers == parseCpuList("8-9"));
+    assert(res.requests.length == 4 && res.requests[2].known && !res.requests[2].accepted);
+    assert(res[ProcessorId(0, 10)].reasons == Reject.notSelected);
+    assert(res[ProcessorId(0, 0)].reasons == Reject.notRequested);
+
+    // workers == 0: never null, no workers, every candidate notSelected.
+    FarmHostOptions none;
+    none.workers = 0;
+    res = FarmHost.resolve(snap, none);
+    assert(res !is null && res.workers.length == 0);
+    assert(res.rejectedCpus(Reject.notSelected).array.length == 16);
+    assert(planOf(snap, none).summary().canFind("no workers"));
 }

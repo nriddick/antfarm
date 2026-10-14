@@ -124,5 +124,5 @@ void main(string[] args)
 
     writeln("fail-fast fold: code=", outcome.code, ", failures=", failures,
         ", dispatched=", dispatched, "/8, leaves run=", leafRuns,
-        ", workers=", host.plan.workers);
+        ", workers=", host.resolution.workers.length);
 }

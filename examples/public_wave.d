@@ -103,5 +103,5 @@ void main(string[] args)
     // array). It requests retirement of each, waits for all, reclaims all.
     host.retire(selectedA, unselected, selectedB);
     writeln("public wave: two runtimes, hook joined after finished, workers=",
-        host.plan.workers);
+        host.resolution.workers.length);
 }

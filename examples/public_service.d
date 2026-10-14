@@ -120,5 +120,5 @@ void main(string[] args)
     if (expected != 234)
         fatal("ledger total mismatch");
     writeln("public service: 36 ordered replies, balance=", expected,
-        ", workers=", host.plan.workers, ", closing-callback-count=", closingCallbacks);
+        ", workers=", host.resolution.workers.length, ", closing-callback-count=", closingCallbacks);
 }

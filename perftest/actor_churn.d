@@ -1078,7 +1078,7 @@ void main(string[] args)
         hostOptions.farm.quotaSmall = quota;
         host = new FarmHost(hostOptions);
         farm = host.farm;
-        writefln("farm_host=1 %s", host.plan.summary());
+        writefln("farm_host=1 %s", host.summary());
     }
     else
         farm = AntFarm.create(8, 8, consumers ? consumers : 1,

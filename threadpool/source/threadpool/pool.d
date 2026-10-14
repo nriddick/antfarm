@@ -386,6 +386,14 @@ final class CacheAwarePool
     /// Call after registry setup (`install` / `setLabel` / `installExchange`).
     void start()
     {
+        start(resolve());
+    }
+
+    /// Start the workers of `planned`, a resolution against the discovered
+    /// snapshot (FarmHost passes its narrowed selection, so
+    /// `pool.resolution` reports its `notSelected` CPUs).
+    package(threadpool) void start(PoolResolution planned)
+    {
         version (ThreadpoolOs)
         {
             enforce(atomicLoad(gRunning) == 0, "threadpool: a pool is already running");
@@ -396,7 +404,7 @@ final class CacheAwarePool
                     || options.managedWorker.pump !is null,
                 "threadpool: managedWorker start/stop require a pump");
 
-            auto res = resolve();
+            auto res = planned;
             lastResolution = res;
             snap = cachedSnapshot();
             enforce(snap !is null, "threadpool: topology not discovered");

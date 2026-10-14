@@ -116,5 +116,5 @@ void main(string[] args)
     // Every canceller is already joined; host.close() stops the workers,
     // then destroys the park.
     writeln("request service: completed, failed 501, requested, deadline,"
-        ~ " cancelAll, workers=", host.plan.workers);
+        ~ " cancelAll, workers=", host.resolution.workers.length);
 }

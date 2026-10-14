@@ -25,7 +25,7 @@ private void render(Life life, uint x, uint y, bool paused, uint speed)
                 TB_DEFAULT, TB_DEFAULT) == 0, "termbox cell failed");
     auto status = format("gen %s | %.1f gen/s | %.0f cells/s | workers %s | %s | speed %s",
         life.generation, life.generationsPerSecond, life.cellsPerSecond,
-        life.host.plan.workers, paused ? "paused" : "running", speed);
+        life.host.resolution.workers.length, paused ? "paused" : "running", speed);
     auto help = "space pause  n step  r random  c clear  g glider  arrows move  enter toggle  +/- speed  q quit";
     foreach (row, line; [status, help])
         foreach (column, ch; line)
