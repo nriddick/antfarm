@@ -8,6 +8,8 @@ dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/
 ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
 ```
 
+The commands set `ANTFARM_HUGE_PAGES=0` only to make the code's default explicit.
+
 Expected output, with exit status 0:
 
 ```text

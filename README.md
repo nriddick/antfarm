@@ -24,6 +24,8 @@ dmd -g -i -I. -Iexamples examples/public_service.d -of=/tmp/public_service
 ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
 ```
 
+The commands set `ANTFARM_HUGE_PAGES=0` only to make the code's default explicit.
+
 Expected output, with exit status 0:
 
 ```text
@@ -37,6 +39,9 @@ command (`ldc2 -g -i -I. -Iexamples examples/public_service.d
 explains who publishes, who consumes, and what completion means.
 [examples/README.md](examples/README.md) has the other programs and the Windows
 commands.
+
+A `consumeNext() == false` result does not park; the threadpool `Director`
+supplies waiting.
 
 ## Where to go next
 
@@ -57,7 +62,7 @@ This repository contains four cooperating packages:
 | `antfarm` | allocation-free `@nogc nothrow` payload distribution |
 | `threadpool` | persistent workers pinned and grouped by cache topology |
 | `actors` | public identities, inboxes and waves, or private parent-owned hierarchies |
-| `fibers` | waiting, yielding, and cancellation on those workers |
+| `antfarm-fibers` | waiting, yielding, and cancellation on those workers; test with `dub test :antfarm-fibers` |
 
 Use `antfarm` alone, or add only the higher-level packages a workload needs.
 For the complete relationship and sizing rules, see
