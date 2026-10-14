@@ -45,6 +45,20 @@ run from the repository root on Linux x86-64. Bare `make` runs it too. The full
 lane matrix, prerequisites, focused entry points, and optional lanes are in
 [docs/development/testing.md](docs/development/testing.md).
 
+For a portable local iteration check, run `make check-quick`. It runs the root
+unit tests, plain review-torture suite, threadpool unit tests, fiber smoke suite,
+and LDC debug/release examples. It needs the LDC toolchain (including Dub), Python
+3, GNU make and Bash; it uses neither DMD nor TSan. `make check` retains the full
+matrix and remains the correctness gate.
+
+The full gate accepts `CHECK_SMALL_CPUS` and `CHECK_ONE_LLC_CPUS` as `taskset -c`
+CPU lists. By default the small-mask confine lane uses the first four CPUs in
+the process's allowed affinity, and host tests use the full allowed mask. With
+fewer than four or sixteen allowed CPUs respectively, the lane prints a notice
+and runs unpinned. Explicit overrides are passed verbatim to `taskset`; choose
+one LLC for `CHECK_ONE_LLC_CPUS` when testing that topology. Invalid overrides
+fail the lane. Inspect selection with `scripts/check.sh --print-cpus`.
+
 ## Performance: `make perf-gate`
 
 `make perf-gate BASE=<sha> CANDIDATE=<sha>` compares two committed refs on the

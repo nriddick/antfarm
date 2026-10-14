@@ -72,7 +72,7 @@ def run_example(binary, workers, sanitize=False):
     subprocess.run(cmd, cwd=root, env=env, check=True, timeout=run_timeout)
 
 
-def check_readme_programs():
+def check_readme_programs(selected_configs):
     text = (root / "README.md").read_text()
     blocks = re.findall(r"```d\n(.*?)\n```", text, re.S)
     if not blocks:
@@ -90,7 +90,7 @@ def check_readme_programs():
             f"expected one complete README program, found {len(programs)}")
     source = build / "readme_payload.d"
     source.write_text(programs[0] + "\n")
-    for compiler, flags, suffix in configs:
+    for compiler, flags, suffix in selected_configs:
         output = build / f"readme_payload{suffix}"
         cmd = [compiler, *flags, "-i", "-I.", str(source), f"-of={output}"]
         print("==>", " ".join(cmd), flush=True)
@@ -102,24 +102,26 @@ def check_readme_programs():
                        timeout=run_timeout)
 
 
-def main():
+def main(ldc_only=False):
+    selected_configs = configs[:2] if ldc_only else configs
     build.mkdir(exist_ok=True)
-    check_readme_programs()
+    check_readme_programs(selected_configs)
     for name in examples:
-        for compiler, flags, suffix in configs:
+        for compiler, flags, suffix in selected_configs:
             output = build / f"{name.replace('/', '_')}{suffix}"
             compile_example(compiler, flags, name, output)
             for workers in ("0", "2"):
                 run_example(output, workers)
-        compiler, flags, suffix = tsan
-        output = build / f"{name.replace('/', '_')}{suffix}"
-        compile_example(compiler, flags, name, output)
-        # TSan fails at the sanitizer/runtime stack-switch boundary for
-        # migrating DRuntime Fibers; see fibers/DESIGN.md "Validation boundary".
-        tsan_workers = ("0",) if name == "fiber_cancel_at" else ("0", "2")
-        for workers in tsan_workers:
-            run_example(output, workers, sanitize=True)
-    if os.name == "posix":
+        if not ldc_only:
+            compiler, flags, suffix = tsan
+            output = build / f"{name.replace('/', '_')}{suffix}"
+            compile_example(compiler, flags, name, output)
+            # TSan fails at the sanitizer/runtime stack-switch boundary for
+            # migrating DRuntime Fibers; see fibers/DESIGN.md "Validation boundary".
+            tsan_workers = ("0",) if name == "fiber_cancel_at" else ("0", "2")
+            for workers in tsan_workers:
+                run_example(output, workers, sanitize=True)
+    if os.name == "posix" and not ldc_only:
         shim = compile_termbox()
         for compiler, flags, suffix in configs:
             compile_life_tui(compiler, flags, suffix, shim)
@@ -135,7 +137,7 @@ if __name__ == "__main__":
             flags = ("-O2", "-release") if compiler == "ldc2" else ("-O", "-release")
             compile_life_tui(compiler, flags, "", compile_termbox())
         else:
-            main()
+            main(ldc_only=len(sys.argv) > 1 and sys.argv[1] == "--ldc-only")
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode or 1)
     except subprocess.TimeoutExpired as error:

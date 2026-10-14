@@ -9,7 +9,7 @@
 # `actor_torture`, `antfarm_test`). New tests stay on druntime threads and
 # atomics; this matrix itself is the Linux gate.
 
-.PHONY: help check check-docs check-soak check-mimalloc farm-tsan run-farm-tsan docs perf-gate
+.PHONY: help check check-quick check-docs check-soak check-mimalloc farm-tsan run-farm-tsan docs perf-gate
 
 # `help` is the first rule, so name the default goal explicitly.
 .DEFAULT_GOAL := check
@@ -20,6 +20,8 @@ Ant Farm local targets (there is no CI). See CONTRIBUTING.md for details.
 Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Python 3):
   make check               full matrix, LDC and DMD, stops at the first failure
                            (bare `make` runs this)
+  make check-quick         root, review torture, threadpool, fiber smoke, examples
+                           (LDC toolchain including Dub and Python 3; no DMD/TSan)
   make check-docs          tracked Markdown relative links and anchors (no network)
                            plus the API reference symbol/coverage check (needs DMD)
   make check-farm-ordering Farm ordering and leaf-reuse tests, LDC and DMD
@@ -54,6 +56,9 @@ help:
 
 check:
 	./scripts/check.sh
+
+check-quick:
+	./scripts/check.sh --quick
 
 check-docs:
 	python3 scripts/check-doc-links.py

@@ -29,6 +29,24 @@ lists every target.
 | Private actors | `private_actor_tests`: unit suite, the extracted private-actor documentation programs, and the fatal-death harness | LDC, DMD, LDC TSan |
 | Examples | `examples/`: the First payload program extracted from [README.md](../../README.md), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
 
+`make check-quick` runs the root unit suite, `make -C review_torture run`
+(including `sweep_cursor`), threadpool unit suite, fiber smoke suite, and
+`python3 examples/run_examples.py --ldc-only`. The examples include the README
+payload and actor/headless programs in LDC debug and release with 0 and 2
+workers; the terminal front end is omitted. This target needs the LDC toolchain
+(including Dub), Python 3, GNU make and Bash, without DMD, a TSan runtime or a C
+compiler. It prints `ALL QUICK CHECKS PASSED` on success; the full `make check`
+matrix remains the correctness gate.
+
+For the full gate's affinity lanes, set `CHECK_SMALL_CPUS` or
+`CHECK_ONE_LLC_CPUS` to a `taskset -c` CPU list. Unset values select the first
+four allowed CPUs for the confine-test small mask and the entire process affinity
+for host tests. If fewer than four or sixteen CPUs respectively are allowed,
+the lane prints a notice and runs unpinned. Explicit values are honoured
+verbatim, and a rejected `taskset` selection fails the lane. To constrain host
+tests to one LLC, supply that LLC's allowed CPUs in `CHECK_ONE_LLC_CPUS`.
+`scripts/check.sh --print-cpus` shows both selections without running tests.
+
 `ANTFARM_HUGE_PAGES=0` is exported for every lane, so the matrix does not depend
 on how the calling shell is configured.
 
