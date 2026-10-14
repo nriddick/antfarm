@@ -2551,8 +2551,82 @@ void fiberParitySmoke()
     domain.releaseAll(domain.takeCompletions());
 }
 
+private void releaseDeathChild(string mode)
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
+                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
+    auto domain = new FiberDomain(farm);
+    if (mode == "null")
+    {
+        domain.release(null);
+        return;
+    }
+    if (mode == "lifecycle-root") domain.enableLifecycleEvents();
+    auto task = domain.spawn({});
+    if (mode == "live")
+    {
+        domain.release(task);
+        return;
+    }
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    subscribeOrThrow(view, farm);
+    drainUntilEmpty(domain, token, view);
+    if (mode == "completion-root")
+    {
+        domain.release(task);
+        return;
+    }
+    domain.takeCompletions();
+    if (mode == "foreign")
+    {
+        auto other = new FiberDomain(farm);
+        other.release(task);
+        return;
+    }
+    if (mode == "double") domain.release(task);
+    domain.release(task);
+}
+
+private void releaseDeathSmoke()
+{
+    version (linux)
+    {
+        import std.algorithm.searching : canFind;
+        import std.process : execute;
+
+        foreach (mode; ["double", "completion-root", "lifecycle-root",
+                       "live", "foreign", "null"])
+        {
+            immutable message = mode == "double"
+                ? "antfarm_fibers: task released twice"
+                : mode == "completion-root" || mode == "lifecycle-root"
+                ? "antfarm_fibers: drain completion and lifecycle events before release"
+                : "antfarm_fibers: only terminated tasks of this domain can be released";
+            auto result = execute(["/proc/self/exe", "--release-child", mode]);
+            if (result.status == 0
+                || !result.output.canFind("antfarm fatal: " ~ message))
+                throw new Exception("fiber release child " ~ mode
+                    ~ " failed:\n" ~ result.output);
+            printf("PASS fiber release child %.*s\n",
+                cast(int) mode.length, mode.ptr);
+        }
+    }
+    else printf("SKIP fiber release death checks: Linux re-exec required\n");
+}
+
 void main(string[] args)
 {
+    if (args.length == 3 && args[1] == "--release-child")
+    {
+        releaseDeathChild(args[2]);
+        return;
+    }
+    if (args.length == 2 && args[1] == "--release-death")
+    {
+        releaseDeathSmoke();
+        return;
+    }
     if (args.length == 2 && args[1] == "--worker-cancellation-only")
     {
         workerCancellationSmoke();
@@ -2569,6 +2643,7 @@ void main(string[] args)
         printf("cancellation smoke passed\n");
         return;
     }
+    releaseDeathSmoke();
     workerCancellationSmoke();
     uxHelpersSmoke();
     cancellationOwnershipSmoke();

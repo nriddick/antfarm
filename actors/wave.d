@@ -184,7 +184,10 @@ public:
         /// accesses or completion callbacks. The next begin increments it.
         void testPresetGeneration(ulong generation) nothrow @nogc @system
         {
-            assert(handle.finished && generation != 0);
+            // Debug-only test-hook precondition, outside production wave paths.
+            version (assert)
+                if (!handle.finished || generation == 0)
+                    fatal("preset actor wave generation requires a finished wave and nonzero generation");
             atomicStore!(MemoryOrder.raw)(generation_, generation);
         }
     }

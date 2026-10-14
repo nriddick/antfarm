@@ -50,8 +50,14 @@ worker integration. The `unittest` configuration compiles those blocks under
 any build type, so Dub prints a warning about `buildOptions "unittests"`.
 The `stress` configuration runs
 `tests/stress.d`. Each suite prints a final `passed` line. Both configurations
-require contracts, so their `assert` checks stay enabled even with
-`--build=release`.
+require contracts, so test `assert` checks stay enabled even with
+`--build=release`. The task-release guards use `fatal` independently of those
+test settings: releasing a null, foreign, live, already-pooled, or still-rooted
+task aborts in debug and ordinary `-release` builds. Completion and lifecycle
+events must be drained before recycling. Other scheduler assertions remain
+assertion-build diagnostics. On Linux, the smoke suite re-executes child cases
+and requires each release violation's fatal message; `--release-death` runs only
+these cases.
 
 ## Run one lane on the current thread
 

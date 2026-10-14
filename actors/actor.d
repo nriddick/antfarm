@@ -1069,8 +1069,14 @@ align(64) struct ActorRuntime
         void testPresetFreeSlotGeneration(ulong generation)
             nothrow @nogc @system
         {
-            assert(quiescent && freeSlots !is null);
-            assert(generation <= maxGeneration);
+            // Debug-only test-hook precondition; valid tests need no release checks.
+            version (assert)
+                if (!quiescent || freeSlots is null)
+                    fatal("preset actor generation without a quiescent free slot");
+            // Debug-only test-hook range diagnostic, outside production paths.
+            version (assert)
+                if (generation > maxGeneration)
+                    fatal("preset actor generation out of range");
             atomicStore!(MemoryOrder.raw)(freeSlots.lifecycle,
                 lifecycleWord(generation, phaseVacant));
         }
@@ -1156,7 +1162,9 @@ private:
         auto slot = takeFreeSlot();
         if (slot is null) return ActorErasedOwner.init;
         immutable observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
-        assert(wordPhase(observed) == phaseVacant);
+        // Release guard: one comparison prevents overwriting a live slot's state.
+        if (wordPhase(observed) != phaseVacant)
+            fatal("create actor from non-vacant free slot");
         immutable generation = wordGeneration(observed) + 1;
         if (generation == 0 || generation > maxGeneration)
             fatal("actor generation wrap");
@@ -1637,8 +1645,11 @@ private void driveActorRetirement(ActorSlot* slot, ulong generation)
                 // RETIRE blocks ordinary wakes and wave reservations. With
                 // no sender left and L still idle, no callback or other
                 // lifecycle writer can exist. A release store suffices.
-                assert(atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) == 0
-                    && slot.inboxCarryWord == 0);
+                // Debug-only: gate join proves emptiness; avoid an extra retirement load.
+                version (assert)
+                    if (atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) != 0
+                        || slot.inboxCarryWord != 0)
+                        fatal("idle actor retirement with live inbox");
                 atomicStore!(MemoryOrder.rel)(slot.lifecycle,
                     lifecycleWord(generation, phaseRetired));
                 return;

@@ -4098,6 +4098,12 @@ private immutable ChildCase[] childCases = [
     ChildCase("actor-generation-wrap", ChildExpect.abort,
         "antfarm fatal: actor generation wrap", false,
         &childActorGenerationWrap),
+    ChildCase("actor-generation-preset-live", ChildExpect.abort,
+        "antfarm fatal: preset actor generation without a quiescent free slot", true,
+        &childActorGenerationPresetLive),
+    ChildCase("actor-generation-preset-oversize", ChildExpect.abort,
+        "antfarm fatal: preset actor generation out of range", true,
+        &childActorGenerationPresetOversize),
     ChildCase("runtime-destroy-live", ChildExpect.abort,
         "antfarm fatal: destroy actor runtime with live actors", false,
         &childRuntimeDestroyLive),
@@ -4110,6 +4116,9 @@ private immutable ChildCase[] childCases = [
     ChildCase("wave-generation-wrap", ChildExpect.abort,
         "antfarm fatal: actor wave generation wrap", false,
         &childWaveGenerationWrap),
+    ChildCase("wave-generation-preset-unfinished", ChildExpect.abort,
+        "antfarm fatal: preset actor wave generation requires a finished wave and nonzero generation", true,
+        &childWaveGenerationPresetUnfinished),
     ChildCase("wave-publish-uninitialized", ChildExpect.abort,
         "antfarm fatal: publish uninitialized actor wave", false,
         &childWavePublish!false),
@@ -4246,6 +4255,18 @@ private void childActorGenerationWrap()
     auto wrapped = childOwner(runtime);
 }
 
+private void childActorGenerationPresetLive()
+{
+    auto runtime = childRuntime();
+    auto owner = childOwner(runtime);
+    runtime.testPresetFreeSlotGeneration(1);
+}
+
+private void childActorGenerationPresetOversize()
+{
+    childRuntime().testPresetFreeSlotGeneration(ulong.max);
+}
+
 private void childRuntimeDestroyLive()
 {
     auto runtime = childRuntime();
@@ -4266,6 +4287,15 @@ private void childWaveReuseUnfinished()
     ActorWave wave;
     wave.begin(farm);
     wave.begin(farm);
+}
+
+private void childWaveGenerationPresetUnfinished()
+{
+    auto farm = AntFarm.create();
+    check(farm !is null, "child wave Farm allocation");
+    ActorWave wave;
+    wave.begin(farm);
+    wave.testPresetGeneration(1);
 }
 
 private void childWaveGenerationWrap()

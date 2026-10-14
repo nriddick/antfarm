@@ -2039,7 +2039,7 @@ final class FiberDomain
     /// Return a terminated task to the recycling pool. After release the
     /// handle must not be read again: a later spawn hands the same object to
     /// a new fiber. Releasing a live or already-released task is a contract
-    /// violation caught by assert.
+    /// violation that is fatal in debug and release builds.
     void release(FiberTask task)
     {
         requireDirector();
@@ -2052,16 +2052,20 @@ final class FiberDomain
 
     private void releaseOne(FiberTask task)
     {
-        assert(task !is null && task.domain is this && task.terminated,
-            "antfarm_fibers: only terminated tasks of this domain can be released");
-        assert(atomicLoad!(MemoryOrder.acq)(task.completionTaken) != 0
-            && atomicLoad!(MemoryOrder.acq)(task.pendingLifecycleEvents) == 0
-            && atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) == 0
-            && !task.rootedFlag,
-            "antfarm_fibers: drain completion and lifecycle events before release");
+        // Release guard: cheap identity/phase checks prevent recycling live or foreign tasks.
+        if (task is null || task.domain !is this || !task.terminated)
+            antfarm.fatal("antfarm_fibers: only terminated tasks of this domain can be released");
+        // Release guard: three loads and a flag prevent reuse while queues/roots still own the task.
+        if (atomicLoad!(MemoryOrder.acq)(task.completionTaken) == 0
+            || atomicLoad!(MemoryOrder.acq)(task.pendingLifecycleEvents) != 0
+            || atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) != 0
+            || task.rootedFlag)
+            antfarm.fatal("antfarm_fibers: drain completion and lifecycle events before release");
         synchronized (poolMutex)
         {
-            assert(!task.pooledFlag, "antfarm_fibers: task released twice");
+            // Release guard: one flag check under the pool lock prevents a cyclic free list.
+            if (task.pooledFlag)
+                antfarm.fatal("antfarm_fibers: task released twice");
             task.closeJoinWaiters();
             while (atomicLoad!(MemoryOrder.acq)(task.joinState)
                     != FiberTask.joinClosed)
