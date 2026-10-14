@@ -180,6 +180,69 @@ enum ActorRetireResult : ubyte
     staleOwner,
 }
 
+/// True for `queued` and `coalesced`: an activation was published or an
+/// existing activation persists. Acceptance does not mean execution finished.
+bool accepted(ActorWakeResult result) pure nothrow @nogc @safe
+{
+    final switch (result)
+    {
+        case ActorWakeResult.queued:
+        case ActorWakeResult.coalesced:
+            return true;
+        case ActorWakeResult.waveOwned:
+        case ActorWakeResult.staleHandle:
+        case ActorWakeResult.closed:
+            return false;
+    }
+}
+
+/// True for `queued` and `coalesced`: the node transferred to the actor,
+/// whether this send published an activation or joined an existing one.
+bool accepted(ActorSendResult result) pure nothrow @nogc @safe
+{
+    final switch (result)
+    {
+        case ActorSendResult.queued:
+        case ActorSendResult.coalesced:
+            return true;
+        case ActorSendResult.waveOwned:
+        case ActorSendResult.staleHandle:
+        case ActorSendResult.closed:
+        case ActorSendResult.nodeBusy:
+            return false;
+    }
+}
+
+/// True for `requested` and `alreadyRetired`: retirement was recorded or
+/// the actor was already cancelling/retired. Acceptance does not prove `retired`.
+bool accepted(ActorRetireResult result) pure nothrow @nogc @safe
+{
+    final switch (result)
+    {
+        case ActorRetireResult.requested:
+        case ActorRetireResult.alreadyRetired:
+            return true;
+        case ActorRetireResult.waveOwned:
+        case ActorRetireResult.staleOwner:
+            return false;
+    }
+}
+
+@safe pure nothrow @nogc unittest
+{
+    import std.traits : EnumMembers;
+
+    static foreach (m; EnumMembers!ActorWakeResult)
+        assert((cast(ActorWakeResult) m).accepted == (m == ActorWakeResult.queued
+            || m == ActorWakeResult.coalesced));
+    static foreach (m; EnumMembers!ActorSendResult)
+        assert((cast(ActorSendResult) m).accepted == (m == ActorSendResult.queued
+            || m == ActorSendResult.coalesced));
+    static foreach (m; EnumMembers!ActorRetireResult)
+        assert((cast(ActorRetireResult) m).accepted == (m == ActorRetireResult.requested
+            || m == ActorRetireResult.alreadyRetired));
+}
+
 /// Drain lets handlers process accepted interactions. Cancel additionally
 /// makes `ActorContext.cancelling` true so handlers can `cancelInbox`; it is
 /// cooperative, and the library never discards nodes itself.
