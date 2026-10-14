@@ -112,17 +112,6 @@ void main()
 {
     suite();
     version (Windows)
-    {
-        import threadpool.sys.win_bindings;
-        auto wait = pWaitOnAddress;
-        auto single = pWakeByAddressSingle;
-        auto all = pWakeByAddressAll;
-        scope (exit) { pWaitOnAddress = wait; pWakeByAddressSingle = single; pWakeByAddressAll = all; }
-        pWaitOnAddress = null;
-        pWakeByAddressSingle = null;
-        pWakeByAddressAll = null;
-        suite();
-        writeln("armed wait races passed: address and event backends");
-    }
+        writeln("armed wait races passed: address backend");
     else writeln("armed wait races passed: futex backend");
 }

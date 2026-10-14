@@ -724,3 +724,45 @@ unittest
     auto here = CacheAwarePool.topology().current();
     assert(here !is null);
 }
+
+unittest
+{
+    import std.conv : to;
+    import std.file : dirEntries, SpanMode;
+    import std.path : baseName;
+
+    auto root = writeTree([TestCpu(2), TestCpu(0)], "", "", null);
+    scope (exit) rmdirRecurse(root);
+    auto cpuRoot = buildPath(root, "cpu");
+    auto nodeRoot = buildPath(root, "node");
+    foreach (name; ["cpu", "cpuBad", "cpu65536"])
+        mkdirRecurse(buildPath(cpuRoot, name));
+    writeFile(buildPath(cpuRoot, "cpu1"), "not a directory");
+    foreach (name; ["node", "nodeBad", "node65536"])
+        mkdirRecurse(buildPath(nodeRoot, name));
+    writeFile(buildPath(nodeRoot, "node4"), "not a directory");
+    writeFile(buildPath(nodeRoot, "node3", "cpulist"), "0,2");
+    writeFile(buildPath(nodeRoot, "node1", "cpulist"), "0,2");
+    ushort lastNode;
+    foreach (entry; dirEntries(nodeRoot, SpanMode.shallow))
+    {
+        auto name = baseName(entry.name);
+        if (name == "node1" || name == "node3")
+            lastNode = to!ushort(name[4 .. $]);
+    }
+    auto snap = parseSysfsTopology(cpuRoot, nodeRoot);
+    assert(snap.processors.length == 2);
+    assert(snap.processors[0].lpIndex == 0 && snap.processors[1].lpIndex == 2);
+    foreach (ref cpu; snap.processors) assert(cpu.numaIndex == lastNode);
+
+    writeFile(buildPath(cpuRoot, "cpu0", "node9"), "not a directory");
+    mkdirRecurse(buildPath(cpuRoot, "cpu2", "nodeBad"));
+    mkdirRecurse(buildPath(cpuRoot, "cpu2", "node65536"));
+    snap = parseSysfsTopology(cpuRoot, buildPath(root, "missing"));
+    assert(snap.processors[0].numaIndex == 9);
+    assert(snap.processors[1].numaIndex == 0);
+    bool missingCpus;
+    try parseSysfsTopology(buildPath(root, "missing"));
+    catch (Exception) missingCpus = true;
+    assert(missingCpus);
+}

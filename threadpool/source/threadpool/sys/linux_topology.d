@@ -2,7 +2,7 @@ module threadpool.sys.linux_topology;
 
 version (linux):
 
-import std.algorithm : sort;
+import std.algorithm : all, filter, map, sort;
 import std.conv : to;
 import std.exception : enforce;
 import std.file : dirEntries, exists, isDir, readText, SpanMode;
@@ -324,6 +324,17 @@ private uint parseU32(string s)
         return 0;
 }
 
+private auto scanNumberedDirs(string root, string prefix, bool dirsOnly)
+{
+    return dirEntries(root, SpanMode.shallow)
+        .filter!(e => !dirsOnly || e.isDir)
+        .map!(e => baseName(e.name))
+        .filter!(name => name.length > prefix.length
+            && name[0 .. prefix.length] == prefix
+            && name[prefix.length .. $].all!(ch => ch >= '0' && ch <= '9'))
+        .map!(name => name[prefix.length .. $]);
+}
+
 private ushort[] enumerateCpus(string cpuRoot)
 {
     if (auto s = readTrim(buildPath(cpuRoot, "present")))
@@ -344,17 +355,8 @@ private ushort[] enumerateCpus(string cpuRoot)
 
     ushort[] cpus;
     if (!exists(cpuRoot) || !isDir(cpuRoot)) return cpus;
-    foreach (e; dirEntries(cpuRoot, SpanMode.shallow))
+    foreach (rest; scanNumberedDirs(cpuRoot, "cpu", true))
     {
-        if (!e.isDir) continue;
-        auto name = baseName(e.name);
-        if (name.length < 4 || name[0 .. 3] != "cpu") continue;
-        auto rest = name[3 .. $];
-        if (rest.length == 0) continue;
-        bool digits = true;
-        foreach (ch; rest)
-            if (ch < '0' || ch > '9') { digits = false; break; }
-        if (!digits) continue;
         try
             cpus ~= to!ushort(rest);
         catch (Exception) {}
@@ -383,21 +385,11 @@ private void fillNuma(string nodeRoot, string cpuRoot, ushort[] cpus,
             nodes = parseLinuxCpuList(s);
         if (nodes.length == 0 && exists(nodeRoot) && isDir(nodeRoot))
         {
-            foreach (e; dirEntries(nodeRoot, SpanMode.shallow))
+            foreach (rest; scanNumberedDirs(nodeRoot, "node", true))
             {
-                if (!e.isDir) continue;
-                auto name = baseName(e.name);
-                if (name.length < 5 || name[0 .. 4] != "node") continue;
-                auto rest = name[4 .. $];
-                bool digits = true;
-                foreach (ch; rest)
-                    if (ch < '0' || ch > '9') { digits = false; break; }
-                if (digits)
-                {
-                    try
-                        nodes ~= to!ushort(rest);
-                    catch (Exception) {}
-                }
+                try
+                    nodes ~= to!ushort(rest);
+                catch (Exception) {}
             }
         }
         foreach (n; nodes)
@@ -427,15 +419,8 @@ private void fillNuma(string nodeRoot, string cpuRoot, ushort[] cpus,
         if (!exists(dir) || !isDir(dir)) continue;
         try
         {
-            foreach (e; dirEntries(dir, SpanMode.shallow))
+            foreach (rest; scanNumberedDirs(dir, "node", false))
             {
-                auto name = baseName(e.name);
-                if (name.length < 5 || name[0 .. 4] != "node") continue;
-                auto rest = name[4 .. $];
-                bool digits = true;
-                foreach (ch; rest)
-                    if (ch < '0' || ch > '9') { digits = false; break; }
-                if (!digits) continue;
                 try
                     numaOf[c] = to!ushort(rest);
                 catch (Exception) {}
