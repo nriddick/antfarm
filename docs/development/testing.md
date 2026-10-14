@@ -3,7 +3,8 @@
 The correctness gate is local. There is no CI. [CONTRIBUTING.md](../../CONTRIBUTING.md)
 defines local iteration and pre-push hardening; this page is the lane matrix,
 prerequisites, and limitations. During iteration, select a focused check for the
-changed behavior. Run the full matrix at the hardening boundary, not after each
+changed behavior. Run the applicable full matrix for pre-push hardening; a narrow
+explicit assessment runs only its scoped checks. Do not run the matrix after each
 increment or agent handoff. Bare `make` runs that full matrix, so use explicit
 focused targets during iteration. Reuse applicable evidence and rerun affected
 checks after corrections; record deferred checks rather than implying they passed.
@@ -50,7 +51,8 @@ tests to one LLC, supply that LLC's allowed CPUs in `CHECK_ONE_LLC_CPUS`.
 `ANTFARM_HUGE_PAGES=0` is exported for every lane, so the matrix does not depend
 on how the calling shell is configured.
 
-Not covered by `make check` (run these yourself when you change those packages):
+Not covered by `make check` (select relevant focused checks during iteration and
+include affected package gates in pre-push scope; these are not a second pipeline):
 the `threadpool` and `fibers` suites (`dub test` in each package, or
 `dub run -c unittest` in `fibers`, which also runs that package's module
 unittests; see [../../threadpool/README.md](../../threadpool/README.md) and
@@ -110,8 +112,12 @@ establish timing results or replace `make check`.
 ### Optional and longer lanes
 
 - `make check-soak` runs the private-actor TSan suite in a loop for at least 121
-  seconds. It builds only that target and does not run the matrix first, so run
-  `make check` separately.
+  seconds. It builds only that target and does not run the matrix first. It is
+  optional and counts against the 600-second collective general TSan soak budget
+  in [CONTRIBUTING.md](../../CONTRIBUTING.md#hardening-boundary); wrap it in a
+  watchdog using the remaining budget. Targeted hardening/concurrency TSan runs
+  are capped at 300 seconds each. Reuse applicable correctness-gate evidence;
+  invoking a soak does not itself require another `make check` run.
 - `make check-mimalloc` runs the normal matrix, then the real allocator lanes
   (`actor_torture` with the pinned mimalloc v3.5.3, release and TSan). It needs
   the submodule (`git submodule update --init --recursive`), CMake and a C
@@ -125,8 +131,9 @@ establish timing results or replace `make check`.
 regresses beyond the project boundary. It is separate from `make check`, builds
 the refs in temporary worktrees, needs a quiet Linux host with LDC, Python 3 and
 the pinned mimalloc archive, and its output directory must be new. An
-inconclusive result is not a pass. Run the correctness gate first; run timing
-serially with nothing else heavy on the host. The method, the modes and the
+inconclusive result is not a pass. Establish applicable correctness evidence first,
+reusing an existing valid result; run timing serially with nothing else heavy on
+the host. The method, the modes and the
 decision rules are in [../../perftest/README.md](../../perftest/README.md).
 
 Changes to executable code or its layout can move performance even when the

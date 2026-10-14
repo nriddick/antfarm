@@ -5,6 +5,8 @@ memory-order arguments. Work proceeds through local iteration and pre-push
 hardening. Local iteration uses focused evidence to make useful progress;
 hardening establishes acceptance with the local gate, meaningful regression tests
 and applicable performance comparisons. There is no CI; the gate is a local command.
+The active CyDo session controls routing and delegation; project guidance specifies
+correctness obligations, not an additional planning, review or verification pipeline.
 
 ## Local iteration (default)
 
@@ -21,18 +23,32 @@ checks and reuse applicable evidence from other agents. Never claim an unrun che
 
 ## Hardening boundary
 
-Run hardening immediately before an authorized remote push, or when the user
-explicitly requests it. An explicit narrow review stays within its requested scope
-and does not establish pre-push clearance. Review the accumulated change using an
-explicit base and final candidate, not just the last commit. Apply the pre-push
-checklist below once to that candidate, reusing applicable evidence. If corrections
-invalidate a gate, rerun it on the final candidate; a new commit ID alone does not
-invalidate evidence for an identical tree and equivalent environment.
+In `crew`, hardening runs before an authorized remote push or on explicit request.
+Its Astra assessor reviews, runs checks, fixes material defects and validates the
+result directly; do not add a separate reviewer, verifier or implementation handoff.
+The standalone `harden` session provides the same complete assessment when selected
+explicitly. `iterate` keeps its Sonnet/Opus/Sol workflow and does not automatically
+start hardening; Sol satisfies any applicable pre-push project checks directly.
+
+For pre-push scope, assess the accumulated change using an explicit base and final
+candidate, not just the last commit. Apply the checklist below once, reusing
+applicable evidence. An explicit narrow review stays within its requested scope
+and does not establish pre-push clearance. If corrections invalidate a gate, rerun
+it on the final candidate; a new commit ID alone does not invalidate evidence for
+an identical tree and equivalent environment.
 
 Full matrices and adversarial work belong here. Select additional probes for the
 changed risks; do not repeat every historical mutation or soak by default. Finish
 when required checks pass and material blockers are resolved. Keep unrelated or
 optional findings separate. Hardening does not itself authorize a push.
+
+General TSan soaks share a **600-second collective budget** for the requested change
+or hardening pass, including all commands, agents, retries and correction rounds.
+Record consumed time and use only the remainder; a handoff or new candidate does
+not reset the budget. Hardening/concurrency work may use narrowly tailored TSan
+checks for concrete hypotheses, each capped at **300 seconds**. Enforce deadlines
+for the whole run and child processes; timeout is not PASS. These are ceilings,
+not required durations, and no soak is mandatory merely because hardening runs.
 
 ## The correctness gate: `make check`
 
@@ -91,16 +107,20 @@ During implementation of changes to the Farm, actors, or shared lifecycle:
   example, `make check` extracts and runs them. Mark partial code blocks as
   fragments.
 
-Before a remote push, also:
+For the pre-push scope, satisfy these obligations within the same assessment:
 
-- Ensure changed properties have deterministic tests, and check them by mutation:
-  break the code (for example weaken the ordering, or remove the check) and confirm the
-  test fails; the suites' READMEs record the existing controls. A passing stress
+- Use meaningful deterministic regression tests for changed properties where
+  feasible. Select a focused mutation only when needed to demonstrate detection
+  of a concrete changed risk, such as a weakened ordering; do not rerun historical
+  mutation catalogs or require mutation testing for every change. A passing stress
   run alone is not evidence of a memory-order argument.
 - Contract violations that must be fatal need a death test in
   `private_actor_tests` or an equivalent that survives `-release`.
-- Run `make check` with the final revision. If you changed executable code on a
-  measured path, also run `make perf-gate`.
+- Establish `make check` evidence for the final candidate when runtime, tests,
+  build inputs or extracted example programs change. Pure prose/configuration
+  changes use their relevant validation; do not run unrelated runtime matrices.
+  If executable code on a measured path changed, also establish `make perf-gate`
+  evidence. Reuse still-applicable results instead of repeating these gates.
 - Do not claim a gate that was not run. Say which lanes passed, on which
   compilers and host, and which you did not run.
 
