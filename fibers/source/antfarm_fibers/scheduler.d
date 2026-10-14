@@ -2890,6 +2890,10 @@ enum FiberEventMode : ubyte
     manualReset,
 }
 
+version (unittest)
+    // TLS scheduling seam; absent from production and from object layouts.
+    package void delegate(FiberEvent) eventAfterRegisterHook;
+
 /// Scheduler-aware event. `wait` parks a managed fiber; `set`/`reset` may run
 /// on any thread. Auto-reset consumes the posted state for one waiter; extras
 /// that were woken re-park. Manual-reset stays posted until `reset`.
@@ -2953,6 +2957,9 @@ final class FiberEvent
             task.waitSignal = key;
             if (!domain.waits.insert(task, key))
                 throw new FiberCancelled;
+            version (unittest)
+                if (eventAfterRegisterHook !is null)
+                    eventAfterRegisterHook(this);
             if (consumePosted())
             {
                 if (domain.waits.remove(task, key))
@@ -2960,7 +2967,13 @@ final class FiberEvent
                 else
                     Fiber.yield();
                 if (task.cancellationRequested)
+                {
+                    // Return the consumed set with release publication and a
+                    // wake for re-parked waiters. This new set may coalesce
+                    // with another set or follow a concurrent reset.
+                    if (mode == FiberEventMode.autoReset) set();
                     throw new FiberCancelled;
+                }
                 return;
             }
             Fiber.yield();

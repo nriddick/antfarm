@@ -64,6 +64,11 @@ The deterministic semaphore cancellation regression can be selected with
 cancellation after an ordinary wake and after consuming a permit during wait
 registration, including waking a second waiter that has already re-parked.
 
+The deterministic event cancellation regression can be selected with
+`dub run -c unittest --compiler=ldc2 -- --event-cancellation-only`. It covers
+ordinary wake cancellation, auto-reset consumption during registration with a
+second waiter already re-parked, a retained refund, and manual-reset behavior.
+
 ## Run one lane on the current thread
 
 [examples/hello_fibers.d](examples/hello_fibers.d) is the smallest complete
@@ -124,6 +129,12 @@ void fiberBody()
   permit acquired during wait registration is returned and other waiters are
   woken. An immediate successful acquisition can still return before observing
   cancellation; a later cancellation does not undo a completed wait.
+- If auto-reset `FiberEvent.wait` throws `FiberCancelled`, a set consumed
+  during registration is restored and waiters are woken. The refund acts as
+  another `set`: it can coalesce with a set or follow a concurrent reset.
+  Immediate acquisition may return before observing cancellation; a later
+  cancellation does not undo a completed wait. Manual-reset waits consume
+  nothing and never restore the flag on cancellation.
 - `ActorWaveTrigger.waitNext` parks until the next wave using a counted edge,
   so completion which precedes the wait or coalesces in the worker handoff is
   not lost.
