@@ -1232,6 +1232,13 @@ private ulong checkPayloadFits(ulong base, ulong quota, uint maxCs, ulong blen)
     return oneMt;
 }
 
+/// Base size of every table in ulongs: Thead + progress pads + Tcount + end
+/// pad. `sq` is a uint, so this cannot overflow.
+private ulong tableBaseWords(uint sq) pure nothrow @nogc @safe
+{
+    return THEAD_LEN + PROG_PAD + 1 + 7 + 8UL * sq + END_PAD;
+}
+
 /// Table size in ulongs: Thead + extension and index words (`headWords`) +
 /// pads + Tprogress + Tcount + payloads + end pad.
 private ulong tableSizeChecked(ulong headWords, ulong sq, ulong psum) nothrow @nogc @system
@@ -1904,7 +1911,7 @@ struct AntFarm
         immutable quota = tier == Tier.bulk ? quotaBulk : quotaSmall;
         immutable csl = atomicLoad!(MemoryOrder.raw)(Cf);
         immutable cs = csl > 0 ? cast(uint) csl : 1;
-        immutable base = tableSizeChecked(0, sqcsOf(cs), 0);
+        immutable base = tableBaseWords(sqcsOf(cs));
         ulong cost;
         return singletonCost(base, header.maxCs, bodyWords, cost) && cost <= quota;
     }
@@ -2007,8 +2014,7 @@ struct AntFarm
 
         // Fit as many payloads as the quota and the table payload cap
         // allow (spec 5b truncation, 2e).
-        // Base size of every table: Thead + progress pads + Tcount + end pad.
-        immutable base = THEAD_LEN + PROG_PAD + 1 + 7 + 8UL * sq + END_PAD;
+        immutable base = tableBaseWords(sq);
         // Spec 2e: a committed table carries fewer than 2^31 payloads.
         immutable size_t maxTablePayloads = 2_147_483_647; // 2^31 - 1
         size_t n;
