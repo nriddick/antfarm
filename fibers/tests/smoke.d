@@ -14,6 +14,7 @@ import core.atomic;
 import core.stdc.stdio : printf;
 import service_plan_tests;
 import host_attach_tests;
+import antfarm_fibers.semaphore_tests : semaphoreCancellationSmoke;
 import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
 import threadpool.resolution : PoolResolution;
 import core.thread : Fiber, Thread;
@@ -2686,6 +2687,12 @@ version (TSan)
 
 void main(string[] args)
 {
+    if (args.length == 2 && args[1] == "--semaphore-cancellation-only")
+    {
+        semaphoreCancellationSmoke();
+        printf("semaphore cancellation smoke passed\n");
+        return;
+    }
     if (args.length == 2 && args[1] == "--tsan-context-only")
     {
         tsanContextSmoke();
@@ -2745,6 +2752,7 @@ void main(string[] args)
     wakePolicySmoke();
     mixedPayloadSmoke();
     syncPrimitiveSmoke();
+    semaphoreCancellationSmoke();
     sharedSignalAndTimerCancellationSmoke();
     threadpoolSmoke();
     admissionAfterStopSmoke();

@@ -3040,6 +3040,10 @@ final class FiberGenerationTrigger
     }
 }
 
+version (unittest)
+    // TLS scheduling seam; absent from production and from object layouts.
+    package void delegate(FiberSemaphore) semaphoreAfterRegisterHook;
+
 /// Counting semaphore. `wait` parks a managed fiber when the count is zero;
 /// `post` may run on any thread. Extra waiters woken by a broadcast re-park
 /// if they lose the decrement race.
@@ -3087,6 +3091,9 @@ final class FiberSemaphore
             task.waitSignal = key;
             if (!domain.waits.insert(task, key))
                 throw new FiberCancelled;
+            version (unittest)
+                if (semaphoreAfterRegisterHook !is null)
+                    semaphoreAfterRegisterHook(this);
             if (tryAcquire())
             {
                 if (domain.waits.remove(task, key))
@@ -3094,7 +3101,14 @@ final class FiberSemaphore
                 else
                     Fiber.yield();
                 if (task.cancellationRequested)
+                {
+                    // The registration recheck acquired a permit, even if a
+                    // wake/cancel already detached us and forced the yield.
+                    // Return ownership before throwing: post's release add
+                    // restores the count and wakes waiters that re-parked.
+                    post();
                     throw new FiberCancelled;
+                }
                 return;
             }
             Fiber.yield();

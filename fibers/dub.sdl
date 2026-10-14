@@ -20,7 +20,7 @@ configuration "unittest" {
     // fixtures) under any build type, so `dub run -c unittest` runs them.
     buildOptions "unittests"
     mainSourceFile "tests/smoke.d"
-    sourceFiles "tests/service_plan.d" "tests/host_attach.d"
+    sourceFiles "tests/service_plan.d" "tests/host_attach.d" "tests/semaphore.d"
     importPaths "tests"
 }
 

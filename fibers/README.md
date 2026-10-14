@@ -59,6 +59,11 @@ assertion-build diagnostics. On Linux, the smoke suite re-executes child cases
 and requires each release violation's fatal message; `--release-death` runs only
 these cases.
 
+The deterministic semaphore cancellation regression can be selected with
+`dub run -c unittest --compiler=ldc2 -- --semaphore-cancellation-only`. It covers
+cancellation after an ordinary wake and after consuming a permit during wait
+registration, including waking a second waiter that has already re-parked.
+
 ## Run one lane on the current thread
 
 [examples/hello_fibers.d](examples/hello_fibers.d) is the smallest complete
@@ -115,6 +120,10 @@ void fiberBody()
 - `FiberDomain.yieldReady()` republishes the task.
 - `await`, `FiberEvent.wait`, `FiberSemaphore.wait`, `sleep*`, and
   `TaskHandle.joinFiber` park without blocking the worker.
+- If `FiberSemaphore.wait` throws `FiberCancelled`, it retains no permit: a
+  permit acquired during wait registration is returned and other waiters are
+  woken. An immediate successful acquisition can still return before observing
+  cancellation; a later cancellation does not undo a completed wait.
 - `ActorWaveTrigger.waitNext` parks until the next wave using a counted edge,
   so completion which precedes the wait or coalesces in the worker handoff is
   not lost.
