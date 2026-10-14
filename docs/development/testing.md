@@ -22,6 +22,9 @@ lists every target.
 | --- | --- | --- |
 | Docs links | `make check-docs`: tracked Markdown relative links and heading anchors (no network), plus `scripts/check-api-docs.py`, the API symbol/coverage check over the Ddoc of the public runtime modules | Python 3, DMD |
 | Root suite | `dub test` (module `unittest` blocks plus `antfarm_test.d`) | LDC, DMD |
+| Threadpool suite | `dub test :threadpool` | LDC, DMD |
+| Fiber suite | `dub test :antfarm-fibers` (smoke suite and module unittests) | LDC, DMD |
+| Threadpool affinity | `confine-test` with full and small affinity masks; `host-test` with the configured host mask | LDC for confine; LDC debug/release and DMD for host |
 | Farm ordering | `make check-farm-ordering`: controlled subscription/reclamation schedules and the leaf-reuse test, with write-audit hooks, plus `scripts/check-ring-stores.py`, which rejects a plain (non-atomic) ring-word store in `writeImpl` | LDC, DMD, Python 3 |
 | Farm TSan | `make run-farm-tsan`: the root suite and `leaf_reuse.d` under ThreadSanitizer | LDC |
 | Actor torture | `actor_torture`: deterministic interleavings and sustained contention for the public actors | LDC, DMD, LDC TSan |
@@ -50,15 +53,15 @@ tests to one LLC, supply that LLC's allowed CPUs in `CHECK_ONE_LLC_CPUS`.
 `ANTFARM_HUGE_PAGES=0` is exported for every lane, so the matrix does not depend
 on how the calling shell is configured.
 
+For focused package checks, see [../../threadpool/README.md](../../threadpool/README.md)
+and [../../fibers/README.md](../../fibers/README.md).
+
 Not covered by `make check` (select relevant focused checks during iteration and
 include affected package gates in pre-push scope; these are not a second pipeline):
-the `threadpool` and `fibers` suites (`dub test` in each package, or
-`dub run -c unittest` in `fibers`, which also runs that package's module
-unittests; see [../../threadpool/README.md](../../threadpool/README.md) and
-[../../fibers/README.md](../../fibers/README.md)), the review-torture
-write-protection (`allwrite`) targets, and `examples/iota_sum.d`. Performance is
-not part of it either (see `make perf-gate`). Windows is validated by hand after
-a release candidate and is not part of this gate.
+the dedicated fiber TSan smoke suite, the review-torture write-protection
+(`allwrite`) targets, and `examples/iota_sum.d`. Performance is not part of it
+either (see `make perf-gate`). Windows is validated by hand after a release
+candidate and is not part of this gate.
 
 To run the fiber smoke suite under ThreadSanitizer, build it with
 `DFLAGS='-fsanitize=thread -d-version=TSan -g -O1' dub build :antfarm-fibers -c unittest --compiler=ldc2`.
