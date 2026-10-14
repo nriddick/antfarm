@@ -116,8 +116,8 @@ def main(ldc_only=False):
             compiler, flags, suffix = tsan
             output = build / f"{name.replace('/', '_')}{suffix}"
             compile_example(compiler, flags, name, output)
-            # TSan fails at the sanitizer/runtime stack-switch boundary for
-            # migrating DRuntime Fibers; see fibers/DESIGN.md "Validation boundary".
+            # Migration under TSan is covered by the Fiber TSan smoke suite;
+            # this example's worker runs are not yet validated under TSan.
             tsan_workers = ("0",) if name == "fiber_cancel_at" else ("0", "2")
             for workers in tsan_workers:
                 run_example(output, workers, sanitize=True)

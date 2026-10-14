@@ -398,9 +398,10 @@ validation, and repeated concurrent drain. The two-LLC live tests (no-edge
 shared domain, unused-group pre-admission, rescue) print SKIP on single-LLC
 hosts.
 
-ThreadSanitizer is not currently evidence for migrating DRuntime Fibers: a
-matching instrumented runtime fails at the sanitizer/runtime stack-switch
-boundary even for isolated probes. Until that boundary changes, the supported
-concurrency evidence is the DMD/LDC debug and release matrix plus deterministic
-race tests and repeated stress. See [../ROADMAP.md](../ROADMAP.md) for the
+Under `version(TSan)` the scheduler keeps a ThreadSanitizer context per task,
+so the dedicated Fiber TSan smoke suite covers migration
+([testing](../docs/development/testing.md)). It assumes the standard,
+uninstrumented DRuntime, disables parallel GC marking, and runs outside
+`make check`. The Fiber gate therefore remains the DMD/LDC debug and release
+matrix plus deterministic race tests and repeated stress. See [../ROADMAP.md](../ROADMAP.md) for the
 current release gates.

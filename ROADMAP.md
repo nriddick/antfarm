@@ -11,6 +11,35 @@ The release content is recorded in [CHANGELOG.md](CHANGELOG.md), including the
 changes since rc.2. The numbers in [PERFORMANCE.md](PERFORMANCE.md) remain tied
 to the revisions at which they were measured.
 
+## 1.8.1
+
+The release content is in the CHANGELOG's 1.8.1 section. The Linux pre-push
+gates pass; the remaining release gate is a manual Windows run.
+
+Accepted performance slips, to be evaluated in a dedicated performance session.
+These are perf-gate results at 20 pairs against the pre-review 1.8.1 candidate
+(4a60b2b), measured on the 2-CCD Ryzen 9 5900XT host:
+
+- `subset` 100%, 0 consumers: −5.1% median. A byte-identical control on the
+  same binary passes at −1.3%, so this is likely a real regression.
+- `subset-whole-unreserved`, 0 consumers: −11.4% median, with a very wide
+  spread (−31% to +19%). Its control passes at +0.4%.
+- `subset-whole`, 0 consumers: −11.6% median. Its control is itself
+  inconclusive.
+- `subset-whole` and `subset-whole-unreserved`, 6 consumers: a steady −2.7%,
+  inside the −3% boundary.
+- Inconclusive: `subset` 10%, 0 consumers (−4.2%) and `tree-cancel`,
+  6 consumers (−3.0%).
+
+The subset callbacks disassemble identically, so the cause is not localized.
+The most likely suspects are the private child rollback/completion dedupe, the
+single `createChildren` implementation, and the threadpool CPU-query changes,
+which moved code in the benchmark binary. The next step is to bisect the range
+on `subset` 100%/0 and `subset-whole-unreserved`/0.
+
+Planned for 1.8.2: revisions to PERFORMANCE.md (including tail-latency rows at
+chunk 2 and 4), and documentation and onboarding reorganization.
+
 ## Deferred after 1.8.0
 
 Committed compatibility limits and features that are deliberately not in the

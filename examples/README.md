@@ -63,9 +63,9 @@ unset. In cmd.exe set it with `set ANTFARM_HUGE_PAGES=0` before the run.
 
 `make -C examples check` is the Linux matrix: LDC and DMD, debug and release,
 each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
-threaded programs. Every program run has a 300 s timeout. `fiber_cancel_at` runs under TSan with 0 workers only,
-because TSan fails at the stack switch for migrating DRuntime Fibers; see
-[fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary). That target also extracts the complete First payload program
+threaded programs. Every program run has a 300 s timeout. `fiber_cancel_at` still runs under TSan with 0 workers only; Fiber migration
+under TSan is covered by the dedicated Fiber TSan smoke suite instead (see
+[fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary)). That target also extracts the complete First payload program
 from the repository README and runs it with LDC and DMD in debug and release.
 Other README D blocks are fragments and are rejected by the extractor unless
 they say so. The repository `make check` includes that target.
