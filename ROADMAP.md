@@ -1,22 +1,17 @@
 # Ant Farm roadmap
 
-The current release is **1.8.0**. This page lists remaining
+The current release is **1.8.1**. This page lists remaining
 and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
 no history here. Windows validation is separate and is not
 part of its local gate.
 
-## 1.8.0
-
-The release content is recorded in [CHANGELOG.md](CHANGELOG.md), including the
-changes since rc.2. The numbers in [PERFORMANCE.md](PERFORMANCE.md) remain tied
-to the revisions at which they were measured.
-
 ## 1.8.1
 
-The release content is in the CHANGELOG's 1.8.1 section. The incoming candidate
-has passed its Linux pre-push gates. The combined candidate has passed the native
-Windows integration matrix with DMD 2.112.1 and LDC 1.42 on a single-LLC x64
-host; a final Linux sanity check remains before release.
+The release content is in [CHANGELOG.md](CHANGELOG.md). It passed the Linux
+pre-push gates, the native Windows integration matrix with DMD 2.112.1 and
+LDC 1.42 on a single-LLC x64 host, and a final Linux sanity check. The numbers
+in [PERFORMANCE.md](PERFORMANCE.md) remain tied to the revisions at which they
+were measured.
 
 Accepted performance slips, to be evaluated in a dedicated performance session.
 These are perf-gate results at 20 pairs against the pre-review 1.8.1 candidate

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.1 (unreleased)
+## 1.8.1
 
 1.8.1 intentionally breaks the threadpool CPU-query API, with no deprecation
 aliases; see the migration table below.

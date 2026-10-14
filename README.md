@@ -5,7 +5,7 @@ of work into a shared ring; any subscribed consumer may claim them. It is
 designed for unordered compute where work can appear on any thread and the next
 available worker should take it.
 
-**Status.** The current release is **1.8.0**. The public and private actor models
+**Status.** The current release is **1.8.1**. The public and private actor models
 are supported functionality; actor state and results have the limits stated in
 their guides. Actor source and ABI stability remain subject to the
 [promotion gates](ROADMAP.md#actor-api-promotion-gates).
