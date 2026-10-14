@@ -4071,9 +4071,59 @@ private struct ChildCase
 private enum ownerDropText = "ActorOwner dropped without reclaim";
 
 private immutable ChildCase[] childCases = [
-    ChildCase("fatal-sample", ChildExpect.abort,
-        "antfarm fatal: actor torture harness sample", false,
-        &childFatalSample),
+    ChildCase("node-complete-unowned", ChildExpect.abort,
+        "antfarm fatal: complete actor inbox node not owned by actor", false,
+        &childNodeUnowned!(NodeAction.complete)),
+    ChildCase("node-fail-unowned", ChildExpect.abort,
+        "antfarm fatal: fail actor inbox node not owned by actor", false,
+        &childNodeUnowned!(NodeAction.fail)),
+    ChildCase("node-cancel-unowned", ChildExpect.abort,
+        "antfarm fatal: cancel actor inbox node not owned by actor", false,
+        &childNodeUnowned!(NodeAction.cancel)),
+    ChildCase("node-fail-oversize", ChildExpect.abort,
+        "antfarm fatal: actor inbox node failure code out of range", false,
+        &childNodeDispatch!false),
+    ChildCase("node-reinitialize-queued", ChildExpect.abort,
+        "antfarm fatal: actor inbox node state corrupt", false,
+        &childNodeDispatch!true),
+    ChildCase("erased-borrow-mismatch", ChildExpect.abort,
+        "antfarm fatal: type-erased actor borrow type mismatch", false,
+        &childErasedBorrowMismatch),
+    ChildCase("owner-overwrite-live", ChildExpect.abort,
+        "antfarm fatal: overwrite live ActorOwner", false,
+        &childOwnerOverwrite!false),
+    ChildCase("erased-owner-overwrite-live", ChildExpect.abort,
+        "antfarm fatal: overwrite live ActorErasedOwner", false,
+        &childOwnerOverwrite!true),
+    ChildCase("actor-generation-wrap", ChildExpect.abort,
+        "antfarm fatal: actor generation wrap", false,
+        &childActorGenerationWrap),
+    ChildCase("runtime-destroy-live", ChildExpect.abort,
+        "antfarm fatal: destroy actor runtime with live actors", false,
+        &childRuntimeDestroyLive),
+    ChildCase("wave-null-farm", ChildExpect.abort,
+        "antfarm fatal: actor wave requires a Farm", false,
+        &childWaveNullFarm),
+    ChildCase("wave-reuse-unfinished", ChildExpect.abort,
+        "antfarm fatal: reuse unfinished actor wave", false,
+        &childWaveReuseUnfinished),
+    ChildCase("wave-generation-wrap", ChildExpect.abort,
+        "antfarm fatal: actor wave generation wrap", false,
+        &childWaveGenerationWrap),
+    ChildCase("wave-publish-uninitialized", ChildExpect.abort,
+        "antfarm fatal: publish uninitialized actor wave", false,
+        &childWavePublish!false),
+    ChildCase("wave-publish-sealed", ChildExpect.abort,
+        "antfarm fatal: publish sealed actor wave", false,
+        &childWavePublish!true),
+    ChildCase("wave-seal-uninitialized", ChildExpect.abort,
+        "antfarm fatal: seal uninitialized actor wave", false,
+        &childWaveSeal!false),
+    ChildCase("wave-seal-twice", ChildExpect.abort,
+        "antfarm fatal: seal actor wave twice", false,
+        &childWaveSeal!true),
+    ChildCase("owner-double-reclaim", ChildExpect.silent, null, false,
+        &childOwnerDoubleReclaim),
     ChildCase("owner-drop-live", ChildExpect.warn, ownerDropText, true,
         &childOwnerDropLive),
     ChildCase("owner-move-scope-exit", ChildExpect.silent, null, false,
@@ -4084,18 +4134,13 @@ private immutable ChildCase[] childCases = [
         &childOwnerLeakScopeExit),
 ];
 
-private void childFatalSample()
-{
-    fatal("actor torture harness sample");
-}
-
 // Child bodies that drop or leak an actor also leak its runtime and Farm:
 // destroying a runtime with a live actor is itself fatal.
-private ActorRuntime* childRuntime()
+private ActorRuntime* childRuntime(size_t capacity = 1)
 {
     auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
     check(farm !is null, "child Farm allocation");
-    auto runtime = ActorRuntime.create(farm, 1);
+    auto runtime = ActorRuntime.create(farm, capacity);
     check(runtime !is null, "child runtime allocation");
     return runtime;
 }
@@ -4116,6 +4161,170 @@ private void childRetireAndReclaim(ref ActorOwner!OwnerProbeState owner)
     check(owner.retired, "child idle actor retires immediately");
     check(owner.reclaim() == ActorReclaimResult.reclaimed,
         "child actor reclaim");
+}
+
+private void childNodeUnowned(NodeAction action)()
+{
+    ActorInboxNode node;
+    node.initialize();
+    static if (action == NodeAction.complete) node.complete();
+    else static if (action == NodeAction.fail) node.fail(0);
+    else node.cancel();
+}
+
+private void childNodeDispatch(bool reinitialize)()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "child node runtime allocation");
+    shared int handled;
+    auto owner = runtime.createActor!(NodeOutcomeState, nodeOutcomeActor)(
+        NodeOutcomeState(&handled));
+    check(owner.valid, "child node actor creation");
+    NodeOutcomeMessage message;
+    message.action = NodeAction.fail;
+    message.code = 0x100_0000;
+    message.node.initialize(&message);
+    check(accepted(owner.handle.send(&message.node)), "child node send");
+    static if (reinitialize)
+        message.node.initialize(&message);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "child node subscribe");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "child node producer");
+    check(runtime.flush(token) == 1, "child node flush");
+    while (view.consumeNext()) {}
+}
+
+private void childMismatchedErasedActor(scope ref ActorErasedBorrow actor,
+        scope ref ActorContext) nothrow @nogc @system
+{
+    actor.value!ubyte() = 0;
+}
+
+private void childErasedBorrowMismatch()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "child erased runtime allocation");
+    ulong initial;
+    auto adapter = runtime.erasedAdapter;
+    auto owner = adapter.createActor(&initial, initial.sizeof,
+        ulong.alignof, &childMismatchedErasedActor);
+    check(owner.valid, "child erased actor creation");
+    check(owner.handle.wake() == ActorWakeResult.queued, "child erased wake");
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "child erased subscribe");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "child erased producer");
+    check(runtime.flush(token) == 1, "child erased flush");
+    while (view.consumeNext()) {}
+}
+
+private void childOwnerOverwrite(bool erased)()
+{
+    auto runtime = childRuntime(2);
+    auto first = childOwner(runtime);
+    auto second = childOwner(runtime);
+    static if (erased)
+    {
+        auto target = first.intoErased();
+        auto source = second.intoErased();
+        target = move(source);
+    }
+    else first = move(second);
+}
+
+private void childActorGenerationWrap()
+{
+    auto runtime = childRuntime();
+    runtime.testPresetFreeSlotGeneration((ulong.max >> 8) - 1);
+    auto owner = childOwner(runtime);
+    check(owner.handle.generation == ulong.max >> 8,
+        "child final representable actor generation");
+    childRetireAndReclaim(owner);
+    auto wrapped = childOwner(runtime);
+}
+
+private void childRuntimeDestroyLive()
+{
+    auto runtime = childRuntime();
+    auto owner = childOwner(runtime);
+    runtime.destroy();
+}
+
+private void childWaveNullFarm()
+{
+    ActorWave wave;
+    wave.begin(null);
+}
+
+private void childWaveReuseUnfinished()
+{
+    auto farm = AntFarm.create();
+    check(farm !is null, "child wave Farm allocation");
+    ActorWave wave;
+    wave.begin(farm);
+    wave.begin(farm);
+}
+
+private void childWaveGenerationWrap()
+{
+    auto farm = AntFarm.create();
+    check(farm !is null, "child wave Farm allocation");
+    ActorWave wave;
+    wave.begin(farm);
+    check(wave.seal().finished, "child wave initial finish");
+    wave.testPresetGeneration(ulong.max - 1);
+    wave.begin(farm);
+    check(wave.handle.generation == ulong.max,
+        "child final representable wave generation");
+    check(wave.seal().finished, "child wave final finish");
+    wave.begin(farm);
+}
+
+private void childWaveOperation(scope ref ActorBorrow!OwnerProbeState)
+    nothrow @nogc @system
+{
+}
+
+private void childWavePublish(bool sealed)()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "child wave runtime allocation");
+    auto owner = childOwner(runtime);
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "child wave producer");
+    ActorWave wave;
+    static if (sealed)
+    {
+        wave.begin(farm);
+        check(wave.seal().finished, "child wave sealed");
+    }
+    ActorHandle!OwnerProbeState[1] handles = [owner.handle];
+    wave.publish!childWaveOperation(handles[], token);
+}
+
+private void childWaveSeal(bool twice)()
+{
+    ActorWave wave;
+    static if (twice)
+    {
+        auto farm = AntFarm.create();
+        check(farm !is null, "child wave Farm allocation");
+        wave.begin(farm);
+        check(wave.seal().finished, "child wave first seal");
+    }
+    wave.seal();
+}
+
+private void childOwnerDoubleReclaim()
+{
+    auto owner = childOwner(childRuntime());
+    childRetireAndReclaim(owner);
+    check(owner.reclaim() == ActorReclaimResult.staleOwner,
+        "child second reclaim is a stale owner");
 }
 
 private void childOwnerDropLive()
@@ -4202,6 +4411,7 @@ private void testChildCases()
                     cast(int) row.mode.length, row.mode.ptr, status,
                     cast(int) text.length, text.ptr);
             check(ok, "child mode exit status or stderr mismatch");
+            printf("PASS child %.*s\n", cast(int) row.mode.length, row.mode.ptr);
         }
         printf("actor child diagnostics OK\n");
     }

@@ -178,6 +178,17 @@ private:
     shared ulong pendingCredits_; // producer hold + physical table hooks
 
 public:
+    version (AntfarmActorTestHooks)
+    {
+        /// Preset a finished wave's generation with no concurrent descriptor
+        /// accesses or completion callbacks. The next begin increments it.
+        void testPresetGeneration(ulong generation) nothrow @nogc @system
+        {
+            assert(handle.finished && generation != 0);
+            atomicStore!(MemoryOrder.raw)(generation_, generation);
+        }
+    }
+
     /// Start the first generation, or reuse this storage after its previous
     /// generation finished. Reuse invalidates every older handle.
     void begin(AntFarm* farm,

@@ -38,7 +38,9 @@ run: actor_torture
 
 # Child-process diagnostics (`actor_torture death`), built in debug and
 # -release. Each row re-execs /proc/self/exe and checks the exit status and
-# stderr; rows for version(assert)-only diagnostics print SKIP under -release.
+# stderr, including each fatal site's exact message substring. The table in
+# README.md lists covered sites and internal invariants without public probes;
+# rows for version(assert)-only diagnostics print SKIP under -release.
 actor_torture_release: $(SOURCES)
 	$(DC) $(DFLAGS) -release $(LDC_VERSIONS) $(SOURCES) -of=$@
 

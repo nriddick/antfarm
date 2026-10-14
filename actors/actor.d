@@ -1062,6 +1062,20 @@ align(64) struct ActorRuntime
         return capacity_;
     }
 
+    version (AntfarmActorTestHooks)
+    {
+        /// Preset the previous generation of the next vacant slot. Call only
+        /// on a quiescent runtime with no concurrent operations.
+        void testPresetFreeSlotGeneration(ulong generation)
+            nothrow @nogc @system
+        {
+            assert(quiescent && freeSlots !is null);
+            assert(generation <= maxGeneration);
+            atomicStore!(MemoryOrder.raw)(freeSlots.lifecycle,
+                lifecycleWord(generation, phaseVacant));
+        }
+    }
+
     /// Actors currently queued for Farm publication (an acquire load).
     @property size_t ready() const nothrow @nogc @system
     {
