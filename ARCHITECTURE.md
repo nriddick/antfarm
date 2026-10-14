@@ -61,11 +61,11 @@ Wave peers are still parallel: they cannot use same-wave mutation as an
 ordering channel. Cross-actor reads should come from an immutable public
 projection selected at a prior wave boundary, while each actor mutates its
 private state or an inactive projection. The application owns that projection
-layout; `actors` supplies exclusive scoped borrowing and the publication
+layout; `antfarm.actors` supplies exclusive scoped borrowing and the publication
 boundary.
 
 Private roots and parent-owned cohorts are a separate path in
-[`actors.private_actor`](docs/guide/private-actors.md). A single emitter owns a
+[`antfarm.actors.private_actor`](docs/guide/private-actors.md). A single emitter owns a
 root park and publishes root and child tables through `pump`; subscribed
 consumers execute the callbacks. Parents authorize whole-cohort or subset
 waves, read cohort-owned result ports or externally owned buffers after the
@@ -251,11 +251,11 @@ including the Fiber steps there; `FarmHost.close()` implements the host's teardo
   shutdown contracts, including the [shutdown recipe](docs/reference/actor-lifecycle.md#shutdown-recipe).
 - [examples/README.md](examples/README.md): compiled public and private actor
   programs, including outcomes, cancellation, and deadline examples.
-- [threadpool/DESIGN.md](threadpool/DESIGN.md): topology, worker, Director, and
+- [docs/design/threadpool.md](docs/design/threadpool.md): topology, worker, Director, and
   registry contracts.
-- [fibers/DESIGN.md](fibers/DESIGN.md): Fiber architecture, ownership, and
+- [docs/design/ant_fibers.md](docs/design/ant_fibers.md): Fiber architecture, ownership, and
   synchronization invariants.
-- [fibers/PERFORMANCE.md](fibers/PERFORMANCE.md): Fiber benchmark evidence and
+- [PERFORMANCE.md](PERFORMANCE.md#fibers): Fiber benchmark evidence and
   tuning guidance.
 - [docs/guide/public-actors.md](docs/guide/public-actors.md): public actor ownership, retirement, and
   phase-oriented waves.
@@ -265,6 +265,6 @@ including the Fiber steps there; `FarmHost.close()` implements the host's teardo
   cancellation ordering.
 - [docs/design/private-actor-layout.md](docs/design/private-actor-layout.md): private Entry/Service/cohort
   layout and slab reuse.
-- [actor_torture/README.md](actor_torture/README.md): forced actor
+- [tests/actors/README.md](tests/actors/README.md): forced actor
   interleavings, sustained generation churn, and allocator-adapter checks.
 - [ROADMAP.md](ROADMAP.md): current release gates and later work.

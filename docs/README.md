@@ -18,7 +18,7 @@ with its owning page; leave the path as soon as the layer fits your workload.
    Leave here for short `@nogc` fan-out.
 3. **Host plumbing (10 min).** Run [public_service.d](../examples/public_service.d)
    with `2` workers using the [quickstart](guide/quickstart.md#run-the-public-service),
-   then read [FarmHost setup](guide/hosting.md#setup). Import `threadpool.host`.
+   then read [FarmHost setup](guide/hosting.md#setup). Import `farmhost`.
 4. **Pick a representation (15 min).** Use the table in
    [choosing-work.md](guide/choosing-work.md) to choose the next program.
 5. **Use that layer.** Public identities: [public_service.d](../examples/public_service.d)
@@ -27,12 +27,12 @@ with its owning page; leave the path as soon as the layer fits your workload.
    Private trees: [private_tree.d](../examples/private_tree.d) and
    [request_deadline.d](../examples/request_deadline.d), then
    [private actors](guide/private-actors.md) and [outcomes](guide/outcomes-and-cancellation.md).
-   Fibers: [hello_fibers.d](../fibers/examples/hello_fibers.d), then
-   [Fibers through handles, joins, and cancellation](../fibers/README.md#handles-joins-and-cancellation).
+   Fibers: [hello_fibers.d](../ant_fibers/examples/hello_fibers.d), then
+   [Fibers through handles, joins, and cancellation](../ant_fibers/README.md#handles-joins-and-cancellation).
    Leave here if the chosen layer supplies what you need.
 6. **Size it.** Read [Sizing one Farm](../ARCHITECTURE.md#sizing-one-farm) and
    [work-cost hints](guide/sizing-and-allocation.md#work-cost-hints).
-   When ready to measure, run the default [throughput shape](../perftest/README.md#payload-benchmarks)
+   When ready to measure, run the default [throughput shape](../tools/perf/README.md#payload-benchmarks)
    once. The [usage rules](guide/using-it-well.md) collect the checks to remember.
 7. **Trust it.** Run `make check-quick`, then read
    [testing](development/testing.md) for what it covers and the deferred lanes.
@@ -63,6 +63,9 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/public-actor-ordering.md](design/public-actor-ordering.md) | see why public activation and wave completion are ordered the way they are |
 | [design/private-actor-ordering.md](design/private-actor-ordering.md) | see the private join, outcome and cancellation proof chains |
 | [design/private-actor-layout.md](design/private-actor-layout.md) | see the Entry/Service/cohort layout invariants and slab reuse proof |
+| [design/farm-ordering.md](design/farm-ordering.md) | see the Farm subscription/reclamation ordering audit and its TSan lanes |
+| [design/threadpool.md](design/threadpool.md) | get the topology, worker, Director, registry and OS-backend contracts |
+| [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
 
 ## Development
 
@@ -70,7 +73,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | --- | --- |
 | [development/testing.md](development/testing.md) | run and understand the local correctness lanes and their limits |
 | [development/agent-workflow.md](development/agent-workflow.md) | follow the CyDo agent process for iteration, hardening, TSan budgets and mutation selection |
-| [../perftest/README.md](../perftest/README.md) | run a benchmark and the committed-ref optimization gate |
+| [../tools/perf/README.md](../tools/perf/README.md) | run a benchmark and the committed-ref optimization gate |
 | [../PERFORMANCE.md](../PERFORMANCE.md) | find the measured numbers, method, and tuning guide |
 
 ## Canonical ownership
@@ -95,8 +98,11 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | Private Entry/Service/cohort layout and slab reuse proof | [design/private-actor-layout.md](design/private-actor-layout.md) |
 | The local correctness gate and its lanes | [development/testing.md](development/testing.md) |
 | CyDo agent session routing, iteration, hardening, TSan budgets and mutation selection | [development/agent-workflow.md](development/agent-workflow.md) |
-| Farm ordering audit and real-atomic TSan lanes | [review_torture/FARM_ORDERING.md](../review_torture/FARM_ORDERING.md) |
-| Benchmark harness and optimization gate | [perftest/README.md](../perftest/README.md) |
-| What changed in each candidate and its compatibility notes | [CHANGELOG.md](../CHANGELOG.md) |
+| Farm ordering audit and real-atomic TSan lanes | [design/farm-ordering.md](design/farm-ordering.md) |
+| Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |
+| Fiber scheduler model and invariants | [design/ant_fibers.md](design/ant_fibers.md) |
+| Test suites (`tests/farm`, `tests/actors`, `tests/private`, `tests/threadpool`, `tests/farmhost`, `tests/ant_fibers`) | each suite's README and [development/testing.md](development/testing.md) |
+| Benchmark harness and optimization gate | [tools/perf/README.md](../tools/perf/README.md) |
+| What changed in each candidate and its compatibility notes | [CHANGELOG.md](../CHANGELOG.md) (current and latest release), [releases/](releases/) (older) |
 | Remaining and deferred work | [ROADMAP.md](../ROADMAP.md) |
-| Threadpool and Fibers | [threadpool/README.md](../threadpool/README.md), [fibers/README.md](../fibers/README.md) |
+| Threadpool, FarmHost and Fibers package entries | [threadpool/README.md](../threadpool/README.md), [farmhost/README.md](../farmhost/README.md), [ant_fibers/README.md](../ant_fibers/README.md) |

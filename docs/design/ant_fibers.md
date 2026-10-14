@@ -1,6 +1,6 @@
 # Fiber scheduler design
 
-`antfarm-fibers` is a freely migrating DRuntime Fiber scheduler built on Ant
+`ant_fibers` is a freely migrating DRuntime Fiber scheduler built on Ant
 Farm. It owns suspendable task lifecycle; Ant Farm transports only runnable
 activations, and `threadpool` supplies pinned workers and wake policy when the
 scheduler is used concurrently.

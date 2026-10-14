@@ -25,7 +25,7 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    copied, but immutable references such as `string` still refer to external
    data: keep that data alive until the job finishes. See
    [the callback contract](../../SPEC.md#9-memory-order-contract) and
-   [parameter adaptation](../../antfarm_templates.d).
+   [parameter adaptation](../../antfarm/templates.d).
 5. **Drain before destruction.** Stop producing, finish the logical drain,
    join consumers and unsubscribe views, destroy actor infrastructure,
    unregister tokens, then destroy the Farm. Quiescent unsubscribe and
@@ -78,7 +78,7 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    assist-ring probe with persistent remote subscriptions, compared with no
    edges on one two-LLC host; it is not a general shared-Farm penalty. See
    [host placement](hosting.md#placement), [LLC service](../../ARCHITECTURE.md#one-llc-and-many-llcs),
-   and [assist-ring measurements](../../fibers/PERFORMANCE.md#assist-ring-ab).
+   and [assist-ring measurements](../../PERFORMANCE.md#assist-ring-ab).
 6. **Account for idle costs.** Polling consumes CPU; arrange waiting through
    the Director or host idle policy. `host.waitUntil` drives control-thread
    progress; it is not automatic core parking. A stalled older segment makes

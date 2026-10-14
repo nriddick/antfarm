@@ -50,7 +50,7 @@ an unpinned scan safe: zero/count/zero ABA remains possible.
 
 ## Regressions and mutation
 
-`make check-farm-ordering` builds and runs the controlled schedules with
+`make -C tests/farm check-farm-ordering` builds and runs the controlled schedules with
 LDC and DMD. `farm_ordering.d` uses production-elided scheduling hooks to
 execute other actors' operations during an exact pause. No sleeps or random
 interleavings are needed. Both schedules abort on cf2aa91 with only hooks

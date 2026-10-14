@@ -1,6 +1,6 @@
 # Ant Farm fibers
 
-`antfarm-fibers` runs freely migrating DRuntime Fibers on Ant Farm work lanes.
+`ant_fibers` runs freely migrating DRuntime Fibers on Ant Farm work lanes.
 It supplies Fiber lifecycle, waits, timers, cancellation, joins, completion,
 and stack recycling; it deliberately leaves worker topology and wake policy to
 the embedding application.
@@ -300,7 +300,8 @@ task.
 
 ## Benchmarks and internals
 
-Performance tools live under `benchmarks/`; their DUB configuration names are:
+The benchmark sources live under [tools/perf/ant_fibers/](../tools/perf/ant_fibers/);
+their DUB configuration names are:
 
 ```text
 dub run -c benchmark --build=release --compiler=ldc2
@@ -310,6 +311,7 @@ dub run -c benchmark_farm_embed --build=release --compiler=ldc2
 ```
 
 The current scheduler model and synchronization invariants live in
-[DESIGN.md](DESIGN.md). Benchmark evidence and tuning guidance live in
-[PERFORMANCE.md](PERFORMANCE.md). Release priorities live in the repository
+[docs/design/ant_fibers.md](../docs/design/ant_fibers.md). Benchmark evidence and
+tuning guidance live in the [Fibers section of PERFORMANCE.md](../PERFORMANCE.md#fibers).
+Release priorities live in the repository
 [roadmap](../ROADMAP.md).

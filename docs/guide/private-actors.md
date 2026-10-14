@@ -1,6 +1,6 @@
 # Private actors
 
-`actors.private_actor` implements a separate ownership model for actors that
+`antfarm.actors.private_actor` implements a separate ownership model for actors that
 have no public identity. A **root** has no external application owner. A
 **child** has exactly one private parent, which can authorize whole-cohort or
 subset waves but cannot inspect the child's state. Children can create children
@@ -29,7 +29,7 @@ result storage. `PrivateChildPark!T` is the same type as
 
 ```d
 import antfarm;
-import actors;
+import antfarm.actors;
 import std.stdio : writeln;
 
 struct Work
@@ -90,9 +90,9 @@ outcome was taken. `park.destroy()` requires that; use
 `park.destroy(); park = null;` because `destroy(park)` resolves to D's pointer
 destruction and does not free the park.
 
-The nested test in [../../private_actor_tests/main.d](../../private_actor_tests/main.d)
+The nested test in [../../tests/private/main.d](../../tests/private/main.d)
 runs three waves through root → child → grandchild trees. The lifecycle
-harness [../../perftest/actor_churn.d](../../perftest/actor_churn.d)
+harness [../../tools/perf/actor_churn.d](../../tools/perf/actor_churn.d)
 demonstrates parent-created cohorts with terminal child waves.
 
 ## Conductors, outputs, and general actors

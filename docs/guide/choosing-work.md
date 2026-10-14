@@ -11,7 +11,7 @@ scheduling rules above the payload path.
 | a phase run over an externally selected set of identities | a public **actor wave** | [public_wave.d](../../examples/public_wave.d) |
 | one exclusive computation tree under a single conductor, with typed joined results or non-POD state | a **private actor** hierarchy | [private_tree.d](../../examples/private_tree.d) |
 | per-request tracked roots with deadlines and cancellation | private actors with `tracking` | [request_deadline.d](../../examples/request_deadline.d) |
-| ordinary D exceptions, allocation, timers, or joins while waiting | a managed **Fiber** | [fibers/README.md](../../fibers/README.md) |
+| ordinary D exceptions, allocation, timers, or joins while waiting | a managed **Fiber** | [ant_fibers/README.md](../../ant_fibers/README.md) |
 
 A bare payload is the lowest-overhead path. A public actor adds explicit
 non-GC state lifetime and a submit surface. A wave adds a bulk-synchronous

@@ -6,7 +6,7 @@ execution context, not a queue: your application chooses what each worker
 pumps and how idle workers are woken.
 
 Use it independently for topology-aware workers, or combine it with Ant Farm
-and `antfarm-fibers` as described in [../ARCHITECTURE.md](../ARCHITECTURE.md).
+and `ant_fibers` as described in [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
 Supported targets are Windows x64 (Windows 10 1803+) and Linux x86-64 with DMD
 2.112+ or LDC 1.42+.
@@ -225,8 +225,8 @@ options.managedWorker = ManagedWorkerHooks(&start, &pump, &stop);
 
 Escaping worker failures stop the pool and are available through
 `workerFailures()` after shutdown as owned, bounded diagnostics, not the
-original throwable objects (see [failure capture](DESIGN.md#managed-worker-hooks)).
-`antfarm-fibers` supplies its own managed
+original throwable objects (see [failure capture](../docs/design/threadpool.md#managed-worker-hooks)).
+`ant_fibers` supplies its own managed
 hooks for Fiber lanes.
 
 ## Thread-safety rules
@@ -281,4 +281,4 @@ runs it with both compilers alongside process-affinity and armed-wait checks.
   characterization; treat it as a benchmark, not onboarding.
 
 Current topology, worker, Director, registry, and OS-backend contracts live in
-[DESIGN.md](DESIGN.md).
+[docs/design/threadpool.md](../docs/design/threadpool.md).

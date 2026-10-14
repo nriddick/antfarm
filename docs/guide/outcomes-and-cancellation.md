@@ -167,7 +167,7 @@ until `live == 0`; pumping alone never gets there. A cancel-mode shutdown is
 
 ```d
 import antfarm;
-import actors;
+import antfarm.actors;
 import core.time : MonoTime, seconds;
 import std.stdio : writeln;
 

@@ -7,7 +7,7 @@ locator and execution context for application-owned work.
 
 This document records the current design. Start with
 [threadpool/README.md](../../threadpool/README.md) for usage and [ARCHITECTURE.md](../../ARCHITECTURE.md)
-for composition with Ant Farm and `antfarm-fibers`.
+for composition with Ant Farm and `ant_fibers`.
 
 ## Responsibilities
 
@@ -374,7 +374,7 @@ consumer slots for every native and covering consumer and enough producer slots
 for every simultaneous token owner. Farm teardown occurs only after workers
 are joined and all registrations have been released.
 
-For managed Fibers, `antfarm-fibers` supplies the hook implementation and lane
+For managed Fibers, `ant_fibers` supplies the hook implementation and lane
 coverage rules. Those scheduler contracts live in
 [the Fiber scheduler design](ant_fibers.md).
 

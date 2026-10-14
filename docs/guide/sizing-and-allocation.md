@@ -61,7 +61,7 @@ other non-empty value is a fatal error rather than being silently ignored.
 
 On Linux this requests `MADV_HUGEPAGE`; the kernel still decides whether to
 promote the shared mapping. On Windows it uses `SEC_LARGE_PAGES` and requires the
-Lock Pages in Memory right; `grant_lock_pages.d` builds the privilege helper.
+Lock Pages in Memory right; `tools/grant_lock_pages.d` builds the privilege helper.
 `farm.usedLargePages` reports that the requested platform path was applied, not
 proof of Linux promotion. Benchmark the actual payload and inspect the live
 mapping when page size is material to the result.
@@ -192,7 +192,7 @@ are not checked.
 
 ### The mimalloc v3 adapter
 
-`actors/mimalloc.d` is a deliberately thin, optional mimalloc v3 adapter. It
+`antfarm/actors/mimalloc.d` is a deliberately thin, optional mimalloc v3 adapter. It
 calls the public C ABI
 [`mi_malloc_aligned(size, alignment)`](https://microsoft.github.io/mimalloc/group__aligned.html)
 and
@@ -207,7 +207,7 @@ mimalloc, or select Dub's opt-in `mimalloc-v3` configuration:
 
 ```d
 // fragment: the adapter plugs into the same ActorRuntime.create call
-import actors.mimalloc;
+import antfarm.actors.mimalloc;
 
 auto runtime = ActorRuntime.create(farm, capacity,
     mimallocV3ActorAllocator());
@@ -249,7 +249,7 @@ scans the whole reservation. The default per-object storage is unchanged.
 
 ```d
 import antfarm;
-import actors;
+import antfarm.actors;
 import std.stdio : writeln;
 
 struct Item { ulong input; }

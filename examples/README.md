@@ -12,7 +12,7 @@ Complete programs for the two actor models. Read these with
 | [fail_fast_fold.d](fail_fast_fold.d) | `context.fail` + `cancelPeers` fail-fast, the wave aggregate after the join, and explicit root propagation |
 | [fiber_cancel_at.d](fiber_cancel_at.d) | Example bridge from `FiberDomain.sleepUntil` to `PrivateRootHandle.requestCancel` (not library API) |
 
-Every program runs on a [`FarmHost`](../threadpool/source/threadpool/host.d) (`threadpool.host`): one Farm, the caller's producer token, and pinned pool workers on one LLC, with the ordered teardown in `close()`. Each sets an explicit 30 s `waitTimeout` as example policy, so a stuck drain fails instead of hanging. `waitUntil` ends only on the program's predicate: it never treats `consumeNext() == false` or `pump() == 0` as idle.
+Every program runs on a [`FarmHost`](../farmhost/source/farmhost/package.d) (`farmhost`): one Farm, the caller's producer token, and pinned pool workers on one LLC, with the ordered teardown in `close()`. Each sets an explicit 30 s `waitTimeout` as example policy, so a stuck drain fails instead of hanging. `waitUntil` ends only on the program's predicate: it never treats `consumeNext() == false` or `pump() == 0` as idle.
 
 `iota_sum.d` remains the threadpool payload example. It is not part of this actor lane.
 
@@ -28,23 +28,23 @@ CPUs is allowed. If no free CPU remains for the caller (including SMT siblings),
 it shares worker CPUs and the host adds a note:
 
 ```text
-dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/public_service.d -of=public_service
 ANTFARM_HUGE_PAGES=0 ./public_service 0
 
-ldc2 -g -i -I. -Iexamples -Ithreadpool/source examples/public_wave.d -of=public_wave
+ldc2 -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/public_wave.d -of=public_wave
 ANTFARM_HUGE_PAGES=0 ./public_wave 2
 
-dmd -g -i -I. -Iexamples -Ithreadpool/source examples/private_tree.d -of=private_tree
+dmd -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/private_tree.d -of=private_tree
 ANTFARM_HUGE_PAGES=0 ./private_tree 0
 ```
 
 The outcomes and cancellation programs use the same command:
 
 ```text
-dmd -g -i -I. -Iexamples -Ithreadpool/source examples/request_deadline.d -of=request_deadline
+dmd -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/request_deadline.d -of=request_deadline
 ANTFARM_HUGE_PAGES=0 ./request_deadline 0
 
-dmd -g -i -I. -Iexamples -Ithreadpool/source examples/fail_fast_fold.d -of=fail_fast_fold
+dmd -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/fail_fast_fold.d -of=fail_fast_fold
 ANTFARM_HUGE_PAGES=0 ./fail_fast_fold 0
 ```
 
@@ -52,7 +52,7 @@ The fiber `cancelAt` adapter links the separate fibers package, so add the
 fibers import path too:
 
 ```text
-ldc2 -g -i -I. -Iexamples -Iant_fibers/source -Ithreadpool/source \
+ldc2 -g -i -I. -Iexamples -Iant_fibers/source -Ithreadpool/source -Ifarmhost/source \
     examples/fiber_cancel_at.d -of=fiber_cancel_at
 ANTFARM_HUGE_PAGES=0 ./fiber_cancel_at 0
 ```
@@ -65,7 +65,7 @@ unset. In cmd.exe set it with `set ANTFARM_HUGE_PAGES=0` before the run.
 each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
 threaded programs. Every program run has a 300 s timeout. `fiber_cancel_at` still runs under TSan with 0 workers only; Fiber migration
 under TSan is covered by the dedicated Fiber TSan smoke suite instead (see
-[fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary)). That target also extracts the complete First payload program
+[docs/design/ant_fibers.md](../docs/design/ant_fibers.md#validation-boundary)). That target also extracts the complete First payload program
 from [the quickstart guide](../docs/guide/quickstart.md#first-payload) and runs it with LDC and DMD in debug and release.
 Other quickstart D blocks are fragments and are rejected by the extractor unless
 they say so. The repository `make check` includes that target.
@@ -129,7 +129,7 @@ ANTFARM_HUGE_PAGES=0 examples/.build/life 2
 make -C examples life DC=dmd
 
 # Portable headless tests (also usable on Windows):
-dmd -g -i -I. -Iexamples -Ithreadpool/source examples/life/headless.d -of=life_headless
+dmd -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/life/headless.d -of=life_headless
 ANTFARM_HUGE_PAGES=0 ./life_headless 0
 ANTFARM_HUGE_PAGES=0 ./life_headless 2
 ```
@@ -194,7 +194,7 @@ have not been re-measured with pinned workers in one LLC.
 Reproduce one run from the repository root:
 
 ```text
-ldc2 -O2 -release -i -I. -Iexamples -Ithreadpool/source examples/life/headless.d -of=examples/.build/life_bench
+ldc2 -O2 -release -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/life/headless.d -of=examples/.build/life_bench
 ANTFARM_HUGE_PAGES=0 examples/.build/life_bench 2 --bench 256 256 200
 ```
 

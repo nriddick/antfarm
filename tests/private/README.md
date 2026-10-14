@@ -1,11 +1,11 @@
 # Private actor correctness tests
 
 ```sh
-make -C private_actor_tests run
-make -C private_actor_tests run-dmd
-make -C private_actor_tests run-tsan
-make -C private_actor_tests run-death
-make -C private_actor_tests run-death-dmd
+make -C tests/private run
+make -C tests/private run-dmd
+make -C tests/private run-tsan
+make -C tests/private run-death
+make -C tests/private run-death-dmd
 ```
 
 Tests force ordinary pages and a 2 MiB Farm for ring reuse and backpressure;
@@ -21,9 +21,9 @@ parent authority, nonoverlapping child waves, three-level descendant joins,
 terminal-wave restrictions, and four independent creator parks on one Farm.
 Borrow/context/park ordinary copies and state-field access are compile-fail
 assertions. They do not prove arbitrary `@system` code obeys the no-escape
-contract; see [../docs/guide/private-actors.md](../docs/guide/private-actors.md).
+contract; see [../docs/guide/private-actors.md](../../docs/guide/private-actors.md).
 
-`./private_actor_tests/private_actor_tests_tsan join-only` is the focused
+`./tests/private/private_tests_tsan join-only` is the focused
 same-shard memory-order regression. It forces two consumers into distinct
 one-payload runs in one shard; both write plain values and the completion hook
 reads them. The handshake before those writes is relaxed. There is no test
@@ -31,7 +31,7 @@ release after the writes that could hide a missing Farm join. Replacing the
 completion `atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, runlen)` with `raw`
 produces a ThreadSanitizer data race in `joined`; the corrected code passes.
 
-The public `actor_torture` suite additionally pauses a wave table notification
+The public `actors_torture` suite additionally pauses a wave table notification
 after recording Wprogress. Both sealing and a second consumer completing
 another table must leave the wave unfinished until the paused hook drops its
 credit. Reuse begins immediately after `finished`, before joining the old
@@ -86,7 +86,7 @@ Each mutation below was applied independently, rebuilt with LDC, and run once
 on 2026-10-04. All seven terminated with SIGABRT and the listed failure. Each
 rebuild contained only its named mutation; the unmodified source was
 restored after the series. Mutation comments beside the tests identify the exact
-statements in `actors/private_actor.d`.
+statements in `antfarm/actors/private_actor.d`.
 
 | Mutation | Focused mode | Observed failure |
 | --- | --- | --- |
@@ -119,8 +119,8 @@ The restored-source run on 2026-10-04 passed `make check` and completed
 
 ## Root-wait and result-port selectors
 
-Pass a selector to `private_actor_tests`, `private_actor_tests_dmd`, or
-`private_actor_tests_tsan`. The normal suite includes `phase-e1` and
+Pass a selector to `private_tests`, `private_tests_dmd`, or
+`private_tests_tsan`. The normal suite includes `phase-e1` and
 `phase-ports` and `phase-dtor`; deterministic schedules require the test-hook build flags
 supplied by the Makefile.
 
@@ -199,7 +199,7 @@ pairs, `cancelled` monotonicity, exactly-once destruction and allocation
 balance, and requires that truncation and failure both occurred. The normal
 suite runs 3000 roots (300 under TSan).
 
-Each mutation below was applied alone to `actors/private_actor.d`, rebuilt
+Each mutation below was applied alone to `antfarm/actors/private_actor.d`, rebuilt
 with LDC and run on its selector on 2026-10-06; the source was restored
 afterwards. Every run aborted (SIGABRT) with the listed failure. The script and
 raw results were archived outside the repository; the deterministic schedules
@@ -283,14 +283,14 @@ modes run from `deathHarness` (`make death`) as well as `slab-death`.
 `slab-gc` is skipped under TSan, like `dtor-gc`. Test-only accessors
 (`privateTestSlabPointer`, `privateTestSlabSlotZero`, `privateTestDirtySlabSlot`,
 entry/result/selection pointers) live in `version (AntfarmActorTestHooks)` in
-`actors/private_actor.d`.
+`antfarm/actors/private_actor.d`.
 
 | Group | Selectors |
 | --- | --- |
 | Correctness | `slab`, `slab-retire`, `slab-retain`, `slab-refill`, `slab-continuation`, `slab-cancel`, `slab-idle`, `slab-create-fail`, `slab-gc`, `slab-reclaim`, `slab-results`, `slab-per-object` |
 | Death | `slab-death`; child modes `slab-unauthorized`, `slab-active-dispose`, `slab-dirty-slot` (debug death; `-release` survives because the uncleared-slot check is `version(assert)`) |
 
-Each mutation below was applied alone to `actors/private_actor.d`, rebuilt with
+Each mutation below was applied alone to `antfarm/actors/private_actor.d`, rebuilt with
 LDC, and run on its selector; the source was restored afterwards. Every run
 aborted (SIGABRT) with the listed failure. The release row used the `-release`
 binary.

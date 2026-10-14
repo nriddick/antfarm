@@ -1,6 +1,6 @@
 # Run actors on a FarmHost
 
-`FarmHost` (`import threadpool.host;`) owns what every actor program needs
+`FarmHost` (`import farmhost;`) owns what every actor program needs
 around its actors:
 - one Farm sized for its participants;
 - the calling thread's producer `Token`;
@@ -10,14 +10,14 @@ around its actors:
 - the documented shutdown order.
 
 A `std.concurrency` port needs three lines of setup and a teardown guard.
-The module lives in the threadpool package, which depends on `antfarm`.
-`import threadpool;` does not re-export it.
+It is the [farmhost](../../farmhost/README.md) package, which depends on
+`antfarm` and `threadpool`; `import threadpool;` does not provide it.
 
 ## Setup
 
 ```d
-import actors;
-import threadpool.host;
+import antfarm.actors;
+import farmhost;
 import std.stdio : writeln;
 
 struct Counter { long total; }
@@ -49,7 +49,7 @@ void main()
 }
 ```
 
-Build it with `-Ithreadpool/source` beside `-I.`, as every program in
+Build it with `-Ithreadpool/source -Ifarmhost/source` beside `-I.`, as every program in
 [examples/](../../examples/README.md) does.
 
 | std.concurrency | FarmHost |
@@ -149,7 +149,7 @@ After `FarmHostFailed`, the caller stays confined until `close()` or
 `FarmHostFailed.workerFailures` contains owned diagnostic snapshots, so an
 assertion's thread-local error object is never used after its worker exits.
 The Error/Exception distinction is preserved; the original subclass, chain
-and stack trace are not. See the [worker failure capture contract](../../threadpool/DESIGN.md#managed-worker-hooks)
+and stack trace are not. See the [worker failure capture contract](../design/threadpool.md#managed-worker-hooks)
 for message/file limits and `sourceType`/`truncated` fields.
 
 ## Teardown
@@ -181,7 +181,7 @@ pool, is rejected with a `FarmHostException`, and the running one is left
 alone. Hosts with `workers == 0` start no pool and can coexist.
 
 A caller-driven `FiberDomain` joins the same host with
-`antfarm_fibers.host.attachFiberDomain(host, new FiberDomain(host.farm))`.
+`ant_fibers.host.attachFiberDomain(host, new FiberDomain(host.farm))`.
 [examples/fiber_cancel_at.d](../../examples/fiber_cancel_at.d) shows it.
 
 ## Performance and tuning
@@ -190,7 +190,7 @@ A host's consumers run on the threadpool's worker loop, not a loop you
 wrote. On one measured host, that cost was invisible except where consumers
 were the bottleneck and often found nothing.
 
-The comparison ran [perftest/actor_churn](../../perftest/README.md#actor_churn)
+The comparison ran [tools/perf/actor_churn](../../tools/perf/README.md#actor_churn)
 on each workload twice: with `ANTFARM_CHURN_HOST=1`, where a `FarmHost` owns
 the Farm, the control token and the pinned consumers, and without it, on the
 benchmark's own hand-written consumers. The controller and every consumer CPU
@@ -244,5 +244,5 @@ What to tune:
 To measure on your own machine, run the same command with and without the
 variable (`ANTFARM_CHURN_HOST=1` needs the small tier, `consumers > 0` and a
 CPU list naming the controller followed by each consumer);
-[perftest/README.md](../../perftest/README.md#actor_churn) has the full
+[tools/perf/README.md](../../tools/perf/README.md#actor_churn) has the full
 argument list.

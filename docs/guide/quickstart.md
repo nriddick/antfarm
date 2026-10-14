@@ -23,7 +23,7 @@ You need DMD 2.112+ or LDC 1.42+. From a clone of the repository, build and run
 a complete tracked program that distributes work to a public actor service:
 
 ```text
-dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source examples/public_service.d -of=/tmp/public_service
 ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
 ```
 
@@ -38,13 +38,13 @@ public service: 36 ordered replies, balance=234, workers=0, closing-callback-cou
 
 The trailing `0` consumes on the calling thread; `/tmp/public_service 2` uses
 two pinned pool workers in one LLC and prints `workers=2` with the same counts.
-LDC works with the same command (`ldc2 -g -i -I. -Iexamples -Ithreadpool/source
+LDC works with the same command (`ldc2 -g -i -I. -Iexamples -Ithreadpool/source -Ifarmhost/source
 examples/public_service.d -of=/tmp/public_service`). If the program prints
 nothing or aborts, check the toolchain first.
 [../../examples/README.md](../../examples/README.md) lists the other programs and
 the Windows commands.
 
-`main` built a `FarmHost` (`threadpool.host`): one Farm, the calling thread's
+`main` built a `FarmHost` (`farmhost`): one Farm, the calling thread's
 producer token, and, for a nonzero argument, pinned pool workers in one LLC.
 It created the actor runtime through the host, waited for each reply with
 `host.waitUntil`, and
@@ -73,7 +73,7 @@ program produces and consumes on one thread. `make -C examples check`
 extracts this block and runs it with LDC and DMD in debug and release:
 
 ```d
-import antfarm_templates;
+import antfarm.templates;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad;
 import std.range : iota;
 import std.stdio : writeln;
@@ -164,7 +164,7 @@ For the multi-threaded version, with one consumer per pinned worker, build and
 run [examples/iota_sum.d](../../examples/iota_sum.d):
 
 ```text
-dmd -g -i examples/iota_sum.d antfarm.d antfarm_templates.d \
+dmd -g -i examples/iota_sum.d antfarm/package.d antfarm/templates.d \
     -Ithreadpool/source -of=iota_sum
 ANTFARM_HUGE_PAGES=0 ./iota_sum
 ```

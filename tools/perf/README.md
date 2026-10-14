@@ -4,25 +4,25 @@ Synthetic payload, actor, private-actor, and Fiber benchmarks, plus the
 optimization gate. This directory intentionally carries no measurements: the
 historical reports and the per-run result trees were archived outside the
 repository, and the committed measurements live in
-[PERFORMANCE.md](../PERFORMANCE.md). Everything below is a qualitative index of
+[PERFORMANCE.md](../../PERFORMANCE.md). Everything below is a qualitative index of
 the harness, not evidence.
 
 ## Build
 
 ```sh
-make -C perftest                 # throughput, dual, tail, actor_ready, actor_churn, scaling, offccd, c2c
-make -C perftest actor_churn_mimalloc   # plus the pinned real mimalloc archive
+make -C tools/perf                 # throughput, dual, tail, actor_ready, actor_churn, scaling, offccd, c2c
+make -C tools/perf actor_churn_mimalloc   # plus the pinned real mimalloc archive
 ```
 
 The default toolchain is LDC `-O2 -release`; `DC` and `DFLAGS` override it. The
 benchmarks keep their correctness checks (`enforce`) in release builds. Set
 `ANTFARM_HUGE_PAGES=0` for ordinary pages unless a run is deliberately testing
-the huge-page path. `make -C perftest clean` removes the built binaries.
+the huge-page path. `make -C tools/perf clean` removes the built binaries.
 
 On Windows, first build the Release allocator with
-`actor_torture/run-mimalloc-windows.ps1 -Configuration Release` (see
-[the allocator recipe](../actor_torture/README.md)), then run
-`./perftest/build-windows.ps1` from the repository root. This builds the same
+`tests/actors/run-mimalloc-windows.ps1 -Configuration Release` (see
+[the allocator recipe](../../tests/actors/README.md)), then run
+`./tools/perf/build-windows.ps1` from the repository root. This builds the same
 nine harnesses with LDC `-O2 -release` and the static release CRT. The report
 driver resolves `.exe` paths on Windows and terminates a timed-out process tree
 with `taskkill`; it does not synthesize Linux CPU accounting.
@@ -42,7 +42,7 @@ To extend the report to larger thread counts without rerunning the default
 matrix:
 
 ```powershell
-python perftest/run_performance_md.py --sections dual,private --runs 5 --dual-threads 12,18,20 --private-consumers 11,17,19 --out .build/performance-high-threads
+python tools/perf/run_performance_md.py --sections dual,private --runs 5 --dual-threads 12,18,20 --private-consumers 11,17,19 --out .build/performance-high-threads
 ```
 
 Dual-role counts are total worker threads. Private actor counts exclude the
@@ -88,7 +88,7 @@ cells are included only when `--dual-threads` includes 6.
   `ctl-*`, `smt`, `layouts`, `perf`, `lat`, `smoke`) in seeded interleaved
   rounds with top-ups for noisy cells and writes an evidence directory
   (metadata, raw runs, summary). Its numbers belong in the evidence store, not
-  here. `make -C perftest offccd-plan` prints the plan; `offccd-smoke` runs the
+  here. `make -C tools/perf offccd-plan` prints the plan; `offccd-smoke` runs the
   validation suite.
 
 Single-threaded tables use the uniform (2g) layout, or the compact 2f
@@ -131,7 +131,7 @@ stale actors. Modes:
 prefixes each allocation with its allocating thread and reports cross-thread
 free counts at exit. `root-hint` is `auto` (the default, derived per root
 table) or a fixed Farm work-cost class `0..7` (chunk `128 >> class`); see
-[the work-cost-hint rule](../docs/guide/sizing-and-allocation.md#work-cost-hints).
+[the work-cost-hint rule](../../docs/guide/sizing-and-allocation.md#work-cost-hints).
 A revision from before `MAX_CHUNK` rose to 128 has classes `0..5` of chunk
 `32 >> class`, so a fixed `root-hint` names a chunk four times larger on the
 newer revision: compare a base at class `k` with a candidate at class `k + 2`.
@@ -152,7 +152,7 @@ followed by one CPU per consumer (`cpus.length == consumers + 1`); any other
 combination is rejected. The host runs `WorkerIdle.spin` and uses the
 benchmark's `k = 8`, `ringMiB = 8` and `quota-words`. Unset, the benchmark
 drives its own consumers. The host path is the comparison side of
-[the tuning guidance](../docs/guide/hosting.md#performance-and-tuning).
+[the tuning guidance](../../docs/guide/hosting.md#performance-and-tuning).
 
 ### `actor_ready`
 
@@ -192,7 +192,7 @@ make perf-gate BASE=CANDIDATE_SHA PERF_GATE_ARGS=--control
 It needs a quiet Linux host with LDC, Python 3, and the pinned real mimalloc
 archive, and the output directory must not already exist. The current
 measurements and how to regenerate them are in
-[PERFORMANCE.md](../PERFORMANCE.md#method). `PERF_GATE_OUTPUT` defaults to the
+[PERFORMANCE.md](../../PERFORMANCE.md#method). `PERF_GATE_OUTPUT` defaults to the
 fixed path `/tmp/antfarm-perf-gate`, which must not already exist; remove it (or
 pass another `--output`/`PERF_GATE_OUTPUT`) before rerunning. `PERF_GATE_ARGS`
 passes options such as `--archive`, `--boundary`, and `--root-hint`. Run the
@@ -233,13 +233,13 @@ Gate decision and option tests run without builds or timing, including on
 Windows:
 
 ```sh
-python3 -B -m unittest perftest/test_perf_gate.py
+python3 -B -m unittest tools/perf/test_perf_gate.py
 ```
 
 The real timing gate still requires Linux and rejects other hosts before
 creating output or starting builds. Only its Linux error-accounting integration
 probe is skipped on Windows; the mocked decisions and options remain covered.
-See [portable Python checks](../docs/development/testing.md#portable-python-checks)
+See [portable Python checks](../../docs/development/testing.md#portable-python-checks)
 for the combined documentation, parser, topology-fixture and grouping suite.
 
 ## Sweep driver
@@ -248,7 +248,7 @@ for the combined documentation, parser, topology-fixture and grouping suite.
 and child-limit sweeps over an `actor_churn_mimalloc` binary:
 
 ```sh
-python3 perftest/private_lifecycle_matrix.py --binary perftest/actor_churn_mimalloc \
+python3 tools/perf/private_lifecycle_matrix.py --binary tools/perf/actor_churn_mimalloc \
   --suite batch --output /tmp/private-matrix
 ```
 

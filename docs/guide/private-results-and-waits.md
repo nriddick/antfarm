@@ -15,7 +15,7 @@ application, which keeps it alive until the root is collected.
 
 ```d
 import antfarm;
-import actors;
+import antfarm.actors;
 import std.stdio : writeln;
 
 struct Item { ulong input; }
@@ -119,7 +119,7 @@ those results are idle on the next callback. For a root → middle → leaf tree
    sum into its own result slot. Reading in a retiring context is allowed.
 3. The root folds `mids.results(context)` and finishes.
 
-The nested test [../../private_actor_tests/main.d](../../private_actor_tests/main.d)
+The nested test [../../tests/private/main.d](../../tests/private/main.d)
 exercises this three-level pipeline on five workers. Each parent reads only its
 direct children's results. External result channels remain the route for
 root-to-application output and application-defined cross-level routing; they
@@ -154,7 +154,7 @@ The root waits once and reads its direct children's results.
 
 ```d
 import antfarm;
-import actors;
+import antfarm.actors;
 
 struct Leaf { ulong input; }
 ulong square(scope ref PrivateBorrow!Leaf b, scope ref PrivateContext c)
@@ -270,7 +270,7 @@ order after the join. Parent retirement also disposes unselected members.
 
 ```d
 import antfarm;
-import actors;
+import antfarm.actors;
 
 struct Item { ulong input; }
 ulong square(scope ref PrivateBorrow!Item actor, scope ref PrivateContext context)

@@ -1,7 +1,7 @@
 # Actor torture suite
 
 This suite promotes the A2 actor inbox beyond ordinary contention coverage.
-It compiles deterministic test hooks into `actors.actor` and forces senders
+It compiles deterministic test hooks into `antfarm.actors.actor` and forces senders
 to stop at each ownership/publication boundary while activation and retirement
 proceed on other threads.
 
@@ -82,13 +82,13 @@ Coverage includes:
 Run with LDC, DMD, or LDC ThreadSanitizer:
 
 ```text
-make -C actor_torture run
-make -C actor_torture run-dmd
-make -C actor_torture run-tsan
+make -C tests/actors run
+make -C tests/actors run-dmd
+make -C tests/actors run-tsan
 ```
 
-`make -C actor_torture death` runs the child-process diagnostics table
-(`actor_torture death`) on LDC and DMD, debug and `-release`. Each row
+`make -C tests/actors death` runs the child-process diagnostics table
+(`actors_torture death`) on LDC and DMD, debug and `-release`. Each row
 re-executes `/proc/self/exe` as `child:<mode>` and checks the exit status and
 stderr: fatal sites must abort with their message, debug diagnostics such as a
 dropped live `ActorOwner` must print and exit 0, and silent rows must leave
@@ -119,8 +119,8 @@ use `version(assert) fatal`; these diagnostics disappear under `-release`.
 The vacant-slot check at creation remains fatal in release to prevent replacing
 live actor storage.
 
-The table inventories every `fatal()` call in `actors/actor.d` and
-`actors/wave.d`. Line numbers describe this revision. "Unreachable" means no
+The table inventories every `fatal()` call in `antfarm/actors/actor.d` and
+`antfarm/actors/wave.d`. Line numbers describe this revision. "Unreachable" means no
 feasible probe through the public API and existing synchronization hooks while
 preserving internal storage and ownership invariants. The last column states
 what extra fault injection or private entry point would be required; those
@@ -130,50 +130,50 @@ The two submission-underflow calls are listed separately.
 
 | Site | Exact fatal message | Coverage / reason and required seam |
 | --- | --- | --- |
-| `actors/actor.d:384` | `complete actor inbox node not owned by actor` | Covered: `child:node-complete-unowned` |
-| `actors/actor.d:395` | `fail actor inbox node not owned by actor` | Covered: `child:node-fail-unowned` |
-| `actors/actor.d:397` | `actor inbox node failure code out of range` | Covered: `child:node-fail-oversize` |
-| `actors/actor.d:408` | `cancel actor inbox node not owned by actor` | Covered: `child:node-cancel-unowned` |
-| `actors/actor.d:570` | `type-erased actor borrow type mismatch` | Covered: `child:erased-borrow-mismatch` |
-| `actors/actor.d:755` | `overwrite live ActorErasedOwner` | Covered: `child:erased-owner-overwrite-live` |
-| `actors/actor.d:835` | `overwrite live ActorOwner` | Covered: `child:owner-overwrite-live` |
-| `actors/actor.d:1075` | `preset actor generation without a quiescent free slot` | Debug-only test hook: covered by `child:actor-generation-preset-live`; skips under `-release`. |
-| `actors/actor.d:1079` | `preset actor generation out of range` | Debug-only test hook: covered by `child:actor-generation-preset-oversize`; skips under `-release`. |
-| `actors/actor.d:1167` | `create actor from non-vacant free slot` | Release-visible, unreachable: Free-list insertion publishes VACANT under the slot gate. Would need free-list/lifecycle corruption; no public probe. |
-| `actors/actor.d:1170` | `actor generation wrap` | Covered: `child:actor-generation-wrap` |
-| `actors/actor.d:1236` | `destroy actor runtime with live actors` | Covered: `child:runtime-destroy-live` |
-| `actors/actor.d:1240` | `destroy actor runtime with queued actors` | Unreachable: Queued actors retain live slots, so public teardown hits the earlier live-actor check. Would need a ready-queue/count corruption seam. |
-| `actors/actor.d:1404` | `running actor lost generation during self-retirement` | Unreachable: Running ownership pins the generation until callback exit. Would need lifecycle corruption during a callback. |
-| `actors/actor.d:1489` | `reclaim actor with live inbox or submission` | Unreachable: RETIRED requires an empty inbox and closed, joined submission gate. Would need a retired-slot inbox/gate corruption seam. |
-| `actors/actor.d:1652` | `idle actor retirement with live inbox` | Debug-only, unreachable: The joined closed gate and stable idle lifecycle prove inbox emptiness. Would need inbox corruption after the join; no public probe. |
-| `actors/actor.d:1735` | `actor inbox submission count wrap` | Unreachable: No feasible public probe can hold 2^63−1 simultaneous reservations; existing hooks only pause operations. Would need a submission-count preset seam. |
-| `actors/actor.d:1752` | `actor inbox submission underflow` | Unreachable: Each successful reservation is released exactly once, including failed confirmation. Would need a gate-count corruption seam or private release entry point. |
-| `actors/actor.d:1763` | `actor inbox submission underflow` | Unreachable: Each successful reservation is released exactly once, including failed confirmation. Would need a gate-count corruption seam or private release entry point. |
-| `actors/actor.d:1817` | `accepted actor inbox send lost its generation` | Unreachable: The sender reservation pins the generation and prevents retirement until its final signal. Would need lifecycle corruption while reserved. |
-| `actors/actor.d:1846` | `actor inbox node state corrupt` | Covered: `child:node-reinitialize-queued` |
-| `actors/actor.d:1900` | `cancel actor wave payload lost membership` | Unreachable: Rollback receives the membership owner it just installed. Would need a membership corruption seam before rollback. |
-| `actors/actor.d:1910` | `cancel actor wave payload lost reservation` | Unreachable: Rollback retains the scheduled generation; public wake/retire only add flags. Would need lifecycle corruption before rollback. |
-| `actors/actor.d:1934` | `actor wave completion lost membership` | Unreachable: Aggregate membership remains pinned until its unique release. Would need a membership corruption seam before completion. |
-| `actors/actor.d:1959` | `actor wave dispatch lost reservation` | Unreachable: The published payload owns a scheduled generation and membership pin. Would need lifecycle corruption before dispatch. |
-| `actors/actor.d:1972` | `actor wave operation lost reservation` | Unreachable: The operation retains its scheduled generation; public wake/retire only add flags. Would need lifecycle corruption during the operation. |
-| `actors/wave.d:190` | `preset actor wave generation requires a finished wave and nonzero generation` | Debug-only test hook: covered by `child:wave-generation-preset-unfinished`; skips under `-release`. |
-| `actors/wave.d:201` | `actor wave requires a Farm` | Covered: `child:wave-null-farm` |
-| `actors/wave.d:206` | `reuse unfinished actor wave` | Covered: `child:wave-reuse-unfinished` |
-| `actors/wave.d:208` | `actor wave generation wrap` | Covered: `child:wave-generation-wrap` |
-| `actors/wave.d:250` | `publish uninitialized actor wave` | Covered: `child:wave-publish-uninitialized` |
-| `actors/wave.d:252` | `publish sealed actor wave` | Covered: `child:wave-publish-sealed` |
-| `actors/wave.d:256` | `actor wave table count wrap` | Unreachable: No feasible public probe publishes 2^64 tables in one generation. Would need a published-table count preset seam. |
-| `actors/wave.d:271` | `actor wave table count underflow` | Unreachable: A failed publish rolls back its own increment under the single-orchestrator contract. Would need counter corruption or unsupported overlapping descriptor writes. |
-| `actors/wave.d:283` | `seal uninitialized actor wave` | Covered: `child:wave-seal-uninitialized` |
-| `actors/wave.d:288` | `seal actor wave twice` | Covered: `child:wave-seal-twice` |
-| `actors/wave.d:324` | `actor wave progress exceeds published tables` | Unreachable: Farm notifies each tracked table once after its publication count increment. Would need a duplicate notification or completion-counter corruption seam. |
-| `actors/wave.d:335` | `actor wave credit underflow` | Unreachable: The producer and each tracked table release one owned credit. Would need a duplicate notification or credit-count corruption seam. |
-| `actors/wave.d:340` | `finish unsealed actor wave` | Unreachable: The producer credit persists until seal; tables cannot release the final credit while unsealed. Would need credit/status corruption. |
-| `actors/wave.d:405` | `actor wave preparation exceeds member range` | Unreachable: Farm computes a prefix bounded by the private range length. Would need a private range entry point accepting an invalid count. |
-| `actors/wave.d:417` | `actor wave member list corrupt` | Unreachable: Single-orchestrator reservation pushes and rollback pops in reverse order. Would need intrusive-list corruption before rollback. |
-| `actors/wave.d:442` | `actor wave payload length corrupt` | Unreachable: The private publisher emits exactly three words. Would need a private callback entry point or malformed ring body. |
-| `actors/wave.d:447` | `actor wave payload identity corrupt` | Unreachable: Preparation rejects invalid handles and the publisher supplies its own nonnull wave address. Would need malformed ring identity words. |
-| `actors/wave.d:456` | `actor wave completion lost owner` | Unreachable: begin installs a nonnull descriptor address as the tracked hook context. Would need a private completion entry point or hook-context corruption. |
+| `antfarm/actors/actor.d:384` | `complete actor inbox node not owned by actor` | Covered: `child:node-complete-unowned` |
+| `antfarm/actors/actor.d:395` | `fail actor inbox node not owned by actor` | Covered: `child:node-fail-unowned` |
+| `antfarm/actors/actor.d:397` | `actor inbox node failure code out of range` | Covered: `child:node-fail-oversize` |
+| `antfarm/actors/actor.d:408` | `cancel actor inbox node not owned by actor` | Covered: `child:node-cancel-unowned` |
+| `antfarm/actors/actor.d:570` | `type-erased actor borrow type mismatch` | Covered: `child:erased-borrow-mismatch` |
+| `antfarm/actors/actor.d:755` | `overwrite live ActorErasedOwner` | Covered: `child:erased-owner-overwrite-live` |
+| `antfarm/actors/actor.d:835` | `overwrite live ActorOwner` | Covered: `child:owner-overwrite-live` |
+| `antfarm/actors/actor.d:1075` | `preset actor generation without a quiescent free slot` | Debug-only test hook: covered by `child:actor-generation-preset-live`; skips under `-release`. |
+| `antfarm/actors/actor.d:1079` | `preset actor generation out of range` | Debug-only test hook: covered by `child:actor-generation-preset-oversize`; skips under `-release`. |
+| `antfarm/actors/actor.d:1167` | `create actor from non-vacant free slot` | Release-visible, unreachable: Free-list insertion publishes VACANT under the slot gate. Would need free-list/lifecycle corruption; no public probe. |
+| `antfarm/actors/actor.d:1170` | `actor generation wrap` | Covered: `child:actor-generation-wrap` |
+| `antfarm/actors/actor.d:1236` | `destroy actor runtime with live actors` | Covered: `child:runtime-destroy-live` |
+| `antfarm/actors/actor.d:1240` | `destroy actor runtime with queued actors` | Unreachable: Queued actors retain live slots, so public teardown hits the earlier live-actor check. Would need a ready-queue/count corruption seam. |
+| `antfarm/actors/actor.d:1404` | `running actor lost generation during self-retirement` | Unreachable: Running ownership pins the generation until callback exit. Would need lifecycle corruption during a callback. |
+| `antfarm/actors/actor.d:1489` | `reclaim actor with live inbox or submission` | Unreachable: RETIRED requires an empty inbox and closed, joined submission gate. Would need a retired-slot inbox/gate corruption seam. |
+| `antfarm/actors/actor.d:1652` | `idle actor retirement with live inbox` | Debug-only, unreachable: The joined closed gate and stable idle lifecycle prove inbox emptiness. Would need inbox corruption after the join; no public probe. |
+| `antfarm/actors/actor.d:1735` | `actor inbox submission count wrap` | Unreachable: No feasible public probe can hold 2^63−1 simultaneous reservations; existing hooks only pause operations. Would need a submission-count preset seam. |
+| `antfarm/actors/actor.d:1752` | `actor inbox submission underflow` | Unreachable: Each successful reservation is released exactly once, including failed confirmation. Would need a gate-count corruption seam or private release entry point. |
+| `antfarm/actors/actor.d:1763` | `actor inbox submission underflow` | Unreachable: Each successful reservation is released exactly once, including failed confirmation. Would need a gate-count corruption seam or private release entry point. |
+| `antfarm/actors/actor.d:1817` | `accepted actor inbox send lost its generation` | Unreachable: The sender reservation pins the generation and prevents retirement until its final signal. Would need lifecycle corruption while reserved. |
+| `antfarm/actors/actor.d:1846` | `actor inbox node state corrupt` | Covered: `child:node-reinitialize-queued` |
+| `antfarm/actors/actor.d:1900` | `cancel actor wave payload lost membership` | Unreachable: Rollback receives the membership owner it just installed. Would need a membership corruption seam before rollback. |
+| `antfarm/actors/actor.d:1910` | `cancel actor wave payload lost reservation` | Unreachable: Rollback retains the scheduled generation; public wake/retire only add flags. Would need lifecycle corruption before rollback. |
+| `antfarm/actors/actor.d:1934` | `actor wave completion lost membership` | Unreachable: Aggregate membership remains pinned until its unique release. Would need a membership corruption seam before completion. |
+| `antfarm/actors/actor.d:1959` | `actor wave dispatch lost reservation` | Unreachable: The published payload owns a scheduled generation and membership pin. Would need lifecycle corruption before dispatch. |
+| `antfarm/actors/actor.d:1972` | `actor wave operation lost reservation` | Unreachable: The operation retains its scheduled generation; public wake/retire only add flags. Would need lifecycle corruption during the operation. |
+| `antfarm/actors/wave.d:190` | `preset actor wave generation requires a finished wave and nonzero generation` | Debug-only test hook: covered by `child:wave-generation-preset-unfinished`; skips under `-release`. |
+| `antfarm/actors/wave.d:201` | `actor wave requires a Farm` | Covered: `child:wave-null-farm` |
+| `antfarm/actors/wave.d:206` | `reuse unfinished actor wave` | Covered: `child:wave-reuse-unfinished` |
+| `antfarm/actors/wave.d:208` | `actor wave generation wrap` | Covered: `child:wave-generation-wrap` |
+| `antfarm/actors/wave.d:250` | `publish uninitialized actor wave` | Covered: `child:wave-publish-uninitialized` |
+| `antfarm/actors/wave.d:252` | `publish sealed actor wave` | Covered: `child:wave-publish-sealed` |
+| `antfarm/actors/wave.d:256` | `actor wave table count wrap` | Unreachable: No feasible public probe publishes 2^64 tables in one generation. Would need a published-table count preset seam. |
+| `antfarm/actors/wave.d:271` | `actor wave table count underflow` | Unreachable: A failed publish rolls back its own increment under the single-orchestrator contract. Would need counter corruption or unsupported overlapping descriptor writes. |
+| `antfarm/actors/wave.d:283` | `seal uninitialized actor wave` | Covered: `child:wave-seal-uninitialized` |
+| `antfarm/actors/wave.d:288` | `seal actor wave twice` | Covered: `child:wave-seal-twice` |
+| `antfarm/actors/wave.d:324` | `actor wave progress exceeds published tables` | Unreachable: Farm notifies each tracked table once after its publication count increment. Would need a duplicate notification or completion-counter corruption seam. |
+| `antfarm/actors/wave.d:335` | `actor wave credit underflow` | Unreachable: The producer and each tracked table release one owned credit. Would need a duplicate notification or credit-count corruption seam. |
+| `antfarm/actors/wave.d:340` | `finish unsealed actor wave` | Unreachable: The producer credit persists until seal; tables cannot release the final credit while unsealed. Would need credit/status corruption. |
+| `antfarm/actors/wave.d:405` | `actor wave preparation exceeds member range` | Unreachable: Farm computes a prefix bounded by the private range length. Would need a private range entry point accepting an invalid count. |
+| `antfarm/actors/wave.d:417` | `actor wave member list corrupt` | Unreachable: Single-orchestrator reservation pushes and rollback pops in reverse order. Would need intrusive-list corruption before rollback. |
+| `antfarm/actors/wave.d:442` | `actor wave payload length corrupt` | Unreachable: The private publisher emits exactly three words. Would need a private callback entry point or malformed ring body. |
+| `antfarm/actors/wave.d:447` | `actor wave payload identity corrupt` | Unreachable: Preparation rejects invalid handles and the publisher supplies its own nonnull wave address. Would need malformed ring identity words. |
+| `antfarm/actors/wave.d:456` | `actor wave completion lost owner` | Unreachable: begin installs a nonnull descriptor address as the tracked hook context. Would need a private completion entry point or hook-context corruption. |
 
 ## Plan scenarios that are not fatal sites
 
@@ -187,7 +187,7 @@ The two submission-underflow calls are listed separately.
 | Erased adapter misuse | Invalid creation metadata returns an invalid owner; requesting a mismatched borrow size/alignment is fatal | `ActorErasedAdapter.createActor` / `ActorErasedBorrow.value`; `child:erased-borrow-mismatch` |
 
 For the wave lifecycle and outcome checks only, build with `make -C
-actor_torture` and run `actor_torture/actor_torture --waves`. The individual
+actors_torture` and run `tests/actors/actors_torture --waves`. The individual
 signal regressions accept `--wave-wake`, `--wave-send`, and `--wave-late-send`.
 Each fails against the old dispatch-to-`failed` mapping after verifying the
 operation and autonomous signal both ran, at "benign wave signal must not fail
@@ -196,10 +196,10 @@ the completed wave".
 After initializing submodules, run the real mimalloc lanes with:
 
 ```text
-make -C actor_torture run-mimalloc
-make -C actor_torture run-mimalloc-dmd
-make -C actor_torture run-mimalloc-debug
-make -C actor_torture run-mimalloc-tsan
+make -C tests/actors run-mimalloc
+make -C tests/actors run-mimalloc-dmd
+make -C tests/actors run-mimalloc-debug
+make -C tests/actors run-mimalloc-tsan
 ```
 
 The real TSan lane requires Clang for mimalloc and LDC for the D test binary.
@@ -208,9 +208,9 @@ On Windows x64, with CMake, Visual Studio and the D compiler on PATH, run
 the static allocator lanes from the repository root:
 
 ```powershell
-./actor_torture/run-mimalloc-windows.ps1 -Compiler dmd -Configuration Debug
-./actor_torture/run-mimalloc-windows.ps1 -Compiler ldc2 -Configuration Debug
-./actor_torture/run-mimalloc-windows.ps1 -Compiler ldc2 -Configuration Release
+./tests/actors/run-mimalloc-windows.ps1 -Compiler dmd -Configuration Debug
+./tests/actors/run-mimalloc-windows.ps1 -Compiler ldc2 -Configuration Debug
+./tests/actors/run-mimalloc-windows.ps1 -Compiler ldc2 -Configuration Release
 ```
 
 `-CMake` accepts a full path to CMake when it is not on PATH. Debug uses
@@ -230,6 +230,6 @@ pinned correctness lane links the same source directly.
 The module-generation fence in this suite is deliberately a test-side engine
 model. Its close/count gate is the unload authority, while its per-kind counts
 are diagnostics and its actor registry is driven by one coordinator. It does
-not add module hierarchy to `actors`, implement dynamic-library loading,
+not add module hierarchy to `antfarm.actors`, implement dynamic-library loading,
 or define non-POD actor-state destruction. The "destructor" claimant models
 module-owned resource or message destructor code admitted before close.
