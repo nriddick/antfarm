@@ -3,6 +3,7 @@ module threadpool.sys.win_wait;
 version (Windows):
 
 import core.atomic;
+import std.exception : enforce;
 import threadpool.sys.win_bindings;
 
 struct WaitSlot
@@ -31,6 +32,8 @@ void cancelWorkerWait(uint workerIndex) @nogc nothrow
 void createWaitSlots(uint n)
 {
     resolveOptionalApis();
+    enforce(pWaitOnAddress !is null,
+        "threadpool: WaitOnAddress unavailable (need Windows 10 1803+)");
     destroyWaitSlots();
     gWait = new WaitSlot[](n);
 }
