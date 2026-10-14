@@ -22,6 +22,7 @@ review_torture/torture_tests_dmd
 review_torture/t19
 review_torture/t19_tsan
 review_torture/t19_dmd
+review_torture/sweep_cursor
 review_torture/last_run.log
 actor_torture/actor_torture
 actor_torture/actor_torture_tsan

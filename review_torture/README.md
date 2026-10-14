@@ -47,6 +47,11 @@ make -C review_torture baseline   # existing antfarm_test.d
   per-payload call counts). T25 checks single-shot callback counter values
   and exact execution in mixed ST/MT tables with two producers, eight
   consumers, ring reuse, and chunk sizes 32 and one.
+- `sweep_cursor.d` — T27: the oldest-epoch idle re-walk resumes at its
+  cursor. One consumer parks in the primary call of the last table of an
+  epoch while another idles with that epoch held as oldest; idle polls
+  after the first re-walk only the parked table. Built with
+  `-d-version=AntfarmSweepStats` and run by `make -C review_torture run`.
 - `t19_flood_lap.d` — T19: interleaved bulk dump + mid-tick small writes +
   subscription churn (four arms: no mid-tick, pure churn, consuming churn,
   steady consumer) plus a forged-token quota test

@@ -2395,6 +2395,18 @@ struct ConsumerView
     /// when the position moves to a new segment.
     ulong sweepSeq;
 
+    /// Internal: oldest-epoch re-walk cursor (spec 8): sequence up to which
+    /// every table of the oldest held segment was observed complete
+    /// (Tprogress == Tlen). Reset when oldestEi advances.
+    ulong oldSweepSeq;
+
+    version (AntfarmSweepStats)
+    {
+        /// Test instrumentation: tables visited by the oldest-epoch
+        /// re-walk (sweepOldestTrailing), cumulative.
+        ulong oldSweepTables;
+    }
+
     /// Internal: oldest-prefix release counter. With -d-version=SdCheckEveryN,
     /// tryReleaseOldest() runs every SD_CHECK_EVERY_N table advances
     /// instead of after every table. Default N = 1 (eager).
@@ -2500,6 +2512,7 @@ struct ConsumerView
         ltiRing[seg] = lti;
         sweeperNext = false;
         sweepSeq = 0;
+        oldSweepSeq = 0;
         sdCheckCounter = 0;
         hasRef = true;
         return es;
@@ -2841,6 +2854,7 @@ private:
                 break;
             decRef(ki, ltiOf(oldestEi));
             ++oldestEi;
+            oldSweepSeq = 0; // new oldest segment: re-walk from its Seqt
         }
     }
 
@@ -2848,6 +2862,12 @@ private:
     /// leftover work, so the segment confirms and its reference can be
     /// released. The data is guaranteed present and intact: we hold a
     /// reference on the segment, so producers cannot have overwritten it.
+    /// The walk resumes at the oldSweepSeq cursor, which advances only over
+    /// the leading run of tables observed complete. A table another
+    /// consumer is still finishing (for example a primary call parked in
+    /// its callback) stops the cursor, so a stalled oldest epoch costs each
+    /// park O(tables from the first incomplete one) rather than
+    /// O(tables in the segment).
     void sweepOldestTrailing() nothrow @nogc @system
     {
         if (oldestEi == newestEi) return;
@@ -2863,9 +2883,11 @@ private:
             return;
         }
         immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
-        ulong seq = seqt;
+        ulong seq = seqt > oldSweepSeq ? seqt : oldSweepSeq;
+        bool drained = true;
         while (seq < boundary)
         {
+            version (AntfarmSweepStats) ++oldSweepTables;
             immutable idx = seq & f.Lmask;
             if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(seq))
                 fatal("held segment's table was overwritten sweepoldest");
@@ -2881,8 +2903,22 @@ private:
             immutable tcountOff = progOff + 8;
             if (tlen > 0)
             {
+                // Raw suffices for advancing the cursor: it is
+                // consumer-local and no data is read on the strength of
+                // this observation. Tprogress only grows, by fetch-add, and
+                // stops at Tlen while our pin keeps the table in place, so
+                // by coherence every later load by this consumer also reads
+                // Tlen and a later re-walk would skip processShard here
+                // too. tertiaryMt below still runs on this pass; afterwards
+                // each MT payload has every call claimed or a looping
+                // (secondary/tertiary) claimant that will claim the rest,
+                // since Pcount's call and claim fields only grow, the
+                // primary visit is the only claim that executes just one
+                // call, and MaxCs >= 2. A later tertiary pass over this
+                // table is not needed for its payloads to complete.
                 if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
                 {
+                    drained = false;
                     immutable nshards = tlen < smallThresh(sq, bp, idx) ? 1 : sq;
                     foreach (s; 0 .. nshards)
                         processShard(bp, seq, idx, tindexOff, tcountOff,
@@ -2891,6 +2927,8 @@ private:
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
             seq = tnext;
+            if (drained)
+                oldSweepSeq = seq;
         }
         tryReleaseOldest();
     }

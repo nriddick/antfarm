@@ -7,7 +7,7 @@ TSAN_OPTIONS ?= history_size=7 halt_on_error=1
 
 .PHONY: all run run-tsan run-dmd run-t19 clean baseline allwrite run-allwrite
 
-all: torture_tests t19
+all: torture_tests t19 sweep_cursor
 
 allwrite: write_protection_allwrite boundary_runoff_allwrite
 
@@ -28,8 +28,12 @@ torture_tests: torture_common.d torture_tests.d $(ROOT)/antfarm.d $(ROOT)/antfar
 t19: torture_common.d t19_flood_lap.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d
 	$(DC) $(DFLAGS) torture_common.d t19_flood_lap.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=$@
 
-run: torture_tests
+sweep_cursor: torture_common.d sweep_cursor.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d
+	$(DC) $(DFLAGS) -d-version=AntfarmSweepStats torture_common.d sweep_cursor.d $(ROOT)/antfarm.d $(ROOT)/antfarm_allocation.d $(ROOT)/antfarm_templates.d -of=$@
+
+run: torture_tests sweep_cursor
 	./torture_tests
+	./sweep_cursor
 
 run-t19: t19
 	./t19
@@ -55,4 +59,4 @@ baseline:
 	../antfarm_test_review
 
 clean:
-	rm -f torture_tests torture_tests_tsan torture_tests_dmd t19 t19_tsan t19_dmd write_protection_allwrite boundary_runoff_allwrite *.o
+	rm -f torture_tests sweep_cursor torture_tests_tsan torture_tests_dmd t19 t19_tsan t19_dmd write_protection_allwrite boundary_runoff_allwrite *.o
