@@ -40,7 +40,8 @@ fi
 select_cpus() {
     local variable="$1" minimum="$2" maximum="$3"
     cpu_pin=()
-    if [[ -v "$variable" ]]; then
+    # Empty counts as unset; `taskset -c ""` would fail the lane.
+    if [[ -n "${!variable:-}" ]]; then
         cpu_pin=(taskset -c "${!variable}")
         return
     fi

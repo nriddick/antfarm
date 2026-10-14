@@ -40,9 +40,10 @@ The full gate accepts `CHECK_SMALL_CPUS` and `CHECK_ONE_LLC_CPUS` as `taskset -c
 CPU lists. By default the small-mask confine lane uses the first four CPUs in
 the process's allowed affinity, and host tests use the full allowed mask. With
 fewer than four or sixteen allowed CPUs respectively, the lane prints a notice
-and runs unpinned. Explicit overrides are passed verbatim to `taskset`; choose
-one LLC for `CHECK_ONE_LLC_CPUS` when testing that topology. Invalid overrides
-fail the lane. Inspect selection with `scripts/check.sh --print-cpus`.
+and runs unpinned. Empty values count as unset. Explicit overrides are passed
+verbatim to `taskset`; choose one LLC for `CHECK_ONE_LLC_CPUS` when testing that
+topology. Invalid overrides fail the lane. Inspect selection with
+`scripts/check.sh --print-cpus`.
 
 ## Performance: `make perf-gate`
 

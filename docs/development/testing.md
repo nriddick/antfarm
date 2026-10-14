@@ -42,10 +42,10 @@ compiler. It prints `ALL QUICK CHECKS PASSED` on success; the full `make check`
 matrix remains the correctness gate.
 
 For the full gate's affinity lanes, set `CHECK_SMALL_CPUS` or
-`CHECK_ONE_LLC_CPUS` to a `taskset -c` CPU list. Unset values select the first
-four allowed CPUs for the confine-test small mask and the entire process affinity
-for host tests. If fewer than four or sixteen CPUs respectively are allowed,
-the lane prints a notice and runs unpinned. Explicit values are honoured
+`CHECK_ONE_LLC_CPUS` to a `taskset -c` CPU list. Unset or empty values select
+the first four allowed CPUs for the confine-test small mask and the entire
+process affinity for host tests. If fewer than four or sixteen CPUs
+respectively are allowed, the lane prints a notice and runs unpinned. Explicit values are honoured
 verbatim, and a rejected `taskset` selection fails the lane. To constrain host
 tests to one LLC, supply that LLC's allowed CPUs in `CHECK_ONE_LLC_CPUS`.
 `scripts/check.sh --print-cpus` shows both selections without running tests.
