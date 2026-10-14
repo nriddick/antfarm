@@ -11150,7 +11150,7 @@ static assert(size_t.max / SlabWide.sizeof + 1 <= size_t.max / 40);
 align(128) struct SlabOveraligned { ulong x; }
 static assert(SlabOveraligned.alignof == 128);
 
-void slabFailOne(T, R, bool subsets)(scope ref PrivateContext ctx, SlabExact* exact,
+void slabFailOne(T, R, bool subsets, PrivateStateStorage storage = PrivateStateStorage.cohortSlab)(scope ref PrivateContext ctx, SlabExact* exact,
     size_t capacity, uint allocs) nothrow @nogc @system
 {
     immutable live = exact.live;
@@ -11160,8 +11160,12 @@ void slabFailOne(T, R, bool subsets)(scope ref PrivateContext ctx, SlabExact* ex
         exact.calls = 0;
         exact.failAt = k;
         exact.strictLifo = true;
-        auto p = ctx.createChildren!(T, R, PrivateStateStorage.cohortSlab)(capacity,
-            PrivateCohortOptions(0, subsets), capacity * T.sizeof);
+        static if (storage == PrivateStateStorage.cohortSlab)
+            auto p = ctx.createChildren!(T, R, storage)(capacity,
+                PrivateCohortOptions(0, subsets), capacity * T.sizeof);
+        else
+            auto p = ctx.createChildren!(T, R)(capacity, PrivateCohortOptions(0, subsets));
+        namedCheck(exact.calls == k, "child-create-fail stops at first failed allocation");
         namedCheck(p is null, "slab-create-fail returns null");
         namedCheck(exact.live == live, "slab-create-fail live allocations");
         namedCheck(exact.top == top, "slab-create-fail unwind restored");
@@ -11180,6 +11184,11 @@ PrivateRootDisposition slabFailStep(scope ref PrivateBorrow!SlabFailRoot b, scop
     slabFailOne!(ulong, ulong, false)(ctx, exact, 4, 4);
     slabFailOne!(ulong, void, true)(ctx, exact, 4, 4);
     slabFailOne!(ulong, ulong, true)(ctx, exact, 4, 5);
+    // The same ledger checks all four layouts without a trailing slab.
+    slabFailOne!(ulong, void, false, PrivateStateStorage.perObject)(ctx, exact, 4, 2);
+    slabFailOne!(ulong, ulong, false, PrivateStateStorage.perObject)(ctx, exact, 4, 3);
+    slabFailOne!(ulong, void, true, PrivateStateStorage.perObject)(ctx, exact, 4, 3);
+    slabFailOne!(ulong, ulong, true, PrivateStateStorage.perObject)(ctx, exact, 4, 4);
 
     immutable live = exact.live;
     exact.calls = 0;
