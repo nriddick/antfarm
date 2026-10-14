@@ -1,15 +1,41 @@
 # Ant Farm roadmap
 
-The current release is **1.8.0**. This page lists remaining
+The current release is **1.8.1**. This page lists remaining
 and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
 no history here. Windows validation is separate and is not
 part of its local gate.
 
-## 1.8.0
+## 1.8.1
 
-The release content is recorded in [CHANGELOG.md](CHANGELOG.md), including the
-changes since rc.2. The numbers in [PERFORMANCE.md](PERFORMANCE.md) remain tied
-to the revisions at which they were measured.
+The release content is in [CHANGELOG.md](CHANGELOG.md). It passed the Linux
+pre-push gates, the native Windows integration matrix with DMD 2.112.1 and
+LDC 1.42 on a single-LLC x64 host, and a final Linux sanity check. The numbers
+in [PERFORMANCE.md](PERFORMANCE.md) remain tied to the revisions at which they
+were measured.
+
+Accepted performance slips, to be evaluated in a dedicated performance session.
+These are perf-gate results at 20 pairs against the pre-review 1.8.1 candidate
+(4a60b2b), measured on the 2-CCD Ryzen 9 5900XT host:
+
+- `subset` 100%, 0 consumers: −5.1% median. A byte-identical control on the
+  same binary passes at −1.3%, so this is likely a real regression.
+- `subset-whole-unreserved`, 0 consumers: −11.4% median, with a very wide
+  spread (−31% to +19%). Its control passes at +0.4%.
+- `subset-whole`, 0 consumers: −11.6% median. Its control is itself
+  inconclusive.
+- `subset-whole` and `subset-whole-unreserved`, 6 consumers: a steady −2.7%,
+  inside the −3% boundary.
+- Inconclusive: `subset` 10%, 0 consumers (−4.2%) and `tree-cancel`,
+  6 consumers (−3.0%).
+
+The subset callbacks disassemble identically, so the cause is not localized.
+The most likely suspects are the private child rollback/completion dedupe, the
+single `createChildren` implementation, and the threadpool CPU-query changes,
+which moved code in the benchmark binary. The next step is to bisect the range
+on `subset` 100%/0 and `subset-whole-unreserved`/0.
+
+Planned for 1.8.2: revisions to PERFORMANCE.md (including tail-latency rows at
+chunk 2 and 4), and documentation and onboarding reorganization.
 
 ## Deferred after 1.8.0
 
@@ -55,18 +81,24 @@ are not promised yet.
 
 ## Platform and validation work
 
-- Windows x64 validation by hand: root, threadpool and Fiber unit tests, the
-  review torture and T19 flood/lap suites, and allocator pairing. A Windows pass
-  is not claimed until it is run. Known limits: T01 and T17 are POSIX-only
+- Windows x64 validation uses `scripts/check-windows.py` for root, threadpool,
+  Fiber, ordering, actor, review/T19 and example coverage (see
+  [Testing](docs/development/testing.md#windows-x64-integration)); real allocator
+  pairing remains a separate lane. A Windows pass is not claimed until it is
+  run. Known limits: T01 and T17 are POSIX-only
   fork/abort probes, and ThreadSanitizer is unavailable in the Windows LDC
   runtime (`Scoped EH not supported`).
 - Multi-LLC Fiber service: native-only service by default; rescue/assist
   validated on the 2-LLC host; selective wake (`servingGroups`) is opt-in
   until it is performance-characterized. Topology-specific
   performance and lost-worker-group claims still need their own evidence.
-- Fiber ThreadSanitizer migration remains a known external limitation at the
-  DRuntime stack-switch boundary; the Fiber gate stays the DMD/LDC smoke,
-  release, deterministic-migration and repeated-stress matrix.
+- Fiber ThreadSanitizer: migration is covered. The scheduler keeps a TSan
+  context per task behind an uninstrumented switch bridge, which assumes the
+  standard, uninstrumented DRuntime
+  ([testing](docs/development/testing.md)). What remains limited: the TSan
+  smoke disables DRuntime's parallel GC marking, whose mark stack TSan
+  reports, and runs outside `make check`; the Fiber gate stays the DMD/LDC
+  smoke, release, deterministic-migration and repeated-stress matrix.
 - Profile multi-producer cold Fiber admission before deciding whether stack
   preparation or moving `mmap` outside the admission lock is justified.
 - Add higher-level synchronization or task-group facilities only in response to

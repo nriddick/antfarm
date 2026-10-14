@@ -3,18 +3,15 @@ module threadpool.sys.win_wait;
 version (Windows):
 
 import core.atomic;
-import core.sys.windows.winbase : CloseHandle, CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects;
-import core.sys.windows.windef : DWORD, FALSE, HANDLE, TRUE;
+import std.exception : enforce;
 import threadpool.sys.win_bindings;
 
 struct WaitSlot
 {
     shared uint wakeWord;
-    HANDLE      workEvent;
 }
 
 __gshared WaitSlot[] gWait;
-__gshared HANDLE     gStopEvent;
 
 private enum uint ACTIVE = 0, ARMED = 1;
 
@@ -35,42 +32,15 @@ void cancelWorkerWait(uint workerIndex) @nogc nothrow
 void createWaitSlots(uint n)
 {
     resolveOptionalApis();
+    enforce(pWaitOnAddress !is null,
+        "threadpool: WaitOnAddress unavailable (need Windows 10 1803+)");
     destroyWaitSlots();
     gWait = new WaitSlot[](n);
-    if (pWaitOnAddress is null)
-    {
-        foreach (ref slot; gWait)
-        {
-            slot.workEvent = CreateEventW(null, FALSE, FALSE, null);
-            if (slot.workEvent is null)
-                throw new Exception("threadpool: CreateEventW failed for wait slot");
-        }
-        gStopEvent = CreateEventW(null, TRUE, FALSE, null);
-        if (gStopEvent is null)
-            throw new Exception("threadpool: CreateEventW failed for stop event");
-    }
 }
 
 void destroyWaitSlots()
 {
-    // Drop the published slice before CloseHandle so a wakeWorker that
-    // reloads gWait cannot SetEvent a handle this function is about to
-    // close and the OS may reuse. A caller that already holds the old
-    // slice can still race; FarmHost drains in-flight wakes first.
-    auto slots = gWait;
-    auto stop = gStopEvent;
     gWait = null;
-    gStopEvent = null;
-    foreach (ref slot; slots)
-    {
-        if (slot.workEvent !is null)
-        {
-            CloseHandle(slot.workEvent);
-            slot.workEvent = null;
-        }
-    }
-    if (stop !is null)
-        CloseHandle(stop);
 }
 
 void wakeWorker(uint workerIndex) @nogc nothrow
@@ -82,10 +52,7 @@ void wakeWorker(uint workerIndex) @nogc nothrow
     auto slot = &slots[workerIndex];
     // Even ACTIVE -> ACTIVE publishes into the worker's next arming RMW.
     if (atomicExchange!(MemoryOrder.acq_rel)(&slot.wakeWord, ACTIVE) != ARMED) return;
-    if (pWakeByAddressSingle !is null)
-        pWakeByAddressSingle(cast(void*)&slot.wakeWord);
-    else if (slot.workEvent !is null)
-        SetEvent(slot.workEvent);
+    pWakeByAddressSingle(cast(void*)&slot.wakeWord);
 }
 
 void wakeAllForStop() @nogc nothrow
@@ -94,13 +61,8 @@ void wakeAllForStop() @nogc nothrow
     {
         if (atomicExchange!(MemoryOrder.acq_rel)(&slot.wakeWord, ACTIVE) != ARMED)
             continue;
-        if (pWakeByAddressAll !is null)
-            pWakeByAddressAll(cast(void*)&slot.wakeWord);
-        else if (slot.workEvent !is null)
-            SetEvent(slot.workEvent);
+        pWakeByAddressAll(cast(void*)&slot.wakeWord);
     }
-    if (gStopEvent !is null)
-        SetEvent(gStopEvent);
 }
 
 /// Requires prepareWorkerWait followed by a final empty work/stop check.
@@ -112,15 +74,7 @@ bool parkWorker(uint workerIndex, ref shared(int) runFlag, uint timeoutMs) @nogc
     if (workerIndex >= gWait.length) return false;
     if (atomicLoad!(MemoryOrder.acq)(gWait[workerIndex].wakeWord) != ARMED)
         return atomicLoad!(MemoryOrder.acq)(runFlag) != 0;
-    if (pWaitOnAddress !is null)
-    {
-        uint cmp = ARMED;
-        pWaitOnAddress(cast(void*)&gWait[workerIndex].wakeWord, &cmp, 4, timeoutMs);
-    }
-    else
-    {
-        HANDLE[2] h = [gWait[workerIndex].workEvent, gStopEvent];
-        WaitForMultipleObjects(2, h.ptr, FALSE, timeoutMs);
-    }
+    uint cmp = ARMED;
+    pWaitOnAddress(cast(void*)&gWait[workerIndex].wakeWord, &cmp, 4, timeoutMs);
     return atomicLoad!(MemoryOrder.acq)(runFlag) != 0;
 }

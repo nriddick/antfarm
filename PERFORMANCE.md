@@ -141,6 +141,8 @@ Payloads are the raw Farm transport. Unless stated otherwise these cells use the
 `payload-entry` write form, a 16-word body, a 16 MiB ring, and the default
 `avgCost` 3 (16-entry claims).
 
+`checkFreshWriteSegments` is a deliberately kept tripwire cost: on a Ryzen 9 5900XT with LDC 1.43.0 `-O2 -release`, disabling it shifted median throughput by +3.92% for the default shape and −3.90% for batch 1700 across three interleaved A/B runs per shape, within the observed run-to-run noise.
+
 ### Throughput vs consumers
 
 One bulk producer, 16,000,000 payloads per run. Ryzen: 9 runs; Intel: 5.

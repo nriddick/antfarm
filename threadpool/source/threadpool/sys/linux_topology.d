@@ -2,7 +2,7 @@ module threadpool.sys.linux_topology;
 
 version (linux):
 
-import std.algorithm : sort;
+import std.algorithm : all, filter, map, sort;
 import std.conv : to;
 import std.exception : enforce;
 import std.file : dirEntries, exists, isDir, readText, SpanMode;
@@ -119,7 +119,7 @@ TopologySnapshot parseSysfsTopology(
             r.hasCapacity = true;
             r.capacity = parseU32(cap);
         }
-        readCaches(dir, r);
+        if (r.online) readCaches(dir, r);
         if (r.maxLine > maxLine) maxLine = r.maxLine;
         raws[i] = r;
     }
@@ -148,6 +148,7 @@ TopologySnapshot parseSysfsTopology(
         p.numaIndex = numaOf.get(r.cpu, cast(ushort) 0);
         p.moduleIndex = ushort.max;
         p.offlineAtDiscovery = !r.online;
+        p.llcIndex = p.llcIndexInGroup = noLlcIndex;
         p.l1d = r.l1d;
         p.l1i = r.l1i;
         p.l2 = r.l2;
@@ -182,12 +183,14 @@ TopologySnapshot parseSysfsTopology(
     }
 
     // Process-wide llcIndex: one dense id per distinct L3 sharing set.
-    // Fall back to L2 share, then a singleton, so every LP gets a shard.
+    // Fall back to L2 share, then a singleton, for online CPUs only.
+    // Offline CPUs remain discoverable but do not define cache domains.
     ushort nextLlc;
     ushort[string] llcOfSet;
     GroupingSource[] sourceOfLlc;
     foreach (ref r; raws)
     {
+        if (!r.online) continue;
         auto share = r.hasL3 ? r.l3Share : (r.hasL2 ? r.l2Share : [r.cpu]);
         share = uniqueSorted(share);
         auto k = setKey(share);
@@ -200,10 +203,13 @@ TopologySnapshot parseSysfsTopology(
         auto lp = &procs[idxOf[r.cpu]];
         lp.llcIndex = llcOfSet[k];
         lp.llcIndexInGroup = r.hasL3 ? r.l3Id : lp.llcIndex;
-        lp.l1d.llcIndex = lp.llcIndex;
-        lp.l1i.llcIndex = lp.llcIndex;
-        lp.l2.llcIndex = lp.llcIndex;
-        lp.l3.llcIndex = lp.llcIndex;
+    }
+    foreach (ref p; procs)
+    {
+        p.l1d.llcIndex = p.llcIndex;
+        p.l1i.llcIndex = p.llcIndex;
+        p.l2.llcIndex = p.llcIndex;
+        p.l3.llcIndex = p.llcIndex;
     }
 
     ushort nextMod;
@@ -228,6 +234,7 @@ TopologySnapshot parseSysfsTopology(
         foreach (s; share)
         {
             if (s !in idxOf) continue;
+            if (procs[idxOf[s]].llcIndex == noLlcIndex) continue;
             procs[idxOf[s]].moduleIndex = mid;
             c.lpIndices ~= s;
             c.llcIndex = procs[idxOf[s]].llcIndex;
@@ -317,6 +324,17 @@ private uint parseU32(string s)
         return 0;
 }
 
+private auto scanNumberedDirs(string root, string prefix, bool dirsOnly)
+{
+    return dirEntries(root, SpanMode.shallow)
+        .filter!(e => !dirsOnly || e.isDir)
+        .map!(e => baseName(e.name))
+        .filter!(name => name.length > prefix.length
+            && name[0 .. prefix.length] == prefix
+            && name[prefix.length .. $].all!(ch => ch >= '0' && ch <= '9'))
+        .map!(name => name[prefix.length .. $]);
+}
+
 private ushort[] enumerateCpus(string cpuRoot)
 {
     if (auto s = readTrim(buildPath(cpuRoot, "present")))
@@ -337,17 +355,8 @@ private ushort[] enumerateCpus(string cpuRoot)
 
     ushort[] cpus;
     if (!exists(cpuRoot) || !isDir(cpuRoot)) return cpus;
-    foreach (e; dirEntries(cpuRoot, SpanMode.shallow))
+    foreach (rest; scanNumberedDirs(cpuRoot, "cpu", true))
     {
-        if (!e.isDir) continue;
-        auto name = baseName(e.name);
-        if (name.length < 4 || name[0 .. 3] != "cpu") continue;
-        auto rest = name[3 .. $];
-        if (rest.length == 0) continue;
-        bool digits = true;
-        foreach (ch; rest)
-            if (ch < '0' || ch > '9') { digits = false; break; }
-        if (!digits) continue;
         try
             cpus ~= to!ushort(rest);
         catch (Exception) {}
@@ -376,21 +385,11 @@ private void fillNuma(string nodeRoot, string cpuRoot, ushort[] cpus,
             nodes = parseLinuxCpuList(s);
         if (nodes.length == 0 && exists(nodeRoot) && isDir(nodeRoot))
         {
-            foreach (e; dirEntries(nodeRoot, SpanMode.shallow))
+            foreach (rest; scanNumberedDirs(nodeRoot, "node", true))
             {
-                if (!e.isDir) continue;
-                auto name = baseName(e.name);
-                if (name.length < 5 || name[0 .. 4] != "node") continue;
-                auto rest = name[4 .. $];
-                bool digits = true;
-                foreach (ch; rest)
-                    if (ch < '0' || ch > '9') { digits = false; break; }
-                if (digits)
-                {
-                    try
-                        nodes ~= to!ushort(rest);
-                    catch (Exception) {}
-                }
+                try
+                    nodes ~= to!ushort(rest);
+                catch (Exception) {}
             }
         }
         foreach (n; nodes)
@@ -420,15 +419,8 @@ private void fillNuma(string nodeRoot, string cpuRoot, ushort[] cpus,
         if (!exists(dir) || !isDir(dir)) continue;
         try
         {
-            foreach (e; dirEntries(dir, SpanMode.shallow))
+            foreach (rest; scanNumberedDirs(dir, "node", false))
             {
-                auto name = baseName(e.name);
-                if (name.length < 5 || name[0 .. 4] != "node") continue;
-                auto rest = name[4 .. $];
-                bool digits = true;
-                foreach (ch; rest)
-                    if (ch < '0' || ch > '9') { digits = false; break; }
-                if (!digits) continue;
                 try
                     numaOf[c] = to!ushort(rest);
                 catch (Exception) {}

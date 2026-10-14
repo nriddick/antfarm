@@ -117,7 +117,7 @@ void main(string[] args)
         life.step(to!ulong(args[5]));
         writefln("workers=%s generations=%s gen/s=%.3f cells/s=%.3f; %s", workers,
             life.generation, life.generationsPerSecond, life.cellsPerSecond,
-            host.plan.summary());
+            host.summary());
     }
     else patterns(workers);
 }

@@ -1,12 +1,12 @@
-module resolution_tests;
+module threadpool.tests.resolution;
 
 // Pure resolution tests on synthetic snapshots; no OS calls, any host.
+// Inside package threadpool so the package-only narrowedTo is reachable.
 
 import std.algorithm : count, canFind;
 import std.array : array;
 import std.string : lineSplitter;
 
-import threadpool.os_scope : OsScope, OsScopeSource;
 import threadpool.pool : PoolOptions;
 import threadpool.resolution;
 import threadpool.topology;
@@ -23,11 +23,10 @@ private TopologySnapshot hybrid()
     return assemble(procs, 1);
 }
 
-/// Resolve with an unrestricted scope: exclusion comes from snapshot flags.
+/// Resolve with the fixture's unrestricted scope: exclusion comes from snapshot flags.
 private PoolResolution resolveOf(ref const TopologySnapshot snap, PoolOptions opt)
 {
-    OsScope unrestricted;
-    return resolvePool(snap, unrestricted, opt);
+    return resolvePool(snap, opt);
 }
 
 /// The pre-resolution `selectLps` (onlyProcessors branch; onlyLps empty), kept
@@ -179,9 +178,10 @@ unittest
 {
     // R6: group disposition on two-LLC hardware with LLC1 excluded.
     auto snap = f1((ushort lp) => (lp % 16) >= 8);
+    snap.osScopeSource = OsScopeSource.processLaunch;
+    snap.osScopeAllowed = parseCpuList("0-7,16-23");
     PoolOptions opt;
-    auto launch = OsScope(OsScopeSource.processLaunch, parseCpuList("0-7,16-23"));
-    auto res = resolvePool(snap, launch, opt);
+    auto res = resolvePool(snap, opt);
     assert(res.physicalGroupCount == 2);
     assert(res.acceptedGroupCount == 1);
     assert(res.groups[0].physical == 16 && res.groups[0].eligible == 16
@@ -197,14 +197,23 @@ unittest
     assert(res.rejectedCpus(Reject.osExcluded).array.length == 16);
     assert(res.acceptedCpus.array.length == 16);
     assert(!res.started);
-    assert(res.osScope.source == OsScopeSource.processLaunch);
-    assert(res.osScope.allowed == parseCpuList("0-7,16-23"));
+    assert(res.topology.osScopeSource == OsScopeSource.processLaunch);
+    assert(res.topology.osScopeAllowed == parseCpuList("0-7,16-23"));
+    assert(res.summary.canFind("os scope processLaunch {0-7,16-23}"), res.summary);
 
     // The scope alone excludes, even when the snapshot carries no flags.
     auto unflagged = f1();
-    auto byScope = resolvePool(unflagged, launch, opt);
+    unflagged.osScopeSource = OsScopeSource.processLaunch;
+    unflagged.osScopeAllowed = parseCpuList("0-7,16-23");
+    auto byScope = resolvePool(unflagged, opt);
     assert(byScope.workers == res.workers);
     assert(byScope.groups[1].common == Reject.osExcluded);
+    assert(byScope.groups[1].eligible == 0);
+    assert(unflagged.inOsScope(ProcessorId(0, 0)) && !unflagged.inOsScope(ProcessorId(0, 8)));
+    assert(unflagged.inOsScope(ProcessorId(0, 23)) && !unflagged.inOsScope(ProcessorId(0, 999)));
+    assert(!unflagged.isEligible(*unflagged.byId(ProcessorId(0, 8))));
+    assert(unflagged.eligibleProcessorsInLlc(1).length == 0 && unflagged.eligibleLlcCount == 1);
+    assert(f1().inOsScope(ProcessorId(0, 999)), "unrestricted admits unknown ids");
 }
 
 unittest
@@ -270,4 +279,70 @@ unittest
     assert(text.canFind("osExcluded,notRequested,smtSecondary"));
     assert(res.summary.canFind("4 accepted"));
     assert(res.summary.count('\n') == 0);
+}
+
+unittest
+{
+    // R9: narrowing keeps one disposition per CPU, request and group;
+    // notSelected is exclusive and separates policy from filters.
+    auto snap = f1((ushort lp) => lp == 3);
+    PoolOptions opt;
+    opt.skipSmtSiblings = true;
+    opt.processors = parseCpuList("0-3,9,999");
+    auto full = resolvePool(snap, opt);
+    assert(full.workers == parseCpuList("0-2,9"));
+    foreach (ref c; full.cpus)
+        assert(!(c.reasons & Reject.notSelected), "resolvePool never sets notSelected");
+    foreach (ref g; full.groups)
+        assert(g.candidates == g.accepted);
+
+    auto narrow = full.narrowedTo(parseCpuList("2,0"));
+    assert(narrow.workers == parseCpuList("0,2"), "snapshot order, not chosen order");
+    assert(narrow[ProcessorId(0, 0)].workerIndex == 0 && narrow[ProcessorId(0, 2)].workerIndex == 1);
+    assert(narrow[ProcessorId(0, 1)].reasons == Reject.notSelected);
+    assert(narrow[ProcessorId(0, 9)].reasons == Reject.notSelected);
+    assert(narrow[ProcessorId(0, 1)].workerIndex == uint.max);
+    assert(narrow[ProcessorId(0, 3)].reasons == full[ProcessorId(0, 3)].reasons, "filters kept");
+    assert(narrow.cpus.length == full.cpus.length);
+    foreach (ref c; narrow.cpus)
+    {
+        assert(c.reasons == Reject.notSelected || !(c.reasons & Reject.notSelected));
+        assert(((c.reasons & ~Reject.notSelected) == Reject.none) == full.isAccepted(c.id));
+    }
+    assert(narrow.rejectedCpus(Reject.notSelected).array.length == 2);
+    assert(narrow.rejectedCpus(cast(Reject)(Reject.all & ~Reject.notSelected)).array.length
+        == full.rejectedCpus.array.length);
+
+    // Requests stay the user's filter list.
+    assert(narrow.requests.length == full.requests.length);
+    assert(narrow.requests[0].accepted && !narrow.requests[1].accepted);
+    assert(narrow.requests[4].known && !narrow.requests[4].accepted);
+    assert(narrow.requests[5].unknown);
+    bool threw;
+    try
+        narrow.enforceRequested();
+    catch (ResolutionException e)
+        threw = e.msg.canFind("0:1 rejected (notSelected)") && e.msg.canFind("0:9 rejected (notSelected)");
+    assert(threw);
+
+    // Group 1 passed the filters but supplies no worker.
+    assert(narrow.groups[0].candidates == 3 && narrow.groups[0].accepted == 2);
+    assert(narrow.groups[1].candidates == 1 && narrow.groups[1].accepted == 0);
+    assert(narrow.groups[1].common == Reject.none, "mixed notSelected and filter reasons");
+    assert(narrow.acceptedGroupCount == 1 && narrow.workersIn(1).length == 0);
+    assert(reasonsText(Reject.notSelected) == "notSelected");
+    import std.conv : to;
+    assert(narrow.to!string.canFind("candidates"));
+
+    // Nothing chosen: every filter-passing CPU is notSelected.
+    auto none = full.narrowedTo(null);
+    assert(none.workers.length == 0);
+    assert(none.rejectedCpus(Reject.notSelected).array.length == full.workers.length);
+    assert(none.groups[1].common == Reject.none && none.groups[1].candidates == 1);
+
+    // A group whose every CPU is a candidate but none chosen.
+    auto homogeneous = f1();
+    auto plain = resolvePool(homogeneous, PoolOptions.init);
+    auto home = plain.narrowedTo(plain.workersIn(0));
+    assert(home.groups[1].candidates == 16 && home.groups[1].common == Reject.notSelected);
 }

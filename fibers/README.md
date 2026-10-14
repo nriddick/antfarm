@@ -50,8 +50,24 @@ worker integration. The `unittest` configuration compiles those blocks under
 any build type, so Dub prints a warning about `buildOptions "unittests"`.
 The `stress` configuration runs
 `tests/stress.d`. Each suite prints a final `passed` line. Both configurations
-require contracts, so their `assert` checks stay enabled even with
-`--build=release`.
+require contracts, so test `assert` checks stay enabled even with
+`--build=release`. The task-release guards use `fatal` independently of those
+test settings: releasing a null, foreign, live, already-pooled, or still-rooted
+task aborts in debug and ordinary `-release` builds. Completion and lifecycle
+events must be drained before recycling. Other scheduler assertions remain
+assertion-build diagnostics. On Linux, the smoke suite re-executes child cases
+and requires each release violation's fatal message; `--release-death` runs only
+these cases.
+
+The deterministic semaphore cancellation regression can be selected with
+`dub run -c unittest --compiler=ldc2 -- --semaphore-cancellation-only`. It covers
+cancellation after an ordinary wake and after consuming a permit during wait
+registration, including waking a second waiter that has already re-parked.
+
+The deterministic event cancellation regression can be selected with
+`dub run -c unittest --compiler=ldc2 -- --event-cancellation-only`. It covers
+ordinary wake cancellation, auto-reset consumption during registration with a
+second waiter already re-parked, a retained refund, and manual-reset behavior.
 
 ## Run one lane on the current thread
 
@@ -109,6 +125,16 @@ void fiberBody()
 - `FiberDomain.yieldReady()` republishes the task.
 - `await`, `FiberEvent.wait`, `FiberSemaphore.wait`, `sleep*`, and
   `TaskHandle.joinFiber` park without blocking the worker.
+- If `FiberSemaphore.wait` throws `FiberCancelled`, it retains no permit: a
+  permit acquired during wait registration is returned and other waiters are
+  woken. An immediate successful acquisition can still return before observing
+  cancellation; a later cancellation does not undo a completed wait.
+- If auto-reset `FiberEvent.wait` throws `FiberCancelled`, a set consumed
+  during registration is restored and waiters are woken. The refund acts as
+  another `set`: it can coalesce with a set or follow a concurrent reset.
+  Immediate acquisition may return before observing cancellation; a later
+  cancellation does not undo a completed wait. Manual-reset waits consume
+  nothing and never restore the flag on cancellation.
 - `ActorWaveTrigger.waitNext` parks until the next wave using a counted edge,
   so completion which precedes the wait or coalesces in the worker handoff is
   not lost.
@@ -234,7 +260,12 @@ slot with its generation and refuses stale reuse.
 - `handle.join()` and timed join block an external OS thread.
 - `handle.joinFiber()` and timed Fiber join suspend a managed Fiber.
 - `requestCancel(handle)` queues a generation-specific request.
-- The Director calls `drainCancellationRequests()` to apply queued requests.
+- Any thread may call `drainCancellationRequests()` to apply queued requests.
+  The managed threadpool pump does this automatically, including waking parked
+  workers under `directorOwned`; the constructing thread need not poll.
+  An explicit drain returns only the requests it applied, since another worker
+  may already have drained them. Observe task outcomes or lifecycle records
+  when the pump owns delivery.
 
 Cancellation is cooperative. A running body that never reaches a scheduler
 boundary cannot be forcibly unwound.
@@ -251,6 +282,11 @@ slice or one bare payload callback is ordinary thread-local use. Pinning is a
 separate application policy; the general scheduler does not infer it.
 
 ## Lifecycle and shutdown
+
+The constructing thread is the domain's Director. `release`, `releaseAll`,
+`beginShutdown`, and synchronous `directorCancel` remain Director-only; draining
+queued requests does not transfer that role. Release waits for in-flight request
+application and refuses release while queued requests remain.
 
 `beginShutdown(false)` stops admission and drains cooperative work.
 `beginShutdown(true)` also requests cancellation and wakes indefinite waiters

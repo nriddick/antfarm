@@ -12,9 +12,8 @@ void main()
         "  E-cores ", t.eCoreCount,
         "  logical processors ", t.logicalProcessorCount,
         "  cache line ", t.cacheLineSize, " B");
-    auto scope_ = osScope();
-    writeln("os scope ", scope_.source, "  allowed ",
-        scope_.source == OsScopeSource.unrestricted ? "all" : formatCpuList(scope_.allowed),
+    writeln("os scope ", t.osScopeSource, "  allowed ",
+        t.osScopeSource == OsScopeSource.unrestricted ? "all" : formatCpuList(t.osScopeAllowed),
         "  grouping source ", t.groupingSource);
 
     foreach (ref d; t.llcDomains)

@@ -148,10 +148,13 @@ event and a registration gate that prevents release/reuse from resetting the
 event beneath an older generation.
 
 Arbitrary threads request cancellation by appending a GC-visible
-`(slot, generation)` handle to the domain control queue. Only the Director
-applies those requests. The currently executing Fiber may cancel itself
-directly. Cancellation is cooperative: a body that never reaches a scheduler
-boundary cannot be forcibly unwound.
+`(slot, generation)` handle to the domain control queue. Any thread may call
+`drainCancellationRequests()`; the managed threadpool pump runs the same drain,
+counting instead of allocating results, at the start of each service pass. The constructing thread remains the Director: synchronous
+`directorCancel`, `release`, `releaseAll`, and `beginShutdown` are Director-only.
+The currently executing Fiber may cancel itself directly. Cancellation is
+cooperative: a body that never reaches a scheduler boundary cannot be forcibly
+unwound.
 
 ## Control-word arbitration
 
@@ -167,7 +170,7 @@ entry suppresses the body.
 
 For a running task, the old word returned by the running-to-terminating
 transition is the cancellation cutoff. A request visible at that cutoff
-abrogates a normal result. A later counted Director request is ineffective and
+abrogates a normal result. A later counted external request is ineffective and
 cannot rewrite the terminal disposition.
 
 ## Memory-order invariants
@@ -183,12 +186,12 @@ the next thread calls it. The handoff chain is explicit at every boundary.
 | Farm to executing Fiber | sentinel acquire, then ENTER/phase transition | precedes `Fiber.call` |
 | event post to waiter | event state under stripe lock, then WAKE | PARK/WAKE arbitration and ready publication |
 | timer/cancel to waiter | one remover wins timer/stripe ownership | ready MPSC/Farm chain |
-| remote cancel to Director | append under request mutex | swap under the same mutex |
+| remote cancel to drainer | append and release-store queued count under request mutex, then wake | acquire count hint, swap under request mutex; apply under admission mutex |
 | terminal data to completion | outcome/failure stores, then completion MPSC release | completion acquire or stable handle snapshot |
 | terminal data to thread join | terminal transition, then event set | event wake, then generation-stable acquire read |
 | lifecycle event to Director | initialized record and release publication | acquire drain into ordered backlog |
 | completion to drained | completion push before active-count decrement | acquire observation of zero active tasks |
-| release to reuse | Director ownership and recycle-pool mutex | initialization before the next ready publication |
+| release to reuse | Director ownership, admission and recycle-pool mutexes | initialization under admission before the next ready publication |
 
 The Farm portion depends on the root implementation writing table contents
 before its release sentinel and consumers acquiring that sentinel before
@@ -204,7 +207,27 @@ reading the body. Ant Farm provides those edges.
   serving a lane by an edge register and destroy those views on that same
   worker.
 - Cancellation requests live in a GC-visible handle array protected by the
-  request mutex. Only the domain's Director swaps and applies it.
+  request mutex. Drainers hold the admission mutex through detaching and applying
+  one finite snapshot. Synchronous Director cancellation takes the same mutex;
+  only the current Fiber's local cancellation can race an external CANCEL add.
+  Thus duplicates coalesce and the counted CANCEL field has at most two adds.
+- Spawn, release and releaseAll also hold admission, excluding generation reuse
+  and recycle-list mutation while a detached cancellation is still applying.
+  The queued count excludes detached requests; release's admission lock waits
+  for those before checking that no queued requests remain. A request appended
+  after that check is safe: application revalidates its generation under admission.
+- The empty drain path is one acquire load, with no lock or allocation. Producers
+  release-store the count after append; array access still requires the request
+  mutex. A zero observed before a concurrent append can defer service to the next
+  pass: enqueue wakes the pool, whose park protocol arms before its final pump.
+  A nonempty drain reports work so the pump makes another pass. Concurrent
+  drainers serialize; a loser may return an empty result after acquiring admission.
+- Lock order is admission before request/pool/wait/join/timer locks. Submission
+  releases the request lock before notifying lanes and never acquires admission.
+  No Fiber body or arbitrary handler runs under admission; wake notifiers may
+  only signal. Release may wait for external join readers to unregister; that
+  path takes no admission lock. Finite snapshot draining bounds each lock hold
+  by the accepted batch, though heavy bursts can delay admission or other drainers.
 - Managed-join inbound-list and waiter-membership state occupy separate aligned
   control records and have separate ownership.
 - `currentTask` is D TLS rewritten for every resume. It is a resume-local
@@ -312,16 +335,22 @@ abandoned work through the existing Sub0 protocol and does not drain the domain.
 The default `broadcast` wake policy signals the pool for external admission,
 signal, cancellation, shutdown, and worker publication. Under
 `directorOwned`, lanes coalesce those reasons into a mailbox. The thread that
-owns `pool.director()` drains it and chooses which workers to signal. An
-optional `nothrow @nogc` notifier fires on an empty-to-nonempty mailbox edge so
+owns `pool.director()` drains it and chooses which workers to signal. Queued
+cancellation is the exception: domain and lane `requestCancel` notify every
+attached lane, recording `cancelled` and waking service even under `directorOwned`.
+Application also wakes a cancelled waiter's destination, which may have parked
+since the initial request wake; synchronous Director cancellation shares this
+wake path. This permits cancellation without Director polling.
+An optional `nothrow @nogc` notifier fires on an empty-to-nonempty mailbox edge so
 an external event loop can wake without running arbitrary handlers on workers.
 
 Successful Fiber publication relays `remoteReady` to the lanes serving it by
 an edge, including
 when the publishing worker also consumed local work. With `directorOwned`, the
 Director must act on those events. Direct Farm writes or direct domain use
-still require the embedding to arrange pool wakes; the pump-count bound does
-not wake a parked worker by itself.
+still require the embedding to arrange pool wakes, except for domain cancellation
+requests and other domain operations with explicit wake hooks; the pump-count bound
+does not wake a parked worker by itself.
 
 Native-only service, rescue edges and the explicit assist ring are validated
 on a two-LLC host (smoke L1-L3). The default broadcast wake still reaches every
@@ -335,7 +364,10 @@ does not claim multi-LLC performance or failover guarantees.
 
 Terminal tasks enter the completion MPSC and remain rooted. The Director calls
 `takeCompletions`, inspects immutable outcomes, and then calls `release` or
-`releaseAll`. Release refuses unsafe reuse while cancellation or join state for
+`releaseAll`. A worker may consume queued cancellation results before an explicit
+drain: that drain returns only its own snapshot's applications. Use task outcomes
+or enabled lifecycle cancellation records to observe pump-applied requests.
+Release refuses unsafe reuse while cancellation or join state for
 the generation remains outstanding.
 
 Optional lifecycle reporting reserves bounded capacity before admission and
@@ -366,9 +398,10 @@ validation, and repeated concurrent drain. The two-LLC live tests (no-edge
 shared domain, unused-group pre-admission, rescue) print SKIP on single-LLC
 hosts.
 
-ThreadSanitizer is not currently evidence for migrating DRuntime Fibers: a
-matching instrumented runtime fails at the sanitizer/runtime stack-switch
-boundary even for isolated probes. Until that boundary changes, the supported
-concurrency evidence is the DMD/LDC debug and release matrix plus deterministic
-race tests and repeated stress. See [../ROADMAP.md](../ROADMAP.md) for the
+Under `version(TSan)` the scheduler keeps a ThreadSanitizer context per task,
+so the dedicated Fiber TSan smoke suite covers migration
+([testing](../docs/development/testing.md)). It assumes the standard,
+uninstrumented DRuntime, disables parallel GC marking, and runs outside
+`make check`. The Fiber gate therefore remains the DMD/LDC debug and release
+matrix plus deterministic race tests and repeated stress. See [../ROADMAP.md](../ROADMAP.md) for the
 current release gates.

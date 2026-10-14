@@ -108,21 +108,43 @@ void suite()
     runRace(true, 0, false, false, true);
 }
 
+version (Windows)
+void waitApiRequired()
+{
+    import std.exception : enforce;
+    import threadpool.sys.win_bindings : pWaitOnAddress, resolveOptionalApis;
+    import threadpool.sys.win_wait : createWaitSlots;
+
+    // Exclusive setup, before any workers exist. Model a resolved API missing
+    // on this host; failure must precede replacing the wait slots.
+    resolveOptionalApis();
+    auto savedApi = pWaitOnAddress;
+    auto savedSlots = gWait;
+    scope (exit)
+    {
+        pWaitOnAddress = savedApi;
+        gWait = savedSlots;
+    }
+    pWaitOnAddress = null;
+    bool rejected;
+    try createWaitSlots(1);
+    catch (Exception e)
+    {
+        enforce(e.msg == "threadpool: WaitOnAddress unavailable (need Windows 10 1803+)",
+            "missing wait API reported the wrong error");
+        rejected = true;
+    }
+    enforce(rejected, "missing WaitOnAddress must reject startup, including in release");
+    enforce(gWait.ptr == savedSlots.ptr && gWait.length == savedSlots.length,
+        "missing wait API replaced wait slots before rejecting startup");
+    writeln("PASS missing WaitOnAddress rejects startup before replacing wait slots");
+}
+
 void main()
 {
+    version (Windows) waitApiRequired();
     suite();
     version (Windows)
-    {
-        import threadpool.sys.win_bindings;
-        auto wait = pWaitOnAddress;
-        auto single = pWakeByAddressSingle;
-        auto all = pWakeByAddressAll;
-        scope (exit) { pWaitOnAddress = wait; pWakeByAddressSingle = single; pWakeByAddressAll = all; }
-        pWaitOnAddress = null;
-        pWakeByAddressSingle = null;
-        pWakeByAddressAll = null;
-        suite();
-        writeln("armed wait races passed: address and event backends");
-    }
+        writeln("armed wait races passed: address backend");
     else writeln("armed wait races passed: futex backend");
 }

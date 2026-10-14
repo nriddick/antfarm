@@ -138,5 +138,5 @@ void main(string[] args)
     if (total != 40 || callbacks != 2 || atomicLoad!(MemoryOrder.acq)(freed) != 1)
         fatal("private tree result mismatch");
     writeln("private tree: subset fold 40, root callbacks=", callbacks,
-        ", workers=", host.plan.workers);
+        ", workers=", host.resolution.workers.length);
 }

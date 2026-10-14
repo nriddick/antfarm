@@ -132,8 +132,8 @@ int main()
     assert(s.llcDomains[0].l3SizeBytes == 24 * 1024 * 1024);
     foreach (ref p; s.processors)
     {
-        assert(p.llcIndex == 0);
-        assert(p.llcIndexInGroup == 0);
+        assert(p.llcIndex == (p.offlineAtDiscovery ? noLlcIndex : 0));
+        assert(p.llcIndexInGroup == (p.offlineAtDiscovery ? noLlcIndex : 0));
         if (p.lpIndex <= 11)
             assert(p.efficiencyClass == 1);
         else

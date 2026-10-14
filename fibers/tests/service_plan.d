@@ -7,7 +7,6 @@ import antfarm;
 import antfarm_fibers;
 import core.stdc.stdio : printf;
 import std.algorithm : any, canFind;
-import threadpool.os_scope : OsScope;
 import threadpool.pool : PoolOptions;
 import threadpool.resolution : PoolResolution, resolvePool;
 import threadpool.topology : GroupingSource, LogicalProcessor,
@@ -31,8 +30,7 @@ PoolResolution synthetic(const(uint)[] accepted)
     auto snapshot = new TopologySnapshot;
     *snapshot = assembleSnapshot("synthetic", processors, null, null,
         cast(ushort) accepted.length, 64, new GroupingSource[accepted.length]);
-    OsScope unrestricted;
-    return resolvePool(*snapshot, unrestricted, PoolOptions.init);
+    return resolvePool(*snapshot, PoolOptions.init);
 }
 
 /// A small Farm sized for `views` consumers and `slots` small producers.

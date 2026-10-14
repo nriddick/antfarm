@@ -17,6 +17,19 @@ import core.thread : Fiber, Thread;
 import core.time : Duration, MonoTime;
 
 
+version (TSan)
+{
+    import ldc.attributes : llvmAttr;
+
+    private extern(C) nothrow @nogc
+    {
+        void* __tsan_get_current_fiber();
+        void* __tsan_create_fiber(uint flags);
+        void __tsan_destroy_fiber(void* fiber);
+        void __tsan_switch_to_fiber(void* fiber, uint flags);
+    }
+}
+
 alias Signal = ulong;
 private enum Signal timerSignalBit = 1UL << 63;
 private enum Signal persistentSignalBit = 1UL << 62;
@@ -79,7 +92,7 @@ enum CancellationResult : ubyte
     requestedWaiting,
 }
 
-/// Result of submitting a generation-paired request to the Director control
+/// Result of submitting a generation-paired request to the domain control
 /// lane. Submission does not imply that cancellation beat terminal entry.
 enum CancellationSubmission : ubyte
 {
@@ -87,7 +100,7 @@ enum CancellationSubmission : ubyte
     staleHandle,
 }
 
-/// Director-side result for one queued remote cancellation request.
+/// Application result for one queued remote cancellation request.
 struct CancellationApplication
 {
     TaskHandle task;
@@ -551,8 +564,10 @@ align(64) private struct FiberDomainControl
     ubyte[56] managedJoinWaiterPadding;
     shared long lifecycleReservationCount;
     ubyte[56] lifecycleReservationPadding;
+    shared size_t cancellationRequestCount;
+    ubyte[cacheLineSize - size_t.sizeof] cancellationRequestPadding;
 }
-static assert(FiberDomainControl.sizeof == 6 * cacheLineSize);
+static assert(FiberDomainControl.sizeof == 7 * cacheLineSize);
 static assert(FiberDomainControl.managedJoinWaiterCount.offsetof
     == 4 * cacheLineSize);
 static assert(FiberDomainControl.lifecycleReservationCount.offsetof
@@ -588,6 +603,7 @@ final class FiberTask
     package FiberDomain domain;
     package FiberReadyLane readyLane;
     package Fiber fiber;
+    version (TSan) private void* tsanContext;
     package Signal waitSignal;
     package shared(Throwable) failure;
     /// Publish chain link; owned by a PublishAccumulator or its drainer.
@@ -639,7 +655,7 @@ final class FiberTask
                 assert(before == 0, "antfarm_fibers: control field already raised");
             else if (addend == ctrlCancel)
                 assert(before < 2,
-                    "antfarm_fibers: more than local+Director CANCEL sources");
+                    "antfarm_fibers: more than local+external CANCEL sources");
         }
         return atomicFetchAdd!(MemoryOrder.acq_rel)(controlWord, addend);
     }
@@ -719,6 +735,7 @@ final class FiberTask
 
     ~this() nothrow @nogc
     {
+        version (TSan) clearTsanContext();
         if (joinControl !is null)
         {
             joinControl.terminalEvent.terminate();
@@ -729,6 +746,39 @@ final class FiberTask
         managedJoinControl = null;
         freeCacheLine(control);
         control = null;
+    }
+
+    version (TSan)
+    {
+        // LDC 1.43's druntime switches native stacks, but only has ASan hooks.
+        // TSan must retain its shadow call stack with the task on migration.
+        // Nothing instrumented may run between the TSan and native switches:
+        // use druntime's non-template call overload (already compiled without
+        // TSan), and keep this bridge uninlined and wholly uninstrumented.
+        @llvmAttr("disable_sanitizer_instrumentation")
+        pragma(inline, false)
+        private Throwable callWithTsan() nothrow @nogc
+        {
+            if (tsanContext is null) tsanContext = __tsan_create_fiber(0);
+            auto caller = __tsan_get_current_fiber();
+            // The caller and task run sequentially: carry that ordering across
+            // the switch, including the caller's currentTask TLS assignment.
+            __tsan_switch_to_fiber(tsanContext, 0);
+            // Rethrow.no cannot throw or allocate; the runtime-argument overload
+            // cannot express these attributes because Rethrow.yes can throw.
+            auto call = cast(Throwable delegate(Fiber.Rethrow) nothrow @nogc)
+                &fiber.call;
+            auto failure = call(Fiber.Rethrow.no);
+            __tsan_switch_to_fiber(caller, 0);
+            return failure;
+        }
+
+        private void clearTsanContext() nothrow @nogc
+        {
+            if (tsanContext is null) return;
+            __tsan_destroy_fiber(tsanContext);
+            tsanContext = null;
+        }
     }
 
     private void initializeControl() nothrow @nogc
@@ -956,7 +1006,7 @@ final class FiberTask
     {
         immutable word = loadControl();
         immutable g = generation;
-        // Once terminal entry has taken its atomic cutoff, a later Director
+        // Once terminal entry has taken its atomic cutoff, a later external
         // add is counted but semantically ineffective. Only an accepted,
         // generation-tagged request remains observable in that phase.
         if (phaseOf(word) == Phase.terminating
@@ -1513,6 +1563,10 @@ class FiberReadyLane
     /// Threadpool lanes override this to wake their own responder set.
     protected void noteExternalReady() nothrow @nogc {}
 
+    /// Queued cancellation must wake domain service even when an embedding
+    /// delegates ordinary readiness wakes to a control thread.
+    protected void noteCancellationRequested() nothrow @nogc {}
+
     /// Called by a running fiber of this lane after it armed its domain's
     /// earliest timer deadline. No ready transition happens until the timer
     /// is polled, so threadpool lanes override this to wake a worker which
@@ -2033,26 +2087,33 @@ final class FiberDomain
     /// Return a terminated task to the recycling pool. After release the
     /// handle must not be read again: a later spawn hands the same object to
     /// a new fiber. Releasing a live or already-released task is a contract
-    /// violation caught by assert.
+    /// violation that is fatal in debug and release builds.
     void release(FiberTask task)
     {
         requireDirector();
-        requireCancellationRequestsDrained();
-        releaseOne(task);
+        synchronized (admissionMutex)
+        {
+            requireCancellationRequestsDrained();
+            releaseOne(task);
+        }
     }
 
     private void releaseOne(FiberTask task)
     {
-        assert(task !is null && task.domain is this && task.terminated,
-            "antfarm_fibers: only terminated tasks of this domain can be released");
-        assert(atomicLoad!(MemoryOrder.acq)(task.completionTaken) != 0
-            && atomicLoad!(MemoryOrder.acq)(task.pendingLifecycleEvents) == 0
-            && atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) == 0
-            && !task.rootedFlag,
-            "antfarm_fibers: drain completion and lifecycle events before release");
+        // Release guard: cheap identity/phase checks prevent recycling live or foreign tasks.
+        if (task is null || task.domain !is this || !task.terminated)
+            antfarm.fatal("antfarm_fibers: only terminated tasks of this domain can be released");
+        // Release guard: three loads and a flag prevent reuse while queues/roots still own the task.
+        if (atomicLoad!(MemoryOrder.acq)(task.completionTaken) == 0
+            || atomicLoad!(MemoryOrder.acq)(task.pendingLifecycleEvents) != 0
+            || atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) != 0
+            || task.rootedFlag)
+            antfarm.fatal("antfarm_fibers: drain completion and lifecycle events before release");
         synchronized (poolMutex)
         {
-            assert(!task.pooledFlag, "antfarm_fibers: task released twice");
+            // Release guard: one flag check under the pool lock prevents a cyclic free list.
+            if (task.pooledFlag)
+                antfarm.fatal("antfarm_fibers: task released twice");
             task.closeJoinWaiters();
             while (atomicLoad!(MemoryOrder.acq)(task.joinState)
                     != FiberTask.joinClosed)
@@ -2067,15 +2128,18 @@ final class FiberDomain
     void releaseAll(FiberTask[] tasks)
     {
         requireDirector();
-        requireCancellationRequestsDrained();
-        foreach (task; tasks) releaseOne(task);
+        synchronized (admissionMutex)
+        {
+            requireCancellationRequestsDrained();
+            foreach (task; tasks) releaseOne(task);
+        }
     }
 
     private void requireCancellationRequestsDrained()
     {
         if (pendingCancellationRequests != 0)
             throw new Exception(
-                "antfarm_fibers: drain Director cancellation requests before release");
+                "antfarm_fibers: drain cancellation requests before release");
     }
 
     /// Tasks currently held by the recycling pool.
@@ -2281,8 +2345,8 @@ final class FiberDomain
         return timers.nextDeadline(ticks);
     }
 
-    /// Verify the construction thread which owns control application and
-    /// release/recycle for this domain.
+    /// Verify the construction thread which owns synchronous cancellation,
+    /// shutdown and release/recycle for this domain.
     private void requireDirector()
     {
         auto self = Thread.getThis();
@@ -2295,7 +2359,7 @@ final class FiberDomain
     }
 
     /// Queue a remote, generation-paired cancellation request. Any thread may
-    /// submit; only the Director mutates the target control word.
+    /// submit; a worker pump or explicit drainer applies the request.
     CancellationSubmission requestCancel(TaskHandle handle)
     {
         auto task = handle.slot;
@@ -2303,7 +2367,17 @@ final class FiberDomain
             || task.generation != handle.generation)
             return CancellationSubmission.staleHandle;
         synchronized (cancellationRequestMutex)
+        {
             cancellationRequests ~= handle;
+            // Publish the empty-queue hint after append. The mutex owns the
+            // array; acquire readers use the count only to avoid an empty lock.
+            atomicStore!(MemoryOrder.rel)(control.cancellationRequestCount,
+                cancellationRequests.length);
+        }
+        // The lane list is fixed at setup. Do not read task.readyLane here:
+        // the unlocked generation check can race release/reuse on another lane.
+        foreach (lane; readyLanes)
+            lane.noteCancellationRequested();
         return CancellationSubmission.queued;
     }
 
@@ -2313,32 +2387,62 @@ final class FiberDomain
                             : requestCancel(task.handle);
     }
 
-    /// Apply every queued request on the Director thread. Duplicate remote
-    /// requests for one generation coalesce before another CANCEL add.
+    /// Apply a snapshot of queued requests from any thread. Concurrent drains
+    /// serialize; each caller receives only the requests it applied.
     CancellationApplication[] drainCancellationRequests()
     {
-        requireDirector();
-        TaskHandle[] requests;
-        synchronized (cancellationRequestMutex)
-        {
-            requests = cancellationRequests;
-            cancellationRequests = null;
-        }
-        auto results = new CancellationApplication[requests.length];
-        foreach (i, handle; requests)
-            results[i] = CancellationApplication(
-                handle, applyCancellation(handle, true));
+        CancellationApplication[] results;
+        applyCancellationRequests(&results);
         return results;
     }
 
-    @property size_t pendingCancellationRequests()
+    /// Same drain without per-request results; returns how many requests it
+    /// applied and allocates nothing. The managed pump and other discarding
+    /// callers use this; lifecycle records retain accepted cancels.
+    package(antfarm_fibers) size_t drainCancellationRequestsCounted()
     {
-        synchronized (cancellationRequestMutex)
-            return cancellationRequests.length;
+        return applyCancellationRequests(null);
     }
 
-    /// Direct cancellation by the currently executing managed Fiber. This is
-    /// the only non-Director path which may add CANCEL to a task control word.
+    private size_t applyCancellationRequests(CancellationApplication[]* results)
+    {
+        // Empty service passes cost one acquire load, no lock or allocation.
+        // A racing append publishes before waking the pump; the pool arms its
+        // wait before a final service pass, so that race cannot lose a wake.
+        if (pendingCancellationRequests == 0) return 0;
+        synchronized (admissionMutex)
+        {
+            // Serialize external CANCEL adds (at most one plus cancelCurrent),
+            // generation validation, and application against spawn/release.
+            // Never run a fiber under this lock. Wake notifiers are signal-only.
+            TaskHandle[] requests;
+            synchronized (cancellationRequestMutex)
+            {
+                requests = cancellationRequests;
+                cancellationRequests = null;
+                atomicStore!(MemoryOrder.rel)(control.cancellationRequestCount, 0);
+            }
+            if (results !is null)
+                *results = new CancellationApplication[requests.length];
+            foreach (i, handle; requests)
+            {
+                immutable result = applyCancellation(handle, true);
+                if (results !is null)
+                    (*results)[i] = CancellationApplication(handle, result);
+            }
+            return requests.length;
+        }
+    }
+
+    /// Queued requests, excluding a batch currently being applied. Release
+    /// holds admissionMutex, so its check also waits for in-flight application.
+    @property size_t pendingCancellationRequests() const nothrow @nogc
+    {
+        return atomicLoad!(MemoryOrder.acq)(control.cancellationRequestCount);
+    }
+
+    /// Direct cancellation by the currently executing managed Fiber. The
+    /// external applier serializes separately; only this local owner may race it.
     static CancellationResult cancelCurrent()
     {
         auto task = currentTask;
@@ -2347,8 +2451,7 @@ final class FiberDomain
         return task.domain.applyCancellation(task.handle, false);
     }
 
-    /// Director-only synchronous cancellation, used for shutdown and for
-    /// applying generation-paired requests from the control queue.
+    /// Director-only synchronous cancellation, also used for shutdown.
     bool directorCancel(TaskHandle handle)
     {
         immutable result = directorCancelDetailed(handle);
@@ -2364,14 +2467,16 @@ final class FiberDomain
     CancellationResult directorCancelDetailed(TaskHandle handle)
     {
         requireDirector();
-        return applyCancellation(handle, true);
+        synchronized (admissionMutex)
+            return applyCancellation(handle, true);
     }
 
-    /// Counted fetch_add arbitration shared by the local owner and Director.
+    /// Counted fetch_add arbitration shared by the local owner and the
+    /// serialized external applier (Director or request drainer).
     /// The old phase returned by the add decides whether this request beat the
-    /// terminal cutoff. A late Director add is harmless and is not rolled back.
+    /// terminal cutoff. A late external add is harmless and is not rolled back.
     private CancellationResult applyCancellation(TaskHandle handle,
-                                                   bool director)
+                                                   bool external)
     {
         auto task = handle.slot;
         immutable requestedGeneration = handle.generation;
@@ -2386,7 +2491,7 @@ final class FiberDomain
             return CancellationResult.alreadyTerminal;
 
         // An accepted request from this generation already owns the semantic
-        // cancellation. At most a simultaneously racing local/Director pair
+        // cancellation. At most a simultaneously racing local/external pair
         // can pass this check and contribute two counted addends.
         if (atomicLoad!(MemoryOrder.acq)(task.cancelGeneration)
                 == requestedGeneration)
@@ -2409,9 +2514,12 @@ final class FiberDomain
             result = CancellationResult.requestedRunning;
 
         acceptCancellation(task, requestedGeneration, result);
-        if (director && ph == Phase.waiting)
+        if (external && ph == Phase.waiting)
         {
             // First or later: WaitSet/join-list remove is exactly-once.
+            // Plain waitSignal read: the owner writes it before insert's
+            // waiting add (acquired by addCtrl above) and rechecks
+            // cancellation before any rewrite; recycle holds admissionMutex.
             auto target = task.managedJoinTarget();
             immutable removed = target !is null
                 ? target.removeManagedJoinWaiter(task)
@@ -2420,6 +2528,10 @@ final class FiberDomain
             {
                 timers.remove(task);
                 makeWaiterReady(task);
+                // The destination lane may have parked after the enqueue wake
+                // but before this drain. Cancellation service also wakes it
+                // under a Director-owned ordinary readiness policy.
+                task.readyLane.noteCancellationRequested();
             }
         }
         return result;
@@ -2493,7 +2605,7 @@ final class FiberDomain
     void beginShutdown(bool cancelActive = false)
     {
         requireDirector();
-        cast(void) drainCancellationRequests();
+        cast(void) drainCancellationRequestsCounted();
         synchronized (admissionMutex)
             atomicStore!(MemoryOrder.rel)(accepting, 0);
         if (!cancelActive) return;
@@ -2618,7 +2730,10 @@ final class FiberDomain
         atomicFetchAdd!(MemoryOrder.rel)(task.resumeCountState, 1UL);
         currentTask = task;
         scope (exit) currentTask = null;
-        auto failure = task.fiber.call!(Fiber.Rethrow.no)();
+        version (TSan)
+            auto failure = task.callWithTsan();
+        else
+            auto failure = task.fiber.call!(Fiber.Rethrow.no)();
 
         word = task.loadControl();
         ph = phaseOf(word);
@@ -2656,6 +2771,9 @@ final class FiberDomain
                                 bool cancellationWon, bool preEntry = false)
         nothrow @nogc
     {
+        // Also discard suspended shadow frames after a rejected raw yield.
+        // Recycled tasks start with a fresh context, including pre-entry cancel.
+        version (TSan) task.clearTsanContext();
         // CANCEL can become visible before acceptCancellation has published
         // even its pending disposition. Wait for the entire cancellation
         // record, not merely an in-progress publisher, so it cannot overwrite
@@ -2793,6 +2911,10 @@ enum FiberEventMode : ubyte
     manualReset,
 }
 
+version (unittest)
+    // TLS scheduling seam; absent from production and from object layouts.
+    package void delegate(FiberEvent) eventAfterRegisterHook;
+
 /// Scheduler-aware event. `wait` parks a managed fiber; `set`/`reset` may run
 /// on any thread. Auto-reset consumes the posted state for one waiter; extras
 /// that were woken re-park. Manual-reset stays posted until `reset`.
@@ -2856,6 +2978,9 @@ final class FiberEvent
             task.waitSignal = key;
             if (!domain.waits.insert(task, key))
                 throw new FiberCancelled;
+            version (unittest)
+                if (eventAfterRegisterHook !is null)
+                    eventAfterRegisterHook(this);
             if (consumePosted())
             {
                 if (domain.waits.remove(task, key))
@@ -2863,7 +2988,13 @@ final class FiberEvent
                 else
                     Fiber.yield();
                 if (task.cancellationRequested)
+                {
+                    // Return the consumed set with release publication and a
+                    // wake for re-parked waiters. This new set may coalesce
+                    // with another set or follow a concurrent reset.
+                    if (mode == FiberEventMode.autoReset) set();
                     throw new FiberCancelled;
+                }
                 return;
             }
             Fiber.yield();
@@ -2943,6 +3074,10 @@ final class FiberGenerationTrigger
     }
 }
 
+version (unittest)
+    // TLS scheduling seam; absent from production and from object layouts.
+    package void delegate(FiberSemaphore) semaphoreAfterRegisterHook;
+
 /// Counting semaphore. `wait` parks a managed fiber when the count is zero;
 /// `post` may run on any thread. Extra waiters woken by a broadcast re-park
 /// if they lose the decrement race.
@@ -2990,6 +3125,9 @@ final class FiberSemaphore
             task.waitSignal = key;
             if (!domain.waits.insert(task, key))
                 throw new FiberCancelled;
+            version (unittest)
+                if (semaphoreAfterRegisterHook !is null)
+                    semaphoreAfterRegisterHook(this);
             if (tryAcquire())
             {
                 if (domain.waits.remove(task, key))
@@ -2997,7 +3135,14 @@ final class FiberSemaphore
                 else
                     Fiber.yield();
                 if (task.cancellationRequested)
+                {
+                    // The registration recheck acquired a permit, even if a
+                    // wake/cancel already detached us and forced the yield.
+                    // Return ownership before throwing: post's release add
+                    // restores the count and wakes waiters that re-parked.
+                    post();
                     throw new FiberCancelled;
+                }
                 return;
             }
             Fiber.yield();
@@ -3050,7 +3195,7 @@ void drainUntilEmpty(FiberDomain domain, ref Token token,
     while (!domain.drained)
     {
         if (domain.pendingCancellationRequests != 0)
-            cast(void) domain.drainCancellationRequests();
+            cast(void) domain.drainCancellationRequestsCounted();
         domain.pollGenerationTriggers();
         domain.pollTimers();
         immutable flushed = domain.flush(token, flushBatch, avgCost);
@@ -3188,5 +3333,34 @@ version (unittest)
         long unused;
         auto hasDeadline = timers.nextDeadline(unused);
         assert(!hasDeadline);
+    }
+
+    unittest
+    {
+        // The pump's counted drain applies queued requests without
+        // allocating on the worker.
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
+                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
+        scope (exit) farm.destroy();
+        auto domain = new FiberDomain(farm);
+        auto token = farm.registerProducer(Tier.small);
+        scope (exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        subscribeOrThrow(view, farm);
+        scope (exit) view.unsubscribe();
+        auto first = domain.spawn({});
+        auto second = domain.spawn({});
+        assert(domain.requestCancel(first.handle) == CancellationSubmission.queued);
+        assert(domain.requestCancel(first.handle) == CancellationSubmission.queued);
+        assert(domain.requestCancel(second.handle) == CancellationSubmission.queued);
+        immutable before = GC.allocatedInCurrentThread;
+        immutable applied = domain.drainCancellationRequestsCounted();
+        assert(GC.allocatedInCurrentThread == before);
+        assert(applied == 3 && domain.pendingCancellationRequests == 0);
+        assert(domain.drainCancellationRequestsCounted() == 0);
+        drainUntilEmpty(domain, token, view);
+        assert(first.outcome == FiberOutcome.cancelled);
+        assert(second.outcome == FiberOutcome.cancelled);
+        domain.releaseAll(domain.takeCompletions());
     }
 }

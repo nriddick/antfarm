@@ -60,6 +60,7 @@ int main(string[] args)
         if (sawFailed) ++failedOk;
         if (host.state != HostState.failed) { ++nonOpen; }
         try host.close(); catch (Throwable t) { stderr.writeln("close: ", t.msg); ++other; }
+        owner.leak(); // the failed host leaked the runtime; reclaim is impossible
     }
     // claim must be reusable
     try { auto h = new FarmHost(FarmHostOptions.init); h.close(); }

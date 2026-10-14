@@ -5,11 +5,10 @@
 # That script passes an explicit SHELL to child makes, because this host has
 # no /bin/sh and their TSan recipes quote TSAN_OPTIONS.
 #
-# Windows is the other supported target and is tested by hand (`dub test`,
-# `actor_torture`, `antfarm_test`). New tests stay on druntime threads and
-# atomics; this matrix itself is the Linux gate.
+# Windows has a separate native Python runner. New tests stay on druntime
+# threads and atomics; the full correctness gate remains the Linux matrix.
 
-.PHONY: help check check-docs check-soak check-mimalloc farm-tsan run-farm-tsan docs perf-gate
+.PHONY: help check check-quick check-windows check-docs check-soak check-mimalloc farm-tsan run-farm-tsan docs perf-gate
 
 # `help` is the first rule, so name the default goal explicitly.
 .DEFAULT_GOAL := check
@@ -20,13 +19,15 @@ Ant Farm local targets (there is no CI). See CONTRIBUTING.md for details.
 Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Python 3):
   make check               full matrix, LDC and DMD, stops at the first failure
                            (bare `make` runs this)
+  make check-quick         root, review torture, threadpool, fiber smoke, examples
+                           (LDC toolchain including Dub and Python 3; no DMD/TSan)
   make check-docs          tracked Markdown relative links and anchors (no network)
                            plus the API reference symbol/coverage check (needs DMD)
   make check-farm-ordering Farm ordering and leaf-reuse tests, LDC and DMD
                            plus the writeImpl raw ring-store check
   make run-farm-tsan       Farm suite under ThreadSanitizer (LDC)
-  make -C actor_torture run run-dmd run-tsan
-                           public actor suite
+  make -C actor_torture run run-dmd run-tsan death
+                           public actor suite and child-process diagnostics
   make -C review_torture run run-tsan
                            adversarial Farm suite
   make -C private_actor_tests run run-dmd run-tsan doc-example death
@@ -36,6 +37,11 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
 Reference (needs DMD):
   make docs               generate the HTML API reference into .build/docs/
                           (ignored; open .build/docs/antfarm.html first)
+
+Windows integration (native x64, Dub, Python 3, LDC and DMD; no Bash or TSan):
+  make check-windows      native Windows matrix (WINDOWS_CHECK_ARGS selects lanes)
+  python scripts/check-windows.py --quick
+                          focused LDC packages, review and examples; no make needed
 
 Longer or optional (not run by make check):
   make check-soak          private-actor TSan loop for at least 121 s
@@ -54,6 +60,14 @@ help:
 
 check:
 	./scripts/check.sh
+
+check-quick:
+	./scripts/check.sh --quick
+
+WINDOWS_PYTHON ?= python
+WINDOWS_CHECK_ARGS ?=
+check-windows:
+	$(WINDOWS_PYTHON) -B scripts/check-windows.py $(WINDOWS_CHECK_ARGS)
 
 check-docs:
 	python3 scripts/check-doc-links.py

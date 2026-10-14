@@ -530,6 +530,7 @@ private struct WavePinResult
 {
     ulong waveCalls;
     ulong autonomousCalls;
+    ulong inboxNodes;
 }
 
 private struct WavePinState
@@ -538,9 +539,14 @@ private struct WavePinState
 }
 
 private void wavePinDormant(scope ref ActorBorrow!WavePinState actor,
-        scope ref ActorContext) nothrow @nogc @system
+        scope ref ActorContext context) nothrow @nogc @system
 {
     ++actor.value.result.autonomousCalls;
+    while (auto node = context.popInbox())
+    {
+        ++actor.value.result.inboxNodes;
+        node.complete();
+    }
 }
 
 private void wavePinOperation(scope ref ActorBorrow!WavePinState actor)
@@ -582,6 +588,125 @@ private final class WaveRacePublisher
         farm.unregisterProducer(token);
         atomicStore!(MemoryOrder.rel)(done, 1);
     }
+}
+
+/// Force either a signal in the CAS/owner-store gap, or an accepted sender
+/// whose zero-owner check preceded admission and whose signal follows it.
+private void testWaveSignalRace(bool send, bool lateSender = false)
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 2, 256);
+    check(farm !is null, "wave signal Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "wave signal runtime allocation");
+    scope (exit) runtime.destroy();
+    WavePinResult output;
+    auto owner = runtime.createActor!(WavePinState, wavePinDormant)(
+        WavePinState(&output));
+    check(owner.valid, "wave signal actor allocation");
+    auto handle = owner.handle;
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "wave signal subscribe");
+    scope (exit) view.unsubscribe();
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "wave signal producer token");
+    scope (exit) farm.unregisterProducer(token);
+    auto deadline = MonoTime.currTime + 15.seconds;
+    ActorInboxNode node;
+    node.initialize(null);
+    ActorSendResult sent;
+    Thread sender;
+    if (lateSender)
+    {
+        g_hookNode = &node;
+        // Release/acquire hook flags publish the selected seam and join the
+        // sender's owner check before wave admission, then resume its signal.
+        atomicStore!(MemoryOrder.rel)(g_hookTarget,
+            cast(int) ActorTestPoint.submissionReserved);
+        atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+        atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+        setActorTestHook(&blockingActorHook);
+        sender = new Thread({ sent = handle.send(&node); });
+        sender.start();
+        waitFlag(g_hookArrived, deadline, "wave late sender reservation timeout");
+    }
+    else
+    {
+        // The hook's release/acquire flags order our signal strictly after
+        // lifecycle reservation and before the publisher's owner store.
+        atomicStore!(MemoryOrder.rel)(g_waveReserveArrived, 0);
+        atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 0);
+        setActorTestHook(&waveReserveHook);
+    }
+    auto publisher = new WaveRacePublisher(farm, handle);
+    auto thread = new Thread(&publisher.run);
+    thread.start();
+    if (lateSender)
+    {
+        waitFlag(publisher.published, deadline, "wave late sender publication timeout");
+        atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+        sender.join();
+    }
+    else
+    {
+        waitFlag(g_waveReserveArrived, deadline, "wave signal reservation timeout");
+        if (send) sent = handle.send(&node);
+        else check(handle.wake() == ActorWakeResult.coalesced,
+            "wave reservation wake coalesces");
+        atomicStore!(MemoryOrder.rel)(g_waveReserveRelease, 1);
+        waitFlag(publisher.published, deadline, "wave signal publication timeout");
+    }
+    setActorTestHook(null);
+    g_hookNode = null;
+    if (send) check(sent == ActorSendResult.coalesced,
+        "wave reservation send coalesces");
+    check(publisher.written == 1, "wave signal member admitted");
+    // Join the publisher before reading its completion handle; consumption
+    // remains on this thread so the post-wave activation cannot run early.
+    atomicStore!(MemoryOrder.rel)(publisher.sealRequested, 1);
+    thread.join();
+    while (!publisher.completion.finished)
+    {
+        while (view.consumeNext()) {}
+        check(MonoTime.currTime < deadline, "wave signal completion timeout");
+    }
+    check(output.waveCalls == 1 && output.autonomousCalls == 0,
+        "wave operation completes before autonomous activation");
+    check(runtime.ready == 1, "wave signal queues post-wave activation");
+    while (output.autonomousCalls == 0)
+    {
+        runtime.flush(token, 1, avgCostForChunk(32));
+        while (view.consumeNext()) {}
+        check(MonoTime.currTime < deadline, "wave signal autonomous timeout");
+    }
+    check(output.autonomousCalls == 1 && output.inboxNodes == (send ? 1 : 0),
+        "wave signal honoured exactly once");
+    if (send) check(node.available && node.outcome == ActorNodeOutcome.completed,
+        "wave signal send completed");
+    check(!publisher.completion.failed,
+        "benign wave signal must not fail the completed wave");
+    check(publisher.completion.interrupted,
+        "wave records the observed signal independently of failure");
+    if (lateSender)
+    {
+        auto old = publisher.completion;
+        publisher.wave.begin(farm);
+        check(!old.valid && !old.interrupted && !old.failed && !old.finished,
+            "reused wave invalidates old outcome observations");
+        auto fresh = publisher.wave.handle;
+        check(!fresh.interrupted && !fresh.failed,
+            "new generation clears sticky outcomes");
+        ActorHandle!WavePinState[2] duplicates = [handle, handle];
+        check(publisher.wave.publish!wavePinOperation(duplicates[], token) == 0,
+            "duplicate wave member rejected");
+        auto rejected = publisher.wave.seal();
+        check(rejected.finished && rejected.failed && !rejected.interrupted,
+            "duplicate rejection remains structural failure");
+    }
+    check(owner.requestRetire() == ActorRetireResult.requested && owner.retired,
+        "wave signal actor retires after drain");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed, "wave signal reclaim");
+    printf("actor wave signal race OK (send=%d late=%d)\n", send, lateSender);
 }
 
 private void testWaveMembershipPinsRetiredActor()
@@ -667,8 +792,9 @@ private void testWaveMembershipPinsRetiredActor()
     waitFlag(publisher.done, deadline, "wave-race seal timeout");
     thread.join();
     setActorTestHook(null);
-    check(publisher.completion.finished && publisher.completion.failed,
-        "raced retirement finishes the sealed wave as failed");
+    check(publisher.completion.finished && !publisher.completion.failed
+            && publisher.completion.interrupted,
+        "raced retirement finishes the sealed wave as interrupted");
     check(quarantine.count == 3, "actor state, slots and runtime quarantined");
     foreach (i; 0 .. quarantine.count)
     {
@@ -951,6 +1077,9 @@ private void testDeterministicInterleavings()
     testCloseBoundary(ActorTestPoint.activationSignalled);
     testContendedNodeClaimDuringClose();
     testReleasedReservationIsQuiescent();
+    testWaveSignalRace(false);
+    testWaveSignalRace(true);
+    testWaveSignalRace(true, true);
     testWaveCompletionCreditPinsDescriptor(false);
     testWaveCompletionCreditPinsDescriptor(true);
     testWaveMembershipPinsRetiredActor();
@@ -3778,8 +3907,9 @@ private void testCancelDuringWaveAdmission()
     atomicStore!(MemoryOrder.rel)(publisher.sealRequested, 1);
     waitFlag(publisher.done, deadline, "admission wave seal timeout");
     publisherThread.join();
-    check(publisher.completion.finished && publisher.completion.failed,
-        "interrupted wave finishes failed");
+    check(publisher.completion.finished && !publisher.completion.failed
+            && publisher.completion.interrupted,
+        "cancelled wave finishes interrupted without structural failure");
     check(owner.reclaim() == ActorReclaimResult.reclaimed,
         "admission reclaim after wave release");
     view.unsubscribe();
@@ -3915,8 +4045,445 @@ private void testCancelModeRetirement()
     fflush(stdout);
 }
 
-void main()
+// -------------------------------------------------------------------------
+// Child-process diagnostics: `actor_torture death` re-executes
+// /proc/self/exe as "child:<mode>" once per childCases row and checks the
+// exit status and stderr. Rows describe fatal sites (abort) and debug
+// diagnostics (warn); silent rows prove a path stays quiet.
+// -------------------------------------------------------------------------
+
+private enum ChildExpect
 {
+    abort,  // nonzero exit; stderr contains `text`
+    warn,   // exit 0; stderr contains `text`
+    silent, // exit 0; stderr empty
+}
+
+private struct ChildCase
+{
+    string mode;
+    ChildExpect expect;
+    string text;
+    bool assertOnly; // the diagnostic exists only in version(assert) builds
+    void function() run;
+}
+
+private enum ownerDropText = "ActorOwner dropped without reclaim";
+
+private immutable ChildCase[] childCases = [
+    ChildCase("node-complete-unowned", ChildExpect.abort,
+        "antfarm fatal: complete actor inbox node not owned by actor", false,
+        &childNodeUnowned!(NodeAction.complete)),
+    ChildCase("node-fail-unowned", ChildExpect.abort,
+        "antfarm fatal: fail actor inbox node not owned by actor", false,
+        &childNodeUnowned!(NodeAction.fail)),
+    ChildCase("node-cancel-unowned", ChildExpect.abort,
+        "antfarm fatal: cancel actor inbox node not owned by actor", false,
+        &childNodeUnowned!(NodeAction.cancel)),
+    ChildCase("node-fail-oversize", ChildExpect.abort,
+        "antfarm fatal: actor inbox node failure code out of range", false,
+        &childNodeDispatch!false),
+    ChildCase("node-reinitialize-queued", ChildExpect.abort,
+        "antfarm fatal: actor inbox node state corrupt", false,
+        &childNodeDispatch!true),
+    ChildCase("erased-borrow-mismatch", ChildExpect.abort,
+        "antfarm fatal: type-erased actor borrow type mismatch", false,
+        &childErasedBorrowMismatch),
+    ChildCase("owner-overwrite-live", ChildExpect.abort,
+        "antfarm fatal: overwrite live ActorOwner", false,
+        &childOwnerOverwrite!false),
+    ChildCase("erased-owner-overwrite-live", ChildExpect.abort,
+        "antfarm fatal: overwrite live ActorErasedOwner", false,
+        &childOwnerOverwrite!true),
+    ChildCase("actor-generation-wrap", ChildExpect.abort,
+        "antfarm fatal: actor generation wrap", false,
+        &childActorGenerationWrap),
+    ChildCase("actor-generation-preset-live", ChildExpect.abort,
+        "antfarm fatal: preset actor generation without a quiescent free slot", true,
+        &childActorGenerationPresetLive),
+    ChildCase("actor-generation-preset-oversize", ChildExpect.abort,
+        "antfarm fatal: preset actor generation out of range", true,
+        &childActorGenerationPresetOversize),
+    ChildCase("runtime-destroy-live", ChildExpect.abort,
+        "antfarm fatal: destroy actor runtime with live actors", false,
+        &childRuntimeDestroyLive),
+    ChildCase("wave-null-farm", ChildExpect.abort,
+        "antfarm fatal: actor wave requires a Farm", false,
+        &childWaveNullFarm),
+    ChildCase("wave-reuse-unfinished", ChildExpect.abort,
+        "antfarm fatal: reuse unfinished actor wave", false,
+        &childWaveReuseUnfinished),
+    ChildCase("wave-generation-wrap", ChildExpect.abort,
+        "antfarm fatal: actor wave generation wrap", false,
+        &childWaveGenerationWrap),
+    ChildCase("wave-generation-preset-unfinished", ChildExpect.abort,
+        "antfarm fatal: preset actor wave generation requires a finished wave and nonzero generation", true,
+        &childWaveGenerationPresetUnfinished),
+    ChildCase("wave-publish-uninitialized", ChildExpect.abort,
+        "antfarm fatal: publish uninitialized actor wave", false,
+        &childWavePublish!false),
+    ChildCase("wave-publish-sealed", ChildExpect.abort,
+        "antfarm fatal: publish sealed actor wave", false,
+        &childWavePublish!true),
+    ChildCase("wave-seal-uninitialized", ChildExpect.abort,
+        "antfarm fatal: seal uninitialized actor wave", false,
+        &childWaveSeal!false),
+    ChildCase("wave-seal-twice", ChildExpect.abort,
+        "antfarm fatal: seal actor wave twice", false,
+        &childWaveSeal!true),
+    ChildCase("owner-double-reclaim", ChildExpect.silent, null, false,
+        &childOwnerDoubleReclaim),
+    ChildCase("owner-drop-live", ChildExpect.warn, ownerDropText, true,
+        &childOwnerDropLive),
+    ChildCase("owner-move-scope-exit", ChildExpect.silent, null, false,
+        &childOwnerMoveScopeExit),
+    ChildCase("owner-reclaim-scope-exit", ChildExpect.silent, null, false,
+        &childOwnerReclaimScopeExit),
+    ChildCase("owner-leak-scope-exit", ChildExpect.silent, null, false,
+        &childOwnerLeakScopeExit),
+];
+
+// Child bodies that drop or leak an actor also leak its runtime and Farm:
+// destroying a runtime with a live actor is itself fatal.
+private ActorRuntime* childRuntime(size_t capacity = 1)
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    check(farm !is null, "child Farm allocation");
+    auto runtime = ActorRuntime.create(farm, capacity);
+    check(runtime !is null, "child runtime allocation");
+    return runtime;
+}
+
+private ActorOwner!OwnerProbeState childOwner(ActorRuntime* runtime)
+{
+    auto owner = runtime.createActor!(OwnerProbeState, ownerProbeActor)(
+        OwnerProbeState(null));
+    check(owner.valid, "child actor creation");
+    return owner;
+}
+
+private void childRetireAndReclaim(ref ActorOwner!OwnerProbeState owner)
+{
+    check(owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "child idle actor retire");
+    check(owner.retired, "child idle actor retires immediately");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed,
+        "child actor reclaim");
+}
+
+private void childNodeUnowned(NodeAction action)()
+{
+    ActorInboxNode node;
+    node.initialize();
+    static if (action == NodeAction.complete) node.complete();
+    else static if (action == NodeAction.fail) node.fail(0);
+    else node.cancel();
+}
+
+private void childNodeDispatch(bool reinitialize)()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "child node runtime allocation");
+    shared int handled;
+    auto owner = runtime.createActor!(NodeOutcomeState, nodeOutcomeActor)(
+        NodeOutcomeState(&handled));
+    check(owner.valid, "child node actor creation");
+    NodeOutcomeMessage message;
+    message.action = NodeAction.fail;
+    message.code = 0x100_0000;
+    message.node.initialize(&message);
+    check(accepted(owner.handle.send(&message.node)), "child node send");
+    static if (reinitialize)
+        message.node.initialize(&message);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "child node subscribe");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "child node producer");
+    check(runtime.flush(token) == 1, "child node flush");
+    while (view.consumeNext()) {}
+}
+
+private void childMismatchedErasedActor(scope ref ActorErasedBorrow actor,
+        scope ref ActorContext) nothrow @nogc @system
+{
+    actor.value!ubyte() = 0;
+}
+
+private void childErasedBorrowMismatch()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "child erased runtime allocation");
+    ulong initial;
+    auto adapter = runtime.erasedAdapter;
+    auto owner = adapter.createActor(&initial, initial.sizeof,
+        ulong.alignof, &childMismatchedErasedActor);
+    check(owner.valid, "child erased actor creation");
+    check(owner.handle.wake() == ActorWakeResult.queued, "child erased wake");
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "child erased subscribe");
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "child erased producer");
+    check(runtime.flush(token) == 1, "child erased flush");
+    while (view.consumeNext()) {}
+}
+
+private void childOwnerOverwrite(bool erased)()
+{
+    auto runtime = childRuntime(2);
+    auto first = childOwner(runtime);
+    auto second = childOwner(runtime);
+    static if (erased)
+    {
+        auto target = first.intoErased();
+        auto source = second.intoErased();
+        target = move(source);
+    }
+    else first = move(second);
+}
+
+private void childActorGenerationWrap()
+{
+    auto runtime = childRuntime();
+    runtime.testPresetFreeSlotGeneration((ulong.max >> 8) - 1);
+    auto owner = childOwner(runtime);
+    check(owner.handle.generation == ulong.max >> 8,
+        "child final representable actor generation");
+    childRetireAndReclaim(owner);
+    auto wrapped = childOwner(runtime);
+}
+
+private void childActorGenerationPresetLive()
+{
+    auto runtime = childRuntime();
+    auto owner = childOwner(runtime);
+    runtime.testPresetFreeSlotGeneration(1);
+}
+
+private void childActorGenerationPresetOversize()
+{
+    childRuntime().testPresetFreeSlotGeneration(ulong.max);
+}
+
+private void childRuntimeDestroyLive()
+{
+    auto runtime = childRuntime();
+    auto owner = childOwner(runtime);
+    runtime.destroy();
+}
+
+private void childWaveNullFarm()
+{
+    ActorWave wave;
+    wave.begin(null);
+}
+
+private void childWaveReuseUnfinished()
+{
+    auto farm = AntFarm.create();
+    check(farm !is null, "child wave Farm allocation");
+    ActorWave wave;
+    wave.begin(farm);
+    wave.begin(farm);
+}
+
+private void childWaveGenerationPresetUnfinished()
+{
+    auto farm = AntFarm.create();
+    check(farm !is null, "child wave Farm allocation");
+    ActorWave wave;
+    wave.begin(farm);
+    wave.testPresetGeneration(1);
+}
+
+private void childWaveGenerationWrap()
+{
+    auto farm = AntFarm.create();
+    check(farm !is null, "child wave Farm allocation");
+    ActorWave wave;
+    wave.begin(farm);
+    check(wave.seal().finished, "child wave initial finish");
+    wave.testPresetGeneration(ulong.max - 1);
+    wave.begin(farm);
+    check(wave.handle.generation == ulong.max,
+        "child final representable wave generation");
+    check(wave.seal().finished, "child wave final finish");
+    wave.begin(farm);
+}
+
+private void childWaveOperation(scope ref ActorBorrow!OwnerProbeState)
+    nothrow @nogc @system
+{
+}
+
+private void childWavePublish(bool sealed)()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "child wave runtime allocation");
+    auto owner = childOwner(runtime);
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "child wave producer");
+    ActorWave wave;
+    static if (sealed)
+    {
+        wave.begin(farm);
+        check(wave.seal().finished, "child wave sealed");
+    }
+    ActorHandle!OwnerProbeState[1] handles = [owner.handle];
+    wave.publish!childWaveOperation(handles[], token);
+}
+
+private void childWaveSeal(bool twice)()
+{
+    ActorWave wave;
+    static if (twice)
+    {
+        auto farm = AntFarm.create();
+        check(farm !is null, "child wave Farm allocation");
+        wave.begin(farm);
+        check(wave.seal().finished, "child wave first seal");
+    }
+    wave.seal();
+}
+
+private void childOwnerDoubleReclaim()
+{
+    auto owner = childOwner(childRuntime());
+    childRetireAndReclaim(owner);
+    check(owner.reclaim() == ActorReclaimResult.staleOwner,
+        "child second reclaim is a stale owner");
+}
+
+private void childOwnerDropLive()
+{
+    auto owner = childOwner(childRuntime());
+}
+
+private void childOwnerMoveScopeExit()
+{
+    auto runtime = childRuntime();
+    ActorOwner!OwnerProbeState moved;
+    {
+        auto owner = childOwner(runtime);
+        moved = move(owner);
+    }
+    check(moved.valid, "child moved-into owner stays valid");
+    childRetireAndReclaim(moved);
+}
+
+private void childOwnerReclaimScopeExit()
+{
+    auto owner = childOwner(childRuntime());
+    childRetireAndReclaim(owner);
+}
+
+private void childOwnerLeakScopeExit()
+{
+    auto owner = childOwner(childRuntime());
+    owner.leak();
+    check(!owner.valid, "leak invalidates the owner");
+}
+
+private void runChildMode(string mode)
+{
+    foreach (ref row; childCases)
+        if (row.mode == mode)
+        {
+            row.run();
+            fflush(stdout);
+            fflush(stderr);
+            return;
+        }
+    check(false, "unknown actor torture child mode");
+}
+
+private void testChildCases()
+{
+    version (linux)
+    {
+        import std.algorithm.searching : canFind;
+        import std.process : Redirect, pipeProcess, wait;
+
+        foreach (ref row; childCases)
+        {
+            version (assert) {}
+            else if (row.assertOnly)
+            {
+                printf("SKIP child %.*s: version(assert) diagnostic, "
+                    ~ "absent under -release\n",
+                    cast(int) row.mode.length, row.mode.ptr);
+                continue;
+            }
+            auto pipes = pipeProcess(["/proc/self/exe", "child:" ~ row.mode],
+                Redirect.stderr);
+            string text;
+            foreach (chunk; pipes.stderr.byChunk(4096))
+                text ~= cast(const(char)[]) chunk;
+            immutable status = wait(pipes.pid);
+            bool ok;
+            final switch (row.expect)
+            {
+            case ChildExpect.abort:
+                ok = status != 0 && text.canFind(row.text);
+                break;
+            case ChildExpect.warn:
+                ok = status == 0 && text.canFind(row.text);
+                break;
+            case ChildExpect.silent:
+                ok = status == 0 && text.length == 0;
+                break;
+            }
+            if (!ok)
+                fprintf(stderr, "child %.*s: status %d, stderr:\n%.*s",
+                    cast(int) row.mode.length, row.mode.ptr, status,
+                    cast(int) text.length, text.ptr);
+            check(ok, "child mode exit status or stderr mismatch");
+            printf("PASS child %.*s\n", cast(int) row.mode.length, row.mode.ptr);
+        }
+        printf("actor child diagnostics OK\n");
+    }
+    else
+        printf("SKIP actor child diagnostics: /proc/self/exe re-exec "
+            ~ "requires Linux\n");
+    fflush(stdout);
+}
+
+void main(string[] args)
+{
+    if (args.length == 2 && args[1].length > 6 && args[1][0 .. 6] == "child:")
+    {
+        runChildMode(args[1][6 .. $]);
+        return;
+    }
+    if (args.length == 2)
+    {
+        switch (args[1])
+        {
+        case "death": testChildCases(); break;
+        case "--wave-wake": testWaveSignalRace(false); break;
+        case "--wave-send": testWaveSignalRace(true); break;
+        case "--wave-late-send": testWaveSignalRace(true, true); break;
+        case "--waves":
+            testWaveSignalRace(false);
+            testWaveSignalRace(true);
+            testWaveSignalRace(true, true);
+            testWaveCompletionCreditPinsDescriptor(false);
+            testWaveCompletionCreditPinsDescriptor(true);
+            testWaveMembershipPinsRetiredActor();
+            testWaveReleaseAllowsImmediateReuse();
+            testCompletionCallbackRunsAfterFinished();
+            testCancelDuringWaveAdmission();
+            testCancelDuringWaveRollback();
+            break;
+        default: check(false, "unknown actor torture selector");
+        }
+        printf("SELECTED ACTOR TORTURE TESTS PASSED\n");
+        return;
+    }
+    check(args.length == 1, "expected at most one actor torture selector");
     testDeterministicInterleavings();
     testNodeOutcomes();
     testOwnerMoveOnly();

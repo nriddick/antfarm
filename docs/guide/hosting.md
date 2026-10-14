@@ -45,7 +45,7 @@ void main()
     owner.handle.send(&node);
     host.waitUntil(() => node.available); // "receive"
     host.retire(owner);                   // "join"
-    writeln(host.plan.summary());
+    writeln(host.summary());
 }
 ```
 
@@ -68,18 +68,27 @@ abandoned hangs process exit.
 
 ## Placement
 
-`FarmHost.preview(options)` returns the `FarmHostPlan` that the constructor
-will execute. It changes nothing, but it does warm topology and OS-scope
-discovery, including when it throws `FarmHostPlanException`. Call it once
-before concurrent construction or preview: that first discovery is an
-unlocked setup operation. On Linux a racing first call is benign; on
-Windows it can spuriously refuse the caller with `outsideOsScope`.
-`plan.summary()` prints the plan in one line, and `plan.notes` lists every
-compromise. The defaults are:
+`FarmHost.resolve(options)` returns the worker selection that the
+constructor will start, as a `PoolResolution`: the workers are accepted,
+every other CPU that passed the `options.pool` filters is
+`Reject.notSelected`, and each physical group reports its `candidates` beside
+its `accepted` count. It changes nothing, but it does warm topology
+discovery (which freezes the OS scope), including when it throws
+`FarmHostResolveException`. Call it once before concurrent construction or
+resolve calls: that first discovery is an unlocked setup operation. On Linux
+a racing first call is benign; on Windows it can spuriously refuse the
+caller with `outsideOsScope`.
+
+A live host reports the same selection, now with every worker's pin outcome,
+as `host.resolution` (the pool's own `pool.resolution`), and the caller's
+confine or pin set as `host.callerCpus`. `host.summary()` prints workers,
+caller placement, Farm participants and sizing in one line, and
+`host.toString` adds every compromise note and the resolution summary.
+The defaults are:
 
 - **One physical group.** Workers come from the accepted LLC with the most
   accepted CPUs. The host never spills into another group: asking for more
-  workers than the group has is a `FarmHostPlanException` that names `span`.
+  workers than the group has is a `FarmHostResolveException` that names `span`.
 - **One worker per core.** `skipSmtSiblings` is on in
   `defaultHostPoolOptions`.
 - **Caller confined** (`CallerPlacement.confine`). The constructing thread's
@@ -92,8 +101,8 @@ compromise. The defaults are:
 - **`workers == 0`** starts no pool. The calling thread is the only consumer.
 
 `HostGroups.span([home, other...])` is the explicit opt-in to consume one Farm
-from several groups. The plan labels it `crossGroup` and counts the other
-groups' workers as foreign consumers. `HostGroups.only(g)` pins the choice to
+from several groups. `host.summary()` labels it `crossGroup` and counts the
+other groups' workers as foreign consumers. `HostGroups.only(g)` pins the choice to
 one group.
 
 ## Progress and waking
@@ -162,7 +171,10 @@ again. Otherwise it runs the
 6. destroys the Farm.
 
 `abandon()` stops the consumers, restores affinity and leaks everything that
-did not drain.
+did not drain. After `abandon()` or a failed host, call `leak()` on any
+`ActorOwner` you cannot reclaim. Otherwise an assertion build prints a
+"dropped without reclaim" diagnostic when the owner goes out of scope,
+including while `FarmHostFailed` unwinds.
 
 Join every thread that may call `requestCancel` on a host park before
 `close()`. The host cannot see those threads. Views subscribed outside the

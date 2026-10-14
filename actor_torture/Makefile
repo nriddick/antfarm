@@ -26,7 +26,7 @@ MIMALLOC_TSAN_CC ?= clang
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
 .PHONY: all run run-tsan run-dmd run-mimalloc run-mimalloc-dmd \
-	run-mimalloc-debug run-mimalloc-tsan clean
+	run-mimalloc-debug run-mimalloc-tsan death run-death run-death-dmd clean
 
 all: actor_torture
 
@@ -35,6 +35,26 @@ actor_torture: $(SOURCES)
 
 run: actor_torture
 	./actor_torture
+
+# Child-process diagnostics (`actor_torture death`), built in debug and
+# -release. Each row re-execs /proc/self/exe and checks the exit status and
+# stderr, including each fatal site's exact message substring. The table in
+# README.md lists covered sites and internal invariants without public probes;
+# rows for version(assert)-only diagnostics print SKIP under -release.
+actor_torture_release: $(SOURCES)
+	$(DC) $(DFLAGS) -release $(LDC_VERSIONS) $(SOURCES) -of=$@
+
+death: run-death run-death-dmd
+
+run-death: actor_torture actor_torture_release
+	./actor_torture death
+	./actor_torture_release death
+
+run-death-dmd:
+	dmd -g -checkaction=context $(DMD_VERSIONS) $(SOURCES) -of=actor_torture_dmd
+	dmd -g -release $(DMD_VERSIONS) $(SOURCES) -of=actor_torture_dmd_release
+	./actor_torture_dmd death
+	./actor_torture_dmd_release death
 
 run-tsan:
 	$(DC) -g -O1 -fsanitize=thread -d-version=TSan $(LDC_VERSIONS) $(SOURCES) -of=actor_torture_tsan
@@ -95,7 +115,8 @@ run-mimalloc-tsan: $(SOURCES) $(MIMALLOC_TSAN_LIBRARY)
 	TSAN_OPTIONS='$(TSAN_OPTIONS)' ./actor_torture_mimalloc_tsan
 
 clean:
-	rm -f actor_torture actor_torture_tsan actor_torture_dmd \
+	rm -f actor_torture actor_torture_release actor_torture_tsan \
+		actor_torture_dmd actor_torture_dmd_release \
 		actor_torture_mimalloc actor_torture_mimalloc_dmd \
 		actor_torture_mimalloc_debug actor_torture_mimalloc_tsan *.o
 	rm -rf .build

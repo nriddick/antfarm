@@ -13,6 +13,10 @@ import std.stdio : writeln;
 import std.exception : enforce;
 import std.traits : hasNested;
 
+// Progress deadlines are hang detectors, not timing assertions; this is
+// generous so a loaded two-core runner does not trip them.
+enum hangTimeout = 60.seconds;
+
 void check(bool ok, string file = __FILE__, size_t line = __LINE__) nothrow @nogc @system
 {
     if (!ok) { fprintf(stderr, "FAIL %.*s:%zu\n", cast(int) file.length, file.ptr, line); abort(); }
@@ -140,7 +144,7 @@ void roots(PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
         output[] = 0;
         foreach (i; 0 .. count) check((park.spawn(State(&output[i], iterations, 0))) == PrivateSpawnResult.spawned);
         check(park.spawn(State.init) == PrivateSpawnResult.capacityFull);
-        auto deadline = MonoTime.currTime + 30.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token, batch);
@@ -238,7 +242,7 @@ void trees(uint consumers = 6)
     {
         output[] = 0;
         foreach (i; 0 .. 48) check((park.spawn(Parent(null, output.ptr + i * 68, 0, gates.ptr + i * 17))) == PrivateSpawnResult.spawned);
-        auto deadline = MonoTime.currTime + 30.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token, 13);
@@ -335,7 +339,7 @@ void backpressure()
         submitted += n;
     }
     check(submitted > 0 && submitted < count && partial);
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         while (view.consumeNext()) {}
@@ -369,7 +373,7 @@ void shardedCreators()
             {
                 output[] = 0;
                 foreach (i; 0 .. 1024) check((park.spawn(State(&output[i], 3, 0))) == PrivateSpawnResult.spawned);
-                auto deadline = MonoTime.currTime + 30.seconds;
+                auto deadline = MonoTime.currTime + hangTimeout;
                 while (park.live)
                 {
                     park.pump(token);
@@ -431,7 +435,7 @@ void sameShardJoin()
         header.call = &joinWork;
         auto n = farm.writeTracked(header, JoinBodies(&probe), 2, &hook, token, MAX_AVG_COST);
         check(n == 2);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (atomicLoad!(MemoryOrder.acq)(probe.done) == 0)
             enforce(MonoTime.currTime < deadline, "join timeout");
     }
@@ -543,7 +547,7 @@ void hugeConfiguredLimits()
             check(park.spawn(State(&outputs[i], 1, 0)) == PrivateSpawnResult.spawned);
         // Configured limit may exceed capacity; validation accepts it and copies clamp.
         check(park.pump(token, configured) == capacity, label, 0);
-        auto deadline = MonoTime.currTime + 5.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             while (view.consumeNext()) {}
@@ -635,7 +639,7 @@ version (AntfarmWriteAuditHooks)
         auto park = PrivateRootPark!(Root, step).create(farm, 1, rootLimit, policy(counts));
         check(park !is null, label, 0);
         check(park.spawn(Root(null, slots.ptr)) == PrivateSpawnResult.spawned, label, 0);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token);
@@ -776,7 +780,7 @@ void pumpCountedTables()
     ulong[4] outputs;
     check(park.spawn(CountedRoot(null, outputs.ptr)) == PrivateSpawnResult.spawned);
     size_t roots, tables, childOnly;
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         immutable count = park.pumpCounted(token);
@@ -826,7 +830,7 @@ void configuredBatches()
     // cannot take the whole batch.
     auto admitted = park.pump(token);
     check(admitted > 0 && admitted < count); // Farm quota splits the configured batch.
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         while (view.consumeNext()) {}
@@ -843,7 +847,7 @@ void configuredBatches()
     check(parent !is null);
     check(parent.spawn(BatchParent(null, childOutputs.ptr, childCount, 1024, 0)) == PrivateSpawnResult.spawned);
     auto workers = new Workers(farm, 1);
-    deadline = MonoTime.currTime + 30.seconds;
+    deadline = MonoTime.currTime + hangTimeout;
     while (parent.live)
     {
         parent.pump(token);
@@ -1299,7 +1303,7 @@ void namedCheck(bool ok, string name) nothrow @nogc @system
 { check(ok, name, 0); }
 void awaitRaw(ref shared uint flag, uint value, string name) nothrow @nogc @system
 {
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (atomicLoad!(MemoryOrder.raw)(flag) != value)
     {
         namedCheck(MonoTime.currTime < deadline, name);
@@ -1389,7 +1393,7 @@ void childLargeCohort(size_t count)
     check(filler !is null);
     foreach (i; 0 .. fillCount) check(filler.spawn(State(fillResults.ptr + i, 1, 0)) == PrivateSpawnResult.spawned);
     size_t admitted;
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (true)
     {
         auto n = filler.pump(token);
@@ -1601,7 +1605,7 @@ void refillAfterFinal()
     auto park = PrivateRootPark!(RefillRoot, refillStep).create(farm, 1, 256, policy(counts));
     check(park !is null);
     check(park.spawn(RefillRoot(null, &c)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -1643,12 +1647,14 @@ version (AntfarmActorTestHooks)
             scope(exit) other.unsubscribe();
             atomicStore!(MemoryOrder.raw)(ready, 1u);
             awaitRaw(go, 1u, "delayed idle worker start timeout");
-            auto deadline = MonoTime.currTime + 10.seconds;
+            auto deadline = MonoTime.currTime + hangTimeout;
             while (atomicLoad!(MemoryOrder.raw)(hook.arrived) == 0)
             {
                 other.consumeNext();
                 namedCheck(MonoTime.currTime < deadline, "delayed idle child claim timeout");
             }
+            // The inactive view must release its ring pin before waiting for retirement.
+            other.unsubscribe();
             awaitRaw(leave, 1u, "delayed idle retirement before worker join timeout");
         });
         worker.start();
@@ -1661,7 +1667,7 @@ version (AntfarmActorTestHooks)
         awaitRaw(hook.arrived, 1u, "delayed idle final-credit hook timeout");
         atomicStore!(MemoryOrder.raw)(c.observeBusy, 1u);
         // Mutation: move the wave.active release-store above privateWaveBeforeIdlePublish.
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (atomicLoad!(MemoryOrder.raw)(c.busyObserved) == 0)
         {
             view.consumeNext();
@@ -1713,7 +1719,7 @@ version (AntfarmActorTestHooks)
             scope(exit) other.unsubscribe();
             atomicStore!(MemoryOrder.raw)(ready, 1u);
             awaitRaw(go, 1u, "return CAS worker start timeout");
-            auto deadline = MonoTime.currTime + 10.seconds;
+            auto deadline = MonoTime.currTime + hangTimeout;
             while (atomicLoad!(MemoryOrder.raw)(hook.arrived) == 0)
             {
                 other.consumeNext();
@@ -1726,7 +1732,7 @@ version (AntfarmActorTestHooks)
         awaitRaw(ready, 1u, "return CAS subscriber timeout");
         atomicStore!(MemoryOrder.raw)(go, 1u);
         awaitRaw(hook.arrived, 1u, "return CAS first head load timeout");
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (atomicLoad!(MemoryOrder.raw)(hook.calls) < 2)
         {
             view.consumeNext();
@@ -1811,7 +1817,7 @@ version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
             scope(exit) other.unsubscribe();
             atomicStore!(MemoryOrder.raw)(c.ready, 1u);
             awaitRaw(c.go, 1u, "early child worker start timeout");
-            auto deadline = MonoTime.currTime + 10.seconds;
+            auto deadline = MonoTime.currTime + hangTimeout;
             while (atomicLoad!(MemoryOrder.raw)(hook.creditCalls) == 0)
             {
                 other.consumeNext();
@@ -1825,7 +1831,7 @@ version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
         park.pump(token); // audit hook blocks the emitter until the child table completed
         writeAuditHook = null; // worker only consumes, and never enters a write path
         namedCheck(atomicLoad!(MemoryOrder.raw)(hook.calls) == 1, "early child emitter seal publishes idle");
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             while (view.consumeNext()) {}
@@ -1900,7 +1906,7 @@ void depth64()
     check(park !is null);
     check(park.spawn(DeepRoot(null, results.ptr)) == PrivateSpawnResult.spawned);
     auto workers = new Workers(farm, 2);
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -2077,7 +2083,7 @@ void e1Basic(PrivateRootReclamation reclaim)()
         c.terminal = kind == 2;
         c.rounds = kind == 3 ? 7 : 1;
         check(park.spawn(E1Root(&c)) == PrivateSpawnResult.spawned);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token);
@@ -2143,7 +2149,7 @@ void e1BeforeCustody(bool peer)
     version (AntfarmActorTestHooks)
         awaitRaw(hook.calls, 2u, "E1 both direct notifications before custody");
     atomicStore!(MemoryOrder.raw)(c.rootGo, 1u);
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token); while (view.consumeNext()) {}
@@ -2195,7 +2201,7 @@ void e1AfterCustody()
     check(park.spawn(E1Root(&empty)) == PrivateSpawnResult.spawned);
     namedCheck(park.pump(token) == 1, "E1 sleeping root recycled only Batch");
     atomicStore!(MemoryOrder.raw)(c.childGo, 1u);
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token); while (view.consumeNext()) {}
@@ -2261,7 +2267,7 @@ void e1LateStrict(PrivateRootReclamation reclaim)()
     namedCheck(park.live == 1, "E1 strict Entry pinned past state cleanup");
     namedCheck(park.spawn(E1StrictRoot(&c)) == PrivateSpawnResult.capacityFull, "E1 strict no premature reuse");
     atomicStore!(MemoryOrder.raw)(hook.release, 1u);
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.poll(); namedCheck(MonoTime.currTime < deadline, "E1 strict tail completion");
@@ -2308,7 +2314,7 @@ void e1JoinedAndMixed(PrivateRootReclamation reclaim)()
     E1Control c;
     auto joined = PrivateRootPark!(E1Root, e1JoinedStep, reclaim).create(farm, 1, 1);
     check(joined.spawn(E1Root(&c)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (joined.live)
     {
         joined.pump(token); while (view.consumeNext()) {}
@@ -2451,7 +2457,7 @@ version (AntfarmActorTestHooks)
         // Each worker is blocked inside its child's consumeNext, so its return
         // counter is frozen until that call (including the root release) returns.
         atomicStore!(MemoryOrder.raw)(c[0].go, 1u);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (atomicLoad!(MemoryOrder.raw)(hook.arrived) == 0)
         {
             namedCheck(MonoTime.currTime < deadline, "E1 CAS first publisher paused");
@@ -2586,7 +2592,7 @@ version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
         namedCheck(atomicLoad!(MemoryOrder.raw)(s.readyCalls) == 1
             && atomicLoad!(MemoryOrder.raw)(s.readyOnEmitter) == 1, "E1 seal emitter published the root wake");
         namedCheck(c.calls == 1 && park.live == 1, "E1 seal root asleep until collected");
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token);
@@ -2903,7 +2909,7 @@ void portsBasic(PrivateRootReclamation reclaim)()
     shared ulong done;
     foreach (n; [2UL, 5, 67]) // 67 > the child limit 64: several tables per wave
         check(park.spawn(PBasic(null, 0, n, &done)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -3007,12 +3013,14 @@ version (AntfarmActorTestHooks)
             scope(exit) other.unsubscribe();
             atomicStore!(MemoryOrder.raw)(ready, 1u);
             awaitRaw(go, 1u, "ports poll worker go timeout");
-            auto deadline = MonoTime.currTime + 10.seconds;
+            auto deadline = MonoTime.currTime + hangTimeout;
             while (atomicLoad!(MemoryOrder.raw)(hook.arrived) == 0)
             {
                 other.consumeNext();
                 namedCheck(MonoTime.currTime < deadline, "ports poll child claim timeout");
             }
+            // The inactive view must release its ring pin before waiting for retirement.
+            other.unsubscribe();
             awaitRaw(leave, 1u, "ports poll worker leave timeout");
         });
         worker.start();
@@ -3021,7 +3029,7 @@ version (AntfarmActorTestHooks)
         atomicStore!(MemoryOrder.raw)(go, 1u);
         awaitRaw(hook.arrived, 1u, "ports poll final-credit hook");
         atomicStore!(MemoryOrder.raw)(c.observeBusy, 1u);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (atomicLoad!(MemoryOrder.raw)(c.busySeen) == 0)
         {
             view.consumeNext();
@@ -3199,7 +3207,7 @@ version (AntfarmActorTestHooks)
             scope(exit) other.unsubscribe();
             atomicStore!(MemoryOrder.raw)(ready, 1u);
             awaitRaw(go, 1u, "ports wait worker go");
-            auto deadline = MonoTime.currTime + 20.seconds;
+            auto deadline = MonoTime.currTime + hangTimeout;
             if (beforeCustody)
                 while (atomicLoad!(MemoryOrder.raw)(leave) == 0) other.consumeNext();
             else
@@ -3213,7 +3221,7 @@ version (AntfarmActorTestHooks)
                 awaitRaw(leave, 1u, "ports wait worker leave");
             }
         });
-        auto deadline = MonoTime.currTime + 20.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         if (beforeCustody)
         {
             worker.start(); awaitRaw(ready, 1u, "ports wait worker ready");
@@ -3323,7 +3331,7 @@ version (AntfarmActorTestHooks)
         namedCheck(park.live == 1, "ports tail Entry pinned past cohort disposal");
         namedCheck(park.spawn(PtRoot(null, &c)) == PrivateSpawnResult.capacityFull, "ports tail no premature reuse");
         atomicStore!(MemoryOrder.raw)(hook.release, 1u);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.poll();
@@ -3438,7 +3446,7 @@ void portsLargeCohort(size_t count, size_t limit)
     check(filler !is null);
     foreach (i; 0 .. fillCount) check(filler.spawn(State(fillResults.ptr + i, 1, 0)) == PrivateSpawnResult.spawned);
     size_t admitted;
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (true)
     {
         auto n = filler.pump(token);
@@ -3616,7 +3624,7 @@ void portsPipeline()
     {
         shared ulong[4] totals;
         foreach (ref t; totals) check(park.spawn(N3Root(null, 0, &t)) == PrivateSpawnResult.spawned);
-        auto deadline = MonoTime.currTime + 30.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token);
@@ -3702,7 +3710,7 @@ void portsDepth64()
     check(park.spawn(RDeepRoot()) == PrivateSpawnResult.spawned);
     auto workers = new Workers(farm, 2);
     scope(exit) workers.join();
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -3808,7 +3816,7 @@ void portsAllocationFailures()
         ActorAllocator(&log, &sizeLogAllocate, &sizeLogDeallocate));
     check(park !is null);
     check(park.spawn(PaRoot(&log)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -4044,7 +4052,7 @@ struct DtHarness
     }
     void drain(P)(P* park, string name)
     {
-        auto deadline = MonoTime.currTime + 30.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token);
@@ -4739,7 +4747,7 @@ class GcObj
 void gcWaitRounds(uint n) nothrow @nogc @system
 {
     immutable target = atomicLoad(gcRounds) + n;
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (atomicLoad(gcRounds) < target)
     {
         namedCheck(MonoTime.currTime < deadline, "dtor-gc collector progress");
@@ -4815,7 +4823,13 @@ void dtorGc(PrivateRootReclamation reclaim)()
     auto park = PrivateRootPark!(GcRoot, gcStep, reclaim).create(h.farm, 2, 2, ActorAllocator.gcRooted(&inner));
     check(park !is null);
     auto collector = new Thread({
-        while (atomicLoad(gcStop) == 0) { GC.collect(); atomicFetchAdd(gcRounds, 1u); }
+        while (atomicLoad(gcStop) == 0)
+        {
+            GC.collect();
+            atomicFetchAdd(gcRounds, 1u);
+            // Let actor callbacks acquire druntime's range lock between collections.
+            Thread.sleep(1.msecs);
+        }
     });
     collector.start();
     scope(exit) { atomicStore(gcStop, 1u); collector.join(); }
@@ -5380,7 +5394,7 @@ void subsetBasic(PrivateRootReclamation reclaim)()
     check(park !is null && voidPark !is null);
     check(park.spawn(SbRoot(null, &control)) == PrivateSpawnResult.spawned);
     check(voidPark.spawn(SvRoot(null, &control)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live || voidPark.live)
     {
         park.pump(token);
@@ -5473,7 +5487,7 @@ void subsetActive(PrivateRootReclamation reclaim)()
     auto park = PrivateRootPark!(SxRoot, sxStep, reclaim).create(farm, 1, 2, policy(counts));
     check(park !is null);
     check(park.spawn(SxRoot(null, &control)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -5593,7 +5607,7 @@ void subsetLargeCohort(size_t count, size_t limit)
     check(filler !is null);
     foreach (i; 0 .. fillCount) check(filler.spawn(State(fillResults.ptr + i, 1, 0)) == PrivateSpawnResult.spawned);
     size_t admitted;
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (true)
     {
         auto n = filler.pump(token);
@@ -5747,7 +5761,7 @@ void subsetNested(PrivateRootReclamation reclaim)()
     auto park = PrivateRootPark!(SnRoot, snStep, reclaim).create(farm, 1, 2, policy(counts));
     check(park !is null);
     check(park.spawn(SnRoot(null, &control)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (atomicLoad!(MemoryOrder.raw)(control.arrived) == 0)
     {
         park.pump(token);
@@ -5879,7 +5893,7 @@ void subsetAllocationFailures()
         ActorAllocator(&log, &sizeLogAllocate, &sizeLogDeallocate));
     check(park !is null);
     check(park.spawn(SfRoot(&log, ran.ptr)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -6049,7 +6063,7 @@ version (AntfarmActorTestHooks)
         check(park.pump(token) == 1); // child table, then polling root
         atomicStore!(MemoryOrder.raw)(go, 1u);
         awaitRaw(hook.arrived, 1u, "subset tail idle tail paused");
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (c.reads == 0)
         {
             while (view.consumeNext()) {}
@@ -6400,7 +6414,7 @@ version (AntfarmActorTestHooks)
         auto park = PrivateRootPark!(EwRoot, ewStep).create(farm, 1);
         check(park !is null);
         check(park.spawn(EwRoot(&control)) == PrivateSpawnResult.spawned);
-        auto deadline = MonoTime.currTime + 30.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token);
@@ -6511,7 +6525,7 @@ void contTree(PrivateRootReclamation reclaim)(uint depth = 2, uint width = 2)
     auto workers = new Workers(farm, 5); scope(exit) workers.join();
     auto park = PrivateRootPark!(CtRoot, ctRoot, reclaim).create(farm, 1, 64, policy(counts));
     check(park.spawn(CtRoot(&c)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 15.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live) { park.pump(token); namedCheck(MonoTime.currTime < deadline, "cont tree completion deadline"); }
     uint total = width == 1 ? depth + 1 : (1u << (depth + 1)) - 1;
     foreach (i; 0 .. total)
@@ -6564,7 +6578,7 @@ void contYield(PrivateRootReclamation reclaim)()
         while (view.consumeNext()) {}
         check(c.calls == expected);
     }
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live) { park.pump(token); while (view.consumeNext()) {} check(MonoTime.currTime < deadline); }
     park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
 }
@@ -6678,7 +6692,7 @@ PrivateRootDisposition ciRoot(scope ref PrivateBorrow!CiRoot b, scope ref Privat
     if ((c.mode == CiMode.beforeP || c.mode == CiMode.afterP) && atomicLoad!(MemoryOrder.raw)(c.armPolling))
     {
         atomicStore!(MemoryOrder.raw)(c.pollEntered, 1u);
-        auto deadline = MonoTime.currTime + 15.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (!r.mids.finished(ctx))
         {
             if (!r.checked && c.mode == CiMode.beforeP && atomicLoad!(MemoryOrder.raw)(c.pPaused))
@@ -6741,7 +6755,7 @@ version (AntfarmActorTestHooks)
                 check(atomicLoad!(MemoryOrder.raw)(c.leafArrived) == 1);
                 check(atomicLoad!(MemoryOrder.raw)(c.leafGo) == 1);
             }
-            auto deadline = MonoTime.currTime + 10.seconds;
+            auto deadline = MonoTime.currTime + hangTimeout;
             while (!atomicLoad!(MemoryOrder.raw)(c.hookGo))
             {
                 if (MonoTime.currTime >= deadline)
@@ -6768,7 +6782,7 @@ version (AntfarmActorTestHooks)
             awaitRaw(c.midReturned, 2u, "cont P callbacks complete");
             if (c.mode == CiMode.beforeP)
             {
-                auto deadline = MonoTime.currTime + 10.seconds;
+                auto deadline = MonoTime.currTime + hangTimeout;
                 while (atomicLoad!(MemoryOrder.raw)(c.activeSeen) == 0)
                 { pause(); namedCheck(MonoTime.currTime < deadline, "cont P pins wave before unschedule"); }
                 check(atomicLoad!(MemoryOrder.raw)(c.rootDestroyed) == 0);
@@ -6812,7 +6826,7 @@ void contInterleave(PrivateRootReclamation reclaim)(CiMode mode)
         }
         scope(exit) { atomicStore!(MemoryOrder.raw)(stop, 1u); foreach (worker; workers) worker.join(); }
         ciEmitter = true; scope(exit) ciEmitter = false;
-        auto deadline = MonoTime.currTime + 15.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         bool opened, unblocked;
         while (park.live)
         {
@@ -6992,7 +7006,7 @@ void contResults(PrivateRootReclamation reclaim)(bool subset)
     auto workers = new Workers(farm, 5); scope(exit) workers.join();
     auto park = PrivateRootPark!(CrRoot, crRoot, reclaim).create(farm, 1, 64, policy(counts));
     check(park.spawn(CrRoot(&c)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 15.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live) { park.pump(token); check(MonoTime.currTime < deadline); }
     foreach (i; 0 .. 8)
     {
@@ -7026,7 +7040,7 @@ void contAdmission(PrivateRootReclamation reclaim)(size_t count, size_t limit)
     park.pump(token); while (view.consumeNext()) {}
     // Publish the initial wave without consumers running: no return can be
     // drained yet. The large ring holds even 1025 one-member tables.
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     foreach (_; 0 .. count + 2) park.pump(token);
     while (view.consumeNext()) {}
     foreach (n; calls) check(n == 1);
@@ -7103,7 +7117,7 @@ void contCasRetry(PrivateRootReclamation reclaim)()
             }); threads ~= t; t.start();
         }
         scope(exit) { atomicStore!(MemoryOrder.raw)(stop, 1u); foreach (t; threads) t.join(); }
-        auto deadline = MonoTime.currTime + 15.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (!atomicLoad!(MemoryOrder.raw)(c.firstAtCas)) { park.pump(token); check(MonoTime.currTime < deadline); }
         // A can reach its CAS before B's table is published; keep emitting until B starts.
         while (!atomicLoad!(MemoryOrder.raw)(c.secondStarted)) { park.pump(token); check(MonoTime.currTime < deadline); }
@@ -7159,7 +7173,7 @@ version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
             awaitRaw(s.work, 2u, "cont seal member go");
             do view.consumeNext(); while (ciRole != 1);
             atomicStore!(MemoryOrder.raw)(c.midReturned, 1u);
-            auto deadline = MonoTime.currTime + 20.seconds;
+            auto deadline = MonoTime.currTime + hangTimeout;
             while (atomicLoad!(MemoryOrder.raw)(s.work) != 3)
             {
                 if (atomicLoad!(MemoryOrder.raw)(s.work) == 4) { ciRole = 0; view.consumeNext(); }
@@ -7193,7 +7207,7 @@ version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
         s.armed = true;
         park.pump(token);
         namedCheck(atomicLoad!(MemoryOrder.raw)(c.emitterReturns) == 1, "cont emitter seal owns terminal child return");
-        auto deadline = MonoTime.currTime + 15.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live) { park.pump(token); check(MonoTime.currTime < deadline); }
         check(atomicLoad!(MemoryOrder.raw)(c.midCalls) == 1);
         check(atomicLoad!(MemoryOrder.raw)(c.midDestroyed) == 1);
@@ -7262,7 +7276,7 @@ version (AntfarmWriteAuditHooks)
         }); worker.start(); awaitRaw(f.ready, 1u, "cont FIFO worker ready");
         scope(exit) { atomicStore!(MemoryOrder.raw)(f.stop, 1u); worker.join(); writeAuditHook = null; cfControl = null; }
         park.pump(token);
-        auto deadline = MonoTime.currTime + 15.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live) { park.pump(token); check(MonoTime.currTime < deadline); }
         foreach (i; 0 .. count) check(calls[i] == 3 && waves[i] == 1);
         park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
@@ -7341,7 +7355,7 @@ version (AntfarmActorTestHooks) version (AntfarmWriteAuditHooks)
         check(atomicLoad!(MemoryOrder.raw)(c.firstGo) == 0);
         park.pump(token); // append B to the empty FIFO, then publish B
         atomicStore!(MemoryOrder.raw)(c.firstGo, 1u);
-        auto deadline = MonoTime.currTime + 15.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live) { park.pump(token); check(MonoTime.currTime < deadline); }
         check(calls[0] == 3 && calls[1] == 3 && waves[0] == 1 && waves[1] == 1);
         park.destroy(); check(atomicLoad(counts.allocated) == atomicLoad(counts.freed));
@@ -7450,7 +7464,7 @@ void outcomeO1()
     }
     auto park = PrivateRootPark!(OcRoot, ocRoot).create(farm, 1, 1);
     check(park !is null && park.spawn(OcRoot(null, &app)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 15.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (!privateTestFailPairWaiting())
     {
         park.pump(token);
@@ -7732,7 +7746,7 @@ PrivateRootDisposition o9Root(scope ref PrivateBorrow!O9Root b, scope ref Privat
 
 void drainOutcome(P)(P* park, ref Token token, string name)
 {
-    auto deadline = MonoTime.currTime + 20.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -7754,7 +7768,7 @@ void phaseOutcomes()
         scope(exit) view.unsubscribe();
         auto park = PrivateRootPark!(O2Root, o2Root).create(farm, 1);
         check(park.spawn(O2Root(null, &app)) == PrivateSpawnResult.spawned);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token);
@@ -7775,7 +7789,7 @@ void phaseOutcomes()
         scope(exit) view.unsubscribe();
         auto park = PrivateRootPark!(O3Root, o3Root).create(farm, 1);
         check(park.spawn(O3Root(null, &app)) == PrivateSpawnResult.spawned);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live) { park.pump(token); while (view.consumeNext()) {} namedCheck(MonoTime.currTime < deadline, "o3 drain"); }
         park.destroy();
         check(app.saw && app.failures == 1 && app.code == 5 && app.position == 2);
@@ -7791,7 +7805,7 @@ void phaseOutcomes()
         scope(exit) view.unsubscribe();
         auto park = PrivateRootPark!(O4Root, o4Root).create(farm, 1);
         check(park.spawn(O4Root(null, &app)) == PrivateSpawnResult.spawned);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live) { park.pump(token); while (view.consumeNext()) {} namedCheck(MonoTime.currTime < deadline, "o4 drain"); }
         park.destroy();
         check(app.saw && app.failures == 1 && app.code == 3);
@@ -7856,7 +7870,7 @@ void phaseOutcomes()
         scope(exit) view.unsubscribe();
         auto park = PrivateRootPark!(O9EmptyRoot, o9EmptyRoot).create(farm, 1);
         check(park.spawn(O9EmptyRoot(null, &app)) == PrivateSpawnResult.spawned);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (park.live)
         {
             park.pump(token);
@@ -8032,7 +8046,7 @@ struct Lockstep { shared uint requested, served, stop; }
 void lockstepDrain(Lockstep* l) nothrow @nogc @system
 {
     immutable target = atomicFetchAdd!(MemoryOrder.acq_rel)(l.requested, 1u) + 1;
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (atomicLoad!(MemoryOrder.acq)(l.served) < target)
     {
         namedCheck(MonoTime.currTime < deadline, "lockstep drain timeout");
@@ -8069,7 +8083,7 @@ void stopLockstep(Lockstep* l, Thread t)
 // One pump, then every published callback, until no root is live.
 void lockstepRun(P)(P* park, ref Token token, Lockstep* l, string name)
 {
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -8449,7 +8463,7 @@ void cancelC5()
     scope(exit) stopLockstep(&l, t);
     auto park = PrivateRootPark!(C5Root, c5Root).create(farm, 1);
     check(park.spawn(C5Root(null, false, &first)) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -8580,7 +8594,7 @@ version (AntfarmActorTestHooks)
         namedCheck(kids.start!c7Op(c) == PrivateStartResult.started, "c7 start");
         namedCheck(kids.cancel(c), "c7 cancel");
         atomicStore!(MemoryOrder.rel)(c7RootCancelled, 1u);
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (!kids.finished(c)) namedCheck(MonoTime.currTime < deadline, "c7 wave joins");
         c7Outcome = kids.outcome(c);
         return PrivateRootDisposition.finish; // disposes the cohort on this consumer
@@ -9163,7 +9177,7 @@ void cancelTorture(size_t roots, uint seed)
         check(park !is null);
         ulong s = seed | 1;
         size_t spawned;
-        auto deadline = MonoTime.currTime + 120.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (spawned < roots || park.live)
         {
             while (spawned < roots && park.live < park.capacity)
@@ -9280,7 +9294,7 @@ PrivateRootOptions trackedOptions(size_t batchLimit = defaultPrivateBatchLimit)
 void drainTracked(P)(P* park, ref Token token, ref ConsumerView view,
     ref PrivateRootOutcome[] taken, string name)
 {
-    auto deadline = MonoTime.currTime + 20.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -9295,7 +9309,7 @@ void drainTracked(P)(P* park, ref Token token, ref ConsumerView view,
 void lockstepRunTracked(P)(P* park, ref Token token, Lockstep* l,
     ref PrivateRootOutcome[] taken, string name)
 {
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -9372,7 +9386,7 @@ void rootTrackingT1()
         atomicStore!(MemoryOrder.rel)(rtDone, 1u);
     });
     canceller.start();
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (atomicLoad!(MemoryOrder.acq)(rtPaused) == 0)
         namedCheck(MonoTime.currTime < deadline, "t1 canceller paused");
     PrivateRootOutcome o;
@@ -9454,7 +9468,7 @@ PrivateRootOutcome t2Run(ActorTestPoint point, ref PrivateCancelResult result)
     rtHandle = h;
     atomicStore!(MemoryOrder.rel)(t2Point, point + 1u);
     auto canceller = new Thread({
-        auto deadline = MonoTime.currTime + 10.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (atomicLoad!(MemoryOrder.acq)(rtPaused) == 0)
             namedCheck(MonoTime.currTime < deadline, "t2 emitter paused");
         atomicStore!(MemoryOrder.rel)(rtResult, cast(ubyte) rtHandle.requestCancel());
@@ -9633,7 +9647,7 @@ void rootTrackingT5()
     scope(exit) view.unsubscribe();
     auto park = PrivateRootPark!(int, t5Root).create(farm, 2, trackedOptions());
     check(park.spawn(1) == PrivateSpawnResult.spawned && park.spawn(2) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 10.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (atomicLoad(t5Finished) < 2)
     {
         park.pump(token);
@@ -9689,7 +9703,7 @@ void rootTrackingT6(PrivateRootReclamation reclaim)()
     auto park = PrivateRootPark!(T6Root, t6Root, reclaim).create(farm, 64, trackedOptions(16));
     uint[64] slotId;
     uint spawned, taken;
-    auto deadline = MonoTime.currTime + 60.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (taken < t6Roots)
     {
         while (spawned < t6Roots && park.live < park.capacity)
@@ -9804,7 +9818,7 @@ void rootTrackingT7()
         if (i % 6 > 1) ++live;
     }
     enum terminalEarly = (t7Roots + 5) / 6 + (t7Roots + 4) / 6; // kinds 0 and 1
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (atomicLoad(t7Final) < terminalEarly)
     {
         park.pump(token);
@@ -10097,7 +10111,7 @@ void trackedTorture(size_t roots, uint seed)
         auto slotId = new size_t[park.capacity];
         ulong s = seed | 1;
         size_t spawned, taken;
-        auto deadline = MonoTime.currTime + 120.seconds;
+        auto deadline = MonoTime.currTime + hangTimeout;
         while (taken < roots)
         {
             while (spawned < roots && park.live < park.capacity)
@@ -10274,7 +10288,7 @@ void childChunkOperation(scope ref PrivateBorrow!ChunkChild b, scope ref Private
     if (i != 0) return;
     // Wait for another thread's member. On timeout fall through: the split
     // check in the caller fails instead of the process hanging.
-    immutable deadline = MonoTime.currTime + 10.seconds;
+    immutable deadline = MonoTime.currTime + hangTimeout;
     for (;;)
     {
         foreach (j; 1 .. childChunkMembers)
@@ -10314,7 +10328,7 @@ void childChunkSplitRun(uint avgCost, size_t chunk)
     check(parent !is null);
     check(parent.spawn(ChunkParent(null, avgCost)) == PrivateSpawnResult.spawned);
     auto workers = new Workers(farm, 2);
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (parent.live)
     {
         parent.pump(token);
@@ -10499,7 +10513,7 @@ bool slabExactFreedSize(ref SlabExact exact, void* ptr, size_t bytes) nothrow @n
 
 void slabDrain(P)(P* park, ref Token token, ref ConsumerView view, string name) nothrow @nogc @system
 {
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -10511,7 +10525,7 @@ void slabDrain(P)(P* park, ref Token token, ref ConsumerView view, string name) 
 void slabPumpUntil(P)(P* park, ref Token token, ref ConsumerView view, shared uint* flag, string name)
     nothrow @nogc @system
 {
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (atomicLoad(*flag) == 0)
     {
         namedCheck(park.live != 0, name);
@@ -11150,7 +11164,7 @@ static assert(size_t.max / SlabWide.sizeof + 1 <= size_t.max / 40);
 align(128) struct SlabOveraligned { ulong x; }
 static assert(SlabOveraligned.alignof == 128);
 
-void slabFailOne(T, R, bool subsets)(scope ref PrivateContext ctx, SlabExact* exact,
+void slabFailOne(T, R, bool subsets, PrivateStateStorage storage = PrivateStateStorage.cohortSlab)(scope ref PrivateContext ctx, SlabExact* exact,
     size_t capacity, uint allocs) nothrow @nogc @system
 {
     immutable live = exact.live;
@@ -11160,8 +11174,12 @@ void slabFailOne(T, R, bool subsets)(scope ref PrivateContext ctx, SlabExact* ex
         exact.calls = 0;
         exact.failAt = k;
         exact.strictLifo = true;
-        auto p = ctx.createChildren!(T, R, PrivateStateStorage.cohortSlab)(capacity,
-            PrivateCohortOptions(0, subsets), capacity * T.sizeof);
+        static if (storage == PrivateStateStorage.cohortSlab)
+            auto p = ctx.createChildren!(T, R, storage)(capacity,
+                PrivateCohortOptions(0, subsets), capacity * T.sizeof);
+        else
+            auto p = ctx.createChildren!(T, R)(capacity, PrivateCohortOptions(0, subsets));
+        namedCheck(exact.calls == k, "child-create-fail stops at first failed allocation");
         namedCheck(p is null, "slab-create-fail returns null");
         namedCheck(exact.live == live, "slab-create-fail live allocations");
         namedCheck(exact.top == top, "slab-create-fail unwind restored");
@@ -11180,6 +11198,11 @@ PrivateRootDisposition slabFailStep(scope ref PrivateBorrow!SlabFailRoot b, scop
     slabFailOne!(ulong, ulong, false)(ctx, exact, 4, 4);
     slabFailOne!(ulong, void, true)(ctx, exact, 4, 4);
     slabFailOne!(ulong, ulong, true)(ctx, exact, 4, 5);
+    // The same ledger checks all four layouts without a trailing slab.
+    slabFailOne!(ulong, void, false, PrivateStateStorage.perObject)(ctx, exact, 4, 2);
+    slabFailOne!(ulong, ulong, false, PrivateStateStorage.perObject)(ctx, exact, 4, 3);
+    slabFailOne!(ulong, void, true, PrivateStateStorage.perObject)(ctx, exact, 4, 3);
+    slabFailOne!(ulong, ulong, true, PrivateStateStorage.perObject)(ctx, exact, 4, 4);
 
     immutable live = exact.live;
     exact.calls = 0;
@@ -11501,7 +11524,7 @@ void slabReclaim(PrivateRootReclamation reclaim)()
         farm, 1, 256, policy(counts));
     check(park !is null);
     check(park.spawn(SlabReclaimRoot.init) == PrivateSpawnResult.spawned);
-    auto deadline = MonoTime.currTime + 30.seconds;
+    auto deadline = MonoTime.currTime + hangTimeout;
     while (park.live)
     {
         park.pump(token);
@@ -12138,7 +12161,7 @@ void main(string[] args)
             scope(exit) view.unsubscribe();
             auto park = PrivateRootPark!(O9EmptyRoot, o9EmptyRoot).create(farm, 1);
             check(park.spawn(O9EmptyRoot(null, &app)) == PrivateSpawnResult.spawned);
-            auto deadline = MonoTime.currTime + 10.seconds;
+            auto deadline = MonoTime.currTime + hangTimeout;
             while (park.live)
             {
                 park.pump(token);

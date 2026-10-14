@@ -1,41 +1,20 @@
 module threadpool.os_scope;
 
 /**
- * The process-level set of CPUs the OS allows, frozen once per process.
+ * Internal: the process-level set of CPUs the OS allows, frozen once per
+ * process. The public view is `TopologySnapshot.osScopeSource` and
+ * `.osScopeAllowed`; see `threadpool.topology`.
  *
- * Linux has no process affinity, only per-thread masks inherited at `clone`.
- * The scope is the **launch mask**, captured by this module's constructor
- * before `main` runs: what `taskset`, `numactl` or a cgroup cpuset produced at
- * exec. Windows uses the single-group **process** affinity mask at first
- * discovery; a multi-group process stays unrestricted.
- *
- * Discovery marks CPUs outside the scope `affinityExcluded`, and every
- * `pinProcessor` call rejects them with `PinOutcome.outsideOsScope`. The scope
- * never refreshes: a later OS narrowing surfaces as a failed pin
- * (`PinOutcome.osRejected`), and it never widens.
+ * Linux captures the launch mask in this module's constructor, before
+ * `main` runs. Windows captures the single-group process mask at first use
+ * (discovery or a pin); a multi-group process stays unrestricted.
  */
 
-import threadpool.topology : ProcessorId, affinityKey, cachedSnapshot;
+import threadpool.topology : OsScopeSource, ProcessorId, affinityKey;
 
-/// Where the OS scope came from.
-enum OsScopeSource : ubyte
-{
-    processLaunch,    /// Linux: sched_getaffinity captured before main (module constructor)
-    processAffinity,  /// Windows: single-group process mask at discovery
-    callingThread,    /// explicit opt-in via `scopeOsToCallingThread()`
-    unrestricted,     /// query failed, or multi-group Windows process (deferred)
-}
-
-/// The process-level set of CPUs the OS allows.
-struct OsScope
-{
-    OsScopeSource source = OsScopeSource.unrestricted; /// provenance
-    /// Sorted; empty iff `source == unrestricted`.
-    const(ProcessorId)[] allowed;
-}
-
-private __gshared OsScope gScope;
-private __gshared const(ulong)[] gKeys; // sorted affinityKey values of gScope.allowed
+private __gshared OsScopeSource gSource = OsScopeSource.unrestricted;
+private __gshared const(ProcessorId)[] gAllowed; // sorted; empty iff unrestricted
+private __gshared const(ulong)[] gKeys; // sorted affinityKey values of gAllowed
 private __gshared bool gCaptured;
 
 version (linux)
@@ -47,29 +26,32 @@ version (linux)
     }
 }
 
-/// The frozen scope discovery uses (or used). The first call on Windows is a
-/// setup operation (it captures the process mask); afterwards, and on Linux
-/// always, it is a thread-safe read.
-const(OsScope) osScope()
+/// Capture the scope if nothing has yet. The first call on Windows is a
+/// setup operation; afterwards, and on Linux always, nothing happens.
+private void capture()
 {
-    if (!gCaptured)
-    {
-        version (Windows)
-            setScope(OsScopeSource.processAffinity, windowsProcessMaskKeys());
-        else version (linux)
-            setScope(OsScopeSource.processLaunch, linuxThreadMaskKeys());
-        else
-            setScope(OsScopeSource.unrestricted, null);
-    }
-    return gScope;
+    if (gCaptured) return;
+    version (Windows)
+        setScope(OsScopeSource.processAffinity, windowsProcessMaskKeys());
+    else version (linux)
+        setScope(OsScopeSource.processLaunch, linuxThreadMaskKeys());
+    else
+        setScope(OsScopeSource.unrestricted, null);
 }
 
-/// Setup only, before the first `discover()`: replace the launch scope with
-/// the calling thread's current mask. Throws if discovery already ran.
-void scopeOsToCallingThread()
+/// The frozen scope discovery uses: its provenance in `source` and its
+/// allowed ids, sorted (empty when unrestricted). Captures on first use.
+package(threadpool) const(ProcessorId)[] frozenOsScope(out OsScopeSource source)
 {
-    if (cachedSnapshot() !is null)
-        throw new Exception("threadpool: scopeOsToCallingThread() must run before topology discovery");
+    capture();
+    source = gSource;
+    return gAllowed;
+}
+
+/// Replace the scope with the calling thread's current mask.
+/// `threadpool.topology.scopeOsToCallingThread` checks it runs before discovery.
+package(threadpool) void scopeToCallingThread()
+{
     version (Windows)
         setScope(OsScopeSource.callingThread, windowsThreadMaskKeys());
     else version (linux)
@@ -84,19 +66,19 @@ void scopeOsToCallingThread()
 package(threadpool) void ensureOsScopeCaptured() @nogc nothrow
 {
     if (gCaptured) return;
-    static void capture() nothrow
+    static void captureNothrow() nothrow
     {
-        try cast(void) osScope();
+        try capture();
         catch (Exception) {}
     }
-    (cast(void function() @nogc nothrow) &capture)();
+    (cast(void function() @nogc nothrow) &captureNothrow)();
 }
 
 /// Membership test used by pin validation. An unrestricted (or not yet
 /// captured) scope admits every id; `pinProcessor` captures first.
-bool inOsScope(ProcessorId id) @nogc nothrow
+package(threadpool) bool inFrozenScope(ProcessorId id) @nogc nothrow
 {
-    if (!gCaptured || gScope.source == OsScopeSource.unrestricted)
+    if (!gCaptured || gSource == OsScopeSource.unrestricted)
         return true;
     immutable key = affinityKey(id.group, id.lp);
     size_t lo, hi = gKeys.length;
@@ -109,10 +91,9 @@ bool inOsScope(ProcessorId id) @nogc nothrow
     return lo < gKeys.length && gKeys[lo] == key;
 }
 
-/// Diagnostics only: what the OS reports right now (Linux: the calling
-/// thread's mask; Windows: the process mask). Never feeds eligibility. Empty
-/// when the query fails or the process spans several Windows groups.
-ProcessorId[] liveOsMask()
+/// What the OS reports right now (Linux: the calling thread's mask; Windows:
+/// the process mask). Backs `threadpool.pin.liveOsMask`.
+package(threadpool) ProcessorId[] liveMaskIds()
 {
     version (Windows)
         return idsOf(windowsProcessMaskKeys());
@@ -125,7 +106,7 @@ ProcessorId[] liveOsMask()
 /// Sorted allowed-processor keys for discovery; empty when unrestricted.
 package(threadpool) const(ulong)[] osScopeKeys()
 {
-    osScope();
+    capture();
     return gKeys;
 }
 
@@ -135,13 +116,15 @@ private void setScope(OsScopeSource source, ulong[] keys)
 
     if (keys.length == 0)
     {
-        gScope = OsScope(OsScopeSource.unrestricted, null);
+        gSource = OsScopeSource.unrestricted;
+        gAllowed = null;
         gKeys = null;
     }
     else
     {
         keys.sort();
-        gScope = OsScope(source, idsOf(keys));
+        gSource = source;
+        gAllowed = idsOf(keys);
         gKeys = keys;
     }
     gCaptured = true;
@@ -237,20 +220,21 @@ version (Windows)
 unittest
 {
     // The frozen scope agrees with its own membership test and is sorted.
-    auto s = osScope();
-    if (s.source == OsScopeSource.unrestricted)
+    OsScopeSource source;
+    auto allowed = frozenOsScope(source);
+    if (source == OsScopeSource.unrestricted)
     {
-        assert(s.allowed.length == 0);
-        assert(inOsScope(ProcessorId(0, 0)));
+        assert(allowed.length == 0);
+        assert(inFrozenScope(ProcessorId(0, 0)));
         return;
     }
-    assert(s.allowed.length > 0);
-    foreach (i, id; s.allowed)
+    assert(allowed.length > 0);
+    foreach (i, id; allowed)
     {
-        assert(inOsScope(id));
-        if (i) assert(s.allowed[i - 1] < id);
+        assert(inFrozenScope(id));
+        if (i) assert(allowed[i - 1] < id);
     }
-    assert(!inOsScope(ProcessorId(0, ushort.max)) || s.allowed[$ - 1] == ProcessorId(0, ushort.max));
+    assert(!inFrozenScope(ProcessorId(0, ushort.max)) || allowed[$ - 1] == ProcessorId(0, ushort.max));
 }
 
 unittest
@@ -260,16 +244,19 @@ unittest
     import threadpool.pin : PinOutcome, pinProcessor;
     import threadpool.topology : LogicalProcessor;
 
-    auto savedScope = gScope;
+    auto savedSource = gSource;
+    auto savedAllowed = gAllowed;
     auto savedKeys = gKeys;
     scope (exit)
     {
-        gScope = savedScope;
+        gSource = savedSource;
+        gAllowed = savedAllowed;
         gKeys = savedKeys;
         gCaptured = true;
     }
     gCaptured = false;
-    gScope = OsScope.init;
+    gSource = OsScopeSource.unrestricted;
+    gAllowed = null;
     gKeys = null;
 
     LogicalProcessor outside;
@@ -277,6 +264,6 @@ unittest
     outside.lpIndex = ushort.max;
     immutable outcome = pinProcessor(outside);
     assert(gCaptured);
-    if (gScope.source != OsScopeSource.unrestricted)
+    if (gSource != OsScopeSource.unrestricted)
         assert(outcome == PinOutcome.outsideOsScope);
 }

@@ -44,8 +44,12 @@ void main()
 }
 ```
 
-`llcIndex` is a dense, process-wide index over physical groups (last-level
-sharing domains), suitable for addressing an array. It is not a raw Windows
+For processors with cache-domain membership, `llcIndex` is a dense, process-wide
+index over physical groups (last-level sharing domains), suitable for addressing
+an array. Linux CPUs offline at discovery remain in `processors` and answer
+`byId`, but have `llcIndex == noLlcIndex` and are omitted from `llcDomains`.
+They are ineligible for workers and do not affect `groupingSource`.
+`llcIndex` is not a raw Windows
 cache index or Linux sysfs cache id. `LlcDomain.source` says how each group was
 formed: `l3`, or a fallback (`l2Fallback`, `singletonFallback`,
 `cpuSetLlcIndex`) that is not a real CCD. Higher `efficiencyClass` values
@@ -64,11 +68,22 @@ auto eligible = topology.eligibleProcessorsInLlc(0); // in OS scope and online
 
 Worker eligibility uses a frozen, process-level OS scope: on Linux the CPU
 mask the process was launched with (`taskset -c 0-7 ./app`), on Windows the
-process affinity mask at first discovery. Narrowing `main`'s own mask later
+process affinity mask at first discovery. The snapshot carries it:
+`topology.osScopeSource` says where it came from and `topology.osScopeAllowed`
+lists the allowed CPUs (empty when unrestricted), and
+`topology.inOsScope(id)` tests one id. Narrowing `main`'s own mask later
 does not change it; call `scopeOsToCallingThread()` before the first
-`discover()` to opt into the calling thread's mask instead. Pin threads with
+`discover()` to opt into the calling thread's mask instead. `liveOsMask()`
+reports the live mask for diagnostics only. Pin threads with
 `pinProcessor(id)`; a CPU outside the scope returns
 `PinOutcome.outsideOsScope` instead of escaping the launch restriction.
+
+Linux affinity masks and cgroup cpusets are respected, but CFS CPU bandwidth
+quotas (`cpu.max` on cgroup v2, `cpu.cfs_quota_us` / `cpu.cfs_period_us` on v1)
+are not detected. Quota-limited containers can therefore start too many workers
+and suffer oversubscription and throttling. Size the pool explicitly for its
+CPU budget: set `PoolOptions.processors` to a suitably sized list of eligible
+CPUs, or set `FarmHostOptions.workers` when using `FarmHost`.
 
 ## Start workers
 
@@ -235,6 +250,7 @@ dub run -c wait-races
 dub run -c affinity-test --compiler=dmd
 dub run -c affinity-test --compiler=ldc2
 dub run -c scope-test --compiler=ldc2
+dub run -c confine-test --compiler=ldc2
 ```
 
 The Linux `scope-test` re-executes itself under `taskset -c` (one physical
@@ -249,6 +265,14 @@ direct pin rejection and startup cleanup after affinity narrows. An optional
 decimal mask can select another allowed subset (`-- 12288` selects LPs 12/13
 on a machine that permits them). Other platforms and multi-group processes
 print an explicit skip.
+
+The Windows/Linux `confine-test` checks the calling thread's affinity after
+confinement and exact restoration, rejected CPU lists, and `stopRequested` after
+a managed worker failure. On Windows it queries thread group affinity and also
+checks that the process mask stays unchanged; it needs two eligible CPUs in the
+caller's processor group. On Linux also run it under a small `taskset` mask.
+The [native Windows matrix](../docs/development/testing.md#windows-x64-integration)
+runs it with both compilers alongside process-affinity and armed-wait checks.
 
 - [examples/hello_topology.d](examples/hello_topology.d): topology only.
 - [examples/hello_antfarm.d](examples/hello_antfarm.d): one Farm per accepted

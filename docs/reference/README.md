@@ -27,6 +27,21 @@ in those modules carries a non-empty Ddoc comment. The public surface is
 reached with `import antfarm;`, `import antfarm_templates;`,
 `import actors;`, or `import threadpool.host;`.
 
+## Actor package imports
+
+`import actors;` re-exports three modules:
+
+| Module | Contents |
+| --- | --- |
+| `actors.actor` | public `ActorRuntime`, `ActorOwner`, `ActorHandle`, `ActorBorrow`, `ActorContext`, `ActorInboxNode`, `ActorAllocator`, and result enums |
+| `actors.wave` | public `ActorWave`, `ActorWaveHandle`, and completion hooks |
+| `actors.private_actor` | `PrivateRootPark`, `PrivateChildPark`, `PrivateContext`, `PrivateBorrow`, options, dispositions and outcome enums |
+
+`actors.mimalloc` is an optional adapter for the pinned mimalloc v3 allocator;
+it is not part of the `actors` package re-export. See
+[sizing-and-allocation.md](../guide/sizing-and-allocation.md#the-mimalloc-v3-adapter)
+for its setup and import.
+
 ## Farm
 
 | Topic | Symbols | Explanation |
@@ -45,7 +60,7 @@ reached with `import antfarm;`, `import antfarm_templates;`,
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
 | Runtime and slot capacity | `ActorRuntime.create`, `ActorRuntime.capacity`, `ActorRuntime.live`, `ActorRuntime.ready`, `ActorRuntime.quiescent`, `ActorRuntime.flush`, `ActorRuntime.destroy`, `ActorRuntime.erasedAdapter` | [public-actors.md](../guide/public-actors.md) |
-| Ownership and identity | `ActorOwner`, `ActorOwner.handle`, `ActorOwner.intoErased`, `ActorHandle` | [public-actors.md](../guide/public-actors.md) |
+| Ownership and identity | `ActorOwner`, `ActorOwner.handle`, `ActorOwner.intoErased`, `ActorOwner.leak`, `ActorHandle` | [public-actors.md](../guide/public-actors.md) |
 | Callback borrow and context | `ActorBorrow`, `ActorContext`, `ActorContext.popInbox` | [design/public-actor-ordering.md](../design/public-actor-ordering.md) |
 | Inbox nodes and outcomes | `ActorInboxNode`, `ActorInboxNode.initialize`, `ActorInboxNode.payloadAs`, `ActorInboxNode.complete`, `ActorInboxNode.fail`, `ActorInboxNode.cancel`, `ActorInboxNode.completeAndWake`, `ActorInboxNode.failAndWake`, `ActorInboxNode.cancelAndWake`, `ActorNodeOutcome` | [public-actors.md](../guide/public-actors.md#inbox) |
 | Wake and send statuses | `ActorWakeResult`, `ActorSendResult` | [actor-lifecycle.md](actor-lifecycle.md) |
@@ -97,10 +112,10 @@ reached with `import antfarm;`, `import antfarm_templates;`,
 
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Options and placement plan | `FarmHost`, `FarmHost.preview`, `FarmHostOptions`, `FarmHostPlan`, `FarmHostPlan.summary`, `HostParticipants`, `HostGroups`, `CallerPlacement`, `WorkerIdle`, `FarmSizing`, `autoWorkers`, `defaultHostPoolOptions` | [hosting.md](../guide/hosting.md#placement) |
+| Options and placement | `FarmHost`, `FarmHost.resolve`, `FarmHost.resolution`, `FarmHost.callerCpus`, `FarmHost.summary`, `FarmHost.toString`, `FarmHostOptions`, `HostGroups`, `CallerPlacement`, `WorkerIdle`, `FarmSizing`, `autoWorkers`, `defaultHostPoolOptions` | [hosting.md](../guide/hosting.md#placement) |
 | Progress, waits and publication | `FarmHost.step`, `FarmHost.waitUntil`, `FarmHost.token`, `FarmHost.flush`, `FarmHost.pump`, `FarmHost.publish`, `FarmHost.wake` | [hosting.md](../guide/hosting.md#progress-and-waking) |
 | Host-owned infrastructure | `FarmHost.createRuntime`, `FarmHost.createPark`, `FarmHost.attach`, `HostAttachment`, `FarmHost.registerProducer`, `FarmHost.unregisterProducer` | [hosting.md](../guide/hosting.md#setup) |
-| Retirement, teardown and failures | `FarmHost.retire`, `FarmHost.close`, `FarmHost.closeOrAbandon`, `FarmHost.abandon`, `HostState`, `FarmHostException`, `FarmHostPlanException`, `FarmHostTimeout`, `FarmHostFailed` | [hosting.md](../guide/hosting.md#teardown) |
+| Retirement, teardown and failures | `FarmHost.retire`, `FarmHost.close`, `FarmHost.closeOrAbandon`, `FarmHost.abandon`, `HostState`, `FarmHostException`, `FarmHostResolveException`, `FarmHostTimeout`, `FarmHostFailed` | [hosting.md](../guide/hosting.md#teardown) |
 
 ## Contracts
 

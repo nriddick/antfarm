@@ -37,7 +37,7 @@ ProcessorId[] liveCallerMask()
     }
     else
     {
-        import threadpool.os_scope : liveOsMask;
+        import threadpool.pin : liveOsMask;
         return liveOsMask();
     }
 }
@@ -314,6 +314,7 @@ version (assert)
         enforce(host.state == HostState.failed, "failed state");
         expectThrow!FarmHostException(() => host.step(), "step after failure");
         host.close(); // acts like abandon: no second throw
+        owner.leak(); // the failed host leaked the runtime; reclaim is impossible
         enforce(diagnostic.msg == "host-test: injected actor failure"
             && diagnostic.file.canFind("host_live.d") && diagnostic.line != 0,
             "worker diagnostic remains valid after close");
@@ -352,7 +353,7 @@ void singleton()
 
     // A user-started pool is rejected and neither shut down nor disturbed.
     PoolOptions options;
-    options.processors = [first.plan.workerSelection.workers[0]];
+    options.processors = [first.resolution.workers[0]];
     options.workerBody = &userBody;
     auto user = new CacheAwarePool(options);
     user.start();
@@ -393,6 +394,7 @@ void abandonLive()
     auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
     enforce(owner.valid, "live actor");
     host.abandon();
+    owner.leak(); // abandon() leaked the runtime; reclaim is impossible
     enforce(host.state == HostState.abandoned && host.pool.workerCount == 0, "consumers stopped");
     enforce(liveCallerMask() == before, "affinity restored");
     host.abandon(); // idempotent
@@ -449,10 +451,10 @@ void retireWaveOwned()
 
 void planErrorCreatesNothing()
 {
-    expectThrow!FarmHostPlanException(() { new FarmHost(guarded(100_000)); }, "impossible worker count");
+    expectThrow!FarmHostResolveException(() { new FarmHost(guarded(100_000)); }, "impossible worker count");
     auto host = new FarmHost(guarded(0));
     host.close();
-    writeln("PASS 5.9: a plan error creates nothing; FarmHost(0) follows");
+    writeln("PASS 5.9: a resolve error creates nothing; FarmHost(0) follows");
 }
 
 void useAfterClose()
@@ -484,6 +486,7 @@ void failurePairing()
             auto runtime = host.createRuntime(1);
             auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
             enforce(owner.valid, "live actor");
+            scope (exit) owner.leak(); // deliberately undrained: the guard abandons
             if (applicationFailure)
                 throw new Exception("host-test: application failure");
         }
@@ -593,7 +596,11 @@ void workersTwo()
     auto options = guarded(2);
     options.idleTimeout = Duration.max;
     auto host = new FarmHost(options);
-    enforce(host.plan.workers == 2 && !host.plan.crossGroup, "two workers in one group");
+    enforce(host.resolution.workers.length == 2 && host.resolution.acceptedGroupCount == 1,
+        "two workers in one group");
+    enforce(host.resolution is host.pool.resolution && host.resolution.started,
+        "the host's resolution is the started pool's");
+    enforce(host.summary().canFind("2 workers"), host.summary());
     publicReplies(host);
     privateTree(host);
     childOnlyWake(host);
@@ -610,11 +617,11 @@ void confineCaller()
     auto before = liveCallerMask();
     auto host = new FarmHost(guarded(2));
     scope (exit) host.closeOrAbandon();
-    enforce(host.plan.caller == CallerPlacement.confine, "confine by default");
+    enforce(host.callerCpus.length != 0, "confine by default");
     auto during = liveCallerMask();
-    enforce(during == sorted(host.plan.callerCpus),
-        "caller mask {" ~ formatCpuList(during) ~ "} is plan.callerCpus {"
-        ~ formatCpuList(host.plan.callerCpus) ~ "}");
+    enforce(during == sorted(host.callerCpus),
+        "caller mask {" ~ formatCpuList(during) ~ "} is callerCpus {"
+        ~ formatCpuList(host.callerCpus) ~ "}");
     host.close();
     enforce(liveCallerMask() == before, "caller mask restored after close");
     writeln("PASS 4: caller confined to {", formatCpuList(during), "} and restored to {",
@@ -632,8 +639,8 @@ void rawTokenPickup()
 bool workersFit()
 {
     try
-        cast(void) FarmHost.preview(guarded(2));
-    catch (FarmHostPlanException e)
+        cast(void) FarmHost.resolve(guarded(2));
+    catch (FarmHostResolveException e)
     {
         writeln("SKIP worker cases: ", e.msg);
         return false;
@@ -650,6 +657,7 @@ int main(string[] args)
         auto runtime = host.createRuntime(1);
         auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
         enforce(owner.valid, "live actor");
+        scope (exit) owner.leak(); // deliberately undrained: the guard abandons
         return 0; // close refuses; closeOrAbandon must stop the workers
     }
     workersZero();
@@ -662,7 +670,7 @@ int main(string[] args)
     useAfterClose();
     if (!workersFit())
         return 0;
-    writeln(FarmHost.preview(guarded(2)).summary());
+    writeln(FarmHost.resolve(guarded(2)).summary());
     workersTwo();
     confineCaller();
     rawTokenPickup();

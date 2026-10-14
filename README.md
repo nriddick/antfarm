@@ -5,12 +5,12 @@ of work into a shared ring; any subscribed consumer may claim them. It is
 designed for unordered compute where work can appear on any thread and the next
 available worker should take it.
 
-**Status.** The current release is **1.8.0**. The public and private actor models
+**Status.** The current release is **1.8.1**. The public and private actor models
 are supported functionality; actor state and results have the limits stated in
 their guides. Actor source and ABI stability remain subject to the
 [promotion gates](ROADMAP.md#actor-api-promotion-gates).
 The correctness gate is the local Linux `make check`; there is no CI. Windows
-(x64) is an intended target with separate manual validation. See
+(x64) has a separate [native integration matrix](docs/development/testing.md#windows-x64-integration). See
 [CHANGELOG.md](CHANGELOG.md) for what the release contains and its
 compatibility notes.
 
@@ -20,9 +20,11 @@ You need DMD 2.112+ or LDC 1.42+. From a clone of this repository, build and run
 a complete tracked program that distributes work to a public actor service:
 
 ```text
-dmd -g -i -I. -Iexamples examples/public_service.d -of=/tmp/public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
 ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
 ```
+
+The commands set `ANTFARM_HUGE_PAGES=0` only to make the code's default explicit.
 
 Expected output, with exit status 0:
 
@@ -32,11 +34,14 @@ public service: 36 ordered replies, balance=234, workers=0, closing-callback-cou
 
 The `0` consumes on the calling thread; `/tmp/public_service 2` uses two worker
 threads and prints `workers=2` with the same counts. LDC works with the same
-command (`ldc2 -g -i -I. -Iexamples examples/public_service.d
+command (`ldc2 -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d
 -of=/tmp/public_service`). [docs/guide/quickstart.md](docs/guide/quickstart.md)
 explains who publishes, who consumes, and what completion means.
 [examples/README.md](examples/README.md) has the other programs and the Windows
 commands.
+
+A `consumeNext() == false` result does not park; the threadpool `Director`
+supplies waiting.
 
 ## Where to go next
 
@@ -57,7 +62,7 @@ This repository contains four cooperating packages:
 | `antfarm` | allocation-free `@nogc nothrow` payload distribution |
 | `threadpool` | persistent workers pinned and grouped by cache topology |
 | `actors` | public identities, inboxes and waves, or private parent-owned hierarchies |
-| `fibers` | waiting, yielding, and cancellation on those workers |
+| `antfarm-fibers` | waiting, yielding, and cancellation on those workers; test with `dub test :antfarm-fibers` |
 
 Use `antfarm` alone, or add only the higher-level packages a workload needs.
 For the complete relationship and sizing rules, see

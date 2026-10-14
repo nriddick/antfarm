@@ -80,5 +80,5 @@ void main(string[] args)
     // host.close() recycles the terminal fiber (the attachment's finish)
     // after the consumers stop and before the Farm goes away.
     writeln("fiber cancelAt: sleeping fiber requested root cancellation"
-        ~ ", workers=", host.plan.workers);
+        ~ ", workers=", host.resolution.workers.length);
 }

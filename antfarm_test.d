@@ -4161,6 +4161,76 @@ void testUniformQuotaBoundaries()
     printf("testUniformQuotaBoundaries OK\n"); fflush(stdout);
 }
 
+void testCanFit()
+{
+    auto f = AntFarm.create(2, 4, 9, 1, 2048, 1, 512);
+    scope (exit) f.destroy();
+    const(AntFarm)* farm = f;
+    PayloadHeader header;
+    initPayloadHeader!testCb(&header, 1, 1);
+
+    foreach (tier; [Tier.small, Tier.bulk])
+        foreach (maxCs; [1U, 2U])
+        {
+            header.maxCs = maxCs;
+            // MaxCs > 1 is MT even with Done == 1.
+            foreach (done; 1U .. maxCs + 1)
+            {
+                header.done = done;
+                immutable quota = tier == Tier.small ? 512UL : 2048UL;
+                immutable overhead = maxCs == 1 ? 40UL : 56UL;
+                immutable limit = quota - overhead;
+                check(farm.canFit(header, 0, tier), "canFit empty body");
+                check(farm.canFit(header, limit, tier), "canFit exact boundary");
+                check(!farm.canFit(header, limit + 1, tier), "canFit one word over");
+                foreach (words; [ulong.max, ulong.max - 16, ulong.max - 40])
+                    check(!farm.canFit(header, words, tier), "canFit overflow is false");
+            }
+        }
+
+    initPayloadHeader!testCb(&header, 1, 1);
+    foreach (tier; [Tier.small, Tier.bulk])
+    {
+        foreach (maxCs; [0U, MAX_PAYLOAD_ITERS + 1])
+        {
+            header.maxCs = maxCs;
+            check(!farm.canFit(header, 0, tier), "canFit invalid MaxCs");
+        }
+        header.maxCs = 1;
+        foreach (done; [0U, 2U, MAX_PAYLOAD_ITERS + 1])
+        {
+            header.done = done;
+            check(!farm.canFit(header, 0, tier), "canFit invalid Done");
+        }
+        header.done = 1;
+        header.call = null;
+        check(!farm.canFit(header, 0, tier), "canFit null callback");
+        initPayloadHeader!testCb(&header, 1, 1);
+    }
+
+    // expectedConsumers is only the epoch-0 hint; writes use live Cf.
+    check(farm.canFit(header, 472, Tier.small), "canFit before consumer growth");
+    ConsumerView[9] views;
+    foreach (ref view; views)
+        check(view.subscribe(f) >= 0, "canFit snapshot subscribe");
+    foreach (tier; [Tier.small, Tier.bulk])
+        foreach (maxCs; [1U, 2U])
+        {
+            header.maxCs = maxCs;
+            immutable quota = tier == Tier.small ? 512UL : 2048UL;
+            immutable overhead = maxCs == 1 ? 56UL : 72UL; // SqCs == 3.
+            immutable limit = quota - overhead;
+            check(farm.canFit(header, limit, tier), "canFit larger SqCs boundary");
+            check(!farm.canFit(header, limit + 1, tier), "canFit larger SqCs over");
+        }
+    header.maxCs = 1;
+    check(!farm.canFit(header, 472, Tier.small), "canFit true becomes false");
+    foreach (ref view; views) view.unsubscribe();
+    check(farm.canFit(header, 472, Tier.small), "canFit false becomes true");
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == 0, "canFit does not reserve");
+    printf("testCanFit OK\n"); fflush(stdout);
+}
+
 void main(string[] args)
 {
     if (args.length > 1 && args[1] == "join-only")
@@ -4198,6 +4268,7 @@ void main(string[] args)
     testCheckGeometry();
     testTryCreate();
     testArithmetic();
+    testCanFit();
     testSweptQuotaBalance();
     testProducerLifecycleChurn();
     testSingleThreaded();

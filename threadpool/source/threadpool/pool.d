@@ -7,7 +7,6 @@ import core.time : Duration, MonoTime, msecs;
 import std.exception : enforce;
 
 import threadpool.hybrid;
-import threadpool.os_scope : OsScope, osScope;
 import threadpool.pin : PinOutcome;
 import threadpool.resolution;
 import threadpool.stats;
@@ -116,54 +115,50 @@ struct Selection
     void spin(uint iters = 0)
     {
         enforceOwner();
-        foreach (i, ref r; gWorkers)
+        forEachSelected!((size_t i, ref WorkerRec r)
         {
-            if (!matches(r)) continue;
             immutable n = iters != 0 ? iters : (r.isP ? pool.options.pSpinIters : pool.options.eSpinIters);
             atomicStore(r.spinIters, n);
             atomicStore!(MemoryOrder.rel)(r.kind, IdleKind.spin);
             bump(r);
             wakeWorker(cast(uint) i);
-        }
+        })(this);
     }
 
     void sleep(Duration d)
     {
         enforceOwner();
         immutable ns = d.total!"nsecs";
-        foreach (i, ref r; gWorkers)
+        forEachSelected!((size_t i, ref WorkerRec r)
         {
-            if (!matches(r)) continue;
             atomicStore(r.sleepNs, ns > 0 ? cast(ulong) ns : 0);
             atomicStore!(MemoryOrder.rel)(r.kind, IdleKind.sleep);
             bump(r);
             wakeWorker(cast(uint) i);
-        }
+        })(this);
     }
 
     void sleepUntil(MonoTime t)
     {
         enforceOwner();
-        foreach (i, ref r; gWorkers)
+        forEachSelected!((size_t i, ref WorkerRec r)
         {
-            if (!matches(r)) continue;
             atomicStore(r.sleepUntilTicks, t.ticks);
             atomicStore!(MemoryOrder.rel)(r.kind, IdleKind.sleepUntil);
             bump(r);
             wakeWorker(cast(uint) i);
-        }
+        })(this);
     }
 
     void wait()
     {
         enforceOwner();
-        foreach (i, ref r; gWorkers)
+        forEachSelected!((size_t i, ref WorkerRec r)
         {
-            if (!matches(r)) continue;
             atomicStore!(MemoryOrder.rel)(r.kind, IdleKind.wait);
             bump(r);
             wakeWorker(cast(uint) i);
-        }
+        })(this);
     }
 
     void cadence(Duration period)
@@ -187,9 +182,8 @@ struct Selection
         immutable lns = opt.spinLead.total!"nsecs";
         immutable leadTicks = lns > 0 ? lns * tps / 1_000_000_000L : 0;
         immutable seq = ++pool.driftSeq;
-        foreach (i, ref r; gWorkers)
+        forEachSelected!((size_t i, ref WorkerRec r)
         {
-            if (!matches(r)) continue;
             atomicStore(r.cadenceEpochTicks, epoch.ticks);
             atomicStore(r.cadencePeriodTicks, periodTicks);
             atomicStore(r.cadenceDriftTicks, 0);
@@ -200,17 +194,16 @@ struct Selection
             atomicStore!(MemoryOrder.rel)(r.kind, IdleKind.cadence);
             bump(r);
             wakeWorker(cast(uint) i);
-        }
+        })(this);
     }
 
     void signal()
     {
         enforceOwner();
-        foreach (i, ref r; gWorkers)
+        forEachSelected!((size_t i, ref WorkerRec r)
         {
-            if (!matches(r)) continue;
             wakeWorker(cast(uint) i);
-        }
+        })(this);
     }
 
     /// One-shot phase step. Positive delays beats; negative pulls them sooner.
@@ -218,13 +211,12 @@ struct Selection
     {
         enforceOwner();
         immutable ticks = durationToTicks(phase);
-        foreach (i, ref r; gWorkers)
+        forEachSelected!((size_t i, ref WorkerRec r)
         {
-            if (!matches(r)) continue;
             atomicFetchAdd(r.cadenceEpochTicks, ticks);
             bump(r);
             wakeWorker(cast(uint) i);
-        }
+        })(this);
     }
 
     /// Sequenced slew: new sequence, add `perBeat` to the period until
@@ -236,15 +228,14 @@ struct Selection
         immutable driftTicks = durationToTicks(perBeat);
         immutable untilTicks = absTicks(durationToTicks(until));
         immutable seq = ++pool.driftSeq;
-        foreach (i, ref r; gWorkers)
+        forEachSelected!((size_t i, ref WorkerRec r)
         {
-            if (!matches(r)) continue;
             atomicStore(r.cadenceDriftTicks, driftTicks);
             atomicStore(r.cadenceDriftUntilTicks, untilTicks);
             atomicStore!(MemoryOrder.rel)(r.cadenceDriftSeq, seq);
             bump(r);
             wakeWorker(cast(uint) i);
-        }
+        })(this);
     }
 
 private:
@@ -277,6 +268,16 @@ private:
     static long absTicks(long t) @nogc nothrow
     {
         return t >= 0 ? t : -t;
+    }
+}
+
+pragma(inline, true)
+private void forEachSelected(alias action)(ref Selection sel)
+{
+    foreach (i, ref r; gWorkers)
+    {
+        if (!sel.matches(r)) continue;
+        action(i, r);
     }
 }
 
@@ -370,8 +371,7 @@ final class CacheAwarePool
     PoolResolution resolve() const
     {
         auto snap = discover();
-        auto scope_ = osScope();
-        return resolvePool(snap, scope_, options);
+        return resolvePool(snap, options);
     }
 
     /// After `start`: the resolution including each worker's `StartState` and
@@ -386,6 +386,14 @@ final class CacheAwarePool
     /// Call after registry setup (`install` / `setLabel` / `installExchange`).
     void start()
     {
+        start(resolve());
+    }
+
+    /// Start the workers of `planned`, a resolution against the discovered
+    /// snapshot (FarmHost passes its narrowed selection, so
+    /// `pool.resolution` reports its `notSelected` CPUs).
+    package(threadpool) void start(PoolResolution planned)
+    {
         version (ThreadpoolOs)
         {
             enforce(atomicLoad(gRunning) == 0, "threadpool: a pool is already running");
@@ -396,7 +404,7 @@ final class CacheAwarePool
                     || options.managedWorker.pump !is null,
                 "threadpool: managedWorker start/stop require a pump");
 
-            auto res = resolve();
+            auto res = planned;
             lastResolution = res;
             snap = cachedSnapshot();
             enforce(snap !is null, "threadpool: topology not discovered");
@@ -494,15 +502,7 @@ final class CacheAwarePool
             foreach (ref rec; gWorkers)
                 if (rec.failure !is null && rec.failure.value !is null)
                     failures ~= rec.failure.value;
-            destroyWaitSlots();
-            gWorkers = null;
-            gWorkerBody = null;
-            gWorkerStop = null;
-            if (gManagedWorkerHooks.poolStopped !is null)
-                gManagedWorkerHooks.poolStopped();
-            gManagedWorkerHooks = ManagedWorkerHooks.init;
-            directorHeld = false;
-            threads.length = 0;
+            clearWorkerState();
             if (gLivePool is this)
                 gLivePool = null;
             atomicStore(gRunning, 0);
@@ -641,12 +641,10 @@ private:
         }
     }
 
-    void abortStart()
+    void clearWorkerState()
     {
         version (ThreadpoolOs)
         {
-            requestStop();
-            joinAll();
             destroyWaitSlots();
             gWorkers = null;
             gWorkerBody = null;
@@ -656,6 +654,16 @@ private:
             gManagedWorkerHooks = ManagedWorkerHooks.init;
             directorHeld = false;
             threads.length = 0;
+        }
+    }
+
+    void abortStart()
+    {
+        version (ThreadpoolOs)
+        {
+            requestStop();
+            joinAll();
+            clearWorkerState();
             gLivePool = null;
             atomicStore(gRunning, 0);
         }
@@ -665,8 +673,7 @@ private:
 version (unittest)
 private PoolResolution resolveTest(ref const TopologySnapshot snap, PoolOptions opt)
 {
-    OsScope unrestricted;
-    return resolvePool(snap, unrestricted, opt);
+    return resolvePool(snap, opt);
 }
 
 unittest
@@ -963,4 +970,62 @@ unittest
     auto failures = pool.workerFailures();
     assert(failures.length == 1);
     assert(failures[0].msg == "managed pump failure");
+}
+
+unittest
+{
+    auto saved = gWorkers;
+    scope (exit) gWorkers = saved;
+    gWorkers = new WorkerRec[6];
+    foreach (ref rec; gWorkers)
+    {
+        rec.isP = true;
+        rec.label = "selected";
+        rec.hasNumber = true;
+        rec.number = 7;
+    }
+    gWorkers[1].isP = false;
+    gWorkers[2].llcIndex = 1;
+    gWorkers[3].label = "other";
+    gWorkers[4].number = 8;
+    gWorkers[5].hasNumber = false;
+    auto pool = new CacheAwarePool(PoolOptions.init);
+    pool.directorHeld = true;
+    Selection all;
+    all.pool = pool;
+    auto selected = all.llc(0).classP.labeled("selected").numbered(7);
+    auto rec = &gWorkers[0];
+    selected.spin(11);
+    assert(atomicLoad(rec.spinIters) == 11 && atomicLoad(rec.kind) == IdleKind.spin);
+    selected.sleep(msecs(-1));
+    assert(atomicLoad(rec.sleepNs) == 0);
+    selected.sleep(msecs(2));
+    assert(atomicLoad(rec.sleepNs) == 2_000_000 && atomicLoad(rec.kind) == IdleKind.sleep);
+    auto epoch = MonoTime.currTime;
+    selected.sleepUntil(epoch);
+    assert(atomicLoad(rec.sleepUntilTicks) == epoch.ticks
+        && atomicLoad(rec.kind) == IdleKind.sleepUntil);
+    selected.wait();
+    assert(atomicLoad(rec.kind) == IdleKind.wait);
+    selected.cadence(epoch, msecs(10), Cadence(true, msecs(1)));
+    assert(atomicLoad(rec.kind) == IdleKind.cadence);
+    assert(atomicLoad(rec.cadenceEpochTicks) == epoch.ticks);
+    assert(atomicLoad(rec.cadencePeriodTicks) == Selection.durationToTicks(msecs(10)));
+    assert(atomicLoad(rec.cadenceSkip) == 1);
+    assert(atomicLoad(rec.cadenceSpinLeadTicks) == Selection.durationToTicks(msecs(1)));
+    selected.nudge(msecs(-1));
+    assert(atomicLoad(rec.cadenceEpochTicks) == epoch.ticks - Selection.durationToTicks(msecs(1)));
+    selected.drift(msecs(2), msecs(4));
+    assert(atomicLoad(rec.cadenceDriftTicks) == Selection.durationToTicks(msecs(2)));
+    assert(atomicLoad(rec.cadenceDriftUntilTicks) == Selection.durationToTicks(msecs(4)));
+    assert(atomicLoad(rec.cadenceDriftSeq) == pool.driftSeq);
+    assert(atomicLoad(rec.epoch) == 8);
+    selected.signal();
+    assert(atomicLoad(rec.epoch) == 8);
+    foreach (ref excluded; gWorkers[1 .. $])
+        assert(atomicLoad(excluded.epoch) == 0 && atomicLoad(excluded.kind) == IdleKind.wait);
+    all.classE.spin();
+    assert(atomicLoad(gWorkers[1].spinIters) == pool.options.eSpinIters);
+    assert(atomicLoad(gWorkers[1].epoch) == 1);
+    assert(!all.classP.classE.matches(*rec));
 }

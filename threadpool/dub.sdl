@@ -49,8 +49,8 @@ configuration "scope-test" {
     mainSourceFile "tests/os_scope_live.d"
 }
 
-// Linux caller confine/restore and stopRequested: `dub run -c confine-test`,
-// also under `taskset -c 0-3`.
+// Windows/Linux caller confine/restore and stopRequested:
+// `dub run -c confine-test`, also under `taskset -c 0-3` on Linux.
 configuration "confine-test" {
     targetType "executable"
     mainSourceFile "tests/confine_live.d"

@@ -1,14 +1,17 @@
 module confine_live;
 
 // Live caller-affinity and pool-stop regression (`dub run -c confine-test`).
-// Linux only; also run it under `taskset -c 0-3`.
+// Windows and Linux; on Linux also run it under `taskset -c 0-3`.
 //
 // confineCallingThread narrows the calling thread to two OS-scope CPUs and
 // restoreCallingThread puts back the exact mask it captured. stopRequested
 // turns true when a managed pump throws, and is false on an unstarted or
 // shut-down pool.
 
-version (linux)
+version (linux) version = ConfineTestOs;
+version (Windows) version = ConfineTestOs;
+
+version (ConfineTestOs)
 {
 import core.atomic : atomicLoad, cas;
 import core.thread : Thread;
@@ -19,7 +22,7 @@ import std.stdio : writeln;
 import threadpool;
 import threadpool.pin : ThreadAffinity, confineCallingThread, restoreCallingThread;
 
-shared int gThrown;
+__gshared shared(int) gThrown;
 
 ManagedPumpResult throwOnce(WorkerSelf*)
 {
@@ -30,27 +33,57 @@ ManagedPumpResult throwOnce(WorkerSelf*)
 
 ProcessorId[] scopeCpus()
 {
-    auto scope_ = osScope();
-    if (scope_.source != OsScopeSource.unrestricted)
-        return scope_.allowed.dup;
     auto snap = discover();
     ProcessorId[] eligible;
     foreach (ref p; snap.processors)
         if (snap.isEligible(p))
             eligible ~= ProcessorId.of(p);
+    // Windows confinement takes one group. Prefer the caller's current group
+    // so this probe also works on machines with several processor groups.
+    version (Windows)
+    {
+        auto current = callerMask();
+        if (current.length == 0) return null;
+        ProcessorId[] sameGroup;
+        foreach (id; eligible)
+            if (id.group == current[0].group) sameGroup ~= id;
+        return sameGroup;
+    }
     return eligible;
+}
+
+ProcessorId[] callerMask()
+{
+    version (Windows)
+    {
+        import core.sys.windows.winbase : GetCurrentThread;
+        import threadpool.sys.win_bindings : GROUP_AFFINITY, GetThreadGroupAffinity;
+        GROUP_AFFINITY affinity;
+        enforce(GetThreadGroupAffinity(GetCurrentThread(), &affinity) != 0,
+            "query caller affinity");
+        ProcessorId[] result;
+        foreach (ushort lp; 0 .. 64)
+            if (affinity.Mask & (1UL << lp))
+                result ~= ProcessorId(affinity.Group, lp);
+        return result;
+    }
+    else return liveOsMask();
 }
 
 void confineAndRestore(const(ProcessorId)[] cpus)
 {
-    auto before = liveOsMask();
+    auto before = callerMask();
+    auto processBefore = liveOsMask();
     auto target = cpus[0 .. 2];
     ThreadAffinity previous;
     enforce(confineCallingThread(target, previous) == PinOutcome.pinned, "confine two CPUs");
+    scope (exit) enforce(restoreCallingThread(previous), "restore on failure");
     enforce(previous.captured, "previous affinity captured");
-    enforce(liveOsMask() == target, "live mask is the confined set: " ~ formatCpuList(liveOsMask()));
+    enforce(callerMask() == target, "caller mask is the confined set: " ~ formatCpuList(callerMask()));
+    version (Windows)
+        enforce(liveOsMask() == processBefore, "caller confinement leaves process affinity unchanged");
     enforce(restoreCallingThread(previous), "restore");
-    enforce(liveOsMask() == before, "restored mask equals the original: " ~ formatCpuList(liveOsMask()));
+    enforce(callerMask() == before, "restored mask equals the original: " ~ formatCpuList(callerMask()));
 
     ThreadAffinity untouched;
     enforce(confineCallingThread(null, untouched) == PinOutcome.unknownProcessor
@@ -64,13 +97,13 @@ void confineAndRestore(const(ProcessorId)[] cpus)
     foreach (ref p; snap.processors)
     {
         auto id = ProcessorId.of(p);
-        if (inOsScope(id)) continue;
+        if (snap.inOsScope(id)) continue;
         enforce(confineCallingThread([cpus[0], id], untouched) == PinOutcome.outsideOsScope
             && !untouched.captured, "out-of-scope CPU rejected before capture");
         writeln("PASS confine rejects out-of-scope ", formatCpuList([id]));
         break;
     }
-    enforce(liveOsMask() == before, "rejections leave the mask alone");
+    enforce(callerMask() == before, "rejections leave the mask alone");
     writeln("PASS confine ", formatCpuList(target), " and restore ", formatCpuList(before));
 }
 
@@ -103,7 +136,7 @@ int main()
     auto cpus = scopeCpus();
     if (cpus.length < 2)
     {
-        writeln("SKIP confine-test: needs two CPUs in the OS scope");
+        writeln("SKIP confine-test: needs two CPUs in one processor group in the OS scope");
         return 0;
     }
     confineAndRestore(cpus);
@@ -117,7 +150,7 @@ import std.stdio : writeln;
 
 int main()
 {
-    writeln("SKIP confine-test: Linux only");
+    writeln("SKIP confine-test: Windows and Linux only");
     return 0;
 }
 }

@@ -1,13 +1,21 @@
 module smoke;
 
 // This executable has a substantial main() suite as well as imported unittests.
-extern(C) __gshared string[] rt_options = ["testmode=run-main"];
+// Under TSan, disable druntime's parallel GC marking: its mark-stack growth
+// races intermittently and is reported before the smoke suite runs.
+version (TSan)
+    extern(C) __gshared string[] rt_options = ["testmode=run-main", "gcopt=parallel:0"];
+else
+    extern(C) __gshared string[] rt_options = ["testmode=run-main"];
 
 import antfarm_fibers;
 import antfarm;
 import core.atomic;
+import core.stdc.stdio : printf;
 import service_plan_tests;
 import host_attach_tests;
+import antfarm_fibers.semaphore_tests : semaphoreCancellationSmoke;
+import antfarm_fibers.event_tests : eventCancellationSmoke;
 import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
 import threadpool.resolution : PoolResolution;
 import core.thread : Fiber, Thread;
@@ -96,7 +104,7 @@ void cancellationOwnershipSmoke()
 
     shared int nonDirectorRejected;
     auto intruder = new Thread({
-        try cast(void) domain.drainCancellationRequests();
+        try domain.releaseAll(null);
         catch (Exception)
             atomicStore(nonDirectorRejected, 1);
     });
@@ -137,6 +145,51 @@ void cancellationOwnershipSmoke()
             ++cancellationEvents;
     assert(cancellationEvents == 1);
     auto remoteHandle = remote.handle;
+    domain.releaseAll(domain.takeCompletions());
+
+    // Two worker-style drainers and the Director can contend for one batch.
+    // Queue more duplicates than the 8-bit CANCEL field can represent: only
+    // one external application may win, with all later requests coalescing.
+    auto concurrent = domain.spawn({});
+    foreach (_; 0 .. 512)
+        assert(domain.requestCancel(concurrent.handle)
+            == CancellationSubmission.queued);
+    shared int go;
+    CancellationApplication[] left, right;
+    auto firstDrainer = new Thread({
+        while (atomicLoad(go) == 0) Thread.yield();
+        left = domain.drainCancellationRequests();
+    });
+    auto secondDrainer = new Thread({
+        while (atomicLoad(go) == 0) Thread.yield();
+        right = domain.drainCancellationRequests();
+    });
+    firstDrainer.start();
+    secondDrainer.start();
+    atomicStore(go, 1);
+    auto direct = domain.directorCancelDetailed(concurrent.handle);
+    firstDrainer.join();
+    secondDrainer.join();
+    assert(left.length + right.length == 512);
+    size_t winners = direct == CancellationResult.wonBeforeEntry ? 1 : 0;
+    assert(direct == CancellationResult.wonBeforeEntry
+        || direct == CancellationResult.alreadyRequested);
+    foreach (batch; [left, right])
+        foreach (application; batch)
+        {
+            assert(application.task == concurrent.handle);
+            if (application.result == CancellationResult.wonBeforeEntry)
+                ++winners;
+            else assert(application.result == CancellationResult.alreadyRequested);
+        }
+    assert(winners == 1 && domain.pendingCancellationRequests == 0);
+    drainUntilEmpty(domain, token, view);
+    assert(concurrent.outcome == FiberOutcome.cancelled);
+    events = domain.takeLifecycleEvents();
+    cancellationEvents = 0;
+    foreach (event; events)
+        if (event.kind == FiberLifecycleKind.cancellation) ++cancellationEvents;
+    assert(cancellationEvents == 1);
     domain.releaseAll(domain.takeCompletions());
 
     auto replacement = domain.spawn({});
@@ -1144,12 +1197,14 @@ void consumeOnFreshThread(AntFarm* farm, FiberTask task, ulong expectedResumes,
     auto thread = new Thread({
         try
         {
+            version (TSan) auto nativeContext = __tsan_get_current_fiber();
             ConsumerView view;
             auto subscription = subscribeOrThrow(view, farm);
             scope (exit) view.unsubscribe();
             foreach (_; 0 .. 100_000)
             {
                 view.consumeNext();
+                version (TSan) assert(__tsan_get_current_fiber() == nativeContext);
                 if (task.resumeCount >= expectedResumes) return;
                 Thread.yield();
             }
@@ -1187,18 +1242,23 @@ void migrationSmoke()
         // `box` is deliberately not stored outside the fiber: across each
         // suspension its only root is on the suspended stack.
         auto box = new MigrationBox(41);
+        version (TSan) auto taskContext = __tsan_get_current_fiber();
         identities[0] = FiberDomain.currentWorkerIdentity();
         FiberDomain.yieldReady();
+        version (TSan) assert(__tsan_get_current_fiber() == taskContext);
         assert(box.value++ == 41);
         identities[1] = FiberDomain.currentWorkerIdentity();
         FiberDomain.await(77);
+        version (TSan) assert(__tsan_get_current_fiber() == taskContext);
         assert(box.value++ == 42);
         identities[2] = FiberDomain.currentWorkerIdentity();
         FiberDomain.sleepFor(msecs(2));
+        version (TSan) assert(__tsan_get_current_fiber() == taskContext);
         assert(box.value++ == 43);
         identities[3] = FiberDomain.currentWorkerIdentity();
         scope (exit)
         {
+            version (TSan) assert(__tsan_get_current_fiber() == taskContext);
             preservedValue = box.value;
             identities[4] = FiberDomain.currentWorkerIdentity();
         }
@@ -1935,6 +1995,69 @@ OneLanePool oneLanePool(AntFarm* farm, bool boundPool)
     return OneLanePool(pool, lane, group);
 }
 
+// T9: the constructing Director only joins the requesting third thread while
+// the pool worker must apply cancellation and unwind the parked fiber itself.
+void workerCancellationSmoke()
+{
+    import core.time : MonoTime;
+    foreach (policy; [FiberWakePolicy.broadcast, FiberWakePolicy.servingGroups,
+                     FiberWakePolicy.directorOwned])
+    foreach (throughLane; [false, true])
+    {
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
+                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
+        scope (exit) farm.destroy();
+        auto fixture = oneLanePool(farm, true);
+        scope (exit) uninstallFiberPlan();
+        fixture.lane.wakePolicy = policy;
+        shared int observedCancellation;
+        auto task = fixture.lane.spawn({
+            try FiberDomain.await(0xCA09);
+            catch (FiberCancelled cancelled)
+            {
+                atomicStore(observedCancellation, 1);
+                throw cancelled;
+            }
+        });
+        auto handle = task.handle;
+        shared int succeeded;
+        auto requester = new Thread({
+            immutable deadline = MonoTime.currTime + msecs(2_000);
+            while (fixture.lane.domain.waiting != 1
+                && MonoTime.currTime < deadline)
+                Thread.sleep(msecs(1));
+            if (fixture.lane.domain.waiting != 1) return;
+            // Let the idle worker park; correctness also covers a request
+            // arriving between its final pump and parking.
+            Thread.sleep(msecs(10));
+            immutable submitted = throughLane
+                ? fixture.lane.requestCancel(handle)
+                : fixture.lane.domain.requestCancel(handle);
+            if (submitted != CancellationSubmission.queued) return;
+            auto joined = handle.join(msecs(2_000));
+            if (joined.status == FiberJoinStatus.timedOut)
+                printf("T9: remote join timed out; observed cancellation = %d\n",
+                    atomicLoad(observedCancellation));
+            if (joined.status == FiberJoinStatus.cancelled
+                && joined.outcome == FiberOutcome.cancelled
+                && atomicLoad(observedCancellation) == 1)
+                atomicStore(succeeded, 1);
+        });
+        fixture.pool.start();
+        requester.start();
+        requester.join(); // No Director service while cancellation is pending.
+        immutable passed = atomicLoad(succeeded) == 1;
+        // Cleanup also makes a pre-fix timeout finite rather than stranding a
+        // live fiber or leaking the domain root after the failed assertion.
+        if (!passed) fixture.lane.beginShutdown(true);
+        waitTerminated(task);
+        fixture.pool.shutdown();
+        assert(fixture.pool.workerFailures.length == 0);
+        fixture.lane.domain.releaseAll(fixture.lane.domain.takeCompletions());
+        assert(passed, "worker cancellation bounded wait expired without Director service");
+    }
+}
+
 // L5: a shutdown that beats every start hook leaves no server to retire the
 // lane; shutdown itself must, so a later spawn throws instead of stranding.
 void admissionAfterEarlyShutdownSmoke()
@@ -2025,8 +2148,7 @@ PoolResolution twoGroupResolution(string test)
     import threadpool;
 
     auto snapshot = discover();
-    auto scope_ = osScope();
-    auto full = resolvePool(snapshot, scope_, PoolOptions.init);
+    auto full = resolvePool(snapshot, PoolOptions.init);
     if (full.acceptedGroupCount >= 2) return full;
     printf("SKIP %s (needs 2 LLCs)\n", test.toStringz);
     return null;
@@ -2442,8 +2564,182 @@ void fiberParitySmoke()
     domain.releaseAll(domain.takeCompletions());
 }
 
-void main()
+private void releaseDeathChild(string mode)
 {
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
+                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
+    auto domain = new FiberDomain(farm);
+    if (mode == "null")
+    {
+        domain.release(null);
+        return;
+    }
+    if (mode == "lifecycle-root") domain.enableLifecycleEvents();
+    auto task = domain.spawn({});
+    if (mode == "live")
+    {
+        domain.release(task);
+        return;
+    }
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    subscribeOrThrow(view, farm);
+    drainUntilEmpty(domain, token, view);
+    if (mode == "completion-root")
+    {
+        domain.release(task);
+        return;
+    }
+    domain.takeCompletions();
+    if (mode == "foreign")
+    {
+        auto other = new FiberDomain(farm);
+        other.release(task);
+        return;
+    }
+    if (mode == "double") domain.release(task);
+    domain.release(task);
+}
+
+private void releaseDeathSmoke()
+{
+    version (linux)
+    {
+        import std.algorithm.searching : canFind;
+        import std.process : execute;
+
+        foreach (mode; ["double", "completion-root", "lifecycle-root",
+                       "live", "foreign", "null"])
+        {
+            immutable message = mode == "double"
+                ? "antfarm_fibers: task released twice"
+                : mode == "completion-root" || mode == "lifecycle-root"
+                ? "antfarm_fibers: drain completion and lifecycle events before release"
+                : "antfarm_fibers: only terminated tasks of this domain can be released";
+            auto result = execute(["/proc/self/exe", "--release-child", mode]);
+            if (result.status == 0
+                || !result.output.canFind("antfarm fatal: " ~ message))
+                throw new Exception("fiber release child " ~ mode
+                    ~ " failed:\n" ~ result.output);
+            printf("PASS fiber release child %.*s\n",
+                cast(int) mode.length, mode.ptr);
+        }
+    }
+    else printf("SKIP fiber release death checks: Linux re-exec required\n");
+}
+
+// A native thread and each suspended task need separate TSan call stacks.
+// Without this, migration can pop frames from another thread's shadow stack.
+private void tsanContextSmoke()
+{
+    version (TSan)
+    {
+        auto nativeContext = __tsan_get_current_fiber();
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
+                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
+        scope (exit) farm.destroy();
+        auto domain = new FiberDomain(farm);
+        auto token = farm.registerProducer(Tier.small);
+        scope (exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        subscribeOrThrow(view, farm);
+        scope (exit) view.unsubscribe();
+        void* firstContext;
+        domain.spawn({
+            firstContext = __tsan_get_current_fiber();
+            assert(firstContext != nativeContext,
+                "scheduler fiber must have its own TSan context");
+            FiberDomain.yieldReady();
+            assert(__tsan_get_current_fiber() == firstContext);
+        });
+        domain.spawn({
+            auto secondContext = __tsan_get_current_fiber();
+            assert(secondContext != nativeContext && secondContext != firstContext);
+            FiberDomain.yieldReady();
+            assert(__tsan_get_current_fiber() == secondContext);
+        });
+        drainUntilEmpty(domain, token, view);
+        assert(__tsan_get_current_fiber() == nativeContext,
+            "scheduler must restore its caller's TSan context");
+        auto completed = domain.takeCompletions();
+        foreach (task; completed)
+        {
+            if (task.exception !is null) throw task.exception;
+            assert(task.outcome == FiberOutcome.completed);
+        }
+        domain.releaseAll(completed);
+        // Reuse a task after termination as well as after suspension.
+        domain.spawn({ assert(__tsan_get_current_fiber() != nativeContext); });
+        drainUntilEmpty(domain, token, view);
+        assert(__tsan_get_current_fiber() == nativeContext);
+        completed = domain.takeCompletions();
+        foreach (task; completed)
+        {
+            if (task.exception !is null) throw task.exception;
+            assert(task.outcome == FiberOutcome.completed);
+        }
+        domain.releaseAll(completed);
+    }
+}
+
+version (TSan)
+    private extern(C) void* __tsan_get_current_fiber() nothrow @nogc;
+
+void main(string[] args)
+{
+    if (args.length == 2 && args[1] == "--event-cancellation-only")
+    {
+        eventCancellationSmoke();
+        printf("event cancellation smoke passed\n");
+        return;
+    }
+    if (args.length == 2 && args[1] == "--semaphore-cancellation-only")
+    {
+        semaphoreCancellationSmoke();
+        printf("semaphore cancellation smoke passed\n");
+        return;
+    }
+    if (args.length == 2 && args[1] == "--tsan-context-only")
+    {
+        tsanContextSmoke();
+        printf("TSan context smoke passed\n");
+        return;
+    }
+    if (args.length == 2 && args[1] == "--migration-only")
+    {
+        migrationSmoke();
+        printf("migration smoke passed\n");
+        return;
+    }
+    if (args.length == 3 && args[1] == "--release-child")
+    {
+        releaseDeathChild(args[2]);
+        return;
+    }
+    if (args.length == 2 && args[1] == "--release-death")
+    {
+        releaseDeathSmoke();
+        return;
+    }
+    if (args.length == 2 && args[1] == "--worker-cancellation-only")
+    {
+        workerCancellationSmoke();
+        printf("worker cancellation smoke passed\n");
+        return;
+    }
+    if (args.length == 2 && args[1] == "--cancellation-only")
+    {
+        workerCancellationSmoke();
+        cancellationOwnershipSmoke();
+        cancellationSemanticsSmoke();
+        fiberJoinSmoke();
+        sharedSignalAndTimerCancellationSmoke();
+        printf("cancellation smoke passed\n");
+        return;
+    }
+    tsanContextSmoke();
+    releaseDeathSmoke();
+    workerCancellationSmoke();
     uxHelpersSmoke();
     cancellationOwnershipSmoke();
     manualSmoke();
@@ -2462,6 +2758,8 @@ void main()
     wakePolicySmoke();
     mixedPayloadSmoke();
     syncPrimitiveSmoke();
+    eventCancellationSmoke();
+    semaphoreCancellationSmoke();
     sharedSignalAndTimerCancellationSmoke();
     threadpoolSmoke();
     admissionAfterStopSmoke();

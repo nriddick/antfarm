@@ -3,10 +3,12 @@
  + `CacheAwarePool` workers that consume it, placed on one physical group
  + (LLC) by default.
  +
- + Placement is decided up front by a `FarmHostPlan`: `FarmHost.preview`
- + shows exactly what the constructor will do, and every compromise is a
- + plan note rather than a silent choice. Spanning groups is an explicit
- + opt-in (`HostGroups.span`), labelled `crossGroup` in the plan.
+ + Placement is decided up front: `FarmHost.resolve` returns the exact worker
+ + selection the constructor will start, as a `PoolResolution` in which every
+ + CPU that passed the filters but was left out is `Reject.notSelected`.
+ + Every compromise is a note in `FarmHost.toString` rather than a silent
+ + choice. Spanning groups is an explicit opt-in (`HostGroups.span`),
+ + labelled `crossGroup` in `FarmHost.summary`.
  +
  + This module is not re-exported by `import threadpool;`; it depends on the
  + `antfarm` package. Import it as `import threadpool.host;`.
@@ -16,6 +18,7 @@ module threadpool.host;
 import core.atomic : MemoryOrder, atomicLoad, atomicOp, atomicStore, cas;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, msecs;
+import std.typecons : Rebindable;
 
 import actors : ActorAllocator, ActorHandle, ActorReclaimResult, ActorRetireMode,
     ActorRetireResult, ActorRuntime, ActorWave, PrivateRootOptions, PrivateRootPark,
@@ -24,13 +27,12 @@ import antfarm : AntFarm, ConsumerView, FarmCreateError, FarmCreateFailure, Tier
     DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, SUBSCRIBE_RETRY, fatal;
 import threadpool.hybrid : ManagedWorkerHooks, WorkerSelf, gWorkers;
 import threadpool.worker : requestStop;
-import threadpool.os_scope : OsScope, OsScopeSource, osScope;
 import threadpool.pin : PinOutcome, ThreadAffinity, confineCallingThread, restoreCallingThread;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.resolution : PoolResolution, Reject, reasonsText, resolvePool;
 import threadpool.topology : ProcessorId, TopologySnapshot, formatCpuList;
 
-/// `FarmHostOptions.workers` sentinel: every CPU the plan can staff in the
+/// `FarmHostOptions.workers` sentinel: every CPU the host can staff in the
 /// selected group(s), after the caller reservation.
 enum uint autoWorkers = uint.max;
 
@@ -52,14 +54,14 @@ enum CallerPlacement : ubyte
 {
     /// Restrict the caller's affinity to the home group's online, in-scope
     /// CPUs that no worker owns (SMT siblings of workers included). When
-    /// every such CPU is a worker, the whole home group, with
-    /// `FarmHostPlan.callerSharesWorkerCpu` set. Restored by close.
+    /// every such CPU is a worker, the whole home group, noted as "caller
+    /// shares worker CPUs" in `FarmHost.summary`. Restored by close.
     confine,
     /// Pin the caller to one CPU: the reserved one, else a free home-group
     /// CPU, else the last home worker CPU (shared). Restored by close.
     pin,
-    /// Leave the caller's affinity alone. The plan reports the caller as
-    /// an external participant that may run in another group.
+    /// Leave the caller's affinity alone. `FarmHost.toString` notes that
+    /// the caller is an external participant that may run in another group.
     unchanged,
 }
 
@@ -72,7 +74,7 @@ struct HostGroups
         return HostGroups.init;
     }
 
-    /// Exactly this group. Plan error if it has no accepted CPU.
+    /// Exactly this group. `FarmHostResolveException` if it has no accepted CPU.
     static HostGroups only(ushort llc) pure nothrow @safe
     {
         HostGroups g;
@@ -82,8 +84,8 @@ struct HostGroups
     }
 
     /// One Farm consumed from several groups: deliberately cross-group.
-    /// `llcs[0]` is the home group (caller placement, `farmGroup`). Every
-    /// worker from another group is a foreign consumer in the plan.
+    /// `llcs[0]` is the home group (caller placement, the Farm's home). Every
+    /// worker from another group is a foreign consumer in `FarmHost.summary`.
     static HostGroups span(const(ushort)[] llcs) pure @safe
     {
         HostGroups g;
@@ -97,7 +99,7 @@ struct HostGroups
     private const(ushort)[] llcs;
 }
 
-/// Farm geometry. Participant counts are computed by the plan; the fields
+/// Farm geometry. Participant counts are computed by the host; the fields
 /// here only add to them.
 struct FarmSizing
 {
@@ -122,7 +124,8 @@ enum PoolOptions defaultHostPoolOptions = () {
     return o;
 }();
 
-/// Everything the host plan reads. `.init` is a sensible default.
+/// Everything `FarmHost.resolve` and the constructor read. `.init` is a
+/// sensible default.
 struct FarmHostOptions
 {
     /// Pool workers. 0 = no pool: the calling thread is the only consumer.
@@ -149,48 +152,46 @@ struct FarmHostOptions
     FarmSizing farm;
 }
 
-/// Participant counts on the host Farm, relative to its home group.
-struct HostParticipants
+/// Internal: the full host placement `planHost` computes. The public views
+/// are `FarmHost.resolve`, `resolution`, `callerCpus`, `summary` and
+/// `toString`.
+package(threadpool) final class HostPlan
 {
-    uint nativeConsumers;   /// pool workers assigned to the home group
-    uint foreignConsumers;  /// pool workers assigned to another group (span only)
-    uint externalConsumers; /// caller view + FarmSizing.extraConsumers
-    uint smallProducers;    /// control token + extraSmallProducers
-    uint bulkProducers;     /// FarmSizing.bulkProducers
-}
-
-/// What a `FarmHost` will do (or did). Immutable after construction; safe
-/// to share, like `PoolResolution`.
-final class FarmHostPlan
-{
-    const FarmHostOptions options;        /// as given
-    const PoolResolution  candidates;     /// user filters over every group
-    /// The exact pool start set, in start (snapshot) order; null when workers == 0.
-    const PoolResolution  workerSelection;
-    /// The Farm's declared home group; 0 and meaningless when workers == 0.
-    ushort                farmGroup;
-    const(ushort)[]       groups;         /// groups supplying workers, home first
-    bool                  crossGroup;     /// foreignConsumers != 0
-    uint                  workers;        /// resolved count
-    CallerPlacement       caller;         /// effective (unchanged when workers == 0)
-    const(ProcessorId)[]  callerCpus;     /// confine/pin set; empty when unchanged
+    const FarmHostOptions options;     /// as given
+    const PoolResolution  candidates;  /// user filters over every group
+    /// `candidates` narrowed to the workers, in start (snapshot) order;
+    /// every other candidate is `Reject.notSelected`. Never null.
+    PoolResolution        resolution;
+    ushort                farmGroup;   /// 0 and meaningless when workers == 0
+    const(ushort)[]       groups;      /// groups supplying workers, home first
+    CallerPlacement       caller;      /// effective (unchanged when workers == 0)
+    const(ProcessorId)[]  callerCpus;  /// confine/pin set; empty when unchanged
     bool                  callerSharesWorkerCpu; /// no free home-group CPU was left
-    bool                  callerConsumes; /// the caller owns a ConsumerView
-    HostParticipants      participants;   /// consumers and producers on the Farm
-    uint                  expectedConsumers; /// passed to AntFarm.create
-    uint                  maxSmall;       /// passed to AntFarm.create
-    uint                  maxBulk;        /// passed to AntFarm.create
-    const(string)[]       notes;          /// e.g. "group 1 not used: osExcluded"
+    bool                  callerConsumes;        /// the caller owns a ConsumerView
+    uint nativeConsumers;   /// workers in the home group
+    uint foreignConsumers;  /// workers in another group (span only)
+    uint externalConsumers; /// caller view + FarmSizing.extraConsumers
+    uint expectedConsumers; /// passed to AntFarm.create
+    uint maxSmall;          /// control token + extraSmallProducers
+    uint maxBulk;           /// FarmSizing.bulkProducers
+    const(string)[] notes;  /// e.g. "group 1 not used: osExcluded"
 
-    private this(const FarmHostOptions options, const PoolResolution candidates,
-        const PoolResolution workerSelection)
+    private this(const FarmHostOptions options, const PoolResolution candidates)
     {
         this.options = options;
         this.candidates = candidates;
-        this.workerSelection = workerSelection;
     }
 
-    /// One line: workers and where, caller placement, participants, sizing.
+    @property uint workers() const @nogc nothrow
+    {
+        return cast(uint) resolution.workers.length;
+    }
+
+    @property bool crossGroup() const @nogc nothrow
+    {
+        return foreignConsumers != 0;
+    }
+
     string summary() const
     {
         import std.format : format;
@@ -199,34 +200,16 @@ final class FarmHostPlan
             ? "FarmHost: no workers, the caller consumes"
             : format("FarmHost: %s worker%s on group%s %s {%s}%s, idle %s",
                 workers, workers == 1 ? "" : "s", groups.length == 1 ? "" : "s",
-                groupsText(groups), formatCpuList(workerSelection.workers),
+                groupsText(groups), formatCpuList(resolution.workers),
                 crossGroup ? " (crossGroup)" : "", idleText());
         if (workers != 0)
             s ~= format("; caller %s%s%s", caller,
                 callerCpus.length ? " {" ~ formatCpuList(callerCpus) ~ "}" : "",
                 callerSharesWorkerCpu ? " (shares worker CPUs)" : "");
         s ~= format("; consumers %s native + %s foreign + %s external, producers %s small + %s bulk",
-            participants.nativeConsumers, participants.foreignConsumers,
-            participants.externalConsumers, participants.smallProducers,
-            participants.bulkProducers);
+            nativeConsumers, foreignConsumers, externalConsumers, maxSmall, maxBulk);
         s ~= format("; Farm %s MiB, k %s", options.farm.ringMiB, options.farm.k);
         return s;
-    }
-
-    /// Summary, every note, then the candidate resolution summary.
-    void toString(scope void delegate(const(char)[]) sink) const
-    {
-        sink(summary());
-        sink("\n");
-        foreach (note; notes)
-        {
-            sink("  note: ");
-            sink(note);
-            sink("\n");
-        }
-        sink("  candidates: ");
-        sink(candidates.summary());
-        sink("\n");
     }
 
     private string idleText() const
@@ -251,18 +234,19 @@ class FarmHostException : Exception
     }
 }
 
-/// The plan cannot be satisfied; nothing was created.
-class FarmHostPlanException : FarmHostException
+/// The options cannot be satisfied on this topology; nothing was created.
+/// Thrown by `FarmHost.resolve` and the constructor.
+class FarmHostResolveException : FarmHostException
 {
     const(string)[] problems; /// every problem found, in check order
 
-    /// Message: "FarmHost plan rejected: " and the problems.
+    /// Message: "FarmHost options rejected: " and the problems.
     this(const(string)[] problems, string file = __FILE__, size_t line = __LINE__)
         @safe pure
     {
         import std.array : join;
 
-        super("FarmHost plan rejected: " ~ problems.join("; "), null, file, line);
+        super("FarmHost options rejected: " ~ problems.join("; "), null, file, line);
         this.problems = problems;
     }
 }
@@ -408,10 +392,11 @@ private void hostStop(WorkerSelf*) @nogc nothrow
  + The constructing thread is the control thread. Work advances only while it
  + is in `step`/`waitUntil` (or an extra-token holder flushes): the host has
  + no background emitter. Control-thread methods are checked by `assert` in
- + debug builds. `plan`, `farm`, `state` and `wake` may be called from any
- + thread while the host is open. `wake` may overlap `close()`, `abandon()`
- + or a worker-failure shutdown: teardown stores a non-open state, then
- + waits until in-flight `wake` calls have returned, before stopping the pool.
+ + debug builds. `resolution`, `callerCpus`, `summary`, `toString`, `farm`,
+ + `state` and `wake` may be called from any thread while the host is open.
+ + `wake` may overlap `close()`, `abandon()` or a worker-failure shutdown:
+ + teardown stores a non-open state, then waits until in-flight `wake` calls
+ + have returned, before stopping the pool.
  +
  + Runtimes and parks from `createRuntime`/`createPark` belong to the host and
  + are destroyed by `close()`, after the consumer join. There is no
@@ -426,10 +411,10 @@ private void hostStop(WorkerSelf*) @nogc nothrow
  + (neither closed nor abandoned) hangs process exit.
  + While it has workers, a host owns the process's single `CacheAwarePool`; a
  + second host with workers, or one started beside an application pool, is
- + rejected. Before concurrent construction or preview calls, complete one
- + `FarmHost.preview()` call: first topology discovery is an unlocked setup
- + operation, including for hosts with `workers == 0`. `preview()` warms
- + that discovery even when it throws `FarmHostPlanException`.
+ + rejected. Before concurrent construction or resolve calls, complete one
+ + `FarmHost.resolve()` call: first topology discovery is an unlocked setup
+ + operation, including for hosts with `workers == 0`. `resolve()` warms
+ + that discovery even when it throws `FarmHostResolveException`.
  +
  + For maximum throughput on consumer-bound fine-grained workloads, a
  + hand-written consumer loop on the raw Farm can beat the host's pool
@@ -437,38 +422,42 @@ private void hostStop(WorkerSelf*) @nogc nothrow
  +/
 final class FarmHost
 {
-    /// What the constructor will do with `options`: discovers topology and
-    /// the frozen OS scope (a threadpool setup operation), then plans as the
-    /// overload below. Throws `FarmHostPlanException`. A throwing preview
+    /// The worker selection the constructor will start with `options`:
+    /// discovers topology (a threadpool setup operation), then resolves as
+    /// the overload below. Throws `FarmHostResolveException`. A throwing call
     /// still completes discovery, so it warms the cache for a later
     /// constructor or a SKIP probe such as `workersFit()`.
-    static FarmHostPlan preview(const FarmHostOptions options = FarmHostOptions.init)
+    static PoolResolution resolve(const FarmHostOptions options = FarmHostOptions.init)
     {
         const snap = CacheAwarePool.topology();
-        const scope_ = osScope();
-        return preview(snap, scope_, options);
+        return resolve(snap, options);
     }
 
-    /// The plan for an explicit snapshot and OS scope: deterministic, no OS
-    /// queries (the test seam, like `resolvePool`). Throws
-    /// `FarmHostPlanException` listing every problem found.
-    static FarmHostPlan preview(ref const TopologySnapshot snap, ref const OsScope scope_,
-        const FarmHostOptions options)
+    /// The worker selection for an explicit snapshot, whose OS scope fields
+    /// apply: deterministic, no OS queries (the test seam, like
+    /// `resolvePool`). The workers are accepted; every other CPU that passed
+    /// the `options.pool` filters is `Reject.notSelected`; `requests` are
+    /// `options.pool.processors`. Never null: with `workers == 0` there are
+    /// no workers. Throws `FarmHostResolveException` listing every problem
+    /// found.
+    static PoolResolution resolve(ref const TopologySnapshot snap, const FarmHostOptions options)
     {
-        return planFor(snap, scope_, options);
+        return planHost(snap, options).resolution;
     }
 
-    /// Plan, create the Farm, register the control token, start and subscribe
-    /// workers, place the caller. All or nothing: on any throw, everything
-    /// created so far is undone in reverse order. Throws
-    /// `FarmHostPlanException` (nothing created), `FarmHostFailed` (a worker
-    /// failed to start) or `FarmHostException`.
+    /// Resolve, create the Farm, register the control token, start and
+    /// subscribe workers, place the caller. All or nothing: on any throw,
+    /// everything created so far is undone in reverse order. Throws
+    /// `FarmHostResolveException` (nothing created), `FarmHostFailed` (a
+    /// worker failed to start) or `FarmHostException`.
     this(FarmHostOptions options = FarmHostOptions.init)
     {
         import std.format : format;
 
         director_ = Director.init;
-        plan_ = preview(options);
+        const snap = CacheAwarePool.topology();
+        plan_ = planHost(snap, options);
+        resolution_ = plan_.resolution;
         control_ = Thread.getThis();
         parkMode_ = plan_.workers != 0 && options.idle == WorkerIdle.park;
         scope (failure) undoConstruction();
@@ -516,10 +505,47 @@ final class FarmHost
 
     // ---- inspection --------------------------------------------------------
 
-    /// The plan this host was built from. Any thread.
-    @property const(FarmHostPlan) plan() const @nogc nothrow
+    /// The host's worker selection, fixed for its life and kept after
+    /// `close()`/`abandon()`. Before the constructor returns it is the
+    /// resolved selection; afterwards the started one, with every worker's
+    /// `StartState` and `PinOutcome`, and the same object as
+    /// `pool.resolution`. Never null: with `workers == 0` it has no workers
+    /// and every filter-passing CPU is `Reject.notSelected`. Any thread.
+    @property const(PoolResolution) resolution() const @nogc nothrow
     {
-        return plan_;
+        return resolution_;
+    }
+
+    /// The CPUs the caller is confined or pinned to; empty when its
+    /// affinity is left unchanged (including `workers == 0`). Any thread.
+    @property const(ProcessorId)[] callerCpus() const @nogc nothrow
+    {
+        return plan_.callerCpus;
+    }
+
+    /// One line: workers and where, caller placement, Farm participants
+    /// (consumers native, foreign and external; small and bulk producers)
+    /// and Farm sizing. Any thread.
+    string summary() const
+    {
+        return plan_.summary();
+    }
+
+    /// `summary()`, every placement note (unused groups and why, caller
+    /// compromises), then `resolution.summary()`. Any thread.
+    void toString(scope void delegate(const(char)[]) sink) const
+    {
+        sink(plan_.summary());
+        sink("\n");
+        foreach (note; plan_.notes)
+        {
+            sink("  note: ");
+            sink(note);
+            sink("\n");
+        }
+        sink("  resolution: ");
+        sink(resolution_.summary());
+        sink("\n");
     }
 
     /// The host Farm, fixed for the host's life. Any thread.
@@ -960,7 +986,8 @@ private:
         bool park;
     }
 
-    FarmHostPlan plan_;
+    HostPlan plan_;
+    Rebindable!(const PoolResolution) resolution_;
     AntFarm* farm_;
     Token token_;
     ConsumerView view_;
@@ -1012,18 +1039,21 @@ private:
                     "FarmHost test hook: injected start failure");
         }
 
+        // The pool starts from the host's own resolution, so pool.resolution
+        // is the host's. processors = workers keeps pool.resolve() selecting
+        // the same CPUs.
         auto poolOptions = options.pool;
-        poolOptions.processors = plan_.workerSelection.workers.dup;
+        poolOptions.processors = plan_.resolution.workers.dup;
         // workerBody/workerStop, not the managed lane: the hot path is one
         // bool return. Subscribe is lazy (no start hook). User hooks were
-        // rejected by the plan; clear them so a copied options struct cannot
+        // rejected by planHost; clear them so a copied options struct cannot
         // select both lanes.
         poolOptions.workerBody = &hostBody;
         poolOptions.workerStop = &hostStop;
         poolOptions.managedWorker = ManagedWorkerHooks.init;
         auto pool = new CacheAwarePool(poolOptions);
         try
-            pool.start();
+            pool.start(plan_.resolution);
         catch (Exception e)
             throw new FarmHostException("FarmHost: pool start failed: " ~ e.msg
                 ~ " [" ~ plan_.summary() ~ "]", e);
@@ -1031,9 +1061,7 @@ private:
         pool_ = pool;
         poolRunning_ = true;
         director_ = pool_.director();
-        if (!plan_.workerSelection.sameSelection(pool_.resolution))
-            throw new FarmHostException("FarmHost: started workers {" ~ formatCpuList(pool_.resolution.workers)
-                ~ "} differ from the plan [" ~ plan_.summary() ~ "]");
+        resolution_ = pool_.resolution;
         // A subscribe failure or a worker Error stops the pool; workers
         // that have not visited yet then exit without subscribing, so stop
         // also ends the wait. The counter covers a failure that has been
@@ -1147,8 +1175,9 @@ private:
     }
 }
 
-private FarmHostPlan planFor(ref const TopologySnapshot snap, ref const OsScope scope_,
-    const FarmHostOptions options)
+/// The host placement for `options` on `snap`; throws
+/// `FarmHostResolveException` listing every problem found.
+package(threadpool) HostPlan planHost(ref const TopologySnapshot snap, const FarmHostOptions options)
 {
     import std.algorithm.searching : canFind;
     import std.format : format;
@@ -1166,7 +1195,7 @@ private FarmHostPlan planFor(ref const TopologySnapshot snap, ref const OsScope 
     if (options.idle == WorkerIdle.park && options.idleTimeout <= Duration.zero)
         problems ~= "idleTimeout must be positive (Duration.max parks until woken)";
 
-    const candidates = resolvePool(snap, scope_, options.pool);
+    const candidates = resolvePool(snap, options.pool);
     immutable callerConsumes = options.callerConsumes || options.workers == 0;
     auto caller = CallerPlacement.unchanged;
     const(ProcessorId)[] callerCpus;
@@ -1178,7 +1207,7 @@ private FarmHostPlan planFor(ref const TopologySnapshot snap, ref const OsScope 
     {
         groups = selectGroups(candidates, options.groups, problems);
         if (groups.length == 0)
-            throw new FarmHostPlanException(problems);
+            throw new FarmHostResolveException(problems);
         immutable home = groups[0];
         farmGroup = home;
         const homeAccepted = candidates.workersIn(home);
@@ -1258,36 +1287,26 @@ private FarmHostPlan planFor(ref const TopologySnapshot snap, ref const OsScope 
         notes ~= "groups ignored: workers == 0 starts no pool";
 
     if (problems.length)
-        throw new FarmHostPlanException(problems);
+        throw new FarmHostResolveException(problems);
 
-    const(PoolResolution) selection = chosen.length ? reresolve(snap, scope_, options.pool, chosen, problems) : null;
-    if (problems.length)
-        throw new FarmHostPlanException(problems);
-
-    auto result = new FarmHostPlan(options, candidates, selection);
+    auto result = new HostPlan(options, candidates);
+    result.resolution = candidates.narrowedTo(chosen);
     result.farmGroup = farmGroup;
     result.groups = groups;
-    result.workers = cast(uint) chosen.length;
     result.caller = caller;
     result.callerCpus = callerCpus;
     result.callerSharesWorkerCpu = callerShares;
     result.callerConsumes = callerConsumes;
 
-    HostParticipants p;
-    if (selection !is null)
-        foreach (id; selection.workers)
-        {
-            if (candidates[id].llcIndex == farmGroup) p.nativeConsumers++;
-            else p.foreignConsumers++;
-        }
+    foreach (id; result.resolution.workers)
+    {
+        if (candidates[id].llcIndex == farmGroup) result.nativeConsumers++;
+        else result.foreignConsumers++;
+    }
     immutable external = cast(ulong)(callerConsumes ? 1 : 0) + options.farm.extraConsumers;
     immutable consumers = external + chosen.length;
     immutable smallProducers = 1UL + options.farm.extraSmallProducers;
-    p.externalConsumers = cast(uint) external;
-    p.smallProducers = cast(uint) smallProducers;
-    p.bulkProducers = options.farm.bulkProducers;
-    result.participants = p;
-    result.crossGroup = p.foreignConsumers != 0;
+    result.externalConsumers = cast(uint) external;
 
     if (consumers < 1 || consumers > MAX_CONSUMERS_LIMIT)
         problems ~= format("%s consumers (%s workers + %s external) exceed the Farm's %s-view limit",
@@ -1295,7 +1314,7 @@ private FarmHostPlan planFor(ref const TopologySnapshot snap, ref const OsScope 
     if (smallProducers > uint.max)
         problems ~= "extraSmallProducers overflows the small producer count";
     if (problems.length)
-        throw new FarmHostPlanException(problems);
+        throw new FarmHostResolveException(problems);
     result.expectedConsumers = cast(uint) consumers;
     result.maxSmall = cast(uint) smallProducers;
     result.maxBulk = options.farm.bulkProducers;
@@ -1304,7 +1323,7 @@ private FarmHostPlan planFor(ref const TopologySnapshot snap, ref const OsScope 
     immutable geometry = AntFarm.checkGeometry(f.ringMiB, f.k, result.expectedConsumers,
         result.maxBulk, f.quotaBulk, result.maxSmall, f.quotaSmall);
     if (geometry.kind != FarmCreateFailure.none)
-        throw new FarmHostPlanException(["Farm sizing: " ~ geometry.detail]);
+        throw new FarmHostResolveException(["Farm sizing: " ~ geometry.detail]);
     result.notes = notes;
     return result;
 }
@@ -1374,25 +1393,6 @@ private string groupWhy(const PoolResolution candidates, ushort g)
         if (c.llcIndex == g)
             any |= c.reasons;
     return "mixed " ~ reasonsText(any);
-}
-
-/// Resolve `chosen` as the exact worker set; its order is the start order.
-private const(PoolResolution) reresolve(ref const TopologySnapshot snap, ref const OsScope scope_,
-    const PoolOptions pool, const(ProcessorId)[] chosen, ref string[] problems)
-{
-    import std.algorithm.sorting : sort;
-
-    PoolOptions exact = pool;
-    exact.processors = chosen.dup;
-    auto selection = resolvePool(snap, scope_, exact);
-    auto want = chosen.dup;
-    auto got = selection.workers.dup;
-    want.sort();
-    got.sort();
-    if (want != got)
-        problems ~= "internal: the final resolution selected {" ~ formatCpuList(selection.workers)
-            ~ "} instead of {" ~ formatCpuList(chosen) ~ "}";
-    return selection;
 }
 
 private string groupsText(const(ushort)[] groups)

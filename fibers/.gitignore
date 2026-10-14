@@ -1,6 +1,7 @@
 /.dub/
 /antfarm-fibers
 /antfarm-fibers-test-*
+/antfarm_antfarm-fibers
 *.o
 *.obj
 *.a

@@ -1176,16 +1176,40 @@ private ulong mulChecked(ulong a, ulong b, const(char)[] msg) nothrow @nogc @sys
     return a * b;
 }
 
+private const(char)[] payloadHeaderError(const PayloadHeader* header)
+        pure nothrow @nogc @system
+{
+    if (header is null || header.call is null) return "bad payload header";
+    if (header.maxCs == 0 || header.maxCs > MAX_PAYLOAD_ITERS)
+        return "payload MaxCs out of range";
+    if (header.done == 0 || header.done > MAX_PAYLOAD_ITERS)
+        return "payload Done out of range";
+    if (header.done > 1 && header.maxCs < 2)
+        return "multithreaded payload requires MaxCs >= 2";
+    return null;
+}
+
 private void validatePayloadHeader(const PayloadHeader* header)
         nothrow @nogc @system
 {
-    if (header is null || header.call is null) fatal("bad payload header");
-    if (header.maxCs == 0 || header.maxCs > MAX_PAYLOAD_ITERS)
-        fatal("payload MaxCs out of range");
-    if (header.done == 0 || header.done > MAX_PAYLOAD_ITERS)
-        fatal("payload Done out of range");
-    if (header.done > 1 && header.maxCs < 2)
-        fatal("multithreaded payload requires MaxCs >= 2");
+    immutable error = payloadHeaderError(header);
+    if (error.length != 0) fatal(error);
+}
+
+/// Shared singleton cost for canFit and every write sizing path. False
+/// means size arithmetic would overflow, including the full-header guard
+/// retained for ST payloads by the write contract (spec 5b.2).
+private bool singletonCost(ulong base, uint maxCs, ulong blen, out ulong cost)
+        pure nothrow @nogc @safe
+{
+    pragma(inline, true);
+    immutable oneMt = maxCs > 1 ? 1UL : 0UL;
+    immutable overhead = base + 1UL + oneMt
+        + (oneMt != 0 ? PHEAD_LEN : PCOMPACT_LEN);
+    if (blen > ulong.max - PHEAD_LEN || blen > ulong.max - overhead)
+        return false;
+    cost = overhead + blen;
+    return true;
 }
 
 /// Spec 5b.2-3: one payload's size-overflow and singleton contract checks
@@ -1200,13 +1224,19 @@ private ulong checkPayloadFits(ulong base, ulong quota, uint maxCs, ulong blen)
     immutable oneMt = maxCs > 1 ? 1UL : 0UL;
     // A singleton that exceeds this tier can never be published by this
     // producer, so it is a contract error.
-    immutable singletonBase = base + 1UL + oneMt;
-    immutable singletonPsz = (oneMt != 0 ? PHEAD_LEN : PCOMPACT_LEN) + blen;
-    if (singletonPsz > ulong.max - singletonBase)
+    ulong cost;
+    if (!singletonCost(base, maxCs, blen, cost))
         fatal("table size overflow");
-    if (singletonBase + singletonPsz > quota)
+    if (cost > quota)
         fatal("payload larger than this producer tier's Exi");
     return oneMt;
+}
+
+/// Base size of every table in ulongs: Thead + progress pads + Tcount + end
+/// pad. `sq` is a uint, so this cannot overflow.
+private ulong tableBaseWords(uint sq) pure nothrow @nogc @safe
+{
+    return THEAD_LEN + PROG_PAD + 1 + 7 + 8UL * sq + END_PAD;
 }
 
 /// Table size in ulongs: Thead + extension and index words (`headWords`) +
@@ -1862,6 +1892,30 @@ struct AntFarm
         }
     }
 
+    /// Whether one payload can fit a singleton table in `tier`, with
+    /// `bodyWords` measured in ulongs (8 bytes). Returns false for malformed
+    /// headers, size overflow, or a singleton exceeding that tier's quota;
+    /// this query never fatals. ST (maxCs == 1) uses the compact/uniform
+    /// singleton cost; MT (maxCs > 1, even with done == 1) uses the full cost.
+    ///
+    /// This is a snapshot of the live consumer count and its SqCs, just as
+    /// in write(). Quotas are fixed, but the answer is not monotone: consumer
+    /// growth can turn true into false, and departures can turn false into
+    /// true. It reserves no quota and does not predict backpressure or how
+    /// many payloads a multi-payload write will accept. A later write still
+    /// validates independently and fatals on an invalid or oversized payload.
+    bool canFit(const ref PayloadHeader header, ulong bodyWords, Tier tier)
+            const nothrow @nogc @system
+    {
+        if (payloadHeaderError(&header).length != 0) return false;
+        immutable quota = tier == Tier.bulk ? quotaBulk : quotaSmall;
+        immutable csl = atomicLoad!(MemoryOrder.raw)(Cf);
+        immutable cs = csl > 0 ? cast(uint) csl : 1;
+        immutable base = tableBaseWords(sqcsOf(cs));
+        ulong cost;
+        return singletonCost(base, header.maxCs, bodyWords, cost) && cost <= quota;
+    }
+
     /// Spec 5b. Writes as many of `payloads` as fit the caller's remaining
     /// quota (carried inside `tok`); returns the number written. Returns 0
     /// (full) when backpressure is too high; callers retry or wait on
@@ -1960,8 +2014,7 @@ struct AntFarm
 
         // Fit as many payloads as the quota and the table payload cap
         // allow (spec 5b truncation, 2e).
-        // Base size of every table: Thead + progress pads + Tcount + end pad.
-        immutable base = THEAD_LEN + PROG_PAD + 1 + 7 + 8UL * sq + END_PAD;
+        immutable base = tableBaseWords(sq);
         // Spec 2e: a committed table carries fewer than 2^31 payloads.
         immutable size_t maxTablePayloads = 2_147_483_647; // 2^31 - 1
         size_t n;
@@ -1985,9 +2038,8 @@ struct AntFarm
             static if (hasCommonPayloadHeader!R && hasFixedPayloadLength!R)
             {
                 immutable bodyLen = cast(ulong) payloads.fixedPayloadLength;
-                if (bodyLen > ulong.max - PHEAD_LEN)
-                    fatal("payload size overflow");
-                immutable oneMt = commonHeader.maxCs > 1 ? 1UL : 0UL;
+                immutable oneMt = checkPayloadFits(base, quota,
+                    commonHeader.maxCs, bodyLen);
                 // Spec 2g: a uniform ST range shares its Call by
                 // construction, and a nonzero uniform length drops Tindex.
                 layout = oneMt != 0 ? TableLayout.full
@@ -2001,13 +2053,6 @@ struct AntFarm
                     "table size overflow");
                 immutable unit = addChecked(indexWordsOf(layout, 1, oneMt), rec,
                     "table size overflow");
-                // The singleton is the same size as before spec 2g:
-                // base + 2 + Plen for ST, base + 2 + 16 + Plen for MT.
-                if (unit > ulong.max - head)
-                    fatal("table size overflow");
-                if (head + unit > quota)
-                    fatal("payload larger than this producer tier's Exi");
-
                 static if (hasLength!R)
                 {
                     immutable available = cast(size_t) payloads.length;
@@ -2395,6 +2440,18 @@ struct ConsumerView
     /// when the position moves to a new segment.
     ulong sweepSeq;
 
+    /// Internal: oldest-epoch re-walk cursor (spec 8): sequence up to which
+    /// every table of the oldest held segment was observed complete
+    /// (Tprogress == Tlen). Reset when oldestEi advances.
+    ulong oldSweepSeq;
+
+    version (AntfarmSweepStats)
+    {
+        /// Test instrumentation: tables visited by the oldest-epoch
+        /// re-walk (sweepOldestTrailing), cumulative.
+        ulong oldSweepTables;
+    }
+
     /// Internal: oldest-prefix release counter. With -d-version=SdCheckEveryN,
     /// tryReleaseOldest() runs every SD_CHECK_EVERY_N table advances
     /// instead of after every table. Default N = 1 (eager).
@@ -2500,6 +2557,7 @@ struct ConsumerView
         ltiRing[seg] = lti;
         sweeperNext = false;
         sweepSeq = 0;
+        oldSweepSeq = 0;
         sdCheckCounter = 0;
         hasRef = true;
         return es;
@@ -2841,6 +2899,7 @@ private:
                 break;
             decRef(ki, ltiOf(oldestEi));
             ++oldestEi;
+            oldSweepSeq = 0; // new oldest segment: re-walk from its Seqt
         }
     }
 
@@ -2848,6 +2907,12 @@ private:
     /// leftover work, so the segment confirms and its reference can be
     /// released. The data is guaranteed present and intact: we hold a
     /// reference on the segment, so producers cannot have overwritten it.
+    /// The walk resumes at the oldSweepSeq cursor, which advances only over
+    /// the leading run of tables observed complete. A table another
+    /// consumer is still finishing (for example a primary call parked in
+    /// its callback) stops the cursor, so a stalled oldest epoch costs each
+    /// park O(tables from the first incomplete one) rather than
+    /// O(tables in the segment).
     void sweepOldestTrailing() nothrow @nogc @system
     {
         if (oldestEi == newestEi) return;
@@ -2863,9 +2928,11 @@ private:
             return;
         }
         immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
-        ulong seq = seqt;
+        ulong seq = seqt > oldSweepSeq ? seqt : oldSweepSeq;
+        bool drained = true;
         while (seq < boundary)
         {
+            version (AntfarmSweepStats) ++oldSweepTables;
             immutable idx = seq & f.Lmask;
             if (atomicLoad!(MemoryOrder.acq)(bp[idx]) != sentinelOf(seq))
                 fatal("held segment's table was overwritten sweepoldest");
@@ -2881,8 +2948,22 @@ private:
             immutable tcountOff = progOff + 8;
             if (tlen > 0)
             {
+                // Raw suffices for advancing the cursor: it is
+                // consumer-local and no data is read on the strength of
+                // this observation. Tprogress only grows, by fetch-add, and
+                // stops at Tlen while our pin keeps the table in place, so
+                // by coherence every later load by this consumer also reads
+                // Tlen and a later re-walk would skip processShard here
+                // too. tertiaryMt below still runs on this pass; afterwards
+                // each MT payload has every call claimed or a looping
+                // (secondary/tertiary) claimant that will claim the rest,
+                // since Pcount's call and claim fields only grow, the
+                // primary visit is the only claim that executes just one
+                // call, and MaxCs >= 2. A later tertiary pass over this
+                // table is not needed for its payloads to complete.
                 if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
                 {
+                    drained = false;
                     immutable nshards = tlen < smallThresh(sq, bp, idx) ? 1 : sq;
                     foreach (s; 0 .. nshards)
                         processShard(bp, seq, idx, tindexOff, tcountOff,
@@ -2891,6 +2972,8 @@ private:
                 tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
             seq = tnext;
+            if (drained)
+                oldSweepSeq = seq;
         }
         tryReleaseOldest();
     }

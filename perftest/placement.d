@@ -1,7 +1,7 @@
 module placement;
 
-import threadpool.topology : GroupingSource, LogicalProcessor, ProcessorId, TopologySnapshot,
-    formatCpuList;
+import threadpool.topology : GroupingSource, LogicalProcessor, OsScopeSource, ProcessorId,
+    TopologySnapshot, formatCpuList;
 public import threadpool.pin : PinOutcome, pinProcessor;
 import std.algorithm.searching : canFind;
 import std.algorithm.sorting : sort;
@@ -305,20 +305,17 @@ string cpuText(ProcessorId id)
 JSONValue topologyJson(ref const TopologySnapshot t, ref const RolePlan plan,
     const(ProcessorId)[] liveMask)
 {
-    import threadpool.os_scope : OsScopeSource, osScope;
-
-    auto scope_ = osScope();
     JSONValue j;
     j["os"] = t.os;
     j["llc_count"] = t.llcCount;
     j["eligible_llc_count"] = t.eligibleLlcCount();
     j["grouping_source"] = t.groupingSource.to!string;
     j["ccd_labelled"] = t.groupingSource == GroupingSource.l3;
-    j["os_scope"] = JSONValue(["source": JSONValue(scope_.source.to!string),
-        "allowed": JSONValue(formatCpuList(scope_.allowed))]);
+    j["os_scope"] = JSONValue(["source": JSONValue(t.osScopeSource.to!string),
+        "allowed": JSONValue(formatCpuList(t.osScopeAllowed))]);
     j["live_os_mask"] = formatCpuList(liveMask);
-    j["scope_drift"] = scope_.source != OsScopeSource.unrestricted
-        && liveMask != scope_.allowed;
+    j["scope_drift"] = t.osScopeSource != OsScopeSource.unrestricted
+        && liveMask != t.osScopeAllowed;
     JSONValue[] llcs;
     foreach (ushort l; 0 .. t.llcCount)
     {

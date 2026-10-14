@@ -1,49 +1,54 @@
 # Contributing to Ant Farm
 
 Ant Farm is concurrent, `@nogc` code whose correctness rests on stated
-memory-order arguments. Work proceeds through local iteration and pre-push
-hardening. Local iteration uses focused evidence to make useful progress;
-hardening establishes acceptance with the local gate, meaningful regression tests
-and applicable performance comparisons. There is no CI; the gate is a local command.
+memory-order arguments. Read the owning document for the area you are changing,
+keep its rules and the implementation in step, and use the checklist below to
+prepare your contribution. There is no CI; the correctness gate is a local
+command.
 
-## Local iteration (default)
-
-Batch related edits, then run the smallest useful check of the changed behavior:
-a build, focused test selector, reproducer, or inspection for a prose-only edit.
-Add a focused behavioral test when it helps establish the increment. Local commits,
-hand-offs and cherry-picks do not require the full gate, a compiler matrix, mutation
-campaigns, extended soaks or performance comparisons. Report those as deferred.
-
-Keep invariants and memory-order reasoning with the implementation. Fix defects
-that prevent the requested behavior from working; record unrelated bugs and
-optional improvements without chasing them. After a correction, rerun affected
-checks and reuse applicable evidence from other agents. Never claim an unrun check.
-
-## Hardening boundary
-
-Run hardening immediately before an authorized remote push, or when the user
-explicitly requests it. An explicit narrow review stays within its requested scope
-and does not establish pre-push clearance. Review the accumulated change using an
-explicit base and final candidate, not just the last commit. Apply the pre-push
-checklist below once to that candidate, reusing applicable evidence. If corrections
-invalidate a gate, rerun it on the final candidate; a new commit ID alone does not
-invalidate evidence for an identical tree and equivalent environment.
-
-Full matrices and adversarial work belong here. Select additional probes for the
-changed risks; do not repeat every historical mutation or soak by default. Finish
-when required checks pass and material blockers are resolved. Keep unrelated or
-optional findings separate. Hardening does not itself authorize a push.
+During development, batch related edits and run the smallest useful check of
+the changed behavior. Local commits do not require the full gate; report checks
+that remain deferred. Before pushing, establish the applicable gate evidence
+for the accumulated change. Agent session routing, local iteration, hardening,
+TSan budgets and mutation selection are defined in
+[docs/development/agent-workflow.md](docs/development/agent-workflow.md).
 
 ## The correctness gate: `make check`
 
-```text
-make check
+Run these commands from the repository root:
+
+```sh
+make check-quick SHELL="$(command -v bash)"
+make check SHELL="$(command -v bash)"
 ```
 
-It stops at the first failure, prints `ALL CHECKS PASSED` on success, and must be
+GNU make and the check scripts need Bash. Pass `SHELL` explicitly on hosts
+without `/bin/sh`, including when invoking a sub-suite's makefile directly.
+
+`make check` stops at the first failure, prints `ALL CHECKS PASSED` on success, and must be
 run from the repository root on Linux x86-64. Bare `make` runs it too. The full
 lane matrix, prerequisites, focused entry points, and optional lanes are in
 [docs/development/testing.md](docs/development/testing.md).
+
+For a portable local iteration check, run `make check-quick`. It runs the root
+unit tests, plain review-torture suite, threadpool unit tests, fiber smoke suite,
+and LDC debug/release examples. It needs the LDC toolchain (including Dub), Python
+3, GNU make and Bash; it uses neither DMD nor TSan. `make check` retains the full
+matrix and remains the correctness gate.
+
+On Windows x64, use `python -B scripts/check-windows.py` for the native
+integration matrix, or add `--quick` for LDC packages, review and examples.
+It needs neither Bash nor GNU make. Coverage, focused selectors and exclusions
+are in [docs/development/testing.md](docs/development/testing.md#windows-x64-integration).
+
+The full gate accepts `CHECK_SMALL_CPUS` and `CHECK_ONE_LLC_CPUS` as `taskset -c`
+CPU lists. By default the small-mask confine lane uses the first four CPUs in
+the process's allowed affinity, and host tests use the full allowed mask. With
+fewer than four or sixteen allowed CPUs respectively, the lane prints a notice
+and runs unpinned. Empty values count as unset. Explicit overrides are passed
+verbatim to `taskset`; choose one LLC for `CHECK_ONE_LLC_CPUS` when testing that
+topology. Invalid overrides fail the lane. Inspect selection with
+`scripts/check.sh --print-cpus`.
 
 ## Performance: `make perf-gate`
 
@@ -77,21 +82,41 @@ During implementation of changes to the Farm, actors, or shared lifecycle:
   example, `make check` extracts and runs them. Mark partial code blocks as
   fragments.
 
-Before a remote push, also:
+Before pushing, satisfy these obligations for the accumulated change:
 
-- Ensure changed properties have deterministic tests, and check them by mutation:
-  break the code (for example weaken the ordering, or remove the check) and confirm the
-  test fails; the suites' READMEs record the existing controls. A passing stress
-  run alone is not evidence of a memory-order argument.
+- Use meaningful deterministic regression tests for changed properties where
+  feasible. A passing stress run alone is not evidence of a memory-order argument.
+  The agent process's focused mutation policy is in
+  [docs/development/agent-workflow.md](docs/development/agent-workflow.md#mutation-selection).
 - Contract violations that must be fatal need a death test in
   `private_actor_tests` or an equivalent that survives `-release`.
-- Run `make check` with the final revision. If you changed executable code on a
-  measured path, also run `make perf-gate`.
+- Establish `make check` evidence for the final candidate when runtime, tests,
+  build inputs or extracted example programs change. Pure prose/configuration
+  changes use their relevant validation; do not run unrelated runtime matrices.
+  If executable code on a measured path changed, also establish `make perf-gate`
+  evidence. Reuse still-applicable results instead of repeating these gates.
 - Do not claim a gate that was not run. Say which lanes passed, on which
   compilers and host, and which you did not run.
 
 Commit message and trailer conventions are the maintainer's; follow the style of
 recent commits (`git log`).
+
+## Adding a test lane
+
+Add the lane's target to the root [Makefile](Makefile) and register it in
+[scripts/check.sh](scripts/check.sh) when it belongs in the full correctness
+gate. Update `make help` so contributors can find it. Decide whether it belongs
+in `make check-quick` too: that target dispatches to `scripts/check.sh --quick`,
+whose quick branch runs the portable LDC-only checks. Keep its toolchain
+requirements consistent with the description above.
+
+Windows-compatible lanes also belong in `scripts/check-windows.py` when they
+contribute to native integration coverage. Keep its exclusions explicit; a
+Windows pass does not replace the Linux correctness gate.
+
+Document the command, coverage, prerequisites and limitations in
+[docs/development/testing.md](docs/development/testing.md), including whether
+it runs in the full gate, the quick check, or only on explicit selection.
 
 ## Documentation map and ownership
 

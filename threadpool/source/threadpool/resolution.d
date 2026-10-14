@@ -4,19 +4,20 @@ module threadpool.resolution;
  * Pool resolution: which known CPU becomes a worker, and why every other CPU,
  * request and physical group does not.
  *
- * `resolvePool` is a pure function of (frozen snapshot, OS scope, options), so
- * `CacheAwarePool.resolve()` previews exactly what `start()` will use.
+ * `resolvePool` is a pure function of (frozen snapshot, options), so
+ * `CacheAwarePool.resolve()` previews exactly what `start()` will use. The OS
+ * scope comes from the snapshot (`osScopeSource`, `osScopeAllowed`).
  */
 
 import std.algorithm.iteration : filter;
 
-import threadpool.os_scope : OsScope, OsScopeSource;
 import threadpool.pin : PinOutcome;
 import threadpool.pool : PoolOptions;
 import threadpool.topology;
 
 /// Why a known processor is not a worker. Several reasons may apply.
-/// `none` = accepted.
+/// `none` = accepted. May gain members: do not `final switch` on it, and
+/// use `all` rather than a literal mask.
 enum Reject : ushort
 {
     none          = 0,
@@ -25,7 +26,11 @@ enum Reject : ushort
     notRequested  = 1 << 2,  /// `PoolOptions.processors` is non-empty and does not name this CPU
     classDisabled = 1 << 3,  /// `enablePCores` / `enableECores`
     smtSecondary  = 1 << 4,  /// `skipSmtSiblings` and this is not its core's fixed primary
-    all           = 0x1F,    /// every reason
+    /// Passed every filter, but a placement policy above the pool (FarmHost
+    /// group choice, worker count, caller reservation) left it out. Never
+    /// combined with another reason; never set by `resolvePool`.
+    notSelected   = 1 << 5,
+    all           = 0x3F,    /// every reason
 }
 
 /// Pool start progress for one CPU.
@@ -40,7 +45,7 @@ enum StartState : ubyte
 struct CpuDisposition
 {
     ProcessorId id;          /// the CPU
-    ushort llcIndex;         /// physical group
+    ushort llcIndex;         /// physical group, or `noLlcIndex` for an ungrouped CPU
     ushort coreIndex;        /// physical core
     ushort numaIndex;        /// NUMA node
     ubyte  tableClass;       /// dense P/E table class
@@ -74,6 +79,9 @@ struct GroupDisposition
     GroupingSource source;  /// how the group was formed
     uint physical;          /// known CPUs
     uint eligible;          /// in OS scope and online
+    /// Passed every filter: `accepted` plus CPUs rejected only as
+    /// `notSelected`. Equals `accepted` for a plain `resolvePool` result.
+    uint candidates;
     uint accepted;          /// workers
     uint started;           /// workers pinned at start
     /// Reasons shared by every member when `accepted == 0` (e.g. osExcluded).
@@ -86,8 +94,9 @@ struct GroupDisposition
 /// A selection report. Immutable after construction; safe to share.
 final class PoolResolution
 {
-    const(TopologySnapshot)* topology;     /// the snapshot resolved against
-    OsScope osScope;                       /// the scope resolved against
+    /// The snapshot resolved against; its `osScopeSource` and
+    /// `osScopeAllowed` are the OS scope used.
+    const(TopologySnapshot)* topology;
     const(CpuDisposition)[]     cpus;      /// snapshot order: every known CPU
     const(RequestDisposition)[] requests;  /// request order: every requested id
     const(GroupDisposition)[]   groups;    /// index == llcIndex: every physical group
@@ -96,12 +105,11 @@ final class PoolResolution
     private const(ProcessorId)[][] workersByGroup;
     private bool startComplete;
 
-    private this(const(TopologySnapshot)* topology, OsScope osScope,
+    private this(const(TopologySnapshot)* topology,
         const(CpuDisposition)[] cpus, const(RequestDisposition)[] requests,
         const(ProcessorId)[] workers, bool startComplete)
     {
         this.topology = topology;
-        this.osScope = osScope;
         this.cpus = cpus;
         this.requests = requests;
         this.workers = workers;
@@ -110,7 +118,7 @@ final class PoolResolution
         size_t n = topology.llcDomains.length;
         if (topology.llcCount > n) n = topology.llcCount;
         foreach (ref c; cpus)
-            if (c.llcIndex + 1 > n) n = c.llcIndex + 1;
+            if (c.llcIndex != noLlcIndex && c.llcIndex + 1 > n) n = c.llcIndex + 1;
         auto g = new GroupDisposition[](n);
         auto byGroup = new ProcessorId[][](n);
         foreach (i, ref gd; g)
@@ -122,10 +130,13 @@ final class PoolResolution
         }
         foreach (ref c; cpus)
         {
+            if (c.llcIndex == noLlcIndex) continue;
             auto gd = &g[c.llcIndex];
             gd.physical++;
             if (!(c.reasons & (Reject.osExcluded | Reject.offline)))
                 gd.eligible++;
+            if ((c.reasons & ~Reject.notSelected) == Reject.none)
+                gd.candidates++;
             if (c.accepted)
                 gd.accepted++;
             if (c.start == StartState.pinned)
@@ -249,18 +260,18 @@ final class PoolResolution
             if (!(c.reasons & (Reject.osExcluded | Reject.offline)))
                 eligible++;
         formattedWrite(w, "threadpool resolution: os scope %s {%s}; %s known, %s eligible, %s accepted\n",
-            osScope.source, osScope.source == OsScopeSource.unrestricted
-                ? "all" : formatCpuList(osScope.allowed),
+            topology.osScopeSource, scopeText(),
             cpus.length, eligible, workers.length);
         formattedWrite(w, "  physical groups %s (source %s), accepted groups %s, workers %s%s\n",
             physicalGroupCount, topology.groupingSource, acceptedGroupCount,
             workers.length, startComplete ? ", started" : "");
-        formattedWrite(w, "  %-5s  %-17s  %-8s  %-8s  %-8s  %-7s  %s\n",
-            "group", "source", "physical", "eligible", "accepted", "started", "common-reject");
+        formattedWrite(w, "  %-5s  %-17s  %-8s  %-8s  %-10s  %-8s  %-7s  %s\n",
+            "group", "source", "physical", "eligible", "candidates", "accepted", "started",
+            "common-reject");
         foreach (ref g; groups)
-            formattedWrite(w, "  %-5s  %-17s  %-8s  %-8s  %-8s  %-7s  %s\n",
-                g.llcIndex, g.source, g.physical, g.eligible, g.accepted, g.started,
-                reasonsText(g.common));
+            formattedWrite(w, "  %-5s  %-17s  %-8s  %-8s  %-10s  %-8s  %-7s  %s\n",
+                g.llcIndex, g.source, g.physical, g.eligible, g.candidates, g.accepted,
+                g.started, reasonsText(g.common));
         if (requests.length == 0)
             sink("  requests: (none: all CPUs considered)\n");
         else
@@ -314,8 +325,7 @@ final class PoolResolution
             else if (r.unknown) unknown++;
         }
         auto s = format("os scope %s {%s}; %s known, %s eligible, %s accepted; groups %s physical, %s accepted",
-            osScope.source, osScope.source == OsScopeSource.unrestricted
-                ? "all" : formatCpuList(osScope.allowed),
+            topology.osScopeSource, scopeText(),
             cpus.length, eligible, workers.length, physicalGroupCount, acceptedGroupCount);
         if (requests.length)
             s ~= format("; %s requested (%s unknown, %s duplicate)", requests.length, unknown, duplicate);
@@ -342,7 +352,36 @@ final class PoolResolution
             d.start = o == PinOutcome.pinned ? StartState.pinned : StartState.pinFailed;
             if (o != PinOutcome.pinned) all = false;
         }
-        return new PoolResolution(topology, osScope, c, requests, workers, all);
+        return new PoolResolution(topology, c, requests, workers, all);
+    }
+
+    /// The same snapshot, filters and requests with only `chosen` as
+    /// workers: every other accepted CPU becomes `Reject.notSelected`.
+    /// Workers keep snapshot (start) order and are renumbered. Ids in
+    /// `chosen` that this resolution did not accept are ignored.
+    package PoolResolution narrowedTo(const(ProcessorId)[] chosen) const
+    {
+        auto c = cpus.dup;
+        ProcessorId[] kept;
+        foreach (ref d; c)
+        {
+            if (!d.accepted) continue;
+            if (contains(chosen, d.id))
+            {
+                d.workerIndex = cast(uint) kept.length;
+                kept ~= d.id;
+            }
+            else
+            {
+                d.reasons = Reject.notSelected;
+                d.workerIndex = uint.max;
+            }
+        }
+        auto r = requests.dup;
+        foreach (ref q; r)
+            if (q.accepted)
+                q.accepted = contains(kept, q.id);
+        return new PoolResolution(topology, c, r, kept, false);
     }
 
     /// `"id (outcome)"` for every worker whose pin failed.
@@ -353,6 +392,12 @@ final class PoolResolution
             if (c.start == StartState.pinFailed)
                 r ~= (r.length ? ", " : "") ~ idText(c.id) ~ " (" ~ pinText(c.pin) ~ ")";
         return r;
+    }
+
+    private string scopeText() const
+    {
+        return topology.osScopeSource == OsScopeSource.unrestricted
+            ? "all" : formatCpuList(topology.osScopeAllowed);
     }
 
     private const(CpuDisposition)* findCpu(ProcessorId id) const @nogc nothrow
@@ -385,11 +430,10 @@ class ResolutionException : Exception
     }
 }
 
-/// Resolve `options` against `snap` and `scope_`. Pure: no OS calls. A CPU is
-/// OS-excluded when the snapshot marks it `affinityExcluded` or a restricted
-/// `scope_` does not list it.
-PoolResolution resolvePool(ref const TopologySnapshot snap, ref const OsScope scope_,
-                           in PoolOptions options)
+/// Resolve `options` against `snap`. Pure: no OS calls. A CPU is OS-excluded
+/// when the snapshot marks it `affinityExcluded` or is outside its OS scope
+/// (`snap.inOsScope`), so a hand-built snapshot may set either.
+PoolResolution resolvePool(ref const TopologySnapshot snap, in PoolOptions options)
 {
     auto cpus = new CpuDisposition[](snap.processors.length);
     ProcessorId[] workers;
@@ -407,7 +451,7 @@ PoolResolution resolvePool(ref const TopologySnapshot snap, ref const OsScope sc
         d.osParked = p.parkedAtDiscovery;
 
         Reject r;
-        if (p.affinityExcluded || !inScope(scope_, id))
+        if (p.affinityExcluded || !snap.inOsScope(id))
             r |= Reject.osExcluded;
         if (p.offlineAtDiscovery)
             r |= Reject.offline;
@@ -446,7 +490,7 @@ PoolResolution resolvePool(ref const TopologySnapshot snap, ref const OsScope sc
             }
     }
 
-    return new PoolResolution([snap].ptr, scope_, cpus, requests, workers, false);
+    return new PoolResolution([snap].ptr, cpus, requests, workers, false);
 }
 
 /// `"osExcluded,smtSecondary"`, or `"-"` for none.
@@ -454,7 +498,8 @@ string reasonsText(Reject r) pure
 {
     if (r == Reject.none) return "-";
     string s;
-    static foreach (name; ["osExcluded", "offline", "notRequested", "classDisabled", "smtSecondary"])
+    static foreach (name; ["osExcluded", "offline", "notRequested", "classDisabled", "smtSecondary",
+        "notSelected"])
         if (r & __traits(getMember, Reject, name))
             s ~= (s.length ? "," : "") ~ name;
     return s;
@@ -470,12 +515,6 @@ private string idText(T)(T v)
 {
     import std.format : format;
     return format("%s", v);
-}
-
-private bool inScope(ref const OsScope s, ProcessorId id) @nogc nothrow pure
-{
-    if (s.source == OsScopeSource.unrestricted) return true;
-    return contains(s.allowed, id);
 }
 
 private bool contains(const(ProcessorId)[] ids, ProcessorId id) @nogc nothrow pure

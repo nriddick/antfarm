@@ -25,13 +25,65 @@ run() {
 
 mimalloc=0
 soak=0
-if [[ "${1:-}" == "--mimalloc" ]]; then
+quick=0
+if [[ "${1:-}" == "--quick" ]]; then
+    quick=1
+elif [[ "${1:-}" == "--mimalloc" ]]; then
     mimalloc=1
 elif [[ "${1:-}" == "--soak" ]]; then
     soak=1
-elif [[ -n "${1:-}" ]]; then
-    echo "usage: scripts/check.sh [--mimalloc|--soak]" >&2
+elif [[ -n "${1:-}" && "${1:-}" != "--print-cpus" ]]; then
+    echo "usage: scripts/check.sh [--quick|--mimalloc|--soak|--print-cpus]" >&2
     exit 2
+fi
+
+select_cpus() {
+    local variable="$1" minimum="$2" maximum="$3"
+    cpu_pin=()
+    # Empty counts as unset; `taskset -c ""` would fail the lane.
+    if [[ -n "${!variable:-}" ]]; then
+        cpu_pin=(taskset -c "${!variable}")
+        return
+    fi
+    local affinity ranges range first last cpu
+    local allowed=()
+    affinity=$(taskset -pc $$)
+    affinity=${affinity##*: }
+    IFS=',' read -r -a ranges <<< "$affinity"
+    for range in "${ranges[@]}"; do
+        first=${range%-*}
+        last=${range#*-}
+        for ((cpu=first; cpu<=last; cpu++)); do
+            allowed+=("$cpu")
+        done
+    done
+    if (( ${#allowed[@]} < minimum )); then
+        echo "check: $variable needs $minimum allowed CPUs; found ${#allowed[@]}; running unpinned"
+    else
+        if (( maximum > 0 )); then
+            local IFS=','
+            affinity="${allowed[*]:0:maximum}"
+        fi
+        cpu_pin=(taskset -c "$affinity")
+    fi
+}
+
+if [[ "${1:-}" == "--print-cpus" ]]; then
+    select_cpus CHECK_SMALL_CPUS 4 4
+    echo "CHECK_SMALL_CPUS: ${cpu_pin[*]:-unpinned}"
+    select_cpus CHECK_ONE_LLC_CPUS 16 0
+    echo "CHECK_ONE_LLC_CPUS: ${cpu_pin[*]:-unpinned}"
+    exit 0
+fi
+
+if [[ "$quick" -eq 1 ]]; then
+    run dub test --compiler=ldc2
+    run "${make_cmd[@]}" -C review_torture run DC=ldc2
+    run dub test :threadpool --compiler=ldc2
+    run dub test :antfarm-fibers --compiler=ldc2
+    run python3 examples/run_examples.py --ldc-only
+    echo "ALL QUICK CHECKS PASSED"
+    exit 0
 fi
 
 if [[ "$soak" -eq 1 ]]; then
@@ -57,16 +109,20 @@ run dub test :threadpool --compiler=dmd
 run dub test :antfarm-fibers --compiler=ldc2
 run dub test :antfarm-fibers --compiler=dmd
 run dub run :threadpool -c confine-test --compiler=ldc2
-run taskset -c 0-3 dub run :threadpool -c confine-test --compiler=ldc2
-# One LLC (this 5900XT: LPs 0-7,16-23). SKIP worker cases fails unless
+select_cpus CHECK_SMALL_CPUS 4 4
+run "${cpu_pin[@]}" dub run :threadpool -c confine-test --compiler=ldc2
+# CHECK_SMALL_CPUS selects the small mask; CHECK_ONE_LLC_CPUS selects host-test CPUs.
+# SKIP worker cases fails unless
 # ALLOW_HOST_SKIP=1. timeout so an exit hang fails the lane.
+select_cpus CHECK_ONE_LLC_CPUS 16 0
+host_pin=("${cpu_pin[@]}")
 host_test() {
     local compiler="$1"
     shift
     local log
     log=$(mktemp)
-    echo "==> timeout 300 taskset -c 0-7,16-23 dub run :threadpool -c host-test --compiler=${compiler} $*"
-    if ! timeout 300 taskset -c 0-7,16-23 dub run :threadpool -c host-test --compiler="$compiler" "$@" | tee "$log"; then
+    echo "==> timeout 300 ${host_pin[*]} dub run :threadpool -c host-test --compiler=${compiler} $*"
+    if ! timeout 300 "${host_pin[@]}" dub run :threadpool -c host-test --compiler="$compiler" "$@" | tee "$log"; then
         rm -f "$log"
         return 1
     fi
@@ -83,7 +139,7 @@ host_test ldc2 --build=release
 run "${make_cmd[@]}" check-docs
 run "${make_cmd[@]}" check-farm-ordering
 run "${make_cmd[@]}" run-farm-tsan
-run "${make_cmd[@]}" -C actor_torture run run-dmd run-tsan
+run "${make_cmd[@]}" -C actor_torture run run-dmd run-tsan death
 run "${make_cmd[@]}" -C review_torture run run-tsan
 run "${make_cmd[@]}" -C private_actor_tests run run-dmd run-tsan doc-example death
 run "${make_cmd[@]}" -C examples check

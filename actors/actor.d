@@ -34,6 +34,7 @@ import antfarm : avgCostForChunk, fatal;
 import core.atomic : MemoryOrder, atomicExchange, atomicFetchAdd,
     atomicFetchSub, atomicLoad, atomicStore, cas, pause;
 import core.lifetime : move;
+import core.stdc.stdio : fprintf, stderr;
 import core.stdc.string : memcpy, memset;
 
 // Cost class of the public flush table: claims of 8 entries.
@@ -178,6 +179,69 @@ enum ActorRetireResult : ubyte
     alreadyRetired,
     /// The owner's generation no longer matches the actor (or is invalid).
     staleOwner,
+}
+
+/// True for `queued` and `coalesced`: an activation was published or an
+/// existing activation persists. Acceptance does not mean execution finished.
+bool accepted(ActorWakeResult result) pure nothrow @nogc @safe
+{
+    final switch (result)
+    {
+        case ActorWakeResult.queued:
+        case ActorWakeResult.coalesced:
+            return true;
+        case ActorWakeResult.waveOwned:
+        case ActorWakeResult.staleHandle:
+        case ActorWakeResult.closed:
+            return false;
+    }
+}
+
+/// True for `queued` and `coalesced`: the node transferred to the actor,
+/// whether this send published an activation or joined an existing one.
+bool accepted(ActorSendResult result) pure nothrow @nogc @safe
+{
+    final switch (result)
+    {
+        case ActorSendResult.queued:
+        case ActorSendResult.coalesced:
+            return true;
+        case ActorSendResult.waveOwned:
+        case ActorSendResult.staleHandle:
+        case ActorSendResult.closed:
+        case ActorSendResult.nodeBusy:
+            return false;
+    }
+}
+
+/// True for `requested` and `alreadyRetired`: retirement was recorded or
+/// the actor was already cancelling/retired. Acceptance does not prove `retired`.
+bool accepted(ActorRetireResult result) pure nothrow @nogc @safe
+{
+    final switch (result)
+    {
+        case ActorRetireResult.requested:
+        case ActorRetireResult.alreadyRetired:
+            return true;
+        case ActorRetireResult.waveOwned:
+        case ActorRetireResult.staleOwner:
+            return false;
+    }
+}
+
+@safe pure nothrow @nogc unittest
+{
+    import std.traits : EnumMembers;
+
+    static foreach (m; EnumMembers!ActorWakeResult)
+        assert((cast(ActorWakeResult) m).accepted == (m == ActorWakeResult.queued
+            || m == ActorWakeResult.coalesced));
+    static foreach (m; EnumMembers!ActorSendResult)
+        assert((cast(ActorSendResult) m).accepted == (m == ActorSendResult.queued
+            || m == ActorSendResult.coalesced));
+    static foreach (m; EnumMembers!ActorRetireResult)
+        assert((cast(ActorRetireResult) m).accepted == (m == ActorRetireResult.requested
+            || m == ActorRetireResult.alreadyRetired));
 }
 
 /// Drain lets handlers process accepted interactions. Cancel additionally
@@ -750,7 +814,8 @@ struct ActorErasedOwner
 /// iterate owner arrays with `foreach (ref o; owners)`. `opAssign` accepts
 /// only an rvalue, so `owner = otherOwner` does not compile either; write
 /// `owner = move(otherOwner)`. Overwriting a live owner with a moved value
-/// is fatal.
+/// is fatal. Dropping a live owner leaks its slot; assertion builds print a
+/// diagnostic to stderr. Call `leak()` where reclaim is impossible.
 /// See_Also:
 ///     docs/guide/public-actors.md, docs/reference/actor-lifecycle.md (the
 ///     drain and shutdown obligations)
@@ -770,7 +835,24 @@ struct ActorOwner(T)
             fatal("overwrite live ActorOwner");
         slot_ = src.slot_;
         generation_ = src.generation_;
+        // `src` is a by-value parameter: leave it inert for its destructor.
+        src.slot_ = null;
+        src.generation_ = 0;
         return this;
+    }
+
+    // Assertion builds only, so release builds keep a trivially destructible
+    // owner. A diagnostic, not fatal: this also runs while an exception
+    // unwinds. Moved-from, reclaimed, leaked, erased and default owners are
+    // inert. An owner field in a GC object reports when the collector
+    // finalizes it, which may be at program exit.
+    version (assert)
+    ~this() nothrow @nogc @trusted
+    {
+        if (slot_ !is null)
+            fprintf(stderr, "antfarm warning: ActorOwner dropped without "
+                ~ "reclaim (slot %p, generation %llu); call reclaim() or "
+                ~ "leak()\n", cast(void*) slot_, cast(ulong) generation_);
     }
 
     /// True while this owner still holds its actor generation.
@@ -826,6 +908,18 @@ struct ActorOwner(T)
         slot_ = null;
         generation_ = 0;
         return result;
+    }
+
+    /// Give up ownership without reclaiming. The actor's slot and state are
+    /// leaked on purpose and stay allocated until the runtime itself is
+    /// leaked or abandoned; existing handles are not invalidated. Use only
+    /// where reclaim is impossible, such as after `FarmHost.abandon()` or a
+    /// worker failure. Assertion builds otherwise report a live owner
+    /// dropped at scope exit. The owner is invalid afterwards.
+    void leak() pure nothrow @nogc @safe
+    {
+        slot_ = null;
+        generation_ = 0;
     }
 }
 
@@ -968,6 +1062,26 @@ align(64) struct ActorRuntime
         return capacity_;
     }
 
+    version (AntfarmActorTestHooks)
+    {
+        /// Preset the previous generation of the next vacant slot. Call only
+        /// on a quiescent runtime with no concurrent operations.
+        void testPresetFreeSlotGeneration(ulong generation)
+            nothrow @nogc @system
+        {
+            // Debug-only test-hook precondition; valid tests need no release checks.
+            version (assert)
+                if (!quiescent || freeSlots is null)
+                    fatal("preset actor generation without a quiescent free slot");
+            // Debug-only test-hook range diagnostic, outside production paths.
+            version (assert)
+                if (generation > maxGeneration)
+                    fatal("preset actor generation out of range");
+            atomicStore!(MemoryOrder.raw)(freeSlots.lifecycle,
+                lifecycleWord(generation, phaseVacant));
+        }
+    }
+
     /// Actors currently queued for Farm publication (an acquire load).
     @property size_t ready() const nothrow @nogc @system
     {
@@ -1048,7 +1162,9 @@ private:
         auto slot = takeFreeSlot();
         if (slot is null) return ActorErasedOwner.init;
         immutable observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
-        assert(wordPhase(observed) == phaseVacant);
+        // Release guard: one comparison prevents overwriting a live slot's state.
+        if (wordPhase(observed) != phaseVacant)
+            fatal("create actor from non-vacant free slot");
         immutable generation = wordGeneration(observed) + 1;
         if (generation == 0 || generation > maxGeneration)
             fatal("actor generation wrap");
@@ -1529,8 +1645,11 @@ private void driveActorRetirement(ActorSlot* slot, ulong generation)
                 // RETIRE blocks ordinary wakes and wave reservations. With
                 // no sender left and L still idle, no callback or other
                 // lifecycle writer can exist. A release store suffices.
-                assert(atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) == 0
-                    && slot.inboxCarryWord == 0);
+                // Debug-only: gate join proves emptiness; avoid an extra retirement load.
+                version (assert)
+                    if (atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) != 0
+                        || slot.inboxCarryWord != 0)
+                        fatal("idle actor retirement with live inbox");
                 atomicStore!(MemoryOrder.rel)(slot.lifecycle,
                     lifecycleWord(generation, phaseRetired));
                 return;
@@ -1822,7 +1941,8 @@ package void releaseActorWaveMembership(ActorSlot* slot, void* waveOwner)
 /// Execute a wave's phase-specific operation under the reservation made
 /// before table publication. False means another actor control path requested
 /// wake/send/retirement during the operation; the operation still completed,
-/// and that request is handed back to the autonomous ready queue.
+/// and that request is handed back to the autonomous ready queue. The wave
+/// reports this as interrupted, not as a structural admission failure.
 ///
 /// Unlike autonomous dispatch, the wave keeps the lifecycle in `scheduled`
 /// while the callback runs. The wave reservation is the unique source of a

@@ -45,6 +45,31 @@ must consume. `flush(token, limit)` publishes up to a bounded ready snapshot
 (default 32, cap 256) as Farm tables; a `0` return is empty, backpressured, or
 contended, and those are not distinguished.
 
+Use `result.accepted` (or `accepted(result)`, imported from `actors`) to check
+whether a wake, send, or retirement request was accepted. For `ActorWakeResult`,
+`queued` and `coalesced` mean an activation was published or already exists.
+For `ActorSendResult`, those same values mean the node transferred to the actor.
+For `ActorRetireResult`, `requested` and `alreadyRetired` mean retirement was
+recorded or the actor was already cancelling/retired. All other values return
+false. Acceptance does not mean execution, a reply, or retirement has finished;
+keep the original result when you need a specific rejection reason.
+
+```d
+import actors;
+
+void main() @safe pure nothrow @nogc
+{
+    assert(ActorWakeResult.queued.accepted);
+    assert(ActorWakeResult.coalesced.accepted);
+    assert(ActorSendResult.queued.accepted);
+    assert(ActorSendResult.coalesced.accepted);
+    assert(!ActorSendResult.nodeBusy.accepted);
+    assert(ActorRetireResult.requested.accepted);
+    assert(ActorRetireResult.alreadyRetired.accepted);
+    assert(!ActorRetireResult.waveOwned.accepted);
+}
+```
+
 Binding the borrowed state to a reference needs the call form:
 `ref T s = actor.value;` does not compile, while `ref Body s =
 actor.value();` and `auto p = &actor.value();` do (verified on DMD and
@@ -59,7 +84,7 @@ The compiled form of this path is
 [../../examples/public_service.d](../../examples/public_service.d):
 
 ```text
-dmd -g -i -I. -Iexamples examples/public_service.d -of=/tmp/public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
 ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
 ```
 
@@ -88,7 +113,7 @@ acquire-observes completion for this interaction, read `outcome`
 before reuse or transfer. Failure codes are 24-bit (0 through `0xFF_FFFF`);
 larger codes are fatal. A reply read before `available` is a race.
 [../../examples/public_service.d](../../examples/public_service.d) exercises
-queued/coalesced acceptance, rejection, a two-node drain, replies after
+`result.accepted`, rejection, a two-node drain, replies after
 `available`, node reuse, admission close, idle retirement, and stale handles.
 
 `send` returns `nodeBusy` when that node is unavailable, not when the mailbox
@@ -139,8 +164,17 @@ Observing `completion.finished` with acquire semantics and confirming
 orchestrator may publish a dependent wave. It does not join an optional
 completion hook: do not reuse that wave storage or free the hook context until
 the hook's last access, and an old hook must not touch a descriptor that has
-been `begin`ned again. `failed` is structural or control-path interference, not
-a domain error, and it does not roll back earlier tables.
+been `begin`ned again. `failed` means structural admission rejection (stale,
+non-idle, duplicate, or wrong-Farm handles), not a domain error; it does not
+roll back earlier tables.
+
+`completion.interrupted` is a separate sticky diagnostic: a wave operation
+completed but observed a concurrent wake, send, or retirement request and handed
+it to autonomous dispatch after its borrow ended. Such a race does not set
+`failed`. Both flags can be set if another table's admission fails. `finished`
+joins the wave operations, not the resulting autonomous work; a dependent wave
+still requires idle members. Requests arriving after an operation's exit
+transition need not set `interrupted`.
 
 Actors in the same wave run in parallel and must not consume one another's
 intermediate writes. For cross-actor reads, keep private mutable actor state

@@ -399,9 +399,7 @@ public:
         nothrow @nogc @system
         if (storage == PrivateStateStorage.perObject)
     {
-        if (actor_ is null) fatal("private child park: unauthorized context");
-        if (retiring_) return null;
-        return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, batchLimit_);
+        return newCohort!(T, R, storage)(capacity, PrivateCohortOptions.init);
     }
     /// ditto: explicit per-cohort batch limit; 0 is a fatal caller error.
     PrivateChildPark!(T, R)* createChildren(T, R = void,
@@ -409,10 +407,7 @@ public:
         nothrow @nogc @system
         if (storage == PrivateStateStorage.perObject)
     {
-        if (actor_ is null) fatal("private child park: unauthorized context");
-        if (childBatchLimit == 0) fatal("invalid private child batch limit");
-        if (retiring_) return null;
-        return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity, childBatchLimit);
+        return newCohort!(T, R, storage, true)(capacity, PrivateCohortOptions(childBatchLimit));
     }
 
     /// ditto: per-cohort options. A batchLimit of 0 in `options` inherits
@@ -422,10 +417,7 @@ public:
         PrivateCohortOptions options) nothrow @nogc @system
         if (storage == PrivateStateStorage.perObject)
     {
-        if (actor_ is null) fatal("private child park: unauthorized context");
-        if (retiring_) return null;
-        return PrivateChildPark!(T, R).create(actor_, service, enclosing_ is null, capacity,
-            options.batchLimit == 0 ? batchLimit_ : options.batchLimit, options.subsets);
+        return newCohort!(T, R, storage)(capacity, options);
     }
     /// cohortSlab only. slabByteLimit is the explicit cap on the state slab of
     /// capacity * T.sizeof bytes reserved here; null if that product overflows
@@ -435,9 +427,19 @@ public:
         PrivateCohortOptions options, size_t slabByteLimit) nothrow @nogc @system
         if (storage == PrivateStateStorage.cohortSlab)
     {
+        return newCohort!(T, R, storage)(capacity, options, slabByteLimit);
+    }
+    // explicitLimit: options.batchLimit came from the caller and 0 is fatal.
+    private PrivateChildPark!(T, R, storage)* newCohort(T, R, PrivateStateStorage storage,
+        bool explicitLimit = false)(size_t capacity, PrivateCohortOptions options,
+        size_t slabByteLimit = 0) nothrow @nogc @system
+    {
         if (actor_ is null) fatal("private child park: unauthorized context");
+        static if (explicitLimit)
+            if (options.batchLimit == 0) fatal("invalid private child batch limit");
         if (retiring_) return null;
-        if (capacity > size_t.max / T.sizeof || capacity * T.sizeof > slabByteLimit) return null;
+        static if (storage == PrivateStateStorage.cohortSlab)
+            if (capacity > size_t.max / T.sizeof || capacity * T.sizeof > slabByteLimit) return null;
         return PrivateChildPark!(T, R, storage).create(actor_, service, enclosing_ is null, capacity,
             options.batchLimit == 0 ? batchLimit_ : options.batchLimit, options.subsets);
     }
@@ -1840,48 +1842,31 @@ private:
             if (capacity > size_t.max / resultBytesPerMember) return null;
         auto park = cast(PrivateChildPark*) allocateZero(service, PrivateChildPark.sizeof, PrivateChildPark.alignof);
         if (park is null) return null;
-        park.entries_ = cast(Entry*) allocateZero(service, capacity * Entry.sizeof, Entry.alignof);
+        // Zeroed fields record the acquired prefix. Short-circuit after the
+        // first failure, then unwind that prefix once, in reverse order.
+        bool acquired = (park.entries_ = cast(Entry*) allocateZero(service,
+            capacity * Entry.sizeof, Entry.alignof)) !is null;
         static if (hasResults)
-            if (park.entries_ !is null)
-            {
-                park.results_ = cast(R*) allocateZero(service, capacity * resultBytesPerMember, R.alignof);
-                if (park.results_ is null)
-                {
-                    freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
-                    park.entries_ = null;
-                }
-            }
-        if (park.entries_ is null)
+            acquired = acquired && (park.results_ = cast(R*) allocateZero(service,
+                capacity * resultBytesPerMember, R.alignof)) !is null;
+        if (subsets)
+            acquired = acquired && (park.sel_ = cast(uint*) allocateZero(service,
+                capacity * 2 * uint.sizeof, uint.alignof)) !is null;
+        // Zeroed before publication: a rooted slab is scanned whole,
+        // including slots that have not been spawned.
+        static if (slab)
+            acquired = acquired && (park.slab_ = allocateZero(service,
+                capacity * T.sizeof, T.alignof)) !is null;
+        if (!acquired)
         {
+            static if (slab)
+                freeMemory(service, park.slab_, capacity * T.sizeof, T.alignof);
+            freeMemory(service, park.sel_, capacity * 2 * uint.sizeof, uint.alignof);
+            static if (hasResults)
+                freeMemory(service, park.results_, capacity * resultBytesPerMember, R.alignof);
+            freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
             freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
             return null;
-        }
-        if (subsets)
-        {
-            park.sel_ = cast(uint*) allocateZero(service, capacity * 2 * uint.sizeof, uint.alignof);
-            if (park.sel_ is null)
-            {
-                static if (hasResults)
-                    freeMemory(service, park.results_, capacity * resultBytesPerMember, R.alignof);
-                freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
-                freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
-                return null;
-            }
-        }
-        // Last, so failure unwinds every earlier allocation. Zeroed before any
-        // publication: a rooted slab is scanned whole, unspawned slots included.
-        static if (slab)
-        {
-            park.slab_ = allocateZero(service, capacity * T.sizeof, T.alignof);
-            if (park.slab_ is null)
-            {
-                freeMemory(service, park.sel_, capacity * 2 * uint.sizeof, uint.alignof);
-                static if (hasResults)
-                    freeMemory(service, park.results_, capacity * resultBytesPerMember, R.alignof);
-                freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
-                freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
-                return null;
-            }
         }
         park.capacity_ = capacity;
         park.batchLimit_ = batchLimit;
@@ -2264,74 +2249,83 @@ private:
             enum retiring = retiringWave;
             version (assert) if (park.retire_ != retiring) fatal("wave retirement policy invariant");
         }
-        static if (kind == OpKind.continuation || kind == OpKind.resultContinuation)
+        enum continuation = kind == OpKind.continuation || kind == OpKind.resultContinuation;
+        static if (continuation) immutable flags = entry.childFlags;
+        else enum ubyte flags = 0;
+        static if (continuation)
         {
-            immutable flags = entry.childFlags;
             if (flags & childCleanup)
             {
-                retireMember!(T, storage)(park.base_.service, entry);
-                entry.childFlags = 0;
-                releaseWave(wave); // H; the resume table credit fences callback return
-                return 1;
+                version (assert)
+                    if (!(flags & childHolding) || !retiring) fatal("private child cleanup invariant");
+                goto complete;
             }
-            atomicStore!(MemoryOrder.raw)(entry.childPending, 1u);
-            auto borrow = PrivateBorrow!T(cast(T*) entry.state);
-            auto context = PrivateContext(entry, wave, false, park.batchLimit_);
-            context.ownJoin_ = true;
-            auto step = operation(borrow, context);
-            static if (kind == OpKind.resultContinuation)
-                auto disposition = step.disposition_;
-            else
-                auto disposition = step;
-            ChildStep next;
-            if (disposition == PrivateChildDisposition.done)
-            {
-                static if (kind == OpKind.resultContinuation)
-                {
-                    static if (subset)
-                        park.writeResult(park.sel_[park.capacity_ + (entry - park.entries_)], step.value_);
-                    else
-                        park.writeResult(entry - park.entries_, step.value_);
-                }
-                if (atomicLoad!(MemoryOrder.acq)(entry.childPending) == 1)
-                {
-                    if (retiring) retireMember!(T, storage)(park.base_.service, entry);
-                    if (flags & childHolding)
-                    {
-                        entry.childFlags = 0;
-                        releaseWave(wave);
-                    }
-                    return 1;
-                }
-                next = retiring ? ChildStep.doneRetire : ChildStep.done;
-            }
-            else next = ChildStep.waitChildren;
-            entry.childStep = next;
-            if (!(flags & childHolding))
-            {
-                atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
-                entry.childFlags = childHolding;
-            }
-            releaseMember(entry); // custody release: final Entry access unless owner
-            version (AntfarmActorTestHooks)
-                actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
         }
-        else
+        // The scope lets cleanup bypass callback locals without initializing
+        // childPending or invoking user code a second time.
         {
+            static if (continuation)
+                atomicStore!(MemoryOrder.raw)(entry.childPending, 1u);
             auto borrow = PrivateBorrow!T(cast(T*) entry.state);
-            auto context = PrivateContext(entry, wave, retiring, park.batchLimit_);
+            auto context = PrivateContext(entry, wave, continuation ? false : retiring, park.batchLimit_);
+            static if (continuation) context.ownJoin_ = true;
             static if (kind == OpKind.plain)
                 operation(borrow, context);
-            else
+            else static if (continuation)
             {
-                static if (subset)
-                    park.writeResult(park.sel_[park.capacity_ + (entry - park.entries_)], operation(borrow, context));
+                auto step = operation(borrow, context);
+                static if (kind == OpKind.resultContinuation)
+                    auto disposition = step.disposition_;
                 else
-                    park.writeResult(entry - park.entries_, operation(borrow, context));
+                    auto disposition = step;
+                ChildStep next;
+                if (disposition == PrivateChildDisposition.done)
+                {
+                    static if (kind == OpKind.resultContinuation)
+                        park.writeResult(park.childResultSlot!subset(entry), step.value_);
+                    if (atomicLoad!(MemoryOrder.acq)(entry.childPending) == 1)
+                        goto complete;
+                    next = retiring ? ChildStep.doneRetire : ChildStep.done;
+                }
+                else next = ChildStep.waitChildren;
+                entry.childStep = next;
+                if (!(flags & childHolding))
+                {
+                    atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
+                    entry.childFlags = childHolding;
+                }
+                releaseMember(entry); // custody release: final Entry access unless owner
+                version (AntfarmActorTestHooks)
+                    actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
+                return 1; // completion now belongs to the last childPending releaser
             }
-            if (retiring) retireMember!(T, storage)(park.base_.service, entry);
+            else park.writeResult(park.childResultSlot!subset(entry), operation(borrow, context));
         }
+    complete:
+        // Immediate completion and joined cleanup retain custody here.
+        // State destruction/clearing must precede H release; the table credit
+        // still fences callback return. Deferred completion must not come here.
+        // Cleanup comes only from doneRetire and reuses this wave's header.
+        if (retiring)
+            retireMember!(T, storage)(park.base_.service, entry);
+        static if (continuation)
+            if (flags & childHolding)
+            {
+                entry.childFlags = 0;
+                releaseWave(wave); // H: final owner access
+            }
         return 1;
+    }
+    static if (hasResults)
+    {
+        pragma(inline, true)
+        size_t childResultSlot(bool subset)(Entry* entry) nothrow @nogc @system
+        {
+            static if (subset)
+                return sel_[capacity_ + (entry - entries_)];
+            else
+                return entry - entries_;
+        }
     }
     // Cleanup header for undispatched members of a truncated retiring wave:
     // retire without calling the op or writing a result. The previous wave's

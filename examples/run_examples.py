@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Compile and run the actor examples with LDC, DMD, and threaded TSan.
 
-Windows builds use the compiler command in examples/README.md. This script is
-the Linux `make check` lane. It does not bump versions or require a shell.
+Runs on Windows and Linux without a shell. Windows omits TSan and the POSIX
+terminal front end. This is also the Linux `make check` examples lane.
 
 Every ```d block in README.md must be a complete program (`void main`) or
 contain the word fragment. Complete programs are compiled and run here.
 """
+import argparse
 import os
 import re
 import subprocess
@@ -72,7 +73,7 @@ def run_example(binary, workers, sanitize=False):
     subprocess.run(cmd, cwd=root, env=env, check=True, timeout=run_timeout)
 
 
-def check_readme_programs():
+def check_readme_programs(selected_configs):
     text = (root / "README.md").read_text()
     blocks = re.findall(r"```d\n(.*?)\n```", text, re.S)
     if not blocks:
@@ -90,8 +91,8 @@ def check_readme_programs():
             f"expected one complete README program, found {len(programs)}")
     source = build / "readme_payload.d"
     source.write_text(programs[0] + "\n")
-    for compiler, flags, suffix in configs:
-        output = build / f"readme_payload{suffix}"
+    for compiler, flags, suffix in selected_configs:
+        output = executable_path(f"readme_payload{suffix}")
         cmd = [compiler, *flags, "-i", "-I.", str(source), f"-of={output}"]
         print("==>", " ".join(cmd), flush=True)
         subprocess.run(cmd, cwd=root, check=True)
@@ -102,40 +103,57 @@ def check_readme_programs():
                        timeout=run_timeout)
 
 
-def main():
+def executable_path(name):
+    return build / (name + (".exe" if os.name == "nt" else ""))
+
+
+def main(ldc_only=False, compiler=None):
+    enable_tsan = os.name == "posix" and not ldc_only and compiler != "dmd"
+    selected_configs = tuple(config for config in configs
+                             if compiler is None or config[0] == compiler)
+    if ldc_only:
+        selected_configs = configs[:2]
     build.mkdir(exist_ok=True)
-    check_readme_programs()
+    check_readme_programs(selected_configs)
     for name in examples:
-        for compiler, flags, suffix in configs:
-            output = build / f"{name.replace('/', '_')}{suffix}"
+        for compiler, flags, suffix in selected_configs:
+            output = executable_path(f"{name.replace('/', '_')}{suffix}")
             compile_example(compiler, flags, name, output)
             for workers in ("0", "2"):
                 run_example(output, workers)
-        compiler, flags, suffix = tsan
-        output = build / f"{name.replace('/', '_')}{suffix}"
-        compile_example(compiler, flags, name, output)
-        # TSan fails at the sanitizer/runtime stack-switch boundary for
-        # migrating DRuntime Fibers; see fibers/DESIGN.md "Validation boundary".
-        tsan_workers = ("0",) if name == "fiber_cancel_at" else ("0", "2")
-        for workers in tsan_workers:
-            run_example(output, workers, sanitize=True)
-    if os.name == "posix":
+        if enable_tsan:
+            compiler, flags, suffix = tsan
+            output = build / f"{name.replace('/', '_')}{suffix}"
+            compile_example(compiler, flags, name, output)
+            # Migration under TSan is covered by the Fiber TSan smoke suite;
+            # this example's worker runs are not yet validated under TSan.
+            tsan_workers = ("0",) if name == "fiber_cancel_at" else ("0", "2")
+            for workers in tsan_workers:
+                run_example(output, workers, sanitize=True)
+    if os.name == "posix" and not ldc_only:
         shim = compile_termbox()
-        for compiler, flags, suffix in configs:
+        for compiler, flags, suffix in selected_configs:
             compile_life_tui(compiler, flags, suffix, shim)
     print("PASS actor examples")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--ldc-only", action="store_true",
+                           help="LDC debug/release only, without TSan or terminal builds")
+    selection.add_argument("--compiler", choices=("ldc2", "dmd"))
+    selection.add_argument("--life", action="store_true", help="build the POSIX terminal app")
+    args = parser.parse_args()
     try:
-        if len(sys.argv) > 1 and sys.argv[1] == "--life":
+        if args.life:
             if os.name != "posix":
                 raise SystemExit("The Life terminal front end requires POSIX")
             compiler = os.environ.get("DC", "ldc2")
             flags = ("-O2", "-release") if compiler == "ldc2" else ("-O", "-release")
             compile_life_tui(compiler, flags, "", compile_termbox())
         else:
-            main()
+            main(ldc_only=args.ldc_only, compiler=args.compiler)
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode or 1)
     except subprocess.TimeoutExpired as error:

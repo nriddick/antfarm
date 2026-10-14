@@ -1,6 +1,6 @@
 # Ant Farm architecture
 
-Ant Farm's current release is 1.8.0. It is one repository
+Ant Farm's current release is 1.8.1. It is one repository
 with four cooperating packages. They separate transport, worker placement,
 stateful identities, and suspendable control flow so an application can choose
 the narrowest representation for each kind of work.
@@ -230,6 +230,9 @@ row the prefix falls in. Do not copy a count from another configuration:
 compute it from the table layouts in [SPEC.md](SPEC.md#2-data-layout), or probe
 the configuration you intend to run. `write() == 0` and a short accepted prefix
 are ordinary backpressure, and the surplus is written by a later call.
+Use `AntFarm.canFit(header, bodyWords, tier)` to pre-check one payload's singleton
+cost against its tier quota; its answer uses the current consumer-count snapshot
+and can change as consumers join or leave (see [SPEC 5b.3](SPEC.md#5b-write-call-and-return)).
 
 - The ring should generally fit the intended LLC working set. Quotas and
   payload sizes remain in ulongs (8 bytes); only the ring size is in MiB.

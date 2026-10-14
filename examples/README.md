@@ -23,9 +23,9 @@ x64 and Linux x86-64. Pass `0` to consume on the calling thread, or a worker
 count N for N pinned pool workers in one LLC, with the calling thread confined
 beside them. A machine with fewer than N accepted worker CPUs (one per
 core by default: `skipSmtSiblings`) in one LLC rejects N with a
-`FarmHostPlanException` that explains why. Exactly N accepted
+`FarmHostResolveException` that explains why. Exactly N accepted
 CPUs is allowed. If no free CPU remains for the caller (including SMT siblings),
-it shares worker CPUs and the plan adds a note:
+it shares worker CPUs and the host adds a note:
 
 ```text
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=public_service
@@ -63,12 +63,25 @@ unset. In cmd.exe set it with `set ANTFARM_HUGE_PAGES=0` before the run.
 
 `make -C examples check` is the Linux matrix: LDC and DMD, debug and release,
 each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
-threaded programs. Every program run has a 300 s timeout. `fiber_cancel_at` runs under TSan with 0 workers only,
-because TSan fails at the stack switch for migrating DRuntime Fibers; see
-[fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary). That target also extracts the complete First payload program
+threaded programs. Every program run has a 300 s timeout. `fiber_cancel_at` still runs under TSan with 0 workers only; Fiber migration
+under TSan is covered by the dedicated Fiber TSan smoke suite instead (see
+[fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary)). That target also extracts the complete First payload program
 from the repository README and runs it with LDC and DMD in debug and release.
 Other README D blocks are fragments and are rejected by the extractor unless
 they say so. The repository `make check` includes that target.
+
+The same runner supports native Windows x64 without make or Bash:
+
+```text
+python -B examples/run_examples.py
+python -B examples/run_examples.py --compiler dmd
+python -B examples/run_examples.py --ldc-only
+```
+
+Windows runs debug/release with 0 and 2 workers, uses explicit `.exe` paths,
+and omits TSan and the POSIX terminal front end. The complete native integration
+matrix is documented in
+[Testing](../docs/development/testing.md#windows-x64-integration).
 
 ## Conway's Game of Life
 

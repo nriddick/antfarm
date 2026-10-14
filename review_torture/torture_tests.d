@@ -891,8 +891,8 @@ void t17_write_size_wrap()
     {
     // Wrap and unsizable payloads must fatal (abort), not smash or return.
     import core.sys.posix.unistd : fork, _exit;
-    import core.sys.posix.sys.wait : waitpid;
-    import core.sys.posix.signal : SIGABRT;
+    import core.sys.posix.sys.wait : waitpid, WNOHANG;
+    import core.sys.posix.signal : SIGABRT, SIGKILL, kill;
 
     auto f = AntFarm.create(2, 4, 1, 1, 2048, 1, 512);
     auto tok = f.registerProducer(Tier.small);
@@ -987,6 +987,72 @@ void t17_write_size_wrap()
     free(mid);
     f.unregisterProducer(tok);
     f.destroy();
+
+    foreach (tier; [Tier.small, Tier.bulk])
+        foreach (maxCs; [1U, 2U])
+            foreach (over; [false, true])
+            {
+                auto boundaryFarm = AntFarm.create(2, 4, 1, 1, 2048, 1, 512);
+                scope (exit) boundaryFarm.destroy();
+                PayloadHeader header;
+                initPayloadHeader!countingCb(&header, maxCs, 1);
+                immutable quota = tier == Tier.small ? 512UL : 2048UL;
+                immutable overhead = maxCs == 1 ? 40UL : 56UL;
+                immutable bodyWords = quota - overhead + (over ? 1 : 0);
+                auto body = cast(ulong*) malloc(bodyWords * ulong.sizeof);
+                check(body !is null, "T17 boundary allocation");
+                scope (exit) free(body);
+                body[0 .. bodyWords] = 0;
+                PayloadEntry entry = PayloadEntry(&header, body[0 .. bodyWords]);
+                immutable fits = boundaryFarm.canFit(header, bodyWords, tier);
+                check(fits == !over, "T17 canFit boundary");
+
+                // Each overload/case gets a child: an acceptance must exit 0,
+                // an oversized singleton must die with SIGABRT, even in release.
+                foreach (form; 0 .. 3)
+                {
+                    auto pid = fork();
+                    if (pid == 0)
+                    {
+                        auto token = boundaryFarm.registerProducer(tier);
+                        if (!token.valid) _exit(2);
+                        ulong wroteBoundary;
+                        PayloadBody[1] bodies = [entry.body];
+                        if (form == 0)
+                            wroteBoundary = boundaryFarm.write((&entry)[0 .. 1], token);
+                        else if (form == 1)
+                            wroteBoundary = boundaryFarm.write(header, bodies[], token);
+                        else
+                            wroteBoundary = boundaryFarm.write(header, bodies[], bodyWords, token);
+                        _exit(wroteBoundary == 1 ? 0 : 1);
+                    }
+                    check(pid > 0, "T17 boundary fork");
+                    int status;
+                    auto deadline = MonoTime.currTime + 10.seconds;
+                    for (;;)
+                    {
+                        immutable waited = waitpid(pid, &status, WNOHANG);
+                        if (waited == pid) break;
+                        check(waited >= 0, "T17 boundary waitpid");
+                        if (MonoTime.currTime > deadline)
+                        {
+                            cast(void) kill(pid, SIGKILL);
+                            waitpid(pid, &status, 0);
+                            check(false, "T17 boundary watchdog");
+                        }
+                        Thread.sleep(1.msecs);
+                    }
+                    immutable sig = status & 0x7f;
+                    check(fits ? status == 0 : sig == SIGABRT,
+                        "T17 canFit agrees with write acceptance/fatal");
+                    printf("T17 canFit %s %s bodyWords=%llu -> %s, write %s (form=%d)\n",
+                        (tier == Tier.small ? "small" : "bulk").ptr,
+                        (maxCs == 1 ? "ST" : "MT").ptr, bodyWords,
+                        (fits ? "true" : "false").ptr,
+                        (fits ? "accepted" : "SIGABRT").ptr, form);
+                    fflush(stdout);
+                }
+            }
     say((okWrap && okBig && okFixedWrap && okMidSmall && wrote == 1)
         ? "T17 fatal on wrap/unsizable/per-tier OK"
         : "T17 DEFECT confirmed");

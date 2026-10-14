@@ -47,6 +47,7 @@ Three reading paths:
 | Page | Read it to |
 | --- | --- |
 | [development/testing.md](development/testing.md) | run and understand the local correctness lanes and their limits |
+| [development/agent-workflow.md](development/agent-workflow.md) | follow the CyDo agent process for iteration, hardening, TSan budgets and mutation selection |
 | [../perftest/README.md](../perftest/README.md) | run a benchmark and the committed-ref optimization gate |
 | [../PERFORMANCE.md](../PERFORMANCE.md) | find the measured numbers, method, and tuning guide |
 
@@ -70,6 +71,7 @@ Three reading paths:
 | Private join, outcome and cancellation proofs | [design/private-actor-ordering.md](design/private-actor-ordering.md) |
 | Private Entry/Service/cohort layout and slab reuse proof | [design/private-actor-layout.md](design/private-actor-layout.md) |
 | The local correctness gate and its lanes | [development/testing.md](development/testing.md) |
+| CyDo agent session routing, iteration, hardening, TSan budgets and mutation selection | [development/agent-workflow.md](development/agent-workflow.md) |
 | Farm ordering audit and real-atomic TSan lanes | [review_torture/FARM_ORDERING.md](../review_torture/FARM_ORDERING.md) |
 | Benchmark harness and optimization gate | [perftest/README.md](../perftest/README.md) |
 | What changed in each candidate and its compatibility notes | [CHANGELOG.md](../CHANGELOG.md) |

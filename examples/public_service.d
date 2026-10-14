@@ -73,7 +73,7 @@ void main(string[] args)
         requests[0].delta = 1;
         // A still-running activation makes the first send coalesce instead of queue; both are acceptance.
         immutable first = handle.send(&nodes[0]);
-        if (first != ActorSendResult.queued && first != ActorSendResult.coalesced)
+        if (!first.accepted)
             fatal("send was rejected");
         // nodeBusy is deterministic only before any flush: no activation can have taken node 0.
         if (round == 0 && handle.send(&nodes[0]) != ActorSendResult.nodeBusy)
@@ -83,7 +83,7 @@ void main(string[] args)
             requests[i].delta = cast(long)(i + 1);
             immutable result = handle.send(&nodes[i]);
             // The activation may finish and go idle between sends. queued and coalesced are both acceptance.
-            if (result != ActorSendResult.queued && result != ActorSendResult.coalesced)
+            if (!result.accepted)
                 fatal("send was rejected");
         }
         foreach (i; 0 .. nodes.length)
@@ -102,8 +102,7 @@ void main(string[] args)
 
     // Senders are quiescent. Retire closes admission, then drains.
     immutable retiring = owner.requestRetire();
-    if (retiring != ActorRetireResult.requested
-            && retiring != ActorRetireResult.alreadyRetired)
+    if (!retiring.accepted)
         fatal("retirement rejected");
     if (handle.send(&nodes[0]) != ActorSendResult.closed)
         fatal("send after admission close was accepted");
@@ -121,5 +120,5 @@ void main(string[] args)
     if (expected != 234)
         fatal("ledger total mismatch");
     writeln("public service: 36 ordered replies, balance=", expected,
-        ", workers=", host.plan.workers, ", closing-callback-count=", closingCallbacks);
+        ", workers=", host.resolution.workers.length, ", closing-callback-count=", closingCallbacks);
 }
