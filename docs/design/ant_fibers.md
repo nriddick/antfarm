@@ -6,8 +6,8 @@ activations, and `threadpool` supplies pinned workers and wake policy when the
 scheduler is used concurrently.
 
 This document records the current design and its synchronization
-invariants. Start with [README.md](README.md) for usage and
-[../ARCHITECTURE.md](../ARCHITECTURE.md) for the relationship between packages.
+invariants. Start with [ant_fibers/README.md](../../ant_fibers/README.md) for usage and
+[ARCHITECTURE.md](../../ARCHITECTURE.md) for the relationship between packages.
 
 ## Execution model
 
@@ -400,8 +400,8 @@ hosts.
 
 Under `version(TSan)` the scheduler keeps a ThreadSanitizer context per task,
 so the dedicated Fiber TSan smoke suite covers migration
-([testing](../docs/development/testing.md)). It assumes the standard,
+([testing](../development/testing.md)). It assumes the standard,
 uninstrumented DRuntime, disables parallel GC marking, and runs outside
 `make check`. The Fiber gate therefore remains the DMD/LDC debug and release
-matrix plus deterministic race tests and repeated stress. See [../ROADMAP.md](../ROADMAP.md) for the
+matrix plus deterministic race tests and repeated stress. See [ROADMAP.md](../../ROADMAP.md) for the
 current release gates.

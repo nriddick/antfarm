@@ -6,7 +6,7 @@ does not own a task queue or define a work-stealing policy. A worker is a
 locator and execution context for application-owned work.
 
 This document records the current design. Start with
-[README.md](README.md) for usage and [../ARCHITECTURE.md](../ARCHITECTURE.md)
+[threadpool/README.md](../../threadpool/README.md) for usage and [ARCHITECTURE.md](../../ARCHITECTURE.md)
 for composition with Ant Farm and `antfarm-fibers`.
 
 ## Responsibilities
@@ -376,7 +376,7 @@ are joined and all registrations have been released.
 
 For managed Fibers, `antfarm-fibers` supplies the hook implementation and lane
 coverage rules. Those scheduler contracts live in
-[../fibers/DESIGN.md](../fibers/DESIGN.md).
+[the Fiber scheduler design](ant_fibers.md).
 
 ## Thread-safety and ownership
 
