@@ -302,9 +302,9 @@ ACTIVE-to-ACTIVE notifications; the previous value decides whether an OS wake
 is necessary. A notification before arming publishes into the next arming
 RMW's acquire chain. A notification after arming either prevents the conditional
 wait or wakes it. Shutdown publishes stop and follows the same protocol.
-Windows' event fallback retains a signal delivered before the wait; stale
-signals can cause harmless extra pump visits. Linux waits on the same fixed
-ARMED value with futex. Spurious returns always lead back to a work check.
+Windows waits on the fixed ARMED value with `WaitOnAddress`; Linux uses futex.
+The atomic slot retains a notification delivered before the conditional wait.
+Spurious returns always lead back to a work check.
 
 ## Installed LLC state
 
@@ -399,8 +399,10 @@ and destroyed on its pinned worker.
 
 Windows topology is built from CPU-set and logical-processor relationship
 records. Affinity uses CPU Sets so processor groups and hybrid scheduling
-policy remain visible to the OS. Wait-on-address is resolved dynamically with
-an event fallback for supported Windows versions.
+policy remain visible to the OS. `WaitOnAddress` is resolved dynamically and
+required on the supported Windows 10 1803+ floor. If it is unavailable, pool
+startup throws before allocating wait slots or starting workers; there is no
+event fallback.
 
 Linux topology is built from sysfs and scheduler-visible CPUs, then pinning is
 applied with the native affinity API. Linux wait/wake uses its native backend.

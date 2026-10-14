@@ -5,11 +5,10 @@
 # That script passes an explicit SHELL to child makes, because this host has
 # no /bin/sh and their TSan recipes quote TSAN_OPTIONS.
 #
-# Windows is the other supported target and is tested by hand (`dub test`,
-# `actor_torture`, `antfarm_test`). New tests stay on druntime threads and
-# atomics; this matrix itself is the Linux gate.
+# Windows has a separate native Python runner. New tests stay on druntime
+# threads and atomics; the full correctness gate remains the Linux matrix.
 
-.PHONY: help check check-quick check-docs check-soak check-mimalloc farm-tsan run-farm-tsan docs perf-gate
+.PHONY: help check check-quick check-windows check-docs check-soak check-mimalloc farm-tsan run-farm-tsan docs perf-gate
 
 # `help` is the first rule, so name the default goal explicitly.
 .DEFAULT_GOAL := check
@@ -39,6 +38,11 @@ Reference (needs DMD):
   make docs               generate the HTML API reference into .build/docs/
                           (ignored; open .build/docs/antfarm.html first)
 
+Windows integration (native x64, Dub, Python 3, LDC and DMD; no Bash or TSan):
+  make check-windows      native Windows matrix (WINDOWS_CHECK_ARGS selects lanes)
+  python scripts/check-windows.py --quick
+                          focused LDC packages, review and examples; no make needed
+
 Longer or optional (not run by make check):
   make check-soak          private-actor TSan loop for at least 121 s
   make check-mimalloc      make check plus real mimalloc lanes (needs the submodule)
@@ -59,6 +63,11 @@ check:
 
 check-quick:
 	./scripts/check.sh --quick
+
+WINDOWS_PYTHON ?= python
+WINDOWS_CHECK_ARGS ?=
+check-windows:
+	$(WINDOWS_PYTHON) -B scripts/check-windows.py $(WINDOWS_CHECK_ARGS)
 
 check-docs:
 	python3 scripts/check-doc-links.py

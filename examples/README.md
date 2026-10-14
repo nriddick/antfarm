@@ -70,6 +70,19 @@ from the repository README and runs it with LDC and DMD in debug and release.
 Other README D blocks are fragments and are rejected by the extractor unless
 they say so. The repository `make check` includes that target.
 
+The same runner supports native Windows x64 without make or Bash:
+
+```text
+python -B examples/run_examples.py
+python -B examples/run_examples.py --compiler dmd
+python -B examples/run_examples.py --ldc-only
+```
+
+Windows runs debug/release with 0 and 2 workers, uses explicit `.exe` paths,
+and omits TSan and the POSIX terminal front end. The complete native integration
+matrix is documented in
+[Testing](../docs/development/testing.md#windows-x64-integration).
+
 ## Conway's Game of Life
 
 [life/backend.d](life/backend.d) demonstrates private-actor waves with one actor

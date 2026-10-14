@@ -13,8 +13,10 @@ to the revisions at which they were measured.
 
 ## 1.8.1
 
-The release content is in the CHANGELOG's 1.8.1 section. The Linux pre-push
-gates pass; the remaining release gate is a manual Windows run.
+The release content is in the CHANGELOG's 1.8.1 section. The incoming candidate
+has passed its Linux pre-push gates. The combined candidate has passed the native
+Windows integration matrix with DMD 2.112.1 and LDC 1.42 on a single-LLC x64
+host; a final Linux sanity check remains before release.
 
 Accepted performance slips, to be evaluated in a dedicated performance session.
 These are perf-gate results at 20 pairs against the pre-review 1.8.1 candidate
@@ -84,9 +86,11 @@ are not promised yet.
 
 ## Platform and validation work
 
-- Windows x64 validation by hand: root, threadpool and Fiber unit tests, the
-  review torture and T19 flood/lap suites, and allocator pairing. A Windows pass
-  is not claimed until it is run. Known limits: T01 and T17 are POSIX-only
+- Windows x64 validation uses `scripts/check-windows.py` for root, threadpool,
+  Fiber, ordering, actor, review/T19 and example coverage (see
+  [Testing](docs/development/testing.md#windows-x64-integration)); real allocator
+  pairing remains a separate lane. A Windows pass is not claimed until it is
+  run. Known limits: T01 and T17 are POSIX-only
   fork/abort probes, and ThreadSanitizer is unavailable in the Windows LDC
   runtime (`Scoped EH not supported`).
 - Multi-LLC Fiber service: native-only service by default; rescue/assist

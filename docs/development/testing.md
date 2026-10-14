@@ -60,8 +60,8 @@ Not covered by `make check` (select relevant focused checks during iteration and
 include affected package gates in pre-push scope; these are not a second pipeline):
 the dedicated fiber TSan smoke suite, the review-torture write-protection
 (`allwrite`) targets, and `examples/iota_sum.d`. Performance is not part of it
-either (see `make perf-gate`). Windows is validated by hand after a release
-candidate and is not part of this gate.
+either (see `make perf-gate`). Windows has a separate native integration runner
+described below and is not part of this gate.
 
 To run the fiber smoke suite under ThreadSanitizer, build it with
 `DFLAGS='-fsanitize=thread -d-version=TSan -g -O1' dub build :antfarm-fibers -c unittest --compiler=ldc2`.
@@ -117,6 +117,60 @@ Each suite has its own README with selectors and the seams it uses:
 [review_torture](../../review_torture/README.md),
 [private_actor_tests](../../private_actor_tests/README.md), and
 [examples](../../examples/README.md).
+
+## Windows x64 integration
+
+Run from the repository root in PowerShell or cmd.exe with Python 3, Dub and
+the selected D compilers on PATH (DMD 2.112+ / LDC 1.42+). No Bash, GNU make,
+C compiler or administrator privileges are needed:
+
+```text
+python -B scripts/check-windows.py
+python -B scripts/check-windows.py --quick
+python -B scripts/check-windows.py --compiler dmd --lanes threadpool examples
+```
+
+The default runs LDC and DMD. `--quick` uses only LDC and runs the packages,
+plain review torture (including sweep cursor), and debug/release examples.
+`--lanes` selects one or more rows below; `--compiler ldc2` or `--compiler dmd`
+restricts the compiler. With GNU make available, `make check-windows` invokes
+the same runner; use `WINDOWS_PYTHON` and `WINDOWS_CHECK_ARGS` to override its
+interpreter and arguments.
+
+| Lane | Native coverage |
+| --- | --- |
+| `packages` | Root, threadpool and Fiber unit/smoke suites via Dub |
+| `threadpool` | Process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release, FarmHost lifecycle; also optimized LDC host tests |
+| `ordering` | Raw ring-store audit, controlled Farm ordering and leaf reuse |
+| `review` | Plain torture suite, sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
+| `actors` | Public actor deterministic/contention suite with the mimalloc stub |
+| `private` | Private actor suite and six extracted documentation programs |
+| `examples` | README payload and actor/headless examples in debug/release with 0 and 2 workers |
+
+The runner forces `ANTFARM_HUGE_PAGES=0`, keeps generated binaries and Dub's
+home under `.build/windows-check/`, and uses local dependencies without registry
+resolution. Dub package outputs and example binaries retain their usual ignored
+locations. Each build or run has a 300 s timeout (`--timeout` overrides it).
+A timeout kills that command's Windows process tree, including Dub's child;
+nonzero exits stop the matrix. Live affinity/host coverage skips fail by default.
+`--allow-hardware-skips` explicitly accepts missing CPUs/groups and labels the
+final pass accordingly. Examples still require two eligible worker CPUs in one
+LLC for their threaded runs.
+
+Success prints `WINDOWS CHECKS PASSED`. This is separate from `make check`:
+TSan, POSIX fork/death probes (including T01/T17), the Life terminal front end,
+real mimalloc and timing gates are excluded. Existing POSIX-only tests may print
+their own skips within a native suite; Fiber multi-LLC probes also skip on
+single-LLC hosts. Use the separate
+[Windows mimalloc commands](../../actor_torture/README.md) for
+real allocator pairing.
+
+The runner's failure/selection tests include a real Windows child-tree timeout
+probe. The example tests also protect Linux's existing TSan and terminal matrix:
+
+```text
+python -B -m unittest scripts/test_check_windows.py examples/test_run_examples.py -v
+```
 
 ### Portable Python checks
 

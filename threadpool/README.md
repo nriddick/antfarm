@@ -250,6 +250,7 @@ dub run -c wait-races
 dub run -c affinity-test --compiler=dmd
 dub run -c affinity-test --compiler=ldc2
 dub run -c scope-test --compiler=ldc2
+dub run -c confine-test --compiler=ldc2
 ```
 
 The Linux `scope-test` re-executes itself under `taskset -c` (one physical
@@ -264,6 +265,14 @@ direct pin rejection and startup cleanup after affinity narrows. An optional
 decimal mask can select another allowed subset (`-- 12288` selects LPs 12/13
 on a machine that permits them). Other platforms and multi-group processes
 print an explicit skip.
+
+The Windows/Linux `confine-test` checks the calling thread's affinity after
+confinement and exact restoration, rejected CPU lists, and `stopRequested` after
+a managed worker failure. On Windows it queries thread group affinity and also
+checks that the process mask stays unchanged; it needs two eligible CPUs in the
+caller's processor group. On Linux also run it under a small `taskset` mask.
+The [native Windows matrix](../docs/development/testing.md#windows-x64-integration)
+runs it with both compilers alongside process-affinity and armed-wait checks.
 
 - [examples/hello_topology.d](examples/hello_topology.d): topology only.
 - [examples/hello_antfarm.d](examples/hello_antfarm.d): one Farm per accepted

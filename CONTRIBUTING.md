@@ -36,6 +36,11 @@ and LDC debug/release examples. It needs the LDC toolchain (including Dub), Pyth
 3, GNU make and Bash; it uses neither DMD nor TSan. `make check` retains the full
 matrix and remains the correctness gate.
 
+On Windows x64, use `python -B scripts/check-windows.py` for the native
+integration matrix, or add `--quick` for LDC packages, review and examples.
+It needs neither Bash nor GNU make. Coverage, focused selectors and exclusions
+are in [docs/development/testing.md](docs/development/testing.md#windows-x64-integration).
+
 The full gate accepts `CHECK_SMALL_CPUS` and `CHECK_ONE_LLC_CPUS` as `taskset -c`
 CPU lists. By default the small-mask confine lane uses the first four CPUs in
 the process's allowed affinity, and host tests use the full allowed mask. With
@@ -104,6 +109,10 @@ gate. Update `make help` so contributors can find it. Decide whether it belongs
 in `make check-quick` too: that target dispatches to `scripts/check.sh --quick`,
 whose quick branch runs the portable LDC-only checks. Keep its toolchain
 requirements consistent with the description above.
+
+Windows-compatible lanes also belong in `scripts/check-windows.py` when they
+contribute to native integration coverage. Keep its exclusions explicit; a
+Windows pass does not replace the Linux correctness gate.
 
 Document the command, coverage, prerequisites and limitations in
 [docs/development/testing.md](docs/development/testing.md), including whether

@@ -73,6 +73,19 @@ aliases; see the migration table below.
   used to set `failed`; it now sets `interrupted` and does not fail the
   operation.
 
+### Windows integration
+
+- A native Python integration runner covers packages, threadpool affinity/wait
+  and FarmHost tests, Farm ordering, review/T19, actor suites and examples with
+  LDC and DMD. It provides quick/focused selection and process-tree timeouts;
+  Windows coverage stays separate from the Linux correctness gate.
+- The caller confinement/restoration regression now runs on Windows, checking
+  thread group affinity and the unchanged process mask.
+- Windows wait tests force a missing `WaitOnAddress` and check the startup
+  rejection in debug and release builds before running the normal wait races.
+- The example runner uses explicit Windows executable paths, supports compiler
+  selection and omits TSan and the POSIX terminal front end on Windows.
+
 ### Breaking changes: two threadpool CPU-query surfaces
 
 Threadpool had four overlapping ways to ask which CPUs a program may use:

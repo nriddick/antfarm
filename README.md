@@ -10,7 +10,7 @@ are supported functionality; actor state and results have the limits stated in
 their guides. Actor source and ABI stability remain subject to the
 [promotion gates](ROADMAP.md#actor-api-promotion-gates).
 The correctness gate is the local Linux `make check`; there is no CI. Windows
-(x64) is an intended target with separate manual validation. See
+(x64) has a separate [native integration matrix](docs/development/testing.md#windows-x64-integration). See
 [CHANGELOG.md](CHANGELOG.md) for what the release contains and its
 compatibility notes.
 
