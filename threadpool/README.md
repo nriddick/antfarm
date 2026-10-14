@@ -74,6 +74,13 @@ does not change it; call `scopeOsToCallingThread()` before the first
 `pinProcessor(id)`; a CPU outside the scope returns
 `PinOutcome.outsideOsScope` instead of escaping the launch restriction.
 
+Linux affinity masks and cgroup cpusets are respected, but CFS CPU bandwidth
+quotas (`cpu.max` on cgroup v2, `cpu.cfs_quota_us` / `cpu.cfs_period_us` on v1)
+are not detected. Quota-limited containers can therefore start too many workers
+and suffer oversubscription and throttling. Size the pool explicitly for its
+CPU budget: set `PoolOptions.processors` to a suitably sized list of eligible
+CPUs, or set `FarmHostOptions.workers` when using `FarmHost`.
+
 ## Start workers
 
 The smallest pool provides a `WorkerBody`. Returning `true` asks the worker to
