@@ -34,6 +34,7 @@ import antfarm : avgCostForChunk, fatal;
 import core.atomic : MemoryOrder, atomicExchange, atomicFetchAdd,
     atomicFetchSub, atomicLoad, atomicStore, cas, pause;
 import core.lifetime : move;
+import core.stdc.stdio : fprintf, stderr;
 import core.stdc.string : memcpy, memset;
 
 // Cost class of the public flush table: claims of 8 entries.
@@ -813,7 +814,8 @@ struct ActorErasedOwner
 /// iterate owner arrays with `foreach (ref o; owners)`. `opAssign` accepts
 /// only an rvalue, so `owner = otherOwner` does not compile either; write
 /// `owner = move(otherOwner)`. Overwriting a live owner with a moved value
-/// is fatal.
+/// is fatal. Dropping a live owner leaks its slot; assertion builds print a
+/// diagnostic to stderr. Call `leak()` where reclaim is impossible.
 /// See_Also:
 ///     docs/guide/public-actors.md, docs/reference/actor-lifecycle.md (the
 ///     drain and shutdown obligations)
@@ -833,7 +835,24 @@ struct ActorOwner(T)
             fatal("overwrite live ActorOwner");
         slot_ = src.slot_;
         generation_ = src.generation_;
+        // `src` is a by-value parameter: leave it inert for its destructor.
+        src.slot_ = null;
+        src.generation_ = 0;
         return this;
+    }
+
+    // Assertion builds only, so release builds keep a trivially destructible
+    // owner. A diagnostic, not fatal: this also runs while an exception
+    // unwinds. Moved-from, reclaimed, leaked, erased and default owners are
+    // inert. An owner field in a GC object reports when the collector
+    // finalizes it, which may be at program exit.
+    version (assert)
+    ~this() nothrow @nogc @trusted
+    {
+        if (slot_ !is null)
+            fprintf(stderr, "antfarm warning: ActorOwner dropped without "
+                ~ "reclaim (slot %p, generation %llu); call reclaim() or "
+                ~ "leak()\n", cast(void*) slot_, cast(ulong) generation_);
     }
 
     /// True while this owner still holds its actor generation.
@@ -889,6 +908,18 @@ struct ActorOwner(T)
         slot_ = null;
         generation_ = 0;
         return result;
+    }
+
+    /// Give up ownership without reclaiming. The actor's slot and state are
+    /// leaked on purpose and stay allocated until the runtime itself is
+    /// leaked or abandoned; existing handles are not invalidated. Use only
+    /// where reclaim is impossible, such as after `FarmHost.abandon()` or a
+    /// worker failure. Assertion builds otherwise report a live owner
+    /// dropped at scope exit. The owner is invalid afterwards.
+    void leak() pure nothrow @nogc @safe
+    {
+        slot_ = null;
+        generation_ = 0;
     }
 }
 

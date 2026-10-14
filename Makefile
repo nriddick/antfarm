@@ -27,8 +27,8 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
   make check-farm-ordering Farm ordering and leaf-reuse tests, LDC and DMD
                            plus the writeImpl raw ring-store check
   make run-farm-tsan       Farm suite under ThreadSanitizer (LDC)
-  make -C actor_torture run run-dmd run-tsan
-                           public actor suite
+  make -C actor_torture run run-dmd run-tsan death
+                           public actor suite and child-process diagnostics
   make -C review_torture run run-tsan
                            adversarial Farm suite
   make -C private_actor_tests run run-dmd run-tsan doc-example death

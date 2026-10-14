@@ -87,6 +87,14 @@ make -C actor_torture run-dmd
 make -C actor_torture run-tsan
 ```
 
+`make -C actor_torture death` runs the child-process diagnostics table
+(`actor_torture death`) on LDC and DMD, debug and `-release`. Each row
+re-executes `/proc/self/exe` as `child:<mode>` and checks the exit status and
+stderr: fatal sites must abort with their message, debug diagnostics such as a
+dropped live `ActorOwner` must print and exit 0, and silent rows must leave
+stderr empty. Rows for `version(assert)`-only diagnostics print `SKIP` under
+`-release`.
+
 For the wave lifecycle and outcome checks only, build with `make -C
 actor_torture` and run `actor_torture/actor_torture --waves`. The individual
 signal regressions accept `--wave-wake`, `--wave-send`, and `--wave-late-send`.

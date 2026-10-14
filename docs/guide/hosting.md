@@ -162,7 +162,10 @@ again. Otherwise it runs the
 6. destroys the Farm.
 
 `abandon()` stops the consumers, restores affinity and leaks everything that
-did not drain.
+did not drain. After `abandon()` or a failed host, call `leak()` on any
+`ActorOwner` you cannot reclaim. Otherwise an assertion build prints a
+"dropped without reclaim" diagnostic when the owner goes out of scope,
+including while `FarmHostFailed` unwinds.
 
 Join every thread that may call `requestCancel` on a host park before
 `close()`. The host cannot see those threads. Views subscribed outside the

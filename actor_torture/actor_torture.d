@@ -4045,12 +4045,184 @@ private void testCancelModeRetirement()
     fflush(stdout);
 }
 
+// -------------------------------------------------------------------------
+// Child-process diagnostics: `actor_torture death` re-executes
+// /proc/self/exe as "child:<mode>" once per childCases row and checks the
+// exit status and stderr. Rows describe fatal sites (abort) and debug
+// diagnostics (warn); silent rows prove a path stays quiet.
+// -------------------------------------------------------------------------
+
+private enum ChildExpect
+{
+    abort,  // nonzero exit; stderr contains `text`
+    warn,   // exit 0; stderr contains `text`
+    silent, // exit 0; stderr empty
+}
+
+private struct ChildCase
+{
+    string mode;
+    ChildExpect expect;
+    string text;
+    bool assertOnly; // the diagnostic exists only in version(assert) builds
+    void function() run;
+}
+
+private enum ownerDropText = "ActorOwner dropped without reclaim";
+
+private immutable ChildCase[] childCases = [
+    ChildCase("fatal-sample", ChildExpect.abort,
+        "antfarm fatal: actor torture harness sample", false,
+        &childFatalSample),
+    ChildCase("owner-drop-live", ChildExpect.warn, ownerDropText, true,
+        &childOwnerDropLive),
+    ChildCase("owner-move-scope-exit", ChildExpect.silent, null, false,
+        &childOwnerMoveScopeExit),
+    ChildCase("owner-reclaim-scope-exit", ChildExpect.silent, null, false,
+        &childOwnerReclaimScopeExit),
+    ChildCase("owner-leak-scope-exit", ChildExpect.silent, null, false,
+        &childOwnerLeakScopeExit),
+];
+
+private void childFatalSample()
+{
+    fatal("actor torture harness sample");
+}
+
+// Child bodies that drop or leak an actor also leak its runtime and Farm:
+// destroying a runtime with a live actor is itself fatal.
+private ActorRuntime* childRuntime()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    check(farm !is null, "child Farm allocation");
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "child runtime allocation");
+    return runtime;
+}
+
+private ActorOwner!OwnerProbeState childOwner(ActorRuntime* runtime)
+{
+    auto owner = runtime.createActor!(OwnerProbeState, ownerProbeActor)(
+        OwnerProbeState(null));
+    check(owner.valid, "child actor creation");
+    return owner;
+}
+
+private void childRetireAndReclaim(ref ActorOwner!OwnerProbeState owner)
+{
+    check(owner.requestRetire(ActorRetireMode.cancel)
+            == ActorRetireResult.requested,
+        "child idle actor retire");
+    check(owner.retired, "child idle actor retires immediately");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed,
+        "child actor reclaim");
+}
+
+private void childOwnerDropLive()
+{
+    auto owner = childOwner(childRuntime());
+}
+
+private void childOwnerMoveScopeExit()
+{
+    auto runtime = childRuntime();
+    ActorOwner!OwnerProbeState moved;
+    {
+        auto owner = childOwner(runtime);
+        moved = move(owner);
+    }
+    check(moved.valid, "child moved-into owner stays valid");
+    childRetireAndReclaim(moved);
+}
+
+private void childOwnerReclaimScopeExit()
+{
+    auto owner = childOwner(childRuntime());
+    childRetireAndReclaim(owner);
+}
+
+private void childOwnerLeakScopeExit()
+{
+    auto owner = childOwner(childRuntime());
+    owner.leak();
+    check(!owner.valid, "leak invalidates the owner");
+}
+
+private void runChildMode(string mode)
+{
+    foreach (ref row; childCases)
+        if (row.mode == mode)
+        {
+            row.run();
+            fflush(stdout);
+            fflush(stderr);
+            return;
+        }
+    check(false, "unknown actor torture child mode");
+}
+
+private void testChildCases()
+{
+    version (linux)
+    {
+        import std.algorithm.searching : canFind;
+        import std.process : Redirect, pipeProcess, wait;
+
+        foreach (ref row; childCases)
+        {
+            version (assert) {}
+            else if (row.assertOnly)
+            {
+                printf("SKIP child %.*s: version(assert) diagnostic, "
+                    ~ "absent under -release\n",
+                    cast(int) row.mode.length, row.mode.ptr);
+                continue;
+            }
+            auto pipes = pipeProcess(["/proc/self/exe", "child:" ~ row.mode],
+                Redirect.stderr);
+            string text;
+            foreach (chunk; pipes.stderr.byChunk(4096))
+                text ~= cast(const(char)[]) chunk;
+            immutable status = wait(pipes.pid);
+            bool ok;
+            final switch (row.expect)
+            {
+            case ChildExpect.abort:
+                ok = status != 0 && text.canFind(row.text);
+                break;
+            case ChildExpect.warn:
+                ok = status == 0 && text.canFind(row.text);
+                break;
+            case ChildExpect.silent:
+                ok = status == 0 && text.length == 0;
+                break;
+            }
+            if (!ok)
+                fprintf(stderr, "child %.*s: status %d, stderr:\n%.*s",
+                    cast(int) row.mode.length, row.mode.ptr, status,
+                    cast(int) text.length, text.ptr);
+            check(ok, "child mode exit status or stderr mismatch");
+        }
+        printf("actor child diagnostics OK\n");
+    }
+    else
+        printf("SKIP actor child diagnostics: /proc/self/exe re-exec "
+            ~ "requires Linux\n");
+    fflush(stdout);
+}
+
 void main(string[] args)
 {
+    if (args.length == 2 && args[1].length > 6 && args[1][0 .. 6] == "child:")
+    {
+        runChildMode(args[1][6 .. $]);
+        return;
+    }
     if (args.length == 2)
     {
         switch (args[1])
         {
+        case "death": testChildCases(); break;
         case "--wave-wake": testWaveSignalRace(false); break;
         case "--wave-send": testWaveSignalRace(true); break;
         case "--wave-late-send": testWaveSignalRace(true, true); break;

@@ -232,12 +232,16 @@ race, or a use of freed memory.
 | 4 | Assuming thread, allocator, or state properties the API does not enforce. A non-thread-safe allocator, thread-affine data in state that migrates across consumers, concurrent use of one private park, re-entering a park from a callback. | Alignment above 64 on the default allocator fails the allocation (null), not a later checked fault. Unauthorized private contexts, active-child `finish`, bad batch overrides, and subset index errors are fatal. Park reentry is fatal only in assertion builds. | POD checks are not transitive ownership. The reentry guard is not a lock. Release builds do not diagnose park reentry. |
 | 5 | Overload and nontermination left as application policy. Unbounded inbox growth, an endless `again` or empty wait, a callback that never returns, a child that never finishes. | Ring, runtime capacity, and private cohort capacity are finite. Exhaustion is a typed status or backpressure, not an automatic cancel. | No mailbox byte cap or public deadline. Private cancellation is cooperative: a callback that ignores `cancelled` runs to completion. Private deadlines are lazy, observed only by checks and emission, and need a tracked park, as do root handles and `cancelAll`. An actor that never pops its inbox can refuse retirement forever, even in cancel mode: the library never discards nodes. `FarmHost.waitUntil` takes an opt-in timeout; the actor library has none. |
 
-Other mistakes that fail late or not at all: dropping an owner or token skips
-cleanup; a type-erased create checks size and alignment, not the semantic type;
-a saved private context has no generation, so comparing its parent pointer does
-not prove the callback is still running; moving or destroying active wave
-storage invalidates embedded self-pointers even though ordinary copying is
-disabled.
+Other mistakes that fail late or not at all: dropping a live `ActorOwner`
+skips cleanup and leaks its slot; assertion builds print a "dropped without
+reclaim" diagnostic on stderr (no abort, so it is safe while an exception
+unwinds), release builds stay silent, and `leak()` is the deliberate opt-out
+for abandoned or failed hosts. Dropping a token, or an `ActorErasedOwner`,
+skips cleanup silently; a type-erased create checks size and alignment, not
+the semantic type; a saved private context has no generation, so comparing its
+parent pointer does not prove the callback is still running; moving or
+destroying active wave storage invalidates embedded self-pointers even though
+ordinary copying is disabled.
 
 ## Where to go next
 

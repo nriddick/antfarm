@@ -314,6 +314,7 @@ version (assert)
         enforce(host.state == HostState.failed, "failed state");
         expectThrow!FarmHostException(() => host.step(), "step after failure");
         host.close(); // acts like abandon: no second throw
+        owner.leak(); // the failed host leaked the runtime; reclaim is impossible
         enforce(diagnostic.msg == "host-test: injected actor failure"
             && diagnostic.file.canFind("host_live.d") && diagnostic.line != 0,
             "worker diagnostic remains valid after close");
@@ -393,6 +394,7 @@ void abandonLive()
     auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
     enforce(owner.valid, "live actor");
     host.abandon();
+    owner.leak(); // abandon() leaked the runtime; reclaim is impossible
     enforce(host.state == HostState.abandoned && host.pool.workerCount == 0, "consumers stopped");
     enforce(liveCallerMask() == before, "affinity restored");
     host.abandon(); // idempotent
@@ -484,6 +486,7 @@ void failurePairing()
             auto runtime = host.createRuntime(1);
             auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
             enforce(owner.valid, "live actor");
+            scope (exit) owner.leak(); // deliberately undrained: the guard abandons
             if (applicationFailure)
                 throw new Exception("host-test: application failure");
         }
@@ -650,6 +653,7 @@ int main(string[] args)
         auto runtime = host.createRuntime(1);
         auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
         enforce(owner.valid, "live actor");
+        scope (exit) owner.leak(); // deliberately undrained: the guard abandons
         return 0; // close refuses; closeOrAbandon must stop the workers
     }
     workersZero();
