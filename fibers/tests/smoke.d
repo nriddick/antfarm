@@ -1,7 +1,12 @@
 module smoke;
 
 // This executable has a substantial main() suite as well as imported unittests.
-extern(C) __gshared string[] rt_options = ["testmode=run-main"];
+// Under TSan, disable druntime's parallel GC marking: its mark-stack growth
+// races intermittently and is reported before the smoke suite runs.
+version (TSan)
+    extern(C) __gshared string[] rt_options = ["testmode=run-main", "gcopt=parallel:0"];
+else
+    extern(C) __gshared string[] rt_options = ["testmode=run-main"];
 
 import antfarm_fibers;
 import antfarm;

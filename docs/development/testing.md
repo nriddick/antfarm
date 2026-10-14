@@ -60,6 +60,11 @@ write-protection (`allwrite`) targets, and `examples/iota_sum.d`. Performance is
 not part of it either (see `make perf-gate`). Windows is validated by hand after
 a release candidate and is not part of this gate.
 
+To run the fiber smoke suite under ThreadSanitizer, build it with
+`DFLAGS='-fsanitize=thread -d-version=TSan -g -O1' dub build :antfarm-fibers -c unittest --compiler=ldc2`.
+In that build `fibers/tests/smoke.d` sets `gcopt=parallel:0`, because druntime's
+parallel GC marking intermittently reports a race in its own mark stack.
+
 ### Prerequisites
 
 - DMD 2.112+ and LDC 1.42+, with the LDC ThreadSanitizer runtime installed (the
