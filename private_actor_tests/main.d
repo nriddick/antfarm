@@ -4823,7 +4823,13 @@ void dtorGc(PrivateRootReclamation reclaim)()
     auto park = PrivateRootPark!(GcRoot, gcStep, reclaim).create(h.farm, 2, 2, ActorAllocator.gcRooted(&inner));
     check(park !is null);
     auto collector = new Thread({
-        while (atomicLoad(gcStop) == 0) { GC.collect(); atomicFetchAdd(gcRounds, 1u); }
+        while (atomicLoad(gcStop) == 0)
+        {
+            GC.collect();
+            atomicFetchAdd(gcRounds, 1u);
+            // Let actor callbacks acquire druntime's range lock between collections.
+            Thread.sleep(1.msecs);
+        }
     });
     collector.start();
     scope(exit) { atomicStore(gcStop, 1u); collector.join(); }

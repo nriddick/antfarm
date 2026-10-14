@@ -61,6 +61,8 @@ aliases; see the migration table below.
   workers in private_actor_tests unsubscribe before waiting. Their inactive
   consumer view retained a ring pin, a circular wait that could hang the
   test. The suite's progress deadlines are uniform 60 s hang timeouts.
+- Test harness only: the `dtor-gc` collector pauses 1 ms between collections
+  so actor callbacks can acquire druntime's GC root-range lock under load.
 
 ### Compatibility notes
 
