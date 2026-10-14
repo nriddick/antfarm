@@ -3,7 +3,7 @@
  +
  +   make -C tools/perf run
  +   ./throughput --grid 8
- +   ldc2 -O2 -release throughput.d ../antfarm/package.d -of=throughput.exe
+ +   ldc2 -O2 -release throughput.d ../../antfarm/package.d ../../antfarm/allocation.d -of=throughput.exe
  +
  + Default mode searches topology, then payload/table shape, and prints a
  + ranked table. `--once` runs a single configuration (see README).

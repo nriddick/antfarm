@@ -58,7 +58,7 @@ lifecycle overhead; they are not predictions for application work.
 | **Mactor_cycles/s** | `actor_churn` | million complete actor lifecycles (create → dispatch → retire → reclaim) per second |
 | **Mselected_callbacks/s** | `actor_churn subset*` | million selected subset callbacks per second |
 | **Mactor/s** | `actor_ready` | million actor activations per second from a prequeued burst |
-| **fibers/s** | `fibers` DUB benchmarks | Fiber creations, scheduler resumptions, or full spawn-and-drain bursts as labeled |
+| **fibers/s** | `ant_fibers` DUB benchmarks | Fiber creations, scheduler resumptions, or full spawn-and-drain bursts as labeled |
 | **ns** | `tail` | sentinel write-to-first-`Call` latency |
 
 Tree modes count leaf lifecycles, so `tree` and `tree-slab` are directly

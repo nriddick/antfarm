@@ -1,5 +1,5 @@
 /++
- + Tests for the Ant Farm. Run: dmd -g -O -inline antfarm/package.d antfarm/templates.d antfarm_test.d -of=antfarm_test && ./antfarm_test
+ + Tests for the Ant Farm. Run from the repository root: dmd -g -O -inline -i -I. tests/farm/antfarm_test.d -of=antfarm_test && ./antfarm_test
  +/
 module antfarm_test;
 

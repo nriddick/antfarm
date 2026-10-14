@@ -15,7 +15,7 @@ Or:
 
 ```
 ldc2 -g -O1 tests/farm/torture_common.d tests/farm/torture_tests.d antfarm/package.d \
-  -of=tests/farm/torture_tests
+  antfarm/allocation.d antfarm/templates.d -of=tests/farm/torture_tests
 ./tests/farm/torture_tests          # all
 ./tests/farm/torture_tests T16 T01  # subset
 ```
@@ -25,7 +25,7 @@ Optional:
 ```
 make -C tests/farm run-tsan
 make -C tests/farm run-dmd
-make -C tests/farm baseline   # existing antfarm_test.d
+make -C tests/farm baseline   # antfarm_test.d unit suite built without dub
 ```
 
 ## Exit codes

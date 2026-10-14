@@ -56,17 +56,18 @@ run-t19-dmd:
 	dmd -g -checkaction=context torture_common.d t19_flood_lap.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=t19_dmd
 	./t19_dmd
 
-baseline:
-	$(DC) $(DFLAGS) $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d antfarm_test.d -of=antfarm_test_review
-	./antfarm_test_review
-
-FARM_TSAN_SOURCES := $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d \
+FARM_TEST_SOURCES := $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d \
 	$(ROOT)/antfarm/actors/package.d $(ROOT)/antfarm/actors/actor.d $(ROOT)/antfarm/actors/wave.d \
 	$(ROOT)/antfarm/actors/private_actor.d $(ROOT)/antfarm/actors/mimalloc.d antfarm_test.d
 
+# The Farm unit suite (antfarm_test.d) built with $(DC) outside dub.
+baseline: $(FARM_TEST_SOURCES)
+	$(DC) $(DFLAGS) -I$(ROOT) $(FARM_TEST_SOURCES) -of=antfarm_test_review
+	./antfarm_test_review
+
 # ThreadSanitizer build of the Farm unit suite (antfarm_test.d). Part of `make check`.
-farm-tsan: $(FARM_TSAN_SOURCES) leaf_reuse.d
-	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I$(ROOT) $(FARM_TSAN_SOURCES) -of=antfarm_test_tsan
+farm-tsan: $(FARM_TEST_SOURCES) leaf_reuse.d
+	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I$(ROOT) $(FARM_TEST_SOURCES) -of=antfarm_test_tsan
 	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I$(ROOT) leaf_reuse.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_leaf_tsan
 
 run-farm-tsan: farm-tsan

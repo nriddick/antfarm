@@ -48,7 +48,7 @@ dmd -g -i -I. -Iexamples -Ithreadpool/source examples/fail_fast_fold.d -of=fail_
 ANTFARM_HUGE_PAGES=0 ./fail_fast_fold 0
 ```
 
-The fiber `cancelAt` adapter links the separate fibers package, so add the
+The fiber `cancelAt` adapter links the separate ant_fibers package, so add the
 fibers import path too:
 
 ```text
