@@ -1176,16 +1176,40 @@ private ulong mulChecked(ulong a, ulong b, const(char)[] msg) nothrow @nogc @sys
     return a * b;
 }
 
+private const(char)[] payloadHeaderError(const PayloadHeader* header)
+        pure nothrow @nogc @system
+{
+    if (header is null || header.call is null) return "bad payload header";
+    if (header.maxCs == 0 || header.maxCs > MAX_PAYLOAD_ITERS)
+        return "payload MaxCs out of range";
+    if (header.done == 0 || header.done > MAX_PAYLOAD_ITERS)
+        return "payload Done out of range";
+    if (header.done > 1 && header.maxCs < 2)
+        return "multithreaded payload requires MaxCs >= 2";
+    return null;
+}
+
 private void validatePayloadHeader(const PayloadHeader* header)
         nothrow @nogc @system
 {
-    if (header is null || header.call is null) fatal("bad payload header");
-    if (header.maxCs == 0 || header.maxCs > MAX_PAYLOAD_ITERS)
-        fatal("payload MaxCs out of range");
-    if (header.done == 0 || header.done > MAX_PAYLOAD_ITERS)
-        fatal("payload Done out of range");
-    if (header.done > 1 && header.maxCs < 2)
-        fatal("multithreaded payload requires MaxCs >= 2");
+    immutable error = payloadHeaderError(header);
+    if (error.length != 0) fatal(error);
+}
+
+/// Shared singleton cost for canFit and every write sizing path. False
+/// means size arithmetic would overflow, including the full-header guard
+/// retained for ST payloads by the write contract (spec 5b.2).
+private bool singletonCost(ulong base, uint maxCs, ulong blen, out ulong cost)
+        pure nothrow @nogc @safe
+{
+    pragma(inline, true);
+    immutable oneMt = maxCs > 1 ? 1UL : 0UL;
+    immutable overhead = base + 1UL + oneMt
+        + (oneMt != 0 ? PHEAD_LEN : PCOMPACT_LEN);
+    if (blen > ulong.max - PHEAD_LEN || blen > ulong.max - overhead)
+        return false;
+    cost = overhead + blen;
+    return true;
 }
 
 /// Spec 5b.2-3: one payload's size-overflow and singleton contract checks
@@ -1200,11 +1224,10 @@ private ulong checkPayloadFits(ulong base, ulong quota, uint maxCs, ulong blen)
     immutable oneMt = maxCs > 1 ? 1UL : 0UL;
     // A singleton that exceeds this tier can never be published by this
     // producer, so it is a contract error.
-    immutable singletonBase = base + 1UL + oneMt;
-    immutable singletonPsz = (oneMt != 0 ? PHEAD_LEN : PCOMPACT_LEN) + blen;
-    if (singletonPsz > ulong.max - singletonBase)
+    ulong cost;
+    if (!singletonCost(base, maxCs, blen, cost))
         fatal("table size overflow");
-    if (singletonBase + singletonPsz > quota)
+    if (cost > quota)
         fatal("payload larger than this producer tier's Exi");
     return oneMt;
 }
@@ -1862,6 +1885,30 @@ struct AntFarm
         }
     }
 
+    /// Whether one payload can fit a singleton table in `tier`, with
+    /// `bodyWords` measured in ulongs (8 bytes). Returns false for malformed
+    /// headers, size overflow, or a singleton exceeding that tier's quota;
+    /// this query never fatals. ST (maxCs == 1) uses the compact/uniform
+    /// singleton cost; MT (maxCs > 1, even with done == 1) uses the full cost.
+    ///
+    /// This is a snapshot of the live consumer count and its SqCs, just as
+    /// in write(). Quotas are fixed, but the answer is not monotone: consumer
+    /// growth can turn true into false, and departures can turn false into
+    /// true. It reserves no quota and does not predict backpressure or how
+    /// many payloads a multi-payload write will accept. A later write still
+    /// validates independently and fatals on an invalid or oversized payload.
+    bool canFit(const ref PayloadHeader header, ulong bodyWords, Tier tier)
+            const nothrow @nogc @system
+    {
+        if (payloadHeaderError(&header).length != 0) return false;
+        immutable quota = tier == Tier.bulk ? quotaBulk : quotaSmall;
+        immutable csl = atomicLoad!(MemoryOrder.raw)(Cf);
+        immutable cs = csl > 0 ? cast(uint) csl : 1;
+        immutable base = tableSizeChecked(0, sqcsOf(cs), 0);
+        ulong cost;
+        return singletonCost(base, header.maxCs, bodyWords, cost) && cost <= quota;
+    }
+
     /// Spec 5b. Writes as many of `payloads` as fit the caller's remaining
     /// quota (carried inside `tok`); returns the number written. Returns 0
     /// (full) when backpressure is too high; callers retry or wait on
@@ -1985,9 +2032,8 @@ struct AntFarm
             static if (hasCommonPayloadHeader!R && hasFixedPayloadLength!R)
             {
                 immutable bodyLen = cast(ulong) payloads.fixedPayloadLength;
-                if (bodyLen > ulong.max - PHEAD_LEN)
-                    fatal("payload size overflow");
-                immutable oneMt = commonHeader.maxCs > 1 ? 1UL : 0UL;
+                immutable oneMt = checkPayloadFits(base, quota,
+                    commonHeader.maxCs, bodyLen);
                 // Spec 2g: a uniform ST range shares its Call by
                 // construction, and a nonzero uniform length drops Tindex.
                 layout = oneMt != 0 ? TableLayout.full
@@ -2001,13 +2047,6 @@ struct AntFarm
                     "table size overflow");
                 immutable unit = addChecked(indexWordsOf(layout, 1, oneMt), rec,
                     "table size overflow");
-                // The singleton is the same size as before spec 2g:
-                // base + 2 + Plen for ST, base + 2 + 16 + Plen for MT.
-                if (unit > ulong.max - head)
-                    fatal("table size overflow");
-                if (head + unit > quota)
-                    fatal("payload larger than this producer tier's Exi");
-
                 static if (hasLength!R)
                 {
                     immutable available = cast(size_t) payloads.length;
