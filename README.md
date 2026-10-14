@@ -20,7 +20,7 @@ You need DMD 2.112+ or LDC 1.42+. From a clone of this repository, build and run
 a complete tracked program that distributes work to a public actor service:
 
 ```text
-dmd -g -i -I. -Iexamples examples/public_service.d -of=/tmp/public_service
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
 ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
 ```
 
@@ -34,7 +34,7 @@ public service: 36 ordered replies, balance=234, workers=0, closing-callback-cou
 
 The `0` consumes on the calling thread; `/tmp/public_service 2` uses two worker
 threads and prints `workers=2` with the same counts. LDC works with the same
-command (`ldc2 -g -i -I. -Iexamples examples/public_service.d
+command (`ldc2 -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d
 -of=/tmp/public_service`). [docs/guide/quickstart.md](docs/guide/quickstart.md)
 explains who publishes, who consumes, and what completion means.
 [examples/README.md](examples/README.md) has the other programs and the Windows
