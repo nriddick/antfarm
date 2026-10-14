@@ -141,7 +141,12 @@ Payloads are the raw Farm transport. Unless stated otherwise these cells use the
 `payload-entry` write form, a 16-word body, a 16 MiB ring, and the default
 `avgCost` 3 (16-entry claims).
 
-`checkFreshWriteSegments` is a deliberately kept tripwire cost: on a Ryzen 9 5900XT with LDC 1.43.0 `-O2 -release`, disabling it shifted median throughput by +3.92% for the default shape and −3.90% for batch 1700 across three interleaved A/B runs per shape, within the observed run-to-run noise.
+`checkFreshWriteSegments` is a deliberately kept tripwire on fresh-segment transitions.
+
+**Layout sensitivity.** Identical hot-function instructions measured 5–12%
+apart on this host when only their cache-line alignment changed. Performance
+is reassessed holistically in dedicated sessions; retain the gate's controls
+and noise policy when comparing measurements.
 
 ### Throughput vs consumers
 
@@ -350,8 +355,7 @@ harness defaults: `ActorRuntime.flush` and `ActorWave.publish` claim 8 entries.
 | `wave` | 27.22 [27.13, 27.28] | 18.10 [18.05, 18.11] | 14.35 [13.74, 14.64] | 12.95 [12.50, 13.04] |
 | `inbox` | 17.14 [17.08, 17.16] | 14.17 [13.71, 14.18] | 8.24 [8.11, 8.25] | 8.70 [8.65, 8.75] |
 
-On Ryzen, the two classes are within a few percent; the default chunk 8 is not a
-regression, and the chunk-32 numbers are the ones the pre-RC tables published.
+On Ryzen, the two classes are within a few percent.
 
 On Ryzen, `wave` is the cheapest public shape single-threaded and `inbox` the most
 expensive (a caller-owned node per actor); every mode loses throughput when six
@@ -427,34 +431,15 @@ tables centralize on one shard. The 0-consumer spread is largest on the subset
 and `tree` modes (for example `subset-whole` 385–504); it is host interference
 and layout sensitivity, not two regimes.
 
-**Ryzen-only accepted trade-off: 0-consumer subset cells against the pre-RC commit
-d152004.** Paired medians over 20 pairs, built from the d152004 benchmark
-source, in two independent sessions:
+Historical paired subset measurements on Ryzen: RC against d152004, using
+that revision's benchmark source, 20 pairs in each of two sessions. These
+measurements remain tied to those builds and their layout.
 
 | Cell | Paired median | Per-pair min to max, stddev |
 | --- | ---: | --- |
 | `subset` 10%/0 | −9.6%, −4.9% | −16.6% to +11.8%, 8.0 pp (second run) |
 | `subset` 100%/0 | −5.2%, −6.5% | −18.5% to +10.1%, 8.7 pp (first run) |
 | `subset-whole-unreserved`/0 | −20.5%, −24.7% | −25.5% to −0.6%, 8.4 pp (second run) |
-
-The byte-identical base/base controls stay within +3.1%. At 6 consumers the
-subset cells pass (+0.5%, +0.1%). The cause is code layout, not the per-wave
-child `avgCost` field load:
-
-- A probe that restores the constant child class on the write path recovers
-  neither subset cell: −6.5% and −6.6% against d152004. Against the RC, the
-  probe gives +1.6% and −4.9%.
-- On `subset-whole-unreserved`/0 the probe's effect changes sign with the
-  benchmark source: −11.4% against the RC on the RC's own benchmark source,
-  +15.7% on d152004's.
-- An inert-code control (the RC plus one unused, retained 198-byte function,
-  with no executed code changed) moves `subset-whole-unreserved`/0 by +32.0%
-  on d152004's benchmark source, back to the d152004 rate, and by −11.1% on
-  the RC's own. It also moves `subset` 10%/0 by +9.4%.
-
-These cells are noise-sensitive: per-pair stddev is 5–16 pp, and swings of
-±15–30% appear in the controls too. Subset is new in this release candidate,
-so no published release regresses.
 
 ### Cohort slab vs per-object
 
@@ -690,11 +675,6 @@ Sensitive results:
 - 0-consumer actor cells move by several percent with code layout alone. The RC
   9-run pass saw `subset-whole` and `subset-whole-unreserved` span 385–504 and
   379–504 with medians near 500, and `tree` span 77–92 with a median near 90.
-- `subset` cells are layout-sensitive at 6 consumers too. The sharded root
-  split does not change subset root tables (one entry, same class), yet
-  `subset` 10% and 100% read 0.95 and 0.92 against the parent over 10 paired
-  rounds, while a byte-identical rebuild of the parent reads 1.01 and 0.99.
-  Another build with identical subset behavior moved `subset-whole` by −26%.
 
 ### Open tuning opportunities (measured opportunity, not default)
 

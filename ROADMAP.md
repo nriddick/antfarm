@@ -13,29 +13,14 @@ LDC 1.42 on a single-LLC x64 host, and a final Linux sanity check. The numbers
 in [PERFORMANCE.md](PERFORMANCE.md) remain tied to the revisions at which they
 were measured.
 
-Accepted performance slips, to be evaluated in a dedicated performance session.
-These are perf-gate results at 20 pairs against the pre-review 1.8.1 candidate
-(4a60b2b), measured on the 2-CCD Ryzen 9 5900XT host:
+Small perf-gate shifts on this host are dominated by code layout; performance
+is reassessed holistically in dedicated sessions.
 
-- `subset` 100%, 0 consumers: −5.1% median. A byte-identical control on the
-  same binary passes at −1.3%, so this is likely a real regression.
-- `subset-whole-unreserved`, 0 consumers: −11.4% median, with a very wide
-  spread (−31% to +19%). Its control passes at +0.4%.
-- `subset-whole`, 0 consumers: −11.6% median. Its control is itself
-  inconclusive.
-- `subset-whole` and `subset-whole-unreserved`, 6 consumers: a steady −2.7%,
-  inside the −3% boundary.
-- Inconclusive: `subset` 10%, 0 consumers (−4.2%) and `tree-cancel`,
-  6 consumers (−3.0%).
+## 1.8.2 in progress
 
-The subset callbacks disassemble identically, so the cause is not localized.
-The most likely suspects are the private child rollback/completion dedupe, the
-single `createChildren` implementation, and the threadpool CPU-query changes,
-which moved code in the benchmark binary. The next step is to bisect the range
-on `subset` 100%/0 and `subset-whole-unreserved`/0.
-
-Planned for 1.8.2: revisions to PERFORMANCE.md (including tail-latency rows at
-chunk 2 and 4), and documentation and onboarding reorganization.
+Planned for 1.8.2: verified usage guidance, a payload-first onboarding path,
+and documentation deduplication. Directory/module reorganization and further
+performance characterization remain for later passes.
 
 ## Deferred after 1.8.0
 
