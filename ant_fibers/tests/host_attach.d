@@ -3,8 +3,8 @@ module host_attach_tests;
 // A FiberDomain attached to a FarmHost drains through waitUntil, and close()
 // refuses while the domain is not drained.
 
-import antfarm_fibers;
-import antfarm_fibers.host : attachFiberDomain;
+import ant_fibers;
+import ant_fibers.host : attachFiberDomain;
 import core.atomic : atomicLoad, atomicStore;
 import core.time : MonoTime, msecs, seconds;
 import std.algorithm.searching : canFind;

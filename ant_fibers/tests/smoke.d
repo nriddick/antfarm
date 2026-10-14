@@ -8,14 +8,14 @@ version (TSan)
 else
     extern(C) __gshared string[] rt_options = ["testmode=run-main"];
 
-import antfarm_fibers;
+import ant_fibers;
 import antfarm;
 import core.atomic;
 import core.stdc.stdio : printf;
 import service_plan_tests;
 import host_attach_tests;
-import antfarm_fibers.semaphore_tests : semaphoreCancellationSmoke;
-import antfarm_fibers.event_tests : eventCancellationSmoke;
+import ant_fibers.semaphore_tests : semaphoreCancellationSmoke;
+import ant_fibers.event_tests : eventCancellationSmoke;
 import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
 import threadpool.resolution : PoolResolution;
 import core.thread : Fiber, Thread;
@@ -2560,7 +2560,7 @@ void fiberParitySmoke()
     drainUntil(domain, token, view);
     assert(raw.outcome == FiberOutcome.failed);
     assert(raw.exception !is null
-        && raw.exception.msg == "antfarm_fibers: Fiber.yield without scheduler suspend");
+        && raw.exception.msg == "ant_fibers: Fiber.yield without scheduler suspend");
     domain.releaseAll(domain.takeCompletions());
 }
 
@@ -2612,10 +2612,10 @@ private void releaseDeathSmoke()
                        "live", "foreign", "null"])
         {
             immutable message = mode == "double"
-                ? "antfarm_fibers: task released twice"
+                ? "ant_fibers: task released twice"
                 : mode == "completion-root" || mode == "lifecycle-root"
-                ? "antfarm_fibers: drain completion and lifecycle events before release"
-                : "antfarm_fibers: only terminated tasks of this domain can be released";
+                ? "ant_fibers: drain completion and lifecycle events before release"
+                : "ant_fibers: only terminated tasks of this domain can be released";
             auto result = execute(["/proc/self/exe", "--release-child", mode]);
             if (result.status == 0
                 || !result.output.canFind("antfarm fatal: " ~ message))

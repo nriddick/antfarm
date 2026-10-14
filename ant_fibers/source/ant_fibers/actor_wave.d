@@ -1,8 +1,8 @@
 /++ Scheduler bridge for actor-wave completion. +/
-module antfarm_fibers.actor_wave;
+module ant_fibers.actor_wave;
 
 import antfarm.actors : ActorWaveCompletionHook;
-import antfarm_fibers.scheduler : FiberDomain, FiberGenerationTrigger;
+import ant_fibers.scheduler : FiberDomain, FiberGenerationTrigger;
 
 /// One serialized actor-wave stream observed by one orchestration Fiber.
 /// Completion may occur in an Ant Farm payload callback, so the hook advances
@@ -38,6 +38,6 @@ final class ActorWaveTrigger
 private void actorWaveCompleted(void* context) nothrow @nogc @system
 {
     auto trigger = cast(FiberGenerationTrigger) context;
-    assert(trigger !is null, "antfarm_fibers: null actor-wave trigger");
+    assert(trigger !is null, "ant_fibers: null actor-wave trigger");
     trigger.advance();
 }

@@ -15,7 +15,7 @@ toolchainRequirements {
 }
 
 subPackage "threadpool"
-subPackage "fibers"
+subPackage "ant_fibers"
 
 configuration "library" {
 	targetType "library"

@@ -1,7 +1,7 @@
 module hello_fibers;
 
 import antfarm;
-import antfarm_fibers;
+import ant_fibers;
 import core.atomic;
 import core.time : msecs;
 import std.stdio : writeln;

@@ -5,10 +5,10 @@
  + and newly-ready fibers collect in `PublishAccumulator` until a producer
  + flushes a useful table. No external thread-pool package is required.
  +/
-module antfarm_fibers.scheduler;
+module ant_fibers.scheduler;
 
 import antfarm;
-import antfarm_fibers.cacheline;
+import ant_fibers.cacheline;
 import core.atomic;
 import core.memory : GC;
 import core.sync.event : Event;
@@ -151,7 +151,7 @@ private Exception rawYieldFailure;
 shared static this()
 {
     rawYieldFailure = new Exception(
-        "antfarm_fibers: Fiber.yield without scheduler suspend");
+        "ant_fibers: Fiber.yield without scheduler suspend");
 }
 
 final class FiberLifecycleBackpressure : Exception
@@ -442,7 +442,7 @@ private final class LifecycleEventNode
     this(FiberTask owner) { this.owner = owner; }
 }
 
-static assert(size_t.sizeof == 8, "antfarm_fibers is 64-bit only");
+static assert(size_t.sizeof == 8, "ant_fibers is 64-bit only");
 
 /// Exclusive-owner execution phase. Cancelled/signalled twins live in the
 /// event fields of `controlWord`, not here.
@@ -652,10 +652,10 @@ final class FiberTask
         {
             immutable before = ctrlField(loadControl(), addend);
             if (addend == ctrlEnter || addend == ctrlPark || addend == ctrlWake)
-                assert(before == 0, "antfarm_fibers: control field already raised");
+                assert(before == 0, "ant_fibers: control field already raised");
             else if (addend == ctrlCancel)
                 assert(before < 2,
-                    "antfarm_fibers: more than local+external CANCEL sources");
+                    "ant_fibers: more than local+external CANCEL sources");
         }
         return atomicFetchAdd!(MemoryOrder.acq_rel)(controlWord, addend);
     }
@@ -664,7 +664,7 @@ final class FiberTask
     package ulong addPhase(Phase from, Phase to) nothrow @nogc
     {
         debug assert(phaseOf(loadControl()) == from,
-            "antfarm_fibers: phase add from mismatched current phase");
+            "ant_fibers: phase add from mismatched current phase");
         immutable delta = (cast(ulong) to << ctrlPhaseShift)
             - (cast(ulong) from << ctrlPhaseShift);
         return atomicFetchAdd!(MemoryOrder.acq_rel)(controlWord, delta);
@@ -1540,7 +1540,7 @@ class FiberReadyLane
     this(AntFarm* farm)
     {
         if (farm is null)
-            throw new Exception("antfarm_fibers: ready lane requires a farm");
+            throw new Exception("ant_fibers: ready lane requires a farm");
         this.farm = farm;
         readyControl = allocateCacheLine!FiberReadyLaneControl();
         publishable = new PublishAccumulator;
@@ -1737,15 +1737,15 @@ final class FiberDomain
     package void attachReadyLane(FiberReadyLane lane)
     {
         if (lane is null)
-            throw new Exception("antfarm_fibers: cannot attach a null lane");
+            throw new Exception("ant_fibers: cannot attach a null lane");
         synchronized (admissionMutex)
         {
             if (active != 0 || roots.length != 0)
                 throw new Exception(
-                    "antfarm_fibers: attach ready lanes before spawning");
+                    "ant_fibers: attach ready lanes before spawning");
             if (lane.ownerDomain !is null && lane.ownerDomain !is this)
                 throw new Exception(
-                    "antfarm_fibers: ready lane already belongs to a domain");
+                    "ant_fibers: ready lane already belongs to a domain");
             foreach (existing; readyLanes)
                 if (existing is lane) return;
             lane.ownerDomain = this;
@@ -1783,12 +1783,12 @@ final class FiberDomain
         if (retentionLimit < lifecycleRecordsPerTask
             || retentionLimit > cast(size_t) long.max)
             throw new Exception(
-                "antfarm_fibers: lifecycle retention limit must be 4..long.max");
+                "ant_fibers: lifecycle retention limit must be 4..long.max");
         synchronized (admissionMutex)
         {
             if (active != 0 || roots.length != 0)
                 throw new Exception(
-                    "antfarm_fibers: enable lifecycle events before spawning");
+                    "ant_fibers: enable lifecycle events before spawning");
             if (!lifecycleEventsEnabled)
             {
                 lifecycleQueue = new LifecycleEventQueue;
@@ -1797,7 +1797,7 @@ final class FiberDomain
             }
             else if (lifecycleRetentionLimitState != retentionLimit)
                 throw new Exception(
-                    "antfarm_fibers: lifecycle retention already configured");
+                    "ant_fibers: lifecycle retention already configured");
         }
     }
 
@@ -1868,7 +1868,7 @@ final class FiberDomain
         size_t maximum = size_t.max)
     {
         if (handler is null)
-            throw new Exception("antfarm_fibers: null lifecycle handler");
+            throw new Exception("ant_fibers: null lifecycle handler");
         if (lifecycleQueue is null || maximum == 0) return 0;
         size_t available;
         auto chain = takeLifecycleChain(available);
@@ -1958,13 +1958,13 @@ final class FiberDomain
     {
         if (lane is null || lane.ownerDomain !is this)
             throw new Exception(
-                "antfarm_fibers: spawn requires a lane in this domain");
+                "ant_fibers: spawn requires a lane in this domain");
         FiberTask task;
         bool recycled;
         synchronized (admissionMutex)
         {
             if (atomicLoad!(MemoryOrder.acq)(accepting) == 0)
-                throw new Exception("antfarm_fibers: domain is shutting down");
+                throw new Exception("ant_fibers: domain is shutting down");
             if (lifecycleEventsEnabled)
             {
                 immutable reserved = lifecycleReserved;
@@ -2102,18 +2102,18 @@ final class FiberDomain
     {
         // Release guard: cheap identity/phase checks prevent recycling live or foreign tasks.
         if (task is null || task.domain !is this || !task.terminated)
-            antfarm.fatal("antfarm_fibers: only terminated tasks of this domain can be released");
+            antfarm.fatal("ant_fibers: only terminated tasks of this domain can be released");
         // Release guard: three loads and a flag prevent reuse while queues/roots still own the task.
         if (atomicLoad!(MemoryOrder.acq)(task.completionTaken) == 0
             || atomicLoad!(MemoryOrder.acq)(task.pendingLifecycleEvents) != 0
             || atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) != 0
             || task.rootedFlag)
-            antfarm.fatal("antfarm_fibers: drain completion and lifecycle events before release");
+            antfarm.fatal("ant_fibers: drain completion and lifecycle events before release");
         synchronized (poolMutex)
         {
             // Release guard: one flag check under the pool lock prevents a cyclic free list.
             if (task.pooledFlag)
-                antfarm.fatal("antfarm_fibers: task released twice");
+                antfarm.fatal("ant_fibers: task released twice");
             task.closeJoinWaiters();
             while (atomicLoad!(MemoryOrder.acq)(task.joinState)
                     != FiberTask.joinClosed)
@@ -2139,7 +2139,7 @@ final class FiberDomain
     {
         if (pendingCancellationRequests != 0)
             throw new Exception(
-                "antfarm_fibers: drain cancellation requests before release");
+                "ant_fibers: drain cancellation requests before release");
     }
 
     /// Tasks currently held by the recycling pool.
@@ -2160,7 +2160,7 @@ final class FiberDomain
     static void await(Signal signal)
     {
         if ((signal & timerSignalBit) != 0)
-            throw new Exception("antfarm_fibers: high-bit signals are reserved for timers");
+            throw new Exception("ant_fibers: high-bit signals are reserved for timers");
         parkOn(signal);
     }
 
@@ -2240,7 +2240,7 @@ final class FiberDomain
     size_t signal(Signal signal)
     {
         if ((signal & timerSignalBit) != 0)
-            throw new Exception("antfarm_fibers: high-bit signals are reserved for timers");
+            throw new Exception("ant_fibers: high-bit signals are reserved for timers");
         return wakeWaiters(signal);
     }
 
@@ -2354,7 +2354,7 @@ final class FiberDomain
         {
             if (directorThread !is self)
                 throw new Exception(
-                    "antfarm_fibers: Director operation from a non-owner thread");
+                    "ant_fibers: Director operation from a non-owner thread");
         }
     }
 
@@ -2399,7 +2399,7 @@ final class FiberDomain
     /// Same drain without per-request results; returns how many requests it
     /// applied and allocates nothing. The managed pump and other discarding
     /// callers use this; lifecycle records retain accepted cancels.
-    package(antfarm_fibers) size_t drainCancellationRequestsCounted()
+    package(ant_fibers) size_t drainCancellationRequestsCounted()
     {
         return applyCancellationRequests(null);
     }
@@ -2579,7 +2579,7 @@ final class FiberDomain
     {
         if (!lifecycleEventsEnabled) return;
         assert(atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) != 0,
-            "antfarm_fibers: lifecycle event exceeded its reservation");
+            "ant_fibers: lifecycle event exceeded its reservation");
         auto node = task.lifecycleNodes[cast(size_t) kind];
         assert(node !is null && node.next is null);
         node.event = FiberLifecycleEvent(0, kind, task.handle, outcome,
@@ -2629,7 +2629,7 @@ final class FiberDomain
     size_t flush(ref Token token, size_t maximum = 32, uint avgCost = flushAvgCost)
     {
         if (defaultReadyLane is null)
-            throw new Exception("antfarm_fibers: domain has no ready lane");
+            throw new Exception("ant_fibers: domain has no ready lane");
         return defaultReadyLane.flush(token, maximum, avgCost);
     }
 
@@ -2939,7 +2939,7 @@ final class FiberEvent
             bool retainWaitKey)
     {
         if (domain is null)
-            throw new Exception("antfarm_fibers: FiberEvent requires a domain");
+            throw new Exception("ant_fibers: FiberEvent requires a domain");
         this.domain = domain;
         this.mode = mode;
         this.key = retainWaitKey
@@ -2969,7 +2969,7 @@ final class FiberEvent
         auto task = FiberDomain.currentTask;
         if (task is null || task.domain !is domain)
             throw new Exception(
-                "antfarm_fibers: FiberEvent.wait requires a managed fiber of this domain");
+                "ant_fibers: FiberEvent.wait requires a managed fiber of this domain");
         while (true)
         {
             if (consumePosted()) return;
@@ -3032,7 +3032,7 @@ final class FiberGenerationTrigger
     {
         if (domain is null)
             throw new Exception(
-                "antfarm_fibers: generation trigger requires a domain");
+                "ant_fibers: generation trigger requires a domain");
         domain_ = domain;
         event_ = new FiberEvent(domain, FiberEventMode.autoReset, true);
     }
@@ -3047,7 +3047,7 @@ final class FiberGenerationTrigger
     {
         immutable before = atomicFetchAdd!(MemoryOrder.acq_rel)(completed_, 1UL);
         if (before == ulong.max)
-            fatal("antfarm_fibers: generation trigger counter wrapped");
+            fatal("ant_fibers: generation trigger counter wrapped");
         if (atomicExchange!(MemoryOrder.acq_rel)(&queued_, 1) == 0)
             domain_.enqueueGenerationTrigger(this);
     }
@@ -3058,11 +3058,11 @@ final class FiberGenerationTrigger
         auto task = FiberDomain.currentTask;
         if (task is null || task.domain !is domain_)
             throw new Exception(
-                "antfarm_fibers: generation trigger requires a managed fiber of this domain");
+                "ant_fibers: generation trigger requires a managed fiber of this domain");
         immutable target = awaited_ + 1;
         if (target == 0)
             throw new Exception(
-                "antfarm_fibers: generation trigger waiter wrapped");
+                "ant_fibers: generation trigger waiter wrapped");
         while (completed < target)
             event_.wait();
         awaited_ = target;
@@ -3090,9 +3090,9 @@ final class FiberSemaphore
     this(FiberDomain domain, long initial = 0)
     {
         if (domain is null)
-            throw new Exception("antfarm_fibers: FiberSemaphore requires a domain");
+            throw new Exception("ant_fibers: FiberSemaphore requires a domain");
         if (initial < 0)
-            throw new Exception("antfarm_fibers: semaphore count must be >= 0");
+            throw new Exception("ant_fibers: semaphore count must be >= 0");
         this.domain = domain;
         this.key = domain.allocateWaitKey();
         atomicStore!(MemoryOrder.raw)(permits, initial);
@@ -3116,7 +3116,7 @@ final class FiberSemaphore
         auto task = FiberDomain.currentTask;
         if (task is null || task.domain !is domain)
             throw new Exception(
-                "antfarm_fibers: FiberSemaphore.wait requires a managed fiber of this domain");
+                "ant_fibers: FiberSemaphore.wait requires a managed fiber of this domain");
         while (true)
         {
             if (tryAcquire()) return;
@@ -3175,9 +3175,9 @@ long subscribeOrThrow(ref ConsumerView consumer, AntFarm* farm)
         subscription = consumer.subscribe(farm);
     while (subscription == SUBSCRIBE_RETRY);
     if (subscription == SUBSCRIBE_FULL)
-        throw new Exception("antfarm_fibers: Farm already has MAX_CONSUMERS_LIMIT subscribers");
+        throw new Exception("ant_fibers: Farm already has MAX_CONSUMERS_LIMIT subscribers");
     if (subscription < 0)
-        throw new Exception("antfarm_fibers: invalid consumer subscription (null Farm or view already subscribed)");
+        throw new Exception("ant_fibers: invalid consumer subscription (null Farm or view already subscribed)");
     return subscription;
 }
 
@@ -3189,9 +3189,9 @@ void drainUntilEmpty(FiberDomain domain, ref Token token,
                      uint avgCost = flushAvgCost)
 {
     if (domain is null)
-        throw new Exception("antfarm_fibers: cannot drain a null domain");
+        throw new Exception("ant_fibers: cannot drain a null domain");
     if (flushBatch == 0)
-        throw new Exception("antfarm_fibers: flushBatch must be greater than zero");
+        throw new Exception("ant_fibers: flushBatch must be greater than zero");
     while (!domain.drained)
     {
         if (domain.pendingCancellationRequests != 0)

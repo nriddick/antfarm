@@ -1,10 +1,10 @@
 /++ Tight binding between Ant Farm fiber lanes and threadpool_llc workers. +/
-module antfarm_fibers.threadpool_driver;
+module ant_fibers.threadpool_driver;
 
 import antfarm;
-import antfarm_fibers.cacheline;
-import antfarm_fibers.scheduler;
-import antfarm_fibers.service_plan;
+import ant_fibers.cacheline;
+import ant_fibers.scheduler;
+import ant_fibers.service_plan;
 import core.atomic;
 import threadpool;
 
@@ -62,7 +62,7 @@ class FiberLaneUnavailable : Exception
         this.state = state;
         this.service = service;
         this.group = group;
-        super("antfarm_fibers: lane unavailable (state " ~ state.to!string
+        super("ant_fibers: lane unavailable (state " ~ state.to!string
             ~ ", service " ~ service.to!string ~ ", group "
             ~ (group == ushort.max ? "none" : group.to!string) ~ ")",
             file, line);
@@ -194,7 +194,7 @@ final class FiberLane : FiberReadyLane
     {
         super(farm);
         if (domain is null)
-            throw new Exception("antfarm_fibers: FiberLane requires a domain");
+            throw new Exception("ant_fibers: FiberLane requires a domain");
         control = allocateCacheLine!FiberLaneControl();
         control.service = LaneService.absent;
         this.domain = domain;
@@ -441,7 +441,7 @@ void applyFiberTopologyPreset(FiberTopologyPreset preset, FiberLane[] lanes,
         foreach (lane; lanes)
         {
             if (lane is null)
-                throw new Exception("antfarm_fibers: null lane in topology preset");
+                throw new Exception("ant_fibers: null lane in topology preset");
             lane.flushBatch = 256;
             lane.avgCost = avgCostForChunk(32);
         }
@@ -451,7 +451,7 @@ void applyFiberTopologyPreset(FiberTopologyPreset preset, FiberLane[] lanes,
         foreach (lane; lanes)
         {
             if (lane is null)
-                throw new Exception("antfarm_fibers: null lane in topology preset");
+                throw new Exception("ant_fibers: null lane in topology preset");
             lane.flushBatch = 32;
             lane.avgCost = avgCostForChunk(8);
         }
@@ -502,7 +502,7 @@ final class FiberWorkerState
 void installFiberPlan(FiberServicePlan plan, CacheAwarePool pool)
 {
     if (plan is null)
-        throw new Exception("antfarm_fibers: installFiberPlan needs a plan");
+        throw new Exception("ant_fibers: installFiberPlan needs a plan");
     plan.validate();
     if (pool !is null && !plan.resolution.sameSelection(pool.resolve()))
         throw new FiberPlanException([
@@ -716,7 +716,7 @@ private void startFiberWorker(WorkerSelf* worker)
 {
     auto lane = home!FiberLane();
     if (lane is null)
-        throw new Exception("antfarm_fibers: no FiberLane installed for worker LLC");
+        throw new Exception("ant_fibers: no FiberLane installed for worker LLC");
     auto state = new FiberWorkerState;
     state.lane = *lane;
     if (state.lane.service == LaneService.disabled)
@@ -732,16 +732,16 @@ private void startFiberWorker(WorkerSelf* worker)
         || state.lane.responderSelector(worker);
     if (installedFiberPool is null && state.lane.responderSelector !is null)
         throw new Exception(
-            "antfarm_fibers: custom responder selection requires a bound pool");
+            "ant_fibers: custom responder selection requires a bound pool");
     if (state.consumer.subscribe(state.lane.farm) < 0)
-        throw new Exception("antfarm_fibers: consumer subscription failed");
+        throw new Exception("ant_fibers: consumer subscription failed");
     state.subscribed = true;
     state.producer = state.lane.farm.registerProducer(Tier.small);
     if (!state.producer.valid)
     {
         state.consumer.unsubscribe();
         state.subscribed = false;
-        throw new Exception("antfarm_fibers: producer registration failed");
+        throw new Exception("ant_fibers: producer registration failed");
     }
     state.registered = true;
     worker.context = cast(void*) state;
@@ -755,7 +755,7 @@ private void startFiberWorker(WorkerSelf* worker)
                 sweep.lane = remoteLane;
                 if (sweep.consumer.subscribe(remoteLane.farm) < 0)
                     throw new Exception(
-                        "antfarm_fibers: remote consumer subscription failed");
+                        "ant_fibers: remote consumer subscription failed");
                 sweep.subscribed = true;
                 sweep.producer = remoteLane.farm.registerProducer(Tier.small);
                 if (!sweep.producer.valid)
@@ -763,7 +763,7 @@ private void startFiberWorker(WorkerSelf* worker)
                     sweep.consumer.unsubscribe();
                     sweep.subscribed = false;
                     throw new Exception(
-                        "antfarm_fibers: remote producer registration failed");
+                        "ant_fibers: remote producer registration failed");
                 }
                 sweep.registered = true;
                 state.remotes ~= sweep;
@@ -809,7 +809,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
 {
     auto state = cast(FiberWorkerState) worker.context;
     if (state is null)
-        throw new Exception("antfarm_fibers: worker state is missing");
+        throw new Exception("ant_fibers: worker state is missing");
 
     if (state.idle)
         return ManagedPumpResult.idle;
@@ -822,7 +822,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
         && atomicLoad!(MemoryOrder.acq)(
             fiberStartControl.invalidActiveLane) != 0)
         throw new Exception(
-            "antfarm_fibers: runnable work is queued on a lane that did not open");
+            "ant_fibers: runnable work is queued on a lane that did not open");
 
     final switch (state.lane.state)
     {
@@ -830,10 +830,10 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
         return ManagedPumpResult.again;
     case FiberLaneState.failed:
         throw new Exception(
-            "antfarm_fibers: lane failed: no responder in its domain or no live server");
+            "ant_fibers: lane failed: no responder in its domain or no live server");
     case FiberLaneState.closed:
     case FiberLaneState.stopped:
-        throw new Exception("antfarm_fibers: worker entered an unavailable lane");
+        throw new Exception("ant_fibers: worker entered an unavailable lane");
     case FiberLaneState.open:
         break;
     }
@@ -852,7 +852,7 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     size_t flushed;
     immutable ready = state.lane.ready;
     if (state.lane.flushBatch == 0)
-        throw new Exception("antfarm_fibers: flushBatch must be greater than zero");
+        throw new Exception("ant_fibers: flushBatch must be greater than zero");
     // Accumulate while useful farm work is flowing. Flush a full batch, or a
     // short tail immediately before this worker would otherwise idle/cadence.
     if (ready >= state.lane.flushBatch || (!consumed && ready != 0))

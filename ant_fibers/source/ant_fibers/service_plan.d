@@ -8,11 +8,11 @@ group has no accepted workers) or `assist` (opt-in, experimental, for staffed
 groups). Nothing generates edges implicitly. `installFiberPlan` validates and
 installs a plan.
 +/
-module antfarm_fibers.service_plan;
+module ant_fibers.service_plan;
 
 import antfarm : MAX_CONSUMERS_LIMIT;
-import antfarm_fibers.scheduler : FiberDomain;
-import antfarm_fibers.threadpool_driver : FiberLane;
+import ant_fibers.scheduler : FiberDomain;
+import ant_fibers.threadpool_driver : FiberLane;
 import threadpool.resolution : PoolResolution;
 
 /// Planned service for a lane's physical group, decided before start from the
@@ -82,7 +82,7 @@ class FiberPlanException : Exception
         import std.array : join;
 
         this.problems = problems;
-        super("antfarm_fibers: invalid Fiber service plan:\n  "
+        super("ant_fibers: invalid Fiber service plan:\n  "
             ~ problems.join("\n  "), file, line);
     }
 }
@@ -104,7 +104,7 @@ final class FiberServicePlan
     this(const PoolResolution resolution)
     {
         if (resolution is null)
-            throw new Exception("antfarm_fibers: a Fiber service plan needs a pool resolution");
+            throw new Exception("ant_fibers: a Fiber service plan needs a pool resolution");
         res = resolution;
         immutable n = resolution.physicalGroupCount;
         lanes = new FiberLane[n];
@@ -379,7 +379,7 @@ final class FiberServicePlan
     {
         import std.format : format;
         if (group >= lanes.length)
-            throw new Exception(format("antfarm_fibers: group %s out of range (%s physical groups)",
+            throw new Exception(format("ant_fibers: group %s out of range (%s physical groups)",
                 group, lanes.length));
     }
 

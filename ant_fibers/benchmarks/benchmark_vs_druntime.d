@@ -1,5 +1,5 @@
 /++
- + Single-thread comparison: DRuntime `Fiber` vs antfarm_fibers vs a bare
+ + Single-thread comparison: DRuntime `Fiber` vs ant_fibers vs a bare
  + Ant Farm payload. The DRuntime side uses the usual programmer tricks:
  + reserve the Fiber array, `Fiber.reset` instead of reallocating, a single
  + recycled Fiber when N concurrent stacks are not required, a two-pass
@@ -16,7 +16,7 @@
 module benchmark_vs_druntime;
 
 import antfarm;
-import antfarm_fibers;
+import ant_fibers;
 import core.atomic;
 import core.memory : GC;
 import core.thread : Fiber, Thread;

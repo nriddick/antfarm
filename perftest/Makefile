@@ -6,7 +6,7 @@ DFLAGS ?= -O2 -release
 FARM_SOURCES := $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d
 ACTOR_SOURCES := $(ROOT)/antfarm/actors/package.d $(ROOT)/antfarm/actors/actor.d \
 	$(ROOT)/antfarm/actors/wave.d $(ROOT)/antfarm/actors/private_actor.d $(ROOT)/antfarm/actors/mimalloc.d
-FIBER_SOURCES := $(wildcard $(ROOT)/fibers/source/antfarm_fibers/*.d)
+FIBER_SOURCES := $(wildcard $(ROOT)/ant_fibers/source/ant_fibers/*.d)
 THREADPOOL_SOURCES := $(wildcard $(ROOT)/threadpool/source/threadpool/*.d) \
 	$(wildcard $(ROOT)/threadpool/source/threadpool/sys/*.d)
 MIMALLOC_LIBRARY := $(ROOT)/actor_torture/.build/mimalloc-v3.5.3/libmimalloc.a
@@ -30,7 +30,7 @@ actor_churn_mimalloc: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOO
 		$(MIMALLOC_SYSTEM_LIBS) -of=$@
 
 scaling: scaling.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(FIBER_SOURCES) $(THREADPOOL_SOURCES)
-	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/fibers/source \
+	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/ant_fibers/source \
 		-I$(ROOT)/threadpool/source scaling.d -of=$@
 
 actor_ready: actor_ready.d $(FARM_SOURCES) $(ACTOR_SOURCES)

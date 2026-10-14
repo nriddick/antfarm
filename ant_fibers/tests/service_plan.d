@@ -4,7 +4,7 @@ module service_plan_tests;
 // or pool is needed. smoke.d runs them, and its live tests reuse `synthetic`.
 
 import antfarm;
-import antfarm_fibers;
+import ant_fibers;
 import core.stdc.stdio : printf;
 import std.algorithm : any, canFind;
 import threadpool.pool : PoolOptions;

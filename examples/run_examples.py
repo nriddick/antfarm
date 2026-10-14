@@ -21,8 +21,8 @@ examples = ("public_service", "public_wave", "private_tree",
 # Every program runs its actors on threadpool.host.FarmHost.
 includes = ("-I.", "-Iexamples", "-Ithreadpool/source")
 extra_includes = {
-    # The fiber adapter example bridges to the separate antfarm-fibers package.
-    "fiber_cancel_at": ("-Ifibers/source",),
+    # The fiber adapter example bridges to the separate ant_fibers package.
+    "fiber_cancel_at": ("-Iant_fibers/source",),
 }
 # A stuck example fails the run instead of hanging it.
 run_timeout = 300

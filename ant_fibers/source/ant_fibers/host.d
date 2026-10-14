@@ -1,15 +1,15 @@
 /++
  + FarmHost adapter for a caller-driven `FiberDomain`. Not re-exported by
- + `import antfarm_fibers;`: import `antfarm_fibers.host`.
+ + `import ant_fibers;`: import `ant_fibers.host`.
  +
  + Fiber task payloads run on the host's existing consumers (same Farm, same
  + group), so attaching a domain adds no consumer, no producer and no
  + cross-group edge.
  +/
-module antfarm_fibers.host;
+module ant_fibers.host;
 
 import antfarm : Token;
-import antfarm_fibers.scheduler : FiberDomain;
+import ant_fibers.scheduler : FiberDomain;
 import threadpool.host : FarmHost, HostAttachment;
 
 /// Drive `domain` from every `host.step()`: `pollTimers`,

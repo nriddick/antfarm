@@ -1,4 +1,4 @@
-name "antfarm-fibers"
+name "ant_fibers"
 description "Freely migrating druntime Fiber scheduler backed by Ant Farm"
 authors "Nathan Riddick"
 license "BSL-1.0"

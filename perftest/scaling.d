@@ -6,7 +6,7 @@ module scaling;
 
 import antfarm.actors;
 import antfarm;
-import antfarm_fibers;
+import ant_fibers;
 import core.time : MonoTime;
 import std.conv : to;
 import std.stdio : writefln;

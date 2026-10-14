@@ -1,4 +1,4 @@
-module antfarm_fibers.cacheline;
+module ant_fibers.cacheline;
 
 import core.exception : onOutOfMemoryError;
 import core.stdc.string : memset;

@@ -75,7 +75,7 @@ class Checks:
         self.run([binary, *arguments])
 
     def packages(self):
-        for package in (None, ":threadpool", ":antfarm-fibers"):
+        for package in (None, ":threadpool", ":ant_fibers"):
             self.dub("test", package)
 
     def threadpool(self):

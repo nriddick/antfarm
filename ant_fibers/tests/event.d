@@ -1,7 +1,7 @@
-module antfarm_fibers.event_tests;
+module ant_fibers.event_tests;
 
 import antfarm;
-import antfarm_fibers.scheduler;
+import ant_fibers.scheduler;
 import core.thread : Thread;
 import core.time : MonoTime, msecs;
 

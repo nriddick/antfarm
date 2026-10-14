@@ -16,7 +16,7 @@
 module benchmark_farm_embed;
 
 import antfarm;
-import antfarm_fibers;
+import ant_fibers;
 import core.atomic;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;

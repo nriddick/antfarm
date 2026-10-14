@@ -52,7 +52,7 @@ The fiber `cancelAt` adapter links the separate fibers package, so add the
 fibers import path too:
 
 ```text
-ldc2 -g -i -I. -Iexamples -Ifibers/source -Ithreadpool/source \
+ldc2 -g -i -I. -Iexamples -Iant_fibers/source -Ithreadpool/source \
     examples/fiber_cancel_at.d -of=fiber_cancel_at
 ANTFARM_HUGE_PAGES=0 ./fiber_cancel_at 0
 ```

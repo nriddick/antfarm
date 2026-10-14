@@ -80,7 +80,7 @@ if [[ "$quick" -eq 1 ]]; then
     run dub test --compiler=ldc2
     run "${make_cmd[@]}" -C review_torture run DC=ldc2
     run dub test :threadpool --compiler=ldc2
-    run dub test :antfarm-fibers --compiler=ldc2
+    run dub test :ant_fibers --compiler=ldc2
     run python3 examples/run_examples.py --ldc-only
     echo "ALL QUICK CHECKS PASSED"
     exit 0
@@ -105,9 +105,8 @@ run dub test --compiler=dmd
 # optimized LDC is what catches closeOrAbandon skipping abandon (LDC -O1+).
 run dub test :threadpool --compiler=ldc2
 run dub test :threadpool --compiler=dmd
-# Package name is antfarm-fibers (directory fibers/); :fibers does not resolve.
-run dub test :antfarm-fibers --compiler=ldc2
-run dub test :antfarm-fibers --compiler=dmd
+run dub test :ant_fibers --compiler=ldc2
+run dub test :ant_fibers --compiler=dmd
 run dub run :threadpool -c confine-test --compiler=ldc2
 select_cpus CHECK_SMALL_CPUS 4 4
 run "${cpu_pin[@]}" dub run :threadpool -c confine-test --compiler=ldc2

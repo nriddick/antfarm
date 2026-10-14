@@ -17,10 +17,10 @@
  +/
 // Package scope permits wake-batched admission to an explicit shared-domain
 // lane, without timing a per-task FiberLane.spawn wake broadcast.
-module antfarm_fibers.benchmark_mt;
+module ant_fibers.benchmark_mt;
 
 import antfarm;
-import antfarm_fibers;
+import ant_fibers;
 import core.atomic;
 import core.thread : Thread;
 import core.time : Duration, MonoTime;

@@ -1,7 +1,7 @@
 module benchmark;
 
 import antfarm;
-import antfarm_fibers;
+import ant_fibers;
 import core.atomic;
 import core.time : MonoTime;
 import std.conv : to;
