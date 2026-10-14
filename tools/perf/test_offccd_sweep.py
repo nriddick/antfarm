@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for offccd_sweep.py: suites, statistics, merge refusal and rendering.
 
-Run: python3 -B -m unittest perftest/test_offccd_sweep.py
+Run: python3 -B -m unittest tools/perf/test_offccd_sweep.py
 Driver output is synthetic; nothing is built or timed.
 """
 import contextlib

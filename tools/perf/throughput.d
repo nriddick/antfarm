@@ -1,7 +1,7 @@
 /++
  + Synthetic throughput sweep for a 16 MiB Ant Farm.
  +
- +   make -C perftest run
+ +   make -C tools/perf run
  +   ./throughput --grid 8
  +   ldc2 -O2 -release throughput.d ../antfarm/package.d -of=throughput.exe
  +

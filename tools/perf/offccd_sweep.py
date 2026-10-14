@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Off-CCD measurement runner and summarizer for perftest/offccd and perftest/c2c.
+"""Off-CCD measurement runner and summarizer for tools/perf/offccd and tools/perf/c2c.
 
   python3 -B offccd_sweep.py --suite smoke --out /tmp/offccd-smoke --runs 2 --window-ms 300
   python3 -B offccd_sweep.py --suite calib,main-c,main-p --out DIR --probe-perf
@@ -30,7 +30,7 @@ import time
 
 P = pathlib.Path
 HERE = P(__file__).resolve().parent
-ROOT = HERE.parent
+ROOT = HERE.parents[1]
 
 COMBOS4 = [('touch', 1700, 'stream'), ('touch', 1700, 'phased'),
            ('touch', 16, 'stream'), ('touch', 16, 'phased')]

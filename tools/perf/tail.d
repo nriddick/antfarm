@@ -1,7 +1,7 @@
 /++
  + Tail latency of a mid-tick 1-payload write against production consumeNext.
  +
- +   make -C perftest tail && ./perftest/tail
+ +   make -C tools/perf tail && ./tools/perf/tail
  +   ldc2 -O2 -release -i -I../threadpool/source tail.d ../antfarm/package.d ../antfarm/allocation.d -of=tail.exe
  +
  + t0 is taken just before write() of the sentinel; Call records now-t0.

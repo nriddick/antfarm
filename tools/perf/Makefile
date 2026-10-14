@@ -1,6 +1,6 @@
 # Synthetic payload throughput and autonomous actor benchmarks.
 # Release flags on purpose: this is a perf tool, not a correctness suite.
-ROOT := ..
+ROOT := ../..
 DC ?= ldc2
 DFLAGS ?= -O2 -release
 FARM_SOURCES := $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d

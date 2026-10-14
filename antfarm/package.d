@@ -462,7 +462,7 @@ uint avgCostForChunk(uint chunk) pure nothrow @nogc @safe
 enum uint rootCostHintAuto = uint.max;
 /// Ceiling on the claims a derived-hint table asks for. It bounds the
 /// per-table claim overhead on large hosts; 8 covers the consumer counts
-/// where splitting small tables measurably pays (see perftest results
+/// where splitting small tables measurably pays (see tools/perf results
 /// perf-g4).
 enum uint rootCostHintMaxSplits = 8;
 /// Largest chunk `rootCostHintFor` hands out. It is the cheapest class the
@@ -542,7 +542,7 @@ uint ringMiBFromUlongs(ulong ringUlongs) nothrow @nogc @system
         fatal("ring length in ulongs is not a whole number of MiB");
     return cast(uint)(ringUlongs >> ULONGS_PER_MIB_SHIFT);
 }
-/// Maximum supported number of segments K. Default create()/perftest K is 8.
+/// Maximum supported number of segments K. Default create()/tools/perf K is 8.
 enum KMAX = 16;
 
 /// Spec 4d: producer ticket slot stride in ulongs. Each slot's hash sits on

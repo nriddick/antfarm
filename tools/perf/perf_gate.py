@@ -76,7 +76,7 @@ def boot_ci(ratios):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--repo',type=P,default=P(__file__).resolve().parent.parent);p.add_argument('--base',required=True);p.add_argument('--candidate')
+    p.add_argument('--repo',type=P,default=P(__file__).resolve().parents[2]);p.add_argument('--base',required=True);p.add_argument('--candidate')
     p.add_argument('--archive',type=P,help='Defaults to REPO/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a');p.add_argument('--output',type=P,required=True)
     p.add_argument('--boundary',action='store_true',help='Require >=20 clean matched pairs (default 20)')
     p.add_argument('--control',action='store_true',help='Compare base to itself and require byte-identical binaries')
@@ -148,12 +148,12 @@ def main():
         try:
             command(['git','worktree','add','--detach',str(scratch),revision],cwd=a.repo);created=True
             if a.benchmark_ref:
-                source=command(['git','show',a.benchmark_ref+':perftest/actor_churn.d'],cwd=a.repo)
-                (scratch/'perftest/actor_churn.d').write_text(source)
-            else:source=(scratch/'perftest/actor_churn.d').read_text()
+                source=command(['git','show',a.benchmark_ref+':tools/perf/actor_churn.d'],cwd=a.repo)
+                (scratch/'tools/perf/actor_churn.d').write_text(source)
+            else:source=(scratch/'tools/perf/actor_churn.d').read_text()
             available[label]=set(re.findall(r'args\[1\] == "([a-z-]+)"',source))
             binary=a.output/(label+'-churn');binaries[label]=binary
-            cmd=['ldc2','-'+a.optimization,'-release','-d-version=AntfarmMimallocV3','-i','-I.','-Ithreadpool/source','-Ifarmhost/source','perftest/actor_churn.d','antfarm/package.d','antfarm/allocation.d','antfarm/actors/package.d','antfarm/actors/actor.d','antfarm/actors/wave.d','antfarm/actors/private_actor.d','antfarm/actors/mimalloc.d',str(a.archive),'-L-lpthread','-L-lrt','-L-latomic','-of='+str(binary)]
+            cmd=['ldc2','-'+a.optimization,'-release','-d-version=AntfarmMimallocV3','-i','-I.','-Ithreadpool/source','-Ifarmhost/source','tools/perf/actor_churn.d','antfarm/package.d','antfarm/allocation.d','antfarm/actors/package.d','antfarm/actors/actor.d','antfarm/actors/wave.d','antfarm/actors/private_actor.d','antfarm/actors/mimalloc.d',str(a.archive),'-L-lpthread','-L-lrt','-L-latomic','-of='+str(binary)]
             with (a.output/(label+'-build.log')).open('w') as log:subprocess.run(cmd,cwd=scratch,stdout=log,stderr=log,check=True)
             meta['builds'][label]=dict(revision=revision,command=cmd,sha256=sha(binary),benchmark_sha256=hashlib.sha256(source.encode()).hexdigest(),modes=sorted(available[label]))
             try:meta['builds'][label]['elf_header']=command(['readelf','-h',str(binary)])

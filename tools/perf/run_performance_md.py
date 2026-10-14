@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Regenerate the raw numbers behind PERFORMANCE.md.
 
-Runs the built perftest binaries (and the Fiber benchmarks) over a fixed
+Runs the built tools/perf binaries (and the Fiber benchmarks) over a fixed
 matrix, writes every raw process output and a machine-readable summary to an
 output directory. Nothing here is checked in: point --out at an ignored or
 scratch path.
 
-    python3 perftest/run_performance_md.py --out /tmp/antfarm-perf-report
-    python3 perftest/run_performance_md.py --out /tmp/antfarm-perf-report --sections farm_best
+    python3 tools/perf/run_performance_md.py --out /tmp/antfarm-perf-report
+    python3 tools/perf/run_performance_md.py --out /tmp/antfarm-perf-report --sections farm_best
 
 A run counts only when its process exits 0 and its metric parses; a cell with
 fewer than --runs valid samples is marked failed and the script exits nonzero.
@@ -32,8 +32,8 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-PERFTEST = ROOT / "perftest"
+ROOT = Path(__file__).resolve().parents[2]
+PERFTEST = ROOT / "tools/perf"
 MIMALLOC = ROOT / "tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a"
 if os.name == "nt":
     MIMALLOC = ROOT / "tests/actors/.build/mimalloc-v3.5.3-windows-release/lib/mimalloc.lib"
@@ -423,11 +423,11 @@ def cases_for(section, args):
         C.append(case("fibers", "benchmark_st",
                       ["dub", "run", "-c", "benchmark", "--build=release",
                        "--compiler=ldc2", "--", "200000", "256", "2"],
-                      cwd=str(ROOT / "fibers")))
+                      cwd=str(ROOT / "ant_fibers")))
         C.append(case("fibers", "benchmark_mt",
                       ["dub", "run", "-c", "benchmark_mt", "--build=release",
                        "--compiler=ldc2", "--", "100000"],
-                      cwd=str(ROOT / "fibers")))
+                      cwd=str(ROOT / "ant_fibers")))
     elif section == "scaling":
         C.append(case("scaling", "create_16384",
                       [benchmark_path("scaling"), "create", "16384"]))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for perf_gate.py decisions and exit semantics.
 
-Run: python3 -m unittest perftest/test_perf_gate.py
+Run: python3 -m unittest tools/perf/test_perf_gate.py
 Git, the compiler, the benchmark and CPU accounting are all faked, so no
 build or timing work happens and the tests run in well under a second each.
 """
@@ -91,8 +91,8 @@ class GateCase(unittest.TestCase):
                 return REFS[ref] + '\n'
             if cmd[:3] == ['git', 'worktree', 'add']:
                 scratch = pathlib.Path(cmd[4])
-                (scratch / 'perftest').mkdir(parents=True)
-                (scratch / 'perftest/actor_churn.d').write_text(
+                (scratch / 'tools/perf').mkdir(parents=True)
+                (scratch / 'tools/perf/actor_churn.d').write_text(
                     sources.get(cmd[5], default_source))
                 r.adds.append(scratch)
                 return ''

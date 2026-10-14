@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for private_lifecycle_matrix.py grouping.
 
-Run: python3 -m unittest perftest/test_private_lifecycle_matrix.py
+Run: python3 -m unittest tools/perf/test_private_lifecycle_matrix.py
 The script is import-safe, so no benchmark or subprocess work happens.
 """
 import importlib.util

@@ -54,7 +54,7 @@ Longer or optional (not run by make check):
 
 Performance (not part of make check; quiet Linux host, LDC, Python 3, mimalloc):
   make perf-gate BASE=<sha> [CANDIDATE=<sha>]
-                           see perftest/README.md
+                           see tools/perf/README.md
 endef
 
 help:
@@ -100,4 +100,4 @@ docs:
 PERF_GATE_OUTPUT ?= /tmp/antfarm-perf-gate
 PERF_GATE_ARGS ?=
 perf-gate:
-	python3 perftest/perf_gate.py --base $(BASE) $(if $(CANDIDATE),--candidate $(CANDIDATE)) --output $(PERF_GATE_OUTPUT) $(PERF_GATE_ARGS)
+	python3 tools/perf/perf_gate.py --base $(BASE) $(if $(CANDIDATE),--candidate $(CANDIDATE)) --output $(PERF_GATE_OUTPUT) $(PERF_GATE_ARGS)

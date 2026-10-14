@@ -34,22 +34,22 @@ tests/actors/actors_torture_mimalloc_dmd
 tests/actors/actors_torture_mimalloc_debug
 tests/actors/actors_torture_mimalloc_tsan
 tests/actors/.build/
-perftest/throughput
-perftest/tail
-perftest/dual
-perftest/actor_ready
-perftest/actor_churn
-perftest/actor_churn_mimalloc
-perftest/scaling
-perftest/offccd
-perftest/c2c
+tools/perf/throughput
+tools/perf/tail
+tools/perf/dual
+tools/perf/actor_ready
+tools/perf/actor_churn
+tools/perf/actor_churn_mimalloc
+tools/perf/scaling
+tools/perf/offccd
+tools/perf/c2c
 tests/private/private_tests
 tests/private/private_tests_dmd
 tests/private/private_tests_release
 tests/private/private_tests_dmd_release
 tests/private/private_tests_tsan
-perftest/throughput_eager
-perftest/throughput_sd64
+tools/perf/throughput_eager
+tools/perf/throughput_sd64
 tests/farm/write_protection_allwrite
 tests/farm/boundary_runoff_allwrite
 
@@ -57,6 +57,6 @@ tests/private/.doc-examples/
 examples/.build/
 /.build/
 
-# Python bytecode from the perftest scripts
+# Python bytecode from the tools/perf scripts
 __pycache__/
 *.pyc

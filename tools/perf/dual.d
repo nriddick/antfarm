@@ -6,8 +6,8 @@
  + mixed-role topology the sweep cannot: small producers that are also
  + consumers, interleaving small writes with consumeNext calls.
  +
- +   make -C perftest dual
- +   ./perftest/dual
+ +   make -C tools/perf dual
+ +   ./tools/perf/dual
  +
  + Default: 4 dual threads, all small tier, batch=1 write followed by one
  + consumeNext call, 16-ulong bodies.

@@ -42,25 +42,25 @@ configuration "hello" {
 
 configuration "benchmark" {
     targetType "executable"
-    mainSourceFile "benchmarks/benchmark.d"
+    mainSourceFile "../tools/perf/ant_fibers/benchmark.d"
 }
 
 configuration "benchmark_mt" {
     targetType "executable"
-    mainSourceFile "benchmarks/benchmark_mt.d"
+    mainSourceFile "../tools/perf/ant_fibers/benchmark_mt.d"
 }
 
 configuration "benchmark_vs_druntime" {
     targetType "executable"
-    mainSourceFile "benchmarks/benchmark_vs_druntime.d"
+    mainSourceFile "../tools/perf/ant_fibers/benchmark_vs_druntime.d"
 }
 
 configuration "benchmark_farm_embed" {
     targetType "executable"
-    mainSourceFile "benchmarks/benchmark_farm_embed.d"
+    mainSourceFile "../tools/perf/ant_fibers/benchmark_farm_embed.d"
 }
 
 configuration "benchmark_actor_wave" {
     targetType "executable"
-    mainSourceFile "benchmarks/actor_wave.d"
+    mainSourceFile "../tools/perf/ant_fibers/actor_wave.d"
 }

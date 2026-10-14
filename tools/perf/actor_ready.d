@@ -1,5 +1,5 @@
 /++
- + Autonomous actor backlog benchmark. Build with `make -C perftest actor_ready`.
+ + Autonomous actor backlog benchmark. Build with `make -C tools/perf actor_ready`.
  + Arguments: actors (default 16384), rounds (100), flush batch (32).
  + Construction and waking are outside the timed region; each round measures
  + flushing a prequeued burst and consuming its callbacks on the same thread.

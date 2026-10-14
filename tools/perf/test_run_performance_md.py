@@ -3,7 +3,7 @@
 
 Run from the repository root:
 
-    python3 -B -m unittest perftest/test_run_performance_md.py -v
+    python3 -B -m unittest tools/perf/test_run_performance_md.py -v
 
 Parser inputs are synthetic in-memory strings and no benchmark binary is run.
 Driver tests inject a fake runner or patch the module; temp files stay under a
