@@ -119,7 +119,7 @@ TopologySnapshot parseSysfsTopology(
             r.hasCapacity = true;
             r.capacity = parseU32(cap);
         }
-        readCaches(dir, r);
+        if (r.online) readCaches(dir, r);
         if (r.maxLine > maxLine) maxLine = r.maxLine;
         raws[i] = r;
     }
@@ -148,6 +148,7 @@ TopologySnapshot parseSysfsTopology(
         p.numaIndex = numaOf.get(r.cpu, cast(ushort) 0);
         p.moduleIndex = ushort.max;
         p.offlineAtDiscovery = !r.online;
+        p.llcIndex = p.llcIndexInGroup = noLlcIndex;
         p.l1d = r.l1d;
         p.l1i = r.l1i;
         p.l2 = r.l2;
@@ -182,12 +183,14 @@ TopologySnapshot parseSysfsTopology(
     }
 
     // Process-wide llcIndex: one dense id per distinct L3 sharing set.
-    // Fall back to L2 share, then a singleton, so every LP gets a shard.
+    // Fall back to L2 share, then a singleton, for online CPUs only.
+    // Offline CPUs remain discoverable but do not define cache domains.
     ushort nextLlc;
     ushort[string] llcOfSet;
     GroupingSource[] sourceOfLlc;
     foreach (ref r; raws)
     {
+        if (!r.online) continue;
         auto share = r.hasL3 ? r.l3Share : (r.hasL2 ? r.l2Share : [r.cpu]);
         share = uniqueSorted(share);
         auto k = setKey(share);
@@ -200,10 +203,13 @@ TopologySnapshot parseSysfsTopology(
         auto lp = &procs[idxOf[r.cpu]];
         lp.llcIndex = llcOfSet[k];
         lp.llcIndexInGroup = r.hasL3 ? r.l3Id : lp.llcIndex;
-        lp.l1d.llcIndex = lp.llcIndex;
-        lp.l1i.llcIndex = lp.llcIndex;
-        lp.l2.llcIndex = lp.llcIndex;
-        lp.l3.llcIndex = lp.llcIndex;
+    }
+    foreach (ref p; procs)
+    {
+        p.l1d.llcIndex = p.llcIndex;
+        p.l1i.llcIndex = p.llcIndex;
+        p.l2.llcIndex = p.llcIndex;
+        p.l3.llcIndex = p.llcIndex;
     }
 
     ushort nextMod;
@@ -228,6 +234,7 @@ TopologySnapshot parseSysfsTopology(
         foreach (s; share)
         {
             if (s !in idxOf) continue;
+            if (procs[idxOf[s]].llcIndex == noLlcIndex) continue;
             procs[idxOf[s]].moduleIndex = mid;
             c.lpIndices ~= s;
             c.llcIndex = procs[idxOf[s]].llcIndex;

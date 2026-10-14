@@ -44,8 +44,12 @@ void main()
 }
 ```
 
-`llcIndex` is a dense, process-wide index over physical groups (last-level
-sharing domains), suitable for addressing an array. It is not a raw Windows
+For processors with cache-domain membership, `llcIndex` is a dense, process-wide
+index over physical groups (last-level sharing domains), suitable for addressing
+an array. Linux CPUs offline at discovery remain in `processors` and answer
+`byId`, but have `llcIndex == noLlcIndex` and are omitted from `llcDomains`.
+They are ineligible for workers and do not affect `groupingSource`.
+`llcIndex` is not a raw Windows
 cache index or Linux sysfs cache id. `LlcDomain.source` says how each group was
 formed: `l3`, or a fallback (`l2Fallback`, `singletonFallback`,
 `cpuSetLlcIndex`) that is not a real CCD. Higher `efficiencyClass` values

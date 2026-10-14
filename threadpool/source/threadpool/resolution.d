@@ -40,7 +40,7 @@ enum StartState : ubyte
 struct CpuDisposition
 {
     ProcessorId id;          /// the CPU
-    ushort llcIndex;         /// physical group
+    ushort llcIndex;         /// physical group, or `noLlcIndex` for an ungrouped CPU
     ushort coreIndex;        /// physical core
     ushort numaIndex;        /// NUMA node
     ubyte  tableClass;       /// dense P/E table class
@@ -110,7 +110,7 @@ final class PoolResolution
         size_t n = topology.llcDomains.length;
         if (topology.llcCount > n) n = topology.llcCount;
         foreach (ref c; cpus)
-            if (c.llcIndex + 1 > n) n = c.llcIndex + 1;
+            if (c.llcIndex != noLlcIndex && c.llcIndex + 1 > n) n = c.llcIndex + 1;
         auto g = new GroupDisposition[](n);
         auto byGroup = new ProcessorId[][](n);
         foreach (i, ref gd; g)
@@ -122,6 +122,7 @@ final class PoolResolution
         }
         foreach (ref c; cpus)
         {
+            if (c.llcIndex == noLlcIndex) continue;
             auto gd = &g[c.llcIndex];
             gd.physical++;
             if (!(c.reasons & (Reject.osExcluded | Reject.offline)))

@@ -12,7 +12,7 @@ module threadpool;
 public import threadpool.topology : TopologySnapshot, LogicalProcessor, LlcDomain,
     PhysicalCore, L2Cluster, CacheInfo, discover, tableClassIndex, classE, classP,
     maxNumaLlcs, fillNumaLlcs, ProcessorId, parseCpuList, formatCpuList,
-    CpuListException, GroupingSource;
+    CpuListException, GroupingSource, noLlcIndex;
 public import threadpool.pool : CacheAwarePool, PoolOptions,
     Director, Selection, Cadence;
 public import threadpool.resolution : PoolResolution, resolvePool, Reject,

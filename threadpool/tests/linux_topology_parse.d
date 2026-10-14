@@ -462,7 +462,7 @@ unittest
     assert(snap.processors.length == snap.logicalProcessorCount);
     assert(snap.llcDomains.length == snap.llcCount);
     foreach (ref p; snap.processors)
-        assert(p.llcIndex < snap.llcCount);
+        assert(p.offlineAtDiscovery ? p.llcIndex == noLlcIndex : p.llcIndex < snap.llcCount);
 
     auto live = discover();
     assert(live.os == "linux");
@@ -537,6 +537,90 @@ unittest
     assert(!snap.isEligible(*p));
     assert(snap.groups[0].activeProcessors == 31);
     assert(snap.eligibleProcessorsInLlc(0) == parseCpuList("0-4,6-7,16-23"));
+}
+
+unittest
+{
+    // F2b: real offline CPUs lose topology/ and cache/; they must not add
+    // a fallback domain or downgrade the surviving L3 domains.
+    auto cpus = ryzen5900Cpus();
+    cpus[5].online = false;
+    auto root = writeTree(cpus, "0-31", "0-4,6-31", [ushort(0): "0-31"]);
+    scope (exit) rmdirRecurse(root);
+    rmdirRecurse(buildPath(root, "cpu", "cpu5", "topology"));
+    rmdirRecurse(buildPath(root, "cpu", "cpu5", "cache"));
+
+    auto snap = parseSysfsTopology(buildPath(root, "cpu"), buildPath(root, "node"));
+    assert(snap.llcCount == 2, format("F2b: expected 2 LLCs, got %s", snap.llcCount));
+    assert(snap.groupingSource == GroupingSource.l3);
+    foreach (ref d; snap.llcDomains)
+        assert(d.source == GroupingSource.l3);
+    auto p = snap.byId(ProcessorId(0, 5));
+    assert(p !is null);
+    assert(p.offlineAtDiscovery);
+    assert(!snap.isEligible(*p));
+    assert(snap.logicalProcessorCount == 32);
+    assert(p.llcIndex == noLlcIndex);
+    assert(p.llcIndexInGroup == noLlcIndex);
+    assert(p.l3.llcIndex == noLlcIndex);
+    assert(snap.domain(noLlcIndex) is null);
+    assert(!snap.llcBelongsToNuma(noLlcIndex, 0));
+    assert(snap.processorsInLlc(0) == parseCpuList("0-4,6-7,16-23"));
+    assert(snap.eligibleProcessorsInLlc(0) == parseCpuList("0-4,6-7,16-23"));
+    assert(snap.processorsInLlc(1) == parseCpuList("8-15,24-31"));
+    assert(snap.llcsInNuma(0) == [ushort(0), 1]);
+    ushort[4] numaLlcs;
+    assert(fillNumaLlcs(0, 0, snap, numaLlcs[]) == 2);
+    assert(numaLlcs[0 .. 2] == [ushort(0), 1]);
+    assert(fillNumaLlcs(noLlcIndex, 0, snap, numaLlcs[]) == 0);
+    foreach (ref cluster; snap.l2Clusters)
+    {
+        assert(cluster.llcIndex < snap.llcCount);
+        foreach (cpu; cluster.lpIndices)
+            assert(cpu != 5);
+    }
+    foreach (ref core; snap.cores)
+    {
+        assert(core.llcIndex < snap.llcCount);
+        assert(core.moduleIndex != ushort.max);
+    }
+
+    OsScope unrestricted;
+    PoolOptions opt;
+    opt.skipSmtSiblings = false;
+    auto res = resolvePool(snap, unrestricted, opt);
+    assert(res.groups.length == 2);
+    assert(res.groups[0].physical == 15);
+    assert(res.groups[1].physical == 16);
+    assert(res.workers.length == 31);
+    assert(res.workersIn(0).length == 15);
+    assert(res.workersIn(1).length == 16);
+    assert(res[ProcessorId(0, 5)].reasons & Reject.offline);
+    assert(!res[ProcessorId(0, 5)].accepted);
+}
+
+unittest
+{
+    // An entirely offline fixture must not synthesize a domain. Even cached
+    // topology records left behind for an offline CPU cannot create one.
+    TestCpu cpu;
+    cpu.online = false;
+    cpu.siblings = "0";
+    cpu.caches = zen3Caches("0", 0, "0");
+    auto root = writeTree([cpu], "0", "", [ushort(0): "0"]);
+    scope (exit) rmdirRecurse(root);
+    auto snap = parseSysfsTopology(buildPath(root, "cpu"), buildPath(root, "node"));
+    assert(snap.llcCount == 0);
+    assert(snap.llcDomains.length == 0);
+    assert(snap.l2Clusters.length == 0);
+    assert(snap.llcsInNuma(0).length == 0);
+    assert(snap.byId(ProcessorId(0, 0)).llcIndex == noLlcIndex);
+    OsScope unrestricted;
+    PoolOptions opt;
+    auto res = resolvePool(snap, unrestricted, opt);
+    assert(res.groups.length == 0);
+    assert(res.workers.length == 0);
+    assert(res[ProcessorId(0, 0)].reasons & Reject.offline);
 }
 
 unittest

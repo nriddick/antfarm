@@ -195,8 +195,12 @@ struct CacheInfo
     ushort    lineSize;
     uint      sizeBytes;
     ushort    associativity;
+    /// Owning processor's cache domain, or `noLlcIndex` when ungrouped.
     ushort    llcIndex;
 }
+
+/// A discovered processor has no cache-domain membership.
+enum noLlcIndex = ushort.max;
 
 struct LogicalProcessor
 {
@@ -204,7 +208,10 @@ struct LogicalProcessor
     ushort lpIndex;
     uint   cpuSetId;
     ushort coreIndex;
+    /// Process-wide cache domain. Linux offline CPUs remain in `processors`
+    /// but are omitted from `llcDomains` and use `noLlcIndex`.
     ushort llcIndex;
+    /// OS-relative cache index, or `noLlcIndex` for Linux offline CPUs.
     ushort llcIndexInGroup;
     ushort numaIndex;
     ushort packageIndex;
@@ -225,6 +232,7 @@ struct LogicalProcessor
 struct PhysicalCore
 {
     ushort coreIndex;
+    /// Cache domain of an online sibling, or `noLlcIndex` if all are offline.
     ushort llcIndex;
     ushort moduleIndex;
     ubyte  efficiencyClass;
@@ -396,6 +404,7 @@ struct TopologySnapshot
         ushort[] r;
         foreach (ref p; processors)
         {
+            if (p.llcIndex == noLlcIndex) continue;
             if (p.numaIndex != numaIndex) continue;
             bool seen;
             foreach (v; r)
@@ -408,6 +417,7 @@ struct TopologySnapshot
 
     bool llcBelongsToNuma(ushort llcIndex, ushort numaIndex) const @nogc nothrow
     {
+        if (llcIndex == noLlcIndex) return false;
         foreach (ref p; processors)
             if (p.llcIndex == llcIndex && p.numaIndex == numaIndex)
                 return true;
@@ -421,11 +431,12 @@ enum maxNumaLlcs = 16;
 ushort fillNumaLlcs(ushort homeLlc, ushort numaIndex,
                     ref const TopologySnapshot snap, ushort[] dest) @nogc nothrow
 {
-    if (dest.length == 0) return 0;
+    if (dest.length == 0 || homeLlc == noLlcIndex) return 0;
     dest[0] = homeLlc;
     ushort n = 1;
     foreach (ref p; snap.processors)
     {
+        if (p.llcIndex == noLlcIndex) continue;
         if (p.numaIndex != numaIndex) continue;
         if (p.llcIndex == homeLlc) continue;
         bool seen;
@@ -527,6 +538,14 @@ TopologySnapshot assembleSnapshot(
         c.coreIndex = p0.coreIndex;
         c.llcIndex = p0.llcIndex;
         c.moduleIndex = p0.moduleIndex;
+        // An offline primary can precede an online sibling on this core.
+        foreach (i; idxs)
+            if (procs[i].llcIndex != noLlcIndex)
+            {
+                c.llcIndex = procs[i].llcIndex;
+                c.moduleIndex = procs[i].moduleIndex;
+                break;
+            }
         c.efficiencyClass = p0.efficiencyClass;
         c.smt = idxs.length > 1;
         foreach (i; idxs)
@@ -537,7 +556,7 @@ TopologySnapshot assembleSnapshot(
 
     ushort maxLlc = llcCount;
     foreach (ref p; procs)
-        if (p.llcIndex + 1 > maxLlc)
+        if (p.llcIndex != noLlcIndex && p.llcIndex + 1 > maxLlc)
             maxLlc = cast(ushort)(p.llcIndex + 1);
 
     LlcDomain[] domains;
