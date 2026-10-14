@@ -1195,12 +1195,14 @@ void consumeOnFreshThread(AntFarm* farm, FiberTask task, ulong expectedResumes,
     auto thread = new Thread({
         try
         {
+            version (TSan) auto nativeContext = __tsan_get_current_fiber();
             ConsumerView view;
             auto subscription = subscribeOrThrow(view, farm);
             scope (exit) view.unsubscribe();
             foreach (_; 0 .. 100_000)
             {
                 view.consumeNext();
+                version (TSan) assert(__tsan_get_current_fiber() == nativeContext);
                 if (task.resumeCount >= expectedResumes) return;
                 Thread.yield();
             }
@@ -1238,18 +1240,23 @@ void migrationSmoke()
         // `box` is deliberately not stored outside the fiber: across each
         // suspension its only root is on the suspended stack.
         auto box = new MigrationBox(41);
+        version (TSan) auto taskContext = __tsan_get_current_fiber();
         identities[0] = FiberDomain.currentWorkerIdentity();
         FiberDomain.yieldReady();
+        version (TSan) assert(__tsan_get_current_fiber() == taskContext);
         assert(box.value++ == 41);
         identities[1] = FiberDomain.currentWorkerIdentity();
         FiberDomain.await(77);
+        version (TSan) assert(__tsan_get_current_fiber() == taskContext);
         assert(box.value++ == 42);
         identities[2] = FiberDomain.currentWorkerIdentity();
         FiberDomain.sleepFor(msecs(2));
+        version (TSan) assert(__tsan_get_current_fiber() == taskContext);
         assert(box.value++ == 43);
         identities[3] = FiberDomain.currentWorkerIdentity();
         scope (exit)
         {
+            version (TSan) assert(__tsan_get_current_fiber() == taskContext);
             preservedValue = box.value;
             identities[4] = FiberDomain.currentWorkerIdentity();
         }
@@ -2620,8 +2627,77 @@ private void releaseDeathSmoke()
     else printf("SKIP fiber release death checks: Linux re-exec required\n");
 }
 
+// A native thread and each suspended task need separate TSan call stacks.
+// Without this, migration can pop frames from another thread's shadow stack.
+private void tsanContextSmoke()
+{
+    version (TSan)
+    {
+        auto nativeContext = __tsan_get_current_fiber();
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
+                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
+        scope (exit) farm.destroy();
+        auto domain = new FiberDomain(farm);
+        auto token = farm.registerProducer(Tier.small);
+        scope (exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        subscribeOrThrow(view, farm);
+        scope (exit) view.unsubscribe();
+        void* firstContext;
+        domain.spawn({
+            firstContext = __tsan_get_current_fiber();
+            assert(firstContext != nativeContext,
+                "scheduler fiber must have its own TSan context");
+            FiberDomain.yieldReady();
+            assert(__tsan_get_current_fiber() == firstContext);
+        });
+        domain.spawn({
+            auto secondContext = __tsan_get_current_fiber();
+            assert(secondContext != nativeContext && secondContext != firstContext);
+            FiberDomain.yieldReady();
+            assert(__tsan_get_current_fiber() == secondContext);
+        });
+        drainUntilEmpty(domain, token, view);
+        assert(__tsan_get_current_fiber() == nativeContext,
+            "scheduler must restore its caller's TSan context");
+        auto completed = domain.takeCompletions();
+        foreach (task; completed)
+        {
+            if (task.exception !is null) throw task.exception;
+            assert(task.outcome == FiberOutcome.completed);
+        }
+        domain.releaseAll(completed);
+        // Reuse a task after termination as well as after suspension.
+        domain.spawn({ assert(__tsan_get_current_fiber() != nativeContext); });
+        drainUntilEmpty(domain, token, view);
+        assert(__tsan_get_current_fiber() == nativeContext);
+        completed = domain.takeCompletions();
+        foreach (task; completed)
+        {
+            if (task.exception !is null) throw task.exception;
+            assert(task.outcome == FiberOutcome.completed);
+        }
+        domain.releaseAll(completed);
+    }
+}
+
+version (TSan)
+    private extern(C) void* __tsan_get_current_fiber() nothrow @nogc;
+
 void main(string[] args)
 {
+    if (args.length == 2 && args[1] == "--tsan-context-only")
+    {
+        tsanContextSmoke();
+        printf("TSan context smoke passed\n");
+        return;
+    }
+    if (args.length == 2 && args[1] == "--migration-only")
+    {
+        migrationSmoke();
+        printf("migration smoke passed\n");
+        return;
+    }
     if (args.length == 3 && args[1] == "--release-child")
     {
         releaseDeathChild(args[2]);
@@ -2648,6 +2724,7 @@ void main(string[] args)
         printf("cancellation smoke passed\n");
         return;
     }
+    tsanContextSmoke();
     releaseDeathSmoke();
     workerCancellationSmoke();
     uxHelpersSmoke();

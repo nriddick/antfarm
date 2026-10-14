@@ -64,6 +64,27 @@ To run the fiber smoke suite under ThreadSanitizer, build it with
 `DFLAGS='-fsanitize=thread -d-version=TSan -g -O1' dub build :antfarm-fibers -c unittest --compiler=ldc2`.
 In that build `fibers/tests/smoke.d` sets `gcopt=parallel:0`, because druntime's
 parallel GC marking intermittently reports a race in its own mark stack.
+When also enabling profiling explicitly, pass `"--DRT-gcopt=parallel:0 profile:1"`
+to preserve that setting.
+
+LDC 1.43.0's druntime has ASan fiber hooks but does not notify TSan about fiber
+switches. Without separate TSan contexts, migrating a suspended fiber between
+threads can underflow TSan's shadow call stack and crash in `__tsan_func_entry`.
+This is unrelated to the application's fiber stack size or GC profiling.
+Under `version(TSan)`, the scheduler therefore keeps a TSan context per active
+task and restores the caller's context after every call. The small switch bridge
+is uninlined and uninstrumented and uses druntime's non-template `Fiber.call`
+overload; scheduler code and fiber bodies remain instrumented. This assumes the
+standard, uninstrumented druntime, not a separately TSan-instrumented druntime.
+Contexts are destroyed at terminal completion, including a rejected raw yield,
+so recycling starts with an empty shadow stack. The switch API carries the
+sequential caller/task ordering; actual task publication still uses the Farm's
+normal synchronization.
+
+The smoke suite checks TSan context identity, restoration, reuse, and migration.
+Run `fibers/antfarm_antfarm-fibers --tsan-context-only` for the context regression
+or `--migration-only` for migration across fresh native threads (including
+cancellation and exception unwinding). The full smoke run includes both checks.
 
 ### Prerequisites
 

@@ -17,6 +17,19 @@ import core.thread : Fiber, Thread;
 import core.time : Duration, MonoTime;
 
 
+version (TSan)
+{
+    import ldc.attributes : llvmAttr;
+
+    private extern(C) nothrow @nogc
+    {
+        void* __tsan_get_current_fiber();
+        void* __tsan_create_fiber(uint flags);
+        void __tsan_destroy_fiber(void* fiber);
+        void __tsan_switch_to_fiber(void* fiber, uint flags);
+    }
+}
+
 alias Signal = ulong;
 private enum Signal timerSignalBit = 1UL << 63;
 private enum Signal persistentSignalBit = 1UL << 62;
@@ -590,6 +603,7 @@ final class FiberTask
     package FiberDomain domain;
     package FiberReadyLane readyLane;
     package Fiber fiber;
+    version (TSan) private void* tsanContext;
     package Signal waitSignal;
     package shared(Throwable) failure;
     /// Publish chain link; owned by a PublishAccumulator or its drainer.
@@ -721,6 +735,7 @@ final class FiberTask
 
     ~this() nothrow @nogc
     {
+        version (TSan) clearTsanContext();
         if (joinControl !is null)
         {
             joinControl.terminalEvent.terminate();
@@ -731,6 +746,39 @@ final class FiberTask
         managedJoinControl = null;
         freeCacheLine(control);
         control = null;
+    }
+
+    version (TSan)
+    {
+        // LDC 1.43's druntime switches native stacks, but only has ASan hooks.
+        // TSan must retain its shadow call stack with the task on migration.
+        // Nothing instrumented may run between the TSan and native switches:
+        // use druntime's non-template call overload (already compiled without
+        // TSan), and keep this bridge uninlined and wholly uninstrumented.
+        @llvmAttr("disable_sanitizer_instrumentation")
+        pragma(inline, false)
+        private Throwable callWithTsan() nothrow @nogc
+        {
+            if (tsanContext is null) tsanContext = __tsan_create_fiber(0);
+            auto caller = __tsan_get_current_fiber();
+            // The caller and task run sequentially: carry that ordering across
+            // the switch, including the caller's currentTask TLS assignment.
+            __tsan_switch_to_fiber(tsanContext, 0);
+            // Rethrow.no cannot throw or allocate; the runtime-argument overload
+            // cannot express these attributes because Rethrow.yes can throw.
+            auto call = cast(Throwable delegate(Fiber.Rethrow) nothrow @nogc)
+                &fiber.call;
+            auto failure = call(Fiber.Rethrow.no);
+            __tsan_switch_to_fiber(caller, 0);
+            return failure;
+        }
+
+        private void clearTsanContext() nothrow @nogc
+        {
+            if (tsanContext is null) return;
+            __tsan_destroy_fiber(tsanContext);
+            tsanContext = null;
+        }
     }
 
     private void initializeControl() nothrow @nogc
@@ -2661,7 +2709,10 @@ final class FiberDomain
         atomicFetchAdd!(MemoryOrder.rel)(task.resumeCountState, 1UL);
         currentTask = task;
         scope (exit) currentTask = null;
-        auto failure = task.fiber.call!(Fiber.Rethrow.no)();
+        version (TSan)
+            auto failure = task.callWithTsan();
+        else
+            auto failure = task.fiber.call!(Fiber.Rethrow.no)();
 
         word = task.loadControl();
         ph = phaseOf(word);
@@ -2699,6 +2750,9 @@ final class FiberDomain
                                 bool cancellationWon, bool preEntry = false)
         nothrow @nogc
     {
+        // Also discard suspended shadow frames after a rejected raw yield.
+        // Recycled tasks start with a fresh context, including pre-entry cancel.
+        version (TSan) task.clearTsanContext();
         // CANCEL can become visible before acceptCancellation has published
         // even its pending disposition. Wait for the entire cancellation
         // record, not merely an in-progress publisher, so it cannot overwrite
