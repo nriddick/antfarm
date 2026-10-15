@@ -20,7 +20,7 @@ import core.thread : Thread;
 import core.time : Duration, MonoTime, msecs;
 import std.typecons : Rebindable;
 
-import actors : ActorAllocator, ActorHandle, ActorReclaimResult, ActorRetireMode,
+import antfarm.actors : ActorAllocator, ActorHandle, ActorReclaimResult, ActorRetireMode,
     ActorRetireResult, ActorRuntime, ActorWave, PrivateRootOptions, PrivateRootPark,
     PrivateRootReclamation;
 import antfarm : AntFarm, ConsumerView, FarmCreateError, FarmCreateFailure, Tier, Token,

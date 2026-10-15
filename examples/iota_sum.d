@@ -1,6 +1,6 @@
 module iota_sum;
 
-import antfarm_templates;
+import antfarm.templates;
 import core.atomic;
 import core.thread;
 import std.range : iota;

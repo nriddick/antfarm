@@ -8,7 +8,7 @@
 # Windows has a separate native Python runner. New tests stay on druntime
 # threads and atomics; the full correctness gate remains the Linux matrix.
 
-.PHONY: help check check-quick check-windows check-docs check-soak check-mimalloc farm-tsan run-farm-tsan docs perf-gate
+.PHONY: help check check-quick check-windows check-docs check-soak check-mimalloc docs perf-gate
 
 # `help` is the first rule, so name the default goal explicitly.
 .DEFAULT_GOAL := check
@@ -23,20 +23,22 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
                            (LDC toolchain including Dub and Python 3; no DMD/TSan)
   make check-docs          tracked Markdown relative links and anchors (no network)
                            plus the API reference symbol/coverage check (needs DMD)
-  make check-farm-ordering Farm ordering and leaf-reuse tests, LDC and DMD
+  make -C tests/farm check-farm-ordering
+                           Farm ordering and leaf-reuse tests, LDC and DMD
                            plus the writeImpl raw ring-store check
-  make run-farm-tsan       Farm suite under ThreadSanitizer (LDC)
-  make -C actor_torture run run-dmd run-tsan death
-                           public actor suite and child-process diagnostics
-  make -C review_torture run run-tsan
+  make -C tests/farm run-farm-tsan
+                           Farm unit suite under ThreadSanitizer (LDC)
+  make -C tests/farm run run-tsan
                            adversarial Farm suite
-  make -C private_actor_tests run run-dmd run-tsan doc-example death
+  make -C tests/actors run run-dmd run-tsan death
+                           public actor suite and child-process diagnostics
+  make -C tests/private run run-dmd run-tsan doc-example death
                            private actor suite, doc programs and death tests
-  make -C examples check   README payload program and the actor examples
+  make -C examples check   quickstart payload program and the actor examples
 
 Reference (needs DMD):
   make docs               generate the HTML API reference into .build/docs/
-                          (ignored; open .build/docs/antfarm.html first)
+                          (ignored; open .build/docs/antfarm/package.html first)
 
 Windows integration (native x64, Dub, Python 3, LDC and DMD; no Bash or TSan):
   make check-windows      native Windows matrix (WINDOWS_CHECK_ARGS selects lanes)
@@ -46,12 +48,12 @@ Windows integration (native x64, Dub, Python 3, LDC and DMD; no Bash or TSan):
 Longer or optional (not run by make check):
   make check-soak          private-actor TSan loop for at least 121 s
   make check-mimalloc      make check plus real mimalloc lanes (needs the submodule)
-  make -C actor_torture run-mimalloc-debug
-                           other allocator lanes (see actor_torture/Makefile)
+  make -C tests/actors run-mimalloc-debug
+                           other allocator lanes (see tests/actors/Makefile)
 
 Performance (not part of make check; quiet Linux host, LDC, Python 3, mimalloc):
   make perf-gate BASE=<sha> [CANDIDATE=<sha>]
-                           see perftest/README.md
+                           see tools/perf/README.md
 endef
 
 help:
@@ -80,45 +82,21 @@ check-soak:
 check-mimalloc:
 	./scripts/check.sh --mimalloc
 
-FARM_TSAN_SOURCES := antfarm.d antfarm_allocation.d antfarm_templates.d \
-	actors/package.d actors/actor.d actors/wave.d actors/private_actor.d actors/mimalloc.d \
-	antfarm_test.d
-
-# ThreadSanitizer build of the Farm suite. Part of `make check`.
-farm-tsan: $(FARM_TSAN_SOURCES) review_torture/leaf_reuse.d
-	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I. $(FARM_TSAN_SOURCES) -of=antfarm_test_tsan
-	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I. review_torture/leaf_reuse.d antfarm.d antfarm_allocation.d -of=antfarm_test_leaf_tsan
-
-run-farm-tsan: farm-tsan
-	./scripts/run-farm-tsan.sh
-
 # Generated HTML API reference. DMD creates the -Dd output directory
 # itself, so the recipe is a single dmd exec with no shell metacharacters.
+# -op keeps source paths, so the two package.d files get separate pages.
 # mimalloc is included with its own version so the optional allocator
 # adapter appears in the reference without a C dependency.
-DOCS_SOURCES := antfarm.d antfarm_templates.d \
-	actors/package.d actors/actor.d actors/wave.d actors/private_actor.d \
-	actors/mimalloc.d threadpool/source/threadpool/host.d
+DOCS_SOURCES := antfarm/package.d antfarm/templates.d \
+	antfarm/actors/package.d antfarm/actors/actor.d antfarm/actors/wave.d antfarm/actors/private_actor.d \
+	antfarm/actors/mimalloc.d threadpool/source/threadpool/host.d
 DOCS_DIR := .build/docs
 
 docs:
-	dmd -D -Dd$(DOCS_DIR) -o- -version=AntfarmMimallocV3 -I. -Ithreadpool/source $(DOCS_SOURCES)
+	dmd -D -Dd$(DOCS_DIR) -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool/source $(DOCS_SOURCES)
 
 # Standalone timing gate; intentionally outside the correctness matrix.
 PERF_GATE_OUTPUT ?= /tmp/antfarm-perf-gate
 PERF_GATE_ARGS ?=
 perf-gate:
-	python3 perftest/perf_gate.py --base $(BASE) $(if $(CANDIDATE),--candidate $(CANDIDATE)) --output $(PERF_GATE_OUTPUT) $(PERF_GATE_ARGS)
-
-# Controlled subscription/reclamation schedules; hooks compile out normally.
-.PHONY: check-farm-ordering
-check-farm-ordering:
-	python3 scripts/check-ring-stores.py
-	ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm.d antfarm_allocation.d -of=antfarm_test_ordering
-	./antfarm_test_ordering
-	dmd -g -version=AntfarmWriteAuditHooks -I. review_torture/farm_ordering.d antfarm.d antfarm_allocation.d -of=antfarm_test_ordering_dmd
-	./antfarm_test_ordering_dmd
-	ldc2 -g -O1 -I. review_torture/leaf_reuse.d antfarm.d antfarm_allocation.d -of=antfarm_test_leaf
-	./antfarm_test_leaf
-	dmd -g -I. review_torture/leaf_reuse.d antfarm.d antfarm_allocation.d -of=antfarm_test_leaf_dmd
-	./antfarm_test_leaf_dmd
+	python3 tools/perf/perf_gate.py --base $(BASE) $(if $(CANDIDATE),--candidate $(CANDIDATE)) --output $(PERF_GATE_OUTPUT) $(PERF_GATE_ARGS)

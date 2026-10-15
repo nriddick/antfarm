@@ -637,9 +637,9 @@ not specific to x86 TSO.
 **Sanitizer evidence.** TSan builds use the same real atomic edges as ordinary
 builds. `version(TSan)` selects runtime options, not synchronization hooks.
 LLVM 22.1.8 carries non-edge leaf releases through the last-on-leaf acquire
-and root release. The controlled `review_torture/leaf_reuse.d` mutation
+and root release. The controlled `tests/farm/leaf_reuse.d` mutation
 exposes a missing leaf acquire only when the old manual root annotations
-are absent; see [the ordering audit](review_torture/FARM_ORDERING.md).
+are absent; see [the ordering audit](docs/design/farm-ordering.md).
 
 
 ---

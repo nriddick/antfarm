@@ -48,11 +48,11 @@ dmd -g -i -I. -Iexamples -Ithreadpool/source examples/fail_fast_fold.d -of=fail_
 ANTFARM_HUGE_PAGES=0 ./fail_fast_fold 0
 ```
 
-The fiber `cancelAt` adapter links the separate fibers package, so add the
+The fiber `cancelAt` adapter links the separate ant_fibers package, so add the
 fibers import path too:
 
 ```text
-ldc2 -g -i -I. -Iexamples -Ifibers/source -Ithreadpool/source \
+ldc2 -g -i -I. -Iexamples -Iant_fibers/source -Ithreadpool/source \
     examples/fiber_cancel_at.d -of=fiber_cancel_at
 ANTFARM_HUGE_PAGES=0 ./fiber_cancel_at 0
 ```
@@ -65,9 +65,9 @@ unset. In cmd.exe set it with `set ANTFARM_HUGE_PAGES=0` before the run.
 each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
 threaded programs. Every program run has a 300 s timeout. `fiber_cancel_at` still runs under TSan with 0 workers only; Fiber migration
 under TSan is covered by the dedicated Fiber TSan smoke suite instead (see
-[fibers/DESIGN.md](../fibers/DESIGN.md#validation-boundary)). That target also extracts the complete First payload program
-from the repository README and runs it with LDC and DMD in debug and release.
-Other README D blocks are fragments and are rejected by the extractor unless
+[docs/design/ant_fibers.md](../docs/design/ant_fibers.md#validation-boundary)). That target also extracts the complete First payload program
+from [the quickstart guide](../docs/guide/quickstart.md#first-payload) and runs it with LDC and DMD in debug and release.
+Other quickstart D blocks are fragments and are rejected by the extractor unless
 they say so. The repository `make check` includes that target.
 
 The same runner supports native Windows x64 without make or Bash:

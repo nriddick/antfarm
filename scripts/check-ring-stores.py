@@ -41,7 +41,7 @@ def plain_stores(body):
 
 
 def main():
-    text = (ROOT / "antfarm.d").read_text()
+    text = (ROOT / "antfarm/package.d").read_text()
     body = write_impl_body(text)
     if body.count("storeRaw(") < 10:
         print("check-ring-stores: writeImpl extraction found too few storeRaw calls", file=sys.stderr)

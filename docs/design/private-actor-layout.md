@@ -1,7 +1,7 @@
 # Private actor layout
 
 This page describes the private path's Entry/Service/cohort layout invariants and
-the cohort-slab reuse proof in `actors/private_actor.d`. The ordering proof that
+the cohort-slab reuse proof in `antfarm/actors/private_actor.d`. The ordering proof that
 uses these fields is in
 [private-actor-ordering.md](private-actor-ordering.md); the user-facing rules are
 in [../guide/private-actors.md](../guide/private-actors.md),
@@ -152,6 +152,6 @@ restriction; `R` also remains POD.
 | Entry union and Service-access rule | `Entry`, `rootService`, `ChildBase.service`, `parentIsRoot_`, `PrivateContext.service` | `phase-e1`, `phase-ports`, `slab` group |
 | Credit target selection | `ownJoin_`, `childPending`, `root.pending`, `Emittable` | `ports-nested`, continuation C-M mutations |
 | Subset storage layout | `sel_`, `resultCount_`, `subsetMembers(context)` | `subset-*`, subset C12/C13 mutations |
-| Signal-only cohort size and layout | `ChildBase`, `Wave` outcome fields, `ChildBase.root` | static asserts under LDC and DMD (`make -C private_actor_tests run run-dmd`) |
+| Signal-only cohort size and layout | `ChildBase`, `Wave` outcome fields, `ChildBase.root` | static asserts under LDC and DMD (`make -C tests/private run run-dmd`) |
 | Slab reuse and zeroing | `retireMember`, `finish`, `count_`, `active`, `slabByteLimit` | `slab`, `slab-retire`, `slab-retain`, `slab-refill`, `slab-idle`, `slab-continuation`, `slab-cancel` |
 | State destruction order | `disposeChildren`, `retireMember`, `destroyState` | `dtor-order`, `dtor-child`, `dtor-root`, `dtor-results` |

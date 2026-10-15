@@ -1,0 +1,122 @@
+# Ant Farm actor deterministic-interleaving and sustained-contention suite
+ROOT := ../..
+DFLAGS ?= -g -O1
+DC ?= ldc2
+TSAN_OPTIONS ?= history_size=7 halt_on_error=1
+SOURCES := actors_torture.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d \
+	$(ROOT)/antfarm/templates.d $(ROOT)/antfarm/actors/package.d \
+	$(ROOT)/antfarm/actors/actor.d $(ROOT)/antfarm/actors/wave.d $(ROOT)/antfarm/actors/private_actor.d \
+	$(ROOT)/antfarm/actors/mimalloc.d
+LDC_VERSIONS := -d-version=AntfarmActorTestHooks -d-version=AntfarmMimallocV3 \
+	-d-version=AntfarmMimallocStub
+DMD_VERSIONS := -version=AntfarmActorTestHooks -version=AntfarmMimallocV3 \
+	-version=AntfarmMimallocStub
+LDC_REAL_VERSIONS := -d-version=AntfarmActorTestHooks \
+	-d-version=AntfarmMimallocV3 -d-version=AntfarmMimallocReal
+DMD_REAL_VERSIONS := -version=AntfarmActorTestHooks \
+	-version=AntfarmMimallocV3 -version=AntfarmMimallocReal
+MIMALLOC_SOURCE := $(ROOT)/third_party/mimalloc
+MIMALLOC_BUILD := .build/mimalloc-v3.5.3
+MIMALLOC_LIBRARY := $(MIMALLOC_BUILD)/libmimalloc.a
+MIMALLOC_DEBUG_BUILD := .build/mimalloc-v3.5.3-debug
+MIMALLOC_DEBUG_LIBRARY := $(MIMALLOC_DEBUG_BUILD)/libmimalloc-debug.a
+MIMALLOC_TSAN_BUILD := .build/mimalloc-v3.5.3-tsan
+MIMALLOC_TSAN_LIBRARY := $(MIMALLOC_TSAN_BUILD)/libmimalloc-debug.a
+MIMALLOC_TSAN_CC ?= clang
+MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
+
+.PHONY: all run run-tsan run-dmd run-mimalloc run-mimalloc-dmd \
+	run-mimalloc-debug run-mimalloc-tsan death run-death run-death-dmd clean
+
+all: actors_torture
+
+actors_torture: $(SOURCES)
+	$(DC) $(DFLAGS) $(LDC_VERSIONS) $(SOURCES) -of=$@
+
+run: actors_torture
+	./actors_torture
+
+# Child-process diagnostics (`actors_torture death`), built in debug and
+# -release. Each row re-execs /proc/self/exe and checks the exit status and
+# stderr, including each fatal site's exact message substring. The table in
+# README.md lists covered sites and internal invariants without public probes;
+# rows for version(assert)-only diagnostics print SKIP under -release.
+actors_torture_release: $(SOURCES)
+	$(DC) $(DFLAGS) -release $(LDC_VERSIONS) $(SOURCES) -of=$@
+
+death: run-death run-death-dmd
+
+run-death: actors_torture actors_torture_release
+	./actors_torture death
+	./actors_torture_release death
+
+run-death-dmd:
+	dmd -g -checkaction=context $(DMD_VERSIONS) $(SOURCES) -of=actors_torture_dmd
+	dmd -g -release $(DMD_VERSIONS) $(SOURCES) -of=actors_torture_dmd_release
+	./actors_torture_dmd death
+	./actors_torture_dmd_release death
+
+run-tsan:
+	$(DC) -g -O1 -fsanitize=thread -d-version=TSan $(LDC_VERSIONS) $(SOURCES) -of=actors_torture_tsan
+	TSAN_OPTIONS='$(TSAN_OPTIONS)' ./actors_torture_tsan
+
+run-dmd:
+	dmd -g -checkaction=context $(DMD_VERSIONS) $(SOURCES) -of=actors_torture_dmd
+	./actors_torture_dmd
+
+$(MIMALLOC_LIBRARY): $(MIMALLOC_SOURCE)/CMakeLists.txt
+	cmake -S $(MIMALLOC_SOURCE) -B $(MIMALLOC_BUILD) \
+		-DCMAKE_BUILD_TYPE=Release -DMI_OVERRIDE=OFF \
+		-DMI_BUILD_SHARED=OFF -DMI_BUILD_STATIC=ON \
+		-DMI_BUILD_OBJECT=OFF -DMI_BUILD_TESTS=OFF -DMI_OPT_ARCH=OFF
+	cmake --build $(MIMALLOC_BUILD) --config Release \
+		--target mimalloc-static --parallel
+
+$(MIMALLOC_DEBUG_LIBRARY): $(MIMALLOC_SOURCE)/CMakeLists.txt
+	cmake -S $(MIMALLOC_SOURCE) -B $(MIMALLOC_DEBUG_BUILD) \
+		-DCMAKE_BUILD_TYPE=Debug -DMI_DEBUG=FULL -DMI_OVERRIDE=OFF \
+		-DMI_BUILD_SHARED=OFF -DMI_BUILD_STATIC=ON \
+		-DMI_BUILD_OBJECT=OFF -DMI_BUILD_TESTS=OFF -DMI_OPT_ARCH=OFF
+	cmake --build $(MIMALLOC_DEBUG_BUILD) --config Debug \
+		--target mimalloc-static --parallel
+
+$(MIMALLOC_TSAN_LIBRARY): $(MIMALLOC_SOURCE)/CMakeLists.txt
+	cmake -S $(MIMALLOC_SOURCE) -B $(MIMALLOC_TSAN_BUILD) \
+		-DCMAKE_C_COMPILER=$(MIMALLOC_TSAN_CC) \
+		-DCMAKE_BUILD_TYPE=Debug -DMI_DEBUG_TSAN=ON -DMI_OVERRIDE=OFF \
+		-DMI_BUILD_SHARED=OFF -DMI_BUILD_STATIC=ON \
+		-DMI_BUILD_OBJECT=OFF -DMI_BUILD_TESTS=OFF -DMI_OPT_ARCH=OFF
+	cmake --build $(MIMALLOC_TSAN_BUILD) --config Debug \
+		--target mimalloc-static --parallel
+
+actors_torture_mimalloc: $(SOURCES) $(MIMALLOC_LIBRARY)
+	$(DC) $(DFLAGS) $(LDC_REAL_VERSIONS) $(SOURCES) \
+		$(MIMALLOC_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) -of=$@
+
+run-mimalloc: actors_torture_mimalloc
+	./actors_torture_mimalloc
+
+run-mimalloc-dmd: $(SOURCES) $(MIMALLOC_LIBRARY)
+	dmd -g -checkaction=context $(DMD_REAL_VERSIONS) $(SOURCES) \
+		$(MIMALLOC_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) \
+		-of=actors_torture_mimalloc_dmd
+	./actors_torture_mimalloc_dmd
+
+run-mimalloc-debug: $(SOURCES) $(MIMALLOC_DEBUG_LIBRARY)
+	$(DC) -g -O0 $(LDC_REAL_VERSIONS) $(SOURCES) \
+		$(MIMALLOC_DEBUG_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) \
+		-of=actors_torture_mimalloc_debug
+	./actors_torture_mimalloc_debug
+
+run-mimalloc-tsan: $(SOURCES) $(MIMALLOC_TSAN_LIBRARY)
+	$(DC) -g -O1 -fsanitize=thread -d-version=TSan \
+		$(LDC_REAL_VERSIONS) $(SOURCES) $(MIMALLOC_TSAN_LIBRARY) \
+		$(MIMALLOC_SYSTEM_LIBS) -of=actors_torture_mimalloc_tsan
+	TSAN_OPTIONS='$(TSAN_OPTIONS)' ./actors_torture_mimalloc_tsan
+
+clean:
+	rm -f actors_torture actors_torture_release actors_torture_tsan \
+		actors_torture_dmd actors_torture_dmd_release \
+		actors_torture_mimalloc actors_torture_mimalloc_dmd \
+		actors_torture_mimalloc_debug actors_torture_mimalloc_tsan *.o
+	rm -rf .build

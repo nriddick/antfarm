@@ -8,9 +8,9 @@
 module fiber_cancel_at;
 
 import antfarm;
-import actors;
-import antfarm_fibers;
-import antfarm_fibers.host : attachFiberDomain;
+import antfarm.actors;
+import ant_fibers;
+import ant_fibers.host : attachFiberDomain;
 import threadpool.host;
 import core.time : MonoTime, msecs, seconds;
 import std.conv : to;

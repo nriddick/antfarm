@@ -12,11 +12,11 @@ make docs
 ```
 
 which runs DMD's Ddoc generator into the ignored `.build/docs/` directory
-(start with `.build/docs/antfarm.html`). The same works wherever DMD exists,
+(start with `.build/docs/antfarm/package.html`). The same works wherever DMD exists,
 Windows included, with the raw command:
 
 ```sh
-dmd -D -Dd.build\docs -o- -version=AntfarmMimallocV3 -I. -Ithreadpool\source antfarm.d antfarm_templates.d actors\package.d actors\actor.d actors\wave.d actors\private_actor.d actors\mimalloc.d threadpool\source\threadpool\host.d
+dmd -D -Dd.build\docs -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool\source antfarm\package.d antfarm\templates.d antfarm\actors\package.d antfarm\actors\actor.d antfarm\actors\wave.d antfarm\actors\private_actor.d antfarm\actors\mimalloc.d threadpool\source\threadpool\host.d
 ```
 
 Ddoc omits declarations that carry no doc comment, so the generated pages
@@ -24,32 +24,35 @@ cover every public declaration of the runtime modules. `make check-docs`
 verifies that: every symbol named in the Symbol column of the table on this
 page exists in the DMD declaration inventory, and every public declaration
 in those modules carries a non-empty Ddoc comment. The public surface is
-reached with `import antfarm;`, `import antfarm_templates;`,
-`import actors;`, or `import threadpool.host;`.
+reached with `import antfarm;`, `import antfarm.templates;`,
+`import antfarm.actors;`, or `import threadpool.host;`.
 
 ## Actor package imports
 
-`import actors;` re-exports three modules:
+`import antfarm.actors;` re-exports three modules:
 
 | Module | Contents |
 | --- | --- |
-| `actors.actor` | public `ActorRuntime`, `ActorOwner`, `ActorHandle`, `ActorBorrow`, `ActorContext`, `ActorInboxNode`, `ActorAllocator`, and result enums |
-| `actors.wave` | public `ActorWave`, `ActorWaveHandle`, and completion hooks |
-| `actors.private_actor` | `PrivateRootPark`, `PrivateChildPark`, `PrivateContext`, `PrivateBorrow`, options, dispositions and outcome enums |
+| `antfarm.actors.actor` | public `ActorRuntime`, `ActorOwner`, `ActorHandle`, `ActorBorrow`, `ActorContext`, `ActorInboxNode`, `ActorAllocator`, and result enums |
+| `antfarm.actors.wave` | public `ActorWave`, `ActorWaveHandle`, and completion hooks |
+| `antfarm.actors.private_actor` | `PrivateRootPark`, `PrivateChildPark`, `PrivateContext`, `PrivateBorrow`, options, dispositions and outcome enums |
 
-`actors.mimalloc` is an optional adapter for the pinned mimalloc v3 allocator;
-it is not part of the `actors` package re-export. See
+`antfarm.actors.mimalloc` is an optional adapter for the pinned mimalloc v3 allocator;
+it is not part of the `antfarm.actors` package re-export. See
 [sizing-and-allocation.md](../guide/sizing-and-allocation.md#the-mimalloc-v3-adapter)
 for its setup and import.
 
 ## Farm
+
+[Using Ant Farm well](../guide/using-it-well.md) collects practical rules and
+links each to its owning contract or tuning page.
 
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
 | Ring construction, tuning and destruction | `AntFarm.create`, `AntFarm.tryCreate`, `AntFarm.checkGeometry`, `FarmCreateError`, `FarmCreateFailure`, `AntFarm.destroy`, `MIN_RING_MIB`, `MAX_RING_MIB`, `ringMiBFromUlongs` | [ARCHITECTURE.md](../../ARCHITECTURE.md#sizing-one-farm) |
 | Producer tickets and registration | `Token`, `Token.valid`, `Tier`, `AntFarm.registerProducer`, `AntFarm.unregisterProducer`, `SUBSCRIBE_FULL`, `SUBSCRIBE_RETRY`, `SUBSCRIBE_INVALID` | [actor-lifecycle.md](actor-lifecycle.md#tokens-and-farm-provenance) |
 | Writing payload tables | `AntFarm.write`, `AntFarm.writeTracked`, `PayloadEntry` | [actor-lifecycle.md](actor-lifecycle.md) |
-| Payload layout and callbacks | `PayloadBody`, `Callback`, `PayloadHeader`, `TableCompletionCallback`, `TableCompletionHook` | [SPEC.md](../../SPEC.md), [README First payload](../../README.md#first-payload) |
+| Payload layout and callbacks | `PayloadBody`, `Callback`, `PayloadHeader`, `TableCompletionCallback`, `TableCompletionHook` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
 | Payload range adapters | `pairPayloads`, `broadcastPayloads`, `PayloadPairRange`, `PayloadBroadcastRange` | [SPEC.md](../../SPEC.md) |
 | Consumers and views | `ConsumerView`, `ConsumerView.subscribe`, `ConsumerView.unsubscribe`, `ConsumerView.consumeNext` | [actor-lifecycle.md](actor-lifecycle.md#consumers-and-views) |
 | Work-cost hints | `rootCostHintAuto`, `rootCostHintFor`, `rootCostHintMaxSplits`, `rootCostHintMaxChunk`, `MAX_CHUNK`, `MAX_AVG_COST`, `DEFAULT_AVG_COST`, `avgCostForChunk` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md) |
@@ -106,7 +109,7 @@ for its setup and import.
 
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Function adaptation | `payloadEntry`, `payloadEntryRuntime`, `callbackFor`, `initPayloadHeader`, `payloadRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [README First payload](../../README.md#first-payload) |
+| Function adaptation | `payloadEntry`, `payloadEntryRuntime`, `callbackFor`, `initPayloadHeader`, `payloadRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
 
 ## Farm host
 

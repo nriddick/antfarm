@@ -1,7 +1,7 @@
 module life.headless;
 
 import life.backend;
-import actors : PrivateOutcomeStatus;
+import antfarm.actors : PrivateOutcomeStatus;
 import threadpool.host : FarmHost;
 import std.conv : to;
 import std.exception : enforce;

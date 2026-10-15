@@ -10,7 +10,7 @@
 module request_deadline;
 
 import antfarm;
-import actors;
+import antfarm.actors;
 import threadpool.host;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;

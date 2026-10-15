@@ -14,7 +14,7 @@ git submodule update --init --recursive
 The actor correctness lane builds the pinned source as a static library with
 `MI_OVERRIDE=OFF`, so it does not replace the C or D runtime allocator. Release,
 `MI_DEBUG=FULL`, and mimalloc-instrumented ThreadSanitizer builds are exercised by
-`actor_torture/Makefile`. The ordinary Ant Farm library and unit-test builds do
+`tests/actors/Makefile`. The ordinary Ant Farm library and unit-test builds do
 not build or link mimalloc.
 
 Dub's `mimalloc-v3` configuration builds the pinned release archive and passes
@@ -25,10 +25,10 @@ Select it directly with `dub build --config=mimalloc-v3`, or from a dependent
 package with `subConfiguration "antfarm" "mimalloc-v3"` in its `dub.sdl`.
 
 For Windows full-debug allocator verification, use
-`actor_torture/run-mimalloc-windows.ps1 -Configuration Debug -Compiler ldc2`
+`tests/actors/run-mimalloc-windows.ps1 -Configuration Debug -Compiler ldc2`
 (or `dmd`). It keeps `MI_DEBUG=FULL` and debug code generation while selecting
 the static release CRT paired with the D executable. See the
-[actor test instructions](../actor_torture/README.md) for both configurations.
+[actor test instructions](../tests/actors/README.md) for both configurations.
 
 To update the pin deliberately:
 

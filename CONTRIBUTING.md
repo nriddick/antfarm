@@ -1,10 +1,11 @@
 # Contributing to Ant Farm
 
-Ant Farm is concurrent, `@nogc` code whose correctness rests on stated
-memory-order arguments. Read the owning document for the area you are changing,
-keep its rules and the implementation in step, and use the checklist below to
-prepare your contribution. There is no CI; the correctness gate is a local
-command.
+Start with `make check-quick SHELL=/usr/bin/bash` for local iteration.
+A local Linux run on 2026-10-14 took **97.209 seconds** (about 1 min 37 s) on
+an AMD Ryzen 9 5900XT with 32 allowed logical CPUs and LDC 1.43.0. Ant Farm is
+concurrent, `@nogc` code whose correctness rests on stated memory-order
+arguments. Read the owning document for the area you change, keep its rules
+and implementation in step, and use the checklist below. There is no CI.
 
 During development, batch related edits and run the smallest useful check of
 the changed behavior. Local commits do not require the full gate; report checks
@@ -55,7 +56,7 @@ topology. Invalid overrides fail the lane. Inspect selection with
 `make perf-gate BASE=<sha> CANDIDATE=<sha>` compares two committed refs on the
 same benchmark source and decides whether the candidate regresses beyond the
 project boundary. It is separate from `make check`. The method, the modes, and
-the decision rules are in [perftest/README.md](perftest/README.md); the measured
+the decision rules are in [tools/perf/README.md](tools/perf/README.md); the measured
 numbers and the tuning guide are in [PERFORMANCE.md](PERFORMANCE.md).
 
 Changes to executable code or its layout can move performance even when the
@@ -75,10 +76,10 @@ During implementation of changes to the Farm, actors, or shared lifecycle:
   or [docs/design/private-actor-ordering.md](docs/design/private-actor-ordering.md)
   for actors. Do not weaken an ordering without the proof that replaces it.
 - Keep the TSan lanes meaningful: do not add annotations that hide a weakened
-  edge (see [review_torture/FARM_ORDERING.md](review_torture/FARM_ORDERING.md)).
+  edge (see [docs/design/farm-ordering.md](docs/design/farm-ordering.md)).
 - New test code stays on druntime threads and atomics, and any new example is a
   compile target in `examples/run_examples.py`.
-- If you change a documentation program, the README First payload, or an
+- If you change a documentation program, the quickstart First payload, or an
   example, `make check` extracts and runs them. Mark partial code blocks as
   fragments.
 
@@ -89,7 +90,7 @@ Before pushing, satisfy these obligations for the accumulated change:
   The agent process's focused mutation policy is in
   [docs/development/agent-workflow.md](docs/development/agent-workflow.md#mutation-selection).
 - Contract violations that must be fatal need a death test in
-  `private_actor_tests` or an equivalent that survives `-release`.
+  `private_tests` or an equivalent that survives `-release`.
 - Establish `make check` evidence for the final candidate when runtime, tests,
   build inputs or extracted example programs change. Pure prose/configuration
   changes use their relevant validation; do not run unrelated runtime matrices.
@@ -103,7 +104,8 @@ recent commits (`git log`).
 
 ## Adding a test lane
 
-Add the lane's target to the root [Makefile](Makefile) and register it in
+Add the lane's target to its suite's Makefile under `tests/` (or to the root
+[Makefile](Makefile) for a repository-wide check) and register it in
 [scripts/check.sh](scripts/check.sh) when it belongs in the full correctness
 gate. Update `make help` so contributors can find it. Decide whether it belongs
 in `make check-quick` too: that target dispatches to `scripts/check.sh --quick`,
@@ -128,7 +130,7 @@ link. Update the owner first. The map and the full ownership index are in
 
 - **Farm:** the layout, invariants, producer, subscription and reclamation
   sections of [SPEC.md](SPEC.md), then
-  [review_torture/FARM_ORDERING.md](review_torture/FARM_ORDERING.md).
+  [docs/design/farm-ordering.md](docs/design/farm-ordering.md).
 - **Public actors:** [docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md),
   [docs/guide/public-actors.md](docs/guide/public-actors.md), then the relevant
   proofs in [docs/design/public-actor-ordering.md](docs/design/public-actor-ordering.md).

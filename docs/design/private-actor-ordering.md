@@ -2,7 +2,7 @@
 
 This page describes the private path's publication, nested-credit, outcome,
 cancellation and final-access reclamation protocols in
-`actors/private_actor.d`. The definitional symbols and the shared Farm and
+`antfarm/actors/private_actor.d`. The definitional symbols and the shared Farm and
 public-actor notation are in
 [public-actor-ordering.md](public-actor-ordering.md#atomic-objects-and-notation);
 the cohort layout invariants and the slab-reuse proof are in
@@ -454,7 +454,7 @@ both orders, emitter-observed deadlines, clock-read counts, held slots, the
 outcome visibility edge under TSan, a 1000-root `cancelAll` shutdown, handle
 identity, generation wrap), each with its mutation, and a tracked torture with
 deadlines, a foreign canceller and `cancelAll`. The selectors are listed in
-[../../private_actor_tests/README.md](../../private_actor_tests/README.md).
+[../../tests/private/README.md](../../tests/private/README.md).
 
 ## Proof to symbol and test map
 
@@ -468,4 +468,4 @@ deadlines, a foreign canceller and `cancelAll`. The selectors are listed in
 | Root tracking control word | `control`, `generation`, `cause`, `flags`, `deadline`, `status`, `PrivateRootHandle.requestCancel` | `root-tracking` / `root-t1`…`root-t8`, `tracked-torture`, `root-tracking-death` |
 | Child continuation custody | `childPending`, `ChildStep`, `childFlags`, `ownJoin_`, `childReturns` | `phase-e1`, `slab-continuation`, `ports-nested`, continuation C-M mutations |
 | Root join state machine | `root.pending`, `rootReturns`, `Service.childReturns`, `collectCompleted`, `pump` (states READY/WAITING/RETURN_QUEUED are descriptive) | `e1-basic`, `e1-root-ready-cas-retry`, `return-cas-retry`, `delayed-final-credit` |
-| Within-shard completion join | completion `atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, runlen)` | `private_actor_tests_tsan join-only` |
+| Within-shard completion join | completion `atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, runlen)` | `private_tests_tsan join-only` |

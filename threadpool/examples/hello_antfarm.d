@@ -173,6 +173,6 @@ int main()
         fprintf(stderr, "hello_antfarm: unexpected counts\n");
         return 1;
     }
-    printf("hello_antfarm: ok\n");
+    printf("hello_antfarm: pinned workers consumed payloads in each accepted LLC group\n");
     return 0;
 }

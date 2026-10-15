@@ -1,7 +1,7 @@
 # Public actor and wave ordering
 
 This page describes the implemented autonomous-activation, intrusive-inbox and
-phase-wave protocols in `actors/actor.d` and `actors/wave.d`. The private path's
+phase-wave protocols in `antfarm/actors/actor.d` and `antfarm/actors/wave.d`. The private path's
 publication, nested-credit and final-access protocol is in
 [private-actor-ordering.md](private-actor-ordering.md); its layout invariants
 are in [private-actor-layout.md](private-actor-layout.md). Both supplement
@@ -37,7 +37,7 @@ caller-observed quiescence described below.
 - A permanent host-owned trampoline is the only callback stored in actor payload
   headers. Reloadable module callbacks never appear directly in the ring.
 - Every actor payload is single-shot and serial: `MaxCs = 1`, `Done = 1`.
-- `antfarm_templates` keeps its current no-unshared-aliasing rule. The actor API
+- `antfarm.templates` keeps its current no-unshared-aliasing rule. The actor API
   is a separate, explicit escape hatch rather than a new ordinary packed
   parameter category.
 
@@ -223,7 +223,7 @@ user completion callback. That callback runs after the release store. An owner
 may observe `finished` and `begin` a new generation before the old callback
 returns. The completion context must outlive the callback. An old callback must
 not touch a reused descriptor, or storage the owner reclaimed after seeing
-`finished`, without separate synchronization. `actor_torture` characterizes this
+`finished`, without separate synchronization. `actors_torture` characterizes this
 contract; it is not a bug reproduction.
 
 The release/acquire chain joins consumers within each shard, shards within a
@@ -577,7 +577,7 @@ with any message payload destructors before unloading code or resetting an arena
 ## Engine aggregate unload fence
 
 The actor torture suite makes the higher-level contract executable with a
-test-side engine generation owner. This is not an `actors` object. It combines
+test-side engine generation owner. This is not an `antfarm.actors` object. It combines
 resident type-erased actor owners with an admission gate for module code frames
 and ownership transferred out of callbacks:
 
@@ -854,11 +854,11 @@ weaken or replace any actor lifecycle handoff edge.
 
 | Proof | Primary symbols | Test selector |
 | --- | --- | --- |
-| Actor-state serial ownership and migration | `ActorSlot.lifecycle`, `slot.dispatch` trampoline | `antfarm_test` (programmatic migration), `actor_torture` (serial entry, migration) |
-| Ready-queue ownership and snapshot extraction | `ActorRuntime.readyHeadWord`, `readyDrainGate`, `readyCarryWord`, `ActorSlot.queueNextWord` | `actor_torture` (1024-actor backlog, four flushers, paused detach) |
-| Farm publication and ring reuse | `AntFarm.write`, `ActorBodyRange`, `Tsent` | `antfarm_test_tsan join-only`, `review_torture` `T16`/`T25`, `leaf_reuse.d` |
-| Wave completion credits | `ActorWave.pendingCredits_`, `tablesPublished_`, `tablesCompleted_`, `status_`, `ActorSlot.waveOwnerWord` | `actor_torture` (`progress equality must not release active table notification`) |
-| Inbox admission and close | `ActorSlot.submissionGate`, `inboxHeadWord`, `inboxCarryWord`, `ActorInboxNode.state_`, `nextWord_`, `completion_` | `actor_torture` (close after reservation/claim/publication/signal, eight-sender race) |
-| Cancel-mode retirement | `ActorRetireMode.cancel`, the `cancelBit` in `ActorSlot.lifecycle` | `actor_torture` (F4b cancel mode, drain-to-cancel escalation, erased owner) |
-| Engine aggregate unload fence | test-side gate and registry in `actor_torture` | `actor_torture` (four stalled claimants) |
-| Within-shard completion join | `atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, runlen)` in `antfarm.d` | `antfarm_test_tsan join-only` |
+| Actor-state serial ownership and migration | `ActorSlot.lifecycle`, `slot.dispatch` trampoline | `antfarm_test` (programmatic migration), `actors_torture` (serial entry, migration) |
+| Ready-queue ownership and snapshot extraction | `ActorRuntime.readyHeadWord`, `readyDrainGate`, `readyCarryWord`, `ActorSlot.queueNextWord` | `actors_torture` (1024-actor backlog, four flushers, paused detach) |
+| Farm publication and ring reuse | `AntFarm.write`, `ActorBodyRange`, `Tsent` | `antfarm_test_tsan join-only`, `tests/farm` `T16`/`T25`, `leaf_reuse.d` |
+| Wave completion credits | `ActorWave.pendingCredits_`, `tablesPublished_`, `tablesCompleted_`, `status_`, `ActorSlot.waveOwnerWord` | `actors_torture` (`progress equality must not release active table notification`) |
+| Inbox admission and close | `ActorSlot.submissionGate`, `inboxHeadWord`, `inboxCarryWord`, `ActorInboxNode.state_`, `nextWord_`, `completion_` | `actors_torture` (close after reservation/claim/publication/signal, eight-sender race) |
+| Cancel-mode retirement | `ActorRetireMode.cancel`, the `cancelBit` in `ActorSlot.lifecycle` | `actors_torture` (F4b cancel mode, drain-to-cancel escalation, erased owner) |
+| Engine aggregate unload fence | test-side gate and registry in `actors_torture` | `actors_torture` (four stalled claimants) |
+| Within-shard completion join | `atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, runlen)` in `antfarm/package.d` | `antfarm_test_tsan join-only` |

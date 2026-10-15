@@ -16,7 +16,7 @@ The module lives in the threadpool package, which depends on `antfarm`.
 ## Setup
 
 ```d
-import actors;
+import antfarm.actors;
 import threadpool.host;
 import std.stdio : writeln;
 
@@ -149,7 +149,7 @@ After `FarmHostFailed`, the caller stays confined until `close()` or
 `FarmHostFailed.workerFailures` contains owned diagnostic snapshots, so an
 assertion's thread-local error object is never used after its worker exits.
 The Error/Exception distinction is preserved; the original subclass, chain
-and stack trace are not. See the [worker failure capture contract](../../threadpool/DESIGN.md#managed-worker-hooks)
+and stack trace are not. See the [worker failure capture contract](../design/threadpool.md#managed-worker-hooks)
 for message/file limits and `sourceType`/`truncated` fields.
 
 ## Teardown
@@ -161,14 +161,9 @@ for message/file limits and `sourceType`/`truncated` fields.
 - no extra producer is outstanding.
 
 If any check fails, it throws and the host stays usable: drain and call it
-again. Otherwise it runs the
-[shutdown order](../reference/actor-lifecycle.md#shutdown-order):
-1. joins the consumers;
-2. finishes the attachments;
-3. destroys parks and runtimes;
-4. restores the caller's affinity;
-5. unregisters the token;
-6. destroys the Farm.
+again. Otherwise it performs the canonical
+[shutdown order](../reference/actor-lifecycle.md#shutdown-order), finishing
+attachments and restoring caller affinity as part of teardown.
 
 `abandon()` stops the consumers, restores affinity and leaks everything that
 did not drain. After `abandon()` or a failed host, call `leak()` on any
@@ -186,7 +181,7 @@ pool, is rejected with a `FarmHostException`, and the running one is left
 alone. Hosts with `workers == 0` start no pool and can coexist.
 
 A caller-driven `FiberDomain` joins the same host with
-`antfarm_fibers.host.attachFiberDomain(host, new FiberDomain(host.farm))`.
+`ant_fibers.host.attachFiberDomain(host, new FiberDomain(host.farm))`.
 [examples/fiber_cancel_at.d](../../examples/fiber_cancel_at.d) shows it.
 
 ## Performance and tuning
@@ -195,7 +190,7 @@ A host's consumers run on the threadpool's worker loop, not a loop you
 wrote. On one measured host, that cost was invisible except where consumers
 were the bottleneck and often found nothing.
 
-The comparison ran [perftest/actor_churn](../../perftest/README.md#actor_churn)
+The comparison ran [tools/perf/actor_churn](../../tools/perf/README.md#actor_churn)
 on each workload twice: with `ANTFARM_CHURN_HOST=1`, where a `FarmHost` owns
 the Farm, the control token and the pinned consumers, and without it, on the
 benchmark's own hand-written consumers. The controller and every consumer CPU
@@ -249,5 +244,5 @@ What to tune:
 To measure on your own machine, run the same command with and without the
 variable (`ANTFARM_CHURN_HOST=1` needs the small tier, `consumers > 0` and a
 CPU list naming the controller followed by each consumer);
-[perftest/README.md](../../perftest/README.md#actor_churn) has the full
+[tools/perf/README.md](../../tools/perf/README.md#actor_churn) has the full
 argument list.

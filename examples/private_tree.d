@@ -6,7 +6,7 @@
 module private_tree;
 
 import antfarm;
-import actors;
+import antfarm.actors;
 import threadpool.host;
 import core.atomic : MemoryOrder, atomicLoad;
 import core.lifetime : move;

@@ -21,20 +21,20 @@ lists every target.
 | Lane | What runs | Compilers |
 | --- | --- | --- |
 | Docs links | `make check-docs`: tracked Markdown relative links and heading anchors (no network), plus `scripts/check-api-docs.py`, the API symbol/coverage check over the Ddoc of the public runtime modules | Python 3, DMD |
-| Root suite | `dub test` (module `unittest` blocks plus `antfarm_test.d`) | LDC, DMD |
-| Threadpool suite | `dub test :threadpool` | LDC, DMD |
-| Fiber suite | `dub test :antfarm-fibers` (smoke suite and module unittests) | LDC, DMD |
-| Threadpool affinity | `confine-test` with full and small affinity masks; `host-test` with the configured host mask | LDC for confine; LDC debug/release and DMD for host |
-| Farm ordering | `make check-farm-ordering`: controlled subscription/reclamation schedules and the leaf-reuse test, with write-audit hooks, plus `scripts/check-ring-stores.py`, which rejects a plain (non-atomic) ring-word store in `writeImpl` | LDC, DMD, Python 3 |
-| Farm TSan | `make run-farm-tsan`: the root suite and `leaf_reuse.d` under ThreadSanitizer | LDC |
-| Actor torture | `actor_torture`: deterministic interleavings and sustained contention for the public actors | LDC, DMD, LDC TSan |
-| Review torture | `review_torture`: adversarial Farm tests | LDC, LDC TSan |
-| Private actors | `private_actor_tests`: unit suite, the extracted private-actor documentation programs, and the fatal-death harness | LDC, DMD, LDC TSan |
-| Examples | `examples/`: the First payload program extracted from [README.md](../../README.md), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
+| Root suite | `dub test` (module `unittest` blocks plus `tests/farm/antfarm_test.d`) | LDC, DMD |
+| Threadpool suite | `dub test :threadpool` (including the FarmHost placement tests on synthetic snapshots) | LDC, DMD |
+| Fiber suite | `dub test :ant_fibers` (smoke suite and module unittests) | LDC, DMD |
+| Threadpool affinity | `dub run :threadpool -c confine-test` with full and small affinity masks; `dub run :threadpool -c host-test` with the configured host mask | LDC for confine; LDC debug/release and DMD for host |
+| Farm ordering | `make -C tests/farm check-farm-ordering`: controlled subscription/reclamation schedules and the leaf-reuse test, with write-audit hooks, plus `scripts/check-ring-stores.py`, which rejects a plain (non-atomic) ring-word store in `writeImpl` | LDC, DMD, Python 3 |
+| Farm TSan | `make -C tests/farm run-farm-tsan`: the root suite and `leaf_reuse.d` under ThreadSanitizer | LDC |
+| Actor torture | `tests/actors`: deterministic interleavings and sustained contention for the public actors | LDC, DMD, LDC TSan |
+| Review torture | `tests/farm`: adversarial Farm tests | LDC, LDC TSan |
+| Private actors | `tests/private`: unit suite, the extracted private-actor documentation programs, and the fatal-death harness | LDC, DMD, LDC TSan |
+| Examples | `examples/`: the First payload program extracted from [quickstart.md](../guide/quickstart.md#first-payload), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
 
-`make check-quick` runs the root unit suite, `make -C review_torture run`
+`make check-quick` runs the root unit suite, `make -C tests/farm run`
 (including `sweep_cursor`), threadpool unit suite, fiber smoke suite, and
-`python3 examples/run_examples.py --ldc-only`. The examples include the README
+`python3 examples/run_examples.py --ldc-only`. The examples include the quickstart
 payload and actor/headless programs in LDC debug and release with 0 and 2
 workers; the terminal front end is omitted. This target needs the LDC toolchain
 (including Dub), Python 3, GNU make and Bash, without DMD, a TSan runtime or a C
@@ -53,8 +53,8 @@ tests to one LLC, supply that LLC's allowed CPUs in `CHECK_ONE_LLC_CPUS`.
 `ANTFARM_HUGE_PAGES=0` is exported for every lane, so the matrix does not depend
 on how the calling shell is configured.
 
-For focused package checks, see [../../threadpool/README.md](../../threadpool/README.md)
-and [../../fibers/README.md](../../fibers/README.md).
+For focused package checks, see [../../threadpool/README.md](../../threadpool/README.md),
+and [../../ant_fibers/README.md](../../ant_fibers/README.md).
 
 Not covered by `make check` (select relevant focused checks during iteration and
 include affected package gates in pre-push scope; these are not a second pipeline):
@@ -64,8 +64,8 @@ either (see `make perf-gate`). Windows has a separate native integration runner
 described below and is not part of this gate.
 
 To run the fiber smoke suite under ThreadSanitizer, build it with
-`DFLAGS='-fsanitize=thread -d-version=TSan -g -O1' dub build :antfarm-fibers -c unittest --compiler=ldc2`.
-In that build `fibers/tests/smoke.d` sets `gcopt=parallel:0`, because druntime's
+`DFLAGS='-fsanitize=thread -d-version=TSan -g -O1' dub build :ant_fibers -c unittest --compiler=ldc2`.
+In that build `tests/ant_fibers/smoke.d` sets `gcopt=parallel:0`, because druntime's
 parallel GC marking intermittently reports a race in its own mark stack.
 When also enabling profiling explicitly, pass `"--DRT-gcopt=parallel:0 profile:1"`
 to preserve that setting.
@@ -85,7 +85,7 @@ sequential caller/task ordering; actual task publication still uses the Farm's
 normal synchronization.
 
 The smoke suite checks TSan context identity, restoration, reuse, and migration.
-Run `fibers/antfarm_antfarm-fibers --tsan-context-only` for the context regression
+Run `ant_fibers/antfarm_ant_fibers --tsan-context-only` for the context regression
 or `--migration-only` for migration across fresh native threads (including
 cancellation and exception unwinding). The full smoke run includes both checks.
 
@@ -105,17 +105,17 @@ cancellation and exception unwinding). The full smoke run includes both checks.
 
 | Command | Use |
 | --- | --- |
-| `make check-farm-ordering` | the Farm ordering and leaf-reuse tests (LDC and DMD) and the raw ring-store check |
-| `make run-farm-tsan` | the Farm suite under ThreadSanitizer |
-| `make -C actor_torture run run-dmd run-tsan` | public actor suite |
-| `make -C review_torture run run-tsan` | adversarial Farm suite |
-| `make -C private_actor_tests run run-dmd run-tsan doc-example death` | private actor suite, documentation programs and death tests |
-| `make -C examples check` | example programs and the README program |
+| `make -C tests/farm check-farm-ordering` | the Farm ordering and leaf-reuse tests (LDC and DMD) and the raw ring-store check |
+| `make -C tests/farm run-farm-tsan` | the Farm suite under ThreadSanitizer |
+| `make -C tests/actors run run-dmd run-tsan` | public actor suite |
+| `make -C tests/farm run run-tsan` | adversarial Farm suite |
+| `make -C tests/private run run-dmd run-tsan doc-example death` | private actor suite, documentation programs and death tests |
+| `make -C examples check` | example programs and the quickstart program |
 
 Each suite has its own README with selectors and the seams it uses:
-[actor_torture](../../actor_torture/README.md),
-[review_torture](../../review_torture/README.md),
-[private_actor_tests](../../private_actor_tests/README.md), and
+[actors_torture](../../tests/actors/README.md),
+[tests/farm](../../tests/farm/README.md),
+[private_tests](../../tests/private/README.md), and
 [examples](../../examples/README.md).
 
 ## Windows x64 integration
@@ -145,7 +145,7 @@ interpreter and arguments.
 | `review` | Plain torture suite, sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
 | `actors` | Public actor deterministic/contention suite with the mimalloc stub |
 | `private` | Private actor suite and six extracted documentation programs |
-| `examples` | README payload and actor/headless examples in debug/release with 0 and 2 workers |
+| `examples` | quickstart payload and actor/headless examples in debug/release with 0 and 2 workers |
 
 The runner forces `ANTFARM_HUGE_PAGES=0`, keeps generated binaries and Dub's
 home under `.build/windows-check/`, and uses local dependencies without registry
@@ -162,7 +162,7 @@ TSan, POSIX fork/death probes (including T01/T17), the Life terminal front end,
 real mimalloc and timing gates are excluded. Existing POSIX-only tests may print
 their own skips within a native suite; Fiber multi-LLC probes also skip on
 single-LLC hosts. Use the separate
-[Windows mimalloc commands](../../actor_torture/README.md) for
+[Windows mimalloc commands](../../tests/actors/README.md) for
 real allocator pairing.
 
 The runner's failure/selection tests include a real Windows child-tree timeout
@@ -179,7 +179,7 @@ benchmark build. Run from the repository root with Python 3 and Git on PATH:
 
 ```text
 python -B scripts/check-doc-links.py
-python -B -m unittest scripts/test_check_doc_links.py perftest/test_perf_gate.py perftest/test_run_performance_md.py perftest/test_private_lifecycle_matrix.py perftest/test_offccd_sweep.py -v
+python -B -m unittest scripts/test_check_doc_links.py tools/perf/test_perf_gate.py tools/perf/test_run_performance_md.py tools/perf/test_private_lifecycle_matrix.py tools/perf/test_offccd_sweep.py -v
 ```
 
 Use `python3` instead of `python` if that is your interpreter's command name.
@@ -201,11 +201,11 @@ establish timing results or replace `make check`.
   are capped at 300 seconds each. Reuse applicable correctness-gate evidence;
   invoking a soak does not itself require another `make check` run.
 - `make check-mimalloc` runs the normal matrix, then the real allocator lanes
-  (`actor_torture` with the pinned mimalloc v3.5.3, release and TSan). It needs
+  (`actors_torture` with the pinned mimalloc v3.5.3, release and TSan). It needs
   the submodule (`git submodule update --init --recursive`), CMake and a C
   toolchain. See [../../third_party/README.md](../../third_party/README.md).
   Other allocator targets (`run-mimalloc-debug`, `run-mimalloc-dmd`) are in
-  [../../actor_torture/Makefile](../../actor_torture/Makefile).
+  [../../tests/actors/Makefile](../../tests/actors/Makefile).
 
 ## Performance is separate
 
@@ -216,7 +216,7 @@ the pinned mimalloc archive, and its output directory must be new. An
 inconclusive result is not a pass. Establish applicable correctness evidence first,
 reusing an existing valid result; run timing serially with nothing else heavy on
 the host. The method, the modes and the
-decision rules are in [../../perftest/README.md](../../perftest/README.md).
+decision rules are in [../../tools/perf/README.md](../../tools/perf/README.md).
 
 Changes to executable code or its layout can move performance even when the
 algorithm is unchanged, so treat a clean diff as no evidence of identical
@@ -226,11 +226,11 @@ performance.
 
 `make check` extracts and runs two kinds of Markdown program:
 
-- The complete First payload program in [README.md](../../README.md), by
+- The complete First payload program in [quickstart.md](../guide/quickstart.md#first-payload), by
   `examples/run_examples.py`.
 - The six complete private-actor programs in the
   [private-actor guides](../guide/private-actors.md), by
-  `private_actor_tests/extract_doc_examples.py`.
+  `tests/private/extract_doc_examples.py`.
 
 Mark partial code blocks as fragments; the extractors reject a block that is
 neither a complete `void main` program nor marked as a fragment. Moving a

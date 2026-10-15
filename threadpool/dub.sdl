@@ -20,10 +20,10 @@ configuration "library" {
 // Default `dub test`: topology_parse.d contains unittest blocks only.
 configuration "unittest" {
 	targetType "executable"
-	mainSourceFile "tests/unittest_main.d"
-	sourceFiles "tests/topology_parse.d" "tests/linux_topology_parse.d" "tests/resolution.d" \
-		"tests/synthetic_topology.d" "tests/host_plan.d"
-	stringImportPaths "tests"
+	mainSourceFile "../tests/threadpool/unittest_main.d"
+	sourceFiles "../tests/threadpool/topology_parse.d" "../tests/threadpool/linux_topology_parse.d" "../tests/threadpool/resolution.d" \
+		"../tests/threadpool/synthetic_topology.d" "../tests/threadpool/host_plan.d"
+	stringImportPaths "../tests/threadpool"
 }
 
 configuration "hello" {
@@ -35,25 +35,25 @@ configuration "hello" {
 
 configuration "wait-races" {
     targetType "executable"
-    mainSourceFile "tests/wait_races.d"
+    mainSourceFile "../tests/threadpool/wait_races.d"
 }
 
 configuration "affinity-test" {
     targetType "executable"
-    mainSourceFile "tests/windows_affinity.d"
+    mainSourceFile "../tests/threadpool/windows_affinity.d"
 }
 
 // Linux frozen-OS-scope regression; re-executes itself under taskset.
 configuration "scope-test" {
     targetType "executable"
-    mainSourceFile "tests/os_scope_live.d"
+    mainSourceFile "../tests/threadpool/os_scope_live.d"
 }
 
 // Windows/Linux caller confine/restore and stopRequested:
 // `dub run -c confine-test`, also under `taskset -c 0-3` on Linux.
 configuration "confine-test" {
     targetType "executable"
-    mainSourceFile "tests/confine_live.d"
+    mainSourceFile "../tests/threadpool/confine_live.d"
 }
 
 // Live FarmHost regression: `dub run -c host-test`. Needs two accepted
@@ -62,21 +62,21 @@ configuration "confine-test" {
 // as a failure unless ALLOW_HOST_SKIP=1.
 configuration "host-test" {
     targetType "executable"
-    mainSourceFile "tests/host_live.d"
+    mainSourceFile "../tests/threadpool/host_live.d"
     versions "FarmHostTestHooks"
 }
 
 // wake() racing a worker-failure shutdown: `dub run -c wakefail`.
 configuration "wakefail" {
     targetType "executable"
-    mainSourceFile "tests/wakefail.d"
+    mainSourceFile "../tests/threadpool/wakefail.d"
 }
 
 // Live hardware binary: `dub run -c live-test` (not `dub test`).
 configuration "live-test" {
 	targetType "executable"
 	versions "threadpool_live_sisyphus"
-	sourceFiles "tests/live_sisyphus.d"
+	sourceFiles "../tests/threadpool/live_sisyphus.d"
 }
 
 platform "windows" {

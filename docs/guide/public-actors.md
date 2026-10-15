@@ -1,6 +1,6 @@
 # Public actors
 
-The `actors` package adds explicit state lifetime and exclusive
+The `antfarm.actors` package adds explicit state lifetime and exclusive
 callback-local borrowing without changing the worker side: ordinary Farm
 consumers execute actor activations and wave tables. The shared contracts are
 in [../reference/actor-lifecycle.md](../reference/actor-lifecycle.md); this
@@ -18,7 +18,7 @@ core.lifetime), lend with a `ref` parameter, and iterate owner arrays with
 actors, owned through an `ActorAllocator`.
 
 ```d
-import actors;
+import antfarm.actors;
 
 struct Body { ulong position; }
 
@@ -45,7 +45,7 @@ must consume. `flush(token, limit)` publishes up to a bounded ready snapshot
 (default 32, cap 256) as Farm tables; a `0` return is empty, backpressured, or
 contended, and those are not distinguished.
 
-Use `result.accepted` (or `accepted(result)`, imported from `actors`) to check
+Use `result.accepted` (or `accepted(result)`, imported from `antfarm.actors`) to check
 whether a wake, send, or retirement request was accepted. For `ActorWakeResult`,
 `queued` and `coalesced` mean an activation was published or already exists.
 For `ActorSendResult`, those same values mean the node transferred to the actor.
@@ -55,7 +55,7 @@ false. Acceptance does not mean execution, a reply, or retirement has finished;
 keep the original result when you need a specific rejection reason.
 
 ```d
-import actors;
+import antfarm.actors;
 
 void main() @safe pure nothrow @nogc
 {
@@ -185,7 +185,7 @@ projection layout. The projection model and its commit rules are in
 [../design/public-actor-ordering.md](../design/public-actor-ordering.md).
 
 An `ActorWaveTrigger` can park a Fiber until that boundary instead of polling;
-see [../../fibers/README.md](../../fibers/README.md). The compiled form is
+see [../../ant_fibers/README.md](../../ant_fibers/README.md). The compiled form is
 [../../examples/public_wave.d](../../examples/public_wave.d).
 
 ## Retirement and reclamation
