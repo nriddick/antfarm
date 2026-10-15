@@ -4,7 +4,7 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
-## 1.8.2 (unreleased)
+## 1.8.2
 
 1.8.2 reorganizes the repository. Module, package, directory and make-target
 names change with no compatibility aliases, shims or forwarding modules; see

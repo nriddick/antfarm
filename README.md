@@ -9,8 +9,7 @@ Start with [First payload](docs/guide/quickstart.md#first-payload) for a complet
 single-threaded program, or [choose a work representation](docs/guide/choosing-work.md).
 Before building on the Farm, read [Using Ant Farm well](docs/guide/using-it-well.md):
 one page with the correctness and performance rules that matter most.
-The current release is **1.8.1**; **1.8.2** (repository layout and documentation)
-is in progress.
+The current release is **1.8.2**.
 Public and private actors are supported, with the limits in their guides and
 source/ABI stability subject to the [promotion gates](ROADMAP.md#actor-api-promotion-gates).
 See [CHANGELOG.md](CHANGELOG.md) for release and compatibility notes.

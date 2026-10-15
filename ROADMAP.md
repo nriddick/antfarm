@@ -1,28 +1,25 @@
 # Ant Farm roadmap
 
-The current release is **1.8.1**. This page lists remaining
+The current release is **1.8.2**. This page lists remaining
 and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
 no history here. Windows validation is separate and is not
 part of its local gate.
 
-## 1.8.1
+## 1.8.2
 
-The release content is in [CHANGELOG.md](CHANGELOG.md). It passed the Linux
-pre-push gates, the native Windows integration matrix with DMD 2.112.1 and
-LDC 1.42 on a single-LLC x64 host, and a final Linux sanity check. The numbers
-in [PERFORMANCE.md](PERFORMANCE.md) remain tied to the revisions at which they
-were measured.
+The release content is in [CHANGELOG.md](CHANGELOG.md): the repository
+reorganization, verified usage guidance, a payload-first onboarding path and
+documentation deduplication. It passed the Linux pre-push gates and the native
+Windows integration matrix. The numbers in [PERFORMANCE.md](PERFORMANCE.md)
+remain tied to the revisions at which they were measured.
 
 Small perf-gate shifts on this host are dominated by code layout; performance
 is reassessed holistically in dedicated sessions.
 
-## 1.8.2 in progress
+## Next
 
-Done on the branch: verified usage guidance, a payload-first onboarding path,
-documentation deduplication, and the directory/module reorganization (see the
-CHANGELOG migration table). Remaining: revisions to PERFORMANCE.md, including
-tail-latency rows at chunk 2 and 4, measured holistically in a dedicated
-performance session.
+- Revise PERFORMANCE.md in a dedicated performance session, including
+  tail-latency rows at chunk 2 and 4.
 
 ## Deferred after 1.8.0
 
