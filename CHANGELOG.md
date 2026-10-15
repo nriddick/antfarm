@@ -32,6 +32,20 @@ the migration table below.
   section of [PERFORMANCE.md](PERFORMANCE.md#fibers).
 - `make docs` keeps source paths; start at `.build/docs/antfarm/package.html`.
 
+### Documentation and tooling
+
+- [Using Ant Farm well](docs/guide/using-it-well.md) (new) collects the
+  correctness and performance rules on one page, each checked against the
+  code and linked to its owner.
+- The documentation map follows a payload-first onboarding path. The README is
+  shorter; First payload lives in the [quickstart](docs/guide/quickstart.md).
+  ARCHITECTURE, the guides and the lifecycle reference no longer repeat each
+  other's rules.
+- `tools/perf/perf_gate.py` builds revisions from before and after the
+  reorganization, and maps benchmark imports across a mixed pair.
+  `--build-only` builds both sides without measuring.
+- The `tests/farm` `baseline` target builds again.
+
 ### Migration table
 
 | Old | New |

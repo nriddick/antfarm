@@ -18,9 +18,11 @@ is reassessed holistically in dedicated sessions.
 
 ## 1.8.2 in progress
 
-Planned for 1.8.2: verified usage guidance, a payload-first onboarding path,
-and documentation deduplication. Directory/module reorganization and further
-performance characterization remain for later passes.
+Done on the branch: verified usage guidance, a payload-first onboarding path,
+documentation deduplication, and the directory/module reorganization (see the
+CHANGELOG migration table). Remaining: revisions to PERFORMANCE.md, including
+tail-latency rows at chunk 2 and 4, measured holistically in a dedicated
+performance session.
 
 ## Deferred after 1.8.0
 

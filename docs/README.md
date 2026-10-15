@@ -4,6 +4,10 @@ This is the map of the repository's documentation and the canonical owner of
 each rule. Each rule is stated in full in exactly one place; other pages
 summarize it and link. Update the owner first, then the pages that link to it.
 
+New here? Keep [Using Ant Farm well](guide/using-it-well.md) open while you
+read: it collects the correctness and performance rules on one page and links
+each to its owner.
+
 ## Run something
 
 Start with First payload, then follow these steps. Each step pairs a program
