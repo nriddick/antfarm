@@ -187,7 +187,7 @@ The two submission-underflow calls are listed separately.
 | Erased adapter misuse | Invalid creation metadata returns an invalid owner; requesting a mismatched borrow size/alignment is fatal | `ActorErasedAdapter.createActor` / `ActorErasedBorrow.value`; `child:erased-borrow-mismatch` |
 
 For the wave lifecycle and outcome checks only, build with `make -C
-actors_torture` and run `tests/actors/actors_torture --waves`. The individual
+tests/actors` and run `tests/actors/actors_torture --waves`. The individual
 signal regressions accept `--wave-wake`, `--wave-send`, and `--wave-late-send`.
 Each fails against the old dispatch-to-`failed` mapping after verifying the
 operation and autonomous signal both ran, at "benign wave signal must not fail

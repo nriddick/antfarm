@@ -600,6 +600,8 @@ throughput guarantees. See [ant_fibers/README.md](ant_fibers/README.md) for
 usage and [docs/design/ant_fibers.md](docs/design/ant_fibers.md) for scheduler
 invariants.
 
+Run the Dub commands in this Fiber characterization from `ant_fibers/`.
+
 ### What to compare
 
 Ant Farm payloads and managed Fibers solve different problems:
