@@ -4,6 +4,11 @@ Ant Farm has one distributor and four ways to put work on it. Start with the
 narrowest representation that fits; each layer adds state lifetime and
 scheduling rules above the payload path.
 
+An input element does not automatically need an actor. Use actors when their
+identity, state lifetime or tree joins serve the application; independent
+stateless cells can be payload entries. If one actor per element is required,
+keep that representation while tuning [child batches and host emission bursts](hosting.md#cheap-work-with-parked-workers).
+
 | Your work is... | Use | Example |
 | --- | --- | --- |
 | short, `nothrow @nogc`, no identity | a bare **payload** | [iota_sum.d](../../examples/iota_sum.d) |

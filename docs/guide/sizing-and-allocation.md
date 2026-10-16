@@ -94,6 +94,14 @@ accepted prefix, so even a large limit does not allocate extra child dispatch
 storage. Zero is fatal; overflowing member capacity returns null. Values above
 256 are legal for both roots and children.
 
+The default limit is 256; it is a general starting point, not a throughput
+target for every cohort. For thousands of cheap, uniform child callbacks,
+measure a larger child limit such as 4096, independently of the root limit.
+Small tables can make pool-wide park/wake overhead dominate the work.
+`FarmHost` batches emission rounds before waking workers by default; see
+[cheap work with parked workers](hosting.md#cheap-work-with-parked-workers)
+for its bound and tuning choices.
+
 ### Work-cost hints
 
 The trailing `avgCost` argument is the Farm work-cost class the table publishes

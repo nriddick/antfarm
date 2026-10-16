@@ -6,6 +6,14 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- `FarmHost.step()` now batches up to 16 emission rounds before waking workers.
+  This amortizes pool-wide wakes for cheap actor tables while retaining the
+  wake needed for reclamation on backpressure. Each round visits every emitter;
+  an empty round ends the burst early. `FarmHostOptions.maxEmitRounds = 1`
+  restores single-round stepping. Attachments may now be called several times
+  per step and must return promptly, reporting actual publications. See
+  [host tuning](docs/guide/hosting.md#cheap-work-with-parked-workers) for batch,
+  idle-policy and deadline guidance.
 - `FarmHost.step()` now wakes parked workers even when its emitters publish
   nothing. This releases completed epochs retained by sleeping consumers and
   prevents publication-backpressure loops from stalling with indefinite waits.

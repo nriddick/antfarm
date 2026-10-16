@@ -150,6 +150,11 @@ struct FarmHostOptions
     PoolOptions pool = defaultHostPoolOptions;
     /// Farm geometry and extra participants.
     FarmSizing farm;
+    /// Maximum emission rounds per step, before waking workers and consuming
+    /// once on the caller (or yielding). Each round visits every emitter;
+    /// a round with no publications ends the burst early. Must be positive.
+    /// 1 restores single-round stepping; larger bursts amortize park/wake cost.
+    uint maxEmitRounds = 16;
 }
 
 /// Internal: the full host placement `planHost` computes. The public views
@@ -294,8 +299,11 @@ enum HostState : ubyte
 struct HostAttachment
 {
     string name; /// for reports
-    /// Run by step() on the control thread with the host token. Returns items
-    /// published (drives the park-mode wake). May throw; the host stays open.
+    /// Run on the control thread with the host token, once per emission round
+    /// in step(). Returns items published; zero does not imply drained.
+    /// May be called again in the same step when any emitter published.
+    /// Must return promptly, including on backpressure; never wait for a worker.
+    /// May throw; the host stays open.
     size_t delegate(ref Token token) emit;
     /// close() precondition. Null = always drained.
     bool delegate() drained;
@@ -755,9 +763,11 @@ final class FarmHost
 
     // ---- progress -----------------------------------------------------------
 
-    /// One step: emit every runtime, park and attachment, wake parked workers
-    /// even if nothing was published, then one `consumeNext` on the caller's view
-    /// (a yield when it found nothing, or without a view). Never infers idle.
+    /// One step: emit every runtime, park and attachment for at most
+    /// maxEmitRounds rounds, stopping after a round with no publications.
+    /// Wake parked workers even if nothing was published, then one
+    /// `consumeNext` on the caller's view (a yield when it found nothing, or
+    /// without a view). A zero-publication round never implies idle or done.
     /// Throws `FarmHostFailed` if a pool worker failed (state `failed`). The
     /// caller stays confined until `close()` or `abandon()` restores affinity.
     void step()
@@ -765,11 +775,18 @@ final class FarmHost
         requireOpen("step");
         if (!token_.valid)
             throw new FarmHostException("control token was moved out of host.token");
-        foreach (ref o; owned_)
-            cast(void) o.emit(token_);
-        foreach (ref a; attachments_)
-            if (a.emit !is null)
-                cast(void) a.emit(token_);
+        foreach (round; 0 .. plan_.options.maxEmitRounds)
+        {
+            bool published;
+            foreach (ref o; owned_)
+                published |= o.emit(token_) != 0;
+            foreach (ref a; attachments_)
+                if (a.emit !is null)
+                    published |= a.emit(token_) != 0;
+            // Do not spin here on backpressure: the workers may need the
+            // wake below to release completed epochs before another write.
+            if (!published) break;
+        }
         // A peer can finish an epoch after other consumers' final idle
         // sweeps. Those parked consumers still pin its storage, so even a
         // refused publication needs polls before the producer can retry.
@@ -1205,6 +1222,8 @@ package(threadpool) HostPlan planHost(ref const TopologySnapshot snap, const Far
         problems ~= "pool.managedWorker must be empty (the host owns worker hooks)";
     if (options.idle == WorkerIdle.park && options.idleTimeout <= Duration.zero)
         problems ~= "idleTimeout must be positive (Duration.max parks until woken)";
+    if (options.maxEmitRounds == 0)
+        problems ~= "maxEmitRounds must be positive";
 
     const candidates = resolvePool(snap, options.pool);
     immutable callerConsumes = options.callerConsumes || options.workers == 0;

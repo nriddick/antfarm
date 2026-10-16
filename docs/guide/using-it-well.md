@@ -88,6 +88,10 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    [host progress and waking](hosting.md#progress-and-waking),
    [reclamation](../../SPEC.md#8-table-accounting-and-segment-reclamation), and
    [payload headers](../../SPEC.md#2d-payload-layout).
+   For large cohorts of cheap callbacks, measure the child batch limit and
+   host emission burst before adding workers: small tables can spend more
+   time waking the pool than doing work. See
+   [cheap work with parked workers](hosting.md#cheap-work-with-parked-workers).
 7. **Treat `expectedConsumers` as a hint.** A positive value seeds epoch-zero sharding;
    later epochs use the live count. A valid hint far from reality can cost
    performance, never safety. The actual cap is 128 simultaneously subscribed

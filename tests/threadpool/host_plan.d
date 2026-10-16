@@ -36,6 +36,18 @@ private ushort llcOf(ref const TopologySnapshot snap, ProcessorId id)
 
 unittest
 {
+    auto snap = f1();
+    FarmHostOptions options;
+    options.workers = 0;
+    options.maxEmitRounds = 0;
+    auto problems = problemsOf(snap, options);
+    assert(problems.length == 1 && problems[0].canFind("maxEmitRounds must be positive"));
+    options.maxEmitRounds = 1;
+    assert(problemsOf(snap, options).length == 0);
+}
+
+unittest
+{
     // 1: automatic picks the group with more accepted CPUs; ties go to the lowest llc.
     auto tied = f1();
     FarmHostOptions options;

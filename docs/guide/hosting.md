@@ -114,7 +114,9 @@ and other threads may `send` and `wake`, but someone still has to flush or
 pump.
 
 `step()` does the following, in order:
-1. Flushes every host runtime and pumps every host park and attachment.
+1. Flushes every host runtime and pumps every host park and attachment, in
+   rounds. It stops after a round publishes nothing, or after
+   `FarmHostOptions.maxEmitRounds` rounds (default **16**, must be positive).
 2. Wakes parked workers, even if nothing was published, to request consumption
    and reclamation progress.
 3. Consumes once on the caller's view, or yields when there is no caller view.
@@ -122,6 +124,18 @@ pump.
 `waitUntil(done)` runs `done()` before every step, so the predicate is the
 place to drain `takeOutcome`. Neither call ever infers idle from a zero flush,
 pump or `consumeNext`.
+
+Each round visits every emitter in registration order (host-owned emitters,
+then attachments), including emitters that returned zero in an earlier round.
+This batches publications before a wake without draining one busy emitter
+indefinitely. The bound counts rounds, not tables or elapsed time: a park may
+publish several pending child tables per pump and a runtime flushes up to four
+times per visit. Attachments must return promptly, including on backpressure,
+and must report the number of items they actually published. An attachment may
+be called several times in one step. Set `maxEmitRounds = 1` for the previous
+single-round behavior or when the control thread must check outcomes and
+deadlines more frequently. `flush`, `pump` and `publish` retain their individual
+publication/wake behavior.
 
 Idle workers park by default (`WorkerIdle.park`, `idleTimeout = 1.msecs`).
 The host's own wrappers wake them as soon as they publish: `step`, `flush`,
@@ -197,6 +211,37 @@ A caller-driven `FiberDomain` joins the same host with
 [examples/fiber_cancel_at.d](../../examples/fiber_cancel_at.d) shows it.
 
 ## Performance and tuning
+
+### Cheap work with parked workers
+
+A large private cohort inherits a batch limit of 256 unless its parent was
+configured otherwise. Publishing a small table and waking every worker can
+cost more than its callbacks, especially with many workers. The default
+16-round step burst amortizes these notifications across several tables; it
+still wakes on an empty round so a full ring can reclaim storage. Workers
+retain the selected idle policy, including indefinite parks, and
+`callerConsumes = false` still keeps callbacks off the control thread.
+
+For a large, uniform child wave, also measure an explicit child batch limit
+such as `context.createChildren!Cell(population, 4096)`. That reduces table
+overhead as well as wake frequency without changing the root batch limit.
+The Farm quota can split it into smaller accepted prefixes. Larger root
+batches have a different trade-off: a slow root holds the other roots in its
+physical table until it returns. See [batch and quota choices](sizing-and-allocation.md#configuring-batches-and-farm-quota).
+
+Measure end-to-end completion and small-request latency, with the same work,
+worker placement, idle policy and verification. Use release builds and serial
+runs on a quiet host. `WorkerIdle.spin` can help sustained work on dedicated
+cores, but burns CPU while idle; it is an explicit application choice. A shorter
+finite park timeout is not a substitute for efficient publication batches.
+
+For a slow run, log application checkpoints as well as the deadline. Steady
+progress up to a watchdog is evidence to check the workload's normal completion
+time; it is not proof of a deadlock. Confirm under a bounded, realistic deadline
+with all correctness checks enabled. Do not retry timed-out correctness runs
+until one passes, or silently change the work or idle policy.
+
+### Host loop versus hand-written consumers
 
 A host's consumers run on the threadpool's worker loop, not a loop you
 wrote. On one measured host, that cost was invisible except where consumers

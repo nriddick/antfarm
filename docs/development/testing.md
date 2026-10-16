@@ -65,6 +65,10 @@ and restore publication. Its internal waits are bounded. Run it alone with
 watchdog (for example `timeout --signal=KILL 60` on Linux). It fails rather than
 skipping when two worker CPUs cannot be selected.
 
+It also checks bounded emission bursts with a busy and a quiet attachment,
+the single-round override, early exit after a zero-publication round, and
+caller consumption after each burst. These cases run without pool workers.
+
 Not covered by `make check` (select relevant focused checks during iteration and
 include affected package gates in pre-push scope; these are not a second pipeline):
 the dedicated fiber TSan smoke suite, the review-torture write-protection

@@ -162,7 +162,7 @@ void childOnlyWake(FarmHost host)
     PrivateRootHandle root;
     atomicStore(gChildWavesStarted, 0u);
     enforce(park.spawn(Root(null, outputs.ptr), root) == PrivateSpawnResult.spawned, "spawn");
-    host.step(); // publishes the root table and wakes a worker
+    host.pump(park); // exactly one pump: publish the root, leave its child wave queued
     auto deadline = MonoTime.currTime + 10.seconds;
     while (atomicLoad(gChildWavesStarted) == 0) // no pump: the child wave stays queued
     {
@@ -648,6 +648,71 @@ bool workersFit()
     return true;
 }
 
+// A busy emitter must not monopolize a step or skip quieter emitters. The
+// caller must regain control (and consume) after a bounded publication burst.
+shared ulong emissionJobs;
+
+long emissionJob(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
+{
+    atomicOp!"+="(emissionJobs, 1UL);
+    return 1;
+}
+
+void emissionBursts()
+{
+    foreach (limit; [1u, 3u, FarmHostOptions.init.maxEmitRounds])
+    {
+        auto options = guarded(0);
+        options.maxEmitRounds = limit;
+        auto host = new FarmHost(options);
+        scope (exit) host.closeOrAbandon();
+        atomicStore(emissionJobs, 0UL);
+        size_t remaining = limit + 2, published;
+        string visits;
+        PayloadHeader header;
+        header.maxCs = header.done = 1;
+        header.call = &emissionJob;
+        host.attach(HostAttachment("busy emitter", (ref Token token) {
+            visits ~= 'a';
+            if (remaining == 0) return 0;
+            immutable n = host.farm.write(header, ReclamationBodies([1], 1), 1, token);
+            remaining -= n;
+            published += n;
+            return n;
+        }));
+        host.attach(HostAttachment("quiet emitter", (ref Token token) {
+            visits ~= 'b';
+            return 0;
+        }));
+        host.attach(HostAttachment("no emitter")); // null emit is allowed
+        host.step();
+        enforce(published == limit && remaining == 2, "busy emitter exceeded/missed burst bound");
+        foreach (i; 0 .. limit)
+            enforce(visits[2*i .. 2*i+2] == "ab", "every round visits each emitter in order");
+        enforce(visits.length == 2*limit && atomicLoad(emissionJobs) > 0,
+            "step must return to caller consumption after its burst");
+
+        // Stop publishing. One empty round must return promptly, even when
+        // previously published callbacks have not all finished.
+        remaining = 0;
+        visits = null;
+        host.step();
+        enforce(visits == "ab", "empty round ends burst without inferring completion");
+        host.waitUntil(() => atomicLoad(emissionJobs) == published);
+
+        if (limit > 1)
+        {
+            remaining = 1;
+            visits = null;
+            host.step();
+            enforce(visits == "abab" && remaining == 0,
+                "short burst stops at the first empty round");
+            host.waitUntil(() => atomicLoad(emissionJobs) == published);
+        }
+    }
+    writeln("PASS: emission bursts are bounded, fair, stop on no progress, and let the caller consume");
+}
+
 // Hold a peer after its armed, final empty poll while the first callback is
 // still incomplete. This models preemption at the exact reclamation/park
 // boundary, rather than relying on a sleep to make the race likely.
@@ -803,6 +868,7 @@ int main(string[] args)
         return 0; // close refuses; closeOrAbandon must stop the workers
     }
     workersZero();
+    emissionBursts();
     closeBeforeDrain();
     timeoutThenCancel(0);
     extraProducers();
