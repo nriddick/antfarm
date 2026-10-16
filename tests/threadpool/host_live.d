@@ -648,8 +648,150 @@ bool workersFit()
     return true;
 }
 
+// Hold a peer after its armed, final empty poll while the first callback is
+// still incomplete. This models preemption at the exact reclamation/park
+// boundary, rather than relying on a sleep to make the race likely.
+shared bool reclamationEntered, reclamationReleaseJob, reclamationHoldIdle;
+shared bool reclamationIdleHeld, reclamationReleaseIdle;
+shared uint reclamationWorker;
+shared ulong reclamationFinished;
+
+void awaitReclamation(scope bool delegate() ready, string diagnostic)
+{
+    immutable deadline = MonoTime.currTime + 5.seconds;
+    for (;;)
+    {
+        if (ready()) return;
+        enforce(MonoTime.currTime < deadline, diagnostic);
+        Thread.yield();
+    }
+}
+
+long reclamationJob(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+{
+    if (body[0] == 0)
+    {
+        atomicStore(reclamationEntered, true);
+        while (!atomicLoad(reclamationReleaseJob)) Thread.yield();
+    }
+    atomicOp!"+="(reclamationFinished, 1UL);
+    return 1;
+}
+
+struct ReclamationBodies
+{
+    ulong[1] value = [1];
+    size_t count;
+    @property bool empty() const nothrow @nogc { return count == 0; }
+    @property const(ulong)[] front() const nothrow @nogc { return value[]; }
+    void popFront() nothrow @nogc { --count; }
+    @property ReclamationBodies save() const nothrow @nogc { return this; }
+    @property size_t length() const nothrow @nogc { return count; }
+}
+
+version (Windows)
+    import threadpool.sys.win_wait : gWait;
+else version (linux)
+    import threadpool.sys.linux_wait : gWait;
+
+void holdReclamationIdle(WorkerSelf* self, ref ConsumerView view, bool consumed)
+    nothrow @nogc
+{
+    if (!consumed && atomicLoad(reclamationHoldIdle)
+        && view.oldestEi < view.newestEi
+        && view.nextSeq == atomicLoad(view.F.Wt)
+        && atomicLoad(gWait[self.workerIndex].wakeWord) == 1)
+    {
+        // There are only two workers; the other is blocked in the first job.
+        atomicStore(reclamationHoldIdle, false);
+        atomicStore(reclamationWorker, self.workerIndex);
+        atomicStore(reclamationIdleHeld, true);
+        while (!atomicLoad(reclamationReleaseIdle)) Thread.yield();
+    }
+}
+
+void reclamationProgress()
+{
+    atomicStore(reclamationEntered, false);
+    atomicStore(reclamationReleaseJob, false);
+    atomicStore(reclamationHoldIdle, false);
+    atomicStore(reclamationIdleHeld, false);
+    atomicStore(reclamationReleaseIdle, false);
+    atomicStore(reclamationFinished, 0UL);
+    hostTestAfterConsume = &holdReclamationIdle;
+    scope (exit) hostTestAfterConsume = null;
+    auto options = guarded(2);
+    options.callerConsumes = false;
+    options.idleTimeout = Duration.max;
+    auto host = new FarmHost(options);
+    scope (exit)
+    {
+        // Release both gates before any failure unwinds into worker join.
+        atomicStore(reclamationReleaseJob, true);
+        atomicStore(reclamationReleaseIdle, true);
+        host.closeOrAbandon();
+    }
+    PayloadHeader header;
+    header.maxCs = header.done = 1;
+    header.call = &reclamationJob;
+    enforce(host.farm.write(header, ReclamationBodies([0], 1), 1, host.token, 3) == 1,
+        "initial delayed callback publication");
+    host.wake();
+    awaitReclamation(() => atomicLoad(reclamationEntered), "delayed callback did not start");
+    ulong published = 1;
+    immutable fillDeadline = MonoTime.currTime + 5.seconds;
+    for (;;)
+    {
+        enforce(MonoTime.currTime < fillDeadline, "ring did not reach backpressure");
+        immutable n = host.farm.write(header, ReclamationBodies([1], 1_000_000),
+            1, host.token, 3);
+        if (n == 0) break;
+        published += n;
+        host.wake(); // every accepted publication already has its required wake
+    }
+    awaitReclamation(() => atomicLoad(reclamationFinished) == published - 1,
+        "peer did not finish all unblocked callbacks");
+    atomicStore(reclamationHoldIdle, true);
+    host.wake();
+    awaitReclamation(() => atomicLoad(reclamationIdleHeld), "peer missed armed idle boundary");
+    atomicStore(reclamationReleaseJob, true);
+    awaitReclamation(() => atomicLoad(reclamationFinished) == published,
+        "delayed callback did not complete");
+    // Callback return precedes epoch confirmation. Observe that independently
+    // before asserting that completed storage, not unfinished work, is pinned.
+    auto farm = host.farm;
+    awaitReclamation(() {
+        foreach (k; 0 .. farm.K - 1)
+            if (atomicLoad(farm.stats[k].seqt) + atomicLoad(farm.stats[k].sd)
+                < atomicLoad(farm.stats[k + 1].seqt)) return false;
+        return true;
+    }, "old epochs did not confirm");
+    enforce(host.farm.write(header, ReclamationBodies([1], 1), 1, host.token, 3) == 0,
+        "held peer must still pin the completed ring");
+    host.step(); // no runtimes, parks, attachments, or caller consumption
+    enforce(atomicLoad(gWait[atomicLoad(reclamationWorker)].wakeWord) == 0,
+        "step without publications must notify the armed peer");
+    atomicStore(reclamationHoldIdle, false);
+    atomicStore(reclamationReleaseIdle, true);
+    awaitReclamation(() {
+        if (host.farm.write(header, ReclamationBodies([1], 1), 1, host.token, 3) == 1)
+            return true;
+        host.step();
+        return false;
+    }, "step did not restore publication progress");
+    host.wake();
+    host.waitUntil(() => atomicLoad(reclamationFinished) == published + 1);
+    writeln("PASS reclamation: completed epochs released by step with no publications, forever waits");
+}
+
 int main(string[] args)
 {
+    if (args.length == 2 && args[1] == "--reclamation-only")
+    {
+        enforce(workersFit(), "reclamation test requires two worker CPUs");
+        reclamationProgress();
+        return 0;
+    }
     if (args.length == 2 && args[1] == "--undrained-exit")
     {
         auto host = new FarmHost(guarded(2));
@@ -672,6 +814,7 @@ int main(string[] args)
         return 0;
     writeln(FarmHost.resolve(guarded(2)).summary());
     workersTwo();
+    reclamationProgress();
     confineCaller();
     rawTokenPickup();
     timeoutThenCancel(2);

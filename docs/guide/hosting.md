@@ -115,7 +115,8 @@ pump.
 
 `step()` does the following, in order:
 1. Flushes every host runtime and pumps every host park and attachment.
-2. Wakes parked workers if any of them published.
+2. Wakes parked workers, even if nothing was published, to request consumption
+   and reclamation progress.
 3. Consumes once on the caller's view, or yields when there is no caller view.
 
 `waitUntil(done)` runs `done()` before every step, so the predicate is the
@@ -133,6 +134,17 @@ for the host's life. `wake()` may be called from any thread while the host is
 open. It may overlap `close()`, `abandon()` or a worker-failure shutdown:
 teardown stores a non-open state and waits for in-flight wakes before
 stopping the pool.
+
+A worker can park while another worker still runs a callback in an epoch it
+holds. Completing that callback does not itself wake the parked worker to
+release its reference. A full ring can therefore refuse publication even
+after all callbacks finish. Keep calling `step()` on publication backpressure:
+each step requests another worker poll, including when no emitter publishes.
+One wake or a fixed number of polls before the peer finishes is insufficient.
+Raw `host.farm.write` loops must wake after accepted writes and call `step()`
+before retrying refused writes. `step()` respects `callerConsumes = false`;
+it does not run callbacks on that caller. This progress guarantee requires the
+control thread to keep stepping and callbacks eventually to return.
 
 ## Deadlines and failures
 

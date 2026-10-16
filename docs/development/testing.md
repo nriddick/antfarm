@@ -56,6 +56,15 @@ on how the calling shell is configured.
 For focused package checks, see [../../threadpool/README.md](../../threadpool/README.md),
 and [../../ant_fibers/README.md](../../ant_fibers/README.md).
 
+The host lane includes a delayed-callback/full-ring reclamation regression with
+two workers, no caller consumption and indefinite parks. It holds a peer after
+its armed final poll, completes the delayed callback, verifies that publication
+is still refused, then requires `step()` without emissions to notify the peer
+and restore publication. Its internal waits are bounded. Run it alone with
+`dub run :threadpool -c host-test -- --reclamation-only` under an external
+watchdog (for example `timeout --signal=KILL 60` on Linux). It fails rather than
+skipping when two worker CPUs cannot be selected.
+
 Not covered by `make check` (select relevant focused checks during iteration and
 include affected package gates in pre-push scope; these are not a second pipeline):
 the dedicated fiber TSan smoke suite, the review-torture write-protection

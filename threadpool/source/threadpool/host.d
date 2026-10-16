@@ -320,6 +320,9 @@ version (FarmHostTestHooks)
     __gshared int hostTestFailStart = -1;
     /// Allocated on the control thread before start(); workers only store it.
     __gshared Throwable hostTestStartFailure;
+    /// Test-only observer after a consumer poll, before the idle decision.
+    /// Install before construction and clear only after the workers stop.
+    __gshared void function(WorkerSelf*, ref ConsumerView, bool) nothrow @nogc hostTestAfterConsume;
 }
 
 // Subscribe failures cannot throw from workerBody (@nogc nothrow). The
@@ -370,7 +373,13 @@ private bool hostBody(WorkerSelf* self) @nogc nothrow
         atomicOp!"+="(gHostSubscribed, 1u);
     }
     try
-        return tHostView.consumeNext();
+    {
+        immutable consumed = tHostView.consumeNext();
+        version (FarmHostTestHooks)
+            if (hostTestAfterConsume !is null)
+                hostTestAfterConsume(self, tHostView, consumed);
+        return consumed;
+    }
     catch (Throwable t)
     {
         noteWorkerFailure(self, t);
@@ -747,7 +756,7 @@ final class FarmHost
     // ---- progress -----------------------------------------------------------
 
     /// One step: emit every runtime, park and attachment, wake parked workers
-    /// if anything was published, then one `consumeNext` on the caller's view
+    /// even if nothing was published, then one `consumeNext` on the caller's view
     /// (a yield when it found nothing, or without a view). Never infers idle.
     /// Throws `FarmHostFailed` if a pool worker failed (state `failed`). The
     /// caller stays confined until `close()` or `abandon()` restores affinity.
@@ -756,13 +765,15 @@ final class FarmHost
         requireOpen("step");
         if (!token_.valid)
             throw new FarmHostException("control token was moved out of host.token");
-        size_t published;
         foreach (ref o; owned_)
-            published += o.emit(token_);
+            cast(void) o.emit(token_);
         foreach (ref a; attachments_)
             if (a.emit !is null)
-                published += a.emit(token_);
-        if (published != 0 && parkMode_)
+                cast(void) a.emit(token_);
+        // A peer can finish an epoch after other consumers' final idle
+        // sweeps. Those parked consumers still pin its storage, so even a
+        // refused publication needs polls before the producer can retry.
+        if (parkMode_)
             pool_.wakeAll();
         if (poolRunning_ && pool_.stopRequested)
             failed();

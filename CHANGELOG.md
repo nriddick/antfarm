@@ -4,6 +4,14 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
+## Unreleased
+
+- `FarmHost.step()` now wakes parked workers even when its emitters publish
+  nothing. This releases completed epochs retained by sleeping consumers and
+  prevents publication-backpressure loops from stalling with indefinite waits.
+  Raw publication loops must step on refusal and wake after accepted writes.
+  Parked-worker step loops may incur more wake overhead; spin mode is unchanged.
+
 ## 1.8.2
 
 1.8.2 reorganizes the repository. Module, package, directory and make-target
