@@ -92,6 +92,8 @@ class Checks:
                                  "antfarm/package.d", "antfarm/allocation.d"], versions)
 
     def review(self):
+        self.run([sys.executable, "-B", "tests/farm/run_parallel.py",
+                  "--compiler", self.compiler])
         common = ["tests/farm/torture_common.d", "antfarm/package.d",
                   "antfarm/allocation.d", "antfarm/templates.d"]
         self.build_run("torture", ["tests/farm/torture_tests.d", *common])

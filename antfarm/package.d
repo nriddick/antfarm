@@ -658,6 +658,30 @@ alias PayloadBody = const(ulong)[];
 /// multi-threaded payloads and mixed tables point into the ring.
 alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration) nothrow @nogc @system;
 
+// A blocking adapter must not re-enter a view whose walk is in a callback.
+// This is TLS, including completion hooks, and has no release-build cost.
+version (assert) private bool farmCallbackActive;
+
+package bool inFarmCallback() nothrow @nogc @safe
+{
+    version (assert) return farmCallbackActive;
+    else return false;
+}
+
+private struct FarmCallbackScope
+{
+    version (assert)
+    {
+        bool previous;
+        this(bool active) nothrow @nogc @safe
+        {
+            previous = farmCallbackActive;
+            farmCallbackActive = active;
+        }
+        ~this() nothrow @nogc @safe { farmCallbackActive = previous; }
+    }
+}
+
 /// Low-level notification attached to one physical payload table. The Farm
 /// invokes `call(context)` exactly once, on the consumer that advances that
 /// table's primary Tprogress to Tlen. The pointed-to hook and its context
@@ -3064,6 +3088,7 @@ private:
     void enterPayload(shared(ulong)* bp, ulong absIdx, bool loopAll) nothrow @nogc @system
     {
         pragma(inline, true);
+        version (assert) auto callbackScope = FarmCallbackScope(true);
         auto head = cast(PayloadHeader*)(bp + absIdx);
         // Header fields other than Pcount are ring words. Load them raw so
         // wrap reuse is atomic vs the producer's store-raw, matching Thead.
@@ -3121,6 +3146,7 @@ private:
                     uint runlen) nothrow @nogc @system
     {
         pragma(inline, true);
+        version (assert) auto callbackScope = FarmCallbackScope(true);
         PayloadHeader head;
         head.maxCs = 1;
         head.done = 1;
@@ -3310,6 +3336,7 @@ private:
                         auto context = hook.context;
                         if (notify is null)
                             fatal("table completion hook lost callback");
+                        version (assert) auto callbackScope = FarmCallbackScope(true);
                         notify(context);
                     }
                 }

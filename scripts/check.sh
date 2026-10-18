@@ -137,6 +137,7 @@ host_test dmd
 host_test ldc2 --build=release
 run "${make_cmd[@]}" check-docs
 run "${make_cmd[@]}" -C tests/farm check-farm-ordering
+run "${make_cmd[@]}" -C tests/farm check-parallel-dmd
 run "${make_cmd[@]}" -C tests/farm run-farm-tsan
 run "${make_cmd[@]}" -C tests/actors run run-dmd run-tsan death
 run "${make_cmd[@]}" -C tests/farm run run-tsan

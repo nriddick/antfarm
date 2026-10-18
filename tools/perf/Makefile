@@ -17,6 +17,9 @@ MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
 all: throughput dual tail actor_ready actor_churn scaling offccd c2c
 
+parallel: parallel.d $(FARM_SOURCES) $(ROOT)/antfarm/parallel.d $(ROOT)/antfarm/templates.d
+	$(DC) $(DFLAGS) -I$(ROOT) $^ -of=$@
+
 actor_churn: actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) $(THREADPOOL_SOURCES)
 	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source \
 		actor_churn.d $(FARM_SOURCES) $(ACTOR_SOURCES) -of=$@
@@ -102,4 +105,4 @@ offccd-smoke: offccd c2c
 	python3 -B offccd_sweep.py --suite smoke --out /tmp/offccd-smoke-$$$$
 
 clean:
-	rm -f throughput tail dual actor_ready actor_churn actor_churn_mimalloc scaling offccd c2c *.o
+	rm -f throughput tail dual actor_ready actor_churn actor_churn_mimalloc scaling offccd c2c parallel *.o

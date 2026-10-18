@@ -35,10 +35,10 @@ and the same actor cannot belong to overlapping unfinished waves. Fibers add
 `scope(exit)`, application signals, and cooperative cancellation; a Fiber that
 never suspends is usually better represented as a payload.
 
-The project intentionally has no general parallel-loop abstraction.
-Callers can construct countable Farm payloads directly when their ownership and
-completion contract is clear. A higher-level bounded parallel API may be
-designed later without preserving the removed experimental surface.
+For independent countable work, [parallel loops](parallel-loops.md) provide
+ST grains, MT slices, asynchronous completion hooks and a blocking foreach
+adapter. Raw ranges also compose into caller-owned payload batches. Use a
+private tree when the computation needs structured nested joins.
 
 The Farm rules are in [SPEC.md](../../SPEC.md).
 

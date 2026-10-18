@@ -23,6 +23,8 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
                            (LDC toolchain including Dub and Python 3; no DMD/TSan)
   make check-docs          tracked Markdown relative links and anchors (no network)
                            plus the API reference symbol/coverage check (needs DMD)
+  make -C tests/farm check-parallel
+                          ST/MT parallel ranges, joins and callback guards
   make -C tests/farm check-farm-ordering
                            Farm ordering and leaf-reuse tests, LDC and DMD
                            plus the writeImpl raw ring-store check
@@ -87,7 +89,7 @@ check-mimalloc:
 # -op keeps source paths, so the two package.d files get separate pages.
 # mimalloc is included with its own version so the optional allocator
 # adapter appears in the reference without a C dependency.
-DOCS_SOURCES := antfarm/package.d antfarm/templates.d \
+DOCS_SOURCES := antfarm/package.d antfarm/templates.d antfarm/parallel.d \
 	antfarm/actors/package.d antfarm/actors/actor.d antfarm/actors/wave.d antfarm/actors/private_actor.d \
 	antfarm/actors/mimalloc.d threadpool/source/threadpool/host.d
 DOCS_DIR := .build/docs

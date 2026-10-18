@@ -52,6 +52,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [using-it-well.md](guide/using-it-well.md) | check correctness and tuning rules before building on the Farm |
 | [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown |
 | [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, or Fiber |
+| [parallel-loops.md](guide/parallel-loops.md) | compose countable ranges, choose ST grains or MT slices, and join parallel regions |
 | [public-actors.md](guide/public-actors.md) | create, address, wake, retire and reclaim public actors and waves |
 | [private-actors.md](guide/private-actors.md) | own a private root tree: roots, cohorts, dispatch, retirement |
 | [private-results-and-waits.md](guide/private-results-and-waits.md) | result ports, subsets, continuations, `waitChildren`, folds |
@@ -87,6 +88,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | Farm algorithm, table layout, compact ST tables, callback header, memory-order contract | [SPEC.md](../SPEC.md) |
 | Layers, sizing formulas and entries per quota | [ARCHITECTURE.md](../ARCHITECTURE.md) |
 | Work-representation and public/private actor choice | [guide/choosing-work.md](guide/choosing-work.md) |
+| Parallel loop API, range ownership, completion proof and blocking restrictions | [guide/parallel-loops.md](guide/parallel-loops.md) |
 | First payload and the initial producer/consumer/actor model | [guide/quickstart.md](guide/quickstart.md) |
 | Runnable actor programs and their commands | [examples/README.md](../examples/README.md) |
 | FarmHost setup, placement, idle and wake, control-thread rule, close and abandon | [guide/hosting.md](guide/hosting.md) |

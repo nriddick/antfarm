@@ -43,6 +43,7 @@ tools/perf/actor_churn_mimalloc
 tools/perf/scaling
 tools/perf/offccd
 tools/perf/c2c
+tools/perf/parallel
 tests/private/private_tests
 tests/private/private_tests_dmd
 tests/private/private_tests_release

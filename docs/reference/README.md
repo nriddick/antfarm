@@ -16,7 +16,7 @@ which runs DMD's Ddoc generator into the ignored `.build/docs/` directory
 Windows included, with the raw command:
 
 ```sh
-dmd -D -Dd.build\docs -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool\source antfarm\package.d antfarm\templates.d antfarm\actors\package.d antfarm\actors\actor.d antfarm\actors\wave.d antfarm\actors\private_actor.d antfarm\actors\mimalloc.d threadpool\source\threadpool\host.d
+dmd -D -Dd.build\docs -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool\source antfarm\package.d antfarm\templates.d antfarm\parallel.d antfarm\actors\package.d antfarm\actors\actor.d antfarm\actors\wave.d antfarm\actors\private_actor.d antfarm\actors\mimalloc.d threadpool\source\threadpool\host.d
 ```
 
 Ddoc omits declarations that carry no doc comment, so the generated pages
@@ -25,7 +25,7 @@ verifies that: every symbol named in the Symbol column of the table on this
 page exists in the DMD declaration inventory, and every public declaration
 in those modules carries a non-empty Ddoc comment. The public surface is
 reached with `import antfarm;`, `import antfarm.templates;`,
-`import antfarm.actors;`, or `import threadpool.host;`.
+`import antfarm.parallel;`, `import antfarm.actors;`, or `import threadpool.host;`.
 
 ## Actor package imports
 
@@ -57,6 +57,15 @@ links each to its owning contract or tuning page.
 | Consumers and views | `ConsumerView`, `ConsumerView.subscribe`, `ConsumerView.unsubscribe`, `ConsumerView.consumeNext` | [actor-lifecycle.md](actor-lifecycle.md#consumers-and-views) |
 | Work-cost hints | `rootCostHintAuto`, `rootCostHintFor`, `rootCostHintMaxSplits`, `rootCostHintMaxChunk`, `MAX_CHUNK`, `MAX_AVG_COST`, `DEFAULT_AVG_COST`, `avgCostForChunk` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md) |
 | Huge pages | `AntFarm.usedLargePages`, `DEFAULT_HUGE_PAGES`, `DEFAULT_SMALL_TABLE_THRESHOLD` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md#memory-backing) |
+
+## Parallel loops
+
+Parallel loop adapters are a separate module:
+
+| Topic | Symbols | Explanation |
+| --- | --- | --- |
+| Parallel payload ranges and options | `parallelRange`, `parallelSlices`, `ParallelRange`, `ParallelForm`, `Options` | [Parallel loops](../guide/parallel-loops.md) |
+| Asynchronous and blocking regions | `parallelFor`, `ParallelHandle`, `parallelForWait`, `parallel`, `ParallelLoop` | [Parallel loops](../guide/parallel-loops.md) |
 
 ## Public actors
 

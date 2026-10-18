@@ -38,6 +38,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 COVERAGE_MODULES = [
     "antfarm/package.d",
     "antfarm/templates.d",
+    "antfarm/parallel.d",
     "antfarm/actors/actor.d",
     "antfarm/actors/wave.d",
     "antfarm/actors/private_actor.d",

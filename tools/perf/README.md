@@ -265,3 +265,45 @@ python3 tools/perf/private_lifecycle_matrix.py --binary tools/perf/actor_churn_m
 `--mimalloc-version` shape the run. The output directory is written in place
 and contains `metadata.json`, `runs.jsonl`, and `summary.json`. Treat it as
 local evidence; nothing under it is checked in.
+
+## Parallel-loop M1
+
+Build the focused range benchmark with `make -C tools/perf parallel`. On
+Windows, from the repository root:
+
+```text
+ldc2 -O2 -release -I. tools/perf/parallel.d antfarm/parallel.d antfarm/templates.d antfarm/package.d antfarm/allocation.d -of=.build/parallel_bench.exe
+```
+
+Run one cell at a time on an otherwise idle host:
+
+```text
+tools/perf/parallel --form=st --grain=64 --n=100000 --cost=16 --workers=8 --rounds=20
+tools/perf/parallel --form=mt --n=100000 --cost=16 --workers=8 --rounds=20
+tools/perf/parallel --form=mt --n=100000 --cost=16 --workers=8 --embedded=4096
+```
+
+The grid axes are form (st, mt), grain (1, 8, 64, 256), element count, item
+cost, workers, cost-class, and embedded element count. Grain applies to ST
+entries and the additional ST batch; MT iteration blocks follow slice size
+and the 512-iteration cap. `--slices=0` snapshots SqCs; `--slices=1` is the
+explicit lone-MT comparison. Workers includes the calling thread.
+
+Use at least 1, 2, 4, 8 and the available larger worker counts, N of 1K,
+100K and 1M, and costs 0, 16 and 256. Compare `--embedded=0` with a fixed
+additional batch (for example 4096). The batch uses the same item function
+and its own range, concatenated into the caller's write. Record OS, compiler,
+CPU placement and repeated-run spread alongside the CSV. This harness does
+not pin workers, compare OpenMP, or establish the committed-ref perf gate.
+
+CSV reports mean ns and reserved ring words per round after one warm-up.
+Every round verifies all outputs. A publication generation plus an idle
+acknowledgment from every consumer joins the raw ranges without adding an
+atomic per item; this barrier is included in timing. Ring words include
+physical tables, shard counters and padding. The harness measures raw range
+composition, not the allocation/hook cost of the asynchronous convenience API.
+
+ST with grain is the standalone hypothesis, while MT slices trade a bounded
+entry count for more iteration arbitration. Treat the proposed crossover as
+a hypothesis until measured; no form is declared a universal winner. See
+[parallel-loop shapes and joins](../../docs/guide/parallel-loops.md).

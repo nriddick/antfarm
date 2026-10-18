@@ -33,7 +33,7 @@ t19: torture_common.d t19_flood_lap.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/
 sweep_cursor: torture_common.d sweep_cursor.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d
 	$(DC) $(DFLAGS) -d-version=AntfarmSweepStats torture_common.d sweep_cursor.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=$@
 
-run: torture_tests sweep_cursor
+run: torture_tests sweep_cursor check-parallel
 	./torture_tests
 	./sweep_cursor
 
@@ -43,6 +43,14 @@ run-t19: t19
 run-tsan:
 	$(DC) -g -O1 -fsanitize=thread -d-version=TSan torture_common.d torture_tests.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=torture_tests_tsan
 	TSAN_OPTIONS='$(TSAN_OPTIONS)' ./torture_tests_tsan
+	python3 run_parallel.py --tsan
+
+.PHONY: check-parallel check-parallel-dmd
+check-parallel:
+	python3 run_parallel.py --compiler $(DC)
+
+check-parallel-dmd:
+	python3 run_parallel.py --compiler dmd
 
 run-t19-tsan:
 	$(DC) -g -O1 -fsanitize=thread -d-version=TSan torture_common.d t19_flood_lap.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d -of=t19_tsan

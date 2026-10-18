@@ -156,3 +156,18 @@ must observe the real leaf/root/sweep/reservation chain. The root-level
 leaf-reuse test under LDC and DMD; `make -C tests/farm run-farm-tsan` includes leaf reuse
 under TSan. See [the ordering audit](../../docs/design/farm-ordering.md) for proofs and mutation
 evidence, including a leaf-acquire defect hidden by the former annotations.
+
+## Parallel-loop adapters
+
+`python3 run_parallel.py --compiler ldc2` (or `dmd`) builds and runs the
+ST/MT range and completion checks in debug and release. It covers empty and
+short ranges, large/uneven grains, the 512-iteration cap, partial submission,
+forward checkpoints, stepped ranges, stack-borrowing foreach, four worker
+threads, early handle destruction after publication, and a deliberately held
+MT callback that must delay the join. Debug death probes reject nested waits
+from ST, MT and table hooks; debug/release reject escaping foreach bodies.
+Each compiler/run has a 300-second timeout.
+
+`make check-parallel` runs LDC by default; `make check-parallel-dmd` runs
+DMD. `make run` includes the LDC check; `make run-tsan` also invokes
+`run_parallel.py --tsan`. The Windows review lane runs the selected compiler.

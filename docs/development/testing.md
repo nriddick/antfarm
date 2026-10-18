@@ -248,3 +248,20 @@ performance.
 Mark partial code blocks as fragments; the extractors reject a block that is
 neither a complete `void main` program nor marked as a fragment. Moving a
 documentation program means updating the extractor path in the same change.
+
+### Parallel-loop checks
+
+The Farm review lane includes `tests/farm/run_parallel.py --compiler ldc2`
+(debug/release and fatal probes). The full Linux gate also selects DMD and
+LDC TSan; the Windows review lane selects its requested compiler(s). Direct
+commands from the repository root:
+
+```text
+python -B tests/farm/run_parallel.py --compiler ldc2
+python -B tests/farm/run_parallel.py --compiler dmd
+```
+
+On Linux use `python3`; `--tsan` selects the focused LDC sanitizer build.
+Coverage includes both forms, empty/uneven inputs, partial admission and
+backpressure, callback joins, borrowed stack delegates, and forbidden nested
+waits. This lane does not establish performance; M1 is a separate benchmark.

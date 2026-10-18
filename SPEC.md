@@ -522,6 +522,12 @@ The `Ci` that drew `X == 0` for a shard (the first claimant, at most one per sha
 
 Priority of roles: if the same run that would qualify `Ci` for the yield is also the shard-completing run (the 7a-e completion sum lands on `Shlen`), the completer outcome takes precedence — `Ci` gains the sweeper role for this table and does not yield early, so the completer's foreign-shard sweep and MT pass are never lost to a mid-tick advance. The yield is only considered after a run that did not complete the shard. A yielded `Ci` also drops any carried sweeper role (7e): it begins the next table as a normal consumer without role baggage. Only a shard-completing result advances the sweeper role; observing the shared-shard signal permits the yield and does not grant the role.
 
+Consumer callbacks and table-completion hooks run inside an active view walk.
+That walk is not re-entrant. Blocking parallel-loop adapters are forbidden
+there; assertion builds diagnose this with a thread-local callback flag. The
+[parallel-loop contract](docs/guide/parallel-loops.md#blocking-loops) owns the
+adapter lifetime and nested-work rules.
+
 ### 7c. Secondary Work Claims
 
 If `Tmt > 0` there are some payloads that are themselves multithreaded. In the primary pathway, `Ci`'s `Shi` maps it to a slice of the full payload set using the shard counters for iteration. Here `Shi` maps to a round-robin assignment of the multithreaded Payloads using a Payload's internal counter for iteration: work shard `Shi` visits MT-index positions `Shi, Shi+SqCs, ...`. An admitted visitor loops over calls until no unissued iteration remains.

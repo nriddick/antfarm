@@ -6,6 +6,12 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- Added `antfarm.parallel`: ST range grains, bounded MT slices, asynchronous
+  submission handles and completion hooks, blocking help-drain calls, and
+  a scoped foreach adapter. Assertion builds reject blocking loops in Farm
+  callbacks and table hooks. See [parallel loops](docs/guide/parallel-loops.md)
+  for partial submission, lifetimes and joins, and the M1 benchmark for tuning.
+
 - `FarmHost.step()` now batches up to 16 emission rounds before waking workers.
   This amortizes pool-wide wakes for cheap actor tables while retaining the
   wake needed for reclamation on backpressure. Each round visits every emitter;
