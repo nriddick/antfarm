@@ -733,6 +733,24 @@ completion; autonomous wake, send, and retirement paths must not bypass that
 ownership. Typed wave operation code must likewise remain resident until the wave
 finishes.
 
+### Erased C wave bridge
+
+The runtime-free C adapter uses this same reservation/dispatch/credit protocol.
+Erased admission omits only the typed size/alignment comparison; Farm identity,
+generation, idle lifecycle and membership checks still apply. Its five-word
+payload adds an operation pointer and context to the typed three-word identity.
+State metadata is read only after reservation has pinned the actor generation.
+No actor lifecycle or membership ordering is weakened.
+
+The C wrapper's completion bridge stores a separate callback-done flag with
+release ordering after invoking the copied user hook. That store is its final
+wrapper access. The C ready query acquire-loads the flag and validates the
+observed wave generation and finished status. Thus ready joins both phase writes
+and the callback tail. Single-orchestrator begin resets the flag before the new
+generation is published; old observation handles fail generation validation.
+C reuse/destruction require ready, and destruction also requires observer
+quiescence. See [C ABI waves](c-abi.md#runtime-free-actor-waves).
+
 ### Private canonical state and public projections
 
 The preferred state model is not two freely mutable copies of the whole actor.

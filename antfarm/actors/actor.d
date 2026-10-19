@@ -1882,17 +1882,18 @@ private ActorInboxNode* popInboxNode(ActorSlot* slot,
 /// ready queue. The scheduled lifecycle pins state through payload execution;
 /// aggregate membership then prevents reclamation until the whole wave has
 /// finished. Cancellation restores the lifecycle immediately.
-package bool reserveActorWavePayload(ActorSlot* slot, ulong generation,
+package bool reserveActorWavePayload(bool erased = false)(ActorSlot* slot, ulong generation,
         AntFarm* expectedFarm, size_t stateSize, size_t stateAlignment,
         void* waveOwner, ref ActorSlot* memberHead)
     nothrow @nogc @system
 {
     if (slot is null || generation == 0 || expectedFarm is null
             || waveOwner is null
-            || slot.runtime is null || slot.runtime.farm !is expectedFarm
-            || slot.stateSize != stateSize
-            || slot.stateAlignment != stateAlignment)
+            || slot.runtime is null || slot.runtime.farm !is expectedFarm)
         return false;
+    static if (!erased)
+        if (slot.stateSize != stateSize || slot.stateAlignment != stateAlignment)
+            return false;
 
     ulong expected = lifecycleWord(generation, phaseIdle);
     immutable replacement = lifecycleWord(generation, phaseScheduled);
@@ -1980,8 +1981,8 @@ package void releaseActorWaveMembership(ActorSlot* slot, void* waveOwner)
 /// publication. The acquire verification below joins the prior actor release;
 /// the exit CAS both publishes this operation and detects a racing pending or
 /// retirement request. A second scheduled-to-running RMW would add no owner.
-package bool dispatchActorWavePayload(T, alias operation)(ActorSlot* slot,
-        ulong generation) nothrow @nogc @system
+package bool dispatchActorWavePayload(T, alias operation, Args...)(ActorSlot* slot,
+        ulong generation, Args args) nothrow @nogc @system
 {
     auto observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     if (wordGeneration(observed) != generation
@@ -1989,9 +1990,20 @@ package bool dispatchActorWavePayload(T, alias operation)(ActorSlot* slot,
         fatal("actor wave dispatch lost reservation");
     bool clean = (observed & (retireBit | pendingBit)) == 0;
 
-    ActorBorrow!T borrow;
-    borrow.state_ = cast(T*) slot.state;
-    operation(borrow);
+    static if (Args.length != 0 && is(T == ActorErasedBorrow))
+    {
+        ActorErasedBorrow borrow;
+        borrow.state_ = slot.state;
+        borrow.stateSize_ = slot.stateSize;
+        borrow.stateAlignment_ = slot.stateAlignment;
+        operation(borrow, args);
+    }
+    else
+    {
+        ActorBorrow!T borrow;
+        borrow.state_ = cast(T*) slot.state;
+        operation(borrow);
+    }
 
     observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     bool queue;

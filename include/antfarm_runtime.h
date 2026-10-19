@@ -58,7 +58,9 @@ uint32_t af_host_state(af_host *);
    parks, sleeping consumer pins can otherwise block producer reclamation.
    step performs that wake and caller progress, and reports worker failures.
 
-   Close also returns AF_BUSY while host-owned actors remain live or queued.
+   Close also returns AF_BUSY while host-owned actors remain live or queued,
+   or any wave bound to the borrowed Farm remains allocated (even if ready).
+   Destroy waves before close.
    Successful close invalidates their runtime and submission handles.
    Close requires application completion signals for every submitted job,
    returned tokens, unsubscribed external views, and quiescent external users.
@@ -68,9 +70,10 @@ uint32_t af_host_state(af_host *);
    diagnostic. Failed D hosts follow FarmHost's abandonment policy. */
 af_status af_host_close(af_host *);
 /* Emergency shutdown: stop/join workers, intentionally retain the Farm's ring
-   and unfinished work (including actors and allocator contexts), and consume
-   the host handle. All its actor runtimes, owners and handles become invalid. Same external-participant
-   preconditions as close. This is an explicit leak for unrecoverable failure. */
+   and unfinished work (including actors, waves and allocator contexts), and
+   consume the host handle. All associated C handles become invalid. Return
+   external tokens and views first; waves may remain and are deliberately
+   leaked. Keep retained code/contexts resident. This is for unrecoverable failure. */
 af_status af_host_abandon(af_host *);
 
 /* Status diagnostics use af_last_error_message()/af_last_os_error(). No D

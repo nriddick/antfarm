@@ -188,6 +188,12 @@ An `ActorWaveTrigger` can park a Fiber until that boundary instead of polling;
 see [../../ant_fibers/README.md](../../ant_fibers/README.md). The compiled form is
 [../../examples/public_wave.d](../../examples/public_wave.d).
 
+C consumers use the same wave ownership protocol through
+[antfarm_actors.h](../../include/antfarm_actors.h); see
+[the C wave guide](../design/c-abi.md#runtime-free-actor-waves) and
+[c_wave.c](../../examples/c_wave.c). Its additional ready query joins the
+completion callback before descriptor reuse or destruction.
+
 ## Retirement and reclamation
 
 Stop senders first, then `owner.requestRetire()` (the default is drain). Late

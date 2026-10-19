@@ -23,7 +23,7 @@ public import antfarm.actors.actor : ActorBorrow, ActorHandle;
 
 import antfarm : AntFarm, PayloadBody, Callback, TableCompletionHook,
     Tier, Token, avgCostForChunk, fatal;
-import antfarm.actors.actor : ActorSlot, cancelActorWavePayload,
+import antfarm.actors.actor : ActorSlot, ActorErasedBorrow, cancelActorWavePayload,
     dispatchActorWavePayload, releaseActorWaveMembership,
     reserveActorWavePayload;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicFetchSub, atomicLoad,
@@ -37,6 +37,10 @@ private enum uint waveFailedBit = 1U << 2;
 private enum uint waveInterruptedBit = 1U << 3;
 // Cost class of a published wave table: claims of 8 entries.
 private enum uint publishAvgCost = avgCostForChunk(8);
+
+// Resident adapter bridge. State remains borrowed only during the operation.
+package alias ActorErasedWaveOperation = void function(
+    scope ref ActorErasedBorrow, void*) nothrow @nogc @system;
 
 // ==== Section: completion callback, hook and handle ====
 /// Signature of ActorWaveCompletionHook.call: invoked exactly once, after
@@ -64,8 +68,8 @@ struct ActorWaveCompletionHook
 /// The owning ActorWave storage must outlive all of its handles.
 struct ActorWaveHandle
 {
-    private ActorWave* wave_;
-    private ulong generation_;
+    package ActorWave* wave_;
+    package ulong generation_;
 
     /// The generation this handle observes.
     @property ulong generation() const pure nothrow @nogc @safe
@@ -271,6 +275,38 @@ public:
         return written;
     }
 
+    // Erased handles may have different state layouts. Keep the same reservation,
+    // rollback and aggregate-credit protocol as typed publication. The range maps
+    // foreign handles without allocating or reinterpreting their representation.
+    package size_t publishErased(R)(R actors, ref Token token,
+            ActorErasedWaveOperation operation, void* context,
+            uint avgCost = publishAvgCost) nothrow @nogc @system
+    {
+        if (actors.length == 0) return 0;
+        if (atomicLoad!(MemoryOrder.acq)(generation_) == 0)
+            fatal("publish uninitialized actor wave");
+        if ((atomicLoad!(MemoryOrder.acq)(status_) & waveSealedBit) != 0)
+            fatal("publish sealed actor wave");
+        if (operation is null) fatal("null erased actor wave operation");
+        immutable oldLength = atomicFetchAdd!(MemoryOrder.acq_rel)(tablesPublished_, 1UL);
+        if (oldLength == ulong.max) fatal("actor wave table count wrap");
+        atomicFetchAdd!(MemoryOrder.acq_rel)(pendingCredits_, 1UL);
+        ActorWaveBodyRange!(void, R, true) bodies;
+        bodies.actors_ = actors;
+        bodies.wave_ = &this;
+        bodies.operation_ = operation;
+        bodies.context_ = context;
+        immutable written = cast(size_t) farm_.write(&erasedActorWavePayloadCallback,
+            bodies, 5, token, avgCost, &tableCompletion_);
+        if (written == 0)
+        {
+            immutable before = atomicFetchSub!(MemoryOrder.acq_rel)(tablesPublished_, 1UL);
+            if (before == 0) fatal("actor wave table count underflow");
+            releaseCredit();
+        }
+        return written;
+    }
+
     /// Close publication. Equality between Wprogress and Wlen is diagnostic
     /// only: the producer hold and every table notification must
     /// release their credits before the exactly-once finished transition.
@@ -359,11 +395,16 @@ private:
 }
 
 // ==== Section: private payload body range and callback ====
-private struct ActorWaveBodyRange(T)
+private struct ActorWaveBodyRange(T, R = ActorHandle!T[], bool erased = false)
 {
-    ActorHandle!T[] actors_;
+    R actors_;
     ActorWave* wave_;
-    ulong[3] scratch_;
+    ulong[erased ? 5 : 3] scratch_;
+    static if (erased)
+    {
+        ActorErasedWaveOperation operation_;
+        void* context_;
+    }
 
     @property bool empty() const pure nothrow @nogc @safe
     {
@@ -375,6 +416,11 @@ private struct ActorWaveBodyRange(T)
         scratch_[0] = cast(ulong) cast(void*) actors_[0].slot_;
         scratch_[1] = actors_[0].generation_;
         scratch_[2] = cast(ulong) cast(void*) wave_;
+        static if (erased)
+        {
+            scratch_[3] = cast(ulong) operation_;
+            scratch_[4] = cast(ulong) context_;
+        }
         return cast(PayloadBody) scratch_[];
     }
 
@@ -404,7 +450,7 @@ private struct ActorWaveBodyRange(T)
         foreach (i; 0 .. count)
         {
             auto actor = actors_[i];
-            if (!reserveActorWavePayload(actor.slot_, actor.generation_,
+            if (!reserveActorWavePayload!erased(actor.slot_, actor.generation_,
                     wave_.farm_, T.sizeof, T.alignof, cast(void*) wave_,
                     wave_.membersHead_))
             {
@@ -423,6 +469,29 @@ private struct ActorWaveBodyRange(T)
         }
         return true;
     }
+}
+
+private void invokeErasedWave(scope ref ActorErasedBorrow borrow,
+        ActorErasedWaveOperation operation, void* context) nothrow @nogc @system
+{
+    operation(borrow, context);
+}
+
+private extern(C) void erasedActorWavePayloadCallback(const(ulong)* ptr, size_t words)
+    nothrow @nogc @system
+{
+    if (words != 5) fatal("erased actor wave payload length corrupt");
+    auto body = ptr[0 .. words];
+    auto slot = cast(ActorSlot*) cast(void*) actorWaveBodyWord(body, 0);
+    immutable generation = actorWaveBodyWord(body, 1);
+    auto wave = cast(ActorWave*) cast(void*) actorWaveBodyWord(body, 2);
+    auto operation = cast(ActorErasedWaveOperation) actorWaveBodyWord(body, 3);
+    auto context = cast(void*) actorWaveBodyWord(body, 4);
+    if (slot is null || wave is null || operation is null)
+        fatal("erased actor wave payload identity corrupt");
+    if (!dispatchActorWavePayload!(ActorErasedBorrow, invokeErasedWave)(
+            slot, generation, operation, context))
+        wave.setStatusBits(waveInterruptedBit);
 }
 
 private ulong actorWaveBodyWord(PayloadBody body, size_t index)

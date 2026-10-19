@@ -34,10 +34,10 @@ is reassessed holistically in dedicated sessions.
   these limits with the measurements; the 392-case grain grid verified output
   throughout, but does not establish a general performance win.
 - Gather production usage of the [C ABI](docs/design/c-abi.md) core, public
-  actors and optional non-Fiber host. Shared-library packaging and language
+  actors, waves and optional non-Fiber host. Shared-library packaging and language
   ownership adapters can follow the static C/C++ distributions.
-- Public actor exports now use the runtime-free core. Add waves next, then
-  private roots/children; the D GC-rooted adapter stays out of BetterC builds.
+- Public actors and waves now use the runtime-free core. Add
+  private roots/children next; the D GC-rooted adapter stays out of BetterC builds.
   Fibers stay outside ABI 1.
 
 ## Next

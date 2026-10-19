@@ -10,7 +10,7 @@ single-threaded program, or [choose a work representation](docs/guide/choosing-w
 Before building on the Farm, read [Using Ant Farm well](docs/guide/using-it-well.md):
 one page with the correctness and performance rules that matter most.
 The current release is **1.8.2**. The 1.9 progress branch includes a
-[C/C++ ABI](docs/design/c-abi.md), with a druntime-free core and public actors, plus
+[C/C++ ABI](docs/design/c-abi.md), with a druntime-free core, public actors and waves, plus
 a separate optional non-Fiber worker host.
 Public and private actors are supported, with the limits in their guides and
 source/ABI stability subject to the [promotion gates](ROADMAP.md#actor-api-promotion-gates).

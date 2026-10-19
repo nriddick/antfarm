@@ -147,6 +147,7 @@ def check_c_examples(compiler):
     core = abi.build_api.build_core(compiler, output)
     abi.execute(abi.native("examples/c_core.c", output, [core]))
     abi.execute(abi.native("examples/c_actors.c", output, [core]))
+    abi.execute(abi.native("examples/c_wave.c", output, [core]))
     runtime = abi.build_api.build_runtime(compiler, output)
     abi.execute(abi.native_runtime("examples/c_host.c", output, [runtime, core], compiler))
     print("PASS C ABI examples", flush=True)

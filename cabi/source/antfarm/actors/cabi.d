@@ -2,8 +2,10 @@
 module antfarm.actors.cabi;
 import antfarm : fatal, inFarmCallback, MAX_AVG_COST;
 import antfarm.actors.actor;
+import antfarm.actors.wave;
+import antfarm : TableCompletionHook;
 import antfarm.c.core;
-import core.atomic : atomicLoad, atomicOp, cas;
+import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicOp, cas;
 import core.stdc.stdlib : malloc, free;
 import core.stdc.string : memcpy, memset;
 
@@ -127,6 +129,59 @@ void finishActorRuntime(af_actor_runtime* r) nothrow @nogc @system
     if (atomicLoad(r.owners)) fatal("C ABI destroy actor runtime with live owners");
     r.impl.destroy();
     r.impl = null;
+}
+
+
+extern(C) alias CWaveOperation = void function(void*, void*, size_t) nothrow @nogc @system;
+struct af_actor_wave
+{
+    ActorWave value;
+    af_farm* farm;
+    CWaveOperation operation;
+    void* user;
+    TableCompletionHook completion;
+    shared uint callbackDone;
+}
+struct af_actor_wave_handle { af_actor_wave* _wave; ulong _generation; }
+static assert(af_actor_wave_handle.sizeof == 16 && af_actor_wave_handle.alignof == 8);
+
+private struct CActorHandleRange
+{
+    const(af_actor_handle)[] values;
+    @property size_t length() const pure nothrow @nogc @safe { return values.length; }
+    ActorErasedHandle opIndex(size_t i) pure nothrow @nogc @system
+    { return ActorErasedHandle(cast(ActorSlot*) values[i]._slot, values[i]._generation); }
+    CActorHandleRange opSlice(size_t lo, size_t hi) pure nothrow @nogc @safe
+    { return CActorHandleRange(values[lo .. hi]); }
+    size_t opDollar() const pure nothrow @nogc @safe { return values.length; }
+}
+private ActorWaveHandle waveHandle(const(af_actor_wave_handle)* h) nothrow @nogc @system
+{
+    return h is null || h._wave is null ? ActorWaveHandle.init :
+        ActorWaveHandle(cast(ActorWave*) &h._wave.value, h._generation);
+}
+private void requireWave(af_actor_wave* w) nothrow @nogc @system
+{
+    if (w is null) fatal("C ABI null actor wave");
+}
+private bool waveReady(af_actor_wave* w) nothrow @nogc @system
+{
+    return w.value.handle.finished && atomicLoad!(MemoryOrder.acq)(w.callbackDone) != 0;
+}
+private void dispatchWave(scope ref ActorErasedBorrow borrow, void* context) nothrow @nogc @system
+{
+    auto w = cast(af_actor_wave*) context;
+    auto p = cast(StatePrefix*) borrow.rawState();
+    w.operation(w.user, cast(ubyte*) p + p.offset, p.bytes);
+}
+private void waveCompleted(void* context) nothrow @nogc @system
+{
+    auto w = cast(af_actor_wave*) context;
+    auto completion = w.completion;
+    if (completion.call !is null) completion.call(completion.context);
+    // Final wrapper access. Readiness joins the user callback as well as the
+    // underlying wave; a waiter may now reuse or destroy the stable storage.
+    atomicStore!(MemoryOrder.rel)(w.callbackDone, 1u);
 }
 
 extern(C) nothrow @nogc @system:
@@ -291,4 +346,88 @@ uint af_actor_message_cancel_and_wake(af_actor_message* m, const(af_actor_handle
     m.value.cancel();
     version (AntfarmCActorTestHooks) if (afterCompletion !is null) afterCompletion();
     return cast(uint) target.wake();
+}
+
+uint af_actor_wave_create(af_farm* f, af_actor_wave** output)
+{
+    if (output is null) return setError(AF_INVALID, "null actor wave output");
+    *output = null;
+    if (inFarmCallback()) fatal("C ABI actor wave creation inside Farm callback");
+    if (f is null || f.impl is null) return setError(AF_INVALID, "null actor wave Farm");
+    auto allocator = ActorAllocator.cRuntime();
+    auto w = cast(af_actor_wave*) allocator.allocate(null, af_actor_wave.sizeof, af_actor_wave.alignof);
+    if (w is null) return setError(AF_ALLOCATION_FAILED, "actor wave allocation failed");
+    static immutable initial = af_actor_wave.init;
+    memcpy(w, &initial, af_actor_wave.sizeof);
+    w.farm = f;
+    atomicOp!"+="(f.waves, size_t(1));
+    *output = w;
+    return setError(AF_OK);
+}
+void af_actor_wave_begin(af_actor_wave* w, CWaveOperation operation, void* user,
+        const(TableCompletionHook)* completion)
+{
+    requireWave(w);
+    if (inFarmCallback()) fatal("C ABI actor wave begin inside Farm callback");
+    if (w.value.handle.generation != 0 && !waveReady(w))
+        fatal("C ABI reuse unfinished actor wave or completion callback");
+    if (operation is null) fatal("C ABI null actor wave operation");
+    if (completion !is null && completion.call is null) fatal("C ABI hook requires a callback");
+    w.operation = operation;
+    w.user = user;
+    w.completion = completion is null ? TableCompletionHook.init :
+        TableCompletionHook(cast(void*) completion.context, completion.call);
+    atomicStore!(MemoryOrder.rel)(w.callbackDone, 0u);
+    w.value.begin(w.farm.impl, ActorWaveCompletionHook(w, &waveCompleted));
+}
+void af_actor_wave_observe(af_actor_wave* w, af_actor_wave_handle* output)
+{
+    requireWave(w);
+    if (output is null) fatal("C ABI null actor wave handle output");
+    *output = af_actor_wave_handle(w, w.value.handle.generation);
+}
+size_t af_actor_wave_publish(af_actor_wave* w, const(af_actor_handle)* actors,
+        size_t count, af_token* token, uint cost)
+{
+    requireWave(w);
+    if (token is null || token.owner !is w.farm) fatal("C ABI foreign or null wave producer token");
+    if (cost > MAX_AVG_COST) fatal("avgCost out of range");
+    if (count != 0)
+    {
+        if (actors is null) fatal("C ABI null nonempty wave span");
+        if (cast(size_t) actors % af_actor_handle.alignof) fatal("C ABI misaligned wave span");
+        if (count > size_t.max / af_actor_handle.sizeof ||
+            cast(size_t) actors > size_t.max - count * af_actor_handle.sizeof)
+            fatal("C ABI wave span size overflow");
+    }
+    return w.value.publishErased(CActorHandleRange(actors[0 .. count]),
+        token.value, &dispatchWave, w, cost);
+}
+void af_actor_wave_seal(af_actor_wave* w)
+{
+    requireWave(w);
+    w.value.seal();
+}
+uint af_actor_wave_valid(const(af_actor_wave_handle)* h) { return waveHandle(h).valid; }
+uint af_actor_wave_finished(const(af_actor_wave_handle)* h) { return waveHandle(h).finished; }
+uint af_actor_wave_failed(const(af_actor_wave_handle)* h) { return waveHandle(h).failed; }
+uint af_actor_wave_interrupted(const(af_actor_wave_handle)* h) { return waveHandle(h).interrupted; }
+ulong af_actor_wave_progress(const(af_actor_wave_handle)* h) { return waveHandle(h).progress; }
+ulong af_actor_wave_length(const(af_actor_wave_handle)* h) { return waveHandle(h).length; }
+uint af_actor_wave_ready(const(af_actor_wave_handle)* h)
+{
+    auto observed = waveHandle(h);
+    if (!observed.valid) return false;
+    immutable done = atomicLoad!(MemoryOrder.acq)(h._wave.callbackDone);
+    return done != 0 && observed.finished;
+}
+void af_actor_wave_destroy(af_actor_wave* w)
+{
+    if (w is null) return;
+    if (inFarmCallback()) fatal("C ABI actor wave destruction inside Farm callback");
+    if (w.value.handle.generation != 0 && !waveReady(w))
+        fatal("C ABI destroy unfinished actor wave or completion callback");
+    atomicOp!"-="(w.farm.waves, size_t(1));
+    auto allocator = ActorAllocator.cRuntime();
+    allocator.deallocate(null, w, af_actor_wave.sizeof, af_actor_wave.alignof);
 }

@@ -97,7 +97,7 @@ def main():
         build = build / "tsan"
     lib = build_api.build_core(args.compiler, build, sanitize=args.tsan)
     if args.tsan:
-        for source in ("core", "actors"):
+        for source in ("core", "actors", "waves"):
             obj = build / (source + "-main.o")
             binary = build / (source + "-tsan")
             build_api.run([os.environ.get("CC", "cc"), "-std=c11", "-g", "-O1", "-fsanitize=thread",
@@ -130,12 +130,27 @@ def main():
             "failure": "failure code out of range",
         }.items():
             execute(actors, name, death=diagnostic)
+        waves = native("tests/cabi/waves.c", build, [lib])
+        execute(waves)
+        for name, diagnostic in {
+            "uninitialized": "publish uninitialized actor wave", "operation": "null actor wave operation",
+            "hook": "hook requires a callback", "begin": "reuse unfinished actor wave",
+            "destroy": "destroy unfinished actor wave", "span": "null nonempty wave span",
+            "overflow": "wave span size overflow", "foreign": "foreign or null wave producer token",
+            "cost": "avgCost out of range", "seal": "seal actor wave twice",
+            "sealed": "publish sealed actor wave", "farm": "destroy Farm with actor waves",
+            "tail-begin": "reuse unfinished actor wave or completion callback",
+            "tail-destroy": "destroy unfinished actor wave or completion callback",
+        }.items():
+            execute(waves, name, death=diagnostic)
         execute(native("tests/cabi/cpp.cpp", build, [lib]))
         execute(native("examples/c_core.c", build, [lib]))
         execute(native("examples/c_actors.c", build, [lib]))
+        execute(native("examples/c_wave.c", build, [lib]))
         audit = build / "audit"
         audit_lib = build_api.build_core(args.compiler, audit, audit=True)
         execute(native("tests/cabi/core.c", audit, [audit_lib], defines=("AF_TEST_AUDIT",)))
+        execute(native("tests/cabi/waves.c", audit, [audit_lib], defines=("AF_TEST_AUDIT",)))
         execute(native("tests/cabi/actors.c", audit, [audit_lib], defines=("AF_TEST_ACTOR_AUDIT",)))
     if not args.core_only:
         runtime_checks(args.compiler, build, lib)

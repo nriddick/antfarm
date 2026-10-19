@@ -11,7 +11,7 @@ all exports and callbacks use C linkage.
 ## Distribution boundary
 
 - **antfarm_core**: Farm, tokens, views, publication, table hooks, public actors,
-  native actor allocation, and fatal policy. Build with BetterC and link from a C main without druntime. Core-only
+  native actor allocation, actor waves, and fatal policy. Build with BetterC and link from a C main without druntime. Core-only
   threads need no D initialization or attachment. The callback guard uses
   native TLS in every build. libc, platform mapping APIs, and pthread on Linux
   are ordinary native dependencies.
@@ -22,7 +22,7 @@ all exports and callbacks use C linkage.
   foreign threads entering runtime services must attach for their call lifetime.
 - **Public actors**: implemented in the core with native C link/run evidence.
   The optional D GC-rooted allocator is excluded from BetterC builds.
-  Waves are the next increment, followed by private roots/children.
+  Waves are also runtime-free; private roots/children are the next increment.
 - **Fibers**: outside ABI 1. A runtime-inclusive build need not expose Fibers.
 
 The first runtime distribution includes the non-Fiber pool requested for C
@@ -231,6 +231,57 @@ and appropriate druntime attachment for threads using those references.
 The C ABI supplies no GC-rooted allocator export. Native allocations are the
 default even when public actors run on the optional worker host.
 
+
+## Runtime-free actor waves
+
+Create an `af_actor_wave` bound to an owned or borrowed Farm, then begin a
+generation with a C operation and its user context. Publish prefixes of C actor
+handles with that Farm's token and seal exactly once. Actors must be idle and
+may come from several runtimes on that Farm, with different state sizes and
+alignments. The operation receives exclusive user state and its byte length;
+it must interpret each layout correctly. It receives no actor context.
+
+Publication allocates nothing. The bridge maps C handles through a range and
+uses the existing wave reservation, rollback, membership and credit protocol.
+The erased payload carries five words: slot, generation, wave, erased operation
+and context. Typed D waves retain their three-word payload. No lifecycle atomic
+ordering changes. The operation and user context remain live until finished.
+
+A zero return without `failed` is empty input or backpressure. Consume work
+(and step/wake a worker host) before retrying. A stale, active, duplicated or
+wrong-Farm actor rejects the prospective physical table and sets `failed`.
+Earlier accepted tables still execute: seal and drain them even on failure.
+Membership persists through aggregate completion, so an actor cannot join an
+overlapping unfinished wave even after its own table has completed.
+`interrupted` separately reports observed control-path interference; completion
+does not join any autonomous work handed off by that interference.
+
+Copy `af_actor_wave_handle` values to observers. `finished` acquire-joins all
+phase writes and membership release. It does not join the optional completion
+callback. The C wrapper additionally supplies `ready`: the completion bridge
+release-stores its final-access flag after the callback returns, and an acquire
+observation joins that tail. Begin/reuse and destruction require readiness.
+This is a stricter reuse rule than the underlying D descriptor permits, giving
+C users an explicit lifetime fence. The copied hook can run inline in seal for
+an empty or already-consumed wave. It must not wait for readiness or reuse or
+destroy its own wave. Its context must survive readiness.
+
+A begin invalidates older handles; their queries return false/zero rather than
+historical results. A never-begun wave can be destroyed directly. Quiesce all
+observers before destruction; afterward even stale handles are invalid memory
+accesses. Destroy waves before their Farm and normal host close. Host close
+returns `AF_BUSY` while a wave wrapper remains, even if ready. Explicit host
+abandonment joins workers and retains unfinished wave storage along with the
+ring and actor storage; all associated handles become invalid. Retained callback
+code and contexts must remain resident with that abandoned work.
+
+The [C wave example](../../examples/c_wave.c) runs two phases over 64 actors,
+handles partial publication, joins a completion callback, and prints
+`wave positions = 448, notifications = 2`. Build it with the core-only native
+link command used for `c_core.c`. The same API works with externally supplied
+native threads or actors created by `af_host_create_actors`; the optional host
+is responsible for stepping/waking and joining its consumers.
+
 ## Runtime-inclusive pool and host
 
 Call `af_runtime_init` on the thread that will control hosts. It takes one
@@ -256,7 +307,7 @@ single active worker-host limit still applies. Fiber APIs are absent.
 `af_host_farm` returns a borrowed core handle. Never destroy it directly.
 `af_host_register_producer` uses the extra slots, returning ordinary core
 producer handles. Return them with `af_unregister_producer`; external views use
-the ordinary core API too. Hosts refuse close while these participants remain.
+the ordinary core API too. Hosts refuse close while these participants or wave wrappers remain.
 Core writes keep their allocation-free, direct-callback path.
 
 Use `af_host_create_actors` for host-owned actor runtimes. `af_host_step`
@@ -304,10 +355,16 @@ execution on native threads. A production-elided actor completion seam frees
 the message and its payload before the reply wake continues, testing the
 adapter's final-access boundary for all three terminal outcomes.
 
+Wave tests cover mixed layouts/runtimes, partial and zero admission, duplicate,
+active, stale and foreign actors, rollback and persistent membership, native
+parallel phases, generation invalidation, and completion before publish returns.
+A paused hook proves that finished can precede ready, and release-build deaths
+reject reuse/destruction during that tail. Ready joins the hook's ordinary writes.
+
 The runtime checks cover caller-only and two indefinitely parked workers,
 publication beyond ring capacity, busy shutdown, native thread attach/detach,
 GC roots, explicit abandonment, foreign control rejection, and an already-initialized D embedding.
-Public actors are also driven by zero- and two-worker hosts, with GC collection,
+Public actors and waves are also driven by zero- and two-worker hosts, with GC collection,
 busy close, joined destruction and explicit abandonment.
 They require two accepted worker CPUs. `--runtime-only` selects this portion.
 The runners bound subprocess lifetimes. Windows uses MSVC; Linux uses
@@ -316,8 +373,8 @@ The runners bound subprocess lifetimes. Windows uses MSVC; Linux uses
 
 The quick gate includes the core ABI alongside the existing BetterC module
 checks. Full Linux and Windows integration also covers the optional runtime.
-The full Linux gate additionally runs the native C/core and public actor tests under TSan; use
+The full Linux gate additionally runs the native C/core, public actor and wave tests under TSan; use
 `python3 scripts/check-c-abi.py --tsan` to select it directly.
-Waves, private roots/children, Fiber exports, shared-library packaging, and
+Private roots/children, Fiber exports, shared-library packaging, and
 Rust/Zig ownership wrappers remain outside the shipped surface. Public actors
 can use application-supplied threads or the optional non-Fiber host.

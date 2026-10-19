@@ -7,7 +7,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ["antfarm/package.d", "antfarm/allocation.d", "cabi/source/antfarm/c/core.d",
-        "antfarm/actors/actor.d", "cabi/source/antfarm/actors/cabi.d"]
+        "antfarm/actors/actor.d", "antfarm/actors/wave.d", "cabi/source/antfarm/actors/cabi.d"]
 
 
 def run(command, **kwargs):
@@ -49,7 +49,7 @@ def build_core(compiler, build, audit=False, sanitize=False):
 
 def build_runtime(compiler, build):
     sources = ["cabi/source/antfarm/c/runtime.d", "antfarm/templates.d", "antfarm/parallel.d",
-               "antfarm/actors/package.d", "antfarm/actors/wave.d",
+               "antfarm/actors/package.d",
                "antfarm/actors/private_actor.d"]
     sources += [str(p.relative_to(ROOT)) for p in sorted((ROOT / "threadpool/source").rglob("*.d"))]
     result = library(build, "antfarm_runtime")

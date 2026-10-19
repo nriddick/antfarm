@@ -48,7 +48,10 @@ Older release notes are in [docs/releases/](docs/releases/):
   custom allocation, owners/handles, wake/flush, reusable inbox messages, replies,
   retirement and reclamation. The optional host now drives and owns C actors,
   joining consumers before destroying them. GC rooting remains a normal-D
-  adapter. Waves and private actor C exports are subsequent increments.
+  adapter. Private actor C exports are a subsequent increment.
+- Added runtime-free C actor waves with erased state, prefix publication,
+  generation-tagged observations, phase completion and a callback-return join
+  before reuse/destruction. Waves also run on the optional non-Fiber host.
 - Native C/C++ checks cover both compilers, release failures, partial admission,
   concurrent joins, completion before write return, GC roots and parked hosts.
   Actor tests include native-thread creation/consumption and deterministic

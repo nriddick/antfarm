@@ -100,15 +100,66 @@ uint32_t af_actor_message_complete_and_wake(af_actor_message *, const af_actor_h
 uint32_t af_actor_message_fail_and_wake(af_actor_message *, uint32_t code, const af_actor_handle *);
 uint32_t af_actor_message_cancel_and_wake(af_actor_message *, const af_actor_handle *);
 
+
+/* Stable, reusable phase over idle C actors, possibly from several runtimes on
+   one Farm. One orchestrator owns create/begin/publish/seal/destroy; observation
+   handles may be shared. State sizes may differ: the operation must interpret
+   each actor's state correctly. It receives no inbox/retirement context.
+   State pointers are borrowed only until return; operations in the same wave
+   must not read one another's mutable state. No allocation during publication. */
+typedef struct af_actor_wave af_actor_wave;
+typedef struct af_actor_wave_handle {
+    af_actor_wave *_wave;
+    uint64_t _generation;
+} af_actor_wave_handle;
+typedef void (*af_actor_wave_operation)(void *user, void *state, size_t state_bytes);
+af_status af_actor_wave_create(af_farm *, af_actor_wave **out);
+/* Begin requires a new wave or previous ready generation. The optional hook is
+   copied. operation/user remain live until finished; hook context until ready.
+   The hook runs once after finished, possibly inline in seal. It must not throw,
+   longjmp, destroy/reuse this wave, or wait for this wave's ready signal.
+   begin/destroy must be outside Farm callbacks. */
+void af_actor_wave_begin(af_actor_wave *, af_actor_wave_operation, void *user,
+                         const af_completion_hook *);
+void af_actor_wave_observe(af_actor_wave *, af_actor_wave_handle *out);
+/* At most one physical table; returns its accepted prefix, which can be partial.
+   Advance by that prefix. Zero without failed means backpressure (or empty
+   input); consume/wake workers and retry. Structural rejection sets failed:
+   stale, active, duplicate, or foreign-Farm actor. Seal and drain any accepted
+   tables even on failure. Earlier operations are never rolled back.
+   Input handles are copied before return; their runtimes outlive the wave.
+   token must belong to the wave's Farm; cost is 0..7 (default convention 4). */
+size_t af_actor_wave_publish(af_actor_wave *, const af_actor_handle *, size_t count,
+                             af_token *, uint32_t avg_cost);
+void af_actor_wave_seal(af_actor_wave *); /* exactly once per generation */
+/* Zero-initialized/null handles return false/zero. Reuse invalidates old handles;
+   after wave destruction all handles expire and must never be accessed. */
+uint32_t af_actor_wave_valid(const af_actor_wave_handle *);
+uint32_t af_actor_wave_finished(const af_actor_wave_handle *); /* acquire joins actor writes */
+uint32_t af_actor_wave_failed(const af_actor_wave_handle *);
+uint32_t af_actor_wave_interrupted(const af_actor_wave_handle *);
+uint64_t af_actor_wave_progress(const af_actor_wave_handle *); /* diagnostic table count */
+uint64_t af_actor_wave_length(const af_actor_wave_handle *);
+/* Acquire joins the completion callback's return and final adapter access too.
+   finished alone does not. Neither query joins handed-off autonomous work.
+   interrupted is a sticky diagnostic of observed wake/send/retirement races. */
+uint32_t af_actor_wave_ready(const af_actor_wave_handle *);
+/* NULL is a no-op. Requires never begun or ready; quiesce observers first.
+   Destroy waves before their Farm, actor runtimes, or normal host close.
+   Host abandon invalidates/leaks remaining waves together with retained work. */
+void af_actor_wave_destroy(af_actor_wave *);
+
 /* Owners are exclusive; synchronize handoff. Handles may be copied and shared.
    All handles expire at runtime destruction; forged or freed pointers are
    invalid C access. No D runtime or thread attachment is needed here. */
 #ifdef __cplusplus
 }
 static_assert(sizeof(af_actor_handle) == 16 && alignof(af_actor_handle) == 8, "actor identity layout");
+static_assert(sizeof(af_actor_wave_handle) == 16 && alignof(af_actor_wave_handle) == 8, "wave identity layout");
 static_assert(sizeof(af_actor_allocator) == 24, "actor allocator layout");
 #else
 _Static_assert(sizeof(af_actor_handle) == 16 && _Alignof(af_actor_handle) == 8, "actor identity layout");
+_Static_assert(sizeof(af_actor_wave_handle) == 16 && _Alignof(af_actor_wave_handle) == 8, "wave identity layout");
 _Static_assert(sizeof(af_actor_allocator) == 24, "actor allocator layout");
 #endif
 #endif
