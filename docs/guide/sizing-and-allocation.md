@@ -187,9 +187,12 @@ in. `ActorAllocator.gcRooted(&inner)` registers each allocation with
 `GC.addRange` and removes the range before free, after destruction. `inner` and
 its context must outlive every allocation and the hierarchy. Descendants inherit
 the root allocator. Registration takes the global GC lock; skip it when state
-holds only manually managed resources.
+holds only manually managed resources. The adapter and its GC helpers are
+available only in normal D builds; BetterC excludes them. The
+[C public actor ABI](../design/c-abi.md#runtime-free-public-actors) uses native
+allocation, including when actors run on the optional druntime-inclusive host.
 
-Callback threads must be druntime-registered. Threadpool workers already are. A
+When using GC-managed references, callback threads must be druntime-registered. Threadpool workers already are. A
 raw native thread needs `thread_attachThis`. The emitter thread must be
 registered too when state holds GC references: a root spawn argument sits on its
 stack while it pumps, and default emitter reclamation frees those ranges there.

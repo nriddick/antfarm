@@ -1,3 +1,4 @@
+#include "antfarm_actors.h"
 #include "antfarm.hpp"
 #include <cassert>
 #include <type_traits>

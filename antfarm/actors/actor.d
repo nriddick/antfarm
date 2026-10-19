@@ -32,10 +32,32 @@ public import antfarm : AntFarm, PayloadBody, Callback, Tier, Token;
 import antfarm.allocation : allocateAligned64, freeAligned64;
 import antfarm : avgCostForChunk, fatal;
 import core.atomic : MemoryOrder, atomicExchange, atomicFetchAdd,
-    atomicFetchSub, atomicLoad, atomicStore, cas, pause;
+    atomicFetchSub, atomicLoad, atomicStore, cas;
 import core.lifetime : move;
 import core.stdc.stdio : fprintf, stderr;
 import core.stdc.string : memcpy, memset;
+
+// DMD's non-inlined core.atomic.pause is an out-of-line druntime symbol.
+// Keep the same processor hint inside the BetterC object; normal D and LDC
+// builds retain their existing core.atomic implementation.
+version (D_BetterC)
+{
+    version (DigitalMars)
+    {
+        private void pause() pure nothrow @nogc @trusted
+        {
+            asm pure nothrow @nogc @trusted
+            {
+                naked;
+                pause;
+                ret;
+            }
+        }
+    }
+    else import core.atomic : pause;
+}
+else import core.atomic : pause;
+
 
 // Cost class of the public flush table: claims of 8 entries.
 private enum uint flushAvgCost = avgCostForChunk(8);
@@ -78,33 +100,40 @@ struct ActorAllocator
         return ActorAllocator(null, &cRuntimeAllocate, &cRuntimeDeallocate);
     }
 
-    /// Register allocations as GC root ranges until free. inner must outlive
-    /// the adapter and every allocation; callback threads must be registered
-    /// with druntime.
-    static ActorAllocator gcRooted(const(ActorAllocator)* inner) pure nothrow @nogc @system
+    version (D_BetterC) {} else
     {
-        return ActorAllocator(cast(void*) inner, &gcRootedAllocate, &gcRootedDeallocate);
+        /// Register allocations as GC root ranges until free. inner must outlive
+        /// the adapter and every allocation; callback threads must be registered
+        /// with druntime.
+        static ActorAllocator gcRooted(const(ActorAllocator)* inner) pure nothrow @nogc @system
+        {
+            return ActorAllocator(cast(void*) inner, &gcRootedAllocate, &gcRootedDeallocate);
+        }
     }
 }
 
-private void* gcRootedAllocate(void* context, size_t bytes, size_t alignment)
-    nothrow @nogc @system
+version (D_BetterC) {} else
 {
-    import core.memory : GC;
-    auto inner = cast(const(ActorAllocator)*) context;
-    auto memory = inner.allocate(cast(void*) inner.context, bytes, alignment);
-    if (memory !is null) GC.addRange(memory, bytes);
-    return memory;
-}
+    private void* gcRootedAllocate(void* context, size_t bytes, size_t alignment)
+        nothrow @nogc @system
+    {
+        import core.memory : GC;
+        auto inner = cast(const(ActorAllocator)*) context;
+        auto memory = inner.allocate(cast(void*) inner.context, bytes, alignment);
+        if (memory !is null) GC.addRange(memory, bytes);
+        return memory;
+    }
 
-private void gcRootedDeallocate(void* context, void* memory, size_t bytes, size_t alignment)
-    nothrow @nogc @system
-{
-    import core.memory : GC;
-    auto inner = cast(const(ActorAllocator)*) context;
-    GC.removeRange(memory);
-    inner.deallocate(cast(void*) inner.context, memory, bytes, alignment);
-}
+    private void gcRootedDeallocate(void* context, void* memory, size_t bytes, size_t alignment)
+        nothrow @nogc @system
+    {
+        import core.memory : GC;
+        auto inner = cast(const(ActorAllocator)*) context;
+        GC.removeRange(memory);
+        inner.deallocate(cast(void*) inner.context, memory, bytes, alignment);
+    }
+
+} // D GC rooting is excluded from the runtime-free distribution.
 
 private void* cRuntimeAllocate(void*, size_t bytes, size_t alignment)
     nothrow @nogc @system
@@ -558,6 +587,9 @@ struct ActorErasedBorrow
     private size_t stateSize_;
     private size_t stateAlignment_;
     @disable this(this);
+
+    // Resident C adapter only; the same callback-local borrowing contract applies.
+    package void* rawState() return nothrow @nogc @system { return state_; }
 
     /// The type-erased actor state for the duration of this callback.
     /// The requested POD type must exactly match the size and alignment

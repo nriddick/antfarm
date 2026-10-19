@@ -1,7 +1,8 @@
 # C ABI 1
 
 Status: implemented on `1.9.0-progress`, unreleased. The public transport is
-defined by [antfarm.h](../../include/antfarm.h), the optional
+defined by [antfarm.h](../../include/antfarm.h), public actors in
+[antfarm_actors.h](../../include/antfarm_actors.h), the optional
 [antfarm_runtime.h](../../include/antfarm_runtime.h), and the C++ ownership
 adapter [antfarm.hpp](../../include/antfarm.hpp). Ring and ownership contracts
 remain in [SPEC](../../SPEC.md). ABI 1 supports 64-bit Windows and Linux;
@@ -9,8 +10,8 @@ all exports and callbacks use C linkage.
 
 ## Distribution boundary
 
-- **antfarm_core**: Farm, tokens, views, publication, table hooks, and fatal
-  policy. Build with BetterC and link from a C main without druntime. Core-only
+- **antfarm_core**: Farm, tokens, views, publication, table hooks, public actors,
+  native actor allocation, and fatal policy. Build with BetterC and link from a C main without druntime. Core-only
   threads need no D initialization or attachment. The callback guard uses
   native TLS in every build. libc, platform mapping APIs, and pthread on Linux
   are ordinary native dependencies.
@@ -19,9 +20,9 @@ all exports and callbacks use C linkage.
   of the Farm identity allocator or fatal-handler state. Runtime initialization
   and shutdown are explicit. Runtime-owned worker threads are attached;
   foreign threads entering runtime services must attach for their call lifetime.
-- **Actors**: follow after core publication is stable. Compile-only BetterC
-  evidence does not establish allocator independence. Split allocator selection
-  and D-only typed/GC-rooted adapters before promising runtime-free actor exports.
+- **Public actors**: implemented in the core with native C link/run evidence.
+  The optional D GC-rooted allocator is excluded from BetterC builds.
+  Waves are the next increment, followed by private roots/children.
 - **Fibers**: outside ABI 1. A runtime-inclusive build need not expose Fibers.
 
 The first runtime distribution includes the non-Fiber pool requested for C
@@ -76,7 +77,7 @@ ANTFARM_HUGE_PAGES=0 .build/c-host
 On Windows, compile the C file with `cl /std:c11 /MT /c /Iinclude`; link its
 object with `ldc2`, `antfarm_runtime.lib`, `antfarm_core.lib`, `kernel32.lib`
 and `advapi32.lib`. The host example uses two workers and prints
-`parallel sum = 523776`. Both examples are built by the ABI check runner.
+`parallel sum = 523776`. All C examples are built by the ABI check runner.
 Static distributions are supported in ABI 1; a DLL/shared-object loader
 interface is not shipped. Link one core instance into the program.
 Independently embedding core copies in multiple plugins is not supported.
@@ -158,12 +159,84 @@ explicit. ABI 1 rejects unknown required layouts rather than guessing. Numeric
 enum values and exported symbol names are defined by the ABI 1 headers. Keep
 internal ring offsets private; the five-word Thead is not a C ABI promise.
 
+## Runtime-free public actors
+
+[antfarm_actors.h](../../include/antfarm_actors.h) exports public actors from
+the same core archive. Include it from C or C++; no D runtime initialization
+or native-thread attachment is needed. The [C actor example](../../examples/c_actors.c)
+copies a counter state, sends three messages, drains retirement and reclaims the
+owner. Build it with the same native command as `c_core.c`; it prints
+`actor sum = 10`.
+
+Create an `af_actor_runtime` over an owned Farm with a fixed slot capacity.
+It starts no threads. Create actors with nonempty plain state, a power-of-two
+alignment and a C handler. Creation copies the bytes; pointees and the handler's
+`user` context remain application-owned. No destructor runs. The default
+allocator supports alignment through 64; a custom `af_actor_allocator` supplies
+C allocation/free callbacks and can support larger alignments. Its copied
+context must outlive the runtime; callbacks must be thread-safe and may not
+throw or longjmp. The allocator sees runtime and slot storage, and a state
+allocation containing a private dispatch prefix before the aligned user bytes.
+Free receives the exact allocated size/alignment. Wrapper handles and temporary
+creation buffers use native malloc separately.
+
+Creation returns `AF_INVALID` for invalid metadata, `AF_FULL` when all slots
+are reserved, and `AF_ALLOCATION_FAILED` on allocation failure. Successful
+creation returns an exclusive owner. Its 16-byte submission handle is copyable
+and shareable, but has no authority to access state or reclaim it. A reclaimed
+generation reports stale through wake/send until runtime destruction; all
+handles expire when their runtime is destroyed. Forged pointers and handles
+used after destruction are invalid C accesses.
+
+Wake coalesces; flush publishes a bounded ready snapshot with the Farm's token
+and cost class. Zero publication is not a completion signal. Within each
+activation the C handler receives exclusive state and a callback-local context.
+It may pop messages, republish, or request retirement. The adapter uses the
+existing erased D dispatch with a small C callback bridge; raw Farm callbacks
+still enter directly. No D actor state-machine or memory-order edge changes.
+
+Messages are cold-allocated reusable nodes with a payload pointer and a tag.
+An accepted send transfers ownership until completion, failure or cancellation.
+Pop in producer linearization order; unpopped messages carry into the next
+activation. A terminal operation is the final access to that message and its
+payload: another thread may immediately reuse or free them after acquiring
+availability. Read outcome/failure only after acquiring that interaction's
+release; initial availability is not a reply. Failure codes are 24 bits.
+The complete/fail/cancel-and-wake variants snapshot the target handle before
+release, so the target may be stored in the released payload.
+
+Request drain or cancel retirement, keep flushing/consuming until retired, then
+reclaim the owner. A request result is not a retirement fence:
+`AF_ACTOR_ALREADY_RETIRED` can mean cancellation was already requested, so
+always query `af_actor_retired`. Successful reclaim consumes its C handle. There is no
+guaranteed final handler invocation; release application resources after
+retirement. Before destroying a standalone actor runtime, reclaim all owners
+and join all consumers, senders and other runtime users. Retired actors and
+zero live/ready counts do not prove that consumers have left the trampoline.
+Destroy runtimes before their Farm. Runtime creation/destruction must be
+outside callbacks. Detailed actor semantics remain in
+[actor lifecycle](../reference/actor-lifecycle.md).
+
+### GC adapter boundary
+
+`ActorAllocator.gcRooted` remains available in normal D builds and is omitted
+under BetterC, along with its GC helper functions. C actor state that only
+refers to manually managed C/C++/Rust/Zig memory gains nothing from GC rooting.
+The optional host uses druntime for its threads and GC-roots its own D host
+object; that does not register C actor state as GC roots.
+
+Mixed-language applications holding D GC-managed references in actor state
+still need external D roots or a custom allocator backed by D root registration,
+and appropriate druntime attachment for threads using those references.
+The C ABI supplies no GC-rooted allocator export. Native allocations are the
+default even when public actors run on the optional worker host.
+
 ## Runtime-inclusive pool and host
 
 Call `af_runtime_init` on the thread that will control hosts. It takes one
 balanced druntime initialization reference and warms topology discovery before
 concurrent use. An embedding D program retains its own runtime reference.
-Only this control thread creates, steps, registers host producers, closes or
+Only this control thread creates hosts/host actor runtimes, steps, registers host producers, closes or
 abandons hosts. These ownership checks remain active in release builds.
 
 Foreign threads call `af_runtime_attach_thread` before runtime services and
@@ -178,13 +251,21 @@ the same thread. ABI 1 permits one session; restart after shutdown is rejected.
 core, caller consumption, unchanged caller affinity, 1 ms parks, and one extra
 small producer. Zero workers uses only the caller. The options expose geometry,
 extra participants, idle policy and optional caller placement; the D pool's
-single active worker-host limit still applies. Actor and Fiber APIs are absent.
+single active worker-host limit still applies. Fiber APIs are absent.
 
 `af_host_farm` returns a borrowed core handle. Never destroy it directly.
 `af_host_register_producer` uses the extra slots, returning ordinary core
 producer handles. Return them with `af_unregister_producer`; external views use
 the ordinary core API too. Hosts refuse close while these participants remain.
 Core writes keep their allocation-free, direct-callback path.
+
+Use `af_host_create_actors` for host-owned actor runtimes. `af_host_step`
+flushes their ready queues and wakes consumers. Standalone runtime creation
+rejects a borrowed host Farm; destroying a host-owned actor runtime directly
+is fatal. Close returns `AF_BUSY` until every owner is reclaimed and the ready
+queues are empty, then joins consumers before destroying actor storage and
+the Farm. Core actor operations remain callable from unattached native threads;
+only calls to runtime services require attachment.
 
 Wake after every accepted table and on idle/retry polls: sleeping views can pin
 completed epochs and prevent the producer reclaiming space. `af_host_step`
@@ -200,7 +281,9 @@ joins workers and consumes the handle only on `AF_OK`. On an error the handle
 remains owned, so fix a busy precondition and retry; after a terminal cleanup
 error a retry releases the terminal handle. `af_host_abandon` explicitly stops
 and joins workers while retaining the ring and unfinished work, matching the
-D host's emergency policy. Failed D hosts close through that abandonment path.
+D host's emergency policy. This also leaks actor storage, outstanding owners
+and allocator contexts; all associated C handles become invalid. Failed D
+hosts close through that abandonment path.
 
 ## Validation and remaining work
 
@@ -214,11 +297,18 @@ forms, partial/zero admission, empty bodies, concurrent table joins, opaque
 handle ownership, and release-build contract deaths. A separate audit build
 uses the existing production-elided publication hook to force completion before
 write returns. The core tests use native C threads specifically to verify
-that no D attachment is needed.
+that no D attachment is needed. Public actor tests cover capacity reservations,
+allocation failure/rollback, aligned copied state, coalescing/republishing, inbox
+order/reuse/outcomes, retirement, stale handles, and creation and callback
+execution on native threads. A production-elided actor completion seam frees
+the message and its payload before the reply wake continues, testing the
+adapter's final-access boundary for all three terminal outcomes.
 
 The runtime checks cover caller-only and two indefinitely parked workers,
 publication beyond ring capacity, busy shutdown, native thread attach/detach,
 GC roots, explicit abandonment, foreign control rejection, and an already-initialized D embedding.
+Public actors are also driven by zero- and two-worker hosts, with GC collection,
+busy close, joined destruction and explicit abandonment.
 They require two accepted worker CPUs. `--runtime-only` selects this portion.
 The runners bound subprocess lifetimes. Windows uses MSVC; Linux uses
 `CC`/`CXX` (default `cc`/`c++`). Headers require C11 or C++11
@@ -226,9 +316,8 @@ The runners bound subprocess lifetimes. Windows uses MSVC; Linux uses
 
 The quick gate includes the core ABI alongside the existing BetterC module
 checks. Full Linux and Windows integration also covers the optional runtime.
-The full Linux gate additionally runs the native C/core test under TSan; use
+The full Linux gate additionally runs the native C/core and public actor tests under TSan; use
 `python3 scripts/check-c-abi.py --tsan` to select it directly.
-No standalone C actor exports, Fiber exports, shared-library packaging, or
-Rust/Zig ownership wrappers are promised. Split actor allocators/adapters before
-adding actor exports; C hosts can already supply their own threads or use the
-optional non-Fiber host above.
+Waves, private roots/children, Fiber exports, shared-library packaging, and
+Rust/Zig ownership wrappers remain outside the shipped surface. Public actors
+can use application-supplied threads or the optional non-Fiber host.

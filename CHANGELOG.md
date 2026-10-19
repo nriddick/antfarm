@@ -43,10 +43,16 @@ Older release notes are in [docs/releases/](docs/releases/):
   shared with D callers. Added a move-only C++11 ownership adapter.
 - Added a separate optional druntime-inclusive static library for the non-Fiber
   FarmHost, explicit runtime initialization/thread attachment, wake/step and
-  shutdown. It links the same core; actor/Fiber exports remain deferred.
+  shutdown. It links the same core; Fiber exports remain deferred.
+- Added runtime-free public actor C exports: copied/aligned state, native or
+  custom allocation, owners/handles, wake/flush, reusable inbox messages, replies,
+  retirement and reclamation. The optional host now drives and owns C actors,
+  joining consumers before destroying them. GC rooting remains a normal-D
+  adapter. Waves and private actor C exports are subsequent increments.
 - Native C/C++ checks cover both compilers, release failures, partial admission,
   concurrent joins, completion before write return, GC roots and parked hosts.
-  The core ABI runs in the quick gate; full gates also check the optional host.
+  Actor tests include native-thread creation/consumption and deterministic
+  message release before reply wake. The core ABI runs in the quick gate; full gates also check the optional host.
 
 ## 1.8.3 — progress branch
 

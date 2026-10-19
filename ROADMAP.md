@@ -33,10 +33,12 @@ is reassessed holistically in dedicated sessions.
   persistent CPU-accounting exclusions whose cause remains unresolved. Keep
   these limits with the measurements; the 392-case grain grid verified output
   throughout, but does not establish a general performance win.
-- Extend the [C ABI](docs/design/c-abi.md) only after its core and optional
-  non-Fiber host have production usage. Shared-library packaging and language
+- Gather production usage of the [C ABI](docs/design/c-abi.md) core, public
+  actors and optional non-Fiber host. Shared-library packaging and language
   ownership adapters can follow the static C/C++ distributions.
-- Actor exports follow their allocator/runtime split; Fibers stay outside ABI 1.
+- Public actor exports now use the runtime-free core. Add waves next, then
+  private roots/children; the D GC-rooted adapter stays out of BetterC builds.
+  Fibers stay outside ABI 1.
 
 ## Next
 

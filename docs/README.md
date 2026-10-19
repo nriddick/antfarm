@@ -69,7 +69,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/private-actor-ordering.md](design/private-actor-ordering.md) | see the private join, outcome and cancellation proof chains |
 | [design/private-actor-layout.md](design/private-actor-layout.md) | see the Entry/Service/cohort layout invariants and slab reuse proof |
 | [design/farm-ordering.md](design/farm-ordering.md) | see the Farm subscription/reclamation ordering audit and its TSan lanes |
-| [design/c-abi.md](design/c-abi.md) | build and use the C/C++ ABI, runtime-free core and optional non-Fiber worker host |
+| [design/c-abi.md](design/c-abi.md) | build and use the C/C++ ABI, runtime-free core/public actors and optional non-Fiber worker host |
 | [design/threadpool.md](design/threadpool.md) | get the topology, worker, Director, registry and OS-backend contracts |
 | [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
 

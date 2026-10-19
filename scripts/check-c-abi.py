@@ -57,6 +57,9 @@ def runtime_checks(compiler, build, core):
     execute(binary)
     execute(binary, "borrowed", death="cannot destroy a borrowed host Farm")
     execute(binary, "nested", death="runtime control operation inside Farm callback")
+    actors = native_runtime("tests/cabi/actors_host.c", build, libraries, compiler, probe=True)
+    execute(actors)
+    execute(actors, "borrowed", death="cannot destroy a host-owned actor runtime")
     embedded = build / ("embedded.exe" if os.name == "nt" else "embedded")
     build_api.run([compiler, "-O", "-I.", "-Icabi/source", "-Ithreadpool/source",
                    "tests/cabi/embedded.d", *libraries,
@@ -94,13 +97,14 @@ def main():
         build = build / "tsan"
     lib = build_api.build_core(args.compiler, build, sanitize=args.tsan)
     if args.tsan:
-        obj = build / "core-main.o"
-        binary = build / "core-tsan"
-        build_api.run([os.environ.get("CC", "cc"), "-std=c11", "-g", "-O1", "-fsanitize=thread",
-                       "-Wall", "-Wextra", "-Werror", "-Iinclude", "-Itests/cabi",
-                       "-c", "tests/cabi/core.c", "-o", obj])
-        build_api.run([args.compiler, "-betterC", "-fsanitize=thread", obj, lib, "-L-lpthread", "-of=" + str(binary)])
-        execute(binary)
+        for source in ("core", "actors"):
+            obj = build / (source + "-main.o")
+            binary = build / (source + "-tsan")
+            build_api.run([os.environ.get("CC", "cc"), "-std=c11", "-g", "-O1", "-fsanitize=thread",
+                           "-Wall", "-Wextra", "-Werror", "-Iinclude", "-Itests/cabi",
+                           "-c", "tests/cabi/" + source + ".c", "-o", obj])
+            build_api.run([args.compiler, "-betterC", "-fsanitize=thread", obj, lib, "-L-lpthread", "-of=" + str(binary)])
+            execute(binary)
         print("C ABI TSAN CHECKS PASSED", flush=True)
         return
     if not args.runtime_only:
@@ -115,11 +119,24 @@ def main():
             "nested-hook": "inside Farm callback",
         }.items():
             execute(binary, name, death=diagnostic)
+        actors = native("tests/cabi/actors.c", build, [lib])
+        execute(actors)
+        for name, diagnostic in {
+            "farm": "destroy Farm with actor runtimes", "live": "destroy actor runtime with live owners",
+            "foreign": "foreign or null actor producer token", "cost": "avgCost out of range",
+            "mode": "invalid actor retire mode", "context": "actor context outside its callback",
+            "complete": "complete actor inbox node not owned", "alignment": "allocator returned misaligned",
+            "busy": "destroy busy actor message", "set": "modify busy actor message",
+            "failure": "failure code out of range",
+        }.items():
+            execute(actors, name, death=diagnostic)
         execute(native("tests/cabi/cpp.cpp", build, [lib]))
         execute(native("examples/c_core.c", build, [lib]))
+        execute(native("examples/c_actors.c", build, [lib]))
         audit = build / "audit"
         audit_lib = build_api.build_core(args.compiler, audit, audit=True)
         execute(native("tests/cabi/core.c", audit, [audit_lib], defines=("AF_TEST_AUDIT",)))
+        execute(native("tests/cabi/actors.c", audit, [audit_lib], defines=("AF_TEST_ACTOR_AUDIT",)))
     if not args.core_only:
         runtime_checks(args.compiler, build, lib)
     print("C ABI CHECKS PASSED", flush=True)

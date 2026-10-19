@@ -1,7 +1,8 @@
 // Optional runtime distribution. Never compile antfarm/package.d into this archive.
 module antfarm.c.runtime;
-import antfarm : AntFarm, fatal, inFarmCallback, DEFAULT_SMALL_TABLE_THRESHOLD;
+import antfarm : AntFarm, fatal, inFarmCallback, DEFAULT_SMALL_TABLE_THRESHOLD, Token;
 import antfarm.c.core;
+import antfarm.actors.cabi;
 import core.atomic : atomicLoad, atomicOp;
 import core.memory : GC;
 import core.runtime : Runtime;
@@ -9,7 +10,7 @@ import core.stdc.stdlib : malloc, free;
 import core.thread : Thread, thread_attachThis, thread_detachThis;
 import core.time : Duration, dur;
 import threadpool.host : FarmHost, FarmHostOptions, FarmHostResolveException,
-    CallerPlacement, WorkerIdle, HostState;
+    CallerPlacement, WorkerIdle, HostState, HostAttachment;
 import threadpool.pool : CacheAwarePool;
 
 extern(C) void rt_moduleTlsCtor();
@@ -26,7 +27,7 @@ struct af_host_options
     ulong reserved;
 }
 static assert(af_host_options.sizeof == 88 && af_host_options.idle_timeout_ns.offsetof == 24);
-struct af_host { FarmHost value; af_farm* farm; }
+struct af_host { FarmHost value; af_farm* farm; af_actor_runtime* actors; }
 private __gshared bool active, attachedOwner, retired;
 private __gshared Thread owner;
 private __gshared uint hosts;
@@ -52,6 +53,13 @@ private uint exception(Throwable e) nothrow @nogc @system
 }
 private void releaseHandle(af_host* h) nothrow @nogc @system
 {
+    for (auto r = h.actors; r !is null;)
+    {
+        auto next = r.next;
+        // Abandon deliberately leaks actor storage and its allocator context.
+        if (r.impl is null) free(r);
+        r = next;
+    }
     releaseBorrowedFarm(h.farm);
     GC.removeRange(h);
     free(h);
@@ -233,6 +241,33 @@ uint af_host_register_producer(af_host* h, uint tier, af_token** outToken) @nogc
     if (h.value.state != HostState.open) return setError(AF_INVALID, "host is not open");
     return af_register_producer(h.farm, tier, outToken);
 }
+uint af_host_create_actors(af_host* h, size_t capacity, const(af_actor_allocator)* allocator,
+    af_actor_runtime** output)
+{
+    if (output is null) return setError(AF_INVALID, "null actor runtime output");
+    *output = null;
+    if (auto status = hostControl(h)) return status;
+    if (h.value.state != HostState.open) return setError(AF_INVALID, "host is not open");
+    af_actor_runtime* r;
+    if (auto status = createActorRuntime(h.farm, capacity, allocator, false, &r)) return status;
+    try
+    {
+        h.value.attach(HostAttachment("C actors",
+            (ref Token token) => r.impl.flush(token),
+            () => actorRuntimeDrained(r),
+            () { finishActorRuntime(r); }));
+    }
+    catch (Throwable e)
+    {
+        finishActorRuntime(r);
+        free(r);
+        return exception(e);
+    }
+    r.next = h.actors;
+    h.actors = r;
+    *output = r;
+    return setError(AF_OK);
+}
 uint af_host_step(af_host* h)
 {
     if (auto status = hostControl(h)) return status;
@@ -255,6 +290,9 @@ uint af_host_close(af_host* h)
 {
     if (auto status = hostControl(h)) return status;
     if (hasParticipants(h.farm)) return setError(AF_BUSY, "host has external producers or views");
+    if (h.value.state == HostState.open)
+        for (auto r = h.actors; r !is null; r = r.next)
+            if (!actorRuntimeDrained(r)) return setError(AF_BUSY, "host has live or queued actors");
     try { h.value.close(); releaseHandle(h); return setError(AF_OK); }
     catch (Throwable e) { return exception(e); }
 }

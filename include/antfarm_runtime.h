@@ -1,7 +1,7 @@
 /* Optional druntime-inclusive non-Fiber FarmHost. Link with antfarm_core. */
 #ifndef ANTFARM_RUNTIME_H
 #define ANTFARM_RUNTIME_H
-#include "antfarm.h"
+#include "antfarm_actors.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -46,6 +46,11 @@ void af_host_options_default(af_host_options *out);
 af_status af_host_create(const af_host_options *, af_host **out);
 af_farm *af_host_farm(af_host *); /* borrowed; never af_destroy this Farm */
 af_status af_host_register_producer(af_host *, af_tier, af_token **out);
+/* Host-owned public actors. step flushes their ready queues. Retire and
+   reclaim every owner before close; the host joins consumers before destroying
+   these runtimes. Never pass them to af_actor_runtime_destroy. */
+af_status af_host_create_actors(af_host *, size_t capacity, const af_actor_allocator *,
+                               af_actor_runtime **out);
 af_status af_host_step(af_host *);
 af_status af_host_wake(af_host *); /* attached threads, while handle remains live */
 uint32_t af_host_state(af_host *);
@@ -53,6 +58,8 @@ uint32_t af_host_state(af_host *);
    parks, sleeping consumer pins can otherwise block producer reclamation.
    step performs that wake and caller progress, and reports worker failures.
 
+   Close also returns AF_BUSY while host-owned actors remain live or queued.
+   Successful close invalidates their runtime and submission handles.
    Close requires application completion signals for every submitted job,
    returned tokens, unsubscribed external views, and quiescent external users.
    It joins workers; it does not infer that arbitrary C work has drained.
@@ -61,7 +68,8 @@ uint32_t af_host_state(af_host *);
    diagnostic. Failed D hosts follow FarmHost's abandonment policy. */
 af_status af_host_close(af_host *);
 /* Emergency shutdown: stop/join workers, intentionally retain the Farm's ring
-   and unfinished work, and consume the host handle. Same external-participant
+   and unfinished work (including actors and allocator contexts), and consume
+   the host handle. All its actor runtimes, owners and handles become invalid. Same external-participant
    preconditions as close. This is an explicit leak for unrecoverable failure. */
 af_status af_host_abandon(af_host *);
 
