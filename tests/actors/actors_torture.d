@@ -1985,7 +1985,7 @@ private class ReadyFlusher
     }
 }
 
-private long readyPadding(PayloadHeader*, PayloadBody, ulong)
+private long readyPadding(PayloadHeader*, PayloadBody)
     nothrow @nogc @system { return 1; }
 
 private void testReadyDrainHandoff()
@@ -2097,7 +2097,7 @@ private void testReadyBacklog()
         "partial table acceptance returns unwritten actors");
     auto deadline = MonoTime.currTime + 30.seconds;
     PayloadHeader paddingHeader;
-    paddingHeader.maxCs = paddingHeader.done = 1;
+
     paddingHeader.call = &readyPadding;
     ulong[400] paddingBody;
     PayloadEntry[1] padding = [PayloadEntry(&paddingHeader, paddingBody[])];

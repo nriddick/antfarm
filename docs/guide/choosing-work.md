@@ -36,7 +36,7 @@ and the same actor cannot belong to overlapping unfinished waves. Fibers add
 never suspends is usually better represented as a payload.
 
 For independent countable work, [parallel loops](parallel-loops.md) provide
-ST grains, MT slices, asynchronous completion hooks and a blocking foreach
+ST grains, asynchronous completion hooks and a blocking foreach
 adapter. Raw ranges also compose into caller-owned payload batches. Use a
 private tree when the computation needs structured nested joins.
 

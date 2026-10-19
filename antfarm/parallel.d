@@ -1,7 +1,7 @@
 /++
  + Bounded parallel loops over finite, sliceable random-access ranges.
  +
- + `parallelRange` and `parallelSlices` compose with ordinary Farm writes.
+ + `parallelRange` composes with ordinary Farm writes.
  + `parallelFor` owns asynchronous submission/completion state; retry its
  + `publish` method after backpressure until `submitted` is true.
  + `parallelForWait` and the `parallel` foreach adapter help-drain a caller's
@@ -17,7 +17,7 @@
 module antfarm.parallel;
 
 public import antfarm;
-import antfarm.templates : callbackFor, argsConvert, payloadRange;
+import antfarm.templates : callbackFor, argsConvert, payloadRange, PayloadGrainRange;
 import core.atomic;
 import core.stdc.stdlib : malloc, free;
 import core.stdc.string : memcpy;
@@ -26,21 +26,11 @@ import std.range.primitives : ElementType, hasLength, hasSlicing,
     isRandomAccessRange;
 import std.traits : hasUnsharedAliasing, Parameters;
 
-/// The standalone default is ST; select MT slices explicitly for bounded footprint.
-enum ParallelForm
-{
-    automatic, /// Use ST for a standalone convenience call.
-    st,        /// One single-shot payload per grain of elements.
-    mtSlices   /// Several MT payloads, with at most 512 iterations each.
-}
-
 /// Scheduling hints for a parallel region.
 struct Options
 {
     size_t grain = 1;                    /// Elements per ST callback; must be positive.
     uint costClass = DEFAULT_AVG_COST;   /// Farm avgCost, in 0 .. MAX_AVG_COST.
-    ParallelForm form = ParallelForm.automatic; /// Payload form.
-    uint slices;                        /// MT slices; 0 snapshots the Farm's SqCs.
 }
 
 private enum suitableRange(R) = isRandomAccessRange!R && hasLength!R && hasSlicing!R;
@@ -57,7 +47,7 @@ private void validateRange(R, bool borrowed = false)() nothrow @nogc @system
 
 private void validateFunction(alias fn, R)() nothrow @nogc @system
 {
-    static assert(Parameters!fn.length == 1 && argsConvert!(fn, false, ElementType!R),
+    static assert(Parameters!fn.length == 1 && argsConvert!(fn, ElementType!R),
         "parallel callback must accept one range element without narrowing");
     // Reuse the packing API's complete signature/aliasing checks.
     auto checked = callbackFor!fn();
@@ -66,24 +56,6 @@ private void validateFunction(alias fn, R)() nothrow @nogc @system
 private size_t ceilDiv(size_t n, size_t d) pure nothrow @nogc @safe
 {
     return n / d + (n % d != 0);
-}
-
-// Balanced partitions without overflowing n * index or n + divisor - 1.
-private size_t boundary(size_t n, size_t parts, size_t index) pure nothrow @nogc @safe
-{
-    return n / parts * index + (index < n % parts ? index : n % parts);
-}
-
-private uint sliceCount(AntFarm* farm, size_t n, uint requested) nothrow @nogc @system
-{
-    if (requested > 512) fatal("parallel slices must be in 1 .. 512, or 0 for automatic");
-    if (requested == 0)
-    {
-        if (farm is null) fatal("automatic parallel slices require a Farm");
-        immutable consumers = atomicLoad!(MemoryOrder.raw)(farm.Cf);
-        requested = sqcsOf(consumers > 0 ? cast(ulong) consumers : 1);
-    }
-    return cast(uint) (n < requested ? n : requested);
 }
 
 private T loadBody(T)(PayloadBody body) nothrow @nogc @system
@@ -97,106 +69,10 @@ private T loadBody(T)(PayloadBody body) nothrow @nogc @system
     return value;
 }
 
-/++
- + A lazy payload-entry range. Each body owns a copied subrange descriptor,
- + so the adapter itself need only outlive `write`. Referenced data must live
- + through execution. Save/popFrontN support partial admission and retry.
- + ST has a common header and fixed body width (uniform kind-2 tables).
- + MT uses full headers with Done = min(512, slice length).
- +/
-struct ParallelRange(alias fn, R, bool mt = false)
-{
-    private R source;
-    private size_t grain;
-    private size_t position;
-    private size_t count;
-    private PayloadHeader header;
-    private ulong[(R.sizeof + 7) / 8] words;
+/// Grain adapter shared with the packed-argument ST helpers.
+alias ParallelRange(alias fn, R) = PayloadGrainRange!(fn, R);
 
-    private this(R input, size_t granularity, uint slices) nothrow @nogc @system
-    {
-        validateRange!R();
-        validateFunction!(fn, R)();
-        source = input;
-        grain = granularity;
-        static if (mt) count = slices;
-        else
-        {
-            if (grain == 0) fatal("parallel grain must be positive");
-            count = ceilDiv(cast(size_t) source.length, grain);
-        }
-        header.maxCs = mt ? 512 : 1;
-        header.done = 1;
-        header.plen = fixedPayloadLength;
-        header.call = &invoke;
-    }
-
-    /// Number of words copied for each subrange descriptor.
-    enum ulong fixedPayloadLength = (R.sizeof + 7) / 8;
-
-    static if (!mt)
-    {
-        /// Common metadata for the Farm's arithmetic uniform sizing path.
-        @property PayloadHeader* commonPayloadHeader() nothrow @nogc @system { return &header; }
-    }
-
-    /// Whether all payloads have been popped.
-    @property bool empty() const nothrow @nogc @safe { return position == count; }
-    /// Number of remaining payloads (not elements).
-    @property size_t length() const nothrow @nogc @safe { return count - position; }
-    /// Independent checkpoint for Farm sizing/emission passes.
-    @property typeof(this) save() nothrow @nogc @system { return this; }
-    /// Next entry; its header/body remain valid until this range is advanced.
-    @property PayloadEntry front() nothrow @nogc @system
-    {
-        immutable n = cast(size_t) source.length;
-        static if (mt)
-        {
-            immutable first = boundary(n, count, position);
-            immutable last = boundary(n, count, position + 1);
-        }
-        else
-        {
-            immutable first = position * grain;
-            immutable last = first + (grain < n - first ? grain : n - first);
-        }
-        R block = source[first .. last];
-        static if (mt) header.done = cast(uint) (last - first < 512 ? last - first : 512);
-        memcpy(words.ptr, &block, R.sizeof);
-        return PayloadEntry(&header, words[]);
-    }
-    /// Advance one payload.
-    void popFront() nothrow @nogc @safe { assert(!empty); ++position; }
-    /// Advance up to n admitted payloads and return the number advanced.
-    size_t popFrontN(size_t n) nothrow @nogc @safe
-    {
-        immutable taken = n < length ? n : length;
-        position += taken;
-        return taken;
-    }
-
-    private static long invoke(PayloadHeader*, PayloadBody body, ulong iteration)
-        nothrow @nogc @system
-    {
-        auto block = loadBody!R(body);
-        immutable n = cast(size_t) block.length;
-        static if (mt)
-        {
-            immutable steps = n < 512 ? n : 512;
-            immutable first = boundary(n, steps, cast(size_t) iteration);
-            immutable last = boundary(n, steps, cast(size_t) iteration + 1);
-        }
-        else
-        {
-            enum size_t first = 0;
-            immutable last = n;
-        }
-        foreach (i; first .. last) fn(block[i]);
-        return 0;
-    }
-}
-
-/// One ST payload per element, using the existing minimal argument packing.
+/// One ST payload per element, using minimal argument packing.
 auto parallelRange(alias fn, R)(R source) nothrow @nogc @system
     if (suitableRange!R)
 {
@@ -205,32 +81,17 @@ auto parallelRange(alias fn, R)(R source) nothrow @nogc @system
     return payloadRange!fn(source);
 }
 
-/// ST payloads, each executing up to grain consecutive elements. The body
-/// copies a subrange descriptor so runtime grain and the tail travel with it.
+/// Each ST payload executes up to grain consecutive elements.
 auto parallelRange(alias fn, R)(R source, size_t grain) nothrow @nogc @system
     if (suitableRange!R)
 {
-    return ParallelRange!(fn, R)(source, grain, 0);
-}
-
-/// MT payloads for a caller-composed batch. Zero slices snapshots live SqCs.
-auto parallelSlices(alias fn, R)(AntFarm* farm, R source, uint slices = 0)
-    nothrow @nogc @system if (suitableRange!R)
-{
-    return ParallelRange!(fn, R, true)(source, 1,
-        sliceCount(farm, cast(size_t) source.length, slices));
-}
-
-/// Explicit-slice variant for composition without a Farm snapshot.
-auto parallelSlices(alias fn, R)(R source, uint slices) nothrow @nogc @system
-    if (suitableRange!R)
-{
-    return parallelSlices!fn(null, source, slices);
+    validateFunction!(fn, R)();
+    return payloadRange!fn(source, grain);
 }
 
 // The producer owns the input cursor. Consumers only read source/options and
 // mutate the completion credits. A producer credit prevents completion while
-// writeTracked is still returning its accepted prefix.
+// write is still returning its accepted prefix.
 private struct Region(R)
 {
     AntFarm* farm;
@@ -257,7 +118,7 @@ private void releaseRegion(R)(Region!R* state) nothrow @nogc @system
 private void finishCredit(R)(Region!R* state) nothrow @nogc @system
 {
     if (atomicFetchSub!(MemoryOrder.acq_rel)(state.credits, size_t(1)) != 1) return;
-    // The acq_rel chain joins all table finishers (ST) or blocks (MT), and
+    // The acq_rel chain joins all table finishers, and
     // publication's final producer credit. Snapshot the hook before invoking.
     auto hook = state.userHook;
     immutable heapOwned = state.heapOwned;
@@ -278,94 +139,53 @@ private void initialize(R)(Region!R* state, AntFarm* farm, R source, Options opt
     if (farm is null) fatal("parallel region requires a Farm");
     if (options.grain == 0) fatal("parallel grain must be positive");
     if (options.costClass > MAX_AVG_COST) fatal("parallel costClass out of range");
-    if (options.form < ParallelForm.automatic || options.form > ParallelForm.mtSlices) fatal("parallel form out of range");
     state.farm = farm;
     state.source = source;
     state.options = options;
     if (done !is null) state.userHook = *done;
     state.tableHook = TableCompletionHook(state, &tableFinished!R);
     immutable n = cast(size_t) source.length;
-    if (options.form == ParallelForm.mtSlices)
-    {
-        state.count = sliceCount(farm, n, options.slices);
-        if (state.count != 0)
-        {
-            immutable base = n / state.count, remainder = n % state.count;
-            immutable shortSteps = base < 512 ? base : 512;
-            immutable longSteps = base < 512 ? base + 1 : 512;
-            atomicStore!(MemoryOrder.raw)(state.credits, size_t(1) +
-                (state.count - remainder) * shortSteps + remainder * longSteps);
-        }
-    }
-    else state.count = ceilDiv(n, options.grain);
+    state.count = ceilDiv(n, options.grain);
 }
 
-private struct Submission(R, bool mt)
+private struct Submission(R)
 {
     Region!R* state;
     size_t position;
     PayloadHeader header;
-    ulong[mt ? 3 : 2] words;
+    ulong[2] words;
 
     this(Region!R* s) nothrow @nogc @system
     {
         state = s;
         position = s.next;
-        header.maxCs = mt ? 512 : 1;
-        header.done = 1;
         header.plen = words.length;
         header.call = &invoke;
     }
-    enum ulong fixedPayloadLength = mt ? 3 : 2;
+    enum ulong fixedPayloadLength = 2;
+    @property PayloadHeader* commonPayloadHeader() nothrow @nogc @system { return &header; }
     @property bool empty() nothrow @nogc @system { return position == state.count; }
     @property size_t length() nothrow @nogc @system { return state.count - position; }
     @property typeof(this) save() nothrow @nogc @system { return this; }
     @property PayloadEntry front() nothrow @nogc @system
     {
         words[0] = cast(ulong) state;
-        static if (mt)
-        {
-            immutable n = cast(size_t) state.source.length;
-            words[1] = boundary(n, state.count, position);
-            words[2] = boundary(n, state.count, position + 1) - words[1];
-            header.done = cast(uint) (words[2] < 512 ? words[2] : 512);
-        }
-        else words[1] = position * state.options.grain;
+        words[1] = position * state.options.grain;
         return PayloadEntry(&header, words[]);
     }
     void popFront() nothrow @nogc @system { ++position; }
 
-    static long invoke(PayloadHeader*, PayloadBody body, ulong iteration)
+    static long invoke(PayloadHeader*, PayloadBody body)
         nothrow @nogc @system
     {
         auto values = loadBody!(typeof(words))(body);
         auto state = cast(Region!R*) values[0];
         immutable first = cast(size_t) values[1];
-        static if (mt)
-        {
-            immutable n = cast(size_t) values[2], steps = n < 512 ? n : 512;
-            state.execute(state, first + boundary(n, steps, cast(size_t) iteration),
-                first + boundary(n, steps, cast(size_t) iteration + 1));
-            finishCredit(state); // final access: may complete/free the region
-        }
-        else
-        {
-            immutable remaining = cast(size_t) state.source.length - first;
-            immutable grain = state.options.grain;
-            state.execute(state, first, first + (grain < remaining ? grain : remaining));
-        }
+        immutable remaining = cast(size_t) state.source.length - first;
+        immutable grain = state.options.grain;
+        state.execute(state, first, first + (grain < remaining ? grain : remaining));
         return 0;
     }
-}
-
-private struct Bodies(R)
-{
-    R entries;
-    @property bool empty() nothrow @nogc @system { return entries.empty; }
-    @property size_t length() nothrow @nogc @system { return entries.length; }
-    @property typeof(this) save() nothrow @nogc @system { return this; }
-    @property PayloadBody front() nothrow @nogc @system { return entries.front.body; }
-    void popFront() nothrow @nogc @system { entries.popFront(); }
 }
 
 // Return on the first full write; never spin or consume from a callback.
@@ -374,19 +194,11 @@ private bool publishRegion(R)(Region!R* state, ref Token token) nothrow @nogc @s
     if (state.submitted) return true;
     while (state.next != state.count)
     {
-        size_t accepted;
-        if (state.options.form == ParallelForm.mtSlices)
-            accepted = cast(size_t) state.farm.write(Submission!(R, true)(state),
-                token, state.options.costClass);
-        else
-        {
-            auto entries = Submission!(R, false)(state);
-            atomicFetchAdd!(MemoryOrder.raw)(state.credits, size_t(1));
-            accepted = cast(size_t) state.farm.writeTracked(entries.header,
-                Bodies!(typeof(entries))(entries), entries.fixedPayloadLength,
-                &state.tableHook, token, state.options.costClass);
-            if (accepted == 0) finishCredit(state); // undo the unadmitted table
-        }
+        auto entries = Submission!R(state);
+        atomicFetchAdd!(MemoryOrder.raw)(state.credits, size_t(1));
+        immutable accepted = cast(size_t) state.farm.write(entries, token,
+            state.options.costClass, &state.tableHook);
+        if (accepted == 0) finishCredit(state); // undo the unadmitted table
         if (accepted == 0) return false;
         state.next += accepted;
     }

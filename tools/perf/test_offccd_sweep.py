@@ -89,7 +89,7 @@ class SuiteTests(unittest.TestCase):
     def test_counts_match_plan(self):
         expected = {'calib': 3, 'main-c': 72, 'main-p': 64, 'combined': 12, 'ctl-equal': 4,
                     'ctl-small': 39, 'ctl-pack': 12, 'ctl-mirror': 28, 'ctl-rolesplit': 8,
-                    'smt': 10, 'layouts': 28, 'lat': 4, 'smoke': 12}
+                    'smt': 10, 'layouts': 14, 'lat': 4, 'smoke': 12}
         for name, n in expected.items():
             self.assertEqual(len(sweep.suite_cells(name)), n, name)
 

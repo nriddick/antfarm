@@ -1073,7 +1073,7 @@ version (unittest)
                 }
             }
             worker.context = cast(void*) state;
-            header.maxCs = header.done = 1;
+
             header.call = &noopRemoteService;
             foreach (ref body; bodies) body = word[];
         }
@@ -1109,7 +1109,7 @@ version (unittest)
         }
     }
 
-    private long noopRemoteService(PayloadHeader*, PayloadBody, ulong)
+    private long noopRemoteService(PayloadHeader*, PayloadBody)
         nothrow @nogc @system { return 0; }
 
     // Group 0 has one accepted CPU; every other group's one CPU is excluded.

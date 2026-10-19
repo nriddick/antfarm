@@ -32,7 +32,7 @@ import std.format : format;
 import std.json : JSONValue;
 import std.stdio : stderr, stdout, writeln;
 
-enum Layout { uniform, compact, mt }
+enum Layout { uniform, compact }
 enum Mode { stream, phased }
 
 enum uint ringMiB = 16;
@@ -122,7 +122,7 @@ __gshared size_t[] g_producers;
 __gshared ulong g_share;          // phased: payloads per producer per round
 __gshared ulong g_costIters;
 __gshared ulong g_calSink;
-__gshared PayloadHeader g_hdr, g_hdrAlt, g_hdrMt;
+__gshared PayloadHeader g_hdr, g_hdrAlt;
 __gshared long[][] g_firstCb;     // per slot, phased
 __gshared long[][] g_lat;         // per slot, latency slice
 
@@ -158,7 +158,7 @@ ulong chain(ulong x, ulong n) nothrow @nogc @system
     return x;
 }
 
-long cbBody(bool alt)(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long cbBody(bool alt)(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
 {
     ulong x = tlsSink;
     foreach (w; b)
@@ -380,9 +380,6 @@ ulong writeSome(ref Writer w, ref Token tok, size_t span)
     case Layout.compact:
         wrote = g_farm.write(w.entries[0 .. span], tok, g_opts.ac);
         break;
-    case Layout.mt:
-        wrote = g_farm.write(g_hdrMt, w.bodies[0 .. span], g_opts.bodyWords, tok, g_opts.ac);
-        break;
     }
     if (stamp)
         w.storage[0] = 0;
@@ -502,7 +499,6 @@ ulong tableWords(Layout layout, ulong n, uint sq, uint bodyWords)
     {
     case Layout.uniform: return base + 2 + n * bodyWords;        // uniformFixed
     case Layout.compact: return base + n * (2 + bodyWords);      // Tindex + Call + body
-    case Layout.mt: return base + n * (2 + 16 + bodyWords);      // full: 2 index words, Phead
     }
 }
 
@@ -517,7 +513,7 @@ struct ScanResult
 // is seq + Tsize, so walking Tnext from the pre-PUBLISH Wt visits exactly the
 // round's tables and lands on the post-round Wt. Offsets follow the table
 // layout: Thead[8], extension words (uniform 1, uniformFixed 2), Tindex
-// (none for uniformFixed, Tlen + Tmt for full), 7 pad, Tprogress, 7 pad,
+// (none for uniformFixed, Tlen otherwise), 7 pad, Tprogress, 7 pad,
 // then Tcount shards at a stride of 8 words. Tcount high 32 bits count claim
 // attempts; attempts beyond Shiter = ceil(Shlen / chunk) failed.
 void scanRound(ulong from, ulong to, ref ScanResult r)
@@ -655,7 +651,7 @@ int usage(string msg)
     stderr.writeln("usage: offccd [--home-llc auto|N] [--home-p N] [--home-c N]",
         " [--home-extra-p N] [--home-extra-c N] [--off-p N] [--off-c N] [--smt-p N] [--smt-c N]",
         " [--cpus LIST] [--cost touch|w100|w1000|NS] [--batch N] [--body N]",
-        " [--layout uniform|compact|mt] [--ac N] [--mode stream|phased] [--warm-ms N]",
+        " [--layout uniform|compact] [--ac N] [--mode stream|phased] [--warm-ms N]",
         " [--window-ms N] [--subwindows N] [--round-frac F] [--lat-every N] [--plan-only] [--seed N]");
     return 2;
 }
@@ -857,15 +853,10 @@ void run(ref RolePlan plan, ref JSONValue out_)
     scope (exit) f.destroy();
 
     g_hdr = PayloadHeader.init;
-    g_hdr.maxCs = 1;
-    g_hdr.done = 1;
+
     g_hdr.call = &cbTouch;
     g_hdrAlt = g_hdr;
     g_hdrAlt.call = &cbTouchAlt;
-    g_hdrMt = g_hdr;
-    g_hdrMt.maxCs = 2;
-    g_hdrMt.done = 2;
-    immutable done = o.layout == Layout.mt ? 2UL : 1UL;
 
     // Phased round budget: whole batches per producer, with one extra table
     // header per write as margin for quota splits.
@@ -957,7 +948,7 @@ void run(ref RolePlan plan, ref JSONValue out_)
             auto cur = snapshot();
             auto tNow = MonoTime.currTime;
             immutable dt = (tNow - tPrev).total!"nsecs" / 1e9;
-            subRates ~= cast(double)(sumOf(cur, g_consumers) - sumOf(prev, g_consumers)) / done / dt;
+            subRates ~= cast(double)(sumOf(cur, g_consumers) - sumOf(prev, g_consumers)) / dt;
             prev = cur;
             tPrev = tNow;
             if (w == (o.subwindows + 1) / 2)
@@ -981,8 +972,8 @@ void run(ref RolePlan plan, ref JSONValue out_)
         ulong produced;
         foreach (k; g_producers)
             produced += atomicLoad!(MemoryOrder.acq)(g_slots[k].items);
-        atomicStore!(MemoryOrder.rel)(g_target.v, produced * done);
-        while (!failure.length && !sumReached(produced * done))
+        atomicStore!(MemoryOrder.rel)(g_target.v, produced);
+        while (!failure.length && !sumReached(produced))
         {
             if (MonoTime.currTime > drainDeadline) { failure = "drain-timeout"; break; }
             Thread.yield();
@@ -1057,7 +1048,7 @@ void run(ref RolePlan plan, ref JSONValue out_)
                 break;
             }
             immutable pubEnd = nowTicks();
-            target += roundItems * done;
+            target += roundItems;
             atomicStore!(MemoryOrder.rel)(g_target.v, target);
             immutable flip2 = nowTicks();
             atomicStore!(MemoryOrder.rel)(g_flipTicks.v, cast(ulong) flip2);
@@ -1188,18 +1179,18 @@ void run(ref RolePlan plan, ref JSONValue out_)
     {
         return windowSecs > 0 ? JSONValue(x / windowSecs) : JSONValue(null);
     }
-    immutable winConsumed = cast(double) sumOf(winItems, g_consumers) / done;
+    immutable winConsumed = cast(double) sumOf(winItems, g_consumers);
     agg["window_secs"] = windowSecs;
     agg["rate_consumed"] = o.mode == Mode.phased ? phased["R_e2e"] : perSec(winConsumed);
     agg["rate_window_consumed"] = perSec(winConsumed);
     agg["rate_produced"] = perSec(sumOf(winItems, g_producers));
-    agg["home_consumer_rate"] = perSec(homeC / done);
-    agg["off_consumer_rate"] = perSec(offC / done);
+    agg["home_consumer_rate"] = perSec(homeC);
+    agg["off_consumer_rate"] = perSec(offC);
     agg["consumer_share"] = sharesJson(cItems, cLocs);
     agg["producer_share"] = sharesJson(pItems, pLocs);
     agg["consumed_total"] = consumed;
     agg["produced_total"] = produced;
-    agg["callbacks_per_payload"] = done;
+    agg["callbacks_per_payload"] = 1;
     out_["aggregate"] = agg;
     if (o.mode == Mode.phased)
     {
@@ -1229,7 +1220,7 @@ void run(ref RolePlan plan, ref JSONValue out_)
         return finish("invalid", verdict.reason);
     if (failure.length)
         return finish("invalid", failure);
-    if (consumed != produced * done)
+    if (consumed != produced)
         return finish("invalid", "conservation");
     finish("ok", null);
 }

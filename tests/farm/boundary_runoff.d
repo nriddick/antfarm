@@ -8,7 +8,7 @@ import antfarm;
 import core.atomic;
 import core.stdc.stdio;
 
-long unusedCallback(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
+long unusedCallback(PayloadHeader*, PayloadBody) nothrow @nogc @system
 {
     fatal("parked consumer unexpectedly invoked");
     return 0;
@@ -24,7 +24,7 @@ void main(string[] args)
     printf("boundary runoff mode=%s\n", pulse ? "Sub0".ptr : "live-root".ptr);
     auto token = f.registerProducer(Tier.small);
     PayloadHeader header;
-    header.maxCs = header.done = 1;
+
     header.call = &unusedCallback;
     // Cf=SqCs=1, compact ST singleton overhead=40 words (Thead 8, index 1,
     // pads/progress 15, Tcount 8, Call 1, end pad 7), body=472 => Tsize=512.

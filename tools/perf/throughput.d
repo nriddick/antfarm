@@ -61,7 +61,7 @@ uint* workerCalls() nothrow @nogc @system
     return &n;
 }
 
-long benchCbLocal(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long benchCbLocal(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
 {
     auto p = workerCalls();
     if (++(*p) >= LOCAL_FLUSH)
@@ -74,7 +74,7 @@ long benchCbLocal(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @sy
 
 /// benchCbLocal's twin for --mixed-calls; a distinct function so tables that
 /// alternate the two are not uniform.
-long benchCbLocalAlt(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long benchCbLocalAlt(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
 {
     auto p = workerCalls();
     if (++(*p) >= LOCAL_FLUSH)
@@ -85,7 +85,7 @@ long benchCbLocalAlt(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc 
     return 2;
 }
 
-long benchCbGlobal(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long benchCbGlobal(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
 {
     atomicFetchAdd(g_calls, 1L);
     return 1;
@@ -342,8 +342,7 @@ Trial runOnce(Cfg c)
         return t;
     }
     *headers = PayloadHeader.init;
-    headers.maxCs = 1;
-    headers.done = 1;
+
     headers.call = g_globalCount ? &benchCbGlobal : &benchCbLocal;
     headers[1] = headers[0];
     headers[1].call = &benchCbLocalAlt;

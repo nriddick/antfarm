@@ -38,7 +38,7 @@ void verifyBody(PayloadBody body) nothrow @nogc @system
         if (word != pattern(i)) fatal("protected payload body changed");
 }
 
-long bodyCallback(PayloadHeader*, PayloadBody body, ulong)
+long bodyCallback(PayloadHeader*, PayloadBody body)
     nothrow @nogc @system
 {
     verifyBody(body);
@@ -56,7 +56,7 @@ long bodyCallback(PayloadHeader*, PayloadBody body, ulong)
     return 1;
 }
 
-// A one-payload, maxCs=done=1 (compact) table has 40 + 8*(SqCs-1) overhead words.
+// A one-payload ST table has 40 + 8*(SqCs-1) overhead words.
 ulong writeWords(AntFarm* f, ref Token tok, ulong words)
     nothrow @nogc @system
 {
@@ -70,7 +70,7 @@ ulong writeWords(AntFarm* f, ref Token tok, ulong words)
     scope (exit) free(mem);
     foreach (i; 0 .. n) mem[i] = pattern(i);
     PayloadHeader h;
-    h.maxCs = h.done = 1;
+
     h.call = &bodyCallback;
     PayloadEntry[1] entries = [PayloadEntry(&h, mem[0 .. n])];
     immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);

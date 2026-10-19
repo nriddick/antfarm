@@ -17,7 +17,7 @@ void require(bool ok, string message) nothrow @nogc @system
     if (!ok) fatal(message);
 }
 
-long callback(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
+long callback(PayloadHeader*, PayloadBody) nothrow @nogc @system
 {
     ++calls;
     return 1;
@@ -43,7 +43,7 @@ ulong writeWords(AntFarm* f, ulong words, bool permit = true) nothrow @nogc @sys
     scope(exit) free(body);
     body[0 .. n] = 0;
     PayloadHeader h;
-    h.maxCs = h.done = 1;
+
     h.call = &callback;
     PayloadEntry[1] entries = [PayloadEntry(&h, body[0 .. n])];
     return f.write(PreparedRange(entries[], permit), *producer);

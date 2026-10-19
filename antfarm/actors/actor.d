@@ -1042,8 +1042,7 @@ align(64) struct ActorRuntime
         runtime.allocator = allocator;
         runtime.slots = cast(ActorSlot*) slotMemory;
         runtime.capacity_ = capacity;
-        runtime.actorHeader.maxCs = 1;
-        runtime.actorHeader.done = 1;
+
         runtime.actorHeader.plen = 2;
         runtime.actorHeader.call = &actorPayloadCallback;
         foreach (i; 0 .. capacity)
@@ -1997,7 +1996,7 @@ private void actorDispatch(T, alias handler)(
     handler(borrow, context);
 }
 
-private long actorPayloadCallback(PayloadHeader*, PayloadBody body, ulong)
+private long actorPayloadCallback(PayloadHeader*, PayloadBody body)
     nothrow @nogc @system
 {
     if (body.length != 2) return 0;

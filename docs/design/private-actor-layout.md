@@ -36,27 +36,19 @@ counter and scheduled flag are emitter-owned and reserved at cohort creation.
 ## Cohort and Entry sizes
 
 - The common child Entry is **40 bytes**. Root-only disposition, flags and the
-  checked 32-bit counter occupy the child enclosing-pointer union; static asserts
-  verify size and offsets under LDC and DMD. `PrivateContext` stays four words.
-- Per-cohort emitter state (two `Emittable` descriptors, resume FIFO, counter and
-  scheduled flag) adds **48 bytes per cohort** on 64-bit targets.
-- Wave outcomes add **16 bytes** to the wave and two participant counters, and
-  cancellation adds the immutable `ChildBase.root` pointer, for **376 bytes in a
-  signal-only cohort**.
-- Opt-in subset storage grows the fixed cohort metadata by **16 bytes** (one
-  selection pointer and a count, with the subset flag in existing padding): a
-  signal-only cohort is **280 bytes instead of 264** before the child Service
-  pointer, continuation descriptors, wave-outcome fields and cohort root pointer
-  are added, i.e. 376 with them. A reserved cohort makes one extra eager
-  allocation of **8 bytes per member of capacity**, containing both the selection
-  and its inverse positions.
-- A tracked root record is **32 bytes per root slot**; an untracked park is 32
-  bytes smaller. The root Entry keeps the sticky `subtreeCancel` byte at offset
-  35, formerly padding; child Entries are unchanged.
-- A root Entry keeps its export/storage design; a signal-only cohort grows to
-  368 bytes with wave outcomes and to 376 with cancellation. Plain/result
-  dispatch adds no RMW, and an empty child-return list costs one raw load per
-  pump.
+  checked 32-bit counter occupy the child enclosing-pointer union; static
+  asserts verify size and offsets. `PrivateContext` stays four words.
+- On 64-bit targets a signal-only per-object cohort is **264 bytes**, including
+  both emission descriptors, resume FIFO, wave outcomes, cancellation root
+  pointer and subset metadata. The ST-only 16-byte payload header removes
+  112 bytes from the previous 376-byte cohort.
+- Result cohorts add two words, for **280 bytes**. The cohort-slab policy
+  appends one pointer to either layout. Plain/result dispatch adds no RMW;
+  an empty child-return list costs one raw load per pump.
+- Opt-in subset storage uses one extra eager allocation of **8 bytes per member
+  of capacity**, containing the selection and its inverse positions.
+- A tracked root record is **32 bytes per root slot**; an untracked park is
+  32 bytes smaller. The root Entry keeps `subtreeCancel` at byte 35.
 
 Root tracking's capacity is limited by a 32-bit `index`: at most `uint.max`.
 

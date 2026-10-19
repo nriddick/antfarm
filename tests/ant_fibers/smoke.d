@@ -38,7 +38,7 @@ void wakeNotifier(void* context) nothrow @nogc
     atomicFetchAdd(*count, 1);
 }
 
-long barePayloadCallback(PayloadHeader*, PayloadBody body, ulong)
+long barePayloadCallback(PayloadHeader*, PayloadBody body)
     nothrow @nogc @system
 {
     assert(body.length == 1 && body[0] == 0xA17F_A4FUL);
@@ -1394,8 +1394,7 @@ void mixedPayloadSmoke()
         });
 
     PayloadHeader header;
-    header.maxCs = 1;
-    header.done = 1;
+
     header.plen = 1;
     header.call = &barePayloadCallback;
     ulong[count] bodies = 0xA17F_A4FUL;

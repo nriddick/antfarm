@@ -44,14 +44,14 @@ void farmYieldFn()
     atomicFetchAdd(ran, 1L);
 }
 
-long payloadCallback(PayloadHeader*, PayloadBody, ulong)
+long payloadCallback(PayloadHeader*, PayloadBody)
     nothrow @nogc @system
 {
     atomicFetchAdd(ran, 1L);
     return 1;
 }
 
-long mtPayloadCallback(PayloadHeader*, PayloadBody, ulong)
+long mtPayloadCallback(PayloadHeader*, PayloadBody)
     nothrow @nogc @system
 {
     atomicFetchAdd(mtHits, 1L);
@@ -154,8 +154,7 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
 
     atomicStore(mtHits, 0);
     PayloadHeader header;
-    header.maxCs = 1;
-    header.done = 1;
+
     header.plen = 1;
     header.call = &mtPayloadCallback;
     ulong word;
@@ -257,8 +256,7 @@ void main(string[] args)
     {
         atomicStore(ran, 0);
         PayloadHeader header;
-        header.maxCs = 1;
-        header.done = 1;
+
         header.plen = 1;
         header.call = &payloadCallback;
         ulong word;

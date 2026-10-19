@@ -111,19 +111,19 @@ void spinFor(ulong ns) nothrow @nogc @system
     while (MonoTime.currTime < end) {}
 }
 
-long bgCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long bgCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
 {
     spinFor(g_spinNs);
     atomicFetchAdd(g_bg, 1L);
     return 1;
 }
 
-long nopCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long nopCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
 {
     return 1;
 }
 
-long sentCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long sentCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
 {
     immutable dt = ticksToNs(nowTicks() - cast(long)(b.length ? b[0] : 0));
     rec(&g_nlat, g_lat, dt);
@@ -320,12 +320,10 @@ FarmSet startFarm(Cfg cfg, uint nc)
         s.sentBody[i] = 0;
     }
     *s.bgH = PayloadHeader.init;
-    s.bgH.maxCs = 1;
-    s.bgH.done = 1;
+
     s.bgH.call = &bgCb;
     *s.sentH = PayloadHeader.init;
-    s.sentH.maxCs = 1;
-    s.sentH.done = 1;
+
     s.sentH.call = &sentCb;
     foreach (i; 0 .. dumpCap)
     {

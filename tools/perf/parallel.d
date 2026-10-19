@@ -53,13 +53,12 @@ void emit(R)(AntFarm* farm, ref Token token, ref ConsumerView view, R entries, u
 void main(string[] args)
 {
     size_t n = 100_000, grain = 64, embedded;
-    uint workers = 4, rounds = 10, cost = 16, costClass = DEFAULT_AVG_COST, slices;
-    string form = "st";
+    uint workers = 4, rounds = 10, cost = 16, costClass = DEFAULT_AVG_COST;
     getopt(args, "n", &n, "grain", &grain, "workers", &workers,
         "rounds", &rounds, "cost", &cost, "cost-class", &costClass,
-        "form", &form, "slices", &slices, "embedded", &embedded);
+        "embedded", &embedded);
     if (workers < 1 || workers > MAX_CONSUMERS_LIMIT || rounds == 0 || rounds == uint.max ||
-        grain == 0 || costClass > MAX_AVG_COST || (form != "st" && form != "mt") ||
+        grain == 0 || costClass > MAX_AVG_COST ||
         embedded > size_t.max - n)
         fatal("invalid parallel benchmark options");
 
@@ -110,15 +109,6 @@ void main(string[] args)
         output[] = 0;
         immutable beforeWords = atomicLoad!(MemoryOrder.raw)(farm.Wt);
         immutable start = MonoTime.currTime;
-        if (form == "mt")
-        {
-            auto entries = parallelSlices!work(farm, iota(n), slices);
-            if (embedded != 0)
-                emit(farm, token, view, chain(entries,
-                    parallelRange!work(iota(n, n + embedded), grain)), costClass);
-            else emit(farm, token, view, entries, costClass);
-        }
-        else
         {
             auto entries = parallelRange!work(iota(n), grain);
             if (embedded != 0)
@@ -149,8 +139,8 @@ void main(string[] args)
         foreach (i, value; output)
             if (value != calculate(i)) fatal("parallel benchmark output mismatch");
     }
-    writeln("form,workers,n,grain,cost,cost_class,slices,embedded,rounds,ns_per_round,ring_words_per_round");
-    writefln("%s,%s,%s,%s,%s,%s,%s,%s,%s,%.1f,%.1f", form, workers, n, grain,
-        cost, costClass, slices, embedded, rounds,
+    writeln("workers,n,grain,cost,cost_class,embedded,rounds,ns_per_round,ring_words_per_round");
+    writefln("%s,%s,%s,%s,%s,%s,%s,%.1f,%.1f", workers, n, grain,
+        cost, costClass, embedded, rounds,
         cast(double) elapsed / rounds, cast(double) ringWords / rounds);
 }

@@ -125,7 +125,7 @@ def suite_cells(name, mirror_llc=1):
                 for batch in (1700, 16):
                     cells.append(cell(name, 'smt', [f'--smt-{flag}', str(k)], k, role, batch=batch))
     elif name == 'layouts':
-        for layout in ('compact', 'mt'):
+        for layout in ('compact',):
             for mode in ('stream', 'phased'):
                 for k in (0, 1, 4, 8):
                     cells.append(cell(name, 'S_C', ['--off-c', str(k)], k, 'consumer', batch=256,

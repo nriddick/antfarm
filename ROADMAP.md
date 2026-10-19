@@ -16,6 +16,14 @@ remain tied to the revisions at which they were measured.
 Small perf-gate shifts on this host are dominated by code layout; performance
 is reassessed holistically in dedicated sessions.
 
+## 1.9.0 progress
+
+- Remove MT payloads and integrate grains into the ST table helpers.
+- Prove the ST-only core links from C without druntime on Windows and Linux.
+- Implement the [C ABI](docs/design/c-abi.md): core first, then the optional
+  druntime-inclusive non-Fiber worker pool and FarmHost distribution.
+- Actors follow their allocator/runtime split; Fibers stay outside ABI 1.
+
 ## Next
 
 - Revise PERFORMANCE.md in a dedicated performance session, including

@@ -39,13 +39,13 @@ make -C tests/farm baseline   # antfarm_test.d unit suite built without dub
 ## Layout
 
 - `torture_common.d` — counters, batch builder, producer/consumer helpers
-- `torture_tests.d` — T01–T18, T20–T25. T20 exercises the D2
+- `torture_tests.d` — T01–T18, T20–T26. T20 exercises the D2
   confirmed-segment pulse invariant under write crossings and churn, with
   small bodies so the arm stays an invariant scan rather than a memcpy
   bench. T21 laps the ring several times and verifies payload body contents
   word-for-word (a run of numbers summed into a global counter, plus
-  per-payload call counts). T25 checks single-shot callback counter values
-  and exact execution in mixed ST/MT tables with two producers, eight
+  per-payload call counts). T25 checks borrowed callback metadata
+  and exact execution in ST tables with two producers, eight
   consumers, ring reuse, and chunk sizes 32 and one.
 - `sweep_cursor.d` — T27: the oldest-epoch idle re-walk resumes at its
   cursor. One consumer parks in the primary call of the last table of an
@@ -160,12 +160,13 @@ evidence, including a leaf-acquire defect hidden by the former annotations.
 ## Parallel-loop adapters
 
 `python3 run_parallel.py --compiler ldc2` (or `dmd`) builds and runs the
-ST/MT range and completion checks in debug and release. It covers empty and
-short ranges, large/uneven grains, the 512-iteration cap, partial submission,
+ST grain range and completion checks in debug and release. Optional write
+hooks cover mixed tables, empty input, full-ring refusal and invalid-hook death probes. It covers empty and
+short ranges, large/uneven grains, tuple and zero-argument grains, partial submission,
 forward checkpoints, stepped ranges, stack-borrowing foreach, four worker
 threads, early handle destruction after publication, and a deliberately held
-MT callback that must delay the join. Debug death probes reject nested waits
-from ST, MT and table hooks; debug/release reject escaping foreach bodies.
+ST grain callback that must delay the join. Debug death probes reject nested waits
+from payload callbacks and table hooks; debug/release reject escaping foreach bodies.
 Each compiler/run has a 300-second timeout.
 
 `make check-parallel` runs LDC by default; `make check-parallel-dmd` runs

@@ -305,6 +305,11 @@ regression test or an exhaustive search outside this 10-by-10 grid.
 
 ### Single-threaded table layouts vs MT tables
 
+The comparison below describes the 1.8.x implementation and its measurements.
+The 1.9 development branch removes MT payloads and full ring headers; its
+current formats are documented in [SPEC](SPEC.md#2-data-layout). Historical
+results here are not measurements of the 1.9 changes.
+
 A table of only single-threaded payloads (`Tmt == 0`, every payload
 `MaxCs == 1 && Done == 1`) stores each payload as a compact `[Call][Pbody]`
 record (SPEC 2f), or, when the accepted prefix shares one `Call`, as the bare

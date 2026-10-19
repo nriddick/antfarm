@@ -109,8 +109,8 @@ by TSan, particularly cross-alias accesses or atomic-only lifecycle errors.
 - Raw ticket/ledger/count operations are mutex-protected, single-owner, or
   advisory scheduling/accounting state. Raw immutable table fields follow
   acquire Tsent; segment sibling reads follow acquire Es under ownership.
-- MT primary accounting is not a join of all secondary callbacks. Each
-  still-running callback retains its own view pin until return.
+- Every payload callback contributes through its shard completion join.
+  Table hooks run after that join and retain their view pin through return.
 
 No additional missing-acquire fast-path defect was confirmed. Cancellation
 must not abandon a reserved table or callback; shutdown still drains/joins

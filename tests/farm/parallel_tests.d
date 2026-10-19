@@ -3,10 +3,12 @@ module parallel_tests;
 version (TSan) extern(C) __gshared string[] rt_options = ["gcopt=parallel:0"];
 
 import antfarm.parallel;
+import antfarm.templates : payloadRange;
 import core.atomic;
 import core.thread;
 import core.stdc.stdio : puts;
 import std.range : iota, isForwardRange;
+import std.typecons : Tuple;
 
 __gshared uint[] hits;
 shared uint notified;
@@ -21,6 +23,15 @@ void check(bool condition) nothrow @nogc @system
 }
 
 void visit(size_t index) nothrow @nogc @system { ++hits[index]; }
+shared uint rawCompleted;
+void countedVisit(size_t index) nothrow @nogc @system
+{
+    visit(index);
+    atomicFetchAdd!(MemoryOrder.acq_rel)(rawCompleted, 1U);
+}
+shared uint zeroCalls;
+void zeroVisit() nothrow @nogc @system { atomicFetchAdd!(MemoryOrder.raw)(zeroCalls, 1U); }
+void visitAmount(size_t index, uint amount) nothrow @nogc @system { hits[index] += amount; }
 void noop(size_t) nothrow @nogc @system {}
 void signedVisit(int index) nothrow @nogc @system { ++hits[index]; }
 void hold(size_t index) nothrow @nogc @system
@@ -58,7 +69,7 @@ void borrowedNoGC(ref ConsumerView view, ref Token token) nothrow @nogc @system
 {
     uint[1031] local;
     foreach (i; parallel(view, token, iota(local.length),
-        Options(13, 7, ParallelForm.mtSlices)))
+        Options(13, 7)))
         local[i] = cast(uint) i + 1;
     foreach (i, value; local) check(value == i + 1);
 }
@@ -73,12 +84,11 @@ void basic()
     subscribe(view, farm);
     scope(exit) view.unsubscribe();
 
-    foreach (form; [ParallelForm.automatic, ParallelForm.st, ParallelForm.mtSlices])
     foreach (n; [size_t(0), 1, 7, 513, 1031, 50_003])
     foreach (grain; [size_t(1), 64, 1024])
     {
         hits = new uint[n];
-        auto options = Options(grain, MAX_AVG_COST, form, 7);
+        auto options = Options(grain, MAX_AVG_COST);
         parallelForWait!visit(iota(n), token, view, options);
         foreach (hit; hits) check(hit == 1);
 
@@ -107,7 +117,7 @@ void basic()
 
     // Forward checkpoints must preserve exactly the unadmitted suffix.
     hits = new uint[1031];
-    auto entries = parallelRange!visit(iota(hits.length), 13);
+    auto entries = payloadRange!visit(iota(hits.length), 13);
     static assert(isForwardRange!(typeof(entries)));
     auto saved = entries.save;
     check(saved.length == 80);
@@ -121,17 +131,39 @@ void basic()
     check(saved.length == 80);
     foreach (hit; hits) check(hit == 1);
 
-    hits[] = 0;
-    auto slices = parallelSlices!visit(farm, iota(hits.length), 7);
-    check(slices.length == 7);
-    check(slices.front.header.maxCs > 1);
-    while (!slices.empty)
+    // Tuple grains expand named fields without changing argument conversion.
+    alias Pair = Tuple!(size_t, "index", uint, "amount");
+    immutable Pair[] pairs = [Pair(0, 1), Pair(1, 2), Pair(2, 3),
+        Pair(3, 4), Pair(4, 5), Pair(5, 6), Pair(6, 7)];
+    hits = new uint[pairs.length];
+    auto tuples = payloadRange!visitAmount(pairs, 3);
+    check(tuples.length == 3);
+    while (!tuples.empty)
     {
-        slices.popFrontN(cast(size_t) farm.write(slices, token));
+        tuples.popFrontN(cast(size_t) farm.write(tuples, token));
         view.consumeNext();
     }
     while (view.consumeNext()) {}
-    foreach (hit; hits) check(hit == 1);
+    foreach (i, hit; hits) check(hit == i + 1);
+
+    // Empty, zero-argument and maximal grains preserve exact element counts.
+    atomicStore!(MemoryOrder.raw)(zeroCalls, 0U);
+    auto empty = payloadRange!zeroVisit(iota(size_t(0)), size_t.max);
+    check(empty.empty && empty.length == 0 && farm.write(empty, token) == 0);
+    foreach (grain; [size_t(4), size_t.max])
+    {
+        auto zero = payloadRange!zeroVisit(iota(size_t(9)), grain);
+        check(zero.length == (grain == 4 ? 3 : 1));
+        while (!zero.empty)
+        {
+            zero.popFrontN(cast(size_t) farm.write(zero, token));
+            view.consumeNext();
+        }
+        while (view.consumeNext()) {}
+    }
+    check(atomicLoad!(MemoryOrder.raw)(zeroCalls) == 18);
+    static assert(!__traits(compiles, payloadRange!visit((size_t[]).init, 2)));
+    static assert(!__traits(compiles, payloadRange!signedVisit(iota(size_t(4)), 2)));
 
     // Preserve nonzero starts and strides, including a descending iota.
     hits = new uint[100];
@@ -140,10 +172,10 @@ void basic()
 
     // Borrow the caller's frame, mutable range, and data without allocating a closure.
     uint[1031] output;
-    foreach (form; [ParallelForm.st, ParallelForm.mtSlices])
+
     {
         output[] = 0;
-        foreach (i; parallel(view, token, iota(output.length), Options(64, 7, form)))
+        foreach (i; parallel(view, token, iota(output.length), Options(64, 7)))
             output[i] = cast(uint) i + 1;
         foreach (i, value; output) check(value == i + 1);
     }
@@ -197,14 +229,13 @@ void concurrent()
     while (atomicLoad!(MemoryOrder.acq)(ready) != 4) Thread.yield();
     borrowedNoGC(view, token);
 
-    foreach (form; [ParallelForm.st, ParallelForm.mtSlices])
     foreach (grain; [size_t(1), 64])
     {
         hits = new uint[32783];
         atomicStore!(MemoryOrder.raw)(notified, 0U);
         auto hook = TableCompletionHook(null, &joined);
         auto handle = parallelFor!visit(farm, iota(hits.length), token,
-            Options(grain, MAX_AVG_COST, form), &hook);
+            Options(grain, MAX_AVG_COST), &hook);
         while (!handle.publish(token))
             if (!view.consumeNext()) Thread.yield();
         while (!handle.complete)
@@ -212,7 +243,20 @@ void concurrent()
         check(atomicLoad!(MemoryOrder.acq)(notified) == 1);
     }
 
-    // An MT callback stays in flight after other iterations have returned.
+    // Direct helper grains use copied descriptors under concurrent partial admission.
+    hits = new uint[50003];
+    atomicStore!(MemoryOrder.raw)(rawCompleted, 0U);
+    auto raw = payloadRange!countedVisit(iota(hits.length), 127);
+    while (!raw.empty)
+    {
+        raw.popFrontN(cast(size_t) farm.write(raw, token, MAX_AVG_COST));
+        if (!view.consumeNext()) Thread.yield();
+    }
+    while (atomicLoad!(MemoryOrder.acq)(rawCompleted) != hits.length)
+        if (!view.consumeNext()) Thread.yield();
+    foreach (hit; hits) check(hit == 1);
+
+    // A grain callback stays in flight after other grains have returned.
     // The aggregate hook must wait for that callback's plain output write.
     hits = new uint[4097];
     atomicStore!(MemoryOrder.raw)(notified, 0U);
@@ -220,7 +264,7 @@ void concurrent()
     atomicStore!(MemoryOrder.raw)(release, 0U);
     auto hook = TableCompletionHook(null, &joined);
     auto handle = parallelFor!hold(farm, iota(hits.length), token,
-        Options(1, 7, ParallelForm.mtSlices, 1), &hook);
+        Options(13, 7), &hook);
     check(handle.submitted);
     while (!atomicLoad!(MemoryOrder.acq)(entered)) Thread.yield();
     check(!handle.complete && atomicLoad!(MemoryOrder.acq)(notified) == 0);
@@ -228,6 +272,47 @@ void concurrent()
     while (!handle.complete)
         if (!view.consumeNext()) Thread.yield();
     check(atomicLoad!(MemoryOrder.acq)(notified) == 1);
+}
+
+struct HookAdmission { size_t callbacks, notifications; }
+long admissionWork(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+{
+    auto state = cast(HookAdmission*) body[0];
+    ++state.callbacks;
+    return 0;
+}
+void admissionDone(void* context) nothrow @nogc @system
+{
+    auto state = cast(HookAdmission*) context;
+    check(state.callbacks == ++state.notifications);
+}
+void hookAdmission()
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 256);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    HookAdmission state;
+    auto hook = TableCompletionHook(&state, &admissionDone);
+    PayloadHeader header;
+    header.call = &admissionWork;
+    ulong[1] body = [cast(ulong) &state];
+    PayloadEntry[1] entry = [PayloadEntry(&header, body[])];
+    check(farm.write(entry[0 .. 0], token, DEFAULT_AVG_COST, &hook) == 0);
+    size_t accepted;
+    while (farm.write(entry[], token, DEFAULT_AVG_COST, &hook) != 0)
+        check(++accepted < 10000);
+    check(accepted > 0 && state.callbacks == 0 && state.notifications == 0);
+    // A refused table and empty input must leave no phantom notification.
+    check(farm.write(entry[], token, DEFAULT_AVG_COST, &hook) == 0);
+    ConsumerView view;
+    subscribe(view, farm);
+    while (view.consumeNext()) {}
+    check(state.callbacks == accepted && state.notifications == accepted);
+    check(farm.write(entry[0 .. 0], token, DEFAULT_AVG_COST, &hook) == 0);
+    while (view.consumeNext()) {}
+    check(state.notifications == accepted);
+    view.unsubscribe();
 }
 
 void main(string[] args)
@@ -249,11 +334,15 @@ void main(string[] args)
         {
             foreach (i; parallel(view, token, iota(size_t(1)))) break;
         }
-        else if (args[1] == "nested-mt")
+        else if (args[1] == "invalid-hook")
         {
-            auto entries = parallelSlices!nested(farm, iota(size_t(2)), 1);
-            check(farm.write(entries, token) == 1);
-            view.consumeNext();
+            TableCompletionHook hook;
+            auto entries = payloadRange!noop(iota(size_t(1)));
+            farm.write(entries, token, DEFAULT_AVG_COST, &hook);
+        }
+        else if (args[1] == "grain-zero")
+        {
+            auto entries = payloadRange!noop(iota(size_t(1)), 0);
         }
         else if (args[1] == "nested-hook")
         {
@@ -271,5 +360,6 @@ void main(string[] args)
     }
     basic();
     concurrent();
+    hookAdmission();
     puts("parallel tests passed");
 }

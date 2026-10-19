@@ -36,7 +36,7 @@ caller-observed quiescence described below.
 - The ring body remains `const(ulong)[]` and contains identity words only.
 - A permanent host-owned trampoline is the only callback stored in actor payload
   headers. Reloadable module callbacks never appear directly in the ring.
-- Every actor payload is single-shot and serial: `MaxCs = 1`, `Done = 1`.
+- Every actor payload is single-shot; its shard run assigns one consumer.
 - `antfarm.templates` keeps its current no-unshared-aliasing rule. The actor API
   is a separate, explicit escape hatch rather than a new ordinary packed
   parameter category.
@@ -103,7 +103,7 @@ caller-observed quiescence described below.
 | `Wowner` | `ActorSlot.waveOwnerWord` | Stable owning wave while aggregate membership and its lifetime pin remain active. |
 | `Tsent` | Farm table sentinel | Release-published last by `AntFarm.write`, acquire-validated by a consumer. |
 | `Pbody` | Two or three const ring words | Stable slot address and generation; wave payloads add the stable wave address. Raw-stored before `Tsent` and raw-loaded after its acquire. |
-| `Tprogress` | Farm table completion counter | Shard completion RMWs on `Shc` are acquire/release; the finisher's acquire/release increment reaching `Tlen` invokes the table hook. Primary-run writes join; all callbacks only for tracked ST single-shot tables. |
+| `Tprogress` | Farm table completion counter | Shard completion RMWs on `Shc` are acquire/release; the finisher's acquire/release increment reaching `Tlen` invokes the table hook. All payload callback writes join before the hook. |
 | `Wlen` | `ActorWave.tablesPublished_` | Number of physical tables admitted into the open wave. |
 | `Wprogress` | `ActorWave.tablesCompleted_` | Number of table hooks which have recorded table completion; diagnostic, not a callback-lifetime fence. |
 | `Wstatus` | `ActorWave.status_` | `SEALED`, `FINISHED`, and `FAILED`; acquire observation of `FINISHED` joins the wave's descriptor accesses, not the optional user callback. |
@@ -427,7 +427,7 @@ A actor writes
 
 Only the successful entry CAS calls `slot.dispatch`. A simultaneous second
 claimant finds `RUNNING` and returns without constructing `ActorBorrow`. The
-Farm's `MaxCs = 1`, `Done = 1` payload gate and the actor ready-state invariant
+Farm's single-shot payload execution and the actor ready-state invariant
 prevent two payloads for one scheduled activation; generation checking rejects
 old identities after reuse. `L` remains the final per-actor serial-ownership
 authority across publications.
@@ -666,7 +666,7 @@ The Farm's chunk completion RMW on `Shc` uses acquire/release ordering, as does
 the shard finisher's RMW on `Tprogress`. Both are needed when a tracked ST
 table's hook observes plain writes from every callback: the first joins
 primary-run consumers within a shard, and the second joins shards. That is a
-join of all callbacks only for tracked ST single-shot tables. Work-claim
+join of all payload callbacks for every table. Work-claim
 increments on `Shc` remain relaxed. `antfarm_test` `join-only` is the
 two-consumer, one-shard ThreadSanitizer regression. It fails with the former
 relaxed completion RMW and passes with acquire/release.

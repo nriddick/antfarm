@@ -1516,7 +1516,7 @@ public:
         // the return queue by writeTracked's return, but only this emitter can
         // acquire/reuse it, and pump is non-reentrant.
         PayloadHeader header;
-        header.maxCs = header.done = 1;
+
         header.plen = 1;
         header.call = &runRoot;
         auto bodies = RootBodies(batch.entries[0 .. count], batch);
@@ -1659,7 +1659,7 @@ private:
         readyTail_ = entry;
     }
 
-    static long runRoot(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+    static long runRoot(PayloadHeader*, PayloadBody body) nothrow @nogc @system
     {
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         auto borrow = PrivateBorrow!T(cast(T*) entry.state);
@@ -1824,7 +1824,7 @@ private:
                 && PrivateChildPark.sizeof == PrivateChildPark!(T, R).sizeof + (void*).sizeof,
                 "cohortSlab appends one word to the perObject layout");
         else
-            static assert(PrivateChildPark.sizeof == (hasResults ? 392 : 376),
+            static assert(PrivateChildPark.sizeof == (hasResults ? 280 : 264),
                 "perObject child park layout changed");
     }
     @disable this(this);
@@ -2028,7 +2028,7 @@ public:
             version (assert) memset(resultWritten, 0, resultCount_);
         }
         header_ = PayloadHeader.init;
-        header_.maxCs = header_.done = 1;
+
         header_.plen = 1;
         header_.call = retire ? &runChild!(operation, false, true)
             : &runChild!(operation, false, false);
@@ -2068,7 +2068,7 @@ public:
             version (assert) memset(resultWritten, 0, resultCount_);
         }
         header_ = PayloadHeader.init;
-        header_.maxCs = header_.done = 1;
+
         header_.plen = 1;
         header_.call = &runChild!(operation, true);
         base_.wave.emittable.emit = &emitSubset;
@@ -2232,7 +2232,7 @@ private:
                 actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
         }
     }
-    static long runChild(alias operation, bool subset = false, bool retiringWave = false)(PayloadHeader*, PayloadBody body, ulong)
+    static long runChild(alias operation, bool subset = false, bool retiringWave = false)(PayloadHeader*, PayloadBody body)
         nothrow @nogc @system
     {
         enum kind = opKind!(T, R, operation);
@@ -2330,7 +2330,7 @@ private:
     // Cleanup header for undispatched members of a truncated retiring wave:
     // retire without calling the op or writing a result. The previous wave's
     // join included all descendants, so the member's children are idle.
-    static long runSkippedRetire(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+    static long runSkippedRetire(PayloadHeader*, PayloadBody body) nothrow @nogc @system
     {
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         retireMember!(T, storage)(fromWave(entry.enclosing).base_.service, entry);

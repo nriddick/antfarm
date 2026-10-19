@@ -24,7 +24,7 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
   make check-docs          tracked Markdown relative links and anchors (no network)
                            plus the API reference symbol/coverage check (needs DMD)
   make -C tests/farm check-parallel
-                          ST/MT parallel ranges, joins and callback guards
+                          ST grain ranges, joins and callback guards
   make -C tests/farm check-farm-ordering
                            Farm ordering and leaf-reuse tests, LDC and DMD
                            plus the writeImpl raw ring-store check

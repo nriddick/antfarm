@@ -28,7 +28,7 @@ import threadpool.pin;
 shared long gHits;
 shared int gStop;
 
-long payloadCb(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
+long payloadCb(PayloadHeader*, PayloadBody) nothrow @nogc @system
 {
     atomicFetchAdd(gHits, 1L);
     return 1;
@@ -90,8 +90,7 @@ AntFarm* makeFarm(uint consumers)
 
 void fillChunk(ref PayloadHeader header, ref ulong word, PayloadEntry[] chunk)
 {
-    header.maxCs = 1;
-    header.done = 1;
+
     header.plen = 1;
     header.call = &payloadCb;
     foreach (i; 0 .. chunk.length)

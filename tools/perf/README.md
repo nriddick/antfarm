@@ -278,16 +278,14 @@ ldc2 -O2 -release -I. tools/perf/parallel.d antfarm/parallel.d antfarm/templates
 Run one cell at a time on an otherwise idle host:
 
 ```text
-tools/perf/parallel --form=st --grain=64 --n=100000 --cost=16 --workers=8 --rounds=20
-tools/perf/parallel --form=mt --n=100000 --cost=16 --workers=8 --rounds=20
-tools/perf/parallel --form=mt --n=100000 --cost=16 --workers=8 --embedded=4096
+tools/perf/parallel --grain=64 --n=100000 --cost=16 --workers=8 --rounds=20
+tools/perf/parallel --grain=1 --n=100000 --cost=16 --workers=8 --rounds=20
+tools/perf/parallel --grain=64 --n=100000 --cost=16 --workers=8 --embedded=4096
 ```
 
-The grid axes are form (st, mt), grain (1, 8, 64, 256), element count, item
-cost, workers, cost-class, and embedded element count. Grain applies to ST
-entries and the additional ST batch; MT iteration blocks follow slice size
-and the 512-iteration cap. `--slices=0` snapshots SqCs; `--slices=1` is the
-explicit lone-MT comparison. Workers includes the calling thread.
+The grid axes are grain (1, 8, 64, 256), element count, item cost,
+workers, cost class and embedded element count. Grain applies to both ranges;
+each grain is one single-shot payload. Workers includes the calling thread.
 
 Use at least 1, 2, 4, 8 and the available larger worker counts, N of 1K,
 100K and 1M, and costs 0, 16 and 256. Compare `--embedded=0` with a fixed
@@ -303,7 +301,6 @@ atomic per item; this barrier is included in timing. Ring words include
 physical tables, shard counters and padding. The harness measures raw range
 composition, not the allocation/hook cost of the asynchronous convenience API.
 
-ST with grain is the standalone hypothesis, while MT slices trade a bounded
-entry count for more iteration arbitration. Treat the proposed crossover as
-a hypothesis until measured; no form is declared a universal winner. See
+Compare grain sizes at several work costs and worker counts; larger grains
+reduce scheduling overhead but offer fewer independently scheduled units. See
 [parallel-loop shapes and joins](../../docs/guide/parallel-loops.md).

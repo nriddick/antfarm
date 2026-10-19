@@ -64,7 +64,7 @@ Parallel loop adapters are a separate module:
 
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Parallel payload ranges and options | `parallelRange`, `parallelSlices`, `ParallelRange`, `ParallelForm`, `Options` | [Parallel loops](../guide/parallel-loops.md) |
+| Parallel payload ranges and options | `parallelRange`, `ParallelRange`, `Options` | [Parallel loops](../guide/parallel-loops.md) |
 | Asynchronous and blocking regions | `parallelFor`, `ParallelHandle`, `parallelForWait`, `parallel`, `ParallelLoop` | [Parallel loops](../guide/parallel-loops.md) |
 
 ## Public actors
@@ -118,7 +118,7 @@ Parallel loop adapters are a separate module:
 
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Function adaptation | `payloadEntry`, `payloadEntryRuntime`, `callbackFor`, `initPayloadHeader`, `payloadRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
+| Function adaptation | `payloadEntry`, `callbackFor`, `initPayloadHeader`, `payloadRange`, `PayloadGrainRange`, `PayloadArgRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
 
 ## Farm host
 

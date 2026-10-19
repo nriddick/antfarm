@@ -1,6 +1,6 @@
 /++
  + Oldest-epoch re-walk cursor (SPEC.md section 8, "Deadlock freedom and the
- + idle re-walk"). Consumer A parks inside the primary call of an MT payload
+ + idle re-walk"). Consumer A parks inside the primary call of an ST payload
  + in the last table of epoch E, so E cannot confirm. Consumer B has drained
  + every other table of E, moved its position to E + 1 and idles at the
  + frontier with E held as oldest. Each idle poll of B re-walks E; with the
@@ -22,17 +22,17 @@ version (AntfarmSweepStats) {} else
     static assert(false, "build with AntfarmSweepStats");
 
 enum ulong ST_TAG = 0;
-enum ulong MT_TAG = 1;
-enum size_t MT_BODY = 1500;
+enum ulong HOLD_TAG = 1;
+enum size_t HOLD_BODY = 1500;
 enum POLLS = 16;
 
 bool isParker; // thread-local: set only on consumer A's thread
 __gshared shared(int) parked, release, stopA;
-__gshared shared(long) mtCalls, stCalls;
+__gshared shared(long) holdCalls, stCalls;
 
-long sweepCb(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+long sweepCb(PayloadHeader*, PayloadBody body) nothrow @nogc @system
 {
-    if (body[0] == MT_TAG)
+    if (body[0] == HOLD_TAG)
     {
         if (isParker)
         {
@@ -40,7 +40,7 @@ long sweepCb(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
             while (atomicLoad!(MemoryOrder.acq)(release) == 0)
                 Thread.yield();
         }
-        atomicFetchAdd!(MemoryOrder.raw)(mtCalls, 1L);
+        atomicFetchAdd!(MemoryOrder.raw)(holdCalls, 1L);
     }
     else
         atomicFetchAdd!(MemoryOrder.raw)(stCalls, 1L);
@@ -80,18 +80,17 @@ void main()
     auto tok = f.registerProducer(Tier.bulk);
     check(tok.valid, "reg");
 
-    PayloadHeader stHead, mtHead;
-    stHead.maxCs = 1;
-    stHead.done = 1;
+    PayloadHeader stHead, holdHead;
+
     stHead.call = &sweepCb;
-    mtHead.maxCs = 2;
-    mtHead.done = 2;
-    mtHead.call = &sweepCb;
+
+
+    holdHead.call = &sweepCb;
     ulong[2] stBody = [ST_TAG, 0];
-    ulong[MT_BODY] mtBody;
-    mtBody[0] = MT_TAG;
+    ulong[HOLD_BODY] holdBody;
+    holdBody[0] = HOLD_TAG;
     auto st = PayloadEntry(&stHead, stBody[]);
-    auto mt = PayloadEntry(&mtHead, mtBody[]);
+    auto held = PayloadEntry(&holdHead, holdBody[]);
 
     ConsumerView b;
     immutable e = b.subscribe(f);
@@ -112,24 +111,24 @@ void main()
     a.start();
     waitFor(&aReady, "A subscribe timeout");
 
-    // Fill E with small ST tables, then one MT table that starts in E and
+    // Fill E with small ST tables, then one held ST table that starts in E and
     // runs past its boundary, so it is the last table of E.
     long nst;
-    while (boundary - atomicLoad!(MemoryOrder.raw)(f.Wt) > MT_BODY / 2)
+    while (boundary - atomicLoad!(MemoryOrder.raw)(f.Wt) > HOLD_BODY / 2)
     {
         writeOne(f, tok, &st);
         ++nst;
         drain(b);
     }
     immutable tablesInE = nst + 1;
-    // A takes the MT table's lone shard-0 run, on its primary path or, if
+    // A takes the held ST table's lone shard-0 run, on its primary path or, if
     // its shard index skips the small table, in its position re-walk.
-    immutable mtSeq = writeOne(f, tok, &mt);
-    check(mtSeq < boundary && atomicLoad!(MemoryOrder.raw)(f.Wt) > boundary,
-        "MT table straddles the boundary of E");
+    immutable holdSeq = writeOne(f, tok, &held);
+    check(holdSeq < boundary && atomicLoad!(MemoryOrder.raw)(f.Wt) > boundary,
+        "held ST table straddles the boundary of E");
     waitFor(&parked, "A park timeout");
 
-    // B passes the MT table (running its other iteration) into E + 1.
+    // B passes the held ST table (its sole callback remains claimed by A) into E + 1.
     foreach (_; 0 .. 4)
     {
         writeOne(f, tok, &st);
@@ -169,7 +168,7 @@ void main()
     a.join();
     b.unsubscribe();
     check(atomicLoad(stCalls) == nst, "ST calls exact");
-    check(atomicLoad(mtCalls) == 2, "MT calls exact");
+    check(atomicLoad(holdCalls) == 1, "held ST callback ran once");
     f.unregisterProducer(tok);
     f.destroy();
     say("T27 oldest-epoch re-walk cursor OK");

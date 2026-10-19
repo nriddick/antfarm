@@ -559,10 +559,6 @@ enum ulong SUB0 = 1UL << 16;
 enum ulong LOWMASK = 0xFFFF_FFFFUL;
 /// Internal: mask for the active-consumer count bits within Rtlow (below the Sub0 bit).
 enum ulong COUNTMASK = SUB0 - 1;
-/// Spec 2d: Done and MaxCs are capped so packed 16-bit fields cannot wrap
-/// through write().
-enum uint MAX_PAYLOAD_ITERS = 512;
-
 // Test-only scheduling points, elided in production builds. Tests may pause a
 // producer here without changing quota or tally state; ordinary builds contain
 // neither the hook nor its call sites.
@@ -632,10 +628,6 @@ version (TSan)
     }
 }
 
-/// Packed-field wrap guards (Tcount/Pcount claims, calls, completions).
-/// Provably unreachable under the 512 caps, the claim-per-payload rule and
-/// MAX_CONSUMERS_LIMIT; they stay on as the corruption tripwire.
-
 /// Compile-time switch for trailing-reference check frequency.
 /// Default: eager release check after every table (baseline).
 /// -d-version=SdCheckEveryN: check every SD_CHECK_EVERY_N table advances.
@@ -649,14 +641,10 @@ else
 /// protects the ring body, not an object reached through an encoded handle.
 alias PayloadBody = const(ulong)[];
 
-/// Spec 2d, 7c: decodes Pbody and executes an iteration of work.
-///
-/// `head` is valid only for the duration of the call and must not be modified
-/// or retained. For a payload in a table of single-threaded payloads it points
-/// to a consumer-local copy shared by the run's callbacks (SPEC.md sections
-/// 2f and 2g, compact and uniform ST tables), not to a ring header;
-/// multi-threaded payloads and mixed tables point into the ring.
-alias Callback = long function(PayloadHeader* head, PayloadBody body, ulong iteration) nothrow @nogc @system;
+/// Spec 2d, 7c: decodes Pbody and executes one single-shot payload.
+/// Return values are ignored. The consumer-local header is borrowed until
+/// return, shared by the run's callbacks, and must not be modified or retained.
+alias Callback = long function(PayloadHeader* head, PayloadBody body) nothrow @nogc @system;
 
 // A blocking adapter must not re-enter a view whose walk is in a callback.
 // This is TLS, including completion hooks, and has no release-build cost.
@@ -693,7 +681,7 @@ alias TableCompletionCallback = void function(void* context)
     nothrow @nogc @system;
 
 /// Optional exactly-once notification attached to one physical payload
-/// table by writeTracked. The Farm snapshots both fields before invoking
+/// table by write or writeTracked. The Farm snapshots both fields before invoking
 /// `call(context)`, exactly once, on the consumer that advances that table's
 /// primary Tprogress to Tlen. The pointed-to storage must remain stable
 /// until invocation; see TableCompletionCallback for the full contract.
@@ -711,54 +699,32 @@ struct TableCompletionHook
     }
 }
 
-/// Spec 2d: payload header, 16 ulongs (128 bytes) as laid out in the buffer.
-/// This is the public API type and the mixed/multithreaded ring layout: a
-/// table containing any multithreaded payload stores this header per
-/// payload. An all-single-threaded table stores only the Call word per
-/// record (compact, SPEC.md section 2f), or only the body when the table's
-/// payloads share one Call (uniform, section 2g); the callback then receives
-/// a consumer-local copy, not a ring header — see Callback. Producers set
-/// maxCs, done and call; plen is overwritten with the body length and
-/// pcount is runtime-owned.
-/// Call sits immediately after Pcount: it is dereferenced only after a valid
-/// claim is acquired (by the consumer that just wrote Pcount), so it can
-/// share Pcount's cache line without adding cross-thread traffic; with the
-/// 6 filler words after Call, Pcount's line is fully covered in every phase.
+/// Callback metadata, copied into consumer-local storage for each claimed run.
+/// Producers set call; plen is overwritten with the copied body length.
+/// This descriptor is never stored as a ring header. Callbacks must not modify
+/// or retain it. All payloads execute exactly once.
 struct PayloadHeader
 {
-    uint maxCs;             /// maximum consumers per payload; 1 = single threaded
-    uint done;              /// iterations to complete; 1 = single threaded
-    ulong plen;             /// payload body length in ulongs
-    ulong[6] filler;        /// layout filler covering Pcount's cache line
-    shared ulong pcount;    /// 32 MSB claims | 16 bits calls | 16 LSB completions
-    Callback call;          /// work callback — claim-gated, shares Pcount's line
-    ulong[6] filler2;       /// layout filler closing the 128-byte header
+    ulong plen;    /// Body length in ulongs, supplied by the Farm.
+    Callback call; /// Work callback.
 }
-static assert(PayloadHeader.sizeof == 128);
-static assert(PayloadHeader.maxCs.offsetof == 0);
-static assert(PayloadHeader.done.offsetof == 4);
-static assert(PayloadHeader.plen.offsetof == 8);
-static assert(PayloadHeader.filler.offsetof == 16);
-static assert(PayloadHeader.pcount.offsetof == 64);
-static assert(PayloadHeader.call.offsetof == 72);
-static assert(PayloadHeader.filler2.offsetof == 80);
-/// PayloadHeader length in ulongs.
-private enum ulong PHEAD_LEN = PayloadHeader.sizeof / 8;
+static assert(PayloadHeader.sizeof == 16);
+static assert(PayloadHeader.plen.offsetof == 0);
+static assert(PayloadHeader.call.offsetof == 8);
 
-/// Compact ST table (spec 2f): a table with Tmt == 0 stores each
+/// Compact ST table (spec 2f): a table with per-payload callbacks stores each
 /// payload as [Call][Pbody...] with no other per-payload word. Tindex still
 /// points at each record; Plen is the distance to the next Tindex entry
 /// minus the Call word, and the last record ends at Tsize - END_PAD. The
 /// reader hands the callback a consumer-local PayloadHeader carrying the
-/// same values the ring header showed on the ST fast path.
+/// payload's body length and callback.
 private enum ulong PCOMPACT_LEN = 1;
 static assert(Callback.sizeof == ulong.sizeof);
-static assert(PCOMPACT_LEN < PHEAD_LEN);
 
 /// Uniform-call ST tables (spec 2g): an all-ST table whose
 /// payloads share one Call stores it once, in a Thead extension word, and
 /// each record is the bare Pbody. Thead word 6's high half carries the
-/// kind (0 for per-payload Call, so full and compact tables are unchanged);
+/// kind (0 for per-payload Call in compact tables);
 /// its low half stays AvgCost, which chunkOf reads as a uint.
 ///   uniformCall:          [8] Tcall, then a Tlen-entry Tindex of body
 ///                         offsets; Plen is the gap to the next entry.
@@ -774,23 +740,21 @@ private enum TableKind : uint
 private enum ulong UNIFORM_EXT = 1;
 private enum ulong UNIFORM_FIXED_EXT = 2;
 
-/// How a table's records are stored, decoded from Tmt and the Thead kind.
+/// How a table's records are stored, decoded from the Thead kind.
 private enum TableLayout : uint
 {
-    full,         /// Phead + Pbody per payload (Tmt != 0), 2e
     compact,      /// [Call][Pbody] per payload, 2f
     uniform,      /// [Pbody] per payload, indexed, 2g
     uniformFixed, /// [Pbody] per payload, index-free, 2g
 }
 
-private TableLayout tableLayoutOf(uint tmt, ulong w6) pure nothrow @nogc @safe
+private TableLayout tableLayoutOf(ulong w6) pure nothrow @nogc @safe
 {
     immutable kind = cast(uint)(w6 >> 32);
-    // Only all-ST tables are uniform; the MT readers rely on it.
-    assert(kind == TableKind.perPayload || tmt == 0);
+    assert(kind <= TableKind.uniformCallAndLength);
     if (kind == TableKind.uniformCallAndLength) return TableLayout.uniformFixed;
     if (kind == TableKind.uniformCall) return TableLayout.uniform;
-    return tmt != 0 ? TableLayout.full : TableLayout.compact;
+    return TableLayout.compact;
 }
 
 private TableKind tableKindOf(TableLayout layout) pure nothrow @nogc @safe
@@ -807,13 +771,12 @@ private ulong extWordsOf(TableLayout layout) pure nothrow @nogc @safe
         : layout == TableLayout.uniformFixed ? UNIFORM_FIXED_EXT : 0;
 }
 
-/// Tindex words of a table of `n` payloads, `m` of them MT.
-private ulong indexWordsOf(TableLayout layout, ulong n, ulong m)
+/// Tindex words of a table of `n` payloads.
+private ulong indexWordsOf(TableLayout layout, ulong n)
         pure nothrow @nogc @safe
 {
     final switch (layout)
     {
-    case TableLayout.full: return n + m;
     case TableLayout.compact: return n;
     case TableLayout.uniform: return n;
     case TableLayout.uniformFixed: return 0;
@@ -823,15 +786,14 @@ private ulong indexWordsOf(TableLayout layout, ulong n, ulong m)
 /// Per-record words besides the body in `layout`.
 private ulong recordWordsOf(TableLayout layout) pure nothrow @nogc @safe
 {
-    return layout == TableLayout.full ? PHEAD_LEN
-        : layout == TableLayout.compact ? PCOMPACT_LEN : 0;
+    return layout == TableLayout.compact ? PCOMPACT_LEN : 0;
 }
 
-/// Spec 2d: one ready-to-publish job: the header to copy into the table
+/// Spec 2d: one ready-to-publish job: callback metadata for the table
 /// (or a common header, for broadcast sources) and the body to append.
 struct PayloadEntry
 {
-    /// Configuration of this payload; the Farm copies it into the table.
+    /// Configuration of this payload; the Farm copies the callback metadata.
     PayloadHeader* header;
     /// Type-erased body words; copied after the header.
     PayloadBody body;
@@ -841,8 +803,6 @@ private void copyPayloadHeaderConfig(ref PayloadHeader dst,
         const PayloadHeader* src) nothrow @nogc @system
 {
     dst = PayloadHeader.init;
-    dst.maxCs = src.maxCs;
-    dst.done = src.done;
     dst.plen = src.plen;
     dst.call = src.call;
 }
@@ -1169,19 +1129,18 @@ static assert(SegStats.sizeof == 64);
 
 /// Table layout offsets (in ulongs, relative to the table's starting
 /// sequence), spec 2e:
-///   [0..8)                 Thead: 0 Tsent, 1 Tnext, 2 Tmt<<32|Tlen,
+///   [0..8)                 Thead: 0 Tsent, 1 Tnext, 2 Tlen,
 ///                          3 Cs, 4 SqCs, 5 Tsize, 6 Tkind<<32|AvgCost,
 ///                          7 optional TableCompletionHook pointer
 ///   uniform tables (2g):   Tcall, then Tblen for the index-free kind
-///   [.. +Tlen+Tmt)         Tindex (total index first, MT index second;
+///   [.. +Tlen)             Tindex (one offset per payload;
 ///                          absent in index-free uniform tables)
 ///   7 ulongs padding
 ///   Tprogress (1 ulong)
 ///   7 ulongs padding
 ///   Tcount: SqCs counters, each followed by 7 ulongs padding
-///   Payloads (each: 16-ulong header + Plen-ulong body; when Tmt == 0,
-///             the compact record: Call + Plen-ulong body, 2f, or in a
-///             uniform table the bare Plen-ulong body, 2g)
+///   Payloads (compact Call + Plen-ulong body, 2f;
+///             uniform bare Plen-ulong body, 2g)
 ///   7 ulongs padding
 private enum ulong THEAD_LEN = 8;
 private enum ulong PROG_PAD = 7;
@@ -1204,12 +1163,6 @@ private const(char)[] payloadHeaderError(const PayloadHeader* header)
         pure nothrow @nogc @system
 {
     if (header is null || header.call is null) return "bad payload header";
-    if (header.maxCs == 0 || header.maxCs > MAX_PAYLOAD_ITERS)
-        return "payload MaxCs out of range";
-    if (header.done == 0 || header.done > MAX_PAYLOAD_ITERS)
-        return "payload Done out of range";
-    if (header.done > 1 && header.maxCs < 2)
-        return "multithreaded payload requires MaxCs >= 2";
     return null;
 }
 
@@ -1220,40 +1173,25 @@ private void validatePayloadHeader(const PayloadHeader* header)
     if (error.length != 0) fatal(error);
 }
 
-/// Shared singleton cost for canFit and every write sizing path. False
-/// means size arithmetic would overflow, including the full-header guard
-/// retained for ST payloads by the write contract (spec 5b.2).
-private bool singletonCost(ulong base, uint maxCs, ulong blen, out ulong cost)
+/// Shared singleton cost for canFit and every write sizing path.
+private bool singletonCost(ulong base, ulong blen, out ulong cost)
         pure nothrow @nogc @safe
 {
     pragma(inline, true);
-    immutable oneMt = maxCs > 1 ? 1UL : 0UL;
-    immutable overhead = base + 1UL + oneMt
-        + (oneMt != 0 ? PHEAD_LEN : PCOMPACT_LEN);
-    if (blen > ulong.max - PHEAD_LEN || blen > ulong.max - overhead)
-        return false;
+    immutable overhead = base + 2UL;
+    if (blen > ulong.max - overhead) return false;
     cost = overhead + blen;
     return true;
 }
 
-/// Spec 5b.2-3: one payload's size-overflow and singleton contract checks
-/// against the caller tier's `quota`. An ST singleton costs base + 2 + Plen
-/// in every ST layout (spec 2f, 2g). Returns 1 for an MT payload, else 0.
-private ulong checkPayloadFits(ulong base, ulong quota, uint maxCs, ulong blen)
+/// A singleton exceeding this tier can never be published by this producer.
+private void checkPayloadFits(ulong base, ulong quota, ulong blen)
         nothrow @nogc @system
 {
     pragma(inline, true);
-    if (blen > ulong.max - PHEAD_LEN)
-        fatal("payload size overflow");
-    immutable oneMt = maxCs > 1 ? 1UL : 0UL;
-    // A singleton that exceeds this tier can never be published by this
-    // producer, so it is a contract error.
     ulong cost;
-    if (!singletonCost(base, maxCs, blen, cost))
-        fatal("table size overflow");
-    if (cost > quota)
-        fatal("payload larger than this producer tier's Exi");
-    return oneMt;
+    if (!singletonCost(base, blen, cost)) fatal("table size overflow");
+    if (cost > quota) fatal("payload larger than this producer tier's Exi");
 }
 
 /// Base size of every table in ulongs: Thead + progress pads + Tcount + end
@@ -1919,8 +1857,7 @@ struct AntFarm
     /// Whether one payload can fit a singleton table in `tier`, with
     /// `bodyWords` measured in ulongs (8 bytes). Returns false for malformed
     /// headers, size overflow, or a singleton exceeding that tier's quota;
-    /// this query never fatals. ST (maxCs == 1) uses the compact/uniform
-    /// singleton cost; MT (maxCs > 1, even with done == 1) uses the full cost.
+    /// this query never fatals. Uses the compact/uniform singleton cost.
     ///
     /// This is a snapshot of the live consumer count and its SqCs, just as
     /// in write(). Quotas are fixed, but the answer is not monotone: consumer
@@ -1937,7 +1874,7 @@ struct AntFarm
         immutable cs = csl > 0 ? cast(uint) csl : 1;
         immutable base = tableBaseWords(sqcsOf(cs));
         ulong cost;
-        return singletonCost(base, header.maxCs, bodyWords, cost) && cost <= quota;
+        return singletonCost(base, bodyWords, cost) && cost <= quota;
     }
 
     /// Spec 5b. Writes as many of `payloads` as fit the caller's remaining
@@ -1948,47 +1885,56 @@ struct AntFarm
     /// the token's private quota. `avgCost` is the producer's declared Call
     /// cost class, a log2 shift in 0 .. MAX_AVG_COST (spec 5b / 7a).
     ///
+    /// An optional completion hook joins every callback in this accepted
+    /// physical table, including mixed callbacks. Zero acceptance invokes no
+    /// hook. Count a table before publishing: the hook can run before write
+    /// returns. Keep its storage stable as required by TableCompletionHook.
+    ///
     /// The table layout, and so how many payloads fit the quota, follows the
     /// accepted prefix's contents in every overload: an all-single-threaded
     /// prefix sharing one Call stores it once and drops the per-payload Call
     /// word, and one sharing a nonzero body length as well drops Tindex
     /// (spec 2g); other single-threaded prefixes are compact (2f).
     ulong write(scope PayloadEntry[] payloads, ref Token tok,
-                uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
+                uint avgCost = DEFAULT_AVG_COST,
+                TableCompletionHook* completion = null) nothrow @nogc @system
     {
-        return writeImpl(payloads, tok, avgCost, null);
+        return writeImpl(payloads, tok, avgCost, completion);
     }
 
     /// ditto: forward range overload. `write` checkpoints the source for its
     /// sizing and emission passes and never advances the caller's checkpoint.
     ulong write(R)(scope R payloads, ref Token tok,
-                   uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
+                   uint avgCost = DEFAULT_AVG_COST,
+                   TableCompletionHook* completion = null) nothrow @nogc @system
         if (isForwardRange!R && is(ElementType!R == PayloadEntry))
     {
-        return writeImpl(payloads, tok, avgCost, null);
+        return writeImpl(payloads, tok, avgCost, completion);
     }
 
     /// Write jobs from independent header and body input ranges.  Pairing is
     /// positional and stops at the shorter range.  This overload is a lazy
     /// shim: it does not allocate or materialize `PayloadEntry` pairs.
     ulong write(HR, BR)(scope HR headers, scope BR bodies, ref Token tok,
-                        uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
+                        uint avgCost = DEFAULT_AVG_COST,
+                        TableCompletionHook* completion = null) nothrow @nogc @system
         if (isForwardRange!HR && isForwardRange!BR &&
             (is(Unqual!(ElementType!HR) == PayloadHeader) ||
              is(ElementType!HR : const(PayloadHeader)*)) &&
             is(ElementType!BR : PayloadBody))
     {
-        return writeImpl(pairPayloads(headers, bodies), tok, avgCost, null);
+        return writeImpl(pairPayloads(headers, bodies), tok, avgCost, completion);
     }
 
     /// Broadcast one common header over a forward range of bodies. The
     /// common metadata is validated once per call rather than once per body.
     ulong write(BR)(const ref PayloadHeader header, scope BR bodies,
-                    ref Token tok, uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
+                    ref Token tok, uint avgCost = DEFAULT_AVG_COST,
+                    TableCompletionHook* completion = null) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
         return writeImpl(broadcastPayloads(header, bodies), tok, avgCost,
-            null);
+            completion);
     }
 
     /// Broadcast a common header over bodies whose uniform length is supplied
@@ -1996,20 +1942,21 @@ struct AntFarm
     /// element type is a runtime slice.
     ulong write(BR)(const ref PayloadHeader header, scope BR bodies,
                     ulong bodyWords, ref Token tok,
-                    uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
+                    uint avgCost = DEFAULT_AVG_COST,
+                    TableCompletionHook* completion = null) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
         return writeImpl(broadcastPayloads(header, bodies, bodyWords), tok,
-            avgCost, null);
+            avgCost, completion);
     }
 
     /// Broadcast a uniform single-shot payload range into one physical table
     /// and notify `completion` when all callbacks in that table have returned.
     /// The table is a uniform one (spec 2g): `bodyWords` ring words per entry,
     /// or one index word per entry when `bodyWords` is 0.
-    /// This is intentionally narrower than `write`: aggregate users such as
-    /// actor waves must count the table before calling, because consumers may
-    /// complete it before this function returns.
+    /// Compatibility spelling for fixed-length broadcast with a required hook.
+    /// Every write overload also accepts an optional completion hook. Aggregate
+    /// users must count the table before calling; consumers may finish early.
     ulong writeTracked(BR)(const ref PayloadHeader header, scope BR bodies,
                     ulong bodyWords, TableCompletionHook* completion,
                     ref Token tok, uint avgCost = DEFAULT_AVG_COST) nothrow @nogc @system
@@ -2017,8 +1964,6 @@ struct AntFarm
     {
         if (completion is null || !completion.valid)
             fatal("tracked table requires a completion hook");
-        if (header.maxCs != 1 || header.done != 1)
-            fatal("tracked table requires single-shot payloads");
         return writeImpl(broadcastPayloads(header, bodies, bodyWords), tok,
             avgCost, completion);
     }
@@ -2029,6 +1974,8 @@ struct AntFarm
         nothrow @nogc @system
     {
         requireToken(tok);
+        if (completion !is null && !completion.valid)
+            fatal("table completion hook requires a callback");
         if (payloads.empty) return 0;
         if (avgCost > MAX_AVG_COST) fatal("avgCost out of range");
         immutable quota = tok.tier == Tier.bulk ? quotaBulk : quotaSmall;
@@ -2042,7 +1989,6 @@ struct AntFarm
         // Spec 2e: a committed table carries fewer than 2^31 payloads.
         immutable size_t maxTablePayloads = 2_147_483_647; // 2^31 - 1
         size_t n;
-        uint m;
         ulong psum;
         // Spec 2f/2g: the accepted prefix's layout and, for the uniform
         // layouts, its shared Call and (index-free) body length.
@@ -2058,16 +2004,14 @@ struct AntFarm
 
         for (;;)
         {
-            n = 0; m = 0; psum = 0;
+            n = 0; psum = 0;
             static if (hasCommonPayloadHeader!R && hasFixedPayloadLength!R)
             {
                 immutable bodyLen = cast(ulong) payloads.fixedPayloadLength;
-                immutable oneMt = checkPayloadFits(base, quota,
-                    commonHeader.maxCs, bodyLen);
+                checkPayloadFits(base, quota, bodyLen);
                 // Spec 2g: a uniform ST range shares its Call by
                 // construction, and a nonzero uniform length drops Tindex.
-                layout = oneMt != 0 ? TableLayout.full
-                    : bodyLen != 0 ? TableLayout.uniformFixed : TableLayout.uniform;
+                layout = bodyLen != 0 ? TableLayout.uniformFixed : TableLayout.uniform;
                 tcall = commonHeader.call;
                 tblen = bodyLen;
                 immutable head = base + extWordsOf(layout);
@@ -2075,7 +2019,7 @@ struct AntFarm
                 // Never zero: index-free tables have nonempty bodies.
                 immutable rec = addChecked(recordWordsOf(layout), bodyLen,
                     "table size overflow");
-                immutable unit = addChecked(indexWordsOf(layout, 1, oneMt), rec,
+                immutable unit = addChecked(indexWordsOf(layout, 1), rec,
                     "table size overflow");
                 static if (hasLength!R)
                 {
@@ -2086,7 +2030,6 @@ struct AntFarm
                     if (cast(ulong) n > maxFit)
                         n = cast(size_t) maxFit;
                     if (n > maxTablePayloads) n = maxTablePayloads;
-                    m = oneMt != 0 ? cast(uint) n : 0;
                     psum = mulChecked(cast(ulong) n, rec,
                         "payload sum overflow");
                 }
@@ -2105,7 +2048,6 @@ struct AntFarm
                         scan.popFront();
                     }
                     if (n > maxTablePayloads) fatal("too many payloads in table");
-                    m = oneMt != 0 ? cast(uint) n : 0;
                     psum = mulChecked(cast(ulong) n, rec,
                         "payload sum overflow");
                 }
@@ -2113,7 +2055,7 @@ struct AntFarm
             else
             {
                 // Spec 2f/2g: a prefix's layout only degrades as it grows
-                // (uniformFixed -> uniform -> compact -> full), and every
+                // (uniformFixed -> uniform -> compact), and every
                 // step costs more words, so size each prefix by its own
                 // layout and keep the greedy accepted prefix. Each layout
                 // has its own scan loop, entered at the payload that
@@ -2149,8 +2091,8 @@ struct AntFarm
                             validatePayloadHeader(hp);
                         }
                         immutable blen = pe.body.length;
-                        if (checkPayloadFits(base, quota, hp.maxCs, blen) != 0
-                            || hp.call !is tcall || blen != tblen)
+                        checkPayloadFits(base, quota, blen);
+                        if (hp.call !is tcall || blen != tblen)
                             break;
                         immutable bodySumNext = addChecked(bodySum, blen,
                             "payload sum overflow");
@@ -2182,8 +2124,8 @@ struct AntFarm
                             validatePayloadHeader(hp);
                         }
                         immutable blen = pe.body.length;
-                        if (checkPayloadFits(base, quota, hp.maxCs, blen) != 0
-                            || hp.call !is tcall)
+                        checkPayloadFits(base, quota, blen);
+                        if (hp.call !is tcall)
                             break;
                         immutable bodySumNext = addChecked(bodySum, blen,
                             "payload sum overflow");
@@ -2203,12 +2145,10 @@ struct AntFarm
                         scan.popFront();
                     }
 
-                // Spec 2f: compact while the prefix has no MT payload,
-                // full once it does; track both payload sums. The uniform
-                // prefix so far costs the same body words in either.
+                // Spec 2f: differing callbacks require compact records.
+                // Add one callback word for every preceding uniform record.
                 if (!stop)
                 {
-                    ulong psumFull = PHEAD_LEN * i + bodySum;
                     ulong psumCompact = PCOMPACT_LEN * i + bodySum;
                     while (!scan.empty && i < maxTablePayloads)
                     {
@@ -2221,22 +2161,18 @@ struct AntFarm
                             validatePayloadHeader(hp);
                         }
                         immutable blen = pe.body.length;
-                        immutable oneMt = checkPayloadFits(base, quota, hp.maxCs, blen);
-                        immutable cm = m + cast(uint) oneMt;
-                        immutable psumFullNext = addChecked(psumFull,
-                            PHEAD_LEN + blen, "payload sum overflow");
-                        immutable psumCompactNext = psumCompact + PCOMPACT_LEN + blen; // <= psumFullNext
-                        immutable psumNext = cm == 0 ? psumCompactNext : psumFullNext;
-                        immutable fixed = base + (cast(ulong) i + 1) + cm;
+                        checkPayloadFits(base, quota, blen);
+                        immutable psumNext = addChecked(psumCompact,
+                            addChecked(PCOMPACT_LEN, blen, "payload sum overflow"),
+                            "payload sum overflow");
+                        immutable fixed = base + (cast(ulong) i + 1);
                         if (fixed > ulong.max - psumNext)
                             fatal("table size overflow");
                         if (fixed + psumNext > tok.quotaLeft) break;
                         n = ++i;
-                        m = cm;
                         psum = psumNext;
-                        psumFull = psumFullNext;
-                        psumCompact = psumCompactNext;
-                        layout = cm == 0 ? TableLayout.compact : TableLayout.full;
+                        psumCompact = psumNext;
+                        layout = TableLayout.compact;
                         scan.popFront();
                     }
                 }
@@ -2248,7 +2184,7 @@ struct AntFarm
         }
 
         immutable size = tableSizeChecked(
-            extWordsOf(layout) + indexWordsOf(layout, n, m), sq, psum);
+            extWordsOf(layout) + indexWordsOf(layout, n), sq, psum);
 
         static if (__traits(hasMember, R, "prepareTableFrontN"))
             if (!payloads.prepareTableFrontN(n)) return 0;
@@ -2295,12 +2231,12 @@ struct AntFarm
         // later lap reuses the same physical words.
         auto w = buf + (wret & Lmask);
         immutable tindexOff = THEAD_LEN + extWordsOf(layout);
-        immutable progOff = tindexOff + indexWordsOf(layout, n, m) + PROG_PAD;
+        immutable progOff = tindexOff + indexWordsOf(layout, n) + PROG_PAD;
         immutable tcountOff = progOff + 8;
         immutable payOff = tcountOff + 8 * sq;
 
         storeRaw(w[1], wtprime);                          // Tnext
-        storeRaw(w[2], (cast(ulong) m << 32) | cast(uint) n);  // Tmt | Tlen
+        storeRaw(w[2], cast(uint) n);                     // Tlen
         storeRaw(w[3], cs);
         storeRaw(w[4], sq);
         storeRaw(w[5], size); // table size, accounted into the segment's Sd on completion
@@ -2320,7 +2256,6 @@ struct AntFarm
         // traversal. Header fields are ring words, not a PayloadHeader
         // overlay: overlay field writes would be plain stores.
         ulong po = payOff;
-        size_t mi = tindexOff + n;
         size_t i = 0;
         auto emit = payloads.save;
         if (layout == TableLayout.uniformFixed)
@@ -2352,7 +2287,7 @@ struct AntFarm
         }
         else if (layout == TableLayout.compact)
         {
-            // Spec 2f: an all-ST table (Tmt == 0) stores [Call][Pbody] records.
+            // Spec 2f: a compact table stores [Call][Pbody] records.
             while (i < n)
             {
                 auto pe = emit.front;
@@ -2370,31 +2305,6 @@ struct AntFarm
                 ++i;
                 emit.popFront();
             }
-        }
-        while (i < n)
-        {
-            auto pe = emit.front;
-            static if (hasCommonPayloadHeader!R)
-                auto hp = commonHeader;
-            else
-                auto hp = pe.header;
-
-            storeRaw(w[tindexOff + i], po);
-            if (hp.maxCs > 1)
-                storeRaw(w[mi++], po);
-
-            auto ph = w + po;
-            storeRaw(ph[0], cast(ulong) hp.maxCs | (cast(ulong) hp.done << 32));
-            storeRaw(ph[1], pe.body.length);
-            storeRawRange(ph + 2, 6);
-            storeRaw(ph[8], 0UL); // pcount
-            storeRaw(ph[9], cast(ulong) cast(void*) hp.call);
-            storeRawRange(ph + 10, 6);
-            foreach (k; 0 .. pe.body.length)
-                storeRaw(ph[PHEAD_LEN + k], pe.body[k]);
-            po += PHEAD_LEN + pe.body.length;
-            ++i;
-            emit.popFront();
         }
         // Compact and uniform readers derive the last Plen from this end point.
         assert(po == size - END_PAD);
@@ -2646,14 +2556,14 @@ struct ConsumerView
         immutable tnext = atomicLoad!(MemoryOrder.raw)(bp[idx + 1]);
         immutable w2 = atomicLoad!(MemoryOrder.raw)(bp[idx + 2]);
         immutable tlen = cast(uint) w2;
-        immutable tmt = cast(uint)(w2 >> 32);
         immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(bp[idx + 4]);
-        immutable layout = tableLayoutOf(tmt,
+        immutable layout = tableLayoutOf(
             atomicLoad!(MemoryOrder.raw)(bp[idx + 6]));
         immutable tindexOff = idx + THEAD_LEN + extWordsOf(layout);
-        immutable progOff = tindexOff + indexWordsOf(layout, tlen, tmt) + PROG_PAD;
+        immutable progOff = tindexOff + indexWordsOf(layout, tlen) + PROG_PAD;
         immutable tcountOff = progOff + 8;
 
+        // Skipping an already-complete table preserves the carried sweeper role.
         if (tlen > 0)
         {
             immutable myShi = cast(uint)((cast(ulong) IDc + nextSeq) % sq);
@@ -2680,22 +2590,8 @@ struct ConsumerView
                                                        progOff, tlen, layout, sq, s, true, !adopted);
                             if (r & 2) adopted = true;
                         }
-                    tertiaryMt(bp, idx, tindexOff, tlen, tmt);
-                }
-                else
-                {
-                    // Spec 7c: secondary round-robin share of the MT payloads.
-                    secondaryMt(bp, idx, tindexOff, tlen, tmt, sq);
                 }
                 sweeperNext = sweeper;
-            }
-            else
-            {
-                // Complete table: cheap pre-checked MT pass only (MT
-                // payloads can outlive their shards' completion). Do not
-                // touch sweeperNext: a carried sweeper role must survive
-                // across already-complete tables (spec 7e).
-                tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
         }
 
@@ -2963,12 +2859,11 @@ private:
             immutable tnext = atomicLoad!(MemoryOrder.raw)(bp[idx + 1]);
             immutable w2 = atomicLoad!(MemoryOrder.raw)(bp[idx + 2]);
             immutable tlen = cast(uint) w2;
-            immutable tmt = cast(uint)(w2 >> 32);
             immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(bp[idx + 4]);
-            immutable layout = tableLayoutOf(tmt,
+            immutable layout = tableLayoutOf(
                 atomicLoad!(MemoryOrder.raw)(bp[idx + 6]));
             immutable tindexOff = idx + THEAD_LEN + extWordsOf(layout);
-            immutable progOff = tindexOff + indexWordsOf(layout, tlen, tmt) + PROG_PAD;
+            immutable progOff = tindexOff + indexWordsOf(layout, tlen) + PROG_PAD;
             immutable tcountOff = progOff + 8;
             if (tlen > 0)
             {
@@ -2977,14 +2872,7 @@ private:
                 // this observation. Tprogress only grows, by fetch-add, and
                 // stops at Tlen while our pin keeps the table in place, so
                 // by coherence every later load by this consumer also reads
-                // Tlen and a later re-walk would skip processShard here
-                // too. tertiaryMt below still runs on this pass; afterwards
-                // each MT payload has every call claimed or a looping
-                // (secondary/tertiary) claimant that will claim the rest,
-                // since Pcount's call and claim fields only grow, the
-                // primary visit is the only claim that executes just one
-                // call, and MaxCs >= 2. A later tertiary pass over this
-                // table is not needed for its payloads to complete.
+                // Tlen and a later re-walk would skip processShard here too.
                 if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
                 {
                     drained = false;
@@ -2993,7 +2881,6 @@ private:
                         processShard(bp, seq, idx, tindexOff, tcountOff,
                                      progOff, tlen, layout, sq, s, true, false);
                 }
-                tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
             seq = tnext;
             if (drained)
@@ -3030,12 +2917,11 @@ private:
             immutable tnext = atomicLoad!(MemoryOrder.raw)(bp[idx + 1]);
             immutable w2 = atomicLoad!(MemoryOrder.raw)(bp[idx + 2]);
             immutable tlen = cast(uint) w2;
-            immutable tmt = cast(uint)(w2 >> 32);
             immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(bp[idx + 4]);
-            immutable layout = tableLayoutOf(tmt,
+            immutable layout = tableLayoutOf(
                 atomicLoad!(MemoryOrder.raw)(bp[idx + 6]));
             immutable tindexOff = idx + THEAD_LEN + extWordsOf(layout);
-            immutable progOff = tindexOff + indexWordsOf(layout, tlen, tmt) + PROG_PAD;
+            immutable progOff = tindexOff + indexWordsOf(layout, tlen) + PROG_PAD;
             immutable tcountOff = progOff + 8;
             if (tlen > 0)
             {
@@ -3046,7 +2932,6 @@ private:
                         processShard(bp, seq, idx, tindexOff, tcountOff,
                                      progOff, tlen, layout, sq, s, true, false);
                 }
-                tertiaryMt(bp, idx, tindexOff, tlen, tmt);
             }
             seq = tnext;
         }
@@ -3082,55 +2967,6 @@ private:
         IDc += delta;
     }
 
-    /// Spec 7c: enter a payload. Claims bounded by MaxCs; calls bounded by
-    /// Done. With loopAll, keep executing iterations until the calls are
-    /// exhausted (secondary/tertiary paths); otherwise execute at most one.
-    void enterPayload(shared(ulong)* bp, ulong absIdx, bool loopAll) nothrow @nogc @system
-    {
-        pragma(inline, true);
-        version (assert) auto callbackScope = FarmCallbackScope(true);
-        auto head = cast(PayloadHeader*)(bp + absIdx);
-        // Header fields other than Pcount are ring words. Load them raw so
-        // wrap reuse is atomic vs the producer's store-raw, matching Thead.
-        immutable w0 = loadRaw(bp[absIdx]);
-        immutable maxCs = cast(uint) w0;
-        immutable done = cast(uint)(w0 >> 32);
-        immutable plen = loadRaw(bp[absIdx + 1]);
-        auto fn = cast(Callback) loadRaw(bp[absIdx + 9]);
-
-        // Spec 7c: ST single-shot (MaxCs=1, Done=1). The shard Tcount claim
-        // already assigned this index to one consumer; sweeper/re-walk use
-        // the same counter, MT paths never walk ST payloads. Record that
-        // unique claim without a second RMW. Keep the callback-visible
-        // claims field at one and calls/completions at zero, as before.
-        if (maxCs == 1 && done == 1 && !loopAll)
-        {
-            atomicStore!(MemoryOrder.raw)(head.pcount, 1UL << 32);
-            // Table completion is Tcount/Tprogress; just do the Call.
-            auto body_ = (cast(const(ulong)*)(bp + absIdx + PHEAD_LEN))[0 .. plen];
-            fn(head, body_, 0);
-            return;
-        }
-
-        immutable c = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 32);
-        if ((c >> 32) == 0xFFFF_FFFFUL) fatal("Pcount claims wrap");
-        if ((c >> 32) >= maxCs)
-            return; // overallocated
-        do
-        {
-            immutable d = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL << 16);
-            immutable called = (d >> 16) & 0xFFFF;
-            if (called == 0xFFFF) fatal("Pcount calls wrap");
-            if (called >= done)
-                break;
-            auto body_ = (cast(const(ulong)*)(bp + absIdx + PHEAD_LEN))[0 .. plen];
-            fn(head, body_, called);
-            immutable oldc = atomicFetchAdd!(MemoryOrder.raw)(head.pcount, 1UL);
-            if ((oldc & 0xFFFF) == 0xFFFF) fatal("Pcount comps wrap");
-        }
-        while (loopAll);
-    }
-
     /// Spec 2f/2g: execute one claimed Tindex run of an all-ST table.
     /// Compact records are [Call][Pbody]; uniform records are the bare
     /// Pbody and share the table's Tcall. In indexed layouts Plen is the gap
@@ -3138,8 +2974,7 @@ private:
     /// table's last record ends at Tsize - END_PAD; index-free records sit
     /// at `payOff + i * Tblen`. The run's claim makes this consumer the
     /// unique visitor of every payload in it, so the callback-visible header
-    /// is a stack copy holding the ST fast path's values: MaxCs = Done = 1,
-    /// claims 1, calls/completions 0, zero filler. It is shared by the run's
+    /// is a stack copy holding Plen and Call. It is shared by the run's
     /// payloads: callbacks must not modify it or retain it past return.
     void runCompact(TableLayout layout)(shared(ulong)* bp, ulong tseqIdx,
                     ulong tindexOff, ulong payOff, uint tlen, uint runstart,
@@ -3148,9 +2983,6 @@ private:
         pragma(inline, true);
         version (assert) auto callbackScope = FarmCallbackScope(true);
         PayloadHeader head;
-        head.maxCs = 1;
-        head.done = 1;
-        atomicStore!(MemoryOrder.raw)(head.pcount, 1UL << 32);
         static if (layout == TableLayout.uniformFixed)
         {
             immutable fn = cast(Callback) loadRaw(bp[tseqIdx + THEAD_LEN]);
@@ -3160,7 +2992,7 @@ private:
             auto p = cast(const(ulong)*)(bp + payOff + runstart * blen);
             foreach (j; 0 .. runlen)
             {
-                fn(&head, p[0 .. blen], 0);
+                fn(&head, p[0 .. blen]);
                 p += blen;
             }
         }
@@ -3186,9 +3018,9 @@ private:
                     head.call = cast(Callback) loadRaw(bp[absIdx]);
                 auto body_ = (cast(const(ulong)*)(bp + absIdx + recLen))[0 .. head.plen];
                 static if (layout == TableLayout.compact)
-                    head.call(&head, body_, 0);
+                    head.call(&head, body_);
                 else
-                    fn(&head, body_, 0);
+                    fn(&head, body_);
                 poff = next;
             }
         }
@@ -3288,20 +3120,13 @@ private:
             else if (layout == TableLayout.compact)
                 runCompact!(TableLayout.compact)(bp, tseqIdx, tindexOff, 0,
                     tlen, runstart, runlen);
-            else
-                foreach (i; 0 .. runlen)
-                {
-                    immutable poff = atomicLoad!(MemoryOrder.raw)(bp[tindexOff + runstart + i]);
-                    enterPayload(bp, tseqIdx + poff, false);
-                }
             // Spec 7a-e: the consumer adding the final completion sum for
             // the shard increments Tprogress by the shard length, whichever
             // consumer (owner, sweeper, or re-walker) that happens to be.
             // Join every chunk's primary-run callback writes before the final
             // chunk forwards this shard's completion into Tprogress. A relaxed
             // completion sum would join only the shard finisher's writes.
-            // Every callback is included only for a tracked ST single-shot
-            // table.
+            // Every payload callback contributes through its claimed run.
             immutable y = atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, cast(ulong) runlen);
             if ((y & 0xFFFF_FFFFUL) > 0xFFFF_FFFFUL - runlen) fatal("Tcount comps wrap");
             if ((y & 0xFFFF_FFFFUL) == shlen - runlen)
@@ -3309,8 +3134,7 @@ private:
                 // Tprogress is also a completion join: each shard publishes
                 // its primary-run callback writes, and the last RMW acquires
                 // the release chain before notifying an aggregate table
-                // observer. Secondary and tertiary MT callbacks are not
-                // joined here.
+                // observer.
                 immutable tp = atomicFetchAdd!(MemoryOrder.acq_rel)(
                     bp[progOff], cast(ulong) shlen);
                 if (tp + shlen == tlen)
@@ -3357,43 +3181,6 @@ private:
                         return 0;
                 }
             }
-        }
-    }
-
-    /// Spec 7c: secondary work claims. Round-robin assignment of the
-    /// multithreaded payloads by shard index, iterating each payload's
-    /// internal counter.
-    void secondaryMt(shared(ulong)* bp, ulong tseqIdx, ulong tindexOff,
-                     uint tlen, uint tmt, uint sq) nothrow @nogc @system
-    {
-        if (tmt == 0) return;
-        immutable shi = cast(uint)((cast(ulong) IDc + nextSeq) % sq);
-        immutable mtBase = tindexOff + tlen;
-        for (ulong j = shi; j < tmt; j += sq)
-        {
-            immutable poff = atomicLoad!(MemoryOrder.raw)(bp[mtBase + j]);
-            enterPayload(bp, tseqIdx + poff, true);
-        }
-    }
-
-    /// Tertiary MT sweep: enter any MT payload that still has iterations
-    /// and a free claim slot, so MT payloads complete even if their
-    /// designated consumers unsubscribed or were pre-empted. A primary
-    /// visit burns exactly one claim per payload, and write() enforces
-    /// MaxCs >= 2 on MT payloads, so a sweeper always finds a slot.
-    void tertiaryMt(shared(ulong)* bp, ulong tseqIdx, ulong tindexOff,
-                    uint tlen, uint tmt) nothrow @nogc @system
-    {
-        if (tmt == 0) return;
-        immutable mtBase = tindexOff + tlen;
-        foreach (j; 0 .. tmt)
-        {
-            immutable poff = atomicLoad!(MemoryOrder.raw)(bp[mtBase + j]);
-            auto head = cast(PayloadHeader*)(cast(ulong*) bp + tseqIdx + poff);
-            immutable pc = atomicLoad!(MemoryOrder.raw)(head.pcount);
-            if (((pc >> 16) & 0xFFFF) >= head.done) continue;
-            if ((pc >> 32) >= head.maxCs) continue;
-            enterPayload(bp, tseqIdx + poff, true);
         }
     }
 }

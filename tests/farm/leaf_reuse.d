@@ -12,7 +12,7 @@ void waitFlag(ref shared int flag) nothrow @nogc @system
     while (atomicLoad!(MemoryOrder.raw)(flag) == 0) Thread.yield();
 }
 void require(bool b, string s) nothrow @nogc @system { if (!b) fatal(s); }
-long cb(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+long cb(PayloadHeader*, PayloadBody body) nothrow @nogc @system
 {
     ulong sum;
     foreach (x; body) sum += x; // Plain ring reads must reach the later writer.
@@ -52,7 +52,7 @@ ulong writeWords(ref Token tok, ulong words)
     require(body !is null, "leaf body allocation");
     body[0..n] = 17;
     PayloadHeader h;
-    h.maxCs = h.done = 1; h.call = &cb;
+    h.call = &cb;
     PayloadEntry[1] entries = [PayloadEntry(&h,body[0..n])];
     return f.write(entries[],tok);
 }

@@ -4,7 +4,33 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
-## Unreleased
+## 1.9.0 — unreleased
+
+- Removed MT payloads from the D core. All payloads are single-shot; independent
+  entries still execute across many consumers. Removed the full ring-header
+  layout, MT index, iteration/admission counters and secondary payload passes.
+- `PayloadHeader` is now 16 bytes (`plen`, `call`). Native callbacks take
+  `(PayloadHeader*, PayloadBody)`; remove the old iteration argument.
+  Removed `maxCs`, `done`, `pcount`, `MAX_PAYLOAD_ITERS`, helper scheduling
+  arguments, `withIteration` and `payloadEntryRuntime`. Use `payloadEntry`
+  for both former entry-construction forms.
+- Added `payloadRange!fn(source, grain)`; `parallelRange` shares that adapter.
+  Grain must be positive. The final grain handles the tail; lengths and write
+  counts are measured in grains. Descriptors refer to data read at execution,
+  so retain that data until completion. Omit grain for per-element packing.
+- Removed `parallelSlices`, `ParallelForm` and `Options.form/slices`.
+  `Options` now contains `grain` and `costClass`. Port MT iteration work to
+  independent entries or grains. See [parallel loops](docs/guide/parallel-loops.md).
+- Every `write` overload accepts an optional completion hook after `avgCost`,
+  including mixed-callback tables. The existing table completion transition
+  joins all accepted payload callbacks. `writeTracked` remains a convenience
+  spelling; partial writes notify only their accepted table, and zero writes
+  do not notify. Parallel regions use this general path.
+- The [C ABI proposal](docs/design/c-abi.md) targets this ST-only foundation:
+  a runtime-free core distribution and a druntime-inclusive distribution with
+  the non-Fiber pool and FarmHost. C exports are not implemented yet.
+
+## 1.8.3 — progress branch
 
 - Added `antfarm.parallel`: ST range grains, bounded MT slices, asynchronous
   submission handles and completion hooks, blocking help-drain calls, and

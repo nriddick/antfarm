@@ -19,7 +19,7 @@ import threadpool.pin;
 __gshared shared(long) g_calls;
 __gshared shared(int) g_stop;
 
-long liveCb(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
+long liveCb(PayloadHeader*, PayloadBody) nothrow @nogc @system
 {
     atomicFetchAdd(g_calls, 1L);
     return 1;
@@ -91,8 +91,7 @@ double runScene(const(TopologySnapshot) snap, bool includeE, ulong nPay)
         Thread.yield();
 
     PayloadHeader h;
-    h.maxCs = 1;
-    h.done = 1;
+
     h.call = &liveCb;
     ulong[2] body = [1, 2];
     PayloadEntry e;

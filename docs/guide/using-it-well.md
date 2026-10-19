@@ -51,8 +51,7 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
 2. **Publish homogeneous tables.** All single-threaded entries sharing one
    callback and one nonzero body width use only the body words per entry.
    A one-word body costs 1 word in that layout, 2 with uniform callback but
-   variable width, 3 with mixed ST callbacks, or 18 for an ST entry in a full
-   table containing MT work (19 for an MT entry). Wider bodies add their own
+   variable width, and 3 with mixed callbacks. Wider bodies add their own
    words; these counts exclude fixed table overhead. Use common-header and
    fixed-length write forms to reduce producer sizing work. See
    [entries per quota](../../ARCHITECTURE.md#how-many-entries-fit-a-quota) and
@@ -110,8 +109,8 @@ The [choice guide](choosing-work.md) owns the full comparison.
 The core deliberately leaves FIFO, priorities, thread affinity, "all done",
 and parking to the application. Several Farms can separate priority classes;
 a Farm with one subscribed thread can confine its work. Use an application
-counter or a `writeTracked` hook for completion; the hook's contract is for
-single-shot ST tables, not arbitrary MT callbacks. Exceptions cannot escape
+counter or a `write` completion hook for completion; the hook joins every
+payload callback in one accepted physical table. Exceptions cannot escape
 payload callbacks. See [the model](../../SPEC.md#1-model-scope-and-terminology),
 [tracked completion](../../SPEC.md#9-memory-order-contract), and
 [the Director](../../threadpool/README.md#start-workers).

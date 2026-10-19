@@ -24,13 +24,9 @@ __gshared shared(long) g_contentSum;
 __gshared shared(long) g_contentBad;
 __gshared shared(long) g_claimContractBad;
 
-private long claimContractCb(PayloadHeader* head, PayloadBody body,
-        ulong iteration) nothrow @nogc @system
+private long claimContractCb(bool alternate)(PayloadHeader* head, PayloadBody body) nothrow @nogc @system
 {
-    if (head.maxCs == 1 && (head.done != 1 || iteration != 0
-            || atomicLoad!(MemoryOrder.raw)(head.pcount) != (1UL << 32)))
-        atomicFetchAdd!(MemoryOrder.raw)(g_claimContractBad, 1L);
-    if (iteration >= head.done)
+    if (head.plen != body.length || head.call !is &claimContractCb!alternate)
         atomicFetchAdd!(MemoryOrder.raw)(g_claimContractBad, 1L);
     return countingCb(cast(size_t) body[0]);
 }
@@ -38,7 +34,7 @@ private long claimContractCb(PayloadHeader* head, PayloadBody body,
 private enum size_t T21_BODY_LEN = 32;
 private enum size_t T21_N = 30000;
 
-long contentSumCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long contentSumCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
 {
     // Count the call first so a corrupted body still advances the global
     // total and consumers do not spin until the watchdog.
@@ -83,7 +79,7 @@ void defect(const(char)[] id, const(char)[] msg)
 
 // ---------------- defect probes (non-fatal) ----------------
 
-void t01_pcount_field_carry()
+void t01_bad_header()
 {
     version (Windows)
     {
@@ -92,7 +88,7 @@ void t01_pcount_field_carry()
     }
     else version (Posix)
     {
-    // Retarget: write() must fatal (abort) on Done/MaxCs > 512. A clean
+    // write() must fatal (abort) on a null callback. A clean
     // return is a miss; SIGILL/SIGSEGV is still a smash.
     import core.sys.posix.unistd : fork, _exit;
     import core.sys.posix.sys.wait : waitpid;
@@ -102,10 +98,11 @@ void t01_pcount_field_carry()
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "T01 reg");
 
-    bool expectAbort(uint done, uint maxCs, const(char)[] label)
+    bool expectAbort(const(char)[] label)
     {
         PayloadHeader h;
-        initPayloadHeader!countingCb(&h, maxCs, done);
+        initPayloadHeader!countingCb(&h);
+        h.call = null;
         ulong body = 0;
         PayloadEntry e;
         e.header = &h;
@@ -129,25 +126,22 @@ void t01_pcount_field_carry()
         return false;
     }
 
-    immutable okDone = expectAbort(MAX_PAYLOAD_ITERS + 1, 1, "Done>512");
-    immutable okCs = expectAbort(1, MAX_PAYLOAD_ITERS + 1, "MaxCs>512");
+    immutable ok = expectAbort("null callback");
     f.unregisterProducer(tok);
     f.destroy();
-    say((okDone && okCs) ? "T01 write rejects >512 OK" : "T01 DEFECT confirmed");
+    say(ok ? "T01 write rejects null callback OK" : "T01 DEFECT confirmed");
     }
 }
 
-void t02_done_wrap_overexec()
+void t02_single_shot_revisit()
 {
     auto f = AntFarm.create(2, 8, 8, 1, 8192, 4, 2048);
     scope (exit) f.destroy();
     allocCalls(1);
     scope (exit) freeCalls();
 
-    enum uint DONE = MAX_PAYLOAD_ITERS;
+    enum uint DONE = 1;
     auto batch = makeBatch(1, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        h.maxCs = 32;
-        h.done = DONE;
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -162,8 +156,7 @@ void t02_done_wrap_overexec()
         Thread.yield();
     f.unregisterProducer(tok);
 
-    auto deadline = MonoTime.currTime + 15.seconds;
-    while (MonoTime.currTime < deadline)
+    foreach (round; 0 .. 1000)
     {
         foreach (i; 0 .. NC)
             vs[i].consumeNext();
@@ -174,8 +167,8 @@ void t02_done_wrap_overexec()
         vs[i].unsubscribe();
 
     immutable got = atomicLoad(g_calls[0]);
-    check(got == DONE, "T02 exact calls at Done=512");
-    say("T02 Done=512 exact OK");
+    check(got == DONE, "T02 exact calls at single-shot revisit");
+    say("T02 single-shot revisit exact OK");
 }
 
 void t16_position_ref_stall()
@@ -194,7 +187,7 @@ void t16_position_ref_stall()
     bodies.length = N;
     foreach (i; 0 .. N)
     {
-        initPayloadHeader!countingCb(&headers[i], 1, 1);
+        initPayloadHeader!countingCb(&headers[i]);
         bodies[i] = cast(ulong*) malloc(800 * ulong.sizeof);
         bodies[i][0] = i;
         entries[i].header = &headers[i];
@@ -298,9 +291,6 @@ void t03_concurrent_exact()
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        immutable mt = i % 5 == 0;
-        h.maxCs = mt ? 3 : 1;
-        h.done = mt ? 4 : 1;
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -343,9 +333,6 @@ void t04_many_consumers_two_producers()
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        immutable mt = i % 7 == 0;
-        h.maxCs = mt ? 4 : 1;
-        h.done = mt ? 5 : 1;
         plen = 2 + (i % 4);
     });
     scope (exit) freeBatch(batch);
@@ -383,9 +370,6 @@ void t05_zero_consumer_gap()
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        immutable mt = i % 6 == 0;
-        h.maxCs = mt ? 2 : 1;
-        h.done = mt ? 3 : 1;
         plen = 2 + (i % 3);
     });
     scope (exit) freeBatch(batch);
@@ -470,9 +454,6 @@ void t06_subscription_storm()
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        immutable mt = i % 5 == 0;
-        h.maxCs = mt ? 4 : 1;
-        h.done = mt ? 5 : 1;
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -520,9 +501,6 @@ void t07_small_table_churn()
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        immutable mt = i % 4 == 0;
-        h.maxCs = mt ? 4 : 1;
-        h.done = mt ? 6 : 1;
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -575,7 +553,7 @@ void t08_spanning_tables()
     long expected;
     foreach (i; 0 .. N)
     {
-        initPayloadHeader!countingCb(&headers[i], 1, 1);
+        initPayloadHeader!countingCb(&headers[i]);
         ++expected;
     }
     huge[0] = 0;
@@ -625,16 +603,16 @@ __gshared shared(long)* g_payInflight;
 __gshared size_t g_payInflightN;
 __gshared shared(long) g_overMax;
 
-long boundedSlowCb(size_t idx, immutable PayloadHeader* h, ulong iter) nothrow @nogc @system
+long boundedSlowCb(size_t idx) nothrow @nogc @system
 {
     long cur = 1;
     if (g_payInflight !is null && idx < g_payInflightN)
     {
         cur = atomicFetchAdd(g_payInflight[idx], 1) + 1;
-        if (cur > h.maxCs)
+        if (cur > 1)
             atomicFetchAdd(g_overMax, 1);
     }
-    ulong x = iter;
+    ulong x = idx;
     foreach (i; 0 .. 20_000)
         x = x * 6364136223846793005UL + 1;
     countingCb(idx);
@@ -643,7 +621,7 @@ long boundedSlowCb(size_t idx, immutable PayloadHeader* h, ulong iter) nothrow @
     return cast(long)(x & 0xff);
 }
 
-void t09_slow_mt_bounds()
+void t09_slow_single_shot()
 {
     auto f = AntFarm.create(2, 8, 16, 1, 8192, 4, 2048);
     scope (exit) f.destroy();
@@ -673,17 +651,15 @@ void t09_slow_mt_bounds()
     foreach (i; 0 .. N)
     {
         auto body = batch.bodyStore[i * 2 .. i * 2 + 2];
-        batch.entries[i] = payloadEntryRuntime!(boundedSlowCb, true)(
-            &batch.headers[i], body, 4, 12, i,
-            cast(immutable PayloadHeader*) &batch.headers[i]);
-        batch.expectedCalls += 12;
+        batch.entries[i] = payloadEntry!boundedSlowCb(&batch.headers[i], body, i);
+        ++batch.expectedCalls;
     }
     batch.bodyUsed = N * 2;
     scope (exit) freeBatch(batch);
     runPair(f, &batch, 20, Tier.bulk, 0, 120);
     expectExactCalls(&batch, "T09");
-    check(atomicLoad(g_overMax) == 0, "MaxCs per-payload");
-    say("T09 slow MT bounds OK");
+    check(atomicLoad(g_overMax) == 0, "one concurrent callback per payload");
+    say("T09 slow single-shot OK");
 }
 
 void t10_caps()
@@ -721,15 +697,11 @@ void t11_late_subscriber_multilap()
 {
     auto f = AntFarm.create(2, 8, 1, 1, 2048, 2, 1024);
     scope (exit) f.destroy();
-    // ~20 ulongs/payload (tiny bodies pack ~17/table); 40000 payloads
-    // write ~790K ulongs, lapping the 2^18 ring ~3x.
-    enum N = 40000;
+    // Variable body lengths exercise indexed uniform tables over multiple laps.
+    enum N = 300000;
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        immutable mt = i % 9 == 0;
-        h.maxCs = mt ? 2 : 1;
-        h.done = mt ? 3 : 1;
         plen = 2 + (i % 4);
     });
     scope (exit) freeBatch(batch);
@@ -758,8 +730,6 @@ void t12_no_reexecution_on_resub()
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        h.maxCs = (i % 4 == 0) ? 3 : 1;
-        h.done = (i % 4 == 0) ? 4 : 1;
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -795,7 +765,7 @@ void t13_create_validation()
     auto tok = f0.registerProducer(Tier.small);
     check(tok.valid, "nb0 reg");
     PayloadHeader h;
-    initPayloadHeader!countingCb(&h, 1, 1);
+    initPayloadHeader!countingCb(&h);
     ulong v = 7;
     PayloadEntry e;
     e.header = &h;
@@ -816,8 +786,6 @@ void t14_k_geometry()
         allocCalls(N);
         scope (exit) freeCalls();
         auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-            h.maxCs = (i % 5 == 0) ? 3 : 1;
-            h.done = (i % 5 == 0) ? 4 : 1;
             plen = 2 + (i % 10);
         });
         scope (exit) freeBatch(batch);
@@ -837,9 +805,6 @@ void t15_wave_consumers()
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        immutable mt = i % 6 == 0;
-        h.maxCs = mt ? 5 : 1;
-        h.done = mt ? 7 : 1;
         plen = 2 + (i % 8);
     });
     scope (exit) freeBatch(batch);
@@ -920,7 +885,7 @@ void t17_write_size_wrap()
     }
 
     PayloadHeader h;
-    initPayloadHeader!countingCb(&h, 1, 1);
+    initPayloadHeader!countingCb(&h);
     ulong one = 42;
     PayloadEntry wrap;
     wrap.header = &h;
@@ -940,11 +905,10 @@ void t17_write_size_wrap()
     immutable okBig = expectAbort(unsized, "unsizable");
     free(big);
 
-    // The same contract on the arithmetic fixed-length path: an MT common
-    // header with a caller-supplied length that wraps the per-payload unit
-    // (16 + 2 + bodyWords) must fatal, not divide by a wrapped zero unit.
+    // The arithmetic fixed-length path must reject a caller-supplied body
+    // length whose singleton cost overflows, before inspecting body storage.
     PayloadHeader mh;
-    initPayloadHeader!countingCb(&mh, 2, 2);
+    initPayloadHeader!countingCb(&mh);
     PayloadBody[1] fixedBodies = [p[0 .. 1]];
     bool okFixedWrap;
     {
@@ -989,70 +953,69 @@ void t17_write_size_wrap()
     f.destroy();
 
     foreach (tier; [Tier.small, Tier.bulk])
-        foreach (maxCs; [1U, 2U])
-            foreach (over; [false, true])
-            {
-                auto boundaryFarm = AntFarm.create(2, 4, 1, 1, 2048, 1, 512);
-                scope (exit) boundaryFarm.destroy();
-                PayloadHeader header;
-                initPayloadHeader!countingCb(&header, maxCs, 1);
-                immutable quota = tier == Tier.small ? 512UL : 2048UL;
-                immutable overhead = maxCs == 1 ? 40UL : 56UL;
-                immutable bodyWords = quota - overhead + (over ? 1 : 0);
-                auto body = cast(ulong*) malloc(bodyWords * ulong.sizeof);
-                check(body !is null, "T17 boundary allocation");
-                scope (exit) free(body);
-                body[0 .. bodyWords] = 0;
-                PayloadEntry entry = PayloadEntry(&header, body[0 .. bodyWords]);
-                immutable fits = boundaryFarm.canFit(header, bodyWords, tier);
-                check(fits == !over, "T17 canFit boundary");
+        foreach (over; [false, true])
+        {
+            auto boundaryFarm = AntFarm.create(2, 4, 1, 1, 2048, 1, 512);
+            scope (exit) boundaryFarm.destroy();
+            PayloadHeader header;
+            initPayloadHeader!countingCb(&header);
+            immutable quota = tier == Tier.small ? 512UL : 2048UL;
+            immutable overhead = 40UL;
+            immutable bodyWords = quota - overhead + (over ? 1 : 0);
+            auto body = cast(ulong*) malloc(bodyWords * ulong.sizeof);
+            check(body !is null, "T17 boundary allocation");
+            scope (exit) free(body);
+            body[0 .. bodyWords] = 0;
+            PayloadEntry entry = PayloadEntry(&header, body[0 .. bodyWords]);
+            immutable fits = boundaryFarm.canFit(header, bodyWords, tier);
+            check(fits == !over, "T17 canFit boundary");
 
-                // Each overload/case gets a child: an acceptance must exit 0,
-                // an oversized singleton must die with SIGABRT, even in release.
-                foreach (form; 0 .. 3)
+            // Each overload/case gets a child: an acceptance must exit 0,
+            // an oversized singleton must die with SIGABRT, even in release.
+            foreach (form; 0 .. 3)
+            {
+                auto pid = fork();
+                if (pid == 0)
                 {
-                    auto pid = fork();
-                    if (pid == 0)
-                    {
-                        auto token = boundaryFarm.registerProducer(tier);
-                        if (!token.valid) _exit(2);
-                        ulong wroteBoundary;
-                        PayloadBody[1] bodies = [entry.body];
-                        if (form == 0)
-                            wroteBoundary = boundaryFarm.write((&entry)[0 .. 1], token);
-                        else if (form == 1)
-                            wroteBoundary = boundaryFarm.write(header, bodies[], token);
-                        else
-                            wroteBoundary = boundaryFarm.write(header, bodies[], bodyWords, token);
-                        _exit(wroteBoundary == 1 ? 0 : 1);
-                    }
-                    check(pid > 0, "T17 boundary fork");
-                    int status;
-                    auto deadline = MonoTime.currTime + 10.seconds;
-                    for (;;)
-                    {
-                        immutable waited = waitpid(pid, &status, WNOHANG);
-                        if (waited == pid) break;
-                        check(waited >= 0, "T17 boundary waitpid");
-                        if (MonoTime.currTime > deadline)
-                        {
-                            cast(void) kill(pid, SIGKILL);
-                            waitpid(pid, &status, 0);
-                            check(false, "T17 boundary watchdog");
-                        }
-                        Thread.sleep(1.msecs);
-                    }
-                    immutable sig = status & 0x7f;
-                    check(fits ? status == 0 : sig == SIGABRT,
-                        "T17 canFit agrees with write acceptance/fatal");
-                    printf("T17 canFit %s %s bodyWords=%llu -> %s, write %s (form=%d)\n",
-                        (tier == Tier.small ? "small" : "bulk").ptr,
-                        (maxCs == 1 ? "ST" : "MT").ptr, bodyWords,
-                        (fits ? "true" : "false").ptr,
-                        (fits ? "accepted" : "SIGABRT").ptr, form);
-                    fflush(stdout);
+                    auto token = boundaryFarm.registerProducer(tier);
+                    if (!token.valid) _exit(2);
+                    ulong wroteBoundary;
+                    PayloadBody[1] bodies = [entry.body];
+                    if (form == 0)
+                        wroteBoundary = boundaryFarm.write((&entry)[0 .. 1], token);
+                    else if (form == 1)
+                        wroteBoundary = boundaryFarm.write(header, bodies[], token);
+                    else
+                        wroteBoundary = boundaryFarm.write(header, bodies[], bodyWords, token);
+                    _exit(wroteBoundary == 1 ? 0 : 1);
                 }
+                check(pid > 0, "T17 boundary fork");
+                int status;
+                auto deadline = MonoTime.currTime + 10.seconds;
+                for (;;)
+                {
+                    immutable waited = waitpid(pid, &status, WNOHANG);
+                    if (waited == pid) break;
+                    check(waited >= 0, "T17 boundary waitpid");
+                    if (MonoTime.currTime > deadline)
+                    {
+                        cast(void) kill(pid, SIGKILL);
+                        waitpid(pid, &status, 0);
+                        check(false, "T17 boundary watchdog");
+                    }
+                    Thread.sleep(1.msecs);
+                }
+                immutable sig = status & 0x7f;
+                check(fits ? status == 0 : sig == SIGABRT,
+                    "T17 canFit agrees with write acceptance/fatal");
+                printf("T17 canFit %s %s bodyWords=%llu -> %s, write %s (form=%d)\n",
+                    (tier == Tier.small ? "small" : "bulk").ptr,
+                    "ST".ptr, bodyWords,
+                    (fits ? "true" : "false").ptr,
+                    (fits ? "accepted" : "SIGABRT").ptr, form);
+                fflush(stdout);
             }
+        }
     say((okWrap && okBig && okFixedWrap && okMidSmall && wrote == 1)
         ? "T17 fatal on wrap/unsizable/per-tier OK"
         : "T17 DEFECT confirmed");
@@ -1061,9 +1024,7 @@ void t17_write_size_wrap()
 
 // SPEC 2f singleton contract: an ST singleton is compact
 // (base + 1 index + 1 Call + Plen), so a body at the compact limit is
-// accepted while one word more fatals; an MT payload keeps the full
-// 16-word-header size and fatals at that same body. Catches M5 (compact
-// size used for MT too).
+// accepted while one word more fatals.
 void t26_compact_singleton_contract()
 {
     version (Windows)
@@ -1079,7 +1040,7 @@ void t26_compact_singleton_contract()
 
     enum size_t Lmax = 100;        // ST compact singleton == Qsmall.
     enum ulong Qsmall = 40 + Lmax; // base 38 + index 1 + Call 1 + Plen.
-    enum ulong Qbulk = 56 + Lmax;  // MT full singleton with the same body.
+    enum ulong Qbulk = 56 + Lmax;  // A larger tier does not relax the small-tier contract.
     auto f = AntFarm.create(2, 4, 1, 1, Qbulk, 1, Qsmall);
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "T26 reg");
@@ -1129,7 +1090,7 @@ void t26_compact_singleton_contract()
     check(okBody !is null, "T26 ok body");
     foreach (i, ref w; okBody[0 .. Lmax]) w = i;
     PayloadHeader st;
-    initPayloadHeader!countingCb(&st, 1, 1);
+    initPayloadHeader!countingCb(&st);
     PayloadEntry exAccept;
     exAccept.header = &st;
     exAccept.body = okBody[0 .. Lmax];
@@ -1144,29 +1105,11 @@ void t26_compact_singleton_contract()
     stOver.body = overBody[0 .. Lmax + 1];
     immutable okSt = expectAbort(stOver, "compact-one-word-over");
 
-    PayloadHeader mt;
-    initPayloadHeader!countingCb(&mt, 2, 1);
-    PayloadEntry mtSame;
-    mtSame.header = &mt;
-    mtSame.body = okBody[0 .. Lmax];
-    immutable okMt = expectAbort(mtSame, "mt-same-body");
-
-    // MT 15 words under the ST limit: the correct full-header check still
-    // aborts, while a check that used the compact size for MT would accept.
-    auto mtNearBody = cast(ulong*) malloc((Lmax - 15) * ulong.sizeof);
-    check(mtNearBody !is null, "T26 near body");
-    foreach (i, ref w; mtNearBody[0 .. Lmax - 15]) w = i;
-    PayloadEntry mtNear;
-    mtNear.header = &mt;
-    mtNear.body = mtNearBody[0 .. Lmax - 15];
-    immutable okMtNear = expectAbort(mtNear, "mt-near-limit");
-
     free(okBody);
     free(overBody);
-    free(mtNearBody);
     f.unregisterProducer(tok);
     f.destroy();
-    say((wrote == 1 && okSt && okMt && okMtNear)
+    say((wrote == 1 && okSt)
         ? "T26 compact singleton contract OK"
         : "T26 DEFECT confirmed");
     }
@@ -1187,9 +1130,6 @@ void t18_pure_churn_orphan()
         enum N = 600;
         allocCalls(N);
         auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-            immutable mt = i % 4 == 0;
-            h.maxCs = mt ? 3 : 1;
-            h.done = mt ? 5 : 1;
             plen = 2;
         });
 
@@ -1296,7 +1236,7 @@ void t20_plant_confirmed_segment()
         long expected;
         foreach (i; 0 .. N)
         {
-            initPayloadHeader!countingCb(&headers[i], 1, 1);
+            initPayloadHeader!countingCb(&headers[i]);
             bodies[i * 2] = i;
             entries[i] = PayloadEntry(&headers[i], bodies[i * 2 .. i * 2 + 2]);
             expected += 1;
@@ -1453,8 +1393,7 @@ void t21_payload_content_multilap()
     foreach (i; 0 .. N)
     {
         headers[i] = PayloadHeader.init;
-        headers[i].maxCs = 1;
-        headers[i].done = 1;
+
         headers[i].call = &contentSumCb;
         foreach (k; 0 .. BODY_LEN)
             bodies[i * BODY_LEN + k] = i + k;
@@ -1530,9 +1469,6 @@ void t22_avgcost_sharding()
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        immutable mt = i % 5 == 0;
-        h.maxCs = mt ? 3 : 1;
-        h.done = mt ? 4 : 1;
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -1583,10 +1519,9 @@ void t22_avgcost_sharding()
 
 void t25_single_shot_claim_contract()
 {
-    // Mix ST, MT with one iteration, and MT with several iterations. All
-    // primary/sweeper visits compete for the same table shard claims. Check
-    // exact execution across ring reuse and the ST callback-visible Pcount,
-    // including chunk size one where claim contention is greatest.
+    // Primary/sweeper visits compete for the same table shard claims. Check
+    // exact execution and borrowed metadata across ring reuse, including
+    // chunk size one where claim contention is greatest.
     foreach (avgCost; [0U, avgCostForChunk(32), MAX_AVG_COST])
     {
         auto f = AntFarm.create(2, 8, 8, 1, 16384, 1, 4096, 0);
@@ -1596,12 +1531,11 @@ void t25_single_shot_claim_contract()
         scope (exit) freeCalls();
         atomicStore!(MemoryOrder.raw)(g_claimContractBad, 0L);
         auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-            h.maxCs = i % 3 == 0 ? 1 : 4;
-            h.done = i % 3 == 2 ? 3 : 1;
-            plen = 2;
+            plen = 47 + i % 3;
         });
         scope (exit) freeBatch(batch);
-        foreach (i; 0 .. N) batch.headers[i].call = &claimContractCb;
+        foreach (i; 0 .. N) batch.headers[i].call = i % 2
+            ? &claimContractCb!true : &claimContractCb!false;
 
         enum NC = 8;
         Thread[NC] consumers;
@@ -1636,10 +1570,11 @@ void t25_single_shot_claim_contract()
         revisit.unsubscribe();
         expectExactCalls(&batch, "T25");
         check(atomicLoad!(MemoryOrder.raw)(g_claimContractBad) == 0,
-            "T25 callback claim and iteration contract");
+            "T25 borrowed callback metadata");
+        check(atomicLoad!(MemoryOrder.raw)(f.Wt) > 2 * f.Ln, "T25 multiple ring laps");
         expectNoLiveConsumerRefs(f, "T25");
     }
-    say("T25 single-shot claim contract and mixed-table exact execution OK");
+    say("T25 single-shot claim contract and mixed-callback exact execution OK");
 }
 
 void t23_late_attach_under_wrap()
@@ -1662,8 +1597,7 @@ void t23_late_attach_under_wrap()
         allocCalls(N);
         scope (exit) freeCalls();
         auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-            h.maxCs = 1;
-            h.done = 1;
+
             plen = 2;
         });
         scope (exit) freeBatch(batch);
@@ -1745,8 +1679,7 @@ void t24_topology_hang_canary()
         allocCalls(N);
         scope (exit) freeCalls();
         auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-            h.maxCs = 1;
-            h.done = 1;
+
             plen = 1;
         });
         scope (exit) freeBatch(batch);
@@ -1816,11 +1749,11 @@ void main(string[] args)
     }
 
     if (want("T01"))
-        t01_pcount_field_carry();
+        t01_bad_header();
     if (want("T16"))
         t16_position_ref_stall();
     if (want("T02"))
-        t02_done_wrap_overexec();
+        t02_single_shot_revisit();
     if (want("T17"))
         t17_write_size_wrap();
     if (want("T26"))
@@ -1853,7 +1786,7 @@ void main(string[] args)
     if (want("T08"))
         t08_spanning_tables();
     if (want("T09"))
-        t09_slow_mt_bounds();
+        t09_slow_single_shot();
     if (want("T10"))
         t10_caps();
     if (want("T11"))

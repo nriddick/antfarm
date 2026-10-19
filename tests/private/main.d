@@ -401,7 +401,7 @@ struct JoinBodies
     { scratch[0] = cast(ulong) probe; scratch[1] = index; return scratch[]; }
     void popFront() nothrow @nogc { ++index; }
 }
-long joinWork(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+long joinWork(PayloadHeader*, PayloadBody body) nothrow @nogc @system
 {
     auto probe = cast(JoinProbe*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
     auto index = atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) (body.ptr + 1));
@@ -430,7 +430,7 @@ void sameShardJoin()
         JoinProbe probe;
         TableCompletionHook hook = TableCompletionHook(&probe, &joined);
         PayloadHeader header;
-        header.maxCs = header.done = 1;
+
         header.plen = 2;
         header.call = &joinWork;
         auto n = farm.writeTracked(header, JoinBodies(&probe), 2, &hook, token, MAX_AVG_COST);
@@ -865,7 +865,7 @@ void rootBatchDeath(bool createZero, bool overLimit)
     check(park !is null);
     park.pump(token, overLimit ? 258 : 0);
 }
-long avgCostDeathWork(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
+long avgCostDeathWork(PayloadHeader*, PayloadBody) nothrow @nogc @system
 {
     return 1;
 }
@@ -876,7 +876,7 @@ void avgCostOverDeath()
     auto farm = AntFarm.create();
     auto token = farm.registerProducer(Tier.small);
     PayloadHeader header;
-    header.maxCs = header.done = 1;
+
     header.plen = 1;
     header.call = &avgCostDeathWork;
     ulong[1] body;
@@ -2763,15 +2763,13 @@ static assert(is(typeof(PrivateContext.init.createChildren!PItem(1)) == PVoidCoh
 static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1)) == PUlongCohort*));
 static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1, 2)) == PUlongCohort*));
 static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNotPod)(1)));
-// Layout: subset selection adds two words per cohort to main 3441b8b's
-// 264-byte signal-only park. Results add exactly two more words. F1 adds
-// 16 bytes of wave failure fields and two participant counters; F2 adds
-// the immutable ChildBase.root word.
+// ST-only metadata reduces the child park by 112 bytes to 264.
+// Results add exactly two words; the cohort-slab variant appends one.
 // Entry's own 40-byte layout is asserted next to its definition and checked
 // through the allocation sizes in portsAllocationFailures.
 static if (size_t.sizeof == 8)
 {
-    static assert(PVoidCohort.sizeof == 376);
+    static assert(PVoidCohort.sizeof == 264);
     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
     // Service.childReturns (E2-3) accounts for one word of both.
     // E2-4 reserves 48 more bytes in ChildBase for the resume descriptor/FIFO.

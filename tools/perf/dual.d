@@ -55,7 +55,7 @@ uint* workerCalls() nothrow @nogc @system
     return &n;
 }
 
-long benchCb(PayloadHeader* h, PayloadBody b, ulong iter) nothrow @nogc @system
+long benchCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
 {
     auto p = workerCalls();
     if (++(*p) >= LOCAL_FLUSH)
@@ -326,8 +326,7 @@ Trial runDual(Cfg c)
     }
 
     *headers = PayloadHeader.init;
-    headers.maxCs = 1;
-    headers.done = 1;
+
     headers.call = &benchCb;
     foreach (i; 0 .. c.body)
         body[i] = i;

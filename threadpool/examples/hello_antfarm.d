@@ -35,7 +35,7 @@ __gshared shared(long) g_sum;
 ConsumerView t_view;
 bool t_subscribed;
 
-long helloCb(PayloadHeader*, PayloadBody b, ulong) nothrow @nogc @system
+long helloCb(PayloadHeader*, PayloadBody b) nothrow @nogc @system
 {
     atomicFetchAdd(g_received[cast(size_t) b[0]], 1L);
     atomicFetchAdd(g_sum, cast(long) b[1]);
@@ -61,8 +61,7 @@ bool pump(WorkerSelf* w) nothrow @nogc @system
         if (tok.valid)
         {
             PayloadHeader hdr;
-            hdr.maxCs = 1;
-            hdr.done = 1;
+
             hdr.call = &helloCb;
             ulong[2] buf = [w.llcIndex, 42];
             PayloadEntry e;

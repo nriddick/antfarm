@@ -55,13 +55,10 @@ long countingCb(size_t idx) nothrow @nogc @system
     return 1;
 }
 
-/// Slow-ish CPU burn callback used to keep multiple entrants concurrent.
-/// Kept in packed form so it can be used with the template shims; the
-/// trailing `ulong` is the callback iteration when used with
-/// `withIteration = true`.
-long slowCountingCb(size_t idx, ulong iter) nothrow @nogc @system
+/// Slow CPU burn callback used across independent ST payloads.
+long slowCountingCb(size_t idx) nothrow @nogc @system
 {
-    ulong x = iter ^ idx;
+    ulong x = idx;
     foreach (i; 0 .. 20_000)
         x = x * 6364136223846793005UL + 1;
     return countingCb(idx) ^ cast(long)(x & 1);
@@ -84,29 +81,37 @@ PayloadBatch makeBatch(size_t n, scope void delegate(size_t i, ref PayloadHeader
     b.count = n;
     b.headers = cast(PayloadHeader*) malloc(n * PayloadHeader.sizeof);
     b.entries = cast(PayloadEntry*) malloc(n * PayloadEntry.sizeof);
-    // generous body arena: up to 4096 ulongs each worst-case; callers use less
-    b.bodyCap = n * 4096;
-    b.bodyStore = cast(ulong*) malloc(b.bodyCap * ulong.sizeof);
-    b.bodyUsed = 0;
-    b.expectedCalls = 0;
-    check(b.headers !is null && b.entries !is null && b.bodyStore !is null, "batch alloc");
+    check(b.headers !is null && b.entries !is null, "batch alloc");
 
+    // Size the actual bodies first: compact tables need more entries to lap
+    // the ring, but should not reserve thousands of unused words per entry.
     foreach (i; 0 .. n)
     {
         b.headers[i] = PayloadHeader.init;
         size_t plen = 2;
         fill(i, b.headers[i], plen);
-        initPayloadHeader!countingCb(&b.headers[i], b.headers[i].maxCs, b.headers[i].done);
+        initPayloadHeader!countingCb(&b.headers[i]);
+        b.headers[i].plen = plen;
+        check(plen <= size_t.max - b.bodyCap, "body arena overflow");
+        b.bodyCap += plen;
+    }
+    check(b.bodyCap <= size_t.max / ulong.sizeof, "body arena byte overflow");
+    b.bodyStore = cast(ulong*) malloc(b.bodyCap == 0 ? 1 : b.bodyCap * ulong.sizeof);
+    check(b.bodyStore !is null, "body arena alloc");
+
+    foreach (i; 0 .. n)
+    {
+        immutable plen = cast(size_t) b.headers[i].plen;
         check(b.bodyUsed + plen <= b.bodyCap, "body arena overflow");
         auto slice = b.bodyStore[b.bodyUsed .. b.bodyUsed + plen];
-        // default body layout: [index, done]
+        // default body layout: [index, expected call count]
         if (plen >= 1) slice[0] = i;
-        if (plen >= 2) slice[1] = b.headers[i].done;
+        if (plen >= 2) slice[1] = 1U;
         foreach (k; 2 .. plen) slice[k] = k;
         b.entries[i].header = &b.headers[i];
         b.entries[i].body = slice;
         b.bodyUsed += plen;
-        b.expectedCalls += b.headers[i].done;
+        b.expectedCalls += 1U;
     }
     return b;
 }
@@ -208,10 +213,10 @@ void expectExactCalls(PayloadBatch* b, const(char)[] label)
     foreach (i; 0 .. b.count)
     {
         immutable got = atomicLoad!(MemoryOrder.raw)(g_calls[i]);
-        if (got != b.headers[i].done)
+        if (got != 1U)
         {
             fprintf(stderr, "%.*s payload %zu calls=%lld done=%u\n",
-                cast(int) label.length, label.ptr, i, got, b.headers[i].done);
+                cast(int) label.length, label.ptr, i, got, 1U);
             abort();
         }
     }

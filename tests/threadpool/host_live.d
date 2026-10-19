@@ -652,7 +652,7 @@ bool workersFit()
 // caller must regain control (and consume) after a bounded publication burst.
 shared ulong emissionJobs;
 
-long emissionJob(PayloadHeader*, PayloadBody, ulong) nothrow @nogc @system
+long emissionJob(PayloadHeader*, PayloadBody) nothrow @nogc @system
 {
     atomicOp!"+="(emissionJobs, 1UL);
     return 1;
@@ -670,7 +670,7 @@ void emissionBursts()
         size_t remaining = limit + 2, published;
         string visits;
         PayloadHeader header;
-        header.maxCs = header.done = 1;
+
         header.call = &emissionJob;
         host.attach(HostAttachment("busy emitter", (ref Token token) {
             visits ~= 'a';
@@ -732,7 +732,7 @@ void awaitReclamation(scope bool delegate() ready, string diagnostic)
     }
 }
 
-long reclamationJob(PayloadHeader*, PayloadBody body, ulong) nothrow @nogc @system
+long reclamationJob(PayloadHeader*, PayloadBody body) nothrow @nogc @system
 {
     if (body[0] == 0)
     {
@@ -797,7 +797,7 @@ void reclamationProgress()
         host.closeOrAbandon();
     }
     PayloadHeader header;
-    header.maxCs = header.done = 1;
+
     header.call = &reclamationJob;
     enforce(host.farm.write(header, ReclamationBodies([0], 1), 1, host.token, 3) == 1,
         "initial delayed callback publication");

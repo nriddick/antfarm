@@ -1544,8 +1544,7 @@ class FiberReadyLane
         this.farm = farm;
         readyControl = allocateCacheLine!FiberReadyLaneControl();
         publishable = new PublishAccumulator;
-        resumeHeader.maxCs = 1;
-        resumeHeader.done = 1;
+
         resumeHeader.plen = 1;
         resumeHeader.call = &resumeCallback;
     }
@@ -1644,7 +1643,7 @@ class FiberReadyLane
         assert(previous > 0);
     }
 
-    private static long resumeCallback(PayloadHeader*, PayloadBody body, ulong)
+    private static long resumeCallback(PayloadHeader*, PayloadBody body)
         nothrow @nogc @system
     {
         if (body.length != 1) return 0;

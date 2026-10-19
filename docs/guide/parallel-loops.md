@@ -81,60 +81,69 @@ later nonblocking pump; it must not spin waiting for ring space.
 
 ```d
 // fragment: callbacks and referenced storage remain alive through execution
-auto st = parallelRange!update(iota(n));          // one entry per element
-auto chunks = parallelRange!update(iota(n), 64);  // one entry per grain
-auto mt = parallelSlices!update(farm, iota(n));   // snapshot live SqCs
-auto explicitMt = parallelSlices!update(iota(n), 4);
+import antfarm.templates : payloadRange;
+auto entries = payloadRange!update(iota(n));       // one entry per element
+auto grains = payloadRange!update(iota(n), 64);    // one entry per grain
+// parallelRange!update(range, grain) uses the same grain adapter.
 
-auto accepted = farm.write(chunks, token, avgCostForChunk(8));
-chunks.popFrontN(cast(size_t) accepted); // advance only the admitted prefix
+auto accepted = farm.write(grains, token, avgCostForChunk(8));
+grains.popFrontN(cast(size_t) accepted); // accepted grains, not source elements
 ```
 
-The raw adapters are forward ranges of `PayloadEntry`. They compose with
-other entries, for example through `std.range.chain`, into the caller's own
-`write`. Their header/body buffers only need to outlive that write; referred
-data must outlive execution. A raw range supplies no aggregate completion
-notification. Supply an application join when mixing it into a batch;
-`Tprogress` is not an MT join.
+These forward ranges compose with other entries, for example through
+`std.range.chain`, into a caller-owned `write`. Their temporary header/body
+buffers need only outlive that write; referenced data must outlive execution.
+A raw range supplies no aggregate completion notification. Supply an
+application join when mixing it into a batch.
+
+Each raw range can attach a table hook directly:
+
+```d
+// fragment: done and its context stay stable through notification
+// Reserve an aggregate table credit before this call if publishing a phase.
+auto accepted = farm.write(grains, token, avgCostForChunk(8), &done);
+grains.popFrontN(cast(size_t) accepted);
+// Roll back the credit if accepted == 0; no hook runs for that call.
+```
+
+The finisher joins all callback writes in the accepted table before invoking
+the hook. This also works for mixed-callback entries. Partial admission joins
+only its accepted prefix; a phase spanning several tables needs aggregate
+credits (as used by `parallelFor`). Notification may run before `write`
+returns. A table hook does not imply that its own execution has returned or
+that the Farm is globally drained.
 
 | Form | Shape and footprint |
 | --- | --- |
-| `parallelRange!fn(range)` | Existing argument packing, one ST entry per element. A one-word argument costs one ring word per entry in a uniform kind-2 table. |
-| `parallelRange!fn(range, grain)` | Copies one subrange descriptor per ST entry. A normal integral `iota` descriptor occupies two words. The runtime grain, stride, and short tail are represented by the subrange itself. |
-| `parallelSlices!fn(farm, range, slices)` | Balanced contiguous slices, each with `Done = min(512, slice.length)` and `MaxCs = 512`. Each callback handles a balanced block within the slice. Uses full headers and both indices; entry count is independent of N. |
-| Convenience ST (`parallelFor`, wait, foreach) | Two words per grain: a stable region pointer and the starting index. |
-| Convenience MT | Three body words per slice plus full headers/indices, with one completion RMW per block. |
+| `payloadRange!fn(range)` / `parallelRange!fn(range)` | Arguments packed at publication, one entry per element. A one-word argument costs one ring word per entry in a uniform kind-2 table. |
+| `payloadRange!fn(range, grain)` / `parallelRange!fn(range, grain)` | One copied subrange descriptor per entry, read during execution. A normal integral iota descriptor occupies two words. The final grain handles the short tail. |
+| `parallelFor`, wait, foreach | Two words per grain: a stable region pointer and starting index. |
 
-Table headers, padding and shard counters add fixed overhead. The grain form
-does not promise a universal one-word record: a generic runtime grain needs
-tail/stride metadata or a stable context. No hidden global context or per-item
-heap records are used to manufacture that footprint.
+The grain overload requires a finite, sliceable random-access range whose
+descriptor is POD, aligned to at most eight bytes, without unshared mutable
+aliases. This is stricter than packing individual values at publication.
+`payloadRange` supports scalar arguments, tuple expansion and zero-argument
+functions; `parallelRange` and region APIs take one element per function call.
+`length`, `popFrontN` and accepted write counts are in grains. Empty input
+publishes no payloads. Grain zero is fatal, including in release builds;
+a grain larger than the input produces one short payload.
 
-`Options.grain` is positive and applies to ST. `costClass` maps directly to
-Farm `avgCost` (0..7), whose claim chunking applies on top of the grain.
-`ParallelForm.automatic` chooses ST for standalone convenience calls. Batch
-composition is explicit through `parallelSlices`; an arbitrary caller's
-`write` cannot be inferred by the convenience API.
+Table headers, padding and shard counters add fixed overhead. Descriptor size
+depends on the range type; there is no per-grain allocation or hidden context.
+Omitting the grain argument retains minimal per-element argument packing.
 
-MT `slices = 0` snapshots `sqcsOf(max(1, farm.Cf))`. Explicit counts are 1..512,
-clamped to element count to avoid empty payloads. Consumer changes and partial
-table admission can change effective width after that snapshot. One MT entry
-has roughly C/SqCs normal secondary entrants (about sqrt(C)), plus its primary
-visitor and sweepers. The default slices give every shard an MT position when
-they fit in one table and consumer count stays stable. `slices = 1` is an
-explicit comparison option, not the standalone default.
+`Options.grain` is positive. `costClass` maps directly to Farm `avgCost`
+(0..7), whose run claim chunking applies on top of the grain. For example,
+grain 64 with a claim chunk of eight can assign 512 source elements in one
+run. Tune both against workload cost and the desired distribution across
+workers. ST describes one payload's execution; separate grains run concurrently.
 
 ## Completion and lifetime proof
 
-Every region starts with a producer credit. ST reserves an additional credit
-before each `writeTracked`; a zero write rolls it back. The existing acq_rel
+Every region starts with a producer credit. It reserves an additional credit
+before each hooked `write`; a zero write rolls it back. The existing acq_rel
 shard and `Tprogress` chains join all callbacks in an admitted ST table. Its
 hook then drops one region credit with acq_rel ordering.
-
-MT reserves all block credits before any publication. Every issued block
-executes its elements and drops one credit with acq_rel ordering as its final
-region access. The core's relaxed `Pcount.completions` and primary table
-accounting are not used as a join.
 
 The producer advances the accepted suffix and relinquishes its credit only
 after all input is submitted. This prevents early callback completion from

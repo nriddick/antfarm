@@ -174,9 +174,6 @@ void runArm(Arm arm)
     allocCalls(N);
     scope (exit) freeCalls();
     auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
-        immutable mt = i % 4 == 0;
-        h.maxCs = mt ? 3 : 1;
-        h.done = mt ? 5 : 1;
         plen = 2;
     });
     scope (exit) freeBatch(batch);

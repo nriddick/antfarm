@@ -257,8 +257,7 @@ public:
         atomicFetchAdd!(MemoryOrder.acq_rel)(pendingCredits_, 1UL);
 
         PayloadHeader header;
-        header.maxCs = 1;
-        header.done = 1;
+
         header.plen = 3;
         header.call = &actorWavePayloadCallback!(T, operation);
         auto bodies = ActorWaveBodyRange!T(actors, &this);
@@ -436,7 +435,7 @@ private ulong actorWaveBodyWord(PayloadBody body, size_t index)
 }
 
 private long actorWavePayloadCallback(T, alias operation)(PayloadHeader*,
-        PayloadBody body, ulong) nothrow @nogc @system
+        PayloadBody body) nothrow @nogc @system
 {
     if (body.length != 3)
         fatal("actor wave payload length corrupt");

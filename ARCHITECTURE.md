@@ -27,17 +27,15 @@ The Farm owns a fixed-size, virtually double-mapped ring. Producers reserve
 quota and publish complete tables; consumers independently claim chunks. Work
 is not FIFO and a false `consumeNext()` result may be a temporary hole.
 
-The hot API is `@nogc nothrow`. Payload callbacks receive a
-`PayloadHeader*` (the type is 128 bytes), a body of packed ulongs, and an
-iteration number. Multi-threaded payloads and mixed tables keep the full header
-in the ring. Tables whose payloads are all single-threaded store compact
-records without a ring header, or only the bodies when the table's payloads
-share one callback, so the callback instead sees a temporary consumer-local
-header: callbacks must not modify it or retain the pointer after returning
-([SPEC.md sections 2f](SPEC.md#2f-compact-st-tables) and
-[2g](SPEC.md#2g-uniform-call-st-tables)). A payload may be
-serial or countable/multiconsumer, but construction and completion policy stay
-with the caller.
+The hot API is `@nogc nothrow`. Each payload callback runs exactly once and
+receives a borrowed 16-byte `PayloadHeader*` (body length and callback) plus
+a body of packed ulongs. The header is consumer-local and must not be modified
+or retained after return. Tables store compact records or bare bodies when
+callbacks are shared ([SPEC 2f](SPEC.md#2f-compact-st-tables) and
+[2g](SPEC.md#2g-uniform-call-st-tables)). Independent payloads can execute
+concurrently. Grain adapters group source elements into single-shot payloads;
+construction, referenced-data lifetime and aggregate completion stay with
+the caller.
 
 ### Actors
 
@@ -198,11 +196,9 @@ per-entry cost depends on what the accepted prefix of one `write` call shares:
 | single-threaded, one callback, one nonzero body length | the body words | [SPEC 2g](SPEC.md#2g-uniform-call-st-tables), index-free |
 | single-threaded, one callback | one index word and the body words | [SPEC 2g](SPEC.md#2g-uniform-call-st-tables) |
 | single-threaded, several callbacks | one index word, one callback word and the body words | [SPEC 2f](SPEC.md#2f-compact-st-tables) |
-| contains a multi-threaded payload | one index word, the 16-word payload header and the body words, plus a second index word per multi-threaded entry | [SPEC 2e](SPEC.md#2e-table-layout) |
 
 A shared callback is stored once per table, and a shared length once more. A
-one-word body therefore costs 1, 2 or 3 ring words in an all-ST table,
-or 18 for an ST entry and 19 for an MT entry in a full table. The number of
+one-word body therefore costs 1, 2 or 3 ring words per entry. The number of
 entries admitted per quota depends on the shard count, the body width, and which
 row the prefix falls in. Do not copy a count from another configuration:
 compute it from the table layouts in [SPEC.md](SPEC.md#2-data-layout), or probe

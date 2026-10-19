@@ -52,7 +52,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [using-it-well.md](guide/using-it-well.md) | check correctness and tuning rules before building on the Farm |
 | [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown |
 | [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, or Fiber |
-| [parallel-loops.md](guide/parallel-loops.md) | compose countable ranges, choose ST grains or MT slices, and join parallel regions |
+| [parallel-loops.md](guide/parallel-loops.md) | compose countable ranges, choose ST grains, and join parallel regions |
 | [public-actors.md](guide/public-actors.md) | create, address, wake, retire and reclaim public actors and waves |
 | [private-actors.md](guide/private-actors.md) | own a private root tree: roots, cohorts, dispatch, retirement |
 | [private-results-and-waits.md](guide/private-results-and-waits.md) | result ports, subsets, continuations, `waitChildren`, folds |
@@ -69,6 +69,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/private-actor-ordering.md](design/private-actor-ordering.md) | see the private join, outcome and cancellation proof chains |
 | [design/private-actor-layout.md](design/private-actor-layout.md) | see the Entry/Service/cohort layout invariants and slab reuse proof |
 | [design/farm-ordering.md](design/farm-ordering.md) | see the Farm subscription/reclamation ordering audit and its TSan lanes |
+| [design/c-abi.md](design/c-abi.md) | review the proposed ST-only C API, runtime-free core and runtime-inclusive worker pool/host boundary |
 | [design/threadpool.md](design/threadpool.md) | get the topology, worker, Director, registry and OS-backend contracts |
 | [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
 
@@ -105,6 +106,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | The local correctness gate and its lanes | [development/testing.md](development/testing.md) |
 | CyDo agent session routing, iteration, hardening, TSan budgets and mutation selection | [development/agent-workflow.md](development/agent-workflow.md) |
 | Farm ordering audit and real-atomic TSan lanes | [design/farm-ordering.md](design/farm-ordering.md) |
+| Proposed C ABI scope, compatibility and runtime separation | [design/c-abi.md](design/c-abi.md) |
 | Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |
 | Fiber scheduler model and invariants | [design/ant_fibers.md](design/ant_fibers.md) |
 | Test suites (`tests/farm`, `tests/actors`, `tests/private`, `tests/threadpool`, `tests/ant_fibers`) | each suite's README and [development/testing.md](development/testing.md) |
