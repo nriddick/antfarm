@@ -489,8 +489,10 @@ Normal D owners remain move-only.
 
 C retirement outcomes occupy values 16–20 and reclaim outcomes 32–34, disjoint
 from `AF_INVALID`. Use symbolic constants. `af_actor_retired(runtime, owner, out)`
-returns a validation status separately from its Boolean observation. Request
-acceptance and batch success counts are not retirement joins.
+returns a validation status separately from its Boolean observation. Stale or
+reclaiming identities report false. When copied owners may reclaim concurrently,
+retry reclaim itself and handle busy/stale instead of waiting exclusively for
+that Boolean. Request acceptance and batch success counts are not retirement joins.
 
 ### Strided sets and partial results
 
@@ -549,4 +551,6 @@ C ABI gate. C++ checks run with exceptions enabled and disabled.
 Lifecycle timing compares the same state sizes and allocator across D scalar,
 C scalar and C batch creation, local/remote reclaim and multiple creators.
 Measurements and their limits belong in the performance report; correctness
-results do not imply a throughput improvement.
+results do not imply a throughput improvement. The
+[October 19 measurements and validation record](../../PERFORMANCE.md#actor-c-abi-refresh-190-progress)
+include the C/D lifecycle matrix, allocation counts and shared-runtime regressions.

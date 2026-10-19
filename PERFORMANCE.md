@@ -1,6 +1,7 @@
 # Ant Farm performance
 
-Measured performance for the 1.8.0 release candidates. The tables retain the
+The actor C ABI refresh has its own measurement section below. Historical
+performance tables cover the 1.8.0 release candidates and retain the
 **Ryzen 5500** measurements and add fresh **Intel 12700H** measurements from
 the Windows RC checkout, including the affinity corrections. These are whole-host
 comparisons, not controlled CPU comparisons: the OS, compiler and topology differ.
@@ -13,6 +14,109 @@ deliberately not committed.
 - Fiber-specific profiling and tuning: [Fibers](#fibers).
 - Stable sizing formulas: [ARCHITECTURE.md](ARCHITECTURE.md#sizing-one-farm) and
   [SPEC.md](SPEC.md).
+
+## Actor C ABI refresh (1.9.0-progress)
+
+October 19, 2026, Intel i7-12700H under WSL2 (Linux 6.6.87.2), LDC 1.42,
+GCC C11, mimalloc 3.5.3, ordinary pages. Runtime implementation: `1777927`;
+follow-up tests and benchmark provenance: `9301d77`. These measurements are
+separate from the historical 1.8.0 tables below.
+
+The [matched lifecycle driver](tools/perf/README.md#c-abi-lifecycle-comparison)
+compares D erased scalar creation, C scalar creation and C batch creation.
+Every cohort has 64 actors with identical source bytes and 64-byte state
+alignment. All modes use the same custom allocator callbacks:
+`posix_memalign/free` or `mi_malloc_aligned/mi_free`. Creation copies directly
+into final storage; actors retire while idle, without executing handlers.
+Remote cases include the handoff to one reclaiming thread per creator.
+Setup, kind registration and thread creation before the start barrier are
+excluded; barrier release, the complete lifetimes and final thread joins are
+included. Threads use distinct WSL core IDs from CPUs 0,2,4,...,18.
+
+Values are median **wall-clock nanoseconds per actor across all creators**,
+not individual-call latency. Lower is better. Five runs per cell, alternating
+mode order, target 0.4 seconds after a pilot; raw minima/maxima are retained.
+These descriptive samples do not reject background activity and do not measure
+wave/handler throughput or native Windows performance.
+
+| State bytes | Creators | Reclaim | Allocator | D scalar ns | C scalar ns | C batch ns |
+| ---: | ---: | --- | --- | ---: | ---: | ---: |
+| 64 | 1 | local | CRT | 145.7 | 163.5 | 131.8 |
+| 64 | 1 | local | mimalloc | 91.8 | 109.3 | 77.3 |
+| 64 | 1 | remote | CRT | 194.6 | 212.7 | 196.8 |
+| 64 | 1 | remote | mimalloc | 134.6 | 145.3 | 128.1 |
+| 64 | 4 | local | CRT | 324.1 | 324.0 | 151.1 |
+| 64 | 4 | local | mimalloc | 330.4 | 339.7 | 153.4 |
+| 64 | 4 | remote | CRT | 329.9 | 354.9 | 163.7 |
+| 64 | 4 | remote | mimalloc | 353.9 | 352.4 | 164.1 |
+| 4096 | 1 | local | CRT | 238.3 | 251.9 | 224.8 |
+| 4096 | 1 | local | mimalloc | 197.2 | 215.5 | 183.5 |
+| 4096 | 1 | remote | CRT | 962.4 | 984.2 | 951.0 |
+| 4096 | 1 | remote | mimalloc | 253.1 | 260.2 | 261.7 |
+| 4096 | 4 | local | CRT | 328.2 | 321.4 | 140.5 |
+| 4096 | 4 | local | mimalloc | 331.4 | 341.4 | 164.1 |
+| 4096 | 4 | remote | CRT | 418.8 | 422.7 | 369.0 |
+| 4096 | 4 | remote | mimalloc | 336.9 | 348.6 | 181.8 |
+
+Batching helps most with several creators contending for slot admission.
+It is not uniformly faster: the single-creator, 4096-byte mimalloc remote case
+is effectively tied with scalar C and slightly slower than D. Remote handoff,
+allocator locality and shared runtime accounting remain part of these results.
+
+Separate allocation diagnostics passed all 48 combinations (768,000 actor
+lifetimes): exactly one allocation/free and exactly the requested state bytes
+per actor, excluding runtime/kind setup. Code inspection confirms that native
+owner/temporary allocations are gone. The copy path performs one final-storage
+copy; initializer construction performs no library state copy. Messages use
+caller storage and have no allocating API.
+
+### Shared-runtime regression comparison
+
+The existing `actor_churn` gate compares `1495d5b` against `1777927` on the
+same benchmark source: 16,384 actors, mimalloc, three-second samples, five clean
+matched pairs targeted per cell, up to ten attempts. Pins are CPU 0 for the
+controller and 2,4,6,8,10,12 for six consumers. Positive throughput change is
+better. The boundary is -3%; descriptive paired-bootstrap intervals are not
+calibrated confidence guarantees.
+
+| Mode | Consumers | Clean pairs | Paired median throughput change | Decision |
+| --- | ---: | ---: | ---: | --- |
+| actor | 0 | 5/5 | -28.26% | regression |
+| wave | 0 | 5/5 | -33.84% | regression |
+| inbox | 0 | 5/5 | -22.83% | regression |
+| private | 0 | 5/5 | -0.51% | inconclusive |
+| actor | 6 | 0/5 | unavailable | insufficient |
+| wave | 6 | 0/5 | unavailable | insufficient |
+| inbox | 6 | 0/5 | unavailable | insufficient |
+| private | 6 | 0/5 | unavailable | insufficient |
+
+The regression gate recorded regressions; this is not a performance-gate pass.
+
+Six-consumer attempts triggered the `system minus benchmark CPU >0.25 core`
+exclusion; its cause remains unresolved on this WSL host. They do not establish
+clean parallel throughput. Retain the regressions and these CPU-accounting
+exclusions for the holistic optimization session. Copied-owner safety adds
+retirement/reclaim arbitration, and scalar creation now tracks reservations. No inference about new C wave dispatch
+throughput follows from the typed-D `wave` cell.
+
+### Correctness evidence
+
+The full Linux `make check SHELL=/usr/bin/bash` passed with LDC and DMD,
+including native C/C++ (exceptions on/off), BetterC whole-archive/export audits,
+core and optional-host checks, deterministic owner reuse, actor/private suites,
+examples, release death tests and TSan. Elapsed: 1468.14 seconds; conservative
+collective TSan charge: 236.25 seconds of 600. Existing single-LLC hardware skips
+remain; this host does not establish multi-LLC coverage.
+
+Windows actor/private suites and native C/C++ core/optional-host ABI checks
+passed with LDC and DMD. The final replacement-generation admission tests also
+passed on both Windows compilers. Documentation links and all 523 indexed public D
+declarations passed their checks.
+
+Raw evidence is local in `.build/actor-refresh-lifecycle/`,
+`.build/actor-refresh-perf-gate/`, the `.build/actor-refresh-*.log` files and
+`.build/actor-refresh-evidence.zip`. Timing source and the rerunnable driver
+are committed under `tools/perf/`.
 
 ## Scope and caveats
 

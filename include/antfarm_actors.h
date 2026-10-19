@@ -97,6 +97,9 @@ uint32_t af_actor_send(const af_actor_handle *, af_actor_message *);
    ALREADY_RETIRED can mean cancel already requested: it is not a join.
    Keep driving until retired reports true. Cancel is cooperative. */
 uint32_t af_actor_request_retire(af_actor_runtime *, const af_actor_owner *, uint32_t mode);
+/* True only for the matching retired phase; stale/reclaiming identities return
+   false. If copies may reclaim concurrently, retry reclaim itself (BUSY/STALE)
+   instead of waiting exclusively for this observation. */
 af_status af_actor_retired(af_actor_runtime *, const af_actor_owner *, uint32_t *out);
 /* RECLAIMED or RECLAIM_STALE clears this owner; BUSY leaves it for retry.
    Exclusive generation claim prevents duplicate destruction through copies. */

@@ -57,6 +57,13 @@ is reassessed holistically in dedicated sessions.
 
 ## Next
 
+- Recover public-actor lifecycle throughput after the C value-owner refresh.
+  Against `1495d5b`, `1777927` measured serial actor/wave/inbox regressions of
+  28.3%/33.8%/22.8%; six-consumer runs had no clean CPU-accounting pairs.
+  Keep the new ownership guarantees and use the
+  [recorded C/D and shared-runtime measurements](PERFORMANCE.md#actor-c-abi-refresh-190-progress)
+  in the holistic optimization session.
+
 - Revise PERFORMANCE.md in a dedicated performance session, including
   tail-latency rows at chunk 2 and 4.
 
