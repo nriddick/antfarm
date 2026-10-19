@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Matched Linux C/D lifecycle timings and separate exact-allocation diagnostics."""
 import argparse
+import hashlib
 import importlib.util
 import itertools
 import json
@@ -37,6 +38,10 @@ def main():
     metadata = {"date": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "platform": platform.platform(),
                 "affinity": sorted(os.sched_getaffinity(0)), "repeats": args.repeats,
                 "target_seconds": args.seconds, "compiler": subprocess.check_output(["ldc2", "--version"], text=True),
+                "c_compiler": subprocess.check_output(["cc", "--version"], text=True),
+                "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "mimalloc_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
                 "scope": "create/copy + idle retire/reclaim; D erased scalar versus C scalar/batch; no callbacks or wave throughput",
                 "counting": "separate allocator diagnostics, timing counters disabled; logical copies from one memcpy per actor",
                 "limitations": "descriptive microbenchmark, no background-load rejection; pinning uses first allowed logical CPUs"}

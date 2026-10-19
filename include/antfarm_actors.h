@@ -191,7 +191,8 @@ void af_actor_wave_observe(af_actor_wave *, af_actor_wave_handle *out);
    stale, active, duplicate, or foreign-Farm actor. Seal and drain any accepted
    tables even on failure. Earlier operations are never rolled back.
    Input handles are copied before return; their runtimes outlive the wave.
-   token must belong to the wave's Farm; cost is 0..7 (default convention 4). */
+   token must belong to the wave's Farm; cost is 0..7 (default convention 4).
+   Malformed span geometry is fatal before publication. */
 size_t af_actor_wave_publish(af_actor_wave *, af_actor_handle_span,
                              af_token *, uint32_t avg_cost);
 void af_actor_wave_seal(af_actor_wave *); /* exactly once per generation */

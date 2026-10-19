@@ -4451,6 +4451,33 @@ private void testChildCases()
 }
 
 
+
+private void verifyReplacementAdmission(AntFarm* farm, ActorRuntime* runtime,
+        ref ActorOwner!BoundaryState replacement)
+{
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0, "replacement subscription");
+    BoundaryMessage message;
+    initializeBoundaryMessage(message);
+    check(replacement.handle.send(&message.node) == ActorSendResult.queued,
+        "new generation admission survives delayed old owner");
+    check(replacement.handle.wake() == ActorWakeResult.coalesced,
+        "new generation wake survives delayed old owner");
+    auto deadline = MonoTime.currTime + 15.seconds;
+    while (!message.node.available)
+    {
+        runtime.flush(token, 1, DEFAULT_AVG_COST);
+        view.consumeNext();
+        check(MonoTime.currTime < deadline, "replacement message completion timeout");
+    }
+    check(replacement.requestRetire() == ActorRetireResult.requested &&
+        replacement.reclaim() == ActorReclaimResult.reclaimed,
+        "replacement remains independently reclaimable");
+    view.unsubscribe();
+    farm.unregisterProducer(token);
+}
+
 private void testCopiedOwners()
 {
     // Pause every final-access boundary of a retirement request. A copied
@@ -4494,9 +4521,7 @@ private void testCopiedOwners()
             BoundaryState(&result));
         check(owner.requestRetire() == ActorRetireResult.staleOwner,
             "old retirement cannot affect replacement");
-        check(replacement.requestRetire() == ActorRetireResult.requested &&
-            replacement.reclaim() == ActorReclaimResult.reclaimed,
-            "replacement remains independently reclaimable");
+        verifyReplacementAdmission(farm, runtime, replacement);
         runtime.destroy();
         farm.destroy();
     }
@@ -4532,9 +4557,7 @@ private void testCopiedOwners()
             thread.join();
             check(reclaimed == ActorReclaimResult.busy,
                 "old exact-word CAS cannot claim reused generation");
-            check(replacement.requestRetire() == ActorRetireResult.requested &&
-                replacement.reclaim() == ActorReclaimResult.reclaimed,
-                "replacement survives losing reclaim");
+            verifyReplacementAdmission(farm, runtime, replacement);
         }
         else
         {

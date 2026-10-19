@@ -24,7 +24,7 @@ typedef struct config {
     pthread_barrier_t start;
     void *d; af_actor_runtime *c; const af_actor_kind *kind;
 } config;
-typedef struct worker {
+typedef struct __attribute__((aligned(64))) worker {
     config *c; size_t id; af_actor_owner *owners; unsigned char *initial;
     uint32_t *results; _Atomic unsigned phase; /* 0=creator, 1=reclaimer, 2=done */
 } worker;
@@ -123,7 +123,9 @@ int main(int argc, char **argv) {
         CHECK(af_actor_kind_register(c.c, &kind, &c.kind) == AF_OK);
     }
     atomic_store(&c.allocations, 0); atomic_store(&c.frees, 0); atomic_store(&c.allocated_bytes, 0);
-    worker *workers = calloc(c.creators, sizeof *workers);
+    worker *workers = NULL;
+    CHECK(posix_memalign((void **)&workers, 64, c.creators * sizeof *workers) == 0);
+    memset(workers, 0, c.creators * sizeof *workers);
     pthread_t *threads = calloc(c.creators * 2, sizeof *threads); CHECK(workers && threads);
     CHECK(pthread_barrier_init(&c.start, NULL, (unsigned)(1 + c.creators * (c.remote ? 2 : 1))) == 0);
     for (size_t i = 0; i < c.creators; ++i) {
