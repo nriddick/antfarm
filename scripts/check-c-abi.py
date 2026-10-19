@@ -190,9 +190,9 @@ def main():
         for name, diagnostic in {
             "farm": "destroy Farm with actor runtimes", "live": "destroy actor runtime with live owners",
             "foreign": "foreign or null actor producer token", "cost": "avgCost out of range",
-            "mode": "invalid actor retire mode", "context": "actor context outside its callback",
+            "context": "actor context outside its callback",
             "complete": "complete actor inbox node not owned", "alignment": "allocator returned misaligned",
-            "busy": "destroy busy actor message", "set": "modify busy actor message",
+            "set": "modify busy actor message",
             "failure": "failure code out of range",
         }.items():
             execute(actors, name, death=diagnostic)
@@ -201,8 +201,8 @@ def main():
         for name, diagnostic in {
             "uninitialized": "publish uninitialized actor wave", "operation": "null actor wave operation",
             "hook": "hook requires a callback", "begin": "reuse unfinished actor wave",
-            "destroy": "destroy unfinished actor wave", "span": "null nonempty wave span",
-            "overflow": "wave span size overflow", "foreign": "foreign or null wave producer token",
+            "destroy": "destroy unfinished actor wave", "span": "invalid wave span",
+            "overflow": "invalid wave span", "foreign": "foreign or null wave producer token",
             "cost": "avgCost out of range", "seal": "seal actor wave twice",
             "sealed": "publish sealed actor wave", "farm": "destroy Farm with actor waves",
             "tail-begin": "reuse unfinished actor wave or completion callback",

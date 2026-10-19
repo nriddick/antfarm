@@ -49,6 +49,10 @@ Older release notes are in [docs/releases/](docs/releases/):
   retirement and reclamation. The optional host now drives and owns C actors,
   joining consumers before destroying them. GC rooting remains a normal-D
   adapter. Private actor C exports are a subsequent increment.
+- Refreshed the unreleased actor C API with runtime-owned kinds, direct copy/init
+  construction, optional destructors, 16-byte value owners, caller-owned inbox
+  storage and strided batch/wave operations. Retirement pins and exclusive
+  reclaim claims make copied owners safe without changing D move-only ownership.
 - Added runtime-free C actor waves with erased state, prefix publication,
   generation-tagged observations, phase completion and a callback-return join
   before reuse/destruction. Waves also run on the optional non-Fiber host.

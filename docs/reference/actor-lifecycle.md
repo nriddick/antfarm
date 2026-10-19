@@ -187,8 +187,9 @@ unregisters, then destroys the Farm.
    senders see `ActorNodeOutcome.cancelled`. A drain can be escalated later with
    a cancel-mode request on the same owner, for example after an application
    deadline. A drain request on an actor already cancelling returns `requested`
-   and leaves it in cancel mode: drain never downgrades cancel. Requests on one
-   owner must not overlap. For a private tree, stop spawning new roots.
+   and leaves it in cancel mode: drain never downgrades cancel. Requests through one D owner remain serialized. Distinct copied C owners may
+   contend; a retirement-operation pin returns retryable busy, and exclusive
+   reclamation prevents duplicate destruction. See [the C contract](../design/c-abi.md#value-owners-and-retirement-arbitration). For a private tree, stop spawning new roots.
 2. Keep flushing or pumping, and keep consumers running, until the model-specific
    drain holds: public owners `retired` and reclaimed; waves `finished` and, if a
    hook was set, the hook's last access observed; private `live == 0` reached
@@ -202,7 +203,7 @@ unregisters, then destroys the Farm.
 3. Stop and join workers. Their unsubscribe must happen before the join returns.
    Unsubscribe any control-thread view the same way.
 4. Destroy actor infrastructure only after that join. `runtime.destroy` fatals if
-   actors are live or the ready queue is non-empty. `park.destroy()` fatals if
+   actors or construction reservations are live, or the ready queue is non-empty. `park.destroy()` fatals if
    roots are live, including untaken outcomes; then set the pointer null. Join
    every thread that may call `requestCancel` on its handles first.
    `destroy(park)` is D's pointer destruction and does not free the park.

@@ -7,6 +7,10 @@ proceed on other threads.
 
 Coverage includes:
 
+- copied-owner retirement pauses before gate close, terminal CAS and final unpin;
+- exclusive reclaim races paused before and after the claim, including immediate
+  slot reuse while the losing old-generation CAS is suspended (`--owners`);
+
 - node claim before inbox publication;
 - close after reservation, claim, publication, and activation signal;
 - eight simultaneous pre-close reservations racing to claim one node;
@@ -30,7 +34,7 @@ Coverage includes:
   that the old wave finishes its link writes before releasing the lifetime pin;
 - a late accepted sender queuing work between retirement's initial idle
   observation and its submission-gate join, proving the lifecycle is rechecked
-  before using the idle retirement store;
+  before the exact-word idle retirement CAS;
 - F4b public cancel-mode retirement: a 32-node backlog cancelled in one
   `cancelling` activation with every sender reading `cancelled` after
   `available`, a drain-mode control on the identical backlog that completes

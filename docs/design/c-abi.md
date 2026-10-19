@@ -23,7 +23,7 @@ all exports and callbacks use C linkage.
   for their call lifetime.
 - **Public actors**: implemented in the core with native C link/run evidence.
   The optional D GC-rooted allocator is excluded from BetterC builds.
-  Waves are also runtime-free. The actor API refresh below precedes private
+  Waves are also runtime-free. The actor construction contract below precedes private
   root/child exports.
 - **Fibers**: outside ABI 1. A runtime-inclusive build need not expose Fibers.
 
@@ -203,25 +203,20 @@ copies a counter state, sends three messages, drains retirement and reclaims the
 owner. Build it with the same native command as `c_core.c`; it prints
 `actor sum = 10`.
 
-Create an `af_actor_runtime` over an owned Farm with a fixed slot capacity.
-It starts no threads. Create actors with nonempty plain state, a power-of-two
-alignment and a C handler. Creation copies the bytes; pointees and the handler's
-`user` context remain application-owned. No destructor runs. The default
-allocator supports alignment through 64; a custom `af_actor_allocator` supplies
-C allocation/free callbacks and can support larger alignments. Its copied
-context must outlive the runtime; callbacks must be thread-safe and may not
-throw or longjmp. The allocator sees runtime and slot storage, and a state
-allocation containing a private dispatch prefix before the aligned user bytes.
-Free receives the exact allocated size/alignment. Wrapper handles and temporary
-creation buffers use native malloc separately.
+Create an `af_actor_runtime` over an owned Farm with fixed capacity, then
+register immutable kinds at quiescence. A kind records handler/user, state size
+and alignment, and an optional destructor. Copy or initializer creation writes
+directly into allocator-owned final state and returns a 16-byte value owner.
+No per-actor prefix, owner wrapper or temporary allocation remains. The default
+allocator supports alignments through 64; custom allocators also supply runtime,
+slot and kind storage, and can support larger alignment.
 
-Creation returns `AF_INVALID` for invalid metadata, `AF_FULL` when all slots
-are reserved, and `AF_ALLOCATION_FAILED` on allocation failure. Successful
-creation returns an exclusive owner. Its 16-byte submission handle is copyable
-and shareable, but has no authority to access state or reclaim it. A reclaimed
-generation reports stale through wake/send until runtime destruction; all
-handles expire when their runtime is destroyed. Forged pointers and handles
-used after destruction are invalid C accesses.
+Owners and submission handles are distinct copyable capabilities. Only owners
+authorize retirement/reclamation; copies arbitrate through a generation-bound
+retirement pin and exclusive reclaim CAS. Mutations of one owner value require
+caller synchronization. Stale capabilities remain safe only while their runtime
+exists. See [the construction and ownership contract](#actor-construction-and-ownership)
+for statuses, provenance, direct initialization, destructors and batch operations.
 
 Wake coalesces; flush publishes a bounded ready snapshot with the Farm's token
 and cost class. Zero publication is not a completion signal. Within each
@@ -231,9 +226,9 @@ their callback or thread. The active-context diagnostic is best-effort: a later
 callback can reuse the same stack address, so a saved pointer is invalid even
 when the check accepts it. The adapter uses the
 existing erased D dispatch with a small C callback bridge; raw Farm callbacks
-still enter directly. No D actor state-machine or memory-order edge changes.
+still enter directly. The shared lifecycle arbitration also protects copied C owners.
 
-Messages are cold-allocated reusable nodes with a payload pointer and a tag.
+Messages are caller-owned 32-byte nodes initialized with a payload pointer and tag.
 An accepted send transfers ownership until completion, failure or cancellation.
 Pop in producer linearization order; unpopped messages carry into the next
 activation. A terminal operation is the final access to that message and its
@@ -246,9 +241,9 @@ release, so the target may be stored in the released payload.
 Request drain or cancel retirement, keep flushing/consuming until retired, then
 reclaim the owner. A request result is not a retirement fence:
 `AF_ACTOR_ALREADY_RETIRED` can mean cancellation was already requested, so
-always query `af_actor_retired`. Successful reclaim consumes its C handle. There is no
+always query `af_actor_retired`. Successful or confirmed-stale reclaim clears its supplied owner value. There is no
 guaranteed final handler invocation; release application resources after
-retirement. Before destroying a standalone actor runtime, reclaim all owners
+retirement, or use the registered destructor. Before destroying a standalone actor runtime, reclaim all actors
 and join all consumers, senders and other runtime users. Retired actors and
 zero live/ready counts do not prove that consumers have left the trampoline.
 Destroy runtimes before their Farm. Runtime creation/destruction must be
@@ -276,14 +271,13 @@ Create an `af_actor_wave` bound to an owned or borrowed Farm, then begin a
 generation with a C operation and its user context. Publish prefixes of C actor
 handles with that Farm's token and seal exactly once. Actors must be idle and
 may come from several runtimes on that Farm, with different state sizes and
-alignments. The operation receives exclusive user state and its byte length;
+alignments. The operation receives the stable kind, exclusive user state and its byte length;
 it must interpret each layout correctly. It receives no actor context.
 
 Publication allocates nothing. The bridge maps C handles through a range and
 uses the existing wave reservation, rollback, membership and credit protocol.
 The erased payload carries five words: slot, generation, wave, erased operation
-and context. Typed D waves retain their three-word payload. No lifecycle atomic
-ordering changes. The operation and user context remain live until finished.
+and context. Typed D waves retain their three-word payload. The reservation keeps the kind and state pinned. The operation and user context remain live until finished.
 
 A zero return without `failed` is empty input or backpressure. Consume work
 (and step/wake a worker host) before retrying. A stale, active, duplicated or
@@ -432,220 +426,127 @@ Private roots/children, Fiber exports, shared-library packaging, and
 Rust/Zig ownership wrappers remain outside the shipped surface. Public actors
 can use application-supplied threads or the optional non-Fiber host.
 
-## Planned actor API refresh
+## Actor construction and ownership
 
-This section is a proposal, not the current exported contract. Implement it
-after the host/C++ contract fixes above and before private-root/child exports.
-ABI 1 is unreleased: update the header, implementation, examples and tests
-together instead of maintaining two actor interfaces. Keep the core/optional
-runtime distribution boundary and existing wave joins.
+ABI 1 is unreleased. The refresh replaces the earlier allocating actor interface;
+header, adapter, tests and examples use one contract. Private cohort/slab exports
+remain separate.
 
-### Runtime-owned actor kinds
+### Runtime-owned kinds and direct construction
 
-Register an immutable kind descriptor once per runtime: handler, handler user
-pointer, state byte size and alignment. Per-instance data belongs in actor
-state. A kind belongs to exactly one runtime and remains addressable until that
-runtime is destroyed; registration is a quiescent setup operation initially.
-Use the runtime's allocator for registry storage.
+`af_actor_kind_register` copies an immutable descriptor containing handler,
+user pointer, state byte count, alignment and optional destructor. Registration
+requires external quiescence and also refuses live actors or reservations.
+Descriptors use the runtime allocator and remain stable until its destruction.
+A nonnull handler, nonzero size, power-of-two alignment and representable
+allocation arithmetic are required; alignment above 64 needs a custom allocator.
 
-Validate descriptor metadata at registration: nonnull handler, nonzero state
-size, power-of-two alignment and representable allocation arithmetic. Alignments
-above 64 require a custom allocator. Record the validated descriptor unchanged;
-creation checks kind/runtime identity and per-call inputs without repeating
-descriptor validation. Live registration or kind unloading is outside this
-increment; handler/destructor code and user data must outlive their kind's uses.
+`ActorSlot.kind` occupies the former eight-byte padding word; slots remain
+128 bytes aligned to 64. Typed D actors use null. A C autonomous callback obtains
+the kind through its pinned context, and a wave through its pinned erased borrow.
+No prefix precedes user state. Mixed-kind waves receive
+`(wave_user, kind, state, bytes)`, including kinds from different runtimes on
+one Farm.
 
-Replace the unused eight-byte `ActorSlot.inboxPadding` with an internal kind
-pointer. Preserve the 128-byte slot size and 64-byte alignment, and initialize
-the pointer before the generation's release transition to idle. Typed D actors
-use null there. Autonomous C dispatch obtains the kind from its pinned slot
-through an internal context accessor; C wave dispatch obtains the kind through
-an internal accessor on its pinned borrow, and the byte count from that borrow.
-The proposed wave callback is
-`(void *wave_user, const af_actor_kind *, void *state, size_t bytes)`.
-Kinds are stable identities for interpreting mixed-kind waves, including kinds
-from different runtimes on the same Farm. Neither dispatch needs a prefix before
-the user's state. Clear the field only under exclusive reclamation, before
-returning the slot.
+`af_actor_create_copy` accepts byte-copyable state. `af_actor_create_init`
+passes final aligned storage, caller context and logical index to a callback.
+Both share construction machinery with their batch forms. There is no public
+reserve/commit interval. On success the slot release-publishes idle after state
+and kind initialization. An initializer returns `AF_OK` on success; any other
+return becomes `AF_ACTOR_INITIALIZER_FAILED`. On failure it must clean up its
+partial object; the library frees storage without invoking the kind destructor.
 
-### Sixteen-byte value owners
+The optional destructor runs exactly once, on the winning reclaimer's thread,
+after retirement and outside all allocator/free-slot gates. It must not throw,
+longjmp or call actor operations on its own actor. Handler/destructor code and
+user data outlive all uses of their kind. Emergency abandonment deliberately
+retains allocations and does not run destruction.
 
-Use distinct public owner and submission-handle types, each a slot pointer
-plus generation. Owners live in caller storage and need no allocated wrapper.
-Successful reclaim clears the supplied owner value; copied values remain
-capabilities for their recorded generation until made stale. Runtime destruction
-still requires external callers to be quiescent: a generation does not protect
-a pointer to an already destroyed slot array.
+### Value owners and retirement arbitration
 
-The current D reclaim implementation assumes one exclusive owner. Its acquire
-load of the retired generation is followed by plain state reads and a free;
-there is no claim CAS. Generation checking alone does **not** prevent two copied
-owners concurrently freeing the same generation. Add an exclusive
-`retired -> reclaiming` CAS before reading/clearing reclaimable fields.
-Only the winner runs destruction, deallocates state, updates live/owner counts
-and returns the slot. Recheck the generation in the CAS, and preserve wave
-membership and closed-submission requirements. Losing calls report busy or
-stale without touching state. A vacant matching generation is already reclaimed,
-rather than indefinitely busy.
+Owners and handles are distinct 16-byte types: slot pointer plus generation.
+An owner is caller storage, with canonical empty value `{0}`. Copies may retire
+or reclaim concurrently; mutation of a particular owner object remains exclusive.
+Successful or confirmed-stale reclaim clears that object. Runtime destruction
+still requires all users, including stale-handle/owner callers, to be joined.
 
-Reserve lifecycle phase 6 for `reclaiming` (retired is 5; the phase mask remains
-`0x7`, with phase 7 unused). Wake, send and retirement treat it as terminal and
-must not access state, schedule work or reopen admission. A competing reclaim
-reports busy until it observes a stale/vacant identity.
+Before dereferencing an owner slot, a runtime-scoped operation checks its integer
+address range and `(address - base) % sizeof(ActorSlot) == 0`. The 64-byte-aligned
+interior of a 128-byte slot is invalid. Foreign/interior/out-of-range owners return
+`AF_INVALID`; canonical empty owners are stale. Runtime and kind pointers must
+themselves be valid and live. Submission handles remain runtime-free capabilities,
+so fabricated handle pointers are invalid accesses.
 
-Retirement also assumes an exclusive owner today. The idle fast path in
-`driveActorRetirement` rechecks a closed, empty submission gate, then blindly
-stores retired. Replace that store with a CAS from the exact joined lifecycle
-word to retired, reloading and rechecking on failure. A delayed retire caller
-must never overwrite a reclaimed or reused generation.
+The shared D implementation reserves lifecycle phase 6 for reclaiming and flag
+0x40 for an exclusive retirement-operation pin. Every lifecycle rebuild preserves
+the pin. A retirement request acquires it before marking/closing, performs an
+exact-word terminal CAS, and releases it as its final slot access. Contention
+returns `AF_ACTOR_RETIRE_BUSY`. Reclaim requires retired, no operation pin and
+no wave membership, then exclusively claims the generation before accessing or
+freeing state. The complete proof is in
+[public actor ordering](public-actor-ordering.md#retirement-and-reclamation).
+Normal D owners remain move-only.
 
-The terminal CAS alone is insufficient: `requestActorRetire` can be delayed
-after marking retirement but before its untagged `closeSubmissionGate` call.
-Another copied owner could retire, reclaim and reuse that slot first; the old
-caller could then close the new generation's gate. Its debug inbox reads and
-other final slot accesses need protection too. Hold a generation-bound,
-exclusive owner-operation pin across the whole retirement request, acquired
-before marking/closing and released only after its final slot access. Use the
-unused lifecycle flag `0x40`; preserve it through every intervening lifecycle
-transition, including callback retirement. Contending retire calls report
-retryable busy. Reclaim may claim retired only with that pin clear, using the
-same lifecycle CAS to exclude a concurrent pin acquisition. It keeps the slot
-in `reclaiming` through destruction, then returns it as vacant to the free list. Document the
-acquire/release edges and audit every lifecycle rebuild before enabling copied
-owners; a separate generation check followed by an untagged gate write is not
-sufficient.
+C retirement outcomes occupy values 16–20 and reclaim outcomes 32–34, disjoint
+from `AF_INVALID`. Use symbolic constants. `af_actor_retired(runtime, owner, out)`
+returns a validation status separately from its Boolean observation. Request
+acceptance and batch success counts are not retirement joins.
 
-Keep the normal D owner move-only. Runtime-scoped owner operations take the C
-runtime explicitly, so provenance and reservation accounting do not depend on
-reading a kind pointer after another caller has reclaimed it. Recognize a
-canonical empty owner as stale first. Before any slot dereference, validate
-the integer address against the runtime's slot-array
-bounds and require `(address - base) % sizeof(ActorSlot) == 0`; return
-`AF_INVALID` for foreign, out-of-range or interior-slot addresses. Alignment
-to 64 alone is insufficient for a 128-byte slot. The runtime pointer itself
-must be valid and live. Wake/send handles remain runtime-free capabilities:
-forged handles are invalid memory accesses, while genuine stale handles remain
-safe until runtime destruction.
-The value fields themselves still require caller synchronization: safe copied
-values do not authorize simultaneous writes to the same output object.
+### Strided sets and partial results
 
-### Copy and initializer creation
+Handle/owner inputs, mutable owner outputs, state inputs and result outputs use
+pointer/byte-stride/count spans. Empty spans accept null. Nonempty spans validate
+alignment, minimum stride, multiplication/address overflow and output capacity
+before mutation. Creation additionally preflights empty owner outputs. Storage
+extent/lifetime and non-overlap of actual element bytes are caller obligations;
+bounding spans may overlap for different fields of an entity array.
 
-Provide scalar copy and initializer forms, each implemented on the same
-construction primitive as the corresponding batch form. Allocate final state
-through the runtime allocator, initialize the kind pointer and final state,
-then release-publish idle. Remove the temporary state allocation, zero-and-copy
-pass and owner wrapper. Copy creation accepts byte-copyable state only.
+Batch copy/init returns `af_actor_batch_result {count, status}`: a live successful
+prefix and `AF_OK`, `AF_FULL`, `AF_ALLOCATION_FAILED`, or
+`AF_ACTOR_INITIALIZER_FAILED`. Invalid structure returns `AF_INVALID` with no
+actions. The suffix remains empty; advance spans and the initializer's
+`first_index` when retrying.
 
-Initializer creation receives final aligned storage, a caller context and the
-logical input element index. It returns a status; it must not throw or longjmp.
-The slot is unavailable to wake/send until initialization succeeds and the owner
-is returned. No public reserve/commit state escapes the create call.
+One free-slot gate acquisition detaches an available prefix into a private chain.
+Allocations and initializers run outside it. A failed creation returns the unused
+chain under one gate acquisition. Reservations consume capacity and prevent
+runtime/host destruction before an owner is returned. The count transfers to
+live accounting before a reservation is released.
 
-Placement-new also needs a destruction contract. Add an optional kind destructor
-called exactly once by the winning reclaimer after retirement and before freeing
-storage. It executes on whichever thread wins reclaim, outside allocator/free-slot
-gates, and must not throw or assume the creating thread. It must not call actor
-operations on its own actor. An initializer that reports failure must clean up
-any partial construction itself; the library frees that storage without calling the kind
-destructor. A successfully initialized object receives the registered destructor
-on normal reclaim. Emergency abandonment retains it under the existing policy.
+Batch wake/retire/reclaim attempts every input occurrence and stores every result.
+Its aggregate count includes queued/coalesced wakes, requested/already-retired
+retirements, and reclaimed/confirmed-stale owners. Busy and invalid outcomes do
+not count. Reclaim uses one mutable owner span and leaves busy owners for retry.
+None of these totals is a join.
 
-### Strided spans and batch results
+Wave publication uses a nonallocating strided range and retains its accepted
+prefix/one-physical-table behavior, membership rollback, seal/drain obligation,
+and finished-versus-ready distinction. The C wave example keeps initial state,
+owners, handles and results inside entity structs.
 
-Represent actor sets by first-element pointer, byte stride and count. Provide
-const handle/owner input spans, mutable owner output spans and strided result
-spans. Starting at an entity's embedded owner/handle field with stride equal to
-the entity size requires no packing buffer. Validate alignment, minimum stride,
-count/stride/address overflow and output capacity before mutation; empty spans
-accept null pointers. Preflight checks require every batch creation output to be
-an empty owner value. Non-overlap of input/output/result element bytes is a caller contract,
-not a general strided-overlap check performed by the API. Their bounding spans
-may overlap when they address different fields in the same entity array.
-An in-place reclaim span is one mutable owner span, not two overlapping spans.
-Stride validation does not establish backing allocation bounds; storage extent
-and lifetime remain the caller's responsibility.
+### Caller-owned messages
 
-Batch copy/init creation uses one kind and returns a successful prefix plus the
-stop status (complete, capacity, allocation failure or initializer failure).
-Returned owners remain live on a partial result; the suffix remains empty.
-Provide a starting logical index for initializer callbacks so retries preserve
-indices after advancing the spans.
+`af_actor_message` exposes 32 opaque bytes aligned to eight, with C/C++ and D
+layout assertions. `af_actor_message_init` initializes caller-exclusive storage;
+there are no allocating message create/destroy exports. Messages can live in
+entities, arenas or stack frames whose lifetimes cover the interaction.
+Synchronization words remain opaque, with no dependency on C atomic layouts.
 
-Take the free-slot gate once to detach an available prefix into a private chain,
-then release it before allocation or any initializer/destructor callback.
-Initialize and publish outside the gate. On failure return the unused reserved
-suffix as a chain under one gate acquisition. Count in-progress reservations
-until they are committed or returned. Capacity admission and `AF_FULL` must
-account for reserved slots; runtime/host teardown must refuse while any
-reservation is in flight, even before its first owner is returned. This avoids
-both per-element gate entry on successful admission and holding a global gate
-across caller code.
+After successful send, do not move, copy or reinitialize the node until ownership
+returns. Completion remains its final access; reply wake snapshots its target
+before release. Access payload/tag/outcome only under the documented ownership
+and acquire rules.
 
-Batch wake, retire and reclaim attempt every element and report per-element
-results, so one stale or busy member does not hide later outcomes. Structural
-span errors reject the call before any action. Reclaim clears successful or
-confirmed-stale owner outputs, leaving busy owners available for retry. Scalar
-and batch calls share the same state-machine operations.
+### Validation and measurement
 
-Also return an aggregate success count: queued/coalesced for wake,
-requested/already-retired for retirement, and reclaimed/confirmed-stale (owner
-cleared) for reclaim. Busy and invalid outcomes do not count. Wake/retire success
-still means request acceptance, not callback completion or proven retirement;
-the aggregate is not a join. Each input occurrence gets its own result, including
-duplicate capabilities; mutations to the same owner storage remain exclusive.
+The suites cover forced retirement/reclaim pauses, copied-owner races, slot reuse,
+wave membership, mixed-kind identity, direct placement-new, destructor uniqueness,
+foreign/interior owners, embedded spans, partial capacity, every allocation-failure
+position, initializer rollback, malformed arithmetic and in-flight host admission.
+The runtime-free archive audit and native C threads remain part of the normal
+C ABI gate. C++ checks run with exceptions enabled and disabled.
 
-Wave publication consumes a strided span through a nonallocating range. Preserve
-the existing accepted-prefix/one-physical-table contract, membership rollback,
-seal/drain obligation and finished-versus-ready distinction. Callers advance the
-span by the accepted count. Do not introduce an implicit wait or all-or-nothing
-transaction around the batch. The nonallocating range is an implementation
-detail; the public surface is a span, with no pull-iterator/callback-range API.
-
-### Caller-owned inbox messages
-
-Expose a 32-byte, eight-byte-aligned storage type matching `ActorInboxNode`,
-with size/alignment/offset assertions on both sides. Keep synchronization fields
-opaque; C/C++ code uses initialization, availability, outcome and payload/tag
-accessors rather than directly manipulating their representation. Do not expose
-C/C++ atomic types whose layout could vary between compilers.
-
-Replace allocating create/destroy with initialization of caller-exclusive
-storage. Messages may be embedded in entities, arenas or stack frames whose
-lifetimes cover the entire interaction. Once submitted they cannot move, be
-copied or be reinitialized until ownership returns. Release completion remains
-the last access to the node and its payload; reply wake snapshots the target
-before release, preserving the existing final-access guarantee.
-
-### Implementation and validation sequence
-
-1. Introduce the retirement-operation pin, exact-word retirement CAS and exclusive
-   reclaim claim, keeping the typed D surface move-only. Deterministically test
-   retire/retire, retire/reclaim and reclaim/reclaim with duplicate capabilities,
-   including drain-to-cancel escalation, a pause before gate closing, a pause
-   before the terminal CAS, slot reuse and wave membership. Audit pin preservation
-   through callback completion and every lifecycle transition; test new-generation
-   wake/send after each losing old-generation call.
-2. Add kinds and direct copy/init construction; test registration validation,
-   mixed-kind waves, exact allocation sizes, initializer rollback and exactly-once
-   destruction with the custom allocator, including reclaim on another thread.
-3. Replace C owner wrappers and message allocation together with their examples
-   and host lifetime accounting. Test foreign runtimes, out-of-range pointers and
-   the 64-aligned interior of a 128-byte slot before accepting owner provenance.
-4. Add strided spans and batch admission/operations, then wave publication over
-   spans. Test embedded entity fields, mixed results, duplicate inputs, partial
-   capacity, in-flight reservation accounting, per-operation success counts,
-   allocation failure at each element and invalid span arithmetic.
-5. Compare C and D lifecycle workloads with the same states and allocator:
-   small/large state, scalar/batch, local/remote reclamation and mimalloc.
-   Include several creating threads. Reuse the creation review's scratch
-   `bench_c.c`, `bench_d.d` and `bench_proto.c` if available, after checking that
-   workloads and completion/lifetime rules match. Count allocations/copies as
-   well as time. There must be no native temporary
-   or owner allocation per actor, and no message allocation by the API.
-   Private cohort/slab exports follow separately and must retain their
-   per-cohort storage advantage.
-
-Run the normal BetterC, native C/C++, DMD/LDC, Linux/Windows and focused TSan
-checks for each changed protocol. Record performance limits under the existing
-optimization policy; do not infer C throughput from the typed-D wave benchmark.
+Lifecycle timing compares the same state sizes and allocator across D scalar,
+C scalar and C batch creation, local/remote reclaim and multiple creators.
+Measurements and their limits belong in the performance report; correctness
+results do not imply a throughput improvement.

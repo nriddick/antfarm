@@ -98,6 +98,25 @@ is passed.
 
 ## Actor benchmarks
 
+### C ABI lifecycle comparison
+
+`python3 tools/perf/run_actor_cabi.py --output .build/actor-cabi-measurements`
+builds the runtime-free library and a matched native C/D driver, then measures
+D erased scalar creation, C scalar creation and C batch creation. States are
+64 and 4096 bytes; both paths use the same copy sources, 64-byte alignment,
+allocator, cohort capacity and native threads. It covers one/four creators,
+local/remote reclamation and CRT/mimalloc. The pinned mimalloc archive must
+already exist at `tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a`.
+
+Separate counted runs require exactly one final-state allocation/free and
+`state_bytes` allocated bytes per actor; timed runs disable those counters.
+Copy counts describe the one explicit final-storage copy in each implementation.
+Setup allocations and thread startup before the start barrier are outside the
+measurement; barrier release and final joins are inside. Remote runs include
+the cohort handoff and waiting overhead. This is descriptive lifecycle timing,
+not wave/callback throughput or the regression gate. Output records raw samples,
+medians, ranges, toolchain and affinity. No background-load rejection is applied.
+
 ### `actor_churn`
 
 ```text

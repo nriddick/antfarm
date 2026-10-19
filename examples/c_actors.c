@@ -22,21 +22,24 @@ int main(void) {
     af_token *token = NULL; check(af_register_producer(farm, AF_SMALL, &token));
     af_view *view = NULL; check(af_view_create(&view)); check(af_subscribe(view, farm));
     counter initial = {0}; unsigned sum = 0, values[] = {2, 3, 5};
-    af_actor_owner *owner = NULL;
-    check(af_actor_create(runtime, &initial, sizeof initial, _Alignof(counter), add, &sum, &owner));
-    af_actor_handle handle; af_actor_owner_handle(owner, &handle);
-    af_actor_message *messages[3];
+    af_actor_owner owner = {0};
+    af_actor_kind_options kind_options = {add, &sum, sizeof(counter), _Alignof(counter), NULL};
+    const af_actor_kind *kind = NULL; check(af_actor_kind_register(runtime, &kind_options, &kind));
+    check(af_actor_create_copy(runtime, kind, &initial, &owner));
+    af_actor_handle handle; af_actor_owner_handle(&owner, &handle);
+    af_actor_message messages[3];
     for (unsigned i = 0; i < 3; ++i) {
-        check(af_actor_message_create(values + i, i, messages + i));
-        if (af_actor_send(&handle, messages[i]) > AF_ACTOR_COALESCED) return 1;
+        af_actor_message_init(messages + i, values + i, i);
+        if (af_actor_send(&handle, messages + i) > AF_ACTOR_COALESCED) return 1;
     }
-    af_actor_request_retire(owner, AF_ACTOR_DRAIN);
-    while (!af_actor_retired(owner)) {
+    af_actor_request_retire(runtime, &owner, AF_ACTOR_DRAIN);
+    unsigned retired = 0;
+    for (;;) {
+        check(af_actor_retired(runtime, &owner, &retired)); if (retired) break;
         af_actor_runtime_flush(runtime, token, 32, AF_ACTOR_DEFAULT_COST);
         af_consume_next(view);
     }
-    if (af_actor_reclaim(owner) != AF_ACTOR_RECLAIMED) return 1;
-    for (unsigned i = 0; i < 3; ++i) af_actor_message_destroy(messages[i]);
+    if (af_actor_reclaim(runtime, &owner) != AF_ACTOR_RECLAIMED) return 1;
     /* No background consumers in this example. With threads, join them here. */
     af_unsubscribe(view); af_view_destroy(view);
     af_actor_runtime_destroy(runtime);

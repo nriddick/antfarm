@@ -4450,6 +4450,113 @@ private void testChildCases()
     fflush(stdout);
 }
 
+
+private void testCopiedOwners()
+{
+    // Pause every final-access boundary of a retirement request. A copied
+    // owner must neither close a reused slot nor free state beneath this call.
+    foreach (point; [ActorTestPoint.retirementBeforeGateClose,
+            ActorTestPoint.retirementBeforePublish,
+            ActorTestPoint.retirementBeforeUnpin])
+    {
+        auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+        auto runtime = ActorRuntime.create(farm, 1);
+        BoundaryResult result;
+        auto typed = runtime.createActor!(BoundaryState, boundaryActor)(
+            BoundaryState(&result));
+        auto owner = typed.intoErased();
+        auto copy = testDuplicateActorOwner(owner);
+        g_hookNode = null;
+        atomicStore(g_hookTarget, cast(int) point);
+        atomicStore(g_hookArrived, 0);
+        atomicStore(g_hookRelease, 0);
+        setActorTestHook(&blockingActorHook);
+        ActorRetireResult retired;
+        auto thread = new Thread({ retired = owner.requestRetire(); });
+        thread.start();
+        waitFlag(g_hookArrived, MonoTime.currTime + 15.seconds,
+            "copied retire did not reach boundary");
+        check(copy.reclaim() == ActorReclaimResult.busy,
+            "retirement pin blocks copied reclaim");
+        auto competing = copy.requestRetire();
+        check(competing == ActorRetireResult.busy ||
+                competing == ActorRetireResult.alreadyRetired,
+            "copied retirement cannot enter pinned generation");
+        atomicStore(g_hookRelease, 1);
+        thread.join();
+        setActorTestHook(null);
+        check(retired == ActorRetireResult.requested && copy.retired, "pinned retirement completes");
+        check(copy.reclaim() == ActorReclaimResult.reclaimed,
+            "copied reclaim after unpin");
+        check(owner.reclaim() == ActorReclaimResult.staleOwner,
+            "vacant generation is stale");
+        auto replacement = runtime.createActor!(BoundaryState, boundaryActor)(
+            BoundaryState(&result));
+        check(owner.requestRetire() == ActorRetireResult.staleOwner,
+            "old retirement cannot affect replacement");
+        check(replacement.requestRetire() == ActorRetireResult.requested &&
+            replacement.reclaim() == ActorReclaimResult.reclaimed,
+            "replacement remains independently reclaimable");
+        runtime.destroy();
+        farm.destroy();
+    }
+    foreach (point; [ActorTestPoint.reclaimBeforeClaim,
+            ActorTestPoint.reclaimClaimed])
+    {
+        auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+        auto runtime = ActorRuntime.create(farm, 1);
+        BoundaryResult result;
+        auto typed = runtime.createActor!(BoundaryState, boundaryActor)(
+            BoundaryState(&result));
+        auto owner = typed.intoErased();
+        auto copy = testDuplicateActorOwner(owner);
+        check(owner.requestRetire() == ActorRetireResult.requested, "reclaim race retirement");
+        g_hookNode = null;
+        atomicStore(g_hookTarget, cast(int) point);
+        atomicStore(g_hookArrived, 0);
+        atomicStore(g_hookRelease, 0);
+        setActorTestHook(&blockingActorHook);
+        ActorReclaimResult reclaimed;
+        auto thread = new Thread({ reclaimed = owner.reclaim(); });
+        thread.start();
+        waitFlag(g_hookArrived, MonoTime.currTime + 15.seconds,
+            "copied reclaim did not reach boundary");
+        atomicStore(g_hookTarget, -1); // Only the first caller stays paused.
+        if (point == ActorTestPoint.reclaimBeforeClaim)
+        {
+            check(copy.reclaim() == ActorReclaimResult.reclaimed,
+                "second caller wins unclaimed generation");
+            auto replacement = runtime.createActor!(BoundaryState, boundaryActor)(
+                BoundaryState(&result));
+            atomicStore(g_hookRelease, 1);
+            thread.join();
+            check(reclaimed == ActorReclaimResult.busy,
+                "old exact-word CAS cannot claim reused generation");
+            check(replacement.requestRetire() == ActorRetireResult.requested &&
+                replacement.reclaim() == ActorReclaimResult.reclaimed,
+                "replacement survives losing reclaim");
+        }
+        else
+        {
+            check(copy.reclaim() == ActorReclaimResult.busy,
+                "exclusive reclaim blocks duplicate free");
+            check(copy.handle.wake() == ActorWakeResult.closed,
+                "reclaiming generation rejects wake");
+            check(copy.requestRetire() == ActorRetireResult.alreadyRetired,
+                "reclaiming generation rejects gate writes");
+            atomicStore(g_hookRelease, 1);
+            thread.join();
+            check(reclaimed == ActorReclaimResult.reclaimed,
+                "exclusive reclaimer finishes");
+            check(copy.reclaim() == ActorReclaimResult.staleOwner,
+                "losing copy becomes stale");
+        }
+        setActorTestHook(null);
+        runtime.destroy();
+        farm.destroy();
+    }
+}
+
 void main(string[] args)
 {
     if (args.length == 2 && args[1].length > 6 && args[1][0 .. 6] == "child:")
@@ -4461,6 +4568,7 @@ void main(string[] args)
     {
         switch (args[1])
         {
+        case "--owners": testCopiedOwners(); break;
         case "death": testChildCases(); break;
         case "--wave-wake": testWaveSignalRace(false); break;
         case "--wave-send": testWaveSignalRace(true); break;
@@ -4483,6 +4591,7 @@ void main(string[] args)
         return;
     }
     check(args.length == 1, "expected at most one actor torture selector");
+    testCopiedOwners();
     testDeterministicInterleavings();
     testNodeOutcomes();
     testOwnerMoveOnly();

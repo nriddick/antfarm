@@ -1,6 +1,7 @@
 #include "check.h"
 #include "antfarm_actors.h"
 #include "threads.h"
+#include "actor_helpers.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,18 +9,20 @@
 static void check(af_status s) {
     if (s != AF_OK) { fprintf(stderr, "%u: %s\n", s, af_last_error_message()); abort(); }
 }
-typedef struct fixture { af_farm *farm; af_token *token; af_view *view; af_actor_runtime *runtime; } fixture;
+typedef struct fixture { af_farm *farm; af_token *token; af_view *view; af_actor_runtime *runtime; const af_actor_kind *kinds[2]; } fixture;
 static af_view *subscribe(af_farm *f) {
     af_view *v = NULL; check(af_view_create(&v)); af_status s;
     do { s = af_subscribe(v, f); } while (s == AF_RETRY);
     check(s); return v;
 }
+static void register_kinds(fixture *x);
 static fixture setup(size_t capacity) {
     fixture x = {0}; af_options o; af_options_default(&o);
     o.ring_mib = 2; o.max_small_producers = 1; o.max_bulk_producers = 0;
     o.small_quota_words = 64; o.expected_consumers = 4;
     check(af_create(&o, &x.farm)); check(af_register_producer(x.farm, AF_SMALL, &x.token));
     check(af_actor_runtime_create(x.farm, capacity, NULL, &x.runtime)); x.view = subscribe(x.farm);
+    register_kinds(&x);
     return x;
 }
 static void release_view(af_view *v) { af_unsubscribe(v); af_view_destroy(v); }
@@ -28,25 +31,29 @@ static void teardown(fixture *x) {
     af_unregister_producer(x->farm, x->token); af_destroy(x->farm);
 }
 static void retire(fixture *x, af_actor_owner *owner) {
-    CHECK(af_actor_request_retire(owner, AF_ACTOR_DRAIN) == AF_ACTOR_RETIRE_REQUESTED);
-    while (!af_actor_retired(owner)) {
+    CHECK(af_actor_request_retire(x->runtime, owner, AF_ACTOR_DRAIN) == AF_ACTOR_RETIRE_REQUESTED);
+    while (!is_retired(x->runtime, owner)) {
         af_actor_runtime_flush(x->runtime, x->token, 256, 4); af_consume_next(x->view);
     }
-    CHECK(af_actor_reclaim(owner) == AF_ACTOR_RECLAIMED);
+    CHECK(af_actor_reclaim(x->runtime, owner) == AF_ACTOR_RECLAIMED);
 }
-typedef struct state { unsigned *output; unsigned value, id; } state;
+typedef struct state { unsigned *output; unsigned value, id; const af_actor_kind *kind; } state;
 static void autonomous(void *u, void *memory, size_t bytes, af_actor_context *c) {
     (void)u; (void)bytes; (void)c; state *s = (state *)memory; *s->output = ++s->value;
 }
-static af_actor_owner *create(af_actor_runtime *r, unsigned *output, unsigned id, af_actor_handle *h) {
-    struct { state s; uint64_t padding[2]; } initial = {{output, 0, id}, {0, 0}};
-    af_actor_owner *o = NULL;
-    check(af_actor_create(r, &initial, id % 2 ? sizeof initial : sizeof(state),
-                         id % 2 ? 64 : _Alignof(state), autonomous, NULL, &o));
-    af_actor_owner_handle(o, h); return o;
+static void register_kinds(fixture *x) {
+    x->kinds[0] = test_kind(x->runtime, sizeof(state), _Alignof(state), autonomous, NULL);
+    x->kinds[1] = test_kind(x->runtime, sizeof(state) + 16, 64, autonomous, NULL);
 }
-static void operation(void *u, void *memory, size_t bytes) {
-    state *s = (state *)memory; unsigned delta = *(unsigned *)u;
+static af_actor_owner create(fixture *x, unsigned *output, unsigned id, af_actor_handle *h) {
+    struct { state s; uint64_t padding[2]; } initial = {{output, 0, id, x->kinds[id % 2]}, {0, 0}};
+    af_actor_owner o = {0};
+    check(af_actor_create_copy(x->runtime, x->kinds[id % 2], &initial, &o));
+    af_actor_owner_handle(&o, h); return o;
+}
+static void operation(void *u, const af_actor_kind *kind, void *memory, size_t bytes) {
+    CHECK(kind != NULL);
+    state *s = (state *)memory; unsigned delta = *(unsigned *)u; CHECK(kind == s->kind);
     CHECK(bytes == (s->id % 2 ? sizeof(state) + 16 : sizeof(state)));
     if (s->id % 2) CHECK((uintptr_t)memory % 64 == 0);
     s->value += delta; *s->output = s->value;
@@ -77,10 +84,10 @@ static void empty(void) {
 }
 static void serial(void) {
     enum { N = 128 }; fixture x = setup(N);
-    af_actor_runtime *second = NULL; check(af_actor_runtime_create(x.farm, N, NULL, &second));
+    fixture second = x; check(af_actor_runtime_create(x.farm, N, NULL, &second.runtime)); register_kinds(&second);
     unsigned outputs[N] = {0}, delta = 3, notifications = 0;
-    af_actor_owner *owners[N]; af_actor_handle actors[N];
-    for (unsigned i = 0; i < N; ++i) owners[i] = create(i % 2 ? second : x.runtime, outputs + i, i, actors + i);
+    af_actor_owner owners[N]; af_actor_handle actors[N];
+    for (unsigned i = 0; i < N; ++i) owners[i] = create(i % 2 ? &second : &x, outputs + i, i, actors + i);
     af_completion_hook hook = {&notifications, counted}; af_actor_wave_handle h;
     af_actor_wave *w = begin(&x, &delta, &hook, &h);
     /* Fill the ring with independent raw work. Failed admission must neither
@@ -88,12 +95,12 @@ static void serial(void) {
     size_t filled = 0, n;
     while ((n = af_write_fixed(x.farm, filler, NULL, 0, 128, x.token, 4, NULL)) != 0) filled += n;
     CHECK(filled && !test_load(&filler_calls));
-    CHECK(af_actor_wave_publish(w, actors, N, x.token, 4) == 0);
+    CHECK(af_actor_wave_publish(w, (af_actor_handle_span){actors, sizeof(af_actor_handle), N}, x.token, 4) == 0);
     CHECK(!af_actor_wave_failed(&h) && !af_actor_wave_length(&h));
     while (test_load(&filler_calls) < filled) af_consume_next(x.view);
     size_t offset = 0;
     while (offset < N) {
-        n = af_actor_wave_publish(w, actors + offset, N - offset, x.token, 4);
+        n = af_actor_wave_publish(w, (af_actor_handle_span){actors + offset, sizeof(af_actor_handle), N - offset}, x.token, 4);
         CHECK(!af_actor_wave_failed(&h));
         if (!offset && n) CHECK(n < N);
         offset += n; af_consume_next(x.view);
@@ -101,10 +108,9 @@ static void serial(void) {
     while (af_actor_wave_progress(&h) != af_actor_wave_length(&h)) af_consume_next(x.view);
     CHECK(!af_actor_wave_finished(&h) && !notifications); /* producer credit */
     CHECK(af_actor_wake(actors) == AF_ACTOR_WAVE_OWNED);
-    CHECK(af_actor_request_retire(owners[0], AF_ACTOR_CANCEL) == AF_ACTOR_RETIRE_WAVE_OWNED);
-    af_actor_message *m = NULL; check(af_actor_message_create(NULL, 0, &m));
+    CHECK(af_actor_request_retire(x.runtime, &owners[0], AF_ACTOR_CANCEL) == AF_ACTOR_RETIRE_WAVE_OWNED);
+    af_actor_message storage, *m = &storage; af_actor_message_init(m, NULL, 0);
     CHECK(af_actor_send(actors, m) == AF_ACTOR_WAVE_OWNED && af_actor_message_available(m));
-    af_actor_message_destroy(m);
     finish(&x, w, &h);
     CHECK(notifications == 1 && !af_actor_wave_failed(&h) && !af_actor_wave_interrupted(&h));
     for (unsigned i = 0; i < N; ++i) CHECK(outputs[i] == 3);
@@ -113,47 +119,47 @@ static void serial(void) {
     CHECK(!af_actor_wave_valid(&old) && !af_actor_wave_finished(&old) && !af_actor_wave_ready(&old));
     CHECK(!af_actor_wave_failed(&old) && !af_actor_wave_interrupted(&old));
     CHECK(!af_actor_wave_length(&old) && !af_actor_wave_progress(&old));
-    CHECK(af_actor_wave_publish(w, NULL, 0, x.token, 4) == 0);
+    CHECK(af_actor_wave_publish(w, (af_actor_handle_span){NULL, sizeof(af_actor_handle), 0}, x.token, 4) == 0);
     for (offset = 0; offset < N;) {
-        n = af_actor_wave_publish(w, actors + offset, N - offset, x.token, 7);
+        n = af_actor_wave_publish(w, (af_actor_handle_span){actors + offset, sizeof(af_actor_handle), N - offset}, x.token, 7);
         CHECK(!af_actor_wave_failed(&h)); offset += n; af_consume_next(x.view);
     }
     finish(&x, w, &h);
     for (unsigned i = 0; i < N; ++i) CHECK(outputs[i] == 7);
     af_actor_wave_destroy(w);
-    for (unsigned i = 0; i < N; ++i) retire(&x, owners[i]);
-    af_actor_runtime_destroy(second); teardown(&x);
+    for (unsigned i = 0; i < N; ++i) retire(i % 2 ? &second : &x, &owners[i]);
+    af_actor_runtime_destroy(second.runtime); teardown(&x);
 }
 static void rejections(void) {
     fixture x = setup(3), foreign = setup(1); unsigned output[4] = {0}, delta = 1;
-    af_actor_handle a[4]; af_actor_owner *o[4];
-    for (unsigned i = 0; i < 3; ++i) o[i] = create(x.runtime, output + i, i, a + i);
-    o[3] = create(foreign.runtime, output + 3, 3, a + 3);
-    retire(&x, o[2]); /* stale generation while its slot remains allocated */
+    af_actor_handle a[4]; af_actor_owner o[4];
+    for (unsigned i = 0; i < 3; ++i) o[i] = create(&x, output + i, i, a + i);
+    o[3] = create(&foreign, output + 3, 3, a + 3);
+    retire(&x, &o[2]); /* stale generation while its slot remains allocated */
     af_actor_wave_handle h; af_actor_wave *w = begin(&x, &delta, NULL, &h);
     for (unsigned which = 0; which < 4; ++which) {
         if (which) { af_actor_wave_begin(w, operation, &delta, NULL); af_actor_wave_observe(w, &h); }
         if (which == 3) CHECK(af_actor_wake(a + 1) == AF_ACTOR_QUEUED);
         static const unsigned rejected[] = {0, 2, 3, 1};
         af_actor_handle offered[] = {a[0], a[rejected[which]]};
-        CHECK(af_actor_wave_publish(w, offered, 2, x.token, 4) == 0);
+        CHECK(af_actor_wave_publish(w, (af_actor_handle_span){offered, sizeof(af_actor_handle), 2}, x.token, 4) == 0);
         CHECK(af_actor_wave_failed(&h) && af_actor_wave_length(&h) == 0);
         finish(&x, w, &h);
         CHECK(output[0] == 0); /* all prospective reservations rolled back */
     }
     while (output[1] == 0) { af_actor_runtime_flush(x.runtime, x.token, 32, 4); af_consume_next(x.view); }
     af_actor_wave_begin(w, operation, &delta, NULL); af_actor_wave_observe(w, &h);
-    CHECK(af_actor_wave_publish(w, a, 1, x.token, 4) == 1);
+    CHECK(af_actor_wave_publish(w, (af_actor_handle_span){a, sizeof(af_actor_handle), 1}, x.token, 4) == 1);
     while (!af_actor_wave_progress(&h)) af_consume_next(x.view);
     CHECK(!af_actor_wave_finished(&h) && output[0] == 1);
     /* Membership persists even after this table finishes. An overlapping wave
        fails, and a duplicate later table cannot erase the accepted prefix. */
     af_actor_wave_handle other_h; af_actor_wave *other = begin(&x, &delta, NULL, &other_h);
-    CHECK(af_actor_wave_publish(other, a, 1, x.token, 4) == 0 && af_actor_wave_failed(&other_h));
+    CHECK(af_actor_wave_publish(other, (af_actor_handle_span){a, sizeof(af_actor_handle), 1}, x.token, 4) == 0 && af_actor_wave_failed(&other_h));
     finish(&x, other, &other_h); af_actor_wave_destroy(other);
-    CHECK(af_actor_wave_publish(w, a, 1, x.token, 4) == 0 && af_actor_wave_failed(&h));
+    CHECK(af_actor_wave_publish(w, (af_actor_handle_span){a, sizeof(af_actor_handle), 1}, x.token, 4) == 0 && af_actor_wave_failed(&h));
     finish(&x, w, &h); CHECK(output[0] == 1 && af_actor_wave_length(&h) == 1);
-    af_actor_wave_destroy(w); retire(&x, o[0]); retire(&x, o[1]); retire(&foreign, o[3]);
+    af_actor_wave_destroy(w); retire(&x, &o[0]); retire(&x, &o[1]); retire(&foreign, &o[3]);
     teardown(&foreign); teardown(&x);
 }
 typedef struct worker { af_farm *farm; test_atomic started, stop; test_atomic *run; } worker;
@@ -166,8 +172,8 @@ TEST_THREAD(consume) {
 
 static void concurrent(void) {
     enum { N = 128 }; fixture x = setup(N); unsigned output[N] = {0}, delta = 1;
-    af_actor_owner *owners[N]; af_actor_handle actors[N];
-    for (unsigned i = 0; i < N; ++i) owners[i] = create(x.runtime, output + i, i, actors + i);
+    af_actor_owner owners[N]; af_actor_handle actors[N];
+    for (unsigned i = 0; i < N; ++i) owners[i] = create(&x, output + i, i, actors + i);
     worker workers[3] = {0}; test_thread threads[3];
     for (unsigned i = 0; i < 3; ++i) { workers[i].farm = x.farm; threads[i] = test_start(consume, workers + i); }
     for (unsigned i = 0; i < 3; ++i) while (!test_load(&workers[i].started)) test_yield();
@@ -175,7 +181,7 @@ static void concurrent(void) {
     for (unsigned round = 1; round <= 100; ++round) {
         if (round > 1) { af_actor_wave_begin(w, operation, &delta, NULL); af_actor_wave_observe(w, &h); }
         for (size_t offset = 0; offset < N;) {
-            offset += af_actor_wave_publish(w, actors + offset, N - offset, x.token, 7);
+            offset += af_actor_wave_publish(w, (af_actor_handle_span){actors + offset, sizeof(af_actor_handle), N - offset}, x.token, 7);
             CHECK(!af_actor_wave_failed(&h)); af_consume_next(x.view);
         }
         finish(&x, w, &h);
@@ -184,7 +190,7 @@ static void concurrent(void) {
     af_actor_wave_destroy(w);
     for (unsigned i = 0; i < 3; ++i) test_store(&workers[i].stop, 1);
     for (unsigned i = 0; i < 3; ++i) test_join(threads[i]);
-    for (unsigned i = 0; i < N; ++i) retire(&x, owners[i]);
+    for (unsigned i = 0; i < N; ++i) retire(&x, &owners[i]);
     teardown(&x);
 }
 typedef struct tail { test_atomic entered, release; af_actor_wave_handle *handle; unsigned result; } tail;
@@ -197,14 +203,14 @@ static void paused_hook(void *u) {
 }
 static void callback_tail(const char *death) {
     fixture x = setup(1); unsigned output = 0, delta = 9; af_actor_handle actor;
-    af_actor_owner *o = create(x.runtime, &output, 1, &actor);
+    af_actor_owner o = create(&x, &output, 1, &actor);
     af_actor_wave_handle h; tail t = {0}; t.handle = &h;
     af_completion_hook hook = {&t, paused_hook}; af_actor_wave *w = begin(&x, &delta, &hook, &h);
     test_atomic run = {0};
     worker worker_state = {0}; worker_state.farm = x.farm; worker_state.run = &run;
     test_thread thread = test_start(consume, &worker_state);
     while (!test_load(&worker_state.started)) test_yield();
-    CHECK(af_actor_wave_publish(w, &actor, 1, x.token, 4) == 1); af_actor_wave_seal(w);
+    CHECK(af_actor_wave_publish(w, (af_actor_handle_span){&actor, sizeof(af_actor_handle), 1}, x.token, 4) == 1); af_actor_wave_seal(w);
     /* Force the worker to own completion. If it finished before seal, seal
        could invoke paused_hook inline and block its own releasing thread. */
     test_store(&run, 1);
@@ -217,7 +223,7 @@ static void callback_tail(const char *death) {
     CHECK(t.result == 17);
     af_actor_wave_destroy(w); /* final adapter access has joined, before worker join */
     test_store(&worker_state.stop, 1); test_join(thread);
-    retire(&x, o); teardown(&x);
+    retire(&x, &o); teardown(&x);
 }
 #ifdef AF_TEST_AUDIT
 extern void antfarm_test_after_publish(void (*)(void));
@@ -229,14 +235,14 @@ static void consume_before_return(void) {
 }
 static void early_completion(void) {
     fixture x = setup(1); unsigned output = 0, delta = 5, hooks = 0; af_actor_handle actor;
-    af_actor_owner *o = create(x.runtime, &output, 0, &actor);
+    af_actor_owner o = create(&x, &output, 0, &actor);
     af_actor_wave_handle h; af_completion_hook hook = {&hooks, counted};
     af_actor_wave *w = begin(&x, &delta, &hook, &h); audit_fixture = &x; audit_handle = &h;
     antfarm_test_after_publish(consume_before_return);
-    CHECK(af_actor_wave_publish(w, &actor, 1, x.token, 4) == 1);
+    CHECK(af_actor_wave_publish(w, (af_actor_handle_span){&actor, sizeof(af_actor_handle), 1}, x.token, 4) == 1);
     antfarm_test_after_publish(NULL);
     CHECK(output == 5 && hooks == 0); finish(&x, w, &h); CHECK(hooks == 1);
-    af_actor_wave_destroy(w); retire(&x, o); teardown(&x);
+    af_actor_wave_destroy(w); retire(&x, &o); teardown(&x);
 }
 #endif
 static void fatal_notice(const char *s, size_t n, void *p) {
@@ -246,21 +252,21 @@ static void deaths(const char *name) {
     af_set_fatal_handler(fatal_notice, NULL);
     if (!strncmp(name, "tail-", 5)) { callback_tail(name); return; }
     fixture x = setup(1); unsigned output = 0, delta = 1; af_actor_handle a;
-    create(x.runtime, &output, 0, &a);
+    create(&x, &output, 0, &a);
     af_actor_wave *w = NULL; check(af_actor_wave_create(x.farm, &w));
-    if (!strcmp(name, "uninitialized")) af_actor_wave_publish(w, &a, 1, x.token, 4);
+    if (!strcmp(name, "uninitialized")) af_actor_wave_publish(w, (af_actor_handle_span){&a, sizeof(af_actor_handle), 1}, x.token, 4);
     if (!strcmp(name, "operation")) af_actor_wave_begin(w, NULL, NULL, NULL);
     if (!strcmp(name, "hook")) { af_completion_hook bad = {0}; af_actor_wave_begin(w, operation, &delta, &bad); }
     af_actor_wave_begin(w, operation, &delta, NULL);
     if (!strcmp(name, "begin")) af_actor_wave_begin(w, operation, &delta, NULL);
     if (!strcmp(name, "destroy")) af_actor_wave_destroy(w);
-    if (!strcmp(name, "span")) af_actor_wave_publish(w, NULL, 1, x.token, 4);
-    if (!strcmp(name, "overflow")) af_actor_wave_publish(w, &a, SIZE_MAX, x.token, 4);
-    if (!strcmp(name, "foreign")) { fixture y = setup(1); af_actor_wave_publish(w, &a, 1, y.token, 4); }
-    if (!strcmp(name, "cost")) af_actor_wave_publish(w, &a, 1, x.token, 8);
+    if (!strcmp(name, "span")) af_actor_wave_publish(w, (af_actor_handle_span){NULL, sizeof(af_actor_handle), 1}, x.token, 4);
+    if (!strcmp(name, "overflow")) af_actor_wave_publish(w, (af_actor_handle_span){&a, sizeof(af_actor_handle), SIZE_MAX}, x.token, 4);
+    if (!strcmp(name, "foreign")) { fixture y = setup(1); af_actor_wave_publish(w, (af_actor_handle_span){&a, sizeof(af_actor_handle), 1}, y.token, 4); }
+    if (!strcmp(name, "cost")) af_actor_wave_publish(w, (af_actor_handle_span){&a, sizeof(af_actor_handle), 1}, x.token, 8);
     af_actor_wave_seal(w);
     if (!strcmp(name, "seal")) af_actor_wave_seal(w);
-    if (!strcmp(name, "sealed")) af_actor_wave_publish(w, &a, 1, x.token, 4);
+    if (!strcmp(name, "sealed")) af_actor_wave_publish(w, (af_actor_handle_span){&a, sizeof(af_actor_handle), 1}, x.token, 4);
     if (!strcmp(name, "farm")) {
         release_view(x.view); af_unregister_producer(x.farm, x.token);
         /* Separate empty Farm so the wave guard is the failing precondition. */

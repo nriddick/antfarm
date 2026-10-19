@@ -36,13 +36,13 @@ is reassessed holistically in dedicated sessions.
 - Gather production usage of the [C ABI](docs/design/c-abi.md) core, public
   actors, waves and optional non-Fiber host. Shared-library packaging and language
   ownership adapters can follow the static C/C++ distributions.
-- Refresh the unreleased public actor C API before private roots/children:
-  runtime-owned kinds, direct state initialization, value owners with exclusive
-  retirement/reclaim arbitration, strided batch operations and caller-owned inbox nodes.
-  The [refresh plan](docs/design/c-abi.md#planned-actor-api-refresh) defines the
-  proposed lifetimes, partial-result rules and acceptance tests.
-  The D GC-rooted adapter stays out of BetterC builds.
-  Fibers stay outside ABI 1.
+- The unreleased public actor C API now has runtime-owned kinds, direct state
+  initialization, value owners with retirement/reclaim arbitration, strided
+  batches and caller-owned inbox nodes. The
+  [implemented contract](docs/design/c-abi.md#actor-construction-and-ownership)
+  defines lifetimes and partial results. Private root/child exports remain next;
+  preserve their cohort/slab advantage. The D GC-rooted adapter and Fibers stay
+  outside the runtime-free ABI.
 - The C wave bridge's existing typed-D `wave` path was compared at
   `d94acc1` against `be025b1` with LDC 1.42 `-O2 -release`, mimalloc 3.5.3,
   16,384 actors and distinct-core pins under Linux/WSL. Caller-only execution

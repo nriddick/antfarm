@@ -5,9 +5,9 @@ import antfarm.actors.actor;
 import antfarm.actors.wave;
 import antfarm : TableCompletionHook;
 import antfarm.c.core;
-import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicOp, cas;
+import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicOp;
 import core.stdc.stdlib : malloc, free;
-import core.stdc.string : memcpy, memset;
+import core.stdc.string : memcpy;
 
 extern(C) alias CActorHandler = void function(void*, void*, size_t, af_actor_context*) nothrow @nogc @system;
 extern(C) alias CActorAllocate = void* function(void*, size_t, size_t) nothrow @nogc @system;
@@ -20,13 +20,42 @@ struct af_actor_runtime
     af_farm* farm;
     bool owned, custom;
     af_actor_allocator allocator;
-    shared size_t owners; // Includes in-flight creation reservations until reclaim returns.
+    af_actor_kind* kinds;
     af_actor_runtime* next; // Control-thread host list.
 }
-struct af_actor_owner { af_actor_runtime* runtime; ActorErasedOwner value; }
+
+extern(C) alias CActorInitializer = uint function(void*, void*, size_t, size_t) nothrow @nogc @system;
+extern(C) alias CActorDestructor = void function(void*, void*, size_t) nothrow @nogc @system;
+struct af_actor_kind_options
+{
+    CActorHandler handler;
+    void* user;
+    size_t state_bytes, state_alignment;
+    CActorDestructor destroy;
+}
+struct af_actor_kind
+{
+    ActorKind value;
+    af_actor_runtime* runtime;
+    af_actor_kind_options options;
+    af_actor_kind* next;
+}
+struct af_actor_owner { void* _slot; ulong _generation; }
+struct af_actor_handle_span { const(af_actor_handle)* data; size_t stride, count; }
+struct af_actor_owner_span { const(af_actor_owner)* data; size_t stride, count; }
+struct af_actor_owner_output_span { af_actor_owner* data; size_t stride, count; }
+struct af_actor_state_span { const(void)* data; size_t stride, count; }
+struct af_actor_result_span { uint* data; size_t stride, count; }
+struct af_actor_batch_result { size_t count; uint status; }
+enum uint AF_ACTOR_INITIALIZER_FAILED = 8;
+enum uint retireBase = 16, reclaimBase = 32;
+static assert(af_actor_owner.sizeof == 16 && af_actor_owner.alignof == 8);
+static assert(af_actor_kind_options.sizeof == 40 && af_actor_kind_options.destroy.offsetof == 32);
+static assert(af_actor_handle_span.sizeof == 24 && af_actor_batch_result.sizeof == 16);
+
 struct af_actor_context { ActorContext* value; }
 struct af_actor_message { ActorInboxNode value; }
-private struct StatePrefix { CActorHandler call; void* user; size_t bytes, offset; }
+
 private af_actor_context* activeContext;
 version (AntfarmCActorTestHooks)
 {
@@ -35,7 +64,8 @@ version (AntfarmCActorTestHooks)
 }
 static assert(af_actor_handle.sizeof == 16 && af_actor_handle.alignof == 8);
 static assert(af_actor_allocator.sizeof == 24);
-static assert(af_actor_message.value.offsetof == 0 && af_actor_message.sizeof == ActorInboxNode.sizeof);
+static assert(af_actor_message.value.offsetof == 0 && af_actor_message.sizeof == 32
+    && af_actor_message.sizeof == ActorInboxNode.sizeof && af_actor_message.alignof == 8);
 static assert(cast(uint) ActorWakeResult.queued == 0 && cast(uint) ActorWakeResult.closed == 4);
 static assert(cast(uint) ActorSendResult.nodeBusy == 5);
 static assert(cast(uint) ActorRetireMode.cancel == 1 && cast(uint) ActorRetireResult.staleOwner == 3);
@@ -54,11 +84,6 @@ private T* allocate(T)() nothrow @nogc @system
 private void requireRuntime(const(af_actor_runtime)* r) nothrow @nogc @system
 {
     if (r is null || r.impl is null) fatal("C ABI null actor runtime");
-}
-private void requireOwner(const(af_actor_owner)* o) nothrow @nogc @system
-{
-    if (o is null) fatal("C ABI null actor owner");
-    requireRuntime(o.runtime);
 }
 private void requireMessage(const(af_actor_message)* m) nothrow @nogc @system
 {
@@ -87,14 +112,93 @@ private void customDeallocate(void* context, void* memory, size_t bytes, size_t 
 }
 private void dispatch(scope ref ActorErasedBorrow borrow, scope ref ActorContext ctx) nothrow @nogc @system
 {
-    auto p = cast(StatePrefix*) borrow.rawState();
+    auto kind = cast(af_actor_kind*) ctx.rawKind();
     af_actor_context c = af_actor_context(&ctx);
     auto previous = activeContext;
     activeContext = &c;
-    p.call(p.user, cast(ubyte*) p + p.offset, p.bytes, &c);
+    kind.options.handler(kind.options.user, borrow.rawState(), borrow.stateSize, &c);
     activeContext = previous;
 }
 
+private ActorAllocator runtimeAllocator(af_actor_runtime* r) nothrow @nogc @system
+{
+    return r.custom ? ActorAllocator(r, &customAllocate, &customDeallocate) : ActorAllocator.cRuntime();
+}
+private bool emptyOwner(const(af_actor_owner)* o) nothrow @nogc @system
+{ return o._slot is null && o._generation == 0; }
+private bool validOwner(af_actor_runtime* r, const(af_actor_owner)* o) nothrow @nogc @system
+{
+    return r !is null && r.impl !is null && o !is null &&
+        (emptyOwner(o) || (o._generation != 0 && r.impl.ownsSlot(o._slot)));
+}
+private bool validSpan(const(void)* data, size_t stride, size_t count,
+        size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    if (count == 0) return true;
+    immutable base = cast(size_t) data;
+    if (data is null || base % alignment || stride < bytes || stride % alignment ||
+            base > size_t.max - bytes) return false;
+    return count - 1 <= (size_t.max - base - bytes) / stride;
+}
+private T* element(T)(T* data, size_t stride, size_t i) nothrow @nogc @system
+{ return cast(T*) (cast(size_t) data + stride * i); }
+private bool validKind(af_actor_runtime* r, const(af_actor_kind)* kind) nothrow @nogc @system
+{
+    // Kind pointers are live capabilities, like runtime pointers. Registration
+    // is quiescent; immutable metadata can be read concurrently by creators.
+    return r !is null && r.impl !is null && kind !is null && kind.runtime is r;
+}
+private void destroyState(void* identity, void* state, size_t bytes) nothrow @nogc @system
+{
+    auto k = cast(af_actor_kind*) identity;
+    k.options.destroy(k.options.user, state, bytes);
+}
+private struct Initializer { CActorInitializer call; void* user; }
+private bool initializeState(void* context, void* state, size_t bytes, size_t index) nothrow @nogc @system
+{
+    auto init = cast(Initializer*) context;
+    return init.call(init.user, state, bytes, index) == AF_OK;
+}
+private af_actor_batch_result createActors(af_actor_runtime* r, const(af_actor_kind)* kind,
+        af_actor_state_span input, CActorInitializer initialize, void* user,
+        size_t firstIndex, af_actor_owner_output_span output) nothrow @nogc @system
+{
+    immutable count = initialize is null ? input.count : output.count;
+    if (!validKind(r, kind) || output.count < count ||
+        !validSpan(output.data, output.stride, output.count, af_actor_owner.sizeof, af_actor_owner.alignof) ||
+        (count && firstIndex > size_t.max - (count - 1)) ||
+        (initialize is null && !validSpan(input.data, input.stride, count,
+            kind.options.state_bytes, 1)))
+        return af_actor_batch_result(0, setError(AF_INVALID, "invalid actor creation span or kind"));
+    foreach (i; 0 .. count)
+        if (!emptyOwner(element(output.data, output.stride, i)))
+            return af_actor_batch_result(0, setError(AF_INVALID, "actor output must be empty"));
+    size_t reserved;
+    auto slot = r.impl.reserveSlots(count, reserved);
+    auto remaining = reserved;
+    // All admission happens before callbacks. Return the unused suffix once.
+    scope(exit) r.impl.returnReservations(slot, remaining);
+    Initializer init = Initializer(initialize, user);
+    foreach (i; 0 .. reserved)
+    {
+        auto next = slot.freeNext;
+        ulong generation;
+        auto status = r.impl.constructReserved(slot,
+            initialize is null ? cast(const(void)*) element(cast(const(ubyte)*) input.data, input.stride, i) : null,
+            initialize is null ? null : &initializeState, &init, firstIndex + i,
+            kind.options.state_bytes, kind.options.state_alignment, &dispatch,
+            cast(ActorKind*) &kind.value, generation);
+        if (status != ActorConstructResult.created)
+            return af_actor_batch_result(i, setError(status == ActorConstructResult.allocationFailed
+                ? AF_ALLOCATION_FAILED : AF_ACTOR_INITIALIZER_FAILED, "actor construction failed"));
+        slot.freeNext = null;
+        *element(output.data, output.stride, i) = af_actor_owner(slot, generation);
+        slot = next;
+        --remaining;
+    }
+    return af_actor_batch_result(reserved, setError(reserved == count ? AF_OK : AF_FULL,
+        reserved == count ? null : "actor capacity full"));
+}
 // Internal bridge for the optional host. Borrowed wrappers are destroyed only
 // after the host joins consumers. Keep the allocator context alive through destroy.
 uint createActorRuntime(af_farm* f, size_t capacity, const(af_actor_allocator)* a,
@@ -122,17 +226,25 @@ uint createActorRuntime(af_farm* f, size_t capacity, const(af_actor_allocator)* 
 }
 bool actorRuntimeDrained(af_actor_runtime* r) nothrow @nogc @system
 {
-    return atomicLoad(r.owners) == 0 && r.impl.quiescent;
+    return r.impl.quiescent;
 }
 void finishActorRuntime(af_actor_runtime* r) nothrow @nogc @system
 {
-    if (atomicLoad(r.owners)) fatal("C ABI destroy actor runtime with live owners");
+    if (!actorRuntimeDrained(r)) fatal("C ABI destroy actor runtime with live owners or reservations");
+    auto allocator = runtimeAllocator(r);
+    for (auto k = r.kinds; k !is null;)
+    {
+        auto next = k.next;
+        allocator.deallocate(allocator.context, k, af_actor_kind.sizeof, af_actor_kind.alignof);
+        k = next;
+    }
+    r.kinds = null;
     r.impl.destroy();
     r.impl = null;
 }
 
 
-extern(C) alias CWaveOperation = void function(void*, void*, size_t) nothrow @nogc @system;
+extern(C) alias CWaveOperation = void function(void*, const(af_actor_kind)*, void*, size_t) nothrow @nogc @system;
 struct af_actor_wave
 {
     ActorWave value;
@@ -147,13 +259,13 @@ static assert(af_actor_wave_handle.sizeof == 16 && af_actor_wave_handle.alignof 
 
 private struct CActorHandleRange
 {
-    const(af_actor_handle)[] values;
-    @property size_t length() const pure nothrow @nogc @safe { return values.length; }
-    ActorErasedHandle opIndex(size_t i) pure nothrow @nogc @system
-    { return ActorErasedHandle(cast(ActorSlot*) values[i]._slot, values[i]._generation); }
-    CActorHandleRange opSlice(size_t lo, size_t hi) pure nothrow @nogc @safe
-    { return CActorHandleRange(values[lo .. hi]); }
-    size_t opDollar() const pure nothrow @nogc @safe { return values.length; }
+    af_actor_handle_span values;
+    @property size_t length() const pure nothrow @nogc @safe { return values.count; }
+    ActorErasedHandle opIndex(size_t i) nothrow @nogc @system
+    { return handle(element(values.data, values.stride, i)); }
+    CActorHandleRange opSlice(size_t lo, size_t hi) nothrow @nogc @system
+    { return CActorHandleRange(af_actor_handle_span(element(values.data, values.stride, lo), values.stride, hi - lo)); }
+    size_t opDollar() const pure nothrow @nogc @safe { return values.count; }
 }
 private ActorWaveHandle waveHandle(const(af_actor_wave_handle)* h) nothrow @nogc @system
 {
@@ -171,8 +283,7 @@ private bool waveReady(af_actor_wave* w) nothrow @nogc @system
 private void dispatchWave(scope ref ActorErasedBorrow borrow, void* context) nothrow @nogc @system
 {
     auto w = cast(af_actor_wave*) context;
-    auto p = cast(StatePrefix*) borrow.rawState();
-    w.operation(w.user, cast(ubyte*) p + p.offset, p.bytes);
+    w.operation(w.user, cast(af_actor_kind*) borrow.rawKind(), borrow.rawState(), borrow.stateSize);
 }
 private void waveCompleted(void* context) nothrow @nogc @system
 {
@@ -208,55 +319,60 @@ void af_actor_runtime_destroy(af_actor_runtime* r)
     atomicOp!"-="(r.farm.actorRuntimes, 1u);
     free(r);
 }
-uint af_actor_create(af_actor_runtime* r, const(void)* initial, size_t bytes, size_t alignment,
-    CActorHandler call, void* user, af_actor_owner** output)
+
+uint af_actor_kind_register(af_actor_runtime* r, const(af_actor_kind_options)* options,
+        const(af_actor_kind)** output)
 {
-    if (output is null) return setError(AF_INVALID, "null actor owner output");
+    if (output is null) return setError(AF_INVALID, "null actor kind output");
     *output = null;
-    if (r is null || r.impl is null || initial is null || !bytes || call is null ||
-        !alignment || (alignment & (alignment - 1)) || (!r.custom && alignment > 64) ||
-        cast(size_t) initial > size_t.max - bytes ||
-        alignment - 1 > size_t.max - StatePrefix.sizeof)
-        return setError(AF_INVALID, "invalid actor state or handler");
-    immutable offset = (StatePrefix.sizeof + alignment - 1) & ~(alignment - 1);
-    if (bytes > size_t.max - offset) return setError(AF_INVALID, "actor state size overflow");
-    immutable total = offset + bytes;
-    // The reservation remains until the D free-slot return completes. Hence a
-    // successful reservation guarantees capacity; a failed D create means OOM.
-    for (;;)
-    {
-        auto count = atomicLoad(r.owners);
-        if (count >= r.impl.capacity) return setError(AF_FULL, "actor capacity full");
-        if (cas(&r.owners, count, count + 1)) break;
-    }
-    auto o = allocate!af_actor_owner();
-    auto temp = cast(StatePrefix*) malloc(total);
-    if (o is null || temp is null)
-    {
-        free(o); free(temp); atomicOp!"-="(r.owners, size_t(1));
-        return setError(AF_ALLOCATION_FAILED, "actor creation buffer allocation failed");
-    }
-    memset(temp, 0, total);
-    *temp = StatePrefix(call, user, bytes, offset);
-    memcpy(cast(ubyte*) temp + offset, initial, bytes);
-    o.value = r.impl.erasedAdapter.createActor(temp, total,
-        alignment < StatePrefix.alignof ? StatePrefix.alignof : alignment, &dispatch);
-    free(temp);
-    if (!o.value.valid)
-    {
-        free(o); atomicOp!"-="(r.owners, size_t(1));
-        return setError(AF_ALLOCATION_FAILED, "actor state allocation failed");
-    }
-    o.runtime = r;
-    *output = o;
+    if (r is null || r.impl is null || options is null || options.handler is null ||
+        options.state_bytes == 0 || options.state_alignment == 0 ||
+        (options.state_alignment & (options.state_alignment - 1)) ||
+        (!r.custom && options.state_alignment > 64) ||
+        options.state_bytes > size_t.max - (options.state_alignment - 1))
+        return setError(AF_INVALID, "invalid actor kind");
+    if (!actorRuntimeDrained(r)) return setError(AF_BUSY, "register actor kind at quiescence");
+    auto allocator = runtimeAllocator(r);
+    auto k = cast(af_actor_kind*) allocator.allocate(allocator.context, af_actor_kind.sizeof, af_actor_kind.alignof);
+    if (k is null) return setError(AF_ALLOCATION_FAILED, "actor kind allocation failed");
+    *k = af_actor_kind.init;
+    k.runtime = r;
+    k.options = af_actor_kind_options(options.handler, cast(void*) options.user,
+        options.state_bytes, options.state_alignment, options.destroy);
+    k.value = ActorKind(k, options.destroy is null ? null : &destroyState);
+    k.next = r.kinds;
+    r.kinds = k;
+    *output = k;
     return setError(AF_OK);
 }
-void af_actor_owner_handle(af_actor_owner* o, af_actor_handle* output)
+uint af_actor_create_copy(af_actor_runtime* r, const(af_actor_kind)* kind,
+        const(void)* initial, af_actor_owner* output)
 {
-    requireOwner(o);
-    if (output is null) fatal("C ABI null actor handle output");
-    auto h = o.value.handle;
-    *output = af_actor_handle(h.slot_, h.generation_);
+    auto result = createActors(r, kind,
+        af_actor_state_span(initial, kind is null ? 0 : kind.options.state_bytes, 1),
+        null, null, 0, af_actor_owner_output_span(output, af_actor_owner.sizeof, 1));
+    return result.status;
+}
+uint af_actor_create_init(af_actor_runtime* r, const(af_actor_kind)* kind,
+        CActorInitializer initialize, void* user, size_t index, af_actor_owner* output)
+{
+    if (initialize is null) return setError(AF_INVALID, "null actor initializer");
+    return createActors(r, kind, af_actor_state_span.init, initialize, user, index,
+        af_actor_owner_output_span(output, af_actor_owner.sizeof, 1)).status;
+}
+af_actor_batch_result af_actor_create_copy_batch(af_actor_runtime* r, const(af_actor_kind)* kind,
+        af_actor_state_span input, af_actor_owner_output_span output)
+{ return createActors(r, kind, input, null, null, 0, output); }
+af_actor_batch_result af_actor_create_init_batch(af_actor_runtime* r, const(af_actor_kind)* kind,
+        CActorInitializer initialize, void* user, size_t firstIndex, af_actor_owner_output_span output)
+{
+    if (initialize is null) return af_actor_batch_result(0, setError(AF_INVALID, "null actor initializer"));
+    return createActors(r, kind, af_actor_state_span.init, initialize, user, firstIndex, output);
+}
+void af_actor_owner_handle(const(af_actor_owner)* o, af_actor_handle* output)
+{
+    if (o is null || output is null) fatal("C ABI null actor identity");
+    *output = af_actor_handle(cast(void*) o._slot, o._generation);
 }
 uint af_actor_wake(const(af_actor_handle)* h) { return cast(uint) handle(h).wake(); }
 uint af_actor_send(const(af_actor_handle)* h, af_actor_message* m)
@@ -264,23 +380,75 @@ uint af_actor_send(const(af_actor_handle)* h, af_actor_message* m)
     requireMessage(m);
     return cast(uint) handle(h).send(&m.value);
 }
-uint af_actor_request_retire(af_actor_owner* o, uint mode)
+uint af_actor_request_retire(af_actor_runtime* r, const(af_actor_owner)* o, uint mode)
 {
-    requireOwner(o);
-    if (mode > 1) fatal("C ABI invalid actor retire mode");
-    return cast(uint) o.value.requestRetire(cast(ActorRetireMode) mode);
+    if (!validOwner(r, o) || mode > 1) return setError(AF_INVALID, "invalid actor owner or retirement mode");
+    return retireBase + cast(uint) requestActorRetire(cast(ActorSlot*) o._slot, o._generation, cast(ActorRetireMode) mode);
 }
-uint af_actor_retired(const(af_actor_owner)* o) { requireOwner(o); return o.value.retired; }
-uint af_actor_reclaim(af_actor_owner* o)
+uint af_actor_retired(af_actor_runtime* r, const(af_actor_owner)* o, uint* output)
 {
-    requireOwner(o);
-    auto result = o.value.reclaim();
-    if (result == ActorReclaimResult.reclaimed)
+    if (!validOwner(r, o) || output is null) return setError(AF_INVALID, "invalid actor owner or query output");
+    *output = actorRetired(cast(ActorSlot*) o._slot, o._generation);
+    return setError(AF_OK);
+}
+uint af_actor_reclaim(af_actor_runtime* r, af_actor_owner* o)
+{
+    if (!validOwner(r, o)) return setError(AF_INVALID, "invalid actor owner");
+    auto slot = cast(ActorSlot*) o._slot;
+    auto generation = o._generation;
+    auto result = reclaimActor(slot, generation);
+    if (result == ActorReclaimResult.reclaimed || result == ActorReclaimResult.staleOwner)
+        *o = af_actor_owner.init;
+    return reclaimBase + cast(uint) result;
+}
+af_actor_batch_result af_actor_wake_batch(af_actor_handle_span input, af_actor_result_span output)
+{
+    if (output.count < input.count ||
+        !validSpan(input.data, input.stride, input.count, af_actor_handle.sizeof, af_actor_handle.alignof) ||
+        !validSpan(output.data, output.stride, output.count, uint.sizeof, uint.alignof))
+        return af_actor_batch_result(0, setError(AF_INVALID, "invalid actor wake span"));
+    size_t count;
+    foreach (i; 0 .. input.count)
     {
-        atomicOp!"-="(o.runtime.owners, size_t(1));
-        free(o);
+        auto result = af_actor_wake(element(input.data, input.stride, i));
+        *element(output.data, output.stride, i) = result;
+        if (result <= cast(uint) ActorWakeResult.coalesced) ++count;
     }
-    return cast(uint) result;
+    return af_actor_batch_result(count, setError(AF_OK));
+}
+af_actor_batch_result af_actor_request_retire_batch(af_actor_runtime* r, af_actor_owner_span input,
+        uint mode, af_actor_result_span output)
+{
+    if (r is null || r.impl is null || mode > 1 || output.count < input.count ||
+        !validSpan(input.data, input.stride, input.count, af_actor_owner.sizeof, af_actor_owner.alignof) ||
+        !validSpan(output.data, output.stride, output.count, uint.sizeof, uint.alignof))
+        return af_actor_batch_result(0, setError(AF_INVALID, "invalid actor retirement span"));
+    size_t count;
+    foreach (i; 0 .. input.count)
+    {
+        auto result = af_actor_request_retire(r, element(input.data, input.stride, i), mode);
+        *element(output.data, output.stride, i) = result;
+        if (result == retireBase + cast(uint) ActorRetireResult.requested ||
+            result == retireBase + cast(uint) ActorRetireResult.alreadyRetired) ++count;
+    }
+    return af_actor_batch_result(count, setError(AF_OK));
+}
+af_actor_batch_result af_actor_reclaim_batch(af_actor_runtime* r, af_actor_owner_output_span input,
+        af_actor_result_span output)
+{
+    if (r is null || r.impl is null || output.count < input.count ||
+        !validSpan(input.data, input.stride, input.count, af_actor_owner.sizeof, af_actor_owner.alignof) ||
+        !validSpan(output.data, output.stride, output.count, uint.sizeof, uint.alignof))
+        return af_actor_batch_result(0, setError(AF_INVALID, "invalid actor reclaim span"));
+    size_t count;
+    foreach (i; 0 .. input.count)
+    {
+        auto result = af_actor_reclaim(r, element(input.data, input.stride, i));
+        *element(output.data, output.stride, i) = result;
+        if (result == reclaimBase + cast(uint) ActorReclaimResult.reclaimed ||
+            result == reclaimBase + cast(uint) ActorReclaimResult.staleOwner) ++count;
+    }
+    return af_actor_batch_result(count, setError(AF_OK));
 }
 void af_actor_republish(af_actor_context* c) { requireContext(c); c.value.republish(); }
 void af_actor_retire(af_actor_context* c) { requireContext(c); c.value.retire(); }
@@ -292,19 +460,10 @@ af_actor_message* af_actor_pop(af_actor_context* c)
     return cast(af_actor_message*) c.value.popInbox();
 }
 size_t af_actor_cancel_inbox(af_actor_context* c) { requireContext(c); return c.value.cancelInbox(); }
-uint af_actor_message_create(void* payload, ulong tag, af_actor_message** output)
+void af_actor_message_init(af_actor_message* m, void* payload, ulong tag)
 {
-    if (output is null) return setError(AF_INVALID, "null actor message output");
-    *output = allocate!af_actor_message();
-    if (*output is null) return setError(AF_ALLOCATION_FAILED, "actor message allocation failed");
-    (*output).value.initialize(payload, tag);
-    return setError(AF_OK);
-}
-void af_actor_message_destroy(af_actor_message* m)
-{
-    if (m is null) return;
-    if (!m.value.available) fatal("C ABI destroy busy actor message");
-    free(m);
+    requireMessage(m);
+    m.value.initialize(payload, tag);
 }
 void af_actor_message_set(af_actor_message* m, void* payload, ulong tag)
 {
@@ -386,21 +545,15 @@ void af_actor_wave_observe(af_actor_wave* w, af_actor_wave_handle* output)
     if (output is null) fatal("C ABI null actor wave handle output");
     *output = af_actor_wave_handle(w, w.value.handle.generation);
 }
-size_t af_actor_wave_publish(af_actor_wave* w, const(af_actor_handle)* actors,
-        size_t count, af_token* token, uint cost)
+size_t af_actor_wave_publish(af_actor_wave* w, af_actor_handle_span actors,
+        af_token* token, uint cost)
 {
     requireWave(w);
     if (token is null || token.owner !is w.farm) fatal("C ABI foreign or null wave producer token");
     if (cost > MAX_AVG_COST) fatal("avgCost out of range");
-    if (count != 0)
-    {
-        if (actors is null) fatal("C ABI null nonempty wave span");
-        if (cast(size_t) actors % af_actor_handle.alignof) fatal("C ABI misaligned wave span");
-        if (count > size_t.max / af_actor_handle.sizeof ||
-            cast(size_t) actors > size_t.max - count * af_actor_handle.sizeof)
-            fatal("C ABI wave span size overflow");
-    }
-    return w.value.publishErased(CActorHandleRange(actors[0 .. count]),
+    if (!validSpan(actors.data, actors.stride, actors.count, af_actor_handle.sizeof, af_actor_handle.alignof))
+        fatal("C ABI invalid wave span");
+    return w.value.publishErased(CActorHandleRange(actors),
         token.value, &dispatchWave, w, cost);
 }
 void af_actor_wave_seal(af_actor_wave* w)
