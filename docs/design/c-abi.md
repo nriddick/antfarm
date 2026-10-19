@@ -19,10 +19,12 @@ all exports and callbacks use C linkage.
   FarmHost. It depends on the same core instance: never embed a second copy
   of the Farm identity allocator or fatal-handler state. Runtime initialization
   and shutdown are explicit. Runtime-owned worker threads are attached;
-  foreign threads entering runtime services must attach for their call lifetime.
+  foreign threads entering runtime services other than wake/state must attach
+  for their call lifetime.
 - **Public actors**: implemented in the core with native C link/run evidence.
   The optional D GC-rooted allocator is excluded from BetterC builds.
-  Waves are also runtime-free; private roots/children are the next increment.
+  Waves are also runtime-free. The actor API refresh below precedes private
+  root/child exports.
 - **Fibers**: outside ABI 1. A runtime-inclusive build need not expose Fibers.
 
 The first runtime distribution includes the non-Fiber pool requested for C
@@ -55,11 +57,30 @@ cl /nologo /std:c11 /MT /Iinclude examples/c_core.c .build/c-abi-ldc2-nt/antfarm
 
 The [core example](../../examples/c_core.c) publishes three C callbacks,
 waits through a table hook, and tears down its handles. It prints `sum = 10`.
-The C++11 wrapper supplies move-only `farm`, `producer`, and `consumer`;
-producers and consumers retain the Farm through cold-path shared ownership.
-Publication simply calls the C exports. Construction reports an
-`antfarm::error` containing the status, including retryable subscription
-failures. Destructors release handles; join work before teardown.
+The C++11 wrapper supplies move-only `farm`, `producer`, and `consumer`.
+Default construction leaves each empty in both exception-enabled and
+exception-disabled builds. Use `farm::create(out, options)`,
+`producer::create(out, farm, tier)`, and `consumer::create(out, farm)`;
+all are nonthrowing status-returning factories. Outputs must be empty
+(else `AF_BUSY`) and remain unchanged on failure. Consumer creation tries
+subscription exactly once: `AF_RETRY` leaves it empty for caller-directed retry.
+There is no implicitly blocking or throwing consumer constructor.
+
+Participants retain their Farm through an atomic ownership control block,
+allocated once per Farm with checked nonthrowing allocation. Allocation failure
+destroys the newly created Farm and returns `AF_ALLOCATION_FAILED`. Ownership
+increments are relaxed; the final acquire/release decrement joins earlier
+participant releases before Farm destruction. The wrappers themselves remain
+exclusive: concurrent mutation/destruction of one wrapper is invalid.
+Publication and polling simply call the C exports without reference-count work.
+Destructors release handles; join work before teardown.
+
+When exceptions are enabled, `farm::make(options)` and
+`producer::make(farm, tier)` are optional throwing conveniences. Their
+`antfarm::error` contains the status and a status-specific message.
+Factory status is authoritative: errors detected by the C++ wrapper itself
+(nonempty output or ownership allocation failure) do not replace the C thread
+diagnostic. This replaces ABI 1's earlier unreleased throwing constructors.
 
 Add `--runtime` to build the separate runtime archive with the same source revision and D
 compiler. Compile [c_host.c](../../examples/c_host.c) as C, then use that D
@@ -290,8 +311,8 @@ concurrent use. An embedding D program retains its own runtime reference.
 Only this control thread creates hosts/host actor runtimes, steps, registers host producers, closes or
 abandons hosts. These ownership checks remain active in release builds.
 
-Foreign threads call `af_runtime_attach_thread` before runtime services and
-`af_runtime_detach_thread` before exit. New attachments run D TLS constructors
+Foreign threads call `af_runtime_attach_thread` before runtime services other than
+wake/state and `af_runtime_detach_thread` before exit. New attachments run D TLS constructors
 and destructors; existing D thread attachments are borrowed and never detached.
 Hosts are explicitly rooted while C owns their handles. The session cannot
 shut down while a host or an ABI attachment remains. Init/shutdown are
@@ -316,20 +337,26 @@ rejects a borrowed host Farm; destroying a host-owned actor runtime directly
 is fatal. Close returns `AF_BUSY` until every owner is reclaimed and the ready
 queues are empty, then joins consumers before destroying actor storage and
 the Farm. Core actor operations remain callable from unattached native threads;
-only calls to runtime services require attachment.
+runtime lifecycle/control services require attachment.
 
 Wake after every accepted table and on idle/retry polls: sleeping views can pin
 completed epochs and prevent the producer reclaiming space. `af_host_step`
 wakes workers and advances the caller view, reporting worker failures.
-`af_host_wake` and `af_host_state` may be called by attached foreign threads
-while the handle remains live. No external caller may race handle release.
+`af_host_wake` and `af_host_state(host, &state)` may be called by any native
+thread without attachment while the handle remains live. Both return
+`AF_INVALID` for null arguments; the state output is unchanged on failure.
+Wake is a no-op on a non-open host. State also reports terminal states while
+the handle is still owned after a cleanup error. No external caller may race
+handle release: join/quiesce wake and state callers before close or abandon.
+The D host's in-flight wake interlock does not extend the C wrapper's lifetime.
 A blocking or consumer-control operation inside a Farm callback/hook is fatal.
 
 Close requires the application's completion signals for all raw C work; it
 cannot infer whether arbitrary application jobs are drained. Return extra
 tokens, unsubscribe external views, and quiesce external users first. Close
 joins workers and consumes the handle only on `AF_OK`. On an error the handle
-remains owned, so fix a busy precondition and retry; after a terminal cleanup
+remains owned. A D `FarmHostNotDrained` refusal maps to `AF_BUSY`, including
+attachment checks beyond the C prechecks. Fix the precondition and retry; after a terminal cleanup
 error a retry releases the terminal handle. `af_host_abandon` explicitly stops
 and joins workers while retaining the ring and unfinished work, matching the
 D host's emergency policy. This also leaks actor storage, outstanding owners
@@ -378,3 +405,150 @@ The full Linux gate additionally runs the native C/core, public actor and wave t
 Private roots/children, Fiber exports, shared-library packaging, and
 Rust/Zig ownership wrappers remain outside the shipped surface. Public actors
 can use application-supplied threads or the optional non-Fiber host.
+
+## Planned actor API refresh
+
+This section is a proposal, not the current exported contract. Implement it
+after the host/C++ contract fixes above and before private-root/child exports.
+ABI 1 is unreleased: update the header, implementation, examples and tests
+together instead of maintaining two actor interfaces. Keep the core/optional
+runtime distribution boundary and existing wave joins.
+
+### Runtime-owned actor kinds
+
+Register an immutable kind descriptor once per runtime: handler, handler user
+pointer, state byte size and alignment. Per-instance data belongs in actor
+state. A kind belongs to exactly one runtime and remains addressable until that
+runtime is destroyed; registration is a quiescent setup operation initially.
+Use the runtime's allocator for registry storage.
+
+Replace the unused eight-byte `ActorSlot.inboxPadding` with an internal kind
+pointer. Preserve the 128-byte slot size and 64-byte alignment, and initialize
+the pointer before the generation's release transition to idle. Typed D actors
+use null there. Autonomous C dispatch obtains the kind from its pinned slot
+through an internal context accessor; C wave dispatch takes the byte count
+directly from its borrow. Neither needs a prefix before the user's state.
+Clear the field only under exclusive reclamation, before returning the slot.
+
+### Sixteen-byte value owners
+
+Use distinct public owner and submission-handle types, each a slot pointer
+plus generation. Owners live in caller storage and need no allocated wrapper.
+Successful reclaim clears the supplied owner value; copied values remain
+capabilities for their recorded generation until made stale. Runtime destruction
+still requires external callers to be quiescent: a generation does not protect
+a pointer to an already destroyed slot array.
+
+The current D reclaim implementation assumes one exclusive owner. Its acquire
+load of the retired generation is followed by plain state reads and a free;
+there is no claim CAS. Generation checking alone does **not** prevent two copied
+owners concurrently freeing the same generation. Add an exclusive
+`retired -> reclaiming` CAS before reading/clearing reclaimable fields.
+Only the winner runs destruction, deallocates state, updates live/owner counts
+and returns the slot. Recheck the generation in the CAS, and preserve wave
+membership and closed-submission requirements. Losing calls report busy or
+stale without touching state. A vacant matching generation is already reclaimed,
+rather than indefinitely busy.
+
+Keep the normal D owner move-only. Specify the new reclaim phase and its
+release/acquire proof for both adapters. Runtime-scoped owner operations should
+take the C runtime explicitly, so provenance and reservation accounting do not
+depend on reading a kind pointer after another caller has reclaimed it.
+The value fields themselves still require caller synchronization: safe copied
+values do not authorize simultaneous writes to the same output object.
+
+### Copy and initializer creation
+
+Provide scalar copy and initializer forms, each implemented on the same
+construction primitive as the corresponding batch form. Allocate final state
+through the runtime allocator, initialize the kind pointer and final state,
+then release-publish idle. Remove the temporary state allocation, zero-and-copy
+pass and owner wrapper. Copy creation accepts byte-copyable state only.
+
+Initializer creation receives final aligned storage, a caller context and the
+logical input element index. It returns a status; it must not throw or longjmp.
+The slot is unavailable to wake/send until initialization succeeds and the owner
+is returned. No public reserve/commit state escapes the create call.
+
+Placement-new also needs a destruction contract. Add an optional kind destructor
+called exactly once by the winning reclaimer after retirement and before freeing
+storage. It executes on the reclaiming thread, outside allocator/free-slot gates,
+and must not throw. An initializer that reports failure must clean up any partial
+construction itself; the library frees that storage without calling the kind
+destructor. A successfully initialized object receives the registered destructor
+on normal reclaim. Emergency abandonment retains it under the existing policy.
+
+### Strided spans and batch results
+
+Represent actor sets by first-element pointer, byte stride and count. Provide
+const handle/owner input spans, mutable owner output spans and strided result
+spans. Starting at an entity's embedded owner/handle field with stride equal to
+the entity size requires no packing buffer. Validate alignment, minimum stride,
+count/stride/address overflow and output capacity before mutation; empty spans
+accept null pointers. Batch outputs must be empty owner values. Input/output/result
+element bytes must not overlap; their bounding spans may overlap when they address
+different fields in the same entity array. Stride validation does not establish
+backing allocation bounds; storage extent and lifetime remain the caller's
+responsibility.
+
+Batch copy/init creation uses one kind and returns a successful prefix plus the
+stop status (complete, capacity, allocation failure or initializer failure).
+Returned owners remain live on a partial result; the suffix remains empty.
+Provide a starting logical index for initializer callbacks so retries preserve
+indices after advancing the spans.
+
+Take the free-slot gate once to detach an available prefix into a private chain,
+then release it before allocation or any initializer/destructor callback.
+Initialize and publish outside the gate. On failure return the unused reserved
+suffix as a chain under one gate acquisition. Count in-progress reservations
+until they are committed or returned. This avoids both per-element gate entry
+on successful admission and holding a global gate across caller code.
+
+Batch wake, retire and reclaim attempt every element and report per-element
+results, so one stale or busy member does not hide later outcomes. Structural
+span errors reject the call before any action. Reclaim clears successful or
+confirmed-stale owner outputs, leaving busy owners available for retry. Scalar
+and batch calls share the same state-machine operations.
+
+Wave publication consumes a strided span through a nonallocating range. Preserve
+the existing accepted-prefix/one-physical-table contract, membership rollback,
+seal/drain obligation and finished-versus-ready distinction. Callers advance the
+span by the accepted count. Do not introduce an implicit wait or all-or-nothing
+transaction around the batch.
+
+### Caller-owned inbox messages
+
+Expose a 32-byte, eight-byte-aligned storage type matching `ActorInboxNode`,
+with size/alignment/offset assertions on both sides. Keep synchronization fields
+opaque; C/C++ code uses initialization, availability, outcome and payload/tag
+accessors rather than directly manipulating their representation. Do not expose
+C/C++ atomic types whose layout could vary between compilers.
+
+Replace allocating create/destroy with initialization of caller-exclusive
+storage. Messages may be embedded in entities, arenas or stack frames whose
+lifetimes cover the entire interaction. Once submitted they cannot move, be
+copied or be reinitialized until ownership returns. Release completion remains
+the last access to the node and its payload; reply wake snapshots the target
+before release, preserving the existing final-access guarantee.
+
+### Implementation and validation sequence
+
+1. Introduce exclusive reclaim arbitration with duplicate-owner interleavings,
+   slot reuse and wave-membership tests, keeping the typed D surface move-only.
+2. Add kinds and direct copy/init construction; test exact allocation sizes,
+   initializer rollback and exactly-once destruction with the custom allocator.
+3. Replace C owner wrappers and message allocation together with their examples
+   and host lifetime accounting.
+4. Add strided spans and batch admission/operations, then wave publication over
+   spans. Test embedded entity fields, mixed results, duplicate inputs, partial
+   capacity, allocation failure at each element and invalid span arithmetic.
+5. Compare C and D lifecycle workloads with the same states and allocator:
+   small/large state, scalar/batch, local/remote reclamation and mimalloc.
+   Count allocations/copies as well as time. There must be no native temporary
+   or owner allocation per actor, and no message allocation by the API.
+   Private cohort/slab exports follow separately and must retain their
+   per-cohort storage advantage.
+
+Run the normal BetterC, native C/C++, DMD/LDC, Linux/Windows and focused TSan
+checks for each changed protocol. Record performance limits under the existing
+optimization policy; do not infer C throughput from the typed-D wave benchmark.

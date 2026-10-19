@@ -30,7 +30,8 @@ typedef struct af_host_options {
    a session after shutdown. */
 af_status af_runtime_init(void);
 af_status af_runtime_shutdown(void);
-/* Foreign threads must attach before runtime services and detach before exit.
+/* Foreign threads must attach before runtime services other than wake/state,
+   and detach before exit.
    Already attached D threads are borrowed, never detached by this library.
    These calls include TLS constructors/destructors only for new attachments.
    Core-only C threads need neither function. */
@@ -52,8 +53,12 @@ af_status af_host_register_producer(af_host *, af_tier, af_token **out);
 af_status af_host_create_actors(af_host *, size_t capacity, const af_actor_allocator *,
                                af_actor_runtime **out);
 af_status af_host_step(af_host *);
-af_status af_host_wake(af_host *); /* attached threads, while handle remains live */
-uint32_t af_host_state(af_host *);
+/* Any native thread; neither call requires attachment. The handle must remain
+   live: quiesce external callers before close/abandon releases it. Wake is a
+   no-op when not open. State queries also accept still-owned terminal hosts.
+   NULL arguments return AF_INVALID; state output is unchanged on failure. */
+af_status af_host_wake(af_host *);
+af_status af_host_state(const af_host *, uint32_t *out_state);
 /* Call wake after accepted raw writes AND on idle/retry polls. With indefinite
    parks, sleeping consumer pins can otherwise block producer reclamation.
    step performs that wake and caller progress, and reports worker failures.

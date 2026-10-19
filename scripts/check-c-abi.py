@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Native C/C++ ABI, release contract deaths, and deterministic publication join."""
 import argparse
+import collections
 import importlib.util
 import os
 from pathlib import Path
+import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,21 +14,68 @@ build_api = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(build_api)
 
 
-def native(source, build, libraries, defines=()):
+def native(source, build, libraries, defines=(), no_exceptions=False):
     cpp = str(source).endswith(".cpp")
-    binary = build / (Path(source).stem + (".exe" if os.name == "nt" else ""))
+    name = Path(source).stem + ("-noexcept" if no_exceptions else "")
+    binary = build / (name + (".exe" if os.name == "nt" else ""))
+    if str(source).startswith("tests/cabi/"):
+        defines = (*defines, "NDEBUG")
     if os.name == "nt":
         build_api.msvc(["cl", "/nologo", "/std:c++14" if cpp else "/std:c11", "/W4", "/WX", "/MT",
-                        *(["/EHsc"] if cpp else []), "/Iinclude", "/Itests/cabi",
-                        *("/D" + x for x in defines), source, *libraries,
-                        "/Fo" + str(build / (Path(source).stem + ".obj")), "/Fe" + str(binary),
-                        "/link", "kernel32.lib", "advapi32.lib"], build)
+                        *(["/EHs-c-", "/D_HAS_EXCEPTIONS=0", "/U_CPPUNWIND"] if no_exceptions else
+                          ["/EHsc"] if cpp else []), "/Iinclude", "/Itests/cabi",
+                        *("/D" + x for x in defines), source,
+                        "/Fo" + str(build / (name + ".obj")), "/Fe" + str(binary),
+                        "/link", *libraries, "kernel32.lib", "advapi32.lib"], build)
     else:
         build_api.run([os.environ.get("CXX" if cpp else "CC", "c++" if cpp else "cc"),
                        "-std=c++11" if cpp else "-std=c11", "-Wall", "-Wextra", "-Werror",
+                       *(["-fno-exceptions"] if no_exceptions else []),
                        "-Iinclude", "-Itests/cabi", *("-D" + x for x in defines),
                        source, *libraries, "-pthread", "-o", binary])
     return binary
+
+
+def audit_symbols(library, headers, build, core=False):
+    """Inspect every archive member, including those no example happens to link."""
+    defined, undefined = [], set()
+    if os.name == "nt":
+        output = build_api.msvc(["dumpbin", "/symbols", library], build,
+                                capture_output=True, text=True).stdout
+        for line in output.splitlines():
+            if "External" not in line or "|" not in line:
+                continue
+            symbol = line.split("|", 1)[1].strip().split()[0]
+            if "UNDEF" in line:
+                undefined.add(symbol)
+            else:
+                defined.append(symbol)
+    else:
+        for flag, target in (("--defined-only", defined), ("--undefined-only", undefined)):
+            output = subprocess.check_output(["nm", "-g", flag, str(library)], text=True)
+            for line in output.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and len(parts[-2]) == 1:
+                    if isinstance(target, set):
+                        target.add(parts[-1])
+                    else:
+                        target.append(parts[-1])
+    text = "\n".join((ROOT / "include" / h).read_text() for h in headers)
+    expected = set(re.findall(r"^[A-Za-z_][\w\s*]*\b(af_\w+)\(", text, re.M))
+    exports = collections.Counter(s for s in defined if re.fullmatch(r"af_\w+", s))
+    if set(exports) != expected or any(n != 1 for n in exports.values()):
+        raise RuntimeError(f"archive/header mismatch: missing={expected - exports.keys()}, "
+                           f"extra={exports.keys() - expected}, duplicates="
+                           f"{[s for s, n in exports.items() if n != 1]}")
+    if core:
+        # Resolve internal references across archive members first. No unresolved
+        # D ABI symbol, runtime entry point, or GC function is allowed in core.
+        external = undefined - set(defined)
+        forbidden = [s for s in external if re.match(
+            r"(?:__imp_)?(?:_D|_d_|_aa|_ad|gc_|rt_|thread_)", s)]
+        if forbidden:
+            raise RuntimeError("core archive requires D runtime: " + ", ".join(sorted(forbidden)))
+    print(f"Archive audit passed: {library.name}, {len(exports)} header exports", flush=True)
 
 
 def native_runtime(source, build, libraries, compiler, probe=False):
@@ -34,16 +83,17 @@ def native_runtime(source, build, libraries, compiler, probe=False):
     binary = build / (Path(source).stem + (".exe" if os.name == "nt" else ""))
     if os.name == "nt":
         build_api.msvc(["cl", "/nologo", "/std:c11", "/W4", "/WX", "/MT", "/c",
-                        "/Iinclude", "/Itests/cabi", source, "/Fo" + str(obj)], build)
+                        "/Iinclude", "/Itests/cabi", "/DNDEBUG", source, "/Fo" + str(obj)], build)
         extra = ["kernel32.lib", "advapi32.lib"]
     else:
         build_api.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
-                       "-Iinclude", "-Itests/cabi", "-c", source, "-o", obj])
+                       "-Iinclude", "-Itests/cabi", "-DNDEBUG", "-c", source, "-o", obj])
         extra = ["-L-lpthread", "-L-lrt", "-L-latomic"]
     probe_objects = []
     if probe:
         probe_obj = build / ("runtime_probe.obj" if os.name == "nt" else "runtime_probe.o")
-        build_api.run([compiler, "-O", "-release", "-c", "tests/cabi/runtime_probe.d", "-of=" + str(probe_obj)])
+        build_api.run([compiler, "-O", "-release", "-I.", "-Icabi/source", "-Ithreadpool/source",
+                       "-c", "tests/cabi/runtime_probe.d", "-of=" + str(probe_obj)])
         probe_objects.append(probe_obj)
     build_api.run([compiler, obj, *probe_objects,
                    *libraries, *extra, "-of=" + str(binary)])
@@ -52,6 +102,7 @@ def native_runtime(source, build, libraries, compiler, probe=False):
 
 def runtime_checks(compiler, build, core):
     runtime = build_api.build_runtime(compiler, build)
+    audit_symbols(runtime, ["antfarm_runtime.h"], build)
     libraries = [runtime, core]
     binary = native_runtime("tests/cabi/runtime.c", build, libraries, compiler, probe=True)
     execute(binary)
@@ -96,18 +147,32 @@ def main():
     if args.tsan:
         build = build / "tsan"
     lib = build_api.build_core(args.compiler, build, sanitize=args.tsan)
+    audit_symbols(lib, ["antfarm.h", "antfarm_actors.h"], build, core=True)
     if args.tsan:
         for source in ("core", "actors", "waves"):
             obj = build / (source + "-main.o")
             binary = build / (source + "-tsan")
             build_api.run([os.environ.get("CC", "cc"), "-std=c11", "-g", "-O1", "-fsanitize=thread",
-                           "-Wall", "-Wextra", "-Werror", "-Iinclude", "-Itests/cabi",
+                           "-Wall", "-Wextra", "-Werror", "-Iinclude", "-Itests/cabi", "-DNDEBUG",
                            "-c", "tests/cabi/" + source + ".c", "-o", obj])
             build_api.run([args.compiler, "-betterC", "-fsanitize=thread", obj, lib, "-L-lpthread", "-of=" + str(binary)])
             execute(binary)
+        obj, binary = build / "cpp-main.o", build / "cpp-tsan"
+        build_api.run([os.environ.get("CXX", "c++"), "-std=c++11", "-g", "-O1",
+                       "-fno-exceptions", "-fsanitize=thread", "-Wall", "-Wextra", "-Werror",
+                       "-Iinclude", "-Itests/cabi", "-DNDEBUG", "-DAF_TEST_TSAN",
+                       "-c", "tests/cabi/cpp.cpp", "-o", obj])
+        build_api.run([args.compiler, "-betterC", "-fsanitize=thread", obj, lib,
+                       "-L-lstdc++", "-L-lpthread", "-of=" + str(binary)])
+        execute(binary)
         print("C ABI TSAN CHECKS PASSED", flush=True)
         return
     if not args.runtime_only:
+        # A whole-archive native link also rejects runtime dependencies not
+        # recognizable by name, including unused objects and unusual C exports.
+        whole = ["/WHOLEARCHIVE:" + str(lib)] if os.name == "nt" else [
+            "-Wl,--whole-archive", lib, "-Wl,--no-whole-archive"]
+        execute(native("tests/cabi/link_all.c", build, whole))
         binary = native("tests/cabi/core.c", build, [lib])
         execute(binary)
         for name, diagnostic in {
@@ -115,6 +180,7 @@ def main():
             "span": "null nonempty span", "overflow": "fixed body size overflow",
             "entry-overflow": "span size overflow", "hook": "hook requires a callback",
             "foreign": "foreign or null producer token", "farm-live": "live consumers",
+            "token-live": "live small ticket",
             "view-live": "destroy subscribed view", "nested": "inside Farm callback",
             "nested-hook": "inside Farm callback",
         }.items():
@@ -144,6 +210,9 @@ def main():
         }.items():
             execute(waves, name, death=diagnostic)
         execute(native("tests/cabi/cpp.cpp", build, [lib]))
+        execute(native("tests/cabi/cpp.cpp", build, [lib], no_exceptions=True))
+        execute(native("tests/cabi/cpp_failures.cpp", build, []))
+        execute(native("tests/cabi/cpp_failures.cpp", build, [], no_exceptions=True))
         execute(native("examples/c_core.c", build, [lib]))
         execute(native("examples/c_actors.c", build, [lib]))
         execute(native("examples/c_wave.c", build, [lib]))

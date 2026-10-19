@@ -52,6 +52,16 @@ Older release notes are in [docs/releases/](docs/releases/):
 - Added runtime-free C actor waves with erased state, prefix publication,
   generation-tagged observations, phase completion and a callback-return join
   before reuse/destruction. Waves also run on the optional non-Fiber host.
+- Host wake/state now accept unattached native threads. State queries return a
+  status plus an output state; null arguments are recoverable. Ordered close
+  refusals use `FarmHostNotDrained` and map to `AF_BUSY`.
+- C++ wrappers now default to empty, with nonthrowing status factories and
+  checked ownership allocation in exception-enabled and disabled builds.
+  Consumer creation returns transient retry to the caller. Optional
+  `farm::make`/`producer::make` conveniences throw only in enabled builds.
+- C ABI checks execute under NDEBUG, audit all archive exports/dependencies,
+  link every core member with a native C toolchain, and cover allocation
+  rollback, native registration churn and unattached host producers.
 - Native C/C++ checks cover both compilers, release failures, partial admission,
   concurrent joins, completion before write return, GC roots and parked hosts.
   Actor tests include native-thread creation/consumption and deterministic

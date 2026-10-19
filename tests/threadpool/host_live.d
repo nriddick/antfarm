@@ -259,7 +259,7 @@ void closeBeforeDrain()
     auto host = new FarmHost(guarded(0));
     auto runtime = host.createRuntime(1);
     auto owner = runtime.createActor!(Ledger, serve)(Ledger(0));
-    auto e = expectThrow!FarmHostException(() => host.close(), "close with a live actor");
+    auto e = expectThrow!FarmHostNotDrained(() => host.close(), "close with a live actor");
     enforce(e.msg.canFind("runtime#0 live=1"), e.msg);
     enforce(host.state == HostState.open, "close before drain leaves the host open");
     publicReplies(host); // still usable
@@ -412,7 +412,7 @@ void extraProducers()
     enforce(token.valid, "extra producer");
     expectThrow!FarmHostException(() { cast(void) host.registerProducer(); }, "beyond extraSmallProducers");
     expectThrow!FarmHostException(() { cast(void) host.registerProducer(Tier.bulk); }, "no bulk tier");
-    auto e = expectThrow!FarmHostException(() => host.close(), "outstanding producer");
+    auto e = expectThrow!FarmHostNotDrained(() => host.close(), "outstanding producer");
     enforce(e.msg.canFind("extra producer token outstanding") && host.state == HostState.open, e.msg);
     host.unregisterProducer(token);
     host.close();

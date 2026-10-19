@@ -1,3 +1,4 @@
+#include "check.h"
 #include "antfarm_actors.h"
 #include "threads.h"
 #include <stdio.h>
@@ -32,12 +33,12 @@ static void step(fixture *x) {
 }
 static void retire(fixture *x, af_actor_owner *o, unsigned mode) {
     unsigned r = af_actor_request_retire(o, mode);
-    assert(r == AF_ACTOR_RETIRE_REQUESTED || r == AF_ACTOR_ALREADY_RETIRED);
-    for (unsigned i = 0; !af_actor_retired(o); ++i) { assert(i < 100000); step(x); }
-    assert(af_actor_reclaim(o) == AF_ACTOR_RECLAIMED);
+    CHECK(r == AF_ACTOR_RETIRE_REQUESTED || r == AF_ACTOR_ALREADY_RETIRED);
+    for (unsigned i = 0; !af_actor_retired(o); ++i) { CHECK(i < 100000); step(x); }
+    CHECK(af_actor_reclaim(o) == AF_ACTOR_RECLAIMED);
 }
 static void teardown(fixture *x) {
-    assert(af_actor_runtime_live(x->runtime) == 0);
+    CHECK(af_actor_runtime_live(x->runtime) == 0);
     release_view(x->view); af_actor_runtime_destroy(x->runtime);
     af_unregister_producer(x->farm, x->token); af_destroy(x->farm);
 }
@@ -45,13 +46,13 @@ typedef struct state { unsigned calls, sum; } state;
 typedef struct report { unsigned calls, sum, expected_tag, alignment, limit; af_actor_context *saved; } report;
 static void handler(void *user, void *memory, size_t bytes, af_actor_context *c) {
     report *r = (report *)user; state *s = (state *)memory;
-    assert(bytes == sizeof *s && (uintptr_t)memory % r->alignment == 0);
+    CHECK(bytes == sizeof *s && (uintptr_t)memory % r->alignment == 0);
     r->saved = c; ++s->calls; r->calls = s->calls;
-    if (af_actor_cancelling(c)) { assert(af_actor_closing(c)); af_actor_cancel_inbox(c); return; }
+    if (af_actor_cancelling(c)) { CHECK(af_actor_closing(c)); af_actor_cancel_inbox(c); return; }
     af_actor_message *m;
     unsigned count = 0;
     while (count < r->limit && (m = af_actor_pop(c)) != NULL) {
-        assert(af_actor_message_tag(m) == r->expected_tag++);
+        CHECK(af_actor_message_tag(m) == r->expected_tag++);
         unsigned *value = (unsigned *)af_actor_message_payload(m);
         s->sum += *value; *value += 10;
         if (count == 0) af_actor_message_complete(m);
@@ -65,46 +66,46 @@ static void basic(void) {
     fixture x = setup(1, NULL); state initial = {7, 0}; report r = {0}; r.alignment = 64; r.limit = 3;
     af_actor_owner *o = NULL, *extra = NULL;
     check(af_actor_create(x.runtime, &initial, sizeof initial, 64, handler, &r, &o));
-    assert(initial.calls == 7 && af_actor_runtime_live(x.runtime) == 1);
-    assert(af_actor_create(x.runtime, &initial, sizeof initial, 8, handler, &r, &extra) == AF_FULL && !extra);
-    assert(af_actor_reclaim(o) == AF_ACTOR_RECLAIM_BUSY);
+    CHECK(initial.calls == 7 && af_actor_runtime_live(x.runtime) == 1);
+    CHECK(af_actor_create(x.runtime, &initial, sizeof initial, 8, handler, &r, &extra) == AF_FULL && !extra);
+    CHECK(af_actor_reclaim(o) == AF_ACTOR_RECLAIM_BUSY);
     af_actor_handle h; af_actor_owner_handle(o, &h);
-    assert(af_actor_wake(&h) == AF_ACTOR_QUEUED);
-    assert(af_actor_wake(&h) == AF_ACTOR_COALESCED && af_actor_runtime_ready(x.runtime) == 1);
-    assert(af_actor_runtime_flush(x.runtime, x.token, 0, 4) == 0);
+    CHECK(af_actor_wake(&h) == AF_ACTOR_QUEUED);
+    CHECK(af_actor_wake(&h) == AF_ACTOR_COALESCED && af_actor_runtime_ready(x.runtime) == 1);
+    CHECK(af_actor_runtime_flush(x.runtime, x.token, 0, 4) == 0);
     while (r.calls != 8) step(&x);
     enum { N = 7 }; unsigned values[N]; af_actor_message *messages[N];
     for (unsigned i = 0; i < N; ++i) {
         values[i] = i + 1; check(af_actor_message_create(values + i, i, messages + i));
-        assert(af_actor_message_available(messages[i]));
-        unsigned sent = af_actor_send(&h, messages[i]); assert(sent <= AF_ACTOR_COALESCED);
+        CHECK(af_actor_message_available(messages[i]));
+        unsigned sent = af_actor_send(&h, messages[i]); CHECK(sent <= AF_ACTOR_COALESCED);
     }
-    assert(af_actor_send(&h, messages[0]) == AF_ACTOR_NODE_BUSY);
+    CHECK(af_actor_send(&h, messages[0]) == AF_ACTOR_NODE_BUSY);
     while (!af_actor_message_available(messages[N - 1])) step(&x);
-    assert(r.expected_tag == N && r.sum == 28 && initial.sum == 0);
+    CHECK(r.expected_tag == N && r.sum == 28 && initial.sum == 0);
     for (unsigned i = 0; i < N; ++i) {
-        assert(values[i] == i + 11);
-        assert(af_actor_message_outcome(messages[i]) == i % 3);
-        assert(af_actor_message_failure(messages[i]) == (i % 3 == 1 ? 0x123456u : 0));
+        CHECK(values[i] == i + 11);
+        CHECK(af_actor_message_outcome(messages[i]) == i % 3);
+        CHECK(af_actor_message_failure(messages[i]) == (i % 3 == 1 ? 0x123456u : 0));
     }
     /* Reuse preserves the old reply until completion of this interaction. */
     af_actor_message_set(messages[1], &values[0], N);
-    assert(af_actor_message_outcome(messages[1]) == AF_ACTOR_FAILED);
-    assert(af_actor_send(&h, messages[1]) <= AF_ACTOR_COALESCED);
+    CHECK(af_actor_message_outcome(messages[1]) == AF_ACTOR_FAILED);
+    CHECK(af_actor_send(&h, messages[1]) <= AF_ACTOR_COALESCED);
     while (!af_actor_message_available(messages[1])) step(&x);
-    assert(af_actor_message_outcome(messages[1]) == AF_ACTOR_COMPLETED && r.sum == 39);
+    CHECK(af_actor_message_outcome(messages[1]) == AF_ACTOR_COMPLETED && r.sum == 39);
     /* Cancel an accepted interaction before flushing. */
     af_actor_message_set(messages[0], &values[0], N + 1);
-    assert(af_actor_send(&h, messages[0]) <= AF_ACTOR_COALESCED);
-    assert(af_actor_request_retire(o, AF_ACTOR_CANCEL) == AF_ACTOR_RETIRE_REQUESTED);
-    assert(af_actor_wake(&h) == AF_ACTOR_CLOSED);
-    assert(af_actor_send(&h, messages[2]) == AF_ACTOR_CLOSED && af_actor_message_available(messages[2]));
+    CHECK(af_actor_send(&h, messages[0]) <= AF_ACTOR_COALESCED);
+    CHECK(af_actor_request_retire(o, AF_ACTOR_CANCEL) == AF_ACTOR_RETIRE_REQUESTED);
+    CHECK(af_actor_wake(&h) == AF_ACTOR_CLOSED);
+    CHECK(af_actor_send(&h, messages[2]) == AF_ACTOR_CLOSED && af_actor_message_available(messages[2]));
     while (!af_actor_retired(o)) step(&x);
-    assert(af_actor_message_available(messages[0]) && af_actor_message_outcome(messages[0]) == AF_ACTOR_CANCELLED);
-    assert(af_actor_reclaim(o) == AF_ACTOR_RECLAIMED);
-    assert(af_actor_wake(&h) == AF_ACTOR_STALE_HANDLE);
+    CHECK(af_actor_message_available(messages[0]) && af_actor_message_outcome(messages[0]) == AF_ACTOR_CANCELLED);
+    CHECK(af_actor_reclaim(o) == AF_ACTOR_RECLAIMED);
+    CHECK(af_actor_wake(&h) == AF_ACTOR_STALE_HANDLE);
     check(af_actor_create(x.runtime, &initial, sizeof initial, 8, handler, &r, &o));
-    assert(af_actor_send(&h, messages[0]) == AF_ACTOR_STALE_HANDLE && af_actor_message_available(messages[0]));
+    CHECK(af_actor_send(&h, messages[0]) == AF_ACTOR_STALE_HANDLE && af_actor_message_available(messages[0]));
     retire(&x, o, AF_ACTOR_DRAIN);
     for (unsigned i = 0; i < N; ++i) af_actor_message_destroy(messages[i]);
     teardown(&x);
@@ -117,15 +118,15 @@ static void *custom_alloc(void *ctx, size_t bytes, size_t alignment) {
 #ifdef _WIN32
     void *p = _aligned_malloc(bytes, alignment);
 #else
-    assert(bytes <= SIZE_MAX - alignment + 1);
+    CHECK(bytes <= SIZE_MAX - alignment + 1);
     void *p = aligned_alloc(alignment, (bytes + alignment - 1) & ~(alignment - 1));
 #endif
     if (p) ++a->outstanding;
     return p;
 }
 static void custom_free(void *ctx, void *p, size_t bytes, size_t alignment) {
-    allocator_log *a = (allocator_log *)ctx; assert(p && bytes && alignment);
-    assert((uintptr_t)p % alignment == 0 && a->outstanding); --a->outstanding; ++a->frees;
+    allocator_log *a = (allocator_log *)ctx; CHECK(p && bytes && alignment);
+    CHECK((uintptr_t)p % alignment == 0 && a->outstanding); --a->outstanding; ++a->frees;
 #ifdef _WIN32
     _aligned_free(p);
 #else
@@ -134,31 +135,31 @@ static void custom_free(void *ctx, void *p, size_t bytes, size_t alignment) {
 }
 static void invalid_and_allocation(void) {
     af_farm *f = make_farm(); af_actor_runtime *r = (af_actor_runtime *)(uintptr_t)1;
-    assert(af_actor_runtime_create(f, 0, NULL, &r) == AF_INVALID && !r);
-    assert(af_actor_runtime_create(f, SIZE_MAX, NULL, &r) == AF_INVALID && !r);
+    CHECK(af_actor_runtime_create(f, 0, NULL, &r) == AF_INVALID && !r);
+    CHECK(af_actor_runtime_create(f, SIZE_MAX, NULL, &r) == AF_INVALID && !r);
     af_actor_allocator bad = {0};
-    assert(af_actor_runtime_create(f, 1, &bad, &r) == AF_INVALID);
+    CHECK(af_actor_runtime_create(f, 1, &bad, &r) == AF_INVALID);
     allocator_log log = {0}; log.fail = 1;
     af_actor_allocator a = {&log, custom_alloc, custom_free};
-    assert(af_actor_runtime_create(f, 1, &a, &r) == AF_ALLOCATION_FAILED && !r && !log.outstanding);
+    CHECK(af_actor_runtime_create(f, 1, &a, &r) == AF_ALLOCATION_FAILED && !r && !log.outstanding);
     log.fail = 0; check(af_actor_runtime_create(f, 1, &a, &r));
     state s = {0}; report report_ = {0}; report_.alignment = 256;
     af_actor_owner *o = (af_actor_owner *)(uintptr_t)1;
-    assert(af_actor_create(r, &s, 0, 8, handler, &report_, &o) == AF_INVALID && !o);
-    assert(af_actor_create(r, &s, sizeof s, 3, handler, &report_, &o) == AF_INVALID);
-    assert(af_actor_create(r, &s, SIZE_MAX, 8, handler, &report_, &o) == AF_INVALID);
-    assert(af_actor_create(r, &s, sizeof s, 8, NULL, NULL, &o) == AF_INVALID);
+    CHECK(af_actor_create(r, &s, 0, 8, handler, &report_, &o) == AF_INVALID && !o);
+    CHECK(af_actor_create(r, &s, sizeof s, 3, handler, &report_, &o) == AF_INVALID);
+    CHECK(af_actor_create(r, &s, SIZE_MAX, 8, handler, &report_, &o) == AF_INVALID);
+    CHECK(af_actor_create(r, &s, sizeof s, 8, NULL, NULL, &o) == AF_INVALID);
     log.fail = 1;
-    assert(af_actor_create(r, &s, sizeof s, 256, handler, &report_, &o) == AF_ALLOCATION_FAILED && !o);
+    CHECK(af_actor_create(r, &s, sizeof s, 256, handler, &report_, &o) == AF_ALLOCATION_FAILED && !o);
     log.fail = 0; check(af_actor_create(r, &s, sizeof s, 256, handler, &report_, &o));
     fixture x = {f, r, NULL, subscribe(f)}; check(af_register_producer(f, AF_SMALL, &x.token));
-    af_actor_handle h; af_actor_owner_handle(o, &h); assert(af_actor_wake(&h) == AF_ACTOR_QUEUED);
+    af_actor_handle h; af_actor_owner_handle(o, &h); CHECK(af_actor_wake(&h) == AF_ACTOR_QUEUED);
     while (!report_.calls) step(&x);
     retire(&x, o, AF_ACTOR_DRAIN); teardown(&x);
-    assert(log.outstanding == 0 && log.calls == log.frees + 2);
+    CHECK(log.outstanding == 0 && log.calls == log.frees + 2);
     af_actor_runtime_destroy(NULL); af_actor_message_destroy(NULL);
-    assert(af_actor_message_create(NULL, 0, NULL) == AF_INVALID);
-    assert(af_actor_wake(NULL) == AF_ACTOR_STALE_HANDLE);
+    CHECK(af_actor_message_create(NULL, 0, NULL) == AF_INVALID);
+    CHECK(af_actor_wake(NULL) == AF_ACTOR_STALE_HANDLE);
 }
 
 /* Republish state remains exclusive even when activations migrate among three
@@ -166,12 +167,12 @@ static void invalid_and_allocation(void) {
 static test_atomic ready, stop, finished, entered;
 static unsigned count_result;
 static void repeating(void *user, void *memory, size_t n, af_actor_context *ctx) {
-    (void)user; assert(n == sizeof(unsigned));
-    assert(test_add(&entered, 1) == 0);
+    (void)user; CHECK(n == sizeof(unsigned));
+    CHECK(test_add(&entered, 1) == 0);
     unsigned *value = (unsigned *)memory;
     if (++*value < 2000) af_actor_republish(ctx);
     else { count_result = *value; af_actor_retire(ctx); test_store(&finished, 1); }
-    assert(test_add(&entered, UINT32_MAX) == 1);
+    CHECK(test_add(&entered, UINT32_MAX) == 1);
 }
 TEST_THREAD(consumer) {
     af_view *v = subscribe((af_farm *)arg); test_add(&ready, 1);
@@ -184,10 +185,10 @@ static void concurrent(void) {
     unsigned initial = 0; check(af_actor_create(r, &initial, sizeof initial, _Alignof(unsigned), repeating, NULL, &o));
     test_thread workers[3]; for (unsigned i = 0; i < 3; ++i) workers[i] = test_start(consumer, f);
     while (test_load(&ready) != 3) test_yield();
-    af_actor_handle h; af_actor_owner_handle(o, &h); assert(af_actor_wake(&h) == AF_ACTOR_QUEUED);
+    af_actor_handle h; af_actor_owner_handle(o, &h); CHECK(af_actor_wake(&h) == AF_ACTOR_QUEUED);
     while (!af_actor_retired(o)) { af_actor_runtime_flush(r, t, 32, 4); test_yield(); }
-    assert(test_load(&finished) && count_result == 2000);
-    assert(af_actor_reclaim(o) == AF_ACTOR_RECLAIMED);
+    CHECK(test_load(&finished) && count_result == 2000);
+    CHECK(af_actor_reclaim(o) == AF_ACTOR_RECLAIMED);
     test_store(&stop, 1); for (unsigned i = 0; i < 3; ++i) test_join(workers[i]);
     af_actor_runtime_destroy(r); af_unregister_producer(f, t); af_destroy(f);
 }
@@ -201,8 +202,8 @@ TEST_THREAD(create_reclaim) {
         af_status result = af_actor_create(c->runtime, &s, sizeof s, _Alignof(unsigned), unused, NULL, &o);
         if (result == AF_FULL) { test_yield(); continue; }
         check(result); ++c->success;
-        assert(af_actor_request_retire(o, AF_ACTOR_DRAIN) == AF_ACTOR_RETIRE_REQUESTED);
-        assert(af_actor_retired(o) && af_actor_reclaim(o) == AF_ACTOR_RECLAIMED);
+        CHECK(af_actor_request_retire(o, AF_ACTOR_DRAIN) == AF_ACTOR_RETIRE_REQUESTED);
+        CHECK(af_actor_retired(o) && af_actor_reclaim(o) == AF_ACTOR_RECLAIMED);
     }
     TEST_RETURN;
 }
@@ -214,7 +215,7 @@ static void concurrent_creation(void) {
         threads[i] = test_start(create_reclaim, callers + i);
     }
     for (unsigned i = 0; i < 3; ++i) { test_join(threads[i]); total += callers[i].success; }
-    assert(total && !af_actor_runtime_live(r));
+    CHECK(total && !af_actor_runtime_live(r));
     af_actor_runtime_destroy(r); af_destroy(f);
 }
 
@@ -224,19 +225,19 @@ static af_actor_message *released_message;
 static af_actor_handle *released_target;
 static unsigned release_count, reply_kind;
 static void released(void) {
-    assert(af_actor_message_available(released_message));
-    assert(af_actor_message_outcome(released_message) == reply_kind);
+    CHECK(af_actor_message_available(released_message));
+    CHECK(af_actor_message_outcome(released_message) == reply_kind);
     memset(released_target, 0, sizeof *released_target);
     free(released_target); af_actor_message_destroy(released_message); ++release_count;
 }
 static void reply(void *user, void *memory, size_t n, af_actor_context *ctx) {
     (void)user; (void)memory; (void)n;
-    af_actor_message *m = af_actor_pop(ctx); assert(m);
+    af_actor_message *m = af_actor_pop(ctx); CHECK(m);
     const af_actor_handle *h = (const af_actor_handle *)af_actor_message_payload(m);
     unsigned result = reply_kind == 0 ? af_actor_message_complete_and_wake(m, h) :
         reply_kind == 1 ? af_actor_message_fail_and_wake(m, 42, h) :
         af_actor_message_cancel_and_wake(m, h);
-    assert(result == AF_ACTOR_QUEUED);
+    CHECK(result == AF_ACTOR_QUEUED);
 }
 static void final_access(void) {
     fixture x = setup(2, NULL); state s = {0}; report r = {0}; r.alignment = 8;
@@ -246,12 +247,12 @@ static void final_access(void) {
     af_actor_handle target; af_actor_owner_handle(receiver, &target);
     af_test_actor_after_completion(released);
     for (reply_kind = 0; reply_kind < 3; ++reply_kind) {
-        released_target = (af_actor_handle *)malloc(sizeof *released_target); assert(released_target);
+        released_target = (af_actor_handle *)malloc(sizeof *released_target); CHECK(released_target);
         af_actor_owner_handle(sender, released_target);
         check(af_actor_message_create(released_target, 0, &released_message));
-        assert(af_actor_send(&target, released_message) == AF_ACTOR_QUEUED);
+        CHECK(af_actor_send(&target, released_message) == AF_ACTOR_QUEUED);
         while (r.calls != reply_kind + 1) step(&x);
-        assert(release_count == reply_kind + 1);
+        CHECK(release_count == reply_kind + 1);
     }
     af_test_actor_after_completion(NULL);
     retire(&x, receiver, AF_ACTOR_DRAIN); retire(&x, sender, AF_ACTOR_DRAIN); teardown(&x);

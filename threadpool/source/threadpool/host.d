@@ -240,6 +240,16 @@ class FarmHostException : Exception
     }
 }
 
+/// Ordered close was refused before teardown. Repair the precondition and retry.
+class FarmHostNotDrained : FarmHostException
+{
+    /// The host remains open and usable; the message names each busy resource.
+    this(string msg, string file = __FILE__, size_t line = __LINE__) @safe pure nothrow
+    {
+        super(msg, null, file, line);
+    }
+}
+
 /// The options cannot be satisfied on this topology; nothing was created.
 /// Thrown by `FarmHost.resolve` and the constructor.
 class FarmHostResolveException : FarmHostException
@@ -911,7 +921,7 @@ final class FarmHost
 
     /// Ordered teardown: stop consumers, finish attachments, destroy parks and
     /// runtimes, restore the caller's affinity, unregister the token, destroy
-    /// the Farm. Throws `FarmHostException` with no side effects when anything
+    /// the Farm. Throws `FarmHostNotDrained` with no side effects when anything
     /// is not drained (the host stays open and usable). After a worker failure
     /// (state `failed`) it acts like `abandon()` and does not throw again.
     /// A no-op once closed or abandoned. Errors in later cleanup stages are
@@ -949,7 +959,7 @@ final class FarmHost
         if (!token_.valid)
             offenders ~= "the control token was moved out of host.token";
         if (offenders.length)
-            throw new FarmHostException("FarmHost.close: not drained: " ~ offenders.join("; ")
+            throw new FarmHostNotDrained("FarmHost.close: not drained: " ~ offenders.join("; ")
                 ~ (hasParks ? "; join every thread that may call requestCancel before close" : ""));
 
         // Non-open before the pool is torn down, so a concurrent wake()

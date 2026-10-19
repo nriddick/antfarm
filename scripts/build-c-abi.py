@@ -16,7 +16,7 @@ def run(command, **kwargs):
     return subprocess.run(command, cwd=ROOT, check=True, timeout=180, **kwargs)
 
 
-def msvc(command, build):
+def msvc(command, build, **kwargs):
     vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
     install = subprocess.check_output([str(vswhere), "-latest", "-products", "*",
                                       "-property", "installationPath"], text=True).strip()
@@ -24,7 +24,7 @@ def msvc(command, build):
     batch = build / "msvc.cmd"
     batch.write_text('@echo off\ncall "' + str(vcvars) + '" >nul\nif errorlevel 1 exit /b 1\n'
                      + subprocess.list2cmdline([str(x) for x in command]) + '\n', encoding="utf-8")
-    run(["cmd.exe", "/d", "/c", batch])
+    return run(["cmd.exe", "/d", "/c", batch], **kwargs)
 
 
 def library(build, name):

@@ -9,7 +9,7 @@ import core.runtime : Runtime;
 import core.stdc.stdlib : malloc, free;
 import core.thread : Thread, thread_attachThis, thread_detachThis;
 import core.time : Duration, dur;
-import threadpool.host : FarmHost, FarmHostOptions, FarmHostResolveException,
+import threadpool.host : FarmHost, FarmHostOptions, FarmHostResolveException, FarmHostNotDrained,
     CallerPlacement, WorkerIdle, HostState, HostAttachment;
 import threadpool.pool : CacheAwarePool;
 
@@ -49,7 +49,8 @@ private uint control() nothrow @nogc @system
 }
 private uint exception(Throwable e) nothrow @nogc @system
 {
-    return setError(cast(FarmHostResolveException) e !is null ? AF_INVALID : AF_RUNTIME_ERROR, e.msg);
+    return setError(cast(FarmHostResolveException) e !is null ? AF_INVALID :
+        cast(FarmHostNotDrained) e !is null ? AF_BUSY : AF_RUNTIME_ERROR, e.msg);
 }
 private void releaseHandle(af_host* h) nothrow @nogc @system
 {
@@ -276,15 +277,15 @@ uint af_host_step(af_host* h)
 }
 uint af_host_wake(af_host* h) @nogc
 {
-    if (auto status = attached()) return status;
     if (h is null) return setError(AF_INVALID, "null host");
     h.value.wake();
     return setError(AF_OK);
 }
-uint af_host_state(af_host* h) @nogc
+uint af_host_state(const(af_host)* h, uint* output) @nogc
 {
-    if (attached() != AF_OK || h is null) fatal("invalid C host state query");
-    return cast(uint) h.value.state;
+    if (h is null || output is null) return setError(AF_INVALID, "null host or state output");
+    *output = cast(uint) h.value.state;
+    return setError(AF_OK);
 }
 uint af_host_close(af_host* h)
 {
