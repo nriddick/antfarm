@@ -39,6 +39,17 @@ is reassessed holistically in dedicated sessions.
 - Public actors and waves now use the runtime-free core. Add
   private roots/children next; the D GC-rooted adapter stays out of BetterC builds.
   Fibers stay outside ABI 1.
+- The C wave bridge's existing typed-D `wave` path was compared at
+  `d94acc1` against `be025b1` with LDC 1.42 `-O2 -release`, mimalloc 3.5.3,
+  16,384 actors and distinct-core pins under Linux/WSL. Caller-only execution
+  passed the -3% boundary with 20 clean pairs: paired-median change **-0.63%**,
+  descriptive interval **[-2.70%, +0.80%]**. A byte-identical candidate/candidate
+  control also passed with 20 clean pairs. Six-consumer execution remained
+  **inconclusive**: 12 clean pairs from 40 attempts, short of the required 20,
+  after background-CPU exclusions. The combined performance gate therefore
+  did not pass. Preserve this limit for the holistic optimization session;
+  this comparison does not measure the new C dispatch bridge's throughput.
+  Local raw evidence is archived in `.build/cabi-waves-performance-evidence.zip`.
 
 ## Next
 
