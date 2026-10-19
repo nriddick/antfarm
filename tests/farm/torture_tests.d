@@ -936,7 +936,7 @@ void t17_write_size_wrap()
     // (singleton in (quotaSmall, quotaBulk]) must abort from a small-tier
     // producer - previously it cleared the farm-max check and then returned
     // write()==0 forever - and must be publishable from a bulk producer.
-    enum midLen = 1500; // compact ST singleton 40 + 1500 = 1540 in (512, 2048]
+    enum midLen = 1500; // compact singleton 37 + 1500 = 1537 in (512, 2048]
     auto mid = cast(ulong*) malloc(midLen * ulong.sizeof);
     check(mid !is null, "T17 mid");
     mid[0] = 0;
@@ -961,7 +961,7 @@ void t17_write_size_wrap()
             Callback header;
             header = callbackFor!countingCb();
             immutable quota = tier == Tier.small ? 512UL : 2048UL;
-            immutable overhead = 40UL;
+            immutable overhead = 37UL;
             immutable bodyWords = quota - overhead + (over ? 1 : 0);
             auto body = cast(ulong*) malloc(bodyWords * ulong.sizeof);
             check(body !is null, "T17 boundary allocation");
@@ -1040,7 +1040,7 @@ void t26_compact_singleton_contract()
     import core.sys.posix.signal : SIGABRT, SIGKILL, kill;
 
     enum size_t Lmax = 100;        // ST compact singleton == Qsmall.
-    enum ulong Qsmall = 40 + Lmax; // base 38 + index 1 + Call 1 + Plen.
+    enum ulong Qsmall = 37 + Lmax; // base 35 + index 1 + Call 1 + Plen.
     enum ulong Qbulk = 56 + Lmax;  // A larger tier does not relax the small-tier contract.
     auto f = AntFarm.create(2, 4, 1, 1, Qbulk, 1, Qsmall);
     auto tok = f.registerProducer(Tier.small);
