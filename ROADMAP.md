@@ -26,6 +26,13 @@ is reassessed holistically in dedicated sessions.
   no consistent benefit. A diagnostic with three padding words on index-free
   tables of at least four payloads recovered serial private-root throughput,
   but needs a complete performance/correctness evaluation before adoption.
+  The October 19 quieter-host retest still measured a -14.1% paired-median
+  change for `private` at zero consumers against 1.8.2 (`2182eb8`), using
+  LDC 1.42 `-O2 -release` on an i7-12700H under WSL2. The other two serial
+  private cases were inconclusive. Six-consumer samples also encountered
+  persistent CPU-accounting exclusions whose cause remains unresolved. Keep
+  these limits with the measurements; the 392-case grain grid verified output
+  throughout, but does not establish a general performance win.
 - Implement the [C ABI](docs/design/c-abi.md): core first, then the optional
   druntime-inclusive non-Fiber worker pool and FarmHost distribution.
 - Actors follow their allocator/runtime split; Fibers stay outside ABI 1.
