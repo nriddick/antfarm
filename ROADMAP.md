@@ -18,8 +18,14 @@ is reassessed holistically in dedicated sessions.
 
 ## 1.9.0 progress
 
-- Resolve the flat private-root performance regression observed against 1.8.2
-  before tagging 1.9. The five-word layout remains under performance review.
+- Revisit table spacing and actor-churn performance in a dedicated optimization
+  session. The 1.9 review retains the compact five-word layout. Compare
+  `private`, `private-remote` and `dtor` at zero and six consumers against 1.8.2,
+  alongside the grain grid, throughput and tail probes. Local same-binary
+  controls implicated fixed-table spacing; disabling the callback guard gave
+  no consistent benefit. A diagnostic with three padding words on index-free
+  tables of at least four payloads recovered serial private-root throughput,
+  but needs a complete performance/correctness evaluation before adoption.
 - Implement the [C ABI](docs/design/c-abi.md): core first, then the optional
   druntime-inclusive non-Fiber worker pool and FarmHost distribution.
 - Actors follow their allocator/runtime split; Fibers stay outside ABI 1.
