@@ -17,10 +17,10 @@ void require(bool ok, string message) nothrow @nogc @system
     if (!ok) fatal(message);
 }
 
-long callback(PayloadHeader*, PayloadBody) nothrow @nogc @system
+extern(C) void callback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
     ++calls;
-    return 1;
+    return;
 }
 
 struct PreparedRange
@@ -36,16 +36,16 @@ struct PreparedRange
 
 ulong writeWords(AntFarm* f, ulong words, bool permit = true) nothrow @nogc @system
 {
-    // Compact ST singleton (spec 2f): 40 words at SqCs=1 (at most two views).
-    auto n = cast(size_t)(words - 40);
+    // Compact ST singleton (spec 2f): 37 words at SqCs=1 (at most two views).
+    auto n = cast(size_t)(words - 37);
     auto body = cast(ulong*) malloc(n * ulong.sizeof);
     require(body !is null, "ordering allocation");
     scope(exit) free(body);
     body[0 .. n] = 0;
-    PayloadHeader h;
+    Callback h;
 
-    h.call = &callback;
-    PayloadEntry[1] entries = [PayloadEntry(&h, body[0 .. n])];
+    h = &callback;
+    PayloadEntry[1] entries = [PayloadEntry(h, body[0 .. n])];
     return f.write(PreparedRange(entries[], permit), *producer);
 }
 
@@ -169,8 +169,43 @@ void staleUnsubscribe()
     puts("PASS unsubscribe: no stale pulse can resurrect reclaimed epoch");
 }
 
+struct EarlyCompletion { bool returned; size_t notifications; }
+extern(C) void earlyDone(void* context) nothrow @nogc @system
+{
+    auto state = cast(EarlyCompletion*) context;
+    require(!state.returned && calls == 3, "finisher must join before write returns");
+    ++state.notifications;
+}
+void consumeAtPublication(AntFarm*, WriteAuditPhase phase, ulong, ulong) nothrow @nogc @system
+{
+    if (phase == WriteAuditPhase.tablePublished) require(consumer.consumeNext(), "published table visible");
+}
+void earlyCompletion()
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 256);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    require(view.subscribe(farm) >= 0, "early completion subscribe");
+    scope(exit) view.unsubscribe();
+    consumer = &view;
+    EarlyCompletion state;
+    auto hook = TableCompletionHook(&state, &earlyDone);
+    PayloadBody[3] emptyBodies;
+    calls = 0;
+    writeAuditHook = &consumeAtPublication;
+    scope(exit) writeAuditHook = null;
+    auto n = farm.write(&callback, emptyBodies[], 0, token, MAX_AVG_COST, &hook);
+    state.returned = true;
+    require(n == 3 && state.notifications == 1, "empty-body indexed table hook exactly once");
+    require(((atomicLoad(farm.buf[2]) >> 32) & 255) == 1, "zero bodies use kind one");
+    puts("PASS completion: zero-body uniform table joins and notifies before write returns");
+}
+
 void main(string[] args)
 {
+    if (args.length == 1 || args[1] == "early") earlyCompletion();
     if (args.length == 1 || args[1] == "s1") staleFallback();
     if (args.length == 1 || args[1] == "s2") staleUnsubscribe();
 }

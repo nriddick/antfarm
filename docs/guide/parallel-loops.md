@@ -2,7 +2,7 @@
 
 Import `antfarm.parallel` for finite, sliceable random-access ranges such as
 `iota`. Functions must accept one element by value and be `nothrow @nogc`;
-their return values are ignored. These are countable Farm payloads, with no
+their return values are ignored. These are single-shot Farm payloads, with no
 actor identity or Fiber suspension.
 
 ## Blocking loops
@@ -30,16 +30,18 @@ fatal, including in release builds. `continue` is allowed.
 
 **Never call a blocking parallel loop inside a Farm callback or table
 completion hook.** Re-entering the running view corrupts its walk; waiting
-without draining can deadlock all workers. Assertion builds track this with
-a thread-local flag and fatal before publishing, including for empty loops.
-Release builds retain the caller contract without the flag's overhead. Nested
+without draining can deadlock all workers. Every build tracks this with
+a thread-local flag and fatals before publishing, including for empty loops. Nested
 work uses asynchronous publication and a hook, or a private actor tree with
 its own structured join protocol.
 
 The view must belong to the token's Farm. Other consumers can help, but the
-caller can complete the region alone. When using parked workers, the host
-still owns waking them; these adapters do not integrate with `FarmHost`'s
-attachment or wake policy automatically.
+caller helps complete the region. Parked consumers can hold reclamation pins,
+so supply `Options.wake` and `wakeContext` to notify them after every accepted
+write and on idle polls. The callback/context must outlive the region.
+For a `FarmHost`, use `host.parallelFor!update(source, options)` on its control
+thread (requires caller consumption), or pass `host.parallelOptions(options)`
+to a low-level adapter. These loops do not pump actor attachments.
 
 ## Asynchronous submission
 
@@ -91,7 +93,7 @@ grains.popFrontN(cast(size_t) accepted); // accepted grains, not source elements
 ```
 
 These forward ranges compose with other entries, for example through
-`std.range.chain`, into a caller-owned `write`. Their temporary header/body
+`std.range.chain`, into a caller-owned `write`. Their temporary body
 buffers need only outlive that write; referenced data must outlive execution.
 A raw range supplies no aggregate completion notification. Supply an
 application join when mixing it into a batch.
@@ -136,13 +138,15 @@ Omitting the grain argument retains minimal per-element argument packing.
 (0..7), whose run claim chunking applies on top of the grain. For example,
 grain 64 with a claim chunk of eight can assign 512 source elements in one
 run. Tune both against workload cost and the desired distribution across
-workers. ST describes one payload's execution; separate grains run concurrently.
+workers. Separate grains run concurrently. A useful starting point is enough elements
+for a callback to take a few microseconds, then measure. Select `costClass`
+for that per-grain cost: one region publishes one class.
 
 ## Completion and lifetime proof
 
 Every region starts with a producer credit. It reserves an additional credit
 before each hooked `write`; a zero write rolls it back. The existing acq_rel
-shard and `Tprogress` chains join all callbacks in an admitted ST table. Its
+shard and `Tprogress` chains join all callbacks in an admitted table. Its
 hook then drops one region credit with acq_rel ordering.
 
 The producer advances the accepted suffix and relinquishes its credit only

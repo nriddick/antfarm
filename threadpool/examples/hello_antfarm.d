@@ -35,11 +35,12 @@ __gshared shared(long) g_sum;
 ConsumerView t_view;
 bool t_subscribed;
 
-long helloCb(PayloadHeader*, PayloadBody b) nothrow @nogc @system
+extern(C) void helloCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto b = bodyPtr[0 .. bodyWords];
     atomicFetchAdd(g_received[cast(size_t) b[0]], 1L);
     atomicFetchAdd(g_sum, cast(long) b[1]);
-    return 1;
+    return;
 }
 
 bool pump(WorkerSelf* w) nothrow @nogc @system
@@ -60,12 +61,12 @@ bool pump(WorkerSelf* w) nothrow @nogc @system
         auto tok = slot.farm.registerProducer(Tier.small);
         if (tok.valid)
         {
-            PayloadHeader hdr;
+            Callback hdr;
 
-            hdr.call = &helloCb;
+            hdr = &helloCb;
             ulong[2] buf = [w.llcIndex, 42];
             PayloadEntry e;
-            e.header = &hdr;
+            e.call = hdr;
             e.body = buf[];
             PayloadEntry[perGroup] batch = [e, e, e, e];
             ulong left = batch.length;

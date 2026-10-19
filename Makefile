@@ -8,7 +8,7 @@
 # Windows has a separate native Python runner. New tests stay on druntime
 # threads and atomics; the full correctness gate remains the Linux matrix.
 
-.PHONY: help check check-quick check-windows check-docs check-soak check-mimalloc docs perf-gate
+.PHONY: help check check-betterc check-quick check-windows check-docs check-soak check-mimalloc docs perf-gate
 
 # `help` is the first rule, so name the default goal explicitly.
 .DEFAULT_GOAL := check
@@ -21,6 +21,7 @@ Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Pytho
                            (bare `make` runs this)
   make check-quick         root, review torture, threadpool, fiber smoke, examples
                            (LDC toolchain including Dub and Python 3; no DMD/TSan)
+  make check-betterc       BetterC modules and native C callback/hook smoke
   make check-docs          tracked Markdown relative links and anchors (no network)
                            plus the API reference symbol/coverage check (needs DMD)
   make -C tests/farm check-parallel
@@ -72,6 +73,9 @@ WINDOWS_PYTHON ?= python
 WINDOWS_CHECK_ARGS ?=
 check-windows:
 	$(WINDOWS_PYTHON) -B scripts/check-windows.py $(WINDOWS_CHECK_ARGS)
+
+check-betterc:
+	python3 scripts/check-betterc.py
 
 check-docs:
 	python3 scripts/check-doc-links.py

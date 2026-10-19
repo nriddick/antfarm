@@ -177,7 +177,7 @@ Wcredits.fetchAdd(acq_rel)
 L.CAS(acq_rel,
   IDLE -> SCHEDULED)
 link member; Wowner.store(rel)
-writeTracked(...)
+write(...)
 Tsent.store(rel)       ---> Tsent.load(acq)
                             L.load(acq, SCHEDULED)
                             phase-specific ActorBorrow mutation
@@ -202,7 +202,7 @@ invoke cached optional completion
 ```
 
 The producer hold prevents completion while more tables can be published or
-while the writer still uses the descriptor after `writeTracked` returns. A zero
+while the writer still uses the descriptor after `write` returns. A zero
 write rolls back both Wlen and its reserved table credit. Each hook records
 diagnostic progress, completes its remaining descriptor accesses, then drops its
 credit. The final acquire/release decrement joins all prior participants and

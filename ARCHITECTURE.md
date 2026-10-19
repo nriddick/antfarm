@@ -28,11 +28,10 @@ quota and publish complete tables; consumers independently claim chunks. Work
 is not FIFO and a false `consumeNext()` result may be a temporary hole.
 
 The hot API is `@nogc nothrow`. Each payload callback runs exactly once and
-receives a borrowed 16-byte `PayloadHeader*` (body length and callback) plus
-a body of packed ulongs. The header is consumer-local and must not be modified
-or retained after return. Tables store compact records or bare bodies when
-callbacks are shared ([SPEC 2f](SPEC.md#2f-compact-st-tables) and
-[2g](SPEC.md#2g-uniform-call-st-tables)). Independent payloads can execute
+receives a borrowed body pointer and word count through a C-linkage void
+callback. The body must not be modified or retained after return. Tables store compact records or bare bodies when
+callbacks are shared ([SPEC 2f](SPEC.md#2f-compact-tables) and
+[2g](SPEC.md#2g-uniform-call-tables)). Independent payloads can execute
 concurrently. Grain adapters group source elements into single-shot payloads;
 construction, referenced-data lifetime and aggregate completion stay with
 the caller.
@@ -94,8 +93,8 @@ one-word Farm payload. It owns generations, waits, timers, cancellation,
 completion, lifecycle records, GC roots, and stack recycling. The Farm sees
 only ready activations.
 
-Each activation shares one callback/header and has a fixed one-word body—the
-task address—so publication uses the Farm's specialized common-header,
+Each activation shares one callback and has a fixed one-word body—the
+task address—so publication uses the Farm's specialized common-callback,
 fixed-length write path. A Fiber may resume on any eligible worker, and must
 not retain TLS-derived state across suspension.
 
@@ -193,9 +192,9 @@ per-entry cost depends on what the accepted prefix of one `write` call shares:
 
 | Accepted prefix | Per-entry cost | Layout |
 | --- | --- | --- |
-| single-threaded, one callback, one nonzero body length | the body words | [SPEC 2g](SPEC.md#2g-uniform-call-st-tables), index-free |
-| single-threaded, one callback | one index word and the body words | [SPEC 2g](SPEC.md#2g-uniform-call-st-tables) |
-| single-threaded, several callbacks | one index word, one callback word and the body words | [SPEC 2f](SPEC.md#2f-compact-st-tables) |
+| single-threaded, one callback, one nonzero body length | the body words | [SPEC 2g](SPEC.md#2g-uniform-call-tables), index-free |
+| single-threaded, one callback | one index word and the body words | [SPEC 2g](SPEC.md#2g-uniform-call-tables) |
+| single-threaded, several callbacks | one index word, one callback word and the body words | [SPEC 2f](SPEC.md#2f-compact-tables) |
 
 A shared callback is stored once per table, and a shared length once more. A
 one-word body therefore costs 1, 2 or 3 ring words per entry. The number of
@@ -204,7 +203,7 @@ row the prefix falls in. Do not copy a count from another configuration:
 compute it from the table layouts in [SPEC.md](SPEC.md#2-data-layout), or probe
 the configuration you intend to run. `write() == 0` and a short accepted prefix
 are ordinary backpressure, and the surplus is written by a later call.
-Use `AntFarm.canFit(header, bodyWords, tier)` to pre-check one payload's singleton
+Use `AntFarm.canFit(callback, bodyWords, tier)` to pre-check one payload's singleton
 cost against its tier quota; its answer uses the current consumer-count snapshot
 and can change as consumers join or leave (see [SPEC 5b.3](SPEC.md#5b-write-call-and-return)).
 

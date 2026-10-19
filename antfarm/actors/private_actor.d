@@ -25,7 +25,7 @@ module antfarm.actors.private_actor;
 import antfarm.actors.actor : ActorAllocator;
 version (AntfarmActorTestHooks)
     import antfarm.actors.actor : ActorTestPoint, actorTestPoint;
-import antfarm : AntFarm, Token, PayloadHeader, PayloadBody,
+import antfarm : AntFarm, Token, Callback, PayloadBody,
     TableCompletionHook, avgCostForChunk, rootCostHintAuto, rootCostHintFor, fatal;
 import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicExchange,
     atomicFetchAdd, atomicFetchSub, cas;
@@ -938,7 +938,7 @@ private void releaseWave(Wave* wave) nothrow @nogc @system
     // No access after the RMW unless we owned the final credit.
 }
 
-private void waveCompleted(void* context) nothrow @nogc @system
+private extern(C) void waveCompleted(void* context) nothrow @nogc @system
 {
     releaseWave(cast(Wave*) context);
 }
@@ -1098,7 +1098,7 @@ private struct Batch
 static assert(Batch.sizeof == 6 * size_t.sizeof,
     "private actor descriptor-overflow test assumes six machine words per Batch");
 
-private void rootsCompleted(void* context) nothrow @nogc @system
+private extern(C) void rootsCompleted(void* context) nothrow @nogc @system
 {
     auto batch = cast(Batch*) context;
     auto returns = batch.returns;
@@ -1513,19 +1513,17 @@ public:
             batch.entries[count++] = entry;
         }
         // Detached pointer values, not borrowed state. Even batch may be on
-        // the return queue by writeTracked's return, but only this emitter can
+        // the return queue by write's return, but only this emitter can
         // acquire/reuse it, and pump is non-reentrant.
-        PayloadHeader header;
+        Callback header;
 
-        header.plen = 1;
-        header.call = &runRoot;
+        header = &runRoot;
         auto bodies = RootBodies(batch.entries[0 .. count], batch);
         if (avgCost == rootCostHintAuto)
             avgCost = rootCostHintFor(count,
                 cast(ulong) atomicLoad!(MemoryOrder.raw)(service_.farm.Cf),
                 service_.farm.smallThreshold);
-        immutable n = cast(size_t) service_.farm.writeTracked(header, bodies, 1,
-            &batch.hook, token, avgCost);
+        immutable n = cast(size_t) service_.farm.write(header, bodies, 1, token, avgCost, &batch.hook);
         foreach (entry; batch.entries[n .. count])
         {
             appendReady(entry);
@@ -1659,8 +1657,9 @@ private:
         readyTail_ = entry;
     }
 
-    static long runRoot(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+    static extern(C) void runRoot(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
     {
+        auto body = bodyPtr[0 .. bodyWords];
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         auto borrow = PrivateBorrow!T(cast(T*) entry.state);
         auto service = rootService(entry, null);
@@ -1674,7 +1673,7 @@ private:
             static if (reclamation == PrivateRootReclamation.consumer)
                 freeMemory(service, entry.state, T.sizeof, T.alignof);
         }
-        return 1;
+        return;
     }
 }
 
@@ -1775,7 +1774,7 @@ private:
     uint avgCost_; // work-cost class of every table in the last nonempty wave
     uint* sel_;
     size_t k_;
-    PayloadHeader header_;
+    Callback header_;
     static if (hasResults)
     {
         R* results_;         // capacity_ slots, in participant order
@@ -1824,7 +1823,7 @@ private:
                 && PrivateChildPark.sizeof == PrivateChildPark!(T, R).sizeof + (void*).sizeof,
                 "cohortSlab appends one word to the perObject layout");
         else
-            static assert(PrivateChildPark.sizeof == (hasResults ? 280 : 264),
+            static assert(PrivateChildPark.sizeof == (hasResults ? 272 : 256),
                 "perObject child park layout changed");
     }
     @disable this(this);
@@ -2027,10 +2026,9 @@ public:
             resultCount_ = producesResults ? count_ : 0;
             version (assert) memset(resultWritten, 0, resultCount_);
         }
-        header_ = PayloadHeader.init;
+        header_ = Callback.init;
 
-        header_.plen = 1;
-        header_.call = retire ? &runChild!(operation, false, true)
+        header_ = retire ? &runChild!(operation, false, true)
             : &runChild!(operation, false, false);
         avgCost_ = avgCost;
         publishWave(context);
@@ -2067,10 +2065,9 @@ public:
             resultCount_ = producesResults ? k_ : 0;
             version (assert) memset(resultWritten, 0, resultCount_);
         }
-        header_ = PayloadHeader.init;
+        header_ = Callback.init;
 
-        header_.plen = 1;
-        header_.call = &runChild!(operation, true);
+        header_ = &runChild!(operation, true);
         base_.wave.emittable.emit = &emitSubset;
         avgCost_ = avgCost;
         publishWave(context);
@@ -2128,20 +2125,12 @@ private:
         if (park.truncated(wave)) return true;
         // A truncated retiring wave covers its remaining members with cleanup
         // tables. The header is local: emitResume still publishes header_.
-        PayloadHeader cleanupHeader = void;
-        const(PayloadHeader)* header = &park.header_;
-        if (park.cursor_ >= park.dispatched_)
-        {
-            cleanupHeader = park.header_;
-            cleanupHeader.call = &runSkippedRetire;
-            header = &cleanupHeader;
-        }
+        auto callback = park.cursor_ >= park.dispatched_ ? &runSkippedRetire : park.header_;
         auto remaining = park.count_ - park.cursor_;
         auto n = remaining > park.batchLimit_ ? park.batchLimit_ : remaining;
         auto bodies = ChildBodies(park.entries_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
-        immutable written = cast(size_t) park.base_.service.farm.writeTracked(
-            *header, bodies, 1, &wave.hook, token, park.avgCost_);
+        immutable written = cast(size_t) park.base_.service.farm.write(callback, bodies, 1, token, park.avgCost_, &wave.hook);
         if (written == 0) releaseWave(wave); // producer hold still protects it
         else ++tables;
         park.cursor_ += written;
@@ -2160,8 +2149,7 @@ private:
         auto n = remaining > park.batchLimit_ ? park.batchLimit_ : remaining;
         auto bodies = SubsetBodies(park.entries_, park.sel_[park.cursor_ .. park.cursor_ + n]);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
-        immutable written = cast(size_t) park.base_.service.farm.writeTracked(
-            park.header_, bodies, 1, &wave.hook, token, park.avgCost_);
+        immutable written = cast(size_t) park.base_.service.farm.write(park.header_, bodies, 1, token, park.avgCost_, &wave.hook);
         if (written == 0) releaseWave(wave);
         else ++tables;
         park.cursor_ += written;
@@ -2196,8 +2184,7 @@ private:
         auto n = base.resumeCount > park.batchLimit_ ? park.batchLimit_ : base.resumeCount;
         auto bodies = ResumeBodies(base, base.resumeHead, n);
         atomicFetchAdd!(MemoryOrder.acq_rel)(wave.pending, 1UL);
-        immutable written = park.base_.service.farm.writeTracked(
-            park.header_, bodies, 1, &wave.hook, token, park.avgCost_);
+        immutable written = park.base_.service.farm.write(park.header_, bodies, 1, token, park.avgCost_, &wave.hook);
         if (written == 0) releaseWave(wave); // P still pins the park
         else ++tables;
         if (base.resumeCount != 0) return false;
@@ -2232,9 +2219,9 @@ private:
                 actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
         }
     }
-    static long runChild(alias operation, bool subset = false, bool retiringWave = false)(PayloadHeader*, PayloadBody body)
-        nothrow @nogc @system
+    static extern(C) void runChild(alias operation, bool subset = false, bool retiringWave = false)(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
     {
+        auto body = bodyPtr[0 .. bodyWords];
         enum kind = opKind!(T, R, operation);
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         auto wave = entry.enclosing;
@@ -2297,7 +2284,7 @@ private:
                 releaseMember(entry); // custody release: final Entry access unless owner
                 version (AntfarmActorTestHooks)
                     actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
-                return 1; // completion now belongs to the last childPending releaser
+                return; // completion now belongs to the last childPending releaser
             }
             else park.writeResult(park.childResultSlot!subset(entry), operation(borrow, context));
         }
@@ -2314,7 +2301,7 @@ private:
                 entry.childFlags = 0;
                 releaseWave(wave); // H: final owner access
             }
-        return 1;
+        return;
     }
     static if (hasResults)
     {
@@ -2330,11 +2317,12 @@ private:
     // Cleanup header for undispatched members of a truncated retiring wave:
     // retire without calling the op or writing a result. The previous wave's
     // join included all descendants, so the member's children are idle.
-    static long runSkippedRetire(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+    static extern(C) void runSkippedRetire(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
     {
+        auto body = bodyPtr[0 .. bodyWords];
         auto entry = cast(Entry*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
         retireMember!(T, storage)(fromWave(entry.enclosing).base_.service, entry);
-        return 1;
+        return;
     }
     static void dispose(ChildBase* base) nothrow @nogc @system
     {

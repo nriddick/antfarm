@@ -28,10 +28,10 @@ import threadpool.pin;
 shared long gHits;
 shared int gStop;
 
-long payloadCb(PayloadHeader*, PayloadBody) nothrow @nogc @system
+extern(C) void payloadCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
     atomicFetchAdd(gHits, 1L);
-    return 1;
+    return;
 }
 
 __gshared AntFarm* gFarm;
@@ -88,18 +88,17 @@ AntFarm* makeFarm(uint consumers)
     return AntFarm.create(ringMiBFromUlongs(ln), k, consumers, 0, 0, slots, quotaSmall);
 }
 
-void fillChunk(ref PayloadHeader header, ref ulong word, PayloadEntry[] chunk)
+void fillChunk(ref Callback header, ref ulong word, PayloadEntry[] chunk)
 {
 
-    header.plen = 1;
-    header.call = &payloadCb;
+    header = &payloadCb;
     foreach (i; 0 .. chunk.length)
-        chunk[i] = PayloadEntry(&header, (&word)[0 .. 1]);
+        chunk[i] = PayloadEntry(header, (&word)[0 .. 1]);
 }
 
 double produceWait(AntFarm* farm, size_t n, uint avgCost, CacheAwarePool pool)
 {
-    PayloadHeader header;
+    Callback header;
     ulong word;
     PayloadEntry[256] chunk;
     fillChunk(header, word, chunk[]);
@@ -140,7 +139,7 @@ double runSt(size_t n, uint avgCost)
     ConsumerView v;
     immutable sub = subscribeOrThrow(v, farm);
     scope (exit) v.unsubscribe();
-    PayloadHeader header;
+    Callback header;
     ulong word;
     PayloadEntry[256] chunk;
     fillChunk(header, word, chunk[]);

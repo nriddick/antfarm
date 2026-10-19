@@ -66,7 +66,8 @@ long slowCountingCb(size_t idx) nothrow @nogc @system
 
 struct PayloadBatch
 {
-    PayloadHeader* headers;
+    Callback* headers;
+    size_t* lengths;
     ulong* bodyStore;   // contiguous backing for all bodies
     size_t bodyCap;
     size_t bodyUsed;
@@ -75,23 +76,24 @@ struct PayloadBatch
     long expectedCalls;
 }
 
-PayloadBatch makeBatch(size_t n, scope void delegate(size_t i, ref PayloadHeader h, ref size_t plen) fill)
+PayloadBatch makeBatch(size_t n, scope void delegate(size_t i, ref Callback h, ref size_t plen) fill)
 {
     PayloadBatch b;
     b.count = n;
-    b.headers = cast(PayloadHeader*) malloc(n * PayloadHeader.sizeof);
+    b.headers = cast(Callback*) malloc(n * Callback.sizeof);
+    b.lengths = cast(size_t*) malloc(n * size_t.sizeof);
     b.entries = cast(PayloadEntry*) malloc(n * PayloadEntry.sizeof);
-    check(b.headers !is null && b.entries !is null, "batch alloc");
+    check(b.headers !is null && b.lengths !is null && b.entries !is null, "batch alloc");
 
     // Size the actual bodies first: compact tables need more entries to lap
     // the ring, but should not reserve thousands of unused words per entry.
     foreach (i; 0 .. n)
     {
-        b.headers[i] = PayloadHeader.init;
+        b.headers[i] = Callback.init;
         size_t plen = 2;
         fill(i, b.headers[i], plen);
-        initPayloadHeader!countingCb(&b.headers[i]);
-        b.headers[i].plen = plen;
+        b.headers[i] = callbackFor!countingCb();
+        b.lengths[i] = plen;
         check(plen <= size_t.max - b.bodyCap, "body arena overflow");
         b.bodyCap += plen;
     }
@@ -101,14 +103,14 @@ PayloadBatch makeBatch(size_t n, scope void delegate(size_t i, ref PayloadHeader
 
     foreach (i; 0 .. n)
     {
-        immutable plen = cast(size_t) b.headers[i].plen;
+        immutable plen = b.lengths[i];
         check(b.bodyUsed + plen <= b.bodyCap, "body arena overflow");
         auto slice = b.bodyStore[b.bodyUsed .. b.bodyUsed + plen];
         // default body layout: [index, expected call count]
         if (plen >= 1) slice[0] = i;
         if (plen >= 2) slice[1] = 1U;
         foreach (k; 2 .. plen) slice[k] = k;
-        b.entries[i].header = &b.headers[i];
+        b.entries[i].call = b.headers[i];
         b.entries[i].body = slice;
         b.bodyUsed += plen;
         b.expectedCalls += 1U;
@@ -119,6 +121,7 @@ PayloadBatch makeBatch(size_t n, scope void delegate(size_t i, ref PayloadHeader
 void freeBatch(ref PayloadBatch b)
 {
     free(b.headers);
+    free(b.lengths);
     free(b.entries);
     free(b.bodyStore);
     b = PayloadBatch.init;

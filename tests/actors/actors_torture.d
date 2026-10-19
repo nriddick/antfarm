@@ -1985,8 +1985,7 @@ private class ReadyFlusher
     }
 }
 
-private long readyPadding(PayloadHeader*, PayloadBody)
-    nothrow @nogc @system { return 1; }
+private extern(C) void readyPadding(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system { return; }
 
 private void testReadyDrainHandoff()
 {
@@ -2096,11 +2095,11 @@ private void testReadyBacklog()
             && runtime.ready == actorCount - published,
         "partial table acceptance returns unwritten actors");
     auto deadline = MonoTime.currTime + 30.seconds;
-    PayloadHeader paddingHeader;
+    Callback paddingHeader;
 
-    paddingHeader.call = &readyPadding;
+    paddingHeader = &readyPadding;
     ulong[400] paddingBody;
-    PayloadEntry[1] padding = [PayloadEntry(&paddingHeader, paddingBody[])];
+    PayloadEntry[1] padding = [PayloadEntry(paddingHeader, paddingBody[])];
     while (farm.write(padding[], token, avgCostForChunk(32)) != 0)
         check(MonoTime.currTime < deadline, "ready backlog padding timeout");
     while (true)

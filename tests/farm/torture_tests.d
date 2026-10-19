@@ -24,18 +24,19 @@ __gshared shared(long) g_contentSum;
 __gshared shared(long) g_contentBad;
 __gshared shared(long) g_claimContractBad;
 
-private long claimContractCb(bool alternate)(PayloadHeader* head, PayloadBody body) nothrow @nogc @system
+private extern(C) void claimContractCb(bool alternate)(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    if (head.plen != body.length || head.call !is &claimContractCb!alternate)
-        atomicFetchAdd!(MemoryOrder.raw)(g_claimContractBad, 1L);
-    return countingCb(cast(size_t) body[0]);
+    auto body = bodyPtr[0 .. bodyWords];
+    if (body.length < 1) fatal("claim callback body too short");
+    countingCb(cast(size_t) body[0]);
 }
 
 private enum size_t T21_BODY_LEN = 32;
 private enum size_t T21_N = 30000;
 
-long contentSumCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
+extern(C) void contentSumCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto b = bodyPtr[0 .. bodyWords];
     // Count the call first so a corrupted body still advances the global
     // total and consumers do not spin until the watchdog.
     atomicFetchAdd(g_totalCalls, 1L);
@@ -45,7 +46,7 @@ long contentSumCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
     if (b.length != T21_BODY_LEN)
     {
         atomicFetchAdd(g_contentBad, 1L);
-        return 0;
+        return;
     }
 
     immutable idx = cast(size_t) b[0];
@@ -66,7 +67,7 @@ long contentSumCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
     if (!ok)
         atomicFetchAdd(g_contentBad, 1L);
     atomicFetchAdd(g_contentSum, cast(long) sum);
-    return 1;
+    return;
 }
 
 void defect(const(char)[] id, const(char)[] msg)
@@ -100,12 +101,12 @@ void t01_bad_header()
 
     bool expectAbort(const(char)[] label)
     {
-        PayloadHeader h;
-        initPayloadHeader!countingCb(&h);
-        h.call = null;
+        Callback h;
+        h = callbackFor!countingCb();
+        h = null;
         ulong body = 0;
         PayloadEntry e;
-        e.header = &h;
+        e.call = h;
         e.body = (&body)[0 .. 1];
         auto pid = fork();
         if (pid == 0)
@@ -141,7 +142,7 @@ void t02_single_shot_revisit()
     scope (exit) freeCalls();
 
     enum uint DONE = 1;
-    auto batch = makeBatch(1, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(1, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -181,16 +182,16 @@ void t16_position_ref_stall()
     scope (exit) f.destroy();
 
     enum N = 120;
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto headers = cast(Callback*) malloc(N * Callback.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
     ulong*[] bodies;
     bodies.length = N;
     foreach (i; 0 .. N)
     {
-        initPayloadHeader!countingCb(&headers[i]);
+        headers[i] = callbackFor!countingCb();
         bodies[i] = cast(ulong*) malloc(800 * ulong.sizeof);
         bodies[i][0] = i;
-        entries[i].header = &headers[i];
+        entries[i].call = headers[i];
         entries[i].body = bodies[i][0 .. 800];
     }
     allocCalls(N);
@@ -290,7 +291,7 @@ void t03_concurrent_exact()
     enum N = 6000;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -332,7 +333,7 @@ void t04_many_consumers_two_producers()
     enum N = 3000;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2 + (i % 4);
     });
     scope (exit) freeBatch(batch);
@@ -369,7 +370,7 @@ void t05_zero_consumer_gap()
     enum N = 1600;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2 + (i % 3);
     });
     scope (exit) freeBatch(batch);
@@ -453,7 +454,7 @@ void t06_subscription_storm()
     enum N = 5000;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -500,7 +501,7 @@ void t07_small_table_churn()
     enum N = 4500;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -545,7 +546,7 @@ void t08_spanning_tables()
     enum N = 64;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto headers = cast(Callback*) malloc(N * Callback.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
     auto huge = cast(ulong*) malloc(100000 * ulong.sizeof);
     auto large = cast(ulong*) malloc(34000 * ulong.sizeof);
@@ -553,18 +554,18 @@ void t08_spanning_tables()
     long expected;
     foreach (i; 0 .. N)
     {
-        initPayloadHeader!countingCb(&headers[i]);
+        headers[i] = callbackFor!countingCb();
         ++expected;
     }
     huge[0] = 0;
     large[0] = 1;
-    entries[0] = PayloadEntry(&headers[0], huge[0 .. 100000]);
-    entries[1] = PayloadEntry(&headers[1], large[0 .. 34000]);
+    entries[0] = PayloadEntry(headers[0], huge[0 .. 100000]);
+    entries[1] = PayloadEntry(headers[1], large[0 .. 34000]);
     foreach (i; 2 .. N)
     {
         small[(i - 2) * 2] = i;
         small[(i - 2) * 2 + 1] = 1;
-        entries[i] = PayloadEntry(&headers[i], small[(i - 2) * 2 .. (i - 2) * 2 + 2]);
+        entries[i] = PayloadEntry(headers[i], small[(i - 2) * 2 .. (i - 2) * 2 + 2]);
     }
     PayloadBatch batch;
     batch.headers = headers;
@@ -641,7 +642,7 @@ void t09_slow_single_shot()
     }
     PayloadBatch batch;
     batch.count = N;
-    batch.headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    batch.headers = cast(Callback*) malloc(N * Callback.sizeof);
     batch.entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
     batch.bodyStore = cast(ulong*) malloc(N * 2 * ulong.sizeof);
     batch.bodyCap = N * 2;
@@ -651,7 +652,7 @@ void t09_slow_single_shot()
     foreach (i; 0 .. N)
     {
         auto body = batch.bodyStore[i * 2 .. i * 2 + 2];
-        batch.entries[i] = payloadEntry!boundedSlowCb(&batch.headers[i], body, i);
+        batch.entries[i] = payloadEntry!boundedSlowCb(body, i);
         ++batch.expectedCalls;
     }
     batch.bodyUsed = N * 2;
@@ -701,7 +702,7 @@ void t11_late_subscriber_multilap()
     enum N = 300000;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2 + (i % 4);
     });
     scope (exit) freeBatch(batch);
@@ -729,7 +730,7 @@ void t12_no_reexecution_on_resub()
     enum N = 200;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -764,11 +765,11 @@ void t13_create_validation()
     check(f0.exmax == 1024, "nb0 exmax");
     auto tok = f0.registerProducer(Tier.small);
     check(tok.valid, "nb0 reg");
-    PayloadHeader h;
-    initPayloadHeader!countingCb(&h);
+    Callback h;
+    h = callbackFor!countingCb();
     ulong v = 7;
     PayloadEntry e;
-    e.header = &h;
+    e.call = h;
     e.body = (cast(const(ulong)*) &v)[0 .. 1];
     check(f0.write((&e)[0 .. 1], tok) == 1, "nb0 write");
     f0.unregisterProducer(tok);
@@ -785,7 +786,7 @@ void t14_k_geometry()
         enum N = 800;
         allocCalls(N);
         scope (exit) freeCalls();
-        auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
             plen = 2 + (i % 10);
         });
         scope (exit) freeBatch(batch);
@@ -804,7 +805,7 @@ void t15_wave_consumers()
     enum N = 4000;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2 + (i % 8);
     });
     scope (exit) freeBatch(batch);
@@ -884,11 +885,11 @@ void t17_write_size_wrap()
         return false;
     }
 
-    PayloadHeader h;
-    initPayloadHeader!countingCb(&h);
+    Callback h;
+    h = callbackFor!countingCb();
     ulong one = 42;
     PayloadEntry wrap;
-    wrap.header = &h;
+    wrap.call = h;
     auto p = cast(const(ulong)*)&one;
     wrap.body = p[0 .. (size_t.max - 16)];
 
@@ -898,7 +899,7 @@ void t17_write_size_wrap()
     check(big !is null, "T17 big");
     big[0] = 0;
     PayloadEntry unsized;
-    unsized.header = &h;
+    unsized.call = h;
     unsized.body = big[0 .. unsizedLen];
 
     immutable okWrap = expectAbort(wrap, "wrap");
@@ -907,8 +908,8 @@ void t17_write_size_wrap()
 
     // The arithmetic fixed-length path must reject a caller-supplied body
     // length whose singleton cost overflows, before inspecting body storage.
-    PayloadHeader mh;
-    initPayloadHeader!countingCb(&mh);
+    Callback mh;
+    mh = callbackFor!countingCb();
     PayloadBody[1] fixedBodies = [p[0 .. 1]];
     bool okFixedWrap;
     {
@@ -940,7 +941,7 @@ void t17_write_size_wrap()
     check(mid !is null, "T17 mid");
     mid[0] = 0;
     PayloadEntry midsize;
-    midsize.header = &h;
+    midsize.call = h;
     midsize.body = mid[0 .. midLen];
     immutable okMidSmall = expectAbort(midsize, "midsize-small");
     auto tokb = f.registerProducer(Tier.bulk);
@@ -957,8 +958,8 @@ void t17_write_size_wrap()
         {
             auto boundaryFarm = AntFarm.create(2, 4, 1, 1, 2048, 1, 512);
             scope (exit) boundaryFarm.destroy();
-            PayloadHeader header;
-            initPayloadHeader!countingCb(&header);
+            Callback header;
+            header = callbackFor!countingCb();
             immutable quota = tier == Tier.small ? 512UL : 2048UL;
             immutable overhead = 40UL;
             immutable bodyWords = quota - overhead + (over ? 1 : 0);
@@ -966,7 +967,7 @@ void t17_write_size_wrap()
             check(body !is null, "T17 boundary allocation");
             scope (exit) free(body);
             body[0 .. bodyWords] = 0;
-            PayloadEntry entry = PayloadEntry(&header, body[0 .. bodyWords]);
+            PayloadEntry entry = PayloadEntry(header, body[0 .. bodyWords]);
             immutable fits = boundaryFarm.canFit(header, bodyWords, tier);
             check(fits == !over, "T17 canFit boundary");
 
@@ -1089,10 +1090,10 @@ void t26_compact_singleton_contract()
     auto okBody = cast(ulong*) malloc(Lmax * ulong.sizeof);
     check(okBody !is null, "T26 ok body");
     foreach (i, ref w; okBody[0 .. Lmax]) w = i;
-    PayloadHeader st;
-    initPayloadHeader!countingCb(&st);
+    Callback st;
+    st = callbackFor!countingCb();
     PayloadEntry exAccept;
-    exAccept.header = &st;
+    exAccept.call = st;
     exAccept.body = okBody[0 .. Lmax];
     immutable wrote = f.write((&exAccept)[0 .. 1], tok);
     check(wrote == 1, "T26 exact-quota compact singleton accepted");
@@ -1101,7 +1102,7 @@ void t26_compact_singleton_contract()
     check(overBody !is null, "T26 over body");
     foreach (i, ref w; overBody[0 .. Lmax + 1]) w = i;
     PayloadEntry stOver;
-    stOver.header = &st;
+    stOver.call = st;
     stOver.body = overBody[0 .. Lmax + 1];
     immutable okSt = expectAbort(stOver, "compact-one-word-over");
 
@@ -1129,7 +1130,7 @@ void t18_pure_churn_orphan()
         auto f = AntFarm.create(2, 8, 8, 1, 4096, 4, 2048);
         enum N = 600;
         allocCalls(N);
-        auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
             plen = 2;
         });
 
@@ -1229,16 +1230,16 @@ void t20_plant_confirmed_segment()
         enum N = 10000;
         allocCalls(N);
         scope (exit) freeCalls();
-        auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+        auto headers = cast(Callback*) malloc(N * Callback.sizeof);
         auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
         auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
         scope (exit) { free(headers); free(bodies); free(entries); }
         long expected;
         foreach (i; 0 .. N)
         {
-            initPayloadHeader!countingCb(&headers[i]);
+            headers[i] = callbackFor!countingCb();
             bodies[i * 2] = i;
-            entries[i] = PayloadEntry(&headers[i], bodies[i * 2 .. i * 2 + 2]);
+            entries[i] = PayloadEntry(headers[i], bodies[i * 2 .. i * 2 + 2]);
             expected += 1;
         }
         atomicStore(g_totalCalls, 0);
@@ -1379,7 +1380,7 @@ void t21_payload_content_multilap()
 
     // Manual exact-size allocation; makeBatch's 4096-ulong-per-slot body
     // arena would be far larger than needed for N=30000.
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto headers = cast(Callback*) malloc(N * Callback.sizeof);
     auto bodies = cast(ulong*) malloc(N * BODY_LEN * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
     check(headers !is null && bodies !is null && entries !is null, "T21 alloc");
@@ -1392,12 +1393,12 @@ void t21_payload_content_multilap()
 
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
+        headers[i] = Callback.init;
 
-        headers[i].call = &contentSumCb;
+        headers[i] = &contentSumCb;
         foreach (k; 0 .. BODY_LEN)
             bodies[i * BODY_LEN + k] = i + k;
-        entries[i].header = &headers[i];
+        entries[i].call = headers[i];
         entries[i].body = bodies[i * BODY_LEN .. i * BODY_LEN + BODY_LEN];
     }
 
@@ -1468,7 +1469,7 @@ void t22_avgcost_sharding()
     }
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -1530,11 +1531,11 @@ void t25_single_shot_claim_contract()
         allocCalls(N);
         scope (exit) freeCalls();
         atomicStore!(MemoryOrder.raw)(g_claimContractBad, 0L);
-        auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
             plen = 47 + i % 3;
         });
         scope (exit) freeBatch(batch);
-        foreach (i; 0 .. N) batch.headers[i].call = i % 2
+        foreach (i; 0 .. N) batch.entries[i].call = i % 2
             ? &claimContractCb!true : &claimContractCb!false;
 
         enum NC = 8;
@@ -1596,7 +1597,7 @@ void t23_late_attach_under_wrap()
         scope (exit) f.destroy();
         allocCalls(N);
         scope (exit) freeCalls();
-        auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
 
             plen = 2;
         });
@@ -1678,7 +1679,7 @@ void t24_topology_hang_canary()
         scope (exit) f.destroy();
         allocCalls(N);
         scope (exit) freeCalls();
-        auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
 
             plen = 1;
         });

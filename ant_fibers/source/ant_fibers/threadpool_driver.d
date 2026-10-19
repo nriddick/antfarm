@@ -1008,7 +1008,7 @@ version (unittest)
         FiberWorkerState state;
         WorkerSelf worker;
         AntFarm*[] farms;
-        PayloadHeader header;
+        Callback header;
         ulong[1] word = [7];
         PayloadBody[1024] bodies;
 
@@ -1074,7 +1074,7 @@ version (unittest)
             }
             worker.context = cast(void*) state;
 
-            header.call = &noopRemoteService;
+            header = &noopRemoteService;
             foreach (ref body; bodies) body = word[];
         }
 
@@ -1109,8 +1109,7 @@ version (unittest)
         }
     }
 
-    private long noopRemoteService(PayloadHeader*, PayloadBody)
-        nothrow @nogc @system { return 0; }
+    private extern(C) void noopRemoteService(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system { return; }
 
     // Group 0 has one accepted CPU; every other group's one CPU is excluded.
     private PoolResolution fixtureResolution(ushort groups)

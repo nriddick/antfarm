@@ -12,12 +12,13 @@ void waitFlag(ref shared int flag) nothrow @nogc @system
     while (atomicLoad!(MemoryOrder.raw)(flag) == 0) Thread.yield();
 }
 void require(bool b, string s) nothrow @nogc @system { if (!b) fatal(s); }
-long cb(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+extern(C) void cb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     ulong sum;
     foreach (x; body) sum += x; // Plain ring reads must reach the later writer.
     atomicStore!(MemoryOrder.raw)(checksum, sum);
-    return 1;
+    return;
 }
 void reader()
 {
@@ -45,15 +46,15 @@ void lastLeaf()
 ulong writeWords(ref Token tok, ulong words)
 {
     auto sq = sqcsOf(atomicLoad!(MemoryOrder.raw)(f.Cf));
-    // Compact ST singleton (spec 2f): 40 + 8*(sq-1) words.
-    auto n = cast(size_t)(words - (40 + 8 * (sq-1)));
+    // Compact ST singleton (spec 2f): 37 + 8*(sq-1) words.
+    auto n = cast(size_t)(words - (37 + 8 * (sq-1)));
     auto body = cast(ulong*)malloc(n * 8);
     scope(exit) free(body);
     require(body !is null, "leaf body allocation");
     body[0..n] = 17;
-    PayloadHeader h;
-    h.call = &cb;
-    PayloadEntry[1] entries = [PayloadEntry(&h,body[0..n])];
+    Callback h;
+    h = &cb;
+    PayloadEntry[1] entries = [PayloadEntry(h,body[0..n])];
     return f.write(entries[],tok);
 }
 void main()

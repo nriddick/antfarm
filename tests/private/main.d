@@ -401,16 +401,17 @@ struct JoinBodies
     { scratch[0] = cast(ulong) probe; scratch[1] = index; return scratch[]; }
     void popFront() nothrow @nogc { ++index; }
 }
-long joinWork(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+extern(C) void joinWork(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     auto probe = cast(JoinProbe*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
     auto index = atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) (body.ptr + 1));
     atomicFetchAdd!(MemoryOrder.raw)(probe.entered, 1u);
     while (atomicLoad!(MemoryOrder.raw)(probe.entered) != 2) pause();
     probe.values[index] = index + 1; // no test release after this write
-    return 1;
+    return;
 }
-void joined(void* p) nothrow @nogc @system
+extern(C) void joined(void* p) nothrow @nogc @system
 {
     auto probe = cast(JoinProbe*) p;
     check(probe.values[0] == 1 && probe.values[1] == 2);
@@ -429,11 +430,10 @@ void sameShardJoin()
     {
         JoinProbe probe;
         TableCompletionHook hook = TableCompletionHook(&probe, &joined);
-        PayloadHeader header;
+        Callback header;
 
-        header.plen = 2;
-        header.call = &joinWork;
-        auto n = farm.writeTracked(header, JoinBodies(&probe), 2, &hook, token, MAX_AVG_COST);
+        header = &joinWork;
+        auto n = farm.write(header, JoinBodies(&probe), 2, token, MAX_AVG_COST, &hook);
         check(n == 2);
         auto deadline = MonoTime.currTime + hangTimeout;
         while (atomicLoad!(MemoryOrder.acq)(probe.done) == 0)
@@ -618,7 +618,7 @@ version (AntfarmWriteAuditHooks)
     {
         Counts counts;
         // One subscriber, no worker: the hook consumes each table before
-        // writeTracked returns. One fresh 4096 grant covers every table, so
+        // write returns. One fresh 4096 grant covers every table, so
         // quota cannot split a 5-, 7-, or 256-wide cohort into extra tables.
         auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
         scope(exit) farm.destroy();
@@ -865,9 +865,9 @@ void rootBatchDeath(bool createZero, bool overLimit)
     check(park !is null);
     park.pump(token, overLimit ? 258 : 0);
 }
-long avgCostDeathWork(PayloadHeader*, PayloadBody) nothrow @nogc @system
+extern(C) void avgCostDeathWork(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    return 1;
+    return;
 }
 // avgCost MAX_AVG_COST is the largest accepted class (the round-trip is
 // covered by the Farm and torture suites); one past it must be fatal.
@@ -875,12 +875,11 @@ void avgCostOverDeath()
 {
     auto farm = AntFarm.create();
     auto token = farm.registerProducer(Tier.small);
-    PayloadHeader header;
+    Callback header;
 
-    header.plen = 1;
-    header.call = &avgCostDeathWork;
+    header = &avgCostDeathWork;
     ulong[1] body;
-    PayloadEntry[1] entries = [PayloadEntry(&header, body[])];
+    PayloadEntry[1] entries = [PayloadEntry(header, body[])];
     farm.write(entries[], token, MAX_AVG_COST + 1);
     // Reaching this point means the fatal contract was not enforced.
 }
@@ -1779,7 +1778,7 @@ version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
         auto c = earlyChildControl;
         if (++c.tables != 1) return;
         // Mutation: set wave.pending to 0UL instead of 1UL in start (remove producer hold).
-        // A separate consumer completes the child while writeTracked is still on stack.
+        // A separate consumer completes the child while write is still on stack.
         atomicStore!(MemoryOrder.raw)(c.go, 1u);
         awaitRaw(c.consumed, 1u, "child completion before seal timeout");
         namedCheck(atomicLoad!(MemoryOrder.raw)(privateControl.calls) == 0,
@@ -2531,7 +2530,7 @@ version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
         if (++s.tables != 1) return; // first table after installation is the child's
         atomicStore!(MemoryOrder.raw)(s.go, 1u);
         awaitRaw(s.consumed, 1u, "E1 seal child completion before seal timeout");
-        // Child table fully joined, emitter still inside writeTracked: the only
+        // Child table fully joined, emitter still inside write: the only
         // root credit released so far is the collector's custody release, and the
         // root has not been woken.
         namedCheck(atomicLoad!(MemoryOrder.raw)(s.creditCalls) == 1, "E1 seal only custody released before seal");
@@ -2539,7 +2538,7 @@ version (AntfarmWriteAuditHooks) version (AntfarmActorTestHooks)
     }
 
     // The child table joins completely while the emitter is still inside the
-    // wave's writeTracked, after the collector released root custody. The only
+    // wave's write, after the collector released root custody. The only
     // remaining wave credit is the producer hold, so the emitter's seal in
     // PrivateChildPark.emit owns the wave's finish, the root's final credit and
     // the root-ready publication, all on the emitter thread, with no consumer
@@ -2763,13 +2762,13 @@ static assert(is(typeof(PrivateContext.init.createChildren!PItem(1)) == PVoidCoh
 static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1)) == PUlongCohort*));
 static assert(is(typeof(PrivateContext.init.createChildren!(PItem, ulong)(1, 2)) == PUlongCohort*));
 static assert(!__traits(compiles, PrivateContext.init.createChildren!(PItem, PNotPod)(1)));
-// ST-only metadata reduces the child park by 112 bytes to 264.
+// Body-only callbacks reduce the ST child park to 256 bytes.
 // Results add exactly two words; the cohort-slab variant appends one.
 // Entry's own 40-byte layout is asserted next to its definition and checked
 // through the allocation sizes in portsAllocationFailures.
 static if (size_t.sizeof == 8)
 {
-    static assert(PVoidCohort.sizeof == 264);
+    static assert(PVoidCohort.sizeof == 256);
     // The debug-only reentrancy flag (`version (assert) bool entered_`) adds a word.
     // Service.childReturns (E2-3) accounts for one word of both.
     // E2-4 reserves 48 more bytes in ChildBase for the resume descriptor/FIFO.
@@ -7235,14 +7234,14 @@ version (AntfarmWriteAuditHooks)
         auto c = cfControl;
         if (++c.publications != 1) return;
         atomicStore!(MemoryOrder.raw)(c.go, 1u);
-        awaitRaw(c.returned, 1u, "cont FIFO accepted prefix returned before writeTracked returns");
+        awaitRaw(c.returned, 1u, "cont FIFO accepted prefix returned before write returns");
         if (c.c.limit == 1)
             namedCheck(atomicLoad!(MemoryOrder.raw)(c.c.firstCalls) == 2 && atomicLoad!(MemoryOrder.raw)(c.c.secondCalls) == 1,
                 "cont partial FIFO accepts A and retains B");
     }
     // C14: independent cursor and accepted-prefix detachment. Run full drain
     // (two members) and partial drain ([A,B,C] accepts [A,B]); accepted entries
-    // republish while the emitter is still inside writeTracked. C-M8 races
+    // republish while the emitter is still inside write. C-M8 races
     // next links; C-M13 fails empty-tail invariant; C-M14 skips accepted A.
     void contFifo(PrivateRootReclamation reclaim)(size_t count, size_t limit = 2)
     {

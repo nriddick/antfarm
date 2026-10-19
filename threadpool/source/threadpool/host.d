@@ -23,6 +23,7 @@ import std.typecons : Rebindable;
 import antfarm.actors : ActorAllocator, ActorHandle, ActorReclaimResult, ActorRetireMode,
     ActorRetireResult, ActorRuntime, ActorWave, PrivateRootOptions, PrivateRootPark,
     PrivateRootReclamation;
+import antfarm.parallel;
 import antfarm : AntFarm, ConsumerView, FarmCreateError, FarmCreateFailure, Tier, Token,
     DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, SUBSCRIBE_RETRY, fatal;
 import threadpool.hybrid : ManagedWorkerHooks, WorkerSelf, gWorkers;
@@ -759,6 +760,34 @@ final class FarmHost
         scope (exit) atomicOp!"-="(wakers_, 1u);
         if (atomicLoad!(MemoryOrder.seq)(state_) == HostState.open)
             pool_.wakeAll();
+    }
+
+    /// Parallel-region options wired to this host's park/wake policy. The host
+    /// must outlive the region. Replaces the supplied wake callback/context.
+    antfarm.parallel.Options parallelOptions(
+        antfarm.parallel.Options options = antfarm.parallel.Options.init) @nogc nothrow
+    {
+        options.wake = &wakeParallel;
+        options.wakeContext = cast(void*) this;
+        return options;
+    }
+
+    private static void wakeParallel(void* context) @nogc nothrow
+    {
+        (cast(FarmHost) context).wake();
+    }
+
+    /// Blocking parallel loop on the control thread. Uses the host's token and
+    /// caller view, waking peers on publication and idle polls. Requires
+    /// callerConsumes; fatal inside a Farm callback, after shutdown, or without
+    /// a caller view. Mutable range storage is borrowed through the join.
+    void parallelFor(alias fn, R)(R source,
+        antfarm.parallel.Options options = antfarm.parallel.Options.init) @nogc nothrow
+    {
+        if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open || !viewSubscribed_)
+            fatal("FarmHost.parallelFor requires an open host with caller consumption");
+        version (assert) assertControl();
+        antfarm.parallel.parallelForWait!fn(source, token_, view_, parallelOptions(options));
     }
 
     // ---- progress -----------------------------------------------------------

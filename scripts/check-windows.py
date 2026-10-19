@@ -75,6 +75,7 @@ class Checks:
         self.run([binary, *arguments])
 
     def packages(self):
+        self.run([sys.executable, "-B", "scripts/check-betterc.py", "--compiler", self.compiler])
         for package in (None, ":threadpool", ":ant_fibers"):
             self.dub("test", package)
 

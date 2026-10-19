@@ -18,7 +18,7 @@ Register a bulk token only when the small quota cannot admit the batch you
 actually publish; adding bulk capacity also reserves more of the total budget.
 
 Publish useful batches: single-item writes pay table overhead every time.
-Common-header and fixed-length writes reduce producer sizing overhead for
+Common-callback and fixed-length writes reduce producer sizing overhead for
 homogeneous batches. They emit the same layout as equivalent `PayloadEntry`
 ranges and leave the consumer contract unchanged.
 
@@ -26,7 +26,7 @@ Private root batches and the Farm quota are different knobs. The park's
 configured batch limit fixes how many root-table slots are reserved.
 `pump(token, limit)` may use a smaller limit; that does not add slots. Actor
 tables share one callback and one body width per table, so they use the
-index-free uniform layout ([SPEC 2g](../../SPEC.md#2g-uniform-call-st-tables)):
+index-free uniform layout ([SPEC 2g](../../SPEC.md#2g-uniform-call-tables)):
 a private root or child entry costs one ring word, a public flush entry two and
 a public wave entry three, plus fixed table overhead that grows with the Farm's
 shard count; see

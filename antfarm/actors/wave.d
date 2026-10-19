@@ -21,7 +21,7 @@ module antfarm.actors.wave;
 
 public import antfarm.actors.actor : ActorBorrow, ActorHandle;
 
-import antfarm : AntFarm, PayloadBody, PayloadHeader, TableCompletionHook,
+import antfarm : AntFarm, PayloadBody, Callback, TableCompletionHook,
     Tier, Token, avgCostForChunk, fatal;
 import antfarm.actors.actor : ActorSlot, cancelActorWavePayload,
     dispatchActorWavePayload, releaseActorWaveMembership,
@@ -256,13 +256,11 @@ public:
         if (oldLength == ulong.max) fatal("actor wave table count wrap");
         atomicFetchAdd!(MemoryOrder.acq_rel)(pendingCredits_, 1UL);
 
-        PayloadHeader header;
+        Callback header;
 
-        header.plen = 3;
-        header.call = &actorWavePayloadCallback!(T, operation);
+        header = &actorWavePayloadCallback!(T, operation);
         auto bodies = ActorWaveBodyRange!T(actors, &this);
-        immutable written = cast(size_t) farm_.writeTracked(header, bodies,
-            3, &tableCompletion_, token, avgCost);
+        immutable written = cast(size_t) farm_.write(header, bodies, 3, token, avgCost, &tableCompletion_);
         if (written == 0)
         {
             immutable before = atomicFetchSub!(MemoryOrder.acq_rel)(
@@ -434,9 +432,9 @@ private ulong actorWaveBodyWord(PayloadBody body, size_t index)
         *cast(shared ulong*) (body.ptr + index));
 }
 
-private long actorWavePayloadCallback(T, alias operation)(PayloadHeader*,
-        PayloadBody body) nothrow @nogc @system
+private extern(C) void actorWavePayloadCallback(T, alias operation)(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     if (body.length != 3)
         fatal("actor wave payload length corrupt");
     auto slot = cast(ActorSlot*) cast(void*) actorWaveBodyWord(body, 0);
@@ -446,10 +444,10 @@ private long actorWavePayloadCallback(T, alias operation)(PayloadHeader*,
         fatal("actor wave payload identity corrupt");
     if (!dispatchActorWavePayload!(T, operation)(slot, generation))
         wave.setStatusBits(waveInterruptedBit);
-    return 1;
+    return;
 }
 
-private void actorWaveTableCompleted(void* context) nothrow @nogc @system
+private extern(C) void actorWaveTableCompleted(void* context) nothrow @nogc @system
 {
     auto wave = cast(ActorWave*) context;
     if (wave is null) fatal("actor wave completion lost owner");

@@ -21,7 +21,7 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    producer. See [views](../reference/actor-lifecycle.md#consumers-and-views)
    and [tokens](../reference/actor-lifecycle.md#tokens-and-farm-provenance).
 4. **Respect callback storage.** Callbacks are `nothrow @nogc @system`.
-   Do not retain or modify the `PayloadHeader*`. Packed parameter values are
+   Raw callbacks borrow a body pointer and word count until return. Packed parameter values are
    copied, but immutable references such as `string` still refer to external
    data: keep that data alive until the job finishes. See
    [the callback contract](../../SPEC.md#9-memory-order-contract) and
@@ -48,20 +48,21 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    workload allows it. Avoid single-item writes from callbacks; accumulate
    and flush per phase. Each table has fixed overhead. See
    [batch and quota decisions](sizing-and-allocation.md#configuring-batches-and-farm-quota).
-2. **Publish homogeneous tables.** All single-threaded entries sharing one
+2. **Publish homogeneous tables.** All entries sharing one
    callback and one nonzero body width use only the body words per entry.
    A one-word body costs 1 word in that layout, 2 with uniform callback but
    variable width, and 3 with mixed callbacks. Wider bodies add their own
-   words; these counts exclude fixed table overhead. Use common-header and
+   words; these counts exclude fixed table overhead. Use common-callback and
    fixed-length write forms to reduce producer sizing work. See
    [entries per quota](../../ARCHITECTURE.md#how-many-entries-fit-a-quota) and
-   [uniform tables](../../SPEC.md#2g-uniform-call-st-tables).
+   [uniform tables](../../SPEC.md#2g-uniform-call-tables).
 3. **Choose `avgCost` per table.** Chunk size is `128 >> avgCost`, with classes
    0 through 7. `write()` defaults to 3, claiming 16 entries; 0 claims 128 for
    very cheap
    uniform work; 5–6 claim 4 or 2 for expensive work where shorter visits and
    tails matter. These are tuning choices, not fixed nanosecond thresholds.
-   Group jobs by cost class before flushing. Small tables assign their work
+   Group jobs by cost class before flushing: `avgCost` is one value per write,
+   hence per table. Small tables assign their work
    to shard 0, still in chunks. See
    [work-cost hints](sizing-and-allocation.md#work-cost-hints).
 4. **Size ring and quota separately.** Fit the ring to the intended LLC working
@@ -82,11 +83,11 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    the Director or host idle policy. `host.waitUntil` drives control-thread
    progress; it is not automatic core parking. A stalled older segment makes
    idle polls revisit its incomplete suffix, using a persistent sweep cursor.
-   Keep callbacks short or expose independent iterations with a countable
-   payload (`done > 1`, `maxCs >= 2`). See
+   Keep callbacks short or publish independent grains with
+   `payloadRange!fn(source, grain)`. See
    [host progress and waking](hosting.md#progress-and-waking),
    [reclamation](../../SPEC.md#8-table-accounting-and-segment-reclamation), and
-   [payload headers](../../SPEC.md#2d-payload-layout).
+   [payload layout](../../SPEC.md#2d-payload-layout).
    For large cohorts of cheap callbacks, measure the child batch limit and
    host emission burst before adding workers: small tables can spend more
    time waking the pool than doing work. See

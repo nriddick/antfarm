@@ -31,10 +31,10 @@ run from the repository root on Linux x86-64. Bare `make` runs it too. The full
 lane matrix, prerequisites, focused entry points, and optional lanes are in
 [docs/development/testing.md](docs/development/testing.md).
 
-For a portable local iteration check, run `make check-quick`. It runs the root
+For a portable local iteration check, run `make check-quick`. It runs the BetterC/native-C link check, root
 unit tests, plain review-torture suite, threadpool unit tests, fiber smoke suite,
 and LDC debug/release examples. It needs the LDC toolchain (including Dub), Python
-3, GNU make and Bash; it uses neither DMD nor TSan. `make check` retains the full
+3, GNU make, Bash and a C11 compiler; it uses neither DMD nor TSan. `make check` retains the full
 matrix and remains the correctness gate.
 
 On Windows x64, use `python -B scripts/check-windows.py` for the native

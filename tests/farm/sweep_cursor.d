@@ -30,8 +30,9 @@ bool isParker; // thread-local: set only on consumer A's thread
 __gshared shared(int) parked, release, stopA;
 __gshared shared(long) holdCalls, stCalls;
 
-long sweepCb(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+extern(C) void sweepCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     if (body[0] == HOLD_TAG)
     {
         if (isParker)
@@ -44,7 +45,7 @@ long sweepCb(PayloadHeader*, PayloadBody body) nothrow @nogc @system
     }
     else
         atomicFetchAdd!(MemoryOrder.raw)(stCalls, 1L);
-    return 1;
+    return;
 }
 
 void waitFor(shared(int)* flag, const(char)[] what)
@@ -80,17 +81,17 @@ void main()
     auto tok = f.registerProducer(Tier.bulk);
     check(tok.valid, "reg");
 
-    PayloadHeader stHead, holdHead;
+    Callback stHead, holdHead;
 
-    stHead.call = &sweepCb;
+    stHead = &sweepCb;
 
 
-    holdHead.call = &sweepCb;
+    holdHead = &sweepCb;
     ulong[2] stBody = [ST_TAG, 0];
     ulong[HOLD_BODY] holdBody;
     holdBody[0] = HOLD_TAG;
-    auto st = PayloadEntry(&stHead, stBody[]);
-    auto held = PayloadEntry(&holdHead, holdBody[]);
+    auto st = PayloadEntry(stHead, stBody[]);
+    auto held = PayloadEntry(holdHead, holdBody[]);
 
     ConsumerView b;
     immutable e = b.subscribe(f);

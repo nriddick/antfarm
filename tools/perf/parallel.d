@@ -1,4 +1,4 @@
-/++ M1: countable parallel ranges, standalone or composed with other payloads.
+/++ M1: grained parallel ranges, standalone or composed with other payloads.
  + Build with `make -C tools/perf parallel`. See README.md for the grid.
  +/
 module parallel_bench;

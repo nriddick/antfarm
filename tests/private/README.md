@@ -10,7 +10,7 @@ make -C tests/private run-death-dmd
 
 Tests force ordinary pages and a 2 MiB Farm for ring reuse and backpressure;
 performance measurements use 8 MiB. A same-thread publication audit hook
-consumes each table after its sentinel release but before `writeTracked`
+consumes each table after its sentinel release but before `write`
 returns. Consumer reclamation frees terminal root state in that interval;
 nested child waves also finish before their producer has sealed publication.
 The hook compiles out of ordinary builds.
@@ -74,7 +74,7 @@ count with the existing same-thread publication hook.
 
 With `AntfarmActorTestHooks`, deterministic tests pause a final wave before idle
 publication, force exactly one return-stack CAS retry, and complete a child
-table while its emitter is still inside `writeTracked`. Parent observations
+table while its emitter is still inside `write`. Parent observations
 always use a live callback context. Raw control flags do not publish callback
 results; result visibility must come from the library joins. Release builds
 without the test version have identical private-module sizes at the rewritten

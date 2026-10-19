@@ -38,11 +38,11 @@ counter and scheduled flag are emitter-owned and reserved at cohort creation.
 - The common child Entry is **40 bytes**. Root-only disposition, flags and the
   checked 32-bit counter occupy the child enclosing-pointer union; static
   asserts verify size and offsets. `PrivateContext` stays four words.
-- On 64-bit targets a signal-only per-object cohort is **264 bytes**, including
+- On 64-bit targets a signal-only per-object cohort is **256 bytes**, including
   both emission descriptors, resume FIFO, wave outcomes, cancellation root
-  pointer and subset metadata. The ST-only 16-byte payload header removes
-  112 bytes from the previous 376-byte cohort.
-- Result cohorts add two words, for **280 bytes**. The cohort-slab policy
+  pointer and subset metadata. The callback pointer removes
+  120 bytes from the previous 376-byte cohort.
+- Result cohorts add two words, for **272 bytes**. The cohort-slab policy
   appends one pointer to either layout. Plain/result dispatch adds no RMW;
   an empty child-return list costs one raw load per pump.
 - Opt-in subset storage uses one extra eager allocation of **8 bytes per member

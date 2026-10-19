@@ -44,12 +44,13 @@ def main():
             flags.extend(["-fsanitize=thread", "-d-version=TSan"])
         run([args.compiler, *flags, *SOURCES, "-of=" + str(binary)], env)
         run([binary], env)
-        if mode == "debug":
+        if mode != "tsan":
             for probe in ("nested", "nested-hook"):
                 run([binary, probe], env, death="blocking parallel loop inside a Farm callback")
         if mode != "tsan":
             run([binary, "invalid-hook"], env, death="table completion hook requires a callback")
             run([binary, "grain-zero"], env, death="payload grain must be positive")
+            run([binary, "cost-class"], env, death="parallel costClass out of range")
             run([binary, "break"], env, death="parallel foreach bodies cannot break or return")
             run([binary, "drop"], env, death="parallel handle dropped before submission completed")
     print("PARALLEL CHECKS PASSED", flush=True)

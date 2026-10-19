@@ -303,3 +303,14 @@ variable (`ANTFARM_CHURN_HOST=1` needs the small tier, `consumers > 0` and a
 CPU list naming the controller followed by each consumer);
 [tools/perf/README.md](../../tools/perf/README.md#actor_churn) has the full
 argument list.
+
+## Blocking parallel regions
+
+Enable `FarmHostOptions.callerConsumes` and call
+`host.parallelFor!fn(source, options)` from the control thread. This uses the
+host's token and caller view, wakes parked peers after every accepted write
+and on idle polls, and returns after all callbacks join. With a separately
+owned token/view, pass `host.parallelOptions(options)` to the low-level
+adapter instead. Keep the host alive through completion. These loops do not
+pump attachments; nested waits inside callbacks/hooks are fatal in every build.
+See [parallel loops](parallel-loops.md) for borrowed ranges and grain sizing.

@@ -6,7 +6,7 @@
  + `publish` method after backpressure until `submitted` is true.
  + `parallelForWait` and the `parallel` foreach adapter help-drain a caller's
  + subscribed view until the join. Blocking inside a Farm callback or table
- + completion hook is forbidden (fatal in assertion builds).
+ + completion hook is fatal in every build.
  +
  + All APIs are nothrow, @nogc and @system. Asynchronous inputs must be POD
  + without unshared mutable aliases. Referenced storage must outlive the join.
@@ -30,7 +30,9 @@ import std.traits : hasUnsharedAliasing, Parameters;
 struct Options
 {
     size_t grain = 1;                    /// Elements per ST callback; must be positive.
-    uint costClass = DEFAULT_AVG_COST;   /// Farm avgCost, in 0 .. MAX_AVG_COST.
+    uint costClass = DEFAULT_AVG_COST;   /// Farm avgCost, 0 through 7.
+    void function(void*) nothrow @nogc @system wake; /// Wake peers after publication and idle polls.
+    void* wakeContext;                   /// Borrowed until region completion; passed to wake.
 }
 
 private enum suitableRange(R) = isRandomAccessRange!R && hasLength!R && hasSlicing!R;
@@ -61,6 +63,7 @@ private size_t ceilDiv(size_t n, size_t d) pure nothrow @nogc @safe
 private T loadBody(T)(PayloadBody body) nothrow @nogc @system
 {
     enum words = (T.sizeof + 7) / 8;
+    if (body.length != words) fatal("parallel payload body length mismatch");
     ulong[words] copy;
     foreach (i; 0 .. words)
         copy[i] = atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) (body.ptr + i));
@@ -69,14 +72,13 @@ private T loadBody(T)(PayloadBody body) nothrow @nogc @system
     return value;
 }
 
-/// Grain adapter shared with the packed-argument ST helpers.
+/// The grained adapter type shared with the packed-argument helpers.
 alias ParallelRange(alias fn, R) = PayloadGrainRange!(fn, R);
 
 /// One ST payload per element, using minimal argument packing.
 auto parallelRange(alias fn, R)(R source) nothrow @nogc @system
     if (suitableRange!R)
 {
-    validateRange!R();
     validateFunction!(fn, R)();
     return payloadRange!fn(source);
 }
@@ -128,7 +130,7 @@ private void finishCredit(R)(Region!R* state) nothrow @nogc @system
     if (heapOwned) releaseRegion(state);
 }
 
-private void tableFinished(R)(void* context) nothrow @nogc @system
+private extern(C) void tableFinished(R)(void* context) nothrow @nogc @system
 {
     finishCredit(cast(Region!R*) context);
 }
@@ -152,18 +154,15 @@ private struct Submission(R)
 {
     Region!R* state;
     size_t position;
-    PayloadHeader header;
     ulong[2] words;
 
     this(Region!R* s) nothrow @nogc @system
     {
         state = s;
         position = s.next;
-        header.plen = words.length;
-        header.call = &invoke;
     }
     enum ulong fixedPayloadLength = 2;
-    @property PayloadHeader* commonPayloadHeader() nothrow @nogc @system { return &header; }
+    @property Callback commonPayloadCallback() nothrow @nogc @system { return &invoke; }
     @property bool empty() nothrow @nogc @system { return position == state.count; }
     @property size_t length() nothrow @nogc @system { return state.count - position; }
     @property typeof(this) save() nothrow @nogc @system { return this; }
@@ -171,20 +170,20 @@ private struct Submission(R)
     {
         words[0] = cast(ulong) state;
         words[1] = position * state.options.grain;
-        return PayloadEntry(&header, words[]);
+        return PayloadEntry(&invoke, words[]);
     }
     void popFront() nothrow @nogc @system { ++position; }
 
-    static long invoke(PayloadHeader*, PayloadBody body)
-        nothrow @nogc @system
+    static extern(C) void invoke(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
     {
+        auto body = bodyPtr[0 .. bodyWords];
         auto values = loadBody!(typeof(words))(body);
         auto state = cast(Region!R*) values[0];
         immutable first = cast(size_t) values[1];
         immutable remaining = cast(size_t) state.source.length - first;
         immutable grain = state.options.grain;
         state.execute(state, first, first + (grain < remaining ? grain : remaining));
-        return 0;
+        return;
     }
 }
 
@@ -201,6 +200,7 @@ private bool publishRegion(R)(Region!R* state, ref Token token) nothrow @nogc @s
         if (accepted == 0) finishCredit(state); // undo the unadmitted table
         if (accepted == 0) return false;
         state.next += accepted;
+        wakePeers(state.options);
     }
     state.submitted = true;
     finishCredit(state); // relinquish the producer credit; final access
@@ -271,18 +271,33 @@ ParallelHandle!R parallelFor(alias fn, R)(AntFarm* farm, R source, ref Token tok
 
 private void checkWait(ref ConsumerView view) nothrow @nogc @system
 {
-    version (assert)
-        if (inFarmCallback()) fatal("blocking parallel loop inside a Farm callback");
+    if (inFarmCallback()) fatal("blocking parallel loop inside a Farm callback");
     if (view.F is null || !view.hasRef) fatal("parallel wait requires a subscribed view");
+}
+
+private void wakePeers(ref Options options) nothrow @nogc @system
+{
+    if (options.wake !is null) options.wake(options.wakeContext);
+}
+
+private void pollRegion(R)(Region!R* state, ref ConsumerView view) nothrow @nogc @system
+{
+    if (!view.consumeNext())
+    {
+        // Completed epochs can remain pinned by a sleeping peer. Publication
+        // wakes alone do not cover the final empty poll/confirmation race.
+        wakePeers(state.options);
+        Thread.yield();
+    }
 }
 
 private void waitRegion(R)(Region!R* state, ref Token token, ref ConsumerView view)
     nothrow @nogc @system
 {
     while (!publishRegion(state, token))
-        if (!view.consumeNext()) Thread.yield();
+        pollRegion(state, view);
     while (atomicLoad!(MemoryOrder.acq)(state.finished) == 0)
-        if (!view.consumeNext()) Thread.yield();
+        pollRegion(state, view);
 }
 
 /// Publish with retry and help-drain view until all callbacks have returned.
@@ -291,7 +306,7 @@ void parallelForWait(alias fn, R)(R source, ref Token token, ref ConsumerView vi
     Options options = Options.init) nothrow @nogc @system if (suitableRange!R)
 {
     checkWait(view);
-    validateRange!R();
+    validateRange!(R, true)();
     validateFunction!(fn, R)();
     Region!R state;
     initialize(&state, view.F, source, options, null);

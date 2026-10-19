@@ -51,8 +51,8 @@ links each to its owning contract or tuning page.
 | --- | --- | --- |
 | Ring construction, tuning and destruction | `AntFarm.create`, `AntFarm.tryCreate`, `AntFarm.checkGeometry`, `FarmCreateError`, `FarmCreateFailure`, `AntFarm.destroy`, `MIN_RING_MIB`, `MAX_RING_MIB`, `ringMiBFromUlongs` | [ARCHITECTURE.md](../../ARCHITECTURE.md#sizing-one-farm) |
 | Producer tickets and registration | `Token`, `Token.valid`, `Tier`, `AntFarm.registerProducer`, `AntFarm.unregisterProducer`, `SUBSCRIBE_FULL`, `SUBSCRIBE_RETRY`, `SUBSCRIBE_INVALID` | [actor-lifecycle.md](actor-lifecycle.md#tokens-and-farm-provenance) |
-| Writing payload tables | `AntFarm.write`, `AntFarm.writeTracked`, `PayloadEntry` | [actor-lifecycle.md](actor-lifecycle.md) |
-| Payload layout and callbacks | `PayloadBody`, `Callback`, `PayloadHeader`, `TableCompletionCallback`, `TableCompletionHook` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
+| Writing payload tables | `AntFarm.write`, `PayloadEntry` | [actor-lifecycle.md](actor-lifecycle.md) |
+| Payload layout and callbacks | `PayloadBody`, `Callback`, `TableCompletionCallback`, `TableCompletionHook` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
 | Payload range adapters | `pairPayloads`, `broadcastPayloads`, `PayloadPairRange`, `PayloadBroadcastRange` | [SPEC.md](../../SPEC.md) |
 | Consumers and views | `ConsumerView`, `ConsumerView.subscribe`, `ConsumerView.unsubscribe`, `ConsumerView.consumeNext` | [actor-lifecycle.md](actor-lifecycle.md#consumers-and-views) |
 | Work-cost hints | `rootCostHintAuto`, `rootCostHintFor`, `rootCostHintMaxSplits`, `rootCostHintMaxChunk`, `MAX_CHUNK`, `MAX_AVG_COST`, `DEFAULT_AVG_COST`, `avgCostForChunk` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md) |
@@ -118,7 +118,7 @@ Parallel loop adapters are a separate module:
 
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
-| Function adaptation | `payloadEntry`, `callbackFor`, `initPayloadHeader`, `payloadRange`, `PayloadGrainRange`, `PayloadArgRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
+| Function adaptation | `payloadEntry`, `callbackFor`, `payloadRange`, `PayloadGrainRange`, `PayloadArgRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
 
 ## Farm host
 

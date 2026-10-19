@@ -13,12 +13,12 @@
  + consumeNext call, 16-ulong bodies.
  + `--grid N` sweeps the dual-thread count from 1 through N while holding
  + the remaining configuration fixed.
- + `--constant-header` uses the common-header write overload with the same
+ + `--constant-header` uses the common-callback write overload with the same
  + bodies, batch cadence, and callback.
  + `--constant-callandlength` additionally supplies the uniform body length,
  + selecting arithmetic sizing without inspecting body fronts.
  + `--full-header-size` sizes the quota-fit check with the pre-compact
- + 16-word PayloadHeader, for runs against runtimes before SPEC 2f.
+ + 16-word Callback, for runs against runtimes before SPEC 2f.
  +/
 module dual;
 
@@ -55,15 +55,16 @@ uint* workerCalls() nothrow @nogc @system
     return &n;
 }
 
-long benchCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
+extern(C) void benchCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto b = bodyPtr[0 .. bodyWords];
     auto p = workerCalls();
     if (++(*p) >= LOCAL_FLUSH)
     {
         atomicFetchAdd(g_calls, cast(long) *p);
         *p = 0;
     }
-    return 1;
+    return;
 }
 
 void flushLocalCalls() nothrow @nogc @system
@@ -81,8 +82,8 @@ ulong singletonSize(uint body, uint sq)
     // THEAD + one index + pads/progress + Tcount + header/body + end pad.
     // The bench's payloads are all ST, so the table is compact (SPEC 2f):
     // one Call word per record. --full-header-size restores the 16-word
-    // PayloadHeader for runs against pre-compact runtimes.
-    return 8 + 1 + 7 + 1 + 7 + 8UL * sq + (g_fullHeaderSize ? 16 : 1) + body + 7;
+    // legacy payload header for runs against pre-compact runtimes.
+    return (g_fullHeaderSize ? 8 : 5) + 1 + 7 + 1 + 7 + 8UL * sq + (g_fullHeaderSize ? 16 : 1) + body + 7;
 }
 
 struct Cfg
@@ -121,7 +122,7 @@ struct DualCtx
 {
     AntFarm* f;
     PayloadEntry* pool;
-    PayloadHeader* commonHeader;
+    Callback* commonCallback;
     PayloadBody* bodies;
     size_t poolN;
     size_t produce;         // this thread's production share
@@ -204,10 +205,10 @@ private void dualMainImpl(WriteMode writeMode)(DualCtx* c)
             immutable take = remain < c.batch ? remain : c.batch;
             immutable span = take < c.poolN ? take : c.poolN;
             static if (writeMode == WriteMode.constantHeader)
-                immutable wrote = c.f.write(*c.commonHeader,
+                immutable wrote = c.f.write(*c.commonCallback,
                     c.bodies[0 .. span], tok, c.avgCost);
             else static if (writeMode == WriteMode.constantCallAndLength)
-                immutable wrote = c.f.write(*c.commonHeader,
+                immutable wrote = c.f.write(*c.commonCallback,
                     c.bodies[0 .. span], c.bodyWords, tok, c.avgCost);
             else
                 immutable wrote = c.f.write(c.pool[0 .. span], tok, c.avgCost);
@@ -310,14 +311,14 @@ Trial runDual(Cfg c)
     auto f = AntFarm.create(ringMiBFromUlongs(c.ln), c.k, c.nd, maxBulk, qb, maxSmall, qs, c.small, c.huge);
 
     immutable poolN = c.batch < 256 ? 256 : c.batch;
-    auto headers = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);
+    auto callbacks = cast(Callback*) malloc(Callback.sizeof);
     auto body = cast(ulong*) malloc(c.body * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(poolN * PayloadEntry.sizeof);
     auto bodies = cast(PayloadBody*) malloc(poolN * PayloadBody.sizeof);
-    if (headers is null || body is null || entries is null || bodies is null)
+    if (callbacks is null || body is null || entries is null || bodies is null)
     {
         t.err = "alloc";
-        if (headers) free(headers);
+        if (callbacks) free(callbacks);
         if (body) free(body);
         if (entries) free(entries);
         if (bodies) free(bodies);
@@ -325,14 +326,14 @@ Trial runDual(Cfg c)
         return t;
     }
 
-    *headers = PayloadHeader.init;
+    *callbacks = Callback.init;
 
-    headers.call = &benchCb;
+    callbacks[0] = &benchCb;
     foreach (i; 0 .. c.body)
         body[i] = i;
     foreach (i; 0 .. poolN)
     {
-        entries[i].header = headers;
+        entries[i].call = callbacks[0];
         entries[i].body = body[0 .. c.body];
         bodies[i] = body[0 .. c.body];
     }
@@ -341,7 +342,7 @@ Trial runDual(Cfg c)
     if (ctxs is null)
     {
         t.err = "ctx alloc";
-        free(headers);
+        free(callbacks);
         free(body);
         free(entries);
         free(bodies);
@@ -365,7 +366,7 @@ Trial runDual(Cfg c)
     {
         immutable remain = cast(size_t) c.n - cursor;
         immutable share = remain / (c.nd - i);
-        ctxs[i] = DualCtx(f, entries, headers, bodies, poolN, share,
+        ctxs[i] = DualCtx(f, entries, callbacks, bodies, poolN, share,
                           c.batch, c.consume, c.avgCost, c.body, c.writeMode,
                           c.bulk ? Tier.bulk : Tier.small,
                           expected, deadline, &timedOut, c.nd, 0, 0);
@@ -402,7 +403,7 @@ Trial runDual(Cfg c)
     t.stalls = stalls;
 
     free(ctxs);
-    free(headers);
+    free(callbacks);
     free(body);
     free(entries);
     free(bodies);

@@ -19,10 +19,10 @@ import threadpool.pin;
 __gshared shared(long) g_calls;
 __gshared shared(int) g_stop;
 
-long liveCb(PayloadHeader*, PayloadBody) nothrow @nogc @system
+extern(C) void liveCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
     atomicFetchAdd(g_calls, 1L);
-    return 1;
+    return;
 }
 
 struct ConsJob
@@ -90,12 +90,12 @@ double runScene(const(TopologySnapshot) snap, bool includeE, ulong nPay)
     while (atomicLoad(f.Cf) < cast(long) lps.length)
         Thread.yield();
 
-    PayloadHeader h;
+    Callback h;
 
-    h.call = &liveCb;
+    h = &liveCb;
     ulong[2] body = [1, 2];
     PayloadEntry e;
-    e.header = &h;
+    e.call = h;
     e.body = body[];
 
     auto tok = f.registerProducer(Tier.bulk);

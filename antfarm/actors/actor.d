@@ -27,7 +27,7 @@
  +/
 module antfarm.actors.actor;
 
-public import antfarm : AntFarm, PayloadBody, PayloadHeader, Tier, Token;
+public import antfarm : AntFarm, PayloadBody, Callback, Tier, Token;
 
 import antfarm.allocation : allocateAligned64, freeAligned64;
 import antfarm : avgCostForChunk, fatal;
@@ -1008,7 +1008,7 @@ align(64) struct ActorRuntime
     private shared uint readyDrainGate;
     private shared uint freeSlotGate;
     private ActorSlot* freeSlots;
-    private PayloadHeader actorHeader;
+    private Callback actorHeader;
 
     /// Create a runtime over `farm` with `capacity` actor slots, allocating
     /// the runtime and slots through `allocator`. Returns null on invalid
@@ -1043,8 +1043,7 @@ align(64) struct ActorRuntime
         runtime.slots = cast(ActorSlot*) slotMemory;
         runtime.capacity_ = capacity;
 
-        runtime.actorHeader.plen = 2;
-        runtime.actorHeader.call = &actorPayloadCallback;
+        runtime.actorHeader = &actorPayloadCallback;
         foreach (i; 0 .. capacity)
         {
             runtime.slots[i].runtime = runtime;
@@ -1996,16 +1995,16 @@ private void actorDispatch(T, alias handler)(
     handler(borrow, context);
 }
 
-private long actorPayloadCallback(PayloadHeader*, PayloadBody body)
-    nothrow @nogc @system
+private extern(C) void actorPayloadCallback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    if (body.length != 2) return 0;
+    auto body = bodyPtr[0 .. bodyWords];
+    if (body.length != 2) return;
     immutable slotWord = atomicLoad!(MemoryOrder.raw)(
         *cast(shared ulong*) (body.ptr + 0));
     immutable generation = atomicLoad!(MemoryOrder.raw)(
         *cast(shared ulong*) (body.ptr + 1));
     auto slot = cast(ActorSlot*) cast(void*) slotWord;
-    if (slot is null) return 0;
+    if (slot is null) return;
     slot.runtime.enter(slot, generation);
-    return 1;
+    return;
 }

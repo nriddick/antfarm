@@ -8,10 +8,10 @@ import antfarm;
 import core.atomic;
 import core.stdc.stdio;
 
-long unusedCallback(PayloadHeader*, PayloadBody) nothrow @nogc @system
+extern(C) void unusedCallback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
     fatal("parked consumer unexpectedly invoked");
-    return 0;
+    return;
 }
 
 void main(string[] args)
@@ -23,14 +23,14 @@ void main(string[] args)
     if (!pulse && held.subscribe(f) < 0) fatal("boundary test subscribe");
     printf("boundary runoff mode=%s\n", pulse ? "Sub0".ptr : "live-root".ptr);
     auto token = f.registerProducer(Tier.small);
-    PayloadHeader header;
+    Callback header;
 
-    header.call = &unusedCallback;
-    // Cf=SqCs=1, compact ST singleton overhead=40 words (Thead 8, index 1,
-    // pads/progress 15, Tcount 8, Call 1, end pad 7), body=472 => Tsize=512.
-    ulong[472] body;
+    header = &unusedCallback;
+    // Cf=SqCs=1, compact ST singleton overhead=37 words (Thead 5, index 1,
+    // pads/progress 15, Tcount 8, Call 1, end pad 7), body=475 => Tsize=512.
+    ulong[475] body;
     foreach (i; 0 .. body.length) body[i] = i;
-    PayloadEntry[1] entries = [PayloadEntry(&header, body[])];
+    PayloadEntry[1] entries = [PayloadEntry(header, body[])];
     ulong sent;
     while (sent <= f.Ln / 512)
     {

@@ -142,9 +142,9 @@ class SentinelJob
         auto tok = f.registerProducer(Tier.small);
         check(tok.valid, "T19 sentinel registration");
 
-        PayloadHeader h;
+        Callback h;
         ulong body = ulong.max;
-        PayloadEntry e = payloadEntry!sentinelCb(&h, (&body)[0 .. 1], body);
+        PayloadEntry e = payloadEntry!sentinelCb((&body)[0 .. 1], body);
 
         // This variable must persist across the entire producer lifetime.
         while (atomicLoad!(MemoryOrder.raw)(g_stop) == 0)
@@ -173,7 +173,7 @@ void runArm(Arm arm)
     enum N = 600;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref PayloadHeader h, ref size_t plen) {
+    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
         plen = 2;
     });
     scope (exit) freeBatch(batch);
@@ -266,9 +266,9 @@ void testQuotaResetRejected()
             if (!tok.valid)
                 _exit(90);
 
-            PayloadHeader h;
+            Callback h;
             ulong body = 0;
-            PayloadEntry e = payloadEntry!sentinelCb(&h, (&body)[0 .. 1], body);
+            PayloadEntry e = payloadEntry!sentinelCb((&body)[0 .. 1], body);
 
             // Drain the granted quota first: the ledger shrinks below quota.
             while (f.write((&e)[0 .. 1], tok) != 0) {}

@@ -95,7 +95,7 @@ by TSan, particularly cross-alias accesses or atomic-only lifecycle errors.
 
 ## Remaining fast-path audit
 
-- `write` and `writeTracked`, retained quota, partial admission and failed
+- `write`, retained quota, partial admission and failed
   transactional prepare converge on the existing acq_rel Wt reservation.
   No sibling release-only reservation remains.
 - Root updates remain release RMWs: they forward the leaf acq_rel join;

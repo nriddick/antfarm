@@ -111,20 +111,23 @@ void spinFor(ulong ns) nothrow @nogc @system
     while (MonoTime.currTime < end) {}
 }
 
-long bgCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
+extern(C) void bgCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto b = bodyPtr[0 .. bodyWords];
     spinFor(g_spinNs);
     atomicFetchAdd(g_bg, 1L);
-    return 1;
+    return;
 }
 
-long nopCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
+extern(C) void nopCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    return 1;
+    auto b = bodyPtr[0 .. bodyWords];
+    return;
 }
 
-long sentCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
+extern(C) void sentCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto b = bodyPtr[0 .. bodyWords];
     immutable dt = ticksToNs(nowTicks() - cast(long)(b.length ? b[0] : 0));
     rec(&g_nlat, g_lat, dt);
     if (b.length > 1)
@@ -135,7 +138,7 @@ long sentCb(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
             rec(&g_nlast, g_last, dt);
     }
     atomicFetchAdd(g_sent, 1L);
-    return 1;
+    return;
 }
 
 uint onlineCpus() nothrow @nogc @system
@@ -264,8 +267,8 @@ struct FarmSet
     AntFarm* f;
     Token bulk;
     Token small;
-    PayloadHeader* bgH;
-    PayloadHeader* sentH;
+    Callback bgH;
+    Callback sentH;
     PayloadEntry* dump;
     ulong* bgBody;
     ulong* sentBody;
@@ -305,29 +308,23 @@ FarmSet startFarm(Cfg cfg, uint nc)
     s.small = s.f.registerProducer(Tier.small);
     if (!s.bulk.valid || !s.small.valid)
         fatal("register");
-    s.bgH = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);
-    s.sentH = cast(PayloadHeader*) malloc(PayloadHeader.sizeof);
     // Cover the largest mid-drain cell (8192) even when Cfg.tlen is smaller.
     immutable dumpCap = cfg.tlen > 8192 ? cfg.tlen : 8192u;
     s.dump = cast(PayloadEntry*) malloc(dumpCap * PayloadEntry.sizeof);
     s.bgBody = cast(ulong*) malloc(cfg.body * ulong.sizeof);
     s.sentBody = cast(ulong*) malloc(cfg.body * ulong.sizeof);
-    if (!s.bgH || !s.sentH || !s.dump || !s.bgBody || !s.sentBody)
+    if (!s.dump || !s.bgBody || !s.sentBody)
         fatal("alloc");
     foreach (i; 0 .. cfg.body)
     {
         s.bgBody[i] = 0xC0FFEEUL + i;
         s.sentBody[i] = 0;
     }
-    *s.bgH = PayloadHeader.init;
-
-    s.bgH.call = &bgCb;
-    *s.sentH = PayloadHeader.init;
-
-    s.sentH.call = &sentCb;
+    s.bgH = &bgCb;
+    s.sentH = &sentCb;
     foreach (i; 0 .. dumpCap)
     {
-        s.dump[i].header = s.bgH;
+        s.dump[i].call =  s.bgH;
         s.dump[i].body = s.bgBody[0 .. cfg.body];
     }
     atomicStore!(MemoryOrder.rel)(g_go, 0);
@@ -359,8 +356,6 @@ void stopFarm(ref FarmSet s)
     s.f.unregisterProducer(s.bulk);
     s.f.unregisterProducer(s.small);
     s.f.destroy();
-    free(s.bgH);
-    free(s.sentH);
     free(s.dump);
     free(s.bgBody);
     free(s.sentBody);
@@ -378,7 +373,7 @@ ulong writeSent(ref FarmSet s, long t0ticks, ulong slot)
     if (s.dump[0].body.length > 1)
         s.sentBody[1] = slot;
     PayloadEntry e;
-    e.header = s.sentH;
+    e.call =  s.sentH;
     e.body = s.sentBody[0 .. s.dump[0].body.length];
     return s.f.write((&e)[0 .. 1], s.small, g_avgCost);
 }
@@ -786,11 +781,10 @@ Row runNear(Cfg cfg, uint nc)
     auto s = startFarm(cfg, nc);
 
     // Parked fill: consumers subscribed but not consuming. Probe with a
-    // no-op header so a successful probe is not a timed sentinel.
-    auto probeH = *s.sentH;
-    probeH.call = &nopCb;
+    // no-op callback so a successful probe is not a timed sentinel.
+    Callback probeH = &nopCb;
     PayloadEntry probe;
-    probe.header = &probeH;
+    probe.call = probeH;
     probe.body = s.sentBody[0 .. s.dump[0].body.length];
     long parked;
     for (;;)

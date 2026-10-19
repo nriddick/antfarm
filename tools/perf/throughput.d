@@ -9,12 +9,12 @@
  + ranked table. `--once` runs a single configuration (see README).
  + `--grid N` runs a single-phase small-producer grid (nb=0) across ns and
  + nc from 1 through N.
- + `--constant-header` replaces the PayloadEntry pool with the common-header
+ + `--constant-header` replaces the PayloadEntry pool with the common-callback
  + write overload while keeping the same bodies, batches, and callbacks.
  + `--constant-callandlength` additionally supplies the uniform body length,
  + selecting arithmetic sizing without inspecting body fronts.
  + `--full-header-size` sizes the quota-fit check with the pre-compact
- + 16-word PayloadHeader, for runs against runtimes before SPEC 2f.
+ + 16-word Callback, for runs against runtimes before SPEC 2f.
  + `--mixed-calls` alternates the PayloadEntry pool between two equivalent
  + callbacks, so every table has two Calls and is never uniform (SPEC 2g).
  +/
@@ -61,34 +61,37 @@ uint* workerCalls() nothrow @nogc @system
     return &n;
 }
 
-long benchCbLocal(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
+extern(C) void benchCbLocal(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto b = bodyPtr[0 .. bodyWords];
     auto p = workerCalls();
     if (++(*p) >= LOCAL_FLUSH)
     {
         atomicFetchAdd(g_calls, cast(long) *p);
         *p = 0;
     }
-    return 1;
+    return;
 }
 
 /// benchCbLocal's twin for --mixed-calls; a distinct function so tables that
 /// alternate the two are not uniform.
-long benchCbLocalAlt(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
+extern(C) void benchCbLocalAlt(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto b = bodyPtr[0 .. bodyWords];
     auto p = workerCalls();
     if (++(*p) >= LOCAL_FLUSH)
     {
         atomicFetchAdd(g_calls, cast(long) *p);
         *p = 0;
     }
-    return 2;
+    return;
 }
 
-long benchCbGlobal(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
+extern(C) void benchCbGlobal(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto b = bodyPtr[0 .. bodyWords];
     atomicFetchAdd(g_calls, 1L);
-    return 1;
+    return;
 }
 
 void flushLocalCalls() nothrow @nogc @system
@@ -138,7 +141,7 @@ struct ProdCtx
 {
     AntFarm* f;
     PayloadEntry* pool;
-    PayloadHeader* commonHeader;
+    Callback* commonCallback;
     PayloadBody* bodies;
     size_t poolN;
     size_t count;          // payloads this producer must commit
@@ -212,10 +215,10 @@ private void producerMainImpl(WriteMode writeMode)(ProdCtx* c)
         immutable take = remain < c.batch ? remain : c.batch;
         immutable span = take < c.poolN ? take : c.poolN;
         static if (writeMode == WriteMode.constantHeader)
-            immutable wrote = c.f.write(*c.commonHeader,
+            immutable wrote = c.f.write(*c.commonCallback,
                 c.bodies[0 .. span], tok, c.avgCost);
         else static if (writeMode == WriteMode.constantCallAndLength)
-            immutable wrote = c.f.write(*c.commonHeader,
+            immutable wrote = c.f.write(*c.commonCallback,
                 c.bodies[0 .. span], c.bodyWords, tok, c.avgCost);
         else
             immutable wrote = c.f.write(c.pool[0 .. span], tok, c.avgCost);
@@ -277,11 +280,11 @@ bool waitReady(int n, MonoTime deadline)
 /// Singleton table size for one ST payload; used to skip unsizable configs.
 ulong singletonSize(uint body, uint sq)
 {
-    // THEAD 8 + 1 index + 7 pad + 1 progress + 7 pad + 8*sq Tcount + payload + 7 end
+    // THEAD 5 + 1 index + 7 pad + 1 progress + 7 pad + 8*sq Tcount + payload + 7 end
     // The bench's payloads are all ST, so the table is compact (SPEC 2f):
     // one Call word per record. --full-header-size restores the 16-word
-    // PayloadHeader for runs against pre-compact runtimes.
-    return 8 + 1 + 7 + 1 + 7 + 8UL * sq + (g_fullHeaderSize ? 16 : 1) + body + 7;
+    // legacy payload header for runs against pre-compact runtimes.
+    return (g_fullHeaderSize ? 8 : 5) + 1 + 7 + 1 + 7 + 8UL * sq + (g_fullHeaderSize ? 16 : 1) + body + 7;
 }
 
 bool cfgFits(ref const Cfg c)
@@ -327,30 +330,30 @@ Trial runOnce(Cfg c)
     auto f = AntFarm.create(ringMiBFromUlongs(c.ln), c.k, c.nc, c.nb, qb, c.ns, c.qs, c.small, c.huge);
 
     immutable poolN = c.batch < 256 ? 256 : c.batch;
-    auto headers = cast(PayloadHeader*) malloc(2 * PayloadHeader.sizeof);
+    auto callbacks = cast(Callback*) malloc(2 * Callback.sizeof);
     auto body = cast(ulong*) malloc(c.body * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(poolN * PayloadEntry.sizeof);
     auto bodies = cast(PayloadBody*) malloc(poolN * PayloadBody.sizeof);
-    if (headers is null || body is null || entries is null || bodies is null)
+    if (callbacks is null || body is null || entries is null || bodies is null)
     {
         t.err = "alloc";
-        if (headers) free(headers);
+        if (callbacks) free(callbacks);
         if (body) free(body);
         if (entries) free(entries);
         if (bodies) free(bodies);
         f.destroy();
         return t;
     }
-    *headers = PayloadHeader.init;
+    *callbacks = Callback.init;
 
-    headers.call = g_globalCount ? &benchCbGlobal : &benchCbLocal;
-    headers[1] = headers[0];
-    headers[1].call = &benchCbLocalAlt;
+    callbacks[0] = g_globalCount ? &benchCbGlobal : &benchCbLocal;
+    callbacks[1] = callbacks[0];
+    callbacks[1] = &benchCbLocalAlt;
     foreach (i; 0 .. c.body)
         body[i] = i;
     foreach (i; 0 .. poolN)
     {
-        entries[i].header = g_mixedCalls && (i & 1) ? headers + 1 : headers;
+        entries[i].call =  callbacks[g_mixedCalls && (i & 1) ? 1 : 0];
         entries[i].body = body[0 .. c.body];
         bodies[i] = body[0 .. c.body];
     }
@@ -363,7 +366,7 @@ Trial runOnce(Cfg c)
         t.err = "context alloc";
         if (pctx) free(pctx);
         if (cctx) free(cctx);
-        free(headers);
+        free(callbacks);
         free(body);
         free(entries);
         free(bodies);
@@ -391,7 +394,7 @@ Trial runOnce(Cfg c)
     {
         immutable remain = cast(size_t) c.n - cursor;
         immutable share = remain / (np - i);
-        pctx[i] = ProdCtx(f, entries, headers, bodies, poolN, share,
+        pctx[i] = ProdCtx(f, entries, callbacks, bodies, poolN, share,
                           i < c.nb ? Tier.bulk : Tier.small,
                           c.batch, c.avgCost, c.body, c.writeMode,
                           &stalls, &timedOut, deadline);
@@ -424,7 +427,7 @@ Trial runOnce(Cfg c)
         GC.enable();
         free(pctx);
         free(cctx);
-        free(headers);
+        free(callbacks);
         free(body);
         free(entries);
         free(bodies);
@@ -455,7 +458,7 @@ Trial runOnce(Cfg c)
 
     free(pctx);
     free(cctx);
-    free(headers);
+    free(callbacks);
     free(body);
     free(entries);
     free(bodies);

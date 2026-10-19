@@ -77,6 +77,7 @@ if [[ "${1:-}" == "--print-cpus" ]]; then
 fi
 
 if [[ "$quick" -eq 1 ]]; then
+    run python3 scripts/check-betterc.py
     run dub test --compiler=ldc2
     run "${make_cmd[@]}" -C tests/farm run DC=ldc2
     run dub test :threadpool --compiler=ldc2
@@ -99,6 +100,7 @@ if [[ "$soak" -eq 1 ]]; then
     exit 0
 fi
 
+run python3 scripts/check-betterc.py
 run dub test --compiler=ldc2
 run dub test --compiler=dmd
 # Threadpool and fibers are not covered by the root dub test. host-test on

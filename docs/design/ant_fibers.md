@@ -38,17 +38,15 @@ spawn / yield / signal / timer / cancellation
 Every runnable activation is a one-shot serial Farm payload:
 
 ```text
-maxCs = 1
-done  = 1
 body  = one ulong containing the FiberTask address
 ```
 
-All activations share one prebuilt callback/header. A flush presents a forward
-range of fixed one-word bodies to Ant Farm's common-header, fixed-length
+All activations share one prebuilt callback. A flush presents a forward
+range of fixed one-word bodies to Ant Farm's common-callback, fixed-length
 `write` overload. Waiters, timers, cancellation state, exceptions,
 completions, GC roots, and recycled stacks never enter the Farm ring.
 
-The scheduler deliberately has no parallel-loop abstraction. Countable Farm
+The scheduler deliberately has no parallel-loop abstraction. Grained Farm
 payloads and suspendable Fibers remain separate work representations.
 
 ## Domain, lanes, and tasks

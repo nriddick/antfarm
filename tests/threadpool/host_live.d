@@ -652,10 +652,10 @@ bool workersFit()
 // caller must regain control (and consume) after a bounded publication burst.
 shared ulong emissionJobs;
 
-long emissionJob(PayloadHeader*, PayloadBody) nothrow @nogc @system
+extern(C) void emissionJob(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
     atomicOp!"+="(emissionJobs, 1UL);
-    return 1;
+    return;
 }
 
 void emissionBursts()
@@ -669,9 +669,9 @@ void emissionBursts()
         atomicStore(emissionJobs, 0UL);
         size_t remaining = limit + 2, published;
         string visits;
-        PayloadHeader header;
+        Callback header;
 
-        header.call = &emissionJob;
+        header = &emissionJob;
         host.attach(HostAttachment("busy emitter", (ref Token token) {
             visits ~= 'a';
             if (remaining == 0) return 0;
@@ -732,15 +732,16 @@ void awaitReclamation(scope bool delegate() ready, string diagnostic)
     }
 }
 
-long reclamationJob(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+extern(C) void reclamationJob(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     if (body[0] == 0)
     {
         atomicStore(reclamationEntered, true);
         while (!atomicLoad(reclamationReleaseJob)) Thread.yield();
     }
     atomicOp!"+="(reclamationFinished, 1UL);
-    return 1;
+    return;
 }
 
 struct ReclamationBodies
@@ -796,9 +797,9 @@ void reclamationProgress()
         atomicStore(reclamationReleaseIdle, true);
         host.closeOrAbandon();
     }
-    PayloadHeader header;
+    Callback header;
 
-    header.call = &reclamationJob;
+    header = &reclamationJob;
     enforce(host.farm.write(header, ReclamationBodies([0], 1), 1, host.token, 3) == 1,
         "initial delayed callback publication");
     host.wake();
@@ -849,8 +850,47 @@ void reclamationProgress()
     writeln("PASS reclamation: completed epochs released by step with no publications, forever waits");
 }
 
+__gshared Thread parallelCaller;
+shared ulong parallelJobs, parallelWorkerJobs;
+void hostedParallelJob(size_t) nothrow @nogc @system
+{
+    atomicOp!"+="(parallelJobs, 1UL);
+    if (Thread.getThis() !is parallelCaller) atomicOp!"+="(parallelWorkerJobs, 1UL);
+}
+
+void parkedParallel()
+{
+    import std.range : iota;
+    import antfarm.parallel : Options;
+    auto options = guarded(2);
+    options.callerConsumes = true;
+    options.farm.ringMiB = 2;
+    options.idleTimeout = Duration.max;
+    auto host = new FarmHost(options);
+    scope (exit) host.closeOrAbandon();
+    parallelCaller = Thread.getThis();
+    atomicStore(parallelJobs, 0UL);
+    atomicStore(parallelWorkerJobs, 0UL);
+    awaitReclamation(() => atomicLoad(gWait[0].wakeWord) == 1
+        && atomicLoad(gWait[1].wakeWord) == 1, "workers did not arm for indefinite parking");
+    // More two-word grains than the whole ring can hold. Only this blocking
+    // caller drives progress; no host.step, timer, or external wake rescues it.
+    immutable count = cast(size_t) host.farm.Ln + 1003;
+    host.parallelFor!hostedParallelJob(iota(count), Options(1, 7));
+    enforce(atomicLoad(parallelJobs) == count, "parked parallel loop lost work");
+    enforce(atomicLoad(parallelWorkerJobs) > 0, "parked workers did not help the loop");
+    host.close();
+    writeln("PASS parallel: parked host, region exceeds ring, caller-only wait joins all work");
+}
+
 int main(string[] args)
 {
+    if (args.length == 2 && args[1] == "--parallel-only")
+    {
+        enforce(workersFit(), "parallel test requires two worker CPUs");
+        parkedParallel();
+        return 0;
+    }
     if (args.length == 2 && args[1] == "--reclamation-only")
     {
         enforce(workersFit(), "reclamation test requires two worker CPUs");
@@ -880,6 +920,7 @@ int main(string[] args)
         return 0;
     writeln(FarmHost.resolve(guarded(2)).summary());
     workersTwo();
+    parkedParallel();
     reclamationProgress();
     confineCaller();
     rawTokenPickup();

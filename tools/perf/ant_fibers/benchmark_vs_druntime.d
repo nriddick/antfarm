@@ -44,18 +44,16 @@ void farmYieldFn()
     atomicFetchAdd(ran, 1L);
 }
 
-long payloadCallback(PayloadHeader*, PayloadBody)
-    nothrow @nogc @system
+extern(C) void payloadCallback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
     atomicFetchAdd(ran, 1L);
-    return 1;
+    return;
 }
 
-long mtPayloadCallback(PayloadHeader*, PayloadBody)
-    nothrow @nogc @system
+extern(C) void mtPayloadCallback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
     atomicFetchAdd(mtHits, 1L);
-    return 1;
+    return;
 }
 
 struct Topo
@@ -153,14 +151,13 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
     lane.domain.releaseAll(lane.domain.takeCompletions());
 
     atomicStore(mtHits, 0);
-    PayloadHeader header;
+    Callback header;
 
-    header.plen = 1;
-    header.call = &mtPayloadCallback;
+    header = &mtPayloadCallback;
     ulong word;
     PayloadEntry[256] chunk;
     foreach (i; 0 .. chunk.length)
-        chunk[i] = PayloadEntry(&header, (&word)[0 .. 1]);
+        chunk[i] = PayloadEntry(header, (&word)[0 .. 1]);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     pool.wakeAll();
@@ -255,14 +252,13 @@ void main(string[] args)
 
     {
         atomicStore(ran, 0);
-        PayloadHeader header;
+        Callback header;
 
-        header.plen = 1;
-        header.call = &payloadCallback;
+        header = &payloadCallback;
         ulong word;
         PayloadEntry[256] chunk;
         foreach (i; 0 .. chunk.length)
-            chunk[i] = PayloadEntry(&header, (&word)[0 .. 1]);
+            chunk[i] = PayloadEntry(header, (&word)[0 .. 1]);
 
         auto t0 = MonoTime.currTime;
         size_t written;

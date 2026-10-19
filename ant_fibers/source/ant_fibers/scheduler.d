@@ -1534,7 +1534,7 @@ class FiberReadyLane
     package FiberDomain ownerDomain;
     private FiberReadyLaneControl* readyControl;
     private PublishAccumulator publishable;
-    private PayloadHeader resumeHeader;
+    private Callback resumeHeader;
     private enum snapshotCap = 256;
 
     this(AntFarm* farm)
@@ -1545,8 +1545,7 @@ class FiberReadyLane
         readyControl = allocateCacheLine!FiberReadyLaneControl();
         publishable = new PublishAccumulator;
 
-        resumeHeader.plen = 1;
-        resumeHeader.call = &resumeCallback;
+        resumeHeader = &resumeCallback;
     }
 
     ~this() nothrow @nogc { freeCacheLine(readyControl); }
@@ -1643,14 +1642,14 @@ class FiberReadyLane
         assert(previous > 0);
     }
 
-    private static long resumeCallback(PayloadHeader*, PayloadBody body)
-        nothrow @nogc @system
+    private static extern(C) void resumeCallback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
     {
-        if (body.length != 1) return 0;
+        auto body = bodyPtr[0 .. bodyWords];
+        if (body.length != 1) return;
         auto task = cast(FiberTask) cast(void*) body[0];
         task.readyLane.noteEntered();
         task.domain.resume(task);
-        return 1;
+        return;
     }
 
 }

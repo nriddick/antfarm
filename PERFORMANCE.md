@@ -337,7 +337,7 @@ times more again.
 These benchmarks all build ST tables (the payload harnesses and actor layers
 set `MaxCs = Done = 1`). The harnesses publish uniform tables wherever a table's
 callbacks are shared (`throughput --mixed-calls` keeps the compact layout). The
-MT path is exercised only by the correctness suite (`antfarm_test`,
+MT path was exercised only by the correctness suite in 1.8.x (`antfarm_test`,
 `tests/farm`).
 
 ## Public actors

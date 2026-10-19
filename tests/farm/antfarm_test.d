@@ -235,8 +235,14 @@ private long incCalls(size_t idx) nothrow @nogc @system
     return 1;
 }
 
-long testCb(size_t idx, ulong done) nothrow @nogc @system
+long testCb(size_t idx) nothrow @nogc @system
 {
+    return incCalls(idx);
+}
+
+long testPairCb(size_t idx, ulong marker) nothrow @nogc @system
+{
+    if (marker != 1 && marker != 2) fatal("tuple marker not decoded");
     return incCalls(idx);
 }
 
@@ -453,14 +459,12 @@ void testSingleThreaded()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     foreach (i; 0 .. N)
     {
-        immutable uint done = 1;
-        entries[i] = payloadEntry!testCb(&headers[i], bodies[i * 2 .. i * 2 + 2], i, done);
+        entries[i] = payloadEntry!testCb(bodies[i * 2 .. i * 2 + 2], i);
     }
     immutable expected = N;
 
@@ -619,16 +623,14 @@ void testInputRangeWrite()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     long expected;
     foreach (i; 0 .. N)
     {
-        immutable uint done = 1;
-        entries[i] = payloadEntry!testCb(&headers[i], bodies[i * 2 .. i * 2 + 2], i, done);
-        expected += done;
+        entries[i] = payloadEntry!testCb(bodies[i * 2 .. i * 2 + 2], i);
+        ++expected;
     }
 
     ConsumerView v;
@@ -662,12 +664,12 @@ void testSeparateRanges()
     enum N = 40;
     allocCalls(N);
     scope (exit) freeCalls();
-    PayloadHeader[N] headers;
+    Callback[N] callbacks;
     ulong[N] words;
     PayloadBody[N] bodies;
     foreach (i; 0 .. N)
     {
-        initPayloadHeader!testCb1(&headers[i]);
+        callbacks[i] = callbackFor!testCb1();
         words[i] = i;
         bodies[i] = words[i .. i + 1];
     }
@@ -675,8 +677,8 @@ void testSeparateRanges()
     ConsumerView v;
     check(v.subscribe(f) == 0, "subscribe before separate-range write");
     auto tok = f.registerProducer(Tier.small);
-    check(f.write(headers[], bodies[], tok, DEFAULT_AVG_COST) == N,
-          "write separate header/body ranges");
+    check(f.write(callbacks[], bodies[], tok, DEFAULT_AVG_COST) == N,
+          "write separate callback/body ranges");
 
     check(v.consumeNext(), "consume separate-range table");
     check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N,
@@ -699,12 +701,12 @@ static assert(!argsConvert!(takeUbyte, int));
 static assert(argsConvert!(takeUbyte, ubyte));
 static assert(argsConvert!(takeUlong, uint));
 static assert(!__traits(compiles, {
-    PayloadHeader h; ulong[1] buf; int x;
-    cast(void) payloadEntry!readImmutableInt(&h, buf[], &x);
+    Callback h; ulong[1] buf; int x;
+    cast(void) payloadEntry!readImmutableInt(buf[], &x);
 }));
 static assert(!__traits(compiles, {
-    PayloadHeader h; ulong[1] buf;
-    cast(void) payloadEntry!takeUbyte(&h, buf[], 1000);
+    Callback h; ulong[1] buf;
+    cast(void) payloadEntry!takeUbyte(buf[], 1000);
 }));
 
 void testPayloadRange()
@@ -716,7 +718,7 @@ void testPayloadRange()
     allocCalls(2 * N);
     scope (exit) freeCalls();
 
-    // Tuple form: fields map onto (idx, done) of testCb.
+    // Tuple form: fields map onto (idx, marker) of testPairCb.
     struct PairRange
     {
         size_t i, n;
@@ -742,7 +744,7 @@ void testPayloadRange()
     check(f.write(singles, tok) == N, "payloadRange single-param write");
 
     // Tuple form: any arity, fields in declaration order.
-    auto pairs = payloadRange!testCb(PairRange(0, N));
+    auto pairs = payloadRange!testPairCb(PairRange(0, N));
     check(f.write(pairs, tok) == N, "payloadRange tuple write");
 
     while (v.consumeNext()) {}
@@ -797,9 +799,9 @@ void testUniformRanges()
     check(written == N && tables > 1, "uniform partial-write retry");
     check(frontCalls == N, "uniform sizing never evaluates front");
 
-    PayloadHeader mutableHeader;
-    initPayloadHeader!testCb1(&mutableHeader);
-    const PayloadHeader commonHeader = mutableHeader;
+    Callback mutableHeader;
+    mutableHeader = callbackFor!testCb1();
+    const Callback commonHeader = mutableHeader;
     ulong[M + F] words;
     PayloadBody[M] bodies;
     foreach (i; 0 .. M)
@@ -812,13 +814,13 @@ void testUniformRanges()
     static assert(hasLength!(typeof(broadcast)));
     auto constPair = pairPayloads((&commonHeader)[0 .. 1], bodies[0 .. 1]);
     static assert(isForwardRange!(typeof(constPair)));
-    check(constPair.front.header.call is mutableHeader.call,
-        "const header range pairing");
-    auto runtimeConfigured = payloadRange!testCb1(iota(0, 0), 1u);
-    static assert(isForwardRange!(typeof(runtimeConfigured)));
-    check(runtimeConfigured.empty, "runtime payloadRange configuration");
+    check(constPair.front.call is mutableHeader,
+        "const callback range pairing");
+    auto unitGrains = payloadRange!testCb1(iota(0, 0), 1u);
+    static assert(isForwardRange!(typeof(unitGrains)));
+    check(unitGrains.empty, "empty unit-grain payloadRange");
     check(f.write(commonHeader, bodies[], tok) == M,
-        "const common-header broadcast write");
+        "const common-callback broadcast write");
     while (v.consumeNext()) {}
 
     foreach (i; 0 .. F)
@@ -879,7 +881,7 @@ void testUniformRanges()
     Tuple!(size_t, ulong)[K] tupleArgs;
     foreach (i; 0 .. K)
         tupleArgs[i] = tuple(cast(size_t)(N + M + F + i), 2UL);
-    auto tupleJobs = payloadRange!testCb(tupleArgs[]);
+    auto tupleJobs = payloadRange!testPairCb(tupleArgs[]);
     // The quota left over from the uniform writes may admit only a prefix.
     size_t tupleWritten;
     while (tupleWritten < K)
@@ -975,16 +977,14 @@ void testConcurrent()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     long expected;
     foreach (i; 0 .. N)
     {
-        immutable uint done = 1;
-        entries[i] = payloadEntry!testCb(&headers[i], bodies[i * 2 .. i * 2 + 2], i, done);
-        expected += done;
+        entries[i] = payloadEntry!testCb(bodies[i * 2 .. i * 2 + 2], i);
+        ++expected;
     }
 
     auto p1 = new Thread({ producerMain(&p1ctx); });
@@ -1036,24 +1036,22 @@ void testWraparound()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 3 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     long expected;
     foreach (i; 0 .. N)
     {
-        immutable uint done = 1;
         immutable plen = 1 + i % 3;
         auto body = bodies[i * 3 .. i * 3 + plen];
         if (plen == 1)
-            entries[i] = payloadEntry!testCb1(&headers[i], body, i);
+            entries[i] = payloadEntry!testCb1(body, i);
         else
         {
-            entries[i] = payloadEntry!testCb(&headers[i], body, i, done);
+            entries[i] = payloadEntry!testCb(body, i);
             entries[i].body = body;
         }
-        expected += done;
+        ++expected;
     }
 
     p1ctx = ProdCtx(f, entries, N, Tier.small);
@@ -1153,16 +1151,14 @@ void testChurn(size_t nsteady)
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     long expected;
     foreach (i; 0 .. N)
     {
-        immutable uint done = 1;
-        entries[i] = payloadEntry!testCb(&headers[i], bodies[i * 2 .. i * 2 + 2], i, done);
-        expected += done;
+        entries[i] = payloadEntry!testCb(bodies[i * 2 .. i * 2 + 2], i);
+        ++expected;
     }
 
     atomicStore!(MemoryOrder.raw)(g_churnStop, 0);
@@ -1172,7 +1168,7 @@ void testChurn(size_t nsteady)
     Thread[] steady = new Thread[nsteady];
     ConsCtx[] sctx = new ConsCtx[nsteady];
     auto deadline = MonoTime.currTime + 90.seconds;
-    // With the tertiary sweep, even a single steady consumer drains every
+    // With the idle re-walk, even a single steady consumer drains every
     // table; with more, shard coverage is a performance property, not a
     // completion requirement.
     foreach (i; 0 .. nsteady)
@@ -1213,7 +1209,7 @@ void testChurn(size_t nsteady)
 // Test 7: lossless backlog. Producer outruns consumers; A consumes part
 // and unsubscribes (planting Sub0 at its earliest unconfirmed segment);
 // B subscribes later and drains the rest. Every payload executes exactly
-// its Done times.
+// exactly once.
 // ---------------------------------------------------------------------
 
 void testBacklog()
@@ -1225,24 +1221,22 @@ void testBacklog()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 3 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     long expected;
     foreach (i; 0 .. N)
     {
-        immutable uint done = 1;
         immutable plen = 1 + i % 3;
         auto body = bodies[i * 3 .. i * 3 + plen];
         if (plen == 1)
-            entries[i] = payloadEntry!testCb1(&headers[i], body, i);
+            entries[i] = payloadEntry!testCb1(body, i);
         else
         {
-            entries[i] = payloadEntry!testCb(&headers[i], body, i, done);
+            entries[i] = payloadEntry!testCb(body, i);
             entries[i].body = body;
         }
-        expected += done;
+        ++expected;
     }
 
     p1ctx = ProdCtx(f, entries, N, Tier.small);
@@ -1300,8 +1294,8 @@ void testSpannedTables()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
-    scope (exit) free(headers);
+    auto callbacks = cast(Callback*) malloc(N * Callback.sizeof);
+    scope (exit) free(callbacks);
     // One huge body (~100000 ulongs -> its table fully spans segments),
     // one large body (~34000 -> spans a boundary), the rest small.
     auto huge = cast(ulong*) malloc(100000 * ulong.sizeof);
@@ -1314,19 +1308,19 @@ void testSpannedTables()
     long expected;
     foreach (i; 0 .. N)
     {
-        initPayloadHeader!testCb(&headers[i]);
+        callbacks[i] = callbackFor!testCb();
         ++expected;
     }
     foreach (i; 0 .. 100000) huge[i] = (i == 0) ? 0 : 1;    // payload 0: body[0] = index
     foreach (i; 0 .. 34000) large[i] = (i == 0) ? 1 : 1;    // payload 1
     huge[0] = 0; large[0] = 1;
-    entries[0].header = &headers[0]; entries[0].body = huge[0 .. 100000];
-    entries[1].header = &headers[1]; entries[1].body = large[0 .. 34000];
+    entries[0].call = callbacks[0]; entries[0].body = huge[0 .. 100000];
+    entries[1].call = callbacks[1]; entries[1].body = large[0 .. 34000];
     foreach (i; 2 .. N)
     {
         small[(i - 2) * 2] = i;
         small[(i - 2) * 2 + 1] = 1;
-        entries[i].header = &headers[i]; entries[i].body = small[(i - 2) * 2 .. (i - 2) * 2 + 2];
+        entries[i].call = callbacks[i]; entries[i].body = small[(i - 2) * 2 .. (i - 2) * 2 + 2];
     }
     // Order: some small tables, the huge one, the large one, more small.
     // (entries already in that order: 0 huge, 1 large, then small.)
@@ -1381,16 +1375,14 @@ void testSmallTableChurn()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     long expected;
     foreach (i; 0 .. N)
     {
-        immutable uint done = 1;
-        entries[i] = payloadEntry!testCb(&headers[i], bodies[i * 2 .. i * 2 + 2], i, done);
-        expected += done;
+        entries[i] = payloadEntry!testCb(bodies[i * 2 .. i * 2 + 2], i);
+        ++expected;
     }
 
     atomicStore!(MemoryOrder.raw)(g_churnStop, 0);
@@ -1443,16 +1435,14 @@ void testMultiSmallProducers()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     long expected;
     foreach (i; 0 .. N)
     {
-        immutable uint done = 1;
-        entries[i] = payloadEntry!testCb(&headers[i], bodies[i * 2 .. i * 2 + 2], i, done);
-        expected += done;
+        entries[i] = payloadEntry!testCb(bodies[i * 2 .. i * 2 + 2], i);
+        ++expected;
     }
 
     p1ctx = ProdCtx(f, entries, N / 2, Tier.small);
@@ -2227,10 +2217,9 @@ void testActorInbox()
     printf("testActorInbox OK\n"); fflush(stdout);
 }
 
-private long quotaProbeCallback(PayloadHeader*, PayloadBody)
-    nothrow @nogc @system
+private extern(C) void quotaProbeCallback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    return 1;
+    return;
 }
 
 void testSweptQuotaBalance()
@@ -2248,10 +2237,10 @@ void testSweptQuotaBalance()
     // A fresh registration does not authorize an unchecked write excursion.
     auto ledger = f.prodHashSmall + token.slot * 8 + 1;
     check(atomicLoad(*ledger) == 0, "registration waits for a checked grant");
-    PayloadHeader header;
+    Callback header;
 
-    header.call = &quotaProbeCallback;
-    PayloadEntry[1] entries = [PayloadEntry(&header, null)];
+    header = &quotaProbeCallback;
+    PayloadEntry[1] entries = [PayloadEntry(header, null)];
     ulong spent;
     foreach (i; 0 .. 6)
     {
@@ -2293,10 +2282,10 @@ private final class ProducerLifecycleJob
     void run()
     {
         PayloadEntry[] emptyBatch;
-        PayloadHeader header;
+        Callback header;
 
-        header.call = &quotaProbeCallback;
-        PayloadEntry[1] entries = [PayloadEntry(&header, null)];
+        header = &quotaProbeCallback;
+        PayloadEntry[1] entries = [PayloadEntry(header, null)];
         auto deadline = MonoTime.currTime + 30.seconds;
         foreach (i; 0 .. 10_000)
         {
@@ -2369,9 +2358,9 @@ class CrossFarmWorker
         auto tok = farm.registerProducer(Tier.small);
         check(tok.valid, "cross-farm worker register");
         scope (exit) farm.unregisterProducer(tok);
-        PayloadHeader h;
+        Callback h;
         ulong[2] body;
-        PayloadEntry[1] e = [payloadEntry!testCb(&h, body[0 .. 2], 0, 1)];
+        PayloadEntry[1] e = [payloadEntry!testCb(body[0 .. 2], 0)];
         foreach (_; 0 .. 64)
         {
             while (farm.write(e[], tok) == 0) pause();
@@ -2417,12 +2406,11 @@ void testTokenMoveOnly()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     foreach (i; 0 .. N)
-        entries[i] = payloadEntry!testCb(&headers[i], bodies[i * 2 .. i * 2 + 2], i, 1);
+        entries[i] = payloadEntry!testCb(bodies[i * 2 .. i * 2 + 2], i);
 
     auto f = AntFarm.create(2, 8, 2, 1, 8192, 4, 2048);
     scope (exit) f.destroy();
@@ -2454,12 +2442,11 @@ void testCrossFarmProvenance()
     allocCalls(N);
     scope (exit) freeCalls();
 
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
     auto bodies = cast(ulong*) malloc(N * 2 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
+    scope (exit) { free(bodies); free(entries); }
     foreach (i; 0 .. N)
-        entries[i] = payloadEntry!testCb(&headers[i], bodies[i * 2 .. i * 2 + 2], i, 1);
+        entries[i] = payloadEntry!testCb(bodies[i * 2 .. i * 2 + 2], i);
 
     auto fa = AntFarm.create(2, 8, 2, 1, 8192, 4, 2048);
     scope (exit) fa.destroy();
@@ -2560,20 +2547,22 @@ void joinAbort() nothrow @nogc @system
     import core.stdc.stdlib : abort;
     abort();
 }
-long joinWork(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+extern(C) void joinWork(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     auto probe = cast(JoinProbe*) atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) body.ptr);
     auto index = atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*) (body.ptr + 1));
     atomicFetchAdd!(MemoryOrder.raw)(probe.entered, 1u);
     while (atomicLoad!(MemoryOrder.raw)(probe.entered) != 2) pause();
     probe.values[index] = index + 1; // no test release after this write
-    return 1;
+    return;
 }
-long joinWorkAlt(PayloadHeader* header, PayloadBody body) nothrow @nogc @system
+extern(C) void joinWorkAlt(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    return joinWork(header, body);
+    auto body = bodyPtr[0 .. bodyWords];
+    joinWork(body.ptr, body.length);
 }
-void joined(void* p) nothrow @nogc @system
+extern(C) void joined(void* p) nothrow @nogc @system
 {
     auto probe = cast(JoinProbe*) p;
     if (probe.values[0] != 1 || probe.values[1] != 2) joinAbort();
@@ -2614,24 +2603,24 @@ void testSameShardPlainWriteJoin()
         {
             JoinProbe probe;
             TableCompletionHook hook = TableCompletionHook(&probe, &joined);
-            PayloadHeader[2] headers;
-            headers[0].call = &joinWork;
-            headers[1].call = &joinWorkAlt;
+            Callback[2] callbacks;
+            callbacks[0] = &joinWork;
+            callbacks[1] = &joinWorkAlt;
             ulong[3][2] words = [[cast(ulong) &probe, 0, 0], [cast(ulong) &probe, 1, 0]];
             PayloadBody[2] bodies = [words[0][0 .. 2], words[1][]];
-            PayloadEntry[2] entries = [PayloadEntry(&headers[0], bodies[0]),
-                PayloadEntry(&headers[1], bodies[1])];
+            PayloadEntry[2] entries = [PayloadEntry(callbacks[0], bodies[0]),
+                PayloadEntry(callbacks[1], bodies[1])];
             ulong n;
             final switch (_ % 6)
             {
-            case 0: n = farm.writeTracked(headers[0], JoinBodies(&probe), 2, &hook, token, MAX_AVG_COST); break;
+            case 0: n = farm.write(callbacks[0], JoinBodies(&probe), 2, token, MAX_AVG_COST, &hook); break;
             case 1: n = farm.write(entries[], token, MAX_AVG_COST, &hook); break;
             case 2:
                 import std.algorithm.iteration : map;
                 n = farm.write(entries[].map!(e => e), token, MAX_AVG_COST, &hook); break;
-            case 3: n = farm.write(headers[], bodies[], token, MAX_AVG_COST, &hook); break;
-            case 4: n = farm.write(headers[0], bodies[], token, MAX_AVG_COST, &hook); break;
-            case 5: n = farm.write(headers[0], JoinBodies(&probe), 2, token, MAX_AVG_COST, &hook); break;
+            case 3: n = farm.write(callbacks[], bodies[], token, MAX_AVG_COST, &hook); break;
+            case 4: n = farm.write(callbacks[0], bodies[], token, MAX_AVG_COST, &hook); break;
+            case 5: n = farm.write(callbacks[0], JoinBodies(&probe), 2, token, MAX_AVG_COST, &hook); break;
             }
 
             check(n == 2, "join table was not fully admitted");
@@ -2674,8 +2663,9 @@ bool chunkOtherThreadRan(ulong me) nothrow @nogc @system
     }
     return false;
 }
-long chunkProbeWork(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+extern(C) void chunkProbeWork(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     immutable i = cast(size_t) body[0];
     immutable me = t_chunkId;
     atomicStore!(MemoryOrder.rel)(g_chunkOwner[i], me);
@@ -2689,10 +2679,10 @@ long chunkProbeWork(PayloadHeader*, PayloadBody body) nothrow @nogc @system
         }
     }
     atomicFetchAdd!(MemoryOrder.rel)(g_chunkCalls, 1u);
-    return 1;
+    return;
 }
 shared uint g_chunkHookDone;
-void chunkHookDone(void*) nothrow @nogc @system
+extern(C) void chunkHookDone(void*) nothrow @nogc @system
 {
     atomicStore!(MemoryOrder.rel)(g_chunkHookDone, 1u);
 }
@@ -2702,10 +2692,10 @@ final class ChunkRig
     Token token;
     shared uint stop, started;
     Thread[2] threads;
-    PayloadHeader header;
+    Callback header;
     ulong[3 * 128] ids;
     PayloadEntry[3 * 128] entries;
-    PayloadHeader*[3 * 128] headerPtrs;
+    Callback[3 * 128] headerPtrs;
     PayloadBody[3 * 128] bodies;
     TableCompletionHook hook;
 
@@ -2731,15 +2721,14 @@ final class ChunkRig
         while (atomicLoad(started) < threads.length)
             check(MonoTime.currTime < startDeadline, "chunk consumers did not start");
 
-        header.plen = 1;
-        header.call = &chunkProbeWork;
+        header = &chunkProbeWork;
         hook = TableCompletionHook(null, &chunkHookDone);
         foreach (i; 0 .. entries.length)
         {
             ids[i] = i;
             bodies[i] = ids[i .. i + 1];
-            headerPtrs[i] = &header;
-            entries[i] = PayloadEntry(&header, bodies[i]);
+            headerPtrs[i] = header;
+            entries[i] = PayloadEntry(header, bodies[i]);
         }
     }
 
@@ -2801,7 +2790,7 @@ void testDefaultAvgCostChunk()
         "default write(range) chunk");
     rig.expectSplit(chunk,
         (size_t n) => rig.farm.write(rig.headerPtrs[0 .. n], rig.bodies[0 .. n], rig.token),
-        "default write(headers, bodies) chunk");
+        "default write(callbacks, bodies) chunk");
     rig.expectSplit(chunk,
         (size_t n) => rig.farm.write(rig.header, rig.bodies[0 .. n], rig.token),
         "default broadcast write chunk");
@@ -2809,12 +2798,11 @@ void testDefaultAvgCostChunk()
         (size_t n) => rig.farm.write(rig.header, rig.bodies[0 .. n], 1UL, rig.token),
         "default broadcast write(bodyWords) chunk");
     rig.expectSplit(chunk,
-        (size_t n) => rig.farm.writeTracked(rig.header, rig.bodies[0 .. n], 1UL,
-            &rig.hook, rig.token),
-        "default writeTracked chunk");
+        (size_t n) => rig.farm.write(rig.header, rig.bodies[0 .. n], 1UL, rig.token, DEFAULT_AVG_COST, &rig.hook),
+        "default hooked write chunk");
     auto doneDeadline = MonoTime.currTime + 10.seconds;
     while (atomicLoad!(MemoryOrder.acq)(g_chunkHookDone) == 0)
-        check(MonoTime.currTime < doneDeadline, "default writeTracked hook did not run");
+        check(MonoTime.currTime < doneDeadline, "default hooked write hook did not run");
     rig.finish();
     printf("PASS default write overloads claim 16 entries\n");
     fflush(stdout);
@@ -2839,20 +2827,20 @@ shared int g_stalePReady, g_staleQDone;
 shared long g_staleCalls;
 shared ulong g_staleObserved;
 enum STALE_N = 400_000;
-long staleQuotaCb(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+extern(C) void staleQuotaCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     atomicStore!(MemoryOrder.raw)(g_staleObserved, body[0] + body[1]); // plain ring reads
     atomicFetchAdd!(MemoryOrder.raw)(g_staleCalls, 1L);
-    return 1;
+    return;
 }
 void staleQuotaPaused()
 {
     auto tok = g_staleFarm.registerProducer(Tier.small);
-    PayloadHeader h;
-    h.plen = 2;
-    h.call = &staleQuotaCb;
+    Callback h;
+    h = &staleQuotaCb;
     ulong[2] body = [1, 2];
-    PayloadEntry[1] e = [PayloadEntry(&h, body[])];
+    PayloadEntry[1] e = [PayloadEntry(h, body[])];
     while (g_staleFarm.write(e[], tok) == 0) Thread.yield();
     atomicStore!(MemoryOrder.raw)(g_stalePReady, 1);
     while (atomicLoad!(MemoryOrder.raw)(g_staleQDone) == 0) Thread.yield();
@@ -2864,13 +2852,12 @@ void staleQuotaMoving()
 {
     while (atomicLoad!(MemoryOrder.raw)(g_stalePReady) == 0) Thread.yield();
     auto tok = g_staleFarm.registerProducer(Tier.small);
-    PayloadHeader h;
-    h.plen = 2;
-    h.call = &staleQuotaCb;
+    Callback h;
+    h = &staleQuotaCb;
     ulong[2] body = [3, 4];
     auto entries = cast(PayloadEntry*) malloc(STALE_N * PayloadEntry.sizeof);
     scope (exit) free(entries);
-    foreach (i; 0 .. STALE_N) entries[i] = PayloadEntry(&h, body[]);
+    foreach (i; 0 .. STALE_N) entries[i] = PayloadEntry(h, body[]);
     size_t off;
     while (off < STALE_N)
     {
@@ -2914,9 +2901,8 @@ __gshared const(size_t)* g_compactLens;
 __gshared size_t g_compactN;
 __gshared shared(long) g_compactZero;
 __gshared shared(long) g_compactBad;
-__gshared shared(long) g_compactHeaderBad;
+__gshared shared(long) g_compactDispatchBad;
 __gshared shared(long) g_compactCompletions;
-__gshared ulong g_compactLastHead;
 
 ulong compactWord(size_t idx, size_t k) pure nothrow @nogc @safe
 {
@@ -2926,10 +2912,10 @@ ulong compactWord(size_t idx, size_t k) pure nothrow @nogc @safe
 /// Exact compact table size for n payloads with total body length sumBody.
 ulong compactTableSize(ulong n, ulong sumBody, ulong sq) pure nothrow @nogc @safe
 {
-    return 30 + 8 * sq + 2 * n + sumBody;
+    return 27 + 8 * sq + 2 * n + sumBody;
 }
 
-/// Thead word 6's high half (SPEC 2g): 0 per-payload Call, 1 uniform Call,
+/// Thead word 2's kind byte (SPEC 2g): 0 per-payload Call, 1 uniform Call,
 /// 2 uniform Call and length.
 enum ulong KIND_PER_PAYLOAD = 0, KIND_UNIFORM = 1, KIND_UNIFORM_FIXED = 2;
 
@@ -2939,8 +2925,8 @@ ulong uniformTableSize(ulong n, ulong sumBody, ulong sq, bool sameLen)
     pure nothrow @nogc @safe
 {
     return sameLen && sumBody != 0
-        ? 30 + 8 * sq + 2 + sumBody
-        : 30 + 8 * sq + 1 + n + sumBody;
+        ? 27 + 8 * sq + 2 + sumBody
+        : 27 + 8 * sq + 1 + n + sumBody;
 }
 
 ulong uniformKind(ulong sumBody, bool sameLen) pure nothrow @nogc @safe
@@ -2951,27 +2937,24 @@ ulong uniformKind(ulong sumBody, bool sameLen) pure nothrow @nogc @safe
 
 ulong tableKindAt(AntFarm* f, ulong seq) nothrow @nogc @system
 {
-    return atomicLoad!(MemoryOrder.raw)(f.buf[(seq & f.Lmask) + 6]) >> 32;
+    return (atomicLoad!(MemoryOrder.raw)(f.buf[(seq & f.Lmask) + 2]) >> 32) & 255;
 }
 
-long compactBodyCb(PayloadHeader* head, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void compactBodyCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    g_compactLastHead = cast(ulong) cast(void*) head;
-    if (head.plen != body.length)
-        atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
+    auto body = bodyPtr[0 .. bodyWords];
     if (body.length == 0)
     {
         atomicFetchAdd!(MemoryOrder.raw)(g_compactZero, 1L);
         atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
-        return 1;
+        return;
     }
     immutable idx = body[0];
     if (idx >= g_compactN || body.length != g_compactLens[idx])
     {
         atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
         atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
-        return 1;
+        return;
     }
     bool ok = true;
     foreach (k, v; body)
@@ -2979,56 +2962,55 @@ long compactBodyCb(PayloadHeader* head, PayloadBody body)
     if (!ok) atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
     atomicFetchAdd(g_calls[idx], 1L);
     atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
-    return 1;
+    return;
 }
 
-long compactOneCb(PayloadHeader* head, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void compactOneCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    if (head.plen != 1 || body.length != 1)
+    auto body = bodyPtr[0 .. bodyWords];
+    if (body.length != 1)
         atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
     atomicFetchAdd(g_calls[body[0]], 1L);
     atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
-    return 1;
+    return;
 }
 
-long compactSingle28Cb(PayloadHeader* head, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void compactSingle28Cb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    bool ok = head.plen == 28 && body.length == 28 && head.call == &compactSingle28Cb;
+    auto body = bodyPtr[0 .. bodyWords];
+    bool ok = body.length == 28;
     if (ok)
         foreach (k, w; body)
             if (w != k) ok = false;
     if (!ok) atomicFetchAdd!(MemoryOrder.raw)(g_compactBad, 1L);
     atomicFetchAdd(g_calls[0], 1L);
     atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
-    return 1;
+    return;
 }
 
 
 
-long compactHeaderCb(PayloadHeader* head, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void compactDispatchCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    if (head.plen != body.length || head.call != &compactHeaderCb)
-        atomicFetchAdd!(MemoryOrder.raw)(g_compactHeaderBad, 1L);
+    auto body = bodyPtr[0 .. bodyWords];
+    if (body.length != 1) atomicFetchAdd!(MemoryOrder.raw)(g_compactDispatchBad, 1L);
     if (body.length > 0)
         atomicFetchAdd(g_calls[body[0]], 1L);
     atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
-    return 1;
+    return;
 }
 
 __gshared size_t g_compactWrapN;
 __gshared shared(long) g_compactWrapBad;
 
-long compactWrapCb(PayloadHeader* head, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void compactWrapCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    if (body.length < 2 || body.length > 3 || head.plen != body.length)
+    auto body = bodyPtr[0 .. bodyWords];
+    if (body.length < 2 || body.length > 3)
     {
         atomicFetchAdd!(MemoryOrder.raw)(g_compactWrapBad, 1L);
         atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
-        return 1;
+        return;
     }
     immutable idx = body[0];
     if (idx >= g_compactWrapN
@@ -3038,10 +3020,10 @@ long compactWrapCb(PayloadHeader* head, PayloadBody body)
     if (idx < g_compactWrapN)
         atomicFetchAdd(g_calls[idx], 1L);
     atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
-    return 1;
+    return;
 }
 
-void compactCompletion(void* context) nothrow @nogc @system
+extern(C) void compactCompletion(void* context) nothrow @nogc @system
 {
     atomicFetchAdd!(MemoryOrder.raw)(g_compactCompletions, 1L);
 }
@@ -3051,39 +3033,36 @@ void compactCompletion(void* context) nothrow @nogc @system
 // than uniform (SPEC 2g); g_compactAltCalls shows each record's own Call ran.
 __gshared shared(long) g_compactAltCalls;
 
-long compactBodyCbAlt(PayloadHeader* head, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void compactBodyCbAlt(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     atomicFetchAdd!(MemoryOrder.raw)(g_compactAltCalls, 1L);
-    return compactBodyCb(head, body);
+    compactBodyCb(body.ptr, body.length);
 }
 
-long compactOneCbAlt(PayloadHeader* head, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void compactOneCbAlt(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     atomicFetchAdd!(MemoryOrder.raw)(g_compactAltCalls, 1L);
-    return compactOneCb(head, body);
+    compactOneCb(body.ptr, body.length);
 }
 
-long compactWrapCbAlt(PayloadHeader* head, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void compactWrapCbAlt(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     atomicFetchAdd!(MemoryOrder.raw)(g_compactAltCalls, 1L);
-    return compactWrapCb(head, body);
+    compactWrapCb(body.ptr, body.length);
 }
 
-long compactHeaderCbAlt(PayloadHeader* head, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void compactDispatchCbAlt(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
-    if (head.call != &compactHeaderCbAlt)
-        atomicFetchAdd!(MemoryOrder.raw)(g_compactHeaderBad, 1L);
+    auto body = bodyPtr[0 .. bodyWords];
     atomicFetchAdd!(MemoryOrder.raw)(g_compactAltCalls, 1L);
-    if (head.plen != body.length)
-        atomicFetchAdd!(MemoryOrder.raw)(g_compactHeaderBad, 1L);
+    if (body.length != 1) atomicFetchAdd!(MemoryOrder.raw)(g_compactDispatchBad, 1L);
     if (body.length > 0)
         atomicFetchAdd(g_calls[body[0]], 1L);
     atomicFetchAdd!(MemoryOrder.raw)(g_totalCalls, 1L);
-    return 1;
+    return;
 }
 
 struct CompactBodies
@@ -3098,7 +3077,7 @@ struct CompactBodies
 }
 
 /// One all-ST table, drained by one consumer; checks exact geometry,
-/// The table kind, per-payload body/length/header and exactly-once.
+/// The table kind, per-payload body/length/callback and exactly-once.
 /// Alternating Calls make it compact (SPEC 2f); one Call makes it uniform
 /// (SPEC 2g), index-free when every length matches and is nonzero.
 void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label,
@@ -3117,11 +3096,11 @@ void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label,
 
     allocCalls(N);
     scope (exit) freeCalls();
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto callbacks = cast(Callback*) malloc(N * Callback.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
     auto bodies = cast(ulong*) malloc((totalBody + 1) * ulong.sizeof);
-    scope (exit) { free(headers); free(entries); free(bodies); }
-    check(headers !is null && entries !is null && bodies !is null, label);
+    scope (exit) { free(callbacks); free(entries); free(bodies); }
+    check(callbacks !is null && entries !is null && bodies !is null, label);
 
     g_compactLens = lens.ptr;
     g_compactN = N;
@@ -3132,13 +3111,12 @@ void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label,
     size_t off;
     foreach (i; 0 .. N)
     {
-        headers[i] = PayloadHeader.init;
+        callbacks[i] = Callback.init;
 
-        headers[i].plen = lens[i];
-        headers[i].call = !uniformCall && (i & 1) ? &compactBodyCbAlt : &compactBodyCb;
+        callbacks[i] = !uniformCall && (i & 1) ? &compactBodyCbAlt : &compactBodyCb;
         auto b = bodies[off .. off + lens[i]];
         foreach (k; 0 .. lens[i]) b[k] = compactWord(i, k);
-        entries[i] = PayloadEntry(&headers[i], b);
+        entries[i] = PayloadEntry(callbacks[i], b);
         off += lens[i];
     }
 
@@ -3153,7 +3131,7 @@ void compactMixedCase(const(size_t)[] lens, uint avgCost, const(char)[] label,
     check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + (uniformCall
             ? uniformTableSize(N, totalBody, 1, sameLen)
             : compactTableSize(N, totalBody, 1)), label);
-    check((atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 2]) >> 32) == 0, label);
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 2]) >> 48) == 0, label);
     check(tableKindAt(f, before) == (uniformCall
             ? uniformKind(totalBody, sameLen) : KIND_PER_PAYLOAD), label);
 
@@ -3223,11 +3201,11 @@ void testCompactWraparound(WrapLayout layout = WrapLayout.compact)
     enum NC = 4;
     allocCalls(N);
     scope (exit) freeCalls();
-    auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+    auto callbacks = cast(Callback*) malloc(N * Callback.sizeof);
     auto bodies = cast(ulong*) malloc(N * 3 * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    scope (exit) { free(headers); free(bodies); free(entries); }
-    check(headers !is null && bodies !is null && entries !is null, "compact wrap alloc");
+    scope (exit) { free(callbacks); free(bodies); free(entries); }
+    check(callbacks !is null && bodies !is null && entries !is null, "compact wrap alloc");
 
     g_compactWrapN = N;
     atomicStore!(MemoryOrder.raw)(g_compactWrapBad, 0L);
@@ -3235,15 +3213,14 @@ void testCompactWraparound(WrapLayout layout = WrapLayout.compact)
     foreach (i; 0 .. N)
     {
         immutable len = layout == WrapLayout.uniform && i % 3 == 0 ? 3 : 2;
-        headers[i] = PayloadHeader.init;
+        callbacks[i] = Callback.init;
 
-        headers[i].plen = len;
-        headers[i].call = layout == WrapLayout.compact && (i & 1)
+        callbacks[i] = layout == WrapLayout.compact && (i & 1)
             ? &compactWrapCbAlt : &compactWrapCb;
         bodies[i * 3] = i;
         bodies[i * 3 + 1] = cast(ulong) i ^ 0xA5A5_A5A5_A5A5_A5A5UL;
         bodies[i * 3 + 2] = ~cast(ulong) i;
-        entries[i] = PayloadEntry(&headers[i], bodies[i * 3 .. i * 3 + len]);
+        entries[i] = PayloadEntry(callbacks[i], bodies[i * 3 .. i * 3 + len]);
     }
 
     auto deadline = MonoTime.currTime + 120.seconds;
@@ -3290,33 +3267,32 @@ void testCompactWraparound(WrapLayout layout = WrapLayout.compact)
 // Catches M2 (writer miscounts compact size) and U2 (writer mis-sizes an
 // index-free table), and verifies the accepted prefix is prepared/emitted
 // exactly; zero admission leaves Wt untouched. The heterogeneous prefix
-// alternates Calls (compact, SPEC 2f); writeTracked and the broadcast
+// alternates Calls (compact, SPEC 2f); hooked write and the broadcast
 // overload share one Call (uniform, SPEC 2g).
 void testCompactPartialAdmission()
 {
     enum N = 20;
     enum K = 10;
-    enum Q = 68; // compact table of 10 one-word bodies: 38 + 3*10.
-    // Uniform table of 10 one-word bodies: 38 + 2 + 10 index-free.
+    enum Q = 65; // compact table of 10 one-word bodies: 35 + 3*10.
+    // Uniform table of 10 one-word bodies: 35 + 2 + 10 index-free.
     immutable QU = uniformTableSize(K, K, 1, true);
 
     // Heterogeneous accepted prefix.
     {
         allocCalls(N);
         scope (exit) freeCalls();
-        auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+        auto callbacks = cast(Callback*) malloc(N * Callback.sizeof);
         auto bodies = cast(ulong*) malloc(N * ulong.sizeof);
         auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-        scope (exit) { free(headers); free(bodies); free(entries); }
+        scope (exit) { free(callbacks); free(bodies); free(entries); }
         atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
         foreach (i; 0 .. N)
         {
-            headers[i] = PayloadHeader.init;
+            callbacks[i] = Callback.init;
 
-            headers[i].plen = 1;
-            headers[i].call = (i & 1) ? &compactOneCbAlt : &compactOneCb;
+            callbacks[i] = (i & 1) ? &compactOneCbAlt : &compactOneCb;
             bodies[i] = i;
-            entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
+            entries[i] = PayloadEntry(callbacks[i], bodies[i .. i + 1]);
         }
         auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
         scope (exit) f.destroy();
@@ -3339,7 +3315,7 @@ void testCompactPartialAdmission()
         f.unregisterProducer(tok);
     }
 
-    // writeTracked with a completion hook.
+    // hooked write with a completion hook.
     {
         allocCalls(N);
         scope (exit) freeCalls();
@@ -3355,14 +3331,13 @@ void testCompactPartialAdmission()
         ConsumerView v;
         check(v.subscribe(f) == 0, "compact tracked subscribe");
         auto tok = f.registerProducer(Tier.small);
-        PayloadHeader h = PayloadHeader.init;
+        Callback h = Callback.init;
 
-        h.plen = 1;
-        h.call = &compactBodyCb;
+        h = &compactBodyCb;
         atomicStore!(MemoryOrder.raw)(g_compactCompletions, 0L);
         TableCompletionHook hook = TableCompletionHook(null, &compactCompletion);
         immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
-        immutable got = f.writeTracked(h, CompactBodies(words.ptr, 0, N), 1, &hook, tok);
+        immutable got = f.write(h, CompactBodies(words.ptr, 0, N), 1, tok, DEFAULT_AVG_COST, &hook);
         check(got == K, "compact tracked partial admits exactly k");
         check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + QU,
             "compact tracked exact Wt advance");
@@ -3389,10 +3364,9 @@ void testCompactPartialAdmission()
         ConsumerView v;
         check(v.subscribe(f) == 0, "compact transactional subscribe");
         auto tok = f.registerProducer(Tier.small);
-        PayloadHeader h = PayloadHeader.init;
+        Callback h = Callback.init;
 
-        h.plen = 1;
-        h.call = &compactOneCb;
+        h = &compactOneCb;
         immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
         immutable got = f.write(h, prep, 1, tok);
         check(got == K, "compact transactional partial admits exactly k");
@@ -3422,25 +3396,24 @@ void testCompactPartialAdmission()
 // Catches M2 (compact sizing off-by-one) at the quota boundary.
 void testCompactQuotaBoundaries()
 {
-    enum Q = 68;
+    enum Q = 65;
 
-    // Exact table: 10 one-word bodies -> 38 + 3*10 = 68.
+    // Exact table: 10 one-word bodies -> 35 + 3*10 = 65.
     {
         allocCalls(10);
         scope (exit) freeCalls();
-        auto headers = cast(PayloadHeader*) malloc(10 * PayloadHeader.sizeof);
+        auto callbacks = cast(Callback*) malloc(10 * Callback.sizeof);
         auto bodies = cast(ulong*) malloc(10 * ulong.sizeof);
         auto entries = cast(PayloadEntry*) malloc(10 * PayloadEntry.sizeof);
-        scope (exit) { free(headers); free(bodies); free(entries); }
+        scope (exit) { free(callbacks); free(bodies); free(entries); }
         atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
         foreach (i; 0 .. 10)
         {
-            headers[i] = PayloadHeader.init;
+            callbacks[i] = Callback.init;
 
-            headers[i].plen = 1;
-            headers[i].call = (i & 1) ? &compactOneCbAlt : &compactOneCb;
+            callbacks[i] = (i & 1) ? &compactOneCbAlt : &compactOneCb;
             bodies[i] = i;
-            entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
+            entries[i] = PayloadEntry(callbacks[i], bodies[i .. i + 1]);
         }
         auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
         scope (exit) f.destroy();
@@ -3457,23 +3430,22 @@ void testCompactQuotaBoundaries()
         f.unregisterProducer(tok);
     }
 
-    // One word over: 11 one-word bodies -> 71 > 68, truncated to 10.
+    // One payload over: 11 one-word bodies -> 68 > 65, truncated to 10.
     {
         allocCalls(11);
         scope (exit) freeCalls();
-        auto headers = cast(PayloadHeader*) malloc(11 * PayloadHeader.sizeof);
+        auto callbacks = cast(Callback*) malloc(11 * Callback.sizeof);
         auto bodies = cast(ulong*) malloc(11 * ulong.sizeof);
         auto entries = cast(PayloadEntry*) malloc(11 * PayloadEntry.sizeof);
-        scope (exit) { free(headers); free(bodies); free(entries); }
+        scope (exit) { free(callbacks); free(bodies); free(entries); }
         atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
         foreach (i; 0 .. 11)
         {
-            headers[i] = PayloadHeader.init;
+            callbacks[i] = Callback.init;
 
-            headers[i].plen = 1;
-            headers[i].call = (i & 1) ? &compactOneCbAlt : &compactOneCb;
+            callbacks[i] = (i & 1) ? &compactOneCbAlt : &compactOneCb;
             bodies[i] = i;
-            entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
+            entries[i] = PayloadEntry(callbacks[i], bodies[i .. i + 1]);
         }
         auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
         scope (exit) f.destroy();
@@ -3491,17 +3463,16 @@ void testCompactQuotaBoundaries()
         f.unregisterProducer(tok);
     }
 
-    // Exact-quota compact singleton: body 28 -> 38 + 2 + 28 = 68.
+    // Exact-quota compact singleton: body 28 -> 35 + 2 + 28 = 68.
     {
         allocCalls(1);
         scope (exit) freeCalls();
         ulong[28] body;
-        PayloadHeader h = PayloadHeader.init;
+        Callback h = Callback.init;
 
-        h.plen = 28;
-        h.call = &compactSingle28Cb;
+        h = &compactSingle28Cb;
         foreach (i; 0 .. 28) body[i] = i;
-        PayloadEntry[1] entries = [PayloadEntry(&h, body[])];
+        PayloadEntry[1] entries = [PayloadEntry(h, body[])];
         atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
         auto f = AntFarm.create(2, 8, 1, 0, 0, 1, Q);
         scope (exit) f.destroy();
@@ -3520,32 +3491,31 @@ void testCompactQuotaBoundaries()
     printf("testCompactQuotaBoundaries OK\n"); fflush(stdout);
 }
 
-// Checks the borrowed callback header under one and several consumers.
-void testCompactCallbackHeader()
+// Checks the callback dispatch and body length under one and several consumers.
+void testCompactCallbackDispatch()
 {
     enum N = 32;
     // Rounds 0/1: alternating Calls (compact); rounds 2/3: one Call
-    // (uniform, SPEC 2g), whose scratch header carries Tcall.
+    // (uniform, SPEC 2g), which shares Tcall.
     foreach (round; 0 .. 4)
     {
         immutable uniformCall = round >= 2;
         allocCalls(N);
         scope (exit) freeCalls();
-        auto headers = cast(PayloadHeader*) malloc(N * PayloadHeader.sizeof);
+        auto callbacks = cast(Callback*) malloc(N * Callback.sizeof);
         auto bodies = cast(ulong*) malloc(N * ulong.sizeof);
         auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-        scope (exit) { free(headers); free(bodies); free(entries); }
-        atomicStore!(MemoryOrder.raw)(g_compactHeaderBad, 0L);
+        scope (exit) { free(callbacks); free(bodies); free(entries); }
+        atomicStore!(MemoryOrder.raw)(g_compactDispatchBad, 0L);
         atomicStore!(MemoryOrder.raw)(g_compactAltCalls, 0L);
         foreach (i; 0 .. N)
         {
-            headers[i] = PayloadHeader.init;
+            callbacks[i] = Callback.init;
 
-            headers[i].plen = 1;
-            headers[i].call = !uniformCall && (i & 1)
-                ? &compactHeaderCbAlt : &compactHeaderCb;
+            callbacks[i] = !uniformCall && (i & 1)
+                ? &compactDispatchCbAlt : &compactDispatchCb;
             bodies[i] = i;
-            entries[i] = PayloadEntry(&headers[i], bodies[i .. i + 1]);
+            entries[i] = PayloadEntry(callbacks[i], bodies[i .. i + 1]);
         }
         auto f = AntFarm.create(2, 8, (round & 1) == 0 ? 1 : 4, 0, 0, 1, 4096);
         scope (exit) f.destroy();
@@ -3553,8 +3523,8 @@ void testCompactCallbackHeader()
         if ((round & 1) == 0)
         {
             ConsumerView v;
-            check(v.subscribe(f) == 0, "compact header single subscribe");
-            check(f.write(entries[0 .. N], tok) == N, "compact header single write");
+            check(v.subscribe(f) == 0, "compact callback single subscribe");
+            check(f.write(entries[0 .. N], tok) == N, "compact callback single write");
             while (v.consumeNext()) {}
             v.unsubscribe();
         }
@@ -3563,7 +3533,7 @@ void testCompactCallbackHeader()
             enum NC = 4;
             Thread[NC] threads;
             ConsCtx[NC] ctx;
-            check(f.write(entries[0 .. N], tok) == N, "compact header multi write");
+            check(f.write(entries[0 .. N], tok) == N, "compact callback multi write");
             foreach (j; 0 .. NC)
             {
                 ctx[j] = ConsCtx(f, N, MonoTime.currTime + 60.seconds);
@@ -3572,16 +3542,16 @@ void testCompactCallbackHeader()
             }
             foreach (t; threads) t.join();
         }
-        check(atomicLoad!(MemoryOrder.raw)(g_compactHeaderBad) == 0,
-            "compact callback header contract");
+        check(atomicLoad!(MemoryOrder.raw)(g_compactDispatchBad) == 0,
+            "compact callback dispatch contract");
         foreach (i; 0 .. N)
-            check(g_calls[i] == 1, "compact header exact call count");
-        check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N, "compact header total");
+            check(g_calls[i] == 1, "compact callback exact call count");
+        check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == N, "compact callback total");
         check(atomicLoad!(MemoryOrder.raw)(g_compactAltCalls) == (uniformCall ? 0 : N / 2),
-            "compact header each record's own Call");
+            "compact callback each record's own Call");
         f.unregisterProducer(tok);
     }
-    printf("testCompactCallbackHeader OK\n"); fflush(stdout);
+    printf("testCompactCallbackDispatch OK\n"); fflush(stdout);
 }
 
 // ---------------------------------------------------------------------
@@ -3589,10 +3559,10 @@ void testCompactCallbackHeader()
 // ---------------------------------------------------------------------
 
 /// Bodies for `lens`, word k of payload i = compactWord(i, k), plus one
-/// header per payload whose Call is `calls[i]`. Owned by the caller.
+/// callback per payload from `calls[i]`. Owned by the caller.
 struct UniformCase
 {
-    PayloadHeader* headers;
+    Callback* callbacks;
     PayloadEntry* entries;
     ulong* words;
     ulong totalBody;
@@ -3600,34 +3570,32 @@ struct UniformCase
     void build(const(size_t)[] lens, const(Callback)[] calls)
     {
         foreach (l; lens) totalBody += l;
-        headers = cast(PayloadHeader*) malloc(lens.length * PayloadHeader.sizeof);
+        callbacks = cast(Callback*) malloc(lens.length * Callback.sizeof);
         entries = cast(PayloadEntry*) malloc(lens.length * PayloadEntry.sizeof);
         words = cast(ulong*) malloc((totalBody + 1) * ulong.sizeof);
-        check(headers !is null && entries !is null && words !is null, "uniform case alloc");
+        check(callbacks !is null && entries !is null && words !is null, "uniform case alloc");
         size_t off;
         foreach (i, l; lens)
         {
-            headers[i] = PayloadHeader.init;
+            callbacks[i] = Callback.init;
 
-            headers[i].plen = l;
-            headers[i].call = calls[i];
+            callbacks[i] = calls[i];
             foreach (k; 0 .. l) words[off + k] = compactWord(i, k);
-            entries[i] = PayloadEntry(&headers[i], words[off .. off + l]);
+            entries[i] = PayloadEntry(callbacks[i], words[off .. off + l]);
             off += l;
         }
     }
 
     void release() nothrow @nogc @system
     {
-        free(headers);
+        free(callbacks);
         free(entries);
         free(words);
     }
 }
 
 /// Write `entries` as one table on a fresh one-consumer farm, check the
-/// expected kind and exact size, drain it, and check bodies, the scratch
-/// header and that every payload ran its own Call exactly once.
+/// expected kind and exact size, drain it, and check bodies and that every payload ran its own callback exactly once.
 void uniformDetectCase(const(size_t)[] lens, const(Callback)[] calls,
                        ulong kind, ulong size, const(char)[] label)
 {
@@ -3658,12 +3626,12 @@ void uniformDetectCase(const(size_t)[] lens, const(Callback)[] calls,
     check(f.write(c.entries[0 .. N], tok) == N, label);
     check(tableKindAt(f, before) == kind, label);
     check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + size, label);
-    check((atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 2]) >> 32) == 0, label);
+    check((atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 2]) >> 48) == 0, label);
     if (kind != KIND_PER_PAYLOAD)
-        check(atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 8])
+        check(atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 5])
                 == cast(ulong) cast(void*) calls[0], label);
     if (kind == KIND_UNIFORM_FIXED)
-        check(atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 9]) == lens[0], label);
+        check(atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 6]) == lens[0], label);
     while (v.consumeNext()) {}
     check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0, label);
     check(atomicLoad!(MemoryOrder.raw)(g_compactZero) == zeros, label);
@@ -3716,7 +3684,7 @@ void testUniformDetection()
 }
 
 // Explicit forms: broadcast without a length detects the length at run
-// time, broadcast with a length and writeTracked are uniform by
+// time, broadcast with a length and hooked write are uniform by
 // construction, and pairPayloads detects the Call at run time.
 void testUniformExplicitForms()
 {
@@ -3730,9 +3698,9 @@ void testUniformExplicitForms()
     ConsumerView v;
     check(v.subscribe(f) == 0, "uniform forms subscribe");
     auto tok = f.registerProducer(Tier.small);
-    PayloadHeader h = PayloadHeader.init;
+    Callback h = Callback.init;
 
-    h.call = &compactBodyCb;
+    h = &compactBodyCb;
     atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
     atomicStore!(MemoryOrder.raw)(g_compactZero, 0L);
 
@@ -3777,20 +3745,20 @@ void testUniformExplicitForms()
     TableCompletionHook hook = TableCompletionHook(null, &compactCompletion);
     atomicStore!(MemoryOrder.raw)(g_compactCompletions, 0L);
     before = atomicLoad!(MemoryOrder.raw)(f.Wt);
-    check(f.writeTracked(h, oneBodies[], 1, &hook, tok) == N, "tracked");
+    check(f.write(h, oneBodies[], 1, tok, DEFAULT_AVG_COST, &hook) == N, "tracked");
     expect(uniformKind(N, true), uniformTableSize(N, N, 1, true), ones[], before,
-        "writeTracked");
+        "hooked write");
     check(atomicLoad!(MemoryOrder.raw)(g_compactCompletions) == 1, "uniform tracked hook once");
-    check(atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 7])
+    check(atomicLoad!(MemoryOrder.raw)(f.buf[(before & f.Lmask) + 4])
             == cast(ulong) cast(void*) &hook, "uniform tracked hook word");
 
-    PayloadHeader[N] hs = h;
+    Callback[N] hs = h;
     before = atomicLoad!(MemoryOrder.raw)(f.Wt);
     check(f.write(hs[], oneBodies[], tok) == N, "pair");
     expect(uniformKind(N, true), uniformTableSize(N, N, 1, true), ones[], before,
         "pairPayloads detects a uniform Call");
 
-    hs[5].call = &compactBodyCbAlt;
+    hs[5] = &compactBodyCbAlt;
     before = atomicLoad!(MemoryOrder.raw)(f.Wt);
     check(f.write(hs[], oneBodies[], tok) == N, "pair mixed");
     expect(KIND_PER_PAYLOAD, compactTableSize(N, N, 1), ones[], before,
@@ -3828,7 +3796,7 @@ void testUniformMultiRunBodies()
 void testUniformPartialAdmission()
 {
     enum K = 10;
-    // Ten one-word bodies, index-free: 38 + 2 + 10 (indexed: 38 + 1 + 20).
+    // Ten one-word bodies, index-free: 35 + 2 + 10 (indexed: 35 + 1 + 20).
     immutable Q = uniformTableSize(K, K, 1, true);
     static immutable size_t[K + 1] onesThenOne = 1;
     static immutable size_t[K + 1] onesThenTwo = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2];
@@ -3888,9 +3856,9 @@ void testUniformPartialAdmission()
         ConsumerView v;
         check(v.subscribe(f) == 0, "uniform zero admission subscribe");
         auto tok = f.registerProducer(Tier.small);
-        PayloadHeader h = PayloadHeader.init;
+        Callback h = Callback.init;
 
-        h.call = &compactOneCb;
+        h = &compactOneCb;
         ulong[N] words;
         foreach (i; 0 .. N) words[i] = i;
         auto bodies = CompactBodies(words.ptr, 0, N);
@@ -3971,25 +3939,25 @@ void testCanFit()
 {
     auto f = AntFarm.create(2, 4, 9, 1, 2048, 1, 512);
     scope(exit) f.destroy();
-    PayloadHeader header;
-    initPayloadHeader!testCb(&header);
+    Callback header;
+    header = callbackFor!testCb();
     foreach (tier; [Tier.small, Tier.bulk])
     {
         immutable quota = tier == Tier.small ? 512UL : 2048UL;
-        check(f.canFit(header, quota - 40, tier), "canFit exact boundary");
-        check(!f.canFit(header, quota - 39, tier), "canFit one word over");
+        check(f.canFit(header, quota - 37, tier), "canFit exact boundary");
+        check(!f.canFit(header, quota - 36, tier), "canFit one word over");
         foreach(words; [ulong.max, ulong.max - 16, ulong.max - 40])
             check(!f.canFit(header, words, tier), "canFit overflow");
-        header.call = null;
+        header = null;
         check(!f.canFit(header, 0, tier), "canFit null callback");
-        initPayloadHeader!testCb(&header);
+        header = callbackFor!testCb();
     }
     ConsumerView[9] views;
     foreach(ref view; views) check(view.subscribe(f) >= 0, "canFit subscribe");
-    check(f.canFit(header, 456, Tier.small), "canFit grown consumer boundary");
-    check(!f.canFit(header, 457, Tier.small), "canFit grown consumer overflow");
+    check(f.canFit(header, 459, Tier.small), "canFit grown consumer boundary");
+    check(!f.canFit(header, 460, Tier.small), "canFit grown consumer overflow");
     foreach(ref view; views) view.unsubscribe();
-    check(f.canFit(header, 472, Tier.small), "canFit after consumer departure");
+    check(f.canFit(header, 475, Tier.small), "canFit after consumer departure");
     printf("testCanFit OK\n");
 }
 
@@ -4013,7 +3981,7 @@ void main(string[] args)
         testCompactPartialAdmission();
         testCompactQuotaBoundaries();
 
-        testCompactCallbackHeader();
+        testCompactCallbackDispatch();
 
         testUniformDetection();
         testUniformExplicitForms();
@@ -4064,7 +4032,7 @@ void main(string[] args)
     testCompactPartialAdmission();
     testCompactQuotaBoundaries();
 
-    testCompactCallbackHeader();
+    testCompactCallbackDispatch();
 
     testUniformDetection();
     testUniformExplicitForms();

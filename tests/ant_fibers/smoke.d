@@ -38,12 +38,12 @@ void wakeNotifier(void* context) nothrow @nogc
     atomicFetchAdd(*count, 1);
 }
 
-long barePayloadCallback(PayloadHeader*, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void barePayloadCallback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     assert(body.length == 1 && body[0] == 0xA17F_A4FUL);
     atomicFetchAdd(barePayloadRuns, 1);
-    return 1;
+    return;
 }
 
 final class MigrationBox
@@ -1393,14 +1393,13 @@ void mixedPayloadSmoke()
             atomicFetchAdd(fiberRuns, 1);
         });
 
-    PayloadHeader header;
+    Callback header;
 
-    header.plen = 1;
-    header.call = &barePayloadCallback;
+    header = &barePayloadCallback;
     ulong[count] bodies = 0xA17F_A4FUL;
     PayloadEntry[count] bare;
     foreach (i; 0 .. count)
-        bare[i] = PayloadEntry(&header, bodies[i .. i + 1]);
+        bare[i] = PayloadEntry(header, bodies[i .. i + 1]);
 
     size_t bareOffset;
     foreach (_; 0 .. 200_000)

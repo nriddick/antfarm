@@ -28,14 +28,14 @@ A public endpoint may front a private tree: write an external result buffer or
 channel at the boundary. Their lifetimes still drain separately, and callers of
 the service never receive identities for the internal actors.
 
-A payload can expose independent iterations through its header. Autonomous
+A payload runs once on one consumer; publish separate grains for independent iterations. Autonomous
 actor handlers receive an exclusive callback-local borrow and may request
 republishing through `ActorContext`; wave operations receive only the borrow,
 and the same actor cannot belong to overlapping unfinished waves. Fibers add
 `scope(exit)`, application signals, and cooperative cancellation; a Fiber that
 never suspends is usually better represented as a payload.
 
-For independent countable work, [parallel loops](parallel-loops.md) provide
+For independent range work, [parallel loops](parallel-loops.md) provide
 ST grains, asynchronous completion hooks and a blocking foreach
 adapter. Raw ranges also compose into caller-owned payload batches. Use a
 private tree when the computation needs structured nested joins.

@@ -20,14 +20,13 @@
  +     pointer conversions are compile errors.
  +
  + `antfarm.templates` publicly imports `antfarm`, so importing this
- + module also brings in `AntFarm`, `ConsumerView`, `PayloadHeader`,
+ + module also brings in `AntFarm`, `ConsumerView`, `Callback`,
  + `PayloadEntry`, `Token`, and `Tier`.
  +
- + The produced PayloadEntry's header is initialized in place: `call` is the
- + generated type-erased callback, `plen` is the packed parameter body length in ulongs.
+ + PayloadEntry.call is the generated C-linkage callback.
  + The body slice aliases `buf[0 .. packedLen!fn]`; `write()` copies both
- + callback metadata and body into the ring before returning, so `buf` and `header` only
- + need to stay alive until `write()` returns.
+ + callback metadata and body into the ring before returning, so `buf` only
+ + needs to stay alive until `write()` returns.
  +
  + Note: for reference-like parameters that pass the no-unshared-aliasing
  + rule (notably `string`), the body stores the reference, not the referred
@@ -77,33 +76,19 @@ Callback callbackFor(alias fn)() nothrow @nogc @system
     return &callbackImpl!(fn);
 }
 
-/// Initializes `h` as the header for a packed call to `fn`.
-void initPayloadHeader(alias fn)(
-    PayloadHeader* h) nothrow @nogc @system
-{
-    static assert(validSignature!(fn),
-        "antfarm.templates: unsupported function signature");
-    if (h is null) fatal("initPayloadHeader: null header");
-    *h = PayloadHeader.init;
-    h.plen = packedLen!(fn);
-    h.call = &callbackImpl!(fn);
-}
-
 /// Packs `args` into `buf` for `fn` and returns the PayloadEntry.
 /// `buf` must have room for at least `packedLen!(fn)` ulongs.
 PayloadEntry payloadEntry(alias fn, Args...)(
-    PayloadHeader* header, ulong[] buf, Args args) nothrow @nogc @system
+    ulong[] buf, Args args) nothrow @nogc @system
     if (Args.length == packedParams!(fn).length
         && argsConvert!(fn, Args))
 {
     static assert(validSignature!(fn),
         "antfarm.templates: unsupported function signature");
-    if (header is null) fatal("payloadEntry: null header");
     if (buf.length < packedLen!(fn))
         fatal("payloadEntry: body buffer too small");
-    initPayloadHeader!(fn)(header);
     packArgsImpl!(fn, 0)(buf, args);
-    return PayloadEntry(header, buf[0 .. packedLen!(fn)]);
+    return PayloadEntry(callbackFor!fn(), buf[0 .. packedLen!(fn)]);
 }
 
 /++
@@ -111,7 +96,7 @@ PayloadEntry payloadEntry(alias fn, Args...)(
  + range. When the argument source is a forward range, the result preserves
  + its checkpoints and can be passed to `write`. Each element becomes
  + one payload whose generated type-erased callback executes `fn` with that
- + element's parameters. The shared header and the packed body live inside
+ + element's parameters. The generated callback and packed body are supplied by
  + the range; `write` copies their metadata and body before returning, so the
  + range need only outlive the `write` call.
  +
@@ -124,7 +109,7 @@ PayloadEntry payloadEntry(alias fn, Args...)(
  +
  + The range advances only when its consumer pops it: `write` uses saved
  + checkpoints and returns how many payloads landed, so the producer pops
- + that many elements before the next `write` call. Its common header and
+ + that many elements before the next `write` call. Its common callback and
  + fixed packed width also select `write`'s uniform sizing path.
  +/
 struct PayloadArgRangeImpl(alias fn, AR)
@@ -134,20 +119,18 @@ struct PayloadArgRangeImpl(alias fn, AR)
         "antfarm.templates: unsupported function signature");
 
     private AR args;
-    private PayloadHeader hdr;
     private ulong[packedLen!(fn)] bodyBuf;
 
     private this(AR a) nothrow @nogc @system
     {
         args = a;
-        initPayloadHeader!(fn)(&hdr);
     }
 
     /// Uniform-layout protocol consumed by AntFarm.writeImpl. Every element
-    /// has the same generated header and compile-time packed body width.
-    @property PayloadHeader* commonPayloadHeader() nothrow @nogc @system
+    /// has the same generated callback and compile-time packed body width.
+    @property Callback commonPayloadCallback() nothrow @nogc @system
     {
-        return &hdr;
+        return callbackFor!fn();
     }
 
     /// The compile-time packed body width of every element.
@@ -175,7 +158,7 @@ struct PayloadArgRangeImpl(alias fn, AR)
                 ~ "'s packed parameters");
             packArgsImpl!(fn)(bodyBuf, args.front);
         }
-        return PayloadEntry(&hdr, bodyBuf[]);
+        return PayloadEntry(commonPayloadCallback, bodyBuf[]);
     }
 
     /// Advance the argument source by one element.
@@ -218,7 +201,7 @@ PayloadArgRange!(fn, AR) payloadRange(alias fn, AR)(AR args)
     return typeof(return)(args);
 }
 
-/// Lazy ST grains over a finite, sliceable random-access argument range.
+/// Lazy grains over a finite, sliceable random-access argument range.
 /// Each payload owns a copied subrange descriptor and executes its elements
 /// sequentially. Referenced immutable/shared data must outlive execution.
 /// The source descriptor must be POD, aligned to at most 8, with no unshared
@@ -228,7 +211,6 @@ struct PayloadGrainRange(alias fn, AR)
 {
     private AR source;
     private size_t grain, position, count;
-    private PayloadHeader header;
     private ulong[(AR.sizeof + 7) / 8] words;
 
     private this(AR input, size_t granularity) nothrow @nogc @system
@@ -242,13 +224,11 @@ struct PayloadGrainRange(alias fn, AR)
         grain = granularity;
         immutable n = cast(size_t) source.length;
         count = n / grain + (n % grain != 0);
-        header.call = &invoke;
-        header.plen = fixedPayloadLength;
     }
     /// Copied descriptor width, independent of grain and final tail length.
     enum ulong fixedPayloadLength = (AR.sizeof + 7) / 8;
     /// Common metadata selects the Farm's uniform table path.
-    @property PayloadHeader* commonPayloadHeader() nothrow @nogc @system { return &header; }
+    @property Callback commonPayloadCallback() nothrow @nogc @system { return &invoke; }
     /// True when every grain has been popped.
     @property bool empty() const nothrow @nogc @safe { return position == count; }
     /// Remaining grains, not source elements.
@@ -263,7 +243,7 @@ struct PayloadGrainRange(alias fn, AR)
         immutable last = first + (grain < remaining ? grain : remaining);
         AR block = source[first .. last];
         memcpy(words.ptr, &block, AR.sizeof);
-        return PayloadEntry(&header, words[]);
+        return PayloadEntry(&invoke, words[]);
     }
     /// Advance one grain.
     void popFront() nothrow @nogc @safe { assert(!empty); ++position; }
@@ -274,8 +254,10 @@ struct PayloadGrainRange(alias fn, AR)
         position += taken;
         return taken;
     }
-    private static long invoke(PayloadHeader*, PayloadBody body) nothrow @nogc @system
+    private static extern(C) void invoke(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
     {
+        auto body = bodyPtr[0 .. bodyWords];
+        if (body.length != fixedPayloadLength) fatal("payload grain body length mismatch");
         ulong[fixedPayloadLength] copy;
         foreach(i; 0 .. copy.length)
             copy[i] = atomicLoad!(MemoryOrder.raw)(*cast(shared ulong*)(body.ptr + i));
@@ -295,11 +277,11 @@ struct PayloadGrainRange(alias fn, AR)
                 fn(block[i]);
             }
         }
-        return 0;
+        return;
     }
 }
 
-/// Group up to grain argument elements into one ST payload. Grain must be
+/// Group up to grain argument elements into one payload. Grain must be
 /// positive; the final payload handles the short tail. Publication counts and
 /// popFrontN are measured in grains. Omit grain for minimal per-element packing.
 auto payloadRange(alias fn, AR)(AR args, size_t grain) nothrow @nogc @system
@@ -374,19 +356,14 @@ private template validParams(alias fn, size_t i)
         enum bool validParams = true;
 }
 
-private long callbackImpl(alias fn)(
-    PayloadHeader* head, PayloadBody body) nothrow @nogc @system
+private extern(C) void callbackImpl(alias fn)(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     static assert(validSignature!(fn),
         "antfarm.templates: unsupported function signature");
     if (body.length < packedLen!(fn))
         fatal("antfarm callback: body too short");
-    static if (is(ReturnType!fn == void))
-    {
-        fn(decodeArgs!(fn)(body).expand);
-        return 0;
-    }
-    else return fn(decodeArgs!(fn)(body).expand);
+    fn(decodeArgs!(fn)(body).expand);
 }
 
 private auto decodeArgs(alias fn, size_t i = 0)(

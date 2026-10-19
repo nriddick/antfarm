@@ -48,7 +48,7 @@ def main():
         return 1
     controls = [
         ("storeRaw(w[1], wtprime);", "w[1] = wtprime;"),
-        ("storeRaw(ph[0], cast(ulong) cast(void*) hp.call);", "ph[0] = cast(ulong) cast(void*) hp.call;"),
+        ("storeRaw(ph[0], cast(ulong) cast(void*) hp);", "ph[0] = cast(ulong) cast(void*) hp;"),
         ("storeRaw(w[1], wtprime);", "*(w + 1) = wtprime;"),
         ("storeRaw(w[1], wtprime);", "w[1] |= wtprime;"),
     ]

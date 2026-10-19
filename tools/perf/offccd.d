@@ -122,7 +122,7 @@ __gshared size_t[] g_producers;
 __gshared ulong g_share;          // phased: payloads per producer per round
 __gshared ulong g_costIters;
 __gshared ulong g_calSink;
-__gshared PayloadHeader g_hdr, g_hdrAlt;
+__gshared Callback g_hdr, g_hdrAlt;
 __gshared long[][] g_firstCb;     // per slot, phased
 __gshared long[][] g_lat;         // per slot, latency slice
 
@@ -158,8 +158,9 @@ ulong chain(ulong x, ulong n) nothrow @nogc @system
     return x;
 }
 
-long cbBody(bool alt)(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
+extern(C) void cbBody(bool alt)(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto b = bodyPtr[0 .. bodyWords];
     ulong x = tlsSink;
     foreach (w; b)
         x ^= w;
@@ -174,7 +175,7 @@ long cbBody(bool alt)(PayloadHeader* h, PayloadBody b) nothrow @nogc @system
     if (tlsLat !is null && (b[0] & latFlag) && tlsLatN < tlsLatCap)
         tlsLat[tlsLatN++] = nowTicks() - cast(long)(b[0] & ~latFlag);
     ++tlsCalls;
-    return alt ? 2 : 1;
+    return;
 }
 
 alias cbTouch = cbBody!false;
@@ -400,7 +401,7 @@ void producerMain(size_t i)
     {
         w.storage[k * bw] = k;
         w.bodies[k] = w.storage[k * bw .. (k + 1) * bw];
-        w.entries[k].header = (k & 1) ? &g_hdrAlt : &g_hdr;
+        w.entries[k].call =  (k & 1) ? g_hdrAlt : g_hdr;
         w.entries[k].body = w.bodies[k];
     }
     if (!pinSelf(i, g_threads[i].cpu.id))
@@ -512,7 +513,7 @@ struct ScanResult
 // Wt value its write reserved, its Tsent word holds sentinelOf(seq), and Tnext
 // is seq + Tsize, so walking Tnext from the pre-PUBLISH Wt visits exactly the
 // round's tables and lands on the post-round Wt. Offsets follow the table
-// layout: Thead[8], extension words (uniform 1, uniformFixed 2), Tindex
+// layout: Thead[5], extension words (uniform 1, uniformFixed 2), Tindex
 // (none for uniformFixed, Tlen otherwise), 7 pad, Tprogress, 7 pad,
 // then Tcount shards at a stride of 8 words. Tcount high 32 bits count claim
 // attempts; attempts beyond Shiter = ceil(Shlen / chunk) failed.
@@ -531,14 +532,12 @@ void scanRound(ulong from, ulong to, ref ScanResult r)
         }
         immutable w2 = bp[idx + 2];
         immutable tlen = cast(uint) w2;
-        immutable tmt = cast(uint)(w2 >> 32);
-        immutable sq = cast(uint) bp[idx + 4];
-        immutable w6 = bp[idx + 6];
-        immutable kind = cast(uint)(w6 >> 32);
-        immutable ac = cast(uint) w6;
+        immutable sq = cast(uint) bp[idx + 3];
+        immutable kind = cast(ubyte)(w2 >> 32);
+        immutable ac = cast(ubyte)(w2 >> 40);
         immutable ext = kind == 2 ? 2 : kind == 1 ? 1 : 0;
-        immutable index = kind == 2 ? 0 : (kind == 0 && tmt != 0) ? cast(ulong) tlen + tmt : tlen;
-        immutable progOff = idx + 8 + ext + index + 7;
+        immutable index = kind == 2 ? 0 : tlen;
+        immutable progOff = idx + 5 + ext + index + 7;
         immutable tcountOff = progOff + 8;
         if (bp[progOff] != tlen)
             r.progressOk = false;
@@ -852,11 +851,11 @@ void run(ref RolePlan plan, ref JSONValue out_)
     g_farm = f;
     scope (exit) f.destroy();
 
-    g_hdr = PayloadHeader.init;
+    g_hdr = Callback.init;
 
-    g_hdr.call = &cbTouch;
+    g_hdr = &cbTouch;
     g_hdrAlt = g_hdr;
-    g_hdrAlt.call = &cbTouchAlt;
+    g_hdrAlt = &cbTouchAlt;
 
     // Phased round budget: whole batches per producer, with one extra table
     // header per write as margin for quota splits.

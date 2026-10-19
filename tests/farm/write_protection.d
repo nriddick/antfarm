@@ -38,9 +38,9 @@ void verifyBody(PayloadBody body) nothrow @nogc @system
         if (word != pattern(i)) fatal("protected payload body changed");
 }
 
-long bodyCallback(PayloadHeader*, PayloadBody body)
-    nothrow @nogc @system
+extern(C) void bodyCallback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
 {
+    auto body = bodyPtr[0 .. bodyWords];
     verifyBody(body);
     if (blockBody && body.length > 50_000)
     {
@@ -53,26 +53,26 @@ long bodyCallback(PayloadHeader*, PayloadBody body)
         verifyBody(body);
     }
     atomicFetchAdd!(MemoryOrder.rel)(calls, 1L);
-    return 1;
+    return;
 }
 
-// A one-payload ST table has 40 + 8*(SqCs-1) overhead words.
+// A one-payload ST table has 37 + 8*(SqCs-1) overhead words.
 ulong writeWords(AntFarm* f, ref Token tok, ulong words)
     nothrow @nogc @system
 {
     immutable cf = atomicLoad!(MemoryOrder.raw)(f.Cf);
     immutable sq = sqcsOf(cf > 0 ? cast(ulong) cf : 1);
-    immutable overhead = 40 + 8 * (sq - 1);
+    immutable overhead = 37 + 8 * (sq - 1);
     require(words > overhead, "test table too short");
     immutable n = cast(size_t)(words - overhead);
     auto mem = cast(ulong*) malloc(n * ulong.sizeof);
     require(mem !is null, "test allocation");
     scope (exit) free(mem);
     foreach (i; 0 .. n) mem[i] = pattern(i);
-    PayloadHeader h;
+    Callback h;
 
-    h.call = &bodyCallback;
-    PayloadEntry[1] entries = [PayloadEntry(&h, mem[0 .. n])];
+    h = &bodyCallback;
+    PayloadEntry[1] entries = [PayloadEntry(h, mem[0 .. n])];
     immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
     immutable result = f.write(entries[], tok);
     // Scheduling hooks may run other producers; only ordinary calls assert size.
