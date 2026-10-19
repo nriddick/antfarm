@@ -5,10 +5,11 @@
 # That script passes an explicit SHELL to child makes, because this host has
 # no /bin/sh and their TSan recipes quote TSAN_OPTIONS.
 #
-# Windows has a separate native Python runner. New tests stay on druntime
-# threads and atomics; the full correctness gate remains the Linux matrix.
+# Windows has a separate native Python runner. D tests use druntime threads
+# and atomics; native C ABI tests verify C threads and attachment explicitly.
+# The full correctness gate remains the Linux matrix.
 
-.PHONY: help check check-betterc check-quick check-windows check-docs check-soak check-mimalloc docs perf-gate
+.PHONY: help check check-betterc check-c-abi c-abi check-quick check-windows check-docs check-soak check-mimalloc docs perf-gate
 
 # `help` is the first rule, so name the default goal explicitly.
 .DEFAULT_GOAL := check
@@ -19,9 +20,11 @@ Ant Farm local targets (there is no CI). See CONTRIBUTING.md for details.
 Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Python 3):
   make check               full matrix, LDC and DMD, stops at the first failure
                            (bare `make` runs this)
-  make check-quick         root, review torture, threadpool, fiber smoke, examples
-                           (LDC toolchain including Dub and Python 3; no DMD/TSan)
+  make check-quick         core C/C++ ABI, root, review, threadpool, fibers, examples
+                           (LDC/Dub, Python 3, C11/C++11; no DMD/TSan)
   make check-betterc       BetterC modules and native C callback/hook smoke
+  make check-c-abi         native C/C++ core and non-Fiber runtime ABI checks
+  make c-abi              build static core; C_ABI_ARGS=--runtime adds the host
   make check-docs          tracked Markdown relative links and anchors (no network)
                            plus the API reference symbol/coverage check (needs DMD)
   make -C tests/farm check-parallel
@@ -76,6 +79,13 @@ check-windows:
 
 check-betterc:
 	python3 scripts/check-betterc.py
+
+C_ABI_ARGS ?=
+c-abi:
+	python3 scripts/build-c-abi.py $(C_ABI_ARGS)
+
+check-c-abi:
+	python3 scripts/check-c-abi.py $(C_ABI_ARGS)
 
 check-docs:
 	python3 scripts/check-doc-links.py

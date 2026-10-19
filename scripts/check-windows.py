@@ -76,10 +76,12 @@ class Checks:
 
     def packages(self):
         self.run([sys.executable, "-B", "scripts/check-betterc.py", "--compiler", self.compiler])
+        self.run([sys.executable, "-B", "scripts/check-c-abi.py", "--compiler", self.compiler, "--core-only"])
         for package in (None, ":threadpool", ":ant_fibers"):
             self.dub("test", package)
 
     def threadpool(self):
+        self.run([sys.executable, "-B", "scripts/check-c-abi.py", "--compiler", self.compiler, "--runtime-only"])
         for config in ("affinity-test", "confine-test", "wait-races", "host-test"):
             self.dub("run", ":threadpool", "-c", config)
         self.dub("run", ":threadpool", "-c", "wait-races", "--build=release")

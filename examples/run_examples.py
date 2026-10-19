@@ -137,6 +137,20 @@ def main(ldc_only=False, compiler=None):
     print("PASS actor examples")
 
 
+def check_c_examples(compiler):
+    """Both C examples use the same native build helpers as the ABI gate."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cabi_check", root / "scripts/check-c-abi.py")
+    abi = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(abi)
+    output = root / ".build" / ("c-abi-" + compiler + "-" + os.name)
+    core = abi.build_api.build_core(compiler, output)
+    abi.execute(abi.native("examples/c_core.c", output, [core]))
+    runtime = abi.build_api.build_runtime(compiler, output)
+    abi.execute(abi.native_runtime("examples/c_host.c", output, [runtime, core], compiler))
+    print("PASS C ABI examples", flush=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     selection = parser.add_mutually_exclusive_group()
@@ -144,9 +158,15 @@ if __name__ == "__main__":
                            help="LDC debug/release only, without TSan or terminal builds")
     selection.add_argument("--compiler", choices=("ldc2", "dmd"))
     selection.add_argument("--life", action="store_true", help="build the POSIX terminal app")
+    parser.add_argument("--c-abi", action="store_true", help="build/run the native C core and host examples")
     args = parser.parse_args()
+    if args.c_abi and args.life:
+        parser.error("--c-abi cannot be combined with --life")
     try:
-        if args.life:
+        if args.c_abi:
+            for selected in ([args.compiler] if args.compiler else ["ldc2"] if args.ldc_only else ["ldc2", "dmd"]):
+                check_c_examples(selected)
+        elif args.life:
             if os.name != "posix":
                 raise SystemExit("The Life terminal front end requires POSIX")
             compiler = os.environ.get("DC", "ldc2")

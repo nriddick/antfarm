@@ -33,8 +33,8 @@ lane matrix, prerequisites, focused entry points, and optional lanes are in
 
 For a portable local iteration check, run `make check-quick`. It runs the BetterC/native-C link check, root
 unit tests, plain review-torture suite, threadpool unit tests, fiber smoke suite,
-and LDC debug/release examples. It needs the LDC toolchain (including Dub), Python
-3, GNU make, Bash and a C11 compiler; it uses neither DMD nor TSan. `make check` retains the full
+and LDC debug/release examples. It includes the core C/C++ ABI check and needs the LDC toolchain (including Dub), Python
+3, GNU make, Bash and C11/C++11 compilers; it uses neither DMD nor TSan. `make check` retains the full
 matrix and remains the correctness gate.
 
 On Windows x64, use `python -B scripts/check-windows.py` for the native
@@ -77,8 +77,9 @@ During implementation of changes to the Farm, actors, or shared lifecycle:
   for actors. Do not weaken an ordering without the proof that replaces it.
 - Keep the TSan lanes meaningful: do not add annotations that hide a weakened
   edge (see [docs/design/farm-ordering.md](docs/design/farm-ordering.md)).
-- New test code stays on druntime threads and atomics, and any new example is a
-  compile target in `examples/run_examples.py`.
+- D test code stays on druntime threads and atomics. Native C ABI tests use
+  native threads to verify runtime independence and foreign-thread attachment.
+  Any new example is a compile target in `examples/run_examples.py`.
 - If you change a documentation program, the quickstart First payload, or an
   example, `make check` extracts and runs them. Mark partial code blocks as
   fragments.

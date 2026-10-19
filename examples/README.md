@@ -1,4 +1,12 @@
-# Actor examples
+# Examples
+
+C/C++ consumers can start with [c_core.c](c_core.c) or the non-Fiber
+[c_host.c](c_host.c). Their [ABI guide](../docs/design/c-abi.md#build-and-run)
+owns the build and lifetime contracts. Run both C examples with
+`python examples/run_examples.py --c-abi --compiler ldc2` (or `dmd`).
+The ABI gate also builds and runs them.
+
+## Actor programs
 
 Complete programs for the two actor models. Read these with
 [the lifecycle guide](../docs/reference/actor-lifecycle.md), not the test sources.

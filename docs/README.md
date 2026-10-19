@@ -69,7 +69,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/private-actor-ordering.md](design/private-actor-ordering.md) | see the private join, outcome and cancellation proof chains |
 | [design/private-actor-layout.md](design/private-actor-layout.md) | see the Entry/Service/cohort layout invariants and slab reuse proof |
 | [design/farm-ordering.md](design/farm-ordering.md) | see the Farm subscription/reclamation ordering audit and its TSan lanes |
-| [design/c-abi.md](design/c-abi.md) | review the proposed ST-only C API, runtime-free core and runtime-inclusive worker pool/host boundary |
+| [design/c-abi.md](design/c-abi.md) | build and use the C/C++ ABI, runtime-free core and optional non-Fiber worker host |
 | [design/threadpool.md](design/threadpool.md) | get the topology, worker, Director, registry and OS-backend contracts |
 | [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
 
@@ -86,7 +86,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 
 | Topic | Owner |
 | --- | --- |
-| Farm algorithm, table layout, compact ST tables, callback header, memory-order contract | [SPEC.md](../SPEC.md) |
+| Farm algorithm, table layout, callbacks and memory-order contract | [SPEC.md](../SPEC.md) |
 | Layers, sizing formulas and entries per quota | [ARCHITECTURE.md](../ARCHITECTURE.md) |
 | Work-representation and public/private actor choice | [guide/choosing-work.md](guide/choosing-work.md) |
 | Parallel loop API, range ownership, completion proof and blocking restrictions | [guide/parallel-loops.md](guide/parallel-loops.md) |
@@ -106,7 +106,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | The local correctness gate and its lanes | [development/testing.md](development/testing.md) |
 | CyDo agent session routing, iteration, hardening, TSan budgets and mutation selection | [development/agent-workflow.md](development/agent-workflow.md) |
 | Farm ordering audit and real-atomic TSan lanes | [design/farm-ordering.md](design/farm-ordering.md) |
-| Proposed C ABI scope, compatibility and runtime separation | [design/c-abi.md](design/c-abi.md) |
+| C ABI headers, compatibility and runtime separation | [design/c-abi.md](design/c-abi.md) |
 | Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |
 | Fiber scheduler model and invariants | [design/ant_fibers.md](design/ant_fibers.md) |
 | Test suites (`tests/farm`, `tests/actors`, `tests/private`, `tests/threadpool`, `tests/ant_fibers`) | each suite's README and [development/testing.md](development/testing.md) |

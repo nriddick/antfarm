@@ -1,0 +1,78 @@
+/* Optional druntime-inclusive non-Fiber FarmHost. Link with antfarm_core. */
+#ifndef ANTFARM_RUNTIME_H
+#define ANTFARM_RUNTIME_H
+#include "antfarm.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+typedef struct af_host af_host;
+#define AF_AUTO_WORKERS UINT32_MAX
+#define AF_WAIT_FOREVER UINT64_MAX
+enum { AF_CALLER_UNCHANGED = 0, AF_CALLER_CONFINE = 1, AF_CALLER_PIN = 2 };
+enum { AF_IDLE_PARK = 0, AF_IDLE_SPIN = 1 };
+enum { AF_HOST_OPEN = 0, AF_HOST_FAILED = 1, AF_HOST_CLOSED = 2,
+       AF_HOST_ABANDONED = 3, AF_HOST_STOPPING = 4 };
+typedef struct af_host_options {
+    uint32_t struct_size, abi_version;
+    uint32_t workers, caller_consumes, caller_placement, idle;
+    uint64_t idle_timeout_ns;
+    uint32_t ring_mib, segments, extra_small_producers, bulk_producers;
+    uint64_t bulk_quota_words, small_quota_words;
+    uint32_t extra_consumers, small_table_threshold, huge_pages, skip_smt_siblings;
+    uint64_t reserved;
+} af_host_options;
+
+/* One explicit session per process. Call init/shutdown serially on the same
+   control thread, with lifecycle operations in other D libraries quiescent.
+   A balanced druntime reference preserves an embedding D application's own
+   initialization. Shutdown returns AF_BUSY until hosts and attachments close.
+   No runtime function may race shutdown. ABI 1 does not support restarting
+   a session after shutdown. */
+af_status af_runtime_init(void);
+af_status af_runtime_shutdown(void);
+/* Foreign threads must attach before runtime services and detach before exit.
+   Already attached D threads are borrowed, never detached by this library.
+   These calls include TLS constructors/destructors only for new attachments.
+   Core-only C threads need neither function. */
+af_status af_runtime_attach_thread(void);
+af_status af_runtime_detach_thread(void);
+
+void af_host_options_default(af_host_options *out);
+/* Control thread only, except wake and state. Defaults: automatic worker
+   count on one LLC, one worker/core, caller consumption, unchanged caller
+   affinity, 1 ms parks, one extra small producer slot. Zero workers is valid.
+   A process can have only one host with workers (the D pool's existing limit).
+   Extra producers/views use the same core handles as standalone Farms. */
+af_status af_host_create(const af_host_options *, af_host **out);
+af_farm *af_host_farm(af_host *); /* borrowed; never af_destroy this Farm */
+af_status af_host_register_producer(af_host *, af_tier, af_token **out);
+af_status af_host_step(af_host *);
+af_status af_host_wake(af_host *); /* attached threads, while handle remains live */
+uint32_t af_host_state(af_host *);
+/* Call wake after accepted raw writes AND on idle/retry polls. With indefinite
+   parks, sleeping consumer pins can otherwise block producer reclamation.
+   step performs that wake and caller progress, and reports worker failures.
+
+   Close requires application completion signals for every submitted job,
+   returned tokens, unsubscribed external views, and quiescent external users.
+   It joins workers; it does not infer that arbitrary C work has drained.
+   AF_OK consumes the host handle. On any error it remains owned by the caller;
+   repair AF_BUSY and retry. A terminal host can be closed again after a cleanup
+   diagnostic. Failed D hosts follow FarmHost's abandonment policy. */
+af_status af_host_close(af_host *);
+/* Emergency shutdown: stop/join workers, intentionally retain the Farm's ring
+   and unfinished work, and consume the host handle. Same external-participant
+   preconditions as close. This is an explicit leak for unrecoverable failure. */
+af_status af_host_abandon(af_host *);
+
+/* Status diagnostics use af_last_error_message()/af_last_os_error(). No D
+   exception crosses these exports. Callbacks still must not throw/longjmp. */
+#ifdef __cplusplus
+}
+static_assert(sizeof(af_host_options) == 88 && alignof(af_host_options) == 8 &&
+              offsetof(af_host_options, idle_timeout_ns) == 24, "host options layout");
+#else
+_Static_assert(sizeof(af_host_options) == 88 && _Alignof(af_host_options) == 8 &&
+               offsetof(af_host_options, idle_timeout_ns) == 24, "host options layout");
+#endif
+#endif

@@ -588,9 +588,30 @@ uint sqcsOf(ulong cs) pure nothrow @nogc @safe
     return r > MAX_LEAVES ? MAX_LEAVES : cast(uint) r;
 }
 
-/// Fatal error: print and abort. Spec 1: "most errors are fatal".
+/// Optional process-wide observer of a fatal contract violation. It must not
+/// throw, longjmp, or re-enter the Farm. Returning is followed by abort().
+alias FatalHandler = extern(C) void function(const(char)* message, size_t bytes,
+    void* context) nothrow @nogc @system;
+private __gshared FatalHandler fatalHandler;
+private __gshared void* fatalContext;
+private bool reportingFatal;
+
+/// Install before starting Farm users; replacement requires process-wide Farm
+/// quiescence. Null restores the default diagnostic and abort policy.
+void setFatalHandler(FatalHandler handler, void* context = null) nothrow @nogc @system
+{
+    fatalContext = context;
+    fatalHandler = handler;
+}
+
+/// Fatal error: notify the installed observer, print, and abort (SPEC 10).
 void fatal(const(char)[] msg) nothrow @nogc @system
 {
+    if (!reportingFatal && fatalHandler !is null)
+    {
+        reportingFatal = true;
+        fatalHandler(msg.ptr, msg.length, fatalContext);
+    }
     fprintf(stderr, "antfarm fatal: %.*s\n", cast(int) msg.length, msg.ptr);
     abort();
 }

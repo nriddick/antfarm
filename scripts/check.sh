@@ -78,6 +78,7 @@ fi
 
 if [[ "$quick" -eq 1 ]]; then
     run python3 scripts/check-betterc.py
+    run python3 scripts/check-c-abi.py --core-only
     run dub test --compiler=ldc2
     run "${make_cmd[@]}" -C tests/farm run DC=ldc2
     run dub test :threadpool --compiler=ldc2
@@ -101,6 +102,9 @@ if [[ "$soak" -eq 1 ]]; then
 fi
 
 run python3 scripts/check-betterc.py
+run python3 scripts/check-c-abi.py --compiler ldc2
+run python3 scripts/check-c-abi.py --compiler dmd
+run python3 scripts/check-c-abi.py --tsan
 run dub test --compiler=ldc2
 run dub test --compiler=dmd
 # Threadpool and fibers are not covered by the root dub test. host-test on

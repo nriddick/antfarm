@@ -33,9 +33,10 @@ is reassessed holistically in dedicated sessions.
   persistent CPU-accounting exclusions whose cause remains unresolved. Keep
   these limits with the measurements; the 392-case grain grid verified output
   throughout, but does not establish a general performance win.
-- Implement the [C ABI](docs/design/c-abi.md): core first, then the optional
-  druntime-inclusive non-Fiber worker pool and FarmHost distribution.
-- Actors follow their allocator/runtime split; Fibers stay outside ABI 1.
+- Extend the [C ABI](docs/design/c-abi.md) only after its core and optional
+  non-Fiber host have production usage. Shared-library packaging and language
+  ownership adapters can follow the static C/C++ distributions.
+- Actor exports follow their allocator/runtime split; Fibers stay outside ABI 1.
 
 ## Next
 

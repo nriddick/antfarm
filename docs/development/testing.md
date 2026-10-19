@@ -22,6 +22,7 @@ lists every target.
 | --- | --- | --- |
 | Docs links | `make check-docs`: tracked Markdown relative links and heading anchors (no network), plus `scripts/check-api-docs.py`, the API symbol/coverage check over the Ddoc of the public runtime modules | Python 3, DMD |
 | Runtime-free core | `make check-betterc`: compile core/parallel/actors with BetterC, then link a native C main and execute all three write forms with C callbacks and hooks, without druntime | LDC, C11 compiler |
+| C ABI | `make check-c-abi`: native C/C++ core linking, release contract deaths, partial/zero writes, concurrent joins and callback-before-return; optional runtime lifecycle, GC roots, native foreign threads and parked hosts. The full gate also runs the native C/core test under TSan (`--tsan`) | LDC, DMD, C11/C++11 compilers; runtime needs two worker CPUs |
 | Root suite | `dub test` (module `unittest` blocks plus `tests/farm/antfarm_test.d`) | LDC, DMD |
 | Threadpool suite | `dub test :threadpool` (including the FarmHost placement tests on synthetic snapshots) | LDC, DMD |
 | Fiber suite | `dub test :ant_fibers` (smoke suite and module unittests) | LDC, DMD |
@@ -33,12 +34,12 @@ lists every target.
 | Private actors | `tests/private`: unit suite, the extracted private-actor documentation programs, and the fatal-death harness | LDC, DMD, LDC TSan |
 | Examples | `examples/`: the First payload program extracted from [quickstart.md](../guide/quickstart.md#first-payload), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
 
-`make check-quick` runs the BetterC/native-C check, root unit suite, `make -C tests/farm run`
+`make check-quick` runs the BetterC/native-C and core C/C++ ABI checks, root unit suite, `make -C tests/farm run`
 (including `sweep_cursor`), threadpool unit suite, fiber smoke suite, and
 `python3 examples/run_examples.py --ldc-only`. The examples include the quickstart
 payload and actor/headless programs in LDC debug and release with 0 and 2
 workers; the terminal front end is omitted. This target needs the LDC toolchain
-(including Dub), Python 3, GNU make, Bash and a C11 compiler, without DMD or a TSan runtime. It prints `ALL QUICK CHECKS PASSED` on success; the full `make check`
+(including Dub), Python 3, GNU make, Bash and C11/C++11 compilers, without DMD or a TSan runtime. It prints `ALL QUICK CHECKS PASSED` on success; the full `make check`
 matrix remains the correctness gate.
 
 For the full gate's affinity lanes, set `CHECK_SMALL_CPUS` or
@@ -111,7 +112,8 @@ cancellation and exception unwinding). The full smoke run includes both checks.
 
 - DMD 2.112+ and LDC 1.42+, with the LDC ThreadSanitizer runtime installed (the
   TSan lanes fail to link without it).
-- Dub, GNU make, Python 3, Bash and a C11 compiler (`cc` by default; set `CC` to override).
+- Dub, GNU make, Python 3, Bash and C11/C++11 compilers (`cc` and `c++` by
+  default; set `CC` and `CXX` to override).
 - `/bin/sh` is not required. GNU make execs recipes without shell metacharacters
   directly, and `scripts/check.sh` carries its own Bash shebang. When `/bin/sh`
   is missing it passes `SHELL=/usr/bin/bash` to child makes, because their TSan
@@ -123,6 +125,7 @@ cancellation and exception unwinding). The full smoke run includes both checks.
 
 | Command | Use |
 | --- | --- |
+| `make check-c-abi` | core C/C++ and optional runtime ABI; select `C_ABI_ARGS='--core-only'`, `'--runtime-only'`, or `'--tsan'` for focused coverage |
 | `make -C tests/farm check-farm-ordering` | the Farm ordering and leaf-reuse tests (LDC and DMD) and the raw ring-store check |
 | `make -C tests/farm run-farm-tsan` | the Farm suite under ThreadSanitizer |
 | `make -C tests/actors run run-dmd run-tsan` | public actor suite |
@@ -140,7 +143,7 @@ Each suite has its own README with selectors and the seams it uses:
 
 Run from the repository root in PowerShell or cmd.exe with Python 3, Dub and
 the selected D compilers on PATH (DMD 2.112+ / LDC 1.42+). The packages lane
-also needs Visual Studio C++ Build Tools with C11 support; `vswhere` locates
+also needs Visual Studio C++ Build Tools with C11/C++14 support; `vswhere` locates
 the installation for the native C link test. No Bash, GNU make or administrator
 privileges are needed:
 
@@ -159,8 +162,8 @@ interpreter and arguments.
 
 | Lane | Native coverage |
 | --- | --- |
-| `packages` | BetterC/native-C link check; root, threadpool and Fiber unit/smoke suites via Dub |
-| `threadpool` | Process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release, FarmHost lifecycle; also optimized LDC host tests |
+| `packages` | BetterC/native-C and core C/C++ ABI checks; root, threadpool and Fiber unit/smoke suites via Dub |
+| `threadpool` | C runtime ABI lifecycle and worker checks; process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release, FarmHost lifecycle; also optimized LDC host tests |
 | `ordering` | Raw ring-store audit, controlled Farm ordering and leaf reuse |
 | `review` | Plain torture suite, sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
 | `actors` | Public actor deterministic/contention suite with the mimalloc stub |

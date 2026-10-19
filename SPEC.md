@@ -683,6 +683,12 @@ are absent; see [the ordering audit](docs/design/farm-ordering.md).
 | tally underflow or invalid ownership transition | fatal |
 | destroy with live consumers or producer tickets | fatal |
 
+A process-wide `setFatalHandler` observer (C: `af_set_fatal_handler`) may log
+or dump before the default diagnostic and abort. Install or replace it only
+while Farm users are quiescent. Its borrowed message is valid only during the
+call; it must not throw, longjmp, or re-enter the Farm. Returning still aborts.
+The core and optional C runtime distribution share this same fatal policy.
+
 Operational sections still mention a fatal guard at the point where it matters to a proof; this table is the compact form of the policy.
 
 ### Current implementation profile

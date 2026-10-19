@@ -37,9 +37,16 @@ Older release notes are in [docs/releases/](docs/releases/):
 - Added a quick-lane BetterC check that compiles the core, parallel layer and
   actors, then links and runs C callbacks and hooks from a native C main without
   druntime. Validated with LDC and DMD on Windows and Linux.
-- The [C ABI proposal](docs/design/c-abi.md) targets this ST-only foundation:
-  a runtime-free core distribution and a druntime-inclusive distribution with
-  the non-Fiber pool and FarmHost. C exports are not implemented yet.
+- Added [C ABI 1](docs/design/c-abi.md): a BetterC static core, opaque Farm,
+  producer and view handles, all three write forms with hooks and cost classes,
+  options/version checks, thread-local status diagnostics, and a fatal observer
+  shared with D callers. Added a move-only C++11 ownership adapter.
+- Added a separate optional druntime-inclusive static library for the non-Fiber
+  FarmHost, explicit runtime initialization/thread attachment, wake/step and
+  shutdown. It links the same core; actor/Fiber exports remain deferred.
+- Native C/C++ checks cover both compilers, release failures, partial admission,
+  concurrent joins, completion before write return, GC roots and parked hosts.
+  The core ABI runs in the quick gate; full gates also check the optional host.
 
 ## 1.8.3 — progress branch
 
