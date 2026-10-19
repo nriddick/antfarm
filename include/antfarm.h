@@ -43,6 +43,9 @@ enum {
 };
 typedef uint32_t af_tier;
 enum { AF_SMALL = 0, AF_BULK = 1 };
+/* Initialize with af_options_default. ABI 1 requires struct_size == sizeof
+   (af_options), abi_version == AF_ABI_VERSION and reserved == 0. Size is a
+   layout check, not support for truncated or future option structures. */
 typedef struct af_options {
     uint32_t struct_size, abi_version;
     uint32_t ring_mib, segments, expected_consumers, max_bulk_producers;

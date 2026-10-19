@@ -12,6 +12,9 @@ enum { AF_CALLER_UNCHANGED = 0, AF_CALLER_CONFINE = 1, AF_CALLER_PIN = 2 };
 enum { AF_IDLE_PARK = 0, AF_IDLE_SPIN = 1 };
 enum { AF_HOST_OPEN = 0, AF_HOST_FAILED = 1, AF_HOST_CLOSED = 2,
        AF_HOST_ABANDONED = 3, AF_HOST_STOPPING = 4 };
+/* Initialize with af_host_options_default. ABI 1 requires struct_size == sizeof
+   (af_host_options), abi_version == AF_ABI_VERSION and reserved == 0. Truncated
+   and larger option structures are rejected with AF_INVALID. */
 typedef struct af_host_options {
     uint32_t struct_size, abi_version;
     uint32_t workers, caller_consumes, caller_placement, idle;
@@ -34,7 +37,13 @@ af_status af_runtime_shutdown(void);
    and detach before exit.
    Already attached D threads are borrowed, never detached by this library.
    These calls include TLS constructors/destructors only for new attachments.
-   Core-only C threads need neither function. */
+   Core-only C threads need neither function.
+   On Linux, druntime installs process-wide GC suspend/resume signal handlers.
+   The supported LDC/DMD runtimes default to SIGRTMIN and SIGRTMIN+1; honor the
+   linked runtime's configured signals. Do not replace those handlers or block
+   those signals on attached threads, including pool workers. Account for
+   inherited signal masks when starting the runtime, workers or attachments.
+   The runtime-free core does not install these handlers. */
 af_status af_runtime_attach_thread(void);
 af_status af_runtime_detach_thread(void);
 

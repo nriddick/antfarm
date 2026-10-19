@@ -70,7 +70,10 @@ uint32_t af_actor_retired(const af_actor_owner *);
    remain safe to query via wake/send until the runtime is destroyed. */
 uint32_t af_actor_reclaim(af_actor_owner *);
 
-/* Context functions are valid only in this callback, on this thread. */
+/* Context functions are valid only in this callback, on this thread. Do not
+   retain the context pointer. The diagnostic is best-effort: a later callback
+   may reuse its stack address, so passing an expired context is invalid even
+   if the check does not detect it. */
 void af_actor_republish(af_actor_context *);
 void af_actor_retire(af_actor_context *);
 uint32_t af_actor_closing(const af_actor_context *);

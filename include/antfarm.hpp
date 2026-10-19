@@ -81,7 +81,8 @@ public:
         out.value_ = detail::farm_ref(control);
         return AF_OK;
     }
-    // Defined only with exceptions; keep the class identical across build modes.
+    // Defined only with exceptions; calling make without them is a link error.
+    // Keep the class identical across build modes; use create in either mode.
     static farm make(const af_options *options = nullptr);
     farm(const farm &) = delete;
     farm &operator=(const farm &) = delete;
@@ -103,6 +104,8 @@ public:
         out.farm_ = f.value_; out.value_ = p;
         return AF_OK;
     }
+    // Defined only with exceptions; calling make without them is a link error.
+    // Keep the class identical across build modes; use create in either mode.
     static producer make(const farm &f, af_tier tier = AF_SMALL);
     ~producer() { reset(); }
     producer(const producer &) = delete;

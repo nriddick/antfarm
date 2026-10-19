@@ -78,6 +78,9 @@ Destructors release handles; join work before teardown.
 When exceptions are enabled, `farm::make(options)` and
 `producer::make(farm, tier)` are optional throwing conveniences. Their
 `antfarm::error` contains the status and a status-specific message.
+The declarations remain present in exception-disabled builds to keep class
+definitions identical across translation units; calling them in those builds
+is a link error. Use the status factories there.
 Factory status is authoritative: errors detected by the C++ wrapper itself
 (nonempty output or ownership allocation failure) do not replace the C thread
 diagnostic. This replaces ABI 1's earlier unreleased throwing constructors.
@@ -175,10 +178,21 @@ borrowed message and may log or dump; it must not throw, longjmp, re-enter the
 Farm, or return control to the failed operation. If it returns, the library
 aborts. The setter configures the same fatal implementation used by the core.
 
-`struct_size`, `abi_version`, and zero reserved fields make options validation
-explicit. ABI 1 rejects unknown required layouts rather than guessing. Numeric
-enum values and exported symbol names are defined by the ABI 1 headers. Keep
-internal ring offsets private; the five-word Thead is not a C ABI promise.
+Initialize options with `af_options_default` or `af_host_options_default`.
+For both structures, ABI 1 requires `struct_size == sizeof(the structure)`,
+`abi_version == AF_ABI_VERSION`, and zero reserved fields. Smaller and larger
+sizes return `AF_INVALID`; the implementation checks the size prefix before
+reading the rest of the structure. The caller still supplies valid, suitably
+aligned storage; the size field cannot validate an allocation's actual extent.
+
+Keep this exact-size rule for ABI 1. Version identifies the contract; size
+independently catches a mismatched binding/layout before a full structure read.
+It does not currently promise append-only compatibility. A future extension
+must specify supported prefix sizes and defaults field by field, or change ABI
+version. Accepting arbitrary shorter sizes with a zero-filled tail would leave
+partial fields and required geometry undefined by the interface.
+Numeric enum values and exported symbol names are defined by the ABI 1 headers.
+Keep internal ring offsets private; the five-word Thead is not a C ABI promise.
 
 ## Runtime-free public actors
 
@@ -212,7 +226,10 @@ used after destruction are invalid C accesses.
 Wake coalesces; flush publishes a bounded ready snapshot with the Farm's token
 and cost class. Zero publication is not a completion signal. Within each
 activation the C handler receives exclusive state and a callback-local context.
-It may pop messages, republish, or request retirement. The adapter uses the
+It may pop messages, republish, or request retirement. Contexts must not escape
+their callback or thread. The active-context diagnostic is best-effort: a later
+callback can reuse the same stack address, so a saved pointer is invalid even
+when the check accepts it. The adapter uses the
 existing erased D dispatch with a small C callback bridge; raw Farm callbacks
 still enter directly. No D actor state-machine or memory-order edge changes.
 
@@ -319,6 +336,15 @@ shut down while a host or an ABI attachment remains. Init/shutdown are
 serialized setup operations, cannot race other runtime services, and run on
 the same thread. ABI 1 permits one session; restart after shutdown is rejected.
 
+On Linux, druntime reserves process-wide GC suspend/resume signal handlers.
+The supported LDC 1.42 and DMD 2.112 runtimes default to `SIGRTMIN` and
+`SIGRTMIN + 1`, not `SIGUSR1`/`SIGUSR2`; use the linked runtime's configured
+signals if an embedding application overrides them. Do not replace their
+handlers or block them on attached threads, including the host's workers.
+Account for inherited masks before starting the runtime, workers or attaching
+foreign threads. This requirement comes from druntime; the runtime-free core
+installs no such handlers and requires no attachment.
+
 `af_host_options_default` chooses automatic workers in one LLC, one worker per
 core, caller consumption, unchanged caller affinity, 1 ms parks, and one extra
 small producer. Zero workers uses only the caller. The options expose geometry,
@@ -422,13 +448,25 @@ state. A kind belongs to exactly one runtime and remains addressable until that
 runtime is destroyed; registration is a quiescent setup operation initially.
 Use the runtime's allocator for registry storage.
 
+Validate descriptor metadata at registration: nonnull handler, nonzero state
+size, power-of-two alignment and representable allocation arithmetic. Alignments
+above 64 require a custom allocator. Record the validated descriptor unchanged;
+creation checks kind/runtime identity and per-call inputs without repeating
+descriptor validation. Live registration or kind unloading is outside this
+increment; handler/destructor code and user data must outlive their kind's uses.
+
 Replace the unused eight-byte `ActorSlot.inboxPadding` with an internal kind
 pointer. Preserve the 128-byte slot size and 64-byte alignment, and initialize
 the pointer before the generation's release transition to idle. Typed D actors
 use null there. Autonomous C dispatch obtains the kind from its pinned slot
-through an internal context accessor; C wave dispatch takes the byte count
-directly from its borrow. Neither needs a prefix before the user's state.
-Clear the field only under exclusive reclamation, before returning the slot.
+through an internal context accessor; C wave dispatch obtains the kind through
+an internal accessor on its pinned borrow, and the byte count from that borrow.
+The proposed wave callback is
+`(void *wave_user, const af_actor_kind *, void *state, size_t bytes)`.
+Kinds are stable identities for interpreting mixed-kind waves, including kinds
+from different runtimes on the same Farm. Neither dispatch needs a prefix before
+the user's state. Clear the field only under exclusive reclamation, before
+returning the slot.
 
 ### Sixteen-byte value owners
 
@@ -450,10 +488,44 @@ membership and closed-submission requirements. Losing calls report busy or
 stale without touching state. A vacant matching generation is already reclaimed,
 rather than indefinitely busy.
 
-Keep the normal D owner move-only. Specify the new reclaim phase and its
-release/acquire proof for both adapters. Runtime-scoped owner operations should
-take the C runtime explicitly, so provenance and reservation accounting do not
-depend on reading a kind pointer after another caller has reclaimed it.
+Reserve lifecycle phase 6 for `reclaiming` (retired is 5; the phase mask remains
+`0x7`, with phase 7 unused). Wake, send and retirement treat it as terminal and
+must not access state, schedule work or reopen admission. A competing reclaim
+reports busy until it observes a stale/vacant identity.
+
+Retirement also assumes an exclusive owner today. The idle fast path in
+`driveActorRetirement` rechecks a closed, empty submission gate, then blindly
+stores retired. Replace that store with a CAS from the exact joined lifecycle
+word to retired, reloading and rechecking on failure. A delayed retire caller
+must never overwrite a reclaimed or reused generation.
+
+The terminal CAS alone is insufficient: `requestActorRetire` can be delayed
+after marking retirement but before its untagged `closeSubmissionGate` call.
+Another copied owner could retire, reclaim and reuse that slot first; the old
+caller could then close the new generation's gate. Its debug inbox reads and
+other final slot accesses need protection too. Hold a generation-bound,
+exclusive owner-operation pin across the whole retirement request, acquired
+before marking/closing and released only after its final slot access. Use the
+unused lifecycle flag `0x40`; preserve it through every intervening lifecycle
+transition, including callback retirement. Contending retire calls report
+retryable busy. Reclaim may claim retired only with that pin clear, using the
+same lifecycle CAS to exclude a concurrent pin acquisition. It keeps the slot
+in `reclaiming` through destruction, then returns it as vacant to the free list. Document the
+acquire/release edges and audit every lifecycle rebuild before enabling copied
+owners; a separate generation check followed by an untagged gate write is not
+sufficient.
+
+Keep the normal D owner move-only. Runtime-scoped owner operations take the C
+runtime explicitly, so provenance and reservation accounting do not depend on
+reading a kind pointer after another caller has reclaimed it. Recognize a
+canonical empty owner as stale first. Before any slot dereference, validate
+the integer address against the runtime's slot-array
+bounds and require `(address - base) % sizeof(ActorSlot) == 0`; return
+`AF_INVALID` for foreign, out-of-range or interior-slot addresses. Alignment
+to 64 alone is insufficient for a 128-byte slot. The runtime pointer itself
+must be valid and live. Wake/send handles remain runtime-free capabilities:
+forged handles are invalid memory accesses, while genuine stale handles remain
+safe until runtime destruction.
 The value fields themselves still require caller synchronization: safe copied
 values do not authorize simultaneous writes to the same output object.
 
@@ -472,9 +544,10 @@ is returned. No public reserve/commit state escapes the create call.
 
 Placement-new also needs a destruction contract. Add an optional kind destructor
 called exactly once by the winning reclaimer after retirement and before freeing
-storage. It executes on the reclaiming thread, outside allocator/free-slot gates,
-and must not throw. An initializer that reports failure must clean up any partial
-construction itself; the library frees that storage without calling the kind
+storage. It executes on whichever thread wins reclaim, outside allocator/free-slot
+gates, and must not throw or assume the creating thread. It must not call actor
+operations on its own actor. An initializer that reports failure must clean up
+any partial construction itself; the library frees that storage without calling the kind
 destructor. A successfully initialized object receives the registered destructor
 on normal reclaim. Emergency abandonment retains it under the existing policy.
 
@@ -485,11 +558,13 @@ const handle/owner input spans, mutable owner output spans and strided result
 spans. Starting at an entity's embedded owner/handle field with stride equal to
 the entity size requires no packing buffer. Validate alignment, minimum stride,
 count/stride/address overflow and output capacity before mutation; empty spans
-accept null pointers. Batch outputs must be empty owner values. Input/output/result
-element bytes must not overlap; their bounding spans may overlap when they address
-different fields in the same entity array. Stride validation does not establish
-backing allocation bounds; storage extent and lifetime remain the caller's
-responsibility.
+accept null pointers. Preflight checks require every batch creation output to be
+an empty owner value. Non-overlap of input/output/result element bytes is a caller contract,
+not a general strided-overlap check performed by the API. Their bounding spans
+may overlap when they address different fields in the same entity array.
+An in-place reclaim span is one mutable owner span, not two overlapping spans.
+Stride validation does not establish backing allocation bounds; storage extent
+and lifetime remain the caller's responsibility.
 
 Batch copy/init creation uses one kind and returns a successful prefix plus the
 stop status (complete, capacity, allocation failure or initializer failure).
@@ -501,8 +576,11 @@ Take the free-slot gate once to detach an available prefix into a private chain,
 then release it before allocation or any initializer/destructor callback.
 Initialize and publish outside the gate. On failure return the unused reserved
 suffix as a chain under one gate acquisition. Count in-progress reservations
-until they are committed or returned. This avoids both per-element gate entry
-on successful admission and holding a global gate across caller code.
+until they are committed or returned. Capacity admission and `AF_FULL` must
+account for reserved slots; runtime/host teardown must refuse while any
+reservation is in flight, even before its first owner is returned. This avoids
+both per-element gate entry on successful admission and holding a global gate
+across caller code.
 
 Batch wake, retire and reclaim attempt every element and report per-element
 results, so one stale or busy member does not hide later outcomes. Structural
@@ -510,11 +588,19 @@ span errors reject the call before any action. Reclaim clears successful or
 confirmed-stale owner outputs, leaving busy owners available for retry. Scalar
 and batch calls share the same state-machine operations.
 
+Also return an aggregate success count: queued/coalesced for wake,
+requested/already-retired for retirement, and reclaimed/confirmed-stale (owner
+cleared) for reclaim. Busy and invalid outcomes do not count. Wake/retire success
+still means request acceptance, not callback completion or proven retirement;
+the aggregate is not a join. Each input occurrence gets its own result, including
+duplicate capabilities; mutations to the same owner storage remain exclusive.
+
 Wave publication consumes a strided span through a nonallocating range. Preserve
 the existing accepted-prefix/one-physical-table contract, membership rollback,
 seal/drain obligation and finished-versus-ready distinction. Callers advance the
 span by the accepted count. Do not introduce an implicit wait or all-or-nothing
-transaction around the batch.
+transaction around the batch. The nonallocating range is an implementation
+detail; the public surface is a span, with no pull-iterator/callback-range API.
 
 ### Caller-owned inbox messages
 
@@ -533,18 +619,29 @@ before release, preserving the existing final-access guarantee.
 
 ### Implementation and validation sequence
 
-1. Introduce exclusive reclaim arbitration with duplicate-owner interleavings,
-   slot reuse and wave-membership tests, keeping the typed D surface move-only.
-2. Add kinds and direct copy/init construction; test exact allocation sizes,
-   initializer rollback and exactly-once destruction with the custom allocator.
+1. Introduce the retirement-operation pin, exact-word retirement CAS and exclusive
+   reclaim claim, keeping the typed D surface move-only. Deterministically test
+   retire/retire, retire/reclaim and reclaim/reclaim with duplicate capabilities,
+   including drain-to-cancel escalation, a pause before gate closing, a pause
+   before the terminal CAS, slot reuse and wave membership. Audit pin preservation
+   through callback completion and every lifecycle transition; test new-generation
+   wake/send after each losing old-generation call.
+2. Add kinds and direct copy/init construction; test registration validation,
+   mixed-kind waves, exact allocation sizes, initializer rollback and exactly-once
+   destruction with the custom allocator, including reclaim on another thread.
 3. Replace C owner wrappers and message allocation together with their examples
-   and host lifetime accounting.
+   and host lifetime accounting. Test foreign runtimes, out-of-range pointers and
+   the 64-aligned interior of a 128-byte slot before accepting owner provenance.
 4. Add strided spans and batch admission/operations, then wave publication over
    spans. Test embedded entity fields, mixed results, duplicate inputs, partial
-   capacity, allocation failure at each element and invalid span arithmetic.
+   capacity, in-flight reservation accounting, per-operation success counts,
+   allocation failure at each element and invalid span arithmetic.
 5. Compare C and D lifecycle workloads with the same states and allocator:
    small/large state, scalar/batch, local/remote reclamation and mimalloc.
-   Count allocations/copies as well as time. There must be no native temporary
+   Include several creating threads. Reuse the creation review's scratch
+   `bench_c.c`, `bench_d.d` and `bench_proto.c` if available, after checking that
+   workloads and completion/lifetime rules match. Count allocations/copies as
+   well as time. There must be no native temporary
    or owner allocation per actor, and no message allocation by the API.
    Private cohort/slab exports follow separately and must retain their
    per-cohort storage advantage.

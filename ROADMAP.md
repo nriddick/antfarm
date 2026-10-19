@@ -38,7 +38,7 @@ is reassessed holistically in dedicated sessions.
   ownership adapters can follow the static C/C++ distributions.
 - Refresh the unreleased public actor C API before private roots/children:
   runtime-owned kinds, direct state initialization, value owners with exclusive
-  reclaim arbitration, strided batch operations and caller-owned inbox nodes.
+  retirement/reclaim arbitration, strided batch operations and caller-owned inbox nodes.
   The [refresh plan](docs/design/c-abi.md#planned-actor-api-refresh) defines the
   proposed lifetimes, partial-result rules and acceptance tests.
   The D GC-rooted adapter stays out of BetterC builds.
