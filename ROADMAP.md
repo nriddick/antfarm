@@ -18,7 +18,8 @@ is reassessed holistically in dedicated sessions.
 
 ## 1.9.0 progress
 
-- Prove the single-shot core links from C without druntime on Windows and Linux.
+- Resolve the flat private-root performance regression observed against 1.8.2
+  before tagging 1.9. The five-word layout remains under performance review.
 - Implement the [C ABI](docs/design/c-abi.md): core first, then the optional
   druntime-inclusive non-Fiber worker pool and FarmHost distribution.
 - Actors follow their allocator/runtime split; Fibers stay outside ABI 1.

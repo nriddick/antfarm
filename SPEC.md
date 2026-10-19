@@ -534,7 +534,7 @@ Each payload belongs to exactly one disjoint shard run. Every visitor uses those
 
 ### 7b. First-Claimant Mid-tick Yield
 
-The `Ci` that drew `X == 0` for a shard (the first claimant, at most one per shard) may, after finishing a run that did not complete the shard, read the claims half of `Shc`. If it is greater than the number of claims that `Ci` has personally made in this shard, the shard is shared: at least one other consumer has claimed a run here. The first claimant may then probe `Tnext`'s sentinel; if it is live, it may return from the primary pathway immediately instead of returning to step c, so `consumeNext` can advance to the already-published table (for example a mid-tick 1-payload write). The Tcount/`Tprogress` arithmetic is unchanged: the yield happens only after `Y = fetch_add(Shc, run_length)`, so the run is accounted, and the other claimant(s) will finish the shard. Unsubscription after the yield cannot starve the shard; OS pre-emption can only delay it, and the idle re-walk of 8 remains the backstop. Sweeper and re-walk calls (`checkFirst`) never yield early.
+The `Ci` that drew `X == 0` for a shard (the first claimant, at most one per shard) may, after finishing a run that did not complete the shard, read the claims half of `Shc`. If it is greater than the number of claims that `Ci` has personally made in this shard, the shard is shared: at least one other consumer has claimed a run here. The first claimant may then probe `Tnext`'s sentinel; if it is live, it may return from its assigned shard immediately instead of returning to step c, so `consumeNext` can advance to the already-published table (for example a mid-tick 1-payload write). The Tcount/`Tprogress` arithmetic is unchanged: the yield happens only after `Y = fetch_add(Shc, run_length)`, so the run is accounted, and the other claimant(s) will finish the shard. Unsubscription after the yield cannot starve the shard; OS pre-emption can only delay it, and the idle re-walk of 8 remains the backstop. Sweeper and re-walk calls (`checkFirst`) never yield early.
 
 Priority of roles: if the same run that would qualify `Ci` for the yield is also the shard-completing run (the 7a-e completion sum lands on `Shlen`), the completer outcome takes precedence — `Ci` gains the sweeper role for this table and does not yield early, so the completer's foreign-shard sweep is never lost to a mid-tick advance. The yield is only considered after a run that did not complete the shard. A yielded `Ci` also drops any carried sweeper role (7e): it begins the next table as a normal consumer without role baggage. Only a shard-completing result advances the sweeper role; observing the shared-shard signal permits the yield and does not grant the role.
 
@@ -554,9 +554,9 @@ other runs and can execute their callbacks concurrently.
 
 ### 7d. Oversaturation Feedback
 
-If `Ci` adds no work in its primary shard, it was entirely oversaturating the table. The value `X` from 7a-c has useful properties.
+If `Ci` adds no work in its assigned shard, it was entirely oversaturating the table. The value `X` from 7a-c has useful properties.
 
-Let `Z = X - Shiter`. After the primary shard's iterations are accounted, each `Ci` that fails to claim a run increments `Shc` one more time and observes the shard fully claimed; `Z` counts those exhausted-claim observations, not callback completions. If `Ci` observes `Z` significantly over `SqCs`, it can check the Farm level `Cf` and see if the shard is overloaded. `Ci` then nudges its `IDc` by +1. Already-incremented leaves are not moved. On the next table (and the next segment pin) `Ci` lands in a different bucket of consumers. This reduces an overallocated shard via a local feedback signal.
+Let `Z = X - Shiter`. After the assigned shard's iterations are accounted, each `Ci` that fails to claim a run increments `Shc` one more time and observes the shard fully claimed; `Z` counts those exhausted-claim observations, not callback completions. If `Ci` observes `Z` significantly over `SqCs`, it can check the Farm level `Cf` and see if the shard is overloaded. `Ci` then nudges its `IDc` by +1. Already-incremented leaves are not moved. On the next table (and the next segment pin) `Ci` lands in a different bucket of consumers. This reduces an overallocated shard via a local feedback signal.
 
 This is a scheduling heuristic: it affects future shard/leaf selection but is not required for memory safety.
 
@@ -570,7 +570,7 @@ does not depend on it, and the idle re-walk in section 8 provides liveness.
 
 The consumer whose 7a-e completion sum lands on `Shlen` — adding `Shlen` to `Tprogress` — gains the sweeper role for that table. This pulls one sweeper from each shard, so it takes all shards' completers being gone (hence no consumers and no progress anyway) for work to starve, without forcing much extra contention. The sweeper makes one linear pass:
 
-- **Foreign shards:** for each shard other than its own, a plain load short-circuits fully-claimed shards (`claims >= Shiter`) without an RMW; otherwise it attempts to claim and process runs exactly as in the primary path. The 7a-e completion rule fires for whichever consumer lands the final sum, owner or sweeper, so `Tprogress` mutations stay bounded by `SqCs`.
+- **Foreign shards:** for each shard other than its own, a plain load short-circuits fully-claimed shards (`claims >= Shiter`) without an RMW; otherwise it attempts to claim and process runs exactly as in the assigned-shard path. The 7a-e completion rule fires for whichever consumer lands the final sum, owner or sweeper, so `Tprogress` mutations stay bounded by `SqCs`.
 
 Sweeps of foreign shards do not recursively confer the role. A late visitor
 finding `Tprogress == Tlen` skips payload execution. The finisher may still

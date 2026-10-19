@@ -34,6 +34,9 @@ Older release notes are in [docs/releases/](docs/releases/):
 - The table header is five words: sentinel, next sequence, packed length/kind/
   cost, shard count, hook. Size derives from the next sequence. Removed the
   unused consumer snapshot; unified sizing, decoding and idle re-walk loops.
+- Added a quick-lane BetterC check that compiles the core, parallel layer and
+  actors, then links and runs C callbacks and hooks from a native C main without
+  druntime. Validated with LDC and DMD on Windows and Linux.
 - The [C ABI proposal](docs/design/c-abi.md) targets this ST-only foundation:
   a runtime-free core distribution and a druntime-inclusive distribution with
   the non-Fiber pool and FarmHost. C exports are not implemented yet.

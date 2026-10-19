@@ -1923,7 +1923,7 @@ struct AntFarm
             {
                 immutable bodyLen = cast(ulong) payloads.fixedPayloadLength;
                 checkPayloadFits(base, quota, bodyLen);
-                // Spec 2g: a uniform ST range shares its Call by
+                // Spec 2g: a uniform range shares its Call by
                 // construction, and a nonzero uniform length drops Tindex.
                 layout = bodyLen != 0 ? TableLayout.uniformFixed : TableLayout.uniform;
                 tcall = commonCall;
@@ -2399,7 +2399,7 @@ struct ConsumerView
             bool sweeper;
             if (atomicLoad!(MemoryOrder.raw)(bp[progOff]) != tlen)
             {
-                // Spec 7a: primary path. Completing a shard gains the
+                // Spec 7a: assigned-shard path. Completing a shard gains the
                 // sweeper role (7e).
                 sweeper = (processShard(bp, nextSeq, idx, tindexOff, tcountOff,
                                         progOff, tlen, layout, sq, myShi, false, false) & 1) != 0;
@@ -2682,7 +2682,7 @@ private:
     /// reference on the segment, so producers cannot have overwritten it.
     /// The walk resumes at the oldSweepSeq cursor, which advances only over
     /// the leading run of tables observed complete. A table another
-    /// consumer is still finishing (for example a primary call parked in
+    /// consumer is still finishing (for example a callback parked in
     /// its callback) stops the cursor, so a stalled oldest epoch costs each
     /// park O(tables from the first incomplete one) rather than
     /// O(tables in the segment).
