@@ -210,6 +210,15 @@ Tprogress, Tcount and the end pad follow the extension and Tindex exactly as in 
 - The common-callback broadcast forms share their `Call` by construction.
 - The common-callback form with a supplied body length is kind 2 by arithmetic, or kind 1 for length 0. Sizing never inspects a body front; emission fatals on a body of another length, as before.
 
+Without a supplied length, the writer uses separate sizing loops for the
+fixed-length uniform prefix, indexed uniform prefix and mixed-callback prefix.
+Each loop validates the next payload before testing its fit; a layout transition
+resumes at that same payload and includes the larger representation's overhead
+for the entire candidate prefix. Only an accepted entry changes the committed
+layout. A common-callback source needs only the first two loops. This is a
+sizing specialization, not an inferred promise that later bodies have the first
+body's length.
+
 **Singleton contract (5b.3).** A singleton is a kind 2 table, or kind 1 when its body is empty. Either way it costs `base + 2 + Plen`, exactly the compact singleton, so the contract check and the set of legal payloads are unchanged.
 
 **Reader.** One decoder derives the table offsets after sentinel validation.

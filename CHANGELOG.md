@@ -6,6 +6,13 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.0 — unreleased
 
+- Restored layout-specific writer sizing loops for inferred fixed-length,
+  indexed uniform and mixed-callback tables. `write(callback, bodies)` again
+  scans equal-length bodies without carrying the general layout transition
+  state through every entry; explicit-length arithmetic sizing is unchanged.
+  Partial admission retains the accepted prefix's layout and transactional
+  preparation still runs before ring reservation.
+
 - Idle public-actor retirement publishes with a release store after joining
   senders and proving exclusive lifecycle ownership; debug builds retain a CAS
   tripwire. Batch creation detaches at most 64 free slots per lock hold, allowing

@@ -3594,6 +3594,18 @@ struct UniformCase
     }
 }
 
+/// Body projection without a length property: inferred sizing must walk a
+/// saved cursor and leave the caller's cursor unchanged on partial admission.
+struct UniformBodyRange
+{
+    PayloadEntry* entries;
+    size_t remaining;
+    @property bool empty() const pure nothrow @nogc @safe { return remaining == 0; }
+    @property PayloadBody front() nothrow @nogc @system { return entries.body; }
+    void popFront() nothrow @nogc @system { ++entries; --remaining; }
+    @property UniformBodyRange save() pure nothrow @nogc @safe { return this; }
+}
+
 /// Write `entries` as one table on a fresh one-consumer farm, check the
 /// expected kind and exact size, drain it, and check bodies and that every payload ran its own callback exactly once.
 void uniformDetectCase(const(size_t)[] lens, const(Callback)[] calls,
@@ -3765,6 +3777,14 @@ void testUniformExplicitForms()
         "pairPayloads with two Calls stays compact");
 
     foreach (i; 0 .. N) check(g_calls[i] == 6, "uniform forms exact calls");
+
+    PayloadBody[N] emptyBodies;
+    static immutable size_t[N] zeros = 0;
+    before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(h, emptyBodies[], tok) == N, "broadcast empty bodies");
+    expect(KIND_UNIFORM, uniformTableSize(N, 0, 1, false), zeros[], before,
+        "broadcast empty bodies retain indexes");
+    check(atomicLoad!(MemoryOrder.raw)(g_compactZero) == N, "broadcast empty callbacks");
     v.unsubscribe();
     f.unregisterProducer(tok);
     printf("testUniformExplicitForms OK\n"); fflush(stdout);
@@ -3804,7 +3824,7 @@ void testUniformPartialAdmission()
     Callback[K + 1] lastOther = &compactBodyCb;
     lastOther[K] = &compactBodyCbAlt;
 
-    foreach (round; 0 .. 2)
+    foreach (round; 0 .. 3)
     {
         const(size_t)[] lens = round == 0 ? onesThenOne[] : onesThenTwo[];
         const(Callback)[] calls = round == 0 ? lastOther[] : same[];
@@ -3825,7 +3845,12 @@ void testUniformPartialAdmission()
         check(v.subscribe(f) == 0, label);
         auto tok = f.registerProducer(Tier.small);
         immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
-        check(f.write(c.entries[0 .. K + 1], tok) == K, label);
+        auto bodies = UniformBodyRange(c.entries, K + 1);
+        immutable got = round == 2 ? f.write(&compactBodyCb, bodies, tok)
+                                  : f.write(c.entries[0 .. K + 1], tok);
+        check(got == K, label);
+        check(bodies.entries == c.entries && bodies.remaining == K + 1,
+            "inferred broadcast preserves caller cursor");
         check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q, label);
         check(tableKindAt(f, before) == uniformKind(K, true), label);
         while (v.consumeNext()) {}
@@ -3833,7 +3858,9 @@ void testUniformPartialAdmission()
         check(g_calls[K] == 0, label);
         // The rest goes out as its own (uniform singleton) table.
         immutable before2 = atomicLoad!(MemoryOrder.raw)(f.Wt);
-        check(f.write(c.entries[K .. K + 1], tok) == 1, label);
+        auto rest = UniformBodyRange(c.entries + K, 1);
+        check((round == 2 ? f.write(&compactBodyCb, rest, tok)
+                         : f.write(c.entries[K .. K + 1], tok)) == 1, label);
         check(tableKindAt(f, before2) == uniformKind(lens[K], true), label);
         while (v.consumeNext()) {}
         check(g_calls[K] == 1, label);
@@ -3897,15 +3924,15 @@ void testUniformQuotaBoundaries()
     static immutable size_t[11] ones = 1;
     static immutable size_t[11] alt12 = [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1];
     Callback[11] same = &compactBodyCb;
-    foreach (round; 0 .. 2)
+    foreach (round; 0 .. 4)
     {
-        const(size_t)[] lens = round == 0 ? ones[] : alt12[];
-        immutable sameLen = round == 0;
-        immutable Q = uniformTableSize(10, round == 0 ? 10 : 15, 1, sameLen);
+        immutable sameLen = (round & 1) == 0;
+        const(size_t)[] lens = sameLen ? ones[] : alt12[];
+        immutable Q = uniformTableSize(10, sameLen ? 10 : 15, 1, sameLen);
         foreach (n; 10 .. 12)
         {
-            immutable label = round == 0 ? "uniform fixed quota boundary"
-                                         : "uniform indexed quota boundary";
+            immutable label = sameLen ? "uniform fixed quota boundary"
+                                      : "uniform indexed quota boundary";
             UniformCase c;
             c.build(lens[0 .. n], same[0 .. n]);
             scope (exit) c.release();
@@ -3920,7 +3947,9 @@ void testUniformQuotaBoundaries()
             check(v.subscribe(f) == 0, label);
             auto tok = f.registerProducer(Tier.small);
             immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
-            check(f.write(c.entries[0 .. n], tok) == 10, label);
+            auto bodies = UniformBodyRange(c.entries, n);
+            check((round >= 2 ? f.write(&compactBodyCb, bodies, tok)
+                             : f.write(c.entries[0 .. n], tok)) == 10, label);
             check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + Q, label);
             check(tableKindAt(f, before) == (sameLen ? uniformKind(10, true) : KIND_UNIFORM),
                 label);
@@ -3933,6 +3962,55 @@ void testUniformQuotaBoundaries()
         }
     }
     printf("testUniformQuotaBoundaries OK\n"); fflush(stdout);
+}
+
+void testUniformInferredPreparation()
+{
+    enum N = 12, K = 10;
+    immutable quota = uniformTableSize(K, K, 1, true);
+    allocCalls(N);
+    scope (exit) freeCalls();
+    ulong[N] words;
+    foreach (i; 0 .. N) words[i] = i;
+    size_t fronts, prepares, prepared;
+    bool permit;
+    auto bodies = PreparingBodyRange(words.ptr, 0, N, &fronts, &prepares,
+        &prepared, &permit);
+    auto f = AntFarm.create(2, 8, 1, 0, 0, 1, quota);
+    scope (exit) f.destroy();
+    ConsumerView v;
+    check(v.subscribe(f) == 0, "inferred prepare subscribe");
+    auto tok = f.registerProducer(Tier.small);
+    TableCompletionHook hook = TableCompletionHook(null, &compactCompletion);
+    atomicStore!(MemoryOrder.raw)(g_compactCompletions, 0L);
+    atomicStore!(MemoryOrder.raw)(g_compactBad, 0L);
+    immutable before = atomicLoad!(MemoryOrder.raw)(f.Wt);
+    check(f.write(&compactOneCb, bodies, tok, DEFAULT_AVG_COST, &hook) == 0,
+        "inferred prepare can reject");
+    check(prepares == 1 && prepared == 0 && bodies.i == 0,
+        "inferred rejected preparation preserves caller range");
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before && !v.consumeNext(),
+        "inferred rejected preparation publishes no table");
+    check(atomicLoad!(MemoryOrder.raw)(g_compactCompletions) == 0,
+        "inferred rejected preparation invokes no hook");
+
+    permit = true;
+    check(f.write(&compactOneCb, bodies, tok, DEFAULT_AVG_COST, &hook) == K,
+        "inferred prepare admits exact prefix after rejection");
+    check(prepares == 2 && prepared == K && bodies.i == 0,
+        "inferred prepare receives only accepted prefix");
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) == before + quota
+        && tableKindAt(f, before) == KIND_UNIFORM_FIXED,
+        "inferred prepared prefix keeps fixed layout");
+    while (v.consumeNext()) {}
+    foreach (i; 0 .. N)
+        check(g_calls[i] == (i < K ? 1 : 0), "inferred prepared exact callbacks");
+    check(atomicLoad!(MemoryOrder.raw)(g_compactBad) == 0
+        && atomicLoad!(MemoryOrder.raw)(g_compactCompletions) == 1,
+        "inferred prepared prefix body contract and hook");
+    v.unsubscribe();
+    f.unregisterProducer(tok);
+    printf("testUniformInferredPreparation OK\n"); fflush(stdout);
 }
 
 void testCanFit()
@@ -3990,6 +4068,7 @@ void main(string[] args)
         testCompactWraparound(WrapLayout.uniformFixed);
         testUniformPartialAdmission();
         testUniformQuotaBoundaries();
+        testUniformInferredPreparation();
         printf("ALL COMPACT TESTS PASSED\n");
         return;
     }
@@ -4041,5 +4120,6 @@ void main(string[] args)
     testCompactWraparound(WrapLayout.uniformFixed);
     testUniformPartialAdmission();
     testUniformQuotaBoundaries();
+    testUniformInferredPreparation();
     printf("ALL TESTS PASSED\n");
 }

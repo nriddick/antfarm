@@ -1989,48 +1989,104 @@ struct AntFarm
             }
             else
             {
-                // One incremental scan. A prefix can only lose uniformity;
-                // retain the accepted layout if the degrading entry won't fit.
+                // Spec 2f/2g: scan each layout with only the state it needs.
+                // Continue at the first entry that degrades the layout; if
+                // that larger representation does not fit, retain the last
+                // accepted prefix's layout. The caller's range stays intact.
                 ulong bodySum;
+                bool stop;
                 auto scan = payloads.save;
-                while (!scan.empty && n < maxTablePayloads)
                 {
-                    auto pe = scan.front;
+                    auto first = scan.front;
                     static if (hasCommonPayloadCallback!R)
-                        auto call = commonCall;
+                        tcall = commonCall;
                     else
                     {
-                        auto call = pe.call;
-                        validateCallback(call);
+                        tcall = first.call;
+                        validateCallback(tcall);
                     }
-                    immutable blen = cast(ulong) pe.body.length;
-                    checkPayloadFits(base, quota, blen);
-                    auto candidateLayout = layout;
-                    if (n == 0)
+                    tblen = first.body.length;
+                }
+
+                // Kind 2: a common callback and a nonzero fixed body length.
+                // There are no indexes or per-entry callback words to size.
+                if (tblen != 0)
+                    while (!scan.empty && n < maxTablePayloads)
                     {
-                        tcall = call;
-                        tblen = blen;
-                        candidateLayout = blen != 0
-                            ? TableLayout.uniformFixed : TableLayout.uniform;
+                        auto pe = scan.front;
+                        static if (!hasCommonPayloadCallback!R)
+                            validateCallback(pe.call);
+                        immutable blen = cast(ulong) pe.body.length;
+                        checkPayloadFits(base, quota, blen);
+                        static if (!hasCommonPayloadCallback!R)
+                            if (pe.call !is tcall) break;
+                        if (blen != tblen) break;
+                        immutable nextBody = addChecked(bodySum, blen,
+                            "payload sum overflow");
+                        immutable size = addChecked(base + UNIFORM_FIXED_EXT,
+                            nextBody, "table size overflow");
+                        if (size > tok.quotaLeft)
+                        {
+                            stop = true;
+                            break;
+                        }
+                        ++n;
+                        bodySum = psum = nextBody;
+                        layout = TableLayout.uniformFixed;
+                        scan.popFront();
                     }
-                    else if (call !is tcall)
-                        candidateLayout = TableLayout.compact;
-                    else if (candidateLayout == TableLayout.uniformFixed && blen != tblen)
-                        candidateLayout = TableLayout.uniform;
-                    immutable nextN = cast(ulong) n + 1;
-                    immutable nextBody = addChecked(bodySum, blen, "payload sum overflow");
-                    immutable nextRecords = addChecked(nextBody,
-                        candidateLayout == TableLayout.compact ? nextN : 0,
-                        "payload sum overflow");
-                    immutable overhead = base + extWordsOf(candidateLayout)
-                        + indexWordsOf(candidateLayout, nextN);
-                    immutable size = addChecked(overhead, nextRecords, "table size overflow");
-                    if (size > tok.quotaLeft) break;
-                    ++n;
-                    bodySum = nextBody;
-                    psum = nextRecords;
-                    layout = candidateLayout;
-                    scan.popFront();
+
+                // Kind 1: one callback, with an index for every body.
+                if (!stop)
+                    while (!scan.empty && n < maxTablePayloads)
+                    {
+                        auto pe = scan.front;
+                        static if (!hasCommonPayloadCallback!R)
+                            validateCallback(pe.call);
+                        immutable blen = cast(ulong) pe.body.length;
+                        checkPayloadFits(base, quota, blen);
+                        static if (!hasCommonPayloadCallback!R)
+                            if (pe.call !is tcall) break;
+                        immutable nextBody = addChecked(bodySum, blen,
+                            "payload sum overflow");
+                        // n < 2^31, so base + extension + indexes cannot wrap.
+                        immutable size = addChecked(base + UNIFORM_EXT + n + 1,
+                            nextBody, "table size overflow");
+                        if (size > tok.quotaLeft)
+                        {
+                            stop = true;
+                            break;
+                        }
+                        ++n;
+                        bodySum = psum = nextBody;
+                        layout = TableLayout.uniform;
+                        scan.popFront();
+                    }
+
+                // Mixed callbacks: one index and one callback word per body.
+                // Broadcast sources cannot reach this layout.
+                static if (!hasCommonPayloadCallback!R)
+                if (!stop)
+                {
+                    while (!scan.empty && n < maxTablePayloads)
+                    {
+                        auto pe = scan.front;
+                        validateCallback(pe.call);
+                        immutable blen = cast(ulong) pe.body.length;
+                        checkPayloadFits(base, quota, blen);
+                        immutable nextN = cast(ulong) n + 1;
+                        immutable nextBody = addChecked(bodySum, blen, "payload sum overflow");
+                        immutable nextRecords = addChecked(nextBody, nextN,
+                            "payload sum overflow");
+                        immutable size = addChecked(base + nextN, nextRecords,
+                            "table size overflow");
+                        if (size > tok.quotaLeft) break;
+                        ++n;
+                        bodySum = nextBody;
+                        psum = nextRecords;
+                        layout = TableLayout.compact;
+                        scan.popFront();
+                    }
                 }
             }
             if (n > 0) break;
