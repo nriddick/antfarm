@@ -1,6 +1,6 @@
 # Ant Farm performance
 
-The actor C ABI refresh has its own measurement section below. Historical
+The public actor optimization and C ABI refresh have separate measurement sections below. Historical
 performance tables cover the 1.8.0 release candidates and retain the
 **Ryzen 5500** measurements and add fresh **Intel 12700H** measurements from
 the Windows RC checkout, including the affinity corrections. These are whole-host
@@ -14,6 +14,212 @@ deliberately not committed.
 - Fiber-specific profiling and tuning: [Fibers](#fibers).
 - Stable sizing formulas: [ARCHITECTURE.md](ARCHITECTURE.md#sizing-one-farm) and
   [SPEC.md](SPEC.md).
+
+## Public actor lifecycle optimization (1.9.0-progress)
+
+October 19, 2026, i7-12700H, LDC 1.42, mimalloc 3.5.3, ordinary pages.
+Runtime candidate: `9f7efec`; strengthened replacement-pin regression: `e1db35b`.
+The immediate baseline is `5fa2769`; `1495d5b` is the pre-value-owner
+reference. Benchmark source is identical across the committed-ref comparisons.
+Linux measurements use WSL2 Linux 6.6.87.2. Native Windows measurements below
+provide a separate platform check; absolute times are not comparable across OSes.
+
+Against `5fa2769`, serial actor/wave/inbox throughput improved by paired medians
+of 26.78%/33.37%/20.88%, with five clean pairs and a pass in each cell. The
+overall gate remains inconclusive because the private control is inconclusive
+and six-consumer samples are excluded. Against pre-refresh `1495d5b`, inbox
+still measures 6.68% lower throughput and crosses the regression threshold;
+the other historical cells are inconclusive. Correctness validation passed.
+
+### Changes and atomic-operation budget
+
+Retirement combines its mark and exclusive operation pin in one CAS. Idle
+retirement combines its terminal publication and pin release in one exact-word
+CAS; running/scheduled retirement retains a separate final unpin. Reclaim still
+claims the exact retired generation before touching state. Copied owners retain
+their safety guarantees.
+
+Construction and reclamation now update one occupancy counter while holding the
+existing free-slot gate. `live` includes the entire reserved construction prefix
+as well as unreclaimed actors. It is not a lifetime fence. Shutdown checks zero
+occupancy followed by a released free-slot gate, and still requires external
+quiescence. Concurrent kind registration uses an append-only atomic list and
+adds no work to creation. The [ordering proof](docs/design/public-actor-ordering.md#retirement-and-reclamation)
+states the final-access and release/acquire arguments.
+
+Uncontended scalar copy/create followed by idle retire/reclaim, excluding
+allocator internals, retries, and any dispatch:
+
+| Path | Before | After |
+| --- | ---: | ---: |
+| Creation locked RMWs | 4 | 1 |
+| Idle retirement plus reclaim locked RMWs | 8 | 5 |
+| Complete lifecycle | 12 | 6 |
+
+These are path counts from code and generated x86-64 inspection, not hardware
+counter samples. The generated `constructReserved` loses both locked counter
+updates. The remaining claim CAS is deliberate; no unique-owner shortcut was
+introduced.
+
+### Isolated diagnostic variants
+
+Six rotating/interleaved runs, 16,384 actors, no consumers, CRT allocator, CPU 0,
+one-second samples, LDC `-O2 -release`. Median ns per complete actor cycle;
+lower is better. These diagnostic samples have no background-load rejection.
+The variants precede the final retirement outcome ordering, concurrent kind
+registration and test updates. The committed gates measure the final runtime.
+Raw phase times and ranges are retained.
+
+| Mode | Baseline | Retirement fusions | Fusions + occupancy |
+| --- | ---: | ---: | ---: |
+| actor | 174.41 | 166.52 | 148.36 |
+| wave | 162.55 | 141.42 | 130.45 |
+| inbox | 213.22 | 198.68 | 185.43 |
+| private | 73.33 | 76.11 | 74.84 |
+
+The actor-mode create/dispatch/retire-reclaim-verification medians were
+75.2/43.8/55.4 ns before and 63.0/43.7/40.6 ns after both changes. The evidence
+supports reducing lifecycle synchronization; it does not prove that every
+remaining difference is caused by an atomic instruction.
+
+### Committed-reference performance gates
+
+Same `actor_churn` source, mimalloc, 16,384 actors, three-second samples, five
+clean pairs required per cell, at most ten attempts. Controller CPU 0; six
+consumers use 2,4,6,8,10,12. The existing -3% threshold and all load exclusions
+are unchanged. Initial load limit is 2 after a bounded cooldown targeting 0.95.
+Positive throughput change is better. The paired bootstrap
+interval is descriptive, not a calibrated confidence guarantee.
+
+| Reference | Mode | Consumers | Clean pairs | Paired median throughput change | Decision |
+| --- | --- | ---: | ---: | ---: | --- |
+| 5fa2769 | actor | 0 | 5/5 | +26.78% | pass |
+| 5fa2769 | wave | 0 | 5/5 | +33.37% | pass |
+| 5fa2769 | inbox | 0 | 5/5 | +20.88% | pass |
+| 5fa2769 | private | 0 | 5/5 | +1.76% | inconclusive |
+| 5fa2769 | actor | 6 | 0/5 | unavailable | insufficient |
+| 5fa2769 | wave | 6 | 0/5 | unavailable | insufficient |
+| 5fa2769 | inbox | 6 | 0/5 | unavailable | insufficient |
+| 5fa2769 | private | 6 | 0/5 | unavailable | insufficient |
+| 1495d5b | actor | 0 | 5/5 | -4.80% | inconclusive |
+| 1495d5b | wave | 0 | 5/5 | -5.67% | inconclusive |
+| 1495d5b | inbox | 0 | 5/5 | -6.68% | regression |
+| 1495d5b | private | 0 | 5/5 | -2.64% | inconclusive |
+
+Read the decisions cell by cell; an incomplete or inconclusive gate is not a
+pass. Raw output, all attempts, exclusion reasons, intervals, rates and ranges
+are in the evidence bundle. The WSL system-minus-child CPU exclusion remains
+active; native Windows timings are supplementary evidence, not a replacement
+or a relabeling of excluded Linux pairs.
+
+A separate three-second probe reproduced system-minus-child CPU gaps of
+roughly 0.06 cores for serial execution and 0.40–0.41 for six consumers.
+Reported steal time was
+zero, and IRQ/softirq time was negligible; those fields do not explain the
+difference between aggregate CPU ticks and child CPU usage. Its cause remains
+unresolved. The probe is recorded without changing the gate or treating these
+samples as accepted evidence.
+
+### Interleaved native Windows comparison
+
+LDC `-O2 -release -mscrtlib=libcmt`, static release mimalloc, identical source
+and flags for all three refs. Six rotating/interleaved rounds, two-second
+samples, the same actor count and logical CPU lists as Linux. No background-load
+rejection: these are descriptive median ns per actor cycle, not a performance
+gate. Minima/maxima and each raw run are retained.
+
+| Mode | Consumers | Historical 1495d5b ns | Baseline 5fa2769 ns | Candidate ns |
+| --- | ---: | ---: | ---: | ---: |
+| actor | 0 | 105.73 | 146.33 | 116.62 |
+| wave | 0 | 84.48 | 124.85 | 95.03 |
+| inbox | 0 | 153.75 | 192.06 | 162.80 |
+| private | 0 | 23.86 | 24.16 | 24.02 |
+| actor | 6 | 171.32 | 247.62 | 187.49 |
+| wave | 6 | 156.29 | 238.93 | 174.57 |
+| inbox | 6 | 226.54 | 306.49 | 244.99 |
+| private | 6 | 35.44 | 35.45 | 35.57 |
+
+On native Windows, six-consumer actor/wave/inbox median cycle times were
+24.3%/26.9%/20.1% lower than the immediate baseline (ratios of medians).
+They remained 9.4%/11.7%/8.1% above the pre-refresh medians. Serial public
+modes also improved versus the immediate baseline. Some ranges are broad;
+these observations support the direction of the recovery without establishing
+a strict Windows gate or full recovery to the older implementation.
+
+### Matched C/D lifecycle comparison
+
+The existing lifecycle driver was rerun with five interleaved baseline/candidate
+pairs per cell, identical iteration counts per pair, target 0.4 seconds,
+64-actor cohorts, and distinct WSL core IDs. The baseline binary was built at
+`9301d77`; its runtime and benchmark source are unchanged at `5fa2769`
+(the intervening changes are prose/header comments). Binary and allocator
+hashes are checked before measurement and retained with toolchain metadata.
+
+Each entry is baseline → candidate median wall-clock ns per actor aggregated
+across creators. D means erased scalar creation. All modes copy identical
+64-byte-aligned source states; remote cases include handoff and waiting. Setup
+and kind registration are excluded. These descriptive samples do not reject
+background load and do not measure handler or wave execution.
+
+| State bytes | Creators | Reclaim | Allocator | D scalar ns | C scalar ns | C batch ns |
+| ---: | ---: | --- | --- | ---: | ---: | ---: |
+| 64 | 1 | local | CRT | 133.4 → 104.0 | 154.4 → 121.4 | 168.9 → 137.7 |
+| 64 | 1 | local | mimalloc | 108.5 → 69.3 | 125.8 → 86.9 | 91.8 → 58.4 |
+| 64 | 1 | remote | CRT | 264.4 → 230.7 | 285.2 → 234.7 | 257.2 → 219.9 |
+| 64 | 1 | remote | mimalloc | 161.2 → 117.1 | 195.4 → 142.6 | 159.2 → 121.5 |
+| 64 | 4 | local | CRT | 511.3 → 492.4 | 517.3 → 483.0 | 258.4 → 226.8 |
+| 64 | 4 | local | mimalloc | 504.0 → 461.0 | 561.8 → 533.6 | 252.8 → 204.8 |
+| 64 | 4 | remote | CRT | 651.3 → 609.8 | 691.2 → 671.5 | 341.3 → 278.9 |
+| 64 | 4 | remote | mimalloc | 678.4 → 588.0 | 709.5 → 626.4 | 333.0 → 303.9 |
+| 4096 | 1 | local | CRT | 307.8 → 249.6 | 291.4 → 259.1 | 262.2 → 234.0 |
+| 4096 | 1 | local | mimalloc | 239.4 → 202.1 | 265.7 → 214.5 | 222.0 → 193.4 |
+| 4096 | 1 | remote | CRT | 1238.0 → 1184.1 | 1297.6 → 1195.4 | 1265.2 → 1223.0 |
+| 4096 | 1 | remote | mimalloc | 339.2 → 317.9 | 370.8 → 352.3 | 343.9 → 312.1 |
+| 4096 | 4 | local | CRT | 560.7 → 501.6 | 569.6 → 515.9 | 268.5 → 172.3 |
+| 4096 | 4 | local | mimalloc | 595.4 → 513.4 | 582.6 → 542.9 | 329.8 → 229.9 |
+| 4096 | 4 | remote | CRT | 929.7 → 939.8 | 991.0 → 932.8 | 878.8 → 801.5 |
+| 4096 | 4 | remote | mimalloc | 738.6 → 655.8 | 756.9 → 658.9 | 407.7 → 298.8 |
+
+The independent medians in the table were lower in 47 of 48 configurations;
+4096-byte, four-creator, remote CRT D scalar was about 1.1% higher.
+The median of per-round candidate/base ratios was below one in 47 of 48
+configurations too, with a different exception: ratio 1.0070
+for 64-byte, four-creator, local CRT D scalar. A median of paired ratios need
+not equal the ratio of independent medians. These are descriptive observations,
+not significance tests.
+
+Separate allocation diagnostics cover all 48 configurations on each binary:
+exactly one final-state allocation/free and the requested state bytes per actor,
+with timing counters disabled in the timing runs. No temporary state, owner
+wrapper or message allocation was added.
+
+### Correctness evidence and remaining work
+
+Full Linux `make check` passed in 1313.74 seconds. The enforced
+600-second collective TSan budget consumed 242.17 seconds conservatively
+(instrumented compilation and execution counted). This includes LDC/DMD,
+BetterC, C/C++ with/without exceptions, optional host, Farm, actor/private,
+release-fatal and TSan lanes. Existing unavailable-topology skips remain.
+Native Windows actor/private and C ABI suites passed with LDC and DMD; the real
+release mimalloc actor suite passed with LDC. Documentation checks passed.
+
+Deterministic tests cover idle terminal publication followed by immediate
+reclaim/reuse, a replacement generation holding its own retirement pin before
+the old request returns, running-callback retirement retaining an external pin,
+and zero occupancy before the final free-slot unlock. A targeted isolated
+mutation which unconditionally unpins after idle publication fails at the
+replacement-pin assertion. Concurrent native kind registration overlaps actor
+creation and checks every descriptor allocation is freed at teardown. Paused
+initializers still consume capacity and block host close.
+
+Combined idle dispose/release and a D batch-create API remain separate candidates.
+They need explicit busy/partial-result contracts and matched measurements; this
+pass does not trade away the copied-owner claim or introduce a second unique-owner
+lifecycle. Private exports and ring-table spacing remain separate roadmap work.
+
+Local evidence: `.build/lifecycle-opt/`; portable raw logs, scripts, summaries
+and generated-code excerpts are archived in `.build/lifecycle-opt-evidence.zip`.
+The bundle includes every attempt, not only accepted samples.
 
 ## Actor C ABI refresh (1.9.0-progress)
 

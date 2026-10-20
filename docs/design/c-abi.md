@@ -564,5 +564,7 @@ Lifecycle timing compares the same state sizes and allocator across D scalar,
 C scalar and C batch creation, local/remote reclaim and multiple creators.
 Measurements and their limits belong in the performance report; correctness
 results do not imply a throughput improvement. The
-[October 19 measurements and validation record](../../PERFORMANCE.md#actor-c-abi-refresh-190-progress)
-include the C/D lifecycle matrix, allocation counts and shared-runtime regressions.
+[initial refresh record](../../PERFORMANCE.md#actor-c-abi-refresh-190-progress)
+and [lifecycle optimization record](../../PERFORMANCE.md#public-actor-lifecycle-optimization-190-progress)
+include the C/D matrix, allocation counts, committed-reference gates and native
+Windows comparisons, with their limits.
