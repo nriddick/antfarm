@@ -320,10 +320,17 @@ emitter consumes entries from a FIFO, snapshots at most its configured batch
 limit of entry addresses into a detached batch, and publishes one-word
 single-shot Farm payloads. The Farm's primary claims provide exclusive dispatch.
 
-Only the accepted prefix changes custody. The emitter requeues the suffix; it
-does not dereference accepted actor entries until their completion returns
-custody. With consumer reclamation, callback completion can free the actor before
-`write` returns. Root state and entry metadata are separate allocations,
+Only the accepted prefix changes custody. The emitter restores the unaccepted
+suffix at the front of the ready FIFO, ahead of entries it has not tried to
+publish. The suffix retains its original links; only its last entry's link and
+the FIFO head/tail need updating. These entries remain emitter-owned. No
+accepted entry is inspected during this restoration, including when the whole
+batch was accepted. Preserving this order prevents partial quota admission from
+progressively permuting the ready/free lists across reuse.
+
+The emitter does not dereference accepted actor entries until their completion
+returns custody. With consumer reclamation, callback completion can free the
+actor before `write` returns. Root state and entry metadata are separate allocations,
 so accepted-pointer source storage stays valid. A terminal callback destroys
 stored state after disposing its descendants. By default, the table notification
 returns metadata to the emitter, which frees the raw bytes without inspecting
@@ -333,6 +340,7 @@ inside the terminal callback instead. This is a measured policy choice:
 simultaneous remote frees substantially hurt the small-allocation workload on
 this host. Child terminal waves still free members on their executing consumers.
 
+This FIFO rule governs admission, not callback execution order across consumers.
 The emitter acquires completed batch metadata and appends `again` roots to the
 ready FIFO. For a wait or deferred retirement it releases table custody and
 recycles the Batch immediately, even while the root sleeps. Other roots can use
@@ -441,7 +449,13 @@ Run `make check` (or the individual private `run`, `run-dmd`, `run-tsan`,
 FIFO progress, immediate completion/free before publication returns, allocation
 failure cleanup, partial-prefix and zero-admission recovery, repeat dispatch,
 three-level joins, authority rejection, terminal waves, allocation balance, and
-four independent creators sharing a Farm. The root-wait selectors add
+four independent creators sharing a Farm. The `root-admission-order` selector
+checks FIFO preservation across partial and repeated zero admission, an
+otherwise-empty ready queue, and slot reuse under both reclamation policies.
+Its immediate-completion cases consume the accepted prefix before publication
+returns; the checks also run in release builds.
+
+The root-wait selectors add
 exactly-once waits, empty/already-joined waves, both custody orders, late
 strict-finish tails, root-ready CAS retry, emitter-owned final sealing, and
 counter-exhaustion death tests. The continuation selectors add continuation

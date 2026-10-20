@@ -350,6 +350,89 @@ void backpressure()
     park.destroy();
 }
 
+struct AdmissionOrderRoot { size_t* next; size_t index; }
+PrivateRootDisposition admissionOrderStep(scope ref PrivateBorrow!AdmissionOrderRoot b,
+    scope ref PrivateContext) nothrow @nogc @system
+{
+    check(*b.value.next == b.value.index);
+    ++*b.value.next;
+    return PrivateRootDisposition.finish;
+}
+extern(C) void admissionOrderFiller(const(ulong)*, size_t) nothrow @nogc @system {}
+
+void rootAdmissionOrder(PrivateRootReclamation reclamation)(bool stalled, bool early)
+{
+    // One consumer makes callback order observable. Quota truncates full
+    // batches; 21 roots also leave a suffix with no later ready entries.
+    enum count = 21, limit = 8;
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 42);
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    auto park = PrivateRootPark!(AdmissionOrderRoot, admissionOrderStep, reclamation)
+        .create(farm, count, limit);
+    check(park !is null);
+    scope(exit) park.destroy();
+    auto deadline = MonoTime.currTime + hangTimeout;
+    size_t next;
+    foreach (generation; 0 .. 3)
+    {
+        next = 0;
+        foreach (i; 0 .. count)
+            check(park.spawn(AdmissionOrderRoot(&next, i)) == PrivateSpawnResult.spawned);
+        if (stalled)
+        {
+            // Hold the view at the frontier until the Farm refuses a write.
+            // Repeated zero admissions must also leave the root FIFO intact.
+            PayloadBody[8] emptyBodies;
+            while (farm.write(&admissionOrderFiller, emptyBodies[], 0UL, token))
+                enforce(MonoTime.currTime < deadline, "root FIFO prefill timeout");
+            check(park.pump(token) == 0);
+            check(park.pump(token) == 0);
+            check(next == 0);
+            while (view.consumeNext()) {}
+        }
+        version (AntfarmWriteAuditHooks)
+        {
+            if (early)
+            {
+                fastView = &view;
+                writeAuditHook = &consumeBeforeReturn;
+            }
+        }
+        scope(exit)
+        {
+            version (AntfarmWriteAuditHooks)
+            { writeAuditHook = null; fastView = null; }
+        }
+        auto first = park.pump(token);
+        check(first > 0 && first < limit);
+        version (AntfarmWriteAuditHooks)
+            if (early) check(next == first);
+        while (park.live)
+        {
+            while (view.consumeNext()) {}
+            park.pump(token);
+            enforce(MonoTime.currTime < deadline, "root FIFO recovery timeout");
+        }
+        check(next == count);
+    }
+}
+
+void rootAdmissionOrderAll()
+{
+    foreach (stalled; [false, true])
+        foreach (early; [false, true])
+        {
+            rootAdmissionOrder!(PrivateRootReclamation.emitter)(stalled, early);
+            rootAdmissionOrder!(PrivateRootReclamation.consumer)(stalled, early);
+        }
+    writeln("PASS root FIFO across partial/zero admission, immediate completion and reuse");
+}
+
 void shardedCreators()
 {
     Counts counts;
@@ -11851,6 +11934,7 @@ void runSuite()
     }
     failures(); writeln("PASS allocation failures");
     backpressure(); writeln("PASS partial-prefix/zero-admission recovery");
+    rootAdmissionOrderAll();
     sameShardJoin(); writeln("PASS same-shard plain-write completion join");
     roots(0, 4097, 3, 256); writeln("PASS roots single thread, partial tables and reuse");
     roots(1, 4097, 7, 17); writeln("PASS roots one consumer, small batches");
@@ -11866,6 +11950,7 @@ void main(string[] args)
     auto mode = args.length > 1 ? args[1] : "";
     switch (mode)
     {
+        case "root-admission-order": rootAdmissionOrderAll(); return;
         case "cont-descendants-first": contInterleave!(PrivateRootReclamation.emitter)(CiMode.early); return;
         case "cont-activation-first": contInterleave!(PrivateRootReclamation.emitter)(CiMode.late);
             contInterleave!(PrivateRootReclamation.consumer)(CiMode.late); return;
