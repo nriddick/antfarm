@@ -123,7 +123,7 @@ quiescent" or "the process may exit".
 
 | Observation | It means | It does not mean |
 | --- | --- | --- |
-| Public `runtime.live == 0` | no live actor generation in that runtime | ready queue empty, consumers gone, wave hook returned |
+| Public `runtime.live == 0` | no occupied slots: construction reservations and unreclaimed generations both count | final free-slot gate released, ready queue empty, consumers gone, wave hook returned |
 | `owner.retired` | this generation closed and drained | reclaimed; `handle.valid` is still true on copies |
 | `ActorHandle.valid` | the copy holds a non-null slot and a non-zero generation | the generation is still live. After reclaim, `wake`/`send` return `staleHandle` |
 | `node.available` | for an accepted interaction, the actor released `complete`/`fail`/`cancel`; outcome, code and payload writes are visible and the node may be reused | the actor has retired, or the runtime is quiet |

@@ -54,10 +54,12 @@ enum { AF_ACTOR_INITIALIZER_FAILED = 8 };
    Custom allocation receives runtime, slots, kinds and final state; frees repeat
    exact sizes/alignments. Functions must be thread-safe, return aligned memory
    or NULL, and never throw/longjmp. Context outlives runtime. No threads start.
-   Create/register/destroy at quiescence, outside Farm callbacks. farm must be
+   Create/destroy the runtime at quiescence, outside Farm callbacks. farm must be
    owned; for a host Farm use af_host_create_actors. Farm outlives runtime. */
 af_status af_actor_runtime_create(af_farm *, size_t capacity, const af_actor_allocator *,
                                   af_actor_runtime **out);
+/* Occupied slots: includes the entire reserved construction prefix, live and
+   retired actors, and reclamation until the slot returns. Zero is not a join. */
 size_t af_actor_runtime_live(const af_actor_runtime *);
 size_t af_actor_runtime_ready(const af_actor_runtime *);
 /* Zero is empty, backpressure or contention, not a join. maximum is capped at
@@ -67,8 +69,9 @@ size_t af_actor_runtime_flush(af_actor_runtime *, af_token *, size_t maximum, ui
    and copied-owner callers first. Host-owned runtimes are destroyed by host. */
 void af_actor_runtime_destroy(af_actor_runtime *);
 
-/* Immutable runtime-owned kind; registration requires external quiescence and
-   returns AF_BUSY if actors/reservations remain. Descriptor is copied. Nonnull
+/* Immutable runtime-owned kind; registration may overlap actors, construction
+   and other registrations. Join registrars before runtime destruction. Each
+   call needs exclusive output storage. Descriptor is copied. Nonnull
    handler, nonzero bytes, power-of-two alignment; >64 needs a custom allocator.
    Handler/user/destructor remain live through all actors and waves using it.
    Optional destructor runs exactly once on the winning reclaimer's thread,

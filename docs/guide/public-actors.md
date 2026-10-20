@@ -7,6 +7,10 @@ in [../reference/actor-lifecycle.md](../reference/actor-lifecycle.md); this
 page shows how to use the public API. Complete programs are under
 [../../examples/](../../examples/README.md).
 
+`runtime.live` counts occupied slots, including in-flight construction
+reservations and retired actors awaiting reclaim. A zero count is a diagnostic,
+not a join of callers or consumers.
+
 An `ActorOwner` controls retirement and reclamation, while its copyable
 `ActorHandle` is the identity used to wake, send to, or phase-dispatch the
 actor. Owners (and producer `Token`s) are move-only: copying one, assigning

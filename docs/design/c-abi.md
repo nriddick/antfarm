@@ -204,7 +204,7 @@ owner. Build it with the same native command as `c_core.c`; it prints
 `actor sum = 10`.
 
 Create an `af_actor_runtime` over an owned Farm with fixed capacity, then
-register immutable kinds at quiescence. A kind records handler/user, state size
+register immutable kinds concurrently with actors or other registrations. A kind records handler/user, state size
 and alignment, and an optional destructor. Copy or initializer creation writes
 directly into allocator-owned final state and returns a 16-byte value owner.
 No per-actor prefix, owner wrapper or temporary allocation remains. The default
@@ -436,7 +436,12 @@ remain separate.
 
 `af_actor_kind_register` copies an immutable descriptor containing handler,
 user pointer, state byte count, alignment and optional destructor. Registration
-requires external quiescence and also refuses live actors or reservations.
+may overlap actors, construction and other registrations; each call has exclusive
+output storage. Registrars must be joined before runtime destruction. A release
+CAS publishes each fully initialized node onto an append-only list; teardown
+acquires that list after external quiescence. Creation reads its supplied kind,
+not the list. This removes the former `AF_BUSY` restriction without adding work
+to the actor creation path.
 Descriptors use the runtime allocator and remain stable until its destruction.
 A nonnull handler, nonzero size, power-of-two alignment and representable
 allocation arithmetic are required; alignment above 64 needs a custom allocator.
@@ -478,9 +483,11 @@ themselves be valid and live. Submission handles remain runtime-free capabilitie
 so fabricated handle pointers are invalid accesses.
 
 The shared D implementation reserves lifecycle phase 6 for reclaiming and flag
-0x40 for an exclusive retirement-operation pin. Every lifecycle rebuild preserves
-the pin. A retirement request acquires it before marking/closing, performs an
-exact-word terminal CAS, and releases it as its final slot access. Contention
+0x40 for an exclusive retirement-operation pin. Lifecycle rebuilds preserve
+the pin until the requesting call releases it. The request fuses its mark and pin
+into one CAS before closing admission. Idle retirement's exact-word terminal CAS
+also releases the pin as its final slot access; scheduled/running paths use a
+separate final unpin. Contention
 returns `AF_ACTOR_RETIRE_BUSY`. Reclaim requires retired, no operation pin and
 no wave membership, then exclusively claims the generation before accessing or
 freeing state. The complete proof is in
@@ -512,8 +519,13 @@ actions. The suffix remains empty; advance spans and the initializer's
 One free-slot gate acquisition detaches an available prefix into a private chain.
 Allocations and initializers run outside it. A failed creation returns the unused
 chain under one gate acquisition. Reservations consume capacity and prevent
-runtime/host destruction before an owner is returned. The count transfers to
-live accounting before a reservation is released.
+runtime/host destruction before an owner is returned. `af_actor_runtime_live`
+counts occupied capacity, including the whole reserved prefix, through successful
+construction and retirement until return to the free list. Failed construction
+returns the unused suffix and its count together. All counter writers hold the
+free-slot gate and use a release store instead of a separate counter RMW.
+A zero count is not a runtime-lifetime fence: shutdown also checks the released
+gate and empty ready queue, and requires external users to be joined.
 
 Batch wake/retire/reclaim attempts every input occurrence and stores every result.
 Its aggregate count includes queued/coalesced wakes, requested/already-retired

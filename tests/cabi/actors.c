@@ -269,9 +269,9 @@ static void batch_contracts(void) {
     CHECK(log.calls == 3 && log.indices[0] == 100 && log.indices[2] == 102);
     CHECK(!test_load(&log.destroyed) && allocations.calls == baseline + 3);
     for (unsigned i = 2; i < N; ++i) CHECK(!e[i].owner._slot);
-    /* Registration is immutable setup; a live runtime refuses another kind. */
+    /* Immutable kinds may be registered while actors remain live. */
     const af_actor_kind *rejected = NULL;
-    CHECK(af_actor_kind_register(x.runtime, &options, &rejected) == AF_BUSY && !rejected);
+    CHECK(af_actor_kind_register(x.runtime, &options, &rejected) == AF_OK && rejected);
     log.fail_index = SIZE_MAX;
     r = af_actor_create_init_batch(x.runtime, kind, init_state, &log, 102,
         (af_actor_owner_output_span){&e[2].owner, sizeof(entity), 3});
@@ -373,6 +373,64 @@ static void copied_owners(void) {
     }
     teardown(&x);
 }
+
+/* Native concurrent registration must retain every allocated descriptor, even
+   with live actors and creators. Counts detect lost-list nodes at teardown. */
+typedef struct kind_alloc_log { test_atomic allocations, frees; } kind_alloc_log;
+static void *kind_alloc(void *ctx, size_t bytes, size_t alignment) {
+    allocator_log local = {0};
+    void *p = custom_alloc(&local, bytes, alignment);
+    if (p) test_add(&((kind_alloc_log *)ctx)->allocations, 1);
+    return p;
+}
+static void kind_free(void *ctx, void *p, size_t bytes, size_t alignment) {
+    allocator_log local = {0}; local.outstanding = 1;
+    custom_free(&local, p, bytes, alignment);
+    test_add(&((kind_alloc_log *)ctx)->frees, 1);
+}
+enum { KIND_THREADS = 8, KINDS_PER_THREAD = 32 };
+typedef struct kind_job {
+    af_actor_runtime *runtime; test_atomic *start;
+    const af_actor_kind *kinds[KINDS_PER_THREAD];
+} kind_job;
+TEST_THREAD(register_kinds) {
+    kind_job *j = (kind_job *)arg;
+    while (!test_load(j->start)) test_yield();
+    for (unsigned i = 0; i < KINDS_PER_THREAD; ++i) {
+        af_actor_kind_options options = {unused, NULL, sizeof(unsigned), 8, NULL};
+        check(af_actor_kind_register(j->runtime, &options, j->kinds + i));
+        af_actor_owner owner = {0}; unsigned initial = i;
+        check(af_actor_create_copy(j->runtime, j->kinds[i], &initial, &owner));
+        CHECK(af_actor_request_retire(j->runtime, &owner, AF_ACTOR_DRAIN) == AF_ACTOR_RETIRE_REQUESTED);
+        CHECK(af_actor_reclaim(j->runtime, &owner) == AF_ACTOR_RECLAIMED);
+    }
+    TEST_RETURN;
+}
+static void concurrent_kinds(void) {
+    kind_alloc_log log = {0}; af_actor_allocator allocator = {&log, kind_alloc, kind_free};
+    fixture x = setup(KIND_THREADS + 1, &allocator);
+    const af_actor_kind *first = test_kind(x.runtime, sizeof(unsigned), 8, unused, NULL);
+    af_actor_owner live = {0}; unsigned initial = 0;
+    check(af_actor_create_copy(x.runtime, first, &initial, &live));
+    test_atomic start = {0}; kind_job jobs[KIND_THREADS] = {0}; test_thread threads[KIND_THREADS];
+    for (unsigned i = 0; i < KIND_THREADS; ++i) {
+        jobs[i].runtime = x.runtime; jobs[i].start = &start;
+        threads[i] = test_start(register_kinds, jobs + i);
+    }
+    test_store(&start, 1);
+    for (unsigned i = 0; i < KIND_THREADS; ++i) test_join(threads[i]);
+    CHECK(af_actor_runtime_live(x.runtime) == 1);
+    for (unsigned i = 0; i < KIND_THREADS * KINDS_PER_THREAD; ++i) {
+        const af_actor_kind *a = jobs[i / KINDS_PER_THREAD].kinds[i % KINDS_PER_THREAD];
+        CHECK(a && a != first);
+        for (unsigned k = 0; k < i; ++k)
+            CHECK(a != jobs[k / KINDS_PER_THREAD].kinds[k % KINDS_PER_THREAD]);
+    }
+    retire(&x, &live, AF_ACTOR_DRAIN);
+    teardown(&x);
+    CHECK(test_load(&log.allocations) == test_load(&log.frees));
+}
+
 typedef struct reservation_job {
     af_actor_runtime *runtime; const af_actor_kind *kind;
     test_atomic entered, release; af_actor_owner owners[2]; af_actor_batch_result result;
@@ -418,12 +476,12 @@ static void in_flight_reservation(void) {
     job.runtime = x.runtime; job.kind = test_kind(x.runtime, sizeof(unsigned), 8, unused, NULL);
     test_thread thread = test_start(reserve_batch, &job);
     while (!test_load(&job.entered)) test_yield();
-    CHECK(af_actor_runtime_live(x.runtime) == 0);
+    CHECK(af_actor_runtime_live(x.runtime) == 2);
     unsigned initial = 0; af_actor_owner extra = {0};
     CHECK(af_actor_create_copy(x.runtime, job.kind, &initial, &extra) == AF_FULL);
     af_actor_kind_options options = {unused, NULL, sizeof(unsigned), 8, NULL};
     const af_actor_kind *rejected = NULL;
-    CHECK(af_actor_kind_register(x.runtime, &options, &rejected) == AF_BUSY);
+    CHECK(af_actor_kind_register(x.runtime, &options, &rejected) == AF_OK && rejected);
     test_store(&job.release, 1); test_join(thread);
     CHECK(job.result.status == AF_OK && job.result.count == 2);
     for (unsigned i = 0; i < 2; ++i) retire(&x, job.owners + i, AF_ACTOR_DRAIN);
@@ -513,7 +571,7 @@ int main(int argc, char **argv) {
 #endif
     if (argc > 1) { death(argv[1]); return 1; }
     invalid_and_allocation(); basic(); concurrent(); concurrent_creation();
-    batch_contracts(); copied_owners(); in_flight_reservation(); allocation_prefixes();
+    batch_contracts(); copied_owners(); concurrent_kinds(); in_flight_reservation(); allocation_prefixes();
 #ifdef AF_TEST_ACTOR_AUDIT
     final_access();
 #endif

@@ -331,9 +331,11 @@ version (AntfarmActorTestHooks)
         retirementIdleObserved,
         retirementBeforeGateClose,
         retirementBeforePublish,
+        retirementAfterPublish,
         retirementBeforeUnpin,
         reclaimBeforeClaim,
         reclaimClaimed,
+        freeSlotBeforeUnlock,
         actorNodeBeforeCompletionStore,
         privateEmitBeforeCancelCheck,
         privateTruncateBeforeSeal,
@@ -1074,7 +1076,6 @@ align(64) struct ActorRuntime
     private shared size_t readyHeadWord;
     private shared ulong readyCount;
     private shared ulong liveCount;
-    private shared ulong reservedCount;
     private shared ulong staleActivations_;
     private size_t readyCarryWord; // detached backlog; readyDrainGate held
     private shared uint readyDrainGate;
@@ -1158,19 +1159,20 @@ align(64) struct ActorRuntime
         return cast(size_t) atomicLoad!(MemoryOrder.acq)(readyCount);
     }
 
-    /// Actors currently created and not yet reclaimed (an acquire load).
+    /// Occupied slots, including in-flight construction reservations and actors
+    /// not yet reclaimed (an acquire load). Bounded by runtime capacity.
     @property size_t live() const nothrow @nogc @system
     {
         return cast(size_t) atomicLoad!(MemoryOrder.acq)(liveCount);
     }
 
-    /// True when `destroy` would not abort: no live actor, construction reservation, or work queued
-    /// for publication (the same acquire loads `destroy` checks). Consumers
-    /// must still be joined before `destroy`; this proves only the counts.
+    /// True when `destroy` would not abort: no occupied slots or queued work,
+    /// and the free-slot gate is released (the same acquire checks as destroy).
+    /// Callers and consumers must still be joined; this is not a lifetime fence.
     @property bool quiescent() const nothrow @nogc @system
     {
-        return atomicLoad!(MemoryOrder.acq)(reservedCount) == 0
-            && atomicLoad!(MemoryOrder.acq)(liveCount) == 0
+        return atomicLoad!(MemoryOrder.acq)(liveCount) == 0
+            && atomicLoad!(MemoryOrder.acq)(freeSlotGate) == 0
             && atomicLoad!(MemoryOrder.acq)(readyCount) == 0
             && atomicLoad!(MemoryOrder.acq)(readyHeadWord) == 0
             && readyCarryWord == 0;
@@ -1266,7 +1268,9 @@ private:
             ++count;
         }
         if (tail !is null) tail.freeNext = null;
-        atomicFetchAdd!(MemoryOrder.rel)(reservedCount, cast(ulong) count);
+        // All occupancy writers hold freeSlotGate; no counter RMW is needed.
+        atomicStore!(MemoryOrder.rel)(liveCount,
+            atomicLoad!(MemoryOrder.raw)(liveCount) + count);
         return head;
     }
 
@@ -1285,12 +1289,14 @@ private:
         lockFreeSlots();
         tail.freeNext = freeSlots;
         freeSlots = head;
+        atomicStore!(MemoryOrder.rel)(liveCount,
+            atomicLoad!(MemoryOrder.raw)(liveCount) - count);
         atomicStore!(MemoryOrder.rel)(freeSlotGate, 0U);
-        atomicFetchSub!(MemoryOrder.rel)(reservedCount, cast(ulong) count);
     }
 
     // On failure the reservation stays in the caller's chain. No destructor
     // runs on failed initialization: that callback cleans its partial object.
+    // Failed construction retains the advanced generation when returned vacant.
     package ActorConstructResult constructReserved(ActorSlot* slot,
             const(void)* initialState, ActorStateInitializer initialize,
             void* user, size_t index, size_t stateSize, size_t stateAlignment,
@@ -1325,10 +1331,8 @@ private:
         slot.stateAlignment = stateAlignment;
         slot.payloadWords[0] = cast(ulong) cast(void*) slot;
         slot.payloadWords[1] = generation;
-        atomicFetchAdd!(MemoryOrder.rel)(liveCount, 1UL);
         atomicStore!(MemoryOrder.rel)(slot.lifecycle,
             lifecycleWord(generation, phaseIdle));
-        atomicFetchSub!(MemoryOrder.rel)(reservedCount, 1UL);
         return ActorConstructResult.created;
     }
 
@@ -1373,7 +1377,7 @@ public:
     void destroy() nothrow @nogc @system
     {
         if (atomicLoad!(MemoryOrder.acq)(liveCount) != 0
-                || atomicLoad!(MemoryOrder.acq)(reservedCount) != 0)
+                || atomicLoad!(MemoryOrder.acq)(freeSlotGate) != 0)
             fatal("destroy actor runtime with live actors");
         if (atomicLoad!(MemoryOrder.acq)(readyCount) != 0
             || atomicLoad!(MemoryOrder.acq)(readyHeadWord) != 0
@@ -1390,7 +1394,8 @@ public:
 
 // ==== Section: slot, reclaim and wave-payload machinery ====
 private:
-    // Only constant-size list operations run under this gate. Allocation,
+    // List and occupancy operations run under this gate (batch detachment is
+    // proportional to the prefix). Allocation,
     // deallocation, and all actor callbacks execute after it is released.
     // Serializing the list avoids ABA on concurrently recycled slot pointers.
     void lockFreeSlots() nothrow @nogc @system
@@ -1409,6 +1414,10 @@ private:
             lifecycleWord(generation, phaseVacant));
         slot.freeNext = freeSlots;
         freeSlots = slot;
+        atomicStore!(MemoryOrder.rel)(liveCount,
+            atomicLoad!(MemoryOrder.raw)(liveCount) - 1);
+        version (AntfarmActorTestHooks)
+            actorTestPoint(ActorTestPoint.freeSlotBeforeUnlock, null);
     }
 
     size_t takeReady(scope ActorSlot*[] snapshot)
@@ -1644,7 +1653,6 @@ package ActorReclaimResult reclaimActor(ref ActorSlot* slot,
     runtime.allocator.deallocate(runtime.allocator.context, state,
         stateSize, stateAlignment);
     runtime.returnFreeSlot(slot, generation);
-    atomicFetchSub!(MemoryOrder.acq_rel)(runtime.liveCount, 1UL);
     slot = null;
     generation = 0;
     return ActorReclaimResult.reclaimed;
@@ -1755,19 +1763,21 @@ private ActorWakeResult wakeActor(ActorSlot* slot, ulong generation)
     return signalActor(slot, generation, false);
 }
 
-private void driveActorRetirement(ActorSlot* slot, ulong generation)
+// Called with the exclusive owner-operation pin. True means the terminal CAS
+// was the final slot access and released that pin; false leaves unpin to caller.
+private bool driveActorRetirement(ActorSlot* slot, ulong generation)
     nothrow @nogc @system
 {
     auto observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     while (true)
     {
         if (wordGeneration(observed) != generation)
-            return;
+            return false;
         immutable phase = wordPhase(observed);
         if (phase == phaseRetired || phase == phaseReclaiming || phase == phaseVacant)
-            return;
+            return false;
         if ((observed & retireBit) == 0)
-            return;
+            return false;
         if (phase == phaseIdle)
         {
             version (AntfarmActorTestHooks)
@@ -1785,9 +1795,8 @@ private void driveActorRetirement(ActorSlot* slot, ulong generation)
                     observed = joined;
                     continue;
                 }
-                // The owner-operation pin protects all accesses through return.
-                // Publish against the exact joined lifecycle word, preserving
-                // the pin until the requesting caller performs its final access.
+                // The caller owns the exclusive pin. Fuse its release into
+                // the terminal CAS, which is the final slot access on success.
                 // Debug-only: gate join proves emptiness; avoid an extra retirement load.
                 version (assert)
                     if (atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) != 0
@@ -1796,9 +1805,14 @@ private void driveActorRetirement(ActorSlot* slot, ulong generation)
                 version (AntfarmActorTestHooks)
                     actorTestPoint(ActorTestPoint.retirementBeforePublish, null);
                 if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(&slot.lifecycle,
-                        joined, lifecycleWord(generation, phaseRetired)
-                            | (joined & ownerOpBit)))
-                    return;
+                        joined, lifecycleWord(generation, phaseRetired)))
+                {
+                    // No slot access after this release: a copied owner may
+                    // immediately reclaim and reuse the generation.
+                    version (AntfarmActorTestHooks)
+                        actorTestPoint(ActorTestPoint.retirementAfterPublish, null);
+                    return true;
+                }
                 observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
                 continue;
             }
@@ -1808,7 +1822,7 @@ private void driveActorRetirement(ActorSlot* slot, ulong generation)
                     &slot.lifecycle, observed, replacement))
             {
                 slot.runtime.pushReady(slot);
-                return;
+                return false;
             }
         }
         else
@@ -1816,7 +1830,7 @@ private void driveActorRetirement(ActorSlot* slot, ulong generation)
             // This same-word RMW orders the closed submission gate against a
             // scheduled entry or forces a running exit CAS to reload it.
             cast(void) signalActor(slot, generation, true);
-            return;
+            return false;
         }
         observed = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     }
@@ -1830,6 +1844,9 @@ package ActorRetireResult requestActorRetire(ActorSlot* slot,
 {
     if (slot is null || generation == 0)
         return ActorRetireResult.staleOwner;
+    immutable modeBits = mode == ActorRetireMode.cancel ? retireModeMask : retireBit;
+    immutable satisfied = (modeBits & cancelBit) != 0
+        ? ActorRetireResult.alreadyRetired : ActorRetireResult.requested;
     auto opening = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     while (true)
     {
@@ -1840,27 +1857,28 @@ package ActorRetireResult requestActorRetire(ActorSlot* slot,
         if (wordPhase(opening) == phaseRetired || wordPhase(opening) == phaseReclaiming)
             return ActorRetireResult.alreadyRetired;
         if ((opening & ownerOpBit) != 0) return ActorRetireResult.busy;
+        if (atomicLoad!(MemoryOrder.acq)(slot.waveOwnerWord) != 0)
+            return ActorRetireResult.waveOwned;
+        if ((opening & modeBits) == modeBits) return satisfied;
+        // Wave admission CASes the bare idle word: either it wins first and
+        // we retry, or this mark/pin prevents its admission. A wave already
+        // scheduled but not yet linked uses the existing interrupted handoff.
         if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
-                &slot.lifecycle, opening, opening | ownerOpBit)) break;
+                &slot.lifecycle, opening, opening | ownerOpBit | modeBits)) break;
         opening = atomicLoad!(MemoryOrder.acq)(slot.lifecycle);
     }
-    scope (exit)
+    bool released;
+    scope (exit) if (!released)
     {
         version (AntfarmActorTestHooks)
             actorTestPoint(ActorTestPoint.retirementBeforeUnpin, null);
-        // Final slot access. Generation reuse is impossible until this release.
+        // Final slot access on scheduled/running paths.
         atomicOp!"&="(slot.lifecycle, ~ownerOpBit);
     }
-    if (atomicLoad!(MemoryOrder.acq)(slot.waveOwnerWord) != 0)
-        return ActorRetireResult.waveOwned;
-    immutable marked = markActorRetiring(slot, generation,
-        mode == ActorRetireMode.cancel ? retireModeMask : retireBit);
-    if (marked != ActorRetireResult.requested)
-        return marked;
     version (AntfarmActorTestHooks)
         actorTestPoint(ActorTestPoint.retirementBeforeGateClose, null);
     closeSubmissionGate(slot);
-    driveActorRetirement(slot, generation);
+    released = driveActorRetirement(slot, generation);
     return ActorRetireResult.requested;
 }
 

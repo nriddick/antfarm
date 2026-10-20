@@ -4478,13 +4478,143 @@ private void verifyReplacementAdmission(AntFarm* farm, ActorRuntime* runtime,
     farm.unregisterProducer(token);
 }
 
+
+private struct PinnedRunningState
+{
+    shared int* entered;
+    shared int* release;
+}
+private void pinnedRunningActor(scope ref ActorBorrow!PinnedRunningState actor,
+        scope ref ActorContext) nothrow @nogc @system
+{
+    atomicStore!(MemoryOrder.rel)(*actor.value.entered, 1);
+    while (atomicLoad!(MemoryOrder.acq)(*actor.value.release) == 0) {}
+}
+
+private void testRetirementFinalAccess()
+{
+    // The idle terminal CAS releases the pin itself. Reuse the slot while the
+    // old retirement call is still on its stack; it must not later clear a
+    // new generation's pin or close its submission gate.
+    {
+        auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+        auto runtime = ActorRuntime.create(farm, 1);
+        BoundaryResult result;
+        auto typed = runtime.createActor!(BoundaryState, boundaryActor)(BoundaryState(&result));
+        auto owner = typed.intoErased();
+        auto copy = testDuplicateActorOwner(owner);
+        g_hookNode = null;
+        atomicStore(g_hookTarget, cast(int) ActorTestPoint.retirementAfterPublish);
+        atomicStore(g_hookArrived, 0);
+        atomicStore(g_hookRelease, 0);
+        setActorTestHook(&blockingActorHook);
+        ActorRetireResult retired;
+        auto thread = new Thread({ retired = owner.requestRetire(); });
+        thread.start();
+        waitFlag(g_hookArrived, MonoTime.currTime + 15.seconds, "idle retirement final access");
+        atomicStore(g_hookTarget, -1);
+        check(copy.retired && copy.reclaim() == ActorReclaimResult.reclaimed,
+            "terminal CAS releases idle pin");
+        auto replacement = runtime.createActor!(BoundaryState, boundaryActor)(BoundaryState(&result));
+        atomicStore(g_hookRelease, 1);
+        thread.join();
+        setActorTestHook(null);
+        check(retired == ActorRetireResult.requested, "old retirement returns after reuse");
+        check(owner.reclaim() == ActorReclaimResult.staleOwner, "old owner remains stale");
+        verifyReplacementAdmission(farm, runtime, replacement);
+        runtime.destroy();
+        farm.destroy();
+    }
+    // A running callback may publish RETIRED before the external request
+    // finishes. Its transition must retain the pin until the separate unpin.
+    {
+        auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+        auto runtime = ActorRuntime.create(farm, 1);
+        shared int entered, release;
+        auto typed = runtime.createActor!(PinnedRunningState, pinnedRunningActor)(
+            PinnedRunningState(&entered, &release));
+        auto owner = typed.intoErased();
+        auto copy = testDuplicateActorOwner(owner);
+        auto token = farm.registerProducer(Tier.small);
+        check(owner.handle.wake() == ActorWakeResult.queued, "running pin wake");
+        auto consumer = new Thread({
+            ConsumerView view;
+            check(view.subscribe(farm) >= 0, "running pin subscription");
+            while (atomicLoad!(MemoryOrder.acq)(entered) == 0) view.consumeNext();
+            view.unsubscribe();
+        });
+        consumer.start();
+        auto deadline = MonoTime.currTime + 15.seconds;
+        while (atomicLoad!(MemoryOrder.acq)(entered) == 0)
+        {
+            runtime.flush(token, 1);
+            check(MonoTime.currTime < deadline, "running pin entry timeout");
+        }
+        g_hookNode = null;
+        atomicStore(g_hookTarget, cast(int) ActorTestPoint.retirementBeforeUnpin);
+        atomicStore(g_hookArrived, 0);
+        atomicStore(g_hookRelease, 0);
+        setActorTestHook(&blockingActorHook);
+        ActorRetireResult retired;
+        auto thread = new Thread({ retired = owner.requestRetire(); });
+        thread.start();
+        waitFlag(g_hookArrived, deadline, "running retirement before unpin");
+        check(copy.requestRetire() == ActorRetireResult.busy, "running exclusive retirement pin");
+        atomicStore!(MemoryOrder.rel)(release, 1);
+        consumer.join();
+        check(copy.retired && copy.reclaim() == ActorReclaimResult.busy,
+            "callback retirement retains external pin");
+        atomicStore(g_hookRelease, 1);
+        thread.join();
+        setActorTestHook(null);
+        check(retired == ActorRetireResult.requested
+            && copy.reclaim() == ActorReclaimResult.reclaimed, "running final unpin");
+        farm.unregisterProducer(token);
+        BoundaryResult result;
+        auto replacement = runtime.createActor!(BoundaryState, boundaryActor)(BoundaryState(&result));
+        verifyReplacementAdmission(farm, runtime, replacement);
+        runtime.destroy();
+        farm.destroy();
+    }
+}
+
+
+private void testOccupancyFinalGate()
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    auto runtime = ActorRuntime.create(farm, 1);
+    BoundaryResult result;
+    auto owner = runtime.createActor!(BoundaryState, boundaryActor)(BoundaryState(&result));
+    check(runtime.live == 1, "occupied actor count");
+    check(owner.requestRetire() == ActorRetireResult.requested, "occupancy retirement");
+    g_hookNode = null;
+    atomicStore(g_hookTarget, cast(int) ActorTestPoint.freeSlotBeforeUnlock);
+    atomicStore(g_hookArrived, 0);
+    atomicStore(g_hookRelease, 0);
+    setActorTestHook(&blockingActorHook);
+    ActorReclaimResult reclaimed;
+    auto thread = new Thread({ reclaimed = owner.reclaim(); });
+    thread.start();
+    waitFlag(g_hookArrived, MonoTime.currTime + 15.seconds, "occupancy final gate boundary");
+    check(runtime.live == 0 && !runtime.quiescent,
+        "zero occupancy cannot hide an unreleased free-slot gate");
+    atomicStore(g_hookRelease, 1);
+    thread.join();
+    setActorTestHook(null);
+    check(reclaimed == ActorReclaimResult.reclaimed && runtime.quiescent,
+        "released free-slot gate completes occupancy accounting");
+    runtime.destroy();
+    farm.destroy();
+}
+
 private void testCopiedOwners()
 {
+    testOccupancyFinalGate();
+    testRetirementFinalAccess();
     // Pause every final-access boundary of a retirement request. A copied
     // owner must neither close a reused slot nor free state beneath this call.
     foreach (point; [ActorTestPoint.retirementBeforeGateClose,
-            ActorTestPoint.retirementBeforePublish,
-            ActorTestPoint.retirementBeforeUnpin])
+            ActorTestPoint.retirementBeforePublish])
     {
         auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
         auto runtime = ActorRuntime.create(farm, 1);

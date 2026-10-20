@@ -5,7 +5,7 @@ import antfarm.actors.actor;
 import antfarm.actors.wave;
 import antfarm : TableCompletionHook;
 import antfarm.c.core;
-import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicOp;
+import core.atomic : MemoryOrder, atomicLoad, atomicStore, atomicOp, cas;
 import core.stdc.stdlib : malloc, free;
 import core.stdc.string : memcpy;
 
@@ -20,7 +20,7 @@ struct af_actor_runtime
     af_farm* farm;
     bool owned, custom;
     af_actor_allocator allocator;
-    af_actor_kind* kinds;
+    shared size_t kindHeadWord;
     af_actor_runtime* next; // Control-thread host list.
 }
 
@@ -232,13 +232,13 @@ void finishActorRuntime(af_actor_runtime* r) nothrow @nogc @system
 {
     if (!actorRuntimeDrained(r)) fatal("C ABI destroy actor runtime with live owners or reservations");
     auto allocator = runtimeAllocator(r);
-    for (auto k = r.kinds; k !is null;)
+    for (auto k = cast(af_actor_kind*) atomicLoad!(MemoryOrder.acq)(r.kindHeadWord); k !is null;)
     {
         auto next = k.next;
         allocator.deallocate(allocator.context, k, af_actor_kind.sizeof, af_actor_kind.alignof);
         k = next;
     }
-    r.kinds = null;
+    atomicStore!(MemoryOrder.raw)(r.kindHeadWord, size_t.init);
     r.impl.destroy();
     r.impl = null;
 }
@@ -331,7 +331,6 @@ uint af_actor_kind_register(af_actor_runtime* r, const(af_actor_kind_options)* o
         (!r.custom && options.state_alignment > 64) ||
         options.state_bytes > size_t.max - (options.state_alignment - 1))
         return setError(AF_INVALID, "invalid actor kind");
-    if (!actorRuntimeDrained(r)) return setError(AF_BUSY, "register actor kind at quiescence");
     auto allocator = runtimeAllocator(r);
     auto k = cast(af_actor_kind*) allocator.allocate(allocator.context, af_actor_kind.sizeof, af_actor_kind.alignof);
     if (k is null) return setError(AF_ALLOCATION_FAILED, "actor kind allocation failed");
@@ -340,8 +339,16 @@ uint af_actor_kind_register(af_actor_runtime* r, const(af_actor_kind_options)* o
     k.options = af_actor_kind_options(options.handler, cast(void*) options.user,
         options.state_bytes, options.state_alignment, options.destroy);
     k.value = ActorKind(k, options.destroy is null ? null : &destroyState);
-    k.next = r.kinds;
-    r.kinds = k;
+    // Registration only appends immutable nodes. No node is removed before
+    // externally quiescent destruction, so this head cannot suffer ABA.
+    auto observed = atomicLoad!(MemoryOrder.acq)(r.kindHeadWord);
+    do
+    {
+        k.next = cast(af_actor_kind*) observed;
+        if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
+                &r.kindHeadWord, observed, cast(size_t) k)) break;
+        observed = atomicLoad!(MemoryOrder.acq)(r.kindHeadWord);
+    } while (true);
     *output = k;
     return setError(AF_OK);
 }

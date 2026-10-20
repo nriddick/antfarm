@@ -83,7 +83,7 @@ static void reserved_host_close(void) {
     b.c.kind = test_kind(b.c.runtime, sizeof(unsigned), _Alignof(unsigned), tick, &calls);
     test_thread thread = test_start(create_blocked, &b);
     while (!test_load(&b.entered)) test_yield();
-    CHECK(!af_actor_runtime_live(b.c.runtime) && af_host_close(h) == AF_BUSY);
+    CHECK(af_actor_runtime_live(b.c.runtime) == 1 && af_host_close(h) == AF_BUSY);
     test_store(&b.release, 1); test_join(thread); check(b.result);
     CHECK(af_actor_request_retire(b.c.runtime, &b.c.owner, AF_ACTOR_DRAIN) == AF_ACTOR_RETIRE_REQUESTED);
     CHECK(af_actor_reclaim(b.c.runtime, &b.c.owner) == AF_ACTOR_RECLAIMED);
