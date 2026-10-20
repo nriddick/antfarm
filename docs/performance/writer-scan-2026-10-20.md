@@ -11,6 +11,10 @@ The earlier headline check supplied a length, so it did not exercise this
 scan. Neither finding clears the previous serial private-actor regression:
 the actor paths already supply their body lengths.
 
+The later [local_ab comparison](local-ab-comparison-2026-10-20.md) evaluates
+additional scanner specialization and a separate root FIFO correction against
+this fixed candidate, retaining our expanded writer tests.
+
 ## Change and contract
 
 The general 1.9 scan recalculated the prospective layout, index count and

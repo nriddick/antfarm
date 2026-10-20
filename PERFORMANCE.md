@@ -58,6 +58,11 @@ recover the inferred-path loss against 1.8.3; the explicit-length overload was
 already specialized. The baseline rows below remain observations at `2cf59da`,
 before this restoration.
 
+The subsequent [local_ab comparison](docs/performance/local-ab-comparison-2026-10-20.md)
+measures further scanner specialization and a private-root FIFO correction
+against `651030b`, including an isolated FIFO-only variant on our current code.
+Those candidates are not incorporated into the baseline rows below.
+
 ### Throughput vs consumers
 
 One bulk producer, 16-word bodies, batch 80. `nc` counts consumers.
