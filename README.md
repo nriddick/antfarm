@@ -11,27 +11,33 @@ Ant Farm needs DMD 2.112+ or LDC 1.42+ on Linux x86-64 or Windows x64.
 
 ## First program
 
-One thread, one file, one import. Save it as `/tmp/first_payload.d` and run it
-from a clone of the repository:
+One thread, one file, one import. Save
+[First payload](docs/guide/quickstart.md#first-payload) as `first_payload.d` in
+the repository root and run it with Dub (its header names this clone as the
+dependency) or with the compiler directly:
 
 ```text
-dmd -g -i -I. /tmp/first_payload.d -of=/tmp/first_payload
-/tmp/first_payload
+dub run --single first_payload.d
+
+dmd -g -i -I. first_payload.d -of=first_payload
+./first_payload
 ```
 
-The complete program is [First payload](docs/guide/quickstart.md#first-payload),
-where the [quickstart](docs/guide/quickstart.md) explains what it relies on.
-It prints `first payload: 256 squares summed to 5625216`.
+It prints `first payload: 256 squares summed to 5625216`; the
+[quickstart](docs/guide/quickstart.md) explains what it relies on.
 
-Next, run a complete actor service on pinned workers: `/tmp/public_service 0`
-consumes on the calling thread, `2` adds two pinned workers in one LLC.
+Next, run a complete actor service on pinned workers. The argument `0`
+consumes on the calling thread; `2` adds two pinned workers in one LLC.
 
 ```text
-dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
-/tmp/public_service 2
+dub run --single examples/public_service.d -- 2
+
+dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=public_service
+./public_service 2
 ```
 
-Substitute `ldc2` for `dmd` to use LDC. Then follow the
+Every example carries the same kind of header. Add `--compiler=ldc2` to Dub,
+or substitute `ldc2` for `dmd`, to use LDC. Then follow the
 [documentation map](docs/README.md#run-something): seven short steps from this
 program to workers, representation choice, sizing, and local checks.
 

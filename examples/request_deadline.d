@@ -1,3 +1,6 @@
+/+ dub.sdl:
+    dependency "antfarm:threadpool" path=".."
++/
 /++
  + Request service with deadlines (U5): one tracked root per request, a
  + per-request deadline, cancellation from another thread, and a terminal

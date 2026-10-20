@@ -13,7 +13,10 @@ Older release notes are in [docs/releases/](docs/releases/):
   `ant_fibers` and the examples drop their retry loops. `FarmHost.createPark`
   takes the root storage policy as a template argument. The onboarding
   commands no longer set `ANTFARM_HUGE_PAGES=0`: ordinary pages are the
-  default, and the variable is documented once under memory backing.
+  default, and the variable is documented once under memory backing. The
+  quickstart program and every D example carry a `dub.sdl` header naming
+  this repository, so `dub run --single <file>` builds them without the
+  compiler flags; the direct compiler commands remain documented.
 
 - Added opt-in root state slabs: `PrivateRootPark!(T, step, reclamation,
   PrivateStateStorage.cohortSlab)` reserves one zeroed slab of

@@ -1,3 +1,6 @@
+/+ dub.sdl:
+    dependency "antfarm:threadpool" path=".."
++/
 /++
  + Private hierarchy: typed result ports, root `waitChildren`, a child
  + continuation fold, a subset wave, non-POD state with a destructor, and a

@@ -1,3 +1,6 @@
+/+ dub.sdl:
+    dependency "antfarm:threadpool" path=".."
++/
 /++
  + Public inbox service: caller-owned nodes, typed send statuses, a bounded
  + drain, replies observed after `available`, node reuse, admission close,

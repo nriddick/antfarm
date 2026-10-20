@@ -64,3 +64,23 @@ examples/.build/
 # Python bytecode from the tools/perf scripts
 __pycache__/
 *.pyc
+
+# Executables that `dub run --single` and the documented compiler commands
+# write beside their sources
+/first_payload
+/public_service
+/public_wave
+/private_tree
+/request_deadline
+/fail_fast_fold
+/fiber_cancel_at
+/iota_sum
+/life_headless
+examples/public_service
+examples/public_wave
+examples/private_tree
+examples/request_deadline
+examples/fail_fast_fold
+examples/fiber_cancel_at
+examples/iota_sum
+examples/life/headless

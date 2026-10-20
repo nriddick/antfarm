@@ -1,3 +1,7 @@
+/+ dub.sdl:
+    dependency "antfarm:threadpool" path=".."
+    dependency "antfarm:ant_fibers" path=".."
++/
 /++
  + Fiber `cancelAt` adapter: a sleeping managed Fiber requests cancellation
  + of a tracked private root at a deadline. This is an example bridge between

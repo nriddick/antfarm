@@ -1,3 +1,6 @@
+/+ dub.sdl:
+    dependency "antfarm:threadpool" path=".."
++/
 /++
  + Fail-fast fold (U3): a leaf reports a domain failure with `context.fail`
  + and stops its siblings with `context.cancelPeers`. The emitter truncates

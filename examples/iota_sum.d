@@ -1,3 +1,6 @@
+/+ dub.sdl:
+    dependency "antfarm:threadpool" path=".."
++/
 module iota_sum;
 
 import antfarm.templates;

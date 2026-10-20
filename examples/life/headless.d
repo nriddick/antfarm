@@ -1,3 +1,6 @@
+/+ dub.sdl:
+    dependency "antfarm:threadpool" path="../.."
++/
 module life.headless;
 
 import life.backend;

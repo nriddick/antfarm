@@ -26,7 +26,17 @@ Every program runs on a [`FarmHost`](../threadpool/source/threadpool/host.d) (`t
 
 ## Build
 
-From the repository root, with DMD or LDC. The same command works on Windows
+Each D program starts with a `dub.sdl` header that names this repository as
+its dependency, so Dub builds and runs it in single-file mode from any
+directory, with DMD or LDC:
+
+```text
+dub run --single examples/public_service.d -- 0
+dub run --single --compiler=ldc2 examples/private_tree.d -- 2
+```
+
+The compiler commands below are the equivalent direct forms. Run them from
+the repository root, with DMD or LDC. The same command works on Windows
 x64 and Linux x86-64. Pass `0` to consume on the calling thread, or a worker
 count N for N pinned pool workers in one LLC, with the calling thread confined
 beside them. A machine with fewer than N accepted worker CPUs (one per

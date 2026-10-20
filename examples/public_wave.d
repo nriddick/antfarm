@@ -1,3 +1,6 @@
+/+ dub.sdl:
+    dependency "antfarm:threadpool" path=".."
++/
 /++
  + ActorWave over externally selected actors on one Farm, possibly two
  + runtimes. `finished` does not join the completion hook. See examples/README.md.

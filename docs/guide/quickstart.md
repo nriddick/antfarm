@@ -10,6 +10,9 @@ arguments are packed into the ring and reconstructed on a consumer.
 debug and release:
 
 ```d
+/+ dub.sdl:
+    dependency "antfarm" path="."
++/
 import antfarm.templates;
 import core.atomic : MemoryOrder, atomicFetchAdd, atomicLoad;
 import std.range : iota;
@@ -56,13 +59,19 @@ void main()
 }
 ```
 
-To run it, save the program as `/tmp/first_payload.d`, then from the repository
-root:
+To run it, save the program as `first_payload.d` in the repository root. The
+`dub.sdl` header names this clone as its dependency, so Dub builds it in
+single-file mode; or call the compiler directly:
 
 ```text
-dmd -g -i -I. /tmp/first_payload.d -of=/tmp/first_payload
-/tmp/first_payload
+dub run --single first_payload.d
+
+dmd -g -i -I. first_payload.d -of=first_payload
+./first_payload
 ```
+
+Add `--compiler=ldc2` to the Dub command, or substitute `ldc2` for `dmd`, to
+use LDC.
 
 It exits with status 0 once all 256 jobs have run and prints:
 
