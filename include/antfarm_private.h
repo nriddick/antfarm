@@ -108,7 +108,8 @@ af_status af_private_root_spawn_init(af_private_roots *, af_actor_initializer, v
                                       size_t index, int64_t deadline, af_private_root_handle *handle);
 /* Collect/pump first. Successful take acquire-joins that root's application
    writes, recycles its slot and makes every copy of the returned handle stale.
-   Tracked-only calls are fatal on an untracked park. */
+   Tracked-only calls are fatal on an untracked park. Returns 1 when an outcome
+   was taken, 0 (output cleared) when none is ready. */
 uint32_t af_private_root_take_outcome(af_private_roots *, af_private_root_outcome *);
 size_t af_private_roots_cancel_all(af_private_roots *);
 uint32_t af_private_root_request_cancel(const af_private_root_handle *);
@@ -149,6 +150,9 @@ af_status af_private_children_start_subset(af_private_children *, af_private_con
                                             af_private_child_step, void *user,
                                             const uint32_t *members, size_t count,
                                             uint32_t continuation, uint32_t cost);
+/* finished returns 1 when the current wave has joined (also before the first
+   start), acquiring its writes. cancel returns 1 when it cancelled an active
+   wave, 0 with no effect when the cohort is idle. */
 uint32_t af_private_children_finished(af_private_children *, af_private_context *);
 uint32_t af_private_children_cancel(af_private_children *, af_private_context *);
 /* Outcome/results require a joined wave. Results have aligned byte stride and
@@ -160,6 +164,9 @@ void af_private_children_outcome(af_private_children *, af_private_context *, af
 af_private_results af_private_children_results(af_private_children *, af_private_context *);
 const uint32_t *af_private_children_subset(af_private_children *, af_private_context *, size_t *count);
 void af_private_fail(af_private_context *, uint32_t code); /* root requires tracking */
+/* cancelled returns 1 once this actor's root or an enclosing wave is cancelled
+   (handle, cancel_all, deadline, parent or peer); within one callback it never
+   reverts to 0. */
 uint32_t af_private_cancelled(af_private_context *);
 void af_private_cancel_children(af_private_context *);
 void af_private_cancel_peers(af_private_context *); /* child context only */
