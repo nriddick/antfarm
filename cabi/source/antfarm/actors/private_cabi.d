@@ -235,6 +235,8 @@ uint af_private_children_create(void* c, const(af_private_child_options)* o, af_
         || !geometry(o.state.bytes, o.state.alignment)
         || (o.result_bytes ? !geometry(o.result_bytes, o.result_alignment) : o.result_alignment != 1))
         return setError(AF_INVALID, "invalid private child options");
+    if (o.storage != 0 && o.slab_byte_limit == 0)
+        return setError(AF_INVALID, "private slab byte limit unset");
     auto l = ErasedCohortLayout(layout(o.state), o.result_bytes, o.result_alignment,
         o.result_bytes ? (o.result_bytes + o.result_alignment - 1) & ~(o.result_alignment - 1) : 0, o.storage != 0);
     if (!erasedChildGeometry(o.capacity, o.subsets != 0, l))

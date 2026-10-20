@@ -314,10 +314,15 @@ static uint32_t allocation_child(void *u, void *s, size_t bytes, af_private_cont
     fixture *f = (fixture *)u; (void)s; (void)bytes;
     af_private_child_options o; af_private_child_options_default(&o);
     o.state.bytes = 8; o.capacity = 4; o.result_bytes = 8; o.result_alignment = 8;
-    o.storage = AF_PRIVATE_COHORT_SLAB; o.slab_byte_limit = 32; o.subsets = 1;
+    o.storage = AF_PRIVATE_COHORT_SLAB; o.subsets = 1;
+    /* An unset cap is a configuration error; only a set cap can be exceeded. */
+    unsigned calls = test_load(&f->memory.calls); af_private_children *p = NULL;
+    CHECK(af_private_children_create(c, &o, &p) == AF_INVALID && !p);
+    o.slab_byte_limit = 31; CHECK(af_private_children_create(c, &o, &p) == AF_ALLOCATION_FAILED && !p);
+    CHECK(test_load(&f->memory.calls) == calls); o.slab_byte_limit = 32;
     unsigned before = test_load(&f->memory.live);
     test_store(&f->memory.fail_at, test_load(&f->memory.calls) + f->failure_position);
-    af_private_children *p = NULL; af_status status = af_private_children_create(c, &o, &p);
+    af_status status = af_private_children_create(c, &o, &p);
     if (f->failure_position <= 5) { CHECK(status == AF_ALLOCATION_FAILED && !p); CHECK(test_load(&f->memory.live) == before); }
     else CHECK(status == AF_OK && p);
     test_store(&f->memory.fail_at, 0);

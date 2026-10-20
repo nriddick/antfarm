@@ -614,7 +614,8 @@ its state descriptor and result geometry, inherits the hierarchy's allocator,
 and belongs to that parent until automatic post-order disposal. Parents cannot
 borrow child state. Per-object storage allocates at spawn; cohort slabs reserve
 `capacity * roundUp(state_bytes, state_alignment)` bytes at creation under an
-explicit byte cap. Every slab child initializes directly in its slot. Failed
+explicit byte cap. The default cap of zero is unset and returns `AF_INVALID`;
+exceeding a set cap returns `AF_ALLOCATION_FAILED`. Every slab child initializes directly in its slot. Failed
 initialization clears the slot without admitting it. Terminal retirement calls
 the destructor and clears the full stride; refill starts only after the retiring
 wave joins. The slab is freed once at cohort disposal. No per-member allocation,

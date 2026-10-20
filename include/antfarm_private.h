@@ -70,7 +70,7 @@ typedef struct af_private_child_options {
     size_t capacity, batch_limit; /* 0 batch limit inherits parent */
     af_private_state_options state;
     size_t result_bytes, result_alignment; /* bytes=0: no storage, alignment must be 1 */
-    size_t slab_byte_limit; /* explicit cap on capacity * aligned state stride */
+    size_t slab_byte_limit; /* COHORT_SLAB: required cap on capacity * aligned state stride */
     uint32_t storage, subsets;
 } af_private_child_options;
 
@@ -130,8 +130,9 @@ void af_private_roots_destroy(af_private_roots *);
    PER_OBJECT allocates each state at spawn. COHORT_SLAB allocates one aligned
    slab at create, then spawns without allocation; terminal waves destroy/clear
    slots and permit refill only after the wave join. No per-member wrappers.
-   Structural option errors: AF_INVALID; retiring: AF_PRIVATE_RETIRING;
-   allocation/cap failure: AF_ALLOCATION_FAILED. A valid output is cleared. */
+   Structural option errors, including a slab with slab_byte_limit 0 (the
+   default): AF_INVALID; retiring: AF_PRIVATE_RETIRING; a slab exceeding its
+   set cap, or allocation failure: AF_ALLOCATION_FAILED. A valid output is cleared. */
 af_status af_private_children_create(af_private_context *, const af_private_child_options *,
                                       af_private_children **out);
 af_status af_private_child_spawn_copy(af_private_children *, af_private_context *, const void *initial);
