@@ -1,4 +1,4 @@
-#include "antfarm_private.h"
+#include "antfarm_private.hpp"
 #include "check.h"
 #include <cstdio>
 #include <cstdlib>
@@ -62,18 +62,36 @@ static uint32_t root_step(void *u, void *p, size_t, af_private_context *ctx) {
     return AF_PRIVATE_FINISH;
 }
 int main() {
-    af_farm *farm = NULL; af_token *token = NULL; af_view *view = NULL;
-    CHECK(af_create(NULL, &farm) == AF_OK); CHECK(af_register_producer(farm, AF_SMALL, &token) == AF_OK);
-    CHECK(af_view_create(&view) == AF_OK); while (af_subscribe(view, farm) == AF_RETRY) {}
     Counters c = {}; af_actor_allocator a = {&c, allocate, deallocate};
     af_private_root_options o; af_private_root_options_default(&o);
     o.capacity = 1; o.state.bytes = sizeof(Root); o.state.alignment = alignof(Root);
-    o.state.destroy = root_destroy; o.state.destroy_user = &c; o.step = root_step; o.user = &c;
-    af_private_roots *park = NULL; CHECK(af_private_roots_create(farm, &o, &a, &park) == AF_OK);
-    CHECK(af_private_root_spawn_init(park, root_init, NULL, 0, AF_PRIVATE_NO_DEADLINE, NULL) == AF_OK);
-    while (af_private_roots_live(park)) { af_private_roots_pump(park, token, 0, AF_PRIVATE_AUTO_COST); while (af_consume_next(view)) {} }
+    o.state.destroy = root_destroy; o.state.destroy_user = &c; o.user = &c;
+    antfarm::private_roots park; antfarm::producer token; antfarm::consumer view;
+    {
+        antfarm::farm farm; CHECK(antfarm::farm::create(farm) == AF_OK);
+        CHECK(antfarm::producer::create(token, farm) == AF_OK);
+        while (antfarm::consumer::create(view, farm) == AF_RETRY) {}
+        CHECK(antfarm::private_roots::create(park, farm, o, &a) == AF_INVALID && !park.get());
+#if ANTFARM_CPP_EXCEPTIONS
+        bool thrown = false;
+        try { (void)antfarm::private_roots::make(farm, o, &a); }
+        catch (const antfarm::error &e) { thrown = e.status == AF_INVALID; }
+        CHECK(thrown);
+#endif
+        o.step = root_step;
+        antfarm::private_roots first; CHECK(antfarm::private_roots::create(first, farm, o, &a) == AF_OK);
+        af_private_roots *raw = first.get();
+        CHECK(antfarm::private_roots::create(first, farm, o, &a) == AF_BUSY && first.get() == raw);
+        park = std::move(first); CHECK(park.get() == raw && !first.get());
+    } // park, token and view retain the Farm; the park is released before it.
+    CHECK(park.spawn_init(root_init, NULL, 0) == AF_OK);
+    while (park.live()) { park.pump(token.get()); while (view.poll()) {} }
     CHECK(c.total == 30 && c.roots == 1 && c.children == 4);
-    af_private_roots_destroy(park); af_unsubscribe(view); af_view_destroy(view);
-    af_unregister_producer(farm, token); af_destroy(farm);
-    std::puts("C++ private placement construction and aligned slab passed");
+    { // A park that is the Farm's last owner is destroyed before the Farm.
+        antfarm::private_roots alone;
+        { antfarm::farm farm; CHECK(antfarm::farm::create(farm) == AF_OK);
+          CHECK(antfarm::private_roots::create(alone, farm, o, &a) == AF_OK); }
+        CHECK(alone.live() == 0);
+    }
+    std::puts("C++ private placement construction, aligned slab and park owner passed");
 }

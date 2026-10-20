@@ -26,6 +26,8 @@ Older release notes are in [docs/releases/](docs/releases/):
   drives the C callbacks. Private parks may use application threads or the
   optional host; the emitter pumps them explicitly and destroys them before
   normal host close.
+  `antfarm_private.hpp` adds a move-only C++ `private_roots` owner that retains
+  its Farm and destroys the park on scope exit.
 
 - Removed MT payloads from the D core. All payloads are single-shot; independent
   entries still execute across many consumers. Removed the full ring-header

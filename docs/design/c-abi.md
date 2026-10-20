@@ -5,7 +5,8 @@ defined by [antfarm.h](../../include/antfarm.h), public actors in
 [antfarm_actors.h](../../include/antfarm_actors.h), private actors in
 [antfarm_private.h](../../include/antfarm_private.h), the optional
 [antfarm_runtime.h](../../include/antfarm_runtime.h), and the C++ ownership
-adapter [antfarm.hpp](../../include/antfarm.hpp). Ring and ownership contracts
+adapters [antfarm.hpp](../../include/antfarm.hpp) and
+[antfarm_private.hpp](../../include/antfarm_private.hpp). Ring and ownership contracts
 remain in [SPEC](../../SPEC.md). ABI 1 supports 64-bit Windows and Linux;
 all exports and callbacks use C linkage.
 
@@ -84,6 +85,12 @@ is a link error. Use the status factories there.
 Factory status is authoritative: errors detected by the C++ wrapper itself
 (nonempty output or ownership allocation failure) do not replace the C thread
 diagnostic. This replaces ABI 1's earlier unreleased throwing constructors.
+
+`antfarm_private.hpp` adds a move-only `private_roots` owner with the same
+`create`/`make` rules. It retains its Farm like a producer and destroys the
+park on scope exit, so drain roots and take tracked outcomes first, including
+before unwinding. Its members forward to the park calls; callbacks and child
+cohorts stay raw C.
 
 Add `--runtime` to build the separate runtime archive with the same source revision and D
 compiler. Compile [c_host.c](../../examples/c_host.c) as C, then use that D
@@ -662,7 +669,8 @@ continuations, subset order, truncation cleanup, signal-only cohorts, cleared
 slab reuse, all creation-allocation failure positions, failed initializers,
 stale cancellation handles, lazy deadlines and release-build contract deaths.
 C++ checks construct noncopyable objects in final storage, including 128-byte
-alignment, with exceptions enabled and disabled. The default C ABI lane runs
+alignment, and drive the park through `private_roots`, with exceptions enabled
+and disabled. The default C ABI lane runs
 both release and debug private tests; its Linux TSan lane includes native C
 private actors. Host tests use zero and two workers plus an unattached native
 emitter. Shared-library packaging, GC allocator exports and Fibers remain outside

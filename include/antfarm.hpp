@@ -62,6 +62,7 @@ inline void check(af_status status) { if (status != AF_OK) throw error(status); 
 
 class producer;
 class consumer;
+class private_roots; // antfarm_private.hpp
 // Default constructors are empty in every build. Factories require empty output
 // and leave it unchanged on failure. Status is authoritative: wrapper errors
 // (busy output/control allocation) do not set the C thread diagnostic.
@@ -69,6 +70,7 @@ class farm {
     detail::farm_ref value_;
     friend class producer;
     friend class consumer;
+    friend class private_roots;
 public:
     farm() noexcept = default;
     static af_status create(farm &out, const af_options *options = nullptr) noexcept {
