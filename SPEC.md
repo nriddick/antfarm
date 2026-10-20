@@ -707,6 +707,8 @@ Operational sections still mention a fatal guard at the point where it matters t
 
 ## 11. Rationale and History Appendix
 
+These details are worth preserving, but they are history, alternatives, or tuning observations rather than normative rules.
+
 ### MT payloads removed (1.9)
 
 1.8.x allowed several consumers to enter one payload through MaxCs/Done/Pcount,
@@ -719,8 +721,6 @@ The callback/header collapse and five-word table header are part of the same
 breaking release. Producers now pass callbacks directly; `PayloadHeader`,
 `initPayloadHeader`, and `writeTracked` are removed. The optional hook on
 `write` covers all layouts, including mixed callbacks and zero-length bodies.
-
-These details are worth preserving, but they are history, alternatives, or tuning observations rather than normative rules.
 
 **Lineage of the tallies.** The leaf/root tally is a refinement of indirect reference counting (Piquer, "Indirect reference counting: a distributed garbage collection algorithm," PARLE 1991, LNCS 505). In Piquer's scheme a reference holder that hands out copies counts them locally and becomes their parent; a holder sends a single decrement to its parent only when its own count reaches zero; and the owner's count reaches zero only when the whole tree has collapsed. The parent's count includes a child before the child exists, so no decrement can ever precede the increment it cancels. The Farm keeps that invariant and that upward-on-zero-only rule. `Lt` are the intermediate counters, `Rt` is the owner, and a consumer's root add is ordered before any matching root subtract by the acq_rel release sequence through its leaf: a leaf returns to zero only after every consumer that incremented it has decremented it, including the one whose 0→1 took the root count, and its root add precedes its own leaf decrement in program order.
 

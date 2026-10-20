@@ -324,6 +324,43 @@ Raw evidence is local in `.build/actor-refresh-lifecycle/`,
 `.build/actor-refresh-evidence.zip`. Timing source and the rerunnable driver
 are committed under `tools/perf/`.
 
+## Open 1.9.0 performance limits
+
+These limits are open for the 1.9.0 release and stay with their measurements
+until the holistic optimization session.
+
+### Table spacing and actor churn
+
+Revisit table spacing and actor-churn performance in a dedicated optimization
+session. The 1.9 review retains the compact five-word layout. Compare
+`private`, `private-remote` and `dtor` at zero and six consumers against 1.8.2,
+alongside the grain grid, throughput and tail probes. Local same-binary
+controls implicated fixed-table spacing; disabling the callback guard gave
+no consistent benefit. A diagnostic with three padding words on index-free
+tables of at least four payloads recovered serial private-root throughput,
+but needs a complete performance/correctness evaluation before adoption.
+The October 19 quieter-host retest still measured a -14.1% paired-median
+change for `private` at zero consumers against 1.8.2 (`2182eb8`), using
+LDC 1.42 `-O2 -release` on an i7-12700H under WSL2. The other two serial
+private cases were inconclusive. Six-consumer samples also encountered
+persistent CPU-accounting exclusions whose cause remains unresolved. Keep
+these limits with the measurements; the 392-case grain grid verified output
+throughout, but does not establish a general performance win.
+
+### C wave bridge on the typed-D path
+
+The C wave bridge's existing typed-D `wave` path was compared at
+`d94acc1` against `be025b1` with LDC 1.42 `-O2 -release`, mimalloc 3.5.3,
+16,384 actors and distinct-core pins under Linux/WSL. Caller-only execution
+passed the -3% boundary with 20 clean pairs: paired-median change **-0.63%**,
+descriptive interval **[-2.70%, +0.80%]**. A byte-identical candidate/candidate
+control also passed with 20 clean pairs. Six-consumer execution remained
+**inconclusive**: 12 clean pairs from 40 attempts, short of the required 20,
+after background-CPU exclusions. The combined performance gate therefore
+did not pass. Preserve this limit for the holistic optimization session;
+this comparison does not measure the new C dispatch bridge's throughput.
+Local raw evidence is archived in `.build/cabi-waves-performance-evidence.zip`.
+
 ## Scope and caveats
 
 These are synthetic microbenchmarks on two machines. They isolate transport and

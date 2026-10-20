@@ -1,7 +1,7 @@
 # Ant Farm architecture
 
-Ant Farm's current release is 1.8.2. It is one repository
-with four cooperating packages. They separate transport, worker placement,
+Ant Farm's current release is 1.8.2; 1.9.0 is in progress. It is one
+repository with four cooperating D packages and a C/C++ ABI over them. They separate transport, worker placement,
 stateful identities, and suspendable control flow so an application can choose
 the narrowest representation for each kind of work.
 
@@ -35,6 +35,11 @@ callbacks are shared ([SPEC 2f](SPEC.md#2f-compact-tables) and
 concurrently. Grain adapters group source elements into single-shot payloads;
 construction, referenced-data lifetime and aggregate completion stay with
 the caller.
+
+`antfarm.parallel` sits on that path: it publishes grains of a range and
+joins them through table completion hooks and region credits, either
+asynchronously or by help-draining the caller's view. It adds no scheduling
+of its own; see [parallel loops](docs/guide/parallel-loops.md).
 
 ### Actors
 
@@ -98,10 +103,18 @@ task address—so publication uses the Farm's specialized common-callback,
 fixed-length write path. A Fiber may resume on any eligible worker, and must
 not retain TLS-derived state across suspension.
 
+### C and C++ ABI
+
+`cabi/` and `include/` expose [C ABI 1](docs/design/c-abi.md). The core
+library (Farm, tokens, views, writes with hooks, public actors and waves) is
+built as BetterC and links into a native C program without druntime. A
+separate optional runtime library adds the non-Fiber `FarmHost`. Fibers and
+private actors are not exported.
+
 ## Choosing the work representation
 
 Use the [work-representation guide](docs/guide/choosing-work.md) to choose
-payloads, public actors, actor waves, private hierarchies, or Fibers. It owns
+payloads, parallel loops, public actors, actor waves, private hierarchies, or Fibers. It owns
 the comparison and the public-vs-private decision.
 
 ## The `iota_sum` path
@@ -262,4 +275,6 @@ including the Fiber steps there; `FarmHost.close()` implements the host's teardo
   layout and slab reuse.
 - [tests/actors/README.md](tests/actors/README.md): forced actor
   interleavings, sustained generation churn, and allocator-adapter checks.
+- [docs/design/c-abi.md](docs/design/c-abi.md): C ABI distribution, handle,
+  failure and actor ownership contracts.
 - [ROADMAP.md](ROADMAP.md): current release gates and later work.

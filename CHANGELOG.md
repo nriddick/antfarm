@@ -1,97 +1,159 @@
 # Changelog
 
 Older release notes are in [docs/releases/](docs/releases/):
-[1.8.0 and its release candidates](docs/releases/1.8.md) and
+[1.8.1, 1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
 ## 1.9.0 — unreleased
 
-- Removed MT payloads from the D core. All payloads are single-shot; independent
-  entries still execute across many consumers. Removed the full ring-header
-  layout, MT index, iteration/admission counters and secondary payload passes.
-- Removed `PayloadHeader` and `initPayloadHeader`. `Callback` is now
-  `extern(C) void function(const(ulong)*, size_t) nothrow @nogc @system`;
-  `PayloadEntry` stores `call` and `body`, and broadcasts take a callback.
-  Use `payloadEntry!fn(buffer, args...)` or `callbackFor!fn()` for D functions.
-  Removed `maxCs`, `done`, `pcount`, `MAX_PAYLOAD_ITERS`, `withIteration`
-  and `payloadEntryRuntime`.
-- Added `payloadRange!fn(source, grain)`; `parallelRange` shares that adapter.
-  Grain must be positive. The final grain handles the tail; lengths and write
-  counts are measured in grains. Descriptors refer to data read at execution,
-  so retain that data until completion. Omit grain for per-element packing.
-- Removed `parallelSlices`, `ParallelForm` and `Options.form/slices`.
-  `Options` contains `grain`, `costClass`, `wake`, and `wakeContext`. Port MT iteration work to
-  independent entries or grains. See [parallel loops](docs/guide/parallel-loops.md).
-- Every `write` overload accepts an optional completion hook after `avgCost`,
-  including mixed-callback tables. The existing table completion transition
-  joins all accepted payload callbacks. Removed `writeTracked`; pass the hook
-  after the token and cost class to `write`. Partial writes notify only their
-  accepted table, and zero writes do not notify. Completion callbacks also
-  use C linkage; hook storage stays two pointers.
-- Blocking loops wake peers after accepted writes and on idle polls. Use
-  `FarmHost.parallelFor` with caller consumption or `host.parallelOptions`.
-  Nested waits inside callbacks or hooks are fatal in release builds too.
-- The table header is five words: sentinel, next sequence, packed length/kind/
-  cost, shard count, hook. Size derives from the next sequence. Removed the
-  unused consumer snapshot; unified sizing, decoding and idle re-walk loops.
-- Added a quick-lane BetterC check that compiles the core, parallel layer and
-  actors, then links and runs C callbacks and hooks from a native C main without
-  druntime. Validated with LDC and DMD on Windows and Linux.
-- Added [C ABI 1](docs/design/c-abi.md): a BetterC static core, opaque Farm,
-  producer and view handles, all three write forms with hooks and cost classes,
-  options/version checks, thread-local status diagnostics, and a fatal observer
-  shared with D callers. Added a move-only C++11 ownership adapter.
-- Added a separate optional druntime-inclusive static library for the non-Fiber
-  FarmHost, explicit runtime initialization/thread attachment, wake/step and
-  shutdown. It links the same core; Fiber exports remain deferred.
-- Added runtime-free public actor C exports: copied/aligned state, native or
-  custom allocation, owners/handles, wake/flush, reusable inbox messages, replies,
-  retirement and reclamation. The optional host now drives and owns C actors,
-  joining consumers before destroying them. GC rooting remains a normal-D
-  adapter. Private actor C exports are a subsequent increment.
-- Refreshed the unreleased actor C API with runtime-owned kinds, direct copy/init
-  construction, optional destructors, 16-byte value owners, caller-owned inbox
-  storage and strided batch/wave operations. Retirement pins and exclusive
-  reclaim claims make copied owners safe without changing D move-only ownership.
-- Added runtime-free C actor waves with erased state, prefix publication,
-  generation-tagged observations, phase completion and a callback-return join
-  before reuse/destruction. Waves also run on the optional non-Fiber host.
-- Host wake/state now accept unattached native threads. State queries return a
-  status plus an output state; null arguments are recoverable. Ordered close
-  refusals use `FarmHostNotDrained` and map to `AF_BUSY`.
-- C++ wrappers now default to empty, with nonthrowing status factories and
-  checked ownership allocation in exception-enabled and disabled builds.
-  Consumer creation returns transient retry to the caller. Optional
-  `farm::make`/`producer::make` conveniences throw only in enabled builds.
-- C ABI checks execute under NDEBUG, audit all archive exports/dependencies,
+1.9.0 makes every payload single-shot, collapses the payload callback to a
+C-linkage body-only function, joins tables through an optional hook on every
+`write`, and adds `antfarm.parallel` and a C/C++ ABI. It also changes how
+`FarmHost.step()` emits and wakes. It folds in the unreleased 1.8.3 progress
+branch. As in 1.8.2, removed and renamed APIs have no compatibility aliases;
+see the [migration table](#migration-from-182).
+
+### Farm core
+
+- **MT payloads are removed.** Every payload runs exactly once on one
+  consumer; independent entries still execute across many consumers. The full
+  in-ring payload header, MT index, iteration/admission counters and secondary
+  payload passes are gone. Work that several consumers entered as one payload
+  becomes several payloads or grains sharing an application counter
+  ([SPEC 11](SPEC.md#mt-payloads-removed-19)).
+- **Callbacks take only their body.** `Callback` is now
+  `extern(C) void function(const(ulong)* body, size_t bodyWords) nothrow @nogc @system`.
+  `PayloadHeader` and `initPayloadHeader` are removed; `PayloadEntry` holds
+  `call` and `body`, and broadcast writes take a `Callback`. Build entries
+  with `payloadEntry!fn(buffer, args...)` or `callbackFor!fn()`.
+  `TableCompletionCallback` also uses C linkage; a hook is still two pointers.
+- **Every `write` overload accepts a completion hook** after `avgCost`,
+  including mixed-callback tables and zero-length bodies. The table finisher
+  joins all accepted callbacks before notifying. A partial write notifies
+  only its accepted table; a zero write notifies nothing. `writeTracked` is
+  removed.
+- **`payloadRange!fn(source, grain)`** publishes one entry per grain of a
+  finite, sliceable random-access range. The final grain handles the tail,
+  and lengths and write counts are in grains. Descriptors refer to data read
+  at execution, so retain it until completion. Without `grain`, arguments are
+  packed per element as before. A zero grain is fatal in every build.
+- The table header is five words: sentinel, next sequence, packed
+  length/kind/cost, shard count and hook. Size derives from the next
+  sequence. The unused consumer snapshot is gone, and sizing, decoding and
+  idle re-walk share one loop.
+
+### Parallel loops (new)
+
+- [`antfarm.parallel`](docs/guide/parallel-loops.md) adapts countable ranges
+  into payloads:
+  - `parallelRange!fn` for caller-owned batches: the one-element form of
+    `payloadRange`, per element or per grain;
+  - `parallelFor!fn` for asynchronous submission, with a move-only
+    `ParallelHandle`, retryable `publish` and a completion hook;
+  - `parallelForWait!fn` and `foreach` over `parallel(view, token, range)`
+    for blocking regions that help-drain the caller's view and keep region
+    storage on the stack.
+- `Options` holds `grain`, `costClass`, `wake` and `wakeContext`. Blocking
+  loops call `wake` after every accepted write and on idle polls, so parked
+  consumers release reclamation pins.
+- `FarmHost.parallelFor!fn(source, options)` runs a blocking region on the
+  control thread with caller consumption. `host.parallelOptions(options)`
+  supplies the host wake to the low-level adapters.
+- A blocking loop inside a Farm callback or table completion hook is fatal
+  in every build, including empty loops.
+- 1.8.3-progress users: `parallelSlices`, `ParallelForm` and
+  `Options.form`/`slices` did not survive the MT removal. Port MT slices to
+  grains.
+
+### FarmHost
+
+- `step()` now batches up to `FarmHostOptions.maxEmitRounds` (default 16)
+  emission rounds before waking workers. Each round visits every emitter, and
+  a round with no publications ends the burst. This amortizes pool-wide wakes
+  for cheap actor tables. **Attachments may be called several times per
+  step**: return promptly, including on backpressure, and report actual
+  publications. `maxEmitRounds = 1` restores single-round stepping. See
+  [host tuning](docs/guide/hosting.md#cheap-work-with-parked-workers).
+- `step()` wakes parked workers even when nothing was published. Sleeping
+  consumers can pin completed epochs, so a refused publication needs their
+  polls before a retry succeeds. Raw publication loops must step on refusal
+  and wake after accepted writes. Parked-mode step loops may pay more wake
+  overhead; spin mode is unchanged.
+- Ordered `close()` refusals throw `FarmHostNotDrained`.
+
+### Public actors
+
+- `runtime.live` counts occupied slots: in-flight construction reservations
+  as well as retired generations awaiting reclaim. `runtime.destroy` fatals
+  while reservations are live.
+- Lifecycle transitions and occupancy accounting are fused; see the
+  [lifecycle measurements](PERFORMANCE.md#public-actor-lifecycle-optimization-190-progress).
+
+### C and C++ ABI 1 (new)
+
+[C ABI 1](docs/design/c-abi.md) targets 64-bit Windows and Linux. All exports
+and callbacks use C linkage.
+
+- **Core** (`antfarm.h`, `antfarm_core`): a BetterC static library with
+  opaque Farm, producer and view handles, all three write forms with hooks and
+  cost classes, options/version checks, thread-local status diagnostics, and a
+  fatal observer shared with D callers. It links from a native C `main`
+  without druntime.
+- **Public actors and waves** (`antfarm_actors.h`, in the core):
+  runtime-owned kinds, direct copy/init construction, optional destructors,
+  native or custom allocation, 16-byte value owners, caller-owned inbox
+  messages, replies, strided batch/wave operations, retirement and
+  reclamation. Retirement pins and exclusive reclaim claims make copied owners
+  safe without changing D's move-only ownership. Waves add erased state,
+  prefix publication, generation-tagged observations, phase completion and a
+  ready query that joins the completion callback before reuse or
+  destruction. GC rooting stays a D-only adapter; private actor exports come
+  later.
+- **Optional runtime** (`antfarm_runtime.h`, `antfarm_runtime`): a separate
+  druntime-inclusive static library with the non-Fiber `FarmHost`, explicit
+  runtime initialization and thread attachment, wake/step and shutdown. It
+  links the same core, drives and owns C actors and waves, and joins
+  consumers before destroying them. Unattached native threads may call wake
+  and state queries; state queries return a status plus an output state, and
+  `FarmHostNotDrained` maps to `AF_BUSY`. Fibers are outside ABI 1.
+- **C++** (`antfarm.hpp`): move-only C++11 ownership wrappers that default to
+  empty, with nonthrowing status factories and checked ownership allocation
+  in builds with and without exceptions. Consumer creation returns transient
+  retry to the caller; `farm::make`/`producer::make` throw only when
+  exceptions are enabled.
+- Examples: [c_core.c](examples/c_core.c), [c_actors.c](examples/c_actors.c),
+  [c_wave.c](examples/c_wave.c) and [c_host.c](examples/c_host.c).
+
+### Validation and tooling
+
+- The quick gate compiles the core, parallel layer and actors as BetterC,
+  then links and runs C callbacks and hooks from a native C `main` without
+  druntime, with LDC and DMD on Windows and Linux. Full gates also check the
+  optional host.
+- C ABI checks run under `NDEBUG`, audit every archive export and dependency,
   link every core member with a native C toolchain, and cover allocation
-  rollback, native registration churn and unattached host producers.
-- Native C/C++ checks cover both compilers, release failures, partial admission,
-  concurrent joins, completion before write return, GC roots and parked hosts.
-  Actor tests include native-thread creation/consumption and deterministic
-  message release before reply wake. The core ABI runs in the quick gate; full gates also check the optional host.
+  rollback, native registration churn and unattached host producers. Native
+  C/C++ checks cover both compilers, release failures, partial admission,
+  concurrent joins, completion before write return, GC roots and parked
+  hosts. Actor tests include native-thread creation/consumption and
+  deterministic message release before reply wake.
+- `make -C tests/farm check-parallel` covers ranges, joins and the callback
+  guard; [M1](tools/perf/README.md#parallel-loop-m1) is the parallel-loop
+  benchmark grid.
 
-## 1.8.3 — progress branch
+### Migration from 1.8.2
 
-- Added `antfarm.parallel`: range adapters, asynchronous
-  submission handles and completion hooks, blocking help-drain calls, and
-  a scoped foreach adapter. Assertion builds reject blocking loops in Farm
-  callbacks and table hooks. See [parallel loops](docs/guide/parallel-loops.md)
-  for partial submission, lifetimes and joins, and the M1 benchmark for tuning.
-
-- `FarmHost.step()` now batches up to 16 emission rounds before waking workers.
-  This amortizes pool-wide wakes for cheap actor tables while retaining the
-  wake needed for reclamation on backpressure. Each round visits every emitter;
-  an empty round ends the burst early. `FarmHostOptions.maxEmitRounds = 1`
-  restores single-round stepping. Attachments may now be called several times
-  per step and must return promptly, reporting actual publications. See
-  [host tuning](docs/guide/hosting.md#cheap-work-with-parked-workers) for batch,
-  idle-policy and deadline guidance.
-- `FarmHost.step()` now wakes parked workers even when its emitters publish
-  nothing. This releases completed epochs retained by sleeping consumers and
-  prevents publication-backpressure loops from stalling with indefinite waits.
-  Raw publication loops must step on refusal and wake after accepted writes.
-  Parked-worker step loops may incur more wake overhead; spin mode is unchanged.
+| 1.8.2 | 1.9.0 |
+| --- | --- |
+| `long function(PayloadHeader* head, PayloadBody body, ulong iteration)` | `extern(C) void function(const(ulong)* body, size_t bodyWords)`; the return value and iteration are gone |
+| `PayloadHeader`, `initPayloadHeader`, `PayloadEntry(header, body)` | `PayloadEntry(call, body)`; `callbackFor!fn()` returns the generated callback |
+| `payloadEntry!(fn, maxCs, done, withIteration)(&header, buf, args...)` | `payloadEntry!fn(buf, args...)` |
+| `payloadEntryRuntime`, `withIteration`, `MAX_PAYLOAD_ITERS`, `maxCs`, `done`, `pcount` | removed: publish independent payloads or `payloadRange!fn(source, grain)` |
+| `write(header, bodies, ...)`, `broadcastPayloads(header, bodies)` | `write(callback, bodies, ...)`, `broadcastPayloads(callback, bodies)` |
+| `writeTracked(header, bodies, bodyWords, hook, token, avgCost)` | `write(callback, bodies, bodyWords, token, avgCost, hook)`; every overload takes the trailing hook |
+| D-linkage `TableCompletionCallback` | `extern(C)`; same `void function(void* context)` shape |
+| `HostAttachment.emit` called once per `step()` | up to `maxEmitRounds` times per step; set `maxEmitRounds = 1` for the old cadence |
+| 1.8.3-progress `parallelSlices`, `ParallelForm`, `Options.form`/`slices` | ST grains through `Options.grain`, `parallelRange` or `payloadRange` |
 
 ## 1.8.2
 
@@ -168,156 +230,3 @@ the migration table below.
 | `fibers/PERFORMANCE.md` | the Fibers section of `PERFORMANCE.md` |
 | `make docs` entry `.build/docs/antfarm.html` | `.build/docs/antfarm/package.html` |
 | CHANGELOG sections 1.8.0 and earlier | `docs/releases/1.8.md`, `docs/releases/1.7-and-earlier.md` |
-
-## 1.8.1
-
-1.8.1 intentionally breaks the threadpool CPU-query API, with no deprecation
-aliases; see the migration table below.
-
-### Fixes and additions
-
-- `AntFarm.canFit(header, bodyWords, tier)` (new) reports whether one
-  singleton payload fits a producer tier's quota at the live consumer count.
-  It never fatals and reserves nothing; a later `write` still validates.
-- `canFit` and `write` share one table base-size helper; `write` codegen is
-  unchanged.
-- An idle consumer held behind a stalled older epoch no longer re-walks every
-  table of that epoch on each poll. The oldest-trailing sweep resumes at a
-  per-consumer cursor (review torture T27: 764 tables per poll, now 764 then
-  1).
-- [PERFORMANCE.md](PERFORMANCE.md) records `checkFreshWriteSegments` as a
-  deliberately kept tripwire cost.
-- `accepted(ActorWakeResult)`, `accepted(ActorSendResult)` and
-  `accepted(ActorRetireResult)` (new, UFCS) name the results that admitted a
-  request.
-- `ActorWaveHandle.interrupted` (new) reports a wake, send or retirement
-  admitted across the wave owner's publication gap. Such a benign race no
-  longer sets `failed` (see Compatibility notes).
-- Assertion builds print `antfarm warning: ActorOwner dropped without
-  reclaim` to stderr when a live `ActorOwner` leaves scope; release builds
-  have no destructor. `ActorOwner.leak()` (new) is the deliberate opt-out.
-- Actor slot creation and `FiberDomain.release` enforce load-bearing
-  invariants with fatal diagnostics in debug and release builds. Redundant
-  actor retirement and test-hook diagnostics stay assertion-build-only.
-- Private child allocation rollback and callback completion share their
-  cleanup paths; behaviour is unchanged.
-- The four `PrivateContext.createChildren` overloads share one
-  implementation; signatures, attributes and generated code are unchanged.
-- `make -C actor_torture death` is a public child-process harness: rows
-  expect an abort with its exact message, a warning, or silence, and cover
-  the public actor and wave fatal sites. `make check` runs it.
-- `FiberSemaphore.wait` returns a permit acquired during registration, and an
-  auto-reset `FiberEvent.wait` restores a consumed set, when cancellation wins
-  before the waiter resumes. Previously another waiter could be stranded.
-- TSan builds keep a sanitizer context per fiber task, so a suspended fiber
-  can migrate between threads without underflowing TSan's shadow stack.
-- Managed worker pumps drain queued remote cancellation requests, serialized
-  with admission and recycling; release and shutdown stay Director-only. The
-  pump counts applied requests without allocating, and
-  `drainCancellationRequests()` still returns per-request results.
-- Offline Linux CPUs stay discoverable with `noLlcIndex` and no longer form
-  their own fallback LLC domains.
-- Threadpool shares topology scans, selection loops and teardown paths.
-- Pool start on Windows throws `threadpool: WaitOnAddress unavailable (need
-  Windows 10 1803+)` instead of parking workers through a null pointer.
-- [threadpool/README.md](threadpool/README.md) notes that CFS bandwidth
-  quotas are not detected; size quota-limited pools explicitly.
-- `scripts/check.sh` no longer needs `/bin/sh`, derives its CPU-pinned lanes
-  from the process affinity (`CHECK_SMALL_CPUS` / `CHECK_ONE_LLC_CPUS`
-  override; empty counts as unset; `--print-cpus` shows the choice), and
-  `make check-quick` runs an LDC-only subset.
-- Test harness only: the `delayed-final-credit` and `ports-poll-visibility`
-  workers in private_actor_tests unsubscribe before waiting. Their inactive
-  consumer view retained a ring pin, a circular wait that could hang the
-  test. The suite's progress deadlines are uniform 60 s hang timeouts.
-- Test harness only: the `dtor-gc` collector pauses 1 ms between collections
-  so actor callbacks can acquire druntime's GC root-range lock under load.
-
-### Compatibility notes
-
-- Threadpool no longer has the Windows event-wait fallback. `WaitOnAddress`
-  is required, with Windows 10 1803+ as the supported floor.
-- `ActorWaveHandle.failed` now means a structural admission rejection only.
-  A wake, send or retirement admitted across the wave owner's publication gap
-  used to set `failed`; it now sets `interrupted` and does not fail the
-  operation.
-
-### Windows integration
-
-- A native Python integration runner covers packages, threadpool affinity/wait
-  and FarmHost tests, Farm ordering, review/T19, actor suites and examples with
-  LDC and DMD. It provides quick/focused selection and process-tree timeouts;
-  Windows coverage stays separate from the Linux correctness gate.
-- The caller confinement/restoration regression now runs on Windows, checking
-  thread group affinity and the unchanged process mask.
-- Windows wait tests force a missing `WaitOnAddress` and check the startup
-  rejection in debug and release builds before running the normal wait races.
-- The example runner uses explicit Windows executable paths, supports compiler
-  selection and omits TSan and the POSIX terminal front end on Windows.
-
-### Breaking changes: two threadpool CPU-query surfaces
-
-Threadpool had four overlapping ways to ask which CPUs a program may use:
-`TopologySnapshot`, `OsScope`, `PoolResolution` and `FarmHostPlan`. Two
-remain. `TopologySnapshot` is the machine plus the frozen OS scope, and
-`PoolResolution` is the per-option disposition of every CPU, request and
-group. The retired symbols are removed outright, with no deprecation
-aliases.
-
-- The OS scope is part of the snapshot: `TopologySnapshot.osScopeSource`,
-  `osScopeAllowed` (sorted, empty when unrestricted, may name CPUs the
-  snapshot does not know) and `inOsScope(id)`. `discover()` fills them from
-  the same frozen capture that sets `affinityExcluded`. `isEligible` also
-  consults the scope list, which makes no difference for discovered
-  snapshots.
-- `resolvePool(snap, options)` drops the `OsScope` argument. A CPU is
-  `osExcluded` when flagged or outside `snap`'s scope, so a hand-built
-  snapshot remains the whole test seam.
-- `Reject.notSelected` (new): the CPU passed every filter, but a placement
-  policy above the pool (FarmHost group choice, worker count, caller
-  reservation) left it out. It is never combined with another reason, and
-  `resolvePool` never sets it. `Reject.all` is now `0x3F`; use it rather than
-  a literal mask. `GroupDisposition.candidates` (new) counts filter-passing
-  CPUs (accepted plus `notSelected`), and the report's group table prints it.
-- `FarmHost.resolve(options)` / `FarmHost.resolve(snap, options)` replace
-  `preview`. They return one `PoolResolution`: the workers are accepted,
-  every other filter-passing CPU is `notSelected`, and the requests stay the
-  user's `options.pool.processors`. The result is never null, including with
-  `workers == 0`. The same problems throw, and a throwing call still warms
-  discovery.
-- A live `FarmHost` has `resolution` (the started selection, which is
-  `host.pool.resolution`: the pool now starts from the host's selection),
-  `callerCpus`, `summary()` and `toString()`. Caller CPUs and Farm sizing are
-  only visible on a live host.
-- `FarmHostPlanException` is renamed `FarmHostResolveException`. Its message
-  prefix is now `FarmHost options rejected: `.
-
-| Old | New |
-| --- | --- |
-| `struct OsScope`, `osScope()` | `discover()` (or `CacheAwarePool.topology()`), then `.osScopeSource` / `.osScopeAllowed` |
-| `OsScope.source` / `OsScope.allowed` | `snap.osScopeSource` / `snap.osScopeAllowed` |
-| `threadpool.os_scope.OsScopeSource` | `threadpool.topology.OsScopeSource` (also `import threadpool;`) |
-| `inOsScope(id)` | `snap.inOsScope(id)` |
-| `threadpool.os_scope.scopeOsToCallingThread` | `threadpool.topology.scopeOsToCallingThread` (also `import threadpool;`) |
-| `threadpool.os_scope.liveOsMask` | `threadpool.pin.liveOsMask` (also `import threadpool;`) |
-| `resolvePool(snap, scope_, options)` | `resolvePool(snap, options)`; fakes set `snap.osScopeSource` / `snap.osScopeAllowed` (`OsScope unrestricted;` just goes away) |
-| `PoolResolution.osScope` | `res.topology.osScopeSource` / `res.topology.osScopeAllowed` |
-| `FarmHost.preview(options)` | `FarmHost.resolve(options)` → `PoolResolution` |
-| `FarmHost.preview(snap, scope_, options)` | `FarmHost.resolve(snap, options)`, with the scope on the snapshot |
-| `host.plan` | `host.resolution`, `host.callerCpus`, `host.summary()`, `host.toString` |
-| `FarmHostPlan.options` | the options you passed |
-| `.candidates` | `resolution`: `candidates.isAccepted(id)` ⇔ `(resolution[id].reasons & ~Reject.notSelected) == Reject.none`; per group `groups[g].candidates` |
-| `.workerSelection`, `.workerSelection.workers` | `resolution`, `resolution.workers` (same workers, same start order; non-workers carry their real reason or `notSelected` instead of `notRequested`) |
-| `.workers` | `resolution.workers.length` |
-| `.groups` | `resolution.acceptedGroups` |
-| `.farmGroup` | `HostGroups.span(llcs)`: `llcs[0]`; otherwise the single group in `resolution.acceptedGroups` |
-| `.crossGroup` | `resolution.acceptedGroupCount > 1` |
-| `.caller` | `options.workers == 0 ? CallerPlacement.unchanged : options.caller` |
-| `.callerCpus` | `host.callerCpus` (live host only) |
-| `.callerSharesWorkerCpu` | `host.callerCpus` intersects `resolution.workers` |
-| `.callerConsumes` | `options.callerConsumes \|\| options.workers == 0` |
-| `.participants` (`HostParticipants`, removed) | printed by `host.summary()`: native = workers in the home group, foreign = the rest, external = `callerConsumes + farm.extraConsumers`, small = `1 + farm.extraSmallProducers`, bulk = `farm.bulkProducers` |
-| `.expectedConsumers` / `.maxSmall` / `.maxBulk` | `workers + external` / `1 + extraSmallProducers` / `bulkProducers` |
-| `.notes` | `host.toString`; as data, `GroupDisposition` (`common`, `candidates` vs `accepted`) and `host.callerCpus` |
-| `.summary()` / `.toString` | `host.summary()` / `host.toString` (`FarmHost.resolve(o).summary()` before construction, worker part only) |
-| `FarmHostPlanException` | `FarmHostResolveException` |

@@ -1,62 +1,33 @@
 # Ant Farm roadmap
 
-The current release is **1.8.2**. This page lists remaining
-and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
-no history here. Windows validation is separate and is not
-part of its local gate.
+The current release is **1.8.2**; **1.9.0** is in progress on
+`1.9.0-progress`. This page lists remaining and next work only. Delivered
+work is in [CHANGELOG.md](CHANGELOG.md); there is no history here. Windows
+validation is separate and is not part of the local gate.
 
-## 1.8.2
+## 1.9.0
 
-The release content is in [CHANGELOG.md](CHANGELOG.md): the repository
-reorganization, verified usage guidance, a payload-first onboarding path and
-documentation deduplication. It passed the Linux pre-push gates and the native
-Windows integration matrix. The numbers in [PERFORMANCE.md](PERFORMANCE.md)
-remain tied to the revisions at which they were measured.
+The release content and the migration from 1.8.2 are in
+[CHANGELOG.md](CHANGELOG.md#190--unreleased): single-shot payloads, body-only
+C-linkage callbacks, `write` hooks, `antfarm.parallel`, FarmHost emission
+bursts and C ABI 1. Before release:
 
-Small perf-gate shifts on this host are dominated by code layout; performance
-is reassessed holistically in dedicated sessions.
-
-## 1.9.0 progress
-
-- Revisit table spacing and actor-churn performance in a dedicated optimization
-  session. The 1.9 review retains the compact five-word layout. Compare
-  `private`, `private-remote` and `dtor` at zero and six consumers against 1.8.2,
-  alongside the grain grid, throughput and tail probes. Local same-binary
-  controls implicated fixed-table spacing; disabling the callback guard gave
-  no consistent benefit. A diagnostic with three padding words on index-free
-  tables of at least four payloads recovered serial private-root throughput,
-  but needs a complete performance/correctness evaluation before adoption.
-  The October 19 quieter-host retest still measured a -14.1% paired-median
-  change for `private` at zero consumers against 1.8.2 (`2182eb8`), using
-  LDC 1.42 `-O2 -release` on an i7-12700H under WSL2. The other two serial
-  private cases were inconclusive. Six-consumer samples also encountered
-  persistent CPU-accounting exclusions whose cause remains unresolved. Keep
-  these limits with the measurements; the 392-case grain grid verified output
-  throughout, but does not establish a general performance win.
+- Run the Linux pre-push gates and the native Windows integration matrix on
+  the candidate.
+- Settle the open performance limits recorded in
+  [PERFORMANCE.md](PERFORMANCE.md#open-190-performance-limits): table spacing
+  and serial private-root throughput against 1.8.2, and the C wave bridge's
+  inconclusive six-consumer gate. Small perf-gate shifts on this host are
+  dominated by code layout; performance is reassessed holistically in a
+  dedicated session.
 - Gather production usage of the [C ABI](docs/design/c-abi.md) core, public
-  actors, waves and optional non-Fiber host. Shared-library packaging and language
-  ownership adapters can follow the static C/C++ distributions.
-- The unreleased public actor C API now has runtime-owned kinds, direct state
-  initialization, value owners with retirement/reclaim arbitration, strided
-  batches and caller-owned inbox nodes. The
-  [implemented contract](docs/design/c-abi.md#actor-construction-and-ownership)
-  defines lifetimes and partial results. Private root/child exports remain next;
-  preserve their cohort/slab advantage. The D GC-rooted adapter and Fibers stay
-  outside the runtime-free ABI.
-- The C wave bridge's existing typed-D `wave` path was compared at
-  `d94acc1` against `be025b1` with LDC 1.42 `-O2 -release`, mimalloc 3.5.3,
-  16,384 actors and distinct-core pins under Linux/WSL. Caller-only execution
-  passed the -3% boundary with 20 clean pairs: paired-median change **-0.63%**,
-  descriptive interval **[-2.70%, +0.80%]**. A byte-identical candidate/candidate
-  control also passed with 20 clean pairs. Six-consumer execution remained
-  **inconclusive**: 12 clean pairs from 40 attempts, short of the required 20,
-  after background-CPU exclusions. The combined performance gate therefore
-  did not pass. Preserve this limit for the holistic optimization session;
-  this comparison does not measure the new C dispatch bridge's throughput.
-  Local raw evidence is archived in `.build/cabi-waves-performance-evidence.zip`.
+  actors, waves and optional non-Fiber host. Shared-library packaging and
+  language ownership adapters can follow the static C/C++ distributions.
 
 ## Next
 
+- Private root/child C exports, preserving their cohort/slab advantage. The
+  D GC-rooted adapter and Fibers stay outside the runtime-free ABI.
 - Continue public-actor tuning from the fused retirement and occupancy path.
   The [lifecycle optimization record](PERFORMANCE.md#public-actor-lifecycle-optimization-190-progress)
   compares both the value-owner baseline and the pre-refresh implementation,
@@ -64,7 +35,6 @@ is reassessed holistically in dedicated sessions.
   idle release/dispose operation and D batch creation as separate API changes,
   with explicit busy/partial-result contracts and matched measurements. Preserve
   copied-owner reclamation arbitration and account for unresolved gate limits.
-
 - Revise PERFORMANCE.md in a dedicated performance session, including
   tail-latency rows at chunk 2 and 4.
 
