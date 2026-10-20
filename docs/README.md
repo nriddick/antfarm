@@ -81,6 +81,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [development/agent-workflow.md](development/agent-workflow.md) | follow the CyDo agent process for iteration, hardening, TSan budgets and mutation selection |
 | [../tools/perf/README.md](../tools/perf/README.md) | run a benchmark and the committed-ref optimization gate |
 | [../PERFORMANCE.md](../PERFORMANCE.md) | find the measured numbers, method, and tuning guide |
+| [performance/archive-2026-10-20.md](performance/archive-2026-10-20.md) | inspect the superseded Ryzen 5500 / Intel 12700H tables and 1.9 optimization reports |
 
 ## Canonical ownership
 

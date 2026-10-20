@@ -1,10 +1,10 @@
 # Performance harness
 
 Synthetic payload, actor, private-actor, and Fiber benchmarks, plus the
-optimization gate. This directory intentionally carries no measurements: the
-historical reports and the per-run result trees were archived outside the
-repository, and the committed measurements live in
-[PERFORMANCE.md](../../PERFORMANCE.md). Everything below is a qualitative index of
+optimization gate. This directory intentionally carries no measurements: current
+numbers live in [PERFORMANCE.md](../../PERFORMANCE.md), and the superseded page
+is preserved in the [performance archive](../../docs/performance/archive-2026-10-20.md).
+Full per-run output stays in local evidence directories. Everything below is a qualitative index of
 the harness, not evidence.
 
 ## Build
@@ -37,6 +37,20 @@ the report's `total_fibers_s` and `warm_total_fibers_s` use the complete burst.
 The harness prints explicit `total` and `total (warm pool)` timings, including
 when a residual `run` phase is not measurable. The parser prefers these totals
 and accepts older logs only when both numeric phase timings are available.
+The single-thread harness's rate-only `total` lines are supported by deriving
+auxiliary burst totals from its counted create/run phases; its primary metric
+remains drain throughput. Malformed explicit multithread totals remain errors.
+Tail summaries record complete-process counts per scene, so a mailbox timeout
+cannot masquerade as a complete scene merely because the primary Farm metric
+parsed successfully.
+
+For a baseline with five samples generally and at least thirty for
+six-consumer actor, throughput and tail cases, pass
+`--runs 5 --six-consumer-runs 30`. The latter is a per-cell minimum, including
+when resuming: five cached samples cannot satisfy a thirty-sample request.
+The report driver records every attempt and rejects nonzero exits or missing
+metrics; it does not reject samples based on background CPU activity. Six
+dual-role threads are not six dedicated consumers and retain `--runs`.
 
 To extend the report to larger thread counts without rerunning the default
 matrix:

@@ -153,7 +153,7 @@ for one claim can pass a larger run, for example
 too expensive for one claim keeps the default and relies on the small-table
 threshold to shard tables across consumers. The measured default and override
 are recorded in
-[Defaults on uniform tables](../../PERFORMANCE.md#defaults-on-uniform-tables),
+[Defaults on uniform tables](../performance/archive-2026-10-20.md#defaults-on-uniform-tables),
 which also records the public flush and wave claim, the root batch limit and the
 quota and threshold defaults with their overrides.
 

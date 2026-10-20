@@ -230,7 +230,33 @@ class TailTests(unittest.TestCase):
             rpm.parse_tail("scene nc tlen spin n p50 p99 p99.9 max miss zero\n")
 
 
+class TailAggregationTests(unittest.TestCase):
+    def test_timeout_scene_does_not_count_as_valid_quantiles(self):
+        good = rpm.parse_tail(TAIL_OUT)
+        bad = rpm.parse_tail(TAIL_OUT)
+        bad["rows"][0].update(p50_ns=None, p99_ns=None, p999_ns=None, max_ns=None)
+        rows = rpm.aggregate_tail([good, bad])
+        scene = next(r for r in rows if r["scene"] == "mid-drain" and r["spin"] == "0ns")
+        self.assertEqual(scene["runs"], 2)
+        self.assertEqual(scene["valid_runs"], 1)
+        self.assertEqual(scene["p99_ns"]["median"], 2700.0)
+
+
 class FiberTests(unittest.TestCase):
+    def test_single_thread_rate_only_totals_use_counted_phases(self):
+        out = FIBER_ST_OUT + (
+            "\ncreate (warm pool): 200000 fibers in 0.010000 s: 20000000.00 fibers/s\n"
+            "total : 1.00 fibers/s\ntotal  (warm pool): 2.00 fibers/s\n")
+        parsed = rpm.parse_fiber(out)
+        self.assertEqual(parsed["metric_kind"], "drain")
+        self.assertEqual(parsed["run_fibers_s"], 4000000.0)
+        self.assertAlmostEqual(parsed["total_fibers_s"], 200000 / 0.095)
+        self.assertAlmostEqual(parsed["warm_total_fibers_s"], 200000 / 0.048)
+
+    def test_multithread_rate_only_total_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "timing/count"):
+            rpm.parse_fiber(FIBER_MT_OUT + "\ntotal: 1000.00 fibers/s\n")
+
     def test_mt_explicit_totals_accept_unmeasurable_drain(self):
         for cold, warm in ((True, False), (False, True), (True, True)):
             with self.subTest(cold=cold, warm=warm):
@@ -421,6 +447,31 @@ class DriverTests(unittest.TestCase):
         self.assertFalse(rpm.cell_is_cached(changed_env, cell, 1))
         self.assertFalse(rpm.cell_is_cached({**cached, "status": "failed"}, cell, 1))
         self.assertFalse(rpm.cell_is_cached({**cached, "values": []}, cell, 1))
+
+    def test_six_consumer_minimum_and_cache(self):
+        args = rpm.build_parser().parse_args(["--runs", "5", "--six-consumer-runs", "30"])
+        for section in ("public", "private", "farm_consumers", "tail"):
+            cells = rpm.cases_for(section, args)
+            six = next(c for c in cells if rpm.requested_runs(args, c) == 30)
+            cached = {**six, "status": "ok", "values": [1.0] * 5}
+            self.assertFalse(rpm.cell_is_cached(cached, six, rpm.requested_runs(args, six)))
+        self.assertEqual(rpm.requested_runs(args, rpm.churn("public", "serial", "actor", 0)), 5)
+        self.assertEqual(rpm.requested_runs(args, rpm.dcase("dual", "six_threads", nd=6)), 5)
+        args.runs = 40
+        self.assertEqual(rpm.requested_runs(args, six), 40)
+
+    def test_six_consumer_measurement_requires_all_samples(self):
+        args = self.args()
+        args.six_consumer_runs = 3
+        cell = rpm.churn("public", "actor6", "actor", 6)
+        runner = mock.Mock(side_effect=[(CHURN_CYCLES_OUT, "", 0),
+                                       (CHURN_CYCLES_OUT, "", 1),
+                                       (CHURN_CYCLES_OUT, "", 0)])
+        row = rpm.measure_cell(args, cell, self.raw, "public", runner=runner)
+        self.assertEqual(runner.call_count, 3)
+        self.assertEqual(row["requested_runs"], 3)
+        self.assertEqual(row["valid_runs"], 2)
+        self.assertEqual(row["status"], "failed")
 
     def test_mt_cache_requires_full_burst_metric(self):
         cell = {**self.cell(), "section": "fibers", "name": "benchmark_mt"}

@@ -59,7 +59,7 @@ is reassessed holistically in dedicated sessions.
 ## Next
 
 - Continue public-actor tuning from the fused retirement and occupancy path.
-  The [lifecycle optimization record](PERFORMANCE.md#public-actor-lifecycle-optimization-190-progress)
+  The [lifecycle optimization record](docs/performance/archive-2026-10-20.md#public-actor-lifecycle-optimization-190-progress)
   compares both the value-owner baseline and the pre-refresh implementation,
   including C/D contention and native Windows evidence. Evaluate a combined
   idle release/dispose operation and D batch creation as separate API changes,
@@ -68,12 +68,13 @@ is reassessed holistically in dedicated sessions.
   Batch reservation now limits each gate hold to 64 slots. Evaluate a contiguous
   free-index stack only with matched large-batch contention measurements; it
   would change slot metadata and runtime allocation, beyond this bounded-walk fix.
-  The [Part 5 follow-up](PERFORMANCE.md#public-actor-part-5-follow-up-190-progress)
+  The [Part 5 follow-up](docs/performance/archive-2026-10-20.md#public-actor-part-5-follow-up-190-progress)
   records release-store retirement, the bounded reservation walk and the
   remaining serial-private/historical-inbox measurement uncertainty.
 
-- Revise PERFORMANCE.md in a dedicated performance session, including
-  tail-latency rows at chunk 2 and 4.
+- Refresh the 5900XT measurements after the current 12700H baseline in
+  [PERFORMANCE.md](PERFORMANCE.md). Tail-latency rows at chunk 2 and 4 remain
+  a separate tuning follow-up.
 
 ## Deferred after 1.8.0
 

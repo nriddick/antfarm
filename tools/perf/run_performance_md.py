@@ -11,8 +11,9 @@ scratch path.
 
 A run counts only when its process exits 0 and its metric parses; a cell with
 fewer than --runs valid samples is marked failed and the script exits nonzero.
-The host must be quiet while this runs. Each cell is measured --runs times
-(default 5) and reported as median [min, max]. Every benchmark is run with
+The host should be quiet while this runs; background load is recorded, not
+filtered. Each cell is measured --runs times (default 5), optionally raised by
+--six-consumer-runs, and reported as median [min, max]. Every benchmark is run with
 ANTFARM_HUGE_PAGES=0 unless a case sets it. Pass --fake-topology when
 /sys/devices/system/cpu is absent; the tail and benchmark_mt cells need it.
 """
@@ -184,7 +185,13 @@ def parse_fiber(out: str) -> dict:
     for label, suffix in (("total_fibers_s", ""), ("warm_total_fibers_s", r"\s+\(warm pool\)")):
         total_prefix = r"^total" + suffix + r"\s*:"
         total = re.search(total_prefix + r"\s+(\d+) fibers in ([\d.]+) s:", out, re.M)
-        if re.search(total_prefix, out, re.M):
+        # The single-thread harness still prints a rate-only total. Derive its
+        # full burst from the counted create/run phases below. Do not accept
+        # that shorthand in the multithread harness, where explicit totals
+        # are authoritative and a malformed total must remain an error.
+        rate_only_st = not re.search(r"^workers:", out, re.M) and re.search(
+            total_prefix + r"\s+\d+(?:\.\d+)? fibers/s\s*$", out, re.M)
+        if re.search(total_prefix, out, re.M) and not rate_only_st:
             if not total:
                 raise ValueError("invalid fiber burst timing/count")
             count, seconds = int(total[1]), float(total[2])
@@ -572,6 +579,8 @@ def aggregate_tail(parsed):
             vals = [r[field] for r in rows if r.get(field) is not None]
             return _stats(vals)
         out.append({"scene": scene, "tlen": tlen, "spin": spin, "runs": len(rows),
+                    "valid_runs": sum(all(r.get(k) is not None for k in
+                        ("p50_ns", "p99_ns", "p999_ns", "max_ns")) for r in rows),
                     "p50_ns": stats("p50_ns"), "p99_ns": stats("p99_ns"),
                     "p999_ns": stats("p999_ns"), "max_ns": stats("max_ns"),
                     "miss_median": statistics.median([r["miss"] for r in rows])})
@@ -749,7 +758,8 @@ def measure_cell(args, cell, raw_dir, section, runner=None):
     parse = parser_for(cell["cmd"])
     runs = []
     valid = []
-    for i in range(args.runs):
+    requested = requested_runs(args, cell)
+    for i in range(requested):
         env = {**os.environ, "ANTFARM_HUGE_PAGES": "0", **cell["env"]}
         load_before = _loadavg()
         started = time.monotonic()
@@ -774,7 +784,7 @@ def measure_cell(args, cell, raw_dir, section, runner=None):
               f"metric={parsed.get('metric') if parsed else None}", flush=True)
     row = {"section": section, "name": cell["name"], "cmd": cell["cmd"],
            "cwd": cell["cwd"], "env": cell["env"], "note": cell["note"],
-           "runs": runs, "valid_runs": len(valid)}
+           "runs": runs, "valid_runs": len(valid), "requested_runs": requested}
     if valid:
         values = [p["metric"] for p in valid]
         row.update(median=statistics.median(values), minimum=min(values),
@@ -784,8 +794,24 @@ def measure_cell(args, cell, raw_dir, section, runner=None):
             row["field_stats"] = stats
         if any("rows" in p for p in valid):
             row["tail_rows"] = aggregate_tail(valid)
-    row["status"] = "ok" if len(valid) >= args.runs else "failed"
+    row["status"] = "ok" if len(valid) >= requested else "failed"
     return row
+
+
+def requested_runs(args, cell):
+    """Apply the six-consumer minimum to actor, throughput and tail cases."""
+    minimum = getattr(args, "six_consumer_runs", None)
+    if minimum is None:
+        return args.runs
+    cmd = cell["cmd"]
+    name = Path(cmd[0]).stem
+    consumers = None
+    if name in ("actor_churn", "actor_churn_mimalloc"):
+        consumers = int(cmd[4])
+    elif name in ("throughput", "tail"):
+        consumers = int(cmd[cmd.index("--nc") + 1]) if "--nc" in cmd else (
+            6 if name == "tail" else None)
+    return max(args.runs, minimum) if consumers == 6 else args.runs
 
 
 def host_metadata():
@@ -835,6 +861,8 @@ def build_parser():
     ap.add_argument("--out", type=Path, default=Path("/tmp/antfarm-perf-report"))
     ap.add_argument("--sections", default=",".join(ALL_SECTIONS))
     ap.add_argument("--runs", type=int, default=5)
+    ap.add_argument("--six-consumer-runs", type=int,
+                    help="minimum samples for six-consumer actor, throughput and tail cases")
     ap.add_argument("--best-n", type=int, default=2_000_000_000)
     ap.add_argument("--dual-threads", type=thread_counts, default=[1, 2, 4, 6, 8, 11],
                     help="comma-separated total dual-role thread counts")
@@ -856,6 +884,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.runs < 1:
         ap.error("--runs must be at least 1")
+    if args.six_consumer_runs is not None and args.six_consumer_runs < 1:
+        ap.error("--six-consumer-runs must be at least 1")
     if 0 in args.dual_threads:
         ap.error("--dual-threads counts must be positive")
     sections = list(dict.fromkeys(s for s in args.sections.split(",") if s))
@@ -907,11 +937,12 @@ def main(argv=None):
                 continue
             cells = cases_for(section, args)
             (raw / section).mkdir(exist_ok=True)
-            print(f"\n===== {section} ({len(cells)} cells x {args.runs} runs) =====",
+            counts = "/".join(str(n) for n in sorted({requested_runs(args, c) for c in cells}))
+            print(f"\n===== {section} ({len(cells)} cells; {counts} samples per cell) =====",
                   flush=True)
             for cell in cells:
                 prev = by_key.get((section, cell["name"]))
-                if not args.no_resume and cell_is_cached(prev, cell, args.runs):
+                if not args.no_resume and cell_is_cached(prev, cell, requested_runs(args, cell)):
                     print(f"  {cell['name']}: cached ({len(prev['values'])} runs)", flush=True)
                     continue
                 row = measure_cell(args, cell, raw / section, section)
