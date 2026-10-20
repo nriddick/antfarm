@@ -4491,6 +4491,14 @@ private void pinnedRunningActor(scope ref ActorBorrow!PinnedRunningState actor,
     while (atomicLoad!(MemoryOrder.acq)(*actor.value.release) == 0) {}
 }
 
+private void replacementRetirementHook(ActorTestPoint point, ActorInboxNode*)
+    nothrow @nogc @system
+{
+    if (point != ActorTestPoint.retirementBeforeGateClose) return;
+    atomicStore!(MemoryOrder.rel)(g_raceArrived, 1);
+    while (atomicLoad!(MemoryOrder.acq)(g_raceRelease) == 0) {}
+}
+
 private void testRetirementFinalAccess()
 {
     // The idle terminal CAS releases the pin itself. Reuse the slot while the
@@ -4516,12 +4524,30 @@ private void testRetirementFinalAccess()
         check(copy.retired && copy.reclaim() == ActorReclaimResult.reclaimed,
             "terminal CAS releases idle pin");
         auto replacement = runtime.createActor!(BoundaryState, boundaryActor)(BoundaryState(&result));
+        auto replacementOwner = replacement.intoErased();
+        auto replacementCopy = testDuplicateActorOwner(replacementOwner);
+        atomicStore(g_raceArrived, 0);
+        atomicStore(g_raceRelease, 0);
+        setActorTestHook(&replacementRetirementHook);
+        auto nextRequest = new Thread({
+            check(replacementOwner.requestRetire() == ActorRetireResult.requested,
+                "replacement retirement completes");
+        });
+        nextRequest.start();
+        waitFlag(g_raceArrived, MonoTime.currTime + 15.seconds, "replacement pin acquired");
         atomicStore(g_hookRelease, 1);
         thread.join();
-        setActorTestHook(null);
         check(retired == ActorRetireResult.requested, "old retirement returns after reuse");
         check(owner.reclaim() == ActorReclaimResult.staleOwner, "old owner remains stale");
-        verifyReplacementAdmission(farm, runtime, replacement);
+        check(replacementCopy.requestRetire() == ActorRetireResult.busy,
+            "old retirement cannot clear the replacement generation's pin");
+        atomicStore(g_raceRelease, 1);
+        nextRequest.join();
+        setActorTestHook(null);
+        check(replacementCopy.reclaim() == ActorReclaimResult.reclaimed,
+            "replacement keeps sole reclaim authority");
+        auto finalOwner = runtime.createActor!(BoundaryState, boundaryActor)(BoundaryState(&result));
+        verifyReplacementAdmission(farm, runtime, finalOwner);
         runtime.destroy();
         farm.destroy();
     }
