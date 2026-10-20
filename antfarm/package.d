@@ -1989,105 +1989,95 @@ struct AntFarm
             }
             else
             {
-                // Spec 2f/2g: scan each layout with only the state it needs.
-                // Continue at the first entry that degrades the layout; if
-                // that larger representation does not fit, retain the last
-                // accepted prefix's layout. The caller's range stays intact.
+                // Phased scan. A prefix can only lose uniformity, so each
+                // layout gets a tight loop with its overhead hoisted; the
+                // degrading entry is admitted only if the whole prefix still
+                // fits under the next layout (otherwise keep the accepted one).
                 ulong bodySum;
                 bool stop;
                 auto scan = payloads.save;
                 {
-                    auto first = scan.front;
+                    auto pe = scan.front;
                     static if (hasCommonPayloadCallback!R)
                         tcall = commonCall;
                     else
                     {
-                        tcall = first.call;
+                        tcall = pe.call;
                         validateCallback(tcall);
                     }
-                    tblen = first.body.length;
+                    tblen = cast(ulong) pe.body.length;
+                    checkPayloadFits(base, quota, tblen);
+                    layout = tblen != 0 ? TableLayout.uniformFixed : TableLayout.uniform;
                 }
-
-                // Kind 2: a common callback and a nonzero fixed body length.
-                // There are no indexes or per-entry callback words to size.
-                if (tblen != 0)
+                if (layout == TableLayout.uniformFixed)
+                {
+                    immutable head = base + UNIFORM_FIXED_EXT;
                     while (!scan.empty && n < maxTablePayloads)
                     {
                         auto pe = scan.front;
                         static if (!hasCommonPayloadCallback!R)
-                            validateCallback(pe.call);
-                        immutable blen = cast(ulong) pe.body.length;
-                        checkPayloadFits(base, quota, blen);
-                        static if (!hasCommonPayloadCallback!R)
                             if (pe.call !is tcall) break;
+                        immutable blen = cast(ulong) pe.body.length;
                         if (blen != tblen) break;
-                        immutable nextBody = addChecked(bodySum, blen,
-                            "payload sum overflow");
-                        immutable size = addChecked(base + UNIFORM_FIXED_EXT,
-                            nextBody, "table size overflow");
-                        if (size > tok.quotaLeft)
-                        {
-                            stop = true;
-                            break;
-                        }
+                        immutable nextBody = addChecked(bodySum, blen, "payload sum overflow");
+                        if (addChecked(head, nextBody, "table size overflow") > tok.quotaLeft)
+                        { stop = true; break; }
                         ++n;
-                        bodySum = psum = nextBody;
-                        layout = TableLayout.uniformFixed;
+                        bodySum = nextBody;
                         scan.popFront();
                     }
-
-                // Kind 1: one callback, with an index for every body.
-                if (!stop)
-                    while (!scan.empty && n < maxTablePayloads)
-                    {
-                        auto pe = scan.front;
-                        static if (!hasCommonPayloadCallback!R)
-                            validateCallback(pe.call);
-                        immutable blen = cast(ulong) pe.body.length;
-                        checkPayloadFits(base, quota, blen);
-                        static if (!hasCommonPayloadCallback!R)
-                            if (pe.call !is tcall) break;
-                        immutable nextBody = addChecked(bodySum, blen,
-                            "payload sum overflow");
-                        // n < 2^31, so base + extension + indexes cannot wrap.
-                        immutable size = addChecked(base + UNIFORM_EXT + n + 1,
-                            nextBody, "table size overflow");
-                        if (size > tok.quotaLeft)
-                        {
-                            stop = true;
-                            break;
-                        }
-                        ++n;
-                        bodySum = psum = nextBody;
-                        layout = TableLayout.uniform;
-                        scan.popFront();
-                    }
-
-                // Mixed callbacks: one index and one callback word per body.
-                // Broadcast sources cannot reach this layout.
-                static if (!hasCommonPayloadCallback!R)
+                    psum = bodySum;
+                }
+                bool degraded;
                 if (!stop)
                 {
+                    immutable head = base + UNIFORM_EXT;
                     while (!scan.empty && n < maxTablePayloads)
                     {
                         auto pe = scan.front;
-                        validateCallback(pe.call);
+                        static if (!hasCommonPayloadCallback!R)
+                        {
+                            if (pe.call is null) validateCallback(pe.call);
+                            if (pe.call !is tcall) { degraded = true; break; }
+                        }
                         immutable blen = cast(ulong) pe.body.length;
                         checkPayloadFits(base, quota, blen);
                         immutable nextN = cast(ulong) n + 1;
                         immutable nextBody = addChecked(bodySum, blen, "payload sum overflow");
-                        immutable nextRecords = addChecked(nextBody, nextN,
-                            "payload sum overflow");
-                        immutable size = addChecked(base + nextN, nextRecords,
-                            "table size overflow");
-                        if (size > tok.quotaLeft) break;
+                        if (addChecked(head + nextN, nextBody, "table size overflow") > tok.quotaLeft)
+                        { stop = true; break; }
                         ++n;
                         bodySum = nextBody;
-                        psum = nextRecords;
-                        layout = TableLayout.compact;
+                        psum = nextBody;
+                        layout = TableLayout.uniform;
                         scan.popFront();
                     }
                 }
+                static if (!hasCommonPayloadCallback!R)
+                    if (!stop && degraded)
+                    {
+                        // Include callback words for the accepted uniform prefix.
+                        ulong records = PCOMPACT_LEN * cast(ulong) n + bodySum;
+                        while (!scan.empty && n < maxTablePayloads)
+                        {
+                            auto pe = scan.front;
+                            validateCallback(pe.call);
+                            immutable blen = cast(ulong) pe.body.length;
+                            checkPayloadFits(base, quota, blen);
+                            immutable nextN = cast(ulong) n + 1;
+                            immutable nextRecords = addChecked(records,
+                                addChecked(PCOMPACT_LEN, blen, "payload sum overflow"),
+                                "payload sum overflow");
+                            if (addChecked(base + nextN, nextRecords, "table size overflow") > tok.quotaLeft)
+                                break;
+                            ++n;
+                            records = nextRecords;
+                            psum = nextRecords;
+                            layout = TableLayout.compact;
+                            scan.popFront();
+                        }
+                    }
+                if (n == 0) layout = TableLayout.compact;
             }
             if (n > 0) break;
             if (!refreshQuota(tok.quotaLeft, quota,
