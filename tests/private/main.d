@@ -2856,8 +2856,8 @@ static if (size_t.sizeof == 8)
     // Service.childReturns (E2-3) accounts for one word of both.
     // E2-4 reserves 48 more bytes in ChildBase for the resume descriptor/FIFO.
     // F3 adds 32: Service.records/rootEntries and the outcome FIFO head/tail.
-    version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 208);
-    else static assert(PrivateRootPark!(State, repeat).sizeof == 200);
+    version (assert) static assert(PrivateRootPark!(State, repeat).sizeof == 216);
+    else static assert(PrivateRootPark!(State, repeat).sizeof == 208);
 }
 static assert(PUlongCohort.sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
 static assert(PrivateChildPark!(PItem, ubyte).sizeof == PVoidCohort.sizeof + 2 * size_t.sizeof);
@@ -11861,14 +11861,22 @@ void slabDeath()
             check(dirty.stderrText.canFind("slab dirty-slot: spawning into a dirty slot"));
             check(dirty.stderrText.canFind("antfarm fatal: private child slab: spawn into an uncleared slot"));
             check(!dirty.stderrText.canFind("survived"));
-            writeln("PASS slab death: unauthorized context, active disposal, and debug uncleared-slot spawn");
+            auto dirtyRoot = probeDeath("root-slab-dirty-slot");
+            check(dirtyRoot.status != 0);
+            check(dirtyRoot.stderrText.canFind("root-slab dirty-slot: spawning into a dirty slot"));
+            check(dirtyRoot.stderrText.canFind("antfarm fatal: private root slab: spawn into an uncleared slot"));
+            check(!dirtyRoot.stderrText.canFind("survived"));
+            writeln("PASS slab death: unauthorized context, active disposal, and debug uncleared-slot spawn (child and root)");
         }
         else
         {
             auto dirty = probeDeath("slab-dirty-slot");
             check(dirty.status == 0);
             check(dirty.stderrText.canFind("slab dirty-slot: release survived"));
-            writeln("PASS slab death: unauthorized context and active disposal; uncleared-slot check compiled out of release");
+            auto dirtyRoot = probeDeath("root-slab-dirty-slot");
+            check(dirtyRoot.status == 0);
+            check(dirtyRoot.stderrText.canFind("root-slab dirty-slot: release survived"));
+            writeln("PASS slab death: unauthorized context and active disposal; uncleared-slot checks compiled out of release");
         }
     }
     else
@@ -11914,6 +11922,7 @@ void runSuite()
     phasePorts();
     phaseDtor();
     phaseSlab();
+    rootSlabAll();
     phaseSubset();
     phaseEntryWord();
     pumpCountedTables(); writeln("PASS pumpCounted counts child-only publications");
@@ -11945,11 +11954,275 @@ void runSuite()
     shardedCreators(); writeln("PASS four independent creators sharing the Farm");
 }
 
+// ---- root-slab -----------------------------------------------------------------
+// Opt-in PrivateStateStorage.cohortSlab on PrivateRootPark: one zeroed slab of
+// capacity * T.sizeof at create under PrivateRootOptions.slabByteLimit, slot
+// i for root slot i, no allocation at spawn, the slot zeroed where the
+// reclamation policy would have freed it (emitter at collection, consumer in
+// the final activation), and the slab freed once at destroy.
+// Selectors: root-slab runs the group; root-slab-lifecycle, root-slab-dtor,
+// root-slab-tracked and root-slab-create-fail run alone; root-slab-dirty-slot
+// is the slab-death child.
+// Catching mutations (each applied alone to antfarm/actors/private_actor.d):
+//   slab spawnRoot allocates: "root-slab no allocation at spawn".
+//   reclaim or runRoot frees a slab slot: "slab exact: mismatched triple".
+//   reclaim or runRoot skips the slot memset: "root-slab slot zero after
+//     finish", and the debug uncleared-slot death.
+//   destroy skips the slab free: "root-slab zero live allocations".
+//   create allocates the slab before its cap check: "root-slab-create-fail
+//     over cap" (calls observed).
+struct RsPod { uint* hits; uint id; uint pad; }
+static assert(RsPod.sizeof == 16);
+PrivateRootDisposition rsPodStep(scope ref PrivateBorrow!RsPod b, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    auto s = &b.value();
+    ++s.hits[s.id];
+    return s.hits[s.id] % 2 == 1 ? PrivateRootDisposition.again : PrivateRootDisposition.finish;
+}
+void rootSlabLifecycle(PrivateRootReclamation reclaim)()
+{
+    enum capacity = 8;
+    alias Park = PrivateRootPark!(RsPod, rsPodStep, reclaim, PrivateStateStorage.cohortSlab);
+    SlabExact exact;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    uint[capacity] hits;
+    PrivateRootOptions options;
+    options.batchLimit = 4;
+    options.allocator = slabExactPolicy(exact);
+    options.slabByteLimit = capacity * RsPod.sizeof;
+    auto park = Park.create(farm, capacity, options);
+    check(park !is null);
+    namedCheck(slabExactSizeCount(exact, capacity * RsPod.sizeof) == 1, "root-slab one slab at create");
+    auto slabPtr = privateTestRootSlabPointer(park);
+    namedCheck(slabPtr !is null, "root-slab pointer");
+    immutable callsAfterCreate = exact.calls;
+    foreach (round; 0 .. 3)
+    {
+        foreach (i; 0 .. capacity)
+        {
+            immutable slot = privateTestRootNextSlot(park);
+            namedCheck(slot < capacity && privateTestRootSlabSlotZero(park, slot),
+                "root-slab vacant slot zero before spawn");
+            namedCheck(park.spawn(RsPod(hits.ptr, cast(uint) i)) == PrivateSpawnResult.spawned, "root-slab spawn");
+            namedCheck(!privateTestRootSlabSlotZero(park, slot), "root-slab spawn wrote the slot the free list named");
+        }
+        namedCheck(park.spawn(RsPod(hits.ptr, 0)) == PrivateSpawnResult.capacityFull, "root-slab full");
+        namedCheck(exact.calls == callsAfterCreate, "root-slab no allocation at spawn");
+        slabDrain(park, token, view, "root-slab drain");
+        foreach (i; 0 .. capacity)
+            namedCheck(hits[i] == 2 * (round + 1), "root-slab two activations per root lifetime");
+        foreach (i; 0 .. capacity)
+            namedCheck(privateTestRootSlabSlotZero(park, i), "root-slab slot zero after finish");
+        namedCheck(exact.calls == callsAfterCreate && exact.frees == 0,
+            "root-slab no allocator traffic across a lifecycle");
+    }
+    park.destroy();
+    namedCheck(slabExactFreedSize(exact, slabPtr, capacity * RsPod.sizeof), "root-slab slab freed once at destroy");
+    namedCheck(exact.live == 0 && exact.top == 0, "root-slab zero live allocations");
+}
+
+struct RsDt { uint id; ~this() nothrow @nogc @system { dtRecord(id); } }
+void rootSlabDtor(PrivateRootReclamation reclaim)()
+{
+    enum capacity = 4;
+    auto h = DtHarness(2);
+    scope(exit) h.close();
+    alias Park = PrivateRootPark!(RsDt, dtFinish!RsDt, reclaim, PrivateStateStorage.cohortSlab);
+    PrivateRootOptions options;
+    options.batchLimit = 2;
+    options.allocator = policy(h.counts);
+    options.slabByteLimit = capacity * RsDt.sizeof;
+    auto park = Park.create(h.farm, capacity, options);
+    check(park !is null);
+    immutable allocatedAfterCreate = atomicLoad(h.counts.allocated);
+    foreach (round; 1 .. 3)
+    {
+        foreach (i; 1 .. capacity + 1)
+            namedCheck(park.spawn(RsDt(cast(uint) i)) == PrivateSpawnResult.spawned, "root-slab-dtor spawn");
+        namedCheck(atomicLoad(h.counts.allocated) == allocatedAfterCreate, "root-slab-dtor no allocation at spawn");
+        h.drain(park, "root-slab-dtor drain");
+        foreach (i; 1 .. capacity + 1)
+        {
+            namedCheck(dtCount(cast(uint) i) == round, "root-slab-dtor stored instance destroyed once per lifetime");
+            namedCheck(dtTidAt(cast(uint) i, round - 1) != dtEmitter, "root-slab-dtor destroyed on a consumer");
+        }
+        foreach (i; 0 .. capacity)
+            namedCheck(privateTestRootSlabSlotZero(park, i), "root-slab-dtor slot zero after finish");
+    }
+    // Each of the 8 spawns leaves one moved-from .init destroyed by its caller.
+    namedCheck(dtCount(0) == 2 * capacity, "root-slab-dtor moved-from sources destroyed on the caller");
+    park.destroy();
+    namedCheck(atomicLoad(h.counts.allocated) == atomicLoad(h.counts.freed), "root-slab-dtor allocation balance");
+}
+
+void rootSlabTracked()
+{
+    enum capacity = 4;
+    alias Park = PrivateRootPark!(RsPod, rsPodStep, PrivateRootReclamation.emitter, PrivateStateStorage.cohortSlab);
+    SlabExact exact;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    auto token = farm.registerProducer(Tier.small);
+    scope(exit) farm.unregisterProducer(token);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    scope(exit) view.unsubscribe();
+    uint[capacity] hits;
+    PrivateRootOptions options;
+    options.batchLimit = 2;
+    options.allocator = slabExactPolicy(exact);
+    options.tracking = true;
+    options.slabByteLimit = capacity * RsPod.sizeof;
+    auto park = Park.create(farm, capacity, options);
+    check(park !is null);
+    immutable callsAfterCreate = exact.calls;
+    PrivateRootHandle[capacity] handles;
+    foreach (i; 0 .. capacity)
+        namedCheck(park.spawn(RsPod(hits.ptr, cast(uint) i), handles[i]) == PrivateSpawnResult.spawned,
+            "root-slab-tracked spawn");
+    namedCheck(handles[capacity - 1].requestCancel() == PrivateCancelResult.requested, "root-slab-tracked cancel");
+    size_t taken, cancelled;
+    auto deadline = MonoTime.currTime + hangTimeout;
+    while (taken < capacity)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        PrivateRootOutcome outcome;
+        while (park.takeOutcome(outcome))
+        {
+            ++taken;
+            if (outcome.status == PrivateOutcomeStatus.cancelled)
+            {
+                ++cancelled;
+                namedCheck(outcome.cause == PrivateCancelCause.requested, "root-slab-tracked cancel cause");
+            }
+            else namedCheck(outcome.status == PrivateOutcomeStatus.completed, "root-slab-tracked completed");
+        }
+        namedCheck(MonoTime.currTime < deadline, "root-slab-tracked drain");
+    }
+    namedCheck(cancelled == 1, "root-slab-tracked one cancelled outcome");
+    namedCheck(park.live == 0, "root-slab-tracked live zero after take");
+    // Slots are released at collection, before their outcomes are taken.
+    foreach (i; 0 .. capacity)
+        namedCheck(privateTestRootSlabSlotZero(park, i), "root-slab-tracked slot zero after take");
+    namedCheck(exact.calls == callsAfterCreate && exact.frees == 0, "root-slab-tracked no allocation at spawn");
+    // The recycled slots take a second generation; tracked roots stay live
+    // until their outcomes are taken.
+    foreach (i; 0 .. capacity)
+        namedCheck(park.spawn(RsPod(hits.ptr, cast(uint) i), handles[i]) == PrivateSpawnResult.spawned,
+            "root-slab-tracked respawn");
+    taken = 0;
+    deadline = MonoTime.currTime + hangTimeout;
+    while (taken < capacity)
+    {
+        park.pump(token);
+        while (view.consumeNext()) {}
+        PrivateRootOutcome outcome;
+        while (park.takeOutcome(outcome)) ++taken;
+        namedCheck(MonoTime.currTime < deadline, "root-slab-tracked respawn drain");
+    }
+    foreach (i; 0 .. capacity)
+        namedCheck(hits[i] == 4 && privateTestRootSlabSlotZero(park, i), "root-slab-tracked second generation");
+    park.destroy();
+    namedCheck(exact.live == 0 && exact.top == 0, "root-slab-tracked zero live allocations");
+}
+
+struct RsBig { ulong[8] w; }
+PrivateRootDisposition rsBigStep(scope ref PrivateBorrow!RsBig, scope ref PrivateContext)
+    nothrow @nogc @system { return PrivateRootDisposition.finish; }
+void rootSlabCreateFail()
+{
+    alias Park = PrivateRootPark!(RsBig, rsBigStep, PrivateRootReclamation.emitter, PrivateStateStorage.cohortSlab);
+    SlabExact exact;
+    auto farm = AntFarm.create();
+    scope(exit) farm.destroy();
+    PrivateRootOptions options;
+    options.batchLimit = 2;
+    options.allocator = slabExactPolicy(exact);
+    // An unset cap rejects every slab; an exceeded cap and an overflowing
+    // product also return null before any allocation.
+    namedCheck(Park.create(farm, 4, options) is null && exact.calls == 0, "root-slab-create-fail unset cap");
+    options.slabByteLimit = 4 * RsBig.sizeof - 1;
+    namedCheck(Park.create(farm, 4, options) is null && exact.calls == 0, "root-slab-create-fail over cap");
+    options.slabByteLimit = size_t.max;
+    // capacity * T.sizeof overflows while capacity * Entry.sizeof does not.
+    namedCheck(Park.create(farm, size_t.max / RsBig.sizeof + 1, options) is null && exact.calls == 0,
+        "root-slab-create-fail overflow");
+    // Every allocation position unwinds: park, entries, batches, batch
+    // entries, then the slab.
+    options.slabByteLimit = 4 * RsBig.sizeof;
+    foreach (position; 1 .. 6)
+    {
+        exact.failAt = exact.calls + position;
+        namedCheck(Park.create(farm, 4, options) is null, "root-slab-create-fail allocation failure returns null");
+        namedCheck(exact.live == 0 && exact.top == 0, "root-slab-create-fail unwinds every earlier allocation");
+    }
+    exact.failAt = 0;
+    auto park = Park.create(farm, 4, options);
+    namedCheck(park !is null, "root-slab-create-fail exact cap succeeds");
+    namedCheck(slabExactSizeCount(exact, 4 * RsBig.sizeof) == 1, "root-slab-create-fail slab allocated once");
+    park.destroy();
+    namedCheck(exact.live == 0 && exact.top == 0, "root-slab-create-fail zero live allocations");
+}
+
+// root-slab-dirty-slot (slab-death child): debug dies on the uncleared-slot
+// check; release survives because the check is version(assert).
+struct RsDirtyRoot { ulong v; }
+PrivateRootDisposition rsDirtyStep(scope ref PrivateBorrow!RsDirtyRoot, scope ref PrivateContext)
+    nothrow @nogc @system { return PrivateRootDisposition.finish; }
+void rootSlabDirtySlotDeath()
+{
+    auto farm = AntFarm.create();
+    auto token = farm.registerProducer(Tier.small);
+    ConsumerView view;
+    check(view.subscribe(farm) >= 0);
+    PrivateRootOptions options;
+    options.slabByteLimit = 2 * RsDirtyRoot.sizeof;
+    auto park = PrivateRootPark!(RsDirtyRoot, rsDirtyStep, PrivateRootReclamation.emitter,
+        PrivateStateStorage.cohortSlab).create(farm, 2, options);
+    check(park !is null);
+    privateTestDirtyRootSlabSlot(park, privateTestRootNextSlot(park));
+    fprintf(stderr, "root-slab dirty-slot: spawning into a dirty slot\n");
+    auto result = park.spawn(RsDirtyRoot(7));
+    namedCheck(result == PrivateSpawnResult.spawned, "root-slab dirty-slot release spawn");
+    fprintf(stderr, "root-slab dirty-slot: release survived\n");
+    slabDrain(park, token, view, "root-slab dirty-slot drain");
+    park.destroy();
+}
+
+void rootSlabAll()
+{
+    rootSlabLifecycle!(PrivateRootReclamation.emitter)();
+    rootSlabLifecycle!(PrivateRootReclamation.consumer)();
+    rootSlabDtor!(PrivateRootReclamation.emitter)();
+    rootSlabDtor!(PrivateRootReclamation.consumer)();
+    rootSlabTracked();
+    rootSlabCreateFail();
+    writeln("PASS root-slab: lifecycle, destructors, tracking and creation failures under both reclamation policies");
+}
+
 void main(string[] args)
 {
     auto mode = args.length > 1 ? args[1] : "";
     switch (mode)
     {
+        case "root-slab": rootSlabAll(); return;
+        case "root-slab-lifecycle":
+            rootSlabLifecycle!(PrivateRootReclamation.emitter)(); rootSlabLifecycle!(PrivateRootReclamation.consumer)();
+            writeln("PASS root-slab-lifecycle"); return;
+        case "root-slab-dtor":
+            rootSlabDtor!(PrivateRootReclamation.emitter)(); rootSlabDtor!(PrivateRootReclamation.consumer)();
+            writeln("PASS root-slab-dtor"); return;
+        case "root-slab-tracked": rootSlabTracked(); writeln("PASS root-slab-tracked"); return;
+        case "root-slab-create-fail": rootSlabCreateFail(); writeln("PASS root-slab-create-fail"); return;
+        case "root-slab-dirty-slot": rootSlabDirtySlotDeath(); return;
         case "root-admission-order": rootAdmissionOrderAll(); return;
         case "cont-descendants-first": contInterleave!(PrivateRootReclamation.emitter)(CiMode.early); return;
         case "cont-activation-first": contInterleave!(PrivateRootReclamation.emitter)(CiMode.late);

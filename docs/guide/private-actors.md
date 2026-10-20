@@ -148,6 +148,9 @@ A third template argument selects member state storage:
 `PrivateChildPark!(T, R, PrivateStateStorage.cohortSlab)` reserves every
 member's state at creation instead of allocating it at spawn; see
 [sizing-and-allocation.md](sizing-and-allocation.md#cohort-state-storage).
+Root parks take the same policy as their fourth template argument, with
+`PrivateRootOptions.slabByteLimit` as the reservation cap; see
+[root state storage](sizing-and-allocation.md#root-state-storage).
 
 An operation accepts `scope ref PrivateBorrow!T` and `scope ref PrivateContext`
 and returns `void`, the cohort's result type `R`, `PrivateChildDisposition`, or

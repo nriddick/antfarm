@@ -6,6 +6,19 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.0 — unreleased
 
+- Added opt-in root state slabs: `PrivateRootPark!(T, step, reclamation,
+  PrivateStateStorage.cohortSlab)` reserves one zeroed slab of
+  `capacity * T.sizeof` at create, under the new
+  `PrivateRootOptions.slabByteLimit`, so root spawn never allocates and a
+  terminal root clears its slot where the reclamation policy would have freed
+  it. The C `af_private_root_options` gains `slab_byte_limit`, `storage` and a
+  zero `reserved` word (96 bytes). On the 5900XT with mimalloc, `private-slab`
+  measured about 34% more lifecycles per second serially and 27% more with six
+  consumers than `private`; `private-remote-slab` (consumer-side release)
+  about 36% serially and seven times with six consumers, because no root state
+  is freed across threads. `actor_churn` has `private-slab` and
+  `private-remote-slab` modes; `run_performance_md.py` includes them.
+
 - Restored layout-specific writer sizing loops for inferred fixed-length,
   indexed uniform and mixed-callback tables. `write(callback, bodies)` again
   scans equal-length bodies without carrying the general layout transition

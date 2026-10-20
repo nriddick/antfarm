@@ -64,6 +64,8 @@ typedef struct af_private_root_options {
     af_private_root_step step;
     void *user;
     uint32_t tracking, reclamation;
+    size_t slab_byte_limit; /* COHORT_SLAB: required cap on capacity * aligned state stride */
+    uint32_t storage, reserved; /* PER_OBJECT or COHORT_SLAB; reserved must be 0 */
 } af_private_root_options;
 typedef struct af_private_child_options {
     uint32_t struct_size, abi_version;
@@ -78,7 +80,15 @@ typedef struct af_private_child_options {
    fields must be 0/1. State bytes>0, alignments power-of-two. The native allocator
    supports through 64; custom allocators can support larger alignments.
    Options are copied. Metadata and descendants inherit the allocator and its
-   context. All allocation callbacks must be thread-safe and correctly aligned. */
+   context. All allocation callbacks must be thread-safe and correctly aligned.
+   Root storage: PER_OBJECT allocates each root's state at spawn and frees it
+   under the reclamation option. COHORT_SLAB reserves one zeroed slab of
+   capacity * aligned stride at create, under slab_byte_limit, so spawn never
+   allocates and the terminal release clears the slot (on the emitter at
+   collection, or on the consumer in the final activation) instead of freeing
+   it; the slab is freed once at destroy. A slab with slab_byte_limit 0 (the
+   default) or an overflowing product: AF_INVALID; a slab exceeding its set
+   cap, or any allocation failure: AF_ALLOCATION_FAILED. */
 void af_private_root_options_default(af_private_root_options *);
 void af_private_child_options_default(af_private_child_options *);
 af_status af_private_roots_create(af_farm *, const af_private_root_options *,
@@ -178,7 +188,9 @@ void af_private_cancel_peers(af_private_context *); /* child context only */
 AF_PRIVATE_ASSERT(sizeof(af_private_root_handle) == 16, "private handle layout");
 AF_PRIVATE_ASSERT(sizeof(af_private_root_outcome) == 32, "root outcome layout");
 AF_PRIVATE_ASSERT(sizeof(af_private_wave_outcome) == 40, "wave outcome layout");
-AF_PRIVATE_ASSERT(sizeof(af_private_root_options) == 80 && offsetof(af_private_root_options, step) == 56, "root options layout");
+AF_PRIVATE_ASSERT(sizeof(af_private_root_options) == 96 && offsetof(af_private_root_options, step) == 56
+                  && offsetof(af_private_root_options, slab_byte_limit) == 80
+                  && offsetof(af_private_root_options, storage) == 88, "root options layout");
 AF_PRIVATE_ASSERT(sizeof(af_private_child_options) == 88 && offsetof(af_private_child_options, storage) == 80, "child options layout");
 AF_PRIVATE_ASSERT(sizeof(af_private_results) == 24 && sizeof(af_private_pump_count) == 16, "private spans layout");
 #undef AF_PRIVATE_ASSERT

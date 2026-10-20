@@ -616,6 +616,18 @@ lazy observations, not timers or wake sources. BetterC uses CLOCK_MONOTONIC on
 Linux and QueryPerformanceCounter on Windows, without D module initialization.
 Normal D builds retain MonoTime semantics.
 
+Root parks choose state storage the same way: `af_private_root_options.storage`
+is per-object (the default) or a cohort slab, with `slab_byte_limit` as the
+required cap on `capacity * roundUp(state_bytes, state_alignment)`. A slab
+root park reserves that slab once at creation, after its metadata, so
+`af_private_root_spawn_copy` and `spawn_init` never allocate; the terminal
+release clears the slot where the reclamation option would have freed it, on
+the emitter at collection or on the consumer in the final activation, and
+`af_private_roots_destroy` frees the slab once. An unset cap, an unknown
+storage value, a nonzero `reserved` word or an overflowing product return
+`AF_INVALID`; a slab exceeding its set cap, or any allocation failure, returns
+`AF_ALLOCATION_FAILED` with every earlier allocation unwound.
+
 Only a current private callback may create child cohorts. Each cohort copies
 its state descriptor and result geometry, inherits the hierarchy's allocator,
 and belongs to that parent until automatic post-order disposal. Parents cannot

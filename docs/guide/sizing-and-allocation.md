@@ -375,6 +375,34 @@ void main()
   reused, so allocator or sanitizer use-after-free detection no longer sees it.
   Debug builds check that `spawn` writes into a zeroed slot.
 
+### Root state storage
+
+Root parks take the same policy as their fourth template argument:
+`PrivateRootPark!(T, step, reclamation, PrivateStateStorage.cohortSlab)`. The
+default `perObject` park is unchanged: `spawn` allocates each root's state and
+the reclamation policy frees it, on the emitter at collection or on the
+consumer in the final activation. A slab park reserves `capacity * T.sizeof`
+bytes once, in `create(farm, capacity, options)`, under
+`PrivateRootOptions.slabByteLimit`; the short `create(farm, capacity,
+batchLimit, allocator)` overload is per-object only. Root slot `i` always uses
+slab slot `i`, so `spawn` never returns `allocationFailed`. The reclamation
+policy keeps its meaning and its thread: where a per-object park frees the
+state, a slab park destroys it and zeroes the slot. The slab is freed once, in
+`destroy()`, which already requires no live roots. Tracked parks are the same;
+a slot is cleared at collection, before its outcome is taken.
+
+The emitter spawns every root and, by default, frees every root, so a
+per-object root park has no cross-thread free; its cost is one allocation and
+one free per lifecycle on the emitter, which is the serial bottleneck once
+consumers are plentiful. Consumer-side reclamation moves the free to a
+consumer and makes every one of them a remote free. A root slab removes both.
+Measured on the Ryzen 9 5900XT with mimalloc 3.5.3, 16,384 roots, batch 256 and
+three samples per cell, `private-slab` delivered about 34% more lifecycles per
+second serially and 27% more with six consumers than `private`, and
+`private-remote-slab` about 36% serially and seven times with six consumers
+compared with `private-remote`. The C ABI exposes the same choice through
+`af_private_root_options.storage` and `slab_byte_limit`.
+
 Measurements, cross-thread free counts, and peak RSS are recorded in
 [PERFORMANCE.md](../../PERFORMANCE.md#cohort-slab-vs-per-object).
 

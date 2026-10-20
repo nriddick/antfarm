@@ -170,6 +170,7 @@ stale actors. Modes:
 | `wave` | the same through one sealed public `ActorWave` per cohort |
 | `private` | private root dispatch, terminal dispatch, and emitter-side free |
 | `private-remote` | the same, but root state is freed on consumers (allocation-locality control) |
+| `private-slab`, `private-remote-slab` | the two above with `PrivateStateStorage.cohortSlab` root state: one slab reserved at park create, slots cleared instead of freed (per-object, printing `storage=perObject`, on runtimes without root slabs) |
 | `private-tracked` | tracked roots with per-root records, handles, and outcomes |
 | `tree`, `tree-wait` | private parents creating child cohorts; `tree-wait` uses `waitChildren` |
 | `tree-cont` | child continuations |

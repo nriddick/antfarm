@@ -378,6 +378,7 @@ def cases_for(section, args):
     elif section == "private":
         modes = [
             ("private", {}), ("private-remote", {}), ("private-tracked", {}),
+            ("private-slab", {}), ("private-remote-slab", {}),
             ("tree", {}), ("tree-wait", {}), ("tree-cont", {}),
             ("tree-slab", {}), ("tree-wait-slab", {}), ("tree-cont-slab", {}),
             ("tree-refill", {}), ("tree-refill-slab", {}), ("tree-pipelined", {}),

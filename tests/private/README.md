@@ -288,7 +288,8 @@ entry/result/selection pointers) live in `version (AntfarmActorTestHooks)` in
 | Group | Selectors |
 | --- | --- |
 | Correctness | `slab`, `slab-retire`, `slab-retain`, `slab-refill`, `slab-continuation`, `slab-cancel`, `slab-idle`, `slab-create-fail`, `slab-gc`, `slab-reclaim`, `slab-results`, `slab-per-object` |
-| Death | `slab-death`; child modes `slab-unauthorized`, `slab-active-dispose`, `slab-dirty-slot` (debug death; `-release` survives because the uncleared-slot check is `version(assert)`) |
+| Root slabs | `root-slab` runs `root-slab-lifecycle`, `root-slab-dtor`, `root-slab-tracked` and `root-slab-create-fail`: `PrivateStateStorage.cohortSlab` on `PrivateRootPark` under both reclamation policies (test accessors `privateTestRootSlabPointer`, `privateTestRootSlabSlotZero`, `privateTestRootNextSlot`, `privateTestDirtyRootSlabSlot`) |
+| Death | `slab-death`; child modes `slab-unauthorized`, `slab-active-dispose`, `slab-dirty-slot` and `root-slab-dirty-slot` (debug death; `-release` survives because the uncleared-slot checks are `version(assert)`) |
 
 Each mutation below was applied alone to `antfarm/actors/private_actor.d`, rebuilt with
 LDC, and run on its selector; the source was restored afterwards. Every run

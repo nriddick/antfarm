@@ -41,6 +41,8 @@ struct af_private_root_options
     ErasedRootOperation step;
     void* user;
     uint tracking, reclamation;
+    size_t slab_byte_limit;
+    uint storage, reserved;
 }
 struct af_private_child_options
 {
@@ -52,7 +54,8 @@ struct af_private_child_options
 }
 static assert(af_private_root_handle.sizeof == 16 && af_private_root_handle.alignof == 8);
 static assert(af_private_root_outcome.sizeof == 32 && af_private_wave_outcome.sizeof == 40);
-static assert(af_private_root_options.sizeof == 80 && af_private_root_options.step.offsetof == 56);
+static assert(af_private_root_options.sizeof == 96 && af_private_root_options.step.offsetof == 56
+    && af_private_root_options.slab_byte_limit.offsetof == 80 && af_private_root_options.storage.offsetof == 88);
 static assert(af_private_child_options.sizeof == 88 && af_private_child_options.storage.offsetof == 80);
 static assert(af_private_results.sizeof == 24 && af_private_pump_count.sizeof == 16);
 
@@ -148,11 +151,17 @@ uint af_private_roots_create(af_farm* farm, const(af_private_root_options)* o,
     if (inFarmCallback()) fatal("C ABI private root operation inside Farm callback");
     if (farm is null || o is null || o.struct_size != af_private_root_options.sizeof)
         return setError(AF_INVALID, "invalid private Farm/options size");
-    if (o.abi_version != AF_ABI_VERSION || o.tracking > 1 || o.reclamation > 1 || o.step is null
+    immutable slab = o.storage != 0;
+    if (o.abi_version != AF_ABI_VERSION || o.tracking > 1 || o.reclamation > 1 || o.storage > 1
+        || o.reserved != 0 || o.step is null
         || !geometry(o.state.bytes, o.state.alignment) || !erasedRootGeometry(o.capacity, o.batch_limit, o.tracking != 0)
         || (a is null && o.state.alignment > 64)
-        || (a !is null && (a.allocate is null || a.deallocate is null)))
+        || (a !is null && (a.allocate is null || a.deallocate is null))
+        || (slab && (o.slab_byte_limit == 0 || o.capacity > size_t.max / layout(o.state).stride)))
         return setError(AF_INVALID, "invalid private root options or allocator");
+    // An over-cap slab fails like the child cohort form, before any allocation.
+    if (slab && o.capacity * layout(o.state).stride > o.slab_byte_limit)
+        return setError(AF_ALLOCATION_FAILED, "private root slab byte limit exceeded");
     auto p = cast(af_private_roots*) (a is null
         ? ActorAllocator.cRuntime().allocate(null, af_private_roots.sizeof, af_private_roots.alignof)
         : a.allocate(cast(void*) a.context, af_private_roots.sizeof, af_private_roots.alignof));
@@ -163,7 +172,7 @@ uint af_private_roots_create(af_farm* farm, const(af_private_root_options)* o,
     p.entered = true; p.farm = farm; p.tracking = o.tracking != 0;
     auto allocator = ActorAllocator(p, &allocate, &deallocate);
     p.impl = erasedRootCreate(farm.impl, o.capacity, PrivateRootOptions(o.batch_limit, allocator, p.tracking),
-        layout(o.state), o.step, cast(void*) o.user, o.reclamation != 0);
+        layout(o.state), o.step, cast(void*) o.user, o.reclamation != 0, slab);
     if (p.impl is null)
     {
         // Snapshot before freeing the bridge that owns the allocator vtable.

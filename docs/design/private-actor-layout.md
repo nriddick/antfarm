@@ -102,6 +102,29 @@ allocation; a collection in that window over-retains transiently.) A refill also
 starts from a zero slot, which debug builds check before construction. Results,
 Entry and selection storage do not depend on slot contents.
 
+## Root slab reuse
+
+A `cohortSlab` root park adds one pointer and no synchronization. Slot i belongs
+to `entries_[i]`, and a slot is written only by the emitter's `spawn`, for the
+entry it pops from the free list, after the slot's previous occupant was
+released on the path the reclamation policy already orders:
+
+- Emitter reclamation: `reclaim` runs on the emitter, in collection, after the
+  root's final table joined (the batch return or the root-return handoff is
+  the acquire). It destroys the state (already done on the consumer), zeroes
+  the slot, and pushes the entry onto the free list. The next `spawn` of that
+  entry is the same thread, later in program order.
+- Consumer reclamation: the final `runRoot` destroys the state and zeroes the
+  slot before it returns; its table credit release orders both before the
+  emitter's collection, which pushes the entry onto the free list.
+- Tracked parks: the slot is cleared at collection as above; `takeOutcome` only
+  recycles the entry. A handle never reads state.
+
+A failed erased initializer clears the slot it wrote and admits nothing.
+`destroy()` requires zero live roots, so every slot has been released, and
+frees the slab once. Under `gcRooted` the slab is one range for the park's
+life; cleared slots retain nothing.
+
 ## State destruction and results
 
 The stored instance is destroyed exactly once on a consumer. Caller-side
@@ -111,12 +134,12 @@ destructors must tolerate `.init`, including observable actions on that value.
 
 | Retirement path | Consumer sequence | Byte free |
 | --- | --- | --- |
-| Root `finish` | user callback → child cohorts recursively → `~T` | emitter or consumer policy |
-| Root `finishAfterChildren` | joined internal cleanup activation → child cohorts → `~T` | emitter or consumer policy |
+| Root `finish` | user callback → child cohorts recursively → `~T` | emitter or consumer policy; a cohortSlab slot is zeroed there instead |
+| Root `finishAfterChildren` | joined internal cleanup activation → child cohorts → `~T` | emitter or consumer policy; a cohortSlab slot is zeroed there instead |
 | Child `startFinal`, plain or result op | op → result slot write if any → child cohorts → `~T` | consumer (perObject); slab slot zeroed on the consumer (cohortSlab) |
 | Child `startFinal`, continuation op | final `done` result write → descendant join → child cohorts → `~T`; deferred retirement uses a consumer cleanup activation | as above |
 | Parent disposes a cohort | each live member's child cohorts → `~T`, including never-dispatched members | consumer; a cohortSlab slab is freed once, after every member |
-| Root park `destroy()` | requires no live state; no implicit retirement | emitter metadata free |
+| Root park `destroy()` | requires no live state; no implicit retirement | emitter metadata free; a cohortSlab root slab is freed once |
 
 Order across siblings is unspecified. Destructors must not read other actors'
 state, block, or call park APIs. Root-park reentry from an owning failed-spawn

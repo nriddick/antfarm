@@ -258,6 +258,8 @@ Lifecycle modes report Mcycles/s. Subset modes report million selected callbacks
 
 Compare each tree/refill mode with its `-slab` partner at the same consumer count above. Slab reservation occurs at cohort creation and member storage is reused; these are complete workload rates, not isolated allocator-call timings. Cancellation's dispatched fraction is retained in the machine-readable counters.
 
+**Root slabs (after this baseline):** `private-slab` and `private-remote-slab` apply the same policy to root state and are not in the tables above. A three-sample screen on the Ryzen 9 5900XT (LDC 1.43.0 `-O2 -release`, mimalloc 3.5.3, 16,384 roots, batch 256, ordinary pages, consumers pinned to physical cores 1-6 with the controller on 0) measured `private` 91.7 → `private-slab` 123.0 Mcycles/s serially and 94.1 → 119.1 with six consumers; `private-remote` 91.5 → `private-remote-slab` 124.5 serially and 16.9 → 117.4 with six consumers. These are descriptive medians of three runs, not gate results; the next refresh includes both modes.
+
 ### Batch limit and work-cost hints
 
 All cells below have six consumers and 30 samples. `b` changes the batch limit; `auto`, `h2` and `h0` select automatic root classification, chunk 32 and chunk 128. The `child` cases change the child-wave hint instead. Defaults should be chosen against the relevant workload rather than the largest rate across unlike cases.

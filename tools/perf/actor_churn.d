@@ -246,6 +246,90 @@ private string storageName(bool slab)
     return slab && slabSupported ? "cohortSlab" : "perObject";
 }
 
+// Opt-in root slabs (`private-slab`, `private-remote-slab`). As for cohort
+// slabs, this source also builds against runtimes whose PrivateRootPark has
+// no storage parameter; there the slab modes run per-object roots and print
+// storage=perObject, so a base/candidate gate on a slab mode compares
+// per-object (base) with slab (candidate) root storage on one harness.
+static if (__traits(compiles, PrivateRootPark!(State, privateActivate,
+    PrivateRootReclamation.emitter, PrivateStateStorage.cohortSlab)))
+{
+    enum rootSlabSupported = true;
+    alias RootSlabPark(PrivateRootReclamation reclaim) = PrivateRootPark!(State, privateActivate,
+        reclaim, PrivateStateStorage.cohortSlab);
+    RootSlabPark!reclaim* createRootSlabPark(PrivateRootReclamation reclaim)(AntFarm* farm,
+        size_t count, size_t batch, ActorAllocator allocator)
+    {
+        PrivateRootOptions options;
+        options.batchLimit = batch;
+        options.allocator = allocator;
+        options.slabByteLimit = count * State.sizeof;
+        return RootSlabPark!reclaim.create(farm, count, options);
+    }
+}
+else
+{
+    enum rootSlabSupported = false;
+    alias RootSlabPark(PrivateRootReclamation reclaim) = PrivateRootPark!(State, privateActivate, reclaim);
+    RootSlabPark!reclaim* createRootSlabPark(PrivateRootReclamation reclaim)(AntFarm* farm,
+        size_t count, size_t batch, ActorAllocator allocator)
+    {
+        return RootSlabPark!reclaim.create(farm, count, batch, allocator);
+    }
+}
+
+// private-slab / private-remote-slab: the private and private-remote
+// workloads with cohortSlab root state. Same spawn-all-then-pump cycle,
+// verification and rate as the main loop's private modes; the root slab is
+// reserved once at park create and freed at destroy, so no cycle allocates.
+private void runPrivateRoots(PrivateRootReclamation reclaim)(AntFarm* farm, ActorAllocator allocator,
+    ref Token token, ref ConsumerView view, string mode, Completion[] completions, double duration,
+    uint consumers, size_t batch, size_t warmups, string allocatorName, const(ProcessorId)[] cpus,
+    uint rootHint)
+{
+    immutable count = completions.length;
+    auto park = createRootSlabPark!reclaim(farm, count, batch, allocator);
+    enforce(park !is null, "private slab park allocation failed");
+    scope(exit) park.destroy();
+    ulong cycle;
+    void runCycle()
+    {
+        ++cycle;
+        auto deadline = MonoTime.currTime + 60.seconds;
+        foreach (i; 0 .. count)
+            enforce(park.spawn(State(&completions[i], cycle)) == PrivateSpawnResult.spawned,
+                "private creation failed");
+        while (park.live != 0)
+        {
+            pumpRoot(park, token, batch, rootHint);
+            if (consumers == 0) while (view.consumeNext()) {}
+            else pause();
+            enforce(MonoTime.currTime < deadline, "private lifecycle timed out");
+        }
+        foreach (ref completion; completions)
+            enforce(atomicLoad!(MemoryOrder.acq)(completion.stamp) == cycle
+                && completion.calls == cycle, "private count mismatch");
+    }
+    foreach (_; 0 .. warmups) runCycle();
+    immutable start = MonoTime.currTime;
+    ulong rounds;
+    double elapsed;
+    do
+    {
+        runCycle();
+        ++rounds;
+        elapsed = elapsedSeconds(MonoTime.currTime.ticks - start.ticks);
+    } while (elapsed < duration);
+    immutable actorCycles = cast(double) count * rounds;
+    writefln("mode=%s actors=%s consumers=%s batch=%s warmups=%s state=%s stateAlign=%s allocator=%s ringMiB=8 hugePages=%s cpus=%s storage=%s",
+        mode, count, consumers, batch, warmups, State.sizeof, State.alignof,
+        allocatorName, farm.usedLargePages, cpus, rootSlabSupported ? "cohortSlab" : "perObject");
+    writefln("rounds=%s elapsed_s=%.6f Mactor_cycles/s=%.6f ns/actor_cycle=%.2f cycles/s=%.2f",
+        rounds, elapsed, actorCycles / elapsed / 1e6, elapsed * 1e9 / actorCycles, rounds / elapsed);
+    writefln("verified_actor_cycles=%s extra_parents_per_cycle=0 retirement=%s phases=overlap",
+        cycle * count, reclaim == PrivateRootReclamation.consumer ? "consumer_free" : "emitter_free");
+}
+
 private struct TreeState(bool slab = false)
 {
     Completion* completions;
@@ -978,8 +1062,8 @@ void main(string[] args)
 {
     markThreadpoolThread();
     enforce(args.length >= 2 && args.length <= 13
-            && (args[1] == "private-tracked" || args[1] == "tree-cont" || args[1] == "tree-slab" || args[1] == "tree-wait-slab" || args[1] == "tree-cont-slab" || args[1] == "tree-refill" || args[1] == "tree-refill-slab" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "tree" || args[1] == "tree-wait"),
-        "usage: actor_churn actor|inbox|wave|private|private-remote|private-tracked|tree|tree-wait|tree-cont|tree-slab|tree-wait-slab|tree-cont-slab|tree-refill|tree-refill-slab|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64|mimalloc-count] [controller-cpu,consumer-cpus (parseCpuList: 0,1-7 or g:lp; ordered)|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..7]");
+            && (args[1] == "private-tracked" || args[1] == "tree-cont" || args[1] == "tree-slab" || args[1] == "tree-wait-slab" || args[1] == "tree-cont-slab" || args[1] == "tree-refill" || args[1] == "tree-refill-slab" || args[1] == "tree-cancel" || args[1] == "tree-pipelined" || args[1] == "subset" || args[1] == "subset-whole" || args[1] == "subset-whole-unreserved" || args[1] == "dtor" || args[1] == "inbox" || args[1] == "actor" || args[1] == "wave" || args[1] == "private" || args[1] == "private-remote" || args[1] == "private-slab" || args[1] == "private-remote-slab" || args[1] == "tree" || args[1] == "tree-wait"),
+        "usage: actor_churn actor|inbox|wave|private|private-remote|private-slab|private-remote-slab|private-tracked|tree|tree-wait|tree-cont|tree-slab|tree-wait-slab|tree-cont-slab|tree-refill|tree-refill-slab|tree-cancel|tree-pipelined|dtor|subset|subset-whole|subset-whole-unreserved [actors=4096] [seconds=3] [consumers=0] [batch=256] [warmups=5] [crt|mimalloc|mimalloc64|mimalloc-count] [controller-cpu,consumer-cpus (parseCpuList: 0,1-7 or g:lp; ordered)|-] [small|bulk] [quota-words=16384] [subset-percent=100] [root-hint=auto|0..7]");
     // Tree modes with their own run function, including the slab and refill
     // variants.
     immutable foldTreeMode = args[1] == "tree-cont" || args[1] == "tree-pipelined"
@@ -996,6 +1080,9 @@ void main(string[] args)
     immutable remoteMode = args[1] == "private-remote";
     immutable dtorMode = args[1] == "dtor";
     immutable privateMode = args[1] == "private" || remoteMode || dtorMode;
+    // Root-slab private modes have their own run function, like the tree
+    // family; they share the private-family argument and hint rules.
+    immutable rootSlabMode = args[1] == "private-slab" || args[1] == "private-remote-slab";
     immutable treeWaitMode = args[1] == "tree-wait";
     immutable treeMode = args[1] == "tree" || treeWaitMode;
     // Root work-cost hint policy: the trailing argument after subset-percent.
@@ -1021,8 +1108,8 @@ void main(string[] args)
     immutable allocatorName = args.length > 7 ? args[7] : defaultAllocator;
     enforce(count > 0 && count <= uint.max && isFinite(duration)
             && duration > 0 && consumers <= 64 && batch > 0
-            && (waveMode || privateMode || treeMode || foldTreeMode || trackedMode || batch <= 256)
-            && ((privateMode || treeMode || foldTreeMode || trackedMode || subsetMode)
+            && (waveMode || privateMode || rootSlabMode || treeMode || foldTreeMode || trackedMode || batch <= 256)
+            && ((privateMode || rootSlabMode || treeMode || foldTreeMode || trackedMode || subsetMode)
                 || args.length <= (subsetMode ? 12 : 11)),
         "actors/seconds/batch must be positive; consumers must be 0..64; actor batch must be <=256; root-hint is only for private-family modes");
     ProcessorId[] cpus;
@@ -1091,7 +1178,7 @@ void main(string[] args)
     // root table (subset roots publish one entry; tree-family roots publish
     // min(batch, parents); private-family roots publish min(batch, actors)).
     // With consumers=0 the controller's inline view is the one subscriber.
-    if (privateMode || treeMode || foldTreeMode || trackedMode || subsetMode)
+    if (privateMode || rootSlabMode || treeMode || foldTreeMode || trackedMode || subsetMode)
     {
         immutable nominal = subsetMode ? 1
             : treeMode || foldTreeMode
@@ -1106,7 +1193,7 @@ void main(string[] args)
     version (AntfarmMimallocV3)
         if (allocatorName != "crt") writefln("mimalloc_version=%s", mi_version());
     scope (exit) { if (host !is null) host.close(); else farm.destroy(); }
-    immutable noRuntime = privateMode || treeMode || subsetMode || foldTreeMode || trackedMode;
+    immutable noRuntime = privateMode || rootSlabMode || treeMode || subsetMode || foldTreeMode || trackedMode;
     auto runtime = noRuntime ? null : ActorRuntime.create(farm, count, allocator);
     enforce(noRuntime || runtime !is null, "actor runtime allocation failed");
     scope (exit) if (runtime !is null) runtime.destroy();
@@ -1177,6 +1264,17 @@ void main(string[] args)
     {
         runTracked(farm, allocator, token, view, args[1], completions, duration,
             consumers, batch, warmups, allocatorName, cpus, rootHint);
+        return;
+    }
+
+    if (rootSlabMode)
+    {
+        if (args[1] == "private-remote-slab")
+            runPrivateRoots!(PrivateRootReclamation.consumer)(farm, allocator, token, view, args[1],
+                completions, duration, consumers, batch, warmups, allocatorName, cpus, rootHint);
+        else
+            runPrivateRoots!(PrivateRootReclamation.emitter)(farm, allocator, token, view, args[1],
+                completions, duration, consumers, batch, warmups, allocatorName, cpus, rootHint);
         return;
     }
 

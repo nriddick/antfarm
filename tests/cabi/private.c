@@ -360,6 +360,63 @@ static void allocation_test(void) {
     CHECK(af_private_roots_create(f.farm, &o, &a, &p) == AF_INVALID && !p);
     teardown(&f);
 }
+/* Root slabs: a slab root initializes directly in a zeroed slot that the
+   previous lifetime (or a failed initializer) cleared. */
+static af_status init_root(void *u, void *s, size_t bytes, size_t index) {
+    (void)u; const unsigned char *p = (const unsigned char *)s;
+    for (size_t i = 0; i < bytes; ++i) CHECK(!p[i]);
+    CHECK(((uintptr_t)s & 31) == 0);
+    memset(s, 0, bytes); *(uint64_t *)s = index; return AF_OK;
+}
+static af_status slab_roots_create(fixture *f, unsigned reclaim, size_t cap, unsigned storage, unsigned reserved,
+                                   af_private_roots **out) {
+    af_private_root_options o; af_private_root_options_default(&o);
+    o.capacity = 2; o.batch_limit = 1; o.state.bytes = 8; o.state.alignment = 32;
+    o.state.destroy = root_destroy; o.state.destroy_user = f;
+    o.step = simple; o.user = f; o.reclamation = reclaim;
+    o.storage = storage; o.slab_byte_limit = cap; o.reserved = reserved;
+    af_actor_allocator a = allocator(f); *out = (af_private_roots *)(uintptr_t)1;
+    return af_private_roots_create(f->farm, &o, &a, out);
+}
+static void root_slab_test(void) {
+    fixture f; setup(&f); f.mode = 3; af_private_roots *p = NULL; uint64_t initial = 0;
+    /* An unset cap, an unknown storage or a set reserved word are option errors;
+       an over-cap slab fails like a cohort slab, before any allocation. */
+    CHECK(slab_roots_create(&f, 0, 0, AF_PRIVATE_COHORT_SLAB, 0, &p) == AF_INVALID && !p);
+    CHECK(slab_roots_create(&f, 0, 64, 2, 0, &p) == AF_INVALID && !p);
+    CHECK(slab_roots_create(&f, 0, 64, AF_PRIVATE_COHORT_SLAB, 1, &p) == AF_INVALID && !p);
+    unsigned calls = test_load(&f.memory.calls);
+    CHECK(slab_roots_create(&f, 0, 63, AF_PRIVATE_COHORT_SLAB, 0, &p) == AF_ALLOCATION_FAILED && !p);
+    CHECK(test_load(&f.memory.calls) == calls);
+    /* Six allocations: handle, park, entries, batches, batch entries, slab. */
+    for (unsigned i = 1; i <= 7; ++i) {
+        test_store(&f.memory.fail_at, test_load(&f.memory.calls) + i);
+        af_status status = slab_roots_create(&f, 0, 64, AF_PRIVATE_COHORT_SLAB, 0, &p);
+        if (i <= 6) CHECK(status == AF_ALLOCATION_FAILED && !p);
+        else { CHECK(status == AF_OK && p); af_private_roots_destroy(p); }
+        CHECK(test_load(&f.memory.live) == 0);
+    }
+    test_store(&f.memory.fail_at, 0);
+    for (unsigned reclaim = 0; reclaim < 2; ++reclaim) {
+        CHECK(slab_roots_create(&f, reclaim, 64, AF_PRIVATE_COHORT_SLAB, 0, &p) == AF_OK);
+        unsigned before = test_load(&f.memory.calls), dtors = test_load(&f.root_dtors);
+        for (unsigned round = 1; round <= 2; ++round) {
+            CHECK(af_private_root_spawn_copy(p, &initial, AF_PRIVATE_NO_DEADLINE, NULL) == AF_OK);
+            CHECK(af_private_root_spawn_init(p, init_root, &f, 0, AF_PRIVATE_NO_DEADLINE, NULL) == AF_OK);
+            CHECK(af_private_root_spawn_copy(p, &initial, AF_PRIVATE_NO_DEADLINE, NULL) == AF_FULL);
+            CHECK(test_load(&f.memory.calls) == before);
+            drive(&f, p); CHECK(f.output == 3);
+            CHECK(test_load(&f.root_dtors) == dtors + 2 * round);
+        }
+        /* A failed initializer clears its slot without admitting a root. */
+        CHECK(af_private_root_spawn_init(p, fail_root, NULL, 0, AF_PRIVATE_NO_DEADLINE, NULL) == AF_ACTOR_INITIALIZER_FAILED);
+        CHECK(!af_private_roots_live(p) && test_load(&f.root_dtors) == dtors + 4);
+        CHECK(af_private_root_spawn_init(p, init_root, &f, 0, AF_PRIVATE_NO_DEADLINE, NULL) == AF_OK);
+        drive(&f, p); CHECK(test_load(&f.memory.calls) == before);
+        af_private_roots_destroy(p); CHECK(test_load(&f.memory.live) == 0);
+    }
+    teardown(&f);
+}
 static void fatal_observer(const char *message, size_t bytes, void *context) {
     (void)context; fprintf(stderr, "C_FATAL_OBSERVER: %.*s\n", (int)bytes, message); fflush(stderr);
 }
@@ -417,7 +474,7 @@ int main(int argc, char **argv) {
     for (unsigned s = 0; s < 2; ++s) for (unsigned r = 0; r < 2; ++r) {
         tree_test(s, r, 0); tree_test(s, r, 2);
     }
-    truncated_test(0); truncated_test(1); root_test(); allocation_test();
-    puts("C private actors passed: nested results, continuations, slabs, cancellation, native threads, rollback");
+    truncated_test(0); truncated_test(1); root_test(); allocation_test(); root_slab_test();
+    puts("C private actors passed: nested results, continuations, slabs, root slabs, cancellation, native threads, rollback");
     return 0;
 }

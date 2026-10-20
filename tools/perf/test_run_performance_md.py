@@ -335,7 +335,7 @@ class MatrixTests(unittest.TestCase):
     def test_default_matrix_is_unchanged(self):
         args = rpm.build_parser().parse_args([])
         self.assertEqual(len(rpm.cases_for("dual", args)), 9)
-        self.assertEqual(len(rpm.cases_for("private", args)), 38)
+        self.assertEqual(len(rpm.cases_for("private", args)), 42)
 
     def test_custom_dual_threads(self):
         args = rpm.build_parser().parse_args(["--dual-threads", "12,18,20,20"])
@@ -347,7 +347,7 @@ class MatrixTests(unittest.TestCase):
     def test_private_counts_exclude_controller(self):
         args = rpm.build_parser().parse_args(["--private-consumers", "11,17,19"])
         cells = rpm.cases_for("private", args)
-        self.assertEqual(len(cells), 57)
+        self.assertEqual(len(cells), 63)
         for cell in cells:
             consumers = int(cell["cmd"][4])
             self.assertIn(consumers, (11, 17, 19))

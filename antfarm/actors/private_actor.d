@@ -206,6 +206,10 @@ struct PrivateRootOptions
     /// Keep per-root records: handles, cancellation, deadlines and outcomes
     /// (which hold their slot until takeOutcome pops them).
     bool tracking;
+    /// cohortSlab parks only: the explicit cap on the root state slab of
+    /// capacity * T.sizeof bytes reserved at create. 0 (the default) rejects
+    /// every slab, so a slab park must set it; perObject parks ignore it.
+    size_t slabByteLimit;
 }
 
 /// Terminal status of a tracked root, from its record's terminal transition.
@@ -1181,17 +1185,32 @@ private struct RootBodies
 /// With PrivateRootOptions.tracking, each root has a record: a handle for
 /// cancellation, an optional lazy deadline, and an outcome that holds the slot
 /// (and counts in live) until takeOutcome pops it.
+/// `storage` selects root state storage: perObject (the default) allocates
+/// each root's state at spawn and frees it under the reclamation policy;
+/// cohortSlab reserves one zeroed slab of capacity * T.sizeof at create,
+/// under PrivateRootOptions.slabByteLimit, so slot i always holds root slot
+/// i and spawn never allocates. A terminal root destroys and zeroes its slot
+/// where the reclamation policy would have freed it (emitter: at collection;
+/// consumer: in the final activation); the slab is freed once, at destroy.
 /// See_Also:
 ///     docs/guide/private-actors.md (the root program),
-///     docs/guide/outcomes-and-cancellation.md (tracking and deadlines)
+///     docs/guide/outcomes-and-cancellation.md (tracking and deadlines),
+///     docs/guide/sizing-and-allocation.md (slabs)
 struct PrivateRootPark(T, alias step,
-    PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)
+    PrivateRootReclamation reclamation = PrivateRootReclamation.emitter,
+    PrivateStateStorage storage = PrivateStateStorage.perObject)
 {
     static assert(is(typeof(&step) : PrivateRootDisposition function(
         scope ref PrivateBorrow!T, scope ref PrivateContext) nothrow @nogc @system));
+    static assert(!(is(T == PrivateErasedState) && storage == PrivateStateStorage.cohortSlab),
+        "erased root parks select slab storage at create");
+    private enum slab = storage == PrivateStateStorage.cohortSlab;
 private:
     Service service_;
     Entry* entries_;
+    // cohortSlab: capacity * T.sizeof bytes, slot i for entries_[i]. Erased
+    // parks set it at create from their layout stride; null otherwise.
+    void* slab_;
     size_t capacity_;
     size_t live_;
     Entry* free_;
@@ -1223,6 +1242,7 @@ public:
     /// failure. All methods, including destroy, are single-emitter: one
     /// thread at a time, without re-entry from callbacks or allocator
     /// hooks. Release it with destroy().
+    static if (!slab)
     static PrivateRootPark* create(AntFarm* farm, size_t capacity,
         size_t batchLimit = defaultPrivateBatchLimit,
         ActorAllocator allocator = ActorAllocator.cRuntime()) nothrow @nogc @system
@@ -1234,9 +1254,25 @@ public:
     /// batchLimit is fatal; a null farm, invalid allocator, zero or
     /// overflowing capacity, or an allocation failure returns null, and a
     /// tracking capacity above uint.max returns null (tracked roots need a
-    /// dense record index).
+    /// dense record index). A cohortSlab park is created only here: it also
+    /// returns null, allocating nothing, if capacity * T.sizeof overflows or
+    /// exceeds options.slabByteLimit (0 rejects every slab).
     static PrivateRootPark* create(AntFarm* farm, size_t capacity, PrivateRootOptions options)
         nothrow @nogc @system
+    {
+        static if (slab)
+        {
+            if (capacity > size_t.max / T.sizeof || capacity * T.sizeof > options.slabByteLimit)
+                return null;
+            return createImpl(farm, capacity, options, capacity * T.sizeof, T.alignof);
+        }
+        else return createImpl(farm, capacity, options, 0, 1);
+    }
+
+    // slabBytes != 0 reserves one zeroed state slab of that size; typed slab
+    // parks and erased slab parks (whose stride is a runtime value) share it.
+    private static PrivateRootPark* createImpl(AntFarm* farm, size_t capacity,
+        PrivateRootOptions options, size_t slabBytes, size_t slabAlignment) nothrow @nogc @system
     {
         immutable batchLimit = options.batchLimit;
         auto allocator = options.allocator;
@@ -1265,9 +1301,18 @@ public:
         if (options.tracking)
             park.service_.records = cast(RootRecord*) allocateZero(&park.service_,
                 capacity * RootRecord.sizeof, RootRecord.alignof);
+        // Zeroed before publication, like a cohort slab: a rooted slab is
+        // scanned whole, including slots that have not been spawned. The
+        // slab, potentially the largest allocation, is only attempted once
+        // every metadata allocation has succeeded.
+        if (slabBytes != 0 && park.entries_ !is null && park.batches_ !is null
+            && park.batchEntries_ !is null && (!options.tracking || park.service_.records !is null))
+            park.slab_ = allocateZero(&park.service_, slabBytes, slabAlignment);
         if (park.entries_ is null || park.batches_ is null || park.batchEntries_ is null
-            || (options.tracking && park.service_.records is null))
+            || (options.tracking && park.service_.records is null)
+            || (slabBytes != 0 && park.slab_ is null))
         {
+            freeMemory(&park.service_, park.slab_, slabBytes, slabAlignment);
             freeMemory(&park.service_, park.entries_, capacity * Entry.sizeof, Entry.alignof);
             freeMemory(&park.service_, park.batches_, park.batchCount_ * Batch.sizeof, Batch.alignof);
             freeMemory(&park.service_, park.batchEntries_, batchSlots * (Entry*).sizeof, (Entry*).alignof);
@@ -1337,8 +1382,20 @@ public:
                     if (!spawned) .destroy(initial);
             }
             if (free_ is null) return PrivateSpawnResult.capacityFull;
-            auto state = service_.allocator.allocate(service_.allocator.context, T.sizeof, T.alignof);
-            if (state is null) return PrivateSpawnResult.allocationFailed;
+            static if (slab)
+            {
+                // Slot of the entry admitRoot pops; zero, because its last
+                // occupant's terminal release cleared it.
+                void* state = cast(ubyte*) slab_ + (free_ - entries_) * T.sizeof;
+                version (assert)
+                    foreach (b; (cast(const(ubyte)*) state)[0 .. T.sizeof])
+                        if (b != 0) fatal("private root slab: spawn into an uncleared slot");
+            }
+            else
+            {
+                auto state = service_.allocator.allocate(service_.allocator.context, T.sizeof, T.alignof);
+                if (state is null) return PrivateSpawnResult.allocationFailed;
+            }
             static if (__traits(isPOD, T))
                 memcpy(state, &initial, T.sizeof);
             else
@@ -1474,11 +1531,13 @@ private:
     {
         static if (is(T == PrivateErasedState))
         {
-            if (!consumerFree_)
-                freeMemory(&service_, entry.state, layout_.bytes, layout_.alignment);
+            if (!consumerFree_) releaseErasedState(this, entry.state);
         }
         else static if (reclamation == PrivateRootReclamation.emitter)
-            freeMemory(&service_, entry.state, T.sizeof, T.alignof);
+        {
+            static if (slab) memset(entry.state, 0, T.sizeof);
+            else freeMemory(&service_, entry.state, T.sizeof, T.alignof);
+        }
         entry.state = null;
         if (service_.records !is null)
         {
@@ -1705,6 +1764,12 @@ public:
             || atomicLoad!(MemoryOrder.acq)(service_.incoming) !is null)
             fatal("destroy nonempty private root park");
         auto allocator = service_.allocator;
+        // No live root: every slab slot was released already, so the slab
+        // goes back whole, once.
+        static if (slab)
+            freeMemory(&service_, slab_, capacity_ * T.sizeof, T.alignof);
+        else static if (is(T == PrivateErasedState))
+            freeMemory(&service_, slab_, capacity_ * layout_.stride, layout_.alignment);
         freeMemory(&service_, service_.records, capacity_ * RootRecord.sizeof, RootRecord.alignof);
         freeMemory(&service_, entries_, capacity_ * Entry.sizeof, Entry.alignof);
         freeMemory(&service_, batches_, batchCount_ * Batch.sizeof, Batch.alignof);
@@ -1745,17 +1810,29 @@ private:
             {
                 auto park = cast(PrivateRootPark*) service;
                 park.layout_.destroyState(entry.state);
-                if (park.consumerFree_)
-                    freeMemory(service, entry.state, park.layout_.bytes, park.layout_.alignment);
+                if (park.consumerFree_) releaseErasedState(*park, entry.state);
             }
             else
             {
                 destroyState!T(entry);
                 static if (reclamation == PrivateRootReclamation.consumer)
-                    freeMemory(service, entry.state, T.sizeof, T.alignof);
+                {
+                    static if (slab) memset(entry.state, 0, T.sizeof);
+                    else freeMemory(service, entry.state, T.sizeof, T.alignof);
+                }
             }
         }
         return;
+    }
+
+    // Erased parks: the byte-level release under the reclamation policy,
+    // after the stored destructor. A slab slot is cleared; per-object state
+    // is freed.
+    static if (is(T == PrivateErasedState))
+    static void releaseErasedState(ref PrivateRootPark park, void* state) nothrow @nogc @system
+    {
+        if (park.slab_ !is null) memset(state, 0, park.layout_.stride);
+        else freeMemory(&park.service_, state, park.layout_.bytes, park.layout_.alignment);
     }
 }
 
@@ -2568,11 +2645,15 @@ bool erasedChildGeometry(size_t capacity, bool subsets, ErasedCohortLayout layou
     return (!resultStride || capacity <= size_t.max / resultStride)
         && (!layout.slab || capacity <= size_t.max / layout.state.stride);
 }
+// slab reserves capacity * layout.stride bytes at create (the caller has
+// checked that product against its byte cap); spawn then never allocates.
 ErasedRootPark* erasedRootCreate(AntFarm* farm, size_t capacity, PrivateRootOptions options,
-    ErasedStateLayout layout, ErasedRootOperation operation, void* user, bool consumerFree)
-    nothrow @nogc @system
+    ErasedStateLayout layout, ErasedRootOperation operation, void* user, bool consumerFree,
+    bool slab = false) nothrow @nogc @system
 {
-    auto park = ErasedRootPark.create(farm, capacity, options);
+    if (slab && capacity > size_t.max / layout.stride) return null;
+    auto park = ErasedRootPark.createImpl(farm, capacity, options,
+        slab ? capacity * layout.stride : 0, slab ? layout.alignment : 1);
     if (park !is null)
     {
         park.layout_ = layout;
@@ -2589,14 +2670,18 @@ PrivateSpawnResult erasedRootSpawn(ErasedRootPark* park, const(void)* initial,
     park.enter();
     scope(exit) { version (assert) park.entered_ = false; }
     if (park.free_ is null) return PrivateSpawnResult.capacityFull;
-    auto state = park.service_.allocator.allocate(park.service_.allocator.context,
+    immutable slab = park.slab_ !is null;
+    void* state;
+    if (slab) state = cast(ubyte*) park.slab_ + (park.free_ - park.entries_) * park.layout_.stride;
+    else state = park.service_.allocator.allocate(park.service_.allocator.context,
         park.layout_.bytes, park.layout_.alignment);
     if (state is null) return PrivateSpawnResult.allocationFailed;
     if (initialize !is null)
     {
         if (initialize(user, state, park.layout_.bytes, index) != 0)
         {
-            freeMemory(&park.service_, state, park.layout_.bytes, park.layout_.alignment);
+            if (slab) memset(state, 0, park.layout_.stride);
+            else freeMemory(&park.service_, state, park.layout_.bytes, park.layout_.alignment);
             return PrivateSpawnResult.initializerFailed;
         }
     }
@@ -2746,6 +2831,44 @@ version (AntfarmActorTestHooks)
     }
 
     void* privateTestSlabPointer(T, R)(PrivateChildPark!(T, R, PrivateStateStorage.cohortSlab)* park)
+        nothrow @nogc @system
+    {
+        return park is null ? null : park.slab_;
+    }
+
+    /// Test-only: root slab slot i (the slot of entries_[i]) is entirely zero.
+    bool privateTestRootSlabSlotZero(T, alias step, PrivateRootReclamation reclamation)(
+        PrivateRootPark!(T, step, reclamation, PrivateStateStorage.cohortSlab)* park, size_t index)
+        nothrow @nogc @system
+    {
+        if (park is null || index >= park.capacity_) return false;
+        auto base = cast(const(ubyte)*) park.slab_;
+        foreach (b; base[index * T.sizeof .. (index + 1) * T.sizeof])
+            if (b != 0) return false;
+        return true;
+    }
+
+    /// Test-only: the slot index the next spawn would use, or size_t.max when
+    /// the park is full.
+    size_t privateTestRootNextSlot(T, alias step, PrivateRootReclamation reclamation,
+        PrivateStateStorage storage)(PrivateRootPark!(T, step, reclamation, storage)* park)
+        nothrow @nogc @system
+    {
+        return park is null || park.free_ is null ? size_t.max : park.free_ - park.entries_;
+    }
+
+    /// Test-only: dirty one byte of root slab slot i, which must be vacant,
+    /// so a later debug spawn into it hits the uncleared-slot check.
+    void privateTestDirtyRootSlabSlot(T, alias step, PrivateRootReclamation reclamation)(
+        PrivateRootPark!(T, step, reclamation, PrivateStateStorage.cohortSlab)* park, size_t index)
+        nothrow @nogc @system
+    {
+        if (park is null || index >= park.capacity_) fatal("private test: root slab slot out of range");
+        (cast(ubyte*) park.slab_)[index * T.sizeof] = 0xA5;
+    }
+
+    void* privateTestRootSlabPointer(T, alias step, PrivateRootReclamation reclamation)(
+        PrivateRootPark!(T, step, reclamation, PrivateStateStorage.cohortSlab)* park)
         nothrow @nogc @system
     {
         return park is null ? null : park.slab_;
