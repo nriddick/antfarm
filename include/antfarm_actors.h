@@ -122,7 +122,9 @@ typedef struct af_actor_batch_result { size_t count; af_status status; } af_acto
 /* Preflight all output owners empty. Successful prefix remains live; suffix
    stays empty. status = AF_OK, AF_FULL, AF_ALLOCATION_FAILED or
    AF_ACTOR_INITIALIZER_FAILED; structural errors return AF_INVALID, count=0.
-   One gate detaches a reserved prefix; callbacks/allocations run outside it.
+   Reserve the prefix in chunks of at most 64 slots per gate hold, allowing
+   other creators/reclaimers between chunks. Finish all reservations before
+   callbacks/allocations, which run outside the gate.
    Init count comes from output; first_index preserves indices across retries. */
 af_actor_batch_result af_actor_create_copy_batch(af_actor_runtime *, const af_actor_kind *,
                                                 af_actor_state_span, af_actor_owner_output_span);

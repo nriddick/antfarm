@@ -15,6 +15,103 @@ deliberately not committed.
 - Stable sizing formulas: [ARCHITECTURE.md](ARCHITECTURE.md#sizing-one-farm) and
   [SPEC.md](SPEC.md).
 
+## Public actor Part 5 follow-up (1.9.0-progress)
+
+October 20, 2026, i7-12700H, WSL2 Linux, LDC 1.42, mimalloc 3.5.3,
+ordinary pages. Runtime candidate: `2eea369`; immediate baseline: `d101485`.
+The historical inbox reference is `1495d5b`. All comparisons use identical
+`actor_churn` source, 16,384 actors, three-second samples, batch limit 256,
+controller CPU 0 and consumers on 2,4,6,8,10,12.
+
+Idle external retirement now release-stores the terminal word after joining
+accepted senders and rechecking the idle lifecycle. Its operation pin and
+retirement flag exclude remaining writers; debug builds retain an exact-word
+CAS that fatals on a violated invariant. The store releases the pin as the
+call's final slot access. The
+[sole-writer proof](docs/design/public-actor-ordering.md#retirement-and-reclamation)
+states the acquire/release and reuse obligations.
+
+The generated release code uses an ordinary store and skips the separate unpin.
+An uncontended scalar create followed by idle retire/reclaim has **five locked
+operations**, down from six: one for creation and four for retirement/reclaim.
+These are path counts, excluding allocator internals, retries and dispatch,
+not hardware-counter samples.
+
+Batch reservation walks at most **64 free-slot links per gate hold**, then
+joins its privately owned chunks outside the gate. All admission still precedes
+allocation and initialization. This bounds work per hold, not elapsed latency
+or fairness. The deterministic 4,097-slot test pauses between chunks and
+requires a remote reclaimer to finish, then verifies occupancy and rollback.
+The contiguous free-index-stack proposal remains a separate measured redesign.
+The review's gate-hold latency estimates were not reproduced here.
+
+### Current-branch comparison
+
+Positive throughput change is better. The threshold remains **−3%**, and the
+bootstrap interval is descriptive, not a calibrated confidence guarantee.
+Serial samples retain CPU filtering. The initial five-pair inbox/private cells
+were inconclusive; their 20-pair follow-ups replace them below. Six-consumer
+measurements disable CPU filtering and use **30 matched pairs per case**,
+retaining telemetry and all other validity checks.
+
+| Mode | Consumers | Accepted pairs | Paired median change | Bootstrap interval | Decision |
+| --- | ---: | ---: | ---: | --- | --- |
+| actor | 0 | 5 | +5.21% | -1.13% to +6.55% | pass |
+| wave | 0 | 5 | +7.54% | -2.62% to +10.73% | pass |
+| inbox | 0 | 20 | +3.58% | +1.29% to +5.23% | pass |
+| private | 0 | 20 | -2.00% | -6.56% to +9.36% | inconclusive |
+| actor | 6 | 30 | +4.75% | +3.28% to +6.83% | pass |
+| wave | 6 | 30 | +4.98% | +4.39% to +6.58% | pass |
+| inbox | 6 | 30 | +3.30% | +1.99% to +4.56% | pass |
+| private | 6 | 30 | -1.06% | -2.92% to +0.59% | pass |
+
+All public-actor cells pass. The overall current-branch result remains
+**inconclusive** because of the serial private control; no current-branch cell
+establishes a regression. These measurements cover the combined changes and
+do not attribute the full difference to one instruction or establish C/D
+throughput equivalence.
+
+The serial byte-identical baseline/base controls both passed with 20 pairs:
+inbox +0.30% (-1.18% to +2.44%) and private +0.41% (-2.33% to +3.31%).
+These controls do not reclassify the candidate's inconclusive private result.
+The six-consumer private baseline/base control also passed, using byte-identical
+binaries and the same unfiltered 30-pair policy: -0.38% (-1.41% to +1.33%).
+
+### Historical inbox comparison
+
+Against pre-refresh `1495d5b`, the serial inbox paired median is **−2.56%** over
+20 accepted pairs, with an interval of **−5.16% to −1.56%**: inconclusive at the
+−3% boundary. The median gap is smaller than the earlier recorded −6.68%, but
+the new comparison does not establish that the historical gap has cleared.
+The earlier measurements remain below as their own evidence.
+The matching byte-identical `1495d5b` inbox control passed over 20 pairs:
++0.47%, with an interval of -1.35% to +4.05%. It does not reclassify the
+historical candidate comparison.
+
+### Validation
+
+The full Linux `make check` passed with LDC 1.42 and DMD 2.112.1, including
+native C/C++, debug/release contract deaths, concurrency/sanitizer suites,
+host integration, documentation and examples. A separate `-release` actor
+torture run under TSan passed to exercise the store path with deterministic
+interleavings. Conservative sanitizer time was **312.52 seconds**, including
+both runs, within the 600-second budget. Multi-LLC cases were skipped on this
+host; the Life terminal interface was compiled only.
+
+Windows actor and runtime-free C/C++ checks passed with both compilers.
+C tests now span multiple reservation chunks, check that the complete prefix
+is occupied before the first initializer, and inject allocation failure on
+both sides of chunk boundaries. Existing replacement-generation tests retain
+the proof that an old retirement cannot clear a replacement's operation pin.
+
+Initial historical/boundary/control attempts after the six-consumer run
+stopped before measurement because the trailing one-minute load average
+exceeded 2. The recorded retries used bounded cooldowns and preserved that
+admission limit and all serial sample filters.
+Raw runs, compiler/build logs, controls, generated-code inspection, scripts
+and validation records are retained in `.build/part5-evidence-2026-10-20.zip`.
+Generated evidence is not committed.
+
 ## Private actor C ABI (1.9.0-progress)
 
 October 20, 2026, i7-12700H, WSL2 Linux, LDC 1.42, mimalloc 3.5.3,

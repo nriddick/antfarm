@@ -68,6 +68,9 @@ is reassessed holistically in dedicated sessions.
   Batch reservation now limits each gate hold to 64 slots. Evaluate a contiguous
   free-index stack only with matched large-batch contention measurements; it
   would change slot metadata and runtime allocation, beyond this bounded-walk fix.
+  The [Part 5 follow-up](PERFORMANCE.md#public-actor-part-5-follow-up-190-progress)
+  records release-store retirement, the bounded reservation walk and the
+  remaining serial-private/historical-inbox measurement uncertainty.
 
 - Revise PERFORMANCE.md in a dedicated performance session, including
   tail-latency rows at chunk 2 and 4.
