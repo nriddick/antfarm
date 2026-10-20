@@ -25,7 +25,9 @@ with its owning page; leave the path as soon as the layer fits your workload.
    then read [FarmHost setup](guide/hosting.md#setup). Import `threadpool.host`.
 4. **Pick a representation (15 min).** Use the table in
    [choosing-work.md](guide/choosing-work.md) to choose the next program.
-5. **Use that layer.** Public identities: [public_service.d](../examples/public_service.d)
+5. **Use that layer.** Countable range work: [parallel loops](guide/parallel-loops.md)
+   for raw batch adapters, asynchronous submission, or blocking joined loops.
+   Public identities: [public_service.d](../examples/public_service.d)
    and [public_wave.d](../examples/public_wave.d), then [public actors](guide/public-actors.md)
    and the [hazards table](reference/actor-lifecycle.md#ranked-misuse-hazards).
    Private trees: [private_tree.d](../examples/private_tree.d) and
@@ -51,7 +53,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [quickstart.md](guide/quickstart.md) | run a public service and the single-threaded First payload |
 | [using-it-well.md](guide/using-it-well.md) | check correctness and tuning rules before building on the Farm |
 | [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown |
-| [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, or Fiber |
+| [choosing-work.md](guide/choosing-work.md) | pick payload, parallel loop, public actor, actor wave, private hierarchy, or Fiber |
 | [parallel-loops.md](guide/parallel-loops.md) | compose ranges, choose grains, and join parallel regions |
 | [public-actors.md](guide/public-actors.md) | create, address, wake, retire and reclaim public actors and waves |
 | [private-actors.md](guide/private-actors.md) | own a private root tree: roots, cohorts, dispatch, retirement |

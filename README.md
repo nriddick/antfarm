@@ -53,6 +53,7 @@ codes provide recoverable checks on the core Farm path. The threadpool
 | Your work is... | Use | Example |
 | --- | --- | --- |
 | short, `nothrow @nogc`, no identity | a payload | [iota_sum.d](examples/iota_sum.d) |
+| independent elements of a finite, sliceable random-access range | parallel loops (`antfarm.parallel`) | [parallel loops](docs/guide/parallel-loops.md) |
 | a stable identity addressed by outside code, with an inbox | a public actor | [public_service.d](examples/public_service.d) |
 | a phase over an externally chosen set of identities | an actor wave | [public_wave.d](examples/public_wave.d) |
 | one conductor, a computation tree, and joined results | a private hierarchy | [private_tree.d](examples/private_tree.d) |

@@ -1,8 +1,9 @@
 # Choosing a work representation
 
-Ant Farm has one distributor and four ways to put work on it. Start with the
-narrowest representation that fits; each layer adds state lifetime and
-scheduling rules above the payload path.
+Ant Farm has one distributor for payloads, public actors, private hierarchies,
+and Fibers. Start with the narrowest representation that fits; each layer adds
+state lifetime and scheduling rules above the payload path. Parallel loops
+adapt countable ranges into payloads.
 
 An input element does not automatically need an actor. Use actors when their
 identity, state lifetime or tree joins serve the application; independent
@@ -12,6 +13,7 @@ keep that representation while tuning [child batches and host emission bursts](h
 | Your work is... | Use | Example |
 | --- | --- | --- |
 | short, `nothrow @nogc`, no identity | a bare **payload** | [iota_sum.d](../../examples/iota_sum.d) |
+| independent elements of a finite, sliceable random-access range | **parallel loops** (`antfarm.parallel`) | [parallel loop forms](parallel-loops.md) |
 | a stable identity that outside code addresses: a service with an inbox, several event sources | a **public actor** (`ActorOwner` / `ActorHandle`) | [public_service.d](../../examples/public_service.d) |
 | a phase run over an externally selected set of identities | a public **actor wave** | [public_wave.d](../../examples/public_wave.d) |
 | one exclusive computation tree under a single conductor, with typed joined results or non-POD state | a **private actor** hierarchy | [private_tree.d](../../examples/private_tree.d) |
@@ -35,12 +37,29 @@ and the same actor cannot belong to overlapping unfinished waves. Fibers add
 `scope(exit)`, application signals, and cooperative cancellation; a Fiber that
 never suspends is usually better represented as a payload.
 
-For independent range work, [parallel loops](parallel-loops.md) provide
-Grains, asynchronous completion hooks and a blocking foreach
-adapter. Raw ranges also compose into caller-owned payload batches. Use a
-private tree when the computation needs structured nested joins.
-
 The Farm rules are in [SPEC.md](../../SPEC.md).
+
+## Parallel loops or raw payloads
+
+Use `antfarm.parallel` when each independent range element needs the same
+`nothrow @nogc` operation. Choose the form by who owns publication and completion:
+
+| Need | Use |
+| --- | --- |
+| Compose loop work with other entries in your own `write()` batches | `payloadRange!fn(range)` for one entry per element, or `payloadRange!fn(range, grain)` for one entry per grain (`parallelRange` takes the same forms for one-element functions). Pass a table hook to `write`, or supply your own aggregate join for a phase spanning several writes. |
+| Start work and continue on the producer thread | `parallelFor!fn(farm, range, token, options, &hook)`; retry `handle.publish(token)` until `handle.submitted`, then observe `handle.complete` or the hook. |
+| Join before returning, without allocating region storage | `parallelForWait!fn`, or `foreach` over `parallel(view, token, range)` to borrow the calling frame. Both help-drain the caller's subscribed view. On a `FarmHost` with caller consumption, use `host.parallelFor!fn(range, options)`. |
+
+Every form publishes independent single-shot grains; there are no
+multi-consumer payloads. Increase `Options.grain` for cheap elements and pick
+`Options.costClass` for the per-grain cost; grain size and Farm claim chunking
+are separate tuning choices.
+
+Blocking loop forms belong outside Farm callbacks and completion hooks; every
+build fatals on that misuse. Use asynchronous submission for nested
+publication, or a private tree when the computation needs structured nested
+joins, typed results, or cancellation. See [parallel loops](parallel-loops.md)
+for storage lifetime, retry, wake, and join contracts.
 
 ## Public or private actors
 

@@ -13,7 +13,12 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    is backpressure; an empty source also returns `0`. It does not advance the caller's range. Never resend a taken prefix.
    See [the write contract](../../SPEC.md#5b-write-call-and-return).
 2. **Count your own completions.** `consumeNext() == false` means nothing is
-   ready at this cursor now. It means neither empty nor done. See
+   ready at this cursor now. It means neither empty nor done. For
+   `parallelFor`, `handle.submitted` means all input is admitted;
+   a true `handle.complete` joins the callbacks and completion hook. A
+   `write` hook joins only its accepted table; a phase spanning several
+   writes needs an application join. See
+   [parallel completion](parallel-loops.md#asynchronous-submission) and
    [consumers and views](../reference/actor-lifecycle.md#consumers-and-views).
 3. **Keep one view per consuming thread.** Subscribe it once, retrying
    `SUBSCRIBE_RETRY`, and unsubscribe on that thread before Farm destruction.
@@ -41,6 +46,18 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    A later `write()` still validates and aborts on an unfittable payload. See
    [sizing one Farm](../../ARCHITECTURE.md#sizing-one-farm) and
    [the singleton check](../../SPEC.md#5b-write-call-and-return).
+7. **Use parallel joins at the right boundary.** Never call `parallelForWait`,
+   blocking `parallel` foreach or `host.parallelFor` inside a Farm callback or
+   completion hook; every build fatals. Use an exclusively owned view
+   subscribed to the token's Farm, and set `Options.wake` (or use
+   `host.parallelOptions`) when peers may be parked. Keep captured and
+   referenced storage alive through the join, with concurrent writes
+   disjoint or synchronized. For asynchronous `parallelFor`, retry
+   `handle.publish(token)` after backpressure until `submitted`; an incomplete
+   handle cannot be destroyed. Drive consumer progress and host waking while
+   retrying. A callback must hand incomplete submission to a later nonblocking
+   pump. See [blocking loops](parallel-loops.md#blocking-loops) and
+   [asynchronous submission](parallel-loops.md#asynchronous-submission).
 
 ## Performance rules
 
@@ -96,11 +113,20 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    later epochs use the live count. A valid hint far from reality can cost
    performance, never safety. The actual cap is 128 simultaneously subscribed
    views. See [sizing](../../ARCHITECTURE.md#sizing-one-farm).
+8. **Tune parallel grains before adding workers.** `Options.grain` controls
+   elements per callback; `Options.costClass` controls how many grains the
+   Farm claims at once. Larger grains amortize cheap element work but
+   lengthen callbacks and tails; start with a few microseconds per grain and
+   measure. Blocking forms use stack region storage; asynchronous
+   `parallelFor` uses one allocation per region. See [range shapes](parallel-loops.md#ranges-for-caller-owned-batches)
+   and the [M1 benchmark](../../tools/perf/README.md#parallel-loop-m1).
 
 ## Choosing a layer
 
-Short `@nogc` fan-out: payload. Address plus inbox: public actor. A phase over
-an externally chosen set: actor wave. One conductor, joined results, and
+Short `@nogc` fan-out: payload. Independent countable range work:
+[parallel loops](parallel-loops.md), with raw adapters for composed batches
+or convenience calls for a joined region. Address plus inbox: public actor.
+A phase over an externally chosen set: actor wave. One conductor, joined results, and
 tracked deadlines: private tree. Work that waits, throws, or allocates:
 Fiber. A Fiber that never suspends usually belongs on the payload path.
 The [choice guide](choosing-work.md) owns the full comparison.
@@ -111,7 +137,9 @@ The core deliberately leaves FIFO, priorities, thread affinity, "all done",
 and parking to the application. Several Farms can separate priority classes;
 a Farm with one subscribed thread can confine its work. Use an application
 counter or a `write` completion hook for completion; the hook joins every
-payload callback in one accepted physical table. Exceptions cannot escape
-payload callbacks. See [the model](../../SPEC.md#1-model-scope-and-terminology),
+payload callback in one accepted physical table. Parallel convenience calls
+supply an aggregate join across all their tables; raw range adapters do not.
+Exceptions cannot escape payload callbacks. See
+[the model](../../SPEC.md#1-model-scope-and-terminology),
 [tracked completion](../../SPEC.md#9-memory-order-contract), and
 [the Director](../../threadpool/README.md#start-workers).
