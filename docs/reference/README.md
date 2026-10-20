@@ -55,7 +55,7 @@ links each to its owning contract or tuning page.
 | Payload layout and callbacks | `PayloadBody`, `Callback`, `TableCompletionCallback`, `TableCompletionHook` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
 | Payload range adapters | `pairPayloads`, `broadcastPayloads`, `PayloadPairRange`, `PayloadBroadcastRange` | [SPEC.md](../../SPEC.md) |
 | Fatal diagnostics | `FatalHandler`, `setFatalHandler`, `fatal` | [C ABI](../design/c-abi.md#handles-failures-and-lifecycle), [SPEC](../../SPEC.md#10-api-errors-and-implementation-profile) |
-| Consumers and views | `ConsumerView`, `ConsumerView.subscribe`, `ConsumerView.unsubscribe`, `ConsumerView.consumeNext` | [actor-lifecycle.md](actor-lifecycle.md#consumers-and-views) |
+| Consumers and views | `ConsumerView`, `ConsumerView.subscribe`, `ConsumerView.subscribeOnce`, `ConsumerView.unsubscribe`, `ConsumerView.consumeNext` | [actor-lifecycle.md](actor-lifecycle.md#consumers-and-views) |
 | Work-cost hints | `rootCostHintAuto`, `rootCostHintFor`, `rootCostHintMaxSplits`, `rootCostHintMaxChunk`, `MAX_CHUNK`, `MAX_AVG_COST`, `DEFAULT_AVG_COST`, `avgCostForChunk` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md) |
 | Huge pages | `AntFarm.usedLargePages`, `DEFAULT_HUGE_PAGES`, `DEFAULT_SMALL_TABLE_THRESHOLD` | [sizing-and-allocation.md](../guide/sizing-and-allocation.md#memory-backing) |
 

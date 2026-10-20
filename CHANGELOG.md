@@ -6,6 +6,15 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.0 — unreleased
 
+- `ConsumerView.subscribe` now retries the transient frontier race itself and
+  returns only the epoch, `SUBSCRIBE_FULL` or `SUBSCRIBE_INVALID`; the former
+  one-attempt call is `subscribeOnce`, which still reports `SUBSCRIBE_RETRY`.
+  The C `af_subscribe` keeps its one-attempt `AF_RETRY` contract. `FarmHost`,
+  `ant_fibers` and the examples drop their retry loops. `FarmHost.createPark`
+  takes the root storage policy as a template argument. The onboarding
+  commands no longer set `ANTFARM_HUGE_PAGES=0`: ordinary pages are the
+  default, and the variable is documented once under memory backing.
+
 - Added opt-in root state slabs: `PrivateRootPark!(T, step, reclamation,
   PrivateStateStorage.cohortSlab)` reserves one zeroed slab of
   `capacity * T.sizeof` at create, under the new

@@ -421,8 +421,8 @@ enum MAX_CONSUMERS_LIMIT = 128;
 /// The Farm already has MAX_CONSUMERS_LIMIT subscribed views. Retry only
 /// after another view unsubscribes.
 enum long SUBSCRIBE_FULL = -1;
-/// The frontier was uninitialized or moved during the attach walk. This is
-/// transient; retry the same call.
+/// `subscribeOnce` only: the frontier was uninitialized or moved during the
+/// attach walk. Transient; `subscribe` retries it internally.
 enum long SUBSCRIBE_RETRY = -2;
 /// Caller error: a null Farm, or a view that is already subscribed.
 enum long SUBSCRIBE_INVALID = -3;
@@ -2300,9 +2300,24 @@ struct ConsumerView
         return ltiRing[cast(uint)(ei & F.kMask)];
     }
 
-    /// Spec 6b. Returns the (non-negative) starting epoch on success, or
-    /// SUBSCRIBE_FULL, SUBSCRIBE_RETRY, or SUBSCRIBE_INVALID on failure.
+    /// Subscribe this view to `f`. Returns the non-negative starting epoch,
+    /// or SUBSCRIBE_FULL (the Farm already has MAX_CONSUMERS_LIMIT views) or
+    /// SUBSCRIBE_INVALID (null Farm, or this view is already subscribed).
+    /// The transient frontier inconsistency that `subscribeOnce` reports as
+    /// SUBSCRIBE_RETRY is retried here immediately, as spec 6b directs.
     long subscribe(AntFarm* f) nothrow @nogc @system
+    {
+        long result;
+        do result = subscribeOnce(f);
+        while (result == SUBSCRIBE_RETRY);
+        return result;
+    }
+
+    /// Spec 6b, one attempt. Returns the (non-negative) starting epoch on
+    /// success, or SUBSCRIBE_FULL, SUBSCRIBE_RETRY (a producer moved the
+    /// frontier during the snapshot; every pin was unwound, call again), or
+    /// SUBSCRIBE_INVALID. `subscribe` is this with the retry folded in.
+    long subscribeOnce(AntFarm* f) nothrow @nogc @system
     {
         if (f is null || hasRef) return SUBSCRIBE_INVALID;
         immutable idc = f.add_consumer();

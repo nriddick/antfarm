@@ -21,6 +21,11 @@ public/private choice table is in [choosing-work.md](choosing-work.md).
 
 ## A root
 
+The program below drives the Farm by hand so every step is visible. On a
+`FarmHost` the same park is `host.createPark!(Work, step)(4096)`, pumped by
+`host.waitUntil`, and destroyed by `close()`; see
+[hosting.md](hosting.md#setup).
+
 Only a private callback can call `context.createChildren!(T, R)(capacity)`. It
 stores the resulting opaque `PrivateChildPark!(T, R)*` in its own state. `R` is
 a POD result type; its default, `void`, creates a signal-only cohort with no

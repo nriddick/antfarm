@@ -391,9 +391,9 @@ Then derived and tracked stats as are convenient.
 
 ### 6b. Subscription
 
-ConsumerView is initialized with `subscribe(AntFarm* F)`.
+ConsumerView is initialized with `subscribe(AntFarm* F)`, which runs the one-attempt protocol below (`subscribeOnce`) until it does not report a transient frontier inconsistency.
 
-**Returns:** the non-negative starting epoch on success. Failures are negative: `SUBSCRIBE_FULL` (-1, capacity), `SUBSCRIBE_RETRY` (-2, transient frontier inconsistency), or `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed view). Epoch 0 is a valid success.
+**Returns:** the non-negative starting epoch on success. Failures are negative: `SUBSCRIBE_FULL` (-1, capacity) or `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed view). `subscribeOnce` additionally returns `SUBSCRIBE_RETRY` (-2, transient frontier inconsistency; every pin was unwound) instead of retrying. Epoch 0 is a valid success.
 
 The subscription protocol:
 
@@ -683,7 +683,7 @@ are absent; see [the ordering audit](docs/design/farm-ordering.md).
 | --- | --- |
 | producer tier has no registration slot | invalid Token; recoverable |
 | consumer capacity exceeded | `subscribe()` returns `SUBSCRIBE_FULL` (-1); recoverable after another view unsubscribes |
-| subscribe sees an uninitialized or generation-inconsistent frontier | `SUBSCRIBE_RETRY` (-2) after unwinding temporary pins; retry immediately |
+| subscribe sees an uninitialized or generation-inconsistent frontier | `subscribe` unwinds its temporary pins and retries immediately; `subscribeOnce` returns `SUBSCRIBE_RETRY` (-2) instead |
 | subscribe with a null Farm or an already subscribed view | `SUBSCRIBE_INVALID` (-3); caller error |
 | assigning over a still-valid Token | fatal |
 | `write()` has no safe quota at present | returns 0; backpressure |

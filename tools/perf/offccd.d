@@ -264,7 +264,7 @@ void consumerMain(size_t i)
     }
     ConsumerView v;
     long e;
-    while ((e = v.subscribe(g_farm)) == SUBSCRIBE_RETRY)
+    while ((e = v.subscribeOnce(g_farm)) == SUBSCRIBE_RETRY) // one attempt: the retries are a statistic
     {
         ++s.subscribeRetries;
         pause();

@@ -3167,11 +3167,8 @@ final class FiberSemaphore
 /// builds. The caller must unsubscribe the same instance.
 long subscribeOrThrow(ref ConsumerView consumer, AntFarm* farm)
 {
-    long subscription;
-    // A moving frontier is transient; capacity and misuse are not.
-    do
-        subscription = consumer.subscribe(farm);
-    while (subscription == SUBSCRIBE_RETRY);
+    // subscribe retries a moving frontier itself; capacity and misuse are not transient.
+    immutable subscription = consumer.subscribe(farm);
     if (subscription == SUBSCRIBE_FULL)
         throw new Exception("ant_fibers: Farm already has MAX_CONSUMERS_LIMIT subscribers");
     if (subscription < 0)

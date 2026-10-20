@@ -384,7 +384,9 @@ the reclamation policy frees it, on the emitter at collection or on the
 consumer in the final activation. A slab park reserves `capacity * T.sizeof`
 bytes once, in `create(farm, capacity, options)`, under
 `PrivateRootOptions.slabByteLimit`; the short `create(farm, capacity,
-batchLimit, allocator)` overload is per-object only. Root slot `i` always uses
+batchLimit, allocator)` overload is per-object only. On a host,
+`host.createPark!(T, step, reclamation, PrivateStateStorage.cohortSlab)(capacity, options)`
+is the same choice. Root slot `i` always uses
 slab slot `i`, so `spawn` never returns `allocationFailed`. The reclamation
 policy keeps its meaning and its thread: where a per-object park frees the
 state, a slab park destroys it and zeroes the slot. The slab is freed once, in

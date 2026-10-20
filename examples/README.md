@@ -37,23 +37,23 @@ it shares worker CPUs and the host adds a note:
 
 ```text
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=public_service
-ANTFARM_HUGE_PAGES=0 ./public_service 0
+./public_service 0
 
 ldc2 -g -i -I. -Iexamples -Ithreadpool/source examples/public_wave.d -of=public_wave
-ANTFARM_HUGE_PAGES=0 ./public_wave 2
+./public_wave 2
 
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/private_tree.d -of=private_tree
-ANTFARM_HUGE_PAGES=0 ./private_tree 0
+./private_tree 0
 ```
 
 The outcomes and cancellation programs use the same command:
 
 ```text
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/request_deadline.d -of=request_deadline
-ANTFARM_HUGE_PAGES=0 ./request_deadline 0
+./request_deadline 0
 
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/fail_fast_fold.d -of=fail_fast_fold
-ANTFARM_HUGE_PAGES=0 ./fail_fast_fold 0
+./fail_fast_fold 0
 ```
 
 The fiber `cancelAt` adapter links the separate ant_fibers package, so add the
@@ -62,12 +62,13 @@ fibers import path too:
 ```text
 ldc2 -g -i -I. -Iexamples -Iant_fibers/source -Ithreadpool/source \
     examples/fiber_cancel_at.d -of=fiber_cancel_at
-ANTFARM_HUGE_PAGES=0 ./fiber_cancel_at 0
+./fiber_cancel_at 0
 ```
 
 On Windows the linker writes `public_service.exe` (and the same for the other
-programs). Ordinary pages are the default, so `ANTFARM_HUGE_PAGES` may be left
-unset. In cmd.exe set it with `set ANTFARM_HUGE_PAGES=0` before the run.
+programs). Ordinary pages are the default everywhere; `ANTFARM_HUGE_PAGES=1`
+opts into huge pages, see
+[memory backing](../docs/guide/sizing-and-allocation.md#memory-backing).
 
 `make -C examples check` is the Linux matrix: LDC and DMD, debug and release,
 each run with 0 and 2 workers, plus an LDC ThreadSanitizer build of the same
@@ -131,15 +132,15 @@ From the repository root:
 
 ```text
 make -C examples life
-ANTFARM_HUGE_PAGES=0 examples/.build/life 2
+examples/.build/life 2
 
 # Use DMD instead of LDC:
 make -C examples life DC=dmd
 
 # Portable headless tests (also usable on Windows):
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/life/headless.d -of=life_headless
-ANTFARM_HUGE_PAGES=0 ./life_headless 0
-ANTFARM_HUGE_PAGES=0 ./life_headless 2
+./life_headless 0
+./life_headless 2
 ```
 
 The optional argument is the number of pinned pool workers (default 2), all in
@@ -203,7 +204,7 @@ Reproduce one run from the repository root:
 
 ```text
 ldc2 -O2 -release -i -I. -Iexamples -Ithreadpool/source examples/life/headless.d -of=examples/.build/life_bench
-ANTFARM_HUGE_PAGES=0 examples/.build/life_bench 2 --bench 256 256 200
+examples/.build/life_bench 2 --bench 256 256 200
 ```
 
 The terminal app uses one generation per request, so its repeated cohort

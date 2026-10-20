@@ -48,7 +48,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 
 | Page | Read it to |
 | --- | --- |
-| [quickstart.md](guide/quickstart.md) | run a public service and the single-threaded First payload |
+| [quickstart.md](guide/quickstart.md) | run the single-threaded First payload, then a public service on pinned workers |
 | [using-it-well.md](guide/using-it-well.md) | check correctness and tuning rules before building on the Farm |
 | [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown |
 | [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, or Fiber |

@@ -89,7 +89,7 @@ The compiled form of this path is
 
 ```text
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
-ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
+/tmp/public_service 0
 ```
 
 ## Inbox

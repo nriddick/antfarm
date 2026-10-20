@@ -86,7 +86,7 @@ void staleFallback()
     calls = 0;
     writeAuditHook = &delayedSubscriber;
     ConsumerView s;
-    auto result = s.subscribe(f);
+    auto result = s.subscribeOnce(f);
     writeAuditHook = null;
     require(fired, "subscriber pause reached");
     // cf2aa91 accepts epoch zero. Spending the grant then hits the always-on

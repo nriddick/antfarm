@@ -22,10 +22,10 @@ import std.typecons : Rebindable;
 
 import antfarm.actors : ActorAllocator, ActorHandle, ActorReclaimResult, ActorRetireMode,
     ActorRetireResult, ActorRuntime, ActorWave, PrivateRootOptions, PrivateRootPark,
-    PrivateRootReclamation;
+    PrivateRootReclamation, PrivateStateStorage;
 import antfarm.parallel;
 import antfarm : AntFarm, ConsumerView, FarmCreateError, FarmCreateFailure, Tier, Token,
-    DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, SUBSCRIBE_RETRY, fatal;
+    DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, fatal;
 import threadpool.hybrid : ManagedWorkerHooks, WorkerSelf, gWorkers;
 import threadpool.worker : requestStop;
 import threadpool.pin : PinOutcome, ThreadAffinity, confineCallingThread, restoreCallingThread;
@@ -378,9 +378,7 @@ private bool hostBody(WorkerSelf* self) @nogc nothrow
     {
         if (gHostFarm is null)
             return false;
-        long result;
-        do result = tHostView.subscribe(gHostFarm);
-        while (result == SUBSCRIBE_RETRY);
+        immutable result = tHostView.subscribe(gHostFarm);
         if (result < 0)
         {
             atomicStore(gHostSubscribeResult, result);
@@ -503,9 +501,7 @@ final class FarmHost
             throw new FarmHostException("FarmHost: control token registration failed");
         if (plan_.callerConsumes)
         {
-            long result;
-            do result = view_.subscribe(farm_);
-            while (result == SUBSCRIBE_RETRY);
+            immutable result = view_.subscribe(farm_);
             if (result < 0)
                 throw new FarmHostException(format("FarmHost: caller view could not subscribe (%s)", result));
             viewSubscribed_ = true;
@@ -668,9 +664,12 @@ final class FarmHost
     /// A `PrivateRootPark` on the host Farm, pumped by `step()` and destroyed
     /// by `close()` after the consumer join. The pointer is borrowed. The
     /// host never calls `takeOutcome`: drain tracked outcomes in a
-    /// `waitUntil` predicate. Throws on `batchLimit == 0` or allocation failure.
-    PrivateRootPark!(T, step, reclamation)* createPark(T, alias step,
-        PrivateRootReclamation reclamation = PrivateRootReclamation.emitter)(
+    /// `waitUntil` predicate. `storage` selects per-object or slab root
+    /// state (a slab needs `options.slabByteLimit`). Throws on
+    /// `batchLimit == 0`, a rejected slab cap or allocation failure.
+    PrivateRootPark!(T, step, reclamation, storage)* createPark(T, alias step,
+        PrivateRootReclamation reclamation = PrivateRootReclamation.emitter,
+        PrivateStateStorage storage = PrivateStateStorage.perObject)(
         size_t capacity, PrivateRootOptions options = PrivateRootOptions.init)
     {
         import std.format : format;
@@ -678,7 +677,7 @@ final class FarmHost
         requireOpen("createPark");
         if (options.batchLimit == 0)
             throw new FarmHostException("FarmHost.createPark: batchLimit must be > 0");
-        auto park = PrivateRootPark!(T, step, reclamation).create(farm_, capacity, options);
+        auto park = PrivateRootPark!(T, step, reclamation, storage).create(farm_, capacity, options);
         if (park is null)
             throw new FarmHostException(format("FarmHost.createPark(%s): invalid capacity "
                 ~ "or allocation failure", capacity));

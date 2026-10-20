@@ -5,48 +5,47 @@ of work into a shared ring; any subscribed consumer may claim them. It suits
 unordered compute where the next available worker should take the work.
 Use it alone, or add pinned workers, actors, and suspendable Fibers.
 
-Start with [First payload](docs/guide/quickstart.md#first-payload) for a complete
-single-threaded program, or [choose a work representation](docs/guide/choosing-work.md).
-Before building on the Farm, read [Using Ant Farm well](docs/guide/using-it-well.md):
-one page with the correctness and performance rules that matter most.
-The current release is **1.8.2**. The 1.9 progress branch includes a
-[C/C++ ABI](docs/design/c-abi.md), with a druntime-free core, public actors and waves, plus
-a separate optional non-Fiber worker host.
-Public and private actors are supported, with the limits in their guides and
-source/ABI stability subject to the [promotion gates](ROADMAP.md#actor-api-promotion-gates).
-See [CHANGELOG.md](CHANGELOG.md) for release and compatibility notes.
+The current release is **1.8.2**; see [CHANGELOG.md](CHANGELOG.md) for the
+1.9 work in progress, including the [C/C++ ABI](docs/design/c-abi.md).
+Ant Farm needs DMD 2.112+ or LDC 1.42+ on Linux x86-64 or Windows x64.
 
-## Quickstart (Linux)
+## First program
 
-You need DMD 2.112+ or LDC 1.42+. From a clone, run this public actor service:
+One thread, one file, one import. Save it as `/tmp/first_payload.d` and run it
+from a clone of the repository:
+
+```text
+dmd -g -i -I. /tmp/first_payload.d -of=/tmp/first_payload
+/tmp/first_payload
+```
+
+The complete program is [First payload](docs/guide/quickstart.md#first-payload),
+where the [quickstart](docs/guide/quickstart.md) explains what it relies on.
+It prints `first payload: 256 squares summed to 5625216`.
+
+Next, run a complete actor service on pinned workers: `/tmp/public_service 0`
+consumes on the calling thread, `2` adds two pinned workers in one LLC.
 
 ```text
 dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=/tmp/public_service
-ANTFARM_HUGE_PAGES=0 /tmp/public_service 0
+/tmp/public_service 2
 ```
 
-`ANTFARM_HUGE_PAGES=0` explicitly selects ordinary pages, which are also the
-default; it overrides a Farm's huge-page request. The example commands in
-the guides use it for reproducible setup.
+Substitute `ldc2` for `dmd` to use LDC. Then follow the
+[documentation map](docs/README.md#run-something): seven short steps from this
+program to workers, representation choice, sizing, and local checks.
 
-Expected output, with exit status 0:
+## Three rules
 
-```text
-public service: 36 ordered replies, balance=234, workers=0, closing-callback-count=0
-```
+- `write()` returns how many payloads it published. Pop exactly that many and
+  retry; `0` is backpressure, not failure.
+- `consumeNext() == false` means nothing is ready at this cursor now. It is
+  not completion: count your own completions.
+- Contract violations abort through `fatal()`. `canFit` and the subscribe
+  codes are the recoverable checks on the core path.
 
-The `0` consumes on the calling thread; `/tmp/public_service 2` uses two pinned
-workers and prints `workers=2` with the same counts. Substitute `ldc2` for
-`dmd` to use LDC. The [quickstart guide](docs/guide/quickstart.md) explains
-publication, consumption, and completion and includes First payload as its
-second program.
-
-`write()` returns a published count; pop that prefix and retry. A false
-`consumeNext()` is no completion signal: count your own completions. Contract
-violations abort the process through `fatal()`; `canFit` and the `SUBSCRIBE_*`
-codes provide recoverable checks on the core Farm path. The threadpool
-`Director` supplies waiting. `FarmHost` needs `import threadpool.host;`;
-`import threadpool;` does not re-export it.
+[Using Ant Farm well](docs/guide/using-it-well.md) is the one page of
+correctness and performance rules behind these, each linked to its owner.
 
 ## Choosing the work representation
 
@@ -60,24 +59,19 @@ codes provide recoverable checks on the core Farm path. The threadpool
 | exceptions, allocation, or waits during work | a managed Fiber | [hello_fibers.d](ant_fibers/examples/hello_fibers.d) |
 
 The [choice guide](docs/guide/choosing-work.md) owns the detailed comparison.
-A public endpoint may front a private tree; their lifetimes drain separately.
+Every actor program in [examples/](examples/README.md) runs on a `FarmHost`
+(`import threadpool.host;`), which owns the Farm, the token, the pinned
+workers and the shutdown order.
 
 ## Read next
 
-- [Documentation map](docs/README.md): the seven-step path from First payload
-  to workers, representation choice, sizing, and local checks.
-- [Examples](examples/README.md): complete actor programs and Windows commands;
-  [threadpool](threadpool/README.md), [actors](antfarm/actors/README.md), and
-  [Fibers](ant_fibers/README.md) are the package entries. The Fiber Dub package
-  is `ant_fibers` (`dub test :ant_fibers`).
-- [Using Ant Farm well](docs/guide/using-it-well.md): correctness and tuning rules,
-  linked to their owning pages.
-- [CONTRIBUTING.md](CONTRIBUTING.md): start with `make check-quick`; the full local
-  Linux correctness gate is `make check`. There is no CI. Windows has a separate
+- [Documentation map](docs/README.md): guides, reference, design pages and
+  which page owns each rule.
+- [ARCHITECTURE.md](ARCHITECTURE.md) describes the layers and sizing formulas;
+  [SPEC.md](SPEC.md) owns the Farm contract; [PERFORMANCE.md](PERFORMANCE.md)
+  has the measurements; [ROADMAP.md](ROADMAP.md) tracks work.
+- [CONTRIBUTING.md](CONTRIBUTING.md): `make check-quick` for iteration, `make check`
+  for the full local Linux gate. There is no CI; Windows has a separate
   [native integration matrix](docs/development/testing.md#windows-x64-integration).
-
-[ARCHITECTURE.md](ARCHITECTURE.md) describes the layers and sizing formulas;
-[SPEC.md](SPEC.md) owns the Farm contract. [PERFORMANCE.md](PERFORMANCE.md)
-contains measurements and methodology, and [ROADMAP.md](ROADMAP.md) tracks work.
 
 Ant Farm is licensed under the Boost Software License 1.0.

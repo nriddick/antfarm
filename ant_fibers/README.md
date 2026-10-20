@@ -35,11 +35,11 @@ The full three-layer arrangement is described in
 From this directory:
 
 ```text
-ANTFARM_HUGE_PAGES=0 dub test --compiler=dmd
-ANTFARM_HUGE_PAGES=0 dub test --compiler=ldc2
-ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=dmd
-ANTFARM_HUGE_PAGES=0 dub run -c unittest --compiler=ldc2
-ANTFARM_HUGE_PAGES=0 dub run -c stress --compiler=ldc2 --build=release
+dub test --compiler=dmd
+dub test --compiler=ldc2
+dub run -c unittest --compiler=dmd
+dub run -c unittest --compiler=ldc2
+dub run -c stress --compiler=ldc2 --build=release
 ```
 
 Both `dub test` and `dub run -c unittest` run this package's module

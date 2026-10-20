@@ -47,7 +47,7 @@ linker supplies libc and platform libraries, without a D runtime:
 
 ```text
 cc -std=c11 -Iinclude examples/c_core.c .build/c-abi-ldc2-posix/libantfarm_core.a -pthread -o .build/c-core
-ANTFARM_HUGE_PAGES=0 .build/c-core
+.build/c-core
 ```
 
 In an x64 Visual Studio developer prompt:
@@ -102,7 +102,7 @@ archive is embedded in `antfarm_runtime`.
 python3 scripts/build-c-abi.py --compiler ldc2 --runtime
 cc -std=c11 -Iinclude -c examples/c_host.c -o .build/c_host.o
 ldc2 .build/c_host.o .build/c-abi-ldc2-posix/libantfarm_runtime.a .build/c-abi-ldc2-posix/libantfarm_core.a -L-lpthread -L-lrt -L-latomic -of=.build/c-host
-ANTFARM_HUGE_PAGES=0 .build/c-host
+.build/c-host
 ```
 
 On Windows, compile the C file with `cl /std:c11 /MT /c /Iinclude`; link its

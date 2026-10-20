@@ -30,13 +30,7 @@ void work(size_t i) nothrow @nogc @system { output[i] = calculate(i); }
 
 void subscribe(ref ConsumerView view, AntFarm* farm)
 {
-    for (;;)
-    {
-        immutable result = view.subscribe(farm);
-        if (result >= 0) return;
-        if (result != SUBSCRIBE_RETRY) fatal("benchmark subscription failed");
-        Thread.yield();
-    }
+    if (view.subscribe(farm) < 0) fatal("benchmark subscription failed");
 }
 
 void emit(R)(AntFarm* farm, ref Token token, ref ConsumerView view, R entries, uint costClass)

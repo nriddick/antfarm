@@ -56,13 +56,7 @@ extern(C) void nestedHook(void*) nothrow @nogc @system { nested(0); }
 
 void subscribe(ref ConsumerView view, AntFarm* farm)
 {
-    while (true)
-    {
-        immutable result = view.subscribe(farm);
-        if (result >= 0) return;
-        check(result == SUBSCRIBE_RETRY);
-        Thread.yield();
-    }
+    check(view.subscribe(farm) >= 0);
 }
 
 void borrowedNoGC(ref ConsumerView view, ref Token token) nothrow @nogc @system

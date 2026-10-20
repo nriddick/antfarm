@@ -15,10 +15,10 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
 2. **Count your own completions.** `consumeNext() == false` means nothing is
    ready at this cursor now. It means neither empty nor done. See
    [consumers and views](../reference/actor-lifecycle.md#consumers-and-views).
-3. **Keep one view per consuming thread.** Subscribe it once, retrying
-   `SUBSCRIBE_RETRY`, and unsubscribe on that thread before Farm destruction.
-   Move tokens rather than copying them, or pass them by `ref` to one active
-   producer. See [views](../reference/actor-lifecycle.md#consumers-and-views)
+3. **Keep one view per consuming thread.** Subscribe it once (a negative
+   result is capacity or misuse, never transient) and unsubscribe on that
+   thread before Farm destruction. Move tokens rather than copying them, or
+   pass them by `ref` to one active producer. See [views](../reference/actor-lifecycle.md#consumers-and-views)
    and [tokens](../reference/actor-lifecycle.md#tokens-and-farm-provenance).
 4. **Respect callback storage.** Callbacks are `nothrow @nogc @system`.
    Raw callbacks borrow a body pointer and word count until return. Packed parameter values are
