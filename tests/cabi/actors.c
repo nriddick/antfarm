@@ -431,29 +431,34 @@ static void concurrent_kinds(void) {
     CHECK(test_load(&log.allocations) == test_load(&log.frees));
 }
 
+enum { RESERVATION_COUNT = 129 };
 typedef struct reservation_job {
     af_actor_runtime *runtime; const af_actor_kind *kind;
-    test_atomic entered, release; af_actor_owner owners[2]; af_actor_batch_result result;
+    test_atomic entered, release; af_actor_owner owners[RESERVATION_COUNT]; af_actor_batch_result result;
 } reservation_job;
 static af_status pause_init(void *user, void *memory, size_t bytes, size_t index) {
     reservation_job *j = (reservation_job *)user;
     CHECK(bytes == sizeof(unsigned)); *(unsigned *)memory = (unsigned)index;
+    CHECK(index >= 42 && index < 42 + RESERVATION_COUNT);
+    CHECK(af_actor_runtime_live(j->runtime) == RESERVATION_COUNT);
     test_store(&j->entered, 1); while (!test_load(&j->release)) test_yield(); return AF_OK;
 }
 TEST_THREAD(reserve_batch) {
     reservation_job *j = (reservation_job *)arg;
     j->result = af_actor_create_init_batch(j->runtime, j->kind, pause_init, j, 42,
-        (af_actor_owner_output_span){j->owners, sizeof j->owners[0], 2});
+        (af_actor_owner_output_span){j->owners, sizeof j->owners[0], RESERVATION_COUNT});
     TEST_RETURN;
 }
 
 static void allocation_prefixes(void) {
-    enum { N = 4 }; allocator_log log = {0};
+    enum { N = 130 }; allocator_log log = {0};
     af_actor_allocator allocator = {&log, custom_alloc, custom_free};
     fixture x = setup(N, &allocator);
     const af_actor_kind *kind = test_kind(x.runtime, sizeof(unsigned), 8, unused, NULL);
     unsigned states[N] = {0}, outcomes[N] = {0}; af_actor_owner owners[N] = {{0}};
-    for (unsigned fail = 0; fail < N; ++fail) {
+    const unsigned failures[] = {0, 63, 64, 65, 129};
+    for (unsigned trial = 0; trial < sizeof failures / sizeof failures[0]; ++trial) {
+        unsigned fail = failures[trial];
         log.fail_at = log.calls + fail + 1;
         af_actor_batch_result made = af_actor_create_copy_batch(x.runtime, kind,
             (af_actor_state_span){states, sizeof states[0], N},
@@ -472,19 +477,19 @@ static void allocation_prefixes(void) {
 }
 
 static void in_flight_reservation(void) {
-    fixture x = setup(2, NULL); reservation_job job = {0};
+    fixture x = setup(RESERVATION_COUNT, NULL); reservation_job job = {0};
     job.runtime = x.runtime; job.kind = test_kind(x.runtime, sizeof(unsigned), 8, unused, NULL);
     test_thread thread = test_start(reserve_batch, &job);
     while (!test_load(&job.entered)) test_yield();
-    CHECK(af_actor_runtime_live(x.runtime) == 2);
+    CHECK(af_actor_runtime_live(x.runtime) == RESERVATION_COUNT);
     unsigned initial = 0; af_actor_owner extra = {0};
     CHECK(af_actor_create_copy(x.runtime, job.kind, &initial, &extra) == AF_FULL);
     af_actor_kind_options options = {unused, NULL, sizeof(unsigned), 8, NULL};
     const af_actor_kind *rejected = NULL;
     CHECK(af_actor_kind_register(x.runtime, &options, &rejected) == AF_OK && rejected);
     test_store(&job.release, 1); test_join(thread);
-    CHECK(job.result.status == AF_OK && job.result.count == 2);
-    for (unsigned i = 0; i < 2; ++i) retire(&x, job.owners + i, AF_ACTOR_DRAIN);
+    CHECK(job.result.status == AF_OK && job.result.count == RESERVATION_COUNT);
+    for (unsigned i = 0; i < RESERVATION_COUNT; ++i) retire(&x, job.owners + i, AF_ACTOR_DRAIN);
     teardown(&x);
 }
 

@@ -4501,7 +4501,7 @@ private void replacementRetirementHook(ActorTestPoint point, ActorInboxNode*)
 
 private void testRetirementFinalAccess()
 {
-    // The idle terminal CAS releases the pin itself. Reuse the slot while the
+    // Idle terminal publication releases the pin itself. Reuse the slot while the
     // old retirement call is still on its stack; it must not later clear a
     // new generation's pin or close its submission gate.
     {
@@ -4522,7 +4522,7 @@ private void testRetirementFinalAccess()
         waitFlag(g_hookArrived, MonoTime.currTime + 15.seconds, "idle retirement final access");
         atomicStore(g_hookTarget, -1);
         check(copy.retired && copy.reclaim() == ActorReclaimResult.reclaimed,
-            "terminal CAS releases idle pin");
+            "terminal publication releases idle pin");
         auto replacement = runtime.createActor!(BoundaryState, boundaryActor)(BoundaryState(&result));
         auto replacementOwner = replacement.intoErased();
         auto replacementCopy = testDuplicateActorOwner(replacementOwner);
@@ -4604,6 +4604,70 @@ private void testRetirementFinalAccess()
     }
 }
 
+private __gshared ActorRuntime* g_reservationRuntime;
+private __gshared size_t g_reservationChunks;
+private __gshared size_t[65] g_reservationOccupancy;
+
+private void reservationChunkHook(ActorTestPoint point, ActorInboxNode* node)
+    nothrow @nogc @system
+{
+    if (point != ActorTestPoint.freeSlotsChunkReleased) return;
+    immutable index = g_reservationChunks++;
+    if (index >= g_reservationOccupancy.length)
+        fatal("too many reservation chunks");
+    g_reservationOccupancy[index] = g_reservationRuntime.live;
+    if (index == 0) blockingActorHook(point, node);
+}
+
+private void testChunkedSlotReservation()
+{
+    enum size_t capacity = 4097;
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    auto runtime = ActorRuntime.create(farm, capacity);
+    BoundaryResult result;
+    auto owner = runtime.createActor!(BoundaryState, boundaryActor)(BoundaryState(&result));
+    check(owner.requestRetire() == ActorRetireResult.requested,
+        "reservation competitor retired");
+    g_reservationRuntime = runtime;
+    g_reservationChunks = 0;
+    g_hookNode = null;
+    atomicStore(g_hookTarget, cast(int) ActorTestPoint.freeSlotsChunkReleased);
+    atomicStore(g_hookArrived, 0);
+    atomicStore(g_hookRelease, 0);
+    setActorTestHook(&reservationChunkHook);
+    size_t reserved;
+    auto creator = new Thread({ reserved = testActorSlotReservation(runtime, capacity); });
+    creator.start();
+    auto deadline = MonoTime.currTime + 15.seconds;
+    waitFlag(g_hookArrived, deadline, "reservation first chunk released");
+    check(runtime.live == 65, "first chunk counts exactly 64 reservations");
+    shared int reclaimed;
+    auto reclaimer = new Thread({
+        check(owner.reclaim() == ActorReclaimResult.reclaimed,
+            "remote reclaim between reservation chunks");
+        atomicStore!(MemoryOrder.rel)(reclaimed, 1);
+    });
+    reclaimer.start();
+    waitFlag(reclaimed, deadline, "reclaim must finish while batch is paused");
+    reclaimer.join();
+    check(runtime.live == 64, "remote reclaim preserves reserved occupancy");
+    atomicStore(g_hookRelease, 1);
+    creator.join();
+    setActorTestHook(null);
+    check(reserved == capacity && g_reservationChunks == 65,
+        "batch includes returned slot without losing reservations");
+    foreach (i; 0 .. g_reservationChunks)
+        check(g_reservationOccupancy[i] ==
+            (i == 0 ? 65 : i == 64 ? capacity : (i + 1) * 64),
+            "each gate hold detaches at most 64 slots");
+    check(runtime.quiescent, "reservation rollback restores empty runtime");
+    check(testActorSlotReservation(runtime, capacity + 1) == capacity
+        && runtime.quiescent, "partial reservation rollback retains every slot");
+    runtime.destroy();
+    farm.destroy();
+    g_reservationRuntime = null;
+}
+
 
 private void testOccupancyFinalGate()
 {
@@ -4635,6 +4699,7 @@ private void testOccupancyFinalGate()
 
 private void testCopiedOwners()
 {
+    testChunkedSlotReservation();
     testOccupancyFinalGate();
     testRetirementFinalAccess();
     // Pause every final-access boundary of a retirement request. A copied
@@ -4659,6 +4724,12 @@ private void testCopiedOwners()
         thread.start();
         waitFlag(g_hookArrived, MonoTime.currTime + 15.seconds,
             "copied retire did not reach boundary");
+        BoundaryMessage rejected;
+        initializeBoundaryMessage(rejected);
+        check(copy.handle.wake() == ActorWakeResult.closed
+            && copy.handle.send(&rejected.node) == ActorSendResult.closed
+            && rejected.node.available,
+            "closing idle lifecycle rejects wake and new sender without mutation");
         check(copy.reclaim() == ActorReclaimResult.busy,
             "retirement pin blocks copied reclaim");
         auto competing = copy.requestRetire();

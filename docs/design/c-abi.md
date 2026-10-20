@@ -485,8 +485,9 @@ so fabricated handle pointers are invalid accesses.
 The shared D implementation reserves lifecycle phase 6 for reclaiming and flag
 0x40 for an exclusive retirement-operation pin. Lifecycle rebuilds preserve
 the pin until the requesting call releases it. The request fuses its mark and pin
-into one CAS before closing admission. Idle retirement's exact-word terminal CAS
-also releases the pin as its final slot access; scheduled/running paths use a
+into one CAS before closing admission. Idle retirement's terminal release store
+(checked by an exact-word CAS in debug builds) also releases the pin as its final
+slot access; scheduled/running paths use a
 separate final unpin. Contention
 returns `AF_ACTOR_RETIRE_BUSY`. Reclaim requires retired, no operation pin and
 no wave membership, then exclusively claims the generation before accessing or
@@ -516,8 +517,10 @@ prefix and `AF_OK`, `AF_FULL`, `AF_ALLOCATION_FAILED`, or
 actions. The suffix remains empty; advance spans and the initializer's
 `first_index` when retrying.
 
-One free-slot gate acquisition detaches an available prefix into a private chain.
-Allocations and initializers run outside it. A failed creation returns the unused
+Free-slot gate acquisitions detach at most 64 slots each into a private chain.
+Other creators and reclaimers may run between chunks. The entire available
+prefix is reserved before allocations or initializers run, outside the gate.
+A failed creation returns the unused
 chain under one gate acquisition. Reservations consume capacity and prevent
 runtime/host destruction before an owner is returned. `af_actor_runtime_live`
 counts occupied capacity, including the whole reserved prefix, through successful

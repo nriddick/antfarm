@@ -65,6 +65,9 @@ is reassessed holistically in dedicated sessions.
   idle release/dispose operation and D batch creation as separate API changes,
   with explicit busy/partial-result contracts and matched measurements. Preserve
   copied-owner reclamation arbitration and account for unresolved gate limits.
+  Batch reservation now limits each gate hold to 64 slots. Evaluate a contiguous
+  free-index stack only with matched large-batch contention measurements; it
+  would change slot metadata and runtime allocation, beyond this bounded-walk fix.
 
 - Revise PERFORMANCE.md in a dedicated performance session, including
   tail-latency rows at chunk 2 and 4.

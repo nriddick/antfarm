@@ -7,7 +7,9 @@ proceed on other threads.
 
 Coverage includes:
 
-- copied-owner retirement pauses before gate close, terminal CAS and final unpin;
+- copied-owner retirement pauses before gate close, terminal publication and final unpin;
+- a 4,097-slot reservation pauses after its first 64-slot chunk, lets a remote
+  reclaimer finish, and checks per-chunk occupancy and complete rollback;
 - exclusive reclaim races paused before and after the claim, including immediate
   slot reuse while the losing old-generation CAS is suspended (`--owners`);
 
@@ -34,7 +36,7 @@ Coverage includes:
   that the old wave finishes its link writes before releasing the lifetime pin;
 - a late accepted sender queuing work between retirement's initial idle
   observation and its submission-gate join, proving the lifecycle is rechecked
-  before the exact-word idle retirement CAS;
+  before idle terminal publication (release store, debug CAS tripwire);
 - F4b public cancel-mode retirement: a 32-node backlog cancelled in one
   `cancelling` activation with every sender reading `cancelled` after
   `available`, a drain-mode control on the identical backlog that completes
@@ -150,6 +152,7 @@ The two submission-underflow calls are listed separately.
 | `antfarm/actors/actor.d:1404` | `running actor lost generation during self-retirement` | Unreachable: Running ownership pins the generation until callback exit. Would need lifecycle corruption during a callback. |
 | `antfarm/actors/actor.d:1489` | `reclaim actor with live inbox or submission` | Unreachable: RETIRED requires an empty inbox and closed, joined submission gate. Would need a retired-slot inbox/gate corruption seam. |
 | `antfarm/actors/actor.d:1652` | `idle actor retirement with live inbox` | Debug-only, unreachable: The joined closed gate and stable idle lifecycle prove inbox emptiness. Would need inbox corruption after the join; no public probe. |
+| `antfarm/actors/actor.d:1844` | `idle actor retirement lost exclusive lifecycle` | Debug-only sole-writer tripwire: the operation pin, joined sender gate and stable idle word exclude other writers. Requires lifecycle corruption or a future writer violating that proof; release uses a store. |
 | `antfarm/actors/actor.d:1735` | `actor inbox submission count wrap` | Unreachable: No feasible public probe can hold 2^63−1 simultaneous reservations; existing hooks only pause operations. Would need a submission-count preset seam. |
 | `antfarm/actors/actor.d:1752` | `actor inbox submission underflow` | Unreachable: Each successful reservation is released exactly once, including failed confirmation. Would need a gate-count corruption seam or private release entry point. |
 | `antfarm/actors/actor.d:1763` | `actor inbox submission underflow` | Unreachable: Each successful reservation is released exactly once, including failed confirmation. Would need a gate-count corruption seam or private release entry point. |

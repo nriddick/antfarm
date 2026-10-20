@@ -371,7 +371,7 @@ alone. The seven rebuild sites are:
 The other writes either OR bits into the observed word (retirement mark,
 `PENDING`), start a fresh generation, or publish `RETIRED`/`VACANT`, which clear
 both mode bits at retirement. Callback retirement preserves `OWNER_OP`; only
-the external idle driver releases its own pin in that terminal CAS. A wave
+the external idle driver releases its own pin in that terminal publication. A wave
 reservation CASes from the exact bare `IDLE` word, so it never
 succeeds over a mode bit or owner-operation pin. However, a cancel accepted between a wave's
 `IDLE -> SCHEDULED` reservation and its `Wowner` publication must survive that
@@ -406,7 +406,7 @@ whose `G` reservation won before `CLOSED`. A closing actor may continue through
 | Submission release to closing actor | An accepted sender enqueues and signals before release-decrementing the reservation count in `G`. | Closing entry/exit acquire-loads `G`; it may publish `RETIRED` only after observing `CLOSED`, count zero, `I` empty, and `C` empty. | All accepted send publication and signalling happens before final retirement. |
 | External retirement to callback | `requestRetire` uses an `acq_rel` CAS to set `RETIRE` on `L` and closes `G`. | Entry or exit reloads/acquires `L`; `ActorContext.closing` also acquire-loads it. | Ordinary admission is closed; callbacks may still run to drain previously accepted inbox nodes. |
 | Cancel request to callback | `requestRetire(cancel)` or escalation sets `RETIRE \| CANCEL` with an `acq_rel` CAS on `L`, then closes `G` and drives retirement. | Every nonterminal rebuild copies the mode bits. An entry CAS ordered after the request carries `CANCEL` into `RUNNING`; otherwise the exit CAS reloads it and schedules the next activation. `ActorContext.cancelling` acquire-loads `L`. | A flag only, no data. A handler activated after the request observes `cancelling` and may `cancelInbox`. Retirement with an empty inbox and a drained gate needs no activation. |
-| Retirement publication to owner | Callback retirement uses `L.CAS(acq_rel, ... -> RETIRED)`; idle external close CASes the exact joined word to `RETIRED`, releasing its own `OWNER_OP` as the final slot access. | `ActorOwner.retired` acquire-loads `L`; reclaim claims `RETIRED -> RECLAIMING` with an acquire/release CAS after the operation pin clears. | Completion of the user dispatch and all actor-state writes. |
+| Retirement publication to owner | Callback retirement uses `L.CAS(acq_rel, ... -> RETIRED)`; idle external close release-stores `RETIRED` after joining senders and proving sole-writer ownership, releasing its own `OWNER_OP` as the final slot access. Debug builds check the exact joined word with a CAS. | `ActorOwner.retired` acquire-loads `L`; reclaim claims `RETIRED -> RECLAIMING` with an acquire/release CAS after the operation pin clears. | Completion of the user dispatch and all actor-state writes. |
 | Reclamation to slot reuse | Reclaimer clears slot fields, deallocates state, then publishes `VACANT` and returns the slot through `Fgate`. | Creator acquires the free-slot gate and the `VACANT` lifecycle before incrementing the generation. | Completion of old-state teardown before new slot initialization. |
 | Stale handle to reused slot | Every handle RMW compares the generation as part of the same `L` value it would modify. | A mismatch returns `staleHandle`; there is no state acquisition. | Nothing: an old generation cannot schedule or borrow the new state. |
 
@@ -544,16 +544,32 @@ The winner closes the untagged submission gate and drives retirement while
 retaining its exclusive pin. For an idle actor, the driver acquire-loads the
 closed gate with zero accepted senders, then rechecks `L`. An accepted sender
 may have queued an activation between the initial idle observation and dropping
-its reservation. The terminal acquire/release CAS uses that exact joined word
-and writes `RETIRED` **without** `OWNER_OP`. It is the call's final slot access:
+its reservation. If the recheck differs, the driver reloads and retries.
+After an unchanged idle recheck, this call is the sole remaining writer of `L`:
+
+- `OWNER_OP` makes other owner requests return busy and prevents reclaim.
+- `RETIRE` makes ordinary wakes return closed before their CAS.
+- Every accepted sender signals before releasing its reservation. Acquiring
+  closed `G` with count zero joins those signals; no later sender can enter.
+- Wave admission CASes the bare idle word, which these flags invalidate.
+  Wave cancellation and dispatch exit write `L` only from scheduled;
+  membership release does not write `L`.
+- Autonomous entry requires scheduled; callback exits and callback
+  self-retirement require running.
+
+The joined lifecycle acquire supplies the prior actor writes. A release store
+therefore writes `RETIRED` **without** `OWNER_OP`, and pairs with the reclaimer's
+acquire. Under `version(assert)` an acquire/release CAS against the exact joined
+word checks this sole-writer invariant and fatals on failure; failure is not a
+retryable state. Both forms are the call's final slot access:
 the driver reports that it released the pin, and the caller skips its unpin.
-Failure reloads and retries. On scheduled/running paths a separate final RMW
+On scheduled/running paths a separate final RMW
 clears the pin; a callback retiring meanwhile must retain it.
 
 A delayed retirement call therefore cannot overwrite another transition, and
 the pin prevents reclaim/reuse before its untagged gate close, debug inbox reads
 and final transition. A terminal CAS alone would not protect those earlier
-accesses. Deterministic tests pause after the idle terminal CAS and reclaim/reuse
+accesses. Deterministic tests pause after idle terminal publication and reclaim/reuse
 before the request returns; another test lets a running callback publish retired
 while the external call is paused before unpin and verifies reclaim stays busy.
 
@@ -575,13 +591,20 @@ extend the lifetime of the runtime's slot array.
 Vacant slots form an intrusive free list protected by `Fgate` (acquire CAS,
 release store, `pause` while contended), avoiding pointer ABA across reuse.
 Scalar creation detaches one slot; batch creation detaches an available prefix
-under one gate acquisition. That same critical section adds the detached prefix
-to `Lc` before any allocation or initializer. Successful construction leaves the
-count unchanged. Failure returns the unused suffix and subtracts its count under
+in chunks of at most 64 slots per gate acquisition. Each critical section adds
+its detached chunk to `Lc` before unlocking. Detached links belong exclusively
+to the creator, which joins the chunks outside the gate. Other creators and
+reclaimers may run between chunks; admission ends at the requested count or an
+observed short/empty chunk. All admission still finishes before any allocation
+or initializer. Successful construction leaves the count unchanged.
+Failure returns the unused suffix and subtracts its count under
 one gate acquisition, retaining any advanced generation (even a failed initializer
 burns one generation). Destructors, allocators and initializers run outside the
-gate. Batch list traversal is proportional to the admitted prefix; it never
-scans occupied slots.
+gate. Total batch traversal is proportional to the admitted prefix; each hold
+walks at most 64 links and never scans occupied slots. This bounds work under
+the gate, not wall-clock latency or fairness of reacquisition. A deterministic
+test pauses after the first chunk and requires a remote reclaimer to finish,
+then checks occupancy, the returned slot's admission, and whole-chain rollback.
 
 Copy and initializer construction write directly into the final allocation.
 The kind pointer, state and metadata precede the idle release; a callback's

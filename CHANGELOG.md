@@ -6,6 +6,11 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.0 — unreleased
 
+- Idle public-actor retirement publishes with a release store after joining
+  senders and proving exclusive lifecycle ownership; debug builds retain a CAS
+  tripwire. Batch creation detaches at most 64 free slots per lock hold, allowing
+  reclaimers to interleave before construction begins.
+
 - Added runtime-free private actor C exports in `antfarm_private.h`: tracked
   roots, cancellation/deadlines and outcomes, parent-owned cohorts, aligned
   result ports, subset waves, continuations, and per-object or slab state.
