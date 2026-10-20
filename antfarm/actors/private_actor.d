@@ -166,6 +166,9 @@ enum PrivateSpawnResult : ubyte
     waveActive,
     /// The creating context is retiring and accepts no new members.
     retiring,
+    /// An erased (C ABI) initializer reported failure. Typed spawn never
+    /// returns it.
+    initializerFailed,
 }
 
 /// Typed start outcomes for child waves; none is fatal. A rejected start
@@ -2579,8 +2582,7 @@ ErasedRootPark* erasedRootCreate(AntFarm* farm, size_t capacity, PrivateRootOpti
     }
     return park;
 }
-// Return values 0..4 match PrivateSpawnResult; 5 is initializer failure.
-uint erasedRootSpawn(ErasedRootPark* park, const(void)* initial,
+PrivateSpawnResult erasedRootSpawn(ErasedRootPark* park, const(void)* initial,
     ErasedPrivateInitializer initialize, void* user, size_t index,
     PrivateRootHandle* handle, long deadline) nothrow @nogc @system
 {
@@ -2595,7 +2597,7 @@ uint erasedRootSpawn(ErasedRootPark* park, const(void)* initial,
         if (initialize(user, state, park.layout_.bytes, index) != 0)
         {
             freeMemory(&park.service_, state, park.layout_.bytes, park.layout_.alignment);
-            return 5;
+            return PrivateSpawnResult.initializerFailed;
         }
     }
     else memcpy(state, initial, park.layout_.bytes);
@@ -2615,7 +2617,7 @@ ErasedChildPark* erasedChildCreate(ref PrivateContext context, size_t capacity,
     return ErasedChildPark.create(context.actor_, context.service, context.enclosing_ is null,
         capacity, options.batchLimit ? options.batchLimit : context.batchLimit_, options.subsets, layout);
 }
-uint erasedChildSpawn(ErasedChildPark* park, ref PrivateContext context, const(void)* initial,
+PrivateSpawnResult erasedChildSpawn(ErasedChildPark* park, ref PrivateContext context, const(void)* initial,
     ErasedPrivateInitializer initialize, void* user, size_t index) nothrow @nogc @system
 {
     park.authorized(context);
@@ -2637,7 +2639,7 @@ uint erasedChildSpawn(ErasedChildPark* park, ref PrivateContext context, const(v
         {
             if (park.layout_.slab) memset(state, 0, layout.stride);
             else freeMemory(service, state, layout.bytes, layout.alignment);
-            return 5;
+            return PrivateSpawnResult.initializerFailed;
         }
     }
     else memcpy(state, initial, layout.bytes);

@@ -2,7 +2,7 @@
 module antfarm.actors.private_cabi;
 import antfarm : fatal, inFarmCallback, rootCostHintAuto;
 import antfarm.c.core;
-import antfarm.actors.cabi : af_actor_allocator;
+import antfarm.actors.cabi : af_actor_allocator, AF_ACTOR_INITIALIZER_FAILED;
 import antfarm.actors.actor : ActorAllocator;
 import antfarm.actors.private_actor;
 import core.atomic : atomicOp;
@@ -87,17 +87,17 @@ private void enter(af_private_roots* p) nothrow @nogc @system
 private PrivateContext* context(void* c) nothrow @nogc @system { return checkedErasedContext(c); }
 private void requireChildren(af_private_children* p) nothrow @nogc @system
 { if (p is null) fatal("C ABI null private child cohort"); }
-private uint spawnStatus(uint result) nothrow @nogc @system
+private uint spawnStatus(PrivateSpawnResult result) nothrow @nogc @system
 {
-    switch (result)
+    final switch (result)
     {
-        case 0: return setError(AF_OK);
-        case 1: return setError(AF_FULL, "private park full");
-        case 2: return setError(AF_ALLOCATION_FAILED, "private state allocation failed");
-        case 3: return setError(AF_BUSY, "private child wave active");
-        case 4: return setError(AF_PRIVATE_RETIRING, "private parent retiring");
-        case 5: return setError(8, "private state initializer failed");
-        default: fatal("invalid private spawn result"); return AF_INVALID;
+        case PrivateSpawnResult.spawned: return setError(AF_OK);
+        case PrivateSpawnResult.capacityFull: return setError(AF_FULL, "private park full");
+        case PrivateSpawnResult.allocationFailed: return setError(AF_ALLOCATION_FAILED, "private state allocation failed");
+        case PrivateSpawnResult.waveActive: return setError(AF_BUSY, "private child wave active");
+        case PrivateSpawnResult.retiring: return setError(AF_PRIVATE_RETIRING, "private parent retiring");
+        case PrivateSpawnResult.initializerFailed:
+            return setError(AF_ACTOR_INITIALIZER_FAILED, "private state initializer failed");
     }
 }
 private uint startStatus(PrivateStartResult result) nothrow @nogc @system

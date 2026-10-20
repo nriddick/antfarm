@@ -35,6 +35,14 @@ typedef struct af_body {
     size_t count;
 } af_body;
 
+/* af_status registry: every value in every ABI 1 header, never reused.
+     0-7    antfarm.h          AF_OK .. AF_RUNTIME_ERROR
+     8      antfarm_actors.h   AF_ACTOR_INITIALIZER_FAILED
+     9-10   antfarm_private.h  AF_PRIVATE_RETIRING, AF_PRIVATE_EMPTY
+   New statuses take the next free value of their header's range: antfarm.h
+   64-79, antfarm_actors.h 80-95, antfarm_private.h 96-111, antfarm_runtime.h
+   112-127. 11-63 stay unassigned: actor retire (16-20) and reclaim (32-34)
+   outcomes share their return value with AF_INVALID. */
 typedef uint32_t af_status;
 enum {
     AF_OK = 0, AF_INVALID = 1, AF_FULL = 2, AF_RETRY = 3,

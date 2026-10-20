@@ -47,7 +47,7 @@ enum { AF_ACTOR_RETIRE_REQUESTED = 16, AF_ACTOR_RETIRE_WAVE_OWNED = 17,
        AF_ACTOR_ALREADY_RETIRED = 18, AF_ACTOR_STALE_OWNER = 19, AF_ACTOR_RETIRE_BUSY = 20 };
 enum { AF_ACTOR_RECLAIMED = 32, AF_ACTOR_RECLAIM_BUSY = 33, AF_ACTOR_RECLAIM_STALE = 34 };
 enum { AF_ACTOR_COMPLETED = 0, AF_ACTOR_FAILED = 1, AF_ACTOR_CANCELLED = 2 };
-enum { AF_ACTOR_INITIALIZER_FAILED = 8 };
+enum { AF_ACTOR_INITIALIZER_FAILED = 8 }; /* af_status; registry in antfarm.h */
 #define AF_ACTOR_DEFAULT_COST 4u /* claims of eight entries */
 
 /* NULL allocator uses native aligned allocation (alignments through 64).

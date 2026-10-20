@@ -157,6 +157,8 @@ requires an unsubscribed view. A token may transfer threads only after a
 quiescent ownership handoff; a view has one exclusive owner and is never walked
 concurrently or re-entered. The Farm outlives every registered token and view.
 
+`antfarm.h` registers every `af_status` value from all four headers and
+reserves a range per header for future statuses, so extensions cannot collide.
 Subscribe-full, retry, and invalid map to distinct statuses. Creation uses
 `tryCreate`: geometry/settings errors return `AF_INVALID`, allocation failure
 returns `AF_ALLOCATION_FAILED`, and mapping/mutex failures return
