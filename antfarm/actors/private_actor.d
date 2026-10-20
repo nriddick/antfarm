@@ -1524,9 +1524,16 @@ public:
                 cast(ulong) atomicLoad!(MemoryOrder.raw)(service_.farm.Cf),
                 service_.farm.smallThreshold);
         immutable n = cast(size_t) service_.farm.write(header, bodies, 1, token, avgCost, &batch.hook);
-        foreach (entry; batch.entries[n .. count])
+        if (n < count)
         {
-            appendReady(entry);
+            // Only the accepted prefix changed custody. The unaccepted
+            // suffix still has its original links: put it back at the front
+            // so quota truncation does not permute the ready/free lists.
+            // Never inspect an accepted entry after publication.
+            auto last = batch.entries[count - 1];
+            last.next = ready_;
+            ready_ = batch.entries[n];
+            if (readyTail_ is null) readyTail_ = last;
         }
         if (n == 0)
         {
