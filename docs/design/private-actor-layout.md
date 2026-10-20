@@ -147,3 +147,24 @@ restriction; `R` also remains POD.
 | Signal-only cohort size and layout | `ChildBase`, `Wave` outcome fields, `ChildBase.root` | static asserts under LDC and DMD (`make -C tests/private run run-dmd`) |
 | Slab reuse and zeroing | `retireMember`, `finish`, `count_`, `active`, `slabByteLimit` | `slab`, `slab-retire`, `slab-retain`, `slab-refill`, `slab-idle`, `slab-continuation`, `slab-cancel` |
 | State destruction order | `disposeChildren`, `retireMember`, `destroyState` | `dtor-order`, `dtor-child`, `dtor-root`, `dtor-results` |
+
+## Erased state and results for C
+
+The package-private erased instantiations use the same 40-byte Entry, Service,
+ChildBase, wave credits and root tracking records. Only their park types carry
+runtime state geometry, destructor and callback descriptors. Existing typed D
+parks do not contain those fields. C state has no per-member header or wrapper.
+
+An erased slab uses a checked stride rounded up to the state's alignment, so
+odd byte lengths still align every member. Allocation and its exact paired free
+use capacity times stride; a per-object state uses its requested byte length.
+Every consumer retirement destroys the state, clears the entire slab stride,
+and clears Entry.state before releasing its credits. Failed initialization
+clears an unadmitted slot before it can be retried. The slab reuse proof above
+therefore applies unchanged. Result storage similarly uses checked aligned
+strides and a separate lifetime; debug written bytes share its one allocation.
+The callback writes the final result slot directly and the ordinary completion
+path marks it written only on done. Zero-byte result ports allocate no array.
+
+The C descriptor and geometry contract is owned by
+[c-abi.md](c-abi.md#runtime-free-private-actors).

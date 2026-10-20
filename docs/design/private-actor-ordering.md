@@ -469,3 +469,26 @@ deadlines, a foreign canceller and `cancelAll`. The selectors are listed in
 | Child continuation custody | `childPending`, `ChildStep`, `childFlags`, `ownJoin_`, `childReturns` | `phase-e1`, `slab-continuation`, `ports-nested`, continuation C-M mutations |
 | Root join state machine | `root.pending`, `rootReturns`, `Service.childReturns`, `collectCompleted`, `pump` (states READY/WAITING/RETURN_QUEUED are descriptive) | `e1-basic`, `e1-root-ready-cas-retry`, `return-cas-retry`, `delayed-final-credit` |
 | Within-shard completion join | completion `atomicFetchAdd!(MemoryOrder.acq_rel)(*shc, runlen)` | `private_tests_tsan join-only` |
+
+## C callback instantiations
+
+The erased C instantiations retain the typed protocol's atomic orders and final
+accesses. Root/child state initialization and copied descriptors precede the
+existing ready-list/table or cohort enqueue publication. Operation pointers and
+user data are replaced only after the idle acquire and after rejecting busy,
+retiring and empty starts. They remain immutable through the wave join.
+
+A C result callback writes its exclusively assigned aligned slot before done
+returns. The existing physical-table and descendant credits carry those writes
+to idle, then to the parent's results acquire. For a continuation, interim slot
+writes are inaccessible to the parent while active; done completes the result
+before inline or deferred retirement. Slab clearing and destructors precede the
+same release chain. No new per-member RMW or fence is needed for erasure.
+
+The C native TLS context guard grants authority only around the current user
+callback; construction initializers temporarily lose it. This diagnoses misuse
+and is not a synchronization edge. The C root-handle representation copies the
+existing record/generation capability; cancellation still uses the same CAS.
+Farm/host bindings count allocated private parks, including empty ones, to
+prevent ordinary teardown while the C park exists. That count is not a join;
+park collection and external user quiescence remain required.

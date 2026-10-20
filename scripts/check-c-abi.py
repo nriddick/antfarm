@@ -111,6 +111,7 @@ def runtime_checks(compiler, build, core):
     actors = native_runtime("tests/cabi/actors_host.c", build, libraries, compiler, probe=True)
     execute(actors)
     execute(actors, "borrowed", death="cannot destroy a host-owned actor runtime")
+    execute(native_runtime("tests/cabi/private_host.c", build, libraries, compiler, probe=True))
     embedded = build / ("embedded.exe" if os.name == "nt" else "embedded")
     build_api.run([compiler, "-O", "-I.", "-Icabi/source", "-Ithreadpool/source",
                    "tests/cabi/embedded.d", *libraries,
@@ -147,9 +148,9 @@ def main():
     if args.tsan:
         build = build / "tsan"
     lib = build_api.build_core(args.compiler, build, sanitize=args.tsan)
-    audit_symbols(lib, ["antfarm.h", "antfarm_actors.h"], build, core=True)
+    audit_symbols(lib, ["antfarm.h", "antfarm_actors.h", "antfarm_private.h"], build, core=True)
     if args.tsan:
-        for source in ("core", "actors", "waves"):
+        for source in ("core", "actors", "waves", "private"):
             obj = build / (source + "-main.o")
             binary = build / (source + "-tsan")
             build_api.run([os.environ.get("CC", "cc"), "-std=c11", "-g", "-O1", "-fsanitize=thread",
@@ -209,6 +210,22 @@ def main():
             "tail-destroy": "destroy unfinished actor wave or completion callback",
         }.items():
             execute(waves, name, death=diagnostic)
+        private = native("tests/cabi/private.c", build, [lib])
+        execute(private)
+        for name, diagnostic in {
+            "farm": "destroy Farm with private parks", "live": "destroy nonempty private root park",
+            "cost": "avgCost out of range", "outcome": "untracked park",
+            "disposition": "invalid private root disposition", "fail": "private root fail: untracked park",
+            "context": "private context outside its callback", "init-context": "private context outside its callback",
+            "authority": "unauthorized context", "subset": "duplicate member",
+            "early": "wave active", "leaf": "private leaf cannot suspend",
+        }.items():
+            execute(private, name, death=diagnostic)
+        execute(native("tests/cabi/private_cpp.cpp", build, [lib]))
+        execute(native("tests/cabi/private_cpp.cpp", build, [lib], no_exceptions=True))
+        debug = build / "private-debug"
+        debug_lib = build_api.build_core(args.compiler, debug, debug=True)
+        execute(native("tests/cabi/private.c", debug, [debug_lib]))
         execute(native("tests/cabi/cpp.cpp", build, [lib]))
         execute(native("tests/cabi/cpp.cpp", build, [lib], no_exceptions=True))
         execute(native("tests/cabi/cpp_failures.cpp", build, []))
@@ -216,6 +233,7 @@ def main():
         execute(native("examples/c_core.c", build, [lib]))
         execute(native("examples/c_actors.c", build, [lib]))
         execute(native("examples/c_wave.c", build, [lib]))
+        execute(native("examples/c_private.c", build, [lib]))
         audit = build / "audit"
         audit_lib = build_api.build_core(args.compiler, audit, audit=True)
         execute(native("tests/cabi/core.c", audit, [audit_lib], defines=("AF_TEST_AUDIT",)))

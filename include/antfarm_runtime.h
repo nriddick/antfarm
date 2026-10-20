@@ -74,7 +74,9 @@ af_status af_host_state(const af_host *, uint32_t *out_state);
 
    Close also returns AF_BUSY while host-owned actors remain live or queued,
    or any wave bound to the borrowed Farm remains allocated (even if ready).
-   Destroy waves before close.
+   Destroy waves and private root parks before close. An allocated private park
+   also returns AF_BUSY, even when empty. Pump private parks explicitly with
+   their emitter token; step does not pump them.
    Successful close invalidates their runtime and submission handles.
    Close requires application completion signals for every submitted job,
    returned tokens, unsubscribed external views, and quiescent external users.
@@ -84,7 +86,7 @@ af_status af_host_state(const af_host *, uint32_t *out_state);
    diagnostic. Failed D hosts follow FarmHost's abandonment policy. */
 af_status af_host_close(af_host *);
 /* Emergency shutdown: stop/join workers, intentionally retain the Farm's ring
-   and unfinished work (including actors, waves and allocator contexts), and
+   and unfinished work (including public/private actors, waves and allocator contexts), and
    consume the host handle. All associated C handles become invalid. Return
    external tokens and views first; waves may remain and are deliberately
    leaked. Keep retained code/contexts resident. This is for unrecoverable failure. */

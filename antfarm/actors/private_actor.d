@@ -662,7 +662,26 @@ private long privateClockTicks() nothrow @nogc @system
 {
     version (AntfarmActorTestHooks)
         atomicFetchAdd!(MemoryOrder.raw)(privateClockReads, 1UL);
-    return MonoTime.currTime.ticks;
+    version (D_BetterC)
+    {
+        version (Windows)
+        {
+            import core.sys.windows.winbase : QueryPerformanceCounter;
+            import core.sys.windows.winnt : LARGE_INTEGER;
+            LARGE_INTEGER value;
+            if (!QueryPerformanceCounter(&value)) fatal("private monotonic clock failed");
+            return value.QuadPart;
+        }
+        else version (linux)
+        {
+            import core.sys.posix.time : timespec, clock_gettime, CLOCK_MONOTONIC;
+            timespec value;
+            if (clock_gettime(CLOCK_MONOTONIC, &value)) fatal("private monotonic clock failed");
+            return value.tv_sec * 1_000_000_000L + value.tv_nsec;
+        }
+        else static assert(0, "private BetterC clock requires Windows or Linux");
+    }
+    else return MonoTime.currTime.ticks;
 }
 
 // Root contexts, descendants and the emitter for roots in its trees. Every
@@ -1064,11 +1083,23 @@ private void retireMember(T, PrivateStateStorage storage)(Service* service, Entr
     nothrow @nogc @system
 {
     disposeChildren(entry);
-    destroyState!T(entry);
-    static if (storage == PrivateStateStorage.perObject)
-        freeMemory(service, entry.state, T.sizeof, T.alignof);
+    static if (is(T == PrivateErasedState))
+    {
+        auto park = ErasedChildPark.fromWave(entry.enclosing);
+        park.layout_.state.destroyState(entry.state);
+        if (park.layout_.slab)
+            memset(entry.state, 0, park.layout_.state.stride);
+        else
+            freeMemory(service, entry.state, park.layout_.state.bytes, park.layout_.state.alignment);
+    }
     else
-        memset(entry.state, 0, T.sizeof);
+    {
+        destroyState!T(entry);
+        static if (storage == PrivateStateStorage.perObject)
+            freeMemory(service, entry.state, T.sizeof, T.alignof);
+        else
+            memset(entry.state, 0, T.sizeof);
+    }
     entry.state = null;
 }
 
@@ -1172,6 +1203,13 @@ private:
     // Tracked only: terminal roots in collection order, linked through
     // Entry.next, which is unused once terminal. Emitter-local.
     Entry* outcomeHead_, outcomeTail_;
+    static if (is(T == PrivateErasedState))
+    {
+        ErasedStateLayout layout_;
+        ErasedRootOperation operation_;
+        void* user_;
+        bool consumerFree_;
+    }
     version (assert) bool entered_;
     @disable this(this);
 public:
@@ -1258,50 +1296,61 @@ public:
         return park;
     }
 
-    /// On a tracked park the root is tracked with no deadline; its handle is
-    /// discarded, but its outcome must still be taken.
-    PrivateSpawnResult spawn(T initial) nothrow @nogc @system
+    static if (!is(T == PrivateErasedState))
     {
-        return spawnRoot(initial, null, noDeadline);
-    }
+        /// On a tracked park the root is tracked with no deadline; its handle is
+        /// discarded, but its outcome must still be taken.
+        PrivateSpawnResult spawn(T initial) nothrow @nogc @system
+        {
+            return spawnRoot(initial, null, noDeadline);
+        }
 
-    /// Tracked parks only. deadline == MonoTime.max means none. A deadline is
-    /// lazy: it becomes cancellation when a check observes it (the root or a
-    /// descendant reading context.cancelled, the emitter before an initial
-    /// table in the root's tree, or cancelAll). A root that never checks and
-    /// never emits after its deadline completes normally.
-    PrivateSpawnResult spawn(T initial, out PrivateRootHandle root,
-        MonoTime deadline = MonoTime.max) nothrow @nogc @system
-    {
-        if (service_.records is null) fatal("private root spawn handle: untracked park");
-        return spawnRoot(initial, &root, deadline);
-    }
+        /// Tracked parks only. deadline == MonoTime.max means none. A deadline is
+        /// lazy: it becomes cancellation when a check observes it (the root or a
+        /// descendant reading context.cancelled, the emitter before an initial
+        /// table in the root's tree, or cancelAll). A root that never checks and
+        /// never emits after its deadline completes normally.
+        PrivateSpawnResult spawn(T initial, out PrivateRootHandle root,
+            MonoTime deadline = MonoTime.max) nothrow @nogc @system
+        {
+            if (service_.records is null) fatal("private root spawn handle: untracked park");
+            return spawnRoot(initial, &root, deadline);
+        }
 
+    private:
+        PrivateSpawnResult spawnRoot(ref T initial, PrivateRootHandle* root, MonoTime deadline)
+            nothrow @nogc @system
+        {
+            static assert(stateAllowed!T, "private actor state: struct/scalar with nothrow @nogc destructor");
+            enter();
+            scope(exit) { version (assert) entered_ = false; }
+            static if (hasElaborateDestructor!T)
+                bool spawned;
+            scope(exit)
+            {
+                static if (hasElaborateDestructor!T)
+                    // object.destroy is exactly-once; core.lifetime.move of an
+                    // over-aligned T runs the destructor during the move on DMD.
+                    if (!spawned) .destroy(initial);
+            }
+            if (free_ is null) return PrivateSpawnResult.capacityFull;
+            auto state = service_.allocator.allocate(service_.allocator.context, T.sizeof, T.alignof);
+            if (state is null) return PrivateSpawnResult.allocationFailed;
+            static if (__traits(isPOD, T))
+                memcpy(state, &initial, T.sizeof);
+            else
+                moveEmplace(initial, *cast(T*) state);
+            static if (hasElaborateDestructor!T)
+                spawned = true;
+            return admitRoot(state, root, deadline);
+        }
+
+    } // typed construction; erased construction initializes final storage directly
 private:
-    PrivateSpawnResult spawnRoot(ref T initial, PrivateRootHandle* root, MonoTime deadline)
+    pragma(inline, true)
+    PrivateSpawnResult admitRoot(Deadline)(void* state, PrivateRootHandle* root, Deadline deadline)
         nothrow @nogc @system
     {
-        static assert(stateAllowed!T, "private actor state: struct/scalar with nothrow @nogc destructor");
-        enter();
-        scope(exit) { version (assert) entered_ = false; }
-        static if (hasElaborateDestructor!T)
-            bool spawned;
-        scope(exit)
-        {
-            static if (hasElaborateDestructor!T)
-                // object.destroy is exactly-once; core.lifetime.move of an
-                // over-aligned T runs the destructor during the move on DMD.
-                if (!spawned) .destroy(initial);
-        }
-        if (free_ is null) return PrivateSpawnResult.capacityFull;
-        auto state = service_.allocator.allocate(service_.allocator.context, T.sizeof, T.alignof);
-        if (state is null) return PrivateSpawnResult.allocationFailed;
-        static if (__traits(isPOD, T))
-            memcpy(state, &initial, T.sizeof);
-        else
-            moveEmplace(initial, *cast(T*) state);
-        static if (hasElaborateDestructor!T)
-            spawned = true;
         auto entry = free_;
         free_ = entry.next;
         entry.state = state;
@@ -1323,12 +1372,20 @@ private:
     // cancellers, which read only control. Out of line: untracked spawn keeps
     // its original shape.
     pragma(inline, false)
-    void trackRoot(Entry* entry, PrivateRootHandle* root, MonoTime deadline) nothrow @nogc @system
+    void trackRoot(Deadline)(Entry* entry, PrivateRootHandle* root, Deadline deadline) nothrow @nogc @system
     {
         auto record = rootRecord(&service_, entry);
         immutable generation = controlGeneration(atomicLoad!(MemoryOrder.raw)(record.control));
-        immutable armed = deadline != noDeadline;
-        record.deadline = deadline.ticks;
+        static if (is(Deadline == long))
+        {
+            immutable armed = deadline != long.max;
+            record.deadline = deadline;
+        }
+        else
+        {
+            immutable armed = deadline != noDeadline;
+            record.deadline = deadline.ticks;
+        }
         record.failed = false;
         record.failureCode = 0;
         atomicStore!(MemoryOrder.rel)(record.control, generation << controlGenerationShift
@@ -1412,7 +1469,12 @@ private:
     // root keeps its slot, and its place in live, until takeOutcome.
     void reclaim(Entry* entry) nothrow @nogc @system
     {
-        static if (reclamation == PrivateRootReclamation.emitter)
+        static if (is(T == PrivateErasedState))
+        {
+            if (!consumerFree_)
+                freeMemory(&service_, entry.state, layout_.bytes, layout_.alignment);
+        }
+        else static if (reclamation == PrivateRootReclamation.emitter)
             freeMemory(&service_, entry.state, T.sizeof, T.alignof);
         entry.state = null;
         if (service_.records !is null)
@@ -1669,9 +1731,19 @@ private:
         if (disposition == PrivateRootDisposition.finish)
         {
             disposeChildren(entry);
-            destroyState!T(entry);
-            static if (reclamation == PrivateRootReclamation.consumer)
-                freeMemory(service, entry.state, T.sizeof, T.alignof);
+            static if (is(T == PrivateErasedState))
+            {
+                auto park = cast(PrivateRootPark*) service;
+                park.layout_.destroyState(entry.state);
+                if (park.consumerFree_)
+                    freeMemory(service, entry.state, park.layout_.bytes, park.layout_.alignment);
+            }
+            else
+            {
+                destroyState!T(entry);
+                static if (reclamation == PrivateRootReclamation.consumer)
+                    freeMemory(service, entry.state, T.sizeof, T.alignof);
+            }
         }
         return;
     }
@@ -1749,6 +1821,7 @@ private struct ResumeBodies
 ///     docs/guide/private-results-and-waits.md (results, subsets, folds)
 struct PrivateChildPark(T, R = void, PrivateStateStorage storage = PrivateStateStorage.perObject)
 {
+    private enum erased = is(T == PrivateErasedState);
     /// Internal: this cohort has a non-void result port.
     enum hasResults = !is(R == void);
     /// Internal: this cohort reserves the state slab at create.
@@ -1775,18 +1848,36 @@ private:
     uint* sel_;
     size_t k_;
     Callback header_;
+    static if (erased)
+    {
+        ErasedCohortLayout layout_;
+        ErasedChildOperation operation_;
+        void* user_;
+    }
     static if (hasResults)
     {
         R* results_;         // capacity_ slots, in participant order
         size_t resultCount_; // members in the last nonempty wave; parent-only
-        version (assert) enum resultBytesPerMember = R.sizeof + 1;
-        else enum resultBytesPerMember = R.sizeof;
+        static if (erased)
+        {
+            @property size_t resultBytesPerMember() const nothrow @nogc
+            {
+                version (assert) return layout_.resultStride + 1;
+                else return layout_.resultStride;
+            }
+        }
+        else
+        {
+            version (assert) enum resultBytesPerMember = R.sizeof + 1;
+            else enum resultBytesPerMember = R.sizeof;
+        }
 
         version (assert)
         {
             ubyte* resultWritten() nothrow @nogc @system
             {
-                return cast(ubyte*) (results_ + capacity_);
+                static if (erased) return cast(ubyte*) results_ + capacity_ * layout_.resultStride;
+                else return cast(ubyte*) (results_ + capacity_);
             }
             void checkResultsWritten() nothrow @nogc @system
             {
@@ -1807,16 +1898,16 @@ private:
                 if (resultWritten[slot] != 0) fatal("private child result: slot written twice");
                 resultWritten[slot] = 1;
             }
-            results_[slot] = value;
+            static if (!erased) results_[slot] = value;
         }
     }
     // capacity_ * T.sizeof bytes at T.alignof; slot i belongs to entries_[i].
     // Last, so the perObject layout is the unchanged prefix.
-    static if (slab)
+    static if (slab || erased)
         void* slab_;
     static assert(base_.offsetof == 0,
         "PrivateChildPark.fromWave requires base_ at offset zero");
-    version (D_LP64)
+    static if (!erased) version (D_LP64)
     {
         static if (slab)
             static assert(slab_.offsetof == PrivateChildPark!(T, R).sizeof
@@ -1829,23 +1920,36 @@ private:
     @disable this(this);
 
     // A cohortSlab caller (createChildren) has already checked capacity *
-    // T.sizeof against overflow and the cap; the signature stays the
-    // perObject one so the default path's code is unchanged.
-    static PrivateChildPark* create(Entry* parent, Service* service, bool parentIsRoot,
-        size_t capacity, size_t batchLimit, bool subsets = false) nothrow @nogc @system
+    // T.sizeof against overflow and the cap. Only the erased instantiation
+    // receives a runtime layout argument.
+    static PrivateChildPark* create(Args...)(Entry* parent, Service* service, bool parentIsRoot,
+        size_t capacity, size_t batchLimit, bool subsets = false, Args args) nothrow @nogc @system
     {
+        static if (erased)
+        {
+            static assert(Args.length == 1);
+            auto erasedLayout = args[0];
+        }
+        else static assert(Args.length == 0);
         static assert(stateAllowed!T, "private actor state: struct/scalar with nothrow @nogc destructor");
         if (capacity == 0 || capacity > size_t.max / Entry.sizeof) return null;
         if (subsets && capacity > uint.max) return null;
-        static if (hasResults)
+        static if (hasResults && !erased)
             if (capacity > size_t.max / resultBytesPerMember) return null;
         auto park = cast(PrivateChildPark*) allocateZero(service, PrivateChildPark.sizeof, PrivateChildPark.alignof);
         if (park is null) return null;
+        static if (erased) park.layout_ = erasedLayout;
         // Zeroed fields record the acquired prefix. Short-circuit after the
         // first failure, then unwind that prefix once, in reverse order.
         bool acquired = (park.entries_ = cast(Entry*) allocateZero(service,
             capacity * Entry.sizeof, Entry.alignof)) !is null;
-        static if (hasResults)
+        static if (erased)
+        {
+            if (erasedLayout.resultBytes)
+                acquired = acquired && (park.results_ = cast(R*) allocateZero(service,
+                    capacity * park.resultBytesPerMember, erasedLayout.resultAlignment)) !is null;
+        }
+        else static if (hasResults)
             acquired = acquired && (park.results_ = cast(R*) allocateZero(service,
                 capacity * resultBytesPerMember, R.alignof)) !is null;
         if (subsets)
@@ -1853,15 +1957,25 @@ private:
                 capacity * 2 * uint.sizeof, uint.alignof)) !is null;
         // Zeroed before publication: a rooted slab is scanned whole,
         // including slots that have not been spawned.
-        static if (slab)
+        static if (erased)
+        {
+            if (erasedLayout.slab)
+                acquired = acquired && (park.slab_ = allocateZero(service,
+                    capacity * erasedLayout.state.stride, erasedLayout.state.alignment)) !is null;
+        }
+        else static if (slab)
             acquired = acquired && (park.slab_ = allocateZero(service,
                 capacity * T.sizeof, T.alignof)) !is null;
         if (!acquired)
         {
-            static if (slab)
+            static if (erased)
+                freeMemory(service, park.slab_, capacity * erasedLayout.state.stride, erasedLayout.state.alignment);
+            else static if (slab)
                 freeMemory(service, park.slab_, capacity * T.sizeof, T.alignof);
             freeMemory(service, park.sel_, capacity * 2 * uint.sizeof, uint.alignof);
-            static if (hasResults)
+            static if (erased)
+                freeMemory(service, park.results_, capacity * park.resultBytesPerMember, erasedLayout.resultAlignment);
+            else static if (hasResults)
                 freeMemory(service, park.results_, capacity * resultBytesPerMember, R.alignof);
             freeMemory(service, park.entries_, capacity * Entry.sizeof, Entry.alignof);
             freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
@@ -2023,8 +2137,9 @@ public:
         resetOutcome(count_);
         static if (hasResults)
         {
-            resultCount_ = producesResults ? count_ : 0;
-            version (assert) memset(resultWritten, 0, resultCount_);
+            static if (erased) resultCount_ = layout_.resultBytes ? count_ : 0;
+            else resultCount_ = producesResults ? count_ : 0;
+            version (assert) if (resultCount_) memset(resultWritten, 0, resultCount_);
         }
         header_ = Callback.init;
 
@@ -2062,8 +2177,9 @@ public:
         resetOutcome(k_);
         static if (hasResults)
         {
-            resultCount_ = producesResults ? k_ : 0;
-            version (assert) memset(resultWritten, 0, resultCount_);
+            static if (erased) resultCount_ = layout_.resultBytes ? k_ : 0;
+            else resultCount_ = producesResults ? k_ : 0;
+            version (assert) if (resultCount_) memset(resultWritten, 0, resultCount_);
         }
         header_ = Callback.init;
 
@@ -2269,7 +2385,14 @@ private:
                 if (disposition == PrivateChildDisposition.done)
                 {
                     static if (kind == OpKind.resultContinuation)
-                        park.writeResult(park.childResultSlot!subset(entry), step.value_);
+                    {
+                        static if (erased)
+                        {
+                            if (park.layout_.resultBytes)
+                                park.writeResult(park.childResultSlot!subset(entry), step.value_);
+                        }
+                        else park.writeResult(park.childResultSlot!subset(entry), step.value_);
+                    }
                     if (atomicLoad!(MemoryOrder.acq)(entry.childPending) == 1)
                         goto complete;
                     next = retiring ? ChildStep.doneRetire : ChildStep.done;
@@ -2286,7 +2409,16 @@ private:
                     actorTestPoint(ActorTestPoint.privateChildCustodyAfterRelease, null);
                 return; // completion now belongs to the last childPending releaser
             }
-            else park.writeResult(park.childResultSlot!subset(entry), operation(borrow, context));
+            else
+            {
+                auto result = operation(borrow, context);
+                static if (erased)
+                {
+                    if (park.layout_.resultBytes)
+                        park.writeResult(park.childResultSlot!subset(entry), result);
+                }
+                else park.writeResult(park.childResultSlot!subset(entry), result);
+            }
         }
     complete:
         // Immediate completion and joined cleanup retain custody here.
@@ -2330,7 +2462,11 @@ private:
         auto service = base.service;
         foreach (ref entry; park.entries_[0 .. park.count_])
         {
-            static if (__traits(isPOD, T))
+            static if (erased)
+            {
+                if (entry.state !is null) retireMember!(T, storage)(service, &entry);
+            }
+            else static if (__traits(isPOD, T))
             {
                 disposeChildren(&entry);
                 static if (!slab)
@@ -2340,15 +2476,241 @@ private:
                 retireMember!(T, storage)(service, &entry);
         }
         // Once, after every retained destructor and descendant disposal.
-        static if (slab)
+        static if (erased)
+            freeMemory(service, park.slab_, park.capacity_ * park.layout_.state.stride, park.layout_.state.alignment);
+        else static if (slab)
             freeMemory(service, park.slab_, park.capacity_ * T.sizeof, T.alignof);
         freeMemory(service, park.entries_, park.capacity_ * Entry.sizeof, Entry.alignof);
-        static if (hasResults)
+        static if (erased)
+            freeMemory(service, park.results_, park.capacity_ * park.resultBytesPerMember, park.layout_.resultAlignment);
+        else static if (hasResults)
             freeMemory(service, park.results_, park.capacity_ * resultBytesPerMember, R.alignof);
         if (park.sel_ !is null)
             freeMemory(service, park.sel_, park.capacity_ * 2 * uint.sizeof, uint.alignof);
         freeMemory(service, park, PrivateChildPark.sizeof, PrivateChildPark.alignof);
     }
+}
+
+// ==== Section: package-private erased instantiations for the C ABI ====
+// These descriptors belong to parks, never to individual states. The typed D
+// layouts and dispatch instantiations do not contain them.
+package(antfarm) {
+extern(C) alias ErasedPrivateDestructor = void function(void*, void*, size_t) nothrow @nogc @system;
+extern(C) alias ErasedPrivateInitializer = uint function(void*, void*, size_t, size_t) nothrow @nogc @system;
+extern(C) alias ErasedRootOperation = uint function(void*, void*, size_t, void*) nothrow @nogc @system;
+extern(C) alias ErasedChildOperation = uint function(void*, void*, size_t, void*, size_t, void*) nothrow @nogc @system;
+struct ErasedStateLayout
+{
+    size_t bytes, alignment, stride;
+    ErasedPrivateDestructor destroy;
+    void* user;
+    void destroyState(void* state) nothrow @nogc @system
+    { if (destroy !is null) destroy(user, state, bytes); }
+}
+struct ErasedCohortLayout
+{
+    ErasedStateLayout state;
+    size_t resultBytes, resultAlignment, resultStride;
+    bool slab;
+}
+alias ErasedRootPark = PrivateRootPark!(PrivateErasedState, erasedRootStep);
+alias ErasedChildPark = PrivateChildPark!(PrivateErasedState, PrivateErasedResult);
+
+PrivateContext* checkedErasedContext(void* context) nothrow @nogc @system
+{
+    if (context is null || context !is activeErasedContext)
+        fatal("C ABI private context outside its callback");
+    return cast(PrivateContext*) context;
+}
+bool erasedContextRetiring(ref PrivateContext context) nothrow @nogc @system
+{ return context.retiring_; }
+long erasedPrivateClockNow() nothrow @nogc @system { return privateClockTicks(); }
+long erasedPrivateClockFrequency() nothrow @nogc @system
+{
+    version (D_BetterC)
+    {
+        version (Windows)
+        {
+            import core.sys.windows.winbase : QueryPerformanceFrequency;
+            import core.sys.windows.winnt : LARGE_INTEGER;
+            LARGE_INTEGER frequency;
+            if (!QueryPerformanceFrequency(&frequency)) fatal("private monotonic clock failed");
+            return frequency.QuadPart;
+        }
+        else return 1_000_000_000L;
+    }
+    else return MonoTime.ticksPerSecond;
+}
+bool erasedRootGeometry(size_t capacity, size_t limit, bool tracking) nothrow @nogc
+{
+    if (!capacity || !limit || capacity > size_t.max / Entry.sizeof
+        || (tracking && (capacity > uint.max || capacity > size_t.max / RootRecord.sizeof))) return false;
+    auto effective = limit < capacity ? limit : capacity;
+    auto batches = (capacity - 1) / effective + 1;
+    return batches <= size_t.max / Batch.sizeof && effective <= size_t.max / batches
+        && batches * effective <= size_t.max / (Entry*).sizeof;
+}
+bool erasedChildGeometry(size_t capacity, bool subsets, ErasedCohortLayout layout) nothrow @nogc
+{
+    if (!capacity || capacity > size_t.max / Entry.sizeof || (subsets && capacity > uint.max)) return false;
+    version (assert) { if (layout.resultStride == size_t.max) return false; auto resultStride = layout.resultStride + 1; }
+    else auto resultStride = layout.resultStride;
+    return (!resultStride || capacity <= size_t.max / resultStride)
+        && (!layout.slab || capacity <= size_t.max / layout.state.stride);
+}
+ErasedRootPark* erasedRootCreate(AntFarm* farm, size_t capacity, PrivateRootOptions options,
+    ErasedStateLayout layout, ErasedRootOperation operation, void* user, bool consumerFree)
+    nothrow @nogc @system
+{
+    auto park = ErasedRootPark.create(farm, capacity, options);
+    if (park !is null)
+    {
+        park.layout_ = layout;
+        park.operation_ = operation;
+        park.user_ = user;
+        park.consumerFree_ = consumerFree;
+    }
+    return park;
+}
+// Return values 0..4 match PrivateSpawnResult; 5 is initializer failure.
+uint erasedRootSpawn(ErasedRootPark* park, const(void)* initial,
+    ErasedPrivateInitializer initialize, void* user, size_t index,
+    PrivateRootHandle* handle, long deadline) nothrow @nogc @system
+{
+    park.enter();
+    scope(exit) { version (assert) park.entered_ = false; }
+    if (park.free_ is null) return PrivateSpawnResult.capacityFull;
+    auto state = park.service_.allocator.allocate(park.service_.allocator.context,
+        park.layout_.bytes, park.layout_.alignment);
+    if (state is null) return PrivateSpawnResult.allocationFailed;
+    if (initialize !is null)
+    {
+        if (initialize(user, state, park.layout_.bytes, index) != 0)
+        {
+            freeMemory(&park.service_, state, park.layout_.bytes, park.layout_.alignment);
+            return 5;
+        }
+    }
+    else memcpy(state, initial, park.layout_.bytes);
+    return park.admitRoot(state, handle, deadline);
+}
+PrivatePumpCount erasedRootPump(ErasedRootPark* park, ref Token token, size_t limit, uint cost)
+    nothrow @nogc @system
+{
+    PrivatePumpCount result;
+    result.roots = park.pumpRoots(token, limit ? limit : park.service_.batchLimit, cost, result.tables);
+    return result;
+}
+ErasedChildPark* erasedChildCreate(ref PrivateContext context, size_t capacity,
+    PrivateCohortOptions options, ErasedCohortLayout layout) nothrow @nogc @system
+{
+    if (context.retiring_) return null;
+    return ErasedChildPark.create(context.actor_, context.service, context.enclosing_ is null,
+        capacity, options.batchLimit ? options.batchLimit : context.batchLimit_, options.subsets, layout);
+}
+uint erasedChildSpawn(ErasedChildPark* park, ref PrivateContext context, const(void)* initial,
+    ErasedPrivateInitializer initialize, void* user, size_t index) nothrow @nogc @system
+{
+    park.authorized(context);
+    if (context.retiring_) return PrivateSpawnResult.retiring;
+    if (atomicLoad!(MemoryOrder.acq)(park.base_.wave.active) != 0) return PrivateSpawnResult.waveActive;
+    if (park.count_ == park.capacity_) return PrivateSpawnResult.capacityFull;
+    auto service = park.base_.service;
+    auto layout = &park.layout_.state;
+    void* state;
+    if (park.layout_.slab) state = cast(ubyte*) park.slab_ + park.count_ * layout.stride;
+    else state = service.allocator.allocate(service.allocator.context, layout.bytes, layout.alignment);
+    if (state is null) return PrivateSpawnResult.allocationFailed;
+    if (initialize !is null)
+    {
+        auto savedContext = activeErasedContext;
+        activeErasedContext = null;
+        scope(exit) activeErasedContext = savedContext;
+        if (initialize(user, state, layout.bytes, index) != 0)
+        {
+            if (park.layout_.slab) memset(state, 0, layout.stride);
+            else freeMemory(service, state, layout.bytes, layout.alignment);
+            return 5;
+        }
+    }
+    else memcpy(state, initial, layout.bytes);
+    auto entry = &park.entries_[park.count_++];
+    entry.state = state;
+    entry.enclosing = &park.base_.wave;
+    return PrivateSpawnResult.spawned;
+}
+PrivateStartResult erasedChildStart(ErasedChildPark* park, ref PrivateContext context,
+    ErasedChildOperation operation, void* user, bool continuation, bool retire,
+    bool subset, const(uint)[] members, uint cost) nothrow @nogc @system
+{
+    park.authorized(context);
+    // Do not replace callbacks or user data on any rejected/empty start.
+    if (context.retiring_) return PrivateStartResult.retiring;
+    if (atomicLoad!(MemoryOrder.acq)(park.base_.wave.active) != 0) return PrivateStartResult.waveActive;
+    if (subset && park.sel_ is null) fatal("private child subset: storage not reserved");
+    if (subset ? members.length == 0 : park.count_ == 0) return PrivateStartResult.empty;
+    park.operation_ = operation;
+    park.user_ = user;
+    if (subset)
+        return continuation ? park.startSubset!erasedChildContinuation(context, members, cost)
+            : park.startSubset!erasedChildLeaf(context, members, cost);
+    return continuation ? park.start!erasedChildContinuation(context, retire, cost)
+        : park.start!erasedChildLeaf(context, retire, cost);
+}
+const(void)* erasedChildResults(ErasedChildPark* park, ref PrivateContext context, out size_t count)
+    nothrow @nogc @system
+{
+    park.authorized(context);
+    if (atomicLoad!(MemoryOrder.acq)(park.base_.wave.active) != 0)
+        fatal("private child results: wave active");
+    version (assert) park.checkResultsWritten();
+    count = park.resultPrefix;
+    return park.results_;
+}
+size_t erasedChildResultStride(ErasedChildPark* park) nothrow @nogc { return park.layout_.resultStride; }
+} // package(antfarm)
+
+private struct PrivateErasedState {}
+private struct PrivateErasedResult {}
+private PrivateContext* activeErasedContext; // native TLS in BetterC too
+private PrivateRootDisposition erasedRootStep(scope ref PrivateBorrow!PrivateErasedState borrow,
+    scope ref PrivateContext context) nothrow @nogc @system
+{
+    auto park = cast(ErasedRootPark*) context.service;
+    auto saved = activeErasedContext;
+    activeErasedContext = &context;
+    scope(exit) activeErasedContext = saved;
+    auto result = park.operation_(park.user_, borrow.state_, park.layout_.bytes, &context);
+    if (result > PrivateRootDisposition.finishAfterChildren) fatal("C ABI invalid private root disposition");
+    return cast(PrivateRootDisposition) result;
+}
+private uint invokeErasedChild(ref PrivateBorrow!PrivateErasedState borrow, ref PrivateContext context)
+    nothrow @nogc @system
+{
+    auto park = ErasedChildPark.fromWave(context.enclosing_);
+    auto slot = park.isSubset_ ? park.childResultSlot!true(context.actor_) : park.childResultSlot!false(context.actor_);
+    auto result = park.layout_.resultBytes ? cast(ubyte*) park.results_ + slot * park.layout_.resultStride : null;
+    auto saved = activeErasedContext;
+    activeErasedContext = &context;
+    scope(exit) activeErasedContext = saved;
+    auto disposition = park.operation_(park.user_, borrow.state_, park.layout_.state.bytes,
+        result, park.layout_.resultBytes, &context);
+    if (disposition > PrivateChildDisposition.waitChildren) fatal("C ABI invalid private child disposition");
+    return disposition;
+}
+private PrivateErasedResult erasedChildLeaf(scope ref PrivateBorrow!PrivateErasedState borrow,
+    scope ref PrivateContext context) nothrow @nogc @system
+{
+    if (invokeErasedChild(borrow, context) != PrivateChildDisposition.done)
+        fatal("C ABI private leaf cannot suspend");
+    return PrivateErasedResult.init;
+}
+private PrivateChildStep!PrivateErasedResult erasedChildContinuation(
+    scope ref PrivateBorrow!PrivateErasedState borrow, scope ref PrivateContext context) nothrow @nogc @system
+{
+    return invokeErasedChild(borrow, context) == PrivateChildDisposition.done
+        ? PrivateChildStep!PrivateErasedResult.done(PrivateErasedResult.init)
+        : PrivateChildStep!PrivateErasedResult.waitChildren();
 }
 
 version (AntfarmActorTestHooks)

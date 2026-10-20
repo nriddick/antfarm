@@ -2,7 +2,8 @@
 
 Status: implemented on `1.9.0-progress`, unreleased. The public transport is
 defined by [antfarm.h](../../include/antfarm.h), public actors in
-[antfarm_actors.h](../../include/antfarm_actors.h), the optional
+[antfarm_actors.h](../../include/antfarm_actors.h), private actors in
+[antfarm_private.h](../../include/antfarm_private.h), the optional
 [antfarm_runtime.h](../../include/antfarm_runtime.h), and the C++ ownership
 adapter [antfarm.hpp](../../include/antfarm.hpp). Ring and ownership contracts
 remain in [SPEC](../../SPEC.md). ABI 1 supports 64-bit Windows and Linux;
@@ -11,7 +12,7 @@ all exports and callbacks use C linkage.
 ## Distribution boundary
 
 - **antfarm_core**: Farm, tokens, views, publication, table hooks, public actors,
-  native actor allocation, actor waves, and fatal policy. Build with BetterC and link from a C main without druntime. Core-only
+  native actor allocation, actor waves, private roots/cohorts, and fatal policy. Build with BetterC and link from a C main without druntime. Core-only
   threads need no D initialization or attachment. The callback guard uses
   native TLS in every build. libc, platform mapping APIs, and pthread on Linux
   are ordinary native dependencies.
@@ -23,8 +24,7 @@ all exports and callbacks use C linkage.
   for their call lifetime.
 - **Public actors**: implemented in the core with native C link/run evidence.
   The optional D GC-rooted allocator is excluded from BetterC builds.
-  Waves are also runtime-free. The actor construction contract below precedes private
-  root/child exports.
+  Waves and private roots/children are also runtime-free.
 - **Fibers**: outside ABI 1. A runtime-inclusive build need not expose Fibers.
 
 The first runtime distribution includes the non-Fiber pool requested for C
@@ -422,15 +422,15 @@ The quick gate includes the core ABI alongside the existing BetterC module
 checks. Full Linux and Windows integration also covers the optional runtime.
 The full Linux gate additionally runs the native C/core, public actor and wave tests under TSan; use
 `python3 scripts/check-c-abi.py --tsan` to select it directly.
-Private roots/children, Fiber exports, shared-library packaging, and
+Fiber exports, shared-library packaging, and
 Rust/Zig ownership wrappers remain outside the shipped surface. Public actors
 can use application-supplied threads or the optional non-Fiber host.
 
 ## Actor construction and ownership
 
 ABI 1 is unreleased. The refresh replaces the earlier allocating actor interface;
-header, adapter, tests and examples use one contract. Private cohort/slab exports
-remain separate.
+header, adapter, tests and examples use one contract. Private cohorts and slabs
+use the separate header described below.
 
 ### Runtime-owned kinds and direct construction
 
@@ -568,3 +568,96 @@ results do not imply a throughput improvement. The
 and [lifecycle optimization record](../../PERFORMANCE.md#public-actor-lifecycle-optimization-190-progress)
 include the C/D matrix, allocation counts, committed-reference gates and native
 Windows comparisons, with their limits.
+
+## Runtime-free private actors
+
+[antfarm_private.h](../../include/antfarm_private.h) exports private root parks
+and parent-owned child cohorts from the same BetterC core. The
+[C example](../../examples/c_private.c) runs a slab-backed cohort, retires its
+members, and reads their joined results; it prints `private result = 30`.
+Use the native build command for `c_core.c` with this source instead.
+
+A root park copies one state descriptor (byte size, alignment and optional
+consumer-side destructor), root callback, and user pointer. Root spawn either
+copies byte-copyable state or calls an initializer in final aligned storage.
+The initializer's logical index is passed through unchanged. Failure leaves no
+admitted actor and calls no destructor: the initializer must clean its own
+partial object. There is no per-root prefix, owner wrapper, or temporary state
+allocation. One C handle and the D park metadata are allocated per park.
+
+Every park operation is single-emitter and non-reentrant, including observation.
+The emitter must keep calling `af_private_roots_pump` while roots wait on child
+work. It returns both root activations and total tables, so child-only or resume
+publication can trigger worker notification. A zero count is not a join. Root
+steps return again, finish, wait-children, or finish-after-children; the existing
+[private custody protocol](private-actor-ordering.md) determines their scheduling
+and destruction. The strict finish form rejects active descendant work.
+
+With tracking enabled, spawn may return a 16-byte cancellation handle. Copies
+may request cancellation from native threads without attachment; all cancellers
+must be joined before park destruction. Handles grant no state access or wake
+capability. Terminal roots retain capacity until the emitter takes their
+outcomes. A successful take joins the root's application writes and invalidates
+that generation's handles. Failure takes priority over cancellation. Deadlines
+use the native monotonic ticks and frequency exported by this header; they are
+lazy observations, not timers or wake sources. BetterC uses CLOCK_MONOTONIC on
+Linux and QueryPerformanceCounter on Windows, without D module initialization.
+Normal D builds retain MonoTime semantics.
+
+Only a current private callback may create child cohorts. Each cohort copies
+its state descriptor and result geometry, inherits the hierarchy's allocator,
+and belongs to that parent until automatic post-order disposal. Parents cannot
+borrow child state. Per-object storage allocates at spawn; cohort slabs reserve
+`capacity * roundUp(state_bytes, state_alignment)` bytes at creation under an
+explicit byte cap. Every slab child initializes directly in its slot. Failed
+initialization clears the slot without admitting it. Terminal retirement calls
+the destructor and clears the full stride; refill starts only after the retiring
+wave joins. The slab is freed once at cohort disposal. No per-member allocation,
+prefix, or wrapper is introduced on the slab path.
+
+A child wave chooses its callback/user pointer, cost class, retirement flag, and
+leaf or continuation mode. Leaf callbacks return done. Continuations may return
+child-wait, then run again after their descendants join; terminal continuations
+also support deferred consumer cleanup. Whole waves can retire members; subsets
+cannot. Subsets copy unique spawn indices into eagerly reserved selection
+storage and return results in selection order. Empty or rejected starts retain
+the previous operation, results and outcome. Publication allocates nothing.
+
+Result byte size zero selects a signal-only cohort. Otherwise the cohort
+reserves aligned result storage once; callbacks receive their final slot and
+must write a byte-copyable value before returning done. Result slots have no
+library destructor and cannot contain pointers into retiring child state.
+Joined results expose pointer/byte-stride/count, remain valid after terminal
+member retirement, and expire at the next nonempty start or cohort disposal.
+They may be read only within the authorized parent's callback. Cancellation
+exposes the dispatched prefix; failure counts and the first failure's code and
+participant position are available through the wave outcome. Cancellation,
+subtree cancellation and peer cancellation use the existing credit protocol;
+they do not cut a join short.
+
+Private contexts and state/result pointers cannot escape a callback. The native
+TLS context check diagnoses ordinary wrong-thread or expired-context use, but
+stack-address reuse cannot make a retained context valid. Initializers run with
+private context authority disabled. Allocator hooks and destructors must not
+re-enter the hierarchy. The callback and destructor code, users, allocator
+context and application-owned output storage must outlive their uses.
+
+Both owned Farms and borrowed host Farms accept private parks. These parks are
+application-owned: the optional host does not pump or destroy them. Pump with
+an exclusive producer token and call host wake/step on publication and retry
+polls. Drain the park (taking all tracked outcomes), join cancellers and park
+users, destroy it, and return external tokens/views before normal host close.
+An allocated private park makes host close return AF_BUSY, even when empty.
+Emergency host abandonment invalidates associated handles and retains unfinished
+hierarchies and their contexts, as it does public actors.
+
+Validation covers native C threads, both root free policies, nested results and
+continuations, subset order, truncation cleanup, signal-only cohorts, cleared
+slab reuse, all creation-allocation failure positions, failed initializers,
+stale cancellation handles, lazy deadlines and release-build contract deaths.
+C++ checks construct noncopyable objects in final storage, including 128-byte
+alignment, with exceptions enabled and disabled. The default C ABI lane runs
+both release and debug private tests; its Linux TSan lane includes native C
+private actors. Host tests use zero and two workers plus an unattached native
+emitter. Shared-library packaging, GC allocator exports and Fibers remain outside
+this ABI. These checks establish behavior, not a C/D throughput equivalence.

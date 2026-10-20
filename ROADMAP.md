@@ -40,8 +40,9 @@ is reassessed holistically in dedicated sessions.
   initialization, value owners with retirement/reclaim arbitration, strided
   batches and caller-owned inbox nodes. The
   [implemented contract](docs/design/c-abi.md#actor-construction-and-ownership)
-  defines lifetimes and partial results. Private root/child exports remain next;
-  preserve their cohort/slab advantage. The D GC-rooted adapter and Fibers stay
+  defines lifetimes and partial results. Gather production usage of private
+  root/child exports, including direct initialization and cohort slabs. The
+  D GC-rooted adapter and Fibers stay
   outside the runtime-free ABI.
 - The C wave bridge's existing typed-D `wave` path was compared at
   `d94acc1` against `be025b1` with LDC 1.42 `-O2 -release`, mimalloc 3.5.3,

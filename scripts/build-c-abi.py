@@ -7,7 +7,8 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ["antfarm/package.d", "antfarm/allocation.d", "cabi/source/antfarm/c/core.d",
-        "antfarm/actors/actor.d", "antfarm/actors/wave.d", "cabi/source/antfarm/actors/cabi.d"]
+        "antfarm/actors/actor.d", "antfarm/actors/wave.d", "cabi/source/antfarm/actors/cabi.d",
+        "antfarm/actors/private_actor.d", "cabi/source/antfarm/actors/private_cabi.d"]
 
 
 def run(command, **kwargs):
@@ -31,7 +32,7 @@ def library(build, name):
     return build / (name + ".lib" if os.name == "nt" else "lib" + name + ".a")
 
 
-def build_core(compiler, build, audit=False, sanitize=False):
+def build_core(compiler, build, audit=False, sanitize=False, debug=False):
     build.mkdir(parents=True, exist_ok=True)
     sources = list(CORE)
     flags = ["-g", "-fsanitize=thread"] if sanitize else []
@@ -42,15 +43,14 @@ def build_core(compiler, build, audit=False, sanitize=False):
     result = library(build, "antfarm_core")
     # LDC updates an existing archive in place, retaining removed source members.
     result.unlink(missing_ok=True)
-    run([compiler, "-betterC", "-O", "-release", "-I.", "-Icabi/source", "-lib",
+    run([compiler, "-betterC", *(["-g"] if debug else ["-O", "-release"]), "-I.", "-Icabi/source", "-lib",
          *flags, *sources, "-of=" + str(result)])
     return result
 
 
 def build_runtime(compiler, build):
     sources = ["cabi/source/antfarm/c/runtime.d", "antfarm/templates.d", "antfarm/parallel.d",
-               "antfarm/actors/package.d",
-               "antfarm/actors/private_actor.d"]
+               "antfarm/actors/package.d"]
     sources += [str(p.relative_to(ROOT)) for p in sorted((ROOT / "threadpool/source").rglob("*.d"))]
     result = library(build, "antfarm_runtime")
     result.unlink(missing_ok=True)

@@ -6,6 +6,15 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.0 — unreleased
 
+- Added runtime-free private actor C exports in `antfarm_private.h`: tracked
+  roots, cancellation/deadlines and outcomes, parent-owned cohorts, aligned
+  result ports, subset waves, continuations, and per-object or slab state.
+  Copy/init forms construct in final storage; descriptors live per park, with
+  no per-member prefix or wrapper. Existing private custody and join machinery
+  drives the C callbacks. Private parks may use application threads or the
+  optional host; the emitter pumps them explicitly and destroys them before
+  normal host close.
+
 - Removed MT payloads from the D core. All payloads are single-shot; independent
   entries still execute across many consumers. Removed the full ring-header
   layout, MT index, iteration/admission counters and secondary payload passes.
@@ -48,7 +57,7 @@ Older release notes are in [docs/releases/](docs/releases/):
   custom allocation, owners/handles, wake/flush, reusable inbox messages, replies,
   retirement and reclamation. The optional host now drives and owns C actors,
   joining consumers before destroying them. GC rooting remains a normal-D
-  adapter. Private actor C exports are a subsequent increment.
+  adapter.
 - Refreshed the unreleased actor C API with runtime-owned kinds, direct copy/init
   construction, optional destructors, 16-byte value owners, caller-owned inbox
   storage and strided batch/wave operations. Retirement pins and exclusive

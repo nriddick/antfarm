@@ -14,7 +14,7 @@ struct af_farm
     AntFarm* impl;
     bool owned;
     shared uint tokens, views, actorRuntimes;
-    shared size_t waves;
+    shared size_t waves, privateParks;
 }
 struct af_token { af_farm* owner; Token value; }
 struct af_view { af_farm* owner; ConsumerView value; }
@@ -172,6 +172,7 @@ void af_destroy(af_farm* f)
     if (!f.owned) fatal("C ABI cannot destroy a borrowed host Farm");
     if (atomicLoad(f.actorRuntimes)) fatal("C ABI destroy Farm with actor runtimes");
     if (atomicLoad(f.waves)) fatal("C ABI destroy Farm with actor waves");
+    if (atomicLoad(f.privateParks)) fatal("C ABI destroy Farm with private parks");
     f.impl.destroy();
     free(f);
 }

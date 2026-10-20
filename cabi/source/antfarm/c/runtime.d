@@ -292,6 +292,7 @@ uint af_host_close(af_host* h)
     if (auto status = hostControl(h)) return status;
     if (hasParticipants(h.farm)) return setError(AF_BUSY, "host has external producers or views");
     if (atomicLoad(h.farm.waves)) return setError(AF_BUSY, "host has actor waves");
+    if (atomicLoad(h.farm.privateParks)) return setError(AF_BUSY, "host has private parks");
     if (h.value.state == HostState.open)
         for (auto r = h.actors; r !is null; r = r.next)
             if (!actorRuntimeDrained(r)) return setError(AF_BUSY, "host has live or queued actors");

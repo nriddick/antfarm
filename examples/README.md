@@ -1,7 +1,7 @@
 # Examples
 
 C/C++ consumers can start with [c_core.c](c_core.c), [c_actors.c](c_actors.c),
-[c_wave.c](c_wave.c), or the non-Fiber [c_host.c](c_host.c). Their [ABI guide](../docs/design/c-abi.md#build-and-run)
+[c_wave.c](c_wave.c), [c_private.c](c_private.c), or the non-Fiber [c_host.c](c_host.c). Their [ABI guide](../docs/design/c-abi.md#build-and-run)
 owns the build and lifetime contracts. Run the C examples with
 `python examples/run_examples.py --c-abi --compiler ldc2` (or `dmd`).
 The ABI gate also builds and runs them.
