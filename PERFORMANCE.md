@@ -15,6 +15,107 @@ deliberately not committed.
 - Stable sizing formulas: [ARCHITECTURE.md](ARCHITECTURE.md#sizing-one-farm) and
   [SPEC.md](SPEC.md).
 
+## Private actor C ABI (1.9.0-progress)
+
+October 20, 2026, i7-12700H, WSL2 Linux, LDC 1.42, mimalloc 3.5.3,
+ordinary pages. Runtime candidate: `61eb23a`; baseline: `091a58f`.
+The timing-policy change is `c9754f4`. The benchmark source is identical
+across both revisions. These comparisons measure existing typed D callers of
+the shared private scheduler; they do not establish C/D throughput equivalence.
+
+The C interface keeps state descriptors on parks, with no per-actor prefix,
+child wrapper, or temporary state allocation. Copy and initializer forms write
+into final storage. Counted allocator tests confirm that slab child spawn adds
+zero allocations after cohort creation, including refill. The native C suite
+also passes with real mimalloc and cross-thread destruction/reclamation.
+
+### Six-consumer measurements
+
+At the maintainer's request, these measurements disable background-CPU sample
+exclusion and use **30 matched pairs per case** (30 baseline processes and 30
+candidate processes). `--no-background-cpu-filter` retains CPU telemetry and
+requires at least 30 pairs. Initial-load admission, affinity, timeout, valid
+benchmark output and the **−3% threshold** remain in force. The earlier filtered
+screen accepted no six-consumer pairs; its records are retained separately.
+The new policy and harness hash are recorded in the measurement metadata.
+
+16,384 actors, three-second samples, batch limit 256, controller CPU 0, consumers
+on 2,4,6,8,10,12. Positive throughput change is better. The bootstrap interval
+is descriptive, not a calibrated confidence guarantee. Five cases pass; the
+consumer-side root reclamation case is inconclusive, so the overall gate is
+inconclusive rather than a pass.
+
+| Mode | Matched pairs | Paired median throughput change | Bootstrap interval | Decision |
+| --- | ---: | ---: | --- | --- |
+| `private` | 30 | +0.43% | -0.39% to +1.66% | pass |
+| `private-remote` | 30 | -2.55% | -5.15% to +3.32% | inconclusive |
+| `private-tracked` | 30 | +0.62% | -2.38% to +3.49% | pass |
+| `tree-wait-slab` | 30 | +2.12% | +0.16% to +4.64% | pass |
+| `tree-cont-slab` | 30 | +0.58% | -0.86% to +3.90% | pass |
+| `dtor` | 30 | +0.99% | -1.11% to +3.62% | pass |
+
+The matching baseline/base control used byte-identical binaries, the same
+six-consumer placement, 30 pairs and disabled CPU filtering. Its paired median
+was +0.44%, with an interval of −1.79% to +2.87% (pass). The candidate's
+consumer-side reclamation comparison remains inconclusive.
+
+### Serial measurements
+
+Zero-consumer measurements retain the original CPU exclusion policy. The initial
+screen required five accepted pairs, with at most six attempts. Four inconclusive
+cases received the required 20-pair follow-up, with at most 24 attempts; all four
+obtained 20 accepted pairs. Their extended results replace the initial screen
+in this table. The allocator, workload, controller placement, sample duration
+and −3% threshold are the same as above.
+
+| Mode | Accepted pairs | Paired median throughput change | Bootstrap interval | Decision |
+| --- | ---: | ---: | --- | --- |
+| `private` | 20 | -0.04% | -4.24% to +4.31% | inconclusive |
+| `private-remote` | 5 | +5.10% | +0.61% to +7.45% | pass |
+| `private-tracked` | 5 | +2.85% | -1.35% to +4.73% | pass |
+| `tree-wait-slab` | 20 | -2.35% | -6.39% to -0.01% | inconclusive |
+| `tree-cont-slab` | 20 | +2.57% | -2.22% to +4.55% | pass |
+| `dtor` | 20 | +1.38% | -3.50% to +4.34% | inconclusive |
+
+Three serial cases pass and three remain inconclusive. Neither the serial nor
+the six-consumer candidate comparisons establish a regression; their combined
+result remains inconclusive. No timing waiver or C/D parity claim is made.
+
+The four serial baseline/base controls used byte-identical binaries and the
+same filtered, 20-pair policy. All remained inconclusive, demonstrating that
+this host can cross the decision boundary even with unchanged code. The controls
+limit confidence in small differences; they do not reclassify candidate results.
+
+| Control mode | Accepted pairs | Paired median change | Bootstrap interval | Decision |
+| --- | ---: | ---: | --- | --- |
+| `private` | 20 | +2.90% | -4.85% to +10.10% | inconclusive |
+| `tree-wait-slab` | 20 | +1.19% | -5.70% to +6.67% | inconclusive |
+| `tree-cont-slab` | 20 | -0.72% | -3.40% to +0.45% | inconclusive |
+| `dtor` | 20 | -0.76% | -5.57% to +6.29% | inconclusive |
+
+### Correctness and allocation evidence
+
+The full Linux `make check` passed on the final runtime, including native C/C++
+ABI checks, both D compilers, release contract deaths, sanitizer lanes, private
+actor regressions and executable examples. Conservative collective TSan use was
+300.5 seconds of the 600-second budget. Hardware-dependent multi-LLC fiber cases
+were skipped on this host; the terminal Life interface was compiled only.
+
+Native Windows C ABI/private-actor checks pass with LDC and DMD. C++ tests cover
+noncopyable placement construction, 128-byte state alignment, and exceptions
+both enabled and disabled. Host integration passes with zero and two workers
+and an unattached native emitter. Whole-archive native C linking and symbol
+inspection confirm that private actors add no druntime dependency to the core.
+
+Tests cover nested result joins, continuation cleanup, subset order, signal-only
+cohorts, failure/cancellation/deadline outcomes, stale handles, slab reuse and
+allocation/initializer rollback. A targeted mutation that omitted failed-slab
+initializer clearing was detected by the native C test. The timing harness's
+90-test suite also passes on Linux and Windows, with platform-specific skips.
+
+Raw runs, build logs, hashes, commands and validation records are archived locally
+in `.build/private-cabi-evidence-2026-10-20.zip`; generated evidence is not committed.
+
 ## Public actor lifecycle optimization (1.9.0-progress)
 
 October 19, 2026, i7-12700H, LDC 1.42, mimalloc 3.5.3, ordinary pages.

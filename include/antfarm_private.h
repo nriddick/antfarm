@@ -69,7 +69,7 @@ typedef struct af_private_child_options {
     uint32_t struct_size, abi_version;
     size_t capacity, batch_limit; /* 0 batch limit inherits parent */
     af_private_state_options state;
-    size_t result_bytes, result_alignment; /* bytes=0: no result storage */
+    size_t result_bytes, result_alignment; /* bytes=0: no storage, alignment must be 1 */
     size_t slab_byte_limit; /* explicit cap on capacity * aligned state stride */
     uint32_t storage, subsets;
 } af_private_child_options;
@@ -136,7 +136,7 @@ af_status af_private_children_create(af_private_context *, const af_private_chil
 af_status af_private_child_spawn_copy(af_private_children *, af_private_context *, const void *initial);
 af_status af_private_child_spawn_init(af_private_children *, af_private_context *,
                                        af_actor_initializer, void *user, size_t index);
-/* Starts return AF_OK, PRIVATE_EMPTY, BUSY or PRIVATE_RETIRING. Empty/rejected
+/* Starts return AF_OK, PRIVATE_EMPTY, BUSY, PRIVATE_RETIRING or INVALID. Empty/rejected
    starts preserve previous results/outcome and operation. retire/continuation
    are Booleans, cost=0..7. Leaf terminal callbacks cannot create/start children;
    terminal continuations can. Keep operation/user alive through finished.
