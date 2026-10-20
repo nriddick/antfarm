@@ -2,6 +2,8 @@
 
 Fresh Intel i7-12700H baseline measured on October 20, 2026, at runtime revision `2cf59da` on `1.9.0-progress`. These measurements replace the old 12700H tables. **Ryzen 9 5900XT measurements are pending**; no cross-host comparison is implied.
 
+**Follow-up qualification:** the ~503 Mpps headline below did not reproduce later with the **same saved executable**: it then delivered 2,183 Mpps under WSL2. Matched 1.8.3/current comparisons also reached 2,245/2,291 Mpps on native Windows and 2,123/2,186 Mpps under WSL2. The earlier session therefore cannot establish a slowdown caused by MT removal, nor a general WSL penalty. Its environmental slowdown remains unexplained. The original observations are retained below; see the [matched revision checks and exact-binary control](docs/performance/mt-excision-check-2026-10-20.md) before interpreting them as a representative baseline.
+
 The [previous performance page](docs/performance/archive-2026-10-20.md) preserves the old Ryzen 5500 and native-Windows 12700H measurements, the detailed Fiber experiments, and the intervening 1.9 optimization reports with their original limitations. Those results are historical evidence, not rows in this baseline.
 
 This is the baseline **before the proposed free-index-stack redesign**. Public actor reservation still walks at most 64 free-list links per gate hold. No runtime implementation changed for this refresh.

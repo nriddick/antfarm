@@ -18,6 +18,12 @@ is reassessed holistically in dedicated sessions.
 
 ## 1.9.0 progress
 
+- Keep the [matched MT-excision checks](docs/performance/mt-excision-check-2026-10-20.md)
+  with the October 20 baseline. The apparent fourfold headline loss did not
+  reproduce with the saved executable, and matched 1.8.3/current core probes
+  retained the fast uniform and compact paths on both Windows and WSL2.
+  The environmental cause of the earlier low rates is unresolved. These short
+  core checks do not clear the separate private-actor regression below.
 - Revisit table spacing and actor-churn performance in a dedicated optimization
   session. The 1.9 review retains the compact five-word layout. Compare
   `private`, `private-remote` and `dtor` at zero and six consumers against 1.8.2,
