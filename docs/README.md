@@ -78,8 +78,8 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | Page | Read it to |
 | --- | --- |
 | [development/testing.md](development/testing.md) | run and understand the local correctness lanes and their limits |
-| [development/agent-workflow.md](development/agent-workflow.md) | follow the CyDo agent process for iteration, hardening, TSan budgets and mutation selection |
-| [../tools/perf/README.md](../tools/perf/README.md) | run a benchmark and the committed-ref optimization gate |
+| [development/agent-workflow.md](development/agent-workflow.md) | follow the CyDo agent process for local iteration and the push gate |
+| [../tools/perf/README.md](../tools/perf/README.md) | run a benchmark and the committed-ref performance report |
 | [../PERFORMANCE.md](../PERFORMANCE.md) | find the measured numbers, method, and tuning guide |
 | [performance/archive-2026-10-20.md](performance/archive-2026-10-20.md) | inspect the superseded Ryzen 5500 / Intel 12700H tables and 1.9 optimization reports |
 
@@ -105,7 +105,8 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | Private join, outcome and cancellation proofs | [design/private-actor-ordering.md](design/private-actor-ordering.md) |
 | Private Entry/Service/cohort layout and slab reuse proof | [design/private-actor-layout.md](design/private-actor-layout.md) |
 | The local correctness gate and its lanes | [development/testing.md](development/testing.md) |
-| CyDo agent session routing, iteration, hardening, TSan budgets and mutation selection | [development/agent-workflow.md](development/agent-workflow.md) |
+| The push gate | [CONTRIBUTING.md](../CONTRIBUTING.md#the-push-gate) |
+| CyDo agent session routing and local iteration | [development/agent-workflow.md](development/agent-workflow.md) |
 | Farm ordering audit and real-atomic TSan lanes | [design/farm-ordering.md](design/farm-ordering.md) |
 | C ABI headers, compatibility and runtime separation | [design/c-abi.md](design/c-abi.md) |
 | Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |

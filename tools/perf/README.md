@@ -231,83 +231,82 @@ empty runtime. `lifecycle` times draining admitted Fiber lifecycle records;
 `handle` invokes a counting delegate and `take` also allocates the returned
 arrays.
 
-## Optimization gate
+## Performance report
 
-`perf_gate.py` is the standard committed-ref gate for optimization changes. It
-builds a base and a candidate in temporary detached worktrees, times clean
-matched pairs on identical benchmark source, and decides whether the candidate
-regresses beyond the project boundary.
+`perf_gate.py` is the committed-ref performance report. It builds a base and a
+candidate in temporary detached worktrees, times matched pairs on identical
+benchmark source, and reports each cell's paired change with its spread. It is
+a report for the reader, not a verdict: the reader decides, and records the
+result in the change's notes.
 
 ```sh
 make perf-gate BASE=BASE_SHA CANDIDATE=CANDIDATE_SHA
-make perf-gate BASE=CANDIDATE_SHA PERF_GATE_ARGS=--control
+make perf-gate BASE=BASE_SHA CANDIDATE=CANDIDATE_SHA PERF_GATE_ARGS='--boundary --modes tree --consumers 0'
 ```
 
-It needs a quiet Linux host with LDC, Python 3, and the pinned real mimalloc
-archive, and the output directory must not already exist. The current
-measurements and how to regenerate them are in
-[PERFORMANCE.md](../../PERFORMANCE.md#method). `PERF_GATE_OUTPUT` defaults to the
-fixed path `/tmp/antfarm-perf-gate`, which must not already exist; remove it (or
-pass another `--output`/`PERF_GATE_OUTPUT`) before rerunning. `PERF_GATE_ARGS`
-passes options such as `--archive`, `--boundary`, and `--root-hint`. Run the
-correctness gate first and run timing serially, with no other heavy work on the
-host.
+It needs Linux with LDC, Python 3, and the pinned real mimalloc archive, and
+the output directory must not already exist. `PERF_GATE_OUTPUT` defaults to
+`/tmp/antfarm-perf-gate`; remove it or pass another `--output` before
+rerunning. The current measurements and how to regenerate them are in
+[PERFORMANCE.md](../../PERFORMANCE.md#method). Run timing serially, with no
+other heavy work on the host; nothing else about the host is checked.
 
 Either ref may predate the 1.8.2 layout (`antfarm.d`, `actors/` and
-`perftest/actor_churn.d` at the root). The gate detects each checkout's layout
+`perftest/actor_churn.d` at the root). The report detects each checkout's layout
 and builds it with that layout's paths. It maps the benchmark's imports between
 layouts (`actors` and `antfarm.actors`, and so on), so one benchmark source
-still counts as identical on both sides. `metadata.json` records each side's
-layout and any renames. `PERF_GATE_ARGS=--build-only` builds both sides,
-writes the metadata and build logs, and stops before measuring; it skips the
-host-load and CPU checks.
+still counts as identical on both sides; pass `--benchmark-ref` to compile one
+revision's benchmark against both runtimes when the benchmark changed.
+`metadata.json` records each side's layout and any renames.
+`PERF_GATE_ARGS=--build-only` builds both sides, writes the metadata and build
+logs, and stops before measuring.
 
-Decision rules:
+The method:
 
-- Exit status is **0 pass, 1 regression, 2 inconclusive/error**. Inconclusive
-  is never a pass.
-- The regression boundary is **−3%** on the paired-median decision. Decisions
-  use clean paired ratios and a descriptive bootstrap median interval; legacy
-  mean/delta fields include contaminated attempts and cannot establish a pass.
-- Near the boundary, collect at least **20 process pairs** (`--boundary`) and a
-  **byte-identical control** (`--control`, which builds the base twice and
-  requires identical binary hashes). Individual pairs may fall below −3% while
-  the cell still passes if the paired-median interval's lower bound is above
-  −3%.
-- `--no-background-cpu-filter` disables CPU-load sample exclusions while retaining
-  all CPU telemetry. It defaults to, and requires, at least **30 matched pairs**
-  per cell. Use it explicitly for six-consumer measurements when the CPU
-  accounting filter is unsuitable for the host. Initial-load admission, affinity,
-  timeout, benchmark validity, matched work and regression-threshold checks remain.
-  The policy is recorded in metadata, samples, summaries and the gate result.
-  Historical `quiet_*` field names then mean accepted samples, not proof of a
-  quiet host; report these measurements separately from filtered results.
-- `tree-cancel` additionally requires valid dispatched fractions and no median
-  fraction change beyond the default tolerance; unequal cancellation work is
-  inconclusive.
-- Each run records CPU/load, placement, source/binary/archive hashes, and the
-  build commands; attach `gate.json`, `summary.json`, `metadata.json`, the build
-  logs, and `runs.jsonl` to the change or PR, or archive them. Do not commit them
-  to the repository.
+- **Five pairs per cell, then twenty on flagged cells.** The default screen
+  times five matched base/candidate pairs per cell, alternating order. Each
+  cell reports the paired median, its descriptive bootstrap interval, the
+  paired minimum, maximum, span and standard deviation, and a classification
+  against `--threshold` (default −3%): `pass`, `regression` or `inconclusive`.
+  A cell is **flagged** when it is not a pass, when its paired ratios span
+  more than twice the threshold, or when its paired median is below half the
+  threshold. `gate.json` lists the flagged cells; rerun each with `--boundary`
+  (20 pairs) and its `--modes`, `--consumers` and `--subset-percent` to
+  characterize its distribution. Report flagged cells with their spread.
+- **Exit status is about completeness.** 0 means every requested cell has
+  its pairs; 2 means the report is incomplete or failed: a mode missing from
+  one side, too few accepted pairs, invalid benchmark output, or an error.
+  No exit status means "regression"; the classification is in the summary.
+- **Background CPU is telemetry.** Every sample records load averages, the
+  busy fraction of the CPUs outside the benchmark's pinned set, and the
+  system CPU time beyond the benchmark's own. None of that excludes a sample:
+  paired, interleaved samples absorb background that touches both sides, and
+  it sits below the layout noise. A sample is excluded only when another task
+  used the benchmark's pinned CPUs (external busy time above 5% of the
+  pinned wall time) or the run timed out. Excluded samples stay in
+  `runs.jsonl`; attempts are capped at twice the pair count, after which the
+  cell is `insufficient`.
+- **Layout moves 0-consumer cells.** Identical binaries have measured
+  ±1–2% at six consumers and ±5–12% on the serial subset cells, and a
+  candidate that differs only in unused code size can move every function
+  under LDC's whole-program layout. Treat a serial cell's swing of that size
+  as layout unless a six-consumer cell or an instruction count moves with it.
+  `--control` (build the base twice, require byte-identical binaries) measures
+  the host's own spread when that is in doubt.
+- `tree-cancel` additionally needs valid dispatched fractions with no median
+  change beyond `--cancel-fraction-tolerance`; otherwise the cell is
+  `inconclusive_work` and flagged, since the two sides did different work.
+- Each run records CPU/load, placement, source/binary/archive hashes and the
+  build commands in `metadata.json`, `summary.json`, `gate.json` and
+  `runs.jsonl`. Keep them locally or archive them; do not commit them.
 
-### Code-layout sensitivity at 0 consumers
-
-A candidate that differs only in unused code size can move every function under
-LDC's size-driven whole-program layout and measurably change single-threaded
-(0-consumer) cells. When a near-boundary 0-consumer cell executes byte-identical
-semantics in both binaries, an inert-code control can attribute the swing to
-layout. Such a waiver is one-off and must record the ≥20-pair run, the
-byte-identical base/base control, and the inert-code control together; it is
-not a general precedent and does not relax the boundary.
-
-Gate decision and option tests run without builds or timing, including on
-Windows:
+Decision and option tests run without builds or timing, including on Windows:
 
 ```sh
 python3 -B -m unittest tools/perf/test_perf_gate.py
 ```
 
-The real timing gate still requires Linux and rejects other hosts before
+The real timing run still requires Linux and rejects other hosts before
 creating output or starting builds. Only its Linux error-accounting integration
 probe is skipped on Windows; the mocked decisions and options remain covered.
 See [portable Python checks](../../docs/development/testing.md#portable-python-checks)

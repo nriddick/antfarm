@@ -218,11 +218,8 @@ establish timing results or replace `make check`.
 
 - `make check-soak` runs the private-actor TSan suite in a loop for at least 121
   seconds. It builds only that target and does not run the matrix first. It is
-  optional and counts against the 600-second collective general TSan soak budget
-  in [agent-workflow.md](agent-workflow.md#hardening-boundary); wrap it in a
-  watchdog using the remaining budget. Targeted hardening/concurrency TSan runs
-  are capped at 300 seconds each. Reuse applicable correctness-gate evidence;
-  invoking a soak does not itself require another `make check` run.
+  optional; wrap it in `timeout`. Invoking a soak does not itself require
+  another `make check` run.
 - `make check-mimalloc` runs the normal matrix, then the real allocator lanes
   (`actors_torture` with the pinned mimalloc v3.5.3, release and TSan). It needs
   the submodule (`git submodule update --init --recursive`), CMake and a C
@@ -232,18 +229,13 @@ establish timing results or replace `make check`.
 
 ## Performance is separate
 
-`make perf-gate` compares two committed refs and decides whether the candidate
-regresses beyond the project boundary. It is separate from `make check`, builds
-the refs in temporary worktrees, needs a quiet Linux host with LDC, Python 3 and
-the pinned mimalloc archive, and its output directory must be new. An
-inconclusive result is not a pass. Establish applicable correctness evidence first,
-reusing an existing valid result; run timing serially with nothing else heavy on
-the host. The method, the modes and the
-decision rules are in [../../tools/perf/README.md](../../tools/perf/README.md).
-
-Changes to executable code or its layout can move performance even when the
-algorithm is unchanged, so treat a clean diff as no evidence of identical
-performance.
+`make perf-gate` compares two committed refs and reports each cell's paired
+change and spread; the reader decides. It is separate from `make check`,
+builds the refs in temporary worktrees, needs Linux with LDC, Python 3 and the
+pinned mimalloc archive, and its output directory must be new. Run timing
+serially with nothing else heavy on the host; background CPU is recorded, not
+gated. The method, the modes and the flagging rule are in
+[../../tools/perf/README.md](../../tools/perf/README.md#performance-report).
 
 ## Documentation and example extraction
 

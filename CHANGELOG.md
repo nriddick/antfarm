@@ -6,6 +6,22 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.0 — unreleased
 
+- The pre-push obligations are one gate, stated once in CONTRIBUTING: `make
+  check` on the final tree, a performance report when a measured path changed,
+  and the Windows matrix before a release. The TSan time budget, the mutation
+  catalog guidance and the duplicated gate text are gone. `perf_gate.py` is a
+  report, not a verdict: it classifies each cell against the threshold, flags
+  cells for a 20-pair rerun (not a pass, span above 6%, or median below
+  −1.5%), reports paired min, max, span and stddev, and exits 0 when the
+  report is complete or 2 when it is not. It no longer refuses to start on a
+  stale load average, and background CPU off the pinned set is recorded as
+  telemetry instead of excluding samples: on this host the old 0.25-core rule
+  sat inside the idle baseline (median 0.20, p99 0.26 core, much of it the
+  monitor's own polling). A sample is excluded only when another task used the
+  benchmark's pinned CPUs or the run timed out. `--initial-load-limit` and
+  `--no-background-cpu-filter` are removed; `--boundary` and `--control`
+  remain as the rerun and host-spread options.
+
 - `ConsumerView.subscribe` now retries the transient frontier race itself and
   returns only the epoch, `SUBSCRIBE_FULL` or `SUBSCRIBE_INVALID`; the former
   one-attempt call is `subscribeOnce`, which still reports `SUBSCRIBE_RETRY`.

@@ -57,7 +57,7 @@ Longer or optional (not run by make check):
   make -C tests/actors run-mimalloc-debug
                            other allocator lanes (see tests/actors/Makefile)
 
-Performance (not part of make check; quiet Linux host, LDC, Python 3, mimalloc):
+Performance report (not part of make check; Linux, LDC, Python 3, mimalloc):
   make perf-gate BASE=<sha> [CANDIDATE=<sha>]
                            see tools/perf/README.md
 endef

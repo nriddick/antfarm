@@ -9,10 +9,30 @@ and implementation in step, and use the checklist below. There is no CI.
 
 During development, batch related edits and run the smallest useful check of
 the changed behavior. Local commits do not require the full gate; report checks
-that remain deferred. Before pushing, establish the applicable gate evidence
-for the accumulated change. Agent session routing, local iteration, hardening,
-TSan budgets and mutation selection are defined in
+that remain deferred. The push gate below is the whole pre-push obligation.
+The CyDo agent process is in
 [docs/development/agent-workflow.md](docs/development/agent-workflow.md).
+
+## The push gate
+
+Stated once, here. Before any push:
+
+1. **`make check` passes on the final tree.** That is the whole correctness
+   obligation, including the TSan lanes it contains. A fix after the run means
+   running it again on the fixed tree; an identical tree needs no second run.
+   Targeted extra TSan runs for a concrete hypothesis are optional; wrap them
+   in `timeout`. There is no budget to account for.
+2. **Performance is a report, not a verdict.** When executable code on a
+   measured path changed, run `make perf-gate` (five pairs per cell), rerun
+   the flagged cells with `--boundary` (20 pairs), and record the medians and
+   spreads in the CHANGELOG entry. The maintainer decides; the tool's
+   classification and exit status block nothing. Prose and configuration
+   changes need no measurement.
+3. **Before a release**, the maintainer runs the native Windows matrix on the
+   Windows host (`python -B scripts/check-windows.py`).
+
+Say which of these ran, on which host and compilers, and which did not. Never
+claim a check that was not run.
 
 ## The correctness gate: `make check`
 
@@ -54,14 +74,10 @@ topology. Invalid overrides fail the lane. Inspect selection with
 ## Performance: `make perf-gate`
 
 `make perf-gate BASE=<sha> CANDIDATE=<sha>` compares two committed refs on the
-same benchmark source and decides whether the candidate regresses beyond the
-project boundary. It is separate from `make check`. The method, the modes, and
-the decision rules are in [tools/perf/README.md](tools/perf/README.md); the measured
+same benchmark source and reports each cell's paired change and spread. The
+method, the modes, the flagging rule and the layout caveat are in
+[tools/perf/README.md](tools/perf/README.md#performance-report); the measured
 numbers and the tuning guide are in [PERFORMANCE.md](PERFORMANCE.md).
-
-Changes to executable code or its layout can move performance even when the
-algorithm is unchanged, so treat a clean diff as no evidence of identical
-performance.
 
 ## Change checklist
 
@@ -84,21 +100,16 @@ During implementation of changes to the Farm, actors, or shared lifecycle:
   example, `make check` extracts and runs them. Mark partial code blocks as
   fragments.
 
-Before pushing, satisfy these obligations for the accumulated change:
+Tests for changed behavior:
 
-- Use meaningful deterministic regression tests for changed properties where
-  feasible. A passing stress run alone is not evidence of a memory-order argument.
-  The agent process's focused mutation policy is in
-  [docs/development/agent-workflow.md](docs/development/agent-workflow.md#mutation-selection).
+- Prefer a deterministic regression test for a changed property. A passing
+  stress run alone is not evidence of a memory-order argument. Add a focused
+  mutation only to show that a test detects a concrete changed risk, such as
+  a weakened ordering; do not rerun historical mutation catalogs.
 - Contract violations that must be fatal need a death test in
   `private_tests` or an equivalent that survives `-release`.
-- Establish `make check` evidence for the final candidate when runtime, tests,
-  build inputs or extracted example programs change. Pure prose/configuration
-  changes use their relevant validation; do not run unrelated runtime matrices.
-  If executable code on a measured path changed, also establish `make perf-gate`
-  evidence. Reuse still-applicable results instead of repeating these gates.
-- Do not claim a gate that was not run. Say which lanes passed, on which
-  compilers and host, and which you did not run.
+
+Then the [push gate](#the-push-gate) applies to the accumulated change.
 
 Commit message and trailer conventions are the maintainer's; follow the style of
 recent commits (`git log`).

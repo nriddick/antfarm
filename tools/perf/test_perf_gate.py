@@ -135,7 +135,7 @@ class GateCase(unittest.TestCase):
             binary.write_bytes(build(label, rev, serial))
             return mock.Mock(returncode=0)
 
-        def fake_runone(cmd, cpus, seconds, child_affinity=None, env=None, background_cpu_filter=True):
+        def fake_runone(cmd, cpus, seconds, child_affinity=None, env=None):
             version = pathlib.Path(cmd[0]).name.split('-')[0]
             mode, consumers = cmd[1], int(cmd[4])
             percent = int(cmd[11]) if len(cmd) > 11 else 100
@@ -148,8 +148,7 @@ class GateCase(unittest.TestCase):
             if row['contaminated'] and not row['reasons']:
                 row['reasons'] = ['fake contamination']
             r.runs.append(dict(version=version, mode=mode, consumers=consumers,
-                               percent=percent, cmd=cmd, n=n, env=env,
-                               background_cpu_filter=background_cpu_filter))
+                               percent=percent, cmd=cmd, n=n, env=env))
             return row
 
         cpuinfo = [dict(processor=str(i), **{'physical id': '0', 'core id': str(i),
@@ -192,6 +191,10 @@ class GateCase(unittest.TestCase):
         return {(x['mode'], x['consumers'], x['percent']): x['decision']
                 for x in self.load(r, 'summary.json')}
 
+    def flagged(self, r):
+        return {(x['mode'], x['consumers'], x['percent']) for x in self.load(r, 'summary.json')
+                if x['flagged']}
+
     def assert_exit_recorded(self, r, status):
         self.assertEqual(r.status, status)
         self.assertEqual(self.load(r, 'gate.json')['exit_status'], status)
@@ -206,39 +209,68 @@ FAST = ['--base', 'BASE', '--candidate', 'CAND', '--modes', 'actor', '--consumer
 
 
 class DecisionTests(GateCase):
-    def test_equal_performance_passes(self):
+    def test_equal_performance_passes_and_is_not_flagged(self):
         r = self.gate(FAST)
         self.assert_exit_recorded(r, 0)
         self.assertEqual(self.decisions(r), {('actor', 0, 100): 'pass'})
+        self.assertEqual(self.flagged(r), set())
+        self.assertEqual(self.load(r, 'gate.json')['flagged'], [])
         self.assert_scratch_cleaned(r)
 
-    def test_default_threshold_is_minus_three_percent(self):
-        self.assertEqual(self.gate(FAST, rate=rel(0.971)).status, 0)
+    def test_default_threshold_is_minus_three_percent_and_classifies_without_failing(self):
+        r = self.gate(FAST, rate=rel(0.971))
+        self.assertEqual((r.status, self.decisions(r)[('actor', 0, 100)]), (0, 'pass'))
         r = self.gate(FAST, rate=rel(0.969))
-        self.assert_exit_recorded(r, 1)
+        # A regression is reported and flagged; the report itself is complete.
+        self.assert_exit_recorded(r, 0)
         self.assertEqual(self.decisions(r), {('actor', 0, 100): 'regression'})
+        self.assertEqual(self.flagged(r), {('actor', 0, 100)})
+        self.assertEqual(self.load(r, 'gate.json')['flagged'][0]['decision'], 'regression')
+        self.assertIn('--boundary', self.load(r, 'gate.json')['rerun'])
 
-    def test_interval_straddling_threshold_is_inconclusive_not_pass(self):
+    def test_interval_straddling_threshold_is_inconclusive_and_flagged(self):
         ratios = [0.90, 1.10, 0.95, 1.05, 1.00]
         r = self.gate(FAST, rate=lambda v, m, c, p, n: dict(
             rate=BASE_RATE * (ratios[n] if v == 'candidate' else 1)))
-        self.assert_exit_recorded(r, 2)
+        self.assert_exit_recorded(r, 0)
         self.assertEqual(self.decisions(r), {('actor', 0, 100): 'inconclusive'})
+        self.assertEqual(self.flagged(r), {('actor', 0, 100)})
 
-    def test_one_bad_pair_blocks_pass(self):
+    def test_one_bad_pair_is_flagged_by_spread(self):
         ratios = [1.0, 1.0, 1.0, 1.0, 0.90]
         r = self.gate(FAST, rate=lambda v, m, c, p, n: dict(
             rate=BASE_RATE * (ratios[n] if v == 'candidate' else 1)))
-        self.assertEqual(r.status, 2)
+        self.assertEqual(r.status, 0)
+        cell = self.load(r, 'summary.json')[0]
+        self.assertAlmostEqual(cell['paired_span'], 0.10)
+        self.assertTrue(cell['flagged'])
 
-    def test_regression_in_any_cell_fails_the_gate(self):
+    def test_wide_spread_flags_a_passing_cell(self):
+        # Median and interval clear the threshold, but the pairs span 7%.
+        ratios = [1.00, 1.01, 1.02, 1.03, 1.07]
+        r = self.gate(FAST, rate=lambda v, m, c, p, n: dict(
+            rate=BASE_RATE * (ratios[n] if v == 'candidate' else 1)))
+        cell = self.load(r, 'summary.json')[0]
+        self.assertEqual(cell['decision'], 'pass')
+        self.assertTrue(cell['flagged'])
+
+    def test_median_below_half_threshold_flags_a_passing_cell(self):
+        r = self.gate(FAST, rate=rel(0.98))
+        cell = self.load(r, 'summary.json')[0]
+        self.assertEqual(cell['decision'], 'pass')
+        self.assertTrue(cell['flagged'])
+        quiet = self.load(self.gate(FAST, rate=rel(0.99)), 'summary.json')[0]
+        self.assertFalse(quiet['flagged'])
+
+    def test_regression_in_one_cell_is_reported_beside_the_others(self):
         r = self.gate(['--base', 'BASE', '--candidate', 'CAND', '--modes', 'actor,wave',
                        '--consumers', '0'],
                       rate=lambda v, m, c, p, n: dict(
                           rate=BASE_RATE * (0.8 if v == 'candidate' and m == 'wave' else 1)))
-        self.assert_exit_recorded(r, 1)
+        self.assert_exit_recorded(r, 0)
         self.assertEqual(self.decisions(r), {('actor', 0, 100): 'pass',
                                              ('wave', 0, 100): 'regression'})
+        self.assertEqual(self.flagged(r), {('wave', 0, 100)})
 
     def test_custom_threshold_is_honoured(self):
         r = self.gate(FAST + ['--threshold', '-0.20'], rate=rel(0.9))
@@ -308,11 +340,14 @@ class UsageValidationTests(GateCase):
 
 
 class HostConditionTests(GateCase):
-    def test_busy_host_is_inconclusive_before_any_build(self):
+    def test_host_load_is_recorded_not_gated(self):
         r = self.gate(FAST, load=5.0)
-        self.assert_exit_recorded(r, 2)
-        self.assertEqual(r.builds, [])
-        self.assertEqual(r.runs, [])
+        self.assert_exit_recorded(r, 0)
+        self.assertEqual(self.load(r, 'metadata.json')['initial_load'], [5.0, 5.0, 5.0])
+        self.assertEqual(len(r.runs), 10)
+
+    def test_initial_load_limit_option_is_gone(self):
+        self.assertEqual(self.usage_error(FAST + ['--initial-load-limit', '8']), 2)
 
     def test_invalid_benchmark_output_is_error_not_pass(self):
         r = self.gate(FAST, rate=lambda v, m, c, p, n: dict(valid=False))
@@ -351,7 +386,8 @@ class ContaminationTests(GateCase):
                 return dict(rate=BASE_RATE * (2 if v == 'candidate' else 1), contaminated=True)
             return dict(rate=BASE_RATE * (0.8 if v == 'candidate' else 1))
         r = self.gate(FAST, rate=rate)
-        self.assert_exit_recorded(r, 1)
+        self.assert_exit_recorded(r, 0)
+        self.assertEqual(self.decisions(r), {('actor', 0, 100): 'regression'})
 
     def test_one_contaminated_run_discards_the_whole_pair(self):
         r = self.gate(FAST, rate=lambda v, m, c, p, n: dict(
@@ -382,9 +418,12 @@ class ContaminationTests(GateCase):
             return dict(rate=BASE_RATE * (0.5 if v == 'candidate' else 1))
         r = self.gate(['--base', 'BASE', '--candidate', 'CAND', '--modes', 'actor,wave',
                        '--consumers', '0'], rate=rate)
-        self.assert_exit_recorded(r, 1)
+        # The actor cell is incomplete, so the report is incomplete (2); the
+        # wave regression is still classified and flagged beside it.
+        self.assert_exit_recorded(r, 2)
         self.assertEqual(self.decisions(r), {('actor', 0, 100): 'insufficient',
                                              ('wave', 0, 100): 'regression'})
+        self.assertEqual(self.flagged(r), {('actor', 0, 100), ('wave', 0, 100)})
 
 
 class BoundaryTests(GateCase):
@@ -420,8 +459,9 @@ class BoundaryTests(GateCase):
             contaminated=n >= 20))
         self.assert_exit_recorded(r, 0)
 
-    def test_boundary_regression_still_exits_one(self):
-        self.assertEqual(self.gate(FAST + ['--boundary'], rate=rel(0.9)).status, 1)
+    def test_boundary_regression_is_reported_with_a_complete_status(self):
+        r = self.gate(FAST + ['--boundary'], rate=rel(0.9))
+        self.assertEqual((r.status, self.decisions(r)[('actor', 0, 100)]), (0, 'regression'))
 
 
 class InterpretationTests(GateCase):
@@ -431,8 +471,9 @@ class InterpretationTests(GateCase):
         r = self.gate(FAST)
         self.assert_exit_recorded(r, 0)
         interpretation = self.load(r, 'gate.json')['interpretation']
-        self.assertIn('Conservative all-pairs threshold screen at n=5', interpretation)
-        self.assertNotIn('Paired-median', interpretation)
+        self.assertIn('This is a report, not a verdict.', interpretation)
+        self.assertIn('at n=5 is descriptive', interpretation)
+        self.assertNotIn('individual pairs may fall below', interpretation)
 
     def test_boundary_wording_is_paired_median_and_permits_one_outlier_pair(self):
         # 19 equal pairs plus a single -4% pair: that pair sits below the
@@ -447,17 +488,16 @@ class InterpretationTests(GateCase):
         self.assertAlmostEqual(worst, -0.04)
         self.assertLess(worst, -0.03)  # one pair below the threshold, gate passes anyway
         interpretation = self.load(r, 'gate.json')['interpretation']
-        self.assertIn('Paired-median interval threshold screen; '
-                      'individual pairs may fall below the threshold and still pass',
+        self.assertIn('individual pairs may fall below the threshold while the cell is classified pass',
                       interpretation)
-        self.assertNotIn('all-pairs', interpretation)
+        self.assertNotIn('at n=5', interpretation)
 
     def test_repeats_twenty_without_boundary_uses_paired_median_wording(self):
         r = self.gate(FAST + ['--repeats', '20'])
         self.assert_exit_recorded(r, 0)
         interpretation = self.load(r, 'gate.json')['interpretation']
-        self.assertIn('Paired-median interval threshold screen', interpretation)
-        self.assertNotIn('all-pairs', interpretation)
+        self.assertIn('individual pairs may fall below', interpretation)
+        self.assertNotIn('at n=5', interpretation)
 
 
 class ArchiveTests(GateCase):
@@ -546,9 +586,10 @@ class ControlTests(GateCase):
         self.assertNotEqual(meta['builds']['base']['revision'], CAND_SHA)
         self.assertEqual(self.load(r, 'summary.json')[0]['decision'], 'pass')
 
-    def test_control_with_regressing_noise_is_still_judged(self):
+    def test_control_with_regressing_noise_is_still_classified(self):
         r = self.gate(self.CONTROL, rate=rel(0.8))
-        self.assert_exit_recorded(r, 1)
+        self.assert_exit_recorded(r, 0)
+        self.assertEqual(self.decisions(r), {('actor', 0, 100): 'regression'})
 
     def test_control_and_boundary_combine(self):
         r = self.gate(self.CONTROL + ['--boundary'])
@@ -780,11 +821,12 @@ class UnavailableModeTests(GateCase):
         self.assertEqual(self.load(r, 'summary.json'), [])
         self.assertEqual(r.runs, [])
 
-    def test_regression_takes_precedence_over_unavailable_mode(self):
+    def test_unavailable_mode_keeps_the_report_incomplete_beside_a_regression(self):
         sources = {BASE_SHA: source_for(['actor']), CAND_SHA: source_for(['actor'])}
         r = self.gate(['--base', 'BASE', '--candidate', 'CAND', '--modes', 'actor,wave',
                        '--consumers', '0'], sources=sources, rate=rel(0.8))
-        self.assert_exit_recorded(r, 1)
+        self.assert_exit_recorded(r, 2)
+        self.assertEqual(self.decisions(r), {('actor', 0, 100): 'regression'})
         self.assertEqual(self.load(r, 'unavailable.json'), {'wave': ['base', 'candidate']})
 
 
@@ -810,20 +852,23 @@ class TreeCancelTests(GateCase):
             return dict(rate=BASE_RATE * (1.5 if v == 'candidate' else 1),
                         fields=dict(dispatched_fraction='0.5' if v == 'base' else '0.2'))
         r = self.gate(self.ARGS, rate=rate)
-        self.assert_exit_recorded(r, 2)
+        self.assert_exit_recorded(r, 0)
         cell = self.load(r, 'summary.json')[0]
         self.assertEqual(cell['decision'], 'inconclusive_work')
+        self.assertTrue(cell['flagged'])
 
     def test_fraction_within_default_tolerance_is_comparable(self):
-        self.assertEqual(self.gate(self.ARGS, rate=self.fractions(0.50, 0.505)).status, 0)
+        self.assertEqual(self.decisions(self.gate(self.ARGS, rate=self.fractions(0.50, 0.505))),
+                         {('tree-cancel', 0, 100): 'pass'})
 
     def test_fraction_beyond_default_tolerance_is_not_comparable(self):
-        self.assertEqual(self.gate(self.ARGS, rate=self.fractions(0.50, 0.52)).status, 2)
+        self.assertEqual(self.decisions(self.gate(self.ARGS, rate=self.fractions(0.50, 0.52))),
+                         {('tree-cancel', 0, 100): 'inconclusive_work'})
 
     def test_custom_tolerance_is_honoured(self):
         r = self.gate(self.ARGS + ['--cancel-fraction-tolerance', '0.05'],
                       rate=self.fractions(0.50, 0.52))
-        self.assertEqual(r.status, 0)
+        self.assertEqual(self.decisions(r), {('tree-cancel', 0, 100): 'pass'})
 
     def test_tolerance_out_of_range_is_rejected(self):
         self.assertEqual(self.usage_error(self.ARGS + ['--cancel-fraction-tolerance', '1.5']), 2)
@@ -831,21 +876,22 @@ class TreeCancelTests(GateCase):
     def test_missing_fraction_is_inconclusive(self):
         for base, cand in ((None, 0.5), (0.5, None), (None, None)):
             r = self.gate(self.ARGS, rate=self.fractions(base, cand))
-            self.assertEqual(r.status, 2, (base, cand))
             cell = self.load(r, 'summary.json')[0]
-            self.assertEqual(cell['decision'], 'inconclusive_work')
+            self.assertEqual(cell['decision'], 'inconclusive_work', (base, cand))
+            self.assertTrue(cell['flagged'])
 
     def test_fraction_outside_unit_interval_is_inconclusive(self):
         for base, cand in ((1.5, 1.5), (0.5, 1.2)):
             r = self.gate(self.ARGS, rate=self.fractions(base, cand))
-            self.assertEqual(r.status, 2, (base, cand))
+            self.assertEqual(self.decisions(r), {('tree-cancel', 0, 100): 'inconclusive_work'}, (base, cand))
 
     def test_regression_with_equal_work_still_fails(self):
         def rate(v, m, c, p, n):
             return dict(rate=BASE_RATE * (0.8 if v == 'candidate' else 1),
                         fields=dict(dispatched_fraction='0.5'))
         r = self.gate(self.ARGS, rate=rate)
-        self.assert_exit_recorded(r, 1)
+        self.assert_exit_recorded(r, 0)
+        self.assertEqual(self.decisions(r), {('tree-cancel', 0, 100): 'regression'})
 
     def test_unequal_work_reports_cancel_inconclusive_next_to_other_regression(self):
         def rate(v, m, c, p, n):
@@ -853,44 +899,33 @@ class TreeCancelTests(GateCase):
                         fields=dict(dispatched_fraction='0.5' if v == 'base' else '0.1'))
         r = self.gate(['--base', 'BASE', '--candidate', 'CAND', '--modes', 'actor,tree-cancel',
                        '--consumers', '0'], rate=rate)
-        self.assert_exit_recorded(r, 1)
+        self.assert_exit_recorded(r, 0)
         self.assertEqual(self.decisions(r), {('actor', 0, 100): 'regression',
                                              ('tree-cancel', 0, 100): 'inconclusive_work'})
+        self.assertEqual(self.flagged(r), {('actor', 0, 100), ('tree-cancel', 0, 100)})
 
 
 class BackgroundCpuPolicyTests(GateCase):
-    def test_disabled_filter_defaults_to_thirty_matched_pairs_and_records_policy(self):
-        r = self.gate(FAST + ['--consumers', '6', '--no-background-cpu-filter'])
-        self.assertEqual(r.status, 0)
-        self.assertEqual(len(r.runs), 60)
-        self.assertTrue(all(x['consumers'] == 6 and not x['background_cpu_filter'] for x in r.runs))
-        meta = self.load(r, 'metadata.json')
-        self.assertEqual(meta['arguments']['repeats'], 30)
-        self.assertTrue(meta['arguments']['no_background_cpu_filter'])
-        self.assertFalse(self.load(r, 'summary.json')[0]['background_cpu_filter'])
-        self.assertFalse(self.load(r, 'gate.json')['background_cpu_filter'])
-        self.assertIn('not quiet-host certification', self.load(r, 'gate.json')['interpretation'])
+    def test_filter_options_are_gone(self):
+        self.assertEqual(self.usage_error(FAST + ['--no-background-cpu-filter']), 2)
 
-    def test_disabled_filter_rejects_short_sample(self):
-        self.assertEqual(self.usage_error(FAST + ['--no-background-cpu-filter', '--repeats', '29']), 2)
-
-    def test_default_filter_remains_enabled(self):
-        r = self.gate(FAST)
-        self.assertTrue(all(x['background_cpu_filter'] for x in r.runs))
+    def test_default_repeats_are_five_and_boundary_twenty(self):
+        self.assertEqual(self.load(self.gate(FAST), 'metadata.json')['arguments']['repeats'], 5)
+        self.assertEqual(self.load(self.gate(FAST + ['--boundary']), 'metadata.json')['arguments']['repeats'], 20)
 
 
 class CpuTelemetryTests(unittest.TestCase):
-    def sample(self, enabled, timeout=False, returncode=0):
+    """runone records background CPU and excludes only a shared pinned CPU or a timeout."""
+
+    def sample(self, after, child_cpu=0, timeout=False, returncode=0, cpus=(0,)):
         proc = mock.Mock(returncode=returncode)
         output = ('Mactor_cycles/s=1 mimalloc_version=30503 hugePages=false', '')
         proc.communicate.side_effect = ([subprocess.TimeoutExpired('bench', .5), output]
                                         if timeout else [output])
         with contextlib.ExitStack() as stack:
             patches = [
-                mock.patch.object(perf_gate, 'ticks', side_effect=[
-                    {0: (0, 0), 1: (0, 0)}, {0: (1000, 0), 1: (1000, 0)}]),
-                mock.patch.object(perf_gate, 'cpuusage', side_effect=[0, 0]),
-                mock.patch.object(perf_gate, 'cpuinfo', return_value=[{'cpu MHz': '1000'}]),
+                mock.patch.object(perf_gate, 'ticks', side_effect=[{0: (0, 0), 1: (0, 0)}, after]),
+                mock.patch.object(perf_gate, 'cpuusage', side_effect=[0, child_cpu]),
                 mock.patch.object(perf_gate.time, 'monotonic', side_effect=[0, 100, 100] if timeout else [0, 1]),
                 mock.patch.object(perf_gate.os, 'getloadavg', return_value=(1, 1, 1), create=True),
                 mock.patch.object(perf_gate.os, 'sysconf', return_value=100, create=True),
@@ -898,22 +933,39 @@ class CpuTelemetryTests(unittest.TestCase):
             ]
             for patch in patches:
                 stack.enter_context(patch)
-            return perf_gate.runone(['bench'], [0], 3, background_cpu_filter=enabled)
+            return perf_gate.runone(['bench'], list(cpus), 3)
 
-    def test_disabled_filter_retains_high_cpu_telemetry_without_exclusion(self):
-        strict, relaxed = self.sample(True), self.sample(False)
-        self.assertEqual(strict['external_cpu_cores'], relaxed['external_cpu_cores'])
-        self.assertEqual(relaxed['external_cpu_cores'], 20)
-        self.assertEqual(relaxed['outside_affinity_busy_fraction'], 1)
-        self.assertEqual(strict['reasons'], ['outside mean >10%', 'outside CPU >25%',
-                                           'system minus benchmark CPU >0.25 core'])
-        self.assertTrue(strict['contaminated'])
-        self.assertFalse(relaxed['contaminated'])
-        self.assertTrue(relaxed['valid'])
+    def test_busy_background_off_the_pinned_cpus_is_telemetry_only(self):
+        # CPU 1 (outside the pinned set) is fully busy; the pinned CPU 0 is idle.
+        row = self.sample({0: (100, 100), 1: (100, 0)})
+        self.assertEqual(row['outside_affinity_busy_fraction'], 1)
+        self.assertAlmostEqual(row['external_cpu_cores'], 1)
+        self.assertEqual(row['pinned_external_fraction'], 0)
+        self.assertEqual(row['reasons'], [])
+        self.assertFalse(row['contaminated'])
+        self.assertTrue(row['valid'])
 
-    def test_disabled_filter_still_rejects_timeouts_and_failed_benchmarks(self):
-        self.assertIn('timeout', self.sample(False, timeout=True)['reasons'])
-        self.assertFalse(self.sample(False, returncode=1)['valid'])
+    def test_sharing_the_pinned_cpu_excludes_the_sample(self):
+        # The pinned CPU was busy for the whole second but the child used only
+        # 0.1 s of it: 90% of the pinned wall time belonged to someone else.
+        row = self.sample({0: (100, 0), 1: (100, 100)}, child_cpu=0.1)
+        self.assertAlmostEqual(row['pinned_external_fraction'], 0.9)
+        self.assertTrue(row['contaminated'])
+        self.assertIn('pinned CPUs shared', row['reasons'][0])
+
+    def test_benchmark_using_its_own_cpus_is_not_excluded(self):
+        row = self.sample({0: (100, 0), 1: (100, 100)}, child_cpu=1.0)
+        self.assertEqual(row['pinned_external_fraction'], 0)
+        self.assertFalse(row['contaminated'])
+
+    def test_small_shared_use_below_the_limit_is_tolerated(self):
+        row = self.sample({0: (100, 0), 1: (100, 100)}, child_cpu=0.96)
+        self.assertAlmostEqual(row['pinned_external_fraction'], 0.04)
+        self.assertFalse(row['contaminated'])
+
+    def test_timeouts_and_failed_benchmarks_are_still_rejected(self):
+        self.assertIn('timeout', self.sample({0: (100, 100), 1: (100, 100)}, timeout=True)['reasons'])
+        self.assertFalse(self.sample({0: (100, 100), 1: (100, 100)}, returncode=1)['valid'])
 
 
 class ScriptEntryPointTests(unittest.TestCase):

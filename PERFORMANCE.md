@@ -26,7 +26,7 @@ This is the baseline **before the proposed free-index-stack redesign**. Public a
 
 Actor runs with workers pin the controller to logical CPU 0 and consumers to 1 through N; serial cases are unpinned. Throughput and dual-role runs are unpinned. Tail placement comes from the topology visible inside WSL and is printed in each raw capture. WSL exposes a virtualized topology: these CPU lists must not be described as distinct physical P cores. Six dual-role threads are six total workers, not six dedicated consumers.
 
-Ranges describe observed variation, not confidence intervals. This is descriptive baseline characterization, not a paired regression gate, a C/D equivalence test, or a controlled comparison with the archived Windows results. Use the [committed-ref optimization gate](tools/perf/README.md#optimization-gate) for changes.
+Ranges describe observed variation, not confidence intervals. This is descriptive baseline characterization, not a paired regression gate, a C/D equivalence test, or a controlled comparison with the archived Windows results. Use the [committed-ref performance report](tools/perf/README.md#performance-report) for changes.
 The callbacks are synthetic and deliberately small. Adding consumers can expose coordination cost rather than increase throughput; these worker sweeps do not predict application speedups.
 
 The [machine-readable results](docs/performance/12700h-2026-10-20.json) retain individual sample values, exact commands, overrides, parsed counters and host identity. Full raw output, host metadata and local evidence are under `.build/performance-12700h-2026-10-20/`.
