@@ -36,6 +36,9 @@ tests/actors/actors_torture_mimalloc_tsan
 tests/actors/.build/
 tools/perf/throughput
 tools/perf/tail
+tools/perf/tail_tests
+tools/perf/throughput_tests
+tools/perf/dual_tests
 tools/perf/dual
 tools/perf/actor_ready
 tools/perf/actor_churn

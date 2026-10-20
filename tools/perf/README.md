@@ -87,6 +87,18 @@ cells are included only when `--dual-threads` includes 6.
   `--mid-only`, `--tlen`, `--nc`, `--ac`, `--attr`, `--repeats`, `--small`,
   `--ln`, `--huge`). A drain run discards a missed backlog window rather than
   reporting idle samples as latency.
+
+  The report driver's `tail` section runs both mid-drain and idle scenes at
+  explicit `avgCost=3` (chunk 16) and `avgCost=5` (chunk 4), with 10,000
+  observations per scene. These costs assume `MAX_CHUNK=128`; case names and
+  recorded commands identify the setting independently of the runtime default.
+  The raw header also reports the effective cost, chunk and repetition count.
+  `make -C tools/perf check-tail` runs its unit tests, including bounded numeric
+  argument parsing; add `DC=dmd` for DMD. Mid-drain and mailbox scenes drain
+  and retry a quota-truncated dump that cannot reach their backlog trigger.
+  Use `check-benchmarks` to include the throughput and dual argument-parsing
+  tests as well; their C numeric conversions also respect D string boundaries.
+
 - **`offccd`**, **`c2c`** and **`offccd_sweep.py`** — off-CCD scaling for one
   Farm. `offccd` pins a home group (default two producers and five consumers)
   on one L3 group and adds off-CCD consumers or producers on another, in

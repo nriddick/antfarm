@@ -476,14 +476,17 @@ Row runMid(Cfg cfg, uint nc, uint tlen, ulong spinNs)
             Thread.yield();
             continue;
         }
-        if (dumped != tlen)
+        if (dumped < trigger)
         {
-            // partial dump: still usable if > trigger
-            if (dumped < trigger)
+            // Exclude a short dump and finish its callbacks before the next
+            // iteration takes a new progress baseline.
+            ++r.zeros;
+            if (!waitUntil(g_bg, bg0 + dumped, MonoTime.currTime + 10.seconds))
             {
-                ++r.zeros;
-                continue;
+                r.err = "mid short dump stuck";
+                break;
             }
+            continue;
         }
         auto win = MonoTime.currTime + 5.seconds;
         while (atomicLoad(g_bg) - bg0 < trigger)
@@ -601,6 +604,19 @@ Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
         {
             ++r.zeros;
             Thread.yield();
+            continue;
+        }
+        if (dumped < trigger)
+        {
+            // A quota-truncated table cannot reach this scene's trigger.
+            // Drain it before retrying so its callbacks cannot contribute to
+            // the next dump's progress count.
+            ++r.miss;
+            if (!waitUntil(g_bg, bg0 + dumped, MonoTime.currTime + 10.seconds))
+            {
+                r.err = "mbox short dump stuck";
+                break;
+            }
             continue;
         }
         auto win = MonoTime.currTime + 5.seconds;
@@ -930,6 +946,8 @@ void printRow(ref const Row r)
 
 Cfg parse(string[] args)
 {
+    import std.string : toStringz;
+
     Cfg c;
     for (size_t i = 1; i < args.length; ++i)
     {
@@ -959,18 +977,31 @@ Cfg parse(string[] args)
             continue;
         }
         if (i + 1 >= args.length) break;
-        auto v = args[++i];
-        if (a == "--nc") c.nc = cast(uint) atoi(v.ptr);
-        else if (a == "--ac") c.avgCost = cast(uint) atoi(v.ptr);
-        else if (a == "--small") c.small = cast(uint) atoi(v.ptr);
-        else if (a == "--tlen") c.tlen = cast(uint) atoi(v.ptr);
-        else if (a == "--spin") c.spinNs = strtoull(v.ptr, null, 0);
-        else if (a == "--samples") c.samples = cast(uint) atoi(v.ptr);
-        else if (a == "--ln") c.ln = strtoull(v.ptr, null, 0);
-        else if (a == "--repeats") c.repeats = cast(uint) atoi(v.ptr);
+        auto v = toStringz(args[++i]);
+        if (a == "--nc") c.nc = cast(uint) atoi(v);
+        else if (a == "--ac") c.avgCost = cast(uint) atoi(v);
+        else if (a == "--small") c.small = cast(uint) atoi(v);
+        else if (a == "--tlen") c.tlen = cast(uint) atoi(v);
+        else if (a == "--spin") c.spinNs = strtoull(v, null, 0);
+        else if (a == "--samples") c.samples = cast(uint) atoi(v);
+        else if (a == "--ln") c.ln = strtoull(v, null, 0);
+        else if (a == "--repeats") c.repeats = cast(uint) atoi(v);
         else --i;
     }
     return c;
+}
+
+unittest
+{
+    // Each numeric slice is followed by another digit outside its bounds.
+    // Heap storage prevents compile-time slicing from producing a separate
+    // NUL-terminated string literal for each prefix.
+    auto raw = "67 35 17 100001 0x10f".idup;
+    auto c = parse(["tail", "--nc", raw[0 .. 1],
+        "--ac", raw[3 .. 4], "--repeats", raw[6 .. 7],
+        "--samples", raw[9 .. 14], "--spin", raw[16 .. 20]]);
+    assert(c.nc == 6 && c.avgCost == 3 && c.repeats == 1);
+    assert(c.samples == 10_000 && c.spinNs == 16);
 }
 
 Row pickMedianP99(Row[] rs)
@@ -1031,10 +1062,12 @@ void main(string[] args)
         fatal("hist alloc");
 
     immutable ncpu = cast(int) onlineCpus();
-    printf("tail  Ln=%llu (%.1f MiB)  nc=%u  samples=%u  warmup=%u  cpus=%d  pin=%s  repeats=%u  huge=%s\n",
+    if (cfg.avgCost > MAX_AVG_COST) fatal("avgCost out of range");
+    printf("tail  Ln=%llu (%.1f MiB)  nc=%u  samples=%u  warmup=%u  cpus=%d  pin=%s  repeats=%u  huge=%s  avgCost=%u chunk=%u\n",
            cast(ulong) cfg.ln, cfg.ln * 8.0 / (1024.0 * 1024.0),
            cfg.nc, cfg.samples, cfg.warmup, ncpu,
-           cfg.pin ? "yes".ptr : "no".ptr, cfg.repeats, cfg.huge ? "yes".ptr : "no".ptr);
+           cfg.pin ? "yes".ptr : "no".ptr, cfg.repeats, cfg.huge ? "yes".ptr : "no".ptr,
+           cfg.avgCost, MAX_CHUNK >> cfg.avgCost);
     printf("metric: ticks before write() of 1-payload sentinel → first insn of its Call\n");
     if (cfg.pin)
     {

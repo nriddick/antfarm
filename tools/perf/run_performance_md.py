@@ -349,12 +349,13 @@ def cases_for(section, args):
             C.append(dcase("dual", "nd6_b2048_ac0", nd=6, batch=2048, ac=0))
             C.append(dcase("dual", "nd6_b256_ac3", nd=6, batch=256, ac=3))
     elif section == "tail":
-        C.append(case("tail", "mid_default",
-                      [benchmark_path("tail"), "--mid-only", "--samples", "10000",
-                       "--repeats", "1"], note="pinned, discovered topology"))
-        C.append(case("tail", "idle_default",
-                      [benchmark_path("tail"), "--idle-only", "--samples", "10000",
-                       "--repeats", "1"]))
+        for ac, chunk in ((3, 16), (5, 4)):
+            for scene in ("mid", "idle"):
+                C.append(case("tail", f"{scene}_ac{ac}_chunk{chunk}",
+                              [benchmark_path("tail"), f"--{scene}-only",
+                               "--ac", str(ac), "--samples", "10000",
+                               "--repeats", "1"],
+                              note=f"pinned, discovered topology; avgCost {ac}, chunk {chunk}"))
     elif section == "public":
         # Public flush/wave default to chunk 8 (ActorRuntime.flush / ActorWave
         # .publish); ANTFARM_PUBLIC_HINT=2 pins chunk 32 at MAX_CHUNK 128.

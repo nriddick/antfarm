@@ -480,6 +480,8 @@ void printRow(ref const Trial t)
 
 Cfg parseArgs(string[] args, Cfg base)
 {
+    import std.string : toStringz;
+
     Cfg c = base;
     for (size_t i = 1; i < args.length; ++i)
     {
@@ -508,22 +510,40 @@ Cfg parseArgs(string[] args, Cfg base)
         if (i + 1 >= args.length)
             break;
         auto v = args[++i];
-        if (a == "--ln") c.ln = strtoull(v.ptr, null, 0);
-        else if (a == "--k") c.k = cast(uint) atoi(v.ptr);
-        else if (a == "--nd") c.nd = cast(uint) atoi(v.ptr);
-        else if (a == "--body") c.body = cast(uint) atoi(v.ptr);
-        else if (a == "--batch") c.batch = cast(uint) atoi(v.ptr);
-        else if (a == "--consume") c.consume = cast(uint) atoi(v.ptr);
-        else if (a == "--n") { c.n = strtoull(v.ptr, null, 0); c.nSet = true; }
-        else if (a == "--ac") c.avgCost = cast(uint) atoi(v.ptr);
-        else if (a == "--small") c.small = cast(uint) atoi(v.ptr);
+        auto numeric = toStringz(v);
+        if (a == "--ln") c.ln = strtoull(numeric, null, 0);
+        else if (a == "--k") c.k = cast(uint) atoi(numeric);
+        else if (a == "--nd") c.nd = cast(uint) atoi(numeric);
+        else if (a == "--body") c.body = cast(uint) atoi(numeric);
+        else if (a == "--batch") c.batch = cast(uint) atoi(numeric);
+        else if (a == "--consume") c.consume = cast(uint) atoi(numeric);
+        else if (a == "--n") { c.n = strtoull(numeric, null, 0); c.nSet = true; }
+        else if (a == "--ac") c.avgCost = cast(uint) atoi(numeric);
+        else if (a == "--small") c.small = cast(uint) atoi(numeric);
         else if (a == "--tier") c.bulk = (v == "bulk");
-        else if (a == "--repeats") c.repeats = cast(uint) atoi(v.ptr);
-        else if (a == "--grid") c.grid = cast(uint) atoi(v.ptr);
+        else if (a == "--repeats") c.repeats = cast(uint) atoi(numeric);
+        else if (a == "--grid") c.grid = cast(uint) atoi(numeric);
         else
             --i;
     }
     return c;
+}
+
+unittest
+{
+    // Non-NUL-terminated slices must not consume the following digit.
+    auto raw = "67 35 17 100001 0x10f".idup;
+    auto c = parseArgs(["dual", "--nd", raw[0 .. 1],
+        "--ac", raw[3 .. 4], "--repeats", raw[6 .. 7],
+        "--n", raw[9 .. 14], "--ln", raw[16 .. 20]], Cfg.init);
+    assert(c.nd == 6 && c.avgCost == 3 && c.repeats == 1);
+    assert(c.n == 10_000 && c.nSet && c.ln == 16);
+    auto bulk = "bulk-suffix".idup;
+    c = parseArgs(["dual", "--tier", bulk[0 .. 4]], c);
+    assert(c.bulk);
+    auto small = "small-suffix".idup;
+    c = parseArgs(["dual", "--tier", small[0 .. 5]], c);
+    assert(!c.bulk);
 }
 
 void scaleN(ref Cfg c)
