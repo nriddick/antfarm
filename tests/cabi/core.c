@@ -25,7 +25,7 @@ static af_farm *make_farm(uint64_t quota) {
 }
 static af_view *subscribe(af_farm *f) {
     af_view *v = NULL; CHECK(af_view_create(&v) == AF_OK);
-    af_status s; do { s = af_subscribe(v, f); } while (s == AF_RETRY);
+    af_status s = af_subscribe(v, f);
     CHECK(s == AF_OK); return v;
 }
 static void release_view(af_view *v) { af_unsubscribe(v); af_view_destroy(v); }

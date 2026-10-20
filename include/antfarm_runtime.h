@@ -25,14 +25,15 @@ typedef struct af_host_options {
     uint64_t reserved;
 } af_host_options;
 
-/* One explicit session per process. Call init/shutdown serially on the same
+/* The D runtime session (hence the prefix: unrelated to af_actor_runtime).
+   One explicit session per process. Call init/shutdown serially on the same
    control thread, with lifecycle operations in other D libraries quiescent.
    A balanced druntime reference preserves an embedding D application's own
    initialization. Shutdown returns AF_BUSY until hosts and attachments close.
    No runtime function may race shutdown. ABI 1 does not support restarting
    a session after shutdown. */
-af_status af_runtime_init(void);
-af_status af_runtime_shutdown(void);
+af_status af_druntime_init(void);
+af_status af_druntime_shutdown(void);
 /* Foreign threads must attach before runtime services other than wake/state,
    and detach before exit.
    Already attached D threads are borrowed, never detached by this library.
@@ -44,8 +45,8 @@ af_status af_runtime_shutdown(void);
    those signals on attached threads, including pool workers. Account for
    inherited signal masks when starting the runtime, workers or attachments.
    The runtime-free core does not install these handlers. */
-af_status af_runtime_attach_thread(void);
-af_status af_runtime_detach_thread(void);
+af_status af_druntime_attach_thread(void);
+af_status af_druntime_detach_thread(void);
 
 void af_host_options_default(af_host_options *out);
 /* Control thread only, except wake and state. Defaults: automatic worker

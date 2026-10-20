@@ -32,7 +32,7 @@ static af_host *make_host(unsigned workers) {
 }
 static void exercise(unsigned workers) {
     af_host *h = make_host(workers);
-    CHECK(af_runtime_shutdown() == AF_BUSY);
+    CHECK(af_druntime_shutdown() == AF_BUSY);
     uint32_t state; check(af_host_state(h, &state)); CHECK(state == AF_HOST_OPEN);
     af_farm *f = af_host_farm(h); CHECK(f);
     af_view *v = NULL; check(af_view_create(&v)); check(af_subscribe(v, f));
@@ -88,7 +88,7 @@ TEST_THREAD(native_producer) {
     for (unsigned i = 0; i < ITEMS; ++i) CHECK(results[i] == i + 1);
     af_unregister_producer(p->farm, token);
     /* No attach call occurred anywhere on this native thread. */
-    CHECK(af_runtime_detach_thread() == AF_INVALID);
+    CHECK(af_druntime_detach_thread() == AF_INVALID);
     TEST_RETURN;
 }
 static void exercise_foreign_producer(void) {
@@ -113,14 +113,14 @@ TEST_THREAD(foreign) {
     af_host *h = (af_host *)arg;
     check(af_host_wake(h));
     uint32_t state; check(af_host_state(h, &state)); CHECK(state == AF_HOST_OPEN);
-    check(af_runtime_attach_thread());
-    CHECK(af_runtime_attach_thread() == AF_BUSY);
+    check(af_druntime_attach_thread());
+    CHECK(af_druntime_attach_thread() == AF_BUSY);
     CHECK(af_host_step(h) == AF_INVALID);
     check(af_host_wake(h));
     test_store(&foreign_ready, 1);
     while (!test_load(&foreign_stop)) test_yield();
-    check(af_runtime_detach_thread());
-    CHECK(af_runtime_detach_thread() == AF_INVALID);
+    check(af_druntime_detach_thread());
+    CHECK(af_druntime_detach_thread() == AF_INVALID);
     TEST_RETURN;
 }
 int main(int argc, char **argv) {
@@ -130,10 +130,10 @@ int main(int argc, char **argv) {
 #endif
     af_host *invalid = (af_host *)(uintptr_t)1;
     CHECK(af_host_create(NULL, &invalid) == AF_INVALID && invalid == NULL);
-    CHECK(af_runtime_shutdown() == AF_INVALID);
-    check(af_runtime_init()); CHECK(af_runtime_init() == AF_BUSY);
-    check(af_runtime_attach_thread()); /* borrows the existing main-thread attachment */
-    CHECK(af_runtime_shutdown() == AF_BUSY); check(af_runtime_detach_thread());
+    CHECK(af_druntime_shutdown() == AF_INVALID);
+    check(af_druntime_init()); CHECK(af_druntime_init() == AF_BUSY);
+    check(af_druntime_attach_thread()); /* borrows the existing main-thread attachment */
+    CHECK(af_druntime_shutdown() == AF_BUSY); check(af_druntime_detach_thread());
     if (argc > 1) {
         af_set_fatal_handler(fatal_notice, &pending);
         live_host = make_host(0); af_farm *f = af_host_farm(live_host);
@@ -172,9 +172,9 @@ int main(int argc, char **argv) {
     while (!test_load(&foreign_ready)) test_yield();
     antfarm_test_collect();
     check(af_host_close(h));
-    CHECK(af_runtime_shutdown() == AF_BUSY); /* attachment alone keeps session alive */
+    CHECK(af_druntime_shutdown() == AF_BUSY); /* attachment alone keeps session alive */
     test_store(&foreign_stop, 1); test_join(t);
-    check(af_runtime_shutdown());
-    CHECK(af_runtime_shutdown() == AF_INVALID && af_runtime_init() == AF_INVALID);
+    check(af_druntime_shutdown());
+    CHECK(af_druntime_shutdown() == AF_INVALID && af_druntime_init() == AF_INVALID);
     puts("C ABI runtime checks passed"); return 0;
 }

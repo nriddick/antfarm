@@ -23,7 +23,8 @@ int main(void) {
     af_view *view = NULL; check(af_view_create(&view)); check(af_subscribe(view, farm));
     counter initial = {0}; unsigned sum = 0, values[] = {2, 3, 5};
     af_actor_owner owner = {0};
-    af_actor_kind_options kind_options = {add, &sum, sizeof(counter), _Alignof(counter), NULL};
+    af_actor_kind_options kind_options; af_actor_kind_options_default(&kind_options);
+    kind_options.handler = add; kind_options.user = &sum; kind_options.state_bytes = sizeof(counter); kind_options.state_alignment = _Alignof(counter); kind_options.destroy = NULL;
     const af_actor_kind *kind = NULL; check(af_actor_kind_register(runtime, &kind_options, &kind));
     check(af_actor_create_copy(runtime, kind, &initial, &owner));
     af_actor_handle handle; af_actor_owner_handle(&owner, &handle);

@@ -73,7 +73,7 @@ private uint hostControl(af_host* h) nothrow @nogc @system
 }
 
 extern(C) nothrow @system:
-uint af_runtime_init()
+uint af_druntime_init()
 {
     if (active) return setError(AF_BUSY, "runtime session already initialized");
     if (retired) return setError(AF_INVALID, "runtime session cannot restart after teardown");
@@ -108,7 +108,7 @@ uint af_runtime_init()
         return status;
     }
 }
-uint af_runtime_shutdown()
+uint af_druntime_shutdown()
 {
     if (auto status = control()) return status;
     if (hosts || atomicLoad(attachments)) return setError(AF_BUSY, "runtime still has hosts or thread attachments");
@@ -128,7 +128,7 @@ uint af_runtime_shutdown()
     }
     catch (Throwable e) { return exception(e); }
 }
-uint af_runtime_attach_thread()
+uint af_druntime_attach_thread()
 {
     if (!active) return setError(AF_INVALID, "runtime is not initialized");
     if (attachedHere) return setError(AF_BUSY, "thread already has an ABI attachment");
@@ -152,7 +152,7 @@ uint af_runtime_attach_thread()
         return status;
     }
 }
-uint af_runtime_detach_thread()
+uint af_druntime_detach_thread()
 {
     if (!active || !attachedHere) return setError(AF_INVALID, "no ABI thread attachment");
     uint result = AF_OK;

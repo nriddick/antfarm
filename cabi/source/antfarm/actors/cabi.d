@@ -28,10 +28,12 @@ extern(C) alias CActorInitializer = uint function(void*, void*, size_t, size_t) 
 extern(C) alias CActorDestructor = void function(void*, void*, size_t) nothrow @nogc @system;
 struct af_actor_kind_options
 {
+    uint struct_size, abi_version;
     CActorHandler handler;
     void* user;
     size_t state_bytes, state_alignment;
     CActorDestructor destroy;
+    ulong reserved;
 }
 struct af_actor_kind
 {
@@ -50,7 +52,8 @@ struct af_actor_batch_result { size_t count; uint status; }
 enum uint AF_ACTOR_INITIALIZER_FAILED = 8;
 enum uint retireBase = 16, reclaimBase = 32;
 static assert(af_actor_owner.sizeof == 16 && af_actor_owner.alignof == 8);
-static assert(af_actor_kind_options.sizeof == 40 && af_actor_kind_options.destroy.offsetof == 32);
+static assert(af_actor_kind_options.sizeof == 56 && af_actor_kind_options.handler.offsetof == 8
+    && af_actor_kind_options.destroy.offsetof == 40 && af_actor_kind_options.reserved.offsetof == 48);
 static assert(af_actor_handle_span.sizeof == 24 && af_actor_batch_result.sizeof == 16);
 
 struct af_actor_context { ActorContext* value; }
@@ -320,12 +323,24 @@ void af_actor_runtime_destroy(af_actor_runtime* r)
     free(r);
 }
 
+void af_actor_kind_options_default(af_actor_kind_options* o)
+{
+    if (o is null) fatal("C ABI null actor kind options");
+    *o = af_actor_kind_options.init;
+    o.struct_size = af_actor_kind_options.sizeof;
+    o.abi_version = AF_ABI_VERSION;
+    o.state_alignment = 8;
+}
 uint af_actor_kind_register(af_actor_runtime* r, const(af_actor_kind_options)* options,
         const(af_actor_kind)** output)
 {
     if (output is null) return setError(AF_INVALID, "null actor kind output");
     *output = null;
-    if (r is null || r.impl is null || options is null || options.handler is null ||
+    if (options is null || options.struct_size != af_actor_kind_options.sizeof)
+        return setError(AF_INVALID, "invalid actor kind options size");
+    if (options.abi_version != AF_ABI_VERSION || options.reserved != 0)
+        return setError(AF_INVALID, "invalid actor kind options version or reserved field");
+    if (r is null || r.impl is null || options.handler is null ||
         options.state_bytes == 0 || options.state_alignment == 0 ||
         (options.state_alignment & (options.state_alignment - 1)) ||
         (!r.custom && options.state_alignment > 64) ||
@@ -336,8 +351,8 @@ uint af_actor_kind_register(af_actor_runtime* r, const(af_actor_kind_options)* o
     if (k is null) return setError(AF_ALLOCATION_FAILED, "actor kind allocation failed");
     *k = af_actor_kind.init;
     k.runtime = r;
-    k.options = af_actor_kind_options(options.handler, cast(void*) options.user,
-        options.state_bytes, options.state_alignment, options.destroy);
+    k.options = af_actor_kind_options(options.struct_size, options.abi_version, options.handler,
+        cast(void*) options.user, options.state_bytes, options.state_alignment, options.destroy, 0);
     k.value = ActorKind(k, options.destroy is null ? null : &destroyState);
     // Registration only appends immutable nodes. No node is removed before
     // externally quiescent destruction, so this head cannot suffer ABA.
@@ -458,7 +473,7 @@ af_actor_batch_result af_actor_reclaim_batch(af_actor_runtime* r, af_actor_owner
     return af_actor_batch_result(count, setError(AF_OK));
 }
 void af_actor_republish(af_actor_context* c) { requireContext(c); c.value.republish(); }
-void af_actor_retire(af_actor_context* c) { requireContext(c); c.value.retire(); }
+void af_actor_retire_self(af_actor_context* c) { requireContext(c); c.value.retire(); }
 uint af_actor_closing(const(af_actor_context)* c) { requireContext(c); return c.value.closing; }
 uint af_actor_cancelling(const(af_actor_context)* c) { requireContext(c); return c.value.cancelling; }
 af_actor_message* af_actor_pop(af_actor_context* c)

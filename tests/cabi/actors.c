@@ -18,7 +18,7 @@ static af_farm *make_farm(void) {
 }
 static af_view *subscribe(af_farm *f) {
     af_view *v = NULL; check(af_view_create(&v)); af_status s;
-    do { s = af_subscribe(v, f); } while (s == AF_RETRY);
+    s = af_subscribe(v, f);
     check(s); return v;
 }
 static void release_view(af_view *v) { af_unsubscribe(v); af_view_destroy(v); }
@@ -146,7 +146,8 @@ static void invalid_and_allocation(void) {
     log.fail = 0; check(af_actor_runtime_create(f, 1, &a, &r));
     state s = {0}; report report_ = {0}; report_.alignment = 256;
     af_actor_owner o = {0};
-    af_actor_kind_options options = {handler, &report_, 0, 8, NULL};
+    af_actor_kind_options options; af_actor_kind_options_default(&options);
+    options.handler = handler; options.user = &report_; options.state_bytes = 0; options.state_alignment = 8; options.destroy = NULL;
     const af_actor_kind *kind = NULL;
     CHECK(af_actor_kind_register(r, &options, &kind) == AF_INVALID && !kind);
     options.state_bytes = sizeof s; options.state_alignment = 3;
@@ -177,7 +178,7 @@ static void repeating(void *user, void *memory, size_t n, af_actor_context *ctx)
     CHECK(test_add(&entered, 1) == 0);
     unsigned *value = (unsigned *)memory;
     if (++*value < 2000) af_actor_republish(ctx);
-    else { count_result = *value; af_actor_retire(ctx); test_store(&finished, 1); }
+    else { count_result = *value; af_actor_retire_self(ctx); test_store(&finished, 1); }
     CHECK(test_add(&entered, UINT32_MAX) == 1);
 }
 TEST_THREAD(consumer) {
@@ -249,7 +250,8 @@ static void batch_contracts(void) {
     entity e[N] = {0}; allocator_log allocations = {0};
     af_actor_allocator allocator = {&allocations, custom_alloc, custom_free};
     fixture x = setup(N, &allocator); refresh_log log = {0}; log.fail_index = 102;
-    af_actor_kind_options options = {unused, &log, sizeof(refresh_state), 64, destroy_state};
+    af_actor_kind_options options; af_actor_kind_options_default(&options);
+    options.handler = unused; options.user = &log; options.state_bytes = sizeof(refresh_state); options.state_alignment = 64; options.destroy = destroy_state;
     const af_actor_kind *kind = NULL; check(af_actor_kind_register(x.runtime, &options, &kind));
     size_t baseline = allocations.calls;
     af_actor_owner_output_span owners = {&e[0].owner, sizeof(entity), N};
@@ -356,7 +358,8 @@ TEST_THREAD(copied_reclaim) {
 }
 static void copied_owners(void) {
     fixture x = setup(1, NULL); refresh_log log = {0}; log.fail_index = SIZE_MAX;
-    af_actor_kind_options options = {unused, &log, sizeof(refresh_state), 8, destroy_state};
+    af_actor_kind_options options; af_actor_kind_options_default(&options);
+    options.handler = unused; options.user = &log; options.state_bytes = sizeof(refresh_state); options.state_alignment = 8; options.destroy = destroy_state;
     const af_actor_kind *kind = NULL; check(af_actor_kind_register(x.runtime, &options, &kind));
     for (unsigned round = 0; round < 50; ++round) {
         refresh_state initial = {round, NULL}; af_actor_owner owner = {0};
@@ -397,7 +400,8 @@ TEST_THREAD(register_kinds) {
     kind_job *j = (kind_job *)arg;
     while (!test_load(j->start)) test_yield();
     for (unsigned i = 0; i < KINDS_PER_THREAD; ++i) {
-        af_actor_kind_options options = {unused, NULL, sizeof(unsigned), 8, NULL};
+        af_actor_kind_options options; af_actor_kind_options_default(&options);
+        options.handler = unused; options.user = NULL; options.state_bytes = sizeof(unsigned); options.state_alignment = 8; options.destroy = NULL;
         check(af_actor_kind_register(j->runtime, &options, j->kinds + i));
         af_actor_owner owner = {0}; unsigned initial = i;
         check(af_actor_create_copy(j->runtime, j->kinds[i], &initial, &owner));
@@ -484,7 +488,8 @@ static void in_flight_reservation(void) {
     CHECK(af_actor_runtime_live(x.runtime) == RESERVATION_COUNT);
     unsigned initial = 0; af_actor_owner extra = {0};
     CHECK(af_actor_create_copy(x.runtime, job.kind, &initial, &extra) == AF_FULL);
-    af_actor_kind_options options = {unused, NULL, sizeof(unsigned), 8, NULL};
+    af_actor_kind_options options; af_actor_kind_options_default(&options);
+    options.handler = unused; options.user = NULL; options.state_bytes = sizeof(unsigned); options.state_alignment = 8; options.destroy = NULL;
     const af_actor_kind *rejected = NULL;
     CHECK(af_actor_kind_register(x.runtime, &options, &rejected) == AF_OK && rejected);
     test_store(&job.release, 1); test_join(thread);

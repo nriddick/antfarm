@@ -12,7 +12,7 @@ static void check(af_status s) {
 typedef struct fixture { af_farm *farm; af_token *token; af_view *view; af_actor_runtime *runtime; const af_actor_kind *kinds[2]; } fixture;
 static af_view *subscribe(af_farm *f) {
     af_view *v = NULL; check(af_view_create(&v)); af_status s;
-    do { s = af_subscribe(v, f); } while (s == AF_RETRY);
+    s = af_subscribe(v, f);
     check(s); return v;
 }
 static void register_kinds(fixture *x);

@@ -236,9 +236,8 @@ uint af_view_create(af_view** outView)
 uint af_subscribe(af_view* v, af_farm* f)
 {
     if (v is null || f is null || v.value.hasRef) return setError(AF_INVALID, "invalid view or Farm");
-    immutable result = v.value.subscribeOnce(f.impl); // one attempt: AF_RETRY is the caller's
+    immutable result = v.value.subscribe(f.impl); // retries the frontier race; AF_RETRY stays registered, unused
     if (result == SUBSCRIBE_FULL) return setError(AF_FULL, "consumer capacity full");
-    if (result == SUBSCRIBE_RETRY) return setError(AF_RETRY, "subscribe frontier changed; retry");
     if (result < 0) return setError(AF_INVALID, "invalid subscription");
     v.owner = f;
     atomicOp!"+="(f.views, 1u);

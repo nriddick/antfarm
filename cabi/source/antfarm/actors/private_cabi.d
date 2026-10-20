@@ -51,12 +51,14 @@ struct af_private_child_options
     af_private_state_options state;
     size_t result_bytes, result_alignment, slab_byte_limit;
     uint storage, subsets;
+    ulong reserved;
 }
 static assert(af_private_root_handle.sizeof == 16 && af_private_root_handle.alignof == 8);
 static assert(af_private_root_outcome.sizeof == 32 && af_private_wave_outcome.sizeof == 40);
 static assert(af_private_root_options.sizeof == 96 && af_private_root_options.step.offsetof == 56
     && af_private_root_options.slab_byte_limit.offsetof == 80 && af_private_root_options.storage.offsetof == 88);
-static assert(af_private_child_options.sizeof == 88 && af_private_child_options.storage.offsetof == 80);
+static assert(af_private_child_options.sizeof == 96 && af_private_child_options.storage.offsetof == 80
+    && af_private_child_options.reserved.offsetof == 88);
 static assert(af_private_results.sizeof == 24 && af_private_pump_count.sizeof == 16);
 
 enum uint AF_PRIVATE_RETIRING = 9, AF_PRIVATE_EMPTY = 10;
@@ -240,7 +242,7 @@ uint af_private_children_create(void* c, const(af_private_child_options)* o, af_
     *output = null;
     if (o is null || o.struct_size != af_private_child_options.sizeof)
         return setError(AF_INVALID, "invalid private child options size");
-    if (o.abi_version != AF_ABI_VERSION || o.storage > 1 || o.subsets > 1
+    if (o.abi_version != AF_ABI_VERSION || o.storage > 1 || o.subsets > 1 || o.reserved != 0
         || !geometry(o.state.bytes, o.state.alignment)
         || (o.result_bytes ? !geometry(o.result_bytes, o.result_alignment) : o.result_alignment != 1))
         return setError(AF_INVALID, "invalid private child options");

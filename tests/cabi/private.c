@@ -43,7 +43,7 @@ static void setup(fixture *f) {
     CHECK(af_create(&o, &f->farm) == AF_OK);
     CHECK(af_register_producer(f->farm, AF_SMALL, &f->token) == AF_OK);
     CHECK(af_view_create(&f->view) == AF_OK);
-    while (af_subscribe(f->view, f->farm) == AF_RETRY) {}
+    CHECK(af_subscribe(f->view, f->farm) == AF_OK);
 }
 static void teardown(fixture *f) {
     CHECK(test_load(&f->memory.live) == 0);
@@ -148,7 +148,7 @@ static uint32_t continuation(void *u, void *s, size_t bytes, void *r, size_t rb,
             initial.state.value = v->value * 10 + i;
             CHECK(af_private_child_spawn_copy(v->children, c, &initial) == AF_OK);
         }
-        CHECK(af_private_children_start(v->children, c, leaf, f, 1, 0, AF_PRIVATE_CHILD_COST) == AF_OK);
+        CHECK(af_private_children_start(v->children, c, leaf, f, 1, 0, AF_PRIVATE_CHILD_DEFAULT_COST) == AF_OK);
         return AF_PRIVATE_CHILD_WAIT;
     }
     uint64_t sum = sum_results(v->children, c, 2);
@@ -198,7 +198,7 @@ static void tree_test(unsigned storage, unsigned reclaim, unsigned workers) {
     worker w[2]; test_thread threads[2];
     for (unsigned i = 0; i < workers; ++i) {
         CHECK(af_view_create(&w[i].view) == AF_OK);
-        while (af_subscribe(w[i].view, f.farm) == AF_RETRY) {}
+        CHECK(af_subscribe(w[i].view, f.farm) == AF_OK);
         w[i].stop = &f.stop; threads[i] = test_start(consume, &w[i]);
     }
     af_private_roots *p = roots(&f, sizeof(root_state), tree, 1, reclaim);

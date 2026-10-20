@@ -70,7 +70,7 @@ int main() {
     {
         antfarm::farm farm; CHECK(antfarm::farm::create(farm) == AF_OK);
         CHECK(antfarm::producer::create(token, farm) == AF_OK);
-        while (antfarm::consumer::create(view, farm) == AF_RETRY) {}
+        CHECK(antfarm::consumer::create(view, farm) == AF_OK);
         CHECK(antfarm::private_roots::create(park, farm, o, &a) == AF_INVALID && !park.get());
 #if ANTFARM_CPP_EXCEPTIONS
         bool thrown = false;

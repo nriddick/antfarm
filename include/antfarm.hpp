@@ -49,8 +49,9 @@ class error : public std::runtime_error {
         case AF_RETRY: return "Ant Farm subscription must be retried";
         case AF_ALLOCATION_FAILED: return "Ant Farm allocation failed";
         case AF_SYSTEM_ERROR: return "Ant Farm system error";
-        case AF_BUSY: return "Ant Farm output already owns a handle";
-        default: return "Ant Farm runtime error";
+        case AF_BUSY: return "Ant Farm busy: output owns a handle, or the target is active";
+        case AF_RUNTIME_ERROR: return "Ant Farm runtime error";
+        default: return "Ant Farm status";
         }
     }
 public:
@@ -139,7 +140,7 @@ class consumer {
     }
 public:
     consumer() noexcept = default;
-    // One attempt. AF_RETRY leaves out empty; caller chooses when to try again.
+    // af_subscribe retries the transient frontier race itself.
     static af_status create(consumer &out, const farm &f) noexcept {
         if (out.value_) return AF_BUSY;
         if (!f.get()) return AF_INVALID;

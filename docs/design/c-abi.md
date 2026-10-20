@@ -63,8 +63,9 @@ Default construction leaves each empty in both exception-enabled and
 exception-disabled builds. Use `farm::create(out, options)`,
 `producer::create(out, farm, tier)`, and `consumer::create(out, farm)`;
 all are nonthrowing status-returning factories. Outputs must be empty
-(else `AF_BUSY`) and remain unchanged on failure. Consumer creation tries
-subscription exactly once: `AF_RETRY` leaves it empty for caller-directed retry.
+(else `AF_BUSY`) and remain unchanged on failure. `af_subscribe` retries the
+transient frontier race itself, so consumer creation returns only `AF_OK`,
+`AF_FULL` or `AF_INVALID`; `AF_RETRY` stays registered but unused in ABI 1.
 There is no implicitly blocking or throwing consumer constructor.
 
 Participants retain their Farm through an atomic ownership control block,
@@ -325,14 +326,14 @@ is responsible for stepping/waking and joining its consumers.
 
 ## Runtime-inclusive pool and host
 
-Call `af_runtime_init` on the thread that will control hosts. It takes one
+Call `af_druntime_init` on the thread that will control hosts. It takes one
 balanced druntime initialization reference and warms topology discovery before
 concurrent use. An embedding D program retains its own runtime reference.
 Only this control thread creates hosts/host actor runtimes, steps, registers host producers, closes or
 abandons hosts. These ownership checks remain active in release builds.
 
-Foreign threads call `af_runtime_attach_thread` before runtime services other than
-wake/state and `af_runtime_detach_thread` before exit. New attachments run D TLS constructors
+Foreign threads call `af_druntime_attach_thread` before runtime services other than
+wake/state and `af_druntime_detach_thread` before exit. New attachments run D TLS constructors
 and destructors; existing D thread attachments are borrowed and never detached.
 Hosts are explicitly rooted while C owns their handles. The session cannot
 shut down while a host or an ABI attachment remains. Init/shutdown are
@@ -526,16 +527,19 @@ prefix and `AF_OK`, `AF_FULL`, `AF_ALLOCATION_FAILED`, or
 actions. The suffix remains empty; advance spans and the initializer's
 `first_index` when retrying.
 
-Free-slot gate acquisitions detach at most 64 slots each into a private chain.
-Other creators and reclaimers may run between chunks. The entire available
-prefix is reserved before allocations or initializers run, outside the gate.
-A failed creation returns the unused
-chain under one gate acquisition. Reservations consume capacity and prevent
-runtime/host destruction before an owner is returned. `af_actor_runtime_live`
-counts occupied capacity, including the whole reserved prefix, through successful
-construction and retirement until return to the free list. Failed construction
-returns the unused suffix and its count together. All counter writers hold the
-free-slot gate and use a release store instead of a separate counter RMW.
+Slots are reserved in bounded chunks, so other creators and reclaimers may
+run between chunks. The entire available prefix is reserved before allocations
+or initializers run, which happen outside any gate. A failed creation returns
+its unused reservation before the call returns. Reservations consume capacity
+and prevent runtime/host destruction before an owner is returned.
+`af_actor_runtime_live` counts occupied capacity, including the whole reserved
+prefix, through successful construction and retirement until the slot is
+returned. Failed construction returns the unused suffix and its count
+together. Capacity that a reclaim call (scalar or batch) releases is available
+to creators when that call returns. The chunk size, the free-slot structure
+(today a linked list walked under one gate) and the counter's publication are
+implementation details, not ABI promises; the [free-index stack
+redesign](../../ROADMAP.md#next) may change them without changing this contract.
 A zero count is not a runtime-lifetime fence: shutdown also checks the released
 gate and empty ready queue, and requires external users to be joined.
 

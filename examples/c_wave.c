@@ -25,7 +25,8 @@ int main(void) {
     /* Owners and handles stay embedded in application entities. */
     struct entity { body initial; af_actor_owner owner; af_actor_handle handle; uint32_t result; };
     struct entity entities[N] = {0};
-    af_actor_kind_options kind_options = {idle, NULL, sizeof(body), _Alignof(body), NULL};
+    af_actor_kind_options kind_options; af_actor_kind_options_default(&kind_options);
+    kind_options.handler = idle; kind_options.user = NULL; kind_options.state_bytes = sizeof(body); kind_options.state_alignment = _Alignof(body); kind_options.destroy = NULL;
     const af_actor_kind *kind = NULL; check(af_actor_kind_register(runtime, &kind_options, &kind));
     for (unsigned i = 0; i < N; ++i) entities[i].initial.projection = positions + i;
     af_actor_owner_output_span owners = {&entities[0].owner, sizeof(struct entity), N};

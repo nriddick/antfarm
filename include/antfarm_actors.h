@@ -27,11 +27,15 @@ typedef void (*af_actor_destructor)(void *user, void *state, size_t state_bytes)
    cleans its own partial object; the library frees storage without destruction.
    index is the logical index, including first_index on batch retries. */
 typedef af_status (*af_actor_initializer)(void *user, void *state, size_t state_bytes, size_t index);
+/* Initialize with af_actor_kind_options_default. ABI 1 requires struct_size ==
+   sizeof(af_actor_kind_options), abi_version == AF_ABI_VERSION and reserved == 0. */
 typedef struct af_actor_kind_options {
+    uint32_t struct_size, abi_version;
     af_actor_handler handler;
     void *user;
     size_t state_bytes, state_alignment;
     af_actor_destructor destroy; /* optional */
+    uint64_t reserved;
 } af_actor_kind_options;
 typedef struct af_actor_allocator {
     void *context;
@@ -71,12 +75,14 @@ void af_actor_runtime_destroy(af_actor_runtime *);
 
 /* Immutable runtime-owned kind; registration may overlap actors, construction
    and other registrations. Join registrars before runtime destruction. Each
-   call needs exclusive output storage. Descriptor is copied. Nonnull
-   handler, nonzero bytes, power-of-two alignment; >64 needs a custom allocator.
+   call needs exclusive output storage. Descriptor is copied. Exact size and
+   version, zero reserved word, nonnull handler, nonzero bytes, power-of-two
+   alignment; >64 needs a custom allocator.
    Handler/user/destructor remain live through all actors and waves using it.
    Optional destructor runs exactly once on the winning reclaimer's thread,
    outside gates; no throw/longjmp or actor operations on its own actor.
    Abandonment deliberately retains state and does not run destructors. */
+void af_actor_kind_options_default(af_actor_kind_options *out);
 af_status af_actor_kind_register(af_actor_runtime *, const af_actor_kind_options *,
                                  const af_actor_kind **out);
 /* Empty output required. Copy accepts byte-copyable state; init receives final
@@ -89,6 +95,8 @@ af_status af_actor_create_copy(af_actor_runtime *, const af_actor_kind *, const 
 af_status af_actor_create_init(af_actor_runtime *, const af_actor_kind *, af_actor_initializer,
                                void *user, size_t index, af_actor_owner *out);
 void af_actor_owner_handle(const af_actor_owner *, af_actor_handle *out);
+/* Wake and send return only the QUEUED..NODE_BUSY outcomes above, never an
+   af_status: a NULL or zeroed handle is STALE_HANDLE. */
 uint32_t af_actor_wake(const af_actor_handle *);
 uint32_t af_actor_send(const af_actor_handle *, af_actor_message *);
 /* Copies may operate concurrently on the same generation, but writes to any
@@ -122,10 +130,11 @@ typedef struct af_actor_batch_result { size_t count; af_status status; } af_acto
 /* Preflight all output owners empty. Successful prefix remains live; suffix
    stays empty. status = AF_OK, AF_FULL, AF_ALLOCATION_FAILED or
    AF_ACTOR_INITIALIZER_FAILED; structural errors return AF_INVALID, count=0.
-   Reserve the prefix in chunks of at most 64 slots per gate hold, allowing
-   other creators/reclaimers between chunks. Finish all reservations before
-   callbacks/allocations, which run outside the gate.
-   Init count comes from output; first_index preserves indices across retries. */
+   Slots are reserved in bounded chunks, so other creators and reclaimers can
+   interleave; the whole admitted prefix is reserved before any initializer
+   or allocation runs, and an unused reservation is returned before the call
+   returns. Init count comes from output; first_index preserves indices
+   across retries. */
 af_actor_batch_result af_actor_create_copy_batch(af_actor_runtime *, const af_actor_kind *,
                                                 af_actor_state_span, af_actor_owner_output_span);
 af_actor_batch_result af_actor_create_init_batch(af_actor_runtime *, const af_actor_kind *,
@@ -135,7 +144,8 @@ af_actor_batch_result af_actor_create_init_batch(af_actor_runtime *, const af_ac
    and write its result, including duplicate identities. count totals accepted
    queued/coalesced wakes, requested/already-retired retirements, or cleared
    reclaimed/stale owners. Busy/invalid do not count. These totals are not joins.
-   Reclaim is in place; every busy owner remains available for retry. */
+   Reclaim is in place; every busy owner remains available for retry. Capacity
+   reclaimed by a call is available to creators when the call returns. */
 af_actor_batch_result af_actor_wake_batch(af_actor_handle_span, af_actor_result_span);
 af_actor_batch_result af_actor_request_retire_batch(af_actor_runtime *, af_actor_owner_span,
                                                    uint32_t mode, af_actor_result_span);
@@ -146,7 +156,7 @@ af_actor_batch_result af_actor_reclaim_batch(af_actor_runtime *, af_actor_owner_
    retain the pointer. Diagnostic is best-effort: later stack-address reuse
    does not make an expired context valid. */
 void af_actor_republish(af_actor_context *);
-void af_actor_retire(af_actor_context *);
+void af_actor_retire_self(af_actor_context *); /* the running actor retires itself */
 uint32_t af_actor_closing(const af_actor_context *);
 uint32_t af_actor_cancelling(const af_actor_context *);
 af_actor_message *af_actor_pop(af_actor_context *);
@@ -232,7 +242,8 @@ AF_ACTOR_STATIC_ASSERT(sizeof(af_actor_handle) == 16 && AF_ACTOR_ALIGNOF(af_acto
 AF_ACTOR_STATIC_ASSERT(offsetof(af_actor_owner, _generation) == 8 && offsetof(af_actor_handle, _generation) == 8, "identity offsets");
 AF_ACTOR_STATIC_ASSERT(sizeof(af_actor_message) == 32 && AF_ACTOR_ALIGNOF(af_actor_message) == 8 &&
                  offsetof(af_actor_message, _opaque) == 0, "inbox storage layout");
-AF_ACTOR_STATIC_ASSERT(sizeof(af_actor_kind_options) == 40 && offsetof(af_actor_kind_options, destroy) == 32, "kind layout");
+AF_ACTOR_STATIC_ASSERT(sizeof(af_actor_kind_options) == 56 && offsetof(af_actor_kind_options, handler) == 8 &&
+                 offsetof(af_actor_kind_options, destroy) == 40 && offsetof(af_actor_kind_options, reserved) == 48, "kind layout");
 AF_ACTOR_STATIC_ASSERT(sizeof(af_actor_handle_span) == 24 && sizeof(af_actor_owner_span) == 24 &&
                  sizeof(af_actor_owner_output_span) == 24 && sizeof(af_actor_state_span) == 24 &&
                  sizeof(af_actor_result_span) == 24, "span layout");

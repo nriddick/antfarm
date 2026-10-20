@@ -40,6 +40,6 @@ static void exercise(unsigned workers) {
     printf("C private host passed: %u workers\n", workers);
 }
 int main(void) {
-    CHECK(af_runtime_init() == AF_OK); exercise(0); exercise(2);
-    CHECK(af_runtime_shutdown() == AF_OK); return 0;
+    CHECK(af_druntime_init() == AF_OK); exercise(0); exercise(2);
+    CHECK(af_druntime_shutdown() == AF_OK); return 0;
 }

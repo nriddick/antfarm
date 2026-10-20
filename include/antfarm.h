@@ -42,7 +42,11 @@ typedef struct af_body {
    New statuses take the next free value of their header's range: antfarm.h
    64-79, antfarm_actors.h 80-95, antfarm_private.h 96-111, antfarm_runtime.h
    112-127. 11-63 stay unassigned: actor retire (16-20) and reclaim (32-34)
-   outcomes share their return value with AF_INVALID. */
+   outcomes share their return value with AF_INVALID. AF_RETRY is registered
+   but no ABI 1 function returns it: af_subscribe retries internally.
+   Return conventions: af_status for operations; a uint32_t documented as a
+   yes/no answer is exactly 0 or 1; a uint32_t documented as an outcome enum
+   returns only that enum's values. */
 typedef uint32_t af_status;
 enum {
     AF_OK = 0, AF_INVALID = 1, AF_FULL = 2, AF_RETRY = 3,
@@ -108,6 +112,8 @@ size_t af_write_fixed(af_farm *, af_callback, const uint64_t *bodies,
                       const af_completion_hook *);
 
 af_status af_view_create(af_view **out);
+/* Retries the transient frontier race internally. AF_FULL: the Farm already
+   has 128 views; AF_INVALID: null arguments or an already subscribed view. */
 af_status af_subscribe(af_view *, af_farm *);
 /* One owner per view. Walking or unsubscribing from a Farm callback/hook is
    forbidden. A false result is an idle poll, NOT a global completion fence. */

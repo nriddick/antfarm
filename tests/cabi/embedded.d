@@ -9,9 +9,9 @@ import std.exception : enforce;
 void main()
 {
     auto original = Thread.getThis();
-    enforce(af_runtime_init() == AF_OK);
-    enforce(af_runtime_attach_thread() == AF_OK);
-    enforce(af_runtime_detach_thread() == AF_OK);
+    enforce(af_druntime_init() == AF_OK);
+    enforce(af_druntime_attach_thread() == AF_OK);
+    enforce(af_druntime_detach_thread() == AF_OK);
     enforce(Thread.getThis() is original);
     af_host_options options;
     af_host_options_default(&options);
@@ -20,7 +20,7 @@ void main()
     enforce(af_host_create(&options, &host) == AF_OK);
     GC.collect();
     enforce(af_host_close(host) == AF_OK);
-    enforce(af_runtime_shutdown() == AF_OK);
+    enforce(af_druntime_shutdown() == AF_OK);
     enforce(Thread.getThis() is original);
     auto thread = new Thread({ auto value = new int(42); enforce(*value == 42); });
     thread.start(); thread.join(); GC.collect();

@@ -13,7 +13,7 @@ static void check(af_status s) {
 static void tick(void *user, void *state, size_t bytes, af_actor_context *c) {
     CHECK(user == &calls && bytes == sizeof(unsigned));
     unsigned *count = (unsigned *)state; ++*count;
-    if (*count == 1000) af_actor_retire(c); else af_actor_republish(c);
+    if (*count == 1000) af_actor_retire_self(c); else af_actor_republish(c);
     test_add(&calls, 1);
 }
 static void phase(void *user, const af_actor_kind *kind, void *state, size_t bytes) {
@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
-    (void)argv; check(af_runtime_init());
+    (void)argv; check(af_druntime_init());
     if (argc > 1) {
         af_set_fatal_handler(fatal_notice, NULL); af_host *h = make_host(0); af_actor_runtime *r = NULL;
         check(af_host_create_actors(h, 1, NULL, &r)); af_actor_runtime_destroy(r); return 1;
@@ -123,6 +123,6 @@ int main(int argc, char **argv) {
     CHECK(af_host_close(h) == AF_BUSY);
     check(af_host_abandon(h)); /* Unfinished wave storage/code/contexts are retained too. */
     h = make_host(0); check(af_host_close(h)); /* Global host claim was released. */
-    antfarm_test_collect(); check(af_runtime_shutdown());
+    antfarm_test_collect(); check(af_druntime_shutdown());
     puts("C ABI actor host checks passed"); return 0;
 }

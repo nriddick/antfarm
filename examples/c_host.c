@@ -23,7 +23,7 @@ static void check(af_status status) {
     if (status != AF_OK) { fprintf(stderr, "%s\n", af_last_error_message()); exit(1); }
 }
 int main(void) {
-    check(af_runtime_init());
+    check(af_druntime_init());
     af_host_options options; af_host_options_default(&options); options.workers = 2;
     af_host *host = NULL; check(af_host_create(&options, &host));
     af_farm *farm = af_host_farm(host); af_token *token = NULL;
@@ -36,6 +36,6 @@ int main(void) {
     unsigned sum = 0; for (unsigned i = 0; i < 1024; ++i) sum += values[i];
     printf("parallel sum = %u\n", sum);
     af_unregister_producer(farm, token); check(af_host_close(host));
-    check(af_runtime_shutdown());
+    check(af_druntime_shutdown());
     return sum == 523776 ? 0 : 1;
 }

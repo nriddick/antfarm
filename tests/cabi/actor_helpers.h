@@ -4,7 +4,8 @@
 #include "check.h"
 static const af_actor_kind *test_kind(af_actor_runtime *r, size_t bytes, size_t alignment,
                                      af_actor_handler handler, void *user) {
-    af_actor_kind_options options = {handler, user, bytes, alignment, NULL};
+    af_actor_kind_options options; af_actor_kind_options_default(&options);
+    options.handler = handler; options.user = user; options.state_bytes = bytes; options.state_alignment = alignment;
     const af_actor_kind *kind = NULL;
     CHECK(af_actor_kind_register(r, &options, &kind) == AF_OK);
     return kind;

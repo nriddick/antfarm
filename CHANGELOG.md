@@ -6,6 +6,22 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.0 — unreleased
 
+- C ABI 1 checkup before freezing: `af_actor_kind_options` gains the
+  `struct_size`/`abi_version` prefix, a zero `reserved` word and
+  `af_actor_kind_options_default` (56 bytes); `af_private_child_options` gains
+  a zero `reserved` word (96 bytes). The batch creation and reclaim contracts
+  state observable guarantees (bounded chunks, whole prefix reserved before
+  initializers, unused reservations and reclaimed capacity returned by the
+  time the call returns) instead of the current free-list mechanics, so the
+  deferred free-index-stack redesign needs no contract change. `antfarm.h`
+  states the return conventions: yes/no answers are exactly 0 or 1, outcome
+  enums never return an `af_status`, and wake/send treat a null handle as
+  stale. Renames: `af_runtime_*` session calls are `af_druntime_*` (they
+  initialize the D runtime, not an actor runtime), the context's
+  self-retirement is `af_actor_retire_self`, private cost parameters are
+  `avg_cost` everywhere, and `AF_PRIVATE_CHILD_COST` is
+  `AF_PRIVATE_CHILD_DEFAULT_COST`.
+
 - The pre-push obligations are one gate, stated once in CONTRIBUTING: `make
   check` on the final tree, a performance report when a measured path changed,
   and the Windows matrix before a release. The TSan time budget, the mutation
@@ -25,7 +41,8 @@ Older release notes are in [docs/releases/](docs/releases/):
 - `ConsumerView.subscribe` now retries the transient frontier race itself and
   returns only the epoch, `SUBSCRIBE_FULL` or `SUBSCRIBE_INVALID`; the former
   one-attempt call is `subscribeOnce`, which still reports `SUBSCRIBE_RETRY`.
-  The C `af_subscribe` keeps its one-attempt `AF_RETRY` contract. `FarmHost`,
+  The C `af_subscribe` retries the same race internally and never returns
+  `AF_RETRY`, which stays registered. `FarmHost`,
   `ant_fibers` and the examples drop their retry loops. `FarmHost.createPark`
   takes the root storage policy as a template argument. The onboarding
   commands no longer set `ANTFARM_HUGE_PAGES=0`: ordinary pages are the

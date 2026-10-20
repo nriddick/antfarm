@@ -51,7 +51,8 @@ extern "C" void placed_destroy(void *, void *p, size_t bytes) noexcept {
 static void placement_actors() {
     af_farm *f = nullptr; CHECK(af_create(nullptr, &f) == AF_OK);
     af_actor_runtime *r = nullptr; CHECK(af_actor_runtime_create(f, 4, nullptr, &r) == AF_OK);
-    af_actor_kind_options options = {placed_handler, nullptr, sizeof(placed_actor), alignof(placed_actor), placed_destroy};
+    af_actor_kind_options options; af_actor_kind_options_default(&options);
+    options.handler = placed_handler; options.user = nullptr; options.state_bytes = sizeof(placed_actor); options.state_alignment = alignof(placed_actor); options.destroy = placed_destroy;
     const af_actor_kind *kind = nullptr; CHECK(af_actor_kind_register(r, &options, &kind) == AF_OK);
     af_actor_owner owners[4] = {};
     af_actor_owner_output_span output = {owners, sizeof owners[0], 4};

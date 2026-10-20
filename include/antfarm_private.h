@@ -39,7 +39,7 @@ enum { AF_PRIVATE_CAUSE_NONE = 0, AF_PRIVATE_CAUSE_REQUESTED = 1, AF_PRIVATE_CAU
 enum { AF_PRIVATE_CANCEL_REQUESTED = 0, AF_PRIVATE_CANCEL_ALREADY = 1,
        AF_PRIVATE_CANCEL_FINISHED = 2, AF_PRIVATE_CANCEL_STALE = 3 };
 #define AF_PRIVATE_AUTO_COST UINT32_MAX
-#define AF_PRIVATE_CHILD_COST 2u /* claims of 32 */
+#define AF_PRIVATE_CHILD_DEFAULT_COST 2u /* claims of 32 */
 #define AF_PRIVATE_NO_DEADLINE INT64_MAX
 
 /* Callbacks never throw/longjmp or retain state/context/result pointers. Only
@@ -74,10 +74,11 @@ typedef struct af_private_child_options {
     size_t result_bytes, result_alignment; /* bytes=0: no storage, alignment must be 1 */
     size_t slab_byte_limit; /* COHORT_SLAB: required cap on capacity * aligned state stride */
     uint32_t storage, subsets;
+    uint64_t reserved; /* must be 0 */
 } af_private_child_options;
 
-/* Defaults leave state/step unset. Exact struct size/version required; Boolean
-   fields must be 0/1. State bytes>0, alignments power-of-two. The native allocator
+/* Defaults leave state/step unset. Exact struct size/version and zero reserved
+   words required; Boolean fields must be 0/1. State bytes>0, alignments power-of-two. The native allocator
    supports through 64; custom allocators can support larger alignments.
    Options are copied. Metadata and descendants inherit the allocator and its
    context. All allocation callbacks must be thread-safe and correctly aligned.
@@ -100,11 +101,11 @@ af_status af_private_roots_create(af_farm *, const af_private_root_options *,
    No worker threads are started. Each emitter exclusively owns its token. */
 size_t af_private_roots_live(af_private_roots *);
 void af_private_roots_collect(af_private_roots *);
-/* limit=0 uses configured limit; otherwise 1..configured limit. cost is 0..7 or
-   AUTO_COST. Returns publications, not completed work. tables counts child and
+/* limit=0 uses configured limit; otherwise 1..configured limit. avg_cost is
+   0..7 or AUTO_COST. Returns publications, not completed work. tables counts child and
    resume publications too: use it to wake parked workers. Keep pumping and
    consuming during waits; zero is not a join. Never calls consumer callbacks. */
-af_private_pump_count af_private_roots_pump(af_private_roots *, af_token *, size_t limit, uint32_t cost);
+af_private_pump_count af_private_roots_pump(af_private_roots *, af_token *, size_t limit, uint32_t avg_cost);
 /* Copy is for byte-copyable state. Init writes directly to final aligned state
    (e.g. placement-new). Failure cleans its own partial object; no destructor is
    invoked, and no root is admitted. Neither form allocates a state prefix or
@@ -150,17 +151,17 @@ af_status af_private_child_spawn_init(af_private_children *, af_private_context 
                                        af_actor_initializer, void *user, size_t index);
 /* Starts return AF_OK, PRIVATE_EMPTY, BUSY, PRIVATE_RETIRING or INVALID. Empty/rejected
    starts preserve previous results/outcome and operation. retire/continuation
-   are Booleans, cost=0..7. Leaf terminal callbacks cannot create/start children;
+   are Booleans, avg_cost=0..7. Leaf terminal callbacks cannot create/start children;
    terminal continuations can. Keep operation/user alive through finished.
    Start allocates nothing. A subset copies unique spawn indices into storage
    reserved with subsets=1. Duplicate/out-of-range selections are fatal. */
 af_status af_private_children_start(af_private_children *, af_private_context *,
                                      af_private_child_step, void *user, uint32_t retire,
-                                     uint32_t continuation, uint32_t cost);
+                                     uint32_t continuation, uint32_t avg_cost);
 af_status af_private_children_start_subset(af_private_children *, af_private_context *,
                                             af_private_child_step, void *user,
                                             const uint32_t *members, size_t count,
-                                            uint32_t continuation, uint32_t cost);
+                                            uint32_t continuation, uint32_t avg_cost);
 /* finished returns 1 when the current wave has joined (also before the first
    start), acquiring its writes. cancel returns 1 when it cancelled an active
    wave, 0 with no effect when the cohort is idle. */
@@ -191,7 +192,8 @@ AF_PRIVATE_ASSERT(sizeof(af_private_wave_outcome) == 40, "wave outcome layout");
 AF_PRIVATE_ASSERT(sizeof(af_private_root_options) == 96 && offsetof(af_private_root_options, step) == 56
                   && offsetof(af_private_root_options, slab_byte_limit) == 80
                   && offsetof(af_private_root_options, storage) == 88, "root options layout");
-AF_PRIVATE_ASSERT(sizeof(af_private_child_options) == 88 && offsetof(af_private_child_options, storage) == 80, "child options layout");
+AF_PRIVATE_ASSERT(sizeof(af_private_child_options) == 96 && offsetof(af_private_child_options, storage) == 80
+                  && offsetof(af_private_child_options, reserved) == 88, "child options layout");
 AF_PRIVATE_ASSERT(sizeof(af_private_results) == 24 && sizeof(af_private_pump_count) == 16, "private spans layout");
 #undef AF_PRIVATE_ASSERT
 #endif
