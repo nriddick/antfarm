@@ -51,6 +51,13 @@ Use a fresh output directory for a new revision or rebuilt binaries: resume chec
 
 Rates are millions of completed payloads per second (Mpps), not application work items unless one payload represents one item. The callback uses per-worker batched accounting. The ring is 16 MiB. These are current ST tables; the retired MT path is only in the archive.
 
+**Writer follow-up:** `651030b` restores the layout-specific sizing scans for
+inferred writes, including `write(callback, bodies)` and C's `af_write_bodies`.
+The [matched writer measurements](docs/performance/writer-scan-2026-10-20.md)
+recover the inferred-path loss against 1.8.3; the explicit-length overload was
+already specialized. The baseline rows below remain observations at `2cf59da`,
+before this restoration.
+
 ### Throughput vs consumers
 
 One bulk producer, 16-word bodies, batch 80. `nc` counts consumers.

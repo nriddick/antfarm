@@ -21,7 +21,10 @@ is reassessed holistically in dedicated sessions.
 - Keep the [matched MT-excision checks](docs/performance/mt-excision-check-2026-10-20.md)
   with the October 20 baseline. The apparent fourfold headline loss did not
   reproduce with the saved executable, and matched 1.8.3/current core probes
-  retained the fast uniform and compact paths on both Windows and WSL2.
+  retained fast explicit-length uniform and mixed-callback paths on both
+  Windows and WSL2. The later
+  [inferred-writer check](docs/performance/writer-scan-2026-10-20.md) found a
+  separate sizing-scan regression and measures its restoration in `651030b`.
   The environmental cause of the earlier low rates is unresolved. These short
   core checks do not clear the separate private-actor regression below.
 - Revisit table spacing and actor-churn performance in a dedicated optimization

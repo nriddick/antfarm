@@ -71,7 +71,7 @@ cells are included only when `--dual-threads` includes 6.
 - **`throughput`** — synthetic payload publish/consume sweep over a 16 MiB
   Farm. The default mode ranks a payload/table shape search; `--once` runs one
   configuration and `--grid N` sweeps small-producer counts. `--constant-header`
-  and `--constant-callandlength` select the common-header and fixed-width write
+  and `--constant-callandlength` select the common-callback and explicit-length write
   forms; `--full-header-size` sizes the quota-fit check with the pre-compact
   16-word header for comparisons against a runtime before SPEC 2f. Remaining
   shape options (`--ln`, `--k`, `--ns`, `--nc`, `--nb`, `--qs`, `--qb`, `--ac`,
@@ -109,6 +109,14 @@ Single-threaded tables use the uniform (2g) layout, or the compact 2f
 `[Call][Pbody]` record when the prefix has several callbacks; payload
 benchmarks size their quota-fit check accordingly unless `--full-header-size`
 is passed.
+
+Keep the write forms separate when checking writer performance.
+`--constant-header` exercises `write(callback, bodies)`, which scans body
+lengths to infer the table layout. `--constant-callandlength` supplies the length
+and uses arithmetic sizing; a good result there does not cover the inferred
+scan. The default payload-entry form also detects callback identity, while
+`--mixed-calls` forces compact tables. Use the same body, batch and worker
+configuration when comparing these forms.
 
 ## Actor benchmarks
 
