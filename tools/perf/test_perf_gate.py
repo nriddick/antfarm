@@ -135,7 +135,7 @@ class GateCase(unittest.TestCase):
             binary.write_bytes(build(label, rev, serial))
             return mock.Mock(returncode=0)
 
-        def fake_runone(cmd, cpus, seconds, child_affinity=None, env=None):
+        def fake_runone(cmd, cpus, seconds, child_affinity=None, env=None, background_cpu_filter=True):
             version = pathlib.Path(cmd[0]).name.split('-')[0]
             mode, consumers = cmd[1], int(cmd[4])
             percent = int(cmd[11]) if len(cmd) > 11 else 100
@@ -148,7 +148,8 @@ class GateCase(unittest.TestCase):
             if row['contaminated'] and not row['reasons']:
                 row['reasons'] = ['fake contamination']
             r.runs.append(dict(version=version, mode=mode, consumers=consumers,
-                               percent=percent, cmd=cmd, n=n, env=env))
+                               percent=percent, cmd=cmd, n=n, env=env,
+                               background_cpu_filter=background_cpu_filter))
             return row
 
         cpuinfo = [dict(processor=str(i), **{'physical id': '0', 'core id': str(i),
@@ -855,6 +856,64 @@ class TreeCancelTests(GateCase):
         self.assert_exit_recorded(r, 1)
         self.assertEqual(self.decisions(r), {('actor', 0, 100): 'regression',
                                              ('tree-cancel', 0, 100): 'inconclusive_work'})
+
+
+class BackgroundCpuPolicyTests(GateCase):
+    def test_disabled_filter_defaults_to_thirty_matched_pairs_and_records_policy(self):
+        r = self.gate(FAST + ['--consumers', '6', '--no-background-cpu-filter'])
+        self.assertEqual(r.status, 0)
+        self.assertEqual(len(r.runs), 60)
+        self.assertTrue(all(x['consumers'] == 6 and not x['background_cpu_filter'] for x in r.runs))
+        meta = self.load(r, 'metadata.json')
+        self.assertEqual(meta['arguments']['repeats'], 30)
+        self.assertTrue(meta['arguments']['no_background_cpu_filter'])
+        self.assertFalse(self.load(r, 'summary.json')[0]['background_cpu_filter'])
+        self.assertFalse(self.load(r, 'gate.json')['background_cpu_filter'])
+        self.assertIn('not quiet-host certification', self.load(r, 'gate.json')['interpretation'])
+
+    def test_disabled_filter_rejects_short_sample(self):
+        self.assertEqual(self.usage_error(FAST + ['--no-background-cpu-filter', '--repeats', '29']), 2)
+
+    def test_default_filter_remains_enabled(self):
+        r = self.gate(FAST)
+        self.assertTrue(all(x['background_cpu_filter'] for x in r.runs))
+
+
+class CpuTelemetryTests(unittest.TestCase):
+    def sample(self, enabled, timeout=False, returncode=0):
+        proc = mock.Mock(returncode=returncode)
+        output = ('Mactor_cycles/s=1 mimalloc_version=30503 hugePages=false', '')
+        proc.communicate.side_effect = ([subprocess.TimeoutExpired('bench', .5), output]
+                                        if timeout else [output])
+        with contextlib.ExitStack() as stack:
+            patches = [
+                mock.patch.object(perf_gate, 'ticks', side_effect=[
+                    {0: (0, 0), 1: (0, 0)}, {0: (1000, 0), 1: (1000, 0)}]),
+                mock.patch.object(perf_gate, 'cpuusage', side_effect=[0, 0]),
+                mock.patch.object(perf_gate, 'cpuinfo', return_value=[{'cpu MHz': '1000'}]),
+                mock.patch.object(perf_gate.time, 'monotonic', side_effect=[0, 100, 100] if timeout else [0, 1]),
+                mock.patch.object(perf_gate.os, 'getloadavg', return_value=(1, 1, 1), create=True),
+                mock.patch.object(perf_gate.os, 'sysconf', return_value=100, create=True),
+                mock.patch.object(perf_gate.subprocess, 'Popen', return_value=proc),
+            ]
+            for patch in patches:
+                stack.enter_context(patch)
+            return perf_gate.runone(['bench'], [0], 3, background_cpu_filter=enabled)
+
+    def test_disabled_filter_retains_high_cpu_telemetry_without_exclusion(self):
+        strict, relaxed = self.sample(True), self.sample(False)
+        self.assertEqual(strict['external_cpu_cores'], relaxed['external_cpu_cores'])
+        self.assertEqual(relaxed['external_cpu_cores'], 20)
+        self.assertEqual(relaxed['outside_affinity_busy_fraction'], 1)
+        self.assertEqual(strict['reasons'], ['outside mean >10%', 'outside CPU >25%',
+                                           'system minus benchmark CPU >0.25 core'])
+        self.assertTrue(strict['contaminated'])
+        self.assertFalse(relaxed['contaminated'])
+        self.assertTrue(relaxed['valid'])
+
+    def test_disabled_filter_still_rejects_timeouts_and_failed_benchmarks(self):
+        self.assertIn('timeout', self.sample(False, timeout=True)['reasons'])
+        self.assertFalse(self.sample(False, returncode=1)['valid'])
 
 
 class ScriptEntryPointTests(unittest.TestCase):

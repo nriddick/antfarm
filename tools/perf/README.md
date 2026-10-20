@@ -239,6 +239,14 @@ Decision rules:
   requires identical binary hashes). Individual pairs may fall below −3% while
   the cell still passes if the paired-median interval's lower bound is above
   −3%.
+- `--no-background-cpu-filter` disables CPU-load sample exclusions while retaining
+  all CPU telemetry. It defaults to, and requires, at least **30 matched pairs**
+  per cell. Use it explicitly for six-consumer measurements when the CPU
+  accounting filter is unsuitable for the host. Initial-load admission, affinity,
+  timeout, benchmark validity, matched work and regression-threshold checks remain.
+  The policy is recorded in metadata, samples, summaries and the gate result.
+  Historical `quiet_*` field names then mean accepted samples, not proof of a
+  quiet host; report these measurements separately from filtered results.
 - `tree-cancel` additionally requires valid dispatched fractions and no median
   fraction change beyond the default tolerance; unequal cancellation work is
   inconclusive.

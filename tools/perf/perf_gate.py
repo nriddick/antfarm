@@ -81,7 +81,7 @@ def cpuusage():
     import resource
     r=resource.getrusage(resource.RUSAGE_CHILDREN);return r.ru_utime+r.ru_stime
 
-def runone(cmd,cpus,seconds,child_affinity=None,env=None):
+def runone(cmd,cpus,seconds,child_affinity=None,env=None,background_cpu_filter=True):
     before=ticks();start=time.monotonic();used=cpuusage();samples=[]
     proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
         env={**os.environ,**(env or {}),'ANTFARM_HUGE_PAGES':'0'},
@@ -101,16 +101,18 @@ def runone(cmd,cpus,seconds,child_affinity=None,env=None):
     external_cpu=max(0,all_busy-child_cpu)/elapsed
     reasons=[]
     if outside is None:reasons.append('no outside-affinity observation')
-    if outside is not None and outside>.10:reasons.append('outside mean >10%')
-    if max(busy.values(),default=0)>.25:reasons.append('outside CPU >25%')
-    if external_cpu>.25:reasons.append('system minus benchmark CPU >0.25 core')
+    if background_cpu_filter:
+        if outside is not None and outside>.10:reasons.append('outside mean >10%')
+        if max(busy.values(),default=0)>.25:reasons.append('outside CPU >25%')
+        if external_cpu>.25:reasons.append('system minus benchmark CPU >0.25 core')
     if expired:reasons.append('timeout')
     rate=re.search(r'\b(Mactor_cycles/s|Mleaf_cycles/s|Mselected_callbacks/s)=([0-9.]+)',stdout)
     fields=dict(re.findall(r'([A-Za-z_]+)=([0-9]+(?:\.[0-9]+)?)',stdout))
     return dict(command=cmd,extra_env=env or {},returncode=proc.returncode,stdout=stdout,stderr=stderr,
         load_before=samples[0]['load'],load_after=os.getloadavg(),load_samples=samples,
         outside_affinity_busy_fraction=outside,outside_per_cpu=busy,external_cpu_cores=external_cpu,
-        benchmark_cpu_seconds=child_cpu,wall_seconds=elapsed,contaminated=bool(reasons),reasons=reasons,
+        benchmark_cpu_seconds=child_cpu,wall_seconds=elapsed,background_cpu_filter=background_cpu_filter,
+        contaminated=bool(reasons),reasons=reasons,
         rate=float(rate[2]) if rate else None,metric=rate[1] if rate else None,fields=fields,
         valid=proc.returncode==0 and rate is not None and float(rate[2])>0 and 'mimalloc_version=30503' in stdout and 'hugePages=false' in stdout)
 
@@ -136,15 +138,17 @@ def main():
     p.add_argument('--base-env',action='append',default=[],metavar='KEY=VALUE',help='Extra environment for base runs only (repeatable), e.g. MIMALLOC_* options; recorded per run')
     p.add_argument('--candidate-env',action='append',default=[],metavar='KEY=VALUE',help='Extra environment for candidate runs only (repeatable); with --control this screens a runtime setting on byte-identical binaries')
     p.add_argument('--optimization',choices=['O2','O3'],default='O2');p.add_argument('--initial-load-limit',type=float,default=1.0)
+    p.add_argument('--no-background-cpu-filter',action='store_true',help='Record CPU telemetry without rejecting samples for background CPU load; requires >=30 matched pairs (default 30)')
     p.add_argument('--threshold',type=float,default=-.03)
     p.add_argument('--build-only',action='store_true',help='Build base and candidate, record metadata and stop: no host-load or CPU checks, no measurements')
     p.add_argument('--cancel-fraction-tolerance',type=float,default=.01,help='Max absolute median dispatched-fraction change before cancellation timing is inconclusive')
     a=p.parse_args()
     require_linux(p)
     a.repo=a.repo.resolve();a.output=a.output.resolve()
-    if a.repeats is None:a.repeats=20 if a.boundary else 5
+    if a.repeats is None:a.repeats=30 if a.no_background_cpu_filter else 20 if a.boundary else 5
     if a.max_attempts is None:a.max_attempts=max(10,2*a.repeats)
     if a.boundary and a.repeats<20:p.error('boundary mode requires >=20 repeats')
+    if a.no_background_cpu_filter and a.repeats<30:p.error('disabling background CPU filtering requires >=30 repeats')
     if a.control:
         if a.candidate is not None and command(['git','rev-parse',a.base+'^{commit}'],cwd=a.repo)!=command(['git','rev-parse',a.candidate+'^{commit}'],cwd=a.repo):
             p.error('control requires base == candidate')
@@ -179,10 +183,10 @@ def main():
         path=P(f'/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_governor')
         governors[c]=path.read_text().strip() if path.exists() else 'unavailable'
     initial_load=os.getloadavg()
-    meta=dict(arguments={k:str(v) if isinstance(v,P) else v for k,v in vars(a).items()},topology=topo,governors=governors,
+    meta=dict(arguments={k:str(v) if isinstance(v,P) else v for k,v in vars(a).items()},harness_sha256=sha(__file__),topology=topo,governors=governors,
         aslr=P('/proc/sys/kernel/randomize_va_space').read_text().strip() if P('/proc/sys/kernel/randomize_va_space').exists() else 'unavailable',
         initial_load=initial_load,controller_shares_core_with=[] if a.build_only else [c for c in pins[1:max(profiles)+1] if cores[c]==cores[pins[0]]],compiler=command(['ldc2','--version']),archive_sha256=sha(a.archive),builds={},
-        note='Five warmup cycles. Serial builds/runs. Own benchmark sources unless benchmark-ref. Loadavg includes benchmark self-load; admission uses initial load, exclusion uses CPU accounting.')
+        note='Five warmup cycles. Serial builds/runs. Own benchmark sources unless benchmark-ref. Loadavg includes benchmark self-load; admission uses initial load. Background CPU exclusion is '+('disabled; CPU telemetry is retained, accepted samples are not certified quiet.' if a.no_background_cpu_filter else 'enabled.'))
     dump('metadata.json',meta)
     if initial_load[0]>a.initial_load_limit and not a.build_only:
         dump('failure.json',dict(reason='initial host load exceeds limit',load=initial_load))
@@ -257,7 +261,7 @@ def main():
             cmd=[str(binaries[version]),mode,str(a.actors),str(a.seconds),str(consumers),str(a.batch),'5','mimalloc',','.join(map(str,cpus)),a.tier,str(a.quota)]
             if mode.startswith('subset'):cmd.append(str(percent))
             if a.root_hint!='auto':cmd.append(a.root_hint)
-            row=runone(cmd,cpus,a.seconds,child_affinity=full_affinity,env=envs[version]);row.update(version=version,mode=mode,percent=percent,consumers=consumers,cpus=cpus,repeat=repeat,accepted_pair_target=len(pairs))
+            row=runone(cmd,cpus,a.seconds,child_affinity=full_affinity,env=envs[version],background_cpu_filter=not a.no_background_cpu_filter);row.update(version=version,mode=mode,percent=percent,consumers=consumers,cpus=cpus,repeat=repeat,accepted_pair_target=len(pairs))
             log.write(json.dumps(row)+'\n');log.flush();pair[version]=row
             print(version,mode,percent,consumers,row['rate'],'contaminated',row['reasons'],flush=True)
             if not row['valid']:
@@ -268,7 +272,7 @@ def main():
           if len(pairs)>=a.repeats:break
          bs=[r['base']['rate'] for r in pairs];cs=[r['candidate']['rate'] for r in pairs]
          allb=[r['base']['rate'] for r in attempts];allc=[r['candidate']['rate'] for r in attempts]
-         item=dict(mode=mode,percent=percent,consumers=consumers,cpus=cpus,quiet_n=len(pairs),
+         item=dict(mode=mode,percent=percent,consumers=consumers,cpus=cpus,quiet_n=len(pairs),background_cpu_filter=not a.no_background_cpu_filter,
             contaminated=sum(x['contaminated'] for z in attempts for x in z.values()),base_mean=statistics.mean(allb),candidate_mean=statistics.mean(allc),delta=statistics.mean(allc)/statistics.mean(allb)-1)
          item['kept_order_counts']={v:sum(next(iter(pair))==v for pair in pairs) for v in ['base','candidate']}
          item['legacy_mean_fields_include_contaminated']=True
@@ -301,7 +305,8 @@ def main():
     dump('summary.json',summary)
     status=1 if any(x['decision']=='regression' for x in summary) else 2 if missing or any(x['decision']!='pass' for x in summary) else 0
     screen='Conservative all-pairs threshold screen at n=5; median interval bounds effectively equal min/max paired ratios.' if a.repeats==5 else 'Paired-median interval threshold screen; individual pairs may fall below the threshold and still pass.'
-    dump('gate.json',dict(exit_status=status,threshold=a.threshold,unavailable=missing,interpretation='Bootstrap interval is descriptive. '+screen+' Not a calibrated 95% confidence guarantee. Inconclusive is not pass. Legacy mean fields include all attempts; use quiet fields and decision. Run correctness separately before timing.'))
+    load_policy=' Background CPU exclusion disabled: quiet_* fields denote accepted samples, not quiet-host certification.' if a.no_background_cpu_filter else ''
+    dump('gate.json',dict(exit_status=status,threshold=a.threshold,unavailable=missing,background_cpu_filter=not a.no_background_cpu_filter,interpretation='Bootstrap interval is descriptive. '+screen+' Not a calibrated 95% confidence guarantee. Inconclusive is not pass. Legacy mean fields include all attempts; use quiet fields and decision.'+load_policy+' Run correctness separately before timing.'))
     return status
 if __name__=='__main__':
     try:sys.exit(main())
