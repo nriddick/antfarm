@@ -6,6 +6,19 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.0 — unreleased
 
+- Pre-push performance report for `cb2fb26..fac31ea` on the 5900XT (34
+  cells, five pairs, then 20 pairs on the ten flagged cells; 340 + 400
+  samples, none excluded). Six-consumer cells: within ±1% except `private`
+  +2.3%, `tree-cont` +2.5%, `tree-pipelined` +2.1%, `tree-cancel` +3.5%,
+  `dtor` +4.1%, `subset` 10% −1.6% (stddev 0.5%) and `subset` 100% −2.9%
+  (stddev 0.2%). Serial cells: +0.2% to +9% except `tree-cancel` −5.3%
+  (stddev 0.8%). The two consistent negatives are the subset callback (three
+  dependent loads, one of them a park field whose line moved when the root
+  park gained its slab pointer) and the serial cancellation cell, which sits
+  with the other zero-consumer layout swings; `dtor` and `subset-whole`
+  serial cells span 24% to 78% from single outlier pairs. Evidence is local
+  under `/tmp/af-gate-push*`.
+
 - PERFORMANCE.md is rebuilt around a headline table (payload, private root,
   public actor and warm Fiber throughput at 2 to 40 threads), a tail-latency
   table at 2 to 32 threads, and the comprehensive array, all as median ± sample
