@@ -50,7 +50,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | --- | --- |
 | [quickstart.md](guide/quickstart.md) | run the single-threaded First payload, then a public service on pinned workers |
 | [using-it-well.md](guide/using-it-well.md) | check correctness and tuning rules before building on the Farm |
-| [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown |
+| [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown, and structuring across LLC groups |
 | [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, or Fiber |
 | [parallel-loops.md](guide/parallel-loops.md) | compose ranges, choose grains, and join parallel regions |
 | [public-actors.md](guide/public-actors.md) | create, address, wake, retire and reclaim public actors and waves |
@@ -94,6 +94,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | First payload and the initial producer/consumer/actor model | [guide/quickstart.md](guide/quickstart.md) |
 | Runnable actor programs and their commands | [examples/README.md](../examples/README.md) |
 | FarmHost setup, placement, idle and wake, control-thread rule, close and abandon | [guide/hosting.md](guide/hosting.md) |
+| Structuring across LLC groups: consumers per group, one-way cross-group publication, Farms as channels | [guide/hosting.md](guide/hosting.md#several-physical-groups) |
 | Actor API topic index and the generated reference command | [reference/README.md](reference/README.md) |
 | Actor authority, completion, storage, drain and shutdown contracts shared by both models | [reference/actor-lifecycle.md](reference/actor-lifecycle.md) |
 | Public actor creation, inbox, retirement and wave API | [guide/public-actors.md](guide/public-actors.md) |

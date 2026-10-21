@@ -67,6 +67,13 @@ is reassessed holistically in dedicated sessions.
 
 ## Next
 
+- A per-group-Farm host: one `FarmHost` owning one Farm per accepted LLC
+  group, each group's workers pinned to its own Farm, a token per Farm, and
+  `publish`/`pump` routed by group so the control thread emits locally into
+  its home group and one-way into the others. The measurements and the
+  interim hand-written shape are in
+  [several physical groups](docs/guide/hosting.md#several-physical-groups).
+
 - Continue public-actor tuning from the fused retirement and occupancy path.
   The [lifecycle optimization record](docs/performance/archive-2026-10-20.md#public-actor-lifecycle-optimization-190-progress)
   compares both the value-owner baseline and the pre-refresh implementation,

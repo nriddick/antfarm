@@ -103,7 +103,100 @@ The defaults are:
 `HostGroups.span([home, other...])` is the explicit opt-in to consume one Farm
 from several groups. `host.summary()` labels it `crossGroup` and counts the
 other groups' workers as foreign consumers. `HostGroups.only(g)` pins the choice to
-one group.
+one group. Spanning is the configuration the next section measures and
+advises against; it exists for the cases where the work is heavy enough not
+to care.
+
+## Several physical groups
+
+A last-level-cache group (a CCD on this host) is the unit of structure. What
+crossing one costs is not the payload bytes but every cache line that two
+groups write in turn: the table header a producer writes and the first
+claimer RFOs, the claim word that every chunk claim CASes, the completion
+counters, and the ring lines themselves when consumers read them before the
+producer's group has finished with them. On the Ryzen 9 5900XT a line moves
+between groups in about 87 ns against 21 ns inside one, so a shared line that
+ping-pongs costs four times what it costs locally, and a line that crosses
+once costs one such transfer per 64 bytes.
+
+Measured on October 21, 2026, with the off-CCD harness
+(`tools/perf/offccd`, one small producer, five consumers, one-word payloads,
+streaming for one second), in millions of payloads per second:
+
+| Work per payload | Batch | All in one group | Producer in one group, consumers in the other | Consumers split 3 + 2 |
+| --- | ---: | ---: | ---: | ---: |
+| touch | 16 | 360 | 83 | 125 |
+| touch | 64 | 425 | 213 | 187 |
+| touch | 256 | 888 | 537 | 476 |
+| touch | 1,024 | 987 | 708 | 694 |
+| touch | 1,700 | 996 | 731 | 751 |
+| 100 ns | 16 | 42.7 | 42.0 | 38.8 |
+| 100 ns | 256 | 46.3 | 44.4 | 43.1 |
+| 100 ns | 1,700 | 47.2 | 45.3 | 44.7 |
+| 1 µs | 16 | 4.8 | 4.7 | 4.7 |
+| 1 µs | 1,700 | 5.0 | 4.8 | 4.9 |
+
+Two things follow. **Table size amortizes the control lines**: with trivial
+payloads, going from 16 to 256 entries per table takes the one-way channel
+from 23% to 60% of local, and beyond 1,024 entries it gains nothing more.
+**Work per payload hides the data lines**: at 100 ns per payload the
+cross-group penalty is 2 to 4% at every batch size, and at 1 µs it is within
+the noise. A trivial callback (a few nanoseconds per word) is latency-bound
+on the line transfers however the tables are shaped, which is also why
+[the headline](../../PERFORMANCE.md#headline-throughput) drops from 517 to
+207 million child lifecycles per second when the first consumer lands on the
+second CCD.
+
+The guidance:
+
+1. **Every Farm's consumers live in one group.** Consumers in two groups
+   contend on the same claim and completion lines; that is the cliff, and it
+   is paid at the first remote consumer. The host's default already does
+   this. A hand-written pool does it with one Farm per `llcIndex` bin
+   (`makeBins`, `at!T(llc)` in the [threadpool](../../threadpool/README.md#install-llc-local-state)).
+2. **Publish across groups only when the tables are large and the work is
+   real.** Keep cross-group tables at 256 entries or more, and expect to lose
+   little only when each payload carries about 100 ns of work or more
+   (roughly 10 ns per word moved). Below that, keep the work on the
+   producer's own group; adding remote consumers to a stream of trivial
+   payloads slows it.
+3. **A Farm is a channel.** To use a second group, give it its own Farm with
+   all of its consumers, and let the control thread publish into it one-way:
+   locally into its home group's Farm, remotely into the other group's. For
+   private actors that is one root park per Farm with its own token, pumped
+   in turn; child cohorts inherit their root's Farm. For public actors it is
+   one runtime per Farm; handles and waves are runtime-bound, so a service
+   is partitioned by group. When one control thread saturates, run one per
+   group: two Farm, park and control sets with the work split at the top and
+   only the application's own data crossing.
+4. **Tokens are cheap to hold; quota is budgeted at creation.** A `Token` is
+   32 bytes and a 64-byte-strided ticket slot in its Farm. Registration takes
+   the Farm's producer mutex and scans the tier's slots, microseconds, so
+   registering for a burst and unregistering after is fine, but there is no
+   reason not to hold one per publishing thread per Farm. What a token really
+   costs is the tier's quota: `maxBulk * quotaBulk + maxSmall * quotaSmall`
+   must fit `k - 1` segments, and the Farm reserves that headroom whether or
+   not the slots are in use. A thread that publishes occasionally into
+   several groups' Farms can share a few tokens through a mutex, as long as
+   each token has one active user at a time; tokens are move-only and never
+   used concurrently.
+5. **Size a channel Farm for its traffic.** The ring floor is 2 MiB
+   (`MIN_RING_MIB`), double-mapped, plus a 15 KiB Farm structure, and every
+   page of the ring is resident after one lap, so a channel costs about
+   2 MiB of memory however little it carries. Its cache footprint is only the
+   live segment, not the ring. Give a remote channel a larger ring than a
+   local one when its producer is busy, so reclamation sweeps, which cross
+   the interconnect, happen less often; give it one or two small producer
+   slots and the quota they need, not the defaults. A smaller ring floor
+   would be a geometry study (the 2,048-word segment floor keeps table
+   headers from dominating a segment), not a design change.
+
+The host does not yet package this. `FarmHost` owns one Farm on one group,
+and a process has one pool with workers, so a per-group-Farm host (one host,
+one Farm per accepted group, a token per Farm, `publish` and `pump` routed by
+group) is the missing primitive and is on the [roadmap](../../ROADMAP.md#next).
+Until then, the hand-written pool shape above, or one process per group, is
+the way to scale past one group.
 
 ## Progress and waking
 

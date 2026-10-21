@@ -71,14 +71,18 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    Each tier's capacity must cover every thread that can hold that tier's
    token simultaneously. See [the formulas](../../ARCHITECTURE.md#sizing-one-farm)
    and [tier decisions](sizing-and-allocation.md#farm-setup-and-tier-choice).
-5. **Pin consumers and prefer one Farm per LLC group.** `FarmHost` defaults to
-   pinned workers in one group; `FiberServicePlan` defaults to native-only
-   service for its LLC lanes. Cross-group service is an explicit choice.
-   The reported 42–73% slowdown was an instrumented two-worker Fiber
-   assist-ring probe with persistent remote subscriptions, compared with no
-   edges on one two-LLC host; it is not a general shared-Farm penalty. See
-   [host placement](hosting.md#placement), [LLC service](../../ARCHITECTURE.md#one-llc-and-many-llcs),
-   and [assist-ring measurements](../performance/archive-2026-10-20.md#assist-ring-ab).
+5. **Keep every Farm's consumers in one LLC group; cross groups by
+   publishing, not by consuming.** Consumers in two groups contend on the
+   same claim and completion lines, and the first remote consumer pays the
+   whole cliff (517 to 207 million child lifecycles per second on the 5900XT).
+   A producer may publish into another group's Farm one-way when its tables
+   have 256 entries or more and each payload carries about 100 ns of work;
+   trivial payloads stay local. `FarmHost` defaults to one group and
+   `FiberServicePlan` to native-only lane service; `HostGroups.span` and
+   assist edges are explicit opt-ins. See
+   [several physical groups](hosting.md#several-physical-groups),
+   [LLC service](../../ARCHITECTURE.md#one-llc-and-many-llcs) and the
+   [assist-ring measurements](../performance/archive-2026-10-20.md#assist-ring-ab).
 6. **Account for idle costs.** Polling consumes CPU; arrange waiting through
    the Director or host idle policy. `host.waitUntil` drives control-thread
    progress; it is not automatic core parking. A stalled older segment makes

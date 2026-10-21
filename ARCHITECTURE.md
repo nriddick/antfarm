@@ -233,6 +233,12 @@ serving a lane. Topology-specific performance and
 lost-worker-group claims still need their own evidence before they are treated
 as release evidence.
 
+The same rule holds below the Fiber layer: a Farm's consumers belong to one
+group, and a second group is reached by giving it its own Farm and publishing
+into it one-way, in large tables of payloads that carry real work. The
+measurements and the token, quota and ring-size consequences are in
+[several physical groups](docs/guide/hosting.md#several-physical-groups).
+
 ## Shutdown order
 
 Stop admission and drain while producers and consumers can still make progress.
