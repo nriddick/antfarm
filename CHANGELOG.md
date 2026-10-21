@@ -6,6 +6,21 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.0 — unreleased
 
+- PERFORMANCE.md is rebuilt around a headline table (payload, private root,
+  public actor and warm Fiber throughput at 2 to 40 threads), a tail-latency
+  table at 2 to 32 threads, and the comprehensive array, all as median ± sample
+  standard deviation from five samples on the Ryzen 9 5900XT. The 12700H
+  tables are retired until the Windows host rebuilds them with the same
+  driver. The report driver gains the `headline` and thread-swept `tail`
+  sections, `--threads`, `--tail-threads`, `--fiber-tasks` and `--markdown`,
+  topology-ordered pin lists, and standard deviations in every summary. The
+  tail benchmark measures only the library's consumer loop: the out-of-band
+  mailbox scene, the attribution mode and the extra consumer-count check are
+  removed. Placement, in the tail harness and the Fiber benchmark's new
+  worker-count argument, fills one physical group (cores, then SMT siblings)
+  before the next, which measured 69.6 versus 38.5 Mcycles/s for private
+  roots at 16 threads against spreading cores across both CCDs.
+
 - C ABI 1 checkup before freezing: `af_actor_kind_options` gains the
   `struct_size`/`abi_version` prefix, a zero `reserved` word and
   `af_actor_kind_options_default` (56 bytes); `af_private_child_options` gains

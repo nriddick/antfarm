@@ -15,6 +15,7 @@ import importlib.util
 import io
 import os
 import pathlib
+from pathlib import Path
 import shutil
 import signal
 import subprocess
@@ -207,27 +208,120 @@ class TailTests(unittest.TestCase):
 
     def test_all_scene_rows_are_returned(self):
         rows = rpm.parse_tail(TAIL_OUT)["rows"]
+        # The mailbox row is an out-of-band signalling path the benchmark no
+        # longer has; an old log's row is ignored rather than parsed.
         self.assertEqual([r["scene"] for r in rows],
-                         ["mid-drain", "mid-drain", "mailbox", "idle"])
-        self.assertEqual(rows[3]["spin"], "-")
-        self.assertEqual(rows[3]["p99_ns"], 5200.0)
+                         ["mid-drain", "mid-drain", "idle"])
+        self.assertEqual(rows[2]["spin"], "-")
+        self.assertEqual(rows[2]["p99_ns"], 5200.0)
 
     def test_metric_prefers_mid_drain_256_1us(self):
         d = rpm.parse_tail(TAIL_OUT)
         self.assertEqual(d["metric"], 34400.0)
 
     def test_metric_falls_back_to_the_first_row(self):
-        only_mailbox = "\n".join(
-            line for line in TAIL_OUT.splitlines() if "mailbox" in line or line.startswith("scene")
+        only_idle = "\n".join(
+            line for line in TAIL_OUT.splitlines() if line.startswith("idle") or line.startswith("scene")
         ) + "\n"
-        d = rpm.parse_tail(only_mailbox)
+        d = rpm.parse_tail(only_idle)
         self.assertEqual(len(d["rows"]), 1)
         self.assertEqual(d["metric"], d["rows"][0]["p99_ns"])
-        self.assertEqual(d["metric"], 150.0)
+        self.assertEqual(d["metric"], 5200.0)
 
     def test_no_rows_raises(self):
         with self.assertRaises(ValueError):
             rpm.parse_tail("scene nc tlen spin n p50 p99 p99.9 max miss zero\n")
+
+
+class HeadlineTests(unittest.TestCase):
+    ORDER = [0, 1, 2, 3, 16, 17, 18, 19]
+
+    def args(self, *extra):
+        args = rpm.build_parser().parse_args(list(extra))
+        args.cpu_order = self.ORDER
+        return args
+
+    def test_payload_split_is_about_one_producer_per_two_consumers(self):
+        self.assertEqual(rpm.payload_split(2), (1, 1))
+        self.assertEqual(rpm.payload_split(4), (1, 3))
+        self.assertEqual(rpm.payload_split(16), (5, 11))
+        self.assertEqual(rpm.payload_split(40), (13, 27))
+
+    def test_pins_follow_placement_order_and_unpin_when_oversubscribed(self):
+        self.assertEqual(rpm.pins_for(2, self.ORDER), "0,1")
+        self.assertEqual(rpm.pins_for(8, self.ORDER), "0,1,2,3,16,17,18,19")
+        self.assertEqual(rpm.pins_for(9, self.ORDER), "-")
+
+    def test_cpu_order_falls_back_to_numeric_order_without_sysfs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            order = rpm.cpu_order(sys_root=Path(tmp))
+        self.assertEqual(order, list(range(os.cpu_count() or 1)))
+
+    def test_cpu_order_groups_by_cache_then_cores_then_siblings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "devices/system/cpu"
+            # Two LLCs of two cores each, SMT siblings offset by 4, as a
+            # 4-core/8-thread two-CCD part exposes them.
+            layout = {0: ("0", "0,2,4,6"), 1: ("1", "1,3,5,7"), 2: ("0", "0,2,4,6"),
+                      3: ("1", "1,3,5,7"), 4: ("0", "0,2,4,6"), 5: ("1", "1,3,5,7"),
+                      6: ("0", "0,2,4,6"), 7: ("1", "1,3,5,7")}
+            core_of = {0: "0", 4: "0", 2: "1", 6: "1", 1: "2", 5: "2", 3: "3", 7: "3"}
+            for cpu, (llc, shared) in layout.items():
+                (base / f"cpu{cpu}/topology").mkdir(parents=True)
+                (base / f"cpu{cpu}/topology/core_id").write_text(core_of[cpu] + "\n")
+                (base / f"cpu{cpu}/cache/index3").mkdir(parents=True)
+                (base / f"cpu{cpu}/cache/index3/shared_cpu_list").write_text(shared + "\n")
+            with mock.patch.object(rpm.os, "cpu_count", return_value=8):
+                order = rpm.cpu_order(sys_root=Path(tmp))
+        self.assertEqual(order, [0, 2, 4, 6, 1, 3, 5, 7])
+
+    def test_headline_cells_cover_every_workload_and_skip_oversubscribed_fibers(self):
+        args = self.args("--threads", "2,8,9")
+        cells = rpm.cases_for("headline", args)
+        names = [c["name"] for c in cells]
+        self.assertEqual(names, ["payload_t2", "payload_t8", "payload_t9",
+                                 "private_t2", "private_t8", "private_t9",
+                                 "tree_t2", "tree_t8", "tree_t9",
+                                 "public_t2", "public_t8", "public_t9",
+                                 "wave_t2", "wave_t8", "wave_t9",
+                                 "fiber_t2", "fiber_t8"])
+        private9 = next(c for c in cells if c["name"] == "private_t9")
+        self.assertEqual(private9["cmd"][4], "8")   # consumers = threads - 1
+        self.assertEqual(private9["cmd"][8], "-")   # unpinned beyond the CPU count
+        fiber8 = next(c for c in cells if c["name"] == "fiber_t8")
+        self.assertEqual(fiber8["cmd"][-3:], [str(args.fiber_tasks), "private", "8"])
+
+    def test_tail_cells_use_one_consumer_fewer_than_threads(self):
+        cells = rpm.cases_for("tail", self.args("--tail-threads", "2,6"))
+        self.assertEqual([c["cmd"][c["cmd"].index("--nc") + 1] for c in cells], ["1", "5"])
+
+    def test_thread_counts_below_two_are_rejected(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            rpm.main(["--threads", "1", "--sections", "host", "--out", tempfile.mkdtemp()])
+
+    def test_markdown_tables_use_median_and_stddev(self):
+        args = self.args("--threads", "2", "--tail-threads", "2")
+        results = [
+            {"section": "headline", "name": "payload_t2", "median": 700.0, "stddev": 5.0},
+            {"section": "headline", "name": "private_t2", "median": 60.0, "stddev": 1.0},
+            {"section": "headline", "name": "public_t2", "median": 10.0, "stddev": 0.5},
+            {"section": "headline", "name": "fiber_t2", "median": 2.5e6, "stddev": 1e5,
+             "field_stats": {"warm_total_fibers_s": {"median": 2.5e6, "stddev": 1e5},
+                             "warm_run_fibers_s": {"median": 5.0e6, "stddev": 2e5}}},
+            {"section": "tail", "name": "tail_t2", "tail_rows": [
+                {"scene": "idle", "tlen": 0, "spin": "-", "runs": 5, "valid_runs": 5,
+                 "p50_ns": {"median": 200.0, "stddev": 10.0}, "p99_ns": {"median": 2000.0, "stddev": 100.0},
+                 "p999_ns": {"median": 4000.0, "stddev": 300.0}, "max_ns": {"median": 9000.0, "stddev": 500.0}}]},
+            {"section": "dual", "name": "nd2", "median": 70.123, "stddev": 0.5,
+             "valid_runs": 5, "requested_runs": 5},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "tables.md"
+            rpm.write_markdown(results, args, out)
+            text = out.read_text()
+        self.assertIn("| 2 | 700.0 ± 5.0 | 60.00 ± 1.00 | — | 10.00 ± 0.50 | — | 2.50 ± 0.10 | 5.00 ± 0.20 |", text)
+        self.assertIn("| 2 | idle | 0 | - | 0.20 ± 0.01 | 2.00 ± 0.10 | 4.00 ± 0.30 | 9.00 ± 0.50 | 5 / 5 |", text)
+        self.assertIn("| `nd2` | 70.123 ± 0.500 | 5 / 5 |", text)
 
 
 class TailAggregationTests(unittest.TestCase):
@@ -449,7 +543,8 @@ class DriverTests(unittest.TestCase):
         self.assertFalse(rpm.cell_is_cached({**cached, "values": []}, cell, 1))
 
     def test_six_consumer_minimum_and_cache(self):
-        args = rpm.build_parser().parse_args(["--runs", "5", "--six-consumer-runs", "30"])
+        args = rpm.build_parser().parse_args(["--runs", "5", "--six-consumer-runs", "30",
+                                              "--tail-threads", "2,7"])
         for section in ("public", "private", "farm_consumers", "tail"):
             cells = rpm.cases_for(section, args)
             six = next(c for c in cells if rpm.requested_runs(args, c) == 30)

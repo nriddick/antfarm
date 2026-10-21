@@ -9,11 +9,14 @@
  + Second generation re-spawns from the recycling pool: zero GC allocation,
  + zero stack mmap per fiber.
  +
- + Usage: benchmark_mt [tasks] [private|shared|assist]
+ + Usage: benchmark_mt [tasks] [private|shared|assist] [workers]
  +   private  (default) one domain per lane;
  +   shared   one domain over every lane, native service only (no edges);
  +   assist   one domain plus an explicit `assistRing` over the accepted
  +            groups, the former automatic ring: the A/B against `shared`.
+ +   workers  pin exactly this many pool workers, filling one physical group
+ +            (cores, then its SMT siblings) before the next; 0 or absent
+ +            keeps the pool's default of one worker per core everywhere.
  +/
 // Package scope permits wake-batched admission to an explicit shared-domain
 // lane, without timing a per-task FiberLane.spawn wake broadcast.
@@ -45,6 +48,24 @@ void report(string label, size_t count, Duration elapsed, bool measurable = true
                  label, count, seconds, count / seconds);
 }
 
+/// The first `count` eligible logical processors in placement order: one
+/// physical group at a time, its cores (faster classes first) before its SMT
+/// siblings. More workers than processors is an error: the pool pins.
+ProcessorId[] pickWorkers(const TopologySnapshot topology, size_t count)
+{
+    import std.algorithm.sorting : sort;
+    auto processors = topology.processors.dup;
+    sort!((a, b) => a.llcIndex != b.llcIndex ? a.llcIndex < b.llcIndex
+        : a.smtSibling != b.smtSibling ? !a.smtSibling
+        : a.efficiencyClass != b.efficiencyClass ? a.efficiencyClass > b.efficiencyClass
+        : (a.group != b.group ? a.group < b.group : a.lpIndex < b.lpIndex))(processors);
+    ProcessorId[] order;
+    foreach (ref p; processors)
+        if (topology.isEligible(p)) order ~= ProcessorId.of(p);
+    enforce(count <= order.length, "benchmark_mt: more workers than eligible processors");
+    return order[0 .. count];
+}
+
 void main(string[] args)
 {
     immutable taskCount = args.length > 1 ? args[1].to!size_t : 100_000;
@@ -55,8 +76,14 @@ void main(string[] args)
     immutable sharedDomain = mode != "private";
     auto domain = sharedDomain ? new FiberDomain : null;
 
+    immutable workers = args.length > 3 ? args[3].to!size_t : 0;
     PoolOptions options;
     options.managedWorker = fiberWorkerHooks();
+    if (workers != 0)
+    {
+        options.processors = pickWorkers(CacheAwarePool.topology(), workers);
+        options.skipSmtSiblings = false;
+    }
     auto pool = new CacheAwarePool(options);
     auto plan = new FiberServicePlan(pool.resolve());
     ushort[] groups;

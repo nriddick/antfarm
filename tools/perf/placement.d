@@ -29,25 +29,26 @@ struct Placement
     bool crossesLlc;
 }
 
-// One thread per physical core first, faster classes first within each pass.
-// Only after every core has a representative do we use SMT siblings.
-// `llc >= 0` restricts the candidates to that physical group; the default
-// ordering is unchanged so historical results stay comparable.
+// Fill one physical group before the next: within a group, one thread per
+// physical core first (faster classes first), then that group's SMT
+// siblings. Measured on the 5900XT, keeping a workload inside one CCD and
+// using its siblings beats spreading primaries across both CCDs (private
+// roots at 16 threads: 69.6 versus 38.5 Mcycles/s). `llc >= 0` restricts
+// the candidates to that physical group.
 Placement choosePlacement(ref const TopologySnapshot topology, uint count, int llc = -1)
 {
     auto processors = topology.processors.dup;
-    sort!((a, b) => a.efficiencyClass != b.efficiencyClass
-        ? a.efficiencyClass > b.efficiencyClass
+    sort!((a, b) => a.llcIndex != b.llcIndex ? a.llcIndex < b.llcIndex
+        : a.smtSibling != b.smtSibling ? !a.smtSibling
+        : a.efficiencyClass != b.efficiencyClass ? a.efficiencyClass > b.efficiencyClass
         : (a.group != b.group ? a.group < b.group : a.lpIndex < b.lpIndex))(processors);
     PlacedCpu[] order;
-    foreach (siblings; [false, true])
-        foreach (ref p; processors)
-        {
-            if (!topology.isEligible(p)) continue;
-            if (llc >= 0 && p.llcIndex != llc) continue;
-            if (p.smtSibling == siblings)
-                order ~= PlacedCpu(ProcessorId.of(p), p.llcIndex, p.coreIndex);
-        }
+    foreach (ref p; processors)
+    {
+        if (!topology.isEligible(p)) continue;
+        if (llc >= 0 && p.llcIndex != llc) continue;
+        order ~= PlacedCpu(ProcessorId.of(p), p.llcIndex, p.coreIndex);
+    }
     enforce(order.length != 0, "no logical processors discovered");
     Placement result;
     result.consumers = new PlacedCpu[count];

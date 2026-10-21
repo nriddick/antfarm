@@ -142,7 +142,7 @@ def parse_tail(out: str) -> dict:
     """All scene rows -> list of dicts; metric is p99 in ns."""
     rows = []
     pat = re.compile(
-        r"^\s*(idle|mid-drain|burst|near-full|mailbox)\s+(\d+)\s+(\d+)\s+(\S+)\s+"
+        r"^\s*(idle|mid-drain|burst|near-full)\s+(\d+)\s+(\d+)\s+(\S+)\s+"
         r"(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\d+)"
     )
     for line in out.splitlines():
@@ -245,6 +245,36 @@ def cpus_for(consumers):
     return "-" if consumers == 0 else ",".join(str(i) for i in range(consumers + 1))
 
 
+def cpu_order(sys_root=Path("/sys")):
+    """Logical CPUs in placement order: one last-level-cache group at a time,
+    its cores (one CPU each) before its SMT siblings. Falls back to numeric
+    order where sysfs is unavailable (Windows, containers without sysfs)."""
+    count = os.cpu_count() or 1
+    base = sys_root / "devices/system/cpu"
+    groups, cores, seen = {}, {}, set()
+    try:
+        for cpu in range(count):
+            topo = base / f"cpu{cpu}/topology"
+            core = (topo / "core_id").read_text().strip()
+            llc_path = base / f"cpu{cpu}/cache/index3/shared_cpu_list"
+            llc = llc_path.read_text().strip() if llc_path.exists() else "all"
+            groups.setdefault(llc, []).append(cpu)
+            cores.setdefault((llc, core), []).append(cpu)
+    except OSError:
+        return list(range(count))
+    order = []
+    for llc in sorted(groups, key=lambda key: min(groups[key])):
+        members = sorted(groups[llc])
+        primaries = sorted(min(cpus) for (g, _), cpus in cores.items() if g == llc)
+        order += primaries + [cpu for cpu in members if cpu not in primaries]
+    return order if len(order) == count else list(range(count))
+
+
+def pins_for(threads, order):
+    """Controller plus threads-1 consumers, or unpinned when oversubscribed."""
+    return "-" if threads > len(order) else ",".join(str(c) for c in order[:threads])
+
+
 def benchmark_path(name):
     return str(PERFTEST / (name + ".exe" if os.name == "nt" else name))
 
@@ -252,10 +282,11 @@ def benchmark_path(name):
 def churn(section, name, mode, consumers, *, actors=16384, seconds=3, batch=256,
           warmups=5, allocator="mimalloc", tier="small", quota=16384,
           subset_percent=None, root_hint=None, binary="actor_churn_mimalloc",
-          unpinned=False, env=None, public_hint=None, child_hint=None, note=""):
+          unpinned=False, cpus=None, env=None, public_hint=None, child_hint=None, note=""):
     cmd = [benchmark_path(binary), mode, str(actors), str(seconds), str(consumers),
            str(batch), str(warmups), allocator,
-           "-" if unpinned else cpus_for(consumers), tier, str(quota)]
+           "-" if unpinned else (cpus if cpus is not None else cpus_for(consumers)),
+           tier, str(quota)]
     if mode.startswith("subset"):
         if subset_percent is not None:
             cmd.append(str(subset_percent))
@@ -310,9 +341,45 @@ def dcase(section, name, *, nd, body=16, batch=256, consume=1, ac=None, n=None,
     return case(section, name, cmd, note=note)
 
 
+def payload_split(threads):
+    """Producers and consumers for a payload cell of `threads` threads: about
+    one producer per two consumers, measured as the best split on the 5900XT
+    (5/11 beat 4/12, 8/8 and 2/14 at 16 threads)."""
+    producers = max(1, threads // 3)
+    return producers, threads - producers
+
+
 def cases_for(section, args):
     C = []
-    if section == "farm_consumers":
+    if section == "headline":
+        order = getattr(args, "cpu_order", None) or cpu_order()
+        for t in args.threads:
+            producers, consumers = payload_split(t)
+            C.append(tp("headline", f"payload_t{t}", nc=consumers, ns=producers, nb=0,
+                        body=1, batch=1700, ac=0, n=args.best_n,
+                        write="--constant-callandlength",
+                        note=f"{producers} small producers, {consumers} consumers, unpinned"))
+        for t in args.threads:
+            C.append(churn("headline", f"private_t{t}", "private-slab", t - 1,
+                           cpus=pins_for(t, order), note="emitter plus consumers, root slab"))
+        for t in args.threads:
+            C.append(churn("headline", f"tree_t{t}", "tree-refill-slab", t - 1,
+                           cpus=pins_for(t, order),
+                           note="private child lifecycles: refilled slab cohorts"))
+        for t in args.threads:
+            C.append(churn("headline", f"public_t{t}", "actor", t - 1,
+                           cpus=pins_for(t, order), note="controller plus consumers"))
+        for t in args.threads:
+            C.append(churn("headline", f"wave_t{t}", "wave", t - 1,
+                           cpus=pins_for(t, order), note="public wave lifecycles"))
+        for t in args.threads:
+            if t > len(order):
+                continue  # the Fiber pool pins one worker per CPU
+            C.append(case("headline", f"fiber_t{t}",
+                          ["dub", "run", "-c", "benchmark_mt", "--build=release",
+                           "--compiler=ldc2", "--", str(args.fiber_tasks), "private", str(t)],
+                          cwd=str(ROOT / "ant_fibers"), note=f"{t} pinned workers"))
+    elif section == "farm_consumers":
         for nc in (1, 2, 4, 6, 11):
             C.append(tp("farm_consumers", f"nc{nc}", nc=nc))
     elif section == "farm_chunk_batch":
@@ -349,13 +416,11 @@ def cases_for(section, args):
             C.append(dcase("dual", "nd6_b2048_ac0", nd=6, batch=2048, ac=0))
             C.append(dcase("dual", "nd6_b256_ac3", nd=6, batch=256, ac=3))
     elif section == "tail":
-        for ac, chunk in ((3, 16), (5, 4)):
-            for scene in ("mid", "idle"):
-                C.append(case("tail", f"{scene}_ac{ac}_chunk{chunk}",
-                              [benchmark_path("tail"), f"--{scene}-only",
-                               "--ac", str(ac), "--samples", "10000",
-                               "--repeats", "1"],
-                              note=f"pinned, discovered topology; avgCost {ac}, chunk {chunk}"))
+        for t in args.tail_threads:
+            C.append(case("tail", f"tail_t{t}",
+                          [benchmark_path("tail"), "--nc", str(t - 1), "--samples", "10000",
+                           "--repeats", "1"],
+                          note=f"{t - 1} pinned consumers plus the producer; chunk 16"))
     elif section == "public":
         # Public flush/wave default to chunk 8 (ActorRuntime.flush / ActorWave
         # .publish); ANTFARM_PUBLIC_HINT=2 pins chunk 32 at MAX_CHUNK 128.
@@ -445,9 +510,9 @@ def cases_for(section, args):
     return C
 
 
-ALL_SECTIONS = ["host", "farm_consumers", "farm_chunk_batch", "farm_best", "dual",
-                "tail", "public", "private", "private_tuning", "allocators",
-                "huge", "pinning", "fibers", "scaling"]
+ALL_SECTIONS = ["host", "headline", "tail", "farm_consumers", "farm_chunk_batch",
+                "farm_best", "dual", "public", "private", "private_tuning",
+                "allocators", "huge", "pinning", "fibers", "scaling"]
 
 
 # ---------------------------------------------------------------- driver
@@ -561,7 +626,9 @@ def cell_is_cached(prev, cell, runs):
 def _stats(values):
     if not values:
         return None
-    return {"median": statistics.median(values), "min": min(values), "max": max(values)}
+    return {"median": statistics.median(values), "min": min(values), "max": max(values),
+            "stddev": statistics.stdev(values) if len(values) > 1 else 0.0,
+            "n": len(values)}
 
 
 def field_stats(parsed, fields):
@@ -580,7 +647,8 @@ def aggregate_tail(parsed):
         def stats(field):
             vals = [r[field] for r in rows if r.get(field) is not None]
             return _stats(vals)
-        out.append({"scene": scene, "tlen": tlen, "spin": spin, "runs": len(rows),
+        out.append({"scene": scene, "nc": rows[0].get("nc"), "tlen": tlen, "spin": spin,
+                    "runs": len(rows),
                     "valid_runs": sum(all(r.get(k) is not None for k in
                         ("p50_ns", "p99_ns", "p999_ns", "max_ns")) for r in rows),
                     "p50_ns": stats("p50_ns"), "p99_ns": stats("p99_ns"),
@@ -790,7 +858,9 @@ def measure_cell(args, cell, raw_dir, section, runner=None):
     if valid:
         values = [p["metric"] for p in valid]
         row.update(median=statistics.median(values), minimum=min(values),
-                   maximum=max(values), values=values, config=valid[-1])
+                   maximum=max(values),
+                   stddev=statistics.stdev(values) if len(values) > 1 else 0.0,
+                   values=values, config=valid[-1])
         stats = field_stats(valid, FIBER_FIELDS)
         if stats:
             row["field_stats"] = stats
@@ -868,6 +938,15 @@ def build_parser():
     ap.add_argument("--best-n", type=int, default=2_000_000_000)
     ap.add_argument("--dual-threads", type=thread_counts, default=[1, 2, 4, 6, 8, 11],
                     help="comma-separated total dual-role thread counts")
+    ap.add_argument("--threads", type=thread_counts, default=[2, 4, 8, 16, 20, 24, 32, 40],
+                    help="headline thread counts (payload: producers+consumers; actors: "
+                         "controller+consumers; fibers: pinned workers, skipped beyond the CPU count)")
+    ap.add_argument("--tail-threads", type=thread_counts, default=[2, 6, 12, 20, 32],
+                    help="tail-latency thread counts (consumers plus the producer)")
+    ap.add_argument("--fiber-tasks", type=int, default=1_000_000,
+                    help="fibers per burst in the headline fiber cells")
+    ap.add_argument("--markdown", type=Path,
+                    help="also write Markdown tables (median ± stddev) for the measured sections")
     ap.add_argument("--private-consumers", type=thread_counts, default=[0, 6],
                     help="comma-separated private actor consumer counts; adds one controller")
     ap.add_argument("--timeout", type=float, default=600.0)
@@ -881,6 +960,65 @@ def build_parser():
     return ap
 
 
+def _fmt(value, digits=1):
+    return "—" if value is None else f"{value:,.{digits}f}"
+
+
+def _cell(row, scale=1.0, digits=1):
+    if row is None or row.get("median") is None:
+        return "—"
+    return f"{_fmt(row['median'] * scale, digits)} ± {_fmt(row.get('stddev', 0.0) * scale, digits)}"
+
+
+def write_markdown(results, args, path):
+    """Markdown tables (median ± sample stddev) for every measured section."""
+    by = {}
+    for r in results:
+        by.setdefault(r["section"], {})[r["name"]] = r
+    lines = []
+    if "headline" in by:
+        h = by["headline"]
+        fiber_burst, fiber_drain = {}, {}
+        for name, r in h.items():
+            if name.startswith("fiber_"):
+                stats = r.get("field_stats", {})
+                if stats.get("warm_total_fibers_s"):
+                    fiber_burst[name] = stats["warm_total_fibers_s"]
+                if stats.get("warm_run_fibers_s"):
+                    fiber_drain[name] = stats["warm_run_fibers_s"]
+        lines += ["| Threads | Payloads, Mpps | Private roots, Mcycles/s | Private children, Mcycles/s | "
+                  "Public actors, Mcycles/s | Public waves, Mcycles/s | "
+                  "Warm Fiber burst, Mfibers/s | Warm Fiber drain, Mfibers/s |",
+                  "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+        for t in args.threads:
+            cells = [_cell(h.get(f"payload_t{t}")), _cell(h.get(f"private_t{t}"), digits=2),
+                     _cell(h.get(f"tree_t{t}"), digits=2),
+                     _cell(h.get(f"public_t{t}"), digits=2), _cell(h.get(f"wave_t{t}"), digits=2),
+                     _cell(fiber_burst.get(f"fiber_t{t}"), scale=1e-6, digits=2),
+                     _cell(fiber_drain.get(f"fiber_t{t}"), scale=1e-6, digits=2)]
+            lines.append(f"| {t} | " + " | ".join(cells) + " |")
+        lines.append("")
+    if "tail" in by:
+        lines += ["| Threads | Scene | Table | Work | p50 µs | p99 µs | p99.9 µs | Max µs | Processes |",
+                  "| ---: | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |"]
+        for t in args.tail_threads:
+            r = by["tail"].get(f"tail_t{t}")
+            for row in (r or {}).get("tail_rows", []):
+                lines.append(f"| {t} | {row['scene']} | {row['tlen']} | {row['spin']} | "
+                             + " | ".join(_cell(row[k], scale=1e-3, digits=2)
+                                          for k in ("p50_ns", "p99_ns", "p999_ns", "max_ns"))
+                             + f" | {row['valid_runs']} / {row['runs']} |")
+        lines.append("")
+    for section in ALL_SECTIONS:
+        if section in ("host", "headline", "tail") or section not in by:
+            continue
+        lines += [f"<!-- {section} -->", "| Case | Median ± stddev | Samples |", "| --- | ---: | ---: |"]
+        for name, r in by[section].items():
+            lines.append(f"| `{name}` | {_cell(r, digits=3)} | {r.get('valid_runs', 0)} / {r.get('requested_runs', 0)} |")
+        lines.append("")
+    path.write_text("\n".join(lines) + "\n")
+
+
 def main(argv=None):
     ap = build_parser()
     args = ap.parse_args(argv)
@@ -890,6 +1028,9 @@ def main(argv=None):
         ap.error("--six-consumer-runs must be at least 1")
     if 0 in args.dual_threads:
         ap.error("--dual-threads counts must be positive")
+    if any(t < 2 for t in args.threads) or any(t < 2 for t in args.tail_threads):
+        ap.error("--threads and --tail-threads counts must be at least 2")
+    args.cpu_order = cpu_order()
     sections = list(dict.fromkeys(s for s in args.sections.split(",") if s))
     for s in sections:
         if s not in ALL_SECTIONS:
@@ -967,6 +1108,8 @@ def main(argv=None):
     results.sort(key=lambda r: (order.get(r["section"], 99),
                                 index.get((r["section"], r["name"]), 0)))
     flush()
+    if args.markdown:
+        write_markdown(results, args, args.markdown)
     failures = sum(1 for r in results if r.get("status") == "failed")
     print(f"\nwrote {args.out}/summary.json ({failures} failed cells)", flush=True)
     return 1 if (failed or failures) else 0

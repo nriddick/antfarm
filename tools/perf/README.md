@@ -40,14 +40,27 @@ and accepts older logs only when both numeric phase timings are available.
 The single-thread harness's rate-only `total` lines are supported by deriving
 auxiliary burst totals from its counted create/run phases; its primary metric
 remains drain throughput. Malformed explicit multithread totals remain errors.
-Tail summaries record complete-process counts per scene, so a mailbox timeout
-cannot masquerade as a complete scene merely because the primary Farm metric
-parsed successfully.
+Tail summaries record complete-process counts per scene, so a timed-out scene
+cannot masquerade as complete merely because the primary metric parsed.
+Every cell reports the median and the sample standard deviation of its valid
+samples; `--markdown PATH` writes the tables (median ± stddev) that
+PERFORMANCE.md uses.
 
-For a baseline with five samples generally and at least thirty for
-six-consumer actor, throughput and tail cases, pass
-`--runs 5 --six-consumer-runs 30`. The latter is a per-cell minimum, including
-when resuming: five cached samples cannot satisfy a thirty-sample request.
+The `headline` section sweeps four workloads over `--threads` (default
+`2,4,8,16,20,24,32,40`): payload throughput with about one small producer per
+two consumers, unpinned (`payload_split`); private root lifecycles
+(`private-slab`) and public actor lifecycles (`actor`) with a controller plus
+`threads - 1` pinned consumers; and the Fiber burst with that many pinned
+workers. Pins follow placement order, one last-level-cache group at a time,
+its cores before its SMT siblings (`cpu_order`, from sysfs); counts beyond the
+CPU count run unpinned, and Fiber cells beyond it are skipped because the
+pool pins. The `tail` section sweeps `--tail-threads` (default `2,6,12,20,32`)
+with `threads - 1` consumers plus the producer. On the 12700H, pass the
+shorter lists (`--threads 2,4,8,16,20,24 --tail-threads 2,6,12,20`).
+
+For the comprehensive array with five samples per cell, pass `--runs 5
+--six-consumer-runs 5`; a larger `--six-consumer-runs` is a per-cell minimum
+for six-consumer actor, throughput and tail cases, including when resuming.
 The report driver records every attempt and rejects nonzero exits or missing
 metrics; it does not reject samples based on background CPU activity. Six
 dual-role threads are not six dedicated consumers and retain `--runs`.
@@ -82,20 +95,23 @@ cells are included only when `--dual-threads` includes 6.
   thread count; `--tier` and `--consume` shape the workload; the header and
   full-size options are the same as `throughput`.
 - **`tail`** (with `placement`) — tail-latency harness on the repository's
-  threadpool. It prints every worker/processor assignment and the placement
-  options (`--no-pin`, `--mailbox`, `--spin`, `--samples`, `--idle-only`,
-  `--mid-only`, `--tlen`, `--nc`, `--ac`, `--attr`, `--repeats`, `--small`,
-  `--ln`, `--huge`). A drain run discards a missed backlog window rather than
-  reporting idle samples as latency.
+  threadpool. Consumers are the library's own loop: pinned threads calling
+  `consumeNext`; there is no out-of-band signalling path. Scenes are idle,
+  mid-drain (table lengths 32 to 8192, callback work 0 to 10 µs), burst and
+  near-full. It prints every worker/processor assignment and the placement
+  options (`--no-pin`, `--spin`, `--samples`, `--idle-only`, `--mid-only`,
+  `--tlen`, `--nc`, `--ac`, `--repeats`, `--small`, `--ln`, `--huge`). A drain
+  run discards a missed backlog window rather than reporting idle samples as
+  latency. Placement fills one physical group at a time, cores before SMT
+  siblings (`placement.d`).
 
-  The report driver's `tail` section runs both mid-drain and idle scenes at
-  explicit `avgCost=3` (chunk 16) and `avgCost=5` (chunk 4), with 10,000
-  observations per scene. These costs assume `MAX_CHUNK=128`; case names and
-  recorded commands identify the setting independently of the runtime default.
-  The raw header also reports the effective cost, chunk and repetition count.
-  `make -C tools/perf check-tail` runs its unit tests, including bounded numeric
-  argument parsing; add `DC=dmd` for DMD. Mid-drain and mailbox scenes drain
-  and retry a quota-truncated dump that cannot reach their backlog trigger.
+  The report driver's `tail` section runs the default scene schedule at each
+  `--tail-threads` count with 10,000 observations per scene and the default
+  `avgCost=3` (chunk 16); the raw header reports the effective cost, chunk and
+  repetition count. `make -C tools/perf check-tail` runs its unit tests,
+  including bounded numeric argument parsing; add `DC=dmd` for DMD. The
+  mid-drain scene drains and retries a quota-truncated dump that cannot reach
+  its backlog trigger.
   Use `check-benchmarks` to include the throughput and dual argument-parsing
   tests as well; their C numeric conversions also respect D string boundaries.
 

@@ -81,9 +81,10 @@ is reassessed holistically in dedicated sessions.
   records release-store retirement, the bounded reservation walk and the
   remaining serial-private/historical-inbox measurement uncertainty.
 
-- Refresh the 5900XT measurements after the current 12700H baseline in
-  [PERFORMANCE.md](PERFORMANCE.md). Tail-latency rows at chunk 2 and 4 remain
-  a separate tuning follow-up.
+- Rebuild the 12700H tables on the Windows host with the report driver's
+  headline and tail sweeps (`--threads 2,4,8,16,20,24 --tail-threads
+  2,6,12,20`), so [PERFORMANCE.md](PERFORMANCE.md) carries both hosts in the
+  same layout.
 
 ## Deferred after 1.8.0
 

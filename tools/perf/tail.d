@@ -5,7 +5,9 @@
  +   ldc2 -O2 -release -i -I../../threadpool/source tail.d ../../antfarm/package.d ../../antfarm/allocation.d -of=tail.exe
  +
  + t0 is taken just before write() of the sentinel; Call records now-t0.
- + Background jobs spin; the sentinel only timestamps.
+ + Background jobs spin; the sentinel only timestamps. Consumers run the
+ + library's own loop (pinned threads calling consumeNext); there is no
+ + out-of-band signalling path. Scenes: idle, mid-drain, burst, near-full.
  +/
 module tail;
 
@@ -28,9 +30,9 @@ else version (Posix)
     import core.sys.posix.unistd : sysconf, _SC_NPROCESSORS_ONLN;
 }
 
-enum Scene : int { idle, mid, burst, near, mbox }
+enum Scene : int { idle, mid, burst, near }
 
-immutable string[5] sceneName = ["idle", "mid-drain", "burst", "near-full", "mailbox"];
+immutable string[4] sceneName = ["idle", "mid-drain", "burst", "near-full"];
 
 struct Cfg
 {
@@ -49,9 +51,6 @@ struct Cfg
     bool runMid = true;
     bool runBurst = true;
     bool runNear = true;
-    bool runOversub = true;
-    bool runAttr = false;
-    bool runMailbox = false;
     uint avgCost = DEFAULT_AVG_COST;  // chunk hint for dump writes
     uint small = 64;   // small-table threshold; 0 = auto
     bool huge;         // --huge: MADV_HUGEPAGE on the magic-buffer mapping
@@ -77,7 +76,6 @@ __gshared ulong g_spinNs;
 __gshared uint g_burstN;
 __gshared uint g_avgCost = DEFAULT_AVG_COST;  // chunk hint for dump/sentinel writes
 __gshared uint g_small = 64;   // small-table threshold; 0 = auto
-__gshared shared(long) g_mbox; // 0 = empty; ticks of a mailbox sentinel
 
 long nowTicks() nothrow @nogc @system
 {
@@ -166,7 +164,6 @@ void resetHist()
     atomicStore(g_nlast, 0);
     atomicStore(g_bg, 0L);
     atomicStore(g_sent, 0L);
-    atomicStore(g_mbox, 0L);
 }
 
 struct Pct
@@ -238,14 +235,6 @@ final class ConsJob
     ConsCtx c;
     this(ConsCtx c) { this.c = c; }
     void run() { consumerMain(&c); }
-}
-
-final class MboxJob
-{
-    ProcessorId cpu;
-    bool doPin;
-    this(ProcessorId cpu, bool doPin) { this.cpu = cpu; this.doPin = doPin; }
-    void run() { mailboxMain(cpu, doPin); }
 }
 
 void consumerMain(ConsCtx* c)
@@ -546,137 +535,6 @@ Row runMid(Cfg cfg, uint nc, uint tlen, ulong spinNs)
     return r;
 }
 
-void mailboxMain(ProcessorId cpu, bool doPin)
-{
-    if (doPin && pinProcessor(cpu) != PinOutcome.pinned)
-        atomicStore(g_pinOk, 0);
-    atomicFetchAdd(g_ready, 1);
-    while (atomicLoad!(MemoryOrder.acq)(g_go) == 0) {}
-    while (atomicLoad!(MemoryOrder.acq)(g_go) == 1)
-    {
-        immutable t0 = atomicLoad!(MemoryOrder.acq)(g_mbox);
-        if (t0 != 0)
-        {
-            rec(&g_nlat, g_lat, ticksToNs(nowTicks() - t0));
-            atomicStore!(MemoryOrder.rel)(g_mbox, 0L);
-            atomicFetchAdd(g_sent, 1L);
-        }
-    }
-}
-
-Row runMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
-{
-    Row r;
-    r.scene = Scene.mbox;
-    r.nc = nc;
-    r.tlen = tlen;
-    r.spinNs = spinNs;
-    g_spinNs = spinNs;
-    g_burstN = 0;
-    resetHist();
-    // Farm workers drain the dump; a dedicated poller is the OOB channel.
-    auto s = startFarm(cfg, nc);
-    auto topology = discover();
-    auto placement = choosePlacement(topology, nc);
-    auto mj = new MboxJob(placement.mailbox.id, cfg.pin);
-    auto mth = new Thread(&mj.run);
-    mth.start();
-    waitReady(nc + 1, MonoTime.currTime + 5.seconds);
-
-    GC.collect();
-    GC.disable();
-    atomicStore!(MemoryOrder.rel)(g_go, 1);
-
-    immutable trigger = tlen <= 16 ? 1u : (tlen / 4 < 16 ? 16u : tlen / 4);
-    immutable want = cfg.warmup + cfg.samples;
-    long sentSeen;
-    auto deadline = MonoTime.currTime + 120.seconds;
-    while (sentSeen < want)
-    {
-        if (MonoTime.currTime > deadline)
-        {
-            r.err = "mbox timeout";
-            break;
-        }
-        immutable bg0 = atomicLoad(g_bg);
-        immutable dumped = writeDump(s, tlen);
-        if (dumped == 0)
-        {
-            ++r.zeros;
-            Thread.yield();
-            continue;
-        }
-        if (dumped < trigger)
-        {
-            // A quota-truncated table cannot reach this scene's trigger.
-            // Drain it before retrying so its callbacks cannot contribute to
-            // the next dump's progress count.
-            ++r.miss;
-            if (!waitUntil(g_bg, bg0 + dumped, MonoTime.currTime + 10.seconds))
-            {
-                r.err = "mbox short dump stuck";
-                break;
-            }
-            continue;
-        }
-        auto win = MonoTime.currTime + 5.seconds;
-        while (atomicLoad(g_bg) - bg0 < trigger)
-        {
-            if (MonoTime.currTime > win)
-                break;
-        }
-        if (atomicLoad(g_bg) - bg0 >= dumped)
-        {
-            ++r.miss;
-            // No mailbox sample when the backlog has already drained.
-            waitUntil(g_bg, bg0 + dumped, MonoTime.currTime + 10.seconds);
-            continue;
-        }
-        immutable t0 = nowTicks();
-        atomicStore!(MemoryOrder.rel)(g_mbox, t0 == 0 ? 1 : t0);
-        ++sentSeen;
-        if (!waitUntil(g_sent, sentSeen, MonoTime.currTime + 2.seconds))
-        {
-            r.err = "mbox sentinel stuck";
-            break;
-        }
-        if (!waitUntil(g_bg, bg0 + dumped, MonoTime.currTime + 10.seconds))
-        {
-            r.err = "mbox dump stuck";
-            break;
-        }
-    }
-    GC.enable();
-    atomicStore!(MemoryOrder.rel)(g_go, 2);
-    mth.join();
-    stopFarm(s);
-    if (r.err.length)
-        return r;
-    immutable got = histCount(g_nlat);
-    size_t use = got;
-    long* lat = g_lat;
-    if (got > cfg.warmup)
-    {
-        lat = g_lat + cfg.warmup;
-        use = got - cfg.warmup;
-    }
-    r.lat = pctOf(lat, use);
-    r.ok = r.lat.n > 0;
-    if (!r.ok)
-        r.err = "no samples";
-    // reuse note via scene: printRow doesn't know mailbox. Tag tlen and
-    // leave scene as mid-drain; caller prints a prefix.
-    return r;
-}
-
-Row medMailbox(Cfg cfg, uint nc, uint tlen, ulong spinNs)
-{
-    auto rs = new Row[cfg.repeats];
-    foreach (i; 0 .. cfg.repeats)
-        rs[i] = runMailbox(cfg, nc, tlen, spinNs);
-    return pickMedianP99(rs);
-}
-
 Row runBurst(Cfg cfg, uint nc, uint tlen, ulong spinNs)
 {
     Row r;
@@ -956,24 +814,12 @@ Cfg parse(string[] args)
         if (a == "--huge") { c.huge = true; continue; }
         if (a == "--idle-only")
         {
-            c.runMid = c.runBurst = c.runNear = c.runOversub = false;
+            c.runMid = c.runBurst = c.runNear = false;
             continue;
         }
         if (a == "--mid-only")
         {
-            c.runIdle = c.runBurst = c.runNear = c.runOversub = false;
-            continue;
-        }
-        if (a == "--attr")
-        {
-            c.runIdle = c.runMid = c.runBurst = c.runNear = c.runOversub = false;
-            c.runAttr = true;
-            continue;
-        }
-        if (a == "--mailbox")
-        {
-            c.runIdle = c.runMid = c.runBurst = c.runNear = c.runOversub = false;
-            c.runMailbox = true;
+            c.runIdle = c.runBurst = c.runNear = false;
             continue;
         }
         if (i + 1 >= args.length) break;
@@ -1075,11 +921,6 @@ void main(string[] args)
         auto placement = choosePlacement(topology, cfg.nc);
         printPlacement(placement);
         printf("placement uses physical cores before SMT siblings; faster classes first\n");
-        if (cfg.runOversub && cfg.nc != 8)
-        {
-            auto extra = choosePlacement(topology, 8);
-            printPlacement(extra);
-        }
     }
     printf("missed windows are excluded; tails depend on workload, placement and scheduling\n");
     printHeader();
@@ -1104,8 +945,6 @@ void main(string[] args)
         emit(medMid(cfg, cfg.nc, 2048, 1000));
         emit(medMid(cfg, cfg.nc, 8192, 1000));
         emit(medMid(cfg, cfg.nc, 32, 1000));
-        emit(medMailbox(cfg, cfg.nc, 256, 1000));
-        emit(medMailbox(cfg, cfg.nc, 8192, 1000));
     }
 
     if (cfg.runBurst)
@@ -1113,25 +952,6 @@ void main(string[] args)
 
     if (cfg.runNear)
         emit(runNear(cfg, cfg.nc));
-
-    if (cfg.runAttr)
-    {
-        printf("attribution (Farm table path and OOB mailbox):\n");
-        emit(medMid(cfg, cfg.nc, 32, 1000));
-        emit(medMid(cfg, cfg.nc, 256, 1000));
-        emit(medMailbox(cfg, cfg.nc, 256, 1000));
-        emit(medMailbox(cfg, cfg.nc, 8192, 1000));
-    }
-
-    if (cfg.runMailbox)
-        emit(medMailbox(cfg, cfg.nc, cfg.tlen, cfg.spinNs ? cfg.spinNs : 1000));
-
-    if (cfg.runOversub && cfg.nc != 8)
-    {
-        printf("additional consumer-count check (nc=8):\n");
-        emit(medIdle(cfg, 8));
-        emit(medMid(cfg, 8, 256, 1000));
-    }
 
     free(g_lat);
     free(g_wlat);

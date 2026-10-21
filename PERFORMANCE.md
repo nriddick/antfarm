@@ -1,349 +1,476 @@
 # Ant Farm performance
 
-Fresh Intel i7-12700H baseline measured on October 20, 2026, at runtime revision `2cf59da` on `1.9.0-progress`. These measurements replace the old 12700H tables. **Ryzen 9 5900XT measurements are pending**; no cross-host comparison is implied.
+Measured on October 20, 2026, on an AMD Ryzen 9 5900XT (16 cores, 32 threads,
+two 8-core CCDs with one L3 each) at runtime revision `d00b37c` on
+`1.9.0-progress`, with LDC 1.43.0 `-O2 -release` and mimalloc 3.5.3. Every
+figure is the **median ± sample standard deviation of five independent
+process samples**; the tail tables aggregate five processes of 10,000
+observations each. The i7-12700H tables that this page carried are retired:
+the Windows host rebuilds them with the same driver when the branch
+transfers, with the shorter thread lists noted under [Method](#method). The
+previous page is archived in
+[docs/performance/archive-2026-10-20.md](docs/performance/archive-2026-10-20.md).
 
-**Follow-up qualification:** the ~503 Mpps headline below did not reproduce later with the **same saved executable**: it then delivered 2,183 Mpps under WSL2. Matched 1.8.3/current comparisons also reached 2,245/2,291 Mpps on native Windows and 2,123/2,186 Mpps under WSL2. The earlier session therefore cannot establish a slowdown caused by MT removal, nor a general WSL penalty. Its environmental slowdown remains unexplained. The original observations are retained below; see the [matched revision checks and exact-binary control](docs/performance/mt-excision-check-2026-10-20.md) before interpreting them as a representative baseline.
+## Headline throughput
 
-The [previous performance page](docs/performance/archive-2026-10-20.md) preserves the old Ryzen 5500 and native-Windows 12700H measurements, the detailed Fiber experiments, and the intervening 1.9 optimization reports with their original limitations. Those results are historical evidence, not rows in this baseline.
+Four workloads at 2 to 40 threads. Payloads are one-word, uniform-callback
+tables of 1,700 entries claimed 128 at a time, with about one small producer
+per two consumers, unpinned. Private actors are child lifecycles: each parent
+refills one slab cohort eight times (`tree-refill-slab`), so spawn, dispatch,
+retirement and refill all count and nothing allocates. Public actors are wave
+lifecycles (`wave`): create, publish through a sealed `ActorWave`, retire and
+reclaim 16,384 actors per cycle. Fibers are the warm burst of
+`benchmark_mt`: 200,000 fibers spawned from the recycling pool and drained,
+with that many pinned workers. For the actor and Fiber columns, threads are the
+controller plus `threads - 1` pinned consumers or workers, filling one CCD's
+cores, then its SMT siblings, then the other CCD; 40 threads oversubscribes the
+32 logical processors and runs unpinned, and the Fiber pool cannot oversubscribe.
 
-This is the baseline **before the proposed free-index-stack redesign**. Public actor reservation still walks at most 64 free-list links per gate hold. No runtime implementation changed for this refresh.
+| Threads | Payloads, Mpps | Private actors, Mcycles/s | Public actors, Mcycles/s | Warm Fibers, Mfibers/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 687.8 ± 68.0 | 168.1 ± 0.2 | 29.64 ± 0.04 | 2.69 ± 0.01 |
+| 4 | 1,070.1 ± 63.4 | 316.0 ± 0.3 | 26.17 ± 0.03 | 2.63 ± 0.05 |
+| 8 | 2,045.8 ± 148.3 | 457.2 ± 0.7 | 24.33 ± 0.06 | 2.43 ± 0.05 |
+| 16 | 2,309.2 ± 101.9 | 516.5 ± 0.7 | 16.52 ± 0.08 | 1.88 ± 0.01 |
+| 20 | 2,298.7 ± 174.1 | 206.5 ± 0.6 | 10.97 ± 0.03 | 1.97 ± 0.02 |
+| 24 | 2,487.1 ± 192.9 | 181.6 ± 6.5 | 9.41 ± 0.04 | 2.03 ± 0.01 |
+| 32 | 2,415.8 ± 73.0 | 158.5 ± 4.0 | 8.36 ± 0.06 | 2.00 ± 0.02 |
+| 40 | 2,179.0 ± 136.1 | 48.2 ± 7.3 | 3.94 ± 0.82 | — |
+
+Payload throughput peaks at 2.49 billion per second with 24 threads and
+stays above two billion from 8 threads up. Private child lifecycles peak at
+517 million per second with 16 threads, when one CCD is fully occupied; the
+first consumer on the second CCD costs more than it adds, and the rate settles
+near 160 to 210 million per second until oversubscription. Public waves and
+Fibers are bounded by their single control thread: wave admission runs at
+about 30 million lifecycles per second with one consumer and falls as
+consumers contend for the same publish path, and a Fiber burst is spawned by
+one thread at 1.9 to 2.7 million per second however many workers drain it.
+The thread sweeps of the root lifecycle, the public actor lifecycle and the
+Fiber drain phase are in the [comprehensive array](#thread-sweeps).
+
+## Tail latency
+
+The latency of one payload: from just before its `write()` to the first
+instruction of its callback, observed by the library's own consumer loop
+(pinned threads calling `consumeNext`) with no out-of-band signalling.
+Threads are `threads - 1` consumers plus the producer. **Idle** writes the
+sentinel into an otherwise empty Farm. **Mid-drain** writes it behind a table
+of 256 one-microsecond jobs once a quarter of them have run. **Burst** writes
+32 sentinels back to back behind the same backlog. Each process records 10,000
+observations per scene after 200 warm-ups and reports its own quantiles; the
+table shows the median ± standard deviation of those process quantiles.
+
+| Threads | Scene | p50 µs | p99 µs | p99.9 µs | Processes |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 2 | idle | 0.14 ± 0.00 | 1.80 ± 0.04 | 3.20 ± 0.05 | 5 / 5 |
+| 2 | mid-drain, 256 × 1 µs | 204.80 ± 1.39 | 208.20 ± 1.31 | 213.50 ± 1.58 | 5 / 5 |
+| 2 | burst, 256 × 1 µs | 250.30 ± 2.33 | 255.80 ± 2.19 | 264.30 ± 4.59 | 5 / 5 |
+| 6 | idle | 0.23 ± 0.00 | 2.00 ± 0.08 | 4.30 ± 1.69 | 5 / 5 |
+| 6 | mid-drain, 256 × 1 µs | 3.20 ± 0.04 | 20.40 ± 0.09 | 22.70 ± 0.23 | 5 / 5 |
+| 6 | burst, 256 × 1 µs | 26.80 ± 0.58 | 30.50 ± 0.24 | 32.80 ± 0.65 | 5 / 5 |
+| 12 | idle | 0.31 ± 0.00 | 2.60 ± 0.05 | 6.70 ± 0.57 | 5 / 5 |
+| 12 | mid-drain, 256 × 1 µs | 10.50 ± 0.00 | 12.70 ± 0.65 | 14.40 ± 0.11 | 5 / 5 |
+| 12 | burst, 256 × 1 µs | 10.90 ± 0.05 | 15.40 ± 0.11 | 18.40 ± 0.34 | 5 / 5 |
+| 20 | idle | 0.60 ± 0.01 | 2.80 ± 0.18 | 11.70 ± 1.80 | 5 / 5 |
+| 20 | mid-drain, 256 × 1 µs | 0.42 ± 0.00 | 1.50 ± 0.28 | 2.60 ± 0.47 | 5 / 5 |
+| 20 | burst, 256 × 1 µs | 1.40 ± 0.05 | 6.50 ± 0.68 | 9.50 ± 4.04 | 5 / 5 |
+| 32 | idle | 0.73 ± 0.01 | 3.60 ± 0.27 | 18.30 ± 0.67 | 5 / 5 |
+| 32 | mid-drain, 256 × 1 µs | 0.67 ± 0.02 | 1.30 ± 0.07 | 3.30 ± 0.19 | 5 / 5 |
+| 32 | burst, 256 × 1 µs | 0.88 ± 0.06 | 5.50 ± 0.67 | 9.60 ± 0.81 | 5 / 5 |
+
+An idle sentinel reaches a consumer in 0.14 to 0.73 µs at the median and
+under 4 µs at p99 at every thread count. Behind a backlog, one consumer must
+first finish the 256 queued microsecond jobs ahead of the sentinel, hence the
+205 µs at 2 threads. With 5 to 11 consumers it waits for one consumer's
+current 16-entry chunk, 3 to 10 µs at the median, and from 20 threads it is
+picked up as fast as an idle one. The full scene matrix, including 2,048 and 8,192-entry
+backlogs, zero and 10 µs jobs and the near-full ring, is in the
+[comprehensive array](#full-tail-latency-matrix).
 
 ## Method
 
 | Property | This run |
 | --- | --- |
-| CPU / environment | Intel i7-12700H; WSL2 Linux 6.6.87.2; 20 allowed logical CPUs |
-| Compiler | LDC 1.42.0, LLVM 21.1.8 |
-| Build modes | Standalone D tools and C ABI D code: `-O2 -release`; Fibers: DUB release; C driver: `cc -O2` |
-| Windows host power plan | Balanced; guest governor unavailable; battery/thermal state not recorded |
-| Actor allocator | mimalloc 3.5.3 unless the case says CRT or counted diagnostic |
-| Page policy | `ANTFARM_HUGE_PAGES=0`; ordinary-page baseline |
-| Samples | 5 per cell; 30 for six-consumer actor and throughput cells; tail retains 5 processes × 10,000 observations per scene |
-| Aggregation | Median [minimum, maximum] of successful independent process samples |
-| Background-load policy | No CPU/load filtering; load averages retained in raw logs |
-| Validity | Nonzero exit, timeout or missing primary metric fails a sample; tail-scene completeness is reported separately |
-| Actor workload | 16,384 actors, 3 seconds per sample, batch 256, 5 cohort warmups unless named otherwise |
+| CPU | AMD Ryzen 9 5900XT, 16 cores / 32 threads, two CCDs (LLC0 logical 0-7 and 16-23, LLC1 8-15 and 24-31), 62 GiB |
+| OS | Linux 7.2.9 (CachyOS), `amd-pstate-epp` with the `performance` governor, ASLR on |
+| Compiler | LDC 1.43.0 (LLVM 22.1.8), `-O2 -release`; Fibers: DUB release; C driver `cc -O2` |
+| Allocator | mimalloc 3.5.3 (`tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a`) unless the case says CRT or counted |
+| Pages | ordinary 4 KiB pages (`ANTFARM_HUGE_PAGES=0`) |
+| Samples | 5 independent processes per cell; tail: 5 processes × 10,000 observations per scene |
+| Aggregation | median ± sample standard deviation of valid samples; tail: of per-process quantiles, never pooled |
+| Validity | a nonzero exit, timeout or missing primary metric fails a sample and the cell; every cell here has 5 / 5 |
+| Background load | none filtered; load averages are retained in the raw captures |
+| Placement | pinned cells fill one last-level-cache group at a time, its cores before its SMT siblings; payload and dual cells are unpinned |
+| Actor workload | 16,384 actors, 3 s per sample, batch 256, 5 warm-up cohorts, quota 16,384 words, unless named otherwise |
 
-Actor runs with workers pin the controller to logical CPU 0 and consumers to 1 through N; serial cases are unpinned. Throughput and dual-role runs are unpinned. Tail placement comes from the topology visible inside WSL and is printed in each raw capture. WSL exposes a virtualized topology: these CPU lists must not be described as distinct physical P cores. Six dual-role threads are six total workers, not six dedicated consumers.
+These are descriptive measurements, not a regression gate. Code layout alone
+moves zero-consumer cells by several percent on identical semantics; compare
+revisions with the [performance report](tools/perf/README.md#performance-report),
+which pairs builds and reports spread. Synthetic callbacks are deliberately
+small, so adding threads can expose coordination cost rather than add
+throughput; these sweeps do not predict application speedups.
 
-Ranges describe observed variation, not confidence intervals. This is descriptive baseline characterization, not a paired regression gate, a C/D equivalence test, or a controlled comparison with the archived Windows results. Use the [committed-ref performance report](tools/perf/README.md#performance-report) for changes.
-The callbacks are synthetic and deliberately small. Adding consumers can expose coordination cost rather than increase throughput; these worker sweeps do not predict application speedups.
-
-The [machine-readable results](docs/performance/12700h-2026-10-20.json) retain individual sample values, exact commands, overrides, parsed counters and host identity. Full raw output, host metadata and local evidence are under `.build/performance-12700h-2026-10-20/`.
-
-Reproduce with the current harness and the pinned allocator built:
+The [machine-readable results](docs/performance/5900xt-2026-10-20.json) keep
+every sample, command, environment and host identity. Reproduce with the
+current harness and the pinned allocator built:
 
 ```sh
-make -C tools/perf SHELL=/usr/bin/bash
-make -C tools/perf SHELL=/usr/bin/bash actor_churn_mimalloc
-python3 tools/perf/run_performance_md.py \
-  --out .build/performance-12700h-refresh --runs 5 --six-consumer-runs 30 \
-  --sections host,farm_consumers,farm_chunk_batch,farm_best,dual,public,private,private_tuning,allocators,pinning,fibers,scaling
-python3 tools/perf/run_performance_md.py \
-  --out .build/performance-12700h-refresh --sections tail --runs 5
-python3 tools/perf/run_actor_cabi.py \
-  --output .build/performance-12700h-cabi-refresh --repeats 5 --seconds 0.4
+make -C tools/perf SHELL=/usr/bin/bash all actor_churn_mimalloc
+python3 -B tools/perf/run_performance_md.py --out .build/performance-refresh \
+  --runs 5 --six-consumer-runs 5 --fiber-tasks 200000 \
+  --sections host,headline,tail,farm_consumers,farm_chunk_batch,farm_best,dual,public,private,private_tuning,allocators,pinning,fibers,scaling \
+  --markdown .build/performance-refresh/tables.md
 ```
 
-Use a fresh output directory for a new revision or rebuilt binaries: resume checks command, environment and sample count, not runtime identity. Huge-page, off-LLC and expanded 12/18/20-thread sweeps are outside this run. The harness [mode index](tools/perf/README.md) defines the workloads.
+On the 12700H add `--threads 2,4,8,16,20,24 --tail-threads 2,6,12,20`. Use a
+fresh output directory for a new revision or rebuilt binaries: resume checks
+command, environment and sample count, not runtime identity. The
+[mode index](tools/perf/README.md) defines every workload.
 
-## Farm core
+## Comprehensive array
 
-Rates are millions of completed payloads per second (Mpps), not application work items unless one payload represents one item. The callback uses per-worker batched accounting. The ring is 16 MiB. These are current ST tables; the retired MT path is only in the archive.
+### Thread sweeps
 
-**Writer follow-up:** `651030b` restores the layout-specific sizing scans for
-inferred writes, including `write(callback, bodies)` and C's `af_write_bodies`.
-The [matched writer measurements](docs/performance/writer-scan-2026-10-20.md)
-recover the inferred-path loss against 1.8.3; the explicit-length overload was
-already specialized. The baseline rows below remain observations at `2cf59da`,
-before this restoration.
+The headline's companion columns: root lifecycles (`private-slab`, the
+emitter spawning and collecting slab-stored roots), public actor lifecycles
+(`actor`: create, wake, execute, await, retire, reclaim) and the drain phase of
+the warm Fiber burst (fibers executed per second once spawned). Roots and
+actors are bounded by their emitter; the drain scales with workers.
 
-The subsequent [local_ab comparison](docs/performance/local-ab-comparison-2026-10-20.md)
-measures further scanner specialization and a private-root FIFO correction
-against `651030b`, including an isolated FIFO-only variant on our current code.
-Those candidates are not incorporated into the baseline rows below.
+| Threads | Private roots, Mcycles/s | Public actor lifecycles, Mcycles/s | Warm Fiber drain, Mfibers/s |
+| ---: | ---: | ---: | ---: |
+| 2 | 68.6 ± 0.2 | 23.16 ± 0.06 | 4.94 ± 0.05 |
+| 4 | 96.7 ± 0.4 | 23.54 ± 0.01 | 7.56 ± 0.27 |
+| 8 | 122.7 ± 1.2 | 23.01 ± 0.03 | 11.14 ± 0.07 |
+| 16 | 68.4 ± 1.5 | 16.35 ± 0.02 | 8.49 ± 0.07 |
+| 20 | 50.8 ± 0.1 | 12.02 ± 0.02 | 10.26 ± 0.15 |
+| 24 | 49.6 ± 0.3 | 10.75 ± 0.03 | 12.99 ± 0.11 |
+| 32 | 52.5 ± 0.2 | 9.53 ± 0.02 | 12.69 ± 0.15 |
+| 40 | 29.0 ± 2.6 | 6.30 ± 0.64 | — |
 
-### Throughput vs consumers
+### Farm core
 
-One bulk producer, 16-word bodies, batch 80. `nc` counts consumers.
+Rates are millions of completed payloads per second (Mpps). The callback uses
+per-worker batched accounting and the ring is 16 MiB. **Throughput vs
+consumers:** one bulk producer, 16-word bodies, batch 80, `nc` consumers.
 
-| Case | Mpps, median [min, max] | Valid / requested samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `nc1` | 144.598 [143.076, 146.020] | 5 / 5 |
-| `nc2` | 134.729 [125.011, 137.126] | 5 / 5 |
-| `nc4` | 94.374 [90.332, 107.015] | 5 / 5 |
-| `nc6` | 46.998 [30.401, 94.491] | 30 / 30 |
-| `nc11` | 25.265 [23.527, 27.908] | 5 / 5 |
+| `nc1` | 179.808 ± 1.525 | 5 / 5 |
+| `nc2` | 130.995 ± 26.519 | 5 / 5 |
+| `nc4` | 127.417 ± 21.891 | 5 / 5 |
+| `nc6` | 110.869 ± 4.106 | 5 / 5 |
+| `nc11` | 99.353 ± 6.583 | 5 / 5 |
 
-### Chunk and batch
+**Chunk and batch:** four consumers, one bulk producer, 16-word bodies.
+`ac0..3` select chunks 128, 64, 32 and 16; `b` is the write batch.
 
-Four consumers, one bulk producer, 16-word bodies. `ac0..3` select chunks 128, 64, 32 and 16; `b` is the write batch.
-
-| Case | Mpps, median [min, max] | Valid / requested samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `ac0_b64` | 41.342 [34.713, 42.337] | 5 / 5 |
-| `ac0_b128` | 57.773 [52.274, 61.760] | 5 / 5 |
-| `ac0_b256` | 50.323 [48.556, 56.788] | 5 / 5 |
-| `ac0_b512` | 53.556 [48.364, 55.591] | 5 / 5 |
-| `ac0_b1024` | 55.960 [51.937, 58.979] | 5 / 5 |
-| `ac0_b2048` | 44.427 [43.859, 55.716] | 5 / 5 |
-| `ac1_b64` | 38.343 [34.720, 46.245] | 5 / 5 |
-| `ac1_b128` | 50.667 [44.212, 55.540] | 5 / 5 |
-| `ac1_b256` | 48.303 [43.236, 54.085] | 5 / 5 |
-| `ac1_b512` | 49.413 [42.039, 52.199] | 5 / 5 |
-| `ac1_b1024` | 50.315 [49.324, 53.587] | 5 / 5 |
-| `ac1_b2048` | 54.402 [50.391, 57.207] | 5 / 5 |
-| `ac2_b64` | 44.708 [41.292, 48.100] | 5 / 5 |
-| `ac2_b128` | 56.018 [52.351, 57.059] | 5 / 5 |
-| `ac2_b256` | 60.046 [52.200, 64.016] | 5 / 5 |
-| `ac2_b512` | 54.957 [51.226, 61.557] | 5 / 5 |
-| `ac2_b1024` | 57.738 [52.434, 60.277] | 5 / 5 |
-| `ac2_b2048` | 56.481 [52.972, 62.070] | 5 / 5 |
-| `ac3_b64` | 44.733 [36.945, 45.953] | 5 / 5 |
-| `ac3_b128` | 55.968 [53.617, 57.498] | 5 / 5 |
-| `ac3_b256` | 48.255 [46.776, 56.886] | 5 / 5 |
-| `ac3_b512` | 52.858 [48.467, 56.543] | 5 / 5 |
-| `ac3_b1024` | 53.700 [48.851, 54.167] | 5 / 5 |
-| `ac3_b2048` | 51.348 [48.965, 57.175] | 5 / 5 |
+| `ac0_b64` | 118.887 ± 17.274 | 5 / 5 |
+| `ac0_b128` | 137.735 ± 26.302 | 5 / 5 |
+| `ac0_b256` | 169.647 ± 16.818 | 5 / 5 |
+| `ac0_b512` | 197.504 ± 11.159 | 5 / 5 |
+| `ac0_b1024` | 200.827 ± 5.993 | 5 / 5 |
+| `ac0_b2048` | 200.391 ± 1.112 | 5 / 5 |
+| `ac1_b64` | 148.004 ± 21.896 | 5 / 5 |
+| `ac1_b128` | 141.364 ± 20.153 | 5 / 5 |
+| `ac1_b256` | 188.644 ± 11.688 | 5 / 5 |
+| `ac1_b512` | 185.808 ± 2.187 | 5 / 5 |
+| `ac1_b1024` | 199.751 ± 2.746 | 5 / 5 |
+| `ac1_b2048` | 199.776 ± 2.075 | 5 / 5 |
+| `ac2_b64` | 119.430 ± 26.916 | 5 / 5 |
+| `ac2_b128` | 181.393 ± 24.120 | 5 / 5 |
+| `ac2_b256` | 189.751 ± 12.696 | 5 / 5 |
+| `ac2_b512` | 199.625 ± 8.806 | 5 / 5 |
+| `ac2_b1024` | 203.580 ± 6.387 | 5 / 5 |
+| `ac2_b2048` | 204.785 ± 5.052 | 5 / 5 |
+| `ac3_b64` | 123.113 ± 23.716 | 5 / 5 |
+| `ac3_b128` | 137.842 ± 27.996 | 5 / 5 |
+| `ac3_b256` | 174.487 ± 13.808 | 5 / 5 |
+| `ac3_b512` | 190.889 ± 5.980 | 5 / 5 |
+| `ac3_b1024` | 196.900 ± 6.661 | 5 / 5 |
+| `ac3_b2048` | 205.027 ± 4.580 | 5 / 5 |
 
-### Fixed-width configurations
+**Fixed-width configurations:** `headline` is four small producers, eight
+consumers, one-word bodies, batch 1700, chunk 128 and two billion payloads;
+`headline_default_chunk` changes the chunk to 16; `single_producer` uses one
+small producer and eleven consumers; `default_shape` is four consumers, a bulk
+producer, 16-word bodies, batch 80 and 16 million payloads.
 
-`headline` is the historical case name, not a promised rate: four small producers, eight consumers, one-word bodies, batch 1700, chunk 128 and two billion payloads. `headline_default_chunk` changes the chunk to 16; `single_producer` uses one small producer and eleven consumers. `default_shape` uses four consumers, a bulk producer, 16-word bodies, batch 80 and 16 million payloads.
-
-| Case | Mpps, median [min, max] | Valid / requested samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `headline` | 503.212 [485.906, 520.568] | 5 / 5 |
-| `headline_default_chunk` | 405.682 [358.254, 419.167] | 5 / 5 |
-| `single_producer` | 165.916 [161.517, 171.950] | 5 / 5 |
-| `default_shape` | 42.339 [33.410, 44.655] | 5 / 5 |
+| `headline` | 2,272.981 ± 64.710 | 5 / 5 |
+| `headline_default_chunk` | 1,714.224 ± 100.329 | 5 / 5 |
+| `single_producer` | 887.955 ± 6.858 | 5 / 5 |
+| `default_shape` | 130.056 ± 25.365 | 5 / 5 |
 
-### Dual-role
+**Dual-role:** `nd` threads each produce and consume (body 16, batch 256, one
+consume attempt per turn, cost class 3 unless the suffix says otherwise).
+Six dual-role threads are six workers in total, not six dedicated consumers.
 
-`nd` counts total producer/consumer workers. Defaults: body 16, batch 256, one consume attempt per turn and cost class 3. Explicit suffixes override batch and class.
-
-| Case | Mpps, median [min, max] | Valid / requested samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `nd1` | 39.681 [33.209, 40.898] | 5 / 5 |
-| `nd2` | 72.828 [68.517, 77.115] | 5 / 5 |
-| `nd4` | 116.578 [112.731, 119.197] | 5 / 5 |
-| `nd6` | 115.540 [108.777, 123.447] | 5 / 5 |
-| `nd8` | 108.370 [96.634, 115.885] | 5 / 5 |
-| `nd11` | 112.918 [106.315, 118.090] | 5 / 5 |
-| `nd6_b256_ac0` | 122.730 [112.786, 134.172] | 5 / 5 |
-| `nd6_b2048_ac0` | 151.558 [144.741, 157.807] | 5 / 5 |
-| `nd6_b256_ac3` | 132.717 [132.627, 136.918] | 5 / 5 |
+| `nd1` | 131.915 ± 4.032 | 5 / 5 |
+| `nd2` | 221.850 ± 23.271 | 5 / 5 |
+| `nd4` | 244.388 ± 59.622 | 5 / 5 |
+| `nd6` | 294.458 ± 60.301 | 5 / 5 |
+| `nd8` | 327.842 ± 43.859 | 5 / 5 |
+| `nd11` | 201.077 ± 108.636 | 5 / 5 |
+| `nd6_b256_ac0` | 336.327 ± 38.587 | 5 / 5 |
+| `nd6_b2048_ac0` | 288.721 ± 118.165 | 5 / 5 |
+| `nd6_b256_ac3` | 243.680 ± 94.709 | 5 / 5 |
 
-### Tail latency
+### Public actors
 
-Each cell uses five processes and requests 10,000 sentinel samples per scene in each process. Figures below are medians of each process's latency quantile, **not pooled quantiles**. Units are nanoseconds. Raw captures retain missed backlog windows and zero counts.
+Lifecycle modes report millions of complete lifecycles per second; `actor`,
+`inbox` and `wave` at zero and six consumers with the default public chunk (8)
+and with chunk 32 (`ANTFARM_PUBLIC_HINT=2`), then the `actor` consumer curve.
+`actor_ready` is different: autonomous dispatch of a prequeued burst, in
+millions of activations per second, with construction and reclamation outside
+the timed region.
 
-| Cell / scene | Table length | Work spin | Complete / attempted processes | p50 ns | p99 ns | p99.9 ns | Median process max ns |
-| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| `mid_default` / mailbox | 256 | 1us | 0 / 5 **incomplete** | — | — | — | — |
-| `mid_default` / mailbox | 8192 | 1us | 5 / 5 | 433 | 15,100 | 86,000 | 213,300 |
-| `mid_default` / mid-drain | 32 | 1us | 5 / 5 | 672 | 3,700 | 7,400 | 79,200 |
-| `mid_default` / mid-drain | 256 | 0ns | 5 / 5 | 3,100 | 8,100 | 10,600 | 53,300 |
-| `mid_default` / mid-drain | 256 | 10us | 5 / 5 | 111,800 | 351,900 | 436,100 | 489,500 |
-| `mid_default` / mid-drain | 256 | 1us | 5 / 5 | 8,500 | 30,000 | 46,400 | 79,000 |
-| `mid_default` / mid-drain | 2048 | 1us | 5 / 5 | 12,200 | 274,000 | 328,200 | 425,700 |
-| `mid_default` / mid-drain | 8192 | 1us | 5 / 5 | 11,200 | 992,800 | 1,060,000 | 1,230,000 |
-| `idle_default` / idle | 0 | - | 5 / 5 | 504 | 7,600 | 43,300 | 181,800 |
-
-A scene with fewer than five complete processes is **incomplete**; any displayed quantiles use only the available observations and do not establish a complete baseline. A mailbox timeout can occur inside a process whose primary mid-drain measurement succeeds. No latency scene is silently promoted to complete based on that primary metric.
-
-## Public actors
-
-Rates are million complete actor lifecycles/s, including creation, dispatch, retirement and reclamation. `actor`, `wave` and `inbox` change dispatch. `c` counts consumers; `chunk32` overrides the public hint to class 2. Ready-only rows below exclude lifecycle work.
-
-| Case | Mcycles/s, median [min, max] | Samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `actor_c0_default` | 10.970 [8.246, 11.516] | 5 |
-| `actor_c0_chunk32` | 8.683 [8.467, 8.852] | 5 |
-| `actor_c6_default` | 5.621 [4.714, 6.412] | 30 |
-| `actor_c6_chunk32` | 5.834 [5.299, 6.032] | 30 |
-| `wave_c0_default` | 10.420 [7.648, 10.840] | 5 |
-| `wave_c0_chunk32` | 10.611 [9.985, 10.757] | 5 |
-| `wave_c6_default` | 6.307 [5.478, 6.925] | 30 |
-| `wave_c6_chunk32` | 6.161 [5.716, 6.374] | 30 |
-| `inbox_c0_default` | 6.391 [5.636, 6.432] | 5 |
-| `inbox_c0_chunk32` | 6.197 [6.094, 6.336] | 5 |
-| `inbox_c6_default` | 4.285 [3.837, 4.415] | 30 |
-| `inbox_c6_chunk32` | 4.348 [3.964, 4.445] | 30 |
-| `actor_curve_c1` | 7.903 [7.396, 7.968] | 5 |
-| `actor_curve_c2` | 7.568 [7.404, 7.657] | 5 |
-| `actor_curve_c4` | 6.401 [6.189, 6.861] | 5 |
-| `actor_curve_c6` | 5.741 [5.342, 5.871] | 30 |
-| `actor_curve_c11` | 4.572 [4.478, 4.694] | 5 |
+| `actor_c0_default` | 22.702 ± 0.153 | 5 / 5 |
+| `actor_c0_chunk32` | 23.026 ± 0.081 | 5 / 5 |
+| `actor_c6_default` | 22.887 ± 0.082 | 5 / 5 |
+| `actor_c6_chunk32` | 22.868 ± 0.061 | 5 / 5 |
+| `wave_c0_default` | 27.702 ± 0.046 | 5 / 5 |
+| `wave_c0_chunk32` | 27.922 ± 0.034 | 5 / 5 |
+| `wave_c6_default` | 24.596 ± 0.061 | 5 / 5 |
+| `wave_c6_chunk32` | 24.329 ± 0.042 | 5 / 5 |
+| `inbox_c0_default` | 18.208 ± 0.035 | 5 / 5 |
+| `inbox_c0_chunk32` | 18.377 ± 0.075 | 5 / 5 |
+| `inbox_c6_default` | 18.350 ± 0.029 | 5 / 5 |
+| `inbox_c6_chunk32` | 18.367 ± 0.028 | 5 / 5 |
+| `actor_curve_c1` | 23.248 ± 0.057 | 5 / 5 |
+| `actor_curve_c2` | 23.401 ± 0.023 | 5 / 5 |
+| `actor_curve_c4` | 23.585 ± 0.059 | 5 / 5 |
+| `actor_curve_c6` | 22.788 ± 0.056 | 5 / 5 |
+| `actor_curve_c11` | 15.482 ± 0.046 | 5 / 5 |
+| `actor_ready_default` | 76.230 ± 0.678 | 5 / 5 |
+| `actor_ready_chunk32` | 78.030 ± 0.716 | 5 / 5 |
 
-### C ABI lifecycle
+### Private actors
 
-Matched C/D create-copy → idle retire → reclaim microbenchmark. Each actor copies 64 or 4096 bytes into its final state, with 64-byte alignment and cohorts of 64. One or four creator threads use local reclamation or a separate reclaimer. Five alternating-order timing repeats target 0.4 seconds per mode; separate counted runs check allocations. Timing excludes setup and includes barrier release and final joins. This measures lifecycle overhead, not callback/wave throughput or a regression gate.
+Lifecycle modes report millions of complete lifecycles per second. Subset
+modes report millions of selected callbacks per second, a different
+denominator. The [mode definitions](tools/perf/README.md#actor_churn)
+distinguish tracked roots, consumer-side free, child trees, continuations,
+refill, cancellation and subset waves; `-slab` modes use cohort slabs, and
+`private-slab` / `private-remote-slab` use root slabs.
 
-All 48 separate counted runs confirmed one final-state allocation and one free per actor, with exactly the requested state bytes allocated. Timing runs disable these counters.
-
-| State bytes | Creators | Reclaim | Allocator | D scalar ns/actor | C scalar ns/actor | C batch ns/actor |
-| ---: | ---: | --- | --- | ---: | ---: | ---: |
-| 64 | 1 | local | CRT | 125.217 [121.529, 130.632] | 140.606 [136.840, 145.804] | 115.354 [113.925, 116.226] |
-| 64 | 1 | local | mimalloc | 60.613 [58.815, 63.888] | 76.056 [74.787, 78.628] | 50.982 [49.522, 53.859] |
-| 64 | 1 | remote | CRT | 187.033 [181.292, 191.127] | 218.063 [196.478, 222.234] | 213.994 [200.620, 217.393] |
-| 64 | 1 | remote | mimalloc | 100.993 [96.602, 112.636] | 121.339 [117.269, 133.177] | 112.871 [108.772, 116.056] |
-| 64 | 4 | local | CRT | 441.489 [401.545, 468.155] | 444.763 [413.992, 524.459] | 209.130 [183.842, 210.090] |
-| 64 | 4 | local | mimalloc | 467.327 [414.037, 475.239] | 443.007 [431.099, 453.908] | 198.518 [190.640, 211.670] |
-| 64 | 4 | remote | CRT | 654.923 [552.071, 674.576] | 654.671 [563.394, 738.468] | 233.040 [212.997, 258.752] |
-| 64 | 4 | remote | mimalloc | 576.621 [536.915, 587.045] | 608.300 [539.992, 647.174] | 257.167 [230.670, 323.355] |
-| 4096 | 1 | local | CRT | 244.563 [216.749, 342.471] | 257.262 [235.642, 322.055] | 227.531 [202.741, 286.294] |
-| 4096 | 1 | local | mimalloc | 181.317 [174.299, 192.224] | 203.836 [197.632, 208.744] | 175.709 [170.862, 190.361] |
-| 4096 | 1 | remote | CRT | 1,085.138 [1,014.487, 1,163.752] | 1,102.571 [1,083.850, 1,118.227] | 1,098.647 [1,073.166, 1,162.017] |
-| 4096 | 1 | remote | mimalloc | 268.700 [250.253, 309.929] | 272.975 [265.786, 302.774] | 282.990 [277.702, 308.749] |
-| 4096 | 4 | local | CRT | 521.513 [425.630, 552.846] | 513.551 [460.345, 538.479] | 170.512 [130.336, 203.952] |
-| 4096 | 4 | local | mimalloc | 606.195 [559.305, 653.043] | 630.371 [583.194, 660.941] | 251.102 [235.344, 264.546] |
-| 4096 | 4 | remote | CRT | 843.351 [791.366, 975.544] | 882.170 [793.472, 1,006.393] | 856.840 [728.214, 886.474] |
-| 4096 | 4 | remote | mimalloc | 650.509 [591.372, 829.675] | 638.207 [589.712, 742.763] | 289.324 [270.434, 344.032] |
-
-### Prequeued ready dispatch
-
-These are D ready-dispatch measurements, separate from the C/D lifecycle comparison.
-
-| Prequeued ready dispatch | Million actors/s, median [min, max] | Samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `actor_ready_default` | 22.550 [16.300, 25.260] | 5 |
-| `actor_ready_chunk32` | 29.480 [28.040, 29.980] | 5 |
+| `private_c0` | 90.102 ± 0.141 | 5 / 5 |
+| `private_c6` | 92.238 ± 0.443 | 5 / 5 |
+| `private-remote_c0` | 91.611 ± 0.318 | 5 / 5 |
+| `private-remote_c6` | 16.839 ± 0.010 | 5 / 5 |
+| `private-tracked_c0` | 23.351 ± 0.055 | 5 / 5 |
+| `private-tracked_c6` | 40.196 ± 0.155 | 5 / 5 |
+| `private-slab_c0` | 122.474 ± 0.334 | 5 / 5 |
+| `private-slab_c6` | 119.220 ± 0.311 | 5 / 5 |
+| `private-remote-slab_c0` | 120.764 ± 1.273 | 5 / 5 |
+| `private-remote-slab_c6` | 116.341 ± 0.227 | 5 / 5 |
+| `tree_c0` | 95.562 ± 2.501 | 5 / 5 |
+| `tree_c6` | 81.208 ± 0.235 | 5 / 5 |
+| `tree-wait_c0` | 95.881 ± 2.229 | 5 / 5 |
+| `tree-wait_c6` | 81.101 ± 0.206 | 5 / 5 |
+| `tree-cont_c0` | 37.146 ± 0.443 | 5 / 5 |
+| `tree-cont_c6` | 41.876 ± 0.059 | 5 / 5 |
+| `tree-slab_c0` | 136.830 ± 0.666 | 5 / 5 |
+| `tree-slab_c6` | 321.221 ± 3.218 | 5 / 5 |
+| `tree-wait-slab_c0` | 136.081 ± 0.888 | 5 / 5 |
+| `tree-wait-slab_c6` | 311.942 ± 1.176 | 5 / 5 |
+| `tree-cont-slab_c0` | 42.646 ± 0.056 | 5 / 5 |
+| `tree-cont-slab_c6` | 42.826 ± 0.053 | 5 / 5 |
+| `tree-refill_c0` | 108.009 ± 3.604 | 5 / 5 |
+| `tree-refill_c6` | 83.796 ± 0.326 | 5 / 5 |
+| `tree-refill-slab_c0` | 165.971 ± 0.818 | 5 / 5 |
+| `tree-refill-slab_c6` | 427.924 ± 0.880 | 5 / 5 |
+| `tree-pipelined_c0` | 39.797 ± 0.077 | 5 / 5 |
+| `tree-pipelined_c6` | 49.612 ± 0.095 | 5 / 5 |
+| `tree-cancel_c0` | 63.348 ± 0.290 | 5 / 5 |
+| `tree-cancel_c6` | 77.487 ± 0.285 | 5 / 5 |
+| `dtor_c0` | 92.352 ± 0.300 | 5 / 5 |
+| `dtor_c6` | 96.387 ± 0.296 | 5 / 5 |
+| `subset1_c0` | 188.042 ± 0.438 | 5 / 5 |
+| `subset1_c6` | 82.868 ± 0.088 | 5 / 5 |
+| `subset10_c0` | 259.190 ± 0.737 | 5 / 5 |
+| `subset10_c6` | 299.547 ± 0.459 | 5 / 5 |
+| `subset100_c0` | 272.498 ± 6.531 | 5 / 5 |
+| `subset100_c6` | 411.112 ± 0.569 | 5 / 5 |
+| `subset-whole_c0` | 456.665 ± 5.503 | 5 / 5 |
+| `subset-whole_c6` | 1,147.984 ± 1.880 | 5 / 5 |
+| `subset-whole-unreserved_c0` | 455.757 ± 8.586 | 5 / 5 |
+| `subset-whole-unreserved_c6` | 1,147.789 ± 3.073 | 5 / 5 |
 
-## Private actors
+#### Cohort slab vs per-object
 
-Lifecycle modes report Mcycles/s. Subset modes report million selected callbacks/s, which is a different denominator. The [mode definitions](tools/perf/README.md#actor_churn) distinguish tracked roots, consumer-side free, child trees, continuations, refill, cancellation and subset waves.
+Compare each tree or refill mode with its `-slab` partner at the same consumer
+count above, and the two root modes with their `-slab` partners. Slab
+reservation happens at creation and member storage is reused; these are
+complete workload rates, not allocator-call timings. At six consumers the
+child tree gains four times (81 to 321) and the refilled tree five times (84
+to 428); consumer-freed roots gain seven times (17 to 116). Cancellation's
+dispatched fraction is retained in the machine-readable counters.
 
-| Case | Unit | Median [min, max] | Samples |
-| --- | --- | ---: | ---: |
-| `private_c0` | Mcycles/s | 39.470 [37.871, 40.895] | 5 |
-| `private_c6` | Mcycles/s | 28.223 [26.300, 29.987] | 30 |
-| `private-remote_c0` | Mcycles/s | 42.988 [38.469, 43.809] | 5 |
-| `private-remote_c6` | Mcycles/s | 8.361 [8.001, 9.282] | 30 |
-| `private-tracked_c0` | Mcycles/s | 13.902 [12.591, 14.110] | 5 |
-| `private-tracked_c6` | Mcycles/s | 15.069 [13.691, 16.560] | 30 |
-| `tree_c0` | Mcycles/s | 52.949 [43.542, 54.818] | 5 |
-| `tree_c6` | Mcycles/s | 22.727 [19.641, 25.687] | 30 |
-| `tree-wait_c0` | Mcycles/s | 52.099 [47.124, 53.207] | 5 |
-| `tree-wait_c6` | Mcycles/s | 22.693 [21.132, 25.383] | 30 |
-| `tree-cont_c0` | Mcycles/s | 18.671 [16.280, 19.151] | 5 |
-| `tree-cont_c6` | Mcycles/s | 10.022 [8.909, 11.506] | 30 |
-| `tree-slab_c0` | Mcycles/s | 66.470 [56.894, 70.136] | 5 |
-| `tree-slab_c6` | Mcycles/s | 56.156 [50.719, 62.747] | 30 |
-| `tree-wait-slab_c0` | Mcycles/s | 60.307 [56.522, 64.615] | 5 |
-| `tree-wait-slab_c6` | Mcycles/s | 55.419 [51.297, 65.530] | 30 |
-| `tree-cont-slab_c0` | Mcycles/s | 19.927 [17.660, 20.486] | 5 |
-| `tree-cont-slab_c6` | Mcycles/s | 11.474 [8.794, 12.418] | 30 |
-| `tree-refill_c0` | Mcycles/s | 58.992 [52.879, 61.426] | 5 |
-| `tree-refill_c6` | Mcycles/s | 26.404 [20.078, 29.218] | 30 |
-| `tree-refill-slab_c0` | Mcycles/s | 73.674 [67.082, 79.890] | 5 |
-| `tree-refill-slab_c6` | Mcycles/s | 81.918 [73.394, 85.714] | 30 |
-| `tree-pipelined_c0` | Mcycles/s | 19.359 [17.617, 19.764] | 5 |
-| `tree-pipelined_c6` | Mcycles/s | 11.913 [10.793, 13.692] | 30 |
-| `tree-cancel_c0` | Mcycles/s | 38.649 [32.955, 39.881] | 5 |
-| `tree-cancel_c6` | Mcycles/s | 22.472 [20.205, 24.712] | 30 |
-| `dtor_c0` | Mcycles/s | 38.597 [33.922, 39.815] | 5 |
-| `dtor_c6` | Mcycles/s | 28.440 [24.892, 30.977] | 30 |
-| `subset1_c0` | Mselected callbacks/s | 132.524 [109.421, 133.387] | 5 |
-| `subset1_c6` | Mselected callbacks/s | 26.650 [24.263, 29.670] | 30 |
-| `subset10_c0` | Mselected callbacks/s | 201.006 [175.224, 226.919] | 5 |
-| `subset10_c6` | Mselected callbacks/s | 87.982 [80.124, 100.361] | 30 |
-| `subset100_c0` | Mselected callbacks/s | 275.919 [245.528, 285.320] | 5 |
-| `subset100_c6` | Mselected callbacks/s | 148.744 [126.080, 173.244] | 30 |
-| `subset-whole_c0` | Mselected callbacks/s | 469.086 [416.418, 477.439] | 5 |
-| `subset-whole_c6` | Mselected callbacks/s | 261.365 [239.767, 294.249] | 30 |
-| `subset-whole-unreserved_c0` | Mselected callbacks/s | 434.307 [384.761, 453.093] | 5 |
-| `subset-whole-unreserved_c6` | Mselected callbacks/s | 261.167 [236.269, 285.115] | 30 |
+#### Batch limit and work-cost hints
 
-### Cohort slab vs per-object
+All cells use six consumers. `b` changes the batch limit; `auto`, `h2` and
+`h0` select automatic root classification, chunk 32 and chunk 128. The `child`
+cases change the child-wave hint instead. Choose defaults against the relevant
+workload rather than the largest rate across unlike cases.
 
-Compare each tree/refill mode with its `-slab` partner at the same consumer count above. Slab reservation occurs at cohort creation and member storage is reused; these are complete workload rates, not isolated allocator-call timings. Cancellation's dispatched fraction is retained in the machine-readable counters.
-
-**Root slabs (after this baseline):** `private-slab` and `private-remote-slab` apply the same policy to root state and are not in the tables above. A three-sample screen on the Ryzen 9 5900XT (LDC 1.43.0 `-O2 -release`, mimalloc 3.5.3, 16,384 roots, batch 256, ordinary pages, consumers pinned to physical cores 1-6 with the controller on 0) measured `private` 91.7 → `private-slab` 123.0 Mcycles/s serially and 94.1 → 119.1 with six consumers; `private-remote` 91.5 → `private-remote-slab` 124.5 serially and 16.9 → 117.4 with six consumers. These are descriptive medians of three runs, not gate results; the next refresh includes both modes.
-
-### Batch limit and work-cost hints
-
-All cells below have six consumers and 30 samples. `b` changes the batch limit; `auto`, `h2` and `h0` select automatic root classification, chunk 32 and chunk 128. The `child` cases change the child-wave hint instead. Defaults should be chosen against the relevant workload rather than the largest rate across unlike cases.
-
-| Case | Mcycles/s, median [min, max] | Valid / requested samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `tree_b256_auto` | 22.904 [18.977, 24.218] | 30 / 30 |
-| `tree_b256_h2` | 19.958 [16.065, 20.923] | 30 / 30 |
-| `tree_b256_h0` | 19.776 [16.529, 20.312] | 30 / 30 |
-| `tree_b1024_auto` | 28.722 [26.258, 29.460] | 30 / 30 |
-| `tree_b1024_h2` | 10.106 [8.946, 10.624] | 30 / 30 |
-| `tree_b1024_h0` | 9.968 [9.151, 10.380] | 30 / 30 |
-| `private_b256_auto` | 28.414 [25.663, 29.408] | 30 / 30 |
-| `private_b256_h2` | 28.013 [26.310, 29.162] | 30 / 30 |
-| `private_b256_h0` | 29.362 [27.184, 30.032] | 30 / 30 |
-| `private_b1024_auto` | 26.031 [23.230, 27.193] | 30 / 30 |
-| `private_b1024_h2` | 26.052 [24.335, 27.241] | 30 / 30 |
-| `private_b1024_h0` | 25.422 [23.499, 26.440] | 30 / 30 |
-| `private_b256` | 28.347 [25.427, 29.071] | 30 / 30 |
-| `private_b1024` | 25.995 [23.986, 26.839] | 30 / 30 |
-| `private_b2048` | 20.502 [18.925, 21.281] | 30 / 30 |
-| `tree_child_default` | 22.843 [21.007, 23.723] | 30 / 30 |
-| `tree_child_h0` | 22.865 [20.793, 23.706] | 30 / 30 |
-| `tree-slab_child_default` | 56.010 [52.491, 57.461] | 30 / 30 |
-| `tree-slab_child_h0` | 55.794 [50.454, 58.425] | 30 / 30 |
+| `tree_b256_auto` | 80.881 ± 0.249 | 5 / 5 |
+| `tree_b256_h2` | 65.320 ± 0.110 | 5 / 5 |
+| `tree_b256_h0` | 66.170 ± 0.140 | 5 / 5 |
+| `tree_b1024_auto` | 95.530 ± 0.145 | 5 / 5 |
+| `tree_b1024_h2` | 18.600 ± 0.191 | 5 / 5 |
+| `tree_b1024_h0` | 18.504 ± 0.197 | 5 / 5 |
+| `private_b256_auto` | 91.893 ± 0.195 | 5 / 5 |
+| `private_b256_h2` | 91.897 ± 0.137 | 5 / 5 |
+| `private_b256_h0` | 92.842 ± 0.246 | 5 / 5 |
+| `private_b1024_auto` | 89.430 ± 0.857 | 5 / 5 |
+| `private_b1024_h2` | 89.722 ± 0.423 | 5 / 5 |
+| `private_b1024_h0` | 92.444 ± 0.199 | 5 / 5 |
+| `private_b256` | 92.042 ± 0.403 | 5 / 5 |
+| `private_b1024` | 89.839 ± 2.297 | 5 / 5 |
+| `private_b2048` | 84.768 ± 0.571 | 5 / 5 |
+| `tree_child_default` | 80.885 ± 0.116 | 5 / 5 |
+| `tree_child_h0` | 80.864 ± 0.246 | 5 / 5 |
+| `tree-slab_child_default` | 315.515 ± 3.272 | 5 / 5 |
+| `tree-slab_child_h0` | 319.512 ± 2.636 | 5 / 5 |
 
-## Allocators
+### Allocators
 
-Six consumers, 30 samples per case. CRT/mimalloc comparisons include the complete lifecycle. `private_emitter` frees on the emitter; `private-remote` frees on consumers. The `count` cases enable allocation instrumentation and are diagnostics, not uninstrumented allocator throughput. Exact cross-thread counts remain in the data file.
+Six consumers. CRT/mimalloc comparisons include the complete lifecycle.
+`private_emitter` frees on the emitter; `private-remote` frees on consumers.
+The `count` cases enable allocation instrumentation and are diagnostics, not
+uninstrumented throughput; exact cross-thread counts are in the data file.
 
-| Case | Mcycles/s, median [min, max] | Valid / requested samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `actor_mimalloc` | 5.734 [5.437, 5.895] | 30 / 30 |
-| `actor_crt` | 3.091 [2.913, 3.256] | 30 / 30 |
-| `wave_mimalloc` | 6.309 [5.764, 6.533] | 30 / 30 |
-| `wave_crt` | 3.270 [3.089, 3.388] | 30 / 30 |
-| `tree_mimalloc` | 22.678 [20.818, 23.826] | 30 / 30 |
-| `tree_crt` | 7.638 [6.841, 7.844] | 30 / 30 |
-| `private-remote_mimalloc` | 8.821 [8.111, 9.169] | 30 / 30 |
-| `private-remote_crt` | 3.952 [2.979, 4.231] | 30 / 30 |
-| `private_emitter` | 27.913 [25.790, 28.866] | 30 / 30 |
-| `private_count` | 5.003 [4.384, 5.170] | 30 / 30 |
-| `private_emitter_count` | 17.936 [16.656, 19.000] | 30 / 30 |
+| `actor_mimalloc` | 22.766 ± 0.047 | 5 / 5 |
+| `actor_crt` | 9.413 ± 0.024 | 5 / 5 |
+| `wave_mimalloc` | 24.593 ± 0.056 | 5 / 5 |
+| `wave_crt` | 9.873 ± 0.111 | 5 / 5 |
+| `tree_mimalloc` | 80.977 ± 0.228 | 5 / 5 |
+| `tree_crt` | 18.368 ± 0.174 | 5 / 5 |
+| `private-remote_mimalloc` | 16.782 ± 0.029 | 5 / 5 |
+| `private-remote_crt` | 5.962 ± 0.099 | 5 / 5 |
+| `private_emitter` | 92.009 ± 0.315 | 5 / 5 |
+| `private_count` | 10.588 ± 0.016 | 5 / 5 |
+| `private_emitter_count` | 60.956 ± 0.171 | 5 / 5 |
 
-## Page backing and pinning
+### Page backing and pinning
 
-All results use ordinary pages. Pinned actor/tree cells use controller 0 and consumers 1–6; unpinned cells leave placement to the OS. No claim about huge-page benefit is made.
+All results use ordinary pages. Pinned cells use controller 0 and consumers
+1-6; unpinned cells leave placement to the OS. Pinning changes the median
+little here and the spread a lot: the unpinned standard deviations are 40 to
+100 times the pinned ones.
 
-| Case | Mcycles/s, median [min, max] | Valid / requested samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `actor_c6_pinned` | 5.714 [5.319, 5.878] | 30 / 30 |
-| `actor_c6_unpinned` | 5.690 [5.234, 5.878] | 30 / 30 |
-| `tree_c6_pinned` | 22.870 [20.782, 23.287] | 30 / 30 |
-| `tree_c6_unpinned` | 22.860 [20.642, 23.694] | 30 / 30 |
+| `actor_c6_pinned` | 22.811 ± 0.043 | 5 / 5 |
+| `actor_c6_unpinned` | 22.619 ± 4.565 | 5 / 5 |
+| `tree_c6_pinned` | 80.857 ± 0.407 | 5 / 5 |
+| `tree_c6_unpinned` | 79.747 ± 17.702 | 5 / 5 |
 
-## Fibers
+### Fibers
 
-Single-thread cells measure drain throughput. Multithread cells use the full creation-plus-drain burst because workers can execute during creation. The machine-readable field statistics also retain warm-pool and creation rates.
-The single-thread harness's existing rate-only total lines exposed a report-parser compatibility bug. The same five successful raw captures were reparsed after the fix; their timings were neither rerun nor discarded. Counted create/run phases supply the auxiliary full-burst totals. Malformed multithread totals remain errors.
+`benchmark_st` is single-thread drain throughput in fibers per second (200,000
+fibers, 256-entry batches, two generations). `benchmark_mt` is the cold full
+burst, creation plus drain, with the pool's default of one worker per core on
+every group; the warm burst and drain at each worker count are in the
+[headline](#headline-throughput) and the [thread sweeps](#thread-sweeps). The
+[historical Fiber characterization](docs/performance/archive-2026-10-20.md#fibers)
+retains the same-thread, worker-topology, embedding, allocation and
+assist-ring experiments.
 
-| Benchmark / phase | Fibers/s, median [min, max] | Samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `benchmark_st` / cold creation | 132,650.470 [124,742.220, 135,647.130] | 5 |
-| `benchmark_st` / cold drain | 3,577,651.130 [3,127,013.010, 3,829,099.630] | 5 |
-| `benchmark_st` / cold full burst | 127,907.906 [119,956.935, 130,881.316] | 5 |
-| `benchmark_st` / warm drain | 3,371,527.120 [2,927,494.740, 3,670,526.220] | 5 |
-| `benchmark_st` / warm full burst | 1,087,133.772 [899,458.526, 1,199,407.493] | 5 |
-| `benchmark_mt` / cold full burst | 122,435.242 [120,495.458, 125,179.116] | 5 |
-| `benchmark_mt` / warm full burst | 2,656,169.485 [2,442,264.859, 2,702,775.751] | 5 |
+| `benchmark_st` | 5,226,749 ± 35,819 | 5 / 5 |
+| `benchmark_mt` | 187,868 ± 1,884 | 5 / 5 |
 
-The [historical Fiber characterization](docs/performance/archive-2026-10-20.md#fibers) retains the detailed same-thread, worker-topology, embedding, allocation and assist-ring experiments. Those experiments were not repeated as part of these two baseline cells.
+### Scaling microbenchmarks
 
-## Scaling microbenchmarks
+Elapsed milliseconds; lower is better. 16,384 creations, and lifecycle work
+with batch 32 and handles.
 
-Elapsed milliseconds; lower is better. These separately measure 16,384 creations and lifecycle work with batch 32 and handles.
-
-| Case | ms, median [min, max] | Valid / requested samples |
+| Case | Median ± stddev | Samples |
 | --- | ---: | ---: |
-| `create_16384` | 1.609 [1.598, 1.699] | 5 / 5 |
-| `lifecycle_16384_b32` | 1.139 [1.079, 1.548] | 5 / 5 |
+| `create_16384` | 1.127 ± 0.077 | 5 / 5 |
+| `lifecycle_16384_b32` | 1.016 ± 0.080 | 5 / 5 |
+
+### Full tail-latency matrix
+
+Every scene the tail harness runs, at each thread count: idle; mid-drain
+behind tables of 32, 256, 2,048 and 8,192 entries with 0, 1 or 10 µs of work
+per job; burst (32 sentinels back to back); and near-full, where the ring is
+filled while consumers are parked and the sentinel is written against
+backpressure. The near-full p99.9 of about 1.5 ms is the wait for ring space,
+not consumer latency.
+
+| Threads | Scene | Table | Work | p50 µs | p99 µs | p99.9 µs | Max µs | Processes |
+| ---: | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 2 | burst | 256 | 1us | 250.30 ± 2.33 | 255.80 ± 2.19 | 264.30 ± 4.59 | 265.40 ± 4.58 | 5 / 5 |
+| 2 | idle | 0 | - | 0.14 ± 0.00 | 1.80 ± 0.04 | 3.20 ± 0.05 | 6.30 ± 5.15 | 5 / 5 |
+| 2 | mid-drain | 32 | 1us | 16.80 ± 0.16 | 19.20 ± 0.15 | 20.40 ± 0.28 | 32.70 ± 4.80 | 5 / 5 |
+| 2 | mid-drain | 256 | 0ns | 2.50 ± 0.00 | 2.90 ± 0.00 | 5.50 ± 0.63 | 8.50 ± 4.07 | 5 / 5 |
+| 2 | mid-drain | 256 | 10us | 1,930.00 ± 0.00 | 1,940.00 ± 0.00 | 1,950.00 ± 0.00 | 1,970.00 ± 66.56 | 5 / 5 |
+| 2 | mid-drain | 256 | 1us | 204.80 ± 1.39 | 208.20 ± 1.31 | 213.50 ± 1.58 | 240.50 ± 15.78 | 5 / 5 |
+| 2 | mid-drain | 2048 | 1us | 1,630.00 ± 13.42 | 1,650.00 ± 5.48 | 1,650.00 ± 5.48 | 1,670.00 ± 4.47 | 5 / 5 |
+| 2 | mid-drain | 8192 | 1us | 6,450.00 ± 52.15 | 6,560.00 ± 10.00 | 6,570.00 ± 8.37 | 6,580.00 ± 21.91 | 5 / 5 |
+| 2 | near-full | 256 | 0ns | 0.14 ± 0.01 | 1.70 ± 0.24 | 1,440.00 ± 144.84 | 1,920.00 ± 317.69 | 5 / 5 |
+| 6 | burst | 256 | 1us | 26.80 ± 0.58 | 30.50 ± 0.24 | 32.80 ± 0.65 | 34.10 ± 2.32 | 5 / 5 |
+| 6 | idle | 0 | - | 0.23 ± 0.00 | 2.00 ± 0.08 | 4.30 ± 1.69 | 6.60 ± 41.77 | 5 / 5 |
+| 6 | mid-drain | 32 | 1us | 0.20 ± 0.00 | 1.70 ± 0.04 | 3.20 ± 0.07 | 6.30 ± 2.49 | 5 / 5 |
+| 6 | mid-drain | 256 | 0ns | 0.70 ± 0.02 | 2.60 ± 0.09 | 3.20 ± 0.09 | 5.40 ± 0.37 | 5 / 5 |
+| 6 | mid-drain | 256 | 10us | 30.20 ± 0.00 | 191.50 ± 0.04 | 352.30 ± 70.55 | 352.70 ± 0.81 | 5 / 5 |
+| 6 | mid-drain | 256 | 1us | 3.20 ± 0.04 | 20.40 ± 0.09 | 22.70 ± 0.23 | 36.90 ± 0.85 | 5 / 5 |
+| 6 | mid-drain | 2048 | 1us | 10.60 ± 0.43 | 266.70 ± 1.32 | 269.00 ± 0.40 | 270.60 ± 1.11 | 5 / 5 |
+| 6 | mid-drain | 8192 | 1us | 8.30 ± 0.93 | 1,030.00 ± 5.48 | 1,040.00 ± 4.47 | 1,040.00 ± 17.89 | 5 / 5 |
+| 6 | near-full | 256 | 0ns | 0.24 ± 0.01 | 0.33 ± 0.02 | 1,570.00 ± 87.64 | 1,610.00 ± 21.68 | 5 / 5 |
+| 12 | burst | 256 | 1us | 10.90 ± 0.05 | 15.40 ± 0.11 | 18.40 ± 0.34 | 27.80 ± 1.72 | 5 / 5 |
+| 12 | idle | 0 | - | 0.31 ± 0.00 | 2.60 ± 0.05 | 6.70 ± 0.57 | 10.80 ± 33.78 | 5 / 5 |
+| 12 | mid-drain | 32 | 1us | 0.32 ± 0.00 | 2.20 ± 0.00 | 4.30 ± 0.11 | 9.40 ± 128.56 | 5 / 5 |
+| 12 | mid-drain | 256 | 0ns | 1.60 ± 0.00 | 2.10 ± 0.00 | 4.50 ± 0.43 | 5.80 ± 0.26 | 5 / 5 |
+| 12 | mid-drain | 256 | 10us | 100.60 ± 0.00 | 103.70 ± 0.08 | 104.70 ± 0.11 | 105.40 ± 0.11 | 5 / 5 |
+| 12 | mid-drain | 256 | 1us | 10.50 ± 0.00 | 12.70 ± 0.65 | 14.40 ± 0.11 | 15.30 ± 124.87 | 5 / 5 |
+| 12 | mid-drain | 2048 | 1us | 1.10 ± 0.05 | 120.30 ± 0.10 | 123.30 ± 0.43 | 124.70 ± 0.42 | 5 / 5 |
+| 12 | mid-drain | 8192 | 1us | 5.70 ± 0.05 | 465.10 ± 0.85 | 469.90 ± 0.40 | 471.30 ± 0.70 | 5 / 5 |
+| 12 | near-full | 256 | 0ns | 0.29 ± 0.01 | 2.30 ± 0.09 | 1,390.00 ± 577.50 | 1,670.00 ± 301.41 | 5 / 5 |
+| 20 | burst | 256 | 1us | 1.40 ± 0.05 | 6.50 ± 0.68 | 9.50 ± 4.04 | 23.10 ± 13.65 | 5 / 5 |
+| 20 | idle | 0 | - | 0.60 ± 0.01 | 2.80 ± 0.18 | 11.70 ± 1.80 | 53.80 ± 28.24 | 5 / 5 |
+| 20 | mid-drain | 32 | 1us | 0.41 ± 0.01 | 2.40 ± 0.04 | 4.20 ± 0.17 | 9.70 ± 33.04 | 5 / 5 |
+| 20 | mid-drain | 256 | 0ns | 0.62 ± 0.01 | 1.60 ± 0.05 | 3.20 ± 0.13 | 5.40 ± 128.87 | 5 / 5 |
+| 20 | mid-drain | 256 | 10us | 0.44 ± 0.01 | 1.10 ± 0.28 | 2.60 ± 0.11 | 4.90 ± 1.33 | 5 / 5 |
+| 20 | mid-drain | 256 | 1us | 0.42 ± 0.00 | 1.50 ± 0.28 | 2.60 ± 0.47 | 5.10 ± 1.03 | 5 / 5 |
+| 20 | mid-drain | 2048 | 1us | 5.00 ± 0.04 | 79.00 ± 0.16 | 81.30 ± 0.17 | 83.00 ± 3.23 | 5 / 5 |
+| 20 | mid-drain | 8192 | 1us | 4.40 ± 0.05 | 298.10 ± 0.44 | 300.30 ± 2.02 | 313.50 ± 26.15 | 5 / 5 |
+| 20 | near-full | 256 | 0ns | 0.61 ± 0.02 | 2.10 ± 766.27 | 1,610.00 ± 19.49 | 1,610.00 ± 0.00 | 5 / 5 |
+| 32 | burst | 256 | 1us | 0.88 ± 0.06 | 5.50 ± 0.67 | 9.60 ± 0.81 | 13.40 ± 13.10 | 5 / 5 |
+| 32 | idle | 0 | - | 0.73 ± 0.01 | 3.60 ± 0.27 | 18.30 ± 0.67 | 69.80 ± 43.35 | 5 / 5 |
+| 32 | mid-drain | 32 | 1us | 0.73 ± 0.01 | 3.00 ± 0.05 | 5.00 ± 0.24 | 9.00 ± 47.63 | 5 / 5 |
+| 32 | mid-drain | 256 | 0ns | 0.67 ± 0.01 | 1.50 ± 0.13 | 3.20 ± 0.42 | 5.40 ± 7.92 | 5 / 5 |
+| 32 | mid-drain | 256 | 10us | 0.59 ± 0.01 | 1.20 ± 0.00 | 3.40 ± 0.27 | 5.50 ± 0.38 | 5 / 5 |
+| 32 | mid-drain | 256 | 1us | 0.67 ± 0.02 | 1.30 ± 0.07 | 3.30 ± 0.19 | 5.80 ± 4.68 | 5 / 5 |
+| 32 | mid-drain | 2048 | 1us | 16.50 ± 0.08 | 19.30 ± 0.22 | 30.30 ± 13.65 | 53.70 ± 1.80 | 5 / 5 |
+| 32 | mid-drain | 8192 | 1us | 15.20 ± 0.08 | 200.20 ± 0.54 | 212.00 ± 10.20 | 236.20 ± 9.40 | 5 / 5 |
+| 32 | near-full | 256 | 0ns | 0.70 ± 0.01 | 1.30 ± 1.03 | 1,610.00 ± 101.00 | 1,620.00 ± 348.24 | 5 / 5 |
 
 ## Follow-up
 
-- Ryzen 9 5900XT: pending a separate run with its own compiler, topology, affinity and page metadata.
-- Free-index stack: this baseline still uses the linked free-slot structure. Evaluate that proposal with matched large-batch contention and latency measurements, including rollback and scalar controls.
-- Historical inconclusive optimization gates remain inconclusive; an absolute-rate refresh does not reclassify them.
-- The 256-entry mailbox latency scene timed out in all five processes. It has no complete latency baseline on this run.
+- Windows host: rebuild the 12700H tables with this driver and the shorter
+  thread lists.
+- Public actors and private roots are emitter-bound from about 4 and 8
+  threads: the single flush or pump thread saturates. Batching more work per
+  publication, or a second emitter, is the lever; the free-index-stack
+  redesign for public reservation stays deferred.
+- The first consumer on the second CCD costs private child throughput more
+  than it adds; keep a workload inside one CCD, or give each CCD its own Farm.

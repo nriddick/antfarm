@@ -305,10 +305,16 @@ their DUB configuration names are:
 
 ```text
 dub run -c benchmark --build=release --compiler=ldc2
-dub run -c benchmark_mt --build=release --compiler=ldc2
+dub run -c benchmark_mt --build=release --compiler=ldc2 -- 1000000 private 8
 dub run -c benchmark_vs_druntime --build=release --compiler=ldc2
 dub run -c benchmark_farm_embed --build=release --compiler=ldc2
 ```
+
+`benchmark_mt` takes the fibers per burst, the domain mode (`private`,
+`shared` or `assist`) and an optional worker count, which pins exactly that
+many pool workers in placement order (one physical group at a time, cores
+before SMT siblings); without it the pool keeps one worker per core on every
+group.
 
 The current scheduler model and synchronization invariants live in
 [docs/design/ant_fibers.md](../docs/design/ant_fibers.md). Benchmark evidence and
