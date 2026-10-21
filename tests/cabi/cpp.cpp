@@ -5,13 +5,7 @@
 #include <thread>
 #include <memory>
 #include <new>
-#ifdef AF_TEST_TSAN
-// LDC links the TSan archive without extracting its preinit-only object.
-// Initialize before libstdc++'s constructors call intercepted pthread routines.
-extern "C" void __tsan_init();
-__attribute__((section(".preinit_array"), used))
-static void (*const tsan_preinit)() = __tsan_init;
-#endif
+#include "tsan_preinit.h"
 static unsigned calls;
 static std::atomic<unsigned> start_threads(0), thread_calls(0);
 extern "C" void count(const uint64_t *, size_t) noexcept { ++calls; }

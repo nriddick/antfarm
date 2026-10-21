@@ -6,6 +6,12 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.1 — unreleased
 
+- README now provides explicit C/C++ and D entry paths and separates building
+  the library from using the runtime-free native core. Added `cpp_threads.cpp`,
+  a C++11 example using application-owned threads, exclusive consumer views,
+  partial-write retries, explicit completion and joined teardown. The native
+  ABI and example runners build and execute it with both supported D compilers.
+
 - Removed the invalid residual Fiber drain throughput column from PERFORMANCE
   and corrected Fiber counts to workers plus a separate controller. Full warm
   burst measurements are unchanged. C ABI documentation now states ABI 1 shipped

@@ -158,14 +158,17 @@ def main():
                            "-c", "tests/cabi/" + source + ".c", "-o", obj])
             build_api.run([args.compiler, "-betterC", "-fsanitize=thread", obj, lib, "-L-lpthread", "-of=" + str(binary)])
             execute(binary)
-        obj, binary = build / "cpp-main.o", build / "cpp-tsan"
-        build_api.run([os.environ.get("CXX", "c++"), "-std=c++11", "-g", "-O1",
-                       "-fno-exceptions", "-fsanitize=thread", "-Wall", "-Wextra", "-Werror",
-                       "-Iinclude", "-Itests/cabi", "-DNDEBUG", "-DAF_TEST_TSAN",
-                       "-c", "tests/cabi/cpp.cpp", "-o", obj])
-        build_api.run([args.compiler, "-betterC", "-fsanitize=thread", obj, lib,
-                       "-L-lstdc++", "-L-lpthread", "-of=" + str(binary)])
-        execute(binary)
+        for source in ("tests/cabi/cpp.cpp", "examples/cpp_threads.cpp"):
+            name = Path(source).stem
+            obj, binary = build / (name + "-main.o"), build / (name + "-tsan")
+            build_api.run([os.environ.get("CXX", "c++"), "-std=c++11", "-g", "-O1",
+                           "-fno-exceptions", "-fsanitize=thread", "-Wall", "-Wextra", "-Werror",
+                           "-Iinclude", "-Itests/cabi", "-DNDEBUG", "-DAF_TEST_TSAN",
+                           "-include", "tests/cabi/tsan_preinit.h",
+                           "-c", source, "-o", obj])
+            build_api.run([args.compiler, "-betterC", "-fsanitize=thread", obj, lib,
+                           "-L-lstdc++", "-L-lpthread", "-of=" + str(binary)])
+            execute(binary)
         print("C ABI TSAN CHECKS PASSED", flush=True)
         return
     if not args.runtime_only:
@@ -231,6 +234,7 @@ def main():
         execute(native("tests/cabi/cpp_failures.cpp", build, []))
         execute(native("tests/cabi/cpp_failures.cpp", build, [], no_exceptions=True))
         execute(native("examples/c_core.c", build, [lib]))
+        execute(native("examples/cpp_threads.cpp", build, [lib]))
         execute(native("examples/c_actors.c", build, [lib]))
         execute(native("examples/c_wave.c", build, [lib]))
         execute(native("examples/c_private.c", build, [lib]))

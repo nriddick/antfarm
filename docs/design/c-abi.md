@@ -58,6 +58,25 @@ cl /nologo /std:c11 /MT /Iinclude examples/c_core.c .build/c-abi-ldc2-nt/antfarm
 
 The [core example](../../examples/c_core.c) publishes three C callbacks,
 waits through a table hook, and tears down its handles. It prints `sum = 10`.
+
+The [native-thread example](../../examples/cpp_threads.cpp) uses two C++11
+`std::thread` workers and the same runtime-free archive. Each worker exclusively
+owns a consumer view; the producer retries unaccepted work, waits for an explicit
+completion count, and joins workers before teardown. No thread attachment or
+druntime initialization is needed. Build on Linux:
+
+```text
+c++ -std=c++11 -Iinclude examples/cpp_threads.cpp .build/c-abi-ldc2-posix/libantfarm_core.a -pthread -o .build/cpp-threads
+.build/cpp-threads
+```
+
+Or in an x64 Visual Studio developer prompt after building the core:
+
+```text
+cl /nologo /std:c++14 /EHsc /MT /Iinclude examples/cpp_threads.cpp .build/c-abi-ldc2-nt/antfarm_core.lib /Fe:.build/cpp-threads.exe /link kernel32.lib advapi32.lib
+.build/cpp-threads.exe
+```
+
 The C++11 wrapper supplies move-only `farm`, `producer`, and `consumer`.
 Default construction leaves each empty in both exception-enabled and
 exception-disabled builds. Use `farm::create(out, options)`,
