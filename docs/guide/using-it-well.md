@@ -109,6 +109,17 @@ tracked deadlines: private tree. Work that waits, throws, or allocates:
 Fiber. A Fiber that never suspends usually belongs on the payload path.
 The [choice guide](choosing-work.md) owns the full comparison.
 
+## Several LLC groups
+
+A Farm's consumers belong to one last-level-cache group; a second group gets
+its own Farm, fed one-way by a producer that publishes tables of 256 entries
+or more whose payloads carry about 100 ns of work each. Trivial payloads stay
+on their own group, tokens are held per publishing thread, and a channel Farm
+costs about 2 MiB. The measurements, the structures for private and public
+actors, and the token, quota and ring-size consequences are in
+[several physical groups](hosting.md#several-physical-groups); the host
+primitive that packages it is on the [roadmap](../../ROADMAP.md#next).
+
 ## Application policies
 
 The core deliberately leaves FIFO, priorities, thread affinity, "all done",
