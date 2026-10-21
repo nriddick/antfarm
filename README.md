@@ -5,8 +5,8 @@ of work into a shared ring; any subscribed consumer may claim them. It suits
 unordered compute where the next available worker should take the work.
 Use it alone, or add pinned workers, actors, and suspendable Fibers.
 
-The current release is **1.8.2**; see [CHANGELOG.md](CHANGELOG.md) for the
-1.9 work in progress, including the [C/C++ ABI](docs/design/c-abi.md).
+The current release is **1.9.0**; see the [release notes](docs/releases/1.9.md)
+and [CHANGELOG.md](CHANGELOG.md), including the [C/C++ ABI](docs/design/c-abi.md).
 Ant Farm needs DMD 2.112+ or LDC 1.42+ on Linux x86-64 or Windows x64.
 
 ## First program

@@ -119,7 +119,11 @@ int main(int argc, char **argv) {
     else {
         CHECK(!strcmp(c.mode, "c") || !strcmp(c.mode, "batch"));
         CHECK(af_actor_runtime_create(farm, c.creators * c.batch, &allocator, &c.c) == AF_OK);
-        af_actor_kind_options kind = {idle, NULL, c.bytes, 64, NULL};
+        af_actor_kind_options kind;
+        af_actor_kind_options_default(&kind);
+        kind.handler = idle;
+        kind.state_bytes = c.bytes;
+        kind.state_alignment = 64;
         CHECK(af_actor_kind_register(c.c, &kind, &c.kind) == AF_OK);
     }
     atomic_store(&c.allocations, 0); atomic_store(&c.frees, 0); atomic_store(&c.allocated_bytes, 0);

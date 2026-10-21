@@ -44,7 +44,9 @@ Tail summaries record complete-process counts per scene, so a timed-out scene
 cannot masquerade as complete merely because the primary metric parsed.
 Every cell reports the median and the sample standard deviation of its valid
 samples; `--markdown PATH` writes the tables (median ± stddev) that
-PERFORMANCE.md uses.
+PERFORMANCE.md uses. Generated tables omit the multithreaded residual drain
+rate; its diagnostic fields remain in the raw results. Fiber counts name
+pinned workers with a separate control thread, rather than total threads.
 
 The `headline` section sweeps four workloads over `--threads` (default
 `2,4,8,16,20,24,32,40`): payload throughput with about one small producer per
@@ -54,7 +56,10 @@ two consumers, unpinned (`payload_split`); private root lifecycles
 workers. Pins follow placement order, one last-level-cache group at a time,
 its cores before its SMT siblings (`cpu_order`, from sysfs); counts beyond the
 CPU count run unpinned, and Fiber cells beyond it are skipped because the
-pool pins. The `tail` section sweeps `--tail-threads` (default `2,6,12,20,32`)
+pool pins. Without sysfs, including Windows, the actor driver falls back to
+numeric CPU order. The tail and Fiber executables use native topology instead;
+record the actual placement rather than assuming the same core order on every
+platform. The `tail` section sweeps `--tail-threads` (default `2,6,12,20,32`)
 with `threads - 1` consumers plus the producer. On the 12700H, pass the
 shorter lists (`--threads 2,4,8,16,20,24 --tail-threads 2,6,12,20`).
 

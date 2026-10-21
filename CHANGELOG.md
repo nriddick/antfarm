@@ -4,7 +4,17 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
-## 1.9.0 — unreleased
+## 1.9.0 — 2026-10-20
+
+See the [release overview and migration notes](docs/releases/1.9.md).
+
+- Release-candidate benchmark checkup: the native Windows build now resolves
+  library imports before the benchmark directory, preventing the benchmark
+  `actor_wave.d` from shadowing the Fiber library module when building
+  `scaling`. The C/D lifecycle benchmark initializes the versioned actor-kind
+  options through `af_actor_kind_options_default`. Generated performance
+  tables report the full warm Fiber burst, omit the misleading residual
+  drain rate, and label Fiber workers separately from the controller.
 
 - Pre-push performance report for `cb2fb26..fac31ea` on the 5900XT (34
   cells, five pairs, then 20 pairs on the ten flagged cells; 340 + 400
@@ -158,7 +168,7 @@ Older release notes are in [docs/releases/](docs/releases/):
   retirement and reclamation. The optional host now drives and owns C actors,
   joining consumers before destroying them. GC rooting remains a normal-D
   adapter.
-- Refreshed the unreleased actor C API with runtime-owned kinds, direct copy/init
+- Finalized the actor C API with runtime-owned kinds, direct copy/init
   construction, optional destructors, 16-byte value owners, caller-owned inbox
   storage and strided batch/wave operations. Retirement pins and exclusive
   reclaim claims make copied owners safe without changing D move-only ownership.
@@ -180,7 +190,7 @@ Older release notes are in [docs/releases/](docs/releases/):
   Actor tests include native-thread creation/consumption and deterministic
   message release before reply wake. The core ABI runs in the quick gate; full gates also check the optional host.
 
-## 1.8.3 — progress branch
+## 1.8.3 development — included in 1.9.0
 
 - Added `antfarm.parallel`: range adapters, asynchronous
   submission handles and completion hooks, blocking help-drain calls, and

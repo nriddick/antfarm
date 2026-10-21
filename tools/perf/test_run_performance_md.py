@@ -319,7 +319,12 @@ class HeadlineTests(unittest.TestCase):
             out = Path(tmp) / "tables.md"
             rpm.write_markdown(results, args, out)
             text = out.read_text()
-        self.assertIn("| 2 | 700.0 ± 5.0 | 60.00 ± 1.00 | — | 10.00 ± 0.50 | — | 2.50 ± 0.10 | 5.00 ± 0.20 |", text)
+        self.assertIn("| 2 | 700.0 ± 5.0 | 60.00 ± 1.00 | — | 10.00 ± 0.50 | — | 2.50 ± 0.10 |", text)
+        # Workers can finish during creation: dividing the entire burst by
+        # the residual drain interval is not a throughput measurement.
+        self.assertNotIn("5.00 ± 0.20", text)
+        self.assertNotIn("Warm Fiber drain", text)
+        self.assertIn("pinned workers plus a separate controller", text)
         self.assertIn("| 2 | idle | 0 | - | 0.20 ± 0.01 | 2.00 ± 0.10 | 4.00 ± 0.30 | 9.00 ± 0.50 | 5 / 5 |", text)
         self.assertIn("| `nd2` | 70.123 ± 0.500 | 5 / 5 |", text)
 

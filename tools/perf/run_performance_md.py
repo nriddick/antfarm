@@ -978,24 +978,22 @@ def write_markdown(results, args, path):
     lines = []
     if "headline" in by:
         h = by["headline"]
-        fiber_burst, fiber_drain = {}, {}
+        fiber_burst = {}
         for name, r in h.items():
             if name.startswith("fiber_"):
                 stats = r.get("field_stats", {})
                 if stats.get("warm_total_fibers_s"):
                     fiber_burst[name] = stats["warm_total_fibers_s"]
-                if stats.get("warm_run_fibers_s"):
-                    fiber_drain[name] = stats["warm_run_fibers_s"]
-        lines += ["| Threads | Payloads, Mpps | Private roots, Mcycles/s | Private children, Mcycles/s | "
+        lines += ["Fiber counts below are pinned workers plus a separate controller; other counts are total workload threads.",
+                  "", "| Threads / Fiber workers | Payloads, Mpps | Private roots, Mcycles/s | Private children, Mcycles/s | "
                   "Public actors, Mcycles/s | Public waves, Mcycles/s | "
-                  "Warm Fiber burst, Mfibers/s | Warm Fiber drain, Mfibers/s |",
-                  "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+                  "Warm Fiber burst, Mfibers/s |",
+                  "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
         for t in args.threads:
             cells = [_cell(h.get(f"payload_t{t}")), _cell(h.get(f"private_t{t}"), digits=2),
                      _cell(h.get(f"tree_t{t}"), digits=2),
                      _cell(h.get(f"public_t{t}"), digits=2), _cell(h.get(f"wave_t{t}"), digits=2),
-                     _cell(fiber_burst.get(f"fiber_t{t}"), scale=1e-6, digits=2),
-                     _cell(fiber_drain.get(f"fiber_t{t}"), scale=1e-6, digits=2)]
+                     _cell(fiber_burst.get(f"fiber_t{t}"), scale=1e-6, digits=2)]
             lines.append(f"| {t} | " + " | ".join(cells) + " |")
         lines.append("")
     if "tail" in by:
