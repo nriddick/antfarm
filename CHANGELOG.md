@@ -4,6 +4,20 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
+## 1.9.1 — unreleased
+
+- The hosting guide gains "Several physical groups": why crossing a CCD
+  costs what it does (shared control lines, then data lines), measured
+  one-way and split consumption at 16 to 1,700 entries per table and 0 to
+  1 µs of work per payload, and the rules that follow: consumers of one Farm
+  in one group, cross-group publication only in tables of 256 entries or
+  more carrying about 100 ns of work per payload, a Farm per group as a
+  one-way channel with parks and runtimes per Farm, tokens held per
+  publishing thread (quota is budgeted at creation), and channel Farms sized
+  for their traffic. The usage rules, architecture page and roadmap (a
+  per-group-Farm host) point at it. The usage rules page carries a
+  "Several LLC groups" stub pointing at it.
+
 ## 1.9.0 — 2026-10-20
 
 See the [release overview and migration notes](docs/releases/1.9.md).
@@ -15,17 +29,6 @@ See the [release overview and migration notes](docs/releases/1.9.md).
   options through `af_actor_kind_options_default`. Generated performance
   tables report the full warm Fiber burst, omit the misleading residual
   drain rate, and label Fiber workers separately from the controller.
-
-- The hosting guide gains "Several physical groups": why crossing a CCD
-  costs what it does (shared control lines, then data lines), measured
-  one-way and split consumption at 16 to 1,700 entries per table and 0 to
-  1 µs of work per payload, and the rules that follow: consumers of one Farm
-  in one group, cross-group publication only in tables of 256 entries or
-  more carrying about 100 ns of work per payload, a Farm per group as a
-  one-way channel with parks and runtimes per Farm, tokens held per
-  publishing thread (quota is budgeted at creation), and channel Farms sized
-  for their traffic. The usage rules, architecture page and roadmap (a
-  per-group-Farm host) point at it.
 
 - Pre-push performance report for `cb2fb26..fac31ea` on the 5900XT (34
   cells, five pairs, then 20 pairs on the ten flagged cells; 340 + 400
