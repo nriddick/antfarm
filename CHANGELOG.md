@@ -16,8 +16,8 @@ Older release notes are in [docs/releases/](docs/releases/):
   dependent loads, one of them a park field whose line moved when the root
   park gained its slab pointer) and the serial cancellation cell, which sits
   with the other zero-consumer layout swings; `dtor` and `subset-whole`
-  serial cells span 24% to 78% from single outlier pairs. Evidence is local
-  under `/tmp/af-gate-push*`.
+  serial cells span 24% to 78% from single outlier pairs. Evidence is under
+  `.build/push-gate-2026-10-20/` (ignored).
 
 - PERFORMANCE.md is rebuilt around a headline table (payload, private root,
   public actor and warm Fiber throughput at 2 to 40 threads), a tail-latency
