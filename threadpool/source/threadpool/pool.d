@@ -128,7 +128,7 @@ struct Selection
     void sleep(Duration d)
     {
         enforceOwner();
-        immutable ns = d.total!"nsecs";
+        immutable ns = scaleClock(d.total!"hnsecs", 10_000_000L, 1_000_000_000L);
         forEachSelected!((size_t i, ref WorkerRec r)
         {
             atomicStore(r.sleepNs, ns > 0 ? cast(ulong) ns : 0);
@@ -175,12 +175,10 @@ struct Selection
     {
         enforceOwner();
         enforce(period > Duration.zero, "threadpool: cadence period must be > 0");
-        immutable tps = MonoTime.ticksPerSecond;
-        immutable pns = period.total!"nsecs";
-        immutable periodTicks = pns > 0 ? pns * tps / 1_000_000_000L : 0;
+        immutable periodTicks = Selection.durationToTicks(period);
         enforce(periodTicks > 0, "threadpool: cadence period is shorter than one tick");
-        immutable lns = opt.spinLead.total!"nsecs";
-        immutable leadTicks = lns > 0 ? lns * tps / 1_000_000_000L : 0;
+        immutable leadTicks = opt.spinLead > Duration.zero
+            ? Selection.durationToTicks(opt.spinLead) : 0;
         immutable seq = ++pool.driftSeq;
         forEachSelected!((size_t i, ref WorkerRec r)
         {
@@ -261,8 +259,8 @@ private:
 
     static long durationToTicks(Duration d) @nogc nothrow
     {
-        immutable tps = MonoTime.ticksPerSecond;
-        return d.total!"nsecs" * tps / 1_000_000_000L;
+        // Duration counts hnsecs; total!"nsecs" would itself wrap past ~29 years.
+        return scaleClock(d.total!"hnsecs", 10_000_000L, MonoTime.ticksPerSecond);
     }
 
     static long absTicks(long t) @nogc nothrow
@@ -468,14 +466,23 @@ final class CacheAwarePool
                 while (atomicLoad(gPinDone) < cast(int) threads.length)
                     Thread.sleep(msecs(1));
 
+                version (unittest)
+                    if (gInjectStartError)
+                    {
+                        gInjectStartError = false;
+                        throw new Error("threadpool: injected start Error");
+                    }
                 lastResolution = res.withStart(gPinOutcome);
                 if (atomicLoad(gPinOk) != cast(int) threads.length)
                     throw new Exception("threadpool: failed to pin worker(s) "
                         ~ lastResolution.pinFailures() ~ "; " ~ lastResolution.summary());
                 releaseWorkers();
             }
-            catch (Exception e)
+            catch (Throwable e)
             {
+                // Errors too (OutOfMemoryError from FailureCapture, spawn
+                // or withStart): spawned workers must be stopped and joined,
+                // or the pool stays started and process exit hangs.
                 abortStart();
                 throw e;
             }
@@ -747,6 +754,27 @@ unittest
 }
 
 shared int gDirTicks;
+version (unittest) __gshared bool gInjectStartError;
+
+unittest
+{
+    // An Error after workers are spawned still stops and joins them; the
+    // pool is not left started and a new pool can start.
+    PoolOptions opt;
+    opt.processors = [ProcessorId(0, 0)];
+    auto pool = new CacheAwarePool(opt);
+    gInjectStartError = true;
+    bool caught;
+    try
+        pool.start();
+    catch (Error e)
+        caught = e.msg == "threadpool: injected start Error";
+    assert(caught);
+    assert(atomicLoad(gRunning) == 0 && gLivePool is null && !pool.stopRequested);
+    auto again = new CacheAwarePool(opt);
+    again.start();
+    again.shutdown();
+}
 
 extern (D) bool directorTestBody(WorkerSelf*) @nogc nothrow
 {
@@ -1028,4 +1056,14 @@ unittest
     assert(atomicLoad(gWorkers[1].spinIters) == pool.options.eSpinIters);
     assert(atomicLoad(gWorkers[1].epoch) == 1);
     assert(!all.classP.classE.matches(*rec));
+
+    // Spans past long.max / ticksPerSecond nanoseconds (~9.2 s on POSIX) wrapped.
+    import core.time : hours, seconds;
+    selected.cadence(epoch, seconds(30), Cadence(false, seconds(12)));
+    assert(atomicLoad(rec.cadencePeriodTicks) == 30 * MonoTime.ticksPerSecond);
+    assert(atomicLoad(rec.cadenceSpinLeadTicks) == 12 * MonoTime.ticksPerSecond);
+    assert(Selection.durationToTicks(hours(1)) == 3600 * MonoTime.ticksPerSecond);
+    assert(Selection.durationToTicks(-seconds(10)) == -10 * MonoTime.ticksPerSecond);
+    selected.sleep(seconds(30));
+    assert(atomicLoad(rec.sleepNs) == 30_000_000_000UL);
 }

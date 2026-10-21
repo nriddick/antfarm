@@ -198,6 +198,34 @@ private bool idleBody(WorkerSelf*) @nogc nothrow
     return false;
 }
 
+/// Convert `n` units of a `fromPerSecond` clock to units of a `toPerSecond`
+/// clock, rounding toward zero and saturating at `long.max`/`-long.max`.
+/// `n * to / from` wraps once `n * to` passes `long.max`: with POSIX
+/// `MonoTime.ticksPerSecond == 1e9` that is any span over ~9.2 s. Whole
+/// seconds and the remainder are scaled separately instead; the result is
+/// exactly `n * to / from` whenever that fits. Both rates must be in
+/// `1 .. 4e9` so the remainder product fits in a `ulong`.
+long scaleClock(long n, long fromPerSecond, long toPerSecond) @nogc nothrow pure @safe
+{
+    if (n < 0)
+        return -scaleClock(n == long.min ? long.max : -n, fromPerSecond, toPerSecond);
+    immutable whole = n / fromPerSecond;
+    immutable rem = n % fromPerSecond;
+    if (whole > long.max / toPerSecond)
+        return long.max;
+    immutable hi = whole * toPerSecond;
+    immutable lo = cast(long)(cast(ulong) rem * cast(ulong) toPerSecond / cast(ulong) fromPerSecond);
+    return hi > long.max - lo ? long.max : hi + lo;
+}
+
+/// `a + b` clamped to `long.min .. long.max`.
+long saturatingAdd(long a, long b) @nogc nothrow pure @safe
+{
+    if (b > 0 && a > long.max - b) return long.max;
+    if (b < 0 && a < long.min - b) return long.min;
+    return a + b;
+}
+
 /// Last grid point `<= now` (`epoch` if `now < epoch`) and the next strictly future point.
 void cadenceGrid(long now, long epoch, long period, out long beat, out long next) @nogc nothrow pure
 {
@@ -321,8 +349,9 @@ void applyIdlePolicy(ref WorkerSelf self, ref shared(int) runFlag,
             immutable ns = atomicLoad(rec.sleepNs);
             if (hasManagedDeadline)
             {
-                auto nominal = MonoTime.currTime.ticks
-                    + cast(long)(ns * MonoTime.ticksPerSecond / 1_000_000_000UL);
+                immutable span = scaleClock(ns > long.max ? long.max : cast(long) ns,
+                    1_000_000_000L, MonoTime.ticksPerSecond);
+                immutable nominal = saturatingAdd(MonoTime.currTime.ticks, span);
                 parkUntilTicks(self.workerIndex, runFlag,
                     managedDeadline < nominal ? managedDeadline : nominal);
             }
@@ -369,9 +398,16 @@ private void parkUntilTicks(uint workerIndex, ref shared(int) runFlag, long tick
     auto now = MonoTime.currTime.ticks;
     if (ticks <= now)
         return;
-    immutable tps = MonoTime.ticksPerSecond;
-    immutable ns = (ticks - now) * 1_000_000_000L / tps;
-    parkMs(workerIndex, runFlag, nsToMs(ns > 0 ? cast(ulong) ns : 0));
+    parkMs(workerIndex, runFlag, parkMsUntil(ticks, now, MonoTime.ticksPerSecond));
+}
+
+/// Milliseconds to park for a tick deadline after `now` (`ticks > now`).
+/// A far deadline saturates and is clamped to the longest finite park.
+uint parkMsUntil(long ticks, long now, long ticksPerSecond) @nogc nothrow pure @safe
+{
+    if (ticks <= now) return 0;
+    immutable ns = scaleClock(saturatingAdd(ticks, -now), ticksPerSecond, 1_000_000_000L);
+    return nsToMs(cast(ulong) ns);
 }
 
 private void parkCadence(ref WorkerSelf self, ref shared(int) runFlag,
@@ -401,7 +437,7 @@ private void parkCadence(ref WorkerSelf self, ref shared(int) runFlag,
     }
 }
 
-private uint nsToMs(ulong ns) @nogc nothrow
+private uint nsToMs(ulong ns) @nogc nothrow pure @safe
 {
     if (ns == 0) return 0;
     immutable ms = ns / 1_000_000UL;
@@ -454,6 +490,36 @@ void pCoreWorkerLoop(ref WorkerSelf self, ref shared(int) runFlag) @nogc nothrow
 void eCoreWorkerLoop(ref WorkerSelf self, ref shared(int) runFlag) @nogc nothrow
 {
     workerLoop(self, runFlag);
+}
+
+unittest
+{
+    // scaleClock is exact wherever the naive product fits...
+    enum ns = 1_000_000_000L;
+    foreach (n; [0L, 1, 999, 123_456_789, 9_000_000_000])
+        foreach (tps; [10_000_000L, ns, 3_579_545])
+            assert(scaleClock(n, ns, tps) == n * tps / ns);
+    assert(scaleClock(-1_500_000, ns, 10_000_000) == -15_000);
+    // ...and correct where it wrapped: POSIX ticks are nanoseconds, so any
+    // span past long.max / 1e9 (~9.2 s) overflowed `n * 1e9`.
+    foreach (secs; [10L, 30, 3600])
+    {
+        assert(scaleClock(secs * ns, ns, ns) == secs * ns);
+        assert(scaleClock(secs * 10_000_000, 10_000_000, ns) == secs * ns);
+        assert(scaleClock(secs * ns, ns, 10_000_000) == secs * 10_000_000);
+    }
+    assert(scaleClock(long.max, 10_000_000, ns) == long.max);
+    assert(scaleClock(long.min, 10_000_000, ns) == -long.max);
+    assert(saturatingAdd(long.max - 1, 5) == long.max);
+    assert(saturatingAdd(long.min + 1, -5) == long.min);
+
+    // Far deadlines park for their real length instead of collapsing to a
+    // zero-length park (Thread.yield) on POSIX and QPC-rate clocks alike.
+    foreach (tps; [ns, 10_000_000L])
+        foreach (secs; [10L, 30, 3600])
+            assert(parkMsUntil(5 + secs * tps, 5, tps) == secs * 1000);
+    assert(parkMsUntil(5, 5, ns) == 0);
+    assert(parkMsUntil(long.max, 0, ns) == uint.max - 1);
 }
 
 unittest
