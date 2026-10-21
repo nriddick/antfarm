@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/antfarm-icon.png" width="160" alt="An ant beside a wooden signpost carved with tally marks">
+</p>
+
 # Ant Farm
 
 Ant Farm is a fixed-memory M:N job distributor and concurrency framework,
