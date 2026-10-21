@@ -86,6 +86,10 @@ all are nonthrowing status-returning factories. Outputs must be empty
 transient frontier race itself, so consumer creation returns only `AF_OK`,
 `AF_FULL` or `AF_INVALID`; `AF_RETRY` stays registered but unused in ABI 1.
 There is no implicitly blocking or throwing consumer constructor.
+Only `get()`, moves and destruction accept an empty wrapper. `write`, `poll`
+and the `private_roots` operations pass its null handle to C, which is fatal
+like any other null-handle contract violation, so check the factory status
+before use.
 
 Participants retain their Farm through an atomic ownership control block,
 allocated once per Farm with checked nonthrowing allocation. Allocation failure
@@ -358,6 +362,9 @@ Hosts are explicitly rooted while C owns their handles. The session cannot
 shut down while a host or an ABI attachment remains. Init/shutdown are
 serialized setup operations, cannot race other runtime services, and run on
 the same thread. ABI 1 permits one session; restart after shutdown is rejected.
+So is a second init after one that failed once druntime had initialized (for
+example, when topology discovery fails): that failure terminates druntime, and
+druntime cannot be initialized again.
 
 On Linux, druntime reserves process-wide GC suspend/resume signal handlers.
 The supported LDC 1.42 and DMD 2.112 runtimes default to `SIGRTMIN` and

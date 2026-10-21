@@ -333,7 +333,11 @@ running on now: it does not follow re-pinning or OS migration.
 Control or producer threads call `at!T(llc, class)` for direct addressing.
 `search!T(label)` searches labeled slots in the current worker's NUMA-local LLC
 neighborhood, which may include groups without accepted workers; off a pool
-worker it searches the complete installed table.
+worker it searches the complete installed table. The neighborhood holds at
+most 16 LLCs (`maxNumaLlcs`): the worker's own, then the others on its NUMA
+node in processor order. A node that reports more, such as a dual-socket
+system with memory interleaving presenting one node across every CCD, omits
+the remainder from `search` without diagnostic.
 
 The registry stores references to caller-owned arrays. It does not allocate
 those objects in LLC- or NUMA-local memory and does not synchronize their

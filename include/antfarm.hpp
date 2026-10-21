@@ -67,6 +67,9 @@ class private_roots; // antfarm_private.hpp
 // Default constructors are empty in every build. Factories require empty output
 // and leave it unchanged on failure. Status is authoritative: wrapper errors
 // (busy output/control allocation) do not set the C thread diagnostic.
+// Only get(), moves and destruction accept an empty object: write, poll and
+// the private_roots operations pass its null handle to C, which is a fatal
+// contract violation in every build. Check the factory status before use.
 class farm {
     detail::farm_ref value_;
     friend class producer;

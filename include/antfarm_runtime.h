@@ -31,7 +31,9 @@ typedef struct af_host_options {
    A balanced druntime reference preserves an embedding D application's own
    initialization. Shutdown returns AF_BUSY until hosts and attachments close.
    No runtime function may race shutdown. ABI 1 does not support restarting
-   a session after shutdown. */
+   a session after shutdown. A failed init that had already initialized
+   druntime (topology discovery failing, for example) terminates it and ends
+   the session the same way: later init calls return AF_INVALID. */
 af_status af_druntime_init(void);
 af_status af_druntime_shutdown(void);
 /* Foreign threads must attach before runtime services other than wake/state,

@@ -38,6 +38,40 @@ Older release notes are in [docs/releases/](docs/releases/):
   per-group-Farm host) point at it. The usage rules page carries a
   "Several LLC groups" stub pointing at it.
 
+- Threadpool idle timing no longer wraps past about 9.2 s. Tick and
+  nanosecond conversions multiplied before dividing, so with POSIX's 1e9
+  ticks per second a park deadline more than about 9.2 s away became a
+  zero-length park (`Thread.yield()` in a loop) for `sleepUntil`, cadence and
+  managed deadlines; a cadence period or spin lead of about 9.2 s or more
+  failed as "shorter than one tick"; and `sleep` under a managed deadline
+  wrapped past about 18.4 s, reachable from C through
+  `af_host_options.idle_timeout_ns`. Windows' 1e7 QPC rate moved the limit to
+  about 15 minutes. Conversions now scale whole seconds and the remainder
+  separately and saturate; results below the old limits are unchanged. Unit
+  tests cover 10 s, 30 s and one hour at both rates.
+
+- `CacheAwarePool.start` stops and joins already spawned workers when any
+  `Throwable` escapes setup, not only an `Exception`. An `Error` such as an
+  out-of-memory failure previously left the pool started with live workers,
+  and process exit hung. A unit test injects an `Error` after spawn.
+
+- `check-c-abi.py` audits declarations, not only exported names. Each
+  compiler's `-HC` output for the C ABI modules is checked against every
+  header prototype with `static_assert`, and every header struct's size,
+  alignment and field offsets are compared with the D definitions: 113
+  prototypes, 25 structs and 115 fields. Before, a prototype mismatch that
+  still linked passed, and the actor and private headers had no C-side layout
+  asserts. The 1.9.0 headers pass unchanged; ABI 1 is unaffected.
+
+- The D `write` overloads take `const(TableCompletionHook)*`, so the C ABI
+  passes `const af_completion_hook *` through without casting const away.
+  Mutable pointers still convert.
+
+- Documented that C++ wrapper operations other than `get()`, moves and
+  destruction need a non-empty object, that an `af_druntime_init` failing
+  after druntime initialized also ends the session, and that a `search`
+  neighborhood holds at most 16 LLCs per NUMA node.
+
 ## 1.9.0 — 2026-10-20
 
 See the [release overview and migration notes](docs/releases/1.9.md).
