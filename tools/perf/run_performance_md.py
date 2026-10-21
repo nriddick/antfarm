@@ -7,7 +7,7 @@ output directory. Nothing here is checked in: point --out at an ignored or
 scratch path.
 
     python3 tools/perf/run_performance_md.py --out /tmp/antfarm-perf-report
-    python3 tools/perf/run_performance_md.py --out /tmp/antfarm-perf-report --sections farm_best
+    python3 tools/perf/run_performance_md.py --out /tmp/antfarm-perf-report --runs 10
 
 A run counts only when its process exits 0 and its metric parses; a cell with
 fewer than --runs valid samples is marked failed and the script exits nonzero.
@@ -535,9 +535,9 @@ def _as_text(value):
 
 def kill_process_group(proc):
     """Terminate the child's process tree and reap the leader."""
-    if proc.poll() is not None:
-        return
     if os.name == "nt":
+        if proc.poll() is not None:
+            return
         result = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                                 capture_output=True, text=True, timeout=15)
         if result.returncode != 0 and proc.poll() is None:
@@ -549,13 +549,15 @@ def kill_process_group(proc):
     for sig, wait in ((signal.SIGTERM, 2), (signal.SIGKILL, 5)):
         try:
             os.killpg(proc.pid, sig)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             pass
         try:
             proc.wait(timeout=wait)
-            return
         except subprocess.TimeoutExpired:
-            continue
+            if sig == signal.SIGKILL:
+                raise
+        # The leader exiting does not imply its descendants exited. Always
+        # send KILL to the remaining group, including an already-exited leader.
 
 
 def _interrupt_handler(signum, frame):
@@ -607,7 +609,8 @@ def parser_for(cmd):
     name = Path(cmd[0]).name
     if name.endswith(".exe"):
         name = name[:-4]
-    return PARSERS["dub_fiber" if cmd[0].startswith("dub") else name]
+    return PARSERS["dub_fiber" if cmd[0].startswith("dub") or
+                   name in ("benchmark", "benchmark_mt") else name]
 
 
 def cell_is_cached(prev, cell, runs):
@@ -1017,6 +1020,97 @@ def write_markdown(results, args, path):
     path.write_text("\n".join(lines) + "\n")
 
 
+def file_hash(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def source_identity(output_dir):
+    """Include working-tree contents, not just HEAD (dirty builds matter)."""
+    paths = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--cached", "--others",
+                            "--exclude-standard", "-z"],
+                           check=True, capture_output=True).stdout.decode().split("\0")
+    sources = {}
+    for name in paths:
+        path = ROOT / name
+        if name and not path.resolve().is_relative_to(output_dir.resolve()) and path.is_file() and (path.suffix in
+                (".d", ".c", ".cpp", ".h", ".hpp", ".py", ".sdl", ".json", ".ps1", ".sh")
+                or path.name == "Makefile"):
+            sources[name] = file_hash(path)
+    return sources
+
+
+def prepare_manifest(args, sections, meta):
+    """Refuse incompatible reuse before changing existing run evidence."""
+    path = args.out / "manifest.json"
+    existing = json.loads(path.read_text()) if path.exists() else None
+    if existing is not None and (not isinstance(existing, dict) or
+            not all(k in existing for k in ("identity", "binaries")) or
+            not (args.out / "metadata.json").exists()):
+        raise ValueError("incomplete run manifest or metadata; use a fresh directory")
+    if existing is None and any((args.out / name).exists()
+                                for name in ("metadata.json", "summary.json", "raw")):
+        raise ValueError("output contains legacy run evidence without a manifest; use a fresh directory")
+    cells = [c for s in sections if s != "host" for c in cases_for(s, args)]
+    config = {k: v for k, v in vars(args).items()
+              if k not in ("out", "markdown", "no_resume", "runs", "six_consumer_runs")}
+    # Ignore launcher bookkeeping (e.g. shell '_', session IDs), while binding
+    # build, loader, allocator and benchmark settings. Do not publish values.
+    env_names = {"PATH", "HOME", "USERPROFILE", "TEMP", "TMP", "TMPDIR", "SYSTEMROOT",
+                 "WINDIR", "LIB", "LIBPATH", "INCLUDE", "CPATH", "C_INCLUDE_PATH",
+                 "CPLUS_INCLUDE_PATH", "CC", "CXX", "DC", "DMD", "LDC", "DFLAGS",
+                 "CFLAGS", "CXXFLAGS", "LDFLAGS", "LANG", "TZ"}
+    env_prefixes = ("ANTFARM_", "DUB", "LDC_", "DMD_", "LD_", "DYLD_", "MI_",
+                    "MIMALLOC_", "MALLOC_", "GLIBC_", "OMP_", "GOMP_", "KMP_", "LC_")
+    environment = {k: v for k, v in os.environ.items()
+                   if k.upper() in env_names or k.upper().startswith(env_prefixes)}
+    env_hash = hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest()
+    identity = {"schema": 1, "revision": meta.get("git_rev"),
+                "sources": source_identity(args.out), "config": config,
+                "environment_sha256": env_hash,
+                "host": {k: meta.get(k) for k in ("uname", "cpu_model", "logical_cpus", "compilers")},
+                "mimalloc_sha256": meta.get("mimalloc_sha256"), "cells": cells}
+    if existing is not None and existing["identity"] != identity:
+        changed = ", ".join(k for k in identity if existing["identity"].get(k) != identity[k])
+        raise ValueError(f"run identity changed ({changed}); use a fresh output directory")
+    binaries = {}
+    for c in cells:
+        cmd = c["cmd"]
+        if cmd[0] == "dub":
+            configuration = cmd[cmd.index("-c") + 1]
+            target = args.out / "bin" / (configuration + (".exe" if os.name == "nt" else ""))
+            if existing is None and str(target) not in binaries:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["dub", "build", "-c", configuration, "--build=release",
+                                "--compiler=ldc2"], cwd=c["cwd"], check=True)
+                shutil.copy2(Path(c["cwd"]) / ("ant_fibers.exe" if os.name == "nt" else "ant_fibers"), target)
+            binary = target
+        else:
+            binary = Path(cmd[0])
+        binaries[str(binary)] = file_hash(binary)
+    manifest = {"identity": identity, "binaries": binaries}
+    if existing is not None:
+        if existing != manifest:
+            raise ValueError("benchmark executable changed; use a fresh output directory")
+    else:
+        # Exclusive creation: never replace provenance for an earlier run.
+        with path.open("x") as out:
+            out.write(json.dumps(manifest, indent=2) + "\n")
+        with (args.out / "metadata.json").open("x") as out:
+            out.write(json.dumps(meta, indent=2) + "\n")
+    return manifest
+
+
+def frozen_cell(cell, args, manifest):
+    cmd = cell["cmd"]
+    if cmd[0] == "dub":
+        configuration = cmd[cmd.index("-c") + 1]
+        target = args.out / "bin" / (configuration + (".exe" if os.name == "nt" else ""))
+        cmd = [str(target), *cmd[cmd.index("--") + 1:]]
+    if file_hash(cmd[0]) != manifest["binaries"][str(Path(cmd[0]))]:
+        raise ValueError("benchmark executable changed during the run")
+    return {**cell, "cmd": cmd}
+
+
 def main(argv=None):
     ap = build_parser()
     args = ap.parse_args(argv)
@@ -1040,12 +1134,16 @@ def main(argv=None):
         except TopologyError as exc:
             print(f"run_performance_md: {exc}", file=sys.stderr)
             return 2
+    args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
+    meta = host_metadata()
+    try:
+        manifest = prepare_manifest(args, sections, meta)
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        print(f"run_performance_md: {exc}", file=sys.stderr)
+        return 2
     raw = args.out / "raw"
     raw.mkdir(exist_ok=True)
-
-    meta = host_metadata()
-    (args.out / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
 
     results = []
     summary_path = args.out / "summary.json"
@@ -1082,6 +1180,7 @@ def main(argv=None):
             print(f"\n===== {section} ({len(cells)} cells; {counts} samples per cell) =====",
                   flush=True)
             for cell in cells:
+                cell = frozen_cell(cell, args, manifest)
                 prev = by_key.get((section, cell["name"]))
                 if not args.no_resume and cell_is_cached(prev, cell, requested_runs(args, cell)):
                     print(f"  {cell['name']}: cached ({len(prev['values'])} runs)", flush=True)

@@ -11,6 +11,7 @@ TemporaryDirectory.
 """
 import argparse
 import contextlib
+import json
 import importlib.util
 import io
 import os
@@ -493,6 +494,11 @@ SCALING_OUT = "actor create n=16384 ms=1.301\n"
 
 class DriverTests(unittest.TestCase):
     def setUp(self):
+        for name, replacement in (("prepare_manifest", lambda *a: {}),
+                                  ("frozen_cell", lambda c, *a: c)):
+            patch = mock.patch.object(rpm, name, replacement)
+            patch.start()
+            self.addCleanup(patch.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.out = pathlib.Path(self.tmp.name)
@@ -633,7 +639,8 @@ class DriverTests(unittest.TestCase):
     def test_cleanup_does_not_target_an_exited_process(self):
         proc = mock.Mock()
         proc.poll.return_value = 0
-        with mock.patch.object(rpm.subprocess, "run") as run:
+        with mock.patch.object(rpm.os, "name", "nt"), \
+                mock.patch.object(rpm.subprocess, "run") as run:
             rpm.kill_process_group(proc)
         run.assert_not_called()
         proc.wait.assert_not_called()
@@ -756,6 +763,137 @@ class DriverTests(unittest.TestCase):
         mounts.write_text("sysfs /sys sysfs rw 0 0\n")
         self.assertTrue(rpm._is_sysfs_mount("/sys", mounts))
         self.assertFalse(rpm._is_sysfs_mount(self.out, mounts))
+
+
+class ManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.binary = self.root / "scaling"
+        self.binary.write_bytes(b"binary A")
+        self.out = self.root / "report"
+        self.out.mkdir()
+        self.args = rpm.build_parser().parse_args(["--out", str(self.out), "--sections", "scaling"])
+        self.cell = {"cmd": [str(self.binary)], "cwd": None, "env": {}, "name": "test"}
+        for name, value in (("source_identity", {"test.d": "source A"}),
+                            ("cases_for", [self.cell])):
+            patch = mock.patch.object(rpm, name, return_value=value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.meta = {"git_rev": "A", "timestamp": "original"}
+
+    def prepare(self):
+        return rpm.prepare_manifest(self.args, ["scaling"], self.meta)
+
+    def test_resume_keeps_original_metadata_and_allows_sample_topup(self):
+        original = self.prepare()
+        self.meta["timestamp"] = "later"
+        self.args.runs += 1
+        self.assertEqual(self.prepare(), original)
+        self.assertEqual(json.loads((self.out / "metadata.json").read_text())["timestamp"], "original")
+
+    def test_launcher_bookkeeping_does_not_invalidate_resume(self):
+        original = self.prepare()
+        with mock.patch.dict(os.environ, {"_": "different-launcher", "SHLVL": "99"}):
+            self.assertEqual(self.prepare(), original)
+
+    def test_changed_binary_refused_even_with_no_resume(self):
+        self.prepare()
+        metadata = (self.out / "metadata.json").read_bytes()
+        self.binary.write_bytes(b"binary B")
+        self.args.no_resume = True
+        with self.assertRaisesRegex(ValueError, "executable changed"):
+            self.prepare()
+        self.assertEqual((self.out / "metadata.json").read_bytes(), metadata)
+
+    def test_changed_revision_source_environment_and_config_refused(self):
+        self.prepare()
+        for change in (mock.patch.dict(self.meta, git_rev="B"),
+                       mock.patch.object(rpm, "source_identity", return_value={"test.d": "B"}),
+                       mock.patch.dict(os.environ, ANTFARM_TEST_MANIFEST="changed"),
+                       mock.patch.object(self.args, "timeout", 1)):
+            with change, self.assertRaisesRegex(ValueError, "identity changed"):
+                self.prepare()
+
+    def test_legacy_output_is_untouched(self):
+        path = self.out / "metadata.json"
+        path.write_text('"old metadata"')
+        with self.assertRaisesRegex(ValueError, "legacy"):
+            self.prepare()
+        self.assertEqual(path.read_text(), '"old metadata"')
+        self.assertFalse((self.out / "manifest.json").exists())
+
+    def test_main_rejects_changed_binary_before_measurement_or_metadata_write(self):
+        argv = ["--out", str(self.out), "--sections", "scaling", "--runs", "1"]
+        with mock.patch.object(rpm, "host_metadata", return_value=self.meta), \
+                mock.patch.object(rpm, "measure_cell", return_value={
+                    **self.cell, "section": "scaling", "status": "ok", "values": [1.]}) as measure:
+            self.assertEqual(rpm.main(argv), 0)
+            before = (self.out / "metadata.json").read_bytes()
+            self.binary.write_bytes(b"binary B")
+            self.assertEqual(rpm.main(argv), 2)
+            self.assertEqual(measure.call_count, 1)
+            self.assertEqual((self.out / "metadata.json").read_bytes(), before)
+
+    def test_binary_change_before_cell_is_refused(self):
+        manifest = self.prepare()
+        self.binary.write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "during the run"):
+            rpm.frozen_cell(self.cell, self.args, manifest)
+
+    def test_fibers_build_once_and_resume_uses_hashed_snapshot(self):
+        self.cell.update(cmd=["dub", "run", "-c", "benchmark_mt", "--build=release",
+                              "--compiler=ldc2", "--", "200000", "private", "2"], cwd=str(self.root))
+        (self.root / ("ant_fibers.exe" if os.name == "nt" else "ant_fibers")).write_bytes(b"fiber A")
+        with mock.patch.object(rpm.subprocess, "run") as build:
+            manifest = self.prepare()
+            build.assert_called_once()
+            self.prepare()
+            build.assert_called_once()
+        frozen = rpm.frozen_cell(self.cell, self.args, manifest)
+        self.assertEqual(pathlib.Path(frozen["cmd"][0]).read_bytes(), b"fiber A")
+        self.assertEqual(frozen["cmd"][1:], ["200000", "private", "2"])
+        self.assertIs(rpm.parser_for(frozen["cmd"]), rpm.parse_fiber)
+
+
+@unittest.skipUnless(sys.platform == "linux", "requires Linux process groups and /proc")
+class ResistantDescendantTests(unittest.TestCase):
+    def test_both_drivers_kill_descendant_after_leader_exits(self):
+        spec = importlib.util.spec_from_file_location("offccd_cleanup", HERE / "offccd_sweep.py")
+        offccd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(offccd)
+        import subprocess
+        for driver in (rpm, offccd):
+            for exit_first in (False, True):
+                with self.subTest(driver=driver.__name__, exit_first=exit_first), tempfile.TemporaryDirectory() as tmp:
+                    marker = pathlib.Path(tmp) / "ready"
+                    child = ("import os,signal,time,pathlib; "
+                             "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                             f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(60)")
+                    parent = ("import subprocess,sys,time; "
+                              f"subprocess.Popen([sys.executable,'-c',{child!r}]); "
+                              + ("" if exit_first else "time.sleep(60)"))
+                    proc = subprocess.Popen([sys.executable, "-c", parent], start_new_session=True)
+                    try:
+                        deadline = time.monotonic() + 5
+                        while not marker.exists() and time.monotonic() < deadline:
+                            time.sleep(.01)
+                        self.assertTrue(marker.exists())
+                        pid = int(marker.read_text())
+                        if exit_first:
+                            proc.wait(timeout=5)
+                        driver.kill_process_group(proc)
+                        deadline = time.monotonic() + 5
+                        while _pid_alive(pid) and time.monotonic() < deadline:
+                            time.sleep(.01)
+                        self.assertFalse(_pid_alive(pid), f"descendant {pid} survived")
+                    finally:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        proc.wait(timeout=5)
 
 
 def _cpuinfo(rows):

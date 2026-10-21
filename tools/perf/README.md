@@ -9,6 +9,17 @@ the harness, not evidence.
 
 ## Build
 
+The report driver records an immutable `manifest.json` before measurement:
+source revision and working-tree source hashes, executable hashes, host,
+configuration and a hash of relevant inherited build/runtime environment
+variables (excluding launcher bookkeeping). Resume rejects changed
+identities or legacy output without a manifest before overwriting any evidence.
+Use a fresh directory after changing sources, binaries, environment or matrix
+configuration; `--no-resume` does not bypass this check. Sample counts may be
+raised to rerun cells with more samples. Original `metadata.json` is retained.
+Fiber configurations are built once into separate executable snapshots under
+the output directory and hashed; measurement runs those snapshots directly.
+
 ```sh
 make -C tools/perf                 # throughput, dual, tail, actor_ready, actor_churn, scaling, offccd, c2c
 make -C tools/perf actor_churn_mimalloc   # plus the pinned real mimalloc archive

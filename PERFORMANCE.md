@@ -20,12 +20,12 @@ retirement and refill all count and nothing allocates. Public actors are wave
 lifecycles (`wave`): create, publish through a sealed `ActorWave`, retire and
 reclaim 16,384 actors per cycle. Fibers are the warm burst of
 `benchmark_mt`: 200,000 fibers spawned from the recycling pool and drained,
-with that many pinned workers. For the actor and Fiber columns, threads are the
-controller plus `threads - 1` pinned consumers or workers, filling one CCD's
+with that many pinned workers plus a separate controller. For actor columns,
+threads are the controller plus `threads - 1` pinned consumers, filling one CCD's
 cores, then its SMT siblings, then the other CCD; 40 threads oversubscribes the
 32 logical processors and runs unpinned, and the Fiber pool cannot oversubscribe.
 
-| Threads | Payloads, Mpps | Private actors, Mcycles/s | Public actors, Mcycles/s | Warm Fibers, Mfibers/s |
+| Threads / Fiber workers | Payloads, Mpps | Private actors, Mcycles/s | Public actors, Mcycles/s | Warm Fibers, Mfibers/s |
 | ---: | ---: | ---: | ---: | ---: |
 | 2 | 687.8 ± 68.0 | 168.1 ± 0.2 | 29.64 ± 0.04 | 2.69 ± 0.01 |
 | 4 | 1,070.1 ± 63.4 | 316.0 ± 0.3 | 26.17 ± 0.03 | 2.63 ± 0.05 |
@@ -45,8 +45,8 @@ Fibers are bounded by their single control thread: wave admission runs at
 about 30 million lifecycles per second with one consumer and falls as
 consumers contend for the same publish path, and a Fiber burst is spawned by
 one thread at 1.9 to 2.7 million per second however many workers drain it.
-The thread sweeps of the root lifecycle, the public actor lifecycle and the
-Fiber drain phase are in the [comprehensive array](#thread-sweeps).
+The root and public actor lifecycle thread sweeps are in the
+[comprehensive array](#thread-sweeps).
 
 ## Tail latency
 
@@ -122,8 +122,9 @@ python3 -B tools/perf/run_performance_md.py --out .build/performance-refresh \
   --markdown .build/performance-refresh/tables.md
 ```
 
-Use a fresh output directory for a new revision or rebuilt binaries: resume checks
-command, environment and sample count, not runtime identity. The
+Use a fresh output directory for a new revision or rebuilt binaries: the driver
+rejects incompatible resume against an immutable run manifest. Legacy output
+without a manifest cannot be resumed. The
 [mode index](tools/perf/README.md) defines every workload.
 
 ## Comprehensive array
@@ -132,20 +133,22 @@ command, environment and sample count, not runtime identity. The
 
 The headline's companion columns: root lifecycles (`private-slab`, the
 emitter spawning and collecting slab-stored roots), public actor lifecycles
-(`actor`: create, wake, execute, await, retire, reclaim) and the drain phase of
-the warm Fiber burst (fibers executed per second once spawned). Roots and
-actors are bounded by their emitter; the drain scales with workers.
+(`actor`: create, wake, execute, await, retire, reclaim). Roots and actors are
+bounded by their emitter. The former residual Fiber drain column is removed:
+workers execute during spawning, so the full burst count divided by the time
+remaining after spawning is not throughput. The headline full-burst rates
+include creation and drain and are unchanged.
 
-| Threads | Private roots, Mcycles/s | Public actor lifecycles, Mcycles/s | Warm Fiber drain, Mfibers/s |
-| ---: | ---: | ---: | ---: |
-| 2 | 68.6 ± 0.2 | 23.16 ± 0.06 | 4.94 ± 0.05 |
-| 4 | 96.7 ± 0.4 | 23.54 ± 0.01 | 7.56 ± 0.27 |
-| 8 | 122.7 ± 1.2 | 23.01 ± 0.03 | 11.14 ± 0.07 |
-| 16 | 68.4 ± 1.5 | 16.35 ± 0.02 | 8.49 ± 0.07 |
-| 20 | 50.8 ± 0.1 | 12.02 ± 0.02 | 10.26 ± 0.15 |
-| 24 | 49.6 ± 0.3 | 10.75 ± 0.03 | 12.99 ± 0.11 |
-| 32 | 52.5 ± 0.2 | 9.53 ± 0.02 | 12.69 ± 0.15 |
-| 40 | 29.0 ± 2.6 | 6.30 ± 0.64 | — |
+| Threads | Private roots, Mcycles/s | Public actor lifecycles, Mcycles/s |
+| ---: | ---: | ---: |
+| 2 | 68.6 ± 0.2 | 23.16 ± 0.06 |
+| 4 | 96.7 ± 0.4 | 23.54 ± 0.01 |
+| 8 | 122.7 ± 1.2 | 23.01 ± 0.03 |
+| 16 | 68.4 ± 1.5 | 16.35 ± 0.02 |
+| 20 | 50.8 ± 0.1 | 12.02 ± 0.02 |
+| 24 | 49.6 ± 0.3 | 10.75 ± 0.03 |
+| 32 | 52.5 ± 0.2 | 9.53 ± 0.02 |
+| 40 | 29.0 ± 2.6 | 6.30 ± 0.64 |
 
 ### Farm core
 
@@ -384,8 +387,8 @@ little here and the spread a lot: the unpinned standard deviations are 40 to
 `benchmark_st` is single-thread drain throughput in fibers per second (200,000
 fibers, 256-entry batches, two generations). `benchmark_mt` is the cold full
 burst, creation plus drain, with the pool's default of one worker per core on
-every group; the warm burst and drain at each worker count are in the
-[headline](#headline-throughput) and the [thread sweeps](#thread-sweeps). The
+every group; the warm full burst at each worker count is in the
+[headline](#headline-throughput). The
 [historical Fiber characterization](docs/performance/archive-2026-10-20.md#fibers)
 retains the same-thread, worker-topology, embedding, allocation and
 assist-ring experiments.

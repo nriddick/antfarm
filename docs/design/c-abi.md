@@ -1,6 +1,6 @@
 # C ABI 1
 
-Status: implemented on `1.9.0-progress`, unreleased. The public transport is
+Status: ABI 1 shipped in Ant Farm 1.9.0. The public transport is
 defined by [antfarm.h](../../include/antfarm.h), public actors in
 [antfarm_actors.h](../../include/antfarm_actors.h), private actors in
 [antfarm_private.h](../../include/antfarm_private.h), the optional
@@ -438,7 +438,7 @@ can use application-supplied threads or the optional non-Fiber host.
 
 ## Actor construction and ownership
 
-ABI 1 is unreleased. The refresh replaces the earlier allocating actor interface;
+ABI 1 shipped in 1.9.0. It replaces the earlier development-only allocating actor interface;
 header, adapter, tests and examples use one contract. Private cohorts and slabs
 use the separate header described below.
 

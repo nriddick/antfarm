@@ -174,22 +174,23 @@ def sha(path):
 
 
 def kill_process_group(proc):
-    if proc.poll() is not None:
-        return
     if os.name == 'nt':
+        if proc.poll() is not None:
+            return
         subprocess.run(['taskkill', '/PID', str(proc.pid), '/T', '/F'], capture_output=True)
         proc.wait(timeout=5)
         return
     for sig, wait in ((signal.SIGTERM, 2), (signal.SIGKILL, 5)):
         try:
             os.killpg(proc.pid, sig)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             pass
         try:
             proc.wait(timeout=wait)
-            return
         except subprocess.TimeoutExpired:
-            continue
+            if sig == signal.SIGKILL:
+                raise
+        # A reaped leader can leave TERM-resistant descendants in the group.
 
 
 def run_cmd(cmd, timeout, cwd=None):

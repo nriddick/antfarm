@@ -6,6 +6,15 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.1 — unreleased
 
+- Removed the invalid residual Fiber drain throughput column from PERFORMANCE
+  and corrected Fiber counts to workers plus a separate controller. Full warm
+  burst measurements are unchanged. C ABI documentation now states ABI 1 shipped
+  in 1.9.0. Both performance drivers terminate remaining POSIX process-group
+  descendants even after the leader exits. Report resume now requires an
+  immutable source/binary/configuration manifest, retains original metadata,
+  and uses hashed Fiber executable snapshots. Focused tests cover TERM-resistant
+  descendants and incompatible resume; no new performance measurements are added.
+
 - Corrected the current release in ARCHITECTURE and ROADMAP to 1.9.0.
   Major performance comparisons use the 5900XT; removed the planned 12700H
   table refresh because the laptop is not expected to sustain stable clocks
