@@ -73,6 +73,10 @@ topology. Invalid overrides fail the lane. Inspect selection with
 
 ## Performance: `make perf-gate`
 
+Run major performance comparisons on the Ryzen 9 5900XT. The i7-12700H
+Windows laptop remains a correctness-validation host; stable clocks over long
+measurement runs are not expected, and no performance-table refresh is planned.
+
 `make perf-gate BASE=<sha> CANDIDATE=<sha>` compares two committed refs on the
 same benchmark source and reports each cell's paired change and spread. The
 method, the modes, the flagging rule and the layout caveat are in

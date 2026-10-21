@@ -6,6 +6,11 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 1.9.1 — unreleased
 
+- Corrected the current release in ARCHITECTURE and ROADMAP to 1.9.0.
+  Major performance comparisons use the 5900XT; removed the planned 12700H
+  table refresh because the laptop is not expected to sustain stable clocks
+  over long measurements. Existing measurements and historical records remain.
+
 - The hosting guide gains "Several physical groups": why crossing a CCD
   costs what it does (shared control lines, then data lines), measured
   one-way and split consumption at 16 to 1,700 entries per table and 0 to
@@ -47,8 +52,7 @@ See the [release overview and migration notes](docs/releases/1.9.md).
   public actor and warm Fiber throughput at 2 to 40 threads), a tail-latency
   table at 2 to 32 threads, and the comprehensive array, all as median ± sample
   standard deviation from five samples on the Ryzen 9 5900XT. The 12700H
-  tables are retired until the Windows host rebuilds them with the same
-  driver. The report driver gains the `headline` and thread-swept `tail`
+  tables are retired. The report driver gains the `headline` and thread-swept `tail`
   sections, `--threads`, `--tail-threads`, `--fiber-tasks` and `--markdown`,
   topology-ordered pin lists, and standard deviations in every summary. The
   tail benchmark measures only the library's consumer loop: the out-of-band

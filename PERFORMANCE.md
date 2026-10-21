@@ -5,10 +5,9 @@ two 8-core CCDs with one L3 each) at runtime revision `d00b37c` on
 `1.9.0-progress`, with LDC 1.43.0 `-O2 -release` and mimalloc 3.5.3. Every
 figure is the **median ± sample standard deviation of five independent
 process samples**; the tail tables aggregate five processes of 10,000
-observations each. The i7-12700H tables that this page carried are retired:
-the Windows host rebuilds them with the same driver when the branch
-transfers, with the shorter thread lists noted under [Method](#method). The
-previous page is archived in
+observations each. Major performance comparisons use the Ryzen 9 5900XT.
+The i7-12700H laptop is not expected to sustain stable clocks over long runs;
+its tables are retired with no refresh planned. The previous page is archived in
 [docs/performance/archive-2026-10-20.md](docs/performance/archive-2026-10-20.md).
 
 ## Headline throughput
@@ -123,8 +122,7 @@ python3 -B tools/perf/run_performance_md.py --out .build/performance-refresh \
   --markdown .build/performance-refresh/tables.md
 ```
 
-On the 12700H add `--threads 2,4,8,16,20,24 --tail-threads 2,6,12,20`. Use a
-fresh output directory for a new revision or rebuilt binaries: resume checks
+Use a fresh output directory for a new revision or rebuilt binaries: resume checks
 command, environment and sample count, not runtime identity. The
 [mode index](tools/perf/README.md) defines every workload.
 
@@ -466,8 +464,6 @@ not consumer latency.
 
 ## Follow-up
 
-- Windows host: rebuild the 12700H tables with this driver and the shorter
-  thread lists.
 - Public actors and private roots are emitter-bound from about 4 and 8
   threads: the single flush or pump thread saturates. Batching more work per
   publication, or a second emitter, is the lever; the free-index-stack

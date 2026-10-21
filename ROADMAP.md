@@ -1,6 +1,6 @@
 # Ant Farm roadmap
 
-The current release is **1.8.2**. This page lists remaining
+The current release is **1.9.0**. This page lists remaining
 and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
 no history here. Windows validation is separate and is not
 part of its local gate.
@@ -87,11 +87,6 @@ is reassessed holistically in dedicated sessions.
   The [Part 5 follow-up](docs/performance/archive-2026-10-20.md#public-actor-part-5-follow-up-190-progress)
   records release-store retirement, the bounded reservation walk and the
   remaining serial-private/historical-inbox measurement uncertainty.
-
-- Rebuild the 12700H tables on the Windows host with the report driver's
-  headline and tail sweeps (`--threads 2,4,8,16,20,24 --tail-threads
-  2,6,12,20`), so [PERFORMANCE.md](PERFORMANCE.md) carries both hosts in the
-  same layout.
 
 ## Deferred after 1.8.0
 

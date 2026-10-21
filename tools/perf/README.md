@@ -60,8 +60,9 @@ pool pins. Without sysfs, including Windows, the actor driver falls back to
 numeric CPU order. The tail and Fiber executables use native topology instead;
 record the actual placement rather than assuming the same core order on every
 platform. The `tail` section sweeps `--tail-threads` (default `2,6,12,20,32`)
-with `threads - 1` consumers plus the producer. On the 12700H, pass the
-shorter lists (`--threads 2,4,8,16,20,24 --tail-threads 2,6,12,20`).
+with `threads - 1` consumers plus the producer. Major performance comparisons
+run on the Ryzen 9 5900XT, as described in
+[CONTRIBUTING.md](../../CONTRIBUTING.md#performance-make-perf-gate).
 
 For the comprehensive array with five samples per cell, pass `--runs 5
 --six-consumer-runs 5`; a larger `--six-consumer-runs` is a per-cell minimum
