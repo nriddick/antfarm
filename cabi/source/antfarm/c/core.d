@@ -207,7 +207,7 @@ size_t af_write(af_farm* f, const(af_entry)* entries, size_t n, af_token* t,
 {
     requireWrite(f, t, cost, hook);
     span(entries, n);
-    return f.impl.write(Entries(entries, n), t.value, cost, cast(TableCompletionHook*) hook);
+    return f.impl.write(Entries(entries, n), t.value, cost, hook);
 }
 size_t af_write_bodies(af_farm* f, Callback call, const(af_body)* bodies, size_t n,
     af_token* t, uint cost, const(TableCompletionHook)* hook)
@@ -215,7 +215,7 @@ size_t af_write_bodies(af_farm* f, Callback call, const(af_body)* bodies, size_t
     requireWrite(f, t, cost, hook);
     if (call is null) fatal("null payload callback");
     span(bodies, n);
-    return f.impl.write(call, Bodies(bodies, n), t.value, cost, cast(TableCompletionHook*) hook);
+    return f.impl.write(call, Bodies(bodies, n), t.value, cost, hook);
 }
 size_t af_write_fixed(af_farm* f, Callback call, const(ulong)* bodies, size_t width,
     size_t n, af_token* t, uint cost, const(TableCompletionHook)* hook)
@@ -225,7 +225,7 @@ size_t af_write_fixed(af_farm* f, Callback call, const(ulong)* bodies, size_t wi
     if (width && n > size_t.max / width) fatal("C ABI fixed body size overflow");
     span(bodies, width * n);
     return f.impl.write(call, FixedBodies(bodies, width, n), width, t.value, cost,
-        cast(TableCompletionHook*) hook);
+        hook);
 }
 uint af_view_create(af_view** outView)
 {

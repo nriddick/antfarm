@@ -78,6 +78,130 @@ def audit_symbols(library, headers, build, core=False):
     print(f"Archive audit passed: {library.name}, {len(exports)} header exports", flush=True)
 
 
+# Header <-> D declaration audit. audit_symbols proves the names match; this
+# proves the types do. The D side comes from the compiler itself: -HC writes C++
+# prototypes for every extern(C) function, and a pragma(msg) module dumps each
+# struct's size, alignment and field offsets. One C++ program then checks every
+# prototype with static_assert and prints the same layout from the headers.
+DECLARATION_MODULES = ["cabi/source/antfarm/c/core.d", "cabi/source/antfarm/c/runtime.d",
+                       "cabi/source/antfarm/actors/cabi.d",
+                       "cabi/source/antfarm/actors/private_cabi.d"]
+DECLARATION_HEADERS = ["antfarm.h", "antfarm_runtime.h", "antfarm_actors.h", "antfarm_private.h"]
+# Header struct -> D type, where the D spelling differs.
+D_STRUCT_NAMES = {"af_completion_hook": "TableCompletionHook"}
+# Header structs that are deliberately opaque storage (C sees padding words, D
+# a typed value): size and alignment are compared, fields are not.
+OPAQUE_STRUCTS = {"af_actor_message", "af_private_root_handle"}
+DECLARATION_TRAITS = r"""
+#include <cstddef>
+#include <cstdio>
+#include <type_traits>
+template <class... T> struct af_list {};
+// Same C ABI type. Beyond identity: integers of equal size and signedness
+// (D spells size_t callback parameters as uint64_t, which is a distinct C++
+// type on some LP64 targets) and D's erased handles, where void* stands for a
+// typed opaque pointer with the same qualification. Function pointers compare
+// return and parameter types recursively.
+template <class C, class D, bool = std::is_integral<C>::value && std::is_integral<D>::value>
+struct af_integer_same : std::false_type {};
+template <class C, class D> struct af_integer_same<C, D, true> : std::integral_constant<bool,
+    !std::is_same<C, bool>::value && !std::is_same<D, bool>::value
+    && sizeof(C) == sizeof(D) && std::is_signed<C>::value == std::is_signed<D>::value> {};
+template <class C, class D> struct af_abi_same : std::integral_constant<bool,
+    std::is_same<C, D>::value || af_integer_same<C, D>::value> {};
+template <class C, class D> struct af_pointee_same : af_abi_same<C, D> {};
+template <class T> struct af_pointee_same<T, void>
+    : std::integral_constant<bool, !std::is_function<T>::value> {};
+template <class C, class D> struct af_abi_same<C *, D *> : std::integral_constant<bool,
+    std::is_const<C>::value == std::is_const<D>::value
+    && af_pointee_same<typename std::remove_const<C>::type,
+                       typename std::remove_const<D>::type>::value> {};
+template <class C, class D> struct af_params_same : std::false_type {};
+template <> struct af_params_same<af_list<>, af_list<>> : std::true_type {};
+template <class C, class... Cs, class D, class... Ds>
+struct af_params_same<af_list<C, Cs...>, af_list<D, Ds...>> : std::integral_constant<bool,
+    af_abi_same<C, D>::value && af_params_same<af_list<Cs...>, af_list<Ds...>>::value> {};
+template <class CR, class... CA, class DR, class... DA>
+struct af_abi_same<CR (*)(CA...), DR (*)(DA...)> : std::integral_constant<bool,
+    af_abi_same<CR, DR>::value && af_params_same<af_list<CA...>, af_list<DA...>>::value> {};
+"""
+
+
+def d_option(compiler, name):
+    return ("-" if compiler == "dmd" else "--") + name
+
+
+def audit_declarations(compiler, build):
+    """Compare every header prototype and struct layout with the D definitions."""
+    work = build / "declarations"
+    work.mkdir(parents=True, exist_ok=True)
+    includes = ["-I.", "-Icabi/source", "-Ithreadpool/source"]
+    generated = work / "d_prototypes.h"
+    build_api.run([compiler, "-o-", *includes, d_option(compiler, "HC"),
+                   d_option(compiler, "HCf=") + str(generated), *DECLARATION_MODULES])
+    headers = "\n".join((ROOT / "include" / h).read_text() for h in DECLARATION_HEADERS)
+    expected = set(re.findall(r"^[A-Za-z_][\w\s*]*\b(af_\w+)\(", headers, re.M))
+    prototypes = {}
+    for line in generated.read_text().splitlines():
+        match = re.match(r'extern "C" (.*?)\b(af_\w+)\((.*)\);$', line.strip())
+        if match and match.group(2) in expected:
+            # -HC cannot name a template instance and prints a bare `*`.
+            params = re.sub(r"(^|,\s*)\*", r"\1void*", match.group(3)) or "void"
+            prototypes[match.group(2)] = (match.group(1).strip(), params)
+    missing = sorted(expected - prototypes.keys())
+    if missing:
+        raise RuntimeError("header functions without a D extern(C) definition: " + ", ".join(missing))
+
+    structs = sorted(set(re.findall(r"^typedef struct (af_\w+) \{", headers, re.M)))
+    layout = ["module af_layout;", "import antfarm;",
+              *("import " + m[len("cabi/source/"):-2].replace("/", ".") + ";" for m in DECLARATION_MODULES),
+              "template Dump(T, string name, bool fields) {",
+              '    pragma(msg, "AFLAYOUT S ", name, " ", cast(int) T.sizeof, " ", cast(int) T.alignof);',
+              "    static if (fields) static foreach (i; 0 .. T.tupleof.length)",
+              '        pragma(msg, "AFLAYOUT F ", name, " ", __traits(identifier, T.tupleof[i]), " ",',
+              "            cast(int) T.tupleof[i].offsetof, \" \", cast(int) typeof(T.tupleof[i]).sizeof);",
+              "    enum Dump = true;", "}"]
+    for name in structs:
+        layout.append(f'enum dump_{name} = Dump!({D_STRUCT_NAMES.get(name, name)}, "{name}", '
+                      f'{"false" if name in OPAQUE_STRUCTS else "true"});')
+    (work / "af_layout.d").write_text("\n".join(layout) + "\n")
+    result = subprocess.run([compiler, "-o-", *includes, str(work / "af_layout.d")], cwd=ROOT,
+                            capture_output=True, text=True, timeout=180)
+    if result.returncode:
+        raise RuntimeError("D layout dump failed:\n" + result.stdout + result.stderr)
+    d_layout = [line for line in (result.stdout + result.stderr).splitlines()
+                if line.startswith("AFLAYOUT ")]
+
+    program = [*("#include \"" + h + "\"" for h in DECLARATION_HEADERS), DECLARATION_TRAITS,
+               "namespace d_side {", "typedef af_completion_hook TableCompletionHook;"]
+    for name, (ret, params) in sorted(prototypes.items()):
+        program.append(f"typedef {ret} (*{name}_t)({params});")
+        program.append(f'static_assert(af_abi_same<decltype(&::{name}), {name}_t>::value, '
+                       f'"{name}: header prototype differs from the D definition");')
+    program += ["}", "int main() {"]
+    for line in d_layout:
+        kind, name = line.split()[1:3]
+        if kind == "S":
+            program.append(f'std::printf("AFLAYOUT S {name} %d %d\\n", (int) sizeof({name}), '
+                           f"(int) alignof({name}));")
+        else:
+            field = line.split()[3]
+            program.append(f'std::printf("AFLAYOUT F {name} {field} %d %d\\n", '
+                           f"(int) offsetof({name}, {field}), (int) sizeof((({name} *) 0)->{field}));")
+    program += ["return 0;", "}"]
+    source = work / "declarations.cpp"
+    source.write_text("\n".join(program) + "\n")
+    binary = native(str(source.relative_to(ROOT)), work, [])
+    output = subprocess.run([str(binary)], cwd=ROOT, capture_output=True, text=True,
+                            timeout=45, check=True).stdout.splitlines()
+    if output != d_layout:
+        diff = [f"D {d!r} / C {c!r}" for d, c in zip(d_layout, output) if d != c]
+        raise RuntimeError("header/D struct layout mismatch:\n" + "\n".join(diff or [
+            f"{len(d_layout)} D rows vs {len(output)} C rows"]))
+    print(f"Declaration audit passed: {len(prototypes)} prototypes, {len(structs)} structs, "
+          f"{len(d_layout) - len(structs)} fields", flush=True)
+
+
 def native_runtime(source, build, libraries, compiler, probe=False):
     obj = build / (Path(source).stem + (".obj" if os.name == "nt" else ".o"))
     binary = build / (Path(source).stem + (".exe" if os.name == "nt" else ""))
@@ -149,6 +273,8 @@ def main():
         build = build / "tsan"
     lib = build_api.build_core(args.compiler, build, sanitize=args.tsan)
     audit_symbols(lib, ["antfarm.h", "antfarm_actors.h", "antfarm_private.h"], build, core=True)
+    if not args.tsan:
+        audit_declarations(args.compiler, build)
     if args.tsan:
         for source in ("core", "actors", "waves", "private"):
             obj = build / (source + "-main.o")

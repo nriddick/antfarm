@@ -1851,7 +1851,7 @@ struct AntFarm
     /// (spec 2g); other prefixes are compact (2f).
     ulong write(scope PayloadEntry[] payloads, ref Token tok,
                 uint avgCost = DEFAULT_AVG_COST,
-                TableCompletionHook* completion = null) nothrow @nogc @system
+                const(TableCompletionHook)* completion = null) nothrow @nogc @system
     {
         return writeImpl(payloads, tok, avgCost, completion);
     }
@@ -1860,7 +1860,7 @@ struct AntFarm
     /// sizing and emission passes and never advances the caller's checkpoint.
     ulong write(R)(scope R payloads, ref Token tok,
                    uint avgCost = DEFAULT_AVG_COST,
-                   TableCompletionHook* completion = null) nothrow @nogc @system
+                   const(TableCompletionHook)* completion = null) nothrow @nogc @system
         if (isForwardRange!R && is(ElementType!R == PayloadEntry))
     {
         return writeImpl(payloads, tok, avgCost, completion);
@@ -1871,7 +1871,7 @@ struct AntFarm
     /// shim: it does not allocate or materialize `PayloadEntry` pairs.
     ulong write(CR, BR)(scope CR callbacks, scope BR bodies, ref Token tok,
                         uint avgCost = DEFAULT_AVG_COST,
-                        TableCompletionHook* completion = null) nothrow @nogc @system
+                        const(TableCompletionHook)* completion = null) nothrow @nogc @system
         if (isForwardRange!CR && isForwardRange!BR &&
             is(ElementType!CR : Callback) &&
             is(ElementType!BR : PayloadBody))
@@ -1883,7 +1883,7 @@ struct AntFarm
     /// common callback is validated once per call rather than once per body.
     ulong write(BR)(Callback callback, scope BR bodies,
                     ref Token tok, uint avgCost = DEFAULT_AVG_COST,
-                    TableCompletionHook* completion = null) nothrow @nogc @system
+                    const(TableCompletionHook)* completion = null) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
         return writeImpl(broadcastPayloads(callback, bodies), tok, avgCost,
@@ -1896,7 +1896,7 @@ struct AntFarm
     ulong write(BR)(Callback callback, scope BR bodies,
                     ulong bodyWords, ref Token tok,
                     uint avgCost = DEFAULT_AVG_COST,
-                    TableCompletionHook* completion = null) nothrow @nogc @system
+                    const(TableCompletionHook)* completion = null) nothrow @nogc @system
         if (isForwardRange!BR && is(ElementType!BR : PayloadBody))
     {
         return writeImpl(broadcastPayloads(callback, bodies, bodyWords), tok,
@@ -1905,7 +1905,7 @@ struct AntFarm
 
     private ulong writeImpl(R)(scope R payloads, ref Token tok,
                               uint avgCost,
-                              TableCompletionHook* completion)
+                              const(TableCompletionHook)* completion)
         nothrow @nogc @system
     {
         requireToken(tok);
@@ -2141,7 +2141,7 @@ struct AntFarm
         storeRaw(w[2], cast(uint) n | (cast(ulong) tableKindOf(layout) << 32)
             | (cast(ulong) avgCost << 40));
         storeRaw(w[3], sq);
-        storeRaw(w[4], cast(ulong) cast(void*) completion);
+        storeRaw(w[4], cast(ulong) cast(const(void)*) completion);
         if (layout == TableLayout.uniform || layout == TableLayout.uniformFixed)
             storeRaw(w[THEAD_LEN], cast(ulong) cast(void*) tcall); // Tcall
         if (layout == TableLayout.uniformFixed)
@@ -3041,12 +3041,12 @@ private:
                         bp[tseqIdx + 4]);
                     if (hookWord != 0)
                     {
-                        auto hook = cast(TableCompletionHook*) cast(void*)
+                        auto hook = cast(const(TableCompletionHook)*) cast(const(void)*)
                             hookWord;
                         // Copy both fields before calling: completion may
                         // release the last external owner of the hook.
                         immutable notify = hook.call;
-                        auto context = hook.context;
+                        auto context = cast(void*) hook.context;
                         if (notify is null)
                             fatal("table completion hook lost callback");
                         auto callbackScope = FarmCallbackScope(true);
