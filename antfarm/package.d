@@ -704,6 +704,10 @@ extern(C) alias TableCompletionCallback = void function(void* context)
 /// `call(context)`, exactly once, on the consumer that advances that table's
 /// Tprogress to Tlen. The pointed-to storage must remain stable
 /// until invocation; see TableCompletionCallback for the full contract.
+/// `write` takes the hook as `const(TableCompletionHook)*`: the const covers
+/// the hook record only. `context` is passed to `call` as the mutable
+/// `void*` it was stored as, despite D's transitive const, matching a C
+/// caller's `const af_completion_hook *`.
 struct TableCompletionHook
 {
     /// Opaque argument passed back to `call`.

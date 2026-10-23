@@ -151,7 +151,7 @@ The guidance:
 
 1. **Every Farm's consumers live in one group.** Consumers in two groups
    contend on the same claim and completion lines; that is the cliff, and it
-   is paid at the first remote consumer. The host's default already does
+   is paid by the first few remote consumers. The host's default already does
    this. A hand-written pool does it with one Farm per `llcIndex` bin
    (`makeBins`, `at!T(llc)` in the [threadpool](../../threadpool/README.md#install-llc-local-state)).
 2. **Publish across groups only when the tables are large and the work is

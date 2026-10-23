@@ -77,7 +77,9 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 - The D `write` overloads take `const(TableCompletionHook)*`, so the C ABI
   passes `const af_completion_hook *` through without casting const away.
-  Mutable pointers still convert.
+  Mutable pointers still convert. The hook's const covers the record only:
+  `context` still reaches `call` as a mutable `void*`, as documented on
+  `TableCompletionHook`.
 
 - Documented that C++ wrapper operations other than `get()`, moves and
   destruction need a non-empty object, that an `af_druntime_init` failing
