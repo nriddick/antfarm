@@ -225,6 +225,9 @@ must specify supported prefix sizes and defaults field by field, or change ABI
 version. Accepting arbitrary shorter sizes with a zero-filled tail would leave
 partial fields and required geometry undefined by the interface.
 Numeric enum values and exported symbol names are defined by the ABI 1 headers.
+[cabi/abi1.lock](../../cabi/abi1.lock) records them with every prototype and
+struct layout; the C ABI check fails on any difference, and only additions are
+compatible within ABI 1.
 Keep internal ring offsets private; the five-word Thead is not a C ABI promise.
 
 ## Runtime-free public actors

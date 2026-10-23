@@ -1,0 +1,328 @@
+# C ABI 1 lock: header prototypes, numeric constants and struct layouts.
+# The declaration audit in scripts/check-c-abi.py fails on any difference.
+# Within ABI 1 only additions are compatible; regenerate deliberately with
+# scripts/check-c-abi.py --write-abi-lock and review the diff.
+PROTO uint32_t af_abi_version(void)
+PROTO size_t af_actor_cancel_inbox(af_actor_context *)
+PROTO uint32_t af_actor_cancelling(const af_actor_context *)
+PROTO uint32_t af_actor_closing(const af_actor_context *)
+PROTO af_status af_actor_create_copy(af_actor_runtime *, const af_actor_kind *, const void *initial_state, af_actor_owner *out)
+PROTO af_actor_batch_result af_actor_create_copy_batch(af_actor_runtime *, const af_actor_kind *, af_actor_state_span, af_actor_owner_output_span)
+PROTO af_status af_actor_create_init(af_actor_runtime *, const af_actor_kind *, af_actor_initializer, void *user, size_t index, af_actor_owner *out)
+PROTO af_actor_batch_result af_actor_create_init_batch(af_actor_runtime *, const af_actor_kind *, af_actor_initializer, void *user, size_t first_index, af_actor_owner_output_span)
+PROTO void af_actor_kind_options_default(af_actor_kind_options *out)
+PROTO af_status af_actor_kind_register(af_actor_runtime *, const af_actor_kind_options *, const af_actor_kind **out)
+PROTO uint32_t af_actor_message_available(const af_actor_message *)
+PROTO void af_actor_message_cancel(af_actor_message *)
+PROTO uint32_t af_actor_message_cancel_and_wake(af_actor_message *, const af_actor_handle *)
+PROTO void af_actor_message_complete(af_actor_message *)
+PROTO uint32_t af_actor_message_complete_and_wake(af_actor_message *, const af_actor_handle *)
+PROTO void af_actor_message_fail(af_actor_message *, uint32_t code)
+PROTO uint32_t af_actor_message_fail_and_wake(af_actor_message *, uint32_t code, const af_actor_handle *)
+PROTO uint32_t af_actor_message_failure(const af_actor_message *)
+PROTO void af_actor_message_init(af_actor_message *, void *payload, uint64_t tag)
+PROTO uint32_t af_actor_message_outcome(const af_actor_message *)
+PROTO void *af_actor_message_payload(const af_actor_message *)
+PROTO void af_actor_message_set(af_actor_message *, void *payload, uint64_t tag)
+PROTO uint64_t af_actor_message_tag(const af_actor_message *)
+PROTO void af_actor_owner_handle(const af_actor_owner *, af_actor_handle *out)
+PROTO af_actor_message *af_actor_pop(af_actor_context *)
+PROTO uint32_t af_actor_reclaim(af_actor_runtime *, af_actor_owner *)
+PROTO af_actor_batch_result af_actor_reclaim_batch(af_actor_runtime *, af_actor_owner_output_span, af_actor_result_span)
+PROTO void af_actor_republish(af_actor_context *)
+PROTO uint32_t af_actor_request_retire(af_actor_runtime *, const af_actor_owner *, uint32_t mode)
+PROTO af_actor_batch_result af_actor_request_retire_batch(af_actor_runtime *, af_actor_owner_span, uint32_t mode, af_actor_result_span)
+PROTO void af_actor_retire_self(af_actor_context *)
+PROTO af_status af_actor_retired(af_actor_runtime *, const af_actor_owner *, uint32_t *out)
+PROTO af_status af_actor_runtime_create(af_farm *, size_t capacity, const af_actor_allocator *, af_actor_runtime **out)
+PROTO void af_actor_runtime_destroy(af_actor_runtime *)
+PROTO size_t af_actor_runtime_flush(af_actor_runtime *, af_token *, size_t maximum, uint32_t avg_cost)
+PROTO size_t af_actor_runtime_live(const af_actor_runtime *)
+PROTO size_t af_actor_runtime_ready(const af_actor_runtime *)
+PROTO uint32_t af_actor_send(const af_actor_handle *, af_actor_message *)
+PROTO uint32_t af_actor_wake(const af_actor_handle *)
+PROTO af_actor_batch_result af_actor_wake_batch(af_actor_handle_span, af_actor_result_span)
+PROTO void af_actor_wave_begin(af_actor_wave *, af_actor_wave_operation, void *user, const af_completion_hook *)
+PROTO af_status af_actor_wave_create(af_farm *, af_actor_wave **out)
+PROTO void af_actor_wave_destroy(af_actor_wave *)
+PROTO uint32_t af_actor_wave_failed(const af_actor_wave_handle *)
+PROTO uint32_t af_actor_wave_finished(const af_actor_wave_handle *)
+PROTO uint32_t af_actor_wave_interrupted(const af_actor_wave_handle *)
+PROTO uint64_t af_actor_wave_length(const af_actor_wave_handle *)
+PROTO void af_actor_wave_observe(af_actor_wave *, af_actor_wave_handle *out)
+PROTO uint64_t af_actor_wave_progress(const af_actor_wave_handle *)
+PROTO size_t af_actor_wave_publish(af_actor_wave *, af_actor_handle_span, af_token *, uint32_t avg_cost)
+PROTO uint32_t af_actor_wave_ready(const af_actor_wave_handle *)
+PROTO void af_actor_wave_seal(af_actor_wave *)
+PROTO uint32_t af_actor_wave_valid(const af_actor_wave_handle *)
+PROTO uint32_t af_can_fit(const af_farm *farm, af_callback call, size_t body_words, af_tier tier)
+PROTO uint32_t af_consume_next(af_view *)
+PROTO af_status af_create(const af_options *options, af_farm **out)
+PROTO void af_destroy(af_farm *farm)
+PROTO af_status af_druntime_attach_thread(void)
+PROTO af_status af_druntime_detach_thread(void)
+PROTO af_status af_druntime_init(void)
+PROTO af_status af_druntime_shutdown(void)
+PROTO af_status af_host_abandon(af_host *)
+PROTO af_status af_host_close(af_host *)
+PROTO af_status af_host_create(const af_host_options *, af_host **out)
+PROTO af_status af_host_create_actors(af_host *, size_t capacity, const af_actor_allocator *, af_actor_runtime **out)
+PROTO af_farm *af_host_farm(af_host *)
+PROTO void af_host_options_default(af_host_options *out)
+PROTO af_status af_host_register_producer(af_host *, af_tier, af_token **out)
+PROTO af_status af_host_state(const af_host *, uint32_t *out_state)
+PROTO af_status af_host_step(af_host *)
+PROTO af_status af_host_wake(af_host *)
+PROTO const char *af_last_error_message(void)
+PROTO int32_t af_last_os_error(void)
+PROTO void af_options_default(af_options *out)
+PROTO void af_private_cancel_children(af_private_context *)
+PROTO void af_private_cancel_peers(af_private_context *)
+PROTO uint32_t af_private_cancelled(af_private_context *)
+PROTO void af_private_child_options_default(af_private_child_options *)
+PROTO af_status af_private_child_spawn_copy(af_private_children *, af_private_context *, const void *initial)
+PROTO af_status af_private_child_spawn_init(af_private_children *, af_private_context *, af_actor_initializer, void *user, size_t index)
+PROTO uint32_t af_private_children_cancel(af_private_children *, af_private_context *)
+PROTO af_status af_private_children_create(af_private_context *, const af_private_child_options *, af_private_children **out)
+PROTO uint32_t af_private_children_finished(af_private_children *, af_private_context *)
+PROTO void af_private_children_outcome(af_private_children *, af_private_context *, af_private_wave_outcome *)
+PROTO af_private_results af_private_children_results(af_private_children *, af_private_context *)
+PROTO af_status af_private_children_start(af_private_children *, af_private_context *, af_private_child_step, void *user, uint32_t retire, uint32_t continuation, uint32_t avg_cost)
+PROTO af_status af_private_children_start_subset(af_private_children *, af_private_context *, af_private_child_step, void *user, const uint32_t *members, size_t count, uint32_t continuation, uint32_t avg_cost)
+PROTO const uint32_t *af_private_children_subset(af_private_children *, af_private_context *, size_t *count)
+PROTO int64_t af_private_clock_frequency(void)
+PROTO int64_t af_private_clock_now(void)
+PROTO void af_private_fail(af_private_context *, uint32_t code)
+PROTO size_t af_private_root_index(const af_private_root_handle *)
+PROTO void af_private_root_options_default(af_private_root_options *)
+PROTO uint32_t af_private_root_request_cancel(const af_private_root_handle *)
+PROTO af_status af_private_root_spawn_copy(af_private_roots *, const void *initial, int64_t deadline, af_private_root_handle *handle)
+PROTO af_status af_private_root_spawn_init(af_private_roots *, af_actor_initializer, void *user, size_t index, int64_t deadline, af_private_root_handle *handle)
+PROTO uint32_t af_private_root_take_outcome(af_private_roots *, af_private_root_outcome *)
+PROTO size_t af_private_roots_cancel_all(af_private_roots *)
+PROTO void af_private_roots_collect(af_private_roots *)
+PROTO af_status af_private_roots_create(af_farm *, const af_private_root_options *, const af_actor_allocator *, af_private_roots **out)
+PROTO void af_private_roots_destroy(af_private_roots *)
+PROTO size_t af_private_roots_live(af_private_roots *)
+PROTO af_private_pump_count af_private_roots_pump(af_private_roots *, af_token *, size_t limit, uint32_t avg_cost)
+PROTO af_status af_register_producer(af_farm *farm, af_tier tier, af_token **out)
+PROTO void af_set_fatal_handler(af_fatal_handler, void *context)
+PROTO af_status af_subscribe(af_view *, af_farm *)
+PROTO void af_unregister_producer(af_farm *farm, af_token *token)
+PROTO void af_unsubscribe(af_view *)
+PROTO af_status af_view_create(af_view **out)
+PROTO void af_view_destroy(af_view *)
+PROTO size_t af_write(af_farm *, const af_entry *, size_t count, af_token *, uint32_t avg_cost, const af_completion_hook *)
+PROTO size_t af_write_bodies(af_farm *, af_callback, const af_body *, size_t count, af_token *, uint32_t avg_cost, const af_completion_hook *)
+PROTO size_t af_write_fixed(af_farm *, af_callback, const uint64_t *bodies, size_t body_words, size_t count, af_token *, uint32_t avg_cost, const af_completion_hook *)
+CONST AF_ABI_VERSION 1
+CONST AF_ACTOR_ALREADY_RETIRED 18
+CONST AF_ACTOR_CANCEL 1
+CONST AF_ACTOR_CANCELLED 2
+CONST AF_ACTOR_CLOSED 4
+CONST AF_ACTOR_COALESCED 1
+CONST AF_ACTOR_COMPLETED 0
+CONST AF_ACTOR_DEFAULT_COST 4
+CONST AF_ACTOR_DRAIN 0
+CONST AF_ACTOR_FAILED 1
+CONST AF_ACTOR_INITIALIZER_FAILED 8
+CONST AF_ACTOR_NODE_BUSY 5
+CONST AF_ACTOR_QUEUED 0
+CONST AF_ACTOR_RECLAIMED 32
+CONST AF_ACTOR_RECLAIM_BUSY 33
+CONST AF_ACTOR_RECLAIM_STALE 34
+CONST AF_ACTOR_RETIRE_BUSY 20
+CONST AF_ACTOR_RETIRE_REQUESTED 16
+CONST AF_ACTOR_RETIRE_WAVE_OWNED 17
+CONST AF_ACTOR_STALE_HANDLE 3
+CONST AF_ACTOR_STALE_OWNER 19
+CONST AF_ACTOR_WAVE_OWNED 2
+CONST AF_ALLOCATION_FAILED 4
+CONST AF_AUTO_WORKERS 4294967295
+CONST AF_BULK 1
+CONST AF_BUSY 6
+CONST AF_CALLER_CONFINE 1
+CONST AF_CALLER_PIN 2
+CONST AF_CALLER_UNCHANGED 0
+CONST AF_DEFAULT_COST 3
+CONST AF_FULL 2
+CONST AF_HOST_ABANDONED 3
+CONST AF_HOST_CLOSED 2
+CONST AF_HOST_FAILED 1
+CONST AF_HOST_OPEN 0
+CONST AF_HOST_STOPPING 4
+CONST AF_IDLE_PARK 0
+CONST AF_IDLE_SPIN 1
+CONST AF_INVALID 1
+CONST AF_MAX_COST 7
+CONST AF_OK 0
+CONST AF_PRIVATE_AGAIN 0
+CONST AF_PRIVATE_AUTO_COST 4294967295
+CONST AF_PRIVATE_CANCELLED 2
+CONST AF_PRIVATE_CANCEL_ALREADY 1
+CONST AF_PRIVATE_CANCEL_FINISHED 2
+CONST AF_PRIVATE_CANCEL_REQUESTED 0
+CONST AF_PRIVATE_CANCEL_STALE 3
+CONST AF_PRIVATE_CAUSE_DEADLINE 2
+CONST AF_PRIVATE_CAUSE_NONE 0
+CONST AF_PRIVATE_CAUSE_REQUESTED 1
+CONST AF_PRIVATE_CHILD_DEFAULT_COST 2
+CONST AF_PRIVATE_CHILD_WAIT 1
+CONST AF_PRIVATE_COHORT_SLAB 1
+CONST AF_PRIVATE_COMPLETED 0
+CONST AF_PRIVATE_DONE 0
+CONST AF_PRIVATE_EMPTY 10
+CONST AF_PRIVATE_FAILED 1
+CONST AF_PRIVATE_FINISH 1
+CONST AF_PRIVATE_FINISH_AFTER_CHILDREN 3
+CONST AF_PRIVATE_FREE_ON_CONSUMER 1
+CONST AF_PRIVATE_FREE_ON_EMITTER 0
+CONST AF_PRIVATE_NO_DEADLINE 9223372036854775807
+CONST AF_PRIVATE_PER_OBJECT 0
+CONST AF_PRIVATE_RETIRING 9
+CONST AF_PRIVATE_WAIT_CHILDREN 2
+CONST AF_RETRY 3
+CONST AF_RUNTIME_ERROR 7
+CONST AF_SMALL 0
+CONST AF_SYSTEM_ERROR 5
+CONST AF_WAIT_FOREVER 18446744073709551615
+LAYOUT S af_actor_allocator 24 8
+LAYOUT F af_actor_allocator context 0 8
+LAYOUT F af_actor_allocator allocate 8 8
+LAYOUT F af_actor_allocator deallocate 16 8
+LAYOUT S af_actor_batch_result 16 8
+LAYOUT F af_actor_batch_result count 0 8
+LAYOUT F af_actor_batch_result status 8 4
+LAYOUT S af_actor_handle 16 8
+LAYOUT F af_actor_handle _slot 0 8
+LAYOUT F af_actor_handle _generation 8 8
+LAYOUT S af_actor_handle_span 24 8
+LAYOUT F af_actor_handle_span data 0 8
+LAYOUT F af_actor_handle_span stride 8 8
+LAYOUT F af_actor_handle_span count 16 8
+LAYOUT S af_actor_kind_options 56 8
+LAYOUT F af_actor_kind_options struct_size 0 4
+LAYOUT F af_actor_kind_options abi_version 4 4
+LAYOUT F af_actor_kind_options handler 8 8
+LAYOUT F af_actor_kind_options user 16 8
+LAYOUT F af_actor_kind_options state_bytes 24 8
+LAYOUT F af_actor_kind_options state_alignment 32 8
+LAYOUT F af_actor_kind_options destroy 40 8
+LAYOUT F af_actor_kind_options reserved 48 8
+LAYOUT S af_actor_message 32 8
+LAYOUT S af_actor_owner 16 8
+LAYOUT F af_actor_owner _slot 0 8
+LAYOUT F af_actor_owner _generation 8 8
+LAYOUT S af_actor_owner_output_span 24 8
+LAYOUT F af_actor_owner_output_span data 0 8
+LAYOUT F af_actor_owner_output_span stride 8 8
+LAYOUT F af_actor_owner_output_span count 16 8
+LAYOUT S af_actor_owner_span 24 8
+LAYOUT F af_actor_owner_span data 0 8
+LAYOUT F af_actor_owner_span stride 8 8
+LAYOUT F af_actor_owner_span count 16 8
+LAYOUT S af_actor_result_span 24 8
+LAYOUT F af_actor_result_span data 0 8
+LAYOUT F af_actor_result_span stride 8 8
+LAYOUT F af_actor_result_span count 16 8
+LAYOUT S af_actor_state_span 24 8
+LAYOUT F af_actor_state_span data 0 8
+LAYOUT F af_actor_state_span stride 8 8
+LAYOUT F af_actor_state_span count 16 8
+LAYOUT S af_actor_wave_handle 16 8
+LAYOUT F af_actor_wave_handle _wave 0 8
+LAYOUT F af_actor_wave_handle _generation 8 8
+LAYOUT S af_body 16 8
+LAYOUT F af_body words 0 8
+LAYOUT F af_body count 8 8
+LAYOUT S af_completion_hook 16 8
+LAYOUT F af_completion_hook context 0 8
+LAYOUT F af_completion_hook call 8 8
+LAYOUT S af_entry 24 8
+LAYOUT F af_entry call 0 8
+LAYOUT F af_entry body 8 8
+LAYOUT F af_entry body_words 16 8
+LAYOUT S af_host_options 88 8
+LAYOUT F af_host_options struct_size 0 4
+LAYOUT F af_host_options abi_version 4 4
+LAYOUT F af_host_options workers 8 4
+LAYOUT F af_host_options caller_consumes 12 4
+LAYOUT F af_host_options caller_placement 16 4
+LAYOUT F af_host_options idle 20 4
+LAYOUT F af_host_options idle_timeout_ns 24 8
+LAYOUT F af_host_options ring_mib 32 4
+LAYOUT F af_host_options segments 36 4
+LAYOUT F af_host_options extra_small_producers 40 4
+LAYOUT F af_host_options bulk_producers 44 4
+LAYOUT F af_host_options bulk_quota_words 48 8
+LAYOUT F af_host_options small_quota_words 56 8
+LAYOUT F af_host_options extra_consumers 64 4
+LAYOUT F af_host_options small_table_threshold 68 4
+LAYOUT F af_host_options huge_pages 72 4
+LAYOUT F af_host_options skip_smt_siblings 76 4
+LAYOUT F af_host_options reserved 80 8
+LAYOUT S af_options 56 8
+LAYOUT F af_options struct_size 0 4
+LAYOUT F af_options abi_version 4 4
+LAYOUT F af_options ring_mib 8 4
+LAYOUT F af_options segments 12 4
+LAYOUT F af_options expected_consumers 16 4
+LAYOUT F af_options max_bulk_producers 20 4
+LAYOUT F af_options bulk_quota_words 24 8
+LAYOUT F af_options max_small_producers 32 4
+LAYOUT F af_options small_table_threshold 36 4
+LAYOUT F af_options small_quota_words 40 8
+LAYOUT F af_options huge_pages 48 4
+LAYOUT F af_options reserved 52 4
+LAYOUT S af_private_child_options 96 8
+LAYOUT F af_private_child_options struct_size 0 4
+LAYOUT F af_private_child_options abi_version 4 4
+LAYOUT F af_private_child_options capacity 8 8
+LAYOUT F af_private_child_options batch_limit 16 8
+LAYOUT F af_private_child_options state 24 32
+LAYOUT F af_private_child_options result_bytes 56 8
+LAYOUT F af_private_child_options result_alignment 64 8
+LAYOUT F af_private_child_options slab_byte_limit 72 8
+LAYOUT F af_private_child_options storage 80 4
+LAYOUT F af_private_child_options subsets 84 4
+LAYOUT F af_private_child_options reserved 88 8
+LAYOUT S af_private_pump_count 16 8
+LAYOUT F af_private_pump_count roots 0 8
+LAYOUT F af_private_pump_count tables 8 8
+LAYOUT S af_private_results 24 8
+LAYOUT F af_private_results data 0 8
+LAYOUT F af_private_results stride 8 8
+LAYOUT F af_private_results count 16 8
+LAYOUT S af_private_root_handle 16 8
+LAYOUT S af_private_root_options 96 8
+LAYOUT F af_private_root_options struct_size 0 4
+LAYOUT F af_private_root_options abi_version 4 4
+LAYOUT F af_private_root_options capacity 8 8
+LAYOUT F af_private_root_options batch_limit 16 8
+LAYOUT F af_private_root_options state 24 32
+LAYOUT F af_private_root_options step 56 8
+LAYOUT F af_private_root_options user 64 8
+LAYOUT F af_private_root_options tracking 72 4
+LAYOUT F af_private_root_options reclamation 76 4
+LAYOUT F af_private_root_options slab_byte_limit 80 8
+LAYOUT F af_private_root_options storage 88 4
+LAYOUT F af_private_root_options reserved 92 4
+LAYOUT S af_private_root_outcome 32 8
+LAYOUT F af_private_root_outcome root 0 16
+LAYOUT F af_private_root_outcome status 16 4
+LAYOUT F af_private_root_outcome cause 20 4
+LAYOUT F af_private_root_outcome code 24 4
+LAYOUT F af_private_root_outcome reserved 28 4
+LAYOUT S af_private_state_options 32 8
+LAYOUT F af_private_state_options bytes 0 8
+LAYOUT F af_private_state_options alignment 8 8
+LAYOUT F af_private_state_options destroy 16 8
+LAYOUT F af_private_state_options destroy_user 24 8
+LAYOUT S af_private_wave_outcome 40 8
+LAYOUT F af_private_wave_outcome participants 0 8
+LAYOUT F af_private_wave_outcome dispatched 8 8
+LAYOUT F af_private_wave_outcome failures 16 4
+LAYOUT F af_private_wave_outcome first_failure_code 20 4
+LAYOUT F af_private_wave_outcome first_failure_position 24 8
+LAYOUT F af_private_wave_outcome cancelled 32 4
+LAYOUT F af_private_wave_outcome reserved 36 4

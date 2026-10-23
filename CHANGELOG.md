@@ -59,9 +59,19 @@ Older release notes are in [docs/releases/](docs/releases/):
   compiler's `-HC` output for the C ABI modules is checked against every
   header prototype with `static_assert`, and every header struct's size,
   alignment and field offsets are compared with the D definitions: 113
-  prototypes, 25 structs and 115 fields. Before, a prototype mismatch that
-  still linked passed, and the actor and private headers had no C-side layout
+  prototypes, 25 structs and 115 fields. Ten prototypes take a handle that
+  `-HC` prints as a bare pointer; those parameters are checked only as
+  pointers of the same constness. Before, a prototype mismatch that still
+  linked passed, and the actor and private headers had no C-side layout
   asserts. The 1.9.0 headers pass unchanged; ABI 1 is unaffected.
+
+- The ABI 1 freeze is a test. `cabi/abi1.lock` records every header
+  prototype, the 71 numeric enum and macro constants, and the audited struct
+  layouts. The declaration audit fails on any difference and reports each
+  changed, removed or added row, so a header and D definition changed
+  together no longer pass. `check-c-abi.py --write-abi-lock` regenerates the
+  lock; within ABI 1 only additions are compatible. The audit and the lock
+  check run in every C ABI lane except `--tsan`.
 
 - The D `write` overloads take `const(TableCompletionHook)*`, so the C ABI
   passes `const af_completion_hook *` through without casting const away.

@@ -92,6 +92,14 @@ D_STRUCT_NAMES = {"af_completion_hook": "TableCompletionHook"}
 # Header structs that are deliberately opaque storage (C sees padding words, D
 # a typed value): size and alignment are compared, fields are not.
 OPAQUE_STRUCTS = {"af_actor_message", "af_private_root_handle"}
+# The ABI 1 freeze as a test: header prototypes, numeric constants and the
+# layout rows above. The audit proves header == D; the lock proves neither moved.
+ABI_LOCK = ROOT / "cabi" / "abi1.lock"
+ABI_LOCK_HEADER = """# C ABI 1 lock: header prototypes, numeric constants and struct layouts.
+# The declaration audit in scripts/check-c-abi.py fails on any difference.
+# Within ABI 1 only additions are compatible; regenerate deliberately with
+# scripts/check-c-abi.py --write-abi-lock and review the diff.
+"""
 DECLARATION_TRAITS = r"""
 #include <cstddef>
 #include <cstdio>
@@ -131,8 +139,56 @@ def d_option(compiler, name):
     return ("-" if compiler == "dmd" else "--") + name
 
 
-def audit_declarations(compiler, build):
-    """Compare every header prototype and struct layout with the D definitions."""
+def header_abi(headers):
+    """Normalized prototypes and numeric constant names, as a C consumer sees them."""
+    prototypes = {}
+    for match in re.finditer(r"^([A-Za-z_][\w \t*]*\b(af_\w+)\(.*?\));", headers, re.M | re.S):
+        text = " ".join(match.group(1).split())
+        for pattern, replacement in ((r"\s*(\*+)\s*", r" \1"), (r"\(\s+", "("),
+                                     (r"\s+\)", ")"), (r"\s*,\s*", ", ")):
+            text = re.sub(pattern, replacement, text)
+        prototypes[match.group(2)] = text
+    constants = set(re.findall(r"^#define (AF_\w+)[ \t]", headers, re.M))
+    for body in re.findall(r"\benum\s*\{(.*?)\}", headers, re.S):
+        constants.update(re.findall(r"\b(AF_\w+)\s*=", body))
+    return prototypes, sorted(constants)
+
+
+def lock_key(line):
+    """The identity a lock row describes, so a change reads as one row, not two."""
+    kind, rest = line.split(" ", 1)
+    if kind == "PROTO":
+        return kind + " " + re.search(r"\b(af_\w+)\(", rest).group(1)
+    words = {"CONST": 2, "LAYOUT": 4 if rest.startswith("F ") else 3}[kind]
+    return " ".join(line.split()[:words])
+
+
+def check_abi_lock(rows, write):
+    if write:
+        ABI_LOCK.write_text(ABI_LOCK_HEADER + "\n".join(rows) + "\n", newline="\n")
+        print(f"ABI lock written: {ABI_LOCK.relative_to(ROOT)}, {len(rows)} rows", flush=True)
+        return
+    if not ABI_LOCK.exists():
+        raise RuntimeError(f"{ABI_LOCK.relative_to(ROOT)} is missing; see --write-abi-lock")
+    locked = [line for line in ABI_LOCK.read_text().splitlines() if line and not line.startswith("#")]
+    if locked == rows:
+        print(f"ABI lock matched: {len(rows)} rows", flush=True)
+        return
+    old = {lock_key(line): line for line in locked}
+    new = {lock_key(line): line for line in rows}
+    report = [f"changed: {old[k]!r} -> {new[k]!r}" for k in old if k in new and old[k] != new[k]]
+    report += [f"removed: {old[k]!r}" for k in old if k not in new]
+    report += [f"added:   {new[k]!r}" for k in new if k not in old]
+    if not report:
+        report = ["row order changed"]
+    raise RuntimeError("C ABI 1 differs from " + str(ABI_LOCK.relative_to(ROOT))
+                       + " (only additions are ABI-1-compatible; regenerate with --write-abi-lock"
+                       " only for those):\n" + "\n".join(report))
+
+
+def audit_declarations(compiler, build, write_lock=False):
+    """Compare every header prototype and struct layout with the D definitions,
+    then the header-side result with the committed ABI 1 lock."""
     work = build / "declarations"
     work.mkdir(parents=True, exist_ok=True)
     includes = ["-I.", "-Icabi/source", "-Ithreadpool/source"]
@@ -141,13 +197,15 @@ def audit_declarations(compiler, build):
                    d_option(compiler, "HCf=") + str(generated), *DECLARATION_MODULES])
     headers = "\n".join((ROOT / "include" / h).read_text() for h in DECLARATION_HEADERS)
     expected = set(re.findall(r"^[A-Za-z_][\w\s*]*\b(af_\w+)\(", headers, re.M))
-    prototypes = {}
+    prototypes, erased = {}, 0
     for line in generated.read_text().splitlines():
         match = re.match(r'extern "C" (.*?)\b(af_\w+)\((.*)\);$', line.strip())
         if match and match.group(2) in expected:
-            # -HC cannot name a template instance and prints a bare `*`.
-            params = re.sub(r"(^|,\s*)\*", r"\1void*", match.group(3)) or "void"
-            prototypes[match.group(2)] = (match.group(1).strip(), params)
+            # -HC cannot name a template instance and prints a bare `*`. Such a
+            # parameter is checked only as a pointer of the same constness.
+            params = re.sub(r"(^|,\s*)\*", r"\1void*", match.group(3))
+            erased += params != match.group(3)
+            prototypes[match.group(2)] = (match.group(1).strip(), params or "void")
     missing = sorted(expected - prototypes.keys())
     if missing:
         raise RuntimeError("header functions without a D extern(C) definition: " + ", ".join(missing))
@@ -178,7 +236,13 @@ def audit_declarations(compiler, build):
         program.append(f"typedef {ret} (*{name}_t)({params});")
         program.append(f'static_assert(af_abi_same<decltype(&::{name}), {name}_t>::value, '
                        f'"{name}: header prototype differs from the D definition");')
-    program += ["}", "int main() {"]
+    header_prototypes, constants = header_abi(headers)
+    if header_prototypes.keys() != expected:
+        raise RuntimeError("lock prototype scan disagrees with the header function scan: "
+                           + ", ".join(sorted(header_prototypes.keys() ^ expected)))
+    program +=["}", "int main() {"]
+    for name in constants:
+        program.append(f'std::printf("CONST {name} %llu\\n", (unsigned long long) {name});')
     for line in d_layout:
         kind, name = line.split()[1:3]
         if kind == "S":
@@ -194,12 +258,17 @@ def audit_declarations(compiler, build):
     binary = native(str(source.relative_to(ROOT)), work, [])
     output = subprocess.run([str(binary)], cwd=ROOT, capture_output=True, text=True,
                             timeout=45, check=True).stdout.splitlines()
+    constant_rows = [line for line in output if line.startswith("CONST ")]
+    output = [line for line in output if not line.startswith("CONST ")]
     if output != d_layout:
         diff = [f"D {d!r} / C {c!r}" for d, c in zip(d_layout, output) if d != c]
         raise RuntimeError("header/D struct layout mismatch:\n" + "\n".join(diff or [
             f"{len(d_layout)} D rows vs {len(output)} C rows"]))
-    print(f"Declaration audit passed: {len(prototypes)} prototypes, {len(structs)} structs, "
-          f"{len(d_layout) - len(structs)} fields", flush=True)
+    print(f"Declaration audit passed: {len(prototypes)} prototypes ({erased} with erased handle "
+          f"parameters), {len(structs)} structs, {len(d_layout) - len(structs)} fields", flush=True)
+    check_abi_lock([*("PROTO " + header_prototypes[n] for n in sorted(header_prototypes)),
+                    *constant_rows, *("LAYOUT " + line[len("AFLAYOUT "):] for line in output)],
+                   write_lock)
 
 
 def native_runtime(source, build, libraries, compiler, probe=False):
@@ -265,16 +334,22 @@ def main():
     selection.add_argument("--core-only", action="store_true")
     selection.add_argument("--runtime-only", action="store_true")
     p.add_argument("--tsan", action="store_true", help="Linux LDC native C/core ThreadSanitizer lane")
+    p.add_argument("--write-abi-lock", action="store_true",
+                   help="regenerate cabi/abi1.lock after the declaration audit, then stop")
     args = p.parse_args()
     if args.tsan and (os.name != "posix" or args.compiler != "ldc2" or args.runtime_only):
         p.error("--tsan requires Linux LDC and checks the core")
+    if args.tsan and args.write_abi_lock:
+        p.error("--write-abi-lock runs the declaration audit, which the TSan lane skips")
     build = ROOT / ".build" / ("c-abi-" + args.compiler + "-" + os.name)
     if args.tsan:
         build = build / "tsan"
     lib = build_api.build_core(args.compiler, build, sanitize=args.tsan)
     audit_symbols(lib, ["antfarm.h", "antfarm_actors.h", "antfarm_private.h"], build, core=True)
     if not args.tsan:
-        audit_declarations(args.compiler, build)
+        audit_declarations(args.compiler, build, args.write_abi_lock)
+        if args.write_abi_lock:
+            return
     if args.tsan:
         for source in ("core", "actors", "waves", "private"):
             obj = build / (source + "-main.o")

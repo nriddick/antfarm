@@ -97,6 +97,13 @@ During implementation of changes to the Farm, actors, or shared lifecycle:
   for actors. Do not weaken an ordering without the proof that replaces it.
 - Keep the TSan lanes meaningful: do not add annotations that hide a weakened
   edge (see [docs/design/farm-ordering.md](docs/design/farm-ordering.md)).
+- A C ABI change keeps the headers, the D `extern(C)` definitions and
+  [cabi/abi1.lock](cabi/abi1.lock) in step. `make check-c-abi` checks
+  prototypes, struct layouts and numeric constants between headers and D, and
+  the headers against the lock, in every lane except `--tsan`. Within ABI 1
+  only additions are compatible: regenerate the lock with
+  `python3 scripts/check-c-abi.py --write-abi-lock` and commit it with the
+  header change.
 - D test code stays on druntime threads and atomics. Native C ABI tests use
   native threads to verify runtime independence and foreign-thread attachment.
   Any new example is a compile target in `examples/run_examples.py`.
