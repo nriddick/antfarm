@@ -9,7 +9,7 @@ static const size_t count = 256;
 static uint64_t squares[count];
 static std::atomic<size_t> completed{0};
 
-extern "C" void square(const uint64_t *body, size_t words) {
+extern "C" void square(const uint64_t *body, size_t words) noexcept {
     if (words != 1 || body[0] >= count) std::abort();
     const size_t i = static_cast<size_t>(body[0]);
     squares[i] = i * i; // Each single-shot payload owns a distinct output slot.

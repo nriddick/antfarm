@@ -5,7 +5,6 @@
 #include <thread>
 #include <memory>
 #include <new>
-#include "tsan_preinit.h"
 static unsigned calls;
 static std::atomic<unsigned> start_threads(0), thread_calls(0);
 extern "C" void count(const uint64_t *, size_t) noexcept { ++calls; }
