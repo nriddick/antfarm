@@ -1,0 +1,8507 @@
+{
+ "note": "Per-LLC layout (tools/perf/llc_split.py) and tail latency at avgCost 5 with a same-session avgCost 3 control, Ryzen 9 5900XT, 2026-10-23, runtime eea08f9.",
+ "llc_split": {
+  "metadata": {
+   "timestamp": "2026-10-23T10:30:08-0400",
+   "uname": {
+    "system": "Linux",
+    "node": "cachyos-box",
+    "release": "7.2.9-2-cachyos",
+    "version": "#1 SMP PREEMPT_DYNAMIC Fri, 09 Oct 2026 15:36:46 +0000",
+    "machine": "x86_64",
+    "processor": ""
+   },
+   "cpu_model": "AMD Ryzen 9 5900XT 16-Core Processor",
+   "logical_cpus": 32,
+   "loadavg_before": "5.85 1.81 0.70 1/1607 178643",
+   "governor": [
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance"
+   ],
+   "thp_enabled": "[always] madvise never",
+   "compilers": {
+    "ldc2": [
+     "LDC - the LLVM D compiler (1.43.0):",
+     "  based on DMD v2.113.0 and LLVM 22.1.8"
+    ],
+    "dmd": [
+     "DMD64 D Compiler v2.113.0",
+     "Copyright (C) 1999-2026 by The D Language Foundation, All Rights Reserved written by Walter Bright"
+    ]
+   },
+   "mimalloc_archive": "/home/nathan-riddick/pi_ground/antfarm/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a",
+   "mimalloc_sha256": "551ee9a97e46b331736163a17cb3514b940d57b68cc82206723e0ccc0e8a1bec",
+   "git_rev": "eea08f977d8e5c323acd97f74016345128a0e220",
+   "git_status": [
+    " M tools/perf/run_performance_md.py",
+    " M tools/perf/test_run_performance_md.py",
+    "?? tools/perf/llc_split.py",
+    "?? tools/perf/test_llc_split.py"
+   ]
+  },
+  "llc_groups": [
+   [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23
+   ],
+   [
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31
+   ]
+  ],
+  "runs": 5,
+  "n": 2000000000,
+  "results": [
+   {
+    "workload": "payload",
+    "layout": "headline",
+    "threads": 2,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "1",
+      "--nb",
+      "0",
+      "--ns",
+      "1",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "5.85",
+      "parts": [
+       768.395
+      ],
+      "metric": 768.344218209758
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.78",
+      "parts": [
+       755.851
+      ],
+      "metric": 755.8578987150416
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "18.41",
+      "parts": [
+       653.368
+      ],
+      "metric": 653.3812479581836
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "19.00",
+      "parts": [
+       532.337
+      ],
+      "metric": 532.3396326856534
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "19.10",
+      "parts": [
+       758.105
+      ],
+      "metric": 758.1501137225172
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 755.8578987150416,
+    "stddev": 101.55283637459013,
+    "values": [
+     768.344218209758,
+     755.8578987150416,
+     653.3812479581836,
+     532.3396326856534,
+     758.1501137225172
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "per-llc",
+    "threads": 2,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "1",
+      "--nb",
+      "0",
+      "--ns",
+      "1",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "5.54",
+      "parts": [
+       764.663
+      ],
+      "metric": 764.525993883792
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.76",
+      "parts": [
+       758.304
+      ],
+      "metric": 758.4376185058778
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.10",
+      "parts": [
+       763.644
+      ],
+      "metric": 763.6502481863306
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.64",
+      "parts": [
+       764.635
+      ],
+      "metric": 764.525993883792
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.73",
+      "parts": [
+       764.043
+      ],
+      "metric": 763.9419404125287
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 763.9419404125287,
+    "stddev": 2.5875362765091356,
+    "values": [
+     764.525993883792,
+     758.4376185058778,
+     763.6502481863306,
+     764.525993883792,
+     763.9419404125287
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "headline",
+    "threads": 4,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "3",
+      "--nb",
+      "0",
+      "--ns",
+      "1",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "5.54",
+      "parts": [
+       1104.88
+      ],
+      "metric": 1104.9723756906078
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.76",
+      "parts": [
+       1102.517
+      ],
+      "metric": 1102.5358324145534
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.10",
+      "parts": [
+       953.975
+      ],
+      "metric": 954.1984732824427
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.64",
+      "parts": [
+       1086.571
+      ],
+      "metric": 1086.3661053775122
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.73",
+      "parts": [
+       1096.587
+      ],
+      "metric": 1096.4912280701753
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 1096.4912280701753,
+    "stddev": 64.52783435352094,
+    "values": [
+     1104.9723756906078,
+     1102.5358324145534,
+     954.1984732824427,
+     1086.3661053775122,
+     1096.4912280701753
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "per-llc",
+    "threads": 4,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "3",
+      "--nb",
+      "0",
+      "--ns",
+      "1",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "5.42",
+      "parts": [
+       1101.31
+      ],
+      "metric": 1101.3215859030836
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.76",
+      "parts": [
+       1079.843
+      ],
+      "metric": 1079.913606911447
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.10",
+      "parts": [
+       1100.215
+      ],
+      "metric": 1100.1100110011
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.55",
+      "parts": [
+       1096.632
+      ],
+      "metric": 1096.4912280701753
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.73",
+      "parts": [
+       1098.259
+      ],
+      "metric": 1098.297638660077
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 1098.297638660077,
+    "stddev": 8.753783123211257,
+    "values": [
+     1101.3215859030836,
+     1079.913606911447,
+     1100.1100110011,
+     1096.4912280701753,
+     1098.297638660077
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "headline",
+    "threads": 8,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "6",
+      "--nb",
+      "0",
+      "--ns",
+      "2",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "5.42",
+      "parts": [
+       2094.379
+      ],
+      "metric": 2094.240837696335
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.97",
+      "parts": [
+       2061.37
+      ],
+      "metric": 2061.855670103093
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.05",
+      "parts": [
+       1675.5
+      ],
+      "metric": 1675.0418760469013
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.55",
+      "parts": [
+       1995.438
+      ],
+      "metric": 1996.007984031936
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.63",
+      "parts": [
+       2059.538
+      ],
+      "metric": 2059.732234809475
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 2059.732234809475,
+    "stddev": 172.720748389977,
+    "values": [
+     2094.240837696335,
+     2061.855670103093,
+     1675.0418760469013,
+     1996.007984031936,
+     2059.732234809475
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "per-llc",
+    "threads": 8,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "6",
+      "--nb",
+      "0",
+      "--ns",
+      "2",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "5.42",
+      "parts": [
+       2079.945
+      ],
+      "metric": 2079.002079002079
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.97",
+      "parts": [
+       2083.895
+      ],
+      "metric": 2083.3333333333335
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.05",
+      "parts": [
+       2089.709
+      ],
+      "metric": 2089.864158829676
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.55",
+      "parts": [
+       2084.089
+      ],
+      "metric": 2083.3333333333335
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.63",
+      "parts": [
+       2082.829
+      ],
+      "metric": 2083.3333333333335
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 2083.3333333333335,
+    "stddev": 3.8872812827100134,
+    "values": [
+     2079.002079002079,
+     2083.3333333333335,
+     2089.864158829676,
+     2083.3333333333335,
+     2083.3333333333335
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "headline",
+    "threads": 16,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "11",
+      "--nb",
+      "0",
+      "--ns",
+      "5",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "5.42",
+      "parts": [
+       2523.307
+      ],
+      "metric": 2522.0680958385874
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.97",
+      "parts": [
+       2234.132
+      ],
+      "metric": 2234.63687150838
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.05",
+      "parts": [
+       2330.228
+      ],
+      "metric": 2331.002331002331
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.55",
+      "parts": [
+       2514.479
+      ],
+      "metric": 2515.7232704402513
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.63",
+      "parts": [
+       2325.479
+      ],
+      "metric": 2325.5813953488373
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 2331.002331002331,
+    "stddev": 127.40526520303443,
+    "values": [
+     2522.0680958385874,
+     2234.63687150838,
+     2331.002331002331,
+     2515.7232704402513,
+     2325.5813953488373
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "per-llc",
+    "threads": 16,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "11",
+      "--nb",
+      "0",
+      "--ns",
+      "5",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "6.27",
+      "parts": [
+       2426.335
+      ],
+      "metric": 2427.184466019418
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.97",
+      "parts": [
+       2386.307
+      ],
+      "metric": 2386.6348448687354
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.05",
+      "parts": [
+       2389.535
+      ],
+      "metric": 2389.4862604540026
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.50",
+      "parts": [
+       2383.544
+      ],
+      "metric": 2383.7902264600716
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.63",
+      "parts": [
+       2392.297
+      ],
+      "metric": 2392.3444976076557
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 2389.4862604540026,
+    "stddev": 17.7833100702112,
+    "values": [
+     2427.184466019418,
+     2386.6348448687354,
+     2389.4862604540026,
+     2383.7902264600716,
+     2392.3444976076557
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "headline",
+    "threads": 20,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "14",
+      "--nb",
+      "0",
+      "--ns",
+      "6",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "6.27",
+      "parts": [
+       2358.609
+      ],
+      "metric": 2358.490566037736
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.22",
+      "parts": [
+       2279.218
+      ],
+      "metric": 2280.5017103762825
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.04",
+      "parts": [
+       2229.011
+      ],
+      "metric": 2229.6544035674474
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.50",
+      "parts": [
+       2256.59
+      ],
+      "metric": 2257.3363431151242
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.58",
+      "parts": [
+       2293.207
+      ],
+      "metric": 2293.5779816513764
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 2280.5017103762825,
+    "stddev": 48.26276022500626,
+    "values": [
+     2358.490566037736,
+     2280.5017103762825,
+     2229.6544035674474,
+     2257.3363431151242,
+     2293.5779816513764
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "per-llc",
+    "threads": 20,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "7",
+      "--nb",
+      "0",
+      "--ns",
+      "3",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ],
+     [
+      "taskset",
+      "-c",
+      "8,9,10,11,12,13,14,15,24,25",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "7",
+      "--nb",
+      "0",
+      "--ns",
+      "3",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "6.27",
+      "parts": [
+       1864.489,
+       1567.844
+      ],
+      "metric": 3134.796238244514
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "13.22",
+      "parts": [
+       1607.068,
+       1877.168
+      ],
+      "metric": 3212.8514056224894
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "16.04",
+      "parts": [
+       1606.691,
+       1873.958
+      ],
+      "metric": 3212.8514056224894
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "16.50",
+      "parts": [
+       1873.971,
+       1598.471
+      ],
+      "metric": 3197.44204636291
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "16.58",
+      "parts": [
+       1863.442,
+       1591.156
+      ],
+      "metric": 3182.1797931583137
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 3197.44204636291,
+    "stddev": 32.36065941900092,
+    "values": [
+     3134.796238244514,
+     3212.8514056224894,
+     3212.8514056224894,
+     3197.44204636291,
+     3182.1797931583137
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "headline",
+    "threads": 24,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "16",
+      "--nb",
+      "0",
+      "--ns",
+      "8",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "6.27",
+      "parts": [
+       2551.494
+      ],
+      "metric": 2551.020408163265
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.22",
+      "parts": [
+       2767.975
+      ],
+      "metric": 2766.2517289073303
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.04",
+      "parts": [
+       2481.481
+      ],
+      "metric": 2481.3895781637716
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.50",
+      "parts": [
+       2449.955
+      ],
+      "metric": 2450.9803921568628
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.58",
+      "parts": [
+       2571.62
+      ],
+      "metric": 2570.6940874035986
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 2551.020408163265,
+    "stddev": 123.20403139102997,
+    "values": [
+     2551.020408163265,
+     2766.2517289073303,
+     2481.3895781637716,
+     2450.9803921568628,
+     2570.6940874035986
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "per-llc",
+    "threads": 24,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17,18,19",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "8",
+      "--nb",
+      "0",
+      "--ns",
+      "4",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ],
+     [
+      "taskset",
+      "-c",
+      "8,9,10,11,12,13,14,15,24,25,26,27",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "8",
+      "--nb",
+      "0",
+      "--ns",
+      "4",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "6.27",
+      "parts": [
+       2193.78,
+       1763.832
+      ],
+      "metric": 3527.3368606701943
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "13.22",
+      "parts": [
+       1740.092,
+       2046.503
+      ],
+      "metric": 3481.2880765883374
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "16.04",
+      "parts": [
+       1783.008,
+       1774.474
+      ],
+      "metric": 3549.2457852706298
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "16.50",
+      "parts": [
+       1723.937,
+       1760.235
+      ],
+      "metric": 3448.275862068966
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "16.58",
+      "parts": [
+       1726.995,
+       2363.139
+      ],
+      "metric": 3454.2314335060455
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 3481.2880765883374,
+    "stddev": 44.66193913651765,
+    "values": [
+     3527.3368606701943,
+     3481.2880765883374,
+     3549.2457852706298,
+     3448.275862068966,
+     3454.2314335060455
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "headline",
+    "threads": 32,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "22",
+      "--nb",
+      "0",
+      "--ns",
+      "10",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "7.45",
+      "parts": [
+       2378.094
+      ],
+      "metric": 2378.1212841854936
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.22",
+      "parts": [
+       2403.174
+      ],
+      "metric": 2403.846153846154
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.04",
+      "parts": [
+       2363.513
+      ],
+      "metric": 2364.066193853428
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.50",
+      "parts": [
+       2625.325
+      ],
+      "metric": 2624.6719160104985
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.58",
+      "parts": [
+       2651.401
+      ],
+      "metric": 2652.5198938992044
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 2403.846153846154,
+    "stddev": 141.60201381998112,
+    "values": [
+     2378.1212841854936,
+     2403.846153846154,
+     2364.066193853428,
+     2624.6719160104985,
+     2652.5198938992044
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "per-llc",
+    "threads": 32,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "11",
+      "--nb",
+      "0",
+      "--ns",
+      "5",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ],
+     [
+      "taskset",
+      "-c",
+      "8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "11",
+      "--nb",
+      "0",
+      "--ns",
+      "5",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "7.45",
+      "parts": [
+       2056.04,
+       2080.035
+      ],
+      "metric": 4110.996916752312
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "14.72",
+      "parts": [
+       2046.09,
+       2051.098
+      ],
+      "metric": 4094.1658137154554
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "17.32",
+      "parts": [
+       2073.046,
+       2047.168
+      ],
+      "metric": 4094.1658137154554
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "17.74",
+      "parts": [
+       2060.683,
+       1710.221
+      ],
+      "metric": 3421.727972626176
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "17.82",
+      "parts": [
+       2099.599,
+       1747.614
+      ],
+      "metric": 3496.5034965034965
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 4094.1658137154554,
+    "stddev": 351.9657357601595,
+    "values": [
+     4110.996916752312,
+     4094.1658137154554,
+     4094.1658137154554,
+     3421.727972626176,
+     3496.5034965034965
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "headline",
+    "threads": 40,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "27",
+      "--nb",
+      "0",
+      "--ns",
+      "13",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "7.45",
+      "parts": [
+       2162.121
+      ],
+      "metric": 2162.1621621621616
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.72",
+      "parts": [
+       2292.245
+      ],
+      "metric": 2290.950744558992
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.32",
+      "parts": [
+       2319.375
+      ],
+      "metric": 2320.185614849188
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.74",
+      "parts": [
+       2265.062
+      ],
+      "metric": 2265.0056625141565
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.82",
+      "parts": [
+       2223.817
+      ],
+      "metric": 2224.6941045606227
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 2265.0056625141565,
+    "stddev": 61.543149329673234,
+    "values": [
+     2162.1621621621616,
+     2290.950744558992,
+     2320.185614849188,
+     2265.0056625141565,
+     2224.6941045606227
+    ]
+   },
+   {
+    "workload": "payload",
+    "layout": "per-llc",
+    "threads": 40,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "14",
+      "--nb",
+      "0",
+      "--ns",
+      "6",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ],
+     [
+      "taskset",
+      "-c",
+      "8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/throughput",
+      "--once",
+      "--nc",
+      "14",
+      "--nb",
+      "0",
+      "--ns",
+      "6",
+      "--body",
+      "1",
+      "--batch",
+      "1700",
+      "--repeats",
+      "1",
+      "--ac",
+      "0",
+      "--n",
+      "2000000000",
+      "--constant-callandlength"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "7.45",
+      "parts": [
+       1728.856,
+       2075.882
+      ],
+      "metric": 3457.2169403630073
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "14.72",
+      "parts": [
+       1460.334,
+       1585.971
+      ],
+      "metric": 2919.70802919708
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "17.32",
+      "parts": [
+       1567.488,
+       1499.029
+      ],
+      "metric": 2998.5007496251874
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "17.74",
+      "parts": [
+       1463.494,
+       1602.459
+      ],
+      "metric": 2926.1155815654715
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "17.82",
+      "parts": [
+       1471.494,
+       1784.876
+      ],
+      "metric": 2943.340691685062
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 2943.340691685062,
+    "stddev": 230.31072779197808,
+    "values": [
+     3457.2169403630073,
+     2919.70802919708,
+     2998.5007496251874,
+     2926.1155815654715,
+     2943.340691685062
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "headline",
+    "threads": 2,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "1",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "7.45",
+      "parts": [
+       138.036785
+      ],
+      "metric": 138.036785
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.72",
+      "parts": [
+       138.469988
+      ],
+      "metric": 138.469988
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.32",
+      "parts": [
+       136.315331
+      ],
+      "metric": 136.315331
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.74",
+      "parts": [
+       140.284066
+      ],
+      "metric": 140.284066
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.82",
+      "parts": [
+       139.392253
+      ],
+      "metric": 139.392253
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 138.469988,
+    "stddev": 1.4972686721919062,
+    "values": [
+     138.036785,
+     138.469988,
+     136.315331,
+     140.284066,
+     139.392253
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "per-llc",
+    "threads": 2,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "1",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "7.01",
+      "parts": [
+       138.820743
+      ],
+      "metric": 138.820743
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.70",
+      "parts": [
+       137.528086
+      ],
+      "metric": 137.528086
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.10",
+      "parts": [
+       136.367496
+      ],
+      "metric": 136.367496
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.48",
+      "parts": [
+       138.016695
+      ],
+      "metric": 138.016695
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.55",
+      "parts": [
+       146.013441
+      ],
+      "metric": 146.013441
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 138.016695,
+    "stddev": 3.829946454719141,
+    "values": [
+     138.820743,
+     137.528086,
+     136.367496,
+     138.016695,
+     146.013441
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "headline",
+    "threads": 4,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "3",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "6.61",
+      "parts": [
+       274.803132
+      ],
+      "metric": 274.803132
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.70",
+      "parts": [
+       274.167888
+      ],
+      "metric": 274.167888
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.10",
+      "parts": [
+       274.955415
+      ],
+      "metric": 274.955415
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "15.32",
+      "parts": [
+       275.416138
+      ],
+      "metric": 275.416138
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.55",
+      "parts": [
+       274.478719
+      ],
+      "metric": 274.478719
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 274.803132,
+    "stddev": 0.4743915625159189,
+    "values": [
+     274.803132,
+     274.167888,
+     274.955415,
+     275.416138,
+     274.478719
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "per-llc",
+    "threads": 4,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "3",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "6.61",
+      "parts": [
+       274.810786
+      ],
+      "metric": 274.810786
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.93",
+      "parts": [
+       274.880037
+      ],
+      "metric": 274.880037
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "15.13",
+      "parts": [
+       274.557409
+      ],
+      "metric": 274.557409
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "15.32",
+      "parts": [
+       274.927851
+      ],
+      "metric": 274.927851
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "15.54",
+      "parts": [
+       274.73358
+      ],
+      "metric": 274.73358
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 274.810786,
+    "stddev": 0.1453426918812841,
+    "values": [
+     274.810786,
+     274.880037,
+     274.557409,
+     274.927851,
+     274.73358
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "headline",
+    "threads": 8,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "7",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "6.40",
+      "parts": [
+       434.443167
+      ],
+      "metric": 434.443167
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.21",
+      "parts": [
+       431.750034
+      ],
+      "metric": 431.750034
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.24",
+      "parts": [
+       432.8653
+      ],
+      "metric": 432.8653
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.42",
+      "parts": [
+       432.486833
+      ],
+      "metric": 432.486833
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.62",
+      "parts": [
+       432.105504
+      ],
+      "metric": 432.105504
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 432.486833,
+    "stddev": 1.044354576341437,
+    "values": [
+     434.443167,
+     431.750034,
+     432.8653,
+     432.486833,
+     432.105504
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "per-llc",
+    "threads": 8,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "7",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "6.40",
+      "parts": [
+       433.749658
+      ],
+      "metric": 433.749658
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.21",
+      "parts": [
+       433.451056
+      ],
+      "metric": 433.451056
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.24",
+      "parts": [
+       431.537065
+      ],
+      "metric": 431.537065
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.42",
+      "parts": [
+       432.672746
+      ],
+      "metric": 432.672746
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.62",
+      "parts": [
+       432.863649
+      ],
+      "metric": 432.863649
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 432.863649,
+    "stddev": 0.8552688971292666,
+    "values": [
+     433.749658,
+     433.451056,
+     431.537065,
+     432.672746,
+     432.863649
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "headline",
+    "threads": 16,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "15",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "6.53",
+      "parts": [
+       518.988014
+      ],
+      "metric": 518.988014
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "11.87",
+      "parts": [
+       517.168305
+      ],
+      "metric": 517.168305
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.74",
+      "parts": [
+       517.111987
+      ],
+      "metric": 517.111987
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.90",
+      "parts": [
+       519.31427
+      ],
+      "metric": 519.31427
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.09",
+      "parts": [
+       516.236428
+      ],
+      "metric": 516.236428
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 517.168305,
+    "stddev": 1.3242919662097332,
+    "values": [
+     518.988014,
+     517.168305,
+     517.111987,
+     519.31427,
+     516.236428
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "per-llc",
+    "threads": 16,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "15",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "7.29",
+      "parts": [
+       518.665767
+      ],
+      "metric": 518.665767
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "11.87",
+      "parts": [
+       519.216315
+      ],
+      "metric": 519.216315
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.74",
+      "parts": [
+       519.100743
+      ],
+      "metric": 519.100743
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.07",
+      "parts": [
+       518.45016
+      ],
+      "metric": 518.45016
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.09",
+      "parts": [
+       518.579112
+      ],
+      "metric": 518.579112
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 518.665767,
+    "stddev": 0.33650159591939754,
+    "values": [
+     518.665767,
+     519.216315,
+     519.100743,
+     518.45016,
+     518.579112
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "headline",
+    "threads": 20,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "19",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23,8,9,10,11",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "7.29",
+      "parts": [
+       207.901405
+      ],
+      "metric": 207.901405
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.20",
+      "parts": [
+       209.366738
+      ],
+      "metric": 209.366738
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.92",
+      "parts": [
+       209.538384
+      ],
+      "metric": 209.538384
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.07",
+      "parts": [
+       209.009911
+      ],
+      "metric": 209.009911
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.24",
+      "parts": [
+       208.666601
+      ],
+      "metric": 208.666601
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 209.009911,
+    "stddev": 0.6498208314879527,
+    "values": [
+     207.901405,
+     209.366738,
+     209.538384,
+     209.009911,
+     208.666601
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "per-llc",
+    "threads": 20,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "9",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7,16,17",
+      "small",
+      "16384"
+     ],
+     [
+      "taskset",
+      "-c",
+      "8,9,10,11,12,13,14,15,24,25",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "9",
+      "256",
+      "5",
+      "mimalloc",
+      "8,9,10,11,12,13,14,15,24,25",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "8.31",
+      "parts": [
+       409.391666,
+       410.14893
+      ],
+      "metric": 819.540596
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "12.83",
+      "parts": [
+       409.286521,
+       409.966153
+      ],
+      "metric": 819.2526740000001
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "14.41",
+      "parts": [
+       409.855528,
+       410.218795
+      ],
+      "metric": 820.074323
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "14.55",
+      "parts": [
+       409.012312,
+       409.94961
+      ],
+      "metric": 818.961922
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "14.70",
+      "parts": [
+       408.799693,
+       409.526342
+      ],
+      "metric": 818.326035
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 819.2526740000001,
+    "stddev": 0.6517050116099412,
+    "values": [
+     819.540596,
+     819.2526740000001,
+     820.074323,
+     818.961922,
+     818.326035
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "headline",
+    "threads": 24,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "23",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23,8,9,10,11,12,13,14,15",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "8.31",
+      "parts": [
+       190.78466
+      ],
+      "metric": 190.78466
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.83",
+      "parts": [
+       197.639729
+      ],
+      "metric": 197.639729
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.41",
+      "parts": [
+       196.733491
+      ],
+      "metric": 196.733491
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.55",
+      "parts": [
+       192.606194
+      ],
+      "metric": 192.606194
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "14.70",
+      "parts": [
+       183.333461
+      ],
+      "metric": 183.333461
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 192.606194,
+    "stddev": 5.721122799438799,
+    "values": [
+     190.78466,
+     197.639729,
+     196.733491,
+     192.606194,
+     183.333461
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "per-llc",
+    "threads": 24,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17,18,19",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "11",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7,16,17,18,19",
+      "small",
+      "16384"
+     ],
+     [
+      "taskset",
+      "-c",
+      "8,9,10,11,12,13,14,15,24,25,26,27",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "11",
+      "256",
+      "5",
+      "mimalloc",
+      "8,9,10,11,12,13,14,15,24,25,26,27",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "9.56",
+      "parts": [
+       429.303335,
+       432.330159
+      ],
+      "metric": 861.6334939999999
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "13.72",
+      "parts": [
+       427.24241,
+       430.210332
+      ],
+      "metric": 857.452742
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "15.17",
+      "parts": [
+       427.673631,
+       430.68431
+      ],
+      "metric": 858.357941
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "15.30",
+      "parts": [
+       428.351579,
+       431.551978
+      ],
+      "metric": 859.9035570000001
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "15.45",
+      "parts": [
+       427.087505,
+       430.140063
+      ],
+      "metric": 857.227568
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 858.357941,
+    "stddev": 1.8482014564647105,
+    "values": [
+     861.6334939999999,
+     857.452742,
+     858.357941,
+     859.9035570000001,
+     857.227568
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "headline",
+    "threads": 32,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "31",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23,8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "10.72",
+      "parts": [
+       159.635262
+      ],
+      "metric": 159.635262
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "13.72",
+      "parts": [
+       164.345344
+      ],
+      "metric": 164.345344
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "15.88",
+      "parts": [
+       164.398704
+      ],
+      "metric": 164.398704
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.00",
+      "parts": [
+       169.468135
+      ],
+      "metric": 169.468135
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "15.45",
+      "parts": [
+       168.639179
+      ],
+      "metric": 168.639179
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 164.398704,
+    "stddev": 3.9476698556042726,
+    "values": [
+     159.635262,
+     164.345344,
+     164.398704,
+     169.468135,
+     168.639179
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "per-llc",
+    "threads": 32,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "15",
+      "256",
+      "5",
+      "mimalloc",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23",
+      "small",
+      "16384"
+     ],
+     [
+      "taskset",
+      "-c",
+      "8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "15",
+      "256",
+      "5",
+      "mimalloc",
+      "8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "10.72",
+      "parts": [
+       444.415102,
+       443.828251
+      ],
+      "metric": 888.2433530000001
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "15.19",
+      "parts": [
+       443.35754,
+       442.929987
+      ],
+      "metric": 886.287527
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "15.88",
+      "parts": [
+       441.680587,
+       441.661238
+      ],
+      "metric": 883.341825
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "16.00",
+      "parts": [
+       442.619237,
+       443.229088
+      ],
+      "metric": 885.8483249999999
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "16.85",
+      "parts": [
+       443.064022,
+       445.00648
+      ],
+      "metric": 888.070502
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 886.287527,
+    "stddev": 1.990556784243282,
+    "values": [
+     888.2433530000001,
+     886.287527,
+     883.341825,
+     885.8483249999999,
+     888.070502
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "headline",
+    "threads": 40,
+    "parts": [
+     [
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "39",
+      "256",
+      "5",
+      "mimalloc",
+      "-",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "12.58",
+      "parts": [
+       56.055014
+      ],
+      "metric": 56.055014
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "16.53",
+      "parts": [
+       58.558941
+      ],
+      "metric": 58.558941
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.17",
+      "parts": [
+       48.964032
+      ],
+      "metric": 48.964032
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "17.28",
+      "parts": [
+       53.490157
+      ],
+      "metric": 53.490157
+     },
+     {
+      "rc": [
+       0
+      ],
+      "load_before": "18.07",
+      "parts": [
+       57.801777
+      ],
+      "metric": 57.801777
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 56.055014,
+    "stddev": 3.883884055035331,
+    "values": [
+     56.055014,
+     58.558941,
+     48.964032,
+     53.490157,
+     57.801777
+    ]
+   },
+   {
+    "workload": "private",
+    "layout": "per-llc",
+    "threads": 40,
+    "parts": [
+     [
+      "taskset",
+      "-c",
+      "0,1,2,3,4,5,6,7,16,17,18,19,20,21,22,23",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "19",
+      "256",
+      "5",
+      "mimalloc",
+      "-",
+      "small",
+      "16384"
+     ],
+     [
+      "taskset",
+      "-c",
+      "8,9,10,11,12,13,14,15,24,25,26,27,28,29,30,31",
+      "/home/nathan-riddick/pi_ground/antfarm/tools/perf/actor_churn_mimalloc",
+      "tree-refill-slab",
+      "16384",
+      "3",
+      "19",
+      "256",
+      "5",
+      "mimalloc",
+      "-",
+      "small",
+      "16384"
+     ]
+    ],
+    "attempts": [
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "12.58",
+      "parts": [
+       128.652604,
+       107.513309
+      ],
+      "metric": 236.165913
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "16.53",
+      "parts": [
+       115.410698,
+       132.991517
+      ],
+      "metric": 248.40221499999998
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "17.17",
+      "parts": [
+       142.900432,
+       135.564846
+      ],
+      "metric": 278.465278
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "17.28",
+      "parts": [
+       122.584387,
+       132.579784
+      ],
+      "metric": 255.164171
+     },
+     {
+      "rc": [
+       0,
+       0
+      ],
+      "load_before": "18.07",
+      "parts": [
+       137.164937,
+       142.476628
+      ],
+      "metric": 279.641565
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "status": "ok",
+    "median": 255.164171,
+    "stddev": 19.051123772328452,
+    "values": [
+     236.165913,
+     248.40221499999998,
+     278.465278,
+     255.164171,
+     279.641565
+    ]
+   }
+  ]
+ },
+ "tail_ac5": {
+  "metadata": {
+   "timestamp": "2026-10-23T10:35:56-0400",
+   "uname": {
+    "system": "Linux",
+    "node": "cachyos-box",
+    "release": "7.2.9-2-cachyos",
+    "version": "#1 SMP PREEMPT_DYNAMIC Fri, 09 Oct 2026 15:36:46 +0000",
+    "machine": "x86_64",
+    "processor": ""
+   },
+   "cpu_model": "AMD Ryzen 9 5900XT 16-Core Processor",
+   "logical_cpus": 32,
+   "loadavg_before": "19.82 12.33 5.70 1/1585 188907",
+   "governor": [
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance"
+   ],
+   "thp_enabled": "[always] madvise never",
+   "compilers": {
+    "ldc2": [
+     "LDC - the LLVM D compiler (1.43.0):",
+     "  based on DMD v2.113.0 and LLVM 22.1.8"
+    ],
+    "dmd": [
+     "DMD64 D Compiler v2.113.0",
+     "Copyright (C) 1999-2026 by The D Language Foundation, All Rights Reserved written by Walter Bright"
+    ]
+   },
+   "mimalloc_archive": "/home/nathan-riddick/pi_ground/antfarm/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a",
+   "mimalloc_sha256": "551ee9a97e46b331736163a17cb3514b940d57b68cc82206723e0ccc0e8a1bec",
+   "git_rev": "eea08f977d8e5c323acd97f74016345128a0e220",
+   "git_status": [
+    " M docs/development/testing.md",
+    " M tools/perf/README.md",
+    " M tools/perf/run_performance_md.py",
+    " M tools/perf/test_run_performance_md.py",
+    "?? tools/perf/llc_split.py",
+    "?? tools/perf/test_llc_split.py"
+   ]
+  },
+  "results": [
+   {
+    "section": "tail",
+    "name": "tail_t2",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "1",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1",
+     "--ac",
+     "5"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "1 pinned consumers plus the producer; chunk 4",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "19.82",
+      "load_after": "3.77",
+      "metric": 207700.0
+     },
+     {
+      "rc": 0,
+      "load_before": "3.77",
+      "load_after": "2.24",
+      "metric": 205400.0
+     },
+     {
+      "rc": 0,
+      "load_before": "2.24",
+      "load_after": "2.08",
+      "metric": 206700.0
+     },
+     {
+      "rc": 0,
+      "load_before": "2.08",
+      "load_after": "2.02",
+      "metric": 207300.0
+     },
+     {
+      "rc": 0,
+      "load_before": "2.02",
+      "load_after": "2.03",
+      "metric": 207200.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 207200.0,
+    "minimum": 205400.0,
+    "maximum": 207700.0,
+    "stddev": 890.5054744357275,
+    "values": [
+     207700.0,
+     205400.0,
+     206700.0,
+     207300.0,
+     207200.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 1,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 140.0,
+       "p99_ns": 1900.0,
+       "p999_ns": 3600.0,
+       "max_ns": 68300.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 3000.0,
+       "p99_ns": 3600.0,
+       "p999_ns": 5800.0,
+       "max_ns": 13200.0,
+       "miss": 8,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 204300.0,
+       "p99_ns": 207200.0,
+       "p999_ns": 211200.0,
+       "max_ns": 276800.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 1930000.0,
+       "p99_ns": 1940000.0,
+       "p999_ns": 2000000.0,
+       "max_ns": 2000000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 1630000.0,
+       "p99_ns": 1640000.0,
+       "p999_ns": 1690000.0,
+       "max_ns": 1710000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 6510000.0,
+       "p99_ns": 6560000.0,
+       "p999_ns": 6590000.0,
+       "max_ns": 6610000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 17000.0,
+       "p99_ns": 19200.0,
+       "p999_ns": 20300.0,
+       "max_ns": 90100.0,
+       "miss": 0,
+       "zero": 21
+      },
+      {
+       "scene": "burst",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 254100.0,
+       "p99_ns": 258500.0,
+       "p999_ns": 268700.0,
+       "max_ns": 270600.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 130.0,
+       "p99_ns": 170.0,
+       "p999_ns": 1610000.0,
+       "max_ns": 1610000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 207200.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 253800.0,
+       "min": 250300.0,
+       "max": 254100.0,
+       "stddev": 1613.3815419794537,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 258300.0,
+       "min": 254300.0,
+       "max": 258600.00000000003,
+       "stddev": 1809.143443732425,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 268200.0,
+       "min": 256000.0,
+       "max": 271700.0,
+       "stddev": 6851.0583124069235,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 269500.0,
+       "min": 257100.00000000003,
+       "max": 273100.0,
+       "stddev": 7209.160838821664,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "idle",
+      "nc": 1,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 140.0,
+       "min": 140.0,
+       "max": 140.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1800.0,
+       "min": 1800.0,
+       "max": 1900.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3300.0,
+       "min": 3200.0,
+       "max": 3600.0,
+       "stddev": 164.31676725154983,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 8500.0,
+       "min": 7100.0,
+       "max": 68300.0,
+       "stddev": 26816.74849790705,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 17000.0,
+       "min": 16800.0,
+       "max": 17000.0,
+       "stddev": 89.44271909999159,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 19100.0,
+       "min": 18700.0,
+       "max": 19200.0,
+       "stddev": 216.79483388678798,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 20000.0,
+       "min": 19900.0,
+       "max": 20300.0,
+       "stddev": 204.93901531919198,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 32400.0,
+       "min": 26200.0,
+       "max": 90100.0,
+       "stddev": 26553.53083866626,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 3000.0,
+       "min": 3000.0,
+       "max": 3100.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 3700.0,
+       "min": 3600.0,
+       "max": 3800.0,
+       "stddev": 100.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 5800.0,
+       "min": 5600.0,
+       "max": 6800.0,
+       "stddev": 477.4934554525329,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 8700.0,
+       "min": 7000.0,
+       "max": 15100.0,
+       "stddev": 3447.752891377223,
+       "n": 5
+      },
+      "miss_median": 8
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1930000.0,
+       "min": 1930000.0,
+       "max": 1930000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1940000.0,
+       "min": 1940000.0,
+       "max": 1940000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 2000000.0,
+       "min": 2000000.0,
+       "max": 2000000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 2009999.9999999998,
+       "min": 2000000.0,
+       "max": 2029999.9999999998,
+       "stddev": 12247.448713915795,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 204300.0,
+       "min": 201900.0,
+       "max": 204500.0,
+       "stddev": 1275.9310326189266,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 207200.0,
+       "min": 205400.0,
+       "max": 207700.0,
+       "stddev": 890.5054744357275,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 209500.0,
+       "min": 208000.0,
+       "max": 217300.0,
+       "stddev": 3750.0666660740844,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 275600.0,
+       "min": 223200.0,
+       "max": 276800.0,
+       "stddev": 23596.08018294564,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1600000.0,
+       "min": 1600000.0,
+       "max": 1630000.0,
+       "stddev": 16431.676725154983,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1640000.0,
+       "min": 1640000.0,
+       "max": 1640000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1670000.0,
+       "min": 1660000.0,
+       "max": 1690000.0,
+       "stddev": 13416.407864998739,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1710000.0,
+       "min": 1680000.0,
+       "max": 1710000.0,
+       "stddev": 13038.404810405298,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 6450000.0,
+       "min": 6410000.0,
+       "max": 6510000.0,
+       "stddev": 44497.19092257398,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 6550000.0,
+       "min": 6540000.0,
+       "max": 6560000.0,
+       "stddev": 8366.600265340756,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 6580000.0,
+       "min": 6570000.0,
+       "max": 6590000.0,
+       "stddev": 8366.600265340756,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 6620000.0,
+       "min": 6610000.0,
+       "max": 6770000.0,
+       "stddev": 68410.52550594827,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 130.0,
+       "min": 130.0,
+       "max": 130.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 170.0,
+       "min": 160.0,
+       "max": 220.0,
+       "stddev": 23.45207879911715,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1610000.0,
+       "min": 1550000.0,
+       "max": 1610000.0,
+       "stddev": 28284.2712474619,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1610000.0,
+       "min": 1610000.0,
+       "max": 1610000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   },
+   {
+    "section": "tail",
+    "name": "tail_t6",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "5",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1",
+     "--ac",
+     "5"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "5 pinned consumers plus the producer; chunk 4",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "2.03",
+      "load_after": "3.67",
+      "metric": 7400.0
+     },
+     {
+      "rc": 0,
+      "load_before": "3.67",
+      "load_after": "4.59",
+      "metric": 7400.0
+     },
+     {
+      "rc": 0,
+      "load_before": "4.59",
+      "load_after": "5.14",
+      "metric": 7500.0
+     },
+     {
+      "rc": 0,
+      "load_before": "5.14",
+      "load_after": "5.51",
+      "metric": 7400.0
+     },
+     {
+      "rc": 0,
+      "load_before": "5.51",
+      "load_after": "5.70",
+      "metric": 7400.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 7400.0,
+    "minimum": 7400.0,
+    "maximum": 7500.0,
+    "stddev": 44.721359549995796,
+    "values": [
+     7400.0,
+     7400.0,
+     7500.0,
+     7400.0,
+     7400.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 5,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 230.0,
+       "p99_ns": 2100.0,
+       "p999_ns": 4700.0,
+       "max_ns": 6100.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 530.0,
+       "p99_ns": 1300.0,
+       "p999_ns": 2400.0,
+       "max_ns": 3500.0,
+       "miss": 0,
+       "zero": 161
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 3100.0,
+       "p99_ns": 7400.0,
+       "p999_ns": 8300.0,
+       "max_ns": 10100.0,
+       "miss": 0,
+       "zero": 161
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 30200.0,
+       "p99_ns": 70600.0,
+       "p999_ns": 71900.0,
+       "max_ns": 73100.0,
+       "miss": 0,
+       "zero": 161
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 2100.0,
+       "p99_ns": 259600.00000000003,
+       "p999_ns": 260800.0,
+       "max_ns": 263000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 3200.0,
+       "p99_ns": 1030000.0,
+       "p999_ns": 1030000.0,
+       "max_ns": 1030000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 190.0,
+       "p99_ns": 1700.0,
+       "p999_ns": 3200.0,
+       "max_ns": 25100.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "burst",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 4700.0,
+       "p99_ns": 47700.0,
+       "p999_ns": 49300.0,
+       "max_ns": 50200.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 240.0,
+       "p99_ns": 1200.0,
+       "p999_ns": 1610000.0,
+       "max_ns": 1610000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 7400.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 4700.0,
+       "min": 4600.0,
+       "max": 5500.0,
+       "stddev": 393.70039370059055,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 46700.0,
+       "min": 45100.0,
+       "max": 47700.0,
+       "stddev": 1126.0550608207398,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 48500.0,
+       "min": 46900.0,
+       "max": 49700.0,
+       "stddev": 1145.4256850621082,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 49800.0,
+       "min": 48600.0,
+       "max": 51800.0,
+       "stddev": 1213.2600710482482,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "idle",
+      "nc": 5,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 230.0,
+       "min": 230.0,
+       "max": 240.0,
+       "stddev": 5.477225575051661,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2100.0,
+       "min": 2100.0,
+       "max": 2200.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 4700.0,
+       "min": 4100.0,
+       "max": 5000.0,
+       "stddev": 357.77087639996637,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 6700.0,
+       "min": 6100.0,
+       "max": 96700.0,
+       "stddev": 39123.03669195427,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 190.0,
+       "min": 180.0,
+       "max": 190.0,
+       "stddev": 5.477225575051661,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1700.0,
+       "min": 1700.0,
+       "max": 1700.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3200.0,
+       "min": 3200.0,
+       "max": 3300.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 10400.0,
+       "min": 8900.0,
+       "max": 164700.0,
+       "stddev": 67951.62249718545,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 530.0,
+       "min": 530.0,
+       "max": 540.0,
+       "stddev": 4.47213595499958,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1300.0,
+       "min": 1300.0,
+       "max": 1300.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 2600.0,
+       "min": 2400.0,
+       "max": 3000.0,
+       "stddev": 240.8318915758459,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 4500.0,
+       "min": 3500.0,
+       "max": 13100.0,
+       "stddev": 3994.996871087636,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 30200.0,
+       "min": 30200.0,
+       "max": 30200.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 70600.0,
+       "min": 70500.0,
+       "max": 70600.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 71900.0,
+       "min": 70700.0,
+       "max": 72100.0,
+       "stddev": 567.4504383644443,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 73400.0,
+       "min": 72100.0,
+       "max": 75300.0,
+       "stddev": 1158.4472366059665,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 3200.0,
+       "min": 3100.0,
+       "max": 3200.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 7400.0,
+       "min": 7400.0,
+       "max": 7500.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 8700.0,
+       "min": 8300.0,
+       "max": 8900.0,
+       "stddev": 282.842712474619,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 10000.0,
+       "min": 9400.0,
+       "max": 10400.0,
+       "stddev": 420.7136793592526,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 2100.0,
+       "min": 1400.0,
+       "max": 2100.0,
+       "stddev": 304.9590136395381,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 259700.0,
+       "min": 259300.0,
+       "max": 260000.0,
+       "stddev": 250.99800796022092,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 260800.0,
+       "min": 260600.00000000003,
+       "max": 260899.99999999997,
+       "stddev": 130.38404810402955,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 263000.0,
+       "min": 261500.0,
+       "max": 270000.0,
+       "stddev": 3695.5378498941127,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 3200.0,
+       "min": 2400.0,
+       "max": 3400.0,
+       "stddev": 400.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1030000.0,
+       "min": 1030000.0,
+       "max": 1030000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1030000.0,
+       "min": 1030000.0,
+       "max": 1030000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1030000.0,
+       "min": 1030000.0,
+       "max": 1030000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 240.0,
+       "min": 240.0,
+       "max": 260.0,
+       "stddev": 8.94427190999916,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 330.0,
+       "min": 320.0,
+       "max": 1200.0,
+       "stddev": 390.2178878524151,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1600000.0,
+       "min": 1570000.0,
+       "max": 1610000.0,
+       "stddev": 16431.676725154983,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1610000.0,
+       "min": 1600000.0,
+       "max": 1610000.0,
+       "stddev": 4472.13595499958,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   },
+   {
+    "section": "tail",
+    "name": "tail_t12",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "11",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1",
+     "--ac",
+     "5"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "11 pinned consumers plus the producer; chunk 4",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "5.70",
+      "load_after": "8.77",
+      "metric": 15000.0
+     },
+     {
+      "rc": 0,
+      "load_before": "8.77",
+      "load_after": "10.35",
+      "metric": 15000.0
+     },
+     {
+      "rc": 0,
+      "load_before": "10.35",
+      "load_after": "11.15",
+      "metric": 15000.0
+     },
+     {
+      "rc": 0,
+      "load_before": "11.15",
+      "load_after": "11.57",
+      "metric": 15000.0
+     },
+     {
+      "rc": 0,
+      "load_before": "11.57",
+      "load_after": "11.85",
+      "metric": 15000.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 15000.0,
+    "minimum": 15000.0,
+    "maximum": 15000.0,
+    "stddev": 0.0,
+    "values": [
+     15000.0,
+     15000.0,
+     15000.0,
+     15000.0,
+     15000.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 11,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 320.0,
+       "p99_ns": 2800.0,
+       "p999_ns": 7200.0,
+       "max_ns": 299300.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 550.0,
+       "p99_ns": 2700.0,
+       "p999_ns": 3000.0,
+       "max_ns": 5700.0,
+       "miss": 0,
+       "zero": 161
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 2000.0,
+       "p99_ns": 15000.0,
+       "p999_ns": 15300.0,
+       "max_ns": 18100.0,
+       "miss": 3,
+       "zero": 161
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 20000.0,
+       "p99_ns": 141100.0,
+       "p999_ns": 141800.0,
+       "max_ns": 144100.0,
+       "miss": 39,
+       "zero": 162
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 1000.0,
+       "p99_ns": 117200.0,
+       "p999_ns": 119500.0,
+       "max_ns": 120700.0,
+       "miss": 25,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 1700.0,
+       "p99_ns": 463600.0,
+       "p999_ns": 465100.0,
+       "max_ns": 465600.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 250.0,
+       "p99_ns": 2300.0,
+       "p999_ns": 4300.0,
+       "max_ns": 7500.0,
+       "miss": 3,
+       "zero": 22
+      },
+      {
+       "scene": "burst",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 4200.0,
+       "p99_ns": 18300.0,
+       "p999_ns": 21100.0,
+       "max_ns": 26100.0,
+       "miss": 5,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 290.0,
+       "p99_ns": 1100.0,
+       "p999_ns": 1620000.0,
+       "max_ns": 1630000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 15000.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 4100.0,
+       "min": 3800.0,
+       "max": 4200.0,
+       "stddev": 151.65750888103102,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 18300.0,
+       "min": 18200.0,
+       "max": 18500.0,
+       "stddev": 122.47448713915891,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 21200.0,
+       "min": 20900.0,
+       "max": 21900.0,
+       "stddev": 389.87177379235857,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 26100.0,
+       "min": 24800.0,
+       "max": 96900.0,
+       "stddev": 31706.19813222645,
+       "n": 5
+      },
+      "miss_median": 5
+     },
+     {
+      "scene": "idle",
+      "nc": 11,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 320.0,
+       "min": 310.0,
+       "max": 330.0,
+       "stddev": 7.0710678118654755,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2800.0,
+       "min": 2700.0,
+       "max": 2800.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 7200.0,
+       "min": 6600.0,
+       "max": 7300.0,
+       "stddev": 294.95762407505254,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 38800.0,
+       "min": 11100.0,
+       "max": 304300.0,
+       "stddev": 154295.61562144273,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 250.0,
+       "min": 240.0,
+       "max": 250.0,
+       "stddev": 5.477225575051661,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2300.0,
+       "min": 2300.0,
+       "max": 2300.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 4300.0,
+       "min": 4200.0,
+       "max": 4500.0,
+       "stddev": 122.47448713915891,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 7500.0,
+       "min": 4400.0,
+       "max": 300700.0,
+       "stddev": 160726.42284328982,
+       "n": 5
+      },
+      "miss_median": 3
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 550.0,
+       "min": 540.0,
+       "max": 560.0,
+       "stddev": 8.366600265340756,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2700.0,
+       "min": 2600.0,
+       "max": 2700.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3000.0,
+       "min": 2800.0,
+       "max": 3100.0,
+       "stddev": 109.54451150103323,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 6200.0,
+       "min": 4600.0,
+       "max": 300100.0,
+       "stddev": 130982.52936937811,
+       "n": 5
+      },
+      "miss_median": 1
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 20000.0,
+       "min": 20000.0,
+       "max": 20000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 141100.0,
+       "min": 141100.0,
+       "max": 141100.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 141900.0,
+       "min": 141400.0,
+       "max": 142000.0,
+       "stddev": 248.99799195977465,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 143700.0,
+       "min": 142400.0,
+       "max": 144800.0,
+       "stddev": 920.3260291874831,
+       "n": 5
+      },
+      "miss_median": 23
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 2000.0,
+       "min": 2000.0,
+       "max": 2000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 15000.0,
+       "min": 15000.0,
+       "max": 15000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 15200.0,
+       "min": 15200.0,
+       "max": 15300.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 18600.0,
+       "min": 18100.0,
+       "max": 18800.0,
+       "stddev": 258.8435821108957,
+       "n": 5
+      },
+      "miss_median": 4
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1100.0,
+       "min": 1000.0,
+       "max": 1100.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 117200.0,
+       "min": 116300.0,
+       "max": 117300.0,
+       "stddev": 415.9326868617084,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 119900.0,
+       "min": 119500.0,
+       "max": 120200.0,
+       "stddev": 288.09720581775866,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 120900.0,
+       "min": 120700.0,
+       "max": 146500.0,
+       "stddev": 11175.508936956741,
+       "n": 5
+      },
+      "miss_median": 18
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1900.0,
+       "min": 1700.0,
+       "max": 2000.0,
+       "stddev": 134.16407864998737,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 463200.0,
+       "min": 463000.0,
+       "max": 463600.0,
+       "stddev": 282.842712474619,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 465100.0,
+       "min": 464600.0,
+       "max": 465300.0,
+       "stddev": 258.8435821108957,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 466000.0,
+       "min": 465600.0,
+       "max": 466400.0,
+       "stddev": 316.22776601683796,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 290.0,
+       "min": 290.0,
+       "max": 300.0,
+       "stddev": 4.47213595499958,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1100.0,
+       "min": 440.0,
+       "max": 2400.0,
+       "stddev": 988.0890648114673,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1470000.0,
+       "min": 1470000.0,
+       "max": 1620000.0,
+       "stddev": 66105.97552415363,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1620000.0,
+       "min": 1610000.0,
+       "max": 3050000.0,
+       "stddev": 640687.1311334418,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   },
+   {
+    "section": "tail",
+    "name": "tail_t20",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "19",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1",
+     "--ac",
+     "5"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "19 pinned consumers plus the producer; chunk 4",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "11.85",
+      "load_after": "12.50",
+      "metric": 5300.0
+     },
+     {
+      "rc": 0,
+      "load_before": "12.50",
+      "load_after": "12.25",
+      "metric": 5200.0
+     },
+     {
+      "rc": 0,
+      "load_before": "12.25",
+      "load_after": "13.53",
+      "metric": 5300.0
+     },
+     {
+      "rc": 0,
+      "load_before": "13.53",
+      "load_after": "14.52",
+      "metric": 5200.0
+     },
+     {
+      "rc": 0,
+      "load_before": "14.52",
+      "load_after": "15.36",
+      "metric": 5200.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 5200.0,
+    "minimum": 5200.0,
+    "maximum": 5300.0,
+    "stddev": 54.772255750516614,
+    "values": [
+     5300.0,
+     5200.0,
+     5300.0,
+     5200.0,
+     5200.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 19,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 600.0,
+       "p99_ns": 2800.0,
+       "p999_ns": 10600.0,
+       "max_ns": 44400.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 1300.0,
+       "p99_ns": 2700.0,
+       "p999_ns": 3900.0,
+       "max_ns": 5400.0,
+       "miss": 1,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 4200.0,
+       "p99_ns": 5200.0,
+       "p999_ns": 7300.0,
+       "max_ns": 8600.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 40300.0,
+       "p99_ns": 41400.0,
+       "p999_ns": 43600.0,
+       "max_ns": 45300.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 4600.0,
+       "p99_ns": 75100.0,
+       "p999_ns": 77200.0,
+       "max_ns": 84900.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 4400.0,
+       "p99_ns": 298100.0,
+       "p999_ns": 301600.0,
+       "max_ns": 379500.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 540.0,
+       "p99_ns": 2400.0,
+       "p999_ns": 3900.0,
+       "max_ns": 14100.0,
+       "miss": 1,
+       "zero": 22
+      },
+      {
+       "scene": "burst",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 3500.0,
+       "p99_ns": 11000.0,
+       "p999_ns": 12700.0,
+       "max_ns": 13200.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 620.0,
+       "p99_ns": 1400.0,
+       "p999_ns": 1540000.0,
+       "max_ns": 1650000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 5200.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 3500.0,
+       "min": 3400.0,
+       "max": 3500.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 10600.0,
+       "min": 10000.0,
+       "max": 11000.0,
+       "stddev": 444.97190922573975,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 12700.0,
+       "min": 12100.0,
+       "max": 13800.0,
+       "stddev": 630.0793600809345,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 13900.0,
+       "min": 13000.0,
+       "max": 14600.0,
+       "stddev": 730.0684899377592,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "idle",
+      "nc": 19,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 600.0,
+       "min": 590.0,
+       "max": 620.0,
+       "stddev": 11.40175425099138,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2800.0,
+       "min": 2800.0,
+       "max": 3100.0,
+       "stddev": 130.38404810405297,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 10600.0,
+       "min": 9900.0,
+       "max": 15300.0,
+       "stddev": 2181.05479069188,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 44400.0,
+       "min": 16600.0,
+       "max": 95500.0,
+       "stddev": 33504.80562546215,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 540.0,
+       "min": 540.0,
+       "max": 570.0,
+       "stddev": 14.142135623730951,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2500.0,
+       "min": 2400.0,
+       "max": 2500.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3900.0,
+       "min": 3800.0,
+       "max": 6200.0,
+       "stddev": 1023.2301793829187,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 14500.0,
+       "min": 9200.0,
+       "max": 44600.0,
+       "stddev": 14764.382818120099,
+       "n": 5
+      },
+      "miss_median": 1
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1300.0,
+       "min": 1200.0,
+       "max": 1300.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2700.0,
+       "min": 2600.0,
+       "max": 2700.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 4200.0,
+       "min": 3900.0,
+       "max": 4600.0,
+       "stddev": 327.10854467592253,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 5900.0,
+       "min": 5300.0,
+       "max": 7800.0,
+       "stddev": 1141.4902540100813,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 40300.0,
+       "min": 40300.0,
+       "max": 40400.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 41400.0,
+       "min": 41300.0,
+       "max": 41500.0,
+       "stddev": 70.71067811865476,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 43400.0,
+       "min": 43300.0,
+       "max": 43600.0,
+       "stddev": 134.16407864998737,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 81200.0,
+       "min": 45300.0,
+       "max": 81800.0,
+       "stddev": 18793.137045208816,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 4300.0,
+       "min": 4200.0,
+       "max": 4400.0,
+       "stddev": 83.66600265340756,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 5200.0,
+       "min": 5200.0,
+       "max": 5300.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 7300.0,
+       "min": 7300.0,
+       "max": 7800.0,
+       "stddev": 230.21728866442677,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 9100.0,
+       "min": 8600.0,
+       "max": 9800.0,
+       "stddev": 497.9959839195493,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 4600.0,
+       "min": 4500.0,
+       "max": 4700.0,
+       "stddev": 70.71067811865476,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 75100.0,
+       "min": 74700.0,
+       "max": 75100.0,
+       "stddev": 178.88543819998318,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 77100.0,
+       "min": 76700.0,
+       "max": 77600.0,
+       "stddev": 339.1164991562634,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 87400.0,
+       "min": 79400.0,
+       "max": 97000.0,
+       "stddev": 7422.061708177856,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 4400.0,
+       "min": 4300.0,
+       "max": 4400.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 298100.0,
+       "min": 298000.0,
+       "max": 298500.0,
+       "stddev": 192.35384061671346,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 302600.0,
+       "min": 301600.0,
+       "max": 308700.0,
+       "stddev": 2942.278029010855,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 313100.0,
+       "min": 311000.0,
+       "max": 379500.0,
+       "stddev": 35542.04552357672,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 580.0,
+       "min": 570.0,
+       "max": 640.0,
+       "stddev": 30.331501776206203,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1200.0,
+       "min": 1100.0,
+       "max": 1400.0,
+       "stddev": 151.65750888103102,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1610000.0,
+       "min": 1540000.0,
+       "max": 1660000.0,
+       "stddev": 46151.923036857304,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1660000.0,
+       "min": 1650000.0,
+       "max": 1670000.0,
+       "stddev": 8366.600265340756,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   },
+   {
+    "section": "tail",
+    "name": "tail_t32",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "31",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1",
+     "--ac",
+     "5"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "31 pinned consumers plus the producer; chunk 4",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "15.36",
+      "load_after": "16.70",
+      "metric": 2400.0
+     },
+     {
+      "rc": 0,
+      "load_before": "16.70",
+      "load_after": "19.05",
+      "metric": 2400.0
+     },
+     {
+      "rc": 0,
+      "load_before": "19.05",
+      "load_after": "20.09",
+      "metric": 2300.0
+     },
+     {
+      "rc": 0,
+      "load_before": "20.09",
+      "load_after": "21.92",
+      "metric": 2500.0
+     },
+     {
+      "rc": 0,
+      "load_before": "21.92",
+      "load_after": "22.73",
+      "metric": 2400.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 2400.0,
+    "minimum": 2300.0,
+    "maximum": 2500.0,
+    "stddev": 70.71067811865476,
+    "values": [
+     2400.0,
+     2400.0,
+     2300.0,
+     2500.0,
+     2400.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 31,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 750.0,
+       "p99_ns": 3900.0,
+       "p999_ns": 20100.0,
+       "max_ns": 35500.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 1300.0,
+       "p99_ns": 2800.0,
+       "p999_ns": 4300.0,
+       "max_ns": 7200.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 1300.0,
+       "p99_ns": 2400.0,
+       "p999_ns": 6000.0,
+       "max_ns": 6600.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 10300.0,
+       "p99_ns": 11400.0,
+       "p999_ns": 12800.0,
+       "max_ns": 50900.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 3200.0,
+       "p99_ns": 50800.0,
+       "p999_ns": 52800.0,
+       "max_ns": 56700.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 1600.0,
+       "p99_ns": 188600.0,
+       "p999_ns": 193500.0,
+       "max_ns": 197000.0,
+       "miss": 0,
+       "zero": 1
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 630.0,
+       "p99_ns": 2900.0,
+       "p999_ns": 5000.0,
+       "max_ns": 9100.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "burst",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 1800.0,
+       "p99_ns": 7300.0,
+       "p999_ns": 14200.0,
+       "max_ns": 28700.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 700.0,
+       "p99_ns": 1300.0,
+       "p999_ns": 1610000.0,
+       "max_ns": 1610000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 2400.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1800.0,
+       "min": 1700.0,
+       "max": 1900.0,
+       "stddev": 70.71067811865476,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 6200.0,
+       "min": 6000.0,
+       "max": 7300.0,
+       "stddev": 680.44103344816,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 9900.0,
+       "min": 8000.0,
+       "max": 14200.0,
+       "stddev": 3023.7394067611053,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 25100.0,
+       "min": 21900.0,
+       "max": 46900.0,
+       "stddev": 10080.674580602232,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "idle",
+      "nc": 31,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 740.0,
+       "min": 730.0,
+       "max": 750.0,
+       "stddev": 7.0710678118654755,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 3900.0,
+       "min": 3700.0,
+       "max": 4000.0,
+       "stddev": 114.0175425099138,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 18800.0,
+       "min": 18200.0,
+       "max": 20700.0,
+       "stddev": 1066.302021005306,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 35500.0,
+       "min": 25700.0,
+       "max": 180000.0,
+       "stddev": 65378.719779451174,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 630.0,
+       "min": 629.0,
+       "max": 630.0,
+       "stddev": 0.4472135954999579,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2900.0,
+       "min": 2900.0,
+       "max": 2900.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 5000.0,
+       "min": 4800.0,
+       "max": 5000.0,
+       "stddev": 89.44271909999159,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 9100.0,
+       "min": 7300.0,
+       "max": 38500.0,
+       "stddev": 13726.325072647813,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1300.0,
+       "min": 1200.0,
+       "max": 1300.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2800.0,
+       "min": 2800.0,
+       "max": 2900.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3800.0,
+       "min": 3700.0,
+       "max": 4700.0,
+       "stddev": 427.78499272414876,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 6200.0,
+       "min": 5600.0,
+       "max": 7200.0,
+       "stddev": 678.2329983125268,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 10300.0,
+       "min": 10300.0,
+       "max": 10300.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 11300.0,
+       "min": 11300.0,
+       "max": 11400.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 13400.0,
+       "min": 12800.0,
+       "max": 15700.0,
+       "stddev": 1145.8621208504974,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 41800.0,
+       "min": 41700.0,
+       "max": 51100.0,
+       "stddev": 5076.219065406851,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1300.0,
+       "min": 1300.0,
+       "max": 1300.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2400.0,
+       "min": 2300.0,
+       "max": 2500.0,
+       "stddev": 70.71067811865476,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 6100.0,
+       "min": 6000.0,
+       "max": 6300.0,
+       "stddev": 130.38404810405297,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 7200.0,
+       "min": 6600.0,
+       "max": 9000.0,
+       "stddev": 981.3256340277676,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 3200.0,
+       "min": 3200.0,
+       "max": 3200.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 50800.0,
+       "min": 50500.0,
+       "max": 51000.0,
+       "stddev": 187.08286933869707,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 53100.0,
+       "min": 52600.0,
+       "max": 53300.0,
+       "stddev": 291.547594742265,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 57000.0,
+       "min": 55800.0,
+       "max": 58700.0,
+       "stddev": 1283.3549781724462,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1600.0,
+       "min": 1600.0,
+       "max": 1700.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 189500.0,
+       "min": 188600.0,
+       "max": 189700.0,
+       "stddev": 439.31765272977594,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 193400.0,
+       "min": 193100.0,
+       "max": 193500.0,
+       "stddev": 151.65750888103102,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 197000.0,
+       "min": 195800.0,
+       "max": 197900.0,
+       "stddev": 884.8728722251575,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 700.0,
+       "min": 680.0,
+       "max": 700.0,
+       "stddev": 8.94427190999916,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1400.0,
+       "min": 1200.0,
+       "max": 1440000.0,
+       "stddev": 643149.8270232218,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1610000.0,
+       "min": 1440000.0,
+       "max": 1620000.0,
+       "stddev": 78421.93570679061,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1620000.0,
+       "min": 1580000.0,
+       "max": 2330000.0,
+       "stddev": 322536.8196035919,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   }
+  ]
+ },
+ "tail_ac3_control": {
+  "metadata": {
+   "timestamp": "2026-10-23T10:54:42-0400",
+   "uname": {
+    "system": "Linux",
+    "node": "cachyos-box",
+    "release": "7.2.9-2-cachyos",
+    "version": "#1 SMP PREEMPT_DYNAMIC Fri, 09 Oct 2026 15:36:46 +0000",
+    "machine": "x86_64",
+    "processor": ""
+   },
+   "cpu_model": "AMD Ryzen 9 5900XT 16-Core Processor",
+   "logical_cpus": 32,
+   "loadavg_before": "22.73 11.94 7.18 1/1572 194850",
+   "governor": [
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance",
+    "performance"
+   ],
+   "thp_enabled": "[always] madvise never",
+   "compilers": {
+    "ldc2": [
+     "LDC - the LLVM D compiler (1.43.0):",
+     "  based on DMD v2.113.0 and LLVM 22.1.8"
+    ],
+    "dmd": [
+     "DMD64 D Compiler v2.113.0",
+     "Copyright (C) 1999-2026 by The D Language Foundation, All Rights Reserved written by Walter Bright"
+    ]
+   },
+   "mimalloc_archive": "/home/nathan-riddick/pi_ground/antfarm/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a",
+   "mimalloc_sha256": "551ee9a97e46b331736163a17cb3514b940d57b68cc82206723e0ccc0e8a1bec",
+   "git_rev": "eea08f977d8e5c323acd97f74016345128a0e220",
+   "git_status": [
+    " M docs/development/testing.md",
+    " M tools/perf/README.md",
+    " M tools/perf/run_performance_md.py",
+    " M tools/perf/test_run_performance_md.py",
+    "?? tools/perf/llc_split.py",
+    "?? tools/perf/test_llc_split.py"
+   ]
+  },
+  "results": [
+   {
+    "section": "tail",
+    "name": "tail_t2",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "1",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "1 pinned consumers plus the producer; chunk 16",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "22.73",
+      "load_after": "4.09",
+      "metric": 204700.0
+     },
+     {
+      "rc": 0,
+      "load_before": "4.09",
+      "load_after": "2.25",
+      "metric": 207500.0
+     },
+     {
+      "rc": 0,
+      "load_before": "2.25",
+      "load_after": "2.07",
+      "metric": 205000.0
+     },
+     {
+      "rc": 0,
+      "load_before": "2.07",
+      "load_after": "2.03",
+      "metric": 207200.0
+     },
+     {
+      "rc": 0,
+      "load_before": "2.03",
+      "load_after": "2.01",
+      "metric": 207500.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 207200.0,
+    "minimum": 204700.0,
+    "maximum": 207500.0,
+    "stddev": 1406.0583202698244,
+    "values": [
+     204700.0,
+     207500.0,
+     205000.0,
+     207200.0,
+     207500.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 1,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 140.0,
+       "p99_ns": 1800.0,
+       "p999_ns": 3200.0,
+       "max_ns": 7800.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 2500.0,
+       "p99_ns": 2900.0,
+       "p999_ns": 4600.0,
+       "max_ns": 6700.0,
+       "miss": 7,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 204800.0,
+       "p99_ns": 207500.0,
+       "p999_ns": 213000.0,
+       "max_ns": 279400.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 1930000.0,
+       "p99_ns": 1940000.0,
+       "p999_ns": 2000000.0,
+       "max_ns": 2000000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 1630000.0,
+       "p99_ns": 1640000.0,
+       "p999_ns": 1690000.0,
+       "max_ns": 1710000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 6510000.0,
+       "p99_ns": 6560000.0,
+       "p999_ns": 6600000.0,
+       "max_ns": 6620000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 1,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 17100.0,
+       "p99_ns": 19200.0,
+       "p999_ns": 20400.0,
+       "max_ns": 89500.0,
+       "miss": 0,
+       "zero": 21
+      },
+      {
+       "scene": "burst",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 254300.0,
+       "p99_ns": 258300.0,
+       "p999_ns": 261600.00000000003,
+       "max_ns": 263000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 1,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 140.0,
+       "p99_ns": 2000.0,
+       "p999_ns": 1610000.0,
+       "max_ns": 1610000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 207500.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 254200.0,
+       "min": 249400.0,
+       "max": 254300.0,
+       "stddev": 2593.838853899756,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 258200.0,
+       "min": 254200.0,
+       "max": 258500.0,
+       "stddev": 2137.054047047009,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 277600.0,
+       "min": 257200.0,
+       "max": 333600.0,
+       "stddev": 36169.351666846334,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 278700.0,
+       "min": 258500.0,
+       "max": 335000.0,
+       "stddev": 36661.901205474875,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "idle",
+      "nc": 1,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 140.0,
+       "min": 140.0,
+       "max": 140.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1800.0,
+       "min": 1800.0,
+       "max": 2000.0,
+       "stddev": 89.44271909999159,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3400.0,
+       "min": 3200.0,
+       "max": 3600.0,
+       "stddev": 148.32396974191326,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 7800.0,
+       "min": 6000.0,
+       "max": 81000.0,
+       "stddev": 32041.4263103252,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 17100.0,
+       "min": 16800.0,
+       "max": 17100.0,
+       "stddev": 164.31676725154983,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 19100.0,
+       "min": 19000.0,
+       "max": 19300.0,
+       "stddev": 114.0175425099138,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 20400.0,
+       "min": 20000.0,
+       "max": 20600.0,
+       "stddev": 219.08902300206645,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 25200.0,
+       "min": 21700.0,
+       "max": 90800.0,
+       "stddev": 36332.45105962437,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 2500.0,
+       "min": 2400.0,
+       "max": 2600.0,
+       "stddev": 70.71067811865476,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2900.0,
+       "min": 2900.0,
+       "max": 3000.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 4700.0,
+       "min": 4400.0,
+       "max": 5000.0,
+       "stddev": 260.76809620810593,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 7000.0,
+       "min": 6700.0,
+       "max": 13300.0,
+       "stddev": 3097.256850827842,
+       "n": 5
+      },
+      "miss_median": 8
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1930000.0,
+       "min": 1930000.0,
+       "max": 1930000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1940000.0,
+       "min": 1940000.0,
+       "max": 1940000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 2000000.0,
+       "min": 2000000.0,
+       "max": 2000000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 2009999.9999999998,
+       "min": 2000000.0,
+       "max": 2009999.9999999998,
+       "stddev": 4472.135954999475,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 203900.0,
+       "min": 201700.0,
+       "max": 204800.0,
+       "stddev": 1554.991961394013,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 207200.0,
+       "min": 204700.0,
+       "max": 207500.0,
+       "stddev": 1406.0583202698244,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 211100.0,
+       "min": 206700.0,
+       "max": 213000.0,
+       "stddev": 2379.7058641773356,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 274400.0,
+       "min": 222200.0,
+       "max": 279400.0,
+       "stddev": 24033.143781037055,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1630000.0,
+       "min": 1600000.0,
+       "max": 1630000.0,
+       "stddev": 16431.676725154983,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1640000.0,
+       "min": 1620000.0,
+       "max": 1640000.0,
+       "stddev": 8944.27190999916,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1690000.0,
+       "min": 1650000.0,
+       "max": 1700000.0,
+       "stddev": 20000.0,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1710000.0,
+       "min": 1690000.0,
+       "max": 1710000.0,
+       "stddev": 8944.27190999916,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 1,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 6510000.0,
+       "min": 6400000.0,
+       "max": 6510000.0,
+       "stddev": 47749.34554525329,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 6560000.0,
+       "min": 6460000.0,
+       "max": 6560000.0,
+       "stddev": 43817.80460041329,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 6590000.0,
+       "min": 6500000.0,
+       "max": 6600000.0,
+       "stddev": 40865.6334834051,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 6620000.0,
+       "min": 6540000.0,
+       "max": 6670000.0,
+       "stddev": 46690.470119715006,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 1,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 140.0,
+       "min": 130.0,
+       "max": 140.0,
+       "stddev": 5.477225575051661,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1700.0,
+       "min": 160.0,
+       "max": 2000.0,
+       "stddev": 765.7153518116246,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1050000.0,
+       "min": 5200.0,
+       "max": 1610000.0,
+       "stddev": 655968.7553534848,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1310000.0,
+       "min": 1260000.0,
+       "max": 1610000.0,
+       "stddev": 183711.73070873835,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   },
+   {
+    "section": "tail",
+    "name": "tail_t6",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "5",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "5 pinned consumers plus the producer; chunk 16",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "2.01",
+      "load_after": "3.58",
+      "metric": 20200.0
+     },
+     {
+      "rc": 0,
+      "load_before": "3.58",
+      "load_after": "4.54",
+      "metric": 20500.0
+     },
+     {
+      "rc": 0,
+      "load_before": "4.54",
+      "load_after": "5.11",
+      "metric": 20400.0
+     },
+     {
+      "rc": 0,
+      "load_before": "5.11",
+      "load_after": "5.46",
+      "metric": 20400.0
+     },
+     {
+      "rc": 0,
+      "load_before": "5.46",
+      "load_after": "5.76",
+      "metric": 20400.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 20400.0,
+    "minimum": 20200.0,
+    "maximum": 20500.0,
+    "stddev": 109.54451150103323,
+    "values": [
+     20200.0,
+     20500.0,
+     20400.0,
+     20400.0,
+     20400.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 5,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 230.0,
+       "p99_ns": 2000.0,
+       "p999_ns": 4400.0,
+       "max_ns": 5800.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 700.0,
+       "p99_ns": 2600.0,
+       "p999_ns": 3100.0,
+       "max_ns": 5000.0,
+       "miss": 1,
+       "zero": 161
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 3300.0,
+       "p99_ns": 20400.0,
+       "p999_ns": 22500.0,
+       "max_ns": 38900.0,
+       "miss": 0,
+       "zero": 161
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 30200.0,
+       "p99_ns": 191500.0,
+       "p999_ns": 352300.0,
+       "max_ns": 352600.0,
+       "miss": 0,
+       "zero": 161
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 10500.0,
+       "p99_ns": 268300.0,
+       "p999_ns": 269600.0,
+       "max_ns": 270100.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 6600.0,
+       "p99_ns": 1040000.0,
+       "p999_ns": 1040000.0,
+       "max_ns": 1040000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 5,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 200.0,
+       "p99_ns": 1700.0,
+       "p999_ns": 3300.0,
+       "max_ns": 101200.0,
+       "miss": 1,
+       "zero": 0
+      },
+      {
+       "scene": "burst",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 26900.0,
+       "p99_ns": 30800.0,
+       "p999_ns": 32500.0,
+       "max_ns": 33400.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 5,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 260.0,
+       "p99_ns": 340.0,
+       "p999_ns": 1600000.0,
+       "max_ns": 1610000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 20400.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 27200.0,
+       "min": 26900.0,
+       "max": 27300.0,
+       "stddev": 151.65750888103102,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 30600.0,
+       "min": 30400.0,
+       "max": 30900.0,
+       "stddev": 207.3644135332772,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 32400.0,
+       "min": 31600.0,
+       "max": 33000.0,
+       "stddev": 585.6620185738528,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 33400.0,
+       "min": 32600.0,
+       "max": 33600.0,
+       "stddev": 384.7076812334269,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "idle",
+      "nc": 5,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 230.0,
+       "min": 230.0,
+       "max": 230.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2000.0,
+       "min": 2000.0,
+       "max": 2100.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 5000.0,
+       "min": 4300.0,
+       "max": 5000.0,
+       "stddev": 357.77087639996637,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 13500.0,
+       "min": 5800.0,
+       "max": 94400.0,
+       "stddev": 41882.41874581744,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 200.0,
+       "min": 200.0,
+       "max": 200.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1700.0,
+       "min": 1700.0,
+       "max": 1700.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3300.0,
+       "min": 3200.0,
+       "max": 3300.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 40000.0,
+       "min": 4300.0,
+       "max": 135500.0,
+       "stddev": 55223.60908162378,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 700.0,
+       "min": 700.0,
+       "max": 710.0,
+       "stddev": 4.47213595499958,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2500.0,
+       "min": 2500.0,
+       "max": 2600.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3200.0,
+       "min": 3100.0,
+       "max": 3200.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 4800.0,
+       "min": 4200.0,
+       "max": 5400.0,
+       "stddev": 477.4934554525329,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 30200.0,
+       "min": 30200.0,
+       "max": 30200.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 191500.0,
+       "min": 191500.0,
+       "max": 191500.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 352300.0,
+       "min": 192900.0,
+       "max": 352400.0,
+       "stddev": 86861.75798359138,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 352700.0,
+       "min": 352600.0,
+       "max": 354200.0,
+       "stddev": 687.0225614927067,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 3200.0,
+       "min": 3200.0,
+       "max": 3300.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 20400.0,
+       "min": 20200.0,
+       "max": 20500.0,
+       "stddev": 109.54451150103323,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 22400.0,
+       "min": 21900.0,
+       "max": 22700.0,
+       "stddev": 294.95762407505254,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 37000.0,
+       "min": 23100.0,
+       "max": 38900.0,
+       "stddev": 6505.997233322498,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 10300.0,
+       "min": 9700.0,
+       "max": 10500.0,
+       "stddev": 300.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 268300.0,
+       "min": 267700.0,
+       "max": 268400.0,
+       "stddev": 277.48873851023217,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 269400.0,
+       "min": 268800.0,
+       "max": 269600.0,
+       "stddev": 328.63353450309967,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 270300.0,
+       "min": 269400.0,
+       "max": 272800.0,
+       "stddev": 1285.6904759700135,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 5,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 6600.0,
+       "min": 6500.0,
+       "max": 7500.0,
+       "stddev": 421.90046219457975,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1040000.0,
+       "min": 1040000.0,
+       "max": 1040000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1040000.0,
+       "min": 1040000.0,
+       "max": 1040000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1050000.0,
+       "min": 1040000.0,
+       "max": 1050000.0,
+       "stddev": 5477.2255750516615,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 5,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 240.0,
+       "min": 230.0,
+       "max": 260.0,
+       "stddev": 12.24744871391589,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 340.0,
+       "min": 320.0,
+       "max": 360.0,
+       "stddev": 14.832396974191326,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1590000.0,
+       "min": 1570000.0,
+       "max": 1600000.0,
+       "stddev": 13038.404810405298,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1610000.0,
+       "min": 1580000.0,
+       "max": 1610000.0,
+       "stddev": 13416.407864998739,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   },
+   {
+    "section": "tail",
+    "name": "tail_t12",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "11",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "11 pinned consumers plus the producer; chunk 16",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "5.76",
+      "load_after": "8.80",
+      "metric": 11400.0
+     },
+     {
+      "rc": 0,
+      "load_before": "8.80",
+      "load_after": "10.36",
+      "metric": 11100.0
+     },
+     {
+      "rc": 0,
+      "load_before": "10.36",
+      "load_after": "11.23",
+      "metric": 12800.0
+     },
+     {
+      "rc": 0,
+      "load_before": "11.23",
+      "load_after": "11.61",
+      "metric": 12600.0
+     },
+     {
+      "rc": 0,
+      "load_before": "11.61",
+      "load_after": "11.80",
+      "metric": 11500.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 11500.0,
+    "minimum": 11100.0,
+    "maximum": 12800.0,
+    "stddev": 766.1592523751182,
+    "values": [
+     11400.0,
+     11100.0,
+     12800.0,
+     12600.0,
+     11500.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 11,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 320.0,
+       "p99_ns": 2700.0,
+       "p999_ns": 7100.0,
+       "max_ns": 298300.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 1600.0,
+       "p99_ns": 2100.0,
+       "p999_ns": 4200.0,
+       "max_ns": 156800.0,
+       "miss": 0,
+       "zero": 161
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 10500.0,
+       "p99_ns": 11500.0,
+       "p999_ns": 14100.0,
+       "max_ns": 14700.0,
+       "miss": 7,
+       "zero": 162
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 100600.0,
+       "p99_ns": 103200.0,
+       "p999_ns": 104300.0,
+       "max_ns": 104900.0,
+       "miss": 19,
+       "zero": 162
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 1000.0,
+       "p99_ns": 121400.0,
+       "p999_ns": 124200.0,
+       "max_ns": 125000.0,
+       "miss": 72,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 5800.0,
+       "p99_ns": 469000.0,
+       "p999_ns": 472500.0,
+       "max_ns": 473300.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 11,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 320.0,
+       "p99_ns": 2300.0,
+       "p999_ns": 4300.0,
+       "max_ns": 98400.0,
+       "miss": 4,
+       "zero": 22
+      },
+      {
+       "scene": "burst",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 10500.0,
+       "p99_ns": 15400.0,
+       "p999_ns": 18100.0,
+       "max_ns": 298300.0,
+       "miss": 5,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 11,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 290.0,
+       "p99_ns": 430.0,
+       "p999_ns": 1370000.0,
+       "max_ns": 1610000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 11500.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 10500.0,
+       "min": 10500.0,
+       "max": 10600.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 15400.0,
+       "min": 15400.0,
+       "max": 15400.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 18100.0,
+       "min": 17400.0,
+       "max": 18800.0,
+       "stddev": 531.9774431308155,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 31300.0,
+       "min": 21300.0,
+       "max": 298300.0,
+       "stddev": 148985.99934222008,
+       "n": 5
+      },
+      "miss_median": 5
+     },
+     {
+      "scene": "idle",
+      "nc": 11,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 320.0,
+       "min": 310.0,
+       "max": 320.0,
+       "stddev": 4.47213595499958,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2800.0,
+       "min": 2700.0,
+       "max": 2900.0,
+       "stddev": 83.66600265340756,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 7300.0,
+       "min": 7100.0,
+       "max": 8500.0,
+       "stddev": 583.09518948453,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 56000.0,
+       "min": 9500.0,
+       "max": 300300.0,
+       "stddev": 148761.41972971353,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 320.0,
+       "min": 320.0,
+       "max": 330.0,
+       "stddev": 5.477225575051661,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2300.0,
+       "min": 2300.0,
+       "max": 2300.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 4400.0,
+       "min": 4300.0,
+       "max": 4400.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 12200.0,
+       "min": 5200.0,
+       "max": 98400.0,
+       "stddev": 38824.116216599185,
+       "n": 5
+      },
+      "miss_median": 4
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1600.0,
+       "min": 1600.0,
+       "max": 1600.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2100.0,
+       "min": 2100.0,
+       "max": 2100.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 4300.0,
+       "min": 4000.0,
+       "max": 4700.0,
+       "stddev": 288.09720581775866,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 6700.0,
+       "min": 5400.0,
+       "max": 156800.0,
+       "stddev": 65370.00076487685,
+       "n": 5
+      },
+      "miss_median": 1
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 100600.0,
+       "min": 100600.0,
+       "max": 100600.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 103200.0,
+       "min": 103200.0,
+       "max": 103400.0,
+       "stddev": 89.44271909999159,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 104200.0,
+       "min": 104100.0,
+       "max": 104300.0,
+       "stddev": 83.66600265340756,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 104900.0,
+       "min": 104800.0,
+       "max": 105000.0,
+       "stddev": 83.66600265340756,
+       "n": 5
+      },
+      "miss_median": 16
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 10500.0,
+       "min": 10500.0,
+       "max": 10600.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 11500.0,
+       "min": 11100.0,
+       "max": 12800.0,
+       "stddev": 766.1592523751182,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 14000.0,
+       "min": 14000.0,
+       "max": 14100.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 14700.0,
+       "min": 14400.0,
+       "max": 14900.0,
+       "stddev": 187.08286933869707,
+       "n": 5
+      },
+      "miss_median": 4
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1100.0,
+       "min": 1000.0,
+       "max": 1100.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 121500.0,
+       "min": 121400.0,
+       "max": 121600.0,
+       "stddev": 83.66600265340756,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 124700.0,
+       "min": 124200.0,
+       "max": 124800.0,
+       "stddev": 268.32815729997475,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 139100.0,
+       "min": 125000.0,
+       "max": 140600.0,
+       "stddev": 6469.544033392152,
+       "n": 5
+      },
+      "miss_median": 66
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 11,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 5800.0,
+       "min": 5700.0,
+       "max": 5900.0,
+       "stddev": 83.66600265340756,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 469700.0,
+       "min": 468700.0,
+       "max": 470300.0,
+       "stddev": 673.0527468185536,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 472400.0,
+       "min": 472000.0,
+       "max": 472600.0,
+       "stddev": 282.842712474619,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 473500.0,
+       "min": 473200.0,
+       "max": 477800.0,
+       "stddev": 1965.96032513375,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 11,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 290.0,
+       "min": 290.0,
+       "max": 300.0,
+       "stddev": 4.47213595499958,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2500.0,
+       "min": 430.0,
+       "max": 2700.0,
+       "stddev": 954.6622439376138,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1400000.0,
+       "min": 1370000.0,
+       "max": 1630000.0,
+       "stddev": 128452.32578665129,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1610000.0,
+       "min": 1610000.0,
+       "max": 2490000.0,
+       "stddev": 392453.8189392479,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   },
+   {
+    "section": "tail",
+    "name": "tail_t20",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "19",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "19 pinned consumers plus the producer; chunk 16",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "11.80",
+      "load_after": "13.06",
+      "metric": 1200.0
+     },
+     {
+      "rc": 0,
+      "load_before": "13.06",
+      "load_after": "14.13",
+      "metric": 1600.0
+     },
+     {
+      "rc": 0,
+      "load_before": "14.13",
+      "load_after": "13.51",
+      "metric": 1200.0
+     },
+     {
+      "rc": 0,
+      "load_before": "13.51",
+      "load_after": "14.03",
+      "metric": 1100.0
+     },
+     {
+      "rc": 0,
+      "load_before": "14.03",
+      "load_after": "14.95",
+      "metric": 1200.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 1200.0,
+    "minimum": 1100.0,
+    "maximum": 1600.0,
+    "stddev": 194.93588689617928,
+    "values": [
+     1200.0,
+     1600.0,
+     1200.0,
+     1100.0,
+     1200.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 19,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 590.0,
+       "p99_ns": 2800.0,
+       "p999_ns": 10600.0,
+       "max_ns": 19100.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 640.0,
+       "p99_ns": 1600.0,
+       "p999_ns": 2900.0,
+       "max_ns": 4500.0,
+       "miss": 1,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 420.0,
+       "p99_ns": 1200.0,
+       "p999_ns": 2700.0,
+       "max_ns": 4300.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 430.0,
+       "p99_ns": 1700.0,
+       "p999_ns": 2600.0,
+       "max_ns": 5300.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 5000.0,
+       "p99_ns": 79000.0,
+       "p999_ns": 80800.0,
+       "max_ns": 88800.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 4500.0,
+       "p99_ns": 300800.0,
+       "p999_ns": 302900.0,
+       "max_ns": 377100.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 19,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 400.0,
+       "p99_ns": 2500.0,
+       "p999_ns": 4100.0,
+       "max_ns": 9200.0,
+       "miss": 1,
+       "zero": 22
+      },
+      {
+       "scene": "burst",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 1400.0,
+       "p99_ns": 7200.0,
+       "p999_ns": 9500.0,
+       "max_ns": 11000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 19,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 580.0,
+       "p99_ns": 1200.0,
+       "p999_ns": 1580000.0,
+       "max_ns": 1610000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 1200.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 1400.0,
+       "min": 1400.0,
+       "max": 1500.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 6300.0,
+       "min": 5400.0,
+       "max": 7200.0,
+       "stddev": 785.4934754662193,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 9500.0,
+       "min": 8000.0,
+       "max": 10200.0,
+       "stddev": 912.6883367283708,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 12700.0,
+       "min": 11000.0,
+       "max": 15200.0,
+       "stddev": 1666.4333169977128,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "idle",
+      "nc": 19,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 590.0,
+       "min": 570.0,
+       "max": 600.0,
+       "stddev": 10.954451150103322,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2900.0,
+       "min": 2800.0,
+       "max": 3100.0,
+       "stddev": 109.54451150103323,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 10600.0,
+       "min": 9400.0,
+       "max": 15400.0,
+       "stddev": 2362.625658033875,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 28300.0,
+       "min": 18600.0,
+       "max": 112900.0,
+       "stddev": 39606.274755397026,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 430.0,
+       "min": 390.0,
+       "max": 440.0,
+       "stddev": 21.6794833886788,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 2400.0,
+       "min": 2400.0,
+       "max": 2500.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 4100.0,
+       "min": 4100.0,
+       "max": 4300.0,
+       "stddev": 89.44271909999159,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 9100.0,
+       "min": 7800.0,
+       "max": 10700.0,
+       "stddev": 1158.8787684654508,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 640.0,
+       "min": 630.0,
+       "max": 650.0,
+       "stddev": 8.366600265340756,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1600.0,
+       "min": 1600.0,
+       "max": 1700.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3100.0,
+       "min": 2900.0,
+       "max": 3200.0,
+       "stddev": 134.16407864998737,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 5000.0,
+       "min": 4300.0,
+       "max": 12500.0,
+       "stddev": 3457.8895297565537,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 430.0,
+       "min": 430.0,
+       "max": 430.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1700.0,
+       "min": 1500.0,
+       "max": 1800.0,
+       "stddev": 130.38404810405297,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 2600.0,
+       "min": 2400.0,
+       "max": 2700.0,
+       "stddev": 109.54451150103323,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 4200.0,
+       "min": 4000.0,
+       "max": 5300.0,
+       "stddev": 526.3078946776307,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 430.0,
+       "min": 420.0,
+       "max": 430.0,
+       "stddev": 5.477225575051661,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1200.0,
+       "min": 1100.0,
+       "max": 1600.0,
+       "stddev": 194.93588689617928,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 2600.0,
+       "min": 2500.0,
+       "max": 2900.0,
+       "stddev": 151.65750888103102,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 4500.0,
+       "min": 4300.0,
+       "max": 6900.0,
+       "stddev": 1265.7013865837391,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 5000.0,
+       "min": 5000.0,
+       "max": 5000.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 79200.0,
+       "min": 78800.0,
+       "max": 79500.0,
+       "stddev": 308.2207001484488,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 81200.0,
+       "min": 80600.0,
+       "max": 81600.0,
+       "stddev": 400.0,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 88800.0,
+       "min": 82000.0,
+       "max": 94500.0,
+       "stddev": 5891.6890617207555,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 19,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 4500.0,
+       "min": 4400.0,
+       "max": 4500.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 300500.0,
+       "min": 299900.0,
+       "max": 300800.0,
+       "stddev": 350.71355833500365,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 302900.0,
+       "min": 302600.0,
+       "max": 304100.0,
+       "stddev": 587.3670062235366,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 372000.0,
+       "min": 314700.0,
+       "max": 377100.0,
+       "stddev": 26615.31513997157,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 19,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 590.0,
+       "min": 580.0,
+       "max": 630.0,
+       "stddev": 21.6794833886788,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1200.0,
+       "min": 1100.0,
+       "max": 1300.0,
+       "stddev": 70.71067811865476,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1610000.0,
+       "min": 1440000.0,
+       "max": 1610000.0,
+       "stddev": 73824.115301167,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1610000.0,
+       "min": 1590000.0,
+       "max": 2570000.0,
+       "stddev": 430581.0028322197,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   },
+   {
+    "section": "tail",
+    "name": "tail_t32",
+    "cmd": [
+     "/home/nathan-riddick/pi_ground/antfarm/tools/perf/tail",
+     "--nc",
+     "31",
+     "--samples",
+     "10000",
+     "--repeats",
+     "1"
+    ],
+    "cwd": null,
+    "env": {},
+    "note": "31 pinned consumers plus the producer; chunk 16",
+    "runs": [
+     {
+      "rc": 0,
+      "load_before": "14.95",
+      "load_after": "17.57",
+      "metric": 1300.0
+     },
+     {
+      "rc": 0,
+      "load_before": "17.57",
+      "load_after": "19.79",
+      "metric": 1200.0
+     },
+     {
+      "rc": 0,
+      "load_before": "19.79",
+      "load_after": "20.77",
+      "metric": 1300.0
+     },
+     {
+      "rc": 0,
+      "load_before": "20.77",
+      "load_after": "22.64",
+      "metric": 1200.0
+     },
+     {
+      "rc": 0,
+      "load_before": "22.64",
+      "load_after": "23.39",
+      "metric": 1300.0
+     }
+    ],
+    "valid_runs": 5,
+    "requested_runs": 5,
+    "median": 1300.0,
+    "minimum": 1200.0,
+    "maximum": 1300.0,
+    "stddev": 54.772255750516614,
+    "values": [
+     1300.0,
+     1200.0,
+     1300.0,
+     1200.0,
+     1300.0
+    ],
+    "config": {
+     "rows": [
+      {
+       "scene": "idle",
+       "nc": 31,
+       "tlen": 0,
+       "spin": "-",
+       "n": "10000",
+       "p50_ns": 740.0,
+       "p99_ns": 3800.0,
+       "p999_ns": 20400.0,
+       "max_ns": 62900.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "10000",
+       "p50_ns": 630.0,
+       "p99_ns": 1700.0,
+       "p999_ns": 3200.0,
+       "max_ns": 6300.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 630.0,
+       "p99_ns": 1300.0,
+       "p999_ns": 3100.0,
+       "max_ns": 5500.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "10us",
+       "n": "10000",
+       "p50_ns": 580.0,
+       "p99_ns": 1200.0,
+       "p999_ns": 3400.0,
+       "max_ns": 11100.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 2048,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 16500.0,
+       "p99_ns": 18500.0,
+       "p999_ns": 20600.0,
+       "max_ns": 54800.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 8192,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 15400.0,
+       "p99_ns": 200900.0,
+       "p999_ns": 203300.0,
+       "max_ns": 216400.0,
+       "miss": 0,
+       "zero": 3211
+      },
+      {
+       "scene": "mid-drain",
+       "nc": 31,
+       "tlen": 32,
+       "spin": "1us",
+       "n": "10000",
+       "p50_ns": 710.0,
+       "p99_ns": 3100.0,
+       "p999_ns": 5000.0,
+       "max_ns": 7400.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "burst",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "1us",
+       "n": "10208",
+       "p50_ns": 900.0,
+       "p99_ns": 6000.0,
+       "p999_ns": 13300.0,
+       "max_ns": 22000.0,
+       "miss": 0,
+       "zero": 0
+      },
+      {
+       "scene": "near-full",
+       "nc": 31,
+       "tlen": 256,
+       "spin": "0ns",
+       "n": "1000",
+       "p50_ns": 710.0,
+       "p99_ns": 1300.0,
+       "p999_ns": 1610000.0,
+       "max_ns": 1620000.0,
+       "miss": 0,
+       "zero": 0
+      }
+     ],
+     "metric": 1300.0
+    },
+    "tail_rows": [
+     {
+      "scene": "burst",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 900.0,
+       "min": 820.0,
+       "max": 980.0,
+       "stddev": 71.55417527999327,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 6000.0,
+       "min": 5600.0,
+       "max": 6000.0,
+       "stddev": 173.20508075688772,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 10500.0,
+       "min": 9700.0,
+       "max": 13300.0,
+       "stddev": 1663.7307474468337,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 22000.0,
+       "min": 11200.0,
+       "max": 33400.0,
+       "stddev": 9074.304381053129,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "idle",
+      "nc": 31,
+      "tlen": 0,
+      "spin": "-",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 740.0,
+       "min": 720.0,
+       "max": 740.0,
+       "stddev": 8.94427190999916,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 3800.0,
+       "min": 3600.0,
+       "max": 3900.0,
+       "stddev": 114.0175425099138,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 20400.0,
+       "min": 19500.0,
+       "max": 21200.0,
+       "stddev": 804.3631020876082,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 103100.0,
+       "min": 27900.0,
+       "max": 157600.0,
+       "stddev": 56178.93733420026,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 32,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 720.0,
+       "min": 710.0,
+       "max": 740.0,
+       "stddev": 11.40175425099138,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 3100.0,
+       "min": 3000.0,
+       "max": 3200.0,
+       "stddev": 83.66600265340756,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 5100.0,
+       "min": 5000.0,
+       "max": 5900.0,
+       "stddev": 364.6916505762094,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 11200.0,
+       "min": 7000.0,
+       "max": 55300.0,
+       "stddev": 20390.56154204685,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 680.0,
+       "min": 630.0,
+       "max": 680.0,
+       "stddev": 23.021728866442675,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1700.0,
+       "min": 1400.0,
+       "max": 1700.0,
+       "stddev": 134.16407864998737,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3200.0,
+       "min": 3000.0,
+       "max": 3500.0,
+       "stddev": 192.35384061671346,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 7200.0,
+       "min": 5400.0,
+       "max": 9000.0,
+       "stddev": 1561.4096195425466,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "10us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 590.0,
+       "min": 580.0,
+       "max": 600.0,
+       "stddev": 7.0710678118654755,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1200.0,
+       "min": 1200.0,
+       "max": 1200.0,
+       "stddev": 0.0,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3200.0,
+       "min": 3100.0,
+       "max": 3400.0,
+       "stddev": 151.65750888103102,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 5500.0,
+       "min": 5500.0,
+       "max": 11100.0,
+       "stddev": 2493.59178696113,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 650.0,
+       "min": 620.0,
+       "max": 670.0,
+       "stddev": 19.493588689617926,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1300.0,
+       "min": 1200.0,
+       "max": 1300.0,
+       "stddev": 54.772255750516614,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 3200.0,
+       "min": 3100.0,
+       "max": 10100.0,
+       "stddev": 3088.2033611794413,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 6100.0,
+       "min": 5500.0,
+       "max": 15100.0,
+       "stddev": 4290.33798202426,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 2048,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 16600.0,
+       "min": 16400.0,
+       "max": 16600.0,
+       "stddev": 89.44271909999159,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 18900.0,
+       "min": 18500.0,
+       "max": 19000.0,
+       "stddev": 216.79483388678798,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 20900.0,
+       "min": 20500.0,
+       "max": 21200.0,
+       "stddev": 288.09720581775866,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 54200.0,
+       "min": 25500.0,
+       "max": 56600.0,
+       "stddev": 13187.949044487546,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "mid-drain",
+      "nc": 31,
+      "tlen": 8192,
+      "spin": "1us",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 15400.0,
+       "min": 15300.0,
+       "max": 15400.0,
+       "stddev": 44.721359549995796,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 200900.0,
+       "min": 200300.0,
+       "max": 201200.0,
+       "stddev": 357.77087639996637,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 203200.0,
+       "min": 202300.0,
+       "max": 203700.0,
+       "stddev": 511.8593556827891,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 216400.0,
+       "min": 204100.0,
+       "max": 230000.0,
+       "stddev": 12088.961907459217,
+       "n": 5
+      },
+      "miss_median": 0
+     },
+     {
+      "scene": "near-full",
+      "nc": 31,
+      "tlen": 256,
+      "spin": "0ns",
+      "runs": 5,
+      "valid_runs": 5,
+      "p50_ns": {
+       "median": 710.0,
+       "min": 700.0,
+       "max": 720.0,
+       "stddev": 8.366600265340756,
+       "n": 5
+      },
+      "p99_ns": {
+       "median": 1300.0,
+       "min": 1200.0,
+       "max": 1340000.0,
+       "stddev": 653381.5753447597,
+       "n": 5
+      },
+      "p999_ns": {
+       "median": 1610000.0,
+       "min": 475200.0,
+       "max": 1620000.0,
+       "stddev": 508634.45420065674,
+       "n": 5
+      },
+      "max_ns": {
+       "median": 1620000.0,
+       "min": 1540000.0,
+       "max": 1640000.0,
+       "stddev": 38470.76812334269,
+       "n": 5
+      },
+      "miss_median": 0
+     }
+    ],
+    "status": "ok"
+   }
+  ]
+ }
+}

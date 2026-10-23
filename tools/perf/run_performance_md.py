@@ -417,10 +417,13 @@ def cases_for(section, args):
             C.append(dcase("dual", "nd6_b256_ac3", nd=6, batch=256, ac=3))
     elif section == "tail":
         for t in args.tail_threads:
-            C.append(case("tail", f"tail_t{t}",
-                          [benchmark_path("tail"), "--nc", str(t - 1), "--samples", "10000",
-                           "--repeats", "1"],
-                          note=f"{t - 1} pinned consumers plus the producer; chunk 16"))
+            ac = getattr(args, "tail_ac", 3)
+            cmd = [benchmark_path("tail"), "--nc", str(t - 1), "--samples", "10000",
+                   "--repeats", "1"]
+            if ac != 3:
+                cmd += ["--ac", str(ac)]
+            C.append(case("tail", f"tail_t{t}", cmd,
+                          note=f"{t - 1} pinned consumers plus the producer; chunk {128 >> ac}"))
     elif section == "public":
         # Public flush/wave default to chunk 8 (ActorRuntime.flush / ActorWave
         # .publish); ANTFARM_PUBLIC_HINT=2 pins chunk 32 at MAX_CHUNK 128.
@@ -946,6 +949,8 @@ def build_parser():
                          "controller+consumers; fibers: pinned workers, skipped beyond the CPU count)")
     ap.add_argument("--tail-threads", type=thread_counts, default=[2, 6, 12, 20, 32],
                     help="tail-latency thread counts (consumers plus the producer)")
+    ap.add_argument("--tail-ac", type=int, choices=range(8), default=3, metavar="0..7",
+                    help="Farm work-cost class of the tail writes (chunk 128 >> class)")
     ap.add_argument("--fiber-tasks", type=int, default=1_000_000,
                     help="fibers per burst in the headline fiber cells")
     ap.add_argument("--markdown", type=Path,

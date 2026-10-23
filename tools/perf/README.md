@@ -124,13 +124,24 @@ cells are included only when `--dual-threads` includes 6.
 
   The report driver's `tail` section runs the default scene schedule at each
   `--tail-threads` count with 10,000 observations per scene and the default
-  `avgCost=3` (chunk 16); the raw header reports the effective cost, chunk and
+  `avgCost=3` (chunk 16); `--tail-ac N` sets another class. The raw header reports the effective cost, chunk and
   repetition count. `make -C tools/perf check-tail` runs its unit tests,
   including bounded numeric argument parsing; add `DC=dmd` for DMD. The
   mid-drain scene drains and retries a quota-truncated dump that cannot reach
   its backlog trigger.
   Use `check-benchmarks` to include the throughput and dual argument-parsing
   tests as well; their C numeric conversions also respect D string boundaries.
+
+- **`llc_split.py`** — the headline payload and private child cells laid out
+  by the [several-groups rules](../../docs/guide/hosting.md#several-physical-groups).
+  Each thread count runs twice in the same session: as the headline command,
+  and with every Farm confined to one L3 group, where a count larger than one
+  group becomes one independent process per group (shares split evenly,
+  started together, confined with `taskset`, actor pins inside the group).
+  A per-group payload sample is the total payloads over the longest process
+  time, a lower bound; a private sample sums the processes' fixed-window
+  rates. Rounds are interleaved over cells. It writes `summary.json`, raw
+  output and `tables.md`; Linux only.
 
 - **`offccd`**, **`c2c`** and **`offccd_sweep.py`** — off-CCD scaling for one
   Farm. `offccd` pins a home group (default two producers and five consumers)

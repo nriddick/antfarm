@@ -296,6 +296,16 @@ class HeadlineTests(unittest.TestCase):
         cells = rpm.cases_for("tail", self.args("--tail-threads", "2,6"))
         self.assertEqual([c["cmd"][c["cmd"].index("--nc") + 1] for c in cells], ["1", "5"])
 
+    def test_tail_cost_class_is_passed_only_when_not_default(self):
+        default = rpm.cases_for("tail", self.args("--tail-threads", "2"))[0]
+        self.assertNotIn("--ac", default["cmd"])
+        self.assertIn("chunk 16", default["note"])
+        cell = rpm.cases_for("tail", self.args("--tail-threads", "2", "--tail-ac", "5"))[0]
+        self.assertEqual(cell["cmd"][-2:], ["--ac", "5"])
+        self.assertIn("chunk 4", cell["note"])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.args("--tail-ac", "8")
+
     def test_thread_counts_below_two_are_rejected(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             rpm.main(["--threads", "1", "--sections", "host", "--out", tempfile.mkdtemp()])

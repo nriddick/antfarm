@@ -48,6 +48,50 @@ one thread at 1.9 to 2.7 million per second however many workers drain it.
 The root and public actor lifecycle thread sweeps are in the
 [comprehensive array](#thread-sweeps).
 
+### One Farm per LLC group
+
+The same payload and private child workloads, laid out by the
+[several-groups rules](docs/guide/hosting.md#several-physical-groups):
+every Farm's threads stay in one last-level-cache group, and a thread count
+larger than one CCD runs as one independent Farm per CCD, the guide's "one
+process per group" form. The threads are split evenly, both processes start
+together, each is confined to its CCD with `taskset`, and actor threads are
+pinned inside it, cores before SMT siblings. Up to 16 threads the whole
+workload sits on the first CCD. The headline-layout columns rerun the
+commands of the table above in the same session, interleaved with the
+per-LLC cells. A per-LLC payload sample is the payloads of both processes
+over the slower one's time, a lower bound; a private sample is the sum of
+the two processes' three-second rates. Measured on October 23, 2026, at
+1.9.1 (`eea08f9`) with
+[`tools/perf/llc_split.py`](tools/perf/README.md#payload-benchmarks), five
+rounds per cell; the [machine-readable results](docs/performance/llc-split-tail-ac5-2026-10-23.json)
+keep every sample.
+
+| Threads | Payloads, headline layout, Mpps | Payloads, one Farm per LLC, Mpps | Private children, headline layout, Mcycles/s | Private children, one Farm per LLC, Mcycles/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 755.9 ± 101.6 | 763.9 ± 2.6 | 138.5 ± 1.5 | 138.0 ± 3.8 |
+| 4 | 1,096.5 ± 64.5 | 1,098.3 ± 8.8 | 274.8 ± 0.5 | 274.8 ± 0.1 |
+| 8 | 2,059.7 ± 172.7 | 2,083.3 ± 3.9 | 432.5 ± 1.0 | 432.9 ± 0.9 |
+| 16 | 2,331.0 ± 127.4 | 2,389.5 ± 17.8 | 517.2 ± 1.3 | 518.7 ± 0.3 |
+| 20 | 2,280.5 ± 48.3 | 3,197.4 ± 32.4 | 209.0 ± 0.6 | 819.3 ± 0.7 |
+| 24 | 2,551.0 ± 123.2 | 3,481.3 ± 44.7 | 192.6 ± 5.7 | 858.4 ± 1.8 |
+| 32 | 2,403.8 ± 141.6 | 4,094.2 ± 352.0 | 164.4 ± 3.9 | 886.3 ± 2.0 |
+| 40 | 2,265.0 ± 61.5 | 2,943.3 ± 230.3 | 56.1 ± 3.9 | 255.2 ± 19.1 |
+
+Up to 16 threads, confining unpinned payload threads to one CCD changes the
+median little but cuts the spread from about 100 to under 20 million per
+second, and private children are pinned the same way in both layouts. From
+20 threads, a Farm per CCD removes the cliff. Private child lifecycles reach
+819 to 886 million per second against 164 to 209, four to five times the
+single Farm and 1.7 times its one-CCD peak. Payloads reach 4.09 billion per
+second at 32 threads against 2.40. The two Farms do not add perfectly: at 32
+threads each runs about 443 million child lifecycles per second, against
+519 for one Farm alone on an otherwise idle host. Oversubscribed at 40
+threads, the per-CCD layout still leads, 255 against 56. In this session
+the private children at 2 to 8 threads ran below the October 20 table
+(138 against 168 at 2 threads) in both layouts; the comparison between
+layouts is within one session.
+
 ## Tail latency
 
 The latency of one payload: from just before its `write()` to the first
@@ -86,6 +130,45 @@ current 16-entry chunk, 3 to 10 µs at the median, and from 20 threads it is
 picked up as fast as an idle one. The full scene matrix, including 2,048 and 8,192-entry
 backlogs, zero and 10 µs jobs and the near-full ring, is in the
 [comprehensive array](#full-tail-latency-matrix).
+
+#### avgCost 5
+
+The same scenes with the dump and sentinel tables written at `avgCost` 5, so
+consumers claim 4 entries at a time instead of 16 (`--tail-ac 5`). Measured
+on October 23, 2026, at 1.9.1 (`eea08f9`). A same-session control at the
+default `avgCost` 3 reproduced the table above within its spread, for
+example 20.40 µs p99 at 6 threads mid-drain; both runs are in the
+[machine-readable results](docs/performance/llc-split-tail-ac5-2026-10-23.json).
+
+| Threads | Scene | p50 µs | p99 µs | p99.9 µs | Processes |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 2 | idle | 0.14 ± 0.00 | 1.80 ± 0.05 | 3.30 ± 0.16 | 5 / 5 |
+| 2 | mid-drain, 256 × 1 µs | 204.30 ± 1.28 | 207.20 ± 0.89 | 209.50 ± 3.75 | 5 / 5 |
+| 2 | burst, 256 × 1 µs | 253.80 ± 1.61 | 258.30 ± 1.81 | 268.20 ± 6.85 | 5 / 5 |
+| 6 | idle | 0.23 ± 0.01 | 2.10 ± 0.04 | 4.70 ± 0.36 | 5 / 5 |
+| 6 | mid-drain, 256 × 1 µs | 3.20 ± 0.04 | 7.40 ± 0.04 | 8.70 ± 0.28 | 5 / 5 |
+| 6 | burst, 256 × 1 µs | 4.70 ± 0.39 | 46.70 ± 1.13 | 48.50 ± 1.15 | 5 / 5 |
+| 12 | idle | 0.32 ± 0.01 | 2.80 ± 0.05 | 7.20 ± 0.29 | 5 / 5 |
+| 12 | mid-drain, 256 × 1 µs | 2.00 ± 0.00 | 15.00 ± 0.00 | 15.20 ± 0.04 | 5 / 5 |
+| 12 | burst, 256 × 1 µs | 4.10 ± 0.15 | 18.30 ± 0.12 | 21.20 ± 0.39 | 5 / 5 |
+| 20 | idle | 0.60 ± 0.01 | 2.80 ± 0.13 | 10.60 ± 2.18 | 5 / 5 |
+| 20 | mid-drain, 256 × 1 µs | 4.30 ± 0.08 | 5.20 ± 0.05 | 7.30 ± 0.23 | 5 / 5 |
+| 20 | burst, 256 × 1 µs | 3.50 ± 0.05 | 10.60 ± 0.44 | 12.70 ± 0.63 | 5 / 5 |
+| 32 | idle | 0.74 ± 0.01 | 3.90 ± 0.11 | 18.80 ± 1.07 | 5 / 5 |
+| 32 | mid-drain, 256 × 1 µs | 1.30 ± 0.00 | 2.40 ± 0.07 | 6.10 ± 0.13 | 5 / 5 |
+| 32 | burst, 256 × 1 µs | 1.80 ± 0.07 | 6.20 ± 0.68 | 9.90 ± 3.02 | 5 / 5 |
+
+Idle latency does not depend on the chunk. Behind a backlog with 5 to 11
+consumers, chunk 4 shortens the wait for a consumer to finish its current
+chunk: at 6 threads mid-drain p99 falls from 20.4 to 7.4 µs, and at 12
+threads the median falls from 10.5 to 2.0 µs. Bursts at those counts gain
+at the median (26.8 to 4.7 µs at 6 threads) but lose at p99 (30.5 to
+46.7 µs), because more claims stand between the burst's last sentinels and
+a consumer. From 20 threads, where a sentinel was already picked up about as
+fast as an idle one, the extra claims cost: the 20-thread mid-drain median
+rises from 0.42 to 4.30 µs and the 32-thread burst median from 0.88 to
+1.80 µs. With 2 threads the single consumer drains the whole backlog either
+way.
 
 ## Method
 
