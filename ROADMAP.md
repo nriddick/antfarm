@@ -88,6 +88,79 @@ is reassessed holistically in dedicated sessions.
   records release-store retirement, the bounded reservation walk and the
   remaining serial-private/historical-inbox measurement uncertainty.
 
+## 2.0 goals — draft
+
+### Work-stealing deques for worker-pool dispatch
+
+Add a dispatch layer with worker-local work-stealing deques to the
+topology-aware worker pool. The goal is to keep locally spawned work cheap
+while allowing idle workers to help with uneven, recursive or bursty workloads.
+Success means better utilization and completion latency on those workloads
+without losing the Farm's efficient bulk-publication path. This is a proposed
+direction, not an implemented API or a performance claim.
+
+Today the pool runs an application-provided pump and owns no task queue; see
+the [current threadpool design](docs/design/threadpool.md). The proposed
+starting point is an optional dispatcher that composes with that machinery.
+Keep the raw worker hooks and direct Farm consumption available. Work stealing
+does not reintroduce MT payloads: each accepted work item still executes once.
+
+Proposed requirements:
+
+- **Local dispatch and external admission.** Give each worker exclusive access
+  to its deque's owner end; eligible thieves claim from the other end. Define
+  a separate submission path for application threads, rather than letting
+  arbitrary producers mutate the owner end. Decide whether a Farm, an injection
+  queue, or both supply that path, including partial acceptance and backpressure.
+- **Topology-aware stealing.** Prefer victims in the worker's own LLC group.
+  Make cross-group stealing an explicit policy, with bounded attempts and
+  clear eligibility rules for affinity-bound work. Balance idle capacity against
+  the cost of moving work and data; connect this design to the per-group-Farm
+  host proposed above rather than making every worker consume every Farm.
+- **Bounded storage and ownership.** Start with preallocated deque capacity and
+  explicit overflow behavior. Keep the raw dispatch path `nothrow @nogc`, with
+  no hidden allocation when a queue fills. Choose the descriptor representation
+  and transfer rules before exposing an API. A ring-borrowed payload pointer,
+  actor borrow, or thread-affine state cannot simply be retained in a deque.
+- **Completion and lifecycle.** Specify publication, claim, execution and
+  reclamation separately. Define how accepted work is counted through steals,
+  nested submission, cancellation, worker failure and shutdown. If a Farm
+  callback forwards work to a deque, its table hook joins that callback, not
+  the later execution; any bridge needs its own completion/lifetime contract.
+  Preserve actor serialization and Fiber ownership rules in future adapters.
+- **Fairness and parking.** Define how workers alternate local work, external
+  submissions, Farm polling and steal attempts so recursive local work cannot
+  indefinitely starve another source. Integrate release-publication with the
+  existing wake/recheck protocol. An empty local deque or failed steal does not
+  prove global completion, and an idle worker must not miss newly admitted work.
+
+Implementation and acceptance sequence:
+
+1. Write the dispatch and memory-order contracts, then choose the deque
+   algorithm. Resolve bounded versus growable storage, overflow policy,
+   single-item versus batch stealing, victim selection, and local execution
+   order. Do not promise FIFO scheduling or lock freedom before those choices
+   and their proofs are established.
+2. Prototype the standalone deque and external admission path. Add deterministic
+   tests for the last-item owner/thief race, competing thieves, wraparound,
+   full queues, publication visibility, and safe destruction. Establish exactly
+   one execution or an explicitly reported cancellation for every accepted item.
+3. Integrate the dispatcher with pool wake, idle and shutdown behavior; test
+   nested submissions, parked workers, admission racing shutdown, and affinity
+   restrictions. Introduce Farm, actor or Fiber adapters only after their
+   ownership and completion mappings are documented.
+4. Compare against direct Farm dispatch on the 5900XT: balanced bulk work,
+   skewed task costs, recursive fan-out, external producer bursts, and idle-to-busy
+   transitions. Report throughput, tail latency, steal success/attempts, wakeups,
+   queue occupancy and memory cost, with same-LLC and opt-in cross-LLC placement.
+   Run the Linux correctness/TSan lanes and native Windows checks. Use these
+   results to decide defaults; do not assume deques improve every workload.
+
+The public D submission surface and any C exports are design decisions for
+this work. Keep the runtime-free core and optional druntime worker host distinct;
+adding deques does not by itself make the worker pool runtime-free. Do not
+silently repurpose C ABI 1 entry points or change their completion semantics.
+
 ## Deferred after 1.8.0
 
 Committed compatibility limits and features that are deliberately not in the
