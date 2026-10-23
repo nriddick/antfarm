@@ -53,7 +53,9 @@ Older release notes are in [docs/releases/](docs/releases/):
 - `CacheAwarePool.start` stops and joins already spawned workers when any
   `Throwable` escapes setup, not only an `Exception`. An `Error` such as an
   out-of-memory failure previously left the pool started with live workers,
-  and process exit hung. A unit test injects an `Error` after spawn.
+  and process exit hung. A failure while stopping those workers is chained
+  onto the original instead of replacing it. A unit test injects an `Error`
+  after spawn and disarms the injection on every exit path.
 
 - `check-c-abi.py` audits declarations, not only exported names. Each
   compiler's `-HC` output for the C ABI modules is checked against every

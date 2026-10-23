@@ -482,8 +482,12 @@ final class CacheAwarePool
             {
                 // Errors too (OutOfMemoryError from FailureCapture, spawn
                 // or withStart): spawned workers must be stopped and joined,
-                // or the pool stays started and process exit hangs.
-                abortStart();
+                // or the pool stays started and process exit hangs. A
+                // failure while aborting is chained, not lost.
+                try
+                    abortStart();
+                catch (Throwable t)
+                    e = Throwable.chainTogether(e, t);
                 throw e;
             }
         }
@@ -764,6 +768,8 @@ unittest
     opt.processors = [ProcessorId(0, 0)];
     auto pool = new CacheAwarePool(opt);
     gInjectStartError = true;
+    // Disarm even if start fails before the injection point.
+    scope (exit) gInjectStartError = false;
     bool caught;
     try
         pool.start();
