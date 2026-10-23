@@ -798,6 +798,12 @@ class ManifestTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"_": "different-launcher", "SHLVL": "99"}):
             self.assertEqual(self.prepare(), original)
 
+    def test_session_paths_do_not_invalidate_resume(self):
+        original = self.prepare()
+        session = {name: "/other/session" for name in ("PATH", "TEMP", "TMP", "TMPDIR")}
+        with mock.patch.dict(os.environ, session):
+            self.assertEqual(self.prepare(), original)
+
     def test_changed_binary_refused_even_with_no_resume(self):
         self.prepare()
         metadata = (self.out / "metadata.json").read_bytes()
@@ -854,7 +860,17 @@ class ManifestTests(unittest.TestCase):
         frozen = rpm.frozen_cell(self.cell, self.args, manifest)
         self.assertEqual(pathlib.Path(frozen["cmd"][0]).read_bytes(), b"fiber A")
         self.assertEqual(frozen["cmd"][1:], ["200000", "private", "2"])
-        self.assertIs(rpm.parser_for(frozen["cmd"]), rpm.parse_fiber)
+        self.assertEqual(frozen["parser"], "dub_fiber")
+
+    def test_any_dub_configuration_snapshot_uses_the_fiber_parser(self):
+        self.cell.update(cmd=["dub", "run", "-c", "benchmark_wide", "--build=release",
+                              "--compiler=ldc2", "--", "200000"], cwd=str(self.root))
+        (self.root / ("ant_fibers.exe" if os.name == "nt" else "ant_fibers")).write_bytes(b"fiber B")
+        with mock.patch.object(rpm.subprocess, "run"):
+            manifest = self.prepare()
+        frozen = rpm.frozen_cell(self.cell, self.args, manifest)
+        self.assertEqual(pathlib.Path(frozen["cmd"][0]).name.split(".")[0], "benchmark_wide")
+        self.assertIs(rpm.PARSERS[frozen["parser"]], rpm.parse_fiber)
 
 
 @unittest.skipUnless(sys.platform == "linux", "requires Linux process groups and /proc")

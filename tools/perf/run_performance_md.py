@@ -606,11 +606,11 @@ def run_cmd(cmd, cwd, env, timeout):
 
 
 def parser_for(cmd):
+    """Dub cells are Fiber runs; frozen_cell records that before replacing cmd."""
     name = Path(cmd[0]).name
     if name.endswith(".exe"):
         name = name[:-4]
-    return PARSERS["dub_fiber" if cmd[0].startswith("dub") or
-                   name in ("benchmark", "benchmark_mt") else name]
+    return PARSERS["dub_fiber" if cmd[0].startswith("dub") else name]
 
 
 def cell_is_cached(prev, cell, runs):
@@ -828,7 +828,7 @@ def remove_fake_topology(created):
 def measure_cell(args, cell, raw_dir, section, runner=None):
     """Run one cell --runs times and return its summary row."""
     runner = run_cmd if runner is None else runner
-    parse = parser_for(cell["cmd"])
+    parse = PARSERS[cell["parser"]] if "parser" in cell else parser_for(cell["cmd"])
     runs = []
     valid = []
     requested = requested_runs(args, cell)
@@ -1055,7 +1055,10 @@ def prepare_manifest(args, sections, meta):
               if k not in ("out", "markdown", "no_resume", "runs", "six_consumer_runs")}
     # Ignore launcher bookkeeping (e.g. shell '_', session IDs), while binding
     # build, loader, allocator and benchmark settings. Do not publish values.
-    env_names = {"PATH", "HOME", "USERPROFILE", "TEMP", "TMP", "TMPDIR", "SYSTEMROOT",
+    # PATH and the temporary directories differ between a terminal, an IDE and
+    # macOS login sessions; compiler versions and binary hashes already bind
+    # what PATH selects.
+    env_names = {"HOME", "USERPROFILE", "SYSTEMROOT",
                  "WINDIR", "LIB", "LIBPATH", "INCLUDE", "CPATH", "C_INCLUDE_PATH",
                  "CPLUS_INCLUDE_PATH", "CC", "CXX", "DC", "DMD", "LDC", "DFLAGS",
                  "CFLAGS", "CXXFLAGS", "LDFLAGS", "LANG", "TZ"}
@@ -1101,14 +1104,17 @@ def prepare_manifest(args, sections, meta):
 
 
 def frozen_cell(cell, args, manifest):
-    cmd = cell["cmd"]
+    cmd, frozen = cell["cmd"], {}
     if cmd[0] == "dub":
+        # The snapshot is named after its Dub configuration, so keep the
+        # parser the Dub command selects rather than one for that name.
+        frozen["parser"] = "dub_fiber"
         configuration = cmd[cmd.index("-c") + 1]
         target = args.out / "bin" / (configuration + (".exe" if os.name == "nt" else ""))
         cmd = [str(target), *cmd[cmd.index("--") + 1:]]
     if file_hash(cmd[0]) != manifest["binaries"][str(Path(cmd[0]))]:
         raise ValueError("benchmark executable changed during the run")
-    return {**cell, "cmd": cmd}
+    return {**cell, **frozen, "cmd": cmd}
 
 
 def main(argv=None):
