@@ -1,6 +1,6 @@
 # Ant Farm architecture
 
-Ant Farm's current release is 1.9.0. It is one repository
+Ant Farm's current release is 1.9.1. It is one repository
 with four cooperating packages. They separate transport, worker placement,
 stateful identities, and suspendable control flow so an application can choose
 the narrowest representation for each kind of work.

@@ -4,7 +4,7 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
-## 1.9.1 — unreleased
+## 1.9.1 — 2026-10-23
 
 - README now provides explicit C/C++ and D entry paths and separates building
   the library from using the runtime-free native core. Added `cpp_threads.cpp`,

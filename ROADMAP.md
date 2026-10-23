@@ -1,6 +1,6 @@
 # Ant Farm roadmap
 
-The current release is **1.9.0**. This page lists remaining
+The current release is **1.9.1**. This page lists remaining
 and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
 no history here. Windows validation is separate and is not
 part of its local gate.
