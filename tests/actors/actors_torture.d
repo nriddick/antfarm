@@ -941,6 +941,173 @@ private void testRetirementJoinsLateSignal()
         "retirement join reclamation");
 }
 
+private struct GateOrderState
+{
+    int unused;
+}
+
+private __gshared shared(int) g_gateBlockHandler;
+private __gshared shared(int) g_gateInHandler;
+private __gshared shared(int) g_gateReleaseHandler;
+private __gshared shared(int) g_gateSelfRetire;
+private __gshared shared(int) g_gateProcessed;
+private __gshared shared(int) g_gateArm = -1;
+private __gshared shared(int) g_gateArrived;
+private __gshared shared(int) g_gateRelease;
+
+private void gateOrderActor(scope ref ActorBorrow!GateOrderState,
+        scope ref ActorContext context) nothrow @nogc @system
+{
+    if (cas(&g_gateBlockHandler, 1, 0))
+    {
+        atomicStore!(MemoryOrder.rel)(g_gateInHandler, 1);
+        while (atomicLoad!(MemoryOrder.acq)(g_gateReleaseHandler) == 0) {}
+    }
+    for (auto node = context.popInbox(); node !is null;
+            node = context.popInbox())
+    {
+        atomicFetchAdd!(MemoryOrder.acq_rel)(g_gateProcessed, 1);
+        node.complete();
+    }
+    if (cas(&g_gateSelfRetire, 1, 0)) context.retire();
+}
+
+/// Parks once at the armed retirement seam (between the gate and inbox
+/// reads); the sender's reservation stall goes through blockingActorHook.
+private void gateOrderHook(ActorTestPoint point, ActorInboxNode* node)
+    nothrow @nogc @system
+{
+    if (cast(int) point == atomicLoad!(MemoryOrder.acq)(g_gateArm)
+            && cas(&g_gateArm, cast(int) point, -1))
+    {
+        atomicStore!(MemoryOrder.rel)(g_gateArrived, 1);
+        while (atomicLoad!(MemoryOrder.acq)(g_gateRelease) == 0) {}
+        return;
+    }
+    blockingActorHook(point, node);
+}
+
+private enum GateOrderMode { exit, entry, self }
+
+/// A sender reserved before the close finishes its push, signal and
+/// release while retirement is parked between its gate and inbox reads.
+/// The actor is already PENDING (a retirement drive or an earlier send),
+/// so the late signal rewrites the lifecycle word with the same value and
+/// the retirement CAS cannot notice it; only the gate-before-inbox order
+/// keeps the accepted message from being dropped at RETIRED.
+private void testRetirementGateBeforeInbox(GateOrderMode mode)
+{
+    auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
+    check(farm !is null, "gate order Farm allocation");
+    scope (exit) farm.destroy();
+    auto runtime = ActorRuntime.create(farm, 1);
+    check(runtime !is null, "gate order runtime allocation");
+    scope (exit) runtime.destroy();
+    auto owner = runtime.createActor!(GateOrderState, gateOrderActor)(
+        GateOrderState(0));
+    check(owner.valid, "gate order actor allocation");
+    auto handle = owner.handle;
+    auto token = farm.registerProducer(Tier.small);
+    check(token.valid, "gate order producer");
+    scope (exit) farm.unregisterProducer(token);
+
+    shared int stopConsumer;
+    auto consumer = new Thread({
+        ConsumerView view;
+        check(view.subscribe(farm) >= 0, "gate order consumer");
+        while (atomicLoad!(MemoryOrder.acq)(stopConsumer) == 0)
+            if (!view.consumeNext()) Thread.yield();
+        view.unsubscribe();
+    });
+    consumer.start();
+    scope (exit)
+    {
+        atomicStore!(MemoryOrder.rel)(stopConsumer, 1);
+        consumer.join();
+    }
+
+    ActorInboxNode late;
+    late.initialize(null, 2);
+    ActorInboxNode early;
+    early.initialize(null, 1);
+    atomicStore!(MemoryOrder.rel)(g_gateBlockHandler, 0);
+    atomicStore!(MemoryOrder.rel)(g_gateInHandler, 0);
+    atomicStore!(MemoryOrder.rel)(g_gateReleaseHandler, 0);
+    atomicStore!(MemoryOrder.rel)(g_gateSelfRetire, 0);
+    atomicStore!(MemoryOrder.rel)(g_gateProcessed, 0);
+    atomicStore!(MemoryOrder.rel)(g_gateArm, -1);
+    atomicStore!(MemoryOrder.rel)(g_gateArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_gateRelease, 0);
+    g_hookNode = &late;
+    atomicStore!(MemoryOrder.rel)(g_hookTarget,
+        cast(int) ActorTestPoint.submissionReserved);
+    atomicStore!(MemoryOrder.rel)(g_hookArrived, 0);
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 0);
+    setActorTestHook(&gateOrderHook);
+    scope (exit)
+    {
+        setActorTestHook(null);
+        g_hookNode = null;
+    }
+    immutable deadline = MonoTime.currTime + 15.seconds;
+
+    ActorSendResult lateResult;
+    auto sender = new Thread({ lateResult = handle.send(&late); });
+    immutable expected = mode == GateOrderMode.self ? 2 : 1;
+    final switch (mode)
+    {
+    case GateOrderMode.exit:
+    case GateOrderMode.self:
+        atomicStore!(MemoryOrder.rel)(g_gateBlockHandler, 1);
+        if (mode == GateOrderMode.self)
+            atomicStore!(MemoryOrder.rel)(g_gateSelfRetire, 1);
+        check(handle.wake() == ActorWakeResult.queued, "gate order wake");
+        while (runtime.flush(token, 8, DEFAULT_AVG_COST) == 0)
+            Thread.yield();
+        waitFlag(g_gateInHandler, deadline, "gate order handler start");
+        if (mode == GateOrderMode.self)
+            check(accepted(handle.send(&early)),
+                "gate order early send while running");
+        sender.start();
+        waitFlag(g_hookArrived, deadline, "gate order sender reservation");
+        if (mode == GateOrderMode.exit)
+            check(owner.requestRetire() == ActorRetireResult.requested,
+                "gate order retirement while running");
+        atomicStore!(MemoryOrder.rel)(g_gateArm,
+            cast(int) ActorTestPoint.retirementExitGateObserved);
+        atomicStore!(MemoryOrder.rel)(g_gateReleaseHandler, 1);
+        break;
+    case GateOrderMode.entry:
+        check(handle.wake() == ActorWakeResult.queued, "gate order wake");
+        sender.start();
+        waitFlag(g_hookArrived, deadline, "gate order sender reservation");
+        check(owner.requestRetire() == ActorRetireResult.requested,
+            "gate order retirement while scheduled");
+        atomicStore!(MemoryOrder.rel)(g_gateArm,
+            cast(int) ActorTestPoint.retirementEntryGateObserved);
+        while (runtime.flush(token, 8, DEFAULT_AVG_COST) == 0)
+            Thread.yield();
+        break;
+    }
+    waitFlag(g_gateArrived, deadline, "gate order retirement seam");
+    atomicStore!(MemoryOrder.rel)(g_hookRelease, 1);
+    sender.join();
+    check(accepted(lateResult), "gate order late sender accepted");
+    atomicStore!(MemoryOrder.rel)(g_gateRelease, 1);
+
+    while (!(owner.retired && late.available))
+    {
+        runtime.flush(token, 8, DEFAULT_AVG_COST);
+        if (MonoTime.currTime >= deadline)
+            check(false, "gate order drain timeout");
+        Thread.yield();
+    }
+    check(atomicLoad!(MemoryOrder.acq)(g_gateProcessed) == expected,
+        "gate order retirement processes every accepted message");
+    check(owner.reclaim() == ActorReclaimResult.reclaimed,
+        "gate order reclamation");
+}
+
 private void waveCreditHook(ActorTestPoint point, ActorInboxNode*) nothrow @nogc @system
 {
     if (point != ActorTestPoint.waveTableProgressRecorded) return;
@@ -1085,6 +1252,9 @@ private void testDeterministicInterleavings()
     testWaveMembershipPinsRetiredActor();
     testWaveReleaseAllowsImmediateReuse();
     testRetirementJoinsLateSignal();
+    testRetirementGateBeforeInbox(GateOrderMode.exit);
+    testRetirementGateBeforeInbox(GateOrderMode.entry);
+    testRetirementGateBeforeInbox(GateOrderMode.self);
     printf("actor deterministic interleavings OK\n");
     fflush(stdout);
 }

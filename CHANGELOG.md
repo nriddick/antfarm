@@ -6,6 +6,19 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+Fixes:
+
+- Public actors: a retiring entry or exit read the inbox before the
+  submission gate, so a sender reserved before the close could push, signal
+  and release in between. With `PENDING` already set (any retirement drive,
+  or a wake during the activation) that signal rewrote the same lifecycle
+  value, the retirement CAS succeeded, and the actor reached `RETIRED` with
+  an accepted node queued: the reply never completed and `reclaim` was
+  fatal. Both loops now acquire the gate first; a closed gate with no
+  reservation joins every accepted push, so the inbox read after it is
+  final. The torture suite parks a retirement between the two reads in
+  entry, exit and self-retirement schedules.
+
 - `forkjoin.frames`: a frame pool for task frames (`allocFrame`,
   `allocFrames!T`, `freeFrame`, `releaseFrames`, `frameStats`). Headerless
   64 KiB chunks whose first line names the owning slot and block size,

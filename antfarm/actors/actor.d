@@ -329,6 +329,8 @@ version (AntfarmActorTestHooks)
         privateResumeAfterUnschedule,
         readyDetached,
         retirementIdleObserved,
+        retirementEntryGateObserved,
+        retirementExitGateObserved,
         retirementBeforeGateClose,
         retirementBeforePublish,
         retirementAfterPublish,
@@ -1512,12 +1514,21 @@ private:
                 return;
             }
             immutable retiring = (observed & retireBit) != 0;
+            // Gate before inbox: a closed gate with no reservation joins
+            // every accepted sender's push, so an empty inbox read after it
+            // is final. The lifecycle CAS cannot stand in for that order: a
+            // sender whose signal finds PENDING already set rewrites the
+            // same value, and the CAS succeeds over it.
+            immutable gate = retiring
+                ? atomicLoad!(MemoryOrder.acq)(slot.submissionGate) : 0;
+            version (AntfarmActorTestHooks)
+                if (retiring)
+                    actorTestPoint(ActorTestPoint.retirementEntryGateObserved,
+                        null);
             immutable hasInbox = slot.inboxCarryWord != 0
                 || atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) != 0;
             if (retiring && !hasInbox)
             {
-                immutable gate = atomicLoad!(MemoryOrder.acq)(
-                    slot.submissionGate);
                 if ((gate & submissionClosedBit) != 0
                     && (gate & submissionCountMask) == 0)
                 {
@@ -1583,13 +1594,18 @@ private:
                 return;
             }
             immutable mustRetire = (observed & retireBit) != 0;
+            // Gate before inbox, as at entry.
+            immutable gate = mustRetire
+                ? atomicLoad!(MemoryOrder.acq)(slot.submissionGate) : 0;
+            version (AntfarmActorTestHooks)
+                if (mustRetire)
+                    actorTestPoint(ActorTestPoint.retirementExitGateObserved,
+                        null);
             immutable hasInbox = slot.inboxCarryWord != 0
                 || atomicLoad!(MemoryOrder.acq)(slot.inboxHeadWord) != 0;
             ulong nextPhase;
             if (mustRetire)
             {
-                immutable gate = atomicLoad!(MemoryOrder.acq)(
-                    slot.submissionGate);
                 immutable canRetire = (gate & submissionClosedBit) != 0
                     && (gate & submissionCountMask) == 0 && !hasInbox;
                 nextPhase = canRetire ? phaseRetired : phaseScheduled;
@@ -1863,8 +1879,10 @@ private bool driveActorRetirement(ActorSlot* slot, ulong generation)
         }
         else
         {
-            // This same-word RMW orders the closed submission gate against a
-            // scheduled entry or forces a running exit CAS to reload it.
+            // This RMW orders the closed submission gate before the
+            // activation's next lifecycle read. It may rewrite the same value
+            // (PENDING already set), so it does not force a running exit CAS
+            // to fail; the exit reads the gate before the inbox instead.
             cast(void) signalActor(slot, generation, true);
             return false;
         }

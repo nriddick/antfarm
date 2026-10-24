@@ -37,6 +37,12 @@ Coverage includes:
 - a late accepted sender queuing work between retirement's initial idle
   observation and its submission-gate join, proving the lifecycle is rechecked
   before idle terminal publication (release store, debug CAS tripwire);
+- a sender reserved before the close finishing its push, signal and gate
+  release while a retiring entry or exit (external drain while scheduled or
+  running, and self-retirement after draining an earlier send) is parked
+  between its submission-gate and inbox reads, with `PENDING` already set so
+  the late signal is a same-value RMW: the accepted message is processed
+  before `RETIRED` and reclamation succeeds;
 - F4b public cancel-mode retirement: a 32-node backlog cancelled in one
   `cancelling` activation with every sender reading `cancelled` after
   `available`, a drain-mode control on the identical backlog that completes
