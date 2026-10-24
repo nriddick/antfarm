@@ -18,6 +18,19 @@ Fixes:
   reservation joins every accepted push, so the inbox read after it is
   final. The torture suite parks a retirement between the two reads in
   entry, exit and self-retirement schedules.
+- Fibers: a signal detached its waiter chain and left each node's
+  membership valid. A cancellation that lost to the signal could then unlink
+  a detached waiter and decrement a bucket recreated for the same signal by a
+  later waiter, stranding that waiter where neither a signal nor its own
+  cancellation could reach it. `WaitSet.take` now clears every detached
+  waiter's membership under the stripe lock.
+- Fibers: timer expiry popped the heap entry, dropped the heap mutex, and
+  only then claimed the task's current wait. A waker that won meanwhile could
+  resume the task, which could park on its next wait (or be recycled) before
+  the expiry claimed that one: an hour-long sleep after a timed join could
+  return at once. Expiry now claims the wait under the heap mutex; every
+  other waker already removes the entry before publishing.
+  tests/ant_fibers/wait_races.d pauses in each window through unittest seams.
 
 - `forkjoin.frames`: a frame pool for task frames (`allocFrame`,
   `allocFrames!T`, `freeFrame`, `releaseFrames`, `frameStats`). Headerless

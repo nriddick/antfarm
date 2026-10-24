@@ -16,6 +16,7 @@ import service_plan_tests;
 import host_attach_tests;
 import ant_fibers.semaphore_tests : semaphoreCancellationSmoke;
 import ant_fibers.event_tests : eventCancellationSmoke;
+import ant_fibers.wait_race_tests : waitRaceSmoke;
 import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
 import threadpool.resolution : PoolResolution;
 import core.thread : Fiber, Thread;
@@ -2732,6 +2733,7 @@ void main(string[] args)
         cancellationSemanticsSmoke();
         fiberJoinSmoke();
         sharedSignalAndTimerCancellationSmoke();
+        waitRaceSmoke();
         printf("cancellation smoke passed\n");
         return;
     }
@@ -2759,6 +2761,7 @@ void main(string[] args)
     eventCancellationSmoke();
     semaphoreCancellationSmoke();
     sharedSignalAndTimerCancellationSmoke();
+    waitRaceSmoke();
     threadpoolSmoke();
     admissionAfterStopSmoke();
     admissionAfterEarlyShutdownSmoke();

@@ -125,7 +125,11 @@ consumers to abandon partially processed tables.
 ## Waits, timers, joins, and cancellation
 
 `WaitSet` uses mutex-striped signal maps with intrusive doubly linked waiter
-chains. Individual removal and whole-signal detach are O(1). `FiberEvent` and
+chains. Individual removal is O(1). Whole-signal detach unlinks the bucket in
+O(1) and clears each detached waiter's membership before the stripe lock
+drops, so a cancellation that loses to the signal sees a non-member and leaves
+both the detached chain and any bucket recreated for the signal alone; the
+signal then wakes it. `FiberEvent` and
 `FiberSemaphore` register and then recheck their state so a signal cannot be
 lost between observing it and parking. A reusable `FiberGenerationTrigger`
 retains one empty map bucket after first use, avoiding delete/reinsert
@@ -137,7 +141,11 @@ until its domain does.
 `TimerSet` assigns private signals and stores them in an indexed binary
 min-heap ordered by `(deadline, sequence)`. Nearest-deadline lookup is O(1),
 insert and removal are O(log N), and expiry does not allocate after the heap
-has reached its high-water capacity.
+has reached its high-water capacity. Expiry pops an entry and claims its wait
+(join-list or wait-set removal) under the heap mutex. Every other waker
+removes the entry before publishing its wake, so while an expiry arbitrates,
+the task cannot resume, park on a later wait or be recycled; the claim
+therefore removes the wait the timer was armed for.
 
 Managed joins use a generation-checked intrusive list on the target. Target
 completion, joiner cancellation, and timer expiry arbitrate removal so exactly

@@ -1127,7 +1127,10 @@ final class WaitSet
     }
 
     /// Remove and return the intrusive chain of all fibers waiting for
-    /// `signal`; `count` receives the chain length.
+    /// `signal`; `count` receives the chain length. The caller owns the
+    /// chain's links. Every node's membership is cleared before the stripe
+    /// lock drops, so `remove` rejects a detached node instead of editing
+    /// the chain being traversed or a bucket recreated for the same signal.
     package FiberTask take(Signal signal, out size_t count)
     {
         immutable s = stripe(signal);
@@ -1136,6 +1139,8 @@ final class WaitSet
             if (auto p = signal in buckets[s])
             {
                 auto bucket = *p;
+                for (auto t = bucket.head; t !is null; t = t.waitNext)
+                    t.waitGeneration = 0;
                 if (persistentSignal(signal))
                 {
                     p.head = null;
@@ -1298,7 +1303,15 @@ final class TimerSet
         return true;
     }
 
-    bool takeExpired(long nowTicks, out FiberTask task)
+    /// Pops the earliest entry if it has expired and runs `claim` on its
+    /// task before the mutex drops; `task` is the task when the claim won and
+    /// null when another waker already had. Popping and claiming are one
+    /// step because a waker that wins instead calls `remove` before it
+    /// publishes: a separate claim could find the task resumed and parked on
+    /// a later wait, or recycled. Lock order: this mutex, then the claim's
+    /// wait-stripe or join-list lock; no path takes this mutex under either.
+    bool takeExpired(long nowTicks, scope bool delegate(FiberTask) claim,
+        out FiberTask task)
     {
         synchronized (mutex)
         {
@@ -1307,7 +1320,8 @@ final class TimerSet
                 task = null;
                 return false;
             }
-            task = removeAt(0);
+            auto popped = removeAt(0);
+            task = claim(popped) ? popped : null;
             return true;
         }
     }
@@ -2305,13 +2319,15 @@ final class FiberDomain
     {
         size_t matched;
         auto chain = waits.take(signal, matched);
+        version (unittest)
+            if (wakeAfterTakeHook !is null)
+                wakeAfterTakeHook(signal);
         while (chain !is null)
         {
             auto task = chain;
             chain = task.waitNext;
             task.waitNext = null;
             task.waitPrev = null;
-            task.waitGeneration = 0;
             makeWaiterReady(task);
         }
         return matched;
@@ -2323,19 +2339,28 @@ final class FiberDomain
     {
         size_t woken;
         FiberTask task;
-        while (timers.takeExpired(now.ticks, task))
+        while (timers.takeExpired(now.ticks, &claimExpiredWait, task))
         {
-            auto target = task.managedJoinTarget();
-            immutable removed = target !is null
-                ? target.removeManagedJoinWaiter(task)
-                : waits.remove(task, task.waitSignal);
-            if (removed)
-            {
-                makeWaiterReady(task);
-                ++woken;
-            }
+            if (task is null) continue;
+            version (unittest)
+                if (timerAfterClaimHook !is null)
+                    timerAfterClaimHook(task);
+            makeWaiterReady(task);
+            ++woken;
         }
         return woken;
+    }
+
+    /// Runs under the timer mutex with the task's entry just popped. Every
+    /// other waker removes the entry before it publishes, so the task cannot
+    /// resume, register another wait or be recycled until this returns, and
+    /// its current join target or wait signal is the one the timer armed.
+    private bool claimExpiredWait(FiberTask task)
+    {
+        auto target = task.managedJoinTarget();
+        return target !is null
+            ? target.removeManagedJoinWaiter(task)
+            : waits.remove(task, task.waitSignal);
     }
 
     bool nextTimerDeadline(out long ticks)
@@ -2913,6 +2938,15 @@ version (unittest)
     // TLS scheduling seam; absent from production and from object layouts.
     package void delegate(FiberEvent) eventAfterRegisterHook;
 
+version (unittest)
+{
+    // TLS scheduling seams for the wait-race tests: after a signal detaches
+    // its waiters and before it wakes them, and after timer expiry claims a
+    // wait and before it publishes the waiter.
+    package void delegate(Signal) wakeAfterTakeHook;
+    package void delegate(FiberTask) timerAfterClaimHook;
+}
+
 /// Scheduler-aware event. `wait` parks a managed fiber; `set`/`reset` may run
 /// on any thread. Auto-reset consumes the posted state for one waiter; extras
 /// that were woken re-park. Manual-reset stays posted until `reset`.
@@ -3313,7 +3347,7 @@ version (unittest)
         ulong lastSequence;
         FiberTask task;
         size_t popped;
-        while (timers.takeExpired(long.max, task))
+        while (timers.takeExpired(long.max, (FiberTask) => true, task))
         {
             immutable deadline = cast(long)(task.payloadWord % 257);
             immutable sequence = task.payloadWord;

@@ -21,7 +21,8 @@ configuration "unittest" {
     buildOptions "unittests"
     mainSourceFile "../tests/ant_fibers/smoke.d"
     sourceFiles "../tests/ant_fibers/service_plan.d" "../tests/ant_fibers/host_attach.d" \
-        "../tests/ant_fibers/semaphore.d" "../tests/ant_fibers/event.d"
+        "../tests/ant_fibers/semaphore.d" "../tests/ant_fibers/event.d" \
+        "../tests/ant_fibers/wait_races.d"
     importPaths "../tests/ant_fibers"
 }
 
