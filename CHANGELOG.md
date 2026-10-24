@@ -4,7 +4,45 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
-## Unreleased
+## 2.0.0 — 2026-10-24
+
+2.0.0 adds a work-stealing fork-join dispatcher beside the Farm, puts one
+owner under the pool, removes the blocking parallel adapters in its favour,
+and moves the whole project to the MIT license. On the tzcnt/runtime-benchmarks
+programs the dispatcher ties or leads citor, libfork, TooManyCooks and TBB on
+fib and skynet at every thread count and is within 5% on nqueens and matmul
+(the table at the top of PERFORMANCE.md). C ABI 1 is unchanged.
+
+Highlights:
+
+- `forkjoin`: per-participant bounded Chase-Lev deques, a heap-frame
+  continuation-passing `Node` with `fork`/`complete`, the Farm as the
+  overflow and admission channel, parking on the pool's armed bitmap,
+  `Dispatcher.start()` on every eligible processor or on a chosen set,
+  `runRoot`, `submitRoot`/`waitRoot`, `submitDetached`, and the loops
+  `forkJoinFor`, `forkJoinEach` and `forkJoinReduce` (deterministic split).
+- `threadpool.groups.GroupHost`: one owner of the pool, caller placement,
+  one Farm per LLC group or one shared Farm, and per-thread producer tokens
+  for raw worker bodies; the dispatcher runs on it.
+- The pool's `wakeOne`/`anyWorkerArmed`; `import threadpool;` re-exports
+  the host and groups modules.
+- Onboarding: the README opens with the three rules and a ten-line fork-join
+  first program; the hosting guide is split into running a host and scaling
+  across groups; a docs inventory check covers every public declaration.
+
+Breaking changes:
+
+- License: BSL-1.0 to MIT for the whole project; the fork-join design is
+  derived from citor (Vitalii Shutov, MIT), acknowledged in `LICENSE`.
+- Removed: `antfarm.parallel`'s `parallelForWait`, `parallel` and
+  `ParallelLoop`; `FarmHost.parallelFor` (`parallelOptions` and `step()`
+  stay for asynchronous regions); `threadpool.exchange`.
+- The pool's spin and park counters compile only with
+  `version (ThreadpoolStats)`; the Director's `cadence`, `nudge` and
+  `drift` and the `Cadence` options only with `version (ThreadpoolCadence)`.
+- `HostGroups.span` is no longer a placement default.
+
+The entries below record the work in the order it landed, newest first.
 
 - PERFORMANCE.md opens with the fork-join dispatcher against citor, libfork,
   TooManyCooks and TBB on the tzcnt/runtime-benchmarks programs at 1, 2, 8,

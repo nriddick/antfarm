@@ -17,7 +17,7 @@ Windows validation is separate and is not part of the local gate.
   before promoting them; shared-library packaging and language adapters can
   follow the static distributions.
 - Route `FarmHost`'s runtimes and parks by group on top of `GroupHost`
-  (`threadpool.groups`), which since 2.0.0-dev owns the pool, caller
+  (`threadpool.groups`), which since 2.0.0 owns the pool, caller
   placement, one Farm per accepted group and per-thread tokens for raw
   worker bodies; the fork-join dispatcher runs on it. The actor host still
   owns one Farm on one group. The measurements are in
@@ -37,9 +37,9 @@ Windows validation is separate and is not part of the local gate.
   records release-store retirement, the bounded reservation walk and the
   remaining serial-private/historical-inbox measurement uncertainty.
 
-## 2.0.0-dev status
+## 2.0.0 status
 
-On the `2.0.0-progress` branch the release content is: the `forkjoin`
+The 2.0.0 release content is: the `forkjoin`
 subpackage (work-stealing deques, continuation-passing join, parking and
 foreign admission, `forkJoinFor`/`forkJoinEach`/`forkJoinReduce`,
 `submitDetached`); `GroupHost` as the owner of pool, Farms and tokens for
