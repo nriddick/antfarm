@@ -6,6 +6,19 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- Cleanup step 3: blocking loops run on the fork-join dispatcher.
+  `forkjoin.range` adds `forkJoinFor`, `forkJoinEach` (a borrowing
+  delegate) and `forkJoinReduce`, a reduction whose split points depend only on
+  length and grain and is therefore bit-identical across participant
+  counts. `antfarm.parallel` loses `parallelForWait`, `parallel` and
+  `ParallelLoop`; `FarmHost.parallelFor` is removed (`parallelOptions` stays
+  for asynchronous regions driven by `step()`). The dispatcher gains
+  `submitDetached`, `isParticipant`, per-root completion in `runRoot` (a
+  nested loop waits only for its own tree) and a draining `stop`. The
+  parked-worker regression in host-test drives an asynchronous handle with
+  `step()`; the parallel death probes for nested blocking waits and
+  `break` are gone with the adapters.
+
 - Cleanup for 2.0, step 5 and 7 of [the plan](docs/development/cleanup-plan-2.0.md):
   `threadpool.exchange` (a self-described stub) is removed; `HostGroups.span`
   moved out of the placement defaults into a "when you know better" note;

@@ -14,8 +14,6 @@ __gshared uint[] hits;
 shared uint notified;
 shared uint entered;
 shared uint release;
-__gshared ConsumerView* nestedView;
-__gshared Token* nestedToken;
 
 void check(bool condition) nothrow @nogc @system
 {
@@ -48,24 +46,22 @@ extern(C) void joined(void*) nothrow @nogc @system
     foreach (value; hits) check(value == 1);
     check(atomicFetchAdd!(MemoryOrder.acq_rel)(notified, 1U) == 0);
 }
-void nested(size_t) nothrow @nogc @system
-{
-    parallelForWait!noop(iota(size_t(1)), *nestedToken, *nestedView);
-}
-extern(C) void nestedHook(void*) nothrow @nogc @system { nested(0); }
-
 void subscribe(ref ConsumerView view, AntFarm* farm)
 {
     check(view.subscribe(farm) >= 0);
 }
 
-void borrowedNoGC(ref ConsumerView view, ref Token token) nothrow @nogc @system
+// Publish with retry and help-drain the caller's view until the join.
+void runRegion(alias fn, R)(AntFarm* farm, R source, ref Token token, ref ConsumerView view,
+    Options options = Options.init) nothrow @nogc @system
 {
-    uint[1031] local;
-    foreach (i; parallel(view, token, iota(local.length),
-        Options(13, 7)))
-        local[i] = cast(uint) i + 1;
-    foreach (i, value; local) check(value == i + 1);
+    auto handle = parallelFor!fn(farm, source, token, options);
+    while (!handle.submitted)
+    {
+        view.consumeNext();
+        handle.publish(token);
+    }
+    while (!handle.complete) view.consumeNext();
 }
 
 void basic()
@@ -83,7 +79,7 @@ void basic()
     {
         hits = new uint[n];
         auto options = Options(grain, MAX_AVG_COST);
-        parallelForWait!visit(iota(n), token, view, options);
+        runRegion!visit(farm, iota(n), token, view, options);
         foreach (hit; hits) check(hit == 1);
 
         hits[] = 0;
@@ -161,30 +157,10 @@ void basic()
 
     static assert(__traits(compiles, parallelRange!visit((size_t[]).init)));
     static assert(!__traits(compiles, parallelRange!visit((size_t[]).init, 2)));
-    size_t[3] borrowed = [0, 1, 2];
-    hits = new uint[3];
-    parallelForWait!visit(borrowed[], token, view, Options(2));
-    foreach (hit; hits) check(hit == 1);
-
     // Preserve nonzero starts and strides, including a descending iota.
     hits = new uint[100];
-    parallelForWait!signedVisit(iota(99, 0, -3), token, view);
+    runRegion!signedVisit(farm, iota(99, 0, -3), token, view);
     foreach (i, hit; hits) check(hit == (i > 0 && i % 3 == 0 ? 1 : 0));
-
-    // Borrow the caller's frame, mutable range, and data without allocating a closure.
-    uint[1031] output;
-
-    {
-        output[] = 0;
-        foreach (i; parallel(view, token, iota(output.length), Options(64, 7)))
-            output[i] = cast(uint) i + 1;
-        foreach (i, value; output) check(value == i + 1);
-    }
-    size_t calls;
-    foreach (value; parallel(view, token, output[], Options(1, 7)))
-        ++calls;
-    check(calls == output.length);
-    borrowedNoGC(view, token);
 
     // A fully published handle can go away before consumers finish.
     hits = new uint[31];
@@ -228,7 +204,6 @@ void concurrent()
         foreach (thread; workers) thread.join();
     }
     while (atomicLoad!(MemoryOrder.acq)(ready) != 4) Thread.yield();
-    borrowedNoGC(view, token);
 
     foreach (grain; [size_t(1), 64])
     {
@@ -362,16 +337,10 @@ void main(string[] args)
         auto token = farm.registerProducer(Tier.small);
         ConsumerView view;
         subscribe(view, farm);
-        nestedView = &view;
-        nestedToken = &token;
         if (args[1] == "drop")
         {
             auto handle = parallelFor!noop(farm, iota(size_t(1_000_000)), token);
             check(!handle.submitted);
-        }
-        else if (args[1] == "break")
-        {
-            foreach (i; parallel(view, token, iota(size_t(1)))) break;
         }
         else if (args[1] == "invalid-hook")
         {
@@ -381,25 +350,13 @@ void main(string[] args)
         }
         else if (args[1] == "cost-class")
         {
-            parallelForWait!noop(iota(size_t(0)), token, view, Options(1, MAX_AVG_COST + 1));
+            auto handle = parallelFor!noop(farm, iota(size_t(0)), token, Options(1, MAX_AVG_COST + 1));
         }
         else if (args[1] == "grain-zero")
         {
             auto entries = payloadRange!noop(iota(size_t(1)), 0);
         }
-        else if (args[1] == "nested-hook")
-        {
-            auto hook = TableCompletionHook(null, &nestedHook);
-            auto handle = parallelFor!noop(farm, iota(size_t(1)), token, Options.init, &hook);
-            while (!handle.complete) view.consumeNext();
-        }
-        else
-        {
-            auto entries = parallelRange!nested(iota(size_t(1)));
-            check(farm.write(entries, token) == 1);
-            view.consumeNext();
-        }
-        fatal("death test returned without rejecting nested wait");
+        fatal("death test returned without its fatal condition");
     }
     basic();
     concurrent();

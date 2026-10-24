@@ -80,7 +80,15 @@ when a deque is full. One frame pointer is the unit in both.
   `Event`; the root goes into the first Farm as a one-entry table through a
   token shared under a spinlock; one parked worker is woken. `waitRoot`
   blocks on the `Event`.
-- **Shutdown.** `Dispatcher.stop` shuts the pool down (every worker runs its
+- **Loops.** `forkjoin.range` splits a range in halves down to the grain;
+  frames are heap cohorts of two freed in the join, so live frames are
+  participants times depth. Split points are a function of length and grain,
+  which makes `forkJoinReduce` deterministic across participant counts.
+  Both run on the caller when it is a participant (`runRoot`, which waits on
+  the root's own sentinel, so a nested loop waits only for its own tree) and
+  through `submitRoot`/`waitRoot` otherwise. `submitDetached` is `submitRoot`
+  without a completion; `stop` drains `g_rootsLive` before shutdown.
+- **Shutdown.** `Dispatcher.stop` drains outstanding roots, then shuts the pool down (every worker runs its
   stop hook: flush counters, unsubscribe, unregister), then the caller
   leaves, the registry is uninstalled, and deques and Farms are destroyed.
 

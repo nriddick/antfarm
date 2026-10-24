@@ -553,10 +553,11 @@ Priority of roles: if the same run that would qualify `Ci` for the yield is also
 ### 7c. Payload Execution
 
 Consumer callbacks and table-completion hooks run inside an active view walk.
-That walk is not re-entrant. Blocking parallel-loop adapters are forbidden
-there; every build diagnoses this with a thread-local callback flag. The
-[parallel-loop contract](docs/guide/parallel-loops.md#blocking-loops) owns the
-adapter lifetime and nested-work rules.
+That walk is not re-entrant: nothing inside a callback may call
+`consumeNext` on the running view or wait for ring space. A thread-local
+callback flag records the walk for diagnostics. Nested work forks onto the
+fork-join dispatcher or publishes asynchronously with a hook
+([parallel loops](docs/guide/parallel-loops.md)).
 
 The consumer executes every payload in its claimed run once, synchronously,
 then accounts the run through 7a-e. It borrows the ring body as described

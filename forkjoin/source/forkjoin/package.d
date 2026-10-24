@@ -15,3 +15,4 @@ module forkjoin;
 public import forkjoin.node;
 public import forkjoin.deque;
 public import forkjoin.dispatcher;
+public import forkjoin.range;

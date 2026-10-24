@@ -68,8 +68,9 @@ watchdog (for example `timeout --signal=KILL 60` on Linux). It fails rather than
 skipping when two worker CPUs cannot be selected.
 
 The parked parallel-loop regression uses two indefinitely parked workers and a
-region larger than the ring. Only the blocking `FarmHost.parallelFor` caller
-drives progress; it must wake workers, finish all grains and reclaim space.
+region larger than the ring. Only the caller's `step()` loop around an
+asynchronous `parallelFor` handle drives progress; it must wake workers,
+publish the rest after backpressure, finish all grains and reclaim space.
 Run it alone with `dub run :threadpool -c host-test -- --parallel-only`.
 
 It also checks bounded emission bursts with a busy and a quiet attachment,

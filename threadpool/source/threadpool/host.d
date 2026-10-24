@@ -771,8 +771,11 @@ final class FarmHost
             pool_.wakeAll();
     }
 
-    /// Parallel-region options wired to this host's park/wake policy. The host
-    /// must outlive the region. Replaces the supplied wake callback/context.
+    /// Options for an asynchronous `antfarm.parallel.parallelFor` region
+    /// wired to this host's wake: every accepted write wakes parked workers.
+    /// Drive the region with `step()` until its handle reports completion.
+    /// The host must outlive the region. Replaces the supplied wake
+    /// callback/context. Blocking loops run on the fork-join dispatcher.
     antfarm.parallel.Options parallelOptions(
         antfarm.parallel.Options options = antfarm.parallel.Options.init) @nogc nothrow
     {
@@ -784,19 +787,6 @@ final class FarmHost
     private static void wakeParallel(void* context) @nogc nothrow
     {
         (cast(FarmHost) context).wake();
-    }
-
-    /// Blocking parallel loop on the control thread. Uses the host's token and
-    /// caller view, waking peers on publication and idle polls. Requires
-    /// callerConsumes; fatal inside a Farm callback, after shutdown, or without
-    /// a caller view. Mutable range storage is borrowed through the join.
-    void parallelFor(alias fn, R)(R source,
-        antfarm.parallel.Options options = antfarm.parallel.Options.init) @nogc nothrow
-    {
-        if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open || !viewSubscribed_)
-            fatal("FarmHost.parallelFor requires an open host with caller consumption");
-        version (assert) assertControl();
-        antfarm.parallel.parallelForWait!fn(source, token_, view_, parallelOptions(options));
     }
 
     // ---- progress -----------------------------------------------------------

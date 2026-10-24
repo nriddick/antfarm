@@ -52,6 +52,30 @@ push onto an empty deque, a spill, or a root submission; a woken worker that
 forks wakes the next one. Threads that are not participants submit roots
 with `submitRoot` and block in `waitRoot`.
 
+## Loops and reductions
+
+`forkjoin.range` turns a finite random-access range into a fork-join tree:
+halves down to `grain` elements, leaves on the deques, a join that never
+blocks a worker. `forkJoinFor!fn` calls a function per element,
+`forkJoinEach` a delegate that may borrow the caller's frame, and
+`forkJoinReduce!(fn, combine)` folds.
+
+```d
+forkJoinFor!update(iota(n), 64);
+forkJoinEach(iota(output.length), 64, (size_t i) nothrow @nogc @system { output[i] = f(i); });
+auto sum = forkJoinReduce!(term, add)(iota(n), 0.0, 64);
+```
+
+The split points depend only on the length and the grain, so
+`forkJoinReduce` is bit-identical across participant counts: leaf folds run
+left to right and the tree combines in a fixed shape. `combine` must be
+associative for the result to equal a sequential fold; it need not be
+commutative. A participant helps while it waits; any other thread submits
+the root and waits on its completion; a loop may start inside a node or a
+Farm callback. `submitDetached(root)` publishes a root without waiting
+(its `join` is the completion callback); `Dispatcher.stop` drains
+outstanding roots first.
+
 ## Run it
 
 ```text

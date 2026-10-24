@@ -398,13 +398,12 @@ CPU list naming the controller followed by each consumer);
 [tools/perf/README.md](../../tools/perf/README.md#actor_churn) has the full
 argument list.
 
-## Blocking parallel regions
+## Parallel regions
 
-Enable `FarmHostOptions.callerConsumes` and call
-`host.parallelFor!fn(source, options)` from the control thread. This uses the
-host's token and caller view, wakes parked peers after every accepted write
-and on idle polls, and returns after all callbacks join. With a separately
-owned token/view, pass `host.parallelOptions(options)` to the low-level
-adapter instead. Keep the host alive through completion. These loops do not
-pump attachments; nested waits inside callbacks/hooks are fatal in every build.
-See [parallel loops](parallel-loops.md) for borrowed ranges and grain sizing.
+Blocking loops run on the fork-join dispatcher (`forkJoinFor`,
+`forkJoinReduce` in [forkjoin](../../forkjoin/README.md#loops-and-reductions)),
+whose join never blocks a worker. For an asynchronous Farm region on the
+host's Farm, pass `host.parallelOptions(options)` to `parallelFor` so every
+accepted write wakes parked workers, then drive it with `step()` until the
+handle reports completion; keep the host alive through completion. See
+[parallel loops](parallel-loops.md) for ranges and grain sizing.

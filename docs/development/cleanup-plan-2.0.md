@@ -59,10 +59,11 @@ and `forkjoin.Dispatcher`.
   blocking loops to it; `antfarm.parallel` keeps the asynchronous hooked
   form and the grain adapter, which are Farm features the dispatcher has no
   equivalent for.
-- Removes: `parallelForWait`, the `parallel` foreach, `FarmHost.parallelFor`,
-  the `wake`/`wakeContext` options, and using-it-well's "never call a
-  blocking loop inside a callback" rule, since the fork-join join never
-  blocks.
+- Removes: `parallelForWait`, the `parallel` foreach, `FarmHost.parallelFor`
+  and the "never call a blocking loop inside a callback" rule, since the
+  fork-join join never blocks. `Options.wake` and `host.parallelOptions`
+  stay: the asynchronous region still needs to wake parked workers after
+  each accepted write. (Done in 2.0.0-dev.)
 - Check: `tests/farm/run_parallel.py` ported to the new entry points; the
   M1 grid in tools/perf shows the balanced cells within noise and the
   skewed cells faster.

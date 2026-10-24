@@ -96,7 +96,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | Farm algorithm, table layout, callbacks and memory-order contract | [SPEC.md](../SPEC.md) |
 | Layers, sizing formulas and entries per quota | [ARCHITECTURE.md](../ARCHITECTURE.md) |
 | Work-representation and public/private actor choice | [guide/choosing-work.md](guide/choosing-work.md) |
-| Parallel loop API, range ownership, completion proof and blocking restrictions | [guide/parallel-loops.md](guide/parallel-loops.md) |
+| Parallel loop API, range ownership and completion proof; blocking loops point to fork-join | [guide/parallel-loops.md](guide/parallel-loops.md) |
 | First payload and the initial producer/consumer/actor model | [guide/quickstart.md](guide/quickstart.md) |
 | Runnable actor programs and their commands | [examples/README.md](../examples/README.md) |
 | FarmHost setup, placement, idle and wake, control-thread rule, close and abandon | [guide/hosting.md](guide/hosting.md) |

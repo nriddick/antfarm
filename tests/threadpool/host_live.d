@@ -873,10 +873,19 @@ void parkedParallel()
     atomicStore(parallelWorkerJobs, 0UL);
     awaitReclamation(() => atomicLoad(gWait[0].wakeWord) == 1
         && atomicLoad(gWait[1].wakeWord) == 1, "workers did not arm for indefinite parking");
-    // More two-word grains than the whole ring can hold. Only this blocking
-    // caller drives progress; no host.step, timer, or external wake rescues it.
+    // More two-word grains than the whole ring can hold. Only this caller's
+    // step() drives progress: it must wake the parked workers, publish the
+    // rest after backpressure, and reclaim ring space to finish.
+    import antfarm.parallel : parallelFor;
     immutable count = cast(size_t) host.farm.Ln + 1003;
-    host.parallelFor!hostedParallelJob(iota(count), Options(1, 7));
+    auto handle = parallelFor!hostedParallelJob(host.farm, iota(count), host.token,
+        host.parallelOptions(Options(1, 7)));
+    while (!handle.submitted)
+    {
+        host.step();
+        handle.publish(host.token);
+    }
+    while (!handle.complete) host.step();
     enforce(atomicLoad(parallelJobs) == count, "parked parallel loop lost work");
     enforce(atomicLoad(parallelWorkerJobs) > 0, "parked workers did not help the loop");
     host.close();

@@ -66,7 +66,8 @@ Parallel loop adapters are a separate module:
 | Topic | Symbols | Explanation |
 | --- | --- | --- |
 | Parallel payload ranges and options | `parallelRange`, `ParallelRange`, `Options` | [Parallel loops](../guide/parallel-loops.md) |
-| Asynchronous and blocking regions | `parallelFor`, `ParallelHandle`, `parallelForWait`, `parallel`, `ParallelLoop` | [Parallel loops](../guide/parallel-loops.md) |
+| Asynchronous regions | `parallelFor`, `ParallelHandle` | [Parallel loops](../guide/parallel-loops.md) |
+| Blocking loops and reductions (fork-join) | `forkJoinFor`, `forkJoinEach`, `forkJoinReduce` | [forkjoin/README.md](../../forkjoin/README.md#loops-and-reductions) |
 
 ## Public actors
 

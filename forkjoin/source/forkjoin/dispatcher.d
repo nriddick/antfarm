@@ -338,15 +338,40 @@ private void idlePause() nothrow @nogc @system
     if (t_idle < 12) t_idle++;
 }
 
-/// Runs `root` on the calling thread, then helps until every root completes.
+/// True on a participant: the caller after `start`, or a pool worker.
+bool isParticipant() nothrow @nogc @system
+{
+    return t_deque !is null;
+}
+
+private struct RootWait
+{
+    Node sentinel;
+    shared uint done;
+}
+
+private Node* rootWaitJoin(Node* node) nothrow @nogc @system
+{
+    atomicStore!(MemoryOrder.rel)((cast(RootWait*) node).done, 1u);
+    return null;
+}
+
+/// Runs `root` on the calling participant, then helps until this root
+/// completes. Waits on the root's own completion, not on every root, so it
+/// may be called from inside a node's `run` (the frame of the enclosing
+/// node stays on the stack until the inner tree joins; prefer `fork`).
 void runRoot(Node* root) nothrow @nogc @system
 {
+    if (t_deque is null) fatal("forkjoin: runRoot off a participant; use submitRoot");
     syncEpoch();
-    root.parent = null;
+    RootWait w;
+    w.sentinel.join = &rootWaitJoin;
+    atomicStore!(MemoryOrder.raw)(w.sentinel.pending, 1u);
+    root.parent = &w.sentinel;
     root.depth = 0;
     atomicOp!"+="(g_rootsLive, 1);
     runChain(root);
-    while (atomicLoad!(MemoryOrder.acq)(g_rootsLive) != 0)
+    while (atomicLoad!(MemoryOrder.acq)(w.done) == 0)
     {
         if (step()) t_idle = 0;
         else idlePause();
@@ -454,6 +479,28 @@ void waitRoot(RootCompletion* c) nothrow @nogc @system
 {
     c.done.wait();
     c.done.terminate();
+}
+
+/// Publishes `root` from a thread that is not a participant and does not
+/// wait. The root's own `join` is its completion callback and owns the
+/// frame's lifetime. `Dispatcher.stop` drains outstanding roots first.
+void submitDetached(Node* root) nothrow @nogc @system
+{
+    if (t_deque !is null) fatal("submitDetached from a participant; use fork or runRoot");
+    if (g_farmCount == 0) fatal("submitDetached before start");
+    root.parent = null;
+    root.depth = 0;
+    atomicOp!"+="(g_rootsLive, 1);
+    Node*[1] one = [root];
+    while (cas(&g_submitLock, false, true) == false) pause();
+    for (;;)
+    {
+        auto n = g_farms[0].write(&nodeCall, OneWordBodies(one[]), 1, g_submitToken, g_opt.avgCost);
+        if (n == 1) break;
+        pause();
+    }
+    atomicStore!(MemoryOrder.rel)(g_submitLock, false);
+    wakeOne();
 }
 
 // ---------------------------------------------------------------------------
@@ -664,8 +711,15 @@ struct Dispatcher
         else pool.director().spin(1);
     }
 
+    /// Drains every outstanding root (detached roots included), then shuts
+    /// the pool down, leaves, and destroys the deques and Farms.
     void stop()
     {
+        while (atomicLoad!(MemoryOrder.acq)(g_rootsLive) != 0)
+        {
+            if (step()) t_idle = 0;
+            else idlePause();
+        }
         if (pool !is null)
         {
             pool.shutdown(); // joins every worker; each ran workerStop

@@ -7,46 +7,39 @@ actor identity or Fiber suspension.
 
 ## Blocking loops
 
-Use a registered producer token and a subscribed, exclusively owned view:
+A loop that blocks its caller until every iteration has run belongs on the
+fork-join dispatcher, not on a Farm view:
 
 ```d
-// fragment: view is subscribed to the Farm that issued token
-import antfarm.parallel;
+// fragment: a Dispatcher is started; the caller is participant 0 or any thread
+import forkjoin;
 import std.range : iota;
 
-parallelForWait!update(iota(n), token, view, Options(grain: 64));
-
-// The delegate borrows the calling frame until every body returns.
-foreach (i; parallel(view, token, iota(output.length), Options(grain: 64)))
-    output[i] = transform(i);
+forkJoinFor!update(iota(n), 64);                       // grain of 64 elements per leaf
+forkJoinEach(iota(output.length), 64, (size_t i) nothrow @nogc @system {
+    output[i] = transform(i);                           // a body may borrow the caller's frame
+});
+auto total = forkJoinReduce!(term, add)(iota(n), 0.0, 64); // bit-identical for any participant count
 ```
 
-Both forms publish with retry and help-drain `view` until completion. They
-allocate no region storage: it lives on the calling stack. The delegate must
-also be `nothrow @nogc`. Its captures and mutable range data must be disjoint
-between iterations or synchronized by the application. Do not use `break`,
-nonlocal `return`, or `goto` out of the body; a nonzero delegate result is
-fatal, including in release builds. `continue` is allowed.
+The range is split in halves down to the grain, leaves run on the deques
+with stealing, and the join is a pending count that never blocks a worker,
+so the loop may be started from inside a node or a Farm callback and from a
+thread that is not a participant (it submits the root and waits). Uneven
+iterations balance through stealing, which a Farm table of fixed grains
+cannot do once claimed. The contract is in
+[forkjoin/README.md](../../forkjoin/README.md#loops-and-reductions).
 
-**Never call a blocking parallel loop inside a Farm callback or table
-completion hook.** Re-entering the running view corrupts its walk; waiting
-without draining can deadlock all workers. Every build tracks this with
-a thread-local flag and fatals before publishing, including for empty loops. Nested
-work uses asynchronous publication and a hook, or a private actor tree with
-its own structured join protocol.
-
-The view must belong to the token's Farm. Other consumers can help, but the
-caller helps complete the region. Parked consumers can hold reclamation pins,
-so supply `Options.wake` and `wakeContext` to notify them after every accepted
-write and on idle polls. The callback/context must outlive the region.
-For a `FarmHost`, use `host.parallelFor!update(source, options)` on its control
-thread (requires caller consumption), or pass `host.parallelOptions(options)`
-to a low-level adapter. These loops do not pump actor attachments.
+The Farm forms below are for work that is published and left to run:
+asynchronous regions with a completion hook, and raw grain tables that
+compose with other entries in one `write`.
 
 ## Asynchronous submission
 
 ```d
-// fragment: done is a TableCompletionHook; stepHost drives/wakes consumers
+// fragment: done is a TableCompletionHook; stepHost drives/wakes consumers.
+// For a FarmHost pass host.parallelOptions(options) so accepted writes wake
+// parked workers, and drive the region with host.step().
 auto handle = parallelFor!update(farm, iota(n), token,
     Options(grain: 64), &done);
 while (!handle.submitted)

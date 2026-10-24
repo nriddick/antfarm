@@ -37,8 +37,9 @@ and the same actor cannot belong to overlapping unfinished waves. Fibers add
 never suspends is usually better represented as a payload.
 
 For independent range work, [parallel loops](parallel-loops.md) provide
-Grains, asynchronous completion hooks and a blocking foreach
-adapter. Raw ranges also compose into caller-owned payload batches.
+grains and asynchronous completion hooks on the Farm, and the fork-join
+dispatcher provides the blocking loop and the deterministic reduction. Raw
+ranges also compose into caller-owned payload batches.
 
 For a recursive tree, two representations overlap and the distinction is
 what the application needs from a node. The [fork-join
