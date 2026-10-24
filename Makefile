@@ -105,11 +105,13 @@ check-mimalloc:
 # adapter appears in the reference without a C dependency.
 DOCS_SOURCES := antfarm/package.d antfarm/templates.d antfarm/parallel.d \
 	antfarm/actors/package.d antfarm/actors/actor.d antfarm/actors/wave.d antfarm/actors/private_actor.d \
-	antfarm/actors/mimalloc.d threadpool/source/threadpool/host.d
+	antfarm/actors/mimalloc.d threadpool/source/threadpool/host.d threadpool/source/threadpool/groups.d \
+	forkjoin/source/forkjoin/package.d forkjoin/source/forkjoin/node.d forkjoin/source/forkjoin/deque.d \
+	forkjoin/source/forkjoin/dispatcher.d forkjoin/source/forkjoin/range.d
 DOCS_DIR := .build/docs
 
 docs:
-	dmd -D -Dd$(DOCS_DIR) -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool/source $(DOCS_SOURCES)
+	dmd -D -Dd$(DOCS_DIR) -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool/source -Iforkjoin/source $(DOCS_SOURCES)
 
 # Standalone timing gate; intentionally outside the correctness matrix.
 PERF_GATE_OUTPUT ?= /tmp/antfarm-perf-gate

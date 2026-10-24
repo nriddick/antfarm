@@ -14,17 +14,23 @@ module forkjoin.node;
 
 import core.atomic;
 
+/// The header every frame begins with.
 struct Node
 {
+    /// The frame whose `pending` this one decrements on completion; null for a root.
     Node* parent;
+    /// Children not yet finished; the last one to finish runs `join`.
     shared uint pending;
+    /// Distance from the root, set by `fork`.
     uint depth;
+    /// Runs the node; returns the node to run next on this thread or null.
     Node* function(Node*) nothrow @nogc @system run;
+    /// Runs once `pending` reaches zero; returns null when complete, or a node to run.
     Node* function(Node*) nothrow @nogc @system join;
 }
 
-/// Roots that have not completed. `runRoot` waits on it.
-shared uint g_rootsLive;
+/// Roots that have not completed; `Dispatcher.stop` drains it.
+package(forkjoin) shared uint g_rootsLive;
 
 /// Runs `node` and every continuation it returns.
 void runChain(Node* node) nothrow @nogc @system

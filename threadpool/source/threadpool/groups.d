@@ -40,9 +40,9 @@ import threadpool.topology : noLlcIndex, ProcessorId, TopologySnapshot;
 /// One LLC group's Farm, installed on the threadpool registry.
 struct GroupSlot
 {
-    AntFarm* farm;
-    ushort llc;
-    uint farmIndex;
+    AntFarm* farm;  /// this group's Farm (shared by every group without `farmPerGroup`)
+    ushort llc;     /// the group
+    uint farmIndex; /// index into `GroupHost.farms`
 }
 
 /// Everything `GroupHost` reads. `.init` is one Farm, automatic group,
@@ -133,6 +133,7 @@ ref Token groupToken(ushort llc) @nogc nothrow
     return *t;
 }
 
+/// The host. Construct it with a worker body; `close` it from the same thread.
 final class GroupHost
 {
     /// The worker selection `options` would start (the test seam is
@@ -206,16 +207,22 @@ final class GroupHost
 
     // ---- inspection ----------------------------------------------------------
 
+    /// The started worker selection (the pool's own after start).
     @property const(PoolResolution) resolution() const @nogc nothrow { return resolution_; }
+    /// The caller's pin or confine set; empty when unchanged.
     @property const(ProcessorId)[] callerCpus() const @nogc nothrow { return callerCpus_; }
     /// Selected groups, home first.
     @property const(ushort)[] groups() const @nogc nothrow { return groups_; }
     /// The group the caller is placed in (the home group, or the group of
     /// `callerProcessor`).
     @property ushort callerGroup() const @nogc nothrow { return callerGroup_; }
+    /// Pool workers started.
     @property uint workers() const @nogc nothrow { return cast(uint) resolution_.workers.length; }
+    /// The pool, or null with no workers.
     @property CacheAwarePool pool() @nogc nothrow { return pool_; }
+    /// False once `close` ran.
     @property bool isOpen() const @nogc nothrow { return open_; }
+    /// The planner's one-line summary.
     string summary() const { return plan_.summary(); }
 
     /// The Farms, one per group with `farmPerGroup`, otherwise one.
@@ -246,9 +253,13 @@ final class GroupHost
 
     // ---- waking -------------------------------------------------------------
 
+    /// Wakes one armed or parked worker; false when none is armed.
     bool wakeOne() @nogc nothrow { return wakeOneArmed(); }
+    /// The hot-path test before `wakeOne`.
     bool anyWorkerArmed() @nogc nothrow { return anyArmed(); }
+    /// Wakes every worker.
     void wakeAll() @nogc nothrow { if (pool_ !is null) pool_.wakeAll(); }
+    /// Wakes the workers of group `llc`.
     void wakeLlc(ushort llc) @nogc nothrow { if (pool_ !is null) pool_.wakeLlc(llc); }
 
     // ---- teardown -------------------------------------------------------------

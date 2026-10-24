@@ -18,13 +18,14 @@ import core.stdc.stdlib : aligned_alloc, free;
 import core.stdc.string : memset;
 import forkjoin.node : Node;
 
+/// One participant's deque of frame pointers.
 struct Deque
 {
-    align(64) shared long top;
-    align(64) shared long bottom;
-    align(64) shared(ulong)* slots;
-    size_t mask;
-    long capacity;
+    private align(64) shared long top;
+    private align(64) shared long bottom;
+    private align(64) shared(ulong)* slots;
+    private size_t mask;
+    private long capacity;
 
     /// `capacity` rounds up to a power of two, at least 64.
     static Deque* create(size_t capacity) nothrow @nogc @system
@@ -39,6 +40,7 @@ struct Deque
         return d;
     }
 
+    /// Frees the deque; no thief may still be probing it.
     void destroy() nothrow @nogc @system
     {
         free(cast(void*) slots);

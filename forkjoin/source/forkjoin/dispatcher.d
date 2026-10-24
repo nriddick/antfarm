@@ -43,6 +43,7 @@ import core.time : Duration;
 version (linux) import threadpool.sys.linux_wait : wakeWorker;
 version (Windows) import threadpool.sys.win_wait : wakeWorker;
 
+/// Participants a dispatcher can have: the caller plus pool workers.
 enum maxParticipants = 128;
 
 /// Tuning. Every field has a measured default from the fork-join benchmarks
@@ -81,46 +82,62 @@ struct DispatcherOptions
     bool spillInline = false;
 }
 
-__gshared GroupHost g_host;
-__gshared AntFarm*[maxParticipants] g_farms;    // g_host.farms
-__gshared size_t g_farmCount;
-__gshared uint[][maxParticipants] g_members;    // per LLC group: participant ids (caller is 0)
-__gshared Deque*[maxParticipants] g_deques;
-__gshared uint[][maxParticipants] g_cross;  // per participant: ids in other groups
-__gshared uint[maxParticipants] g_sibling;  // per participant: the SMT sibling's id, or uint.max
-__gshared size_t g_participants;
-__gshared DispatcherOptions g_opt;
-__gshared Token g_submitToken;              // shared by foreign submitters under g_submitLock
-shared bool g_submitLock;
-shared uint g_epoch;             // bumped before the timed run; counts from epoch 0 are discarded
+private __gshared GroupHost g_host;
+private __gshared AntFarm*[maxParticipants] g_farms;    // g_host.farms
+private __gshared size_t g_farmCount;
+private __gshared uint[][maxParticipants] g_members;    // per LLC group: participant ids (caller is 0)
+private __gshared Deque*[maxParticipants] g_deques;
+private __gshared uint[][maxParticipants] g_cross;  // per participant: ids in other groups
+private __gshared uint[maxParticipants] g_sibling;  // per participant: the SMT sibling's id, or uint.max
+private __gshared size_t g_participants;
+private __gshared DispatcherOptions g_opt;
+private __gshared Token g_submitToken;              // shared by foreign submitters under g_submitLock
+private shared bool g_submitLock;
+private shared uint g_epoch;             // bumped before the timed run; counts from epoch 0 are discarded
 
+/// Counters summed over participants by `counters()`. The first three need
+/// `-version=ForkjoinHotStats`.
 struct Stats
 {
-    ulong pushed, popped, stealAttempts, stealSuccesses, crossAttempts,
-        crossSuccesses, siblingSuccesses, spilledTables, spilledChildren, inlineChildren,
-        soloChildren, farmPolls, farmHits, dequeHighWater, parks, wakes, submits;
+    ulong pushed;           /// children pushed onto deques
+    ulong popped;           /// nodes popped by their owners
+    ulong stealAttempts;    /// steal probes
+    ulong stealSuccesses;   /// probes that took a node
+    ulong crossAttempts;    /// probes aimed at another LLC group
+    ulong crossSuccesses;   /// of those, successful
+    ulong siblingSuccesses; /// nodes taken from the SMT sibling
+    ulong spilledTables;    /// Farm tables written on deque overflow
+    ulong spilledChildren;  /// children in those tables
+    ulong inlineChildren;   /// children run inline when the Farm refused
+    ulong soloChildren;     /// children run inline with one participant
+    ulong farmPolls;        /// `consumeNext` calls
+    ulong farmHits;         /// of those, one that ran a payload
+    ulong dequeHighWater;   /// sum over participants of each deque's deepest point
+    ulong parks;            /// times a worker parked
+    ulong wakes;            /// successful `wakeOne` calls
+    ulong submits;          /// reserved
 }
-shared Stats g_stats;
+private shared Stats g_stats;
 
 // Thread-local participant state.
-Deque* t_deque;
-AntFarm* t_farm;      // home Farm
-uint[] t_same;        // participant ids in the home group
-Token* t_token;       // home Farm token, owned by the GroupHost per thread
-uint t_id;
-ConsumerView t_view;
-bool t_consumes;
-uint t_pops;
-uint t_hotVictim = uint.max;
-ulong t_rng;
-uint t_epoch;
-uint t_idle; // consecutive failed steps, drives the backoff
-bool t_recheck; // the next body call is the pool's armed recheck before parking
-uint t_failed; // consecutive failed steps across body calls, drives parking
-Stats t_stats;
+private Deque* t_deque;
+private AntFarm* t_farm;      // home Farm
+private uint[] t_same;        // participant ids in the home group
+private Token* t_token;       // home Farm token, owned by the GroupHost per thread
+private uint t_id;
+private ConsumerView t_view;
+private bool t_consumes;
+private uint t_pops;
+private uint t_hotVictim = uint.max;
+private ulong t_rng;
+private uint t_epoch;
+private uint t_idle; // consecutive failed steps, drives the backoff
+private bool t_recheck; // the next body call is the pool's armed recheck before parking
+private uint t_failed; // consecutive failed steps across body calls, drives parking
+private Stats t_stats;
 
 /// The one Farm callback: a one-word body holding a `Node*`.
-extern (C) void nodeCall(const(ulong)* body, size_t) nothrow @nogc @system
+private extern (C) void nodeCall(const(ulong)* body, size_t) nothrow @nogc @system
 {
     runChain(cast(Node*) body[0]);
 }
@@ -392,8 +409,8 @@ void wakeOne() nothrow @nogc @system
 /// Completion of a root submitted from a thread that is not a participant.
 struct RootCompletion
 {
-    Node sentinel;
-    Event done;
+    Node sentinel; /// the root's parent; its join signals `done`
+    Event done;    /// set when the root completes; `waitRoot` blocks on it
 }
 
 private Node* completionJoin(Node* node) nothrow @nogc @system
@@ -430,6 +447,7 @@ void submitRoot(Node* root, RootCompletion* c) nothrow @nogc @system
     wakeOne();
 }
 
+/// Blocks until the root submitted with `c` completes.
 void waitRoot(RootCompletion* c) nothrow @nogc @system
 {
     c.done.wait();
@@ -560,8 +578,10 @@ private void leaveThread() nothrow @nogc @system
 
 // ---------------------------------------------------------------------------
 
+/// The dispatcher: start it, run or submit roots, stop it. One per process.
 struct Dispatcher
 {
+    /// The host that owns the pool, the Farms and the caller's pin.
     GroupHost host;
 
     /// Starts the dispatcher on every eligible processor: the calling thread
