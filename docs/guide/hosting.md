@@ -100,12 +100,7 @@ The defaults are:
   leaves the caller alone and notes it as an external participant.
 - **`workers == 0`** starts no pool. The calling thread is the only consumer.
 
-`HostGroups.span([home, other...])` is the explicit opt-in to consume one Farm
-from several groups. `host.summary()` labels it `crossGroup` and counts the
-other groups' workers as foreign consumers. `HostGroups.only(g)` pins the choice to
-one group. Spanning is the configuration the next section measures and
-advises against; it exists for the cases where the work is heavy enough not
-to care.
+`HostGroups.only(g)` pins the choice to one group.
 
 ## Several physical groups
 
@@ -190,6 +185,12 @@ The guidance:
    slots and the quota they need, not the defaults. A smaller ring floor
    would be a geometry study (the 2,048-word segment floor keeps table
    headers from dominating a segment), not a design change.
+
+**When you know better.** `HostGroups.span([home, other...])` consumes one
+Farm from several groups anyway; `host.summary()` labels it `crossGroup` and
+counts the other groups' workers as foreign consumers. It is the
+configuration the table above measures and advises against, kept for work
+heavy enough per payload (about 1 µs) that the control lines do not matter.
 
 The host does not yet package this. `FarmHost` owns one Farm on one group,
 and a process has one pool with workers, so a per-group-Farm host (one host,

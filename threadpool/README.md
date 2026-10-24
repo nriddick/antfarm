@@ -187,8 +187,7 @@ bool pump(WorkerSelf* worker) nothrow @nogc @system
 
 `binStaffed!T(llc)` says whether a group had accepted workers in the
 validating resolution. `install(bins, res, classCount)` installs one value per
-(group, P/E class). `search`, labels, and the exchange APIs extend lookup
-beyond the home LLC.
+(group, P/E class). `search` and labels extend lookup beyond the home LLC.
 Install, label, and uninstall only during exclusive setup/teardown; lookup is
 concurrent after installation.
 
@@ -227,14 +226,15 @@ Escaping worker failures stop the pool and are available through
 `workerFailures()` after shutdown as owned, bounded diagnostics, not the
 original throwable objects (see [failure capture](../docs/design/threadpool.md#managed-worker-hooks)).
 `ant_fibers` supplies its own managed
-hooks for Fiber lanes.
+hooks for Fiber lanes; that package is the reason this lane exists, and a
+raw `WorkerBody` is the right choice for everything else.
 
 ## Thread-safety rules
 
 - First topology discovery, `install`, labels, pool start/shutdown, and
   Director policy changes require exclusive ownership.
-- `home`, `search`, `at`, exchange lookup, `currentWorker`, `wakeAll` and
-  `wakeLlc` are safe during the running phase.
+- `home`, `search`, `at`, `currentWorker`, `wakeAll` and `wakeLlc` are safe
+  during the running phase.
 - Do not uninstall or relabel state while workers can still look it up.
 - Pinning failure is fatal; the pool never silently falls back to migrating
   workers.

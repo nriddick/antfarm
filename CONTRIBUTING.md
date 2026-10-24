@@ -1,8 +1,7 @@
 # Contributing to Ant Farm
 
-Start with `make check-quick SHELL=/usr/bin/bash` for local iteration.
-A local Linux run on 2026-10-14 took **97.209 seconds** (about 1 min 37 s) on
-an AMD Ryzen 9 5900XT with 32 allowed logical CPUs and LDC 1.43.0. Ant Farm is
+Start with `make check-quick SHELL=/usr/bin/bash` for local iteration; it
+takes about a minute and a half on a 32-thread desktop. Ant Farm is
 concurrent, `@nogc` code whose correctness rests on stated memory-order
 arguments. Read the owning document for the area you change, keep its rules
 and implementation in step, and use the checklist below. There is no CI.

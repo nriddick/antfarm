@@ -1,72 +1,21 @@
 # Ant Farm roadmap
 
-The current release is **1.9.1**. This page lists remaining
-and next work only. Delivered work is in [CHANGELOG.md](CHANGELOG.md); there is
-no history here. Windows validation is separate and is not
-part of its local gate.
-
-## 1.8.2
-
-The release content is in [CHANGELOG.md](CHANGELOG.md): the repository
-reorganization, verified usage guidance, a payload-first onboarding path and
-documentation deduplication. It passed the Linux pre-push gates and the native
-Windows integration matrix. The numbers in [PERFORMANCE.md](PERFORMANCE.md)
-remain tied to the revisions at which they were measured.
-
-Small perf-gate shifts on this host are dominated by code layout; performance
-is reassessed holistically in dedicated sessions.
-
-## 1.9.0 progress
-
-- Keep the [matched MT-excision checks](docs/performance/mt-excision-check-2026-10-20.md)
-  with the October 20 baseline. The apparent fourfold headline loss did not
-  reproduce with the saved executable, and matched 1.8.3/current core probes
-  retained fast explicit-length uniform and mixed-callback paths on both
-  Windows and WSL2. The later
-  [inferred-writer check](docs/performance/writer-scan-2026-10-20.md) found a
-  separate sizing-scan regression and measures its restoration in `651030b`.
-  The environmental cause of the earlier low rates is unresolved. These short
-  core checks do not clear the separate private-actor regression below.
-- Revisit table spacing and actor-churn performance in a dedicated optimization
-  session. The 1.9 review retains the compact five-word layout. Compare
-  `private`, `private-remote` and `dtor` at zero and six consumers against 1.8.2,
-  alongside the grain grid, throughput and tail probes. Local same-binary
-  controls implicated fixed-table spacing; disabling the callback guard gave
-  no consistent benefit. A diagnostic with three padding words on index-free
-  tables of at least four payloads recovered serial private-root throughput,
-  but needs a complete performance/correctness evaluation before adoption.
-  The October 19 quieter-host retest still measured a -14.1% paired-median
-  change for `private` at zero consumers against 1.8.2 (`2182eb8`), using
-  LDC 1.42 `-O2 -release` on an i7-12700H under WSL2. The other two serial
-  private cases were inconclusive. Six-consumer samples also encountered
-  persistent CPU-accounting exclusions whose cause remains unresolved. Keep
-  these limits with the measurements; the 392-case grain grid verified output
-  throughout, but does not establish a general performance win.
-- Gather production usage of the [C ABI](docs/design/c-abi.md) core, public
-  actors, waves and optional non-Fiber host. Shared-library packaging and language
-  ownership adapters can follow the static C/C++ distributions.
-- The unreleased public actor C API now has runtime-owned kinds, direct state
-  initialization, value owners with retirement/reclaim arbitration, strided
-  batches and caller-owned inbox nodes. The
-  [implemented contract](docs/design/c-abi.md#actor-construction-and-ownership)
-  defines lifetimes and partial results. Gather production usage of private
-  root/child exports, including direct initialization and cohort slabs. The
-  D GC-rooted adapter and Fibers stay
-  outside the runtime-free ABI.
-- The C wave bridge's existing typed-D `wave` path was compared at
-  `d94acc1` against `be025b1` with LDC 1.42 `-O2 -release`, mimalloc 3.5.3,
-  16,384 actors and distinct-core pins under Linux/WSL. Caller-only execution
-  passed the -3% boundary with 20 clean pairs: paired-median change **-0.63%**,
-  descriptive interval **[-2.70%, +0.80%]**. A byte-identical candidate/candidate
-  control also passed with 20 clean pairs. Six-consumer execution remained
-  **inconclusive**: 12 clean pairs from 40 attempts, short of the required 20,
-  after background-CPU exclusions. The combined performance gate therefore
-  did not pass. Preserve this limit for the holistic optimization session;
-  this comparison does not measure the new C dispatch bridge's throughput.
-  Local raw evidence is archived in `.build/cabi-waves-performance-evidence.zip`.
+This page lists remaining and next work only; the version is in
+[VERSION](VERSION) and delivered work is in [CHANGELOG.md](CHANGELOG.md).
+Windows validation is separate and is not part of the local gate.
 
 ## Next
 
+- Revisit table spacing and actor-churn performance in a dedicated
+  optimization session: the 1.9 review kept the compact five-word layout, a
+  diagnostic with three padding words on index-free tables recovered serial
+  private-root throughput, and the serial `private` case still measured
+  -14.1% against 1.8.2 on the laptop. The records are in the 1.9.1 CHANGELOG
+  entry.
+- Gather production usage of the [C ABI](docs/design/c-abi.md) core, public
+  actors, waves, private root/child exports and the optional non-Fiber host
+  before promoting them; shared-library packaging and language adapters can
+  follow the static distributions.
 - A per-group-Farm host: one `FarmHost` owning one Farm per accepted LLC
   group, each group's workers pinned to its own Farm, a token per Farm, and
   `publish`/`pump` routed by group so the control thread emits locally into

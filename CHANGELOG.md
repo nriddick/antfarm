@@ -6,6 +6,16 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- Cleanup for 2.0, step 5 and 7 of [the plan](docs/development/cleanup-plan-2.0.md):
+  `threadpool.exchange` (a self-described stub) is removed; `HostGroups.span`
+  moved out of the placement defaults into a "when you know better" note;
+  the MT-payload removal history moved from SPEC section 11 to the
+  performance archive, the lineage appendix stays; `VERSION` holds the
+  version and README, ARCHITECTURE and ROADMAP no longer carry it in prose;
+  the roadmap's 1.8.2 and 1.9.0-progress sections closed into this file;
+  the measured cliff figure left using-it-well for PERFORMANCE; the quoted
+  check-quick duration left CONTRIBUTING.
+
 - New subpackage `forkjoin`: a fork-join dispatcher on the threadpool with
   one bounded Chase-Lev deque per participant, the Farm as admission and
   overflow channel, a continuation-passing join that never blocks, idle
@@ -22,6 +32,30 @@ Older release notes are in [docs/releases/](docs/releases/):
   derives; `dub.sdl` of every package and the C header say MIT.
 
 ## 1.9.1 — 2026-10-23
+
+Measurement records carried over from the roadmap's "1.9.0 progress" section
+when it closed in 2.0:
+
+- The matched MT-excision checks ([mt-excision-check-2026-10-20](docs/performance/mt-excision-check-2026-10-20.md))
+  kept the October 20 baseline: the apparent fourfold headline loss did not
+  reproduce with the saved executable, and matched 1.8.3/current core probes
+  retained fast explicit-length uniform and mixed-callback paths on Windows
+  and WSL2. The [inferred-writer check](docs/performance/writer-scan-2026-10-20.md)
+  found a separate sizing-scan regression and measured its restoration in
+  `651030b`. The environmental cause of the earlier low rates is unresolved.
+- The October 19 quieter-host retest measured -14.1% paired-median for
+  `private` at zero consumers against 1.8.2 (`2182eb8`), LDC 1.42 `-O2
+  -release`, i7-12700H under WSL2; the other two serial private cases were
+  inconclusive, six-consumer samples hit persistent CPU-accounting
+  exclusions, and the 392-case grain grid verified output throughout without
+  establishing a general performance win.
+- The C wave bridge's typed-D `wave` path at `d94acc1` against `be025b1`
+  (LDC 1.42 `-O2 -release`, mimalloc 3.5.3, 16,384 actors, distinct-core
+  pins, Linux/WSL): caller-only execution passed the -3% boundary with 20
+  clean pairs (paired-median -0.63%, interval [-2.70%, +0.80%]), a
+  byte-identical control also passed, six-consumer execution stayed
+  inconclusive (12 clean pairs of 40), so the combined gate did not pass.
+  Raw evidence was archived locally in `.build/cabi-waves-performance-evidence.zip`.
 
 - README now provides explicit C/C++ and D entry paths and separates building
   the library from using the runtime-free native core. Added `cpp_threads.cpp`,

@@ -74,7 +74,7 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
 5. **Keep every Farm's consumers in one LLC group; cross groups by
    publishing, not by consuming.** Consumers in two groups contend on the
    same claim and completion lines, and the first remote consumer pays the
-   whole cliff (517 to 207 million child lifecycles per second on the 5900XT).
+   whole cliff ([measured](../../PERFORMANCE.md#headline-throughput)).
    A producer may publish into another group's Farm one-way when its tables
    have 256 entries or more and each payload carries about 100 ns of work;
    trivial payloads stay local. `FarmHost` defaults to one group and

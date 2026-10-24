@@ -721,16 +721,9 @@ Operational sections still mention a fatal guard at the point where it matters t
 
 ### MT payloads removed (1.9)
 
-1.8.x allowed several consumers to enter one payload through MaxCs/Done/Pcount,
-MT indexes, and secondary passes. 1.9 removes that pathway and its full in-ring
-header. Every payload runs once; every table finisher joins all callbacks.
-Applications needing k-way entry into one logical item publish k payloads
-sharing a counter above the ring.
-
-The callback/header collapse and five-word table header are part of the same
-breaking release. Producers now pass callbacks directly; `PayloadHeader`,
-`initPayloadHeader`, and `writeTracked` are removed. The optional hook on
-`write` covers all layouts, including mixed callbacks and zero-length bodies.
+The removal and its breaking changes are recorded in
+[docs/performance/archive-2026-10-20.md](docs/performance/archive-2026-10-20.md#mt-payloads-removed-19);
+every payload runs once and every table finisher joins all callbacks.
 
 These details are worth preserving, but they are history, alternatives, or tuning observations rather than normative rules.
 

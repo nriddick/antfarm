@@ -1,6 +1,6 @@
 # Ant Farm architecture
 
-Ant Farm's current release is 1.9.1. It is one repository
+Ant Farm (version in [VERSION](VERSION)) is one repository
 with five cooperating packages. They separate transport, worker placement,
 stateful identities, and suspendable control flow so an application can choose
 the narrowest representation for each kind of work.
@@ -282,4 +282,4 @@ including the Fiber steps there; `FarmHost.close()` implements the host's teardo
   layout and slab reuse.
 - [tests/actors/README.md](tests/actors/README.md): forced actor
   interleavings, sustained generation churn, and allocator-adapter checks.
-- [ROADMAP.md](ROADMAP.md): current release gates and later work.
+- [ROADMAP.md](ROADMAP.md): remaining and later work.

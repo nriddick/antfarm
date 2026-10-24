@@ -345,21 +345,6 @@ contents. Install, label, and uninstall are exclusive setup/teardown
 operations. Lookup is concurrent only while the installed table and labels are
 unchanged.
 
-## Cross-NUMA exchange registry
-
-The exchange registry is a separate type-parameterized table with one ingress
-object per NUMA node:
-
-- `exchangeHome!T()` finds the current worker's ingress object;
-- `exchangeTo!T(remote)` finds a remote node's ingress object;
-- `atExchange!T(numa)` addresses a slot from a control thread;
-- `exchangeSearch!T(label)` searches remote labeled slots from a worker.
-
-It is only an addressing seam. The package does not transfer bytes, choose a
-remote worker, or drain these objects. Pairwise source/destination exchange
-tables are not implemented and fail explicitly. Installation and labeling are
-setup-only, with the same lifetime rules as LLC bins.
-
 ## Ant Farm embedding
 
 The usual non-Fiber embedding installs one Farm-bearing object per accepted
@@ -387,10 +372,10 @@ coverage rules. Those scheduler contracts live in
 | Operation | Ownership |
 | --- | --- |
 | first topology discovery | exclusive setup |
-| bin/exchange install, label, uninstall | exclusive setup or teardown |
+| bin install, label, uninstall | exclusive setup or teardown |
 | pool start and shutdown | one lifecycle owner |
 | Director policy changes and selected signals | the sole Director owner |
-| `home`, `at`, `search`, and exchange lookup | concurrent during stable installation |
+| `home`, `at`, `search` | concurrent during stable installation |
 | `currentWorker` | calling worker only |
 | `wakeAll`, `wakeLlc` | concurrent producers |
 | application objects found through registries | defined by the application |
@@ -425,7 +410,7 @@ available only after workers have joined.
 
 The test suite covers captured Windows topology records, synthetic processor
 groups and LLC identities, Linux topology parsing, bin/class lookup, NUMA-local
-search, exchange addressing, worker selection, pin/start failure, Director
+search, worker selection, pin/start failure, Director
 ownership and filtering, cadence arithmetic, wake behavior, managed hook
 lifecycle, and live topology/pinning where the host supports it.
 
