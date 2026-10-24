@@ -97,6 +97,30 @@ when a deque is full. One frame pointer is the unit in both.
 - **Shutdown.** `Dispatcher.stop` drains outstanding roots, then closes the host, which shuts the pool down (every worker runs its
   stop hook: flush counters, unsubscribe, unregister), then the caller
   leaves, the registry is uninstalled, and deques and Farms are destroyed.
+- **Map and scan.** `forkJoinMap` runs the loop tree over a source slice
+  paired with an output slice that splits identically. `forkJoinScan` runs
+  two passes over one retained tree: pass one writes `fn(element)` into the
+  output and folds each leaf and each inner node (`acc`); pass two hands each
+  child its prefix (`prefix` for the left child, `combine(prefix, left.acc)`
+  for the right) and the leaves fold their prefix in place, so `fn` runs once
+  per element and the output is its own scratch. Frames are kept between the
+  passes and freed in pass two's join. The split is the reduction's, so the
+  result is bit-identical across participant counts; like any tree fold it
+  may differ in the last bits from a sequential left fold.
+- **Invoke.** `forkJoinInvoke(fns...)` builds one frame per callable on the
+  caller's stack (the caller blocks until the join, so the frames outlive
+  the children) and forks them from one root; delegates may borrow the
+  caller's frame.
+- **Task group.** `TaskGroup` is a sentinel node whose `pending` holds one
+  count for the group itself plus one per root added; `add` publishes the
+  root through the submit Farm, `wait` releases the group's count and
+  blocks on an Event when roots are still running, or, when the release
+  brings the count to zero, decrements the live-root count itself since no
+  join ran. One live root is counted per armed group, so `Dispatcher.stop`
+  drains a waited group cleanly; an unwaited group would hold `stop`.
+- **Any thread.** `runRootAny` is the one entry the loops, the scan and
+  `forkJoinInvoke` share: a participant runs the root and helps, any other
+  thread submits it and waits.
 
 ## What was measured and what was not
 

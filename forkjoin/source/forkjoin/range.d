@@ -11,19 +11,32 @@
 /// and the tree combines in a fixed shape. Uneven iterations balance through
 /// stealing. The caller blocks until the join; a participant helps while it
 /// waits, any other thread submits the root and waits on its completion.
-/// Frames are heap cohorts of two, freed in the join.
+/// Frames are cohorts of two from the frame pool, freed in the join.
+/// `forkJoinMap` writes a transform into an output slice over the same tree,
+/// and `forkJoinScan` is an inclusive prefix fold in two passes over one
+/// retained tree.
 module forkjoin.range;
 
 import antfarm : fatal;
 import forkjoin.node;
 import forkjoin.dispatcher;
-import core.stdc.stdlib : malloc, free;
+import forkjoin.frames : allocFrames, freeFrame;
 import std.range.primitives : ElementType, hasLength, hasSlicing, isRandomAccessRange;
 
 private enum suitableRange(R) = isRandomAccessRange!R && hasLength!R && hasSlicing!R;
 
 /// Accumulator type of the loop paths, which fold nothing.
 private struct NoAcc {}
+
+/// A source slice paired with an output slice of the same length, so a tree
+/// over one splits the other identically.
+private struct Paired(S, O)
+{
+    S src;
+    O dst;
+    size_t length() { return src.length; }
+    Paired opSlice(size_t a, size_t b) { return Paired(src[a .. b], dst[a .. b]); }
+}
 
 private struct Frame(S, T)
 {
@@ -66,6 +79,54 @@ void forkJoinEach(R, D)(R source, size_t grain, scope D body) nothrow @nogc @sys
     runTree!(typeof(source[0 .. 0]), NoAcc, leaf, null)(source, grain, cast(void*) &body, NoAcc.init);
 }
 
+/// Writes `output[i] = fn(source[i])` for every element, in parallel, and
+/// returns when every write is done. `output` is a random-access range of
+/// the same length whose elements are assignable (a slice); each leaf
+/// writes its own elements and nothing else, so no synchronization is
+/// needed. `fn` is `nothrow @nogc`.
+void forkJoinMap(alias fn, R, O)(R source, O output, size_t grain = 1) nothrow @nogc @system
+    if (suitableRange!R && suitableRange!O)
+{
+    if (output.length != source.length) fatal("forkJoinMap: output length differs from source length");
+    static void leaf(S)(ref S slice, void*) nothrow @nogc @system
+    {
+        foreach (i; 0 .. slice.length) slice.dst[i] = fn(slice.src[i]);
+    }
+    alias P = Paired!(typeof(source[0 .. 0]), typeof(output[0 .. 0]));
+    runTree!(P, NoAcc, leaf, null)(P(source[0 .. source.length], output[0 .. output.length]), grain, null, NoAcc.init);
+}
+
+/// Inclusive prefix fold: `output[i]` becomes
+/// `combine(... combine(combine(seed, fn(source[0])), fn(source[1])) ..., fn(source[i]))`
+/// and the last output value is returned (`seed` for an empty source).
+/// `combine` must be associative; the split points depend on length and
+/// grain only, so the result is bit-identical for any participant count,
+/// though a floating-point result may differ in the last bits from a
+/// sequential left fold, as any tree fold does. Two passes
+/// over one tree: the first writes `fn(element)` into `output` and folds
+/// each leaf, the second folds each element's prefix in place. `fn` runs
+/// once per element; `output`'s elements hold `T`.
+T forkJoinScan(alias fn, alias combine, R, O, T)(R source, O output, T seed, size_t grain = 1)
+    nothrow @nogc @system if (suitableRange!R && suitableRange!O)
+{
+    if (grain == 0) fatal("forkjoin: grain must be positive");
+    if (output.length != source.length) fatal("forkJoinScan: output length differs from source length");
+    if (source.length == 0) return seed;
+    alias P = Paired!(typeof(source[0 .. 0]), typeof(output[0 .. 0]));
+    ScanPool!(P, T, fn, combine) pool;
+    pool.grain = grain;
+    ScanFrame!(P, T) root;
+    root.slice = P(source[0 .. source.length], output[0 .. output.length]);
+    root.pool = &pool;
+    root.node.run = &pool.run1;
+    runRootAny(&root.node);
+    root.node = Node.init;
+    root.node.run = &pool.run2;
+    root.prefix = seed;
+    runRootAny(&root.node);
+    return output[source.length - 1];
+}
+
 /// Folds `fn(element)` over `source` with `combine`, starting every leaf from
 /// `seed`: `combine(combine(seed, fn(a)), fn(b))` within a leaf, then
 /// `combine(left, right)` up the tree. `combine` must be associative for the
@@ -104,7 +165,7 @@ private struct Pool(S, T, alias leaf, alias join)
             else leaf(f.slice, p.ctx, f.acc);
             return complete(node);
         }
-        auto kids = cast(F*) malloc(2 * F.sizeof);
+        auto kids = allocFrames!F(2);
         if (kids is null) fatal("forkjoin: frame allocation failed");
         immutable mid = n / 2;
         kids[0] = F.init;
@@ -128,7 +189,98 @@ private struct Pool(S, T, alias leaf, alias join)
         auto f = cast(F*) node;
         auto kids = *cast(F**) &f.slice;
         static if (!is(T == NoAcc)) f.acc = join(kids[0].acc, kids[1].acc);
-        free(kids);
+        freeFrame(kids);
+        return null;
+    }
+}
+
+private struct ScanFrame(P, T)
+{
+    Node node;
+    P slice;
+    T acc;      // fold of this subtree's fn values (pass 1)
+    T prefix;   // fold of everything before this subtree, seed included (pass 2)
+    void* pool;
+    ScanFrame* kids;  // retained between the passes; null on a leaf
+}
+
+private struct ScanPool(P, T, alias fn, alias combine)
+{
+    size_t grain;
+    alias F = ScanFrame!(P, T);
+
+    /// Pass 1: write fn values, fold each leaf, combine up the tree.
+    static Node* run1(Node* node) nothrow @nogc @system
+    {
+        auto f = cast(F*) node;
+        auto p = cast(ScanPool*) f.pool;
+        immutable n = f.slice.length;
+        if (n <= p.grain)
+        {
+            f.slice.dst[0] = fn(f.slice.src[0]);
+            f.acc = f.slice.dst[0];
+            foreach (i; 1 .. n)
+            {
+                f.slice.dst[i] = fn(f.slice.src[i]);
+                f.acc = combine(f.acc, f.slice.dst[i]);
+            }
+            return complete(node);
+        }
+        auto kids = allocFrames!F(2);
+        if (kids is null) fatal("forkjoin: frame allocation failed");
+        immutable mid = n / 2;
+        kids[0] = F.init;
+        kids[0].slice = f.slice[0 .. mid];
+        kids[0].pool = p;
+        kids[0].node.run = &run1;
+        kids[1] = F.init;
+        kids[1].slice = f.slice[mid .. n];
+        kids[1].pool = p;
+        kids[1].node.run = &run1;
+        f.kids = kids;
+        f.node.join = &join1;
+        Node*[2] nodes = [&kids[0].node, &kids[1].node];
+        return fork(node, nodes[]);
+    }
+
+    static Node* join1(Node* node) nothrow @nogc @system
+    {
+        auto f = cast(F*) node;
+        f.acc = combine(f.kids[0].acc, f.kids[1].acc);
+        return null;
+    }
+
+    /// Pass 2: hand each child its prefix, fold leaves in place, free frames.
+    static Node* run2(Node* node) nothrow @nogc @system
+    {
+        auto f = cast(F*) node;
+        auto kids = f.kids;
+        if (kids is null)
+        {
+            auto running = f.prefix;
+            foreach (i; 0 .. f.slice.length)
+            {
+                running = combine(running, f.slice.dst[i]);
+                f.slice.dst[i] = running;
+            }
+            return complete(node);
+        }
+        kids[0].prefix = f.prefix;
+        kids[1].prefix = combine(f.prefix, kids[0].acc);
+        kids[0].node = Node.init;
+        kids[0].node.run = &run2;
+        kids[1].node = Node.init;
+        kids[1].node.run = &run2;
+        f.node.join = &join2;
+        Node*[2] nodes = [&kids[0].node, &kids[1].node];
+        return fork(node, nodes[]);
+    }
+
+    static Node* join2(Node* node) nothrow @nogc @system
+    {
+        auto f = cast(F*) node;
+        freeFrame(f.kids);
+        f.kids = null;
         return null;
     }
 }
@@ -146,13 +298,6 @@ private T runTree(S, T, alias leaf, alias join, R)(R source, size_t grain, void*
     root.acc = seed;
     root.pool = &pool;
     root.node.run = &pool.run;
-    if (isParticipant())
-        runRoot(&root.node);
-    else
-    {
-        RootCompletion c;
-        submitRoot(&root.node, &c);
-        waitRoot(&c);
-    }
+    runRootAny(&root.node);
     return root.acc;
 }

@@ -17,6 +17,18 @@ Older release notes are in [docs/releases/](docs/releases/):
   against 39; skynet 3% faster; matmul unchanged. The fib example uses it.
   tests/forkjoin/frames_test.d covers classes, patterns, reuse without new
   chunks, large requests, cross-thread drains, restarts and parked slots.
+- 2.0.1 features. `forkJoinMap!fn(source, output, grain)` writes a transform
+  into an output slice over the loop tree. `forkJoinScan!(fn, combine)(source,
+  output, seed, grain)` is an inclusive prefix fold in two passes over one
+  retained tree, `fn` once per element, bit-identical across participant
+  counts, returning the last output. `forkJoinInvoke(fns...)` runs a fixed
+  set of `nothrow @nogc` callables as the children of one node with the
+  frames on the caller's stack. `TaskGroup` (`add`, `wait`) collects a batch
+  of roots from a thread that is not a participant, reusable after `wait`.
+  `runRootAny` runs a root from a participant or any other thread.
+  `DispatcherOptions.oneFarm()` and `.perGroup()` name the two documented
+  shapes; `printCounters` prints a `Stats`. The loop frames now come from the
+  frame pool. tests/forkjoin/features_test.d covers all of it.
 - The gate's `dub test :forkjoin` lanes pass `--DRT-testmode=run-main`:
   druntime skips `main` after module unittests, so the suite driver had run
   only in the sanitizer lanes.

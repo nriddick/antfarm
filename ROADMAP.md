@@ -59,22 +59,23 @@ validation of the wake path.
 A short release on top of the dispatcher, each item a thin layer over
 `fork`/`complete` or `forkJoinReduce` with a test and a measured cost:
 
-- Done on `2.0.1-progress`: `forkjoin.frames`, a per-thread frame pool that
-  takes the process allocator out of the fork-join hot path (fib(39) at 32
-  threads: 102 ms under any allocator, from 106 to 135 with `malloc`).
-- `forkJoinScan`: an inclusive prefix sum with the same deterministic split
-  as `forkJoinReduce` (two passes over the tree, the combine applied to
-  per-chunk totals).
-- `forkJoinInvoke`: run a fixed set of heterogeneous callables as the
-  children of one node and join them (the `invoke` of citor and TBB).
-- `forkJoinMap`: `forkJoinEach` writing into a preallocated output slice,
-  so a transform does not need a reduction's seed and combine.
-- A task-group handle: `submitDetached` roots counted on one
-  `RootCompletion` so a foreign thread can wait for a batch rather than
-  one root at a time.
-- `DispatcherOptions` presets for the two documented shapes (one Farm per
-  group with pinned workers; one shared Farm) and a `counters()` summary
-  printer, so a first measurement needs no glue.
+All done on `2.0.1-progress`:
+
+- `forkjoin.frames`, a per-thread frame pool that takes the process
+  allocator out of the fork-join hot path (fib(39) at 32 threads: 102 ms
+  under any allocator, from 106 to 135 with `malloc`).
+- `forkJoinScan`: an inclusive prefix fold with the same deterministic split
+  as `forkJoinReduce`, two passes over one retained tree.
+- `forkJoinInvoke`: a fixed set of callables as the children of one node,
+  frames on the caller's stack (the `invoke` of citor and TBB).
+- `forkJoinMap`: the loop tree writing into a preallocated output slice.
+- `TaskGroup`: a batch of roots from a thread that is not a participant,
+  waited for together, reusable.
+- `DispatcherOptions.oneFarm()`/`.perGroup()` and `printCounters`, so a
+  first measurement needs no glue.
+
+Before the release: re-take the PERFORMANCE.md table under the harness's
+build rules with the pool, and point the staged upstream runtime at the tag.
 
 ## 2.0.2 — the C ABI grows to the dispatcher
 

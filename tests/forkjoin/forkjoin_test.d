@@ -9,6 +9,7 @@ import paths_test;
 import range_test;
 import completion_test;
 import frames_test;
+import features_test;
 import core.stdc.stdio : printf;
 import core.stdc.stdlib : exit;
 
@@ -20,5 +21,6 @@ void main()
     if (!runRangeTest()) { printf("FAILED range_test\n"); exit(1); }
     if (!runCompletionTest()) { printf("FAILED completion_test\n"); exit(1); }
     if (!runFramesTest()) { printf("FAILED frames_test\n"); exit(1); }
+    if (!runFeaturesTest()) { printf("FAILED features_test\n"); exit(1); }
     printf("passed\n");
 }

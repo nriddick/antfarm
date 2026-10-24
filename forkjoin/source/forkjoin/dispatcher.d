@@ -85,6 +85,20 @@ struct DispatcherOptions
     bool callerConsumes = false;
     /// Test knob: deque overflow runs inline instead of going to the Farm.
     bool spillInline = false;
+
+    /// The documented default shape: one Farm shared by every group, workers
+    /// pinned, idle workers parked. Equal to `DispatcherOptions.init`.
+    static DispatcherOptions oneFarm() nothrow @nogc @safe { return DispatcherOptions.init; }
+
+    /// The scaling shape: one Farm per LLC group, consumed only by its own
+    /// participants, so spills and submissions stay inside a cache domain.
+    /// `Dispatcher.start()` with no arguments uses it.
+    static DispatcherOptions perGroup() nothrow @nogc @safe
+    {
+        DispatcherOptions o;
+        o.farmPerGroup = true;
+        return o;
+    }
 }
 
 private __gshared GroupHost g_host;
@@ -500,6 +514,74 @@ void submitDetached(Node* root) nothrow @nogc @system
     publishRoot(root);
 }
 
+/// Runs `root` to completion from any thread: a participant runs it and
+/// helps (`runRoot`), any other thread submits it and waits (`submitRoot`,
+/// `waitRoot`). The loops and `forkJoinInvoke` are built on it.
+void runRootAny(Node* root) nothrow @nogc @system
+{
+    if (t_deque !is null)
+        runRoot(root);
+    else
+    {
+        RootCompletion c;
+        submitRoot(root, &c);
+        waitRoot(&c);
+    }
+}
+
+/// A batch of roots submitted from a thread that is not a participant and
+/// waited for together. `add` publishes a root at once; `wait` blocks until
+/// every root added since the last `wait` has completed, after which the
+/// group may be reused. Each root's frame is the caller's; its own `join`
+/// runs when it completes, before the group is signalled. Wait before
+/// `Dispatcher.stop`, which drains outstanding roots.
+struct TaskGroup
+{
+    private Node sentinel;  // the roots' parent; holds one count for the group itself until wait
+    private Event done;
+    private bool open;
+
+    /// Publishes `root` as a member of the group and returns at once.
+    void add(Node* root) nothrow @nogc @system
+    {
+        if (t_deque !is null) fatal("TaskGroup.add from a participant; use fork or runRoot");
+        if (g_farmCount == 0) fatal("TaskGroup.add before start");
+        if (!open)
+        {
+            open = true;
+            sentinel = Node.init;
+            sentinel.join = &groupJoin;
+            atomicStore!(MemoryOrder.raw)(sentinel.pending, 1u); // the group's own hold
+            done.initialize(true, false);
+            atomicOp!"+="(g_rootsLive, 1); // one live root per armed group
+        }
+        atomicOp!"+="(sentinel.pending, 1u);
+        root.parent = &sentinel;
+        root.depth = 0;
+        publishRoot(root);
+    }
+
+    /// Blocks until every root added since the last `wait` has completed.
+    /// Returns at once when nothing was added.
+    void wait() nothrow @nogc @system
+    {
+        if (!open) return;
+        if (atomicOp!"-="(sentinel.pending, 1u) == 0)
+            atomicOp!"-="(g_rootsLive, 1); // every root had finished; nobody ran the sentinel's join
+        else
+            done.wait();
+        done.terminate();
+        open = false;
+    }
+}
+
+private Node* groupJoin(Node* node) nothrow @nogc @system
+{
+    auto g = cast(TaskGroup*) node;
+    g.done.setIfInitialized();
+    return null;
+}
+
 // ---------------------------------------------------------------------------
 // Threadpool worker hooks
 
@@ -724,6 +806,15 @@ struct Dispatcher
         g_farmCount = 0;
         g_participants = 0;
     }
+}
+
+/// Prints the counters as `name: value` lines, one per field, for a first
+/// look at a run without glue code.
+void printCounters(ref const Stats s) nothrow @nogc
+{
+    import core.stdc.stdio : printf;
+    static foreach (m; __traits(allMembers, Stats))
+        printf("%s: %llu\n", m.ptr, cast(ulong) __traits(getMember, s, m));
 }
 
 /// Discards every participant's counters so far: counts belong to the epoch

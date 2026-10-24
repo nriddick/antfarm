@@ -25,7 +25,7 @@ configuration "unittest" {
 	targetType "executable"
 	buildRequirements "requireContracts"
 	mainSourceFile "../tests/forkjoin/forkjoin_test.d"
-	sourceFiles "../tests/forkjoin/deque_test.d" "../tests/forkjoin/admission_test.d" "../tests/forkjoin/paths_test.d" "../tests/forkjoin/range_test.d" "../tests/forkjoin/completion_test.d" "../tests/forkjoin/frames_test.d"
+	sourceFiles "../tests/forkjoin/deque_test.d" "../tests/forkjoin/admission_test.d" "../tests/forkjoin/paths_test.d" "../tests/forkjoin/range_test.d" "../tests/forkjoin/completion_test.d" "../tests/forkjoin/frames_test.d" "../tests/forkjoin/features_test.d"
 	importPaths "../tests/forkjoin"
 }
 

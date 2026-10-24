@@ -67,14 +67,34 @@ with `submitRoot` and block in `waitRoot`.
 `forkjoin.range` turns a finite random-access range into a fork-join tree:
 halves down to `grain` elements, leaves on the deques, a join that never
 blocks a worker. `forkJoinFor!fn` calls a function per element,
-`forkJoinEach` a delegate that may borrow the caller's frame, and
-`forkJoinReduce!(fn, combine)` folds.
+`forkJoinEach` a delegate that may borrow the caller's frame,
+`forkJoinMap!fn` writes `fn(element)` into an output slice,
+`forkJoinReduce!(fn, combine)` folds, and `forkJoinScan!(fn, combine)` is
+an inclusive prefix fold into an output slice (two passes over one tree,
+`fn` once per element).
 
 ```d
 forkJoinFor!update(iota(n), 64);
 forkJoinEach(iota(output.length), 64, (size_t i) nothrow @nogc @system { output[i] = f(i); });
+forkJoinMap!f(iota(n), output, 64);
 auto sum = forkJoinReduce!(term, add)(iota(n), 0.0, 64);
+auto last = forkJoinScan!(term, add)(iota(n), prefix, 0.0, 64);   // prefix[i] = seed + term(0) + ... + term(i)
 ```
+
+`forkJoinInvoke` runs a fixed set of callables as the children of one node
+and returns when all have returned; the frames live on the caller's stack.
+A `TaskGroup` lets a thread that is not a participant submit a batch of
+roots and wait for them together, and may be reused.
+
+```d
+forkJoinInvoke(&buildIndex, () nothrow @nogc { total = sum(parts); });
+TaskGroup g;
+foreach (ref job; jobs) g.add(&job.node);
+g.wait();
+```
+
+`DispatcherOptions.oneFarm()` and `DispatcherOptions.perGroup()` are the
+two documented shapes; `printCounters(counters())` prints a run's counters.
 
 The split points depend only on the length and the grain, so
 `forkJoinReduce` is bit-identical across participant counts: leaf folds run

@@ -18,3 +18,4 @@ public import forkjoin.deque;
 public import forkjoin.dispatcher;
 public import forkjoin.range;
 public import forkjoin.frames;
+public import forkjoin.invoke;

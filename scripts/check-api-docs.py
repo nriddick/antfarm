@@ -49,6 +49,7 @@ COVERAGE_MODULES = [
     "forkjoin/source/forkjoin/dispatcher.d",
     "forkjoin/source/forkjoin/range.d",
     "forkjoin/source/forkjoin/frames.d",
+    "forkjoin/source/forkjoin/invoke.d",
 ]
 
 # Everything compiled for the inventory; the index may name symbols here.
