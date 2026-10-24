@@ -1,13 +1,55 @@
 # Quickstart
 
-## First payload
+You need DMD 2.112+ or LDC 1.42+ and a clone of the repository.
 
-You need DMD 2.112+ or LDC 1.42+ and a clone of the repository. This complete
-program produces and consumes on one thread. Application functions become
+## First program
+
+Ten lines on every core: the fork-join dispatcher, a deterministic
+reduction. `make -C examples check` extracts this block and runs it with
+LDC and DMD in debug and release:
+
+```d
+/+ dub.sdl:
+    dependency "antfarm:forkjoin" path="."
++/
+import threadpool;
+import forkjoin;
+import std.range : iota;
+import std.stdio : writeln;
+
+void main()
+{
+    Dispatcher d;
+    d.start();                 // the caller plus one pinned worker per core
+    scope (exit) d.stop();
+    writeln("sum of squares: ", forkJoinReduce!((ulong x) => x * x,
+        (ulong a, ulong b) => a + b)(iota(1UL, 257UL), 0UL, 16));
+}
+```
+
+Run it with `dub run --single first.d` from the repository root; it prints
+`sum of squares: 5625216`. What it relies on:
+
+- `Dispatcher.start()` with no arguments takes every eligible processor:
+  the calling thread is participant 0 and each other processor gets a pinned
+  pool worker, with one Farm per last-level-cache group underneath
+  ([forkjoin/README.md](../../forkjoin/README.md)). `start(cpus, options)`
+  chooses processors and tuning.
+- `forkJoinReduce!(fn, combine)(range, seed, grain)` splits the range in
+  halves down to `grain` elements; the split points depend only on length
+  and grain, so the result is the same for any participant count. `fn` and
+  `combine` are `nothrow @nogc` and, as here, may be lambdas.
+- `stop()` drains anything still running, parks and joins the workers and
+  destroys the Farms. Pool workers are non-daemon threads: a dispatcher that
+  is never stopped keeps the process alive.
+
+## What the dispatcher does for you: the raw ring, one thread
+
+This complete program produces and consumes on one thread. Application functions become
 payloads through `payloadRange`: the callback must be `nothrow @nogc`, and its
-arguments are packed into the ring and reconstructed on a consumer.
-`make -C examples check` extracts this block and runs it with LDC and DMD in
-debug and release:
+arguments are packed into the ring and reconstructed on a consumer. The
+dispatcher above does exactly this for its spilled and submitted roots; its
+deques carry everything else. `make -C examples check` runs this block too:
 
 ```d
 /+ dub.sdl:

@@ -564,6 +564,18 @@ struct Dispatcher
 {
     GroupHost host;
 
+    /// Starts the dispatcher on every eligible processor: the calling thread
+    /// on the first, a pool worker on each of the rest, one Farm per LLC group.
+    void start(DispatcherOptions opt = DispatcherOptions.init)
+    {
+        auto topo = CacheAwarePool.topology();
+        ProcessorId[] cpus;
+        foreach (ref p; topo.processors)
+            if (topo.isEligible(p)) cpus ~= ProcessorId.of(p);
+        opt.farmPerGroup = true;
+        start(cpus, opt);
+    }
+
     /// Starts the dispatcher on a `GroupHost`. `cpus[0]` is the calling
     /// thread's processor, pinned here; the rest become pool workers. Throws
     /// if the host does not accept every requested processor.

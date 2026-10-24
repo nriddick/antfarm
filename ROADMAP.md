@@ -21,7 +21,7 @@ Windows validation is separate and is not part of the local gate.
   placement, one Farm per accepted group and per-thread tokens for raw
   worker bodies; the fork-join dispatcher runs on it. The actor host still
   owns one Farm on one group. The measurements are in
-  [several physical groups](docs/guide/hosting.md#several-physical-groups).
+  [several physical groups](docs/guide/scaling-groups.md#several-physical-groups).
 
 - Continue public-actor tuning from the fused retirement and occupancy path.
   The [lifecycle optimization record](docs/performance/archive-2026-10-20.md#public-actor-lifecycle-optimization-190-progress)
@@ -36,6 +36,22 @@ Windows validation is separate and is not part of the local gate.
   The [Part 5 follow-up](docs/performance/archive-2026-10-20.md#public-actor-part-5-follow-up-190-progress)
   records release-store retirement, the bounded reservation walk and the
   remaining serial-private/historical-inbox measurement uncertainty.
+
+## 2.0.0-dev status
+
+On the `2.0.0-progress` branch the release content is: the `forkjoin`
+subpackage (work-stealing deques, continuation-passing join, parking and
+foreign admission, `forkJoinFor`/`forkJoinEach`/`forkJoinReduce`,
+`submitDetached`); `GroupHost` as the owner of pool, Farms and tokens for
+raw worker bodies; the pool's `wakeOne`/`anyWorkerArmed`; blocking parallel
+loops removed in favour of fork-join; `threadpool.exchange` removed;
+counters and cadence verbs behind versions; MIT licensing; `VERSION`; and
+the onboarding pass (three rules first, a ten-line first program on every
+core, the hosting guide split). The ordered plan with each step's checks is
+[docs/development/cleanup-plan-2.0.md](docs/development/cleanup-plan-2.0.md).
+Left for 2.1: `FarmHost` on `GroupHost` (above, under Next), private trees
+retreating to typed results and tracked outcomes, scans and chains, a TSan
+lane for the dispatcher, Windows validation of the wake path.
 
 ## 2.0 goals — draft
 

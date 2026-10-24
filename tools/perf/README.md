@@ -133,7 +133,7 @@ cells are included only when `--dual-threads` includes 6.
   tests as well; their C numeric conversions also respect D string boundaries.
 
 - **`llc_split.py`** — the headline payload and private child cells laid out
-  by the [several-groups rules](../../docs/guide/hosting.md#several-physical-groups).
+  by the [several-groups rules](../../docs/guide/scaling-groups.md#several-physical-groups).
   Each thread count runs twice in the same session: as the headline command,
   and with every Farm confined to one L3 group, where a count larger than one
   group becomes one independent process per group (shares split evenly,
@@ -250,7 +250,7 @@ followed by one CPU per consumer (`cpus.length == consumers + 1`); any other
 combination is rejected. The host runs `WorkerIdle.spin` and uses the
 benchmark's `k = 8`, `ringMiB = 8` and `quota-words`. Unset, the benchmark
 drives its own consumers. The host path is the comparison side of
-[the tuning guidance](../../docs/guide/hosting.md#performance-and-tuning).
+[the tuning guidance](../../docs/guide/scaling-groups.md#performance-and-tuning).
 
 ### `actor_ready`
 

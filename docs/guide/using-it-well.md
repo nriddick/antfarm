@@ -80,7 +80,7 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    trivial payloads stay local. `FarmHost` defaults to one group and
    `FiberServicePlan` to native-only lane service; `HostGroups.span` and
    assist edges are explicit opt-ins. See
-   [several physical groups](hosting.md#several-physical-groups),
+   [several physical groups](scaling-groups.md#several-physical-groups),
    [LLC service](../../ARCHITECTURE.md#one-llc-and-many-llcs) and the
    [assist-ring measurements](../performance/archive-2026-10-20.md#assist-ring-ab).
 6. **Account for idle costs.** Polling consumes CPU; arrange waiting through
@@ -95,7 +95,7 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    For large cohorts of cheap callbacks, measure the child batch limit and
    host emission burst before adding workers: small tables can spend more
    time waking the pool than doing work. See
-   [cheap work with parked workers](hosting.md#cheap-work-with-parked-workers).
+   [cheap work with parked workers](scaling-groups.md#cheap-work-with-parked-workers).
 7. **Treat `expectedConsumers` as a hint.** A positive value seeds epoch-zero sharding;
    later epochs use the live count. A valid hint far from reality can cost
    performance, never safety. The actual cap is 128 simultaneously subscribed
@@ -103,10 +103,12 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
 
 ## Choosing a layer
 
-Short `@nogc` fan-out: payload. Address plus inbox: public actor. A phase over
-an externally chosen set: actor wave. One conductor, joined results, and
-tracked deadlines: private tree. Work that waits, throws, or allocates:
-Fiber. A Fiber that never suspends usually belongs on the payload path.
+Short `@nogc` fan-out: payload. A recursive tree, divide and conquer, a
+blocking loop or a deterministic reduction: the fork-join dispatcher. Address
+plus inbox: public actor. A phase over an externally chosen set: actor wave.
+One conductor with typed results, non-POD state or tracked deadlines:
+private tree. Work that waits, throws, or allocates: Fiber. A Fiber that
+never suspends usually belongs on the payload path.
 The [choice guide](choosing-work.md) owns the full comparison.
 
 ## Several LLC groups
@@ -117,7 +119,7 @@ or more whose payloads carry about 100 ns of work each. Trivial payloads stay
 on their own group, tokens are held per publishing thread, and a channel Farm
 costs about 2 MiB. The measurements, the structures for private and public
 actors, and the token, quota and ring-size consequences are in
-[several physical groups](hosting.md#several-physical-groups); the host
+[several physical groups](scaling-groups.md#several-physical-groups); the host
 primitive that packages it is on the [roadmap](../../ROADMAP.md#next).
 
 ## Application policies

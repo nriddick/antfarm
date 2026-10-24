@@ -6,6 +6,19 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- Cleanup step 6, onboarding. The README opens with the three rules and the
+  representation table with a one-sentence default above it; the D first
+  program is ten lines on the fork-join dispatcher (`Dispatcher.start()`
+  with no arguments takes every eligible processor), with the raw one-thread
+  ring program as the quickstart's second step; `import threadpool;`
+  re-exports `threadpool.host` and `threadpool.groups`; the README shows
+  only `dub run --single` and leaves compiler lines to examples/README.md;
+  hosting.md is split into running a host and
+  [scaling across groups](docs/guide/scaling-groups.md); the docs map's
+  seventh step is running the example for your shape, and the gate stays in
+  CONTRIBUTING. `run_examples.py` extracts every complete quickstart
+  program.
+
 - Cleanup step 1, one owner of the pool: `threadpool.groups.GroupHost`
   resolves workers with `FarmHost`'s planner, creates one Farm per selected
   LLC group (`farmPerGroup`, `HostGroups.all`) or one shared Farm, pins the
@@ -374,7 +387,7 @@ See the [release overview and migration notes](docs/releases/1.9.md).
   an empty round ends the burst early. `FarmHostOptions.maxEmitRounds = 1`
   restores single-round stepping. Attachments may now be called several times
   per step and must return promptly, reporting actual publications. See
-  [host tuning](docs/guide/hosting.md#cheap-work-with-parked-workers) for batch,
+  [host tuning](docs/guide/scaling-groups.md#cheap-work-with-parked-workers) for batch,
   idle-policy and deadline guidance.
 - `FarmHost.step()` now wakes parked workers even when its emitters publish
   nothing. This releases completed epochs retained by sleeping consumers and

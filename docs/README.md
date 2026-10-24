@@ -13,35 +13,35 @@ each to its owner.
 Start with First payload, then follow these steps. Each step pairs a program
 with its owning page; leave the path as soon as the layer fits your workload.
 
-1. **See it work (5 min).** Run [First payload](guide/quickstart.md#first-payload)
-   on one thread and read the [quickstart model](guide/quickstart.md#what-just-happened).
-   Learn the token, published count, cursor, and application completion counter.
-2. **Add threads (10 min).** Run [iota_sum.d](../examples/iota_sum.d) with
-   `-Ithreadpool/source` using its [command](guide/quickstart.md#first-payload),
-   then read [Start workers](../threadpool/README.md#start-workers).
-   Leave here for short `@nogc` fan-out.
+1. **See it work (5 min).** Run the [first program](guide/quickstart.md#first-program):
+   a reduction on every core through the fork-join dispatcher.
+2. **See the ring (10 min).** Run [the one-thread payload program](guide/quickstart.md#what-the-dispatcher-does-for-you-the-raw-ring-one-thread)
+   and read the [quickstart model](guide/quickstart.md#what-just-happened):
+   token, published count, cursor, and your own completion counter. This is
+   what every layer above it does underneath.
 3. **Host plumbing (10 min).** Run [public_service.d](../examples/public_service.d)
    with `2` workers using the [quickstart](guide/quickstart.md#run-the-public-service),
-   then read [FarmHost setup](guide/hosting.md#setup). Import `threadpool.host`.
-4. **Pick a representation (15 min).** Use the table in
-   [choosing-work.md](guide/choosing-work.md) to choose the next program.
+   then read [FarmHost setup](guide/hosting.md#setup).
+4. **Pick a representation (15 min).** The default per shape is one sentence
+   above the table in [choosing-work.md](guide/choosing-work.md); the table
+   carries the exceptions.
 5. **Use that layer.** Public identities: [public_service.d](../examples/public_service.d)
    and [public_wave.d](../examples/public_wave.d), then [public actors](guide/public-actors.md)
    and the [hazards table](reference/actor-lifecycle.md#ranked-misuse-hazards).
    Private trees: [private_tree.d](../examples/private_tree.d) and
    [request_deadline.d](../examples/request_deadline.d), then
    [private actors](guide/private-actors.md) and [outcomes](guide/outcomes-and-cancellation.md).
-   Fork-join trees: [forkjoin_fib.d](../forkjoin/examples/forkjoin_fib.d), then
+   Fork-join trees and loops: [forkjoin_fib.d](../forkjoin/examples/forkjoin_fib.d), then
    [the fork-join README](../forkjoin/README.md).
    Fibers: [hello_fibers.d](../ant_fibers/examples/hello_fibers.d), then
    [Fibers through handles, joins, and cancellation](../ant_fibers/README.md#handles-joins-and-cancellation).
-   Leave here if the chosen layer supplies what you need.
 6. **Size it.** Read [Sizing one Farm](../ARCHITECTURE.md#sizing-one-farm) and
-   [work-cost hints](guide/sizing-and-allocation.md#work-cost-hints).
-   When ready to measure, run the default [throughput shape](../tools/perf/README.md#payload-benchmarks)
-   once. The [usage rules](guide/using-it-well.md) collect the checks to remember.
-7. **Trust it.** Run `make check-quick`, then read
-   [testing](development/testing.md) for what it covers and the deferred lanes.
+   [work-cost hints](guide/sizing-and-allocation.md#work-cost-hints); for a
+   second LLC group, [scaling across groups](guide/scaling-groups.md).
+   The [usage rules](guide/using-it-well.md) collect the checks to remember.
+7. **Run the example for your shape** from the table in
+   [examples/README.md](../examples/README.md) with `dub run --single`.
+   The correctness gate is a contributor's step: [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 [ARCHITECTURE.md](../ARCHITECTURE.md) and [SPEC.md](../SPEC.md).
@@ -52,7 +52,8 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | --- | --- |
 | [quickstart.md](guide/quickstart.md) | run the single-threaded First payload, then a public service on pinned workers |
 | [using-it-well.md](guide/using-it-well.md) | check correctness and tuning rules before building on the Farm |
-| [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown, and structuring across LLC groups |
+| [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown |
+| [scaling-groups.md](guide/scaling-groups.md) | cross a second LLC group: what it costs, `GroupHost`, the host loop against a hand-written one, tuning cheap work |
 | [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, fork-join tree, or Fiber |
 | [parallel-loops.md](guide/parallel-loops.md) | compose ranges, choose grains, and join parallel regions |
 | [public-actors.md](guide/public-actors.md) | create, address, wake, retire and reclaim public actors and waves |
@@ -100,7 +101,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | First payload and the initial producer/consumer/actor model | [guide/quickstart.md](guide/quickstart.md) |
 | Runnable actor programs and their commands | [examples/README.md](../examples/README.md) |
 | FarmHost setup, placement, idle and wake, control-thread rule, close and abandon | [guide/hosting.md](guide/hosting.md) |
-| Structuring across LLC groups: consumers per group, one-way cross-group publication, Farms as channels | [guide/hosting.md](guide/hosting.md#several-physical-groups) |
+| Structuring across LLC groups: consumers per group, one-way cross-group publication, Farms as channels | [guide/hosting.md](guide/scaling-groups.md#several-physical-groups) |
 | Actor API topic index and the generated reference command | [reference/README.md](reference/README.md) |
 | Actor authority, completion, storage, drain and shutdown contracts shared by both models | [reference/actor-lifecycle.md](reference/actor-lifecycle.md) |
 | Public actor creation, inbox, retirement and wave API | [guide/public-actors.md](guide/public-actors.md) |

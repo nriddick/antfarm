@@ -12,9 +12,9 @@ Supported targets are Windows x64 (Windows 10 1803+) and Linux x86-64 with DMD
 2.112+ or LDC 1.42+.
 
 To run actors on pinned workers without writing the hooks yourself, use
-`FarmHost` in `threadpool.host` (`import threadpool.host;`; not re-exported by
-`import threadpool;`). It owns one Farm, the caller's token and the workers,
-places them on one LLC, and tears down in order; see
+`FarmHost` (`threadpool.host`, re-exported by `import threadpool;`). It owns
+one Farm, the caller's token and the workers, places them on one LLC, and
+tears down in order; see
 [../docs/guide/hosting.md](../docs/guide/hosting.md). Because of it, the
 threadpool dub package depends on the `antfarm` package.
 
@@ -201,7 +201,7 @@ placement and one Farm per accepted group for a raw worker body: workers
 find their Farm with `home!GroupSlot()`, control threads publish with
 `host.farmOf(llc)` and `host.token(llc)`, and `host.close()` tears down in
 order. See [the design](../docs/design/threadpool.md#group-host) and the
-[hosting guide](../docs/guide/hosting.md#several-physical-groups).
+[hosting guide](../docs/guide/scaling-groups.md#several-physical-groups).
 
 ## Managed workers
 

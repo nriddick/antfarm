@@ -99,7 +99,7 @@ target for every cohort. For thousands of cheap, uniform child callbacks,
 measure a larger child limit such as 4096, independently of the root limit.
 Small tables can make pool-wide park/wake overhead dominate the work.
 `FarmHost` batches emission rounds before waking workers by default; see
-[cheap work with parked workers](hosting.md#cheap-work-with-parked-workers)
+[cheap work with parked workers](scaling-groups.md#cheap-work-with-parked-workers)
 for its bound and tuning choices.
 
 ### Work-cost hints

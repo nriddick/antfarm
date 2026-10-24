@@ -15,16 +15,91 @@ release changed is in [CHANGELOG.md](CHANGELOG.md), including the
 [C/C++ ABI](docs/design/c-abi.md).
 Supported platforms are Linux x86-64 and Windows x64.
 
-| Start here | Entry path |
-| --- | --- |
-| C or C++ | [Native core and application threads](#native-core-and-application-threads) |
-| D | [D first program](#d-first-program) |
+## Three rules
 
-- **Building Ant Farm from source** requires DMD 2.112+ or LDC 1.42+.
-- **Using the built core** requires an ordinary native C/C++ toolchain and
-  platform libraries. The core and public/private actors have **no D runtime
-  dependency** and can run on your application's threads. The optional
-  non-Fiber `FarmHost` library includes druntime; Fibers remain a D API.
+- `write()` / `af_write*()` returns how many payloads it published. Pop
+  exactly that many and retry; `0` is backpressure, not failure.
+- `consumeNext() == false` / `af_consume_next() == 0` means nothing is ready
+  at this cursor now. It is not completion: count your own completions.
+- Contract violations abort through `fatal()`. `canFit` and the subscribe
+  codes are the recoverable checks on the core path.
+
+[Using Ant Farm well](docs/guide/using-it-well.md) is the one page of
+correctness and performance rules behind these, each linked to its owner.
+
+## Choosing the work representation
+
+Independent elements go in payload tables; a recursive tree runs on the
+fork-join dispatcher; a service with an inbox is a public actor; work that
+waits, throws or allocates is a Fiber. The table carries the exceptions.
+
+| Your work is... | Use | Example |
+| --- | --- | --- |
+| short, nonthrowing work without identity | a payload | [c_core.c](examples/c_core.c), [iota_sum.d](examples/iota_sum.d) |
+| a stable identity addressed by outside code, with an inbox | a public actor | [public_service.d](examples/public_service.d) |
+| a phase over an externally chosen set of identities | an actor wave | [public_wave.d](examples/public_wave.d) |
+| one conductor, a computation tree, and joined results | a private hierarchy | [private_tree.d](examples/private_tree.d) |
+| recursive fork-join: divide and conquer, irregular trees, no identity | the fork-join dispatcher | [forkjoin_fib.d](forkjoin/examples/forkjoin_fib.d) |
+| tracked requests with deadlines and cancellation | private actors with tracking | [request_deadline.d](examples/request_deadline.d) |
+| exceptions, allocation, or waits during work | a managed Fiber | [hello_fibers.d](ant_fibers/examples/hello_fibers.d) |
+
+The [choice guide](docs/guide/choosing-work.md) owns the detailed comparison.
+The fork-join dispatcher (`import forkjoin;`, [forkjoin/README.md](forkjoin/README.md))
+runs on the threadpool with one work-stealing deque per participant and the
+Farm as its admission and overflow channel.
+The D actor programs in [examples/](examples/README.md) run on a `FarmHost`
+(`import threadpool.host;`), which owns the Farm, the token, the pinned
+workers and the shutdown order.
+
+## Start here
+
+| | Entry path |
+| --- | --- |
+| D | [D first program](#d-first-program) below: ten lines on every core |
+| C or C++ | [Native core and application threads](#native-core-and-application-threads) |
+
+Building Ant Farm from source requires DMD 2.112+ or LDC 1.42+. Using the
+built core requires only a native C/C++ toolchain: the core and the
+public/private actors have no D runtime dependency and run on your
+application's threads. The optional `FarmHost` and `GroupHost` libraries
+include druntime; Fibers remain a D API.
+
+## D first program
+
+Save this as `first.d` in the repository root and run it with
+`dub run --single first.d` (add `--compiler=ldc2` for LDC):
+
+```d
+/+ dub.sdl:
+    dependency "antfarm:forkjoin" path="."
++/
+import threadpool;
+import forkjoin;
+import std.range : iota;
+import std.stdio : writeln;
+
+void main()
+{
+    Dispatcher d;
+    d.start();                 // the caller plus one pinned worker per core
+    scope (exit) d.stop();
+    writeln("sum of squares: ", forkJoinReduce!((ulong x) => x * x,
+        (ulong a, ulong b) => a + b)(iota(1UL, 257UL), 0UL, 16));
+}
+```
+
+It prints `sum of squares: 5625216`. The dispatcher split the range in
+halves down to 16 elements, idle workers stole subtrees, and the reduction
+is bit-identical for any worker count. The [quickstart](docs/guide/quickstart.md)
+explains what it relies on and then shows the same sum on the raw ring,
+one thread, which is what the dispatcher does underneath.
+
+Next, run a complete actor service on pinned workers:
+`dub run --single examples/public_service.d -- 2` (`0` consumes on the
+calling thread; `2` adds two pinned workers in one LLC). Every D example
+carries the same kind of header; the direct compiler commands are in
+[examples/README.md](examples/README.md#build). Then follow the
+[documentation map](docs/README.md#run-something).
 
 ## Native core and application threads
 
@@ -48,70 +123,6 @@ It prints `native threads: 256 squares summed to 5559680`. The
 [build guide](docs/design/c-abi.md#build-and-run) includes Windows commands
 and the optional host library. [antfarm.h](include/antfarm.h) is the C interface;
 [antfarm.hpp](include/antfarm.hpp) adds C++11 move-only ownership adapters.
-
-## D first program
-
-One thread, one file, one import. Save
-[First payload](docs/guide/quickstart.md#first-payload) as `first_payload.d` in
-the repository root and run it with Dub (its header names this clone as the
-dependency) or with the compiler directly:
-
-```text
-dub run --single first_payload.d
-
-dmd -g -i -I. first_payload.d -of=first_payload
-./first_payload
-```
-
-It prints `first payload: 256 squares summed to 5625216`; the
-[quickstart](docs/guide/quickstart.md) explains what it relies on.
-
-Next, run a complete actor service on pinned workers. The argument `0`
-consumes on the calling thread; `2` adds two pinned workers in one LLC.
-
-```text
-dub run --single examples/public_service.d -- 2
-
-dmd -g -i -I. -Iexamples -Ithreadpool/source examples/public_service.d -of=public_service
-./public_service 2
-```
-
-Every D example carries the same kind of header. Add `--compiler=ldc2` to Dub,
-or substitute `ldc2` for `dmd`, to use LDC. Then follow the
-[documentation map](docs/README.md#run-something): seven short steps from this
-program to workers, representation choice, sizing, and local checks.
-
-## Three rules
-
-- `write()` / `af_write*()` returns how many payloads it published. Pop exactly that many and
-  retry; `0` is backpressure, not failure.
-- `consumeNext() == false` / `af_consume_next() == 0` means nothing is ready at this cursor now. It is
-  not completion: count your own completions.
-- Contract violations abort through `fatal()`. `canFit` and the subscribe
-  codes are the recoverable checks on the core path.
-
-[Using Ant Farm well](docs/guide/using-it-well.md) is the one page of
-correctness and performance rules behind these, each linked to its owner.
-
-## Choosing the work representation
-
-| Your work is... | Use | Example |
-| --- | --- | --- |
-| short, nonthrowing work without identity | a payload | [c_core.c](examples/c_core.c), [iota_sum.d](examples/iota_sum.d) |
-| a stable identity addressed by outside code, with an inbox | a public actor | [public_service.d](examples/public_service.d) |
-| a phase over an externally chosen set of identities | an actor wave | [public_wave.d](examples/public_wave.d) |
-| one conductor, a computation tree, and joined results | a private hierarchy | [private_tree.d](examples/private_tree.d) |
-| recursive fork-join: divide and conquer, irregular trees, no identity | the fork-join dispatcher | [forkjoin_fib.d](forkjoin/examples/forkjoin_fib.d) |
-| tracked requests with deadlines and cancellation | private actors with tracking | [request_deadline.d](examples/request_deadline.d) |
-| exceptions, allocation, or waits during work | a managed Fiber | [hello_fibers.d](ant_fibers/examples/hello_fibers.d) |
-
-The [choice guide](docs/guide/choosing-work.md) owns the detailed comparison.
-The fork-join dispatcher (`import forkjoin;`, [forkjoin/README.md](forkjoin/README.md))
-runs on the threadpool with one work-stealing deque per participant and the
-Farm as its admission and overflow channel.
-The D actor programs in [examples/](examples/README.md) run on a `FarmHost`
-(`import threadpool.host;`), which owns the Farm, the token, the pinned
-workers and the shutdown order.
 
 ## Read next
 

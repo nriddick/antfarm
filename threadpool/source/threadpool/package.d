@@ -26,3 +26,9 @@ public import threadpool.bins : makeBins, install, uninstall, binStaffed, setLab
     search, at;
 public import threadpool.stats : PoolStats;
 public import threadpool.failure : WorkerFailure;
+// The hosts: one Farm for actor programs, one Farm per group for raw bodies.
+public import threadpool.host : FarmHost, FarmHostOptions, FarmSizing, HostGroups,
+    CallerPlacement, WorkerIdle, HostState, HostAttachment, autoWorkers, defaultHostPoolOptions,
+    FarmHostException, FarmHostNotDrained, FarmHostResolveException, FarmHostTimeout, FarmHostFailed;
+public import threadpool.groups : GroupHost, GroupHostOptions, GroupSlot, groupFarmOf, groupToken,
+    releaseThreadTokens;

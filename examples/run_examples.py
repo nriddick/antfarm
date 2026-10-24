@@ -86,21 +86,22 @@ def check_quickstart_programs(selected_configs):
             raise SystemExit(
                 f"docs/guide/quickstart.md ```d block {index} is neither a complete program "
                 "nor marked as a fragment")
-    if len(programs) != 1:
-        raise SystemExit(
-            f"expected one complete quickstart program, found {len(programs)}")
-    source = build / "quickstart_payload.d"
-    source.write_text(programs[0] + "\n")
-    for compiler, flags, suffix in selected_configs:
-        output = executable_path(f"quickstart_payload{suffix}")
-        cmd = [compiler, *flags, "-i", "-I.", str(source), f"-of={output}"]
-        print("==>", " ".join(cmd), flush=True)
-        subprocess.run(cmd, cwd=root, check=True)
-        env = os.environ.copy()
-        env["ANTFARM_HUGE_PAGES"] = "0"
-        print("==>", output, flush=True)
-        subprocess.run([str(output)], cwd=root, env=env, check=True,
-                       timeout=run_timeout)
+    if not programs:
+        raise SystemExit("expected at least one complete quickstart program")
+    for number, program in enumerate(programs):
+        source = build / f"quickstart_{number}.d"
+        source.write_text(program + "\n")
+        for compiler, flags, suffix in selected_configs:
+            output = executable_path(f"quickstart_{number}{suffix}")
+            cmd = [compiler, *flags, "-i", "-I.", "-Ithreadpool/source", "-Iforkjoin/source",
+                   str(source), f"-of={output}"]
+            print("==>", " ".join(cmd), flush=True)
+            subprocess.run(cmd, cwd=root, check=True)
+            env = os.environ.copy()
+            env["ANTFARM_HUGE_PAGES"] = "0"
+            print("==>", output, flush=True)
+            subprocess.run([str(output)], cwd=root, env=env, check=True,
+                           timeout=run_timeout)
 
 
 def executable_path(name):

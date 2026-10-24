@@ -7,7 +7,12 @@ scheduling rules above the payload path.
 An input element does not automatically need an actor. Use actors when their
 identity, state lifetime or tree joins serve the application; independent
 stateless cells can be payload entries. If one actor per element is required,
-keep that representation while tuning [child batches and host emission bursts](hosting.md#cheap-work-with-parked-workers).
+keep that representation while tuning [child batches and host emission bursts](scaling-groups.md#cheap-work-with-parked-workers).
+
+The default per shape: independent elements go in payload tables; a
+recursive tree runs on the fork-join dispatcher; a service with an inbox is a
+public actor; work that waits, throws or allocates is a Fiber. The table
+carries the exceptions.
 
 | Your work is... | Use | Example |
 | --- | --- | --- |

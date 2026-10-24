@@ -51,7 +51,7 @@ The root and public actor lifecycle thread sweeps are in the
 ### One Farm per LLC group
 
 The same payload and private child workloads, laid out by the
-[several-groups rules](docs/guide/hosting.md#several-physical-groups):
+[several-groups rules](docs/guide/scaling-groups.md#several-physical-groups):
 every Farm's threads stay in one last-level-cache group, and a thread count
 larger than one CCD runs as one independent Farm per CCD, the guide's "one
 process per group" form. The threads are split evenly, both processes start

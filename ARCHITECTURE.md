@@ -137,7 +137,7 @@ example. It exercises the complete non-Fiber path:
    then uninstall the bins and destroy the Farm.
 
 The source remains a real example rather than a README-only snippet. Build it
-with the command in [First payload](docs/guide/quickstart.md#first-payload).
+with the command in [First payload](docs/guide/quickstart.md#what-the-dispatcher-does-for-you-the-raw-ring-one-thread).
 The Linux `make check` matrix does not compile it; that matrix does compile
 and run the actor programs under
 [examples/](examples/README.md).
@@ -251,7 +251,7 @@ The same rule holds below the Fiber layer: a Farm's consumers belong to one
 group, and a second group is reached by giving it its own Farm and publishing
 into it one-way, in large tables of payloads that carry real work. The
 measurements and the token, quota and ring-size consequences are in
-[several physical groups](docs/guide/hosting.md#several-physical-groups).
+[several physical groups](docs/guide/scaling-groups.md#several-physical-groups).
 
 ## Shutdown order
 

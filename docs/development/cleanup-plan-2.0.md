@@ -115,7 +115,8 @@ and `forkjoin.Dispatcher`.
 - Step 7 of the docs map becomes "run the example for your shape"; the gate
   stays in CONTRIBUTING.
 - Check: `make check-docs`; a reader who follows the map reaches a running
-  multi-threaded program in two steps.
+  multi-threaded program in two steps. (Done in 2.0.0-dev: the first program
+  is one step.)
 
 ### 7. Duplicated status
 
