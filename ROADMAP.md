@@ -104,7 +104,11 @@ exactly-once by deque and Farm claims) and fairness and parking (periodic
 Farm poll, Director parking with a parked bitmap) are done. Still open: a
 TSan lane for the dispatcher, Windows validation of the wake path, a submit
 token per foreign thread, and actor or Fiber adapters, which wait for their
-ownership mappings. The text below is the original proposal.
+ownership mappings. The cleanup that follows the addition (one owner of the
+pool, idle machinery, loops over fork-join, private trees, stubs,
+onboarding, duplicated status) is ordered in
+[docs/development/cleanup-plan-2.0.md](docs/development/cleanup-plan-2.0.md).
+The text below is the original proposal.
 
 Add a dispatch layer with worker-local work-stealing deques to the
 topology-aware worker pool. The goal is to keep locally spawned work cheap
