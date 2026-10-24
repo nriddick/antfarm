@@ -83,6 +83,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [development/testing.md](development/testing.md) | run and understand the local correctness lanes and their limits |
 | [development/surface-and-onboarding-review-2026-10-24.md](development/surface-and-onboarding-review-2026-10-24.md) | see which features overlap after `forkjoin` and where onboarding costs time |
 | [development/cleanup-plan-2.0.md](development/cleanup-plan-2.0.md) | follow the ordered cleanup for 2.0: one owner of the pool, loops over fork-join, stubs, onboarding |
+| [development/test-suite-review-2026-10-24.md](development/test-suite-review-2026-10-24.md) | see what each gate lane proves, what it costs, and which compiler and build-type repeats could go |
 | [development/agent-workflow.md](development/agent-workflow.md) | follow the CyDo agent process for local iteration and the push gate |
 | [../tools/perf/README.md](../tools/perf/README.md) | run a benchmark and the committed-ref performance report |
 | [../PERFORMANCE.md](../PERFORMANCE.md) | find the measured numbers, method, and tuning guide |

@@ -693,11 +693,14 @@ struct Dispatcher
 }
 
 /// Discards every participant's counters so far: counts belong to the epoch
-/// in which they were flushed, and `counters` sums only the current one.
-/// Call before a measured region.
+/// in which they were flushed, `counters` sums only the current one, and the
+/// sum itself restarts from zero. Call before a measured region, while no
+/// participant is leaving (participants flush only in `Dispatcher.stop`).
 void discardCounters() nothrow @nogc
 {
     atomicOp!"+="(g_epoch, 1);
+    static foreach (m; __traits(allMembers, Stats))
+        atomicStore(__traits(getMember, g_stats, m), 0UL);
 }
 
 /// Counters summed over every participant that has left (after

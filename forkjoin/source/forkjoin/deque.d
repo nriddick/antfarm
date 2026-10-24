@@ -106,20 +106,4 @@ struct Deque
             return null;
         return x;
     }
-
-    /// Thief-side probe; a true result is only a hint.
-    bool empty() const nothrow @nogc @system
-    {
-        auto t = atomicLoad!(MemoryOrder.acq)(top);
-        auto b = atomicLoad!(MemoryOrder.acq)(bottom);
-        return t >= b;
-    }
-
-    /// Owner-side size estimate.
-    long size() const nothrow @nogc @system
-    {
-        auto t = atomicLoad!(MemoryOrder.acq)(top);
-        auto b = atomicLoad!(MemoryOrder.acq)(bottom);
-        return b > t ? b - t : 0;
-    }
 }
