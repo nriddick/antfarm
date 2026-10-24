@@ -84,3 +84,4 @@ examples/fail_fast_fold
 examples/fiber_cancel_at
 examples/iota_sum
 examples/life/headless
+forkjoin/bin/

@@ -92,6 +92,20 @@ is reassessed holistically in dedicated sessions.
 
 ### Work-stealing deques for worker-pool dispatch
 
+**Status (October 24, 2026): implemented as the `forkjoin` subpackage** on
+the `forkjoin` branch, with the deque exactly-once test, the admission test
+and the design page [docs/design/forkjoin.md](docs/design/forkjoin.md). The
+measurements against citor, libfork, TooManyCooks and TBB are in
+antfarm-fwbench. Of the requirements below: local dispatch and external
+admission (deque owner end, Farm injection), topology-aware stealing
+(same-LLC bias, measured as neutral on the 5900XT), bounded storage (fixed
+deques, Farm spill, inline fallback), completion (continuation-passing join,
+exactly-once by deque and Farm claims) and fairness and parking (periodic
+Farm poll, Director parking with a parked bitmap) are done. Still open: a
+TSan lane for the dispatcher, Windows validation of the wake path, a submit
+token per foreign thread, and actor or Fiber adapters, which wait for their
+ownership mappings. The text below is the original proposal.
+
 Add a dispatch layer with worker-local work-stealing deques to the
 topology-aware worker pool. The goal is to keep locally spawned work cheap
 while allowing idle workers to help with uneven, recursive or bursty workloads.

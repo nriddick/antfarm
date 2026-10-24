@@ -1,7 +1,7 @@
 # Ant Farm architecture
 
 Ant Farm's current release is 1.9.1. It is one repository
-with four cooperating packages. They separate transport, worker placement,
+with five cooperating packages. They separate transport, worker placement,
 stateful identities, and suspendable control flow so an application can choose
 the narrowest representation for each kind of work.
 
@@ -11,6 +11,7 @@ application
     |-- actor wake/inbox --> actors -- ready flush ---+--> antfarm
     |-- actor phase ------> actors -- wave tables ----+    work tables
     |-- private hierarchy -> root park -- pump -------+
+    |-- fork-join tree ----> forkjoin deques -- spill +
     |-- waiting/yielding Fiber --> fibers -- resume --+       ^
     |                                                        |
     +<-- wave completion --> Fiber trigger                    |
@@ -77,6 +78,18 @@ a cancellation/status handle. Use this path for an exclusive hierarchy; use publ
 independently addressed services and externally selected waves. Shared
 lifecycle rules are in [docs/reference/actor-lifecycle.md](docs/reference/actor-lifecycle.md).
 
+### Fork-join
+
+`forkjoin` dispatches recursive fork-join work on the threadpool's workers:
+one bounded Chase-Lev deque per participant holds forked children, the owner
+pops the newest and thieves take the oldest, and the Farm is the admission
+channel for roots from other threads and the overflow when a deque is full.
+Every task is a heap frame beginning with a `Node`; `run` and `join` return
+continuations, so the worker loop is a trampoline and the join never blocks a
+thread. Idle workers park through the Director and are woken by a push onto
+an empty deque, a spill or a submission. The contract and measurements are
+in [docs/design/forkjoin.md](docs/design/forkjoin.md).
+
 ### Threadpool
 
 The pool discovers CPU/cache topology, pins persistent workers, and associates
@@ -101,7 +114,8 @@ not retain TLS-derived state across suspension.
 ## Choosing the work representation
 
 Use the [work-representation guide](docs/guide/choosing-work.md) to choose
-payloads, public actors, actor waves, private hierarchies, or Fibers. It owns
+payloads, public actors, actor waves, private hierarchies, fork-join trees,
+or Fibers. It owns
 the comparison and the public-vs-private decision.
 
 ## The `iota_sum` path

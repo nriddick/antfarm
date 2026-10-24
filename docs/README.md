@@ -31,6 +31,8 @@ with its owning page; leave the path as soon as the layer fits your workload.
    Private trees: [private_tree.d](../examples/private_tree.d) and
    [request_deadline.d](../examples/request_deadline.d), then
    [private actors](guide/private-actors.md) and [outcomes](guide/outcomes-and-cancellation.md).
+   Fork-join trees: [forkjoin_fib.d](../forkjoin/examples/forkjoin_fib.d), then
+   [the fork-join README](../forkjoin/README.md).
    Fibers: [hello_fibers.d](../ant_fibers/examples/hello_fibers.d), then
    [Fibers through handles, joins, and cancellation](../ant_fibers/README.md#handles-joins-and-cancellation).
    Leave here if the chosen layer supplies what you need.
@@ -51,7 +53,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [quickstart.md](guide/quickstart.md) | run the single-threaded First payload, then a public service on pinned workers |
 | [using-it-well.md](guide/using-it-well.md) | check correctness and tuning rules before building on the Farm |
 | [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown, and structuring across LLC groups |
-| [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, or Fiber |
+| [choosing-work.md](guide/choosing-work.md) | pick payload, public actor, actor wave, private hierarchy, fork-join tree, or Fiber |
 | [parallel-loops.md](guide/parallel-loops.md) | compose ranges, choose grains, and join parallel regions |
 | [public-actors.md](guide/public-actors.md) | create, address, wake, retire and reclaim public actors and waves |
 | [private-actors.md](guide/private-actors.md) | own a private root tree: roots, cohorts, dispatch, retirement |
@@ -71,6 +73,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/farm-ordering.md](design/farm-ordering.md) | see the Farm subscription/reclamation ordering audit and its TSan lanes |
 | [design/c-abi.md](design/c-abi.md) | build and use the C/C++ ABI, runtime-free core/public actors and optional non-Fiber worker host |
 | [design/threadpool.md](design/threadpool.md) | get the topology, worker, Director, registry and OS-backend contracts |
+| [design/forkjoin.md](design/forkjoin.md) | get the fork-join dispatcher's frame, deque, parking and admission contracts, and what the benchmarks found |
 | [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
 
 ## Development

@@ -15,6 +15,7 @@ keep that representation while tuning [child batches and host emission bursts](h
 | a stable identity that outside code addresses: a service with an inbox, several event sources | a **public actor** (`ActorOwner` / `ActorHandle`) | [public_service.d](../../examples/public_service.d) |
 | a phase run over an externally selected set of identities | a public **actor wave** | [public_wave.d](../../examples/public_wave.d) |
 | one exclusive computation tree under a single conductor, with typed joined results or non-POD state | a **private actor** hierarchy | [private_tree.d](../../examples/private_tree.d) |
+| recursive fork-join with no identity: divide and conquer, irregular trees, millions of short tasks | the **fork-join dispatcher** (`forkjoin`) | [forkjoin_fib.d](../../forkjoin/examples/forkjoin_fib.d) |
 | per-request tracked roots with deadlines and cancellation | private actors with `tracking` | [request_deadline.d](../../examples/request_deadline.d) |
 | ordinary D exceptions, allocation, timers, or joins while waiting | a managed **Fiber** | [ant_fibers/README.md](../../ant_fibers/README.md) |
 
@@ -37,8 +38,19 @@ never suspends is usually better represented as a payload.
 
 For independent range work, [parallel loops](parallel-loops.md) provide
 Grains, asynchronous completion hooks and a blocking foreach
-adapter. Raw ranges also compose into caller-owned payload batches. Use a
-private tree when the computation needs structured nested joins.
+adapter. Raw ranges also compose into caller-owned payload batches.
+
+For a recursive tree, two representations overlap and the distinction is
+what the application needs from a node. The [fork-join
+dispatcher](../../forkjoin/README.md) is the fast path when nodes are bare
+frames: every fork is one deque push, the join is a pending count run by the
+last finishing child, and idle participants steal subtrees; it beats the
+payload port of the same tree by 2x at 32 threads and runs level with the
+best C++ work-stealing runtimes ([design](../design/forkjoin.md)). A
+[private actor](private-actors.md) hierarchy is for a tree whose nodes need
+typed result ports, non-POD state with destructors, cancellation, deadlines
+or tracked outcomes; it costs more per node and is dispatched through the
+Farm.
 
 The Farm rules are in [SPEC.md](../../SPEC.md).
 

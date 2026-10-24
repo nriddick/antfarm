@@ -4,6 +4,20 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
+## Unreleased
+
+- New subpackage `forkjoin`: a fork-join dispatcher on the threadpool with
+  one bounded Chase-Lev deque per participant, the Farm as admission and
+  overflow channel, a continuation-passing join that never blocks, idle
+  parking through the Director, and root submission from foreign threads.
+  `dub test :forkjoin` runs the deque exactly-once test and the admission
+  test; both are in `make check` and `make check-quick`. Design and
+  measurements: [docs/design/forkjoin.md](docs/design/forkjoin.md); the
+  choosing guide, README and ARCHITECTURE name the new representation, and
+  the roadmap's 2.0 work-stealing item records what is done and open.
+  The subpackage is MIT licensed (`forkjoin/LICENSE`) with an
+  acknowledgement of citor by Vitalii Shutov, from which its design derives.
+
 ## 1.9.1 — 2026-10-23
 
 - README now provides explicit C/C++ and D entry paths and separates building

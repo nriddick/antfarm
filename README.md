@@ -100,10 +100,14 @@ correctness and performance rules behind these, each linked to its owner.
 | a stable identity addressed by outside code, with an inbox | a public actor | [public_service.d](examples/public_service.d) |
 | a phase over an externally chosen set of identities | an actor wave | [public_wave.d](examples/public_wave.d) |
 | one conductor, a computation tree, and joined results | a private hierarchy | [private_tree.d](examples/private_tree.d) |
+| recursive fork-join: divide and conquer, irregular trees, no identity | the fork-join dispatcher | [forkjoin_fib.d](forkjoin/examples/forkjoin_fib.d) |
 | tracked requests with deadlines and cancellation | private actors with tracking | [request_deadline.d](examples/request_deadline.d) |
 | exceptions, allocation, or waits during work | a managed Fiber | [hello_fibers.d](ant_fibers/examples/hello_fibers.d) |
 
 The [choice guide](docs/guide/choosing-work.md) owns the detailed comparison.
+The fork-join dispatcher (`import forkjoin;`, [forkjoin/README.md](forkjoin/README.md))
+runs on the threadpool with one work-stealing deque per participant and the
+Farm as its admission and overflow channel.
 The D actor programs in [examples/](examples/README.md) run on a `FarmHost`
 (`import threadpool.host;`), which owns the Farm, the token, the pinned
 workers and the shutdown order.
@@ -119,4 +123,6 @@ workers and the shutdown order.
   for the full local Linux gate. There is no CI; Windows has a separate
   [native integration matrix](docs/development/testing.md#windows-x64-integration).
 
-Ant Farm is licensed under the Boost Software License 1.0.
+Ant Farm is licensed under the Boost Software License 1.0, except the
+`forkjoin` subpackage, which is MIT ([forkjoin/LICENSE](forkjoin/LICENSE))
+because its design derives from citor by Vitalii Shutov.
