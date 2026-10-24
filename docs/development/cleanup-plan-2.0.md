@@ -48,7 +48,10 @@ and `forkjoin.Dispatcher`.
 - Removes: the -7.8% hosting.md measures for spin against a hand-written
   loop, and three Director verbs nothing uses.
 - Check: `tools/perf/actor_churn` with `ANTFARM_CHURN_HOST=1` against the
-  hand-written loop; the gap closes or the reason is written down.
+  hand-written loop; the gap closes or the reason is written down. (Done in
+  2.0.0-dev: counters behind `ThreadpoolStats`, cadence verbs behind
+  `ThreadpoolCadence`, `wakeOne` and `anyWorkerArmed` on the pool; the
+  measurement is in hosting.md.)
 
 ### 3. Parallel loops over fork-join
 

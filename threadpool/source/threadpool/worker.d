@@ -127,7 +127,8 @@ private void managedWorkerLoop(ref WorkerSelf self)
             version (ThreadpoolOs)
             {
                 if (!prepareWorkerWait(self.workerIndex)) break;
-                scope (exit) cancelWorkerWait(self.workerIndex);
+                armWorkerBit(self.workerIndex);
+                scope (exit) { disarmWorkerBit(self.workerIndex); cancelWorkerWait(self.workerIndex); }
                 if (!atomicLoad!(MemoryOrder.acq)(gRunFlag)) break;
                 result = hooks.pump(&self);
                 if (result.retry) continue;

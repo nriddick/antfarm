@@ -67,11 +67,11 @@ when a deque is full. One frame pointer is the unit in both.
   view that never advances pins ring reclamation for every writer.
 - **Parking.** Through the threadpool's protocol only. After `spinSteps`
   consecutive failed steps the body returns `false`; the pool arms the
-  worker's wait word and calls the body again; the recheck sets the worker's
-  bit in `g_parkedBits` and returns `false`; the pool parks it. A waker
-  clears a set bit with CAS and calls `wakeWorker`, which exchanges the armed
-  word: a worker armed but not yet asleep returns from `parkWorker` at once,
-  so no wake is lost. Wakers: a push that made an empty deque non-empty, a
+  worker's wait word and its bit in the pool's armed bitmap and calls the
+  body again; the recheck returns `false`; the pool parks it. A waker
+  (`wakeOneArmed`) clears a set bit with CAS and calls `wakeWorker`, which
+  exchanges the armed word: a worker armed but not yet asleep returns from
+  `parkWorker` at once, so no wake is lost. Wakers: a push that made an empty deque non-empty, a
   spill, a root submission. Each wakes one; a woken worker that forks wakes
   the next.
 - **Admission.** The caller is participant 0 and runs `runRoot`, which runs

@@ -14,12 +14,12 @@ version (linux)
 
 version (Windows)
 {
-    import threadpool.sys.win_wait : parkWorker, prepareWorkerWait, cancelWorkerWait;
+    import threadpool.sys.win_wait : parkWorker, prepareWorkerWait, cancelWorkerWait, wakeWorker;
     enum uint kWaitForever = 0xFFFF_FFFF;
 }
 else version (linux)
 {
-    import threadpool.sys.linux_wait : parkWorker, prepareWorkerWait, cancelWorkerWait;
+    import threadpool.sys.linux_wait : parkWorker, prepareWorkerWait, cancelWorkerWait, wakeWorker;
     enum uint kWaitForever = uint.max;
 }
 
@@ -72,6 +72,60 @@ struct WorkerRec
 }
 
 __gshared WorkerRec[] gWorkers;
+
+/// One bit per worker, set while its wait slot is armed (between
+/// `prepareWorkerWait` and `cancelWorkerWait`). `wakeOneArmed` clears a bit
+/// before waking so two wakers pick two workers; a bit left set by a wake
+/// from elsewhere costs one spurious `wakeWorker`, which is an exchange on
+/// an unarmed word. Sized by `start`.
+__gshared shared(ulong)[] gArmedBits;
+
+void armWorkerBit(uint index) @nogc nothrow
+{
+    if (index / 64 < gArmedBits.length)
+        atomicOp!"|="(gArmedBits[index / 64], 1UL << (index % 64));
+}
+
+void disarmWorkerBit(uint index) @nogc nothrow
+{
+    if (index / 64 < gArmedBits.length)
+        atomicOp!"&="(gArmedBits[index / 64], ~(1UL << (index % 64)));
+}
+
+/// True when some worker is armed or parked. One or two loads of a line
+/// that is written only on arm, disarm and wake.
+bool anyArmed() @nogc nothrow
+{
+    foreach (ref w; gArmedBits)
+        if (atomicLoad!(MemoryOrder.raw)(w) != 0) return true;
+    return false;
+}
+
+/// Wakes one armed or parked worker and returns true, or returns false when
+/// none is armed. A worker that is armed but not yet asleep returns from its
+/// park at once, so a wake that lands in that window is not lost.
+bool wakeOneArmed() @nogc nothrow
+{
+    version (ThreadpoolOs)
+    {
+        import core.bitop : bsf;
+        foreach (w; 0 .. gArmedBits.length)
+        {
+            auto bits = atomicLoad!(MemoryOrder.raw)(gArmedBits[w]);
+            while (bits != 0)
+            {
+                auto bit = bits & -bits;
+                if (cas(&gArmedBits[w], bits, bits & ~bit))
+                {
+                    wakeWorker(cast(uint)(w * 64 + bsf(bit)));
+                    return true;
+                }
+                bits = atomicLoad!(MemoryOrder.raw)(gArmedBits[w]);
+            }
+        }
+    }
+    return false;
+}
 
 /// `true` = did work, retry immediately. `false` = idle, apply director policy.
 alias WorkerBody = bool function(WorkerSelf* w) @nogc nothrow;
@@ -325,17 +379,25 @@ void applyIdlePolicy(ref WorkerSelf self, ref shared(int) runFlag,
             foreach (i; 0 .. n)
             {
                 atomicPause();
-                if (self.isP)
-                    atomicFetchAdd(gSpinsP, 1);
-                else
-                    atomicFetchAdd(gSpinsE, 1);
+                // A process-wide counter per pause cost 7.8% on consumer-bound
+                // workloads (hosting.md); counted only when built for it.
+                version (ThreadpoolStats)
+                {
+                    if (self.isP)
+                        atomicFetchAdd(gSpinsP, 1);
+                    else
+                        atomicFetchAdd(gSpinsE, 1);
+                }
             }
             return;
         }
-        if (self.isP)
-            atomicFetchAdd(gParksP, 1);
-        else
-            atomicFetchAdd(gParksE, 1);
+        version (ThreadpoolStats)
+        {
+            if (self.isP)
+                atomicFetchAdd(gParksP, 1);
+            else
+                atomicFetchAdd(gParksE, 1);
+        }
         if (kind == IdleKind.wait)
         {
             if (hasManagedDeadline)
@@ -430,10 +492,13 @@ private void parkCadence(ref WorkerSelf self, ref shared(int) runFlag,
     while (atomicLoad!(MemoryOrder.acq)(runFlag) && MonoTime.currTime.ticks < deadline)
     {
         atomicPause();
-        if (self.isP)
-            atomicFetchAdd(gSpinsP, 1);
-        else
-            atomicFetchAdd(gSpinsE, 1);
+        version (ThreadpoolStats)
+        {
+            if (self.isP)
+                atomicFetchAdd(gSpinsP, 1);
+            else
+                atomicFetchAdd(gSpinsE, 1);
+        }
     }
 }
 
@@ -471,7 +536,8 @@ private void workerLoop(ref WorkerSelf self, ref shared(int) runFlag) @nogc noth
             if (body_(&self))
                 continue;
             if (!prepareWorkerWait(self.workerIndex)) break;
-            scope (exit) cancelWorkerWait(self.workerIndex);
+            armWorkerBit(self.workerIndex);
+            scope (exit) { disarmWorkerBit(self.workerIndex); cancelWorkerWait(self.workerIndex); }
             if (!atomicLoad!(MemoryOrder.acq)(runFlag)) break;
             if (body_(&self)) continue;
             applyIdlePolicy(self, runFlag);

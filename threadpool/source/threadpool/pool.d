@@ -161,6 +161,11 @@ struct Selection
         })(this);
     }
 
+    // The cadence, nudge and drift verbs have no in-tree user; they stay
+    // behind `version (ThreadpoolCadence)` with their tests until one appears
+    // (cleanup plan 2.0, step 2).
+    version (ThreadpoolCadence)
+    {
     void cadence(Duration period)
     {
         cadence(MonoTime.currTime, period, Cadence.init);
@@ -195,6 +200,8 @@ struct Selection
         })(this);
     }
 
+    } // version (ThreadpoolCadence)
+
     void signal()
     {
         enforceOwner();
@@ -204,6 +211,8 @@ struct Selection
         })(this);
     }
 
+    version (ThreadpoolCadence)
+    {
     /// One-shot phase step. Positive delays beats; negative pulls them sooner.
     void nudge(Duration phase)
     {
@@ -235,6 +244,8 @@ struct Selection
             wakeWorker(cast(uint) i);
         })(this);
     }
+
+    } // version (ThreadpoolCadence)
 
 private:
     void enforceOwner()
@@ -328,6 +339,8 @@ struct Director
     void sleepUntil(MonoTime t) { all.sleepUntil(t); }
     void wait() { all.wait(); }
     void signal() { all.signal(); }
+    version (ThreadpoolCadence)
+    {
     void cadence(Duration period) { all.cadence(period); }
     void cadence(Duration period, Cadence opt) { all.cadence(period, opt); }
     void cadence(MonoTime epoch, Duration period, Cadence opt = Cadence.init)
@@ -336,6 +349,7 @@ struct Director
     }
     void nudge(Duration phase) { all.nudge(phase); }
     void drift(Duration perBeat, Duration until) { all.drift(perBeat, until); }
+    }
 
     private this(CacheAwarePool p)
     {
@@ -421,6 +435,7 @@ final class CacheAwarePool
             gWorkers = new WorkerRec[](selected.length);
             gPinOutcome = new PinOutcome[](selected.length);
             createWaitSlots(cast(uint) selected.length);
+            gArmedBits = new shared(ulong)[(selected.length + 63) / 64];
             resetWorkerHandshake();
             directorHeld = false;
             atomicStore(gRunning, 1);
@@ -560,6 +575,23 @@ final class CacheAwarePool
         r.number = n;
     }
 
+    /// Wake one armed or parked worker, if any (does not change policy).
+    /// Safe for producer threads: a producer that made new work visible
+    /// calls this instead of `wakeAll` when one worker is enough, and a woken
+    /// worker that finds more work wakes the next (a chain wake). Returns
+    /// whether a worker was woken.
+    bool wakeOne() @nogc nothrow
+    {
+        return wakeOneArmed();
+    }
+
+    /// True when some worker is armed or parked; cheap enough for a hot
+    /// path's "is anyone asleep" check before `wakeOne`.
+    bool anyWorkerArmed() @nogc nothrow
+    {
+        return anyArmed();
+    }
+
     /// Wake every worker (does not change policy). Safe for producer threads.
     /// Loads the worker slice once so a concurrent shutdown cannot tear
     /// the length away from the pointer between the bound and the index.
@@ -657,6 +689,7 @@ private:
         version (ThreadpoolOs)
         {
             destroyWaitSlots();
+            gArmedBits = null;
             gWorkers = null;
             gWorkerBody = null;
             gWorkerStop = null;
@@ -1041,6 +1074,8 @@ unittest
         && atomicLoad(rec.kind) == IdleKind.sleepUntil);
     selected.wait();
     assert(atomicLoad(rec.kind) == IdleKind.wait);
+    version (ThreadpoolCadence)
+    {
     selected.cadence(epoch, msecs(10), Cadence(true, msecs(1)));
     assert(atomicLoad(rec.kind) == IdleKind.cadence);
     assert(atomicLoad(rec.cadenceEpochTicks) == epoch.ticks);
@@ -1053,9 +1088,14 @@ unittest
     assert(atomicLoad(rec.cadenceDriftTicks) == Selection.durationToTicks(msecs(2)));
     assert(atomicLoad(rec.cadenceDriftUntilTicks) == Selection.durationToTicks(msecs(4)));
     assert(atomicLoad(rec.cadenceDriftSeq) == pool.driftSeq);
-    assert(atomicLoad(rec.epoch) == 8);
+    }
+    // spin, sleep, sleep, sleepUntil, wait bump the epoch; cadence, nudge
+    // and drift add three more when they are compiled in.
+    version (ThreadpoolCadence) enum expectedEpoch = 8;
+    else enum expectedEpoch = 5;
+    assert(atomicLoad(rec.epoch) == expectedEpoch);
     selected.signal();
-    assert(atomicLoad(rec.epoch) == 8);
+    assert(atomicLoad(rec.epoch) == expectedEpoch);
     foreach (ref excluded; gWorkers[1 .. $])
         assert(atomicLoad(excluded.epoch) == 0 && atomicLoad(excluded.kind) == IdleKind.wait);
     all.classE.spin();
@@ -1065,9 +1105,12 @@ unittest
 
     // Spans past long.max / ticksPerSecond nanoseconds (~9.2 s on POSIX) wrapped.
     import core.time : hours, seconds;
+    version (ThreadpoolCadence)
+    {
     selected.cadence(epoch, seconds(30), Cadence(false, seconds(12)));
     assert(atomicLoad(rec.cadencePeriodTicks) == 30 * MonoTime.ticksPerSecond);
     assert(atomicLoad(rec.cadenceSpinLeadTicks) == 12 * MonoTime.ticksPerSecond);
+    }
     assert(Selection.durationToTicks(hours(1)) == 3600 * MonoTime.ticksPerSecond);
     assert(Selection.durationToTicks(-seconds(10)) == -10 * MonoTime.ticksPerSecond);
     selected.sleep(seconds(30));

@@ -6,6 +6,18 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- Cleanup step 2, idle machinery. The pool keeps one bit per armed worker
+  and offers `wakeOne` (clear a bit, wake that worker; a woken worker that
+  finds more work wakes the next) and `anyWorkerArmed`; the fork-join
+  dispatcher uses them instead of its own bitmap. The spin and park counters
+  behind `PoolStats` are compiled only with `version (ThreadpoolStats)`: a
+  process-wide atomic add per pause had measured 7.8% on consumer-bound
+  workloads under `WorkerIdle.spin`; the re-measurement in hosting.md found
+  the host 4% ahead of the hand-written loop on this tree before the change
+  and 1.5% more after it. The Director's `cadence`, `nudge` and `drift`
+  verbs and the `Cadence` options, which have no in-tree user, are compiled
+  only with `version (ThreadpoolCadence)` together with their tests.
+
 - Cleanup step 3: blocking loops run on the fork-join dispatcher.
   `forkjoin.range` adds `forkJoinFor`, `forkJoinEach` (a borrowing
   delegate) and `forkJoinReduce`, a reduction whose split points depend only on

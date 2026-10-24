@@ -13,13 +13,15 @@ public import threadpool.topology : TopologySnapshot, LogicalProcessor, LlcDomai
     maxNumaLlcs, fillNumaLlcs, ProcessorId, parseCpuList, formatCpuList,
     CpuListException, GroupingSource, noLlcIndex, OsScopeSource, scopeOsToCallingThread;
 public import threadpool.pool : CacheAwarePool, PoolOptions,
-    Director, Selection, Cadence;
+    Director, Selection;
+version (ThreadpoolCadence) public import threadpool.pool : Cadence;
 public import threadpool.resolution : PoolResolution, resolvePool, Reject,
     StartState, CpuDisposition, RequestDisposition, GroupDisposition,
     ResolutionException, reasonsText;
 public import threadpool.pin : PinOutcome, pinProcessor, liveOsMask;
 public import threadpool.hybrid : WorkerSelf, currentWorker, bindNumaNeighborhood,
-    WorkerBody, WorkerStop, ManagedWorkerHooks, ManagedPumpResult, IdleKind;
+    WorkerBody, WorkerStop, ManagedWorkerHooks, ManagedPumpResult, IdleKind,
+    anyArmed, wakeOneArmed;
 public import threadpool.bins : makeBins, install, uninstall, binStaffed, setLabel, home,
     search, at;
 public import threadpool.stats : PoolStats;

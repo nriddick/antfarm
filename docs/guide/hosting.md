@@ -371,6 +371,17 @@ second consume and the spin bookkeeping cost throughput only where consumers
 are the bottleneck and miss often: many workers on private- and tree-style
 fine-grained workloads.
 
+Re-measured on October 24, 2026 on the 5900XT at the 2.0.0-dev tree, same
+command (`private`, 4,096 actors, 6 consumers, batch 256, three rounds of
+3 s): the host ran 14.5 to 14.8 million actor cycles per second against the
+hand-written loop's 14.0 to 14.1 before the change, and 14.9 against 14.0
+after the spin counters moved behind `version (ThreadpoolStats)`. The
+-7.8% above did not reproduce on this tree; the host was 4% ahead both
+times, and removing the per-pause atomics added about 1.5% to the host
+path, within one round's spread. The paragraph above is kept as the
+record of what was measured when; the cost it names is now compiled out by
+default.
+
 What to tune:
 
 - **Fewer workers** when consumers are the bottleneck: fewer consumers polling

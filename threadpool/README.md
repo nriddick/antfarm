@@ -143,9 +143,12 @@ queue, so finish or cancel application work before calling it.
 
 The default policy after `start()` is `wait`. One owner thread controls the
 Director and may select workers by LLC, P/E class, or application label before
-choosing `spin`, `wait`, `sleep`, `sleepUntil`, or `cadence`. Other producer
-threads use `pool.wakeAll()`, or `pool.wakeLlc(g)` for the workers assigned
-to one physical group, rather than acquiring Director ownership.
+choosing `spin`, `wait`, `sleep` or `sleepUntil` (`cadence` needs
+`version (ThreadpoolCadence)`). Other producer threads use `pool.wakeOne()`
+to wake one armed worker (a woken worker that finds more work wakes the
+next), `pool.wakeAll()`, or `pool.wakeLlc(g)` for the workers assigned to
+one physical group, rather than acquiring Director ownership;
+`pool.anyWorkerArmed()` is the hot-path test before `wakeOne`.
 
 After an idle result, a worker arms its wait slot and pumps again before it
 can sleep. Both worker lanes use this protocol; managed workers use the final

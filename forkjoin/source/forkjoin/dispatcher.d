@@ -16,13 +16,13 @@
 /// inline.
 ///
 /// Parking: after `spinSteps` consecutive failed steps a worker returns
-/// `false` to the pool, which arms its wait slot, rechecks once through the
-/// body and parks it on a futex (`Director.wait`). Before the recheck
-/// returns `false` the worker sets its bit in `g_parkedBits`. A push onto an
-/// empty deque, a spill and a root submission each wake one parked worker
-/// (clear its bit, `wakeWorker`); `wakeWorker` exchanges the armed word, so a
-/// wake that lands before the futex wait is not lost, and a woken worker
-/// that forks wakes the next one. Threads that are not participants submit
+/// `false` to the pool, which arms its wait slot and its bit in the pool's
+/// armed bitmap, rechecks once through the body and parks it on a futex
+/// (`Director.wait`). A push onto an empty deque, a spill and a root
+/// submission each wake one armed worker (`wakeOneArmed`: clear its bit,
+/// `wakeWorker`); `wakeWorker` exchanges the armed word, so a wake that lands
+/// before the futex wait is not lost, and a woken worker that forks wakes
+/// the next one. Threads that are not participants submit
 /// roots with `submitRoot` and wait on a `RootCompletion`.
 ///
 /// Counters on the hot path (`pushed`, `popped`, `dequeHighWater`) are
@@ -94,7 +94,6 @@ __gshared uint[][maxParticipants] g_cross;  // per participant: ids in other gro
 __gshared uint[maxParticipants] g_sibling;  // per participant: the SMT sibling's id, or uint.max
 __gshared size_t g_participants;
 __gshared DispatcherOptions g_opt;
-shared ulong[maxParticipants / 64] g_parkedBits; // bit id: participant id is parked or about to park
 __gshared Token g_submitToken;              // shared by foreign submitters under g_submitLock
 shared bool g_submitLock;
 __gshared GroupBin g_soloBin;               // the one group when there is no pool
@@ -121,7 +120,6 @@ ulong t_rng;
 uint t_epoch;
 uint t_idle; // consecutive failed steps, drives the backoff
 bool t_recheck; // the next body call is the pool's armed recheck before parking
-bool t_parkedBit; // this participant's bit in g_parkedBits is set
 uint t_failed; // consecutive failed steps across body calls, drives parking
 Stats t_stats;
 
@@ -379,59 +377,20 @@ void runRoot(Node* root) nothrow @nogc @system
 }
 
 // ---------------------------------------------------------------------------
-// Parking and waking
+// Parking and waking: the pool keeps one bit per armed or parked worker
+// (threadpool.hybrid.gArmedBits); `anyArmed` is the hot-path test and
+// `wakeOneArmed` clears a bit and wakes that worker.
 
-private void setParkedBit() nothrow @nogc @system
-{
-    atomicOp!"|="(g_parkedBits[t_id / 64], 1UL << (t_id % 64));
-    t_parkedBit = true;
-}
-
-private void clearParkedBit() nothrow @nogc @system
-{
-    atomicOp!"&="(g_parkedBits[t_id / 64], ~(1UL << (t_id % 64)));
-    t_parkedBit = false;
-}
-
-/// Cheap inline test for the hot path; the bitmap line is read-shared and
-/// only written when a participant parks or is woken.
-pragma(inline, true)
 private bool anyParked() nothrow @nogc @system
 {
-    return (atomicLoad!(MemoryOrder.raw)(g_parkedBits[0]) | atomicLoad!(MemoryOrder.raw)(g_parkedBits[1])) != 0;
+    return anyArmed();
 }
 
-/// Wakes one parked participant, if any. Clearing the bit first means two
-/// wakers pick two different sleepers; `wakeWorker` on a worker that is
-/// armed but not yet asleep makes its park return at once.
+/// Wakes one parked participant, if any.
 void wakeOne() nothrow @nogc @system
 {
-    version (linux)
-    {
-        if (!g_opt.park) return;
-        foreach (w; 0 .. g_parkedBits.length)
-        {
-            auto bits = atomicLoad!(MemoryOrder.raw)(g_parkedBits[w]);
-            while (bits != 0)
-            {
-                auto bit = bits & -bits;
-                if (cas(&g_parkedBits[w], bits, bits & ~bit))
-                {
-                    auto id = cast(uint)(w * 64 + bsf(bit));
-                    if (id != 0) wakeWorker(id - 1); // pool worker index
-                    t_stats.wakes++;
-                    return;
-                }
-                bits = atomicLoad!(MemoryOrder.raw)(g_parkedBits[w]);
-            }
-        }
-    }
-}
-
-private uint bsf(ulong x) nothrow @nogc @safe pure
-{
-    import core.bitop : bsf;
-    return cast(uint) bsf(x);
+    if (!g_opt.park) return;
+    if (wakeOneArmed()) t_stats.wakes++;
 }
 
 /// Completion of a root submitted from a thread that is not a participant.
@@ -519,9 +478,10 @@ private bool workerBody(WorkerSelf* w) nothrow @nogc @system
 {
     if (t_deque is null)
         enterThread(w.workerIndex + 1, home!GroupBin(), true);
-    if (t_parkedBit) clearParkedBit();
     if (t_recheck)
     {
+        // The pool armed this worker's wait slot (and its bit) before this
+        // call; returning false now parks it.
         t_recheck = false;
         foreach (_; 0 .. 4)
             if (step())
@@ -530,7 +490,6 @@ private bool workerBody(WorkerSelf* w) nothrow @nogc @system
                 t_failed = 0;
                 return true;
             }
-        setParkedBit();
         t_stats.parks++;
         return false;
     }
@@ -618,7 +577,6 @@ struct Dispatcher
         enforce(cpus.length >= 1 && cpus.length <= maxParticipants, "forkjoin: bad participant count");
         enforce(g_participants == 0, "forkjoin: a dispatcher is already running");
         g_opt = opt;
-        g_parkedBits[] = 0;
         immutable callerConsumes = opt.callerConsumes || cpus.length == 1;
         auto topo = CacheAwarePool.topology();
         auto callerLp = topo.byId(cpus[0]);

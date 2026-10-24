@@ -277,19 +277,32 @@ For the selected workers, the Director can choose:
 - `wait`: park until signalled;
 - `sleep`: park for a relative duration;
 - `sleepUntil`: park until an absolute time;
-- `cadence`: align work visits to a repeating time grid;
 - `signal`: wake without changing policy.
 
-Cadence can skip missed beats or let a late worker pull immediately. `nudge`
-applies a one-shot phase shift; `drift` temporarily slews the period through a
-sequenced update. Policy fields are published before a worker's epoch is
-advanced and its OS wait primitive is signalled.
+`cadence` (align work visits to a repeating time grid, with `nudge` for a
+one-shot phase shift and `drift` for a sequenced slew of the period) is
+compiled only with `version (ThreadpoolCadence)`: it has no in-tree user,
+and its arithmetic and tests stay with it until one appears. Policy fields
+are published before a worker's epoch is advanced and its OS wait primitive
+is signalled.
 
 Producer threads do not need Director ownership. `pool.wakeAll()` is a
 thread-safe, non-owning notification which leaves each worker's idle policy
 unchanged; `pool.wakeLlc(g)` is the same notification for the workers
-assigned to physical group `g` only. Work publication must occur before the wake in the application's
-own queue or Farm synchronization protocol.
+assigned to physical group `g` only; `pool.wakeOne()` wakes one armed or
+parked worker and reports whether it found one, and `pool.anyWorkerArmed()`
+is the cheap test a hot path makes before calling it. The pool keeps one
+bit per worker, set while its wait slot is armed; `wakeOne` clears a bit
+before waking so two producers pick two workers, and a bit left set by a
+wake from elsewhere costs one spurious exchange on an unarmed word. A woken
+worker that then finds more work than it can run wakes the next: a chain
+wake with no broadcast on the first producer's path. Work publication must
+occur before the wake in the application's own queue or Farm
+synchronization protocol.
+
+The spin and park counters (`PoolStats`) are compiled only with
+`version (ThreadpoolStats)`: a process-wide atomic add per pause cost 7.8%
+of throughput on consumer-bound workloads under `WorkerIdle.spin`.
 
 Each worker owns one atomic ACTIVE/ARMED wait slot. After an idle pump it
 exchanges ACTIVE to ARMED with acquire/release ordering, checks stop, and
