@@ -119,17 +119,47 @@ Findings that shaped the defaults:
 - The pop barrier is inherent to Chase-Lev at every deque size; libfork and
   citor pay it too. The payload port's inline path was the only thing that
   avoided it, at the price of no redistribution.
-- A per-participant frame allocator (size classes, local free lists, remote
-  free stack) was slower than mimalloc by 8% and raised RSS; frames stay on
-  `malloc`.
+- A first per-participant frame allocator (64-byte classes, a 16-byte block
+  header, 256 KiB chunks) was slower than mimalloc by 8% and raised RSS; the
+  2.0.1 pool (`forkjoin.frames`) is headerless with 16-byte classes and
+  64 KiB chunks and its fast paths inline into the caller. It beats
+  `malloc` under every allocator (below).
 - Code layout moved fib by 4 to 10% at equal instruction counts: the worker
   body's burst loop must stay minimal (no per-step stack store), `step` stays
   out of line, and 64-byte function alignment is worth keeping.
+- The benchmark harness links each runtime against the first of tcmalloc,
+  mimalloc and jemalloc it finds. With `malloc` frames the dispatcher's fib
+  depended on that choice: 106 ms with mimalloc, 117 with glibc, 135 with
+  tcmalloc at 32 threads, since fib frees each two-child frame on whichever
+  thread runs the join and tcmalloc charges for the cross-thread case. That
+  is what the frame pool removes.
 
-Not done: a ThreadSanitizer lane for the dispatcher (the deque has one);
-one-way remote tables into another group's Farm (nothing spills in these
-benchmarks); a submit token per submitting thread (one shared token under a
-spinlock suits occasional roots, not a stream); Windows validation of the
-wake path (`threadpool.sys.win_wait` is imported but has not run); and the
-nqueens cohort frames on the heap (38 MB against 19 for stack-framed
-runtimes).
+## The frame pool
+
+`forkjoin.frames` allocates task frames off the process allocator. Blocks
+live in 64 KiB chunks aligned to their size; the chunk's first cache line
+names the owning slot and the block size, so `freeFrame` finds both by
+masking the pointer and no block carries a header. Sizes are 16-byte classes
+up to `frameMax` (1 KiB): a fib pair is 112 bytes, not 128. A slot has one
+LIFO free list and one bump cursor per class, used only by its owning
+thread; the fast paths (pop, push) are `pragma(inline, true)` and the
+caller carries no spills for the slow ones. A free from another thread is
+one CAS onto the slot's remote list for that class; the owner exchanges the
+whole list into its free list only when the list and the bump cursor are
+empty, so remote frees never touch the owner's fast path and the Treiber
+stack has no pop, hence no ABA. Slots outlive threads: `releaseFrames`,
+which `leaveThread` calls, parks the slot, and the next thread to allocate
+adopts it with its chunks, lists and pending remote frees, so dispatcher
+restarts do not grow the footprint. Chunks are never returned to the process
+allocator; requests above `frameMax` get a chunk of their own and are.
+
+Measured on the 5900XT at 32 threads against the same binaries with `malloc`
+frames, same session: fib(39) 102 ms under tcmalloc, glibc and mimalloc alike
+(against 135, 117 and 106); skynet 47.6 against 49.3; nqueens 125.7 against
+146 with peak memory 16 MB against 39; matmul unchanged. At one thread fib
+executes 7% fewer instructions and runs within 2% of the mimalloc build.
+
+Not done: one-way remote tables into another group's Farm (nothing spills in
+these benchmarks); a submit token per submitting thread (one shared token
+under a spinlock suits occasional roots, not a stream); Windows validation
+of the wake path (`threadpool.sys.win_wait` is imported but has not run).

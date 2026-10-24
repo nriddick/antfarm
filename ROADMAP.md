@@ -59,6 +59,9 @@ validation of the wake path.
 A short release on top of the dispatcher, each item a thin layer over
 `fork`/`complete` or `forkJoinReduce` with a test and a measured cost:
 
+- Done on `2.0.1-progress`: `forkjoin.frames`, a per-thread frame pool that
+  takes the process allocator out of the fork-join hot path (fib(39) at 32
+  threads: 102 ms under any allocator, from 106 to 135 with `malloc`).
 - `forkJoinScan`: an inclusive prefix sum with the same deterministic split
   as `forkJoinReduce` (two passes over the tree, the combine applied to
   per-chunk totals).

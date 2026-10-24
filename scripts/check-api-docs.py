@@ -48,6 +48,7 @@ COVERAGE_MODULES = [
     "forkjoin/source/forkjoin/deque.d",
     "forkjoin/source/forkjoin/dispatcher.d",
     "forkjoin/source/forkjoin/range.d",
+    "forkjoin/source/forkjoin/frames.d",
 ]
 
 # Everything compiled for the inventory; the index may name symbols here.

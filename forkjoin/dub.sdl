@@ -18,13 +18,14 @@ configuration "library" {
 	targetType "library"
 }
 
-// `dub test :forkjoin`: the deque exactly-once test and the dispatcher
+// `dub test :forkjoin -- --DRT-testmode=run-main` (druntime skips main after
+// unittests without the flag): the deque exactly-once test and the dispatcher
 // admission test (parking, foreign submission, shutdown with parked workers).
 configuration "unittest" {
 	targetType "executable"
 	buildRequirements "requireContracts"
 	mainSourceFile "../tests/forkjoin/forkjoin_test.d"
-	sourceFiles "../tests/forkjoin/deque_test.d" "../tests/forkjoin/admission_test.d" "../tests/forkjoin/paths_test.d" "../tests/forkjoin/range_test.d" "../tests/forkjoin/completion_test.d"
+	sourceFiles "../tests/forkjoin/deque_test.d" "../tests/forkjoin/admission_test.d" "../tests/forkjoin/paths_test.d" "../tests/forkjoin/range_test.d" "../tests/forkjoin/completion_test.d" "../tests/forkjoin/frames_test.d"
 	importPaths "../tests/forkjoin"
 }
 

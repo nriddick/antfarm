@@ -36,6 +36,7 @@ import antfarm;
 import threadpool;
 import threadpool.groups : GroupHost, GroupHostOptions, GroupSlot, groupFarmOf, groupToken;
 import threadpool.host : HostGroups, CallerPlacement, WorkerIdle;
+import forkjoin.frames : releaseFrames;
 import forkjoin.node;
 import forkjoin.deque;
 import core.atomic;
@@ -594,6 +595,7 @@ private void leaveThread() nothrow @nogc @system
     t_stats = Stats.init;
     if (t_consumes) t_view.unsubscribe();
     t_consumes = false;
+    releaseFrames(); // park this thread's frame slot for the next participant
     t_token = null; // released by the GroupHost after this hook
     t_deque = null;
     t_farm = null;

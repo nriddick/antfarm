@@ -17,7 +17,6 @@ module forkjoin_fib;
 import forkjoin;
 import threadpool;
 import core.stdc.stdio : printf;
-import core.stdc.stdlib : malloc, free;
 
 struct Fib
 {
@@ -35,7 +34,7 @@ Node* fibRun(Node* node) nothrow @nogc @system
         f.result = f.n;
         return complete(node);
     }
-    auto kids = cast(Fib*) malloc(2 * Fib.sizeof);
+    auto kids = allocFrames!Fib(2); // the dispatcher's frame pool
     kids[0] = Fib.init; kids[0].n = f.n - 1; kids[0].node.run = &fibRun;
     kids[1] = Fib.init; kids[1].n = f.n - 2; kids[1].node.run = &fibRun;
     f.kids = kids;
@@ -48,7 +47,7 @@ Node* fibJoin(Node* node) nothrow @nogc @system
 {
     auto f = cast(Fib*) node;
     f.result = f.kids[0].result + f.kids[1].result;
-    free(f.kids);
+    freeFrame(f.kids);
     return null;
 }
 

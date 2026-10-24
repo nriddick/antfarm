@@ -83,7 +83,7 @@ if [[ "$quick" -eq 1 ]]; then
     run "${make_cmd[@]}" -C tests/farm run DC=ldc2
     run dub test :threadpool --compiler=ldc2
     run dub test :ant_fibers --compiler=ldc2
-    run dub test :forkjoin --compiler=ldc2
+    run dub test :forkjoin --compiler=ldc2 -- --DRT-testmode=run-main
     run python3 examples/run_examples.py --ldc-only
     echo "ALL QUICK CHECKS PASSED"
     exit 0
@@ -114,8 +114,8 @@ run dub test :threadpool --compiler=ldc2
 run dub test :threadpool --compiler=dmd
 run dub test :ant_fibers --compiler=ldc2
 run dub test :ant_fibers --compiler=dmd
-run dub test :forkjoin --compiler=ldc2
-run dub test :forkjoin --compiler=dmd
+run dub test :forkjoin --compiler=ldc2 -- --DRT-testmode=run-main
+run dub test :forkjoin --compiler=dmd -- --DRT-testmode=run-main
 # The whole fork-join suite under ThreadSanitizer and AddressSanitizer:
 # dispatcher, pool parking, foreign submission, nested loops, deque.
 run ldc2 -g -O1 -fsanitize=thread -d-version=TSan -i -I. -Ithreadpool/source -Iforkjoin/source -Itests/forkjoin \

@@ -6,6 +6,21 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- `forkjoin.frames`: a frame pool for task frames (`allocFrame`,
+  `allocFrames!T`, `freeFrame`, `releaseFrames`, `frameStats`). Headerless
+  64 KiB chunks whose first line names the owning slot and block size,
+  16-byte classes up to 1 KiB, thread-local LIFO lists and bump cursors, one
+  CAS per cross-thread free onto the owner's remote list, slots parked and
+  adopted across participant threads. fib(39) at 32 threads runs in 102 ms
+  under tcmalloc, glibc and mimalloc alike (previously 135, 117 and 106 with
+  `malloc` frames); nqueens 125.7 ms against 146 with peak memory 16 MB
+  against 39; skynet 3% faster; matmul unchanged. The fib example uses it.
+  tests/forkjoin/frames_test.d covers classes, patterns, reuse without new
+  chunks, large requests, cross-thread drains, restarts and parked slots.
+- The gate's `dub test :forkjoin` lanes pass `--DRT-testmode=run-main`:
+  druntime skips `main` after module unittests, so the suite driver had run
+  only in the sanitizer lanes.
+
 - PERFORMANCE.md's fork-join table is re-taken under the benchmark harness's
   own build rules: the harness's allocator (tcmalloc here, not Ant Farm's
   bundled mimalloc), no function-alignment flag, library-default dispatcher
