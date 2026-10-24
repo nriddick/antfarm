@@ -22,6 +22,9 @@ import std.range.primitives : ElementType, hasLength, hasSlicing, isRandomAccess
 
 private enum suitableRange(R) = isRandomAccessRange!R && hasLength!R && hasSlicing!R;
 
+/// Accumulator type of the loop paths, which fold nothing.
+private struct NoAcc {}
+
 private struct Frame(S, T)
 {
     Node node;
@@ -40,7 +43,7 @@ void forkJoinFor(alias fn, R)(R source, size_t grain = 1) nothrow @nogc @system
     {
         foreach (i; 0 .. slice.length) fn(slice[i]);
     }
-    runTree!(typeof(source[0 .. 0]), ubyte, leaf, null)(source, grain, null, ubyte.init);
+    runTree!(typeof(source[0 .. 0]), NoAcc, leaf, null)(source, grain, null, NoAcc.init);
 }
 
 /// The same loop with a body that may borrow the caller's frame. The delegate
@@ -60,7 +63,7 @@ void forkJoinEach(R, D)(R source, size_t grain, scope D body) nothrow @nogc @sys
         auto b = *cast(D*) ctx;
         foreach (i; 0 .. slice.length) b(slice[i]);
     }
-    runTree!(typeof(source[0 .. 0]), ubyte, leaf, null)(source, grain, cast(void*) &body, ubyte.init);
+    runTree!(typeof(source[0 .. 0]), NoAcc, leaf, null)(source, grain, cast(void*) &body, NoAcc.init);
 }
 
 /// Folds `fn(element)` over `source` with `combine`, starting every leaf from
@@ -97,7 +100,7 @@ private struct Pool(S, T, alias leaf, alias join)
         immutable n = f.slice.length;
         if (n <= p.grain)
         {
-            static if (is(T == ubyte)) leaf(f.slice, p.ctx);
+            static if (is(T == NoAcc)) leaf(f.slice, p.ctx);
             else leaf(f.slice, p.ctx, f.acc);
             return complete(node);
         }
@@ -124,7 +127,7 @@ private struct Pool(S, T, alias leaf, alias join)
     {
         auto f = cast(F*) node;
         auto kids = *cast(F**) &f.slice;
-        static if (!is(T == ubyte)) f.acc = join(kids[0].acc, kids[1].acc);
+        static if (!is(T == NoAcc)) f.acc = join(kids[0].acc, kids[1].acc);
         free(kids);
         return null;
     }

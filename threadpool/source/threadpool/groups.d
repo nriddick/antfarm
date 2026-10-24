@@ -30,7 +30,7 @@ import threadpool.bins : at, home, install, uninstall, makeBins;
 import threadpool.host : autoWorkers, CallerPlacement, FarmHostOptions, FarmHostException,
     FarmHostResolveException, FarmSizing, gHostClaimed, HostGroups, HostPlan, planHost,
     WorkerIdle, defaultHostPoolOptions;
-import threadpool.hybrid : anyArmed, wakeOneArmed, WorkerBody, WorkerSelf, WorkerStop;
+import threadpool.hybrid : anyArmed, wakeOneArmed, wakeOneArmedIn, WorkerBody, WorkerSelf, WorkerStop;
 import threadpool.pin : PinOutcome, pinProcessor, ThreadAffinity, confineCallingThread,
     restoreCallingThread;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
@@ -176,6 +176,10 @@ final class GroupHost
             callerCpus_ = [options.callerProcessor];
             callerPlacement_ = CallerPlacement.pin;
             callerGroup_ = lp.llcIndex;
+            // A caller alone in its group still needs a Farm there.
+            bool present;
+            foreach (gi; groups_) if (gi == callerGroup_) present = true;
+            if (!present) groups_ ~= callerGroup_;
         }
         else
         {
@@ -255,6 +259,9 @@ final class GroupHost
 
     /// Wakes one armed or parked worker; false when none is armed.
     bool wakeOne() @nogc nothrow { return wakeOneArmed(); }
+    /// Wakes one armed or parked worker of group `llc`, which is the only
+    /// kind that will poll that group's Farm; false when none is armed.
+    bool wakeOneIn(ushort llc) @nogc nothrow { return wakeOneArmedIn(llc); }
     /// The hot-path test before `wakeOne`.
     bool anyWorkerArmed() @nogc nothrow { return anyArmed(); }
     /// Wakes every worker.

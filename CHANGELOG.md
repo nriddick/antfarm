@@ -6,6 +6,30 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- Fork-join review fixes, from an independent read of the dispatcher.
+  `complete` reads the grandparent before running a parent's join, since the
+  join may free the parent or hand it to a waiter (a use after free under
+  ThreadSanitizer and AddressSanitizer). A loop started inside a Farm
+  callback no longer polls the view that is running it (SPEC 7c) and runs
+  spilled children inline, so a child in the Farm cannot be left for a
+  consumer that is itself waiting. `DispatcherOptions.callerConsumes` now
+  defaults to false: a subscribed view that never polls pins reclamation,
+  and a sustained stream of foreign roots stalled after about 24,000 with
+  an idle consuming caller; a refused root write wakes a worker of the
+  submit Farm's group. A caller whose LLC group has no worker gets its own
+  group instead of failing with "participant without a group Farm".
+  `wakeOneArmedIn` compared its CAS against a word it had already modified
+  and could skip a parked worker. A failed `start` rolls back, so a valid
+  start may follow it. `forkJoinReduce` accepts accumulators narrower than
+  a word. New: tests/forkjoin/completion_test.d (concurrent foreign
+  submitters with nested loops in callbacks, spilled children starting
+  nested reductions, parked workers with one Farm per group, forced
+  overflow with one worker, a 30,000-root stream through a 2 MiB ring, a
+  caller alone in its group, a failed start then a valid one, all under a
+  watchdog), accumulator-type reductions in range_test.d, and the fork-join
+  suite runs under ThreadSanitizer and AddressSanitizer in `make check`
+  (tests/forkjoin/tsan.supp suppresses druntime's suspend-handler report).
+
 - Cleanup step 6, onboarding. The README opens with the three rules and the
   representation table with a one-sentence default above it; the D first
   program is ten lines on the fork-join dispatcher (`Dispatcher.start()`

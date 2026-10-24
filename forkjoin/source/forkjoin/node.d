@@ -44,9 +44,9 @@ void runChain(Node* node) nothrow @nogc @system
 /// (a parent that forked again) or null.
 Node* complete(Node* node) nothrow @nogc @system
 {
+    auto p = node.parent;
     for (;;)
     {
-        auto p = node.parent;
         if (p is null)
         {
             atomicOp!"-="(g_rootsLive, 1);
@@ -54,9 +54,13 @@ Node* complete(Node* node) nothrow @nogc @system
         }
         if (atomicOp!"-="(p.pending, 1) != 0)
             return null;
+        // A join may free its frame (a detached root) or signal a waiter that
+        // then reuses it (a RootCompletion), so read the grandparent first and
+        // never touch `p` afterwards.
+        auto grand = p.parent;
         auto next = p.join(p);
         if (next !is null)
             return next;
-        node = p;
+        p = grand;
     }
 }

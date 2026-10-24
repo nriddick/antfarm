@@ -116,6 +116,14 @@ run dub test :ant_fibers --compiler=ldc2
 run dub test :ant_fibers --compiler=dmd
 run dub test :forkjoin --compiler=ldc2
 run dub test :forkjoin --compiler=dmd
+# The whole fork-join suite under ThreadSanitizer and AddressSanitizer:
+# dispatcher, pool parking, foreign submission, nested loops, deque.
+run ldc2 -g -O1 -fsanitize=thread -d-version=TSan -i -I. -Ithreadpool/source -Iforkjoin/source -Itests/forkjoin \
+    tests/forkjoin/forkjoin_test.d -of=.build/forkjoin_tsan -od=.build/obj-forkjoin-tsan
+run env TSAN_OPTIONS=history_size=7:halt_on_error=1:report_thread_leaks=0:suppressions=tests/forkjoin/tsan.supp .build/forkjoin_tsan
+run ldc2 -g -O1 -fsanitize=address -i -I. -Ithreadpool/source -Iforkjoin/source -Itests/forkjoin \
+    tests/forkjoin/forkjoin_test.d -of=.build/forkjoin_asan -od=.build/obj-forkjoin-asan
+run env ASAN_OPTIONS=detect_leaks=0 .build/forkjoin_asan
 run dub run :threadpool -c confine-test --compiler=ldc2
 select_cpus CHECK_SMALL_CPUS 4 4
 run "${cpu_pin[@]}" dub run :threadpool -c confine-test --compiler=ldc2

@@ -1,0 +1,6 @@
+# ThreadSanitizer suppressions for the fork-join suite.
+#
+# druntime's garbage collector stops the world with a signal; its handler is
+# reported for spoiling errno. That is a runtime matter, not a dispatcher race,
+# and with halt_on_error it would end the run before the suite finishes.
+signal:thread_suspendHandler

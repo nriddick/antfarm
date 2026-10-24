@@ -101,6 +101,62 @@ bool anyArmed() @nogc nothrow
     return false;
 }
 
+/// Wakes one armed or parked worker of group `llc` and returns true, or
+/// returns false when none of that group is armed. For work that only that
+/// group's workers can see, such as a table in that group's Farm.
+bool wakeOneArmedIn(ushort llc) @nogc nothrow
+{
+    version (ThreadpoolOs)
+    {
+        import core.bitop : bsf;
+        foreach (w; 0 .. gArmedBits.length)
+        {
+            auto word = atomicLoad!(MemoryOrder.raw)(gArmedBits[w]);
+            auto scan = word; // bits still to look at; `word` stays the CAS expectation
+            while (scan != 0)
+            {
+                auto bit = scan & -scan;
+                scan &= ~bit;
+                immutable index = cast(uint)(w * 64 + bsf(bit));
+                if (index >= gWorkers.length || gWorkers[index].llcIndex != llc) continue;
+                if (cas(&gArmedBits[w], word, word & ~bit))
+                {
+                    wakeWorker(index);
+                    return true;
+                }
+                // Lost a race on this word: reload and rescan it.
+                word = atomicLoad!(MemoryOrder.raw)(gArmedBits[w]);
+                scan = word;
+            }
+        }
+    }
+    return false;
+}
+
+unittest
+{
+    // Mixed groups in one word: waking group 1 clears only group 1's bit.
+    auto savedWorkers = gWorkers;
+    auto savedBits = gArmedBits;
+    scope (exit) { gWorkers = savedWorkers; gArmedBits = savedBits; }
+    gWorkers = new WorkerRec[3];
+    gWorkers[0].llcIndex = 0;
+    gWorkers[1].llcIndex = 1;
+    gWorkers[2].llcIndex = 0;
+    gArmedBits = new shared(ulong)[1];
+    atomicStore(gArmedBits[0], 0b111UL);
+    assert(wakeOneArmedIn(1));
+    assert(atomicLoad(gArmedBits[0]) == 0b101UL);
+    assert(!wakeOneArmedIn(1), "no armed worker of group 1 left");
+    assert(wakeOneArmedIn(0));
+    assert(wakeOneArmedIn(0));
+    assert(!wakeOneArmedIn(0));
+    assert(atomicLoad(gArmedBits[0]) == 0);
+    assert(!anyArmed());
+    atomicStore(gArmedBits[0], 0b100UL);
+    assert(anyArmed() && wakeOneArmed() && !anyArmed());
+}
+
 /// Wakes one armed or parked worker and returns true, or returns false when
 /// none is armed. A worker that is armed but not yet asleep returns from its
 /// park at once, so a wake that lands in that window is not lost.

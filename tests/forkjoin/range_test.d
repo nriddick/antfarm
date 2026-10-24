@@ -181,6 +181,17 @@ bool runRangeTest()
         }
         if (g_foreignSum == 0.0) ok = false;
     }
+    // Accumulator types: byte, double and a struct all compile and fold.
+    {
+        Dispatcher d;
+        d.start(cpus[0 .. 2]);
+        auto bytes = forkJoinReduce!((size_t i) => cast(ubyte)(i & 1), (ubyte a, ubyte b) => cast(ubyte)(a + b))(iota(size_t(100)), ubyte(0), 7);
+        if (bytes != 50) { printf("range_test: ubyte reduce %u\n", bytes); ok = false; }
+        static struct MinMax { size_t lo = size_t.max; size_t hi; }
+        auto mm = forkJoinReduce!((size_t i) => MinMax(i, i), (MinMax a, MinMax b) => MinMax(a.lo < b.lo ? a.lo : b.lo, a.hi > b.hi ? a.hi : b.hi))(iota(size_t(5), size_t(905)), MinMax.init, 16);
+        if (mm.lo != 5 || mm.hi != 904) { printf("range_test: struct reduce %zu..%zu\n", mm.lo, mm.hi); ok = false; }
+        d.stop();
+    }
     printf("range_test: %s\n", ok ? "ok".ptr : "FAILED".ptr);
     return ok;
 }

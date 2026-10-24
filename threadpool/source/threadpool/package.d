@@ -21,7 +21,7 @@ public import threadpool.resolution : PoolResolution, resolvePool, Reject,
 public import threadpool.pin : PinOutcome, pinProcessor, liveOsMask;
 public import threadpool.hybrid : WorkerSelf, currentWorker, bindNumaNeighborhood,
     WorkerBody, WorkerStop, ManagedWorkerHooks, ManagedPumpResult, IdleKind,
-    anyArmed, wakeOneArmed;
+    anyArmed, wakeOneArmed, wakeOneArmedIn;
 public import threadpool.bins : makeBins, install, uninstall, binStaffed, setLabel, home,
     search, at;
 public import threadpool.stats : PoolStats;

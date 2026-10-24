@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Nathan Riddick. Design derived from citor by Vitalii
 // Shutov (MIT); see the repository LICENSE.
-/// The dispatcher: pinned `CacheAwarePool` workers plus the calling thread
-/// as participant 0, one `GroupBin` per last-level-cache group installed with
-/// `makeBins`/`install` and found with `home!GroupBin` on workers and
-/// `at!GroupBin` on the caller. A bin names its Farm and its participants.
-/// With `DispatcherOptions.farmPerGroup` every group has its own Farm,
-/// consumed only by its own participants; otherwise all bins share one.
+/// The dispatcher: a `threadpool.groups.GroupHost` owns the pinned pool, the
+/// caller's pin and the Farms; its workers plus the calling thread are the
+/// participants, the caller as participant 0. Each participant finds its
+/// home Farm through the host's `GroupSlot` registry and holds one producer
+/// token per Farm it writes. With `DispatcherOptions.farmPerGroup` every
+/// last-level-cache group has its own Farm, consumed only by its own
+/// participants; otherwise all groups share one.
 ///
 /// Scheduling order on every participant: pop the own deque (LIFO), poll the
 /// home Farm every `pollEvery` pops or when the deque is empty, then steal:
@@ -76,8 +77,11 @@ struct DispatcherOptions
     uint spinSteps = 4096;
     /// One Farm per LLC group instead of one shared Farm.
     bool farmPerGroup = false;
-    /// The calling thread subscribes a view and polls the Farm too.
-    bool callerConsumes = true;
+    /// The calling thread subscribes a view and polls the Farm during
+    /// `runRoot`. Leave it false unless the caller keeps running roots: an
+    /// idle subscribed view pins ring reclamation, and a stream of
+    /// `submitRoot` calls from other threads then stalls once the ring laps.
+    bool callerConsumes = false;
     /// Test knob: deque overflow runs inline instead of going to the Farm.
     bool spillInline = false;
 }
@@ -91,6 +95,7 @@ private __gshared uint[][maxParticipants] g_cross;  // per participant: ids in o
 private __gshared uint[maxParticipants] g_sibling;  // per participant: the SMT sibling's id, or uint.max
 private __gshared size_t g_participants;
 private __gshared DispatcherOptions g_opt;
+private __gshared ushort g_submitLlc;         // the group whose Farm takes submitted roots
 private __gshared Token g_submitToken;              // shared by foreign submitters under g_submitLock
 private shared bool g_submitLock;
 private shared uint g_epoch;             // bumped before the timed run; counts from epoch 0 are discarded
@@ -124,6 +129,8 @@ private Deque* t_deque;
 private AntFarm* t_farm;      // home Farm
 private uint[] t_same;        // participant ids in the home group
 private Token* t_token;       // home Farm token, owned by the GroupHost per thread
+private ushort t_llc;         // home group
+private bool t_inCallback;    // inside nodeCall: the view walk is running, do not re-enter it
 private uint t_id;
 private ConsumerView t_view;
 private bool t_consumes;
@@ -139,7 +146,12 @@ private Stats t_stats;
 /// The one Farm callback: a one-word body holding a `Node*`.
 private extern (C) void nodeCall(const(ulong)* body, size_t) nothrow @nogc @system
 {
+    // A node arriving through the Farm runs inside consumeNext. A nested
+    // runRoot from here steps without polling the view (SPEC 7c).
+    immutable outer = t_inCallback;
+    t_inCallback = true;
     runChain(cast(Node*) body[0]);
+    t_inCallback = outer;
 }
 
 /// Publishes `kids` as children of `parent` and returns the one to run
@@ -204,11 +216,14 @@ private struct OneWordBodies
     size_t length() const nothrow @nogc @safe { return nodes.length; }
 }
 
-/// Deque overflow: one table into the home Farm, then inline for what it refuses.
+/// Deque overflow: one table into the home Farm, then inline for what it
+/// refuses. Inside a Farm callback everything runs inline: the nested wait
+/// cannot poll the view that is running, so a child in the Farm could be
+/// reachable by no one when this is the only active consumer.
 private void spill(Node*[] kids) nothrow @nogc @system
 {
     size_t done;
-    while (!g_opt.spillInline && done < kids.length)
+    while (!g_opt.spillInline && !t_inCallback && done < kids.length)
     {
         auto n = cast(size_t) t_farm.write(&nodeCall, OneWordBodies(kids[done .. $]), 1,
             *t_token, g_opt.avgCost);
@@ -217,7 +232,7 @@ private void spill(Node*[] kids) nothrow @nogc @system
         t_stats.spilledTables++;
     }
     t_stats.spilledChildren += done;
-    if (done && anyParked()) wakeOne();
+    if (done && anyParked()) wakeOneIn(t_llc);
     if (done < kids.length)
     {
         t_stats.inlineChildren += kids.length - done;
@@ -290,7 +305,7 @@ private Node* steal() nothrow @nogc @system
 
 private bool pollFarm() nothrow @nogc @system
 {
-    if (!t_consumes) return false;
+    if (!t_consumes || t_inCallback) return false;
     t_stats.farmPolls++;
     if (t_view.consumeNext())
     {
@@ -406,6 +421,14 @@ void wakeOne() nothrow @nogc @system
     if (wakeOneArmed()) t_stats.wakes++;
 }
 
+/// Wakes one parked participant of group `llc` if it has one, else any: a
+/// table in that group's Farm is visible only to that group's participants.
+private void wakeOneIn(ushort llc) nothrow @nogc @system
+{
+    if (!g_opt.park) return;
+    if (wakeOneArmedIn(llc) || wakeOneArmed()) t_stats.wakes++;
+}
+
 /// Completion of a root submitted from a thread that is not a participant.
 struct RootCompletion
 {
@@ -435,16 +458,25 @@ void submitRoot(Node* root, RootCompletion* c) nothrow @nogc @system
     root.parent = &c.sentinel;
     root.depth = 0;
     atomicOp!"+="(g_rootsLive, 1);
+    publishRoot(root);
+}
+
+/// Writes one root into the submit Farm under the submit lock. A refused
+/// write means the ring is full of unconsumed tables: wake a consumer of
+/// that group and retry, so parked workers drain it.
+private void publishRoot(Node* root) nothrow @nogc @system
+{
     Node*[1] one = [root];
     while (cas(&g_submitLock, false, true) == false) pause();
     for (;;)
     {
         auto n = g_farms[0].write(&nodeCall, OneWordBodies(one[]), 1, g_submitToken, g_opt.avgCost);
         if (n == 1) break;
+        wakeOneIn(g_submitLlc);
         pause();
     }
     atomicStore!(MemoryOrder.rel)(g_submitLock, false);
-    wakeOne();
+    wakeOneIn(g_submitLlc);
 }
 
 /// Blocks until the root submitted with `c` completes.
@@ -464,16 +496,7 @@ void submitDetached(Node* root) nothrow @nogc @system
     root.parent = null;
     root.depth = 0;
     atomicOp!"+="(g_rootsLive, 1);
-    Node*[1] one = [root];
-    while (cas(&g_submitLock, false, true) == false) pause();
-    for (;;)
-    {
-        auto n = g_farms[0].write(&nodeCall, OneWordBodies(one[]), 1, g_submitToken, g_opt.avgCost);
-        if (n == 1) break;
-        pause();
-    }
-    atomicStore!(MemoryOrder.rel)(g_submitLock, false);
-    wakeOne();
+    publishRoot(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,6 +569,7 @@ private void workerStop(WorkerSelf*) nothrow @nogc @system
 private void enterThread(uint id, ushort llc, bool consumes) nothrow @nogc @system
 {
     t_id = id;
+    t_llc = llc;
     t_farm = groupFarmOf(llc);
     if (t_farm is null) fatal("participant without a group Farm");
     t_same = g_members[llc];
@@ -606,6 +630,16 @@ struct Dispatcher
         enforce(g_participants == 0, "forkjoin: a dispatcher is already running");
         g_opt = opt;
         immutable callerConsumes = opt.callerConsumes || cpus.length == 1;
+        scope (failure)
+        {
+            // Undo every stage so a later start can succeed.
+            if (host !is null) { host.close(); host = null; }
+            g_host = null;
+            foreach (i; 0 .. g_participants)
+                if (g_deques[i] !is null) { g_deques[i].destroy(); g_deques[i] = null; }
+            g_farmCount = 0;
+            g_participants = 0;
+        }
 
         GroupHostOptions ho;
         ho.workers = cast(uint)(cpus.length - 1);
@@ -660,6 +694,7 @@ struct Dispatcher
         enforce(host.resolution.workers == res.workers, "forkjoin: the host started a different selection");
         g_farmCount = host.farms.length;
         foreach (i, f; host.farms) g_farms[i] = f;
+        g_submitLlc = host.groups[0];
         g_submitToken = g_farms[0].registerProducer(Tier.small);
         if (!g_submitToken.valid) fatal("submit token registration failed");
         enterThread(0, llcOfId[0], callerConsumes);
