@@ -892,12 +892,106 @@ void parkedParallel()
     writeln("PASS parallel: parked host, region exceeds ring, caller-only wait joins all work");
 }
 
+
+// ---- GroupHost: one Farm per group, tokens per thread, ordered teardown ----
+
+import threadpool.groups : GroupHost, GroupHostOptions, GroupSlot, releaseThreadTokens;
+import threadpool.bins : home;
+
+__gshared shared(ulong) groupJobs;
+__gshared shared(ulong)[8] groupJobsBy; // per llc
+ConsumerView tGroupView;
+bool tGroupSubscribed;
+
+void groupJob(ulong llc) nothrow @nogc @system
+{
+    atomicOp!"+="(groupJobs, 1UL);
+    if (llc < groupJobsBy.length) atomicOp!"+="(groupJobsBy[llc], 1UL);
+}
+
+bool groupBody(WorkerSelf* w) nothrow @nogc @system
+{
+    if (!tGroupSubscribed)
+    {
+        auto slot = home!GroupSlot();
+        if (slot is null || slot.farm is null) return false;
+        if (tGroupView.subscribe(slot.farm) < 0) return false;
+        tGroupSubscribed = true;
+    }
+    return tGroupView.consumeNext();
+}
+
+void groupStopHook(WorkerSelf*) nothrow @nogc @system
+{
+    if (tGroupSubscribed) { tGroupView.unsubscribe(); tGroupSubscribed = false; }
+}
+
+/// Every accepted group gets its own Farm; the caller publishes a table into
+/// each through its per-group token, that group's workers consume it, the
+/// caller's affinity is restored and the pool is released for the next host.
+void groupHostPerGroup()
+{
+    import antfarm.templates : payloadRange;
+    import std.range : iota, repeat;
+    auto before = liveCallerMask();
+    GroupHostOptions o;
+    o.groups = HostGroups.all();
+    o.farmPerGroup = true;
+    o.idleTimeout = Duration.max;
+    o.farm.ringMiB = 2;
+    auto host = new GroupHost(o, &groupBody, &groupStopHook);
+    enforce(host.workers >= 2, "group host needs two workers");
+    enforce(host.farms.length == host.groups.length, "one Farm per selected group");
+    atomicStore(groupJobs, 0UL);
+    foreach (ref c; groupJobsBy) atomicStore(c, 0UL);
+    ulong expected;
+    foreach (llc; host.groups)
+    {
+        auto farm = host.farmOf(llc);
+        enforce(farm !is null, "each selected group has a Farm");
+        auto jobs = payloadRange!groupJob(repeat(cast(ulong) llc, 3000));
+        ulong left = 3000;
+        while (left)
+        {
+            immutable w = farm.write(jobs, host.token(llc));
+            if (w == 0) { host.wakeAll(); Thread.yield(); continue; }
+            jobs.popFrontN(cast(size_t) w);
+            left -= w;
+            host.wakeOne();
+        }
+        expected += 3000;
+    }
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad(groupJobs) < expected && MonoTime.currTime < deadline)
+    {
+        host.wakeAll();
+        Thread.sleep(1.msecs);
+    }
+    enforce(atomicLoad(groupJobs) == expected, "every group's table ran");
+    foreach (llc; host.groups)
+        enforce(atomicLoad(groupJobsBy[llc]) == 3000, "a group's jobs ran on its own Farm");
+    host.close();
+    enforce(!host.isOpen, "closed");
+    enforce(liveCallerMask() == before, "caller mask restored after GroupHost.close");
+    // The pool is free again: a FarmHost can follow.
+    auto next = new FarmHost(guarded(2));
+    next.close();
+    writeln("PASS group host: ", host.farms.length == 0 ? host.groups.length : host.farms.length,
+        " group(s), one Farm each, tokens per thread, teardown and pool release");
+}
+
 int main(string[] args)
 {
     if (args.length == 2 && args[1] == "--parallel-only")
     {
         enforce(workersFit(), "parallel test requires two worker CPUs");
         parkedParallel();
+        return 0;
+    }
+    if (args.length == 2 && args[1] == "--groups-only")
+    {
+        enforce(workersFit(), "group host test requires two worker CPUs");
+        groupHostPerGroup();
         return 0;
     }
     if (args.length == 2 && args[1] == "--reclamation-only")
@@ -933,6 +1027,7 @@ int main(string[] args)
     reclamationProgress();
     confineCaller();
     rawTokenPickup();
+    groupHostPerGroup();
     timeoutThenCancel(2);
     version (assert) workerFailure();
     singleton();

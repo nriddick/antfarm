@@ -33,23 +33,17 @@ module forkjoin.dispatcher;
 
 import antfarm;
 import threadpool;
+import threadpool.groups : GroupHost, GroupHostOptions, GroupSlot, groupFarmOf, groupToken;
+import threadpool.host : HostGroups, CallerPlacement, WorkerIdle;
 import forkjoin.node;
 import forkjoin.deque;
 import core.atomic;
 import core.sync.event : Event;
+import core.time : Duration;
 version (linux) import threadpool.sys.linux_wait : wakeWorker;
 version (Windows) import threadpool.sys.win_wait : wakeWorker;
 
 enum maxParticipants = 128;
-
-/// One per LLC group, installed on the threadpool registry.
-struct GroupBin
-{
-    AntFarm* farm;
-    uint farmIndex;
-    uint[] members;   // participant ids in this group (caller is id 0)
-    uint consumers;
-}
 
 /// Tuning. Every field has a measured default from the fork-join benchmarks
 /// on a two-CCD Ryzen 9 5900XT; see docs/design/forkjoin.md.
@@ -87,8 +81,10 @@ struct DispatcherOptions
     bool spillInline = false;
 }
 
-__gshared AntFarm*[maxParticipants] g_farms;
+__gshared GroupHost g_host;
+__gshared AntFarm*[maxParticipants] g_farms;    // g_host.farms
 __gshared size_t g_farmCount;
+__gshared uint[][maxParticipants] g_members;    // per LLC group: participant ids (caller is 0)
 __gshared Deque*[maxParticipants] g_deques;
 __gshared uint[][maxParticipants] g_cross;  // per participant: ids in other groups
 __gshared uint[maxParticipants] g_sibling;  // per participant: the SMT sibling's id, or uint.max
@@ -96,7 +92,6 @@ __gshared size_t g_participants;
 __gshared DispatcherOptions g_opt;
 __gshared Token g_submitToken;              // shared by foreign submitters under g_submitLock
 shared bool g_submitLock;
-__gshared GroupBin g_soloBin;               // the one group when there is no pool
 shared uint g_epoch;             // bumped before the timed run; counts from epoch 0 are discarded
 
 struct Stats
@@ -109,9 +104,10 @@ shared Stats g_stats;
 
 // Thread-local participant state.
 Deque* t_deque;
-GroupBin* t_bin;
+AntFarm* t_farm;      // home Farm
+uint[] t_same;        // participant ids in the home group
+Token* t_token;       // home Farm token, owned by the GroupHost per thread
 uint t_id;
-Token t_token;
 ConsumerView t_view;
 bool t_consumes;
 uint t_pops;
@@ -197,8 +193,8 @@ private void spill(Node*[] kids) nothrow @nogc @system
     size_t done;
     while (!g_opt.spillInline && done < kids.length)
     {
-        auto n = cast(size_t) t_bin.farm.write(&nodeCall, OneWordBodies(kids[done .. $]), 1,
-            t_token, g_opt.avgCost);
+        auto n = cast(size_t) t_farm.write(&nodeCall, OneWordBodies(kids[done .. $]), 1,
+            *t_token, g_opt.avgCost);
         if (n == 0) break;
         done += n;
         t_stats.spilledTables++;
@@ -255,7 +251,7 @@ private Node* steal() nothrow @nogc @system
         }
     auto r = xorshift(t_rng);
     auto cross = g_cross[t_id];
-    auto same = t_bin.members;
+    auto same = t_same;
     bool goCross;
     if (g_opt.crossDiv == 0)
         goCross = (r >> 32) % g_participants < cross.length;     // uniform over everyone
@@ -477,7 +473,7 @@ void submitDetached(Node* root) nothrow @nogc @system
 private bool workerBody(WorkerSelf* w) nothrow @nogc @system
 {
     if (t_deque is null)
-        enterThread(w.workerIndex + 1, home!GroupBin(), true);
+        enterThread(w.workerIndex + 1, w.llcIndex, true);
     if (t_recheck)
     {
         // The pool armed this worker's wait slot (and its bit) before this
@@ -529,19 +525,19 @@ private void workerStop(WorkerSelf*) nothrow @nogc @system
     leaveThread();
 }
 
-private void enterThread(uint id, GroupBin* bin, bool consumes) nothrow @nogc @system
+private void enterThread(uint id, ushort llc, bool consumes) nothrow @nogc @system
 {
-    if (bin is null) fatal("participant without a group bin");
     t_id = id;
-    t_bin = bin;
+    t_farm = groupFarmOf(llc);
+    if (t_farm is null) fatal("participant without a group Farm");
+    t_same = g_members[llc];
     t_deque = g_deques[id];
     t_rng = 0x9E3779B97F4A7C15UL * (id + 1) | 1;
     t_hotVictim = uint.max;
     t_pops = 0;
-    t_token = bin.farm.registerProducer(Tier.small);
-    if (!t_token.valid) fatal("producer registration failed");
+    t_token = &groupToken(llc);
     t_consumes = consumes;
-    if (consumes && t_view.subscribe(bin.farm) < 0)
+    if (consumes && t_view.subscribe(t_farm) < 0)
         fatal("consumer subscription failed");
 }
 
@@ -556,21 +552,21 @@ private void leaveThread() nothrow @nogc @system
     t_stats = Stats.init;
     if (t_consumes) t_view.unsubscribe();
     t_consumes = false;
-    t_bin.farm.unregisterProducer(t_token);
+    t_token = null; // released by the GroupHost after this hook
     t_deque = null;
-    t_bin = null;
+    t_farm = null;
+    t_same = null;
 }
 
 // ---------------------------------------------------------------------------
 
 struct Dispatcher
 {
-    CacheAwarePool pool;
-    GroupBin[] bins;
+    GroupHost host;
 
-    /// Starts the dispatcher. `cpus[0]` is the calling thread's processor,
-    /// pinned here; the rest become pool workers. Throws if the pool does
-    /// not accept every requested processor or a processor is unknown.
+    /// Starts the dispatcher on a `GroupHost`. `cpus[0]` is the calling
+    /// thread's processor, pinned here; the rest become pool workers. Throws
+    /// if the host does not accept every requested processor.
     void start(const(ProcessorId)[] cpus, DispatcherOptions opt = DispatcherOptions.init)
     {
         import std.exception : enforce;
@@ -578,77 +574,46 @@ struct Dispatcher
         enforce(g_participants == 0, "forkjoin: a dispatcher is already running");
         g_opt = opt;
         immutable callerConsumes = opt.callerConsumes || cpus.length == 1;
-        auto topo = CacheAwarePool.topology();
-        auto callerLp = topo.byId(cpus[0]);
-        enforce(callerLp !is null, "forkjoin: caller CPU unknown to the topology");
 
-        g_participants = cpus.length;
-        if (cpus.length == 1)
-        {
-            // Caller only: no pool, no registry, one Farm for the spill path.
-            g_deques[0] = Deque.create(opt.dequeCapacity);
-            g_farms[0] = AntFarm.create(opt.ringMiB, 8, 1, 0, 0, 3, opt.smallQuota);
-            g_farmCount = 1;
-            g_submitToken = g_farms[0].registerProducer(Tier.small);
-            g_soloBin = GroupBin(g_farms[0], 0, [0u], 1);
-            g_cross[0] = null;
-            g_sibling[0] = uint.max;
-            enforce(pinProcessor(cpus[0]) == PinOutcome.pinned, "forkjoin: could not pin the caller");
-            enterThread(0, &g_soloBin, true);
-            return;
-        }
-
-        // Resolve the workers first: the bins are built from the resolution.
-        PoolOptions popt;
-        popt.processors = cpus[1 .. $];
-        popt.workerBody = &workerBody;
-        popt.workerStop = &workerStop;
-        pool = new CacheAwarePool(popt);
-        auto res = pool.resolve();
+        GroupHostOptions ho;
+        ho.workers = cast(uint)(cpus.length - 1);
+        ho.groups = HostGroups.all();
+        ho.callerProcessor = cpus[0];
+        ho.callerConsumes = callerConsumes;
+        ho.idle = opt.park ? WorkerIdle.park : WorkerIdle.spin;
+        ho.idleTimeout = Duration.max; // park until woken; wakeOne does the waking
+        ho.pool.skipSmtSiblings = false;
+        ho.pool.processors = cpus[1 .. $];
+        ho.pool.pSpinIters = 1;
+        ho.pool.eSpinIters = 1;
+        ho.farm.ringMiB = opt.ringMiB;
+        ho.farm.quotaSmall = opt.smallQuota;
+        ho.farm.extraSmallProducers = 1; // the shared submit token
+        ho.farmPerGroup = opt.farmPerGroup;
+        // Workers run their first body call inside the host constructor, so
+        // every table they read is built from the resolution beforehand.
+        auto res = GroupHost.resolve(ho);
         enforce(res.workers.length == cpus.length - 1,
             "forkjoin: the threadpool accepted " ~ res.summary());
-        auto callerLlc = callerLp.llcIndex;
+        auto topo = CacheAwarePool.topology();
 
         // Participant ids: caller 0, pool worker i -> i + 1; group of each.
-        auto llcOfId = new ushort[cpus.length];
-        llcOfId[0] = callerLlc;
-        foreach (i, id; res.workers)
-            llcOfId[i + 1] = topo.byId(id).llcIndex;
-        foreach (i; 0 .. cpus.length)
-            g_deques[i] = Deque.create(opt.dequeCapacity);
-
-        bins = makeBins!GroupBin(res, (ref const GroupDisposition g) {
-            GroupBin b;
-            foreach (i; 0 .. cpus.length)
-                if (llcOfId[i] == g.llcIndex)
-                {
-                    b.members ~= cast(uint) i;
-                    if (i > 0 || callerConsumes) b.consumers++;
-                }
-            return b;
-        });
-        // Farms: one per staffed group, or one shared by all.
-        g_farmCount = 0;
-        foreach (ref b; bins)
-        {
-            if (b.members.length == 0) continue;
-            if (opt.farmPerGroup || g_farmCount == 0)
-            {
-                uint consumers = opt.farmPerGroup ? b.consumers
-                    : cast(uint)(callerConsumes ? cpus.length : cpus.length - 1);
-                uint producers = opt.farmPerGroup ? cast(uint) b.members.length + 2 : cast(uint) cpus.length + 2;
-                g_farms[g_farmCount++] = AntFarm.create(opt.ringMiB, 8, consumers == 0 ? 1 : consumers,
-                    0, 0, producers, opt.smallQuota);
-            }
-            b.farmIndex = cast(uint) g_farmCount - 1;
-            b.farm = g_farms[b.farmIndex];
-        }
-        // Siblings from the topology: two participants on one physical core.
+        g_participants = cpus.length;
         auto idOf = new ProcessorId[cpus.length];
         idOf[0] = cpus[0];
         foreach (i, id; res.workers) idOf[i + 1] = id;
+        auto llcOfId = new ushort[cpus.length];
         auto coreOf = new ushort[cpus.length];
-        foreach (i; 0 .. cpus.length) coreOf[i] = topo.byId(idOf[i]).coreIndex;
+        foreach (i; 0 .. cpus.length)
+        {
+            auto lp = topo.byId(idOf[i]);
+            llcOfId[i] = lp.llcIndex;
+            coreOf[i] = lp.coreIndex;
+            g_deques[i] = Deque.create(opt.dequeCapacity);
+        }
+        foreach (ref m; g_members) m = null;
+        foreach (i; 0 .. cpus.length)
+            g_members[llcOfId[i]] ~= cast(uint) i;
         foreach (i; 0 .. cpus.length)
         {
             g_cross[i] = null;
@@ -658,19 +623,19 @@ struct Dispatcher
             foreach (j; 0 .. cpus.length)
                 if (j != i && coreOf[j] == coreOf[i]) g_sibling[i] = cast(uint) j;
         }
-        install(bins, res);
+        host = new GroupHost(ho, &workerBody, &workerStop);
+        g_host = host;
+        enforce(host.resolution.workers == res.workers, "forkjoin: the host started a different selection");
+        g_farmCount = host.farms.length;
+        foreach (i, f; host.farms) g_farms[i] = f;
         g_submitToken = g_farms[0].registerProducer(Tier.small);
         if (!g_submitToken.valid) fatal("submit token registration failed");
-
-        enforce(pinProcessor(cpus[0]) == PinOutcome.pinned, "forkjoin: could not pin the caller");
-        enterThread(0, at!GroupBin(callerLlc), callerConsumes);
-        pool.start();
-        if (opt.park) pool.director().wait();
-        else pool.director().spin(1);
+        enterThread(0, llcOfId[0], callerConsumes);
     }
 
-    /// Drains every outstanding root (detached roots included), then shuts
-    /// the pool down, leaves, and destroys the deques and Farms.
+    /// Drains every outstanding root (detached roots included), then closes
+    /// the host (pool shutdown runs each worker's stop hook), leaves, and
+    /// destroys the deques.
     void stop()
     {
         while (atomicLoad!(MemoryOrder.acq)(g_rootsLive) != 0)
@@ -678,29 +643,17 @@ struct Dispatcher
             if (step()) t_idle = 0;
             else idlePause();
         }
-        if (pool !is null)
-        {
-            pool.shutdown(); // joins every worker; each ran workerStop
-            leaveThread();
-            uninstall!GroupBin();
-            pool = null;
-        }
-        else
-            leaveThread();
+        g_farms[0].unregisterProducer(g_submitToken);
+        leaveThread();
+        host.close(); // joins workers, releases tokens, destroys the Farms
+        g_host = null;
         foreach (i; 0 .. g_participants)
         {
             g_deques[i].destroy();
             g_deques[i] = null;
         }
-        g_farms[0].unregisterProducer(g_submitToken);
-        foreach (i; 0 .. g_farmCount)
-        {
-            g_farms[i].destroy();
-            g_farms[i] = null;
-        }
         g_farmCount = 0;
         g_participants = 0;
-        bins = null;
     }
 }
 

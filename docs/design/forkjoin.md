@@ -88,7 +88,13 @@ when a deque is full. One frame pointer is the unit in both.
   the root's own sentinel, so a nested loop waits only for its own tree) and
   through `submitRoot`/`waitRoot` otherwise. `submitDetached` is `submitRoot`
   without a completion; `stop` drains `g_rootsLive` before shutdown.
-- **Shutdown.** `Dispatcher.stop` drains outstanding roots, then shuts the pool down (every worker runs its
+- **Host.** The dispatcher runs on `threadpool.groups.GroupHost`, which owns
+  the pool, the caller's pin (`callerProcessor`), one Farm per group
+  (`farmPerGroup`) or one shared Farm, the `GroupSlot` registry and the
+  per-thread tokens. The dispatcher builds its participant tables from
+  `GroupHost.resolve` before constructing the host, since workers run their
+  first body call inside the constructor.
+- **Shutdown.** `Dispatcher.stop` drains outstanding roots, then closes the host, which shuts the pool down (every worker runs its
   stop hook: flush counters, unsubscribe, unregister), then the caller
   leaves, the registry is uninstalled, and deques and Farms are destroyed.
 

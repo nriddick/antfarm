@@ -122,6 +122,12 @@ Parallel loop adapters are a separate module:
 | --- | --- | --- |
 | Function adaptation | `payloadEntry`, `callbackFor`, `payloadRange`, `PayloadGrainRange`, `PayloadArgRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#first-payload) |
 
+## Group host
+
+| Topic | Symbols | Explanation |
+| --- | --- | --- |
+| Per-group Farms, tokens and teardown for raw worker bodies | `GroupHost`, `GroupHostOptions`, `GroupSlot`, `groupFarmOf`, `groupToken`, `releaseThreadTokens`, `HostGroups.all` | [threadpool design](../design/threadpool.md#group-host) |
+
 ## Farm host
 
 | Topic | Symbols | Explanation |

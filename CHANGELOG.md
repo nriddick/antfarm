@@ -6,6 +6,19 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- Cleanup step 1, one owner of the pool: `threadpool.groups.GroupHost`
+  resolves workers with `FarmHost`'s planner, creates one Farm per selected
+  LLC group (`farmPerGroup`, `HostGroups.all`) or one shared Farm, pins the
+  caller (`callerProcessor`) or confines it, starts the pool with a raw
+  worker body, installs a `GroupSlot` registry (`home!GroupSlot`,
+  `farmOf`), hands out one token per thread per Farm (`token`,
+  `groupToken`, `releaseThreadTokens`) and tears down in order. The
+  fork-join dispatcher runs on it and lost its own Farm creation, pinning
+  and teardown. `FarmHost` keeps its one-Farm implementation and shares the
+  planner and the pool claim; routing its runtimes and parks by group is the
+  roadmap's next item. host-test gains a GroupHost case (two groups, one
+  Farm each, tokens per thread, teardown, pool released for a FarmHost).
+
 - Cleanup step 2, idle machinery. The pool keeps one bit per armed worker
   and offers `wakeOne` (clear a bit, wake that worker; a woken worker that
   finds more work wakes the next) and `anyWorkerArmed`; the fork-join

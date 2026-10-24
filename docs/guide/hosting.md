@@ -192,12 +192,14 @@ counts the other groups' workers as foreign consumers. It is the
 configuration the table above measures and advises against, kept for work
 heavy enough per payload (about 1 µs) that the control lines do not matter.
 
-The host does not yet package this. `FarmHost` owns one Farm on one group,
-and a process has one pool with workers, so a per-group-Farm host (one host,
-one Farm per accepted group, a token per Farm, `publish` and `pump` routed by
-group) is the missing primitive and is on the [roadmap](../../ROADMAP.md#next).
-Until then, the hand-written pool shape above, or one process per group, is
-the way to scale past one group.
+`GroupHost` (`import threadpool.groups;`) packages this for programs with a
+raw worker body: `HostGroups.all` and `farmPerGroup` give one Farm per
+accepted group with that group's workers on it, `farmOf(llc)` and
+`token(llc)` route a control thread's publications group by group, and
+`close` tears everything down in order. The fork-join dispatcher runs on it
+([design](../design/threadpool.md#group-host)). `FarmHost` still owns one
+Farm on one group for actor programs; routing its runtimes and parks by
+group is the remaining step.
 
 ## Progress and waking
 

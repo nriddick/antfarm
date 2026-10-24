@@ -358,6 +358,40 @@ contents. Install, label, and uninstall are exclusive setup/teardown
 operations. Lookup is concurrent only while the installed table and labels are
 unchanged.
 
+## Group host
+
+`threadpool.groups.GroupHost` is the one owner of the pool, the caller's
+placement, the Farms and the tokens for a program with pinned workers; the
+fork-join dispatcher is built on it and `FarmHost` shares its planner and
+its claim on the process's single pool. It resolves workers with
+`planHost` (`FarmHostOptions` mapped from `GroupHostOptions`), so group
+selection, `autoWorkers`, caller confinement and the reasons for unused
+groups are the same as `FarmHost`'s; `HostGroups.all` selects every group
+with an accepted CPU, home first, and `callerProcessor` pins the caller to
+one exact CPU kept out of the worker set.
+
+With `farmPerGroup` it creates one Farm per selected group, sized for that
+group's workers (plus the caller's view when the caller consumes in that
+group), and installs one `GroupSlot {farm, llc, farmIndex}` per group
+through `makeBins`/`install`: a worker finds its Farm with
+`home!GroupSlot()`, a control thread with `farmOf(llc)`. Without it, one
+Farm serves every selected group and every slot names it. Every Farm plans
+one small-tier producer per participant plus `FarmSizing.extraSmallProducers`;
+`groupToken(llc)` (or `host.token(llc)`) registers the calling thread's
+token on that Farm lazily, and `releaseThreadTokens` returns them: after a
+worker's stop hook, in `close` for the caller, and by hand on any other
+thread that published.
+
+The host owns no consumer views and no queue: the raw `WorkerBody` it is
+given subscribes its own view and unsubscribes it in its stop hook, as a
+hand-written pool did. Workers run their first body call inside the
+constructor, so everything a body reads must be built before `new GroupHost`
+(the dispatcher builds its tables from `GroupHost.resolve`). `close` is the
+ordered teardown: pool shutdown (stop hooks, then token release), the
+caller's tokens, the registry, the Farms, the caller's affinity, the pool
+claim. `wakeOne`, `anyWorkerArmed`, `wakeAll` and `wakeLlc` pass through to
+the pool.
+
 ## Ant Farm embedding
 
 The usual non-Fiber embedding installs one Farm-bearing object per accepted

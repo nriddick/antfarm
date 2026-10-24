@@ -16,11 +16,11 @@ Windows validation is separate and is not part of the local gate.
   actors, waves, private root/child exports and the optional non-Fiber host
   before promoting them; shared-library packaging and language adapters can
   follow the static distributions.
-- A per-group-Farm host: one `FarmHost` owning one Farm per accepted LLC
-  group, each group's workers pinned to its own Farm, a token per Farm, and
-  `publish`/`pump` routed by group so the control thread emits locally into
-  its home group and one-way into the others. The measurements and the
-  interim hand-written shape are in
+- Route `FarmHost`'s runtimes and parks by group on top of `GroupHost`
+  (`threadpool.groups`), which since 2.0.0-dev owns the pool, caller
+  placement, one Farm per accepted group and per-thread tokens for raw
+  worker bodies; the fork-join dispatcher runs on it. The actor host still
+  owns one Farm on one group. The measurements are in
   [several physical groups](docs/guide/hosting.md#several-physical-groups).
 
 - Continue public-actor tuning from the fused retirement and occupancy path.

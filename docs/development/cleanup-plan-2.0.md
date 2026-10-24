@@ -35,7 +35,9 @@ and `forkjoin.Dispatcher`.
   "hand-written shape" paragraphs and the fwbench `farms.d` pool.
 - Check: `dub test :forkjoin`, the host-test lane, fwbench's four
   benchmarks within 2% of the 2.0.0-progress numbers, `make perf-gate` on
-  the actor churn and private cells.
+  the actor churn and private cells. (In 2.0.0-dev: `GroupHost` exists and
+  the dispatcher runs on it; `FarmHost` shares its planner and pool claim
+  but is not yet a client. That conversion moved to the roadmap's Next.)
 
 ### 2. Idle machinery
 

@@ -194,6 +194,15 @@ validating resolution. `install(bins, res, classCount)` installs one value per
 Install, label, and uninstall only during exclusive setup/teardown; lookup is
 concurrent after installation.
 
+## Several groups
+
+`import threadpool.groups;` for a host that owns the pool, the caller's
+placement and one Farm per accepted group for a raw worker body: workers
+find their Farm with `home!GroupSlot()`, control threads publish with
+`host.farmOf(llc)` and `host.token(llc)`, and `host.close()` tears down in
+order. See [the design](../docs/design/threadpool.md#group-host) and the
+[hosting guide](../docs/guide/hosting.md#several-physical-groups).
+
 ## Managed workers
 
 Use `PoolOptions.managedWorker` when workers need allocation, exceptions, or

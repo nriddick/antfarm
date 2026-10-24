@@ -95,9 +95,19 @@ struct HostGroups
         return g;
     }
 
-    private enum Kind : ubyte { automatic, only, span }
-    private Kind kind;
-    private const(ushort)[] llcs;
+    /// Every group with an accepted CPU, the one with the most first (home).
+    /// With `GroupHostOptions.farmPerGroup` each group gets its own Farm;
+    /// on a `FarmHost` it behaves as `span` over every group.
+    static HostGroups all() pure nothrow @safe
+    {
+        HostGroups g;
+        g.kind = Kind.all;
+        return g;
+    }
+
+    package(threadpool) enum Kind : ubyte { automatic, only, span, all }
+    package(threadpool) Kind kind;
+    package(threadpool) const(ushort)[] llcs;
 }
 
 /// Farm geometry. Participant counts are computed by the host; the fields
@@ -325,7 +335,7 @@ struct HostAttachment
 // Worker hooks: CacheAwarePool takes context-free function pointers, so the
 // host's worker state is process-global, owned by whichever host holds
 // gHostClaimed (taken before any of the others is written).
-private shared bool gHostClaimed;
+package(threadpool) shared bool gHostClaimed;
 private __gshared AntFarm* gHostFarm;
 private shared uint gHostSubscribed;
 private ConsumerView tHostView; // TLS: one cursor per worker
@@ -1301,7 +1311,7 @@ package(threadpool) HostPlan planHost(ref const TopologySnapshot snap, const Far
             foreach (id; chosen)
                 if (id.group != processorGroup)
                 {
-                    problems ~= "HostGroups.span across Windows processor groups is not supported yet";
+                    problems ~= "HostGroups.span/all across Windows processor groups is not supported yet";
                     break;
                 }
         }
@@ -1395,6 +1405,7 @@ private ushort[] selectGroups(const PoolResolution candidates, const HostGroups 
     final switch (wanted.kind)
     {
         case HostGroups.Kind.automatic:
+        case HostGroups.Kind.all:
             ushort best;
             uint most;
             foreach (ref gd; candidates.groups)
@@ -1408,7 +1419,12 @@ private ushort[] selectGroups(const PoolResolution candidates, const HostGroups 
                 problems ~= "no group has an accepted CPU: " ~ candidates.summary();
                 return null;
             }
-            return [best];
+            if (wanted.kind == HostGroups.Kind.automatic)
+                return [best];
+            ushort[] every = [best];
+            foreach (ref gd; candidates.groups)
+                if (gd.isAccepted && gd.llcIndex != best) every ~= gd.llcIndex;
+            return every;
         case HostGroups.Kind.only:
         case HostGroups.Kind.span:
             if (wanted.llcs.length == 0)
