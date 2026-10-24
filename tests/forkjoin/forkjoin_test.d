@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT (see forkjoin/LICENSE)
+// SPDX-License-Identifier: MIT
 /// `dub test :forkjoin`: the deque exactly-once test and the dispatcher
 /// admission test. Prints `passed` on success.
 module forkjoin_test;

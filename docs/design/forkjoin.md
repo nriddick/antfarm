@@ -8,9 +8,9 @@ were taken in [antfarm-fwbench](https://github.com/nriddick/antfarm-fwbench),
 whose `docs/forkjoin-synthesis-plan.md` records every phase, including the
 negative results.
 
-The package is MIT licensed, unlike the rest of Ant Farm (BSL-1.0), because
-its design derives from citor by Vitalii Shutov (MIT); the acknowledgement
-and the list of what was taken are in [forkjoin/LICENSE](../../forkjoin/LICENSE).
+The package's design derives from citor by Vitalii Shutov (MIT); the
+acknowledgement and the list of what was taken are in the repository
+[LICENSE](../../LICENSE), which is MIT for all of Ant Farm.
 
 ## Why both a deque and the Farm
 

@@ -123,6 +123,6 @@ workers and the shutdown order.
   for the full local Linux gate. There is no CI; Windows has a separate
   [native integration matrix](docs/development/testing.md#windows-x64-integration).
 
-Ant Farm is licensed under the Boost Software License 1.0, except the
-`forkjoin` subpackage, which is MIT ([forkjoin/LICENSE](forkjoin/LICENSE))
-because its design derives from citor by Vitalii Shutov.
+Ant Farm is licensed under the MIT License ([LICENSE](LICENSE)). The
+`forkjoin` subpackage's design derives from citor by Vitalii Shutov (MIT);
+the acknowledgement is in the license file.

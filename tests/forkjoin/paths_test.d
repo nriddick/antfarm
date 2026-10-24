@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT (see forkjoin/LICENSE)
+// SPDX-License-Identifier: MIT
 /// Dispatcher paths the admission test does not reach: one participant (no
 /// pool, children run inline), deque overflow spilled into the Farm and run
 /// inline when the Farm is bypassed, a join that forks a second phase,

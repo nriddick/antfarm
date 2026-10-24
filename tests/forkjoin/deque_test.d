@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT (see forkjoin/LICENSE)
+// SPDX-License-Identifier: MIT
 /// Exactly-once test for forkjoin.deque: one owner pushes and pops, several
 /// thieves steal, every item is observed exactly once, and the deque never
 /// loses or duplicates an item through full, wraparound and last-item races.

@@ -2,7 +2,7 @@
     dependency "antfarm:forkjoin" path="../.."
 +/
 /++
- + SPDX-License-Identifier: MIT (forkjoin/LICENSE)
+ + SPDX-License-Identifier: MIT
  +
  + Smallest complete fork-join program: fib(30) on the calling thread plus
  + one pinned worker per remaining eligible processor of the first LLC group.

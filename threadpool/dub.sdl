@@ -1,7 +1,7 @@
 name "threadpool"
 description "Cache-topology-aware thread pool"
 authors "Nathan Riddick"
-license "BSL-1.0"
+license "MIT"
 targetType "library"
 targetPath "bin"
 sourcePaths "source"

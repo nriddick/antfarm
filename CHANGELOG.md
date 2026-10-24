@@ -15,8 +15,11 @@ Older release notes are in [docs/releases/](docs/releases/):
   measurements: [docs/design/forkjoin.md](docs/design/forkjoin.md); the
   choosing guide, README and ARCHITECTURE name the new representation, and
   the roadmap's 2.0 work-stealing item records what is done and open.
-  The subpackage is MIT licensed (`forkjoin/LICENSE`) with an
-  acknowledgement of citor by Vitalii Shutov, from which its design derives.
+
+- Ant Farm is now MIT licensed as a whole (`LICENSE`), replacing the Boost
+  Software License 1.0. The license file carries the acknowledgement of
+  citor by Vitalii Shutov, from whose design the `forkjoin` subpackage
+  derives; `dub.sdl` of every package and the C header say MIT.
 
 ## 1.9.1 — 2026-10-23
 

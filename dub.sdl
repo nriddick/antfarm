@@ -1,7 +1,7 @@
 name "antfarm"
 description "Ant Farm M:N jobs, cache-aware threadpool, and colocated Fiber scheduler"
 authors "Nathan Riddick"
-license "BSL-1.0"
+license "MIT"
 targetType "library"
 // Build outputs go under bin/: an executable named antfarm would collide
 // with the antfarm/ source directory.

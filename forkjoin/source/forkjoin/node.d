@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Nathan Riddick. Design derived from citor by Vitalii
-// Shutov (MIT); see forkjoin/LICENSE.
+// Shutov (MIT); see the repository LICENSE.
 /// The work item and the trampoline.
 ///
 /// Every task is a heap frame that begins with a `Node`. `run` executes the

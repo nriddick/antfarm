@@ -1,7 +1,7 @@
 name "ant_fibers"
 description "Freely migrating druntime Fiber scheduler backed by Ant Farm"
 authors "Nathan Riddick"
-license "BSL-1.0"
+license "MIT"
 targetType "library"
 sourcePaths "source"
 importPaths "source"

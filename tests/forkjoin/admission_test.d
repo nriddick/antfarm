@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT (see forkjoin/LICENSE)
+// SPDX-License-Identifier: MIT
 /// Dispatcher test: idle workers park (near-zero CPU while nothing runs),
 /// roots submitted from a thread that is not a participant complete with
 /// correct results while workers are parked, a participant root runs through

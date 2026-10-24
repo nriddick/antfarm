@@ -64,10 +64,10 @@ Build with `-d-version=ForkjoinHotStats` (LDC) or `-version=ForkjoinHotStats`
 (DMD) to count every push and pop; those counters cost 1% on fib and 6% on
 skynet at two threads, so they are off by default.
 
-## License and acknowledgement
+## Acknowledgement
 
-This package is MIT licensed ([LICENSE](LICENSE)); the rest of Ant Farm is
-BSL-1.0. Its design derives from [citor](https://github.com/Lallapallooza/citor)
+Ant Farm is MIT licensed ([LICENSE](../LICENSE)). This package's design
+derives from [citor](https://github.com/Lallapallooza/citor)
 by Vitalii Shutov (MIT): per-worker Chase-Lev deques with the last child run
 inline, the hot-victim hint, same-cluster stealing with a cross-cluster escape
 probe, the single-participant inline path and the chain wake. The deque

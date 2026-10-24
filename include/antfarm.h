@@ -1,4 +1,4 @@
-/* Ant Farm C ABI 1. BSL-1.0. Windows/Linux, 64-bit. */
+/* Ant Farm C ABI 1. MIT License. Windows/Linux, 64-bit. */
 #ifndef ANTFARM_H
 #define ANTFARM_H
 #include <stddef.h>
