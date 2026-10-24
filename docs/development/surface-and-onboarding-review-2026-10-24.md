@@ -88,14 +88,16 @@ exchange, v1 stub, with pairwise matrices and draining not implemented.
 `HostGroups.span` exists so a program can do what the next section measures
 and advises against. Fiber `assist` edges are experimental and opt-in.
 `ManagedWorkerHooks` is a second worker lane whose only in-tree user is
-`ant_fibers`. The MT payload form was removed in 1.9 but its history still
-occupies SPEC section 11.
+`ant_fibers`. The MT payload form was removed in 1.9 but its removal history
+still opens SPEC section 11, ahead of the lineage passage (Piquer, SNZI)
+that the section exists for.
 
 Suggestion: delete `exchange` until a NUMA host exists to validate it; keep
 `span` but move it out of the hosting guide's placement section into a
-"when you know better" note; fold the SPEC history into the archive. The
-managed lane stays as long as fibers need it, but its README section could
-say so.
+"when you know better" note; move the MT-payload removal history to the
+archive and keep the rationale appendix, whose Piquer and SNZI lineage
+passage is the one place that explains the tally's design. The managed lane
+stays as long as fibers need it, but its README section could say so.
 
 ### Duplicated numbers and status
 

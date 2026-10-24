@@ -86,9 +86,13 @@ and `forkjoin.Dispatcher`.
 
 - Delete `threadpool.exchange` (self-described stub) and its README
   section. Move `HostGroups.span` from the placement defaults into a
-  short "when you know better" note. Fold SPEC section 11's MT-payload
-  history into docs/performance/archive. Say in threadpool/README.md that
-  the managed worker lane exists for `ant_fibers`.
+  short "when you know better" note. In SPEC section 11, move only the
+  "MT payloads removed (1.9)" history into docs/performance/archive; the
+  rationale appendix stays, and in particular the lineage passage (Piquer's
+  indirect reference counting, SNZI, Dijkstra and Scholten) with its
+  provenance note is kept in the SPEC as the owner of why the tally is
+  shaped as it is. Say in threadpool/README.md that the managed worker lane
+  exists for `ant_fibers`.
 - Check: `make check-docs`, the threadpool and fiber suites.
 
 ### 6. Onboarding
