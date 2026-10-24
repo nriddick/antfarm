@@ -4,6 +4,15 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
+## Unreleased
+
+- PERFORMANCE.md's fork-join table is re-taken under the benchmark harness's
+  own build rules: the harness's allocator (tcmalloc here, not Ant Farm's
+  bundled mimalloc), no function-alignment flag, library-default dispatcher
+  options, with the ports staged for the upstream suite. fib(39) now trails
+  citor at 16 threads and above because its per-fork frame allocation is
+  allocator-bound; skynet and nqueens still lead at every count.
+
 ## 2.0.0 — 2026-10-24
 
 2.0.0 adds a work-stealing fork-join dispatcher beside the Farm, puts one

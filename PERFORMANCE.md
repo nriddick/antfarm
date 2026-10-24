@@ -15,58 +15,60 @@ its tables are retired with no refresh planned. The previous page is archived in
 The [tzcnt/runtime-benchmarks](https://github.com/tzcnt/runtime-benchmarks)
 programs ported to the 2.0 fork-join dispatcher (`forkjoin`), run against the
 harness's C++ runtimes on the same machine in one session on October 24, 2026,
-at `b4d2852` on `2.0.0-progress`. Wall time in milliseconds, **median of three
+at Ant Farm 2.0.0 (`6603a3b`). Wall time in milliseconds, **median of three
 process samples**, runtimes interleaved within each sample round; the fastest
-cell per column is in bold. The D ports are built with LDC 1.43.0
-`-O3 -release -boundscheck=off -mcpu=native` and mimalloc; the C++ runtimes
-with the harness's own CMake builds at its pinned commit `5c499a1`. The Ant Farm
-variants use the harness glue's defaults (32 MiB ring per Farm, 4096-entry
-deques, parking on) with the caller consuming; "Farm per group" gives each L3
-group its own Farm for spills and submissions, "one Farm" shares one. Threads
-are participants including the calling thread; the Ant Farm ports pin them to
-the 16 physical cores across both CCDs first and to SMT siblings from 24
-threads on, while the C++ runtimes place threads as they ship. The raw samples are in the fwbench
-repository's `results/20261024-154300-b4d2852-threads.json`.
+cell per column is in bold. Both sides are built under the harness's rules:
+the C++ runtimes with its CMake presets at its commit `5c499a1` (clang 23.1.3,
+`-O3 -march=native`), the D ports with LDC 1.43.0
+`-O3 -release -mcpu=native -boundscheck=off`, no layout flags, the library's
+default `DispatcherOptions`, and every binary dynamically linked against the
+first allocator the harness finds, here `libtcmalloc_minimal`. The D ports are
+the ones staged for the suite (`d/antfarm` in the fwbench repository's
+staging clone); they compute the same problems with the same recursion shape,
+warm-up run, timer placement and result checks as the C++ ports. Threads are
+participants including the calling thread; Ant Farm pins them to the 16
+physical cores across both CCDs first and to SMT siblings from 24 threads on,
+the C++ runtimes place threads as they ship. The raw samples are in the
+fwbench repository's `results/20261024-fair-v2.0.0-threads.json`.
 
 | Benchmark | Runtime | 1 | 2 | 8 | 16 | 24 | 32 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| fib(39) | citor 0.4.5 | 1,850.6 | 1,000.9 | 258.3 | 140.9 | 141.3 | 107.1 |
-| fib(39) | libfork | 1,967.1 | 1,045.4 | 274.4 | 158.2 | 148.6 | 140.6 |
-| fib(39) | TooManyCooks | 2,610.8 | 1,321.3 | 354.5 | 210.5 | 210.0 | 206.6 |
-| fib(39) | TBB | 7,008.1 | 3,675.3 | 944.3 | 549.1 | 542.2 | 533.0 |
-| fib(39) | Ant Farm fork-join, one Farm | **1,156.6** | 748.9 | 198.4 | **116.8** | 111.7 | 107.1 |
-| fib(39) | Ant Farm fork-join, Farm per group | 1,208.0 | **748.5** | **196.3** | 117.6 | **111.6** | **106.8** |
-| skynet | citor 0.4.5 | 569.5 | 483.8 | 126.3 | 69.0 | 69.1 | 54.2 |
-| skynet | libfork | 1,250.9 | 658.3 | 167.7 | 97.4 | 96.7 | 96.2 |
-| skynet | TooManyCooks | 1,232.8 | 617.6 | 163.5 | 96.8 | 93.4 | 90.3 |
-| skynet | TBB | 4,223.7 | 2,154.7 | 563.8 | 323.2 | 311.5 | 301.5 |
-| skynet | Ant Farm fork-join, one Farm | **396.4** | 359.6 | **95.0** | **55.1** | 52.5 | **50.0** |
-| skynet | Ant Farm fork-join, Farm per group | 396.6 | **357.6** | 95.3 | 55.2 | **52.2** | 50.1 |
-| nqueens | citor 0.4.5 | 2,786.9 | 1,583.3 | 412.2 | 218.2 | 219.5 | 168.7 |
-| nqueens | libfork | 2,314.0 | 1,214.0 | 316.5 | 167.9 | **153.2** | **142.4** |
-| nqueens | TooManyCooks | 2,589.4 | 1,281.7 | 340.8 | 188.4 | 174.9 | 162.7 |
-| nqueens | TBB | 4,193.2 | 2,102.4 | 559.5 | 312.1 | 281.4 | 258.3 |
-| nqueens | Ant Farm fork-join, one Farm | 2,295.6 | 1,147.9 | 306.2 | 166.7 | 155.2 | 146.1 |
-| nqueens | Ant Farm fork-join, Farm per group | **2,289.9** | **1,146.4** | **305.6** | **166.1** | 154.6 | 145.7 |
-| matmul 2048 | citor 0.4.5 | 1,344.0 | 679.2 | 178.2 | 105.5 | 104.5 | 71.4 |
-| matmul 2048 | libfork | **1,180.2** | 633.2 | 164.8 | **90.8** | **70.0** | **60.9** |
-| matmul 2048 | TooManyCooks | 1,210.0 | **608.7** | **162.7** | 94.0 | 72.7 | 62.5 |
-| matmul 2048 | TBB | 1,258.3 | 640.6 | 172.4 | 102.6 | 82.8 | 74.3 |
-| matmul 2048 | Ant Farm fork-join, one Farm | 1,239.3 | 620.5 | 164.9 | 94.8 | 71.6 | 61.3 |
-| matmul 2048 | Ant Farm fork-join, Farm per group | 1,235.5 | 621.3 | 165.0 | 95.0 | 71.7 | 61.2 |
+| fib(39) | citor 0.4.5 | 1,805.4 | 1,005.7 | 258.6 | **140.8** | **140.9** | **107.8** |
+| fib(39) | libfork | 1,977.3 | 1,047.5 | 274.7 | 157.2 | 149.8 | 141.2 |
+| fib(39) | TooManyCooks | 2,613.0 | 1,319.0 | 356.6 | 211.3 | 209.2 | 207.1 |
+| fib(39) | TBB | 6,874.0 | 3,598.7 | 969.1 | 547.1 | 542.8 | 532.5 |
+| fib(39) | Ant Farm fork-join | **1,296.1** | **849.6** | **233.8** | 159.9 | 148.2 | 134.8 |
+| skynet | citor 0.4.5 | 571.8 | 485.2 | 126.7 | 69.0 | 69.1 | 54.3 |
+| skynet | libfork | 1,246.6 | 660.1 | 167.5 | 97.5 | 96.9 | 96.2 |
+| skynet | TooManyCooks | 1,183.3 | 617.3 | 162.3 | 97.2 | 93.0 | 91.4 |
+| skynet | TBB | 4,174.0 | 2,147.6 | 566.4 | 322.9 | 311.0 | 301.5 |
+| skynet | Ant Farm fork-join | **412.2** | **360.8** | **94.3** | **55.1** | **52.2** | **49.6** |
+| nqueens | citor 0.4.5 | 2,788.1 | 1,586.1 | 412.2 | 218.5 | 219.0 | 168.6 |
+| nqueens | libfork | 2,312.9 | 1,217.4 | 317.6 | 167.6 | 153.9 | 142.1 |
+| nqueens | TooManyCooks | 2,557.5 | 1,284.9 | 340.4 | 189.0 | 175.1 | 161.7 |
+| nqueens | TBB | 4,186.0 | 2,199.4 | 567.8 | 312.3 | 281.3 | 259.5 |
+| nqueens | Ant Farm fork-join | **2,120.2** | **1,067.5** | **289.0** | **161.3** | **145.8** | **134.6** |
+| matmul 2048 | citor 0.4.5 | 1,343.5 | 670.8 | 179.5 | 103.7 | 103.9 | 70.0 |
+| matmul 2048 | libfork | **1,172.4** | 620.9 | 165.6 | **91.3** | 70.6 | 60.7 |
+| matmul 2048 | TooManyCooks | 1,214.1 | **607.9** | **162.9** | 93.7 | 72.6 | 62.2 |
+| matmul 2048 | TBB | 1,262.8 | 637.3 | 176.6 | 103.5 | 83.7 | 71.5 |
+| matmul 2048 | Ant Farm fork-join | 1,223.7 | 618.9 | 163.7 | 93.9 | **70.5** | **59.5** |
 
-fib and skynet are spawn-bound: the deque push, pop and the continuation join
-set the pace, and the dispatcher leads at every count, by 30 to 38% at one
-thread, where its frame is a heap node and a few stores with no coroutine.
-nqueens and matmul have real leaves and the runtimes converge: on nqueens the
-dispatcher leads through 16 threads and trails libfork by 1 to 3% at 24 and
-32; on matmul libfork or TooManyCooks lead at every count, by 1 to 5%, the
-widest gap at 16 threads. The two Farm layouts are within 1% of each other on every cell: on this workload set
-the Farm carries only spills and roots, so where it lives hardly matters. From
-16 threads on, every added thread is an SMT sibling of a busy core, and the
-spawn-bound programs gain little from them for every runtime.
-Per-phase history and the measurement notes are in the fwbench repository's
-`docs/forkjoin-synthesis-plan.md`.
+skynet and nqueens are led by the dispatcher at every count. fib is led
+through 8 threads and then trails citor, by 25% at 32 threads, and the gap is
+the allocator: fib's port mallocs a two-child frame per fork and frees it on
+whichever thread runs the join, and tcmalloc's cross-thread free path costs
+what citor's arena-allocated frames do not. With Ant Farm's bundled mimalloc
+instead, the same binary runs fib(39) at 32 threads in 107 ms and ties citor;
+the other three programs are allocator-neutral. Taking frame allocation out of
+the port, with a per-participant frame pool in the library, is on the 2.0.1
+list. matmul has real leaves and the runtimes converge within 3%; the
+dispatcher is fastest at 24 and 32 threads. From 16 threads on, every added
+thread is an SMT sibling of a busy core, and the spawn-bound programs gain
+little from them for every runtime. An earlier version of this table, taken
+with mimalloc and 64-byte function alignment, showed fib at 107 ms; it is
+superseded by this one. Per-phase history and the measurement notes are in
+the fwbench repository's `docs/forkjoin-synthesis-plan.md`.
 
 ## Headline throughput
 
