@@ -10,6 +10,64 @@ The i7-12700H laptop is not expected to sustain stable clocks over long runs;
 its tables are retired with no refresh planned. The previous page is archived in
 [docs/performance/archive-2026-10-20.md](docs/performance/archive-2026-10-20.md).
 
+## Fork-join against the C++ runtimes
+
+The [tzcnt/runtime-benchmarks](https://github.com/tzcnt/runtime-benchmarks)
+programs ported to the 2.0 fork-join dispatcher (`forkjoin`), run against the
+harness's C++ runtimes on the same machine in one session on October 24, 2026,
+at `b4d2852` on `2.0.0-progress`. Wall time in milliseconds, **median of three
+process samples**, runtimes interleaved within each sample round; the fastest
+cell per column is in bold. The D ports are built with LDC 1.43.0
+`-O3 -release -boundscheck=off -mcpu=native` and mimalloc; the C++ runtimes
+with the harness's own CMake builds at its pinned commit `5c499a1`. The Ant Farm
+variants use the harness glue's defaults (32 MiB ring per Farm, 4096-entry
+deques, parking on) with the caller consuming; "Farm per group" gives each L3
+group its own Farm for spills and submissions, "one Farm" shares one. Threads
+are participants including the calling thread; the Ant Farm ports pin them to
+the 16 physical cores across both CCDs first and to SMT siblings from 24
+threads on, while the C++ runtimes place threads as they ship. The raw samples are in the fwbench
+repository's `results/20261024-154300-b4d2852-threads.json`.
+
+| Benchmark | Runtime | 1 | 2 | 8 | 16 | 24 | 32 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| fib(39) | citor 0.4.5 | 1,850.6 | 1,000.9 | 258.3 | 140.9 | 141.3 | 107.1 |
+| fib(39) | libfork | 1,967.1 | 1,045.4 | 274.4 | 158.2 | 148.6 | 140.6 |
+| fib(39) | TooManyCooks | 2,610.8 | 1,321.3 | 354.5 | 210.5 | 210.0 | 206.6 |
+| fib(39) | TBB | 7,008.1 | 3,675.3 | 944.3 | 549.1 | 542.2 | 533.0 |
+| fib(39) | Ant Farm fork-join, one Farm | **1,156.6** | 748.9 | 198.4 | **116.8** | 111.7 | 107.1 |
+| fib(39) | Ant Farm fork-join, Farm per group | 1,208.0 | **748.5** | **196.3** | 117.6 | **111.6** | **106.8** |
+| skynet | citor 0.4.5 | 569.5 | 483.8 | 126.3 | 69.0 | 69.1 | 54.2 |
+| skynet | libfork | 1,250.9 | 658.3 | 167.7 | 97.4 | 96.7 | 96.2 |
+| skynet | TooManyCooks | 1,232.8 | 617.6 | 163.5 | 96.8 | 93.4 | 90.3 |
+| skynet | TBB | 4,223.7 | 2,154.7 | 563.8 | 323.2 | 311.5 | 301.5 |
+| skynet | Ant Farm fork-join, one Farm | **396.4** | 359.6 | **95.0** | **55.1** | 52.5 | **50.0** |
+| skynet | Ant Farm fork-join, Farm per group | 396.6 | **357.6** | 95.3 | 55.2 | **52.2** | 50.1 |
+| nqueens | citor 0.4.5 | 2,786.9 | 1,583.3 | 412.2 | 218.2 | 219.5 | 168.7 |
+| nqueens | libfork | 2,314.0 | 1,214.0 | 316.5 | 167.9 | **153.2** | **142.4** |
+| nqueens | TooManyCooks | 2,589.4 | 1,281.7 | 340.8 | 188.4 | 174.9 | 162.7 |
+| nqueens | TBB | 4,193.2 | 2,102.4 | 559.5 | 312.1 | 281.4 | 258.3 |
+| nqueens | Ant Farm fork-join, one Farm | 2,295.6 | 1,147.9 | 306.2 | 166.7 | 155.2 | 146.1 |
+| nqueens | Ant Farm fork-join, Farm per group | **2,289.9** | **1,146.4** | **305.6** | **166.1** | 154.6 | 145.7 |
+| matmul 2048 | citor 0.4.5 | 1,344.0 | 679.2 | 178.2 | 105.5 | 104.5 | 71.4 |
+| matmul 2048 | libfork | **1,180.2** | 633.2 | 164.8 | **90.8** | **70.0** | **60.9** |
+| matmul 2048 | TooManyCooks | 1,210.0 | **608.7** | **162.7** | 94.0 | 72.7 | 62.5 |
+| matmul 2048 | TBB | 1,258.3 | 640.6 | 172.4 | 102.6 | 82.8 | 74.3 |
+| matmul 2048 | Ant Farm fork-join, one Farm | 1,239.3 | 620.5 | 164.9 | 94.8 | 71.6 | 61.3 |
+| matmul 2048 | Ant Farm fork-join, Farm per group | 1,235.5 | 621.3 | 165.0 | 95.0 | 71.7 | 61.2 |
+
+fib and skynet are spawn-bound: the deque push, pop and the continuation join
+set the pace, and the dispatcher leads at every count, by 30 to 38% at one
+thread, where its frame is a heap node and a few stores with no coroutine.
+nqueens and matmul have real leaves and the runtimes converge: on nqueens the
+dispatcher leads through 16 threads and trails libfork by 1 to 3% at 24 and
+32; on matmul libfork or TooManyCooks lead at every count, by 1 to 5%, the
+widest gap at 16 threads. The two Farm layouts are within 1% of each other on every cell: on this workload set
+the Farm carries only spills and roots, so where it lives hardly matters. From
+16 threads on, every added thread is an SMT sibling of a busy core, and the
+spawn-bound programs gain little from them for every runtime.
+Per-phase history and the measurement notes are in the fwbench repository's
+`docs/forkjoin-synthesis-plan.md`.
+
 ## Headline throughput
 
 Four workloads at 2 to 40 threads. Payloads are one-word, uniform-callback

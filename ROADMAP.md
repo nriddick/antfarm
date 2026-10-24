@@ -49,9 +49,52 @@ counters and cadence verbs behind versions; MIT licensing; `VERSION`; and
 the onboarding pass (three rules first, a ten-line first program on every
 core, the hosting guide split). The ordered plan with each step's checks is
 [docs/development/cleanup-plan-2.0.md](docs/development/cleanup-plan-2.0.md).
-Left for 2.1: `FarmHost` on `GroupHost` (above, under Next), private trees
-retreating to typed results and tracked outcomes, scans and chains, a TSan
-lane for the dispatcher, Windows validation of the wake path.
+The fork-join suite runs under ThreadSanitizer and AddressSanitizer in
+`make check`. Left for 2.1: `FarmHost` on `GroupHost` (above, under Next),
+private trees retreating to typed results and tracked outcomes, Windows
+validation of the wake path.
+
+## 2.0.1 — wrappers and small features
+
+A short release on top of the dispatcher, each item a thin layer over
+`fork`/`complete` or `forkJoinReduce` with a test and a measured cost:
+
+- `forkJoinScan`: an inclusive prefix sum with the same deterministic split
+  as `forkJoinReduce` (two passes over the tree, the combine applied to
+  per-chunk totals).
+- `forkJoinInvoke`: run a fixed set of heterogeneous callables as the
+  children of one node and join them (the `invoke` of citor and TBB).
+- `forkJoinMap`: `forkJoinEach` writing into a preallocated output slice,
+  so a transform does not need a reduction's seed and combine.
+- A task-group handle: `submitDetached` roots counted on one
+  `RootCompletion` so a foreign thread can wait for a batch rather than
+  one root at a time.
+- `DispatcherOptions` presets for the two documented shapes (one Farm per
+  group with pinned workers; one shared Farm) and a `counters()` summary
+  printer, so a first measurement needs no glue.
+
+## 2.0.2 — the C ABI grows to the dispatcher
+
+[The C ABI](docs/design/c-abi.md) exports the Farm, actors and waves; the
+2.0 additions have no C surface yet. Candidates, in the order a C caller
+needs them:
+
+- `antfarm_dispatcher_start`/`_stop` over `DispatcherOptions`, and
+  `antfarm_dispatcher_counters` in the same flat struct the D side
+  reports.
+- Nodes as C structs with `run`/`join` function pointers, plus
+  `antfarm_fork`, `antfarm_complete`, `antfarm_run_root`,
+  `antfarm_submit_root`/`_wait_root` and `antfarm_submit_detached`, so a
+  C program writes the same continuation-passing tree as the D one.
+- `antfarm_forkjoin_for` and `antfarm_forkjoin_reduce` over callbacks with
+  a `void*` context, with the deterministic split documented as part of
+  the contract.
+- `GroupHost` exports (`resolve`, `start`, the per-thread token and the
+  group Farm) for hosts written in C that want one Farm per group without
+  the dispatcher.
+- A `cabi/examples` fork-join program and a death-test lane mirroring the
+  D suite's admission and completion cases.
+
 
 ## 2.0 goals — draft
 

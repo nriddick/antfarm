@@ -6,6 +6,11 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## Unreleased
 
+- PERFORMANCE.md opens with the fork-join dispatcher against citor, libfork,
+  TooManyCooks and TBB on the tzcnt/runtime-benchmarks programs at 1, 2, 8,
+  16, 24 and 32 threads; ROADMAP gains the 2.0.1 (wrappers and small
+  features) and 2.0.2 (the C ABI grows to the dispatcher) sections.
+
 - Fork-join review fixes, from an independent read of the dispatcher.
   `complete` reads the grandparent before running a parent's join, since the
   join may free the parent or hand it to a waiter (a use after free under
