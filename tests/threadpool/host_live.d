@@ -1261,6 +1261,146 @@ void blockedStop(WorkerSelf*) nothrow @nogc @system
 /// shared worker records and hooks while the live pool's worker is still
 /// inside its body, and the live pool's own shutdown still runs the stop
 /// hook and joins.
+// ---- farmPerGroup: runtimes and parks bound to one group's Farm -------------
+
+struct Routed
+{
+    AntFarm* expected; // the Farm the activation must arrive through
+}
+
+shared ulong gRoutedRuns, gRoutedMisrouted;
+
+void noteRouted(AntFarm* expected) nothrow @nogc @system
+{
+    auto slot = home!GroupSlot();
+    atomicOp!"+="(gRoutedRuns, 1UL);
+    if (slot is null || slot.farm !is expected) atomicOp!"+="(gRoutedMisrouted, 1UL);
+}
+
+void routedServe(scope ref ActorBorrow!Routed actor, scope ref ActorContext) nothrow @nogc @system
+{
+    noteRouted(actor.value.expected);
+}
+
+PrivateRootDisposition routedRootStep(scope ref PrivateBorrow!Routed root, scope ref PrivateContext)
+    nothrow @nogc @system
+{
+    noteRouted(root.value.expected);
+    return PrivateRootDisposition.finish;
+}
+
+/// With `farmPerGroup`, a runtime or park created on a group runs on that
+/// group's Farm and workers only; `step()` emits each through its Farm's
+/// control token, extra producers are planned per Farm, and `tokenOf(llc)`
+/// publishes raw tables into a chosen group.
+void farmPerGroupRouting()
+{
+    import antfarm.templates : payloadRange;
+    import std.range : repeat;
+
+    GroupHostOptions probe;
+    probe.groups = HostGroups.all();
+    if (GroupHost.resolve(probe).groups.length < 2)
+    {
+        writeln("SKIP farmPerGroup routing: one LLC group");
+        return;
+    }
+    FarmHostOptions o;
+    o.groups = HostGroups.all();
+    o.farmPerGroup = true;
+    o.farm.ringMiB = 2;
+    o.farm.extraSmallProducers = 1;
+    o.idleTimeout = Duration.max; // every publication must wake the right group
+    auto host = new FarmHost(o);
+    scope (failure) host.abandon();
+    enforce(host.farmPerGroup, "more than one Farm");
+    enforce(host.farms.length == host.groups.length, "one Farm per group");
+    enforce(host.farm is host.farmOf(host.callerGroup), "farm is the caller group's");
+    foreach (llc; host.groups)
+        enforce(host.farmOf(llc) !is null, "every group has a Farm");
+    atomicStore(gRoutedRuns, 0UL);
+    atomicStore(gRoutedMisrouted, 0UL);
+    ulong expected;
+
+    // Public actors: one runtime per group, woken repeatedly.
+    ActorRuntime*[] runtimes;
+    foreach (llc; host.groups)
+    {
+        auto farm = host.farmOf(llc);
+        auto runtime = host.createRuntime(1, llc);
+        runtimes ~= runtime;
+        auto owner = runtime.createActor!(Routed, routedServe)(Routed(farm));
+        enforce(owner.valid, "actor creation");
+        foreach (_; 0 .. 40)
+        {
+            enforce(owner.handle.wake().accepted, "wake");
+            ++expected;
+            host.waitUntil(() => atomicLoad(gRoutedRuns) >= expected);
+        }
+        host.retire(owner);
+        enforce(!owner.valid, "retired");
+    }
+
+    // Private parks: roots of a park created on a group step on that group.
+    foreach (llc; host.groups)
+    {
+        auto farm = host.farmOf(llc);
+        PrivateRootOptions po;
+        po.tracking = true;
+        auto park = host.createPark!(Routed, routedRootStep)(4, po, llc);
+        PrivateRootHandle[4] roots;
+        foreach (i; 0 .. 4)
+            enforce(park.spawn(Routed(farm), roots[i]) == PrivateSpawnResult.spawned, "spawn");
+        expected += 4;
+        host.waitUntil(() {
+            PrivateRootOutcome outcome;
+            while (park.takeOutcome(outcome)) {}
+            return park.live == 0;
+        });
+    }
+    host.waitUntil(() => atomicLoad(gRoutedRuns) == expected);
+    enforce(atomicLoad(gRoutedMisrouted) == 0, "every activation arrived through its group's Farm");
+
+    // Extra producers are planned per Farm: one per group registers, a
+    // second on the same group is refused, and each returns to its issuer.
+    Token[] extras;
+    foreach (llc; host.groups)
+        extras ~= host.registerProducer(Tier.small, llc);
+    expectThrow!FarmHostException(() { host.registerProducer(Tier.small, host.groups[1]); },
+        "second extra producer on one group");
+    foreach (ref t; extras)
+        host.unregisterProducer(t);
+
+    // Raw tables through tokenOf(llc) run on that group's workers.
+    atomicStore(groupJobs, 0UL);
+    foreach (ref c; groupJobsBy) atomicStore(c, 0UL);
+    ulong jobsExpected;
+    foreach (llc; host.groups)
+    {
+        auto jobs = payloadRange!groupJob(repeat(cast(ulong) llc, 500));
+        ulong left = 500;
+        while (left)
+        {
+            immutable w = host.farmOf(llc).write(jobs, host.tokenOf(llc));
+            if (w == 0) { host.wake(); Thread.yield(); continue; }
+            jobs.popFrontN(cast(size_t) w);
+            left -= w;
+            host.wake();
+        }
+        jobsExpected += 500;
+    }
+    host.waitUntil(() => atomicLoad(groupJobs) == jobsExpected);
+    foreach (llc; host.groups)
+        enforce(atomicLoad(groupJobsBy[llc]) == 500, "a group's raw table ran on its own Farm");
+    expectThrow!FarmHostException(() { host.createRuntime(1, cast(ushort) 250); }, "group without a Farm");
+
+    foreach (runtime; runtimes)
+        host.waitUntil(() => runtime.quiescent);
+    host.close();
+    writeln("PASS farmPerGroup: ", host.groups.length, " groups, runtimes and parks routed to their Farm, ",
+        expected, " activations, extra producers per Farm, tokenOf");
+}
+
 void rejectedPoolShutdown()
 {
     PoolOptions options;
@@ -1306,6 +1446,7 @@ int main(string[] args)
         groupHostAttachments();
         groupHostServiceFailure();
         farmHostOnGroupHost();
+        farmPerGroupRouting();
         rejectedPoolShutdown();
         return 0;
     }
@@ -1347,6 +1488,7 @@ int main(string[] args)
     groupHostAttachments();
     groupHostServiceFailure();
     farmHostOnGroupHost();
+    farmPerGroupRouting();
     rejectedPoolShutdown();
     timeoutThenCancel(2);
     version (assert) workerFailure();

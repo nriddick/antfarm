@@ -97,8 +97,8 @@ struct HostGroups
     }
 
     /// Every group with an accepted CPU, the one with the most first (home).
-    /// With `GroupHostOptions.farmPerGroup` each group gets its own Farm;
-    /// on a `FarmHost` it behaves as `span` over every group.
+    /// With `farmPerGroup` (`GroupHostOptions`, `FarmHostOptions`) each group
+    /// gets its own Farm; otherwise every group consumes the one Farm.
     static HostGroups all() pure nothrow @safe
     {
         HostGroups g;
@@ -144,6 +144,14 @@ struct FarmHostOptions
     uint workers = autoWorkers;
     /// Which group(s) supply workers. Ignored when `workers == 0`.
     HostGroups groups;
+    /// One Farm per group that supplies workers, consumed by that group's
+    /// workers only, instead of one Farm every group consumes. Runtimes and
+    /// parks are then bound to one group's Farm (`createRuntime` and
+    /// `createPark` take the group; the default is the caller's) and the
+    /// host emits each through that Farm's control token (`tokenOf`).
+    /// `farm`, `token` and the caller's view are the caller group's.
+    /// Ignored when `workers == 0` or one group supplies every worker.
+    bool farmPerGroup = false;
     /// Effective only with workers; `unchanged` when `workers == 0`.
     CallerPlacement caller = CallerPlacement.confine;
     /// The caller also owns a ConsumerView and consumes once per `step()`.
@@ -230,7 +238,8 @@ package(threadpool) final class HostPlan
                 callerSharesWorkerCpu ? " (shares worker CPUs)" : "");
         s ~= format("; consumers %s native + %s foreign + %s external, producers %s small + %s bulk",
             nativeConsumers, foreignConsumers, externalConsumers, maxSmall, maxBulk);
-        s ~= format("; Farm %s MiB, k %s", options.farm.ringMiB, options.farm.k);
+        s ~= format("; Farm %s MiB, k %s%s", options.farm.ringMiB, options.farm.k,
+            options.farmPerGroup && groups.length > 1 ? ", one per group" : "");
         return s;
     }
 
@@ -453,8 +462,9 @@ private void hostStop(WorkerSelf*) @nogc nothrow
  + propagates, including on normal return with undrained work.
  + Pool workers are non-daemon threads: a host with workers left open
  + (neither closed nor abandoned) hangs process exit.
- + While it has workers, a host runs on a `GroupHost` (one shared Farm, its
- + consuming worker body the host's one attachment) and so owns the process's
+ + While it has workers, a host runs on a `GroupHost` (one shared Farm, or one
+ + per group with `farmPerGroup`; its consuming worker body the host's one
+ + attachment) and so owns the process's
  + single `CacheAwarePool`; a second host with workers, a `GroupHost`, or one
  + started beside an application pool, is rejected. Without workers it is a
  + standalone Farm and may exist beside any host. Before concurrent construction or resolve calls, complete one
@@ -529,6 +539,8 @@ final class FarmHost
             if (!token_.valid)
                 throw new FarmHostException("FarmHost: control token registration failed");
         }
+        extraSmallBy_ = new uint[farms.length];
+        extraBulkBy_ = new uint[farms.length];
         if (plan_.callerConsumes)
         {
             immutable result = view_.subscribe(farm_);
@@ -594,11 +606,51 @@ final class FarmHost
         sink("\n");
     }
 
-    /// The host Farm, fixed for the host's life. Any thread.
+    /// The caller group's Farm, fixed for the host's life: the one Farm
+    /// without `farmPerGroup`, the one `token` publishes into and the
+    /// caller's view consumes with it. Any thread.
     @property AntFarm* farm() @nogc nothrow
     {
         return farm_;
     }
+
+    /// Every Farm of the host: one, or one per group with `farmPerGroup`, in
+    /// `groups` order. Any thread while the host is open.
+    @property AntFarm*[] farms() @nogc nothrow
+    {
+        if (group_ !is null) return group_.farms;
+        return farm_ is null ? null : (&farm_)[0 .. 1];
+    }
+
+    /// Group `llc`'s Farm, or null for a group without one on this host.
+    /// Without `farmPerGroup` every selected group maps to `farm`. Any thread.
+    AntFarm* farmOf(ushort llc) @nogc nothrow
+    {
+        if (group_ !is null) return group_.farmOf(llc);
+        return llc == plan_.farmGroup || llc == defaultGroup ? farm_ : null;
+    }
+
+    /// The groups that supply workers, the caller's first; with `workers == 0`
+    /// the caller's group alone. Any thread.
+    @property const(ushort)[] groups() const @nogc nothrow
+    {
+        return group_ !is null ? group_.groups : plan_.groups;
+    }
+
+    /// The caller's group: the one `farm` and `token` belong to. Any thread.
+    @property ushort callerGroup() const @nogc nothrow
+    {
+        return group_ !is null ? group_.callerGroup : plan_.farmGroup;
+    }
+
+    /// True when the host has more than one Farm. Any thread while open.
+    @property bool farmPerGroup() @nogc nothrow
+    {
+        return farms.length > 1;
+    }
+
+    /// The `llc` argument that means the caller's group.
+    enum ushort defaultGroup = ushort.max;
 
     /// Current lifecycle state (an acquire load). Any thread.
     @property HostState state() const @nogc nothrow
@@ -617,56 +669,135 @@ final class FarmHost
         return control();
     }
 
-    /// An extra producer, counted against `FarmSizing.extraSmallProducers`
-    /// or `bulkProducers`. Move-only; return it with `unregisterProducer`
+    /// The control token on group `llc`'s Farm; `token` is the caller
+    /// group's. With `farmPerGroup` the host registers one per Farm on first
+    /// use and releases them at `close()`; without it every group names
+    /// `token`. Control thread only; pass it by ref. Throws for a group
+    /// without a Farm on this host.
+    ref Token tokenOf(ushort llc) return
+    {
+        requireOpen("tokenOf");
+        version (assert) assertControl();
+        return tokenFor(resolveGroup(llc, "tokenOf"));
+    }
+
+    /// An extra producer on group `llc`'s Farm (default the caller's),
+    /// counted against that Farm's `FarmSizing.extraSmallProducers` or
+    /// `bulkProducers`. Move-only; return it with `unregisterProducer`
     /// before `close()`. Throws when the tier's planned slots are used up.
-    Token registerProducer(Tier tier = Tier.small)
+    Token registerProducer(Tier tier = Tier.small, ushort llc = defaultGroup)
     {
         import std.format : format;
 
         requireOpen("registerProducer");
+        immutable g = resolveGroup(llc, "registerProducer");
+        immutable index = farmIndexOf(g);
         immutable planned = tier == Tier.small
             ? plan_.options.farm.extraSmallProducers : plan_.options.farm.bulkProducers;
-        auto outstanding = tier == Tier.small ? &extraSmall_ : &extraBulk_;
+        auto outstanding = tier == Tier.small ? &extraSmallBy_[index] : &extraBulkBy_[index];
         if (*outstanding >= planned)
             throw new FarmHostException(format("FarmHost.registerProducer: all %s planned %s "
-                ~ "producer slots are in use (FarmSizing)", planned, tier));
-        auto result = farm_.registerProducer(tier);
+                ~ "producer slots of group %s's Farm are in use (FarmSizing)", planned, tier, g));
+        auto result = farms[index].registerProducer(tier);
         if (!result.valid)
             throw new FarmHostException(format("FarmHost.registerProducer: %s registration failed", tier));
         ++*outstanding;
         return result;
     }
 
-    /// Return a token from `registerProducer`. Throws on an invalid token.
+    /// Return a token from `registerProducer`, to the Farm that issued it.
+    /// Throws on an invalid token or one from another Farm.
     void unregisterProducer(ref Token token)
     {
         requireOpen("unregisterProducer");
         if (!token.valid)
             throw new FarmHostException("FarmHost.unregisterProducer: invalid token");
+        size_t index = size_t.max;
+        foreach (i, f; farms)
+            if (f.farmId == token.issuer) index = i;
+        if (index == size_t.max)
+            throw new FarmHostException("FarmHost.unregisterProducer: token from another Farm");
         immutable tier = token.tier;
-        farm_.unregisterProducer(token);
-        if (tier == Tier.small) --extraSmall_;
-        else --extraBulk_;
+        farms[index].unregisterProducer(token);
+        if (tier == Tier.small) --extraSmallBy_[index];
+        else --extraBulkBy_[index];
+    }
+
+    /// Outstanding extra producer tokens over every Farm.
+    private uint extraOutstanding() const @nogc nothrow
+    {
+        uint n;
+        foreach (c; extraSmallBy_) n += c;
+        foreach (c; extraBulkBy_) n += c;
+        return n;
+    }
+
+    /// Index of group `llc`'s Farm in `farms`.
+    private size_t farmIndexOf(ushort llc) @nogc nothrow
+    {
+        auto farm = farmOf(llc);
+        foreach (i, f; farms)
+            if (f is farm) return i;
+        return 0;
+    }
+
+    /// `llc`, or the caller's group for `defaultGroup`; throws for a group
+    /// without a Farm on this host.
+    private ushort resolveGroup(ushort llc, string what)
+    {
+        import std.format : format;
+
+        if (llc == defaultGroup) return callerGroup;
+        if (farmOf(llc) is null)
+            throw new FarmHostException(format("FarmHost.%s: group %s has no Farm on this host",
+                what, llc));
+        return llc;
+    }
+
+    /// The control thread's token on group `llc`'s Farm (a resolved group).
+    private ref Token tokenFor(ushort llc) return @nogc nothrow
+    {
+        return group_ !is null ? group_.token(llc) : control();
+    }
+
+    /// The group an owned runtime or park was created on; the caller's for
+    /// anything else.
+    private ushort groupOf(const(void)* object) const @nogc nothrow
+    {
+        foreach (ref o; owned_)
+            if (o.object is object) return o.llc;
+        return callerGroup;
+    }
+
+    /// Wake the workers that consume group `llc`'s Farm (park mode only).
+    private void wakeGroup(ushort llc) @nogc nothrow
+    {
+        if (!parkMode_) return;
+        if (farmPerGroup) group_.wakeLlc(llc);
+        else group_.wakeAll();
     }
 
     // ---- host-owned infrastructure ------------------------------------------
 
-    /// An `ActorRuntime` on the host Farm, flushed by `step()` and destroyed
-    /// by `close()` after the consumer join. The pointer is borrowed: never
-    /// destroy it yourself.
+    /// An `ActorRuntime` on group `llc`'s Farm (default the caller's; with
+    /// one Farm every group names it), flushed by `step()` through that
+    /// Farm's control token and destroyed by `close()` after the consumer
+    /// join. The pointer is borrowed: never destroy it yourself. Throws for
+    /// a group without a Farm on this host.
     ActorRuntime* createRuntime(size_t capacity,
-        ActorAllocator allocator = ActorAllocator.cRuntime())
+        ActorAllocator allocator = ActorAllocator.cRuntime(), ushort llc = defaultGroup)
     {
         import std.format : format;
 
         requireOpen("createRuntime");
-        auto runtime = ActorRuntime.create(farm_, capacity, allocator);
+        immutable g = resolveGroup(llc, "createRuntime");
+        auto runtime = ActorRuntime.create(farmOf(g), capacity, allocator);
         if (runtime is null)
             throw new FarmHostException(format("FarmHost.createRuntime(%s): invalid capacity "
                 ~ "or allocation failure", capacity));
-        immutable name = format("runtime#%s", runtimes_++);
-        owned_ ~= Owned(
+        immutable name = farmPerGroup
+            ? format("runtime#%s on group %s", runtimes_++, g) : format("runtime#%s", runtimes_++);
+        auto owned = Owned(
             (ref Token token) {
                 size_t total;
                 foreach (_; 0 .. flushRounds)
@@ -680,37 +811,55 @@ final class FarmHost
             () => runtime.quiescent ? null
                 : format("%s live=%s ready=%s", name, runtime.live, runtime.ready),
             () { runtime.destroy(); });
+        owned.llc = g;
+        owned.object = runtime;
+        owned_ ~= owned;
         return runtime;
     }
 
-    /// A `PrivateRootPark` on the host Farm, pumped by `step()` and destroyed
-    /// by `close()` after the consumer join. The pointer is borrowed. The
-    /// host never calls `takeOutcome`: drain tracked outcomes in a
-    /// `waitUntil` predicate. `storage` selects per-object or slab root
-    /// state (a slab needs `options.slabByteLimit`). Throws on
-    /// `batchLimit == 0`, a rejected slab cap or allocation failure.
+    /// ditto, with the C runtime allocator.
+    ActorRuntime* createRuntime(size_t capacity, ushort llc)
+    {
+        return createRuntime(capacity, ActorAllocator.cRuntime(), llc);
+    }
+
+    /// A `PrivateRootPark` on group `llc`'s Farm (default the caller's; with
+    /// one Farm every group names it), pumped by `step()` through that
+    /// Farm's control token and destroyed by `close()` after the consumer
+    /// join; its roots and child waves run on that group's workers. The
+    /// pointer is borrowed. The host never calls `takeOutcome`: drain
+    /// tracked outcomes in a `waitUntil` predicate. `storage` selects
+    /// per-object or slab root state (a slab needs `options.slabByteLimit`).
+    /// Throws on `batchLimit == 0`, a rejected slab cap, allocation failure
+    /// or a group without a Farm on this host.
     PrivateRootPark!(T, step, reclamation, storage)* createPark(T, alias step,
         PrivateRootReclamation reclamation = PrivateRootReclamation.emitter,
         PrivateStateStorage storage = PrivateStateStorage.perObject)(
-        size_t capacity, PrivateRootOptions options = PrivateRootOptions.init)
+        size_t capacity, PrivateRootOptions options = PrivateRootOptions.init,
+        ushort llc = defaultGroup)
     {
         import std.format : format;
 
         requireOpen("createPark");
         if (options.batchLimit == 0)
             throw new FarmHostException("FarmHost.createPark: batchLimit must be > 0");
-        auto park = PrivateRootPark!(T, step, reclamation, storage).create(farm_, capacity, options);
+        immutable g = resolveGroup(llc, "createPark");
+        auto park = PrivateRootPark!(T, step, reclamation, storage).create(farmOf(g), capacity, options);
         if (park is null)
             throw new FarmHostException(format("FarmHost.createPark(%s): invalid capacity "
                 ~ "or allocation failure", capacity));
-        immutable name = format("park#%s", parks_++);
+        immutable name = farmPerGroup
+            ? format("park#%s on group %s", parks_++, g) : format("park#%s", parks_++);
         immutable tracked = options.tracking;
-        owned_ ~= Owned(
+        auto owned = Owned(
             (ref Token token) => park.pumpCounted(token).tables,
             () => park.live == 0 ? null
                 : format("%s live=%s%s", name, park.live, tracked ? " (tracked: drain takeOutcome)" : ""),
             () { park.destroy(); },
             true);
+        owned.llc = g;
+        owned.object = park;
+        owned_ ~= owned;
         return park;
     }
 
@@ -723,16 +872,19 @@ final class FarmHost
 
     // ---- publication with the control token (+ wake in park mode) ----------
 
-    /// `runtime.flush(token, maximum)`, waking parked workers when it wrote.
-    /// Aborts rather than throwing `FarmHostException` once the host is not
-    /// open: after `close()`, after `abandon()`, or after a worker failure.
+    /// `runtime.flush(token, maximum)` with the token of the Farm the
+    /// runtime was created on, waking that Farm's parked workers when it
+    /// wrote. Aborts rather than throwing `FarmHostException` once the host
+    /// is not open: after `close()`, after `abandon()`, or after a worker
+    /// failure.
     size_t flush(ActorRuntime* runtime, size_t maximum = 32) @nogc nothrow
     {
         if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
             fatal("FarmHost.flush after close/abandon or worker failure");
         version (assert) assertControl();
-        immutable n = runtime.flush(control(), maximum);
-        if (n != 0 && parkMode_) group_.wakeAll();
+        immutable g = groupOf(runtime);
+        immutable n = runtime.flush(tokenFor(g), maximum);
+        if (n != 0) wakeGroup(g);
         return n;
     }
 
@@ -745,8 +897,9 @@ final class FarmHost
         if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
             fatal("FarmHost.pump after close/abandon or worker failure");
         version (assert) assertControl();
-        immutable count = park.pumpCounted(control());
-        if (count.tables != 0 && parkMode_) group_.wakeAll();
+        immutable g = groupOf(park);
+        immutable count = park.pumpCounted(tokenFor(g));
+        if (count.tables != 0) wakeGroup(g);
         return count.roots;
     }
 
@@ -755,19 +908,21 @@ final class FarmHost
     /// as with `ActorWave.publish`). Aborts rather than throwing
     /// `FarmHostException` once the host is not open: after `close()`, after
     /// `abandon()`, or after a worker failure.
-    bool publish(alias operation, T)(ref ActorWave wave, scope ActorHandle!T[] actors)
+    bool publish(alias operation, T)(ref ActorWave wave, scope ActorHandle!T[] actors,
+        ushort llc = defaultGroup)
     {
         if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
             fatal("FarmHost.publish after close/abandon or worker failure");
         version (assert) assertControl();
+        immutable g = resolveGroup(llc, "publish");
         size_t offset;
         while (offset < actors.length)
         {
-            immutable written = wave.publish!operation(actors[offset .. $], control());
+            immutable written = wave.publish!operation(actors[offset .. $], tokenFor(g));
             if (written != 0)
             {
                 offset += written;
-                if (parkMode_) group_.wakeAll();
+                wakeGroup(g);
                 continue;
             }
             if (wave.handle.failed) return false;
@@ -829,7 +984,7 @@ final class FarmHost
         {
             bool published;
             foreach (ref o; owned_)
-                published |= o.emit(control()) != 0;
+                published |= o.emit(tokenFor(o.llc)) != 0;
             foreach (ref a; attachments_)
                 if (a.emit !is null)
                     published |= a.emit(control()) != 0;
@@ -971,9 +1126,9 @@ final class FarmHost
         foreach (ref a; attachments_)
             if (a.drained !is null && !a.drained())
                 offenders ~= a.name ~ " not drained";
-        if (extraSmall_ + extraBulk_ != 0)
+        if (immutable extra = extraOutstanding())
             offenders ~= format("%s extra producer token%s outstanding (unregisterProducer first)",
-                extraSmall_ + extraBulk_, extraSmall_ + extraBulk_ == 1 ? "" : "s");
+                extra, extra == 1 ? "" : "s");
         if (!control().valid)
             offenders ~= "the control token was moved out of host.token";
         if (offenders.length)
@@ -1073,6 +1228,8 @@ private:
         string delegate() busy; // null when destroy would not abort
         void delegate() destroy;
         bool park;
+        ushort llc;   // the group whose Farm and control token it uses
+        void* object; // the runtime or park, for flush/pump lookups
     }
 
     HostPlan plan_;
@@ -1089,7 +1246,8 @@ private:
     shared uint wakers_; // in-flight wake() calls; drained before pool shutdown
     Owned[] owned_;
     HostAttachment[] attachments_;
-    uint runtimes_, parks_, extraSmall_, extraBulk_;
+    uint runtimes_, parks_;
+    uint[] extraSmallBy_, extraBulkBy_; // outstanding extra tokens per Farm, `farms` order
     // Keep layout and initialization identical across assertion modes: clients
     // can instantiate templates against a release-built threadpool library.
     Thread control_;
@@ -1137,7 +1295,7 @@ private:
         go.idleTimeout = options.idleTimeout;
         go.pool = options.pool;
         go.farm = options.farm;
-        go.farmPerGroup = false; // one Farm, every selected group consumes it
+        go.farmPerGroup = options.farmPerGroup;
         // Alone, the host's workers only consume, so the Farm plans exactly
         // 1 + extraSmallProducers and refuses a producer beyond that; other
         // attachments' workers may publish (`groupToken`).
@@ -1154,7 +1312,7 @@ private:
             throw new FarmHostException("FarmHost: pool start failed: " ~ e.msg ~ " [" ~ plan_.summary() ~ "]", e);
         }
         poolRunning_ = true;
-        farm_ = group_.farms[0];
+        farm_ = group_.farmOf(group_.callerGroup);
         resolution_ = group_.resolution;
     }
 

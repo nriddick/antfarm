@@ -106,7 +106,10 @@ The defaults are:
 
 Everything about a second LLC group, the cost of crossing one, the host
 loop against a hand-written consumer loop and the child-batch tuning is on
-its own page: [scaling across groups](scaling-groups.md).
+its own page: [scaling across groups](scaling-groups.md). In short: with
+`FarmHostOptions.groups = HostGroups.all()` every group supplies workers,
+and `farmPerGroup` gives each group its own Farm, with `createRuntime` and
+`createPark` taking the group a runtime or park runs on.
 
 ## Progress and waking
 

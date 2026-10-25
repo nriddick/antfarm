@@ -204,7 +204,11 @@ attachments (`@nogc` bodies, or GC-enabled service hooks on the pool's
 managed lane), workers find their Farm with `home!GroupSlot()`, control
 threads publish with `host.farmOf(llc)` and `host.token(llc)`, and
 `host.close()` tears down in order. The fork-join dispatcher, a `FarmHost`
-with workers and `ant_fibers.groups` all run on it. See [the design](../docs/design/threadpool.md#group-host) and the
+with workers and `ant_fibers.groups` all run on it. A `FarmHost` with
+`FarmHostOptions.farmPerGroup` gets the same one Farm per group and binds
+each runtime or park to a group (`createRuntime(capacity, llc)`,
+`createPark!(...)(capacity, options, llc)`), emitting it through that
+Farm's control token (`tokenOf(llc)`). See [the design](../docs/design/threadpool.md#group-host) and the
 [hosting guide](../docs/guide/scaling-groups.md#several-physical-groups).
 
 ## Managed workers

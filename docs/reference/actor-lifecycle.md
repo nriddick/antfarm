@@ -33,7 +33,14 @@ foreign token only when they publish something; an empty call returns before
 
 The slot hash is not provenance. Two Farms with the same registration history
 derive the same hash. Ownership is the separate `farmId` field, not a
-probabilistic check.
+probabilistic check; `Token.issuer` reads it, and `FarmHost.unregisterProducer`
+uses it to return a token to the Farm that issued it.
+
+A runtime or park is bound to one Farm at creation. On a `FarmHost` with
+`farmPerGroup` that is the Farm of the group it was created on, and the host
+flushes or pumps it with that Farm's control token (`tokenOf(llc)`); a
+handle may be woken from any thread, and the activation still arrives
+through its runtime's Farm.
 
 ## Consumers and views
 

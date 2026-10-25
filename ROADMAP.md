@@ -43,10 +43,10 @@ the onboarding pass (three rules first, a ten-line first program on every
 core, the hosting guide split). The ordered plan with each step's checks is
 [docs/development/cleanup-plan-2.0.md](docs/development/cleanup-plan-2.0.md).
 The fork-join suite runs under ThreadSanitizer and AddressSanitizer in
-`make check`. Left after 2.0.0: `farmPerGroup` routing of `FarmHost`'s
-runtimes and parks (2.1.0, below; `FarmHost` itself runs on `GroupHost`),
-private trees retreating to typed results and tracked outcomes (2.1.1), and
-Windows validation of the wake path (with the next Windows matrix).
+`make check`. Left after 2.0.0: private trees retreating to typed results
+and tracked outcomes (2.1.1), and Windows validation of the wake path (with
+the next Windows matrix). `FarmHost` runs on `GroupHost` and routes its
+runtimes and parks by group (2.1.0, below).
 
 ## 2.1.0 — in progress on `2.1.0-progress`
 
@@ -105,11 +105,12 @@ Remaining for 2.1.0:
   attachment, keeping its API, state machine and owned runtimes and parks
   (`FarmHost.groupHost`), and the dispatcher has an attachment form
   (`Dispatcher.attachment` + `start(host)`) so dispatcher, Fibers and a
-  `FarmHost` share one host. Remaining: `farmPerGroup` routing of
-  `FarmHost`'s actor runtimes and private parks, which is an application-level
-  routing decision as much as a host one. The dispatcher's participant
-  tables (`g_host`, `g_participants`) stay process globals: one dispatcher
-  per process, like one host.
+  `FarmHost` share one host. `FarmHostOptions.farmPerGroup` routes the
+  host's actor runtimes and private parks by group: each is created on one
+  group's Farm and emitted through that Farm's control token, so the
+  application decides which group runs which actors. The dispatcher's
+  participant tables (`g_host`, `g_participants`) stay process globals: one
+  dispatcher per process, like one host.
 - Before the release: the full `make check` on the branch tip; the native
   Windows matrix, once features and fixes settle; re-take the PERFORMANCE.md
   fork-join table under the harness's build rules with the frame pool; and

@@ -1043,6 +1043,9 @@ struct Token
     private ulong farmId;
     private ulong quotaLeft;
 
+    /// The issuing Farm's `farmId`; 0 for a token that was never registered.
+    @property ulong issuer() const pure nothrow @nogc @safe { return farmId; }
+
     /// True while this token is registered with its Farm.
     bool valid() const pure nothrow @nogc @safe { return hash != 0; }
 

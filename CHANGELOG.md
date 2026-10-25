@@ -199,6 +199,18 @@ Fixes:
   A second host of either kind is refused ("another host owns the pool");
   `FarmHost(0)` stays a standalone Farm and may exist beside any host. The
   whole FarmHost live suite passes unchanged apart from that message.
+- `FarmHostOptions.farmPerGroup`: with workers on several groups, one Farm
+  per group consumed by that group's workers only. `createRuntime` and
+  `createPark` take the group (default the caller's) and bind the runtime
+  or park to its Farm; `step()`, `flush` and `pump` emit each through that
+  Farm's control token and wake that group; `publish` and
+  `registerProducer` take the group too, extra producers are counted per
+  Farm, and `unregisterProducer` returns a token to its issuer
+  (`Token.issuer`, new). `FarmHost` gains `farms`, `farmOf(llc)`, `groups`,
+  `callerGroup`, `farmPerGroup` and `tokenOf(llc)`; `farm` and `token` are
+  the caller group's. Without the option nothing changes, and the C host
+  (`af_host`) stays single-Farm. Test: `farmPerGroupRouting` in the live
+  suite (skips on one LLC group).
 - `ant_fibers.groups.FiberGroups`: a Fiber domain on a `GroupHost`, one
   `GroupFiberLane` per group Farm built at install, served by every worker
   (`serve` on its home lane, group token, `until` deadline parks), with

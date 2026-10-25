@@ -372,11 +372,16 @@ unchanged.
 `threadpool.groups.GroupHost` is the one owner of the pool, the caller's
 placement, the Farms and the tokens for a program with pinned workers. The
 fork-join dispatcher is built on it, and so is a `FarmHost` with workers: it
-constructs a `GroupHost` with one shared Farm and its consuming worker body
-as the single raw attachment, keeps its own control token, caller view,
-state machine, `step()`/`waitUntil()` and owned runtimes and parks, and
-closes or abandons the group host in its own teardown (`abandon` leaks the
-Farm through `GroupHost.abandon`). `FarmHost.groupHost` exposes it. Without
+constructs a `GroupHost` with one shared Farm (or one per group with
+`FarmHostOptions.farmPerGroup`) and its consuming worker body as the single
+raw attachment, keeps its own control token, caller view, state machine,
+`step()`/`waitUntil()` and owned runtimes and parks, and closes or abandons
+the group host in its own teardown (`abandon` leaks the Farm through
+`GroupHost.abandon`). With several Farms each owned runtime or park is bound
+to one group's Farm at creation and the host emits it through that Farm's
+control token (`GroupHost.token(llc)` on the control thread), waking that
+group; `farm` and `token` are the caller group's, and `farmOf`, `farms`,
+`tokenOf` and `groups` expose the rest. `FarmHost.groupHost` exposes it. Without
 workers a `FarmHost` is a standalone Farm that needs no pool, registry or
 placement, so it may exist beside an open host of either kind. It resolves workers with
 `planHost` (`FarmHostOptions` mapped from `GroupHostOptions`), so group

@@ -103,8 +103,16 @@ publications group by group, and `close` tears everything down in order.
 Its worker loop is composed from attachments: the fork-join dispatcher is a
 raw `@nogc` one, and `ant_fibers.groups.FiberGroups` attaches a Fiber domain
 with one lane per group Farm ([design](../design/threadpool.md#group-host)).
-`FarmHost` with workers runs on it with one shared Farm; routing its actor
-runtimes and private parks by group (`farmPerGroup`) is the remaining step.
+`FarmHost` with workers runs on it: one shared Farm by default, or with
+`FarmHostOptions.farmPerGroup` one Farm per group, where every runtime and
+park is created on a group (`createRuntime(capacity, llc)`,
+`createPark!(...)(capacity, options, llc)`; the default is the caller's)
+and runs on that group's workers only. The host emits each through its
+Farm's control token, `tokenOf(llc)` publishes raw tables into a chosen
+group, and `farm`, `token` and the caller's view stay the caller group's.
+Which actors go to which group is the application's decision: keep a
+runtime's actors and the data they share on one group, and split work
+across groups by runtime rather than by actor.
 
 ## Performance and tuning
 
