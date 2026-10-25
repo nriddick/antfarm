@@ -255,7 +255,7 @@ the steps.
 | Host | Who consumes | Who calls `serve` | Director retirement | Parking |
 | --- | --- | --- | --- | --- |
 | Caller-driven (`drainUntilEmpty`, custom loops) | the caller's view | the caller, as responder | the caller is the Director | the caller's own |
-| `FarmHost` (`attachFiberDomain`) | pool workers on the host Farm | the control thread in each `step()` (emit), as responder | the control thread, which must have constructed the domain; `attach` checks | control thread steps; workers park as the host configures |
+| `FarmHost` (`attachFiberDomain`; with workers, itself a `GroupHost` layer) | pool workers on the host Farm | the control thread in each `step()` (emit), as responder | the control thread, which must have constructed the domain; `attach` checks | control thread steps; workers park as the host configures |
 | `CacheAwarePool` (`installFiberPlan`) | managed workers on their lane | every managed worker, responders by plan | the Director calls `retire`, woken by `FiberWakeEvent.lifecycle`, or the domain uses `serviceThreads` | `ManagedPumpResult.until(deadline)` |
 | `GroupHost` (`FiberGroups`) | the host's view, or a consuming attachment's (the dispatcher) | every worker's managed pump, as responder | the Director calls `retire`, or the domain uses `serviceThreads` | `until(deadline)` from the pump |
 

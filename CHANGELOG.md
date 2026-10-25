@@ -179,6 +179,15 @@ Fixes:
   the earliest deadline. `host.attachments` and `host.managedLane` report
   the result. The `(options, body, stop)` constructor remains as one
   consuming attachment.
+- `FarmHost` with workers runs on a `GroupHost`: one shared Farm, its
+  consuming worker body the single raw attachment (installed as is), the
+  group host owning pool, caller placement and the pool claim while
+  `FarmHost` keeps its control token, caller view, state machine, owned
+  runtimes and parks and `step()`/`waitUntil()`; `FarmHost.groupHost`
+  exposes it, and `GroupHost` gains `director` and a Farm-leaking `abandon`.
+  A second host of either kind is refused ("another host owns the pool");
+  `FarmHost(0)` stays a standalone Farm and may exist beside any host. The
+  whole FarmHost live suite passes unchanged apart from that message.
 - `ant_fibers.groups.FiberGroups`: a Fiber domain on a `GroupHost`, one
   `GroupFiberLane` per group Farm built at install, served by every worker
   (`serve` on its home lane, group token, `until` deadline parks), with

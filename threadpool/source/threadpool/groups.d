@@ -122,8 +122,14 @@ struct GroupHostOptions
     /// CPU filters and QoS. Hooks must be empty; the host installs them.
     PoolOptions pool = defaultHostPoolOptions;
     /// Farm geometry, applied to every Farm. `extraSmallProducers` is on
-    /// top of one token per participant per Farm.
+    /// top of one token per participant per Farm: the caller and, with
+    /// `workerTokens`, every worker.
     FarmSizing farm;
+    /// Workers may publish through `groupToken`, so every Farm plans one
+    /// small-tier token per worker. False plans only the caller's token plus
+    /// `extraSmallProducers` (`FarmHost`, whose workers only consume), so the
+    /// Farm itself refuses a producer beyond the plan.
+    bool workerTokens = true;
     /// One Farm per selected group, consumed only by that group's workers;
     /// false shares one Farm among every selected group.
     bool farmPerGroup = false;
@@ -372,6 +378,9 @@ final class GroupHost
     @property uint workers() const @nogc nothrow { return cast(uint) resolution_.workers.length; }
     /// The pool, or null with no workers.
     @property CacheAwarePool pool() @nogc nothrow { return pool_; }
+    /// The pool's Director, held for the host's life; empty without workers
+    /// or after `stopWorkers`. Lend it; do not `move` it out.
+    @property ref Director director() return @nogc nothrow { return director_; }
     /// False once `close` ran.
     @property bool isOpen() const @nogc nothrow { return open_; }
     /// The planner's one-line summary.
@@ -444,6 +453,19 @@ final class GroupHost
         undoConstruction();
     }
 
+    /// `close` that leaks the Farms: stop and join the workers, run the
+    /// attachments' `uninstall`, release the caller's tokens, uninstall the
+    /// registry, restore the caller's affinity and release the pool claim,
+    /// but leave every Farm alive for borrowers that were never drained
+    /// (`FarmHost.abandon`). Control thread only; a no-op once closed.
+    void abandon()
+    {
+        if (!open_) return;
+        open_ = false;
+        leakFarms_ = true;
+        undoConstruction();
+    }
+
 private:
     GroupHostOptions options_;
     HostPlan plan_;
@@ -454,7 +476,7 @@ private:
     const(ProcessorId)[] callerCpus_;
     AntFarm*[] farms_;
     GroupSlot[] slots_;
-    bool installed_, claimed_, poolRunning_, affinityChanged_, open_;
+    bool installed_, claimed_, poolRunning_, affinityChanged_, open_, leakFarms_;
     size_t installedAttachments_;
     CacheAwarePool pool_;
     Director director_;
@@ -488,7 +510,7 @@ private:
     void createFarms()
     {
         immutable callerConsumes = options_.callerConsumes || plan_.workers == 0;
-        immutable participants = cast(uint) resolution_.workers.length + 1;
+        immutable participants = (options_.workerTokens ? cast(uint) resolution_.workers.length : 0) + 1;
         immutable smallProducers = participants + options_.farm.extraSmallProducers;
         const f = options_.farm;
         if (options_.farmPerGroup)
@@ -595,7 +617,8 @@ private:
             installed_ = false;
         }
         gFarms = null;
-        foreach (f; farms_) if (f !is null) f.destroy();
+        if (!leakFarms_)
+            foreach (f; farms_) if (f !is null) f.destroy();
         farms_ = null;
         if (affinityChanged_)
             cast(void) restoreCallingThread(previousAffinity_);

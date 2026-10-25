@@ -198,11 +198,13 @@ concurrent after installation.
 
 ## Several groups
 
-`import threadpool.groups;` for a host that owns the pool, the caller's
-placement and one Farm per accepted group for a raw worker body: workers
-find their Farm with `home!GroupSlot()`, control threads publish with
-`host.farmOf(llc)` and `host.token(llc)`, and `host.close()` tears down in
-order. See [the design](../docs/design/threadpool.md#group-host) and the
+`import threadpool.groups;` for the host that owns the pool, the caller's
+placement and one Farm per accepted group: its worker loop is composed from
+attachments (`@nogc` bodies, or GC-enabled service hooks on the pool's
+managed lane), workers find their Farm with `home!GroupSlot()`, control
+threads publish with `host.farmOf(llc)` and `host.token(llc)`, and
+`host.close()` tears down in order. The fork-join dispatcher, a `FarmHost`
+with workers and `ant_fibers.groups` all run on it. See [the design](../docs/design/threadpool.md#group-host) and the
 [hosting guide](../docs/guide/scaling-groups.md#several-physical-groups).
 
 ## Managed workers

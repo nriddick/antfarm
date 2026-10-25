@@ -26,9 +26,10 @@ import antfarm.actors : ActorAllocator, ActorHandle, ActorReclaimResult, ActorRe
 import antfarm.parallel;
 import antfarm : AntFarm, ConsumerView, FarmCreateError, FarmCreateFailure, Tier, Token,
     DEFAULT_SMALL_TABLE_THRESHOLD, DEFAULT_HUGE_PAGES, MAX_CONSUMERS_LIMIT, fatal;
+import threadpool.bins : home;
+import threadpool.groups : GroupAttachment, GroupHost, GroupHostOptions, GroupSlot;
 import threadpool.hybrid : ManagedWorkerHooks, WorkerSelf, gWorkers;
 import threadpool.worker : requestStop;
-import threadpool.pin : PinOutcome, ThreadAffinity, confineCallingThread, restoreCallingThread;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.resolution : PoolResolution, Reject, reasonsText, resolvePool;
 import threadpool.topology : ProcessorId, TopologySnapshot, formatCpuList;
@@ -334,9 +335,10 @@ struct HostAttachment
 
 // Worker hooks: CacheAwarePool takes context-free function pointers, so the
 // host's worker state is process-global, owned by whichever host holds
-// gHostClaimed (taken before any of the others is written).
+// gHostClaimed (taken before any of the others is written). A FarmHost with
+// workers runs on a GroupHost, which takes the claim; its workers find the
+// one Farm through the GroupHost registry.
 package(threadpool) shared bool gHostClaimed;
-private __gshared AntFarm* gHostFarm;
 private shared uint gHostSubscribed;
 private ConsumerView tHostView; // TLS: one cursor per worker
 
@@ -386,9 +388,10 @@ private bool hostBody(WorkerSelf* self) @nogc nothrow
     }
     if (!tHostSubscribed)
     {
-        if (gHostFarm is null)
+        auto slot = home!GroupSlot();
+        if (slot is null || slot.farm is null)
             return false;
-        immutable result = tHostView.subscribe(gHostFarm);
+        immutable result = tHostView.subscribe(slot.farm);
         if (result < 0)
         {
             atomicStore(gHostSubscribeResult, result);
@@ -445,9 +448,11 @@ private void hostStop(WorkerSelf*) @nogc nothrow
  + propagates, including on normal return with undrained work.
  + Pool workers are non-daemon threads: a host with workers left open
  + (neither closed nor abandoned) hangs process exit.
- + While it has workers, a host owns the process's single `CacheAwarePool`; a
- + second host with workers, or one started beside an application pool, is
- + rejected. Before concurrent construction or resolve calls, complete one
+ + While it has workers, a host runs on a `GroupHost` (one shared Farm, its
+ + consuming worker body the host's one attachment) and so owns the process's
+ + single `CacheAwarePool`; a second host with workers, a `GroupHost`, or one
+ + started beside an application pool, is rejected. Without workers it is a
+ + standalone Farm and may exist beside any host. Before concurrent construction or resolve calls, complete one
  + `FarmHost.resolve()` call: first topology discovery is an unlocked setup
  + operation, including for hosts with `workers == 0`. `resolve()` warms
  + that discovery even when it throws `FarmHostResolveException`.
@@ -498,14 +503,19 @@ final class FarmHost
         parkMode_ = plan_.workers != 0 && options.idle == WorkerIdle.park;
         scope (failure) undoConstruction();
 
-        FarmCreateError error;
-        const f = options.farm;
-        farm_ = AntFarm.tryCreate(f.ringMiB, f.k, plan_.expectedConsumers, plan_.maxBulk,
-            f.quotaBulk, plan_.maxSmall, f.quotaSmall, f.smallThreshold, f.hugePages, &error);
-        if (farm_ is null)
-            throw new FarmHostException(format("FarmHost: Farm creation failed (%s%s): %s [%s]",
-                error.kind, error.osError ? format(", os error %s", error.osError) : "",
-                error.detail, plan_.summary()));
+        if (plan_.workers != 0)
+            startWorkers(options); // the GroupHost creates the Farm and places the caller
+        else
+        {
+            FarmCreateError error;
+            const f = options.farm;
+            farm_ = AntFarm.tryCreate(f.ringMiB, f.k, plan_.expectedConsumers, plan_.maxBulk,
+                f.quotaBulk, plan_.maxSmall, f.quotaSmall, f.smallThreshold, f.hugePages, &error);
+            if (farm_ is null)
+                throw new FarmHostException(format("FarmHost: Farm creation failed (%s%s): %s [%s]",
+                    error.kind, error.osError ? format(", os error %s", error.osError) : "",
+                    error.detail, plan_.summary()));
+        }
         token_ = farm_.registerProducer(Tier.small);
         if (!token_.valid)
             throw new FarmHostException("FarmHost: control token registration failed");
@@ -517,15 +527,7 @@ final class FarmHost
             viewSubscribed_ = true;
         }
         if (plan_.workers != 0)
-            startWorkers(options);
-        if (plan_.caller != CallerPlacement.unchanged)
-        {
-            immutable outcome = confineCallingThread(plan_.callerCpus, previousAffinity_);
-            affinityChanged_ = previousAffinity_.captured;
-            if (outcome != PinOutcome.pinned)
-                throw new FarmHostException(format("FarmHost: caller %s to {%s} failed: %s [%s]",
-                    plan_.caller, formatCpuList(plan_.callerCpus), outcome, plan_.summary()));
-        }
+            awaitWorkers();
         atomicStore!(MemoryOrder.rel)(state_, HostState.open);
     }
 
@@ -720,7 +722,7 @@ final class FarmHost
             fatal("FarmHost.flush after close/abandon or worker failure");
         version (assert) assertControl();
         immutable n = runtime.flush(token_, maximum);
-        if (n != 0 && parkMode_) pool_.wakeAll();
+        if (n != 0 && parkMode_) group_.wakeAll();
         return n;
     }
 
@@ -734,7 +736,7 @@ final class FarmHost
             fatal("FarmHost.pump after close/abandon or worker failure");
         version (assert) assertControl();
         immutable count = park.pumpCounted(token_);
-        if (count.tables != 0 && parkMode_) pool_.wakeAll();
+        if (count.tables != 0 && parkMode_) group_.wakeAll();
         return count.roots;
     }
 
@@ -755,7 +757,7 @@ final class FarmHost
             if (written != 0)
             {
                 offset += written;
-                if (parkMode_) pool_.wakeAll();
+                if (parkMode_) group_.wakeAll();
                 continue;
             }
             if (wave.handle.failed) return false;
@@ -778,7 +780,7 @@ final class FarmHost
         atomicOp!"+="(wakers_, 1u);
         scope (exit) atomicOp!"-="(wakers_, 1u);
         if (atomicLoad!(MemoryOrder.seq)(state_) == HostState.open)
-            pool_.wakeAll();
+            group_.wakeAll();
     }
 
     /// Options for an asynchronous `antfarm.parallel.parallelFor` region
@@ -829,8 +831,8 @@ final class FarmHost
         // sweeps. Those parked consumers still pin its storage, so even a
         // refused publication needs polls before the producer can retry.
         if (parkMode_)
-            pool_.wakeAll();
-        if (poolRunning_ && pool_.stopRequested)
+            group_.wakeAll();
+        if (poolRunning_ && group_.pool.stopRequested)
             failed();
         if (!viewSubscribed_ || !view_.consumeNext())
             Thread.yield();
@@ -856,7 +858,7 @@ final class FarmHost
         immutable deadline = bounded ? MonoTime.currTime + timeout : MonoTime.max;
         while (!done())
         {
-            if (poolRunning_ && pool_.stopRequested)
+            if (poolRunning_ && group_.pool.stopRequested)
                 failed();
             if (bounded && MonoTime.currTime >= deadline)
                 throw new FarmHostTimeout(format("FarmHost.waitUntil: not done after %s; the host "
@@ -906,14 +908,21 @@ final class FarmHost
     /// The pool; null when `workers == 0`. Do not call start/shutdown on it.
     @property CacheAwarePool pool()
     {
-        return pool_;
+        return group_ is null ? null : group_.pool;
     }
 
     /// The pool's single Director, held for the host's life (cadence, labels,
     /// idle policy). Empty when `workers == 0`. Lend it; do not `move` it out.
     @property ref Director director() return
     {
-        return director_;
+        return group_ is null ? director_ : group_.director;
+    }
+
+    /// The `GroupHost` this host runs on; null when `workers == 0`. Its
+    /// `attachments` are this host's consuming body; do not close it.
+    @property GroupHost groupHost() @nogc nothrow
+    {
+        return group_;
     }
 
     // ---- teardown -----------------------------------------------------------
@@ -976,11 +985,16 @@ final class FarmHost
             o.destroy();
         owned_ = null;
         attachments_ = null;
-        if (affinityChanged_ && !restoreCallingThread(previousAffinity_))
-            errors ~= new FarmHostException("FarmHost.close: the caller's affinity could not be restored");
-        affinityChanged_ = false;
         farm_.unregisterProducer(token_);
-        farm_.destroy();
+        if (group_ !is null)
+        {
+            // Restores the caller's affinity, releases the registry and the
+            // pool claim, destroys the Farm.
+            try group_.close(); // group_ stays: `pool` still reports the stopped pool
+            catch (Exception e) errors ~= e;
+        }
+        else
+            farm_.destroy();
         farm_ = null;
         releaseClaim();
         atomicStore!(MemoryOrder.rel)(state_, HostState.closed);
@@ -1032,11 +1046,10 @@ final class FarmHost
         else
             drainWakers(); // failed or stopping: state is already non-open
         cast(void) stopConsumers();
-        if (affinityChanged_)
-            cast(void) restoreCallingThread(previousAffinity_);
-        affinityChanged_ = false;
         if (token_.valid)
             farm_.unregisterProducer(token_);
+        if (group_ !is null)
+            group_.abandon(); // affinity, registry and claim back; the Farm leaks
         releaseClaim();
         atomicStore!(MemoryOrder.rel)(state_, HostState.abandoned);
     }
@@ -1058,10 +1071,9 @@ private:
     Token token_;
     ConsumerView view_;
     bool viewSubscribed_;
-    CacheAwarePool pool_;
-    Director director_;
-    bool claimed_, poolRunning_, parkMode_, affinityChanged_;
-    ThreadAffinity previousAffinity_;
+    GroupHost group_;   // with workers: owns pool, Farm, caller placement, claim; kept after close
+    Director director_; // empty: the GroupHost holds the live one
+    bool poolRunning_, parkMode_;
     shared HostState state_;
     shared uint wakers_; // in-flight wake() calls; drained before pool shutdown
     Owned[] owned_;
@@ -1089,12 +1101,8 @@ private:
 
     void startWorkers(FarmHostOptions options)
     {
-        import std.format : format;
+        import std.algorithm.searching : canFind;
 
-        if (!cas(&gHostClaimed, false, true))
-            throw new FarmHostException("FarmHost: another FarmHost owns the pool [" ~ plan_.summary() ~ "]");
-        claimed_ = true;
-        gHostFarm = farm_;
         atomicStore(gHostSubscribed, 0u);
         atomicStore(gHostStartFailed, 0u);
         atomicStore(gHostSubscribeResult, 0);
@@ -1104,39 +1112,48 @@ private:
                 hostTestStartFailure = new FarmHostException(
                     "FarmHost test hook: injected start failure");
         }
-
-        // The pool starts from the host's own resolution, so pool.resolution
-        // is the host's. processors = workers keeps pool.resolve() selecting
-        // the same CPUs.
-        auto poolOptions = options.pool;
-        poolOptions.processors = plan_.resolution.workers.dup;
+        GroupHostOptions go;
+        go.workers = options.workers;
+        go.groups = options.groups;
+        go.caller = options.caller;
+        go.callerConsumes = options.callerConsumes;
+        go.idle = options.idle;
+        go.idleTimeout = options.idleTimeout;
+        go.pool = options.pool;
+        go.farm = options.farm;
+        go.farmPerGroup = false; // one Farm, every selected group consumes it
+        go.workerTokens = false; // workers only consume: the Farm plans 1 + extraSmallProducers
         // workerBody/workerStop, not the managed lane: the hot path is one
-        // bool return. Subscribe is lazy (no start hook). User hooks were
-        // rejected by planHost; clear them so a copied options struct cannot
-        // select both lanes.
-        poolOptions.workerBody = &hostBody;
-        poolOptions.workerStop = &hostStop;
-        poolOptions.managedWorker = ManagedWorkerHooks.init;
-        auto pool = new CacheAwarePool(poolOptions);
+        // bool return, and a single raw attachment's body is installed as is.
+        go.attachments = [GroupAttachment("FarmHost", &hostBody, &hostStop, true)];
         try
-            pool.start(plan_.resolution);
-        catch (Exception e)
-            throw new FarmHostException("FarmHost: pool start failed: " ~ e.msg
-                ~ " [" ~ plan_.summary() ~ "]", e);
-        // Only a pool this constructor started is ever shut down.
-        pool_ = pool;
+            group_ = new GroupHost(go);
+        catch (FarmHostException e)
+        {
+            if (e.msg.canFind("another GroupHost is open") || e.msg.canFind("another host owns the pool"))
+                throw new FarmHostException("FarmHost: another host owns the pool [" ~ plan_.summary() ~ "]", e);
+            throw new FarmHostException("FarmHost: pool start failed: " ~ e.msg ~ " [" ~ plan_.summary() ~ "]", e);
+        }
         poolRunning_ = true;
-        director_ = pool_.director();
-        resolution_ = pool_.resolution;
-        // A subscribe failure or a worker Error stops the pool; workers
-        // that have not visited yet then exit without subscribing, so stop
-        // also ends the wait. The counter covers a failure that has been
-        // published but whose stop has not yet been observed.
+        farm_ = group_.farms[0];
+        resolution_ = group_.resolution;
+    }
+
+    /// Wait until every worker subscribed its view. A subscribe failure or
+    /// a worker Error stops the pool; workers that have not visited yet then
+    /// exit without subscribing, so stop also ends the wait. The counter
+    /// covers a failure that has been published but whose stop has not yet
+    /// been observed.
+    void awaitWorkers()
+    {
+        import std.format : format;
+
+        auto pool = group_.pool;
         while (atomicLoad!(MemoryOrder.acq)(gHostSubscribed) < plan_.workers
-            && !pool_.stopRequested
+            && !pool.stopRequested
             && atomicLoad!(MemoryOrder.acq)(gHostStartFailed) == 0)
             Thread.yield();
-        if (pool_.stopRequested || atomicLoad(gHostStartFailed) != 0)
+        if (pool.stopRequested || atomicLoad(gHostStartFailed) != 0)
         {
             auto failures = stopConsumers();
             if (failures.length == 0 && atomicLoad(gHostStartFailed) != 0)
@@ -1145,12 +1162,6 @@ private:
                     atomicLoad(gHostSubscribeResult)));
             throw new FarmHostFailed("FarmHost: workers failed to start: " ~ messages(failures), failures);
         }
-        if (options.idle == WorkerIdle.spin)
-            director_.spin();
-        else if (options.idleTimeout == Duration.max)
-            director_.wait();
-        else
-            director_.sleep(options.idleTimeout);
     }
 
     /// Join the workers (if this host's pool still runs) and unsubscribe the
@@ -1160,10 +1171,9 @@ private:
         Throwable[] failures;
         if (poolRunning_)
         {
-            director_ = Director.init; // releases the director flag before shutdown
-            pool_.shutdown();
+            group_.stopWorkers(); // releases the Director, joins the workers
             poolRunning_ = false;
-            failures = pool_.workerFailures();
+            failures = group_.pool.workerFailures();
         }
         if (viewSubscribed_)
         {
@@ -1175,13 +1185,10 @@ private:
 
     void releaseClaim()
     {
-        if (!claimed_) return;
-        gHostFarm = null;
+        // The GroupHost releases the pool claim; the worker counters are ours.
         atomicStore(gHostSubscribed, 0u);
         atomicStore(gHostStartFailed, 0u);
         atomicStore(gHostSubscribeResult, 0);
-        claimed_ = false;
-        atomicStore!(MemoryOrder.rel)(gHostClaimed, false);
     }
 
     void failed()
@@ -1210,18 +1217,15 @@ private:
     // Constructor unwinding, strictly in reverse.
     void undoConstruction()
     {
-        if (affinityChanged_)
-            cast(void) restoreCallingThread(previousAffinity_);
-        affinityChanged_ = false;
         cast(void) stopConsumers();
-        releaseClaim();
-        if (farm_ !is null)
-        {
-            if (token_.valid)
-                farm_.unregisterProducer(token_);
+        if (farm_ !is null && token_.valid)
+            farm_.unregisterProducer(token_);
+        if (group_ !is null)
+            group_.close(); // affinity, registry, claim, Farm
+        else if (farm_ !is null)
             farm_.destroy();
-            farm_ = null;
-        }
+        farm_ = null;
+        releaseClaim();
         atomicStore!(MemoryOrder.rel)(state_, HostState.closed);
     }
 

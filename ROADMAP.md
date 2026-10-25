@@ -98,14 +98,15 @@ Remaining for 2.1.0:
   managed lane when a GC-enabled hook attaches), and
   `ant_fibers.groups.FiberGroups` hosts a domain with one lane per group
   Farm, served by every worker with `until(deadline)` parks
-  ([design](docs/design/threadpool.md#group-host)). Remaining: `FarmHost`
-  as a layer over `GroupHost` that attaches its actor runtimes and private
-  parks and keeps `step()`/`waitUntil()`, one shared Farm first and
-  `farmPerGroup` routing of runtimes and parks last; then the four
-  process-global owners (`gWorkerBody`, the dispatcher's `g_host`,
-  `FarmHost`'s `gHostFarm`, `installedFiberPool`) converge on the one
-  `GroupHost`. Keep `installFiberPlan` and the standalone `FarmHost` through
-  2.1.0 and remove them once the composed host has a release behind it.
+  ([design](docs/design/threadpool.md#group-host)), and a `FarmHost` with
+  workers runs on a `GroupHost` with one shared Farm, its body the single raw
+  attachment, keeping its API, state machine and owned runtimes and parks
+  (`FarmHost.groupHost`). Remaining: `farmPerGroup` routing of `FarmHost`'s
+  actor runtimes and private parks, which is an application-level routing
+  decision as much as a host one; then the process-global owners (the
+  dispatcher's `g_host`, `installedFiberPool`) converge on the one
+  `GroupHost`. Keep `installFiberPlan` through 2.1.0 and remove it once
+  `ant_fibers.groups` has a release behind it.
 - Before the release: the full `make check` on the branch tip; the native
   Windows matrix, once features and fixes settle; re-take the PERFORMANCE.md
   fork-join table under the harness's build rules with the frame pool; and

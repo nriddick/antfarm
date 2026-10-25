@@ -370,9 +370,15 @@ unchanged.
 ## Group host
 
 `threadpool.groups.GroupHost` is the one owner of the pool, the caller's
-placement, the Farms and the tokens for a program with pinned workers; the
-fork-join dispatcher is built on it and `FarmHost` shares its planner and
-its claim on the process's single pool. It resolves workers with
+placement, the Farms and the tokens for a program with pinned workers. The
+fork-join dispatcher is built on it, and so is a `FarmHost` with workers: it
+constructs a `GroupHost` with one shared Farm and its consuming worker body
+as the single raw attachment, keeps its own control token, caller view,
+state machine, `step()`/`waitUntil()` and owned runtimes and parks, and
+closes or abandons the group host in its own teardown (`abandon` leaks the
+Farm through `GroupHost.abandon`). `FarmHost.groupHost` exposes it. Without
+workers a `FarmHost` is a standalone Farm that needs no pool, registry or
+placement, so it may exist beside an open host of either kind. It resolves workers with
 `planHost` (`FarmHostOptions` mapped from `GroupHostOptions`), so group
 selection, `autoWorkers`, caller confinement and the reasons for unused
 groups are the same as `FarmHost`'s; `HostGroups.all` selects every group
@@ -385,7 +391,10 @@ group), and installs one `GroupSlot {farm, llc, farmIndex}` per group
 through `makeBins`/`install`: a worker finds its Farm with
 `home!GroupSlot()`, a control thread with `farmOf(llc)`. Without it, one
 Farm serves every selected group and every slot names it. Every Farm plans
-one small-tier producer per participant plus `FarmSizing.extraSmallProducers`;
+one small-tier producer for the caller, one per worker with `workerTokens`
+(the default; `FarmHost` turns it off, since its workers only consume, so the
+Farm itself refuses a producer beyond `extraSmallProducers`), plus
+`FarmSizing.extraSmallProducers`;
 `groupToken(llc)` (or `host.token(llc)`) registers the calling thread's
 token on that Farm lazily, and `releaseThreadTokens` returns them: after a
 worker's stop hook, in `close` for the caller, and by hand on any other

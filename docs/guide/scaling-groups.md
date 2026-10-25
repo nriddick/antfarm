@@ -103,8 +103,8 @@ publications group by group, and `close` tears everything down in order.
 Its worker loop is composed from attachments: the fork-join dispatcher is a
 raw `@nogc` one, and `ant_fibers.groups.FiberGroups` attaches a Fiber domain
 with one lane per group Farm ([design](../design/threadpool.md#group-host)).
-`FarmHost` still owns one Farm on one group for actor programs; routing its
-runtimes and parks by group is the remaining step.
+`FarmHost` with workers runs on it with one shared Farm; routing its actor
+runtimes and private parks by group (`farmPerGroup`) is the remaining step.
 
 ## Performance and tuning
 

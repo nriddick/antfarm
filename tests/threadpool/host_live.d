@@ -341,7 +341,7 @@ void singleton()
     foreach (attempt; 0 .. 2) // a rejection must not release the first host's claim
     {
         e = expectThrow!FarmHostException(() { new FarmHost(guarded(2)); }, "second host");
-        enforce(e.msg.canFind("another FarmHost owns the pool"), e.msg);
+        enforce(e.msg.canFind("another host owns the pool"), e.msg);
     }
     enforce(first.state == HostState.open && !first.pool.stopRequested, "first host untouched");
     enforce(liveCallerMask() == confined, "caller placement untouched");
@@ -1178,6 +1178,39 @@ void groupHostAttachments()
         managed.workers, " workers woke ", during, " times in 100 ms idle for a 5 ms deadline");
 }
 
+/// A FarmHost with workers runs on a GroupHost (one shared Farm, its body the
+/// one raw attachment) and excludes other hosts both ways; without workers it
+/// is a standalone Farm that may exist beside an open GroupHost.
+void farmHostOnGroupHost()
+{
+    auto host = new FarmHost(guarded(2));
+    auto group = host.groupHost;
+    enforce(group !is null && group.isOpen, "a FarmHost with workers runs on a GroupHost");
+    enforce(group.farms.length == 1 && group.farms[0] is host.farm, "one shared Farm");
+    enforce(group.attachments.length == 1 && group.attachments[0].consumes && !group.managedLane,
+        "the host body is the one raw attachment");
+    enforce(group.pool is host.pool && group.workers == host.resolution.workers.length);
+    GroupHostOptions o;
+    o.groups = HostGroups.all();
+    auto e = expectThrow!FarmHostException(() { new GroupHost(o, &groupBody, &groupStopHook); },
+        "GroupHost beside a FarmHost with workers");
+    enforce(e.msg.canFind("another GroupHost is open"), e.msg);
+    auto standalone = new FarmHost(guarded(0));
+    enforce(standalone.groupHost is null, "without workers: no GroupHost");
+    standalone.close();
+    publicReplies(host);
+    host.close();
+    enforce(!group.isOpen && host.pool is group.pool, "close closed the GroupHost; pool still reported");
+
+    auto plain = new GroupHost(o, &groupBody, &groupStopHook);
+    e = expectThrow!FarmHostException(() { new FarmHost(guarded(2)); }, "FarmHost beside a GroupHost");
+    enforce(e.msg.canFind("another host owns the pool"), e.msg);
+    auto beside = new FarmHost(guarded(0)); // no pool, no registry: allowed
+    beside.close();
+    plain.close();
+    writeln("PASS FarmHost on GroupHost: shared Farm, one raw attachment, mutual exclusion, FarmHost(0) beside");
+}
+
 __gshared shared(int) blockedEntered, blockedRelease, blockedStops;
 
 bool blockedBody(WorkerSelf*) nothrow @nogc @system
@@ -1240,6 +1273,7 @@ int main(string[] args)
         groupHostPerGroup();
         groupHostSingleton();
         groupHostAttachments();
+        farmHostOnGroupHost();
         rejectedPoolShutdown();
         return 0;
     }
@@ -1279,6 +1313,7 @@ int main(string[] args)
     groupHostPerGroup();
     groupHostSingleton();
     groupHostAttachments();
+    farmHostOnGroupHost();
     rejectedPoolShutdown();
     timeoutThenCancel(2);
     version (assert) workerFailure();

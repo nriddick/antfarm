@@ -204,10 +204,12 @@ Join every thread that may call `requestCancel` on a host park before
 `close()`. The host cannot see those threads. Views subscribed outside the
 host (`FarmSizing.extraConsumers`) must unsubscribe first as well.
 
-While it has workers, a host owns the process's single `CacheAwarePool`. A
-second host with workers, or a host started beside an application-started
-pool, is rejected with a `FarmHostException`, and the running one is left
-alone. Hosts with `workers == 0` start no pool and can coexist.
+While it has workers, a host runs on a `GroupHost` (`host.groupHost`) and so
+owns the process's single `CacheAwarePool`. A second host with workers, a
+`GroupHost` (the fork-join dispatcher's, say), or a host started beside an
+application-started pool, is rejected with a `FarmHostException`, and the
+running one is left alone. Hosts with `workers == 0` start no pool and can
+coexist with any of them.
 
 A caller-driven `FiberDomain` joins the same host with
 `ant_fibers.host.attachFiberDomain(host, new FiberDomain(host.farm))`.
