@@ -1,7 +1,8 @@
 /++
  + DRuntime Fiber scheduling layer for Ant Farm.
  +
- + Ant Farm is only the ready-work transport. Long waits live in `WaitSet`,
+ + Ant Farm is only the ready-work transport. Waits are arbitrated by a claim
+ + word per task (see FiberTask.armWait) and never enter the Farm,
  + and newly-ready fibers collect in `PublishAccumulator` until a producer
  + flushes a useful table. No external thread-pool package is required.
  +/
@@ -31,18 +32,27 @@ version (TSan)
 }
 
 alias Signal = ulong;
+// Application signals keep the high bit clear (reserved, as it always was).
 private enum Signal timerSignalBit = 1UL << 63;
-private enum Signal persistentSignalBit = 1UL << 62;
-private enum Signal internalSignalMask = timerSignalBit | persistentSignalBit;
 enum size_t defaultLifecycleRetention = 65_536;
 private enum uint lifecycleRecordsPerTask = 4;
 // Cost class of a Fiber flush table: claims of 8 entries.
 private enum uint flushAvgCost = avgCostForChunk(8);
 
-private bool persistentSignal(Signal signal) pure nothrow @nogc
+/// How a wait ended, in the low bits of a task's wait word. The word's high
+/// bits count waits; see FiberTask.armWait.
+private enum WaitCause : ubyte
 {
-    return (signal & internalSignalMask) == internalSignalMask;
+    none,
+    armed,      // the wait is live and unclaimed
+    signalled,  // an event, semaphore, signal or join completion claimed it
+    timedOut,   // its timer claimed it
+    cancelled,  // cancellation claimed it
+    withdrawn,  // its own fiber claimed it before parking
 }
+private enum uint waitCauseBits = 3;
+private enum ulong waitCauseMask = (1UL << waitCauseBits) - 1;
+static assert(WaitCause.max <= waitCauseMask);
 
 enum FiberOutcome : ubyte
 {
@@ -322,6 +332,7 @@ struct TaskHandle
                 TaskHandle(target, generation, diagnosticId),
                 FiberJoinStatus.wrongDomain);
 
+        auto domain = waiter.domain;
         while (true)
         {
             auto observed = poll();
@@ -331,32 +342,34 @@ struct TaskHandle
                 observed.status = FiberJoinStatus.timedOut;
                 return observed;
             }
+            if (waiter.cancellationRequested) throw new FiberCancelled;
+            immutable armed = waiter.armWait();
+            if (waiter.cancellationRequested)
+            {
+                waiter.withdrawWait(armed);
+                throw new FiberCancelled;
+            }
+            // False: the target finished (or was recycled) first; re-poll.
             if (!target.registerManagedJoinWaiter(waiter, generation))
             {
-                if (waiter.cancellationRequested) throw new FiberCancelled;
+                waiter.withdrawWait(armed);
                 continue;
             }
             if (timed)
             {
-                auto domain = waiter.domain;
-                immutable seq = atomicFetchAdd(domain.timerSequence, 1UL);
-                bool earliest;
                 try
-                    earliest = domain.timers.insert(waiter, deadline.ticks, seq);
+                    domain.armTimer(waiter, deadline, armed);
                 catch (Throwable failure)
                 {
                     target.removeManagedJoinWaiter(waiter);
-                    domain.timers.remove(waiter);
-                    domain.restoreRunningAfterWaitSetupFailure(waiter);
                     throw failure;
                 }
-                // Completion can detach and wake us before timer insertion.
-                if (!target.hasManagedJoinWaiter(waiter, generation))
-                    domain.timers.remove(waiter);
-                else if (earliest)
-                    waiter.readyLane.noteTimerArmed();
             }
             Fiber.yield();
+            // No-op when completion unlinked us; required after a timeout or
+            // cancellation, before this fiber can wait again.
+            target.removeManagedJoinWaiter(waiter);
+            if (timed) domain.disarmTimer(waiter);
             if (waiter.cancellationRequested) throw new FiberCancelled;
         }
     }
@@ -531,7 +544,10 @@ align(64) private struct FiberManagedJoinControl
     shared size_t nextWord;
     shared size_t previousWord;
     shared ulong targetGeneration;
-    ubyte[32] membershipPadding;
+    // This task's wait claim word (FiberTask.armWait). Every waker of any
+    // container CASes it; it shares the line with the outbound membership.
+    shared ulong waitWord;
+    ubyte[24] membershipPadding;
 }
 static assert(FiberManagedJoinControl.sizeof == 2 * cacheLineSize);
 static assert(FiberManagedJoinControl.targetWord.offsetof == cacheLineSize);
@@ -560,15 +576,15 @@ align(64) private struct FiberDomainControl
     ubyte[56] timerPadding;
     shared int fatalState;
     ubyte[60] fatalPadding;
-    shared long managedJoinWaiterCount;
-    ubyte[56] managedJoinWaiterPadding;
+    shared long waitingCount; // armed, unclaimed waits of every kind
+    ubyte[56] waitingPadding;
     shared long lifecycleReservationCount;
     ubyte[56] lifecycleReservationPadding;
     shared size_t cancellationRequestCount;
     ubyte[cacheLineSize - size_t.sizeof] cancellationRequestPadding;
 }
 static assert(FiberDomainControl.sizeof == 7 * cacheLineSize);
-static assert(FiberDomainControl.managedJoinWaiterCount.offsetof
+static assert(FiberDomainControl.waitingCount.offsetof
     == 4 * cacheLineSize);
 static assert(FiberDomainControl.lifecycleReservationCount.offsetof
     == 5 * cacheLineSize);
@@ -608,15 +624,18 @@ final class FiberTask
     package shared(Throwable) failure;
     /// Publish chain link; owned by a PublishAccumulator or its drainer.
     package shared(FiberTask) queueNext;
-    /// WaitSet bucket link, and pool freelist link; each container holds a
-    /// task at disjoint times, both under their own lock.
+    /// Waiter-queue link (WaitSet bucket, FiberEvent, FiberSemaphore), and
+    /// pool freelist link; each container holds a task at disjoint times,
+    /// under its own lock. A waker that claimed a detached waiter also uses
+    /// it as a private chain until it adds WAKE.
     package FiberTask waitNext;
-    /// WaitSet-only predecessor. Together with waitNext this permits O(1)
-    /// cancellation from a shared-signal bucket under its stripe lock.
+    /// Waiter-queue predecessor, for O(1) unlink by the waiter itself.
     package FiberTask waitPrev;
-    /// Generation installed in the WaitSet. Guards an unlink against a stale
-    /// membership observation after task recycling.
-    package ulong waitGeneration;
+    /// The container whose waiter queue links this task, or null. Written
+    /// only under that container's lock. The waiter unlinks itself after
+    /// every wait, before it can arm another, so a linked task's current
+    /// wait word is the one it linked with.
+    package Object waitOwner;
     /// Timer heap position, protected by TimerSet.mutex. size_t.max means the
     /// task has no live timer registration.
     package size_t timerIndex = size_t.max;
@@ -731,7 +750,11 @@ final class FiberTask
     }
 
     /// PublishAccumulator stub node: never resumed, never published.
-    private this() nothrow @nogc { initializeControl(); }
+    private this() nothrow @nogc
+    {
+        initializeControl();
+        managedJoinControl = allocateCacheLine!FiberManagedJoinControl();
+    }
 
     ~this() nothrow @nogc
     {
@@ -883,14 +906,7 @@ final class FiberTask
             || phaseOf(atomicLoad!(MemoryOrder.acq)(controlWord))
                 == Phase.terminated)
             return false;
-        if ((waiter.loadControl() & ctrlCancelMask) != 0)
-            return false;
-        waiter.addPhase(Phase.running, Phase.waiting);
-        if ((waiter.loadControl() & ctrlCancelMask) != 0)
-        {
-            waiter.addPhase(Phase.waiting, Phase.running);
-            return false;
-        }
+        // The waiter armed its wait first; this only links it.
         assert(atomicLoad!(MemoryOrder.raw)(
             waiter.managedJoinControl.targetWord) == 0);
         immutable oldHeadWord = atomicLoad!(MemoryOrder.raw)(
@@ -913,21 +929,7 @@ final class FiberTask
         atomicStore!(MemoryOrder.raw)(managedJoinControl.headWord,
             cast(size_t) cast(void*) waiter);
         atomicFetchAdd!(MemoryOrder.rel)(managedJoinControl.waiterCount, 1u);
-        atomicFetchAdd!(MemoryOrder.rel)(domain.managedJoinWaiterCount, 1L);
         return true;
-    }
-
-    private bool hasManagedJoinWaiter(FiberTask waiter,
-        ulong expectedGeneration) nothrow @nogc
-    {
-        lockManagedJoinList();
-        scope (exit) unlockManagedJoinList();
-        return atomicLoad!(MemoryOrder.raw)(
-                waiter.managedJoinControl.targetWord)
-                == cast(size_t) cast(void*) this
-            && atomicLoad!(MemoryOrder.raw)(
-                waiter.managedJoinControl.targetGeneration)
-                == expectedGeneration;
     }
 
     private bool removeManagedJoinWaiter(FiberTask waiter) nothrow @nogc
@@ -967,7 +969,6 @@ final class FiberTask
         immutable previousCount = atomicFetchSub!(MemoryOrder.rel)(
             managedJoinControl.waiterCount, 1u);
         assert(previousCount != 0);
-        atomicFetchSub!(MemoryOrder.rel)(domain.managedJoinWaiterCount, 1L);
         return true;
     }
 
@@ -1057,146 +1058,209 @@ final class FiberTask
     {
         return atomicLoad!(MemoryOrder.acq)(lastResumeIdentityState);
     }
+
+    @property private ref shared(ulong) waitWord() const return nothrow @nogc
+    { return (cast(FiberManagedJoinControl*) managedJoinControl).waitWord; }
+
+    /// Running fiber only: start a wait and return its armed word. Exactly
+    /// one `claimWait` on that word succeeds, and only its winner adds WAKE,
+    /// so containers, timers and cancellation need no removal protocol among
+    /// themselves. The count in the high bits never resets (not even on
+    /// recycling), so a stale container entry or timer can never claim a
+    /// later wait. The fence pairs with the one cancellation issues between
+    /// its CANCEL add and its claim: either the canceller claims this wait,
+    /// or the caller's next `cancellationRequested` check sees the request.
+    package ulong armWait() nothrow @nogc
+    {
+        immutable old = atomicLoad!(MemoryOrder.raw)(waitWord);
+        assert((old & waitCauseMask) != WaitCause.armed);
+        immutable word = ((old & ~waitCauseMask) + (1UL << waitCauseBits))
+            | WaitCause.armed;
+        addPhase(Phase.running, Phase.waiting);
+        atomicFetchAdd!(MemoryOrder.rel)(domain.waitingCount, 1L);
+        atomicStore!(MemoryOrder.rel)(waitWord, word);
+        atomicFence!(MemoryOrder.seq)();
+        return word;
+    }
+
+    /// Any waker: claim the wait `armed` names. True means the caller owns
+    /// the wait's single WAKE and must deliver it (`makeWaiterReady`).
+    package bool claimWait(ulong armed, WaitCause cause) nothrow @nogc
+    {
+        assert((armed & waitCauseMask) == WaitCause.armed);
+        auto expected = armed;
+        if (!cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(&managedJoinControl.waitWord, expected,
+                (armed & ~waitCauseMask) | cause))
+            return false;
+        atomicFetchSub!(MemoryOrder.rel)(domain.waitingCount, 1L);
+        return true;
+    }
+
+    /// Claim whatever wait is armed now. Used under a container lock (where
+    /// a linked task's current wait is its linked one) and by cancellation.
+    package bool claimCurrentWait(WaitCause cause) nothrow @nogc
+    {
+        immutable word = atomicLoad!(MemoryOrder.acq)(waitWord);
+        return (word & waitCauseMask) == WaitCause.armed
+            && claimWait(word, cause);
+    }
+
+    /// The cause that ended the most recent wait; the waiter reads it after
+    /// it resumes.
+    @property package WaitCause waitCause() const nothrow @nogc
+    {
+        return cast(WaitCause)(atomicLoad!(MemoryOrder.acq)(waitWord)
+            & waitCauseMask);
+    }
+
+    /// Running fiber only: end the armed wait `armed` without parking. If a
+    /// waker claimed it first, consume that waker's WAKE by suspending once.
+    /// Either way the task is running again with no wake outstanding. Returns
+    /// true when a waker had claimed the wait.
+    package bool withdrawWait(ulong armed)
+    {
+        if (claimWait(armed, WaitCause.withdrawn))
+        {
+            addPhase(Phase.waiting, Phase.running);
+            return false;
+        }
+        Fiber.yield();
+        return true;
+    }
 }
 
-/// Fibers parked for an indefinitely distant signal. The mutex is deliberately
+/// Intrusive FIFO of waiting tasks through waitNext/waitPrev. The owning
+/// container serializes every operation with its lock; `owner` tags each
+/// member so the waiter can unlink itself after any wake.
+private struct WaiterQueue
+{
+    FiberTask head;
+    FiberTask tail;
+    size_t length;
+
+    void pushBack(FiberTask task, Object owner) nothrow @nogc
+    {
+        assert(task.waitOwner is null);
+        task.waitOwner = owner;
+        task.waitNext = null;
+        task.waitPrev = tail;
+        if (tail !is null) tail.waitNext = task;
+        else head = task;
+        tail = task;
+        ++length;
+    }
+
+    void unlink(FiberTask task) nothrow @nogc
+    {
+        auto prev = task.waitPrev;
+        auto next = task.waitNext;
+        if (prev !is null) prev.waitNext = next;
+        else head = next;
+        if (next !is null) next.waitPrev = prev;
+        else tail = prev;
+        task.waitNext = null;
+        task.waitPrev = null;
+        task.waitOwner = null;
+        --length;
+    }
+
+    /// Unlink members oldest first until `limit` claims succeed. Members that
+    /// another waker already claimed are dropped: their own resume finds them
+    /// unlinked. Winners return as a chain through waitNext; each stays
+    /// suspended until its WAKE, so the chain is stable after the lock drops.
+    FiberTask claimFront(size_t limit, out size_t claimed) nothrow @nogc
+    {
+        FiberTask first, last;
+        while (claimed < limit && head !is null)
+        {
+            auto task = head;
+            unlink(task);
+            if (!task.claimCurrentWait(WaitCause.signalled)) continue;
+            if (last !is null) last.waitNext = task;
+            else first = task;
+            last = task;
+            ++claimed;
+        }
+        return first;
+    }
+}
+
+/// Fibers parked on application signals (`FiberDomain.await`). Waiters of
+/// one signal share a bucket in a mutex-striped map; FiberEvent and
+/// FiberSemaphore keep their own queues instead. The mutexes are deliberately
 /// off the Ant Farm hot path: waits and notifications are scheduler events.
 final class WaitSet
 {
-    private WaitSetControl* control;
     private enum stripeBits = 6;
     private enum stripeCount = 1 << stripeBits;
 
-    private struct Bucket
-    {
-        FiberTask head; // intrusive chain through waitNext, newest first
-        size_t count;
-    }
-
     private Mutex[stripeCount] mutexes;
-    private Bucket[Signal][stripeCount] buckets;
-
-    @property private ref shared(long) waiterCount() const return nothrow @nogc
-    { return (cast(WaitSetControl*) control).waiterCount; }
+    private WaiterQueue[Signal][stripeCount] buckets;
 
     this()
     {
-        control = allocateCacheLine!WaitSetControl();
         foreach (ref m; mutexes) m = new Mutex;
     }
-
-    ~this() nothrow @nogc { freeCacheLine(control); }
 
     private static size_t stripe(Signal signal) nothrow @nogc
     {
         return cast(size_t)(signal * 0x9E37_79B9_7F4A_7C15UL) >> (64 - stripeBits);
     }
 
-    package bool insert(FiberTask task, Signal signal)
+    /// Link the running `task` under `task.waitSignal` and arm its wait
+    /// in one step under the stripe lock, returning the armed word. A signal
+    /// is an edge with no state to recheck, so the wait must not count in
+    /// `FiberDomain.waiting` before delivery can find it: a caller that waits
+    /// for that count and then signals would otherwise lose the signal. The
+    /// bucket exists before the task is tagged, so a failed allocation leaves
+    /// nothing linked or armed.
+    package ulong linkArmed(FiberTask task)
     {
+        immutable signal = task.waitSignal;
         immutable s = stripe(signal);
         synchronized (mutexes[s])
         {
-            // Phase add stays inside the stripe lock: a signal that takes
-            // the bucket must never observe waiting before the node is linked.
-            task.addPhase(Phase.running, Phase.waiting);
-            if ((task.loadControl() & ctrlCancelMask) != 0)
+            auto p = signal in buckets[s];
+            if (p is null)
             {
-                task.addPhase(Phase.waiting, Phase.running);
-                return false;
+                buckets[s][signal] = WaiterQueue.init;
+                p = signal in buckets[s];
             }
-            if (auto p = signal in buckets[s])
-            {
-                task.waitNext = p.head;
-                task.waitPrev = null;
-                if (p.head !is null)
-                    p.head.waitPrev = task;
-                p.head = task;
-                ++p.count;
-            }
-            else
-            {
-                task.waitNext = null;
-                task.waitPrev = null;
-                buckets[s][signal] = Bucket(task, 1);
-            }
-            task.waitGeneration = task.generation;
-            atomicFetchAdd!(MemoryOrder.rel)(waiterCount, 1L);
-            return true;
+            p.pushBack(task, this);
+            return task.armWait();
         }
     }
 
-    /// Remove and return the intrusive chain of all fibers waiting for
-    /// `signal`; `count` receives the chain length. The caller owns the
-    /// chain's links. Every node's membership is cleared before the stripe
-    /// lock drops, so `remove` rejects a detached node instead of editing
-    /// the chain being traversed or a bucket recreated for the same signal.
-    package FiberTask take(Signal signal, out size_t count)
-    {
-        immutable s = stripe(signal);
-        synchronized (mutexes[s])
-        {
-            if (auto p = signal in buckets[s])
-            {
-                auto bucket = *p;
-                for (auto t = bucket.head; t !is null; t = t.waitNext)
-                    t.waitGeneration = 0;
-                if (persistentSignal(signal))
-                {
-                    p.head = null;
-                    p.count = 0;
-                }
-                else
-                    buckets[s].remove(signal);
-                atomicFetchSub!(MemoryOrder.rel)(waiterCount, cast(long) bucket.count);
-                count = bucket.count;
-                return bucket.head;
-            }
-        }
-        count = 0;
-        return null;
-    }
-
-    /// Remove one particular waiter without disturbing other fibers sharing
-    /// the signal. False means signal delivery already won the race.
-    package bool remove(FiberTask task, Signal signal)
+    /// Claim every waiter of `signal`. Each is unlinked under the stripe lock,
+    /// so a waiter woken by another cause (which unlinks itself) never edits
+    /// the returned chain, and a later wait of the same signal starts a new
+    /// bucket. `count` receives the number of claims won.
+    package FiberTask claimAll(Signal signal, out size_t count)
     {
         immutable s = stripe(signal);
         synchronized (mutexes[s])
         {
             auto p = signal in buckets[s];
-            if (p is null || task.waitSignal != signal
-                || task.waitGeneration != task.generation)
-                return false;
-            if (phaseOf(task.loadControl()) != Phase.waiting)
-                return false;
-            auto prev = task.waitPrev;
-            auto next = task.waitNext;
-            if (prev is null)
-            {
-                if (p.head !is task) return false;
-                p.head = next;
-            }
-            else
-            {
-                if (prev.waitNext !is task) return false;
-                prev.waitNext = next;
-            }
-            if (next !is null) next.waitPrev = prev;
-            task.waitNext = null;
-            task.waitPrev = null;
-            task.waitGeneration = 0;
-            if (--p.count == 0 && !persistentSignal(signal))
-                buckets[s].remove(signal);
-            atomicFetchSub!(MemoryOrder.rel)(waiterCount, 1L);
-            return true;
+            if (p is null) return null;
+            auto chain = p.claimFront(size_t.max, count);
+            buckets[s].remove(signal);
+            return chain;
         }
-        return false;
     }
 
-    @property size_t length() nothrow @nogc
+    /// The waiter itself, after it resumes: unlink if a signal did not.
+    package void unlink(FiberTask task)
     {
-        return cast(size_t) atomicLoad!(MemoryOrder.acq)(waiterCount);
+        immutable signal = task.waitSignal;
+        immutable s = stripe(signal);
+        synchronized (mutexes[s])
+        {
+            if (task.waitOwner !is this) return;
+            auto p = signal in buckets[s];
+            assert(p !is null);
+            p.unlink(task);
+            if (p.length == 0) buckets[s].remove(signal);
+        }
     }
 }
 
@@ -1205,6 +1269,7 @@ private struct TimerEntry
     long deadlineTicks;
     ulong sequence;
     FiberTask task;
+    ulong waitWord; // the armed wait this timer may claim
 }
 
 /// Managed timer registry. Expiration is polled by lane workers; the nearest
@@ -1212,7 +1277,34 @@ private struct TimerEntry
 final class TimerSet
 {
     private Mutex mutex;
-    private TimerEntry[] entries;
+    // The heap is storage[0 .. count]. An explicit count keeps the block
+    // across removals; shrinking a slice would make the next append copy the
+    // entire heap into a new block.
+    private TimerEntry[] storage;
+    private size_t count;
+
+    @property private inout(TimerEntry)[] entries() inout return nothrow @nogc
+    {
+        return storage[0 .. count];
+    }
+    // The heap top's deadline, long.max when empty. Written under the mutex
+    // whenever the top can change; read without it so an idle poll and the
+    // pre-park deadline query take no lock. A stale read races exactly as
+    // the locked read did: a later top only wakes early, and an insert that
+    // becomes the top after the read raises `noteTimerArmed`.
+    private shared long earliestTicks = long.max;
+
+    private void publishEarliest() nothrow @nogc
+    {
+        atomicStore!(MemoryOrder.rel)(earliestTicks,
+            entries.length != 0 ? entries[0].deadlineTicks : long.max);
+    }
+
+    /// The earliest armed deadline, or long.max; lock-free and possibly stale.
+    @property long earliest() const nothrow @nogc
+    {
+        return atomicLoad!(MemoryOrder.acq)(earliestTicks);
+    }
 
     this() { mutex = new Mutex; }
 
@@ -1260,14 +1352,19 @@ final class TimerSet
     }
 
     /// Returns true when the new entry became the earliest deadline.
-    bool insert(FiberTask task, long deadlineTicks, ulong sequence)
+    bool insert(FiberTask task, long deadlineTicks, ulong sequence,
+        ulong waitWord)
     {
         synchronized (mutex)
         {
             assert(task.timerIndex == size_t.max);
-            task.timerIndex = entries.length;
-            entries ~= TimerEntry(deadlineTicks, sequence, task);
+            if (count == storage.length)
+                storage.length = count < 8 ? 8 : count * 2;
+            task.timerIndex = count;
+            storage[count++] = TimerEntry(deadlineTicks, sequence, task,
+                waitWord);
             siftUp(task.timerIndex);
+            publishEarliest();
             return task.timerIndex == 0;
         }
     }
@@ -1281,7 +1378,8 @@ final class TimerSet
             entries[i] = entries[last];
             entries[i].task.timerIndex = i;
         }
-        entries = entries[0 .. last];
+        storage[last] = TimerEntry.init; // the GC scans the whole block
+        count = last;
         removed.timerIndex = size_t.max;
         if (i < entries.length)
         {
@@ -1290,6 +1388,7 @@ final class TimerSet
             else
                 siftDown(i);
         }
+        publishEarliest();
         return removed;
     }
 
@@ -1303,37 +1402,26 @@ final class TimerSet
         return true;
     }
 
-    /// Pops the earliest entry if it has expired and runs `claim` on its
-    /// task before the mutex drops; `task` is the task when the claim won and
-    /// null when another waker already had. Popping and claiming are one
-    /// step because a waker that wins instead calls `remove` before it
-    /// publishes: a separate claim could find the task resumed and parked on
-    /// a later wait, or recycled. Lock order: this mutex, then the claim's
-    /// wait-stripe or join-list lock; no path takes this mutex under either.
-    bool takeExpired(long nowTicks, scope bool delegate(FiberTask) claim,
-        out FiberTask task)
+    /// Pop the earliest entry if it has expired. The caller claims
+    /// `waitWord` after the mutex drops: the word names the exact wait this
+    /// timer was armed for, so a claim that lost to another waker (whose
+    /// waiter may already wait again) fails instead of ending a later wait.
+    bool takeExpired(long nowTicks, out FiberTask task, out ulong waitWord)
+        nothrow @nogc
     {
-        synchronized (mutex)
-        {
-            if (entries.length == 0 || entries[0].deadlineTicks > nowTicks)
-            {
-                task = null;
-                return false;
-            }
-            auto popped = removeAt(0);
-            task = claim(popped) ? popped : null;
-            return true;
-        }
+        mutex.lock_nothrow();
+        scope (exit) mutex.unlock_nothrow();
+        if (count == 0 || storage[0].deadlineTicks > nowTicks)
+            return false;
+        waitWord = storage[0].waitWord;
+        task = removeAt(0);
+        return true;
     }
 
-    bool nextDeadline(out long ticks)
+    bool nextDeadline(out long ticks) nothrow @nogc
     {
-        synchronized (mutex)
-        {
-            if (entries.length == 0) return false;
-            ticks = entries[0].deadlineTicks;
-            return true;
-        }
+        ticks = earliest;
+        return ticks != long.max;
     }
 }
 
@@ -1709,9 +1797,9 @@ final class FiberDomain
     { return (cast(FiberDomainControl*) control).timerSequence; }
     @property private ref shared(int) fatalState() const return nothrow @nogc
     { return (cast(FiberDomainControl*) control).fatalState; }
-    @property private ref shared(long) managedJoinWaiterCount() const
+    @property private ref shared(long) waitingCount() const
         return nothrow @nogc
-    { return (cast(FiberDomainControl*) control).managedJoinWaiterCount; }
+    { return (cast(FiberDomainControl*) control).waitingCount; }
     @property private ref shared(long) lifecycleReservationCount() const
         return nothrow @nogc
     { return (cast(FiberDomainControl*) control).lifecycleReservationCount; }
@@ -2025,7 +2113,7 @@ final class FiberDomain
                     cast(shared(Throwable)) null);
                 task.waitSignal = 0;
                 task.waitPrev = null;
-                task.waitGeneration = 0;
+                assert(task.waitOwner is null && task.waitCause != WaitCause.armed);
                 task.timerIndex = size_t.max;
                 atomicStore!(MemoryOrder.rel)(task.outcomeState, FiberOutcome.pending);
                 task.storeControl(controlWordFor(Phase.ready));
@@ -2176,7 +2264,7 @@ final class FiberDomain
         parkOn(signal);
     }
 
-    /// Park the current fiber on a scheduler-private wait key.
+    /// Park the current fiber until `signal` is delivered or cancellation.
     package static void parkOn(Signal signal)
     {
         auto task = currentTask;
@@ -2184,9 +2272,16 @@ final class FiberDomain
         if (task.cancellationRequested)
             throw new FiberCancelled;
         task.waitSignal = signal;
-        if (!task.domain.waits.insert(task, signal))
+        auto waits = task.domain.waits;
+        immutable armed = waits.linkArmed(task); // may allocate a bucket
+        if (task.cancellationRequested)
+        {
+            task.withdrawWait(armed);
+            waits.unlink(task);
             throw new FiberCancelled;
+        }
         Fiber.yield();
+        waits.unlink(task);
         if (task.cancellationRequested)
             throw new FiberCancelled;
     }
@@ -2205,29 +2300,48 @@ final class FiberDomain
     }
 
     /// Suspend the current managed fiber until an absolute monotonic deadline.
-    /// The high half of `Signal` is reserved for these internal timer keys.
     static void sleepUntil(MonoTime deadline)
     {
         auto task = currentTask;
         assert(task !is null && task.fiber is Fiber.getThis());
         if (task.cancellationRequested)
             throw new FiberCancelled;
-        auto domain = task.domain;
-        immutable seq = atomicFetchAdd(domain.timerSequence, 1UL);
-        immutable key = timerSignalBit | (seq & ~internalSignalMask);
-        task.waitSignal = key;
-        if (!domain.waits.insert(task, key))
-            throw new FiberCancelled;
-        if (domain.timers.insert(task, deadline.ticks, seq))
-            task.readyLane.noteTimerArmed();
-        // Cancellation may have removed the waiter just before this insert.
-        // In that ordering it could not remove a not-yet-present heap entry;
-        // close the registration handshake from the running fiber side.
+        immutable armed = task.armWait();
         if (task.cancellationRequested)
-            domain.timers.remove(task);
+        {
+            task.withdrawWait(armed);
+            throw new FiberCancelled;
+        }
+        task.domain.armTimer(task, deadline, armed);
         Fiber.yield();
+        task.domain.disarmTimer(task);
         if (task.cancellationRequested)
             throw new FiberCancelled;
+    }
+
+    /// Running fiber only, after `armWait`: let the timer claim `armed` at
+    /// `deadline`. On failure (heap growth) the wait is withdrawn.
+    package void armTimer(FiberTask task, MonoTime deadline, ulong armed)
+    {
+        immutable seq = atomicFetchAdd(timerSequence, 1UL);
+        bool earliest;
+        try
+            earliest = timers.insert(task, deadline.ticks, seq, armed);
+        catch (Throwable failure)
+        {
+            task.withdrawWait(armed);
+            throw failure;
+        }
+        if (earliest)
+            task.readyLane.noteTimerArmed();
+    }
+
+    /// The waiter, after it resumes from a wait it armed a timer for. A timer
+    /// that claimed the wait has already left the heap.
+    package void disarmTimer(FiberTask task) nothrow @nogc
+    {
+        if (task.waitCause != WaitCause.timedOut)
+            timers.remove(task);
     }
 
     static void sleepFor(Duration duration)
@@ -2303,45 +2417,51 @@ final class FiberDomain
             lane.noteExternalReady();
     }
 
-    package Signal allocateWaitKey() nothrow @nogc
-    {
-        immutable seq = atomicFetchAdd(timerSequence, 1UL);
-        return timerSignalBit | (seq & ~internalSignalMask);
-    }
-
-    package Signal allocatePersistentWaitKey() nothrow @nogc
-    {
-        immutable seq = atomicFetchAdd(timerSequence, 1UL);
-        return internalSignalMask | (seq & ~internalSignalMask);
-    }
-
     package size_t wakeWaiters(Signal signal)
     {
         size_t matched;
-        auto chain = waits.take(signal, matched);
+        auto chain = waits.claimAll(signal, matched);
         version (unittest)
             if (wakeAfterTakeHook !is null)
                 wakeAfterTakeHook(signal);
+        wakeClaimed(chain);
+        return matched;
+    }
+
+    /// Deliver WAKE to a chain of claimed waiters (WaiterQueue.claimFront).
+    /// Read each link before the wake: a woken task may run and wait again.
+    package void wakeClaimed(FiberTask chain) nothrow @nogc
+    {
         while (chain !is null)
         {
             auto task = chain;
             chain = task.waitNext;
             task.waitNext = null;
-            task.waitPrev = null;
             makeWaiterReady(task);
         }
-        return matched;
     }
 
     /// Turn expired timers into ordinary ready fibers. Called by managed lane
     /// workers before consuming/publishing work.
-    size_t pollTimers(MonoTime now = MonoTime.currTime)
+    size_t pollTimers()
     {
+        // Every responder calls this on every pump: an empty heap costs one
+        // load, with no clock read and no mutex.
+        if (timers.earliest == long.max) return 0;
+        return pollTimers(MonoTime.currTime);
+    }
+
+    /// ditto
+    size_t pollTimers(MonoTime now)
+    {
+        if (timers.earliest > now.ticks) return 0;
         size_t woken;
         FiberTask task;
-        while (timers.takeExpired(now.ticks, &claimExpiredWait, task))
+        ulong armed;
+        while (timers.takeExpired(now.ticks, task, armed))
         {
-            if (task is null) continue;
+            // A lost claim is a wait some other waker already ended.
+            if (!task.claimWait(armed, WaitCause.timedOut)) continue;
             version (unittest)
                 if (timerAfterClaimHook !is null)
                     timerAfterClaimHook(task);
@@ -2351,19 +2471,7 @@ final class FiberDomain
         return woken;
     }
 
-    /// Runs under the timer mutex with the task's entry just popped. Every
-    /// other waker removes the entry before it publishes, so the task cannot
-    /// resume, register another wait or be recycled until this returns, and
-    /// its current join target or wait signal is the one the timer armed.
-    private bool claimExpiredWait(FiberTask task)
-    {
-        auto target = task.managedJoinTarget();
-        return target !is null
-            ? target.removeManagedJoinWaiter(task)
-            : waits.remove(task, task.waitSignal);
-    }
-
-    bool nextTimerDeadline(out long ticks)
+    bool nextTimerDeadline(out long ticks) nothrow @nogc
     {
         return timers.nextDeadline(ticks);
     }
@@ -2537,19 +2645,16 @@ final class FiberDomain
             result = CancellationResult.requestedRunning;
 
         acceptCancellation(task, requestedGeneration, result);
-        if (external && ph == Phase.waiting)
+        if (external)
         {
-            // First or later: WaitSet/join-list remove is exactly-once.
-            // Plain waitSignal read: the owner writes it before insert's
-            // waiting add (acquired by addCtrl above) and rechecks
-            // cancellation before any rewrite; recycle holds admissionMutex.
-            auto target = task.managedJoinTarget();
-            immutable removed = target !is null
-                ? target.removeManagedJoinWaiter(task)
-                : waits.remove(task, task.waitSignal);
-            if (removed)
+            // Pairs with the fence in armWait. The CANCEL add above precedes
+            // it, so a wait armed after this load sees the request and
+            // withdraws; one armed before is claimed here. The claim is
+            // exactly-once against every other waker, whichever container
+            // the wait is in, so the cancelled waiter unlinks itself.
+            atomicFence!(MemoryOrder.seq)();
+            if (task.claimCurrentWait(WaitCause.cancelled))
             {
-                timers.remove(task);
                 makeWaiterReady(task);
                 // The destination lane may have parked after the enqueue wake
                 // but before this drain. Cancellation service also wakes it
@@ -2656,10 +2761,11 @@ final class FiberDomain
         return defaultReadyLane.flush(token, maximum, avgCost);
     }
 
-    @property size_t waiting()
+    /// Armed waits not yet claimed by a wake, timeout or cancellation.
+    @property size_t waiting() const nothrow @nogc
     {
-        immutable managed = atomicLoad!(MemoryOrder.acq)(managedJoinWaiterCount);
-        return waits.length + (managed < 0 ? 0 : cast(size_t) managed);
+        immutable n = atomicLoad!(MemoryOrder.acq)(waitingCount);
+        return n < 0 ? 0 : cast(size_t) n;
     }
     @property size_t ready() nothrow @nogc
     {
@@ -2713,7 +2819,13 @@ final class FiberDomain
         auto moved = roots[$ - 1];
         roots[i] = moved;
         moved.rootsIndex = i;
+        // Clear the vacated slot (the GC scans the whole block), then keep
+        // the block: no other slice aliases roots (shutdown copies it), and
+        // without assumeSafeAppend the next spawn's append would copy the
+        // entire array into a new block.
+        roots[$ - 1] = null;
         roots.length = roots.length - 1;
+        roots.assumeSafeAppend();
         task.rootedFlag = false;
         if (roots.length == 0 && domainRooted)
         {
@@ -2868,32 +2980,36 @@ final class FiberDomain
         atomicStore!(MemoryOrder.raw)(target.managedJoinControl.headWord,
             size_t.init);
         atomicStore!(MemoryOrder.rel)(target.managedJoinControl.waiterCount, 0u);
-        size_t detachedCount;
-        // Mark every detached node before dropping the list lock. Cancellation
-        // or expiry can then observe either linked membership and remove it,
-        // or detached membership which this waker exclusively owns; it can
-        // never edit the detached chain while it is being traversed.
-        for (auto detached = word; detached != 0; )
-        {
-            ++detachedCount;
-            auto waiter = cast(FiberTask) cast(void*) detached;
-            detached = atomicLoad!(MemoryOrder.raw)(
-                waiter.managedJoinControl.nextWord);
-            atomicStore!(MemoryOrder.rel)(
-                waiter.managedJoinControl.targetWord, size_t.init);
-        }
-        if (detachedCount != 0)
-            atomicFetchSub!(MemoryOrder.rel)(managedJoinWaiterCount,
-                cast(long) detachedCount);
-        target.unlockManagedJoinList();
-
+        // Unlink and claim every joiner before dropping the list lock. A
+        // joiner a timer or cancellation already claimed loses here and, on
+        // resume, finds itself unlinked. Winners are rechained through
+        // nextWord; each stays suspended until its WAKE below.
+        size_t winners;
+        size_t winnersTail;
         while (word != 0)
         {
             auto waiter = cast(FiberTask) cast(void*) word;
             word = atomicLoad!(MemoryOrder.raw)(
                 waiter.managedJoinControl.nextWord);
             FiberTask.clearManagedJoinMembership(waiter);
-            waiter.domain.timers.remove(waiter);
+            if (!waiter.claimCurrentWait(WaitCause.signalled)) continue;
+            if (winnersTail != 0)
+                atomicStore!(MemoryOrder.raw)((cast(FiberTask) cast(void*)
+                    winnersTail).managedJoinControl.nextWord,
+                    cast(size_t) cast(void*) waiter);
+            else
+                winners = cast(size_t) cast(void*) waiter;
+            winnersTail = cast(size_t) cast(void*) waiter;
+        }
+        target.unlockManagedJoinList();
+
+        while (winners != 0)
+        {
+            auto waiter = cast(FiberTask) cast(void*) winners;
+            winners = atomicLoad!(MemoryOrder.raw)(
+                waiter.managedJoinControl.nextWord);
+            atomicStore!(MemoryOrder.raw)(waiter.managedJoinControl.nextWord,
+                size_t.init);
             waiter.domain.makeWaiterReady(waiter);
         }
     }
@@ -2913,17 +3029,6 @@ final class FiberDomain
         task.subParkWake();
         task.readyLane.push(task);
         task.readyLane.noteExternalReady();
-    }
-
-    private void restoreRunningAfterWaitSetupFailure(FiberTask task)
-        nothrow @nogc
-    {
-        immutable word = task.loadControl();
-        immutable ph = phaseOf(word);
-        if (ph == Phase.running)
-            return;
-        assert(ph == Phase.waiting);
-        task.addPhase(Phase.waiting, Phase.running);
     }
 
 }
@@ -2947,36 +3052,134 @@ version (unittest)
     package void delegate(FiberTask) timerAfterClaimHook;
 }
 
+/// The waiter queue of a FiberEvent or FiberSemaphore: a FIFO under its own
+/// mutex, so waits need no signal key, bucket or map allocation.
+private struct UnitWaiters
+{
+    Mutex lock;
+    WaiterQueue queue;
+
+    void initialize() { lock = new Mutex; }
+
+    void link(FiberTask task, Object owner) nothrow @nogc
+    {
+        lock.lock_nothrow();
+        queue.pushBack(task, owner);
+        lock.unlock_nothrow();
+    }
+
+    void unlink(FiberTask task, Object owner) nothrow @nogc
+    {
+        lock.lock_nothrow();
+        if (task.waitOwner is owner) queue.unlink(task);
+        lock.unlock_nothrow();
+    }
+
+    /// Wake up to `limit` waiters, oldest first, skipping any whose wait
+    /// another waker already ended.
+    void wake(FiberDomain domain, size_t limit) nothrow @nogc
+    {
+        size_t claimed;
+        lock.lock_nothrow();
+        auto chain = queue.claimFront(limit, claimed);
+        lock.unlock_nothrow();
+        domain.wakeClaimed(chain);
+    }
+}
+
+/// Shared wait of FiberEvent and FiberSemaphore. `Owner` supplies tryTake
+/// (consume one unit), refund (return a unit taken by a cancelled wait),
+/// passOn (wake another waiter if units remain) and its waiter queue.
+///
+/// Each wake goes to one claimed waiter, so a woken waiter that leaves
+/// without a unit (cancelled, or its timer arm failed) passes the wake on.
+/// Returns false only for a timed wait whose deadline passed with no unit
+/// taken.
+private bool waitForUnit(Owner)(Owner owner, string misuse, bool timed,
+    MonoTime deadline)
+{
+    auto task = FiberDomain.currentTask;
+    auto domain = owner.domain;
+    if (task is null || task.domain !is domain)
+        throw new Exception(misuse);
+    while (true)
+    {
+        if (owner.tryTake()) return true;
+        if (task.cancellationRequested)
+            throw new FiberCancelled;
+        if (timed && MonoTime.currTime >= deadline)
+            return false;
+        immutable armed = task.armWait();
+        if (task.cancellationRequested)
+        {
+            task.withdrawWait(armed);
+            throw new FiberCancelled;
+        }
+        owner.waiters.link(task, owner);
+        owner.afterRegister();
+        if (owner.tryTake())
+        {
+            // A waker that claimed this wait first spent one wake, and this
+            // waiter took one unit: nothing is owed onward. Every unit's wake
+            // went to a waiter linked when it arrived, and a waiter that
+            // linked later rechecks the units itself.
+            task.withdrawWait(armed);
+            owner.waiters.unlink(task, owner);
+            if (task.cancellationRequested)
+            {
+                // Return the unit with release publication; the refund wakes
+                // a waiter that parked meanwhile.
+                owner.refund();
+                throw new FiberCancelled;
+            }
+            return true;
+        }
+        if (timed)
+        {
+            try
+                domain.armTimer(task, deadline, armed);
+            catch (Throwable failure)
+            {
+                // armTimer withdrew the wait, consuming any wake that beat it.
+                owner.waiters.unlink(task, owner);
+                if (task.waitCause == WaitCause.signalled) owner.passOn();
+                throw failure;
+            }
+        }
+        Fiber.yield();
+        owner.waiters.unlink(task, owner);
+        if (timed) domain.disarmTimer(task);
+        immutable cause = task.waitCause;
+        if (task.cancellationRequested)
+        {
+            if (cause == WaitCause.signalled) owner.passOn();
+            throw new FiberCancelled;
+        }
+        // A wake that lost to this timeout went to another waiter, or left
+        // its unit for this last attempt.
+        if (cause == WaitCause.timedOut)
+            return owner.tryTake();
+    }
+}
+
 /// Scheduler-aware event. `wait` parks a managed fiber; `set`/`reset` may run
-/// on any thread. Auto-reset consumes the posted state for one waiter; extras
-/// that were woken re-park. Manual-reset stays posted until `reset`.
+/// on any thread. Auto-reset consumes the posted state for one waiter and
+/// wakes one waiter per `set`. Manual-reset stays posted until `reset` and
+/// wakes every waiter.
 final class FiberEvent
 {
     private FiberDomain domain;
-    private Signal key;
     private FiberEventMode mode;
     private shared int posted;
+    private UnitWaiters waiters;
 
     this(FiberDomain domain, FiberEventMode mode = FiberEventMode.autoReset)
-    {
-        initialize(domain, mode, false);
-    }
-
-    package this(FiberDomain domain, FiberEventMode mode, bool retainWaitKey)
-    {
-        initialize(domain, mode, retainWaitKey);
-    }
-
-    private void initialize(FiberDomain domain, FiberEventMode mode,
-            bool retainWaitKey)
     {
         if (domain is null)
             throw new Exception("ant_fibers: FiberEvent requires a domain");
         this.domain = domain;
         this.mode = mode;
-        this.key = retainWaitKey
-            ? domain.allocatePersistentWaitKey()
-            : domain.allocateWaitKey();
+        waiters.initialize();
     }
 
     @property bool isSet() const nothrow @nogc
@@ -2984,10 +3187,11 @@ final class FiberEvent
         return atomicLoad!(MemoryOrder.acq)(posted) != 0;
     }
 
-    void set()
+    void set() nothrow @nogc
     {
         atomicStore!(MemoryOrder.rel)(posted, 1);
-        domain.wakeWaiters(key);
+        waiters.wake(domain,
+            mode == FiberEventMode.manualReset ? size_t.max : 1);
     }
 
     void reset() nothrow @nogc
@@ -2998,49 +3202,50 @@ final class FiberEvent
     /// Park the current managed fiber until this event is posted.
     void wait()
     {
-        auto task = FiberDomain.currentTask;
-        if (task is null || task.domain !is domain)
-            throw new Exception(
-                "ant_fibers: FiberEvent.wait requires a managed fiber of this domain");
-        while (true)
-        {
-            if (consumePosted()) return;
-            if (task.cancellationRequested)
-                throw new FiberCancelled;
-            task.waitSignal = key;
-            if (!domain.waits.insert(task, key))
-                throw new FiberCancelled;
-            version (unittest)
-                if (eventAfterRegisterHook !is null)
-                    eventAfterRegisterHook(this);
-            if (consumePosted())
-            {
-                if (domain.waits.remove(task, key))
-                    domain.restoreRunningAfterWaitSetupFailure(task);
-                else
-                    Fiber.yield();
-                if (task.cancellationRequested)
-                {
-                    // Return the consumed set with release publication and a
-                    // wake for re-parked waiters. This new set may coalesce
-                    // with another set or follow a concurrent reset.
-                    if (mode == FiberEventMode.autoReset) set();
-                    throw new FiberCancelled;
-                }
-                return;
-            }
-            Fiber.yield();
-            if (task.cancellationRequested)
-                throw new FiberCancelled;
-        }
+        cast(void) waitForUnit(this, misuse, false, MonoTime.init);
     }
 
-    private bool consumePosted() nothrow @nogc
+    /// Park until posted or `timeout` elapses; false on timeout.
+    bool wait(Duration timeout)
+    {
+        return waitUntil(MonoTime.currTime + timeout);
+    }
+
+    /// Park until posted or `deadline`; false if the deadline passed first.
+    bool waitUntil(MonoTime deadline)
+    {
+        return waitForUnit(this, misuse, true, deadline);
+    }
+
+    private enum misuse =
+        "ant_fibers: FiberEvent.wait requires a managed fiber of this domain";
+
+    private bool tryTake() nothrow @nogc
     {
         if (mode == FiberEventMode.manualReset)
             return atomicLoad!(MemoryOrder.acq)(posted) != 0;
         int expected = 1;
         return cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(&posted, expected, 0);
+    }
+
+    // A manual-reset wait consumes nothing. An auto-reset refund may coalesce
+    // with another set or follow a concurrent reset.
+    private void refund() nothrow @nogc
+    {
+        if (mode == FiberEventMode.autoReset) set();
+    }
+
+    private void passOn() nothrow @nogc
+    {
+        if (mode == FiberEventMode.autoReset && isSet)
+            waiters.wake(domain, 1);
+    }
+
+    private void afterRegister()
+    {
+        version (unittest)
+            if (eventAfterRegisterHook !is null)
+                eventAfterRegisterHook(this);
     }
 }
 
@@ -3066,7 +3271,7 @@ final class FiberGenerationTrigger
             throw new Exception(
                 "ant_fibers: generation trigger requires a domain");
         domain_ = domain;
-        event_ = new FiberEvent(domain, FiberEventMode.autoReset, true);
+        event_ = new FiberEvent(domain, FiberEventMode.autoReset);
     }
 
     @property ulong completed() const nothrow @nogc
@@ -3111,13 +3316,12 @@ version (unittest)
     package void delegate(FiberSemaphore) semaphoreAfterRegisterHook;
 
 /// Counting semaphore. `wait` parks a managed fiber when the count is zero;
-/// `post` may run on any thread. Extra waiters woken by a broadcast re-park
-/// if they lose the decrement race.
+/// `post` may run on any thread and wakes one waiter per permit.
 final class FiberSemaphore
 {
     private FiberDomain domain;
-    private Signal key;
     private shared long permits;
+    private UnitWaiters waiters;
 
     this(FiberDomain domain, long initial = 0)
     {
@@ -3126,7 +3330,7 @@ final class FiberSemaphore
         if (initial < 0)
             throw new Exception("ant_fibers: semaphore count must be >= 0");
         this.domain = domain;
-        this.key = domain.allocateWaitKey();
+        waiters.initialize();
         atomicStore!(MemoryOrder.raw)(permits, initial);
     }
 
@@ -3136,54 +3340,34 @@ final class FiberSemaphore
         return n < 0 ? 0 : n;
     }
 
-    void post(long count = 1)
+    void post(long count = 1) nothrow @nogc
     {
         if (count <= 0) return;
         atomicFetchAdd!(MemoryOrder.rel)(permits, count);
-        domain.wakeWaiters(key);
+        waiters.wake(domain, cast(size_t) count);
     }
 
     void wait()
     {
-        auto task = FiberDomain.currentTask;
-        if (task is null || task.domain !is domain)
-            throw new Exception(
-                "ant_fibers: FiberSemaphore.wait requires a managed fiber of this domain");
-        while (true)
-        {
-            if (tryAcquire()) return;
-            if (task.cancellationRequested)
-                throw new FiberCancelled;
-            task.waitSignal = key;
-            if (!domain.waits.insert(task, key))
-                throw new FiberCancelled;
-            version (unittest)
-                if (semaphoreAfterRegisterHook !is null)
-                    semaphoreAfterRegisterHook(this);
-            if (tryAcquire())
-            {
-                if (domain.waits.remove(task, key))
-                    domain.restoreRunningAfterWaitSetupFailure(task);
-                else
-                    Fiber.yield();
-                if (task.cancellationRequested)
-                {
-                    // The registration recheck acquired a permit, even if a
-                    // wake/cancel already detached us and forced the yield.
-                    // Return ownership before throwing: post's release add
-                    // restores the count and wakes waiters that re-parked.
-                    post();
-                    throw new FiberCancelled;
-                }
-                return;
-            }
-            Fiber.yield();
-            if (task.cancellationRequested)
-                throw new FiberCancelled;
-        }
+        cast(void) waitForUnit(this, misuse, false, MonoTime.init);
     }
 
-    private bool tryAcquire() nothrow @nogc
+    /// Wait for a permit or until `timeout` elapses; false on timeout.
+    bool wait(Duration timeout)
+    {
+        return waitUntil(MonoTime.currTime + timeout);
+    }
+
+    /// Wait for a permit until `deadline`; false if it passed first.
+    bool waitUntil(MonoTime deadline)
+    {
+        return waitForUnit(this, misuse, true, deadline);
+    }
+
+    private enum misuse =
+        "ant_fibers: FiberSemaphore.wait requires a managed fiber of this domain";
+
+    private bool tryTake() nothrow @nogc
     {
         auto observed = atomicLoad!(MemoryOrder.acq)(permits);
         while (observed > 0)
@@ -3194,6 +3378,20 @@ final class FiberSemaphore
             observed = atomicLoad!(MemoryOrder.acq)(permits);
         }
         return false;
+    }
+
+    private void refund() nothrow @nogc { post(); }
+
+    private void passOn() nothrow @nogc
+    {
+        if (available > 0) waiters.wake(domain, 1);
+    }
+
+    private void afterRegister()
+    {
+        version (unittest)
+            if (semaphoreAfterRegisterHook !is null)
+                semaphoreAfterRegisterHook(this);
     }
 }
 
@@ -3238,41 +3436,56 @@ version (unittest)
 {
     unittest
     {
-        // Exercise indexed removal from one deliberately crowded bucket.
+        // Waiter self-unlink and whole-signal claim on one deliberately
+        // crowded bucket; claims skip waits another waker already ended.
         enum count = 100_000;
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
+                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
+        scope (exit) farm.destroy();
+        auto domain = new FiberDomain(farm);
         auto waits = new WaitSet;
-        assert((cast(size_t) waits.control % cacheLineSize) == 0);
         FiberTask[] tasks;
         tasks.reserve(count);
         foreach (i; 0 .. count)
         {
             auto task = new FiberTask;
             assert((cast(size_t) task.control % cacheLineSize) == 0);
-            atomicStore!(MemoryOrder.rel)(task.generationState, i + 1);
-            task.storeControl(controlWordFor(Phase.running));
+            task.domain = domain;
             task.waitSignal = 7;
-            waits.insert(task, 7);
+            task.storeControl(controlWordFor(Phase.running));
+            immutable armed = waits.linkArmed(task);
+            assert(armed == ((1UL << waitCauseBits) | WaitCause.armed));
             tasks ~= task;
         }
         foreach (i; 0 .. count)
-            if ((i & 1) == 0)
+            if (i % 4 == 0)
             {
-                auto removed = waits.remove(tasks[i], 7);
-                assert(removed);
+                // Woken elsewhere (say, a timeout), then unlinks itself.
+                assert(tasks[i].claimCurrentWait(WaitCause.timedOut));
+                waits.unlink(tasks[i]);
+                assert(tasks[i].waitOwner is null);
             }
-        assert(waits.length == count / 2);
-        size_t remaining;
-        auto chain = waits.take(7, remaining);
-        assert(remaining == count / 2 && waits.length == 0);
-        FiberTask previous;
+            else if (i % 4 == 1)
+                // Claimed elsewhere but not yet resumed: still linked.
+                assert(tasks[i].claimCurrentWait(WaitCause.cancelled));
+        assert(domain.waiting == count / 2);
+        size_t claimed;
+        auto chain = waits.claimAll(7, claimed);
+        assert(claimed == count / 2 && domain.waiting == 0);
         size_t seen;
         for (auto task = chain; task !is null; task = task.waitNext)
         {
-            assert(task.waitPrev is previous);
-            previous = task;
+            assert(task is tasks[(seen / 2) * 4 + 2 + seen % 2], "oldest first");
+            assert(task.waitCause == WaitCause.signalled && task.waitOwner is null);
             ++seen;
         }
-        assert(seen == remaining);
+        assert(seen == claimed);
+        foreach (task; tasks)
+        {
+            assert(task.waitOwner is null);
+            waits.unlink(task); // late self-unlink after a claim is a no-op
+        }
+        assert(waits.claimAll(7, claimed) is null && claimed == 0);
     }
 
     unittest
@@ -3335,7 +3548,7 @@ version (unittest)
             auto task = new FiberTask;
             task.payloadWord = i;
             tasks ~= task;
-            timers.insert(task, cast(long)(i % 257), i);
+            timers.insert(task, cast(long)(i % 257), i, 0);
         }
         foreach (task; tasks)
             if ((task.payloadWord % 3) == 0)
@@ -3347,7 +3560,8 @@ version (unittest)
         ulong lastSequence;
         FiberTask task;
         size_t popped;
-        while (timers.takeExpired(long.max, (FiberTask) => true, task))
+        ulong unusedWord;
+        while (timers.takeExpired(long.max, task, unusedWord))
         {
             immutable deadline = cast(long)(task.payloadWord % 257);
             immutable sequence = task.payloadWord;
@@ -3390,6 +3604,57 @@ version (unittest)
         drainUntilEmpty(domain, token, view);
         assert(first.outcome == FiberOutcome.cancelled);
         assert(second.outcome == FiberOutcome.cancelled);
+        domain.releaseAll(domain.takeCompletions());
+    }
+
+    unittest
+    {
+        // Removal keeps the backing blocks. A timer insert after a removal and
+        // a spawn after a root release append in place; a shrunk slice would
+        // copy the whole heap or roots array into a new block every time.
+        auto timers = new TimerSet;
+        auto sleepers = new FiberTask[64];
+        foreach (i, ref t; sleepers)
+        {
+            t = new FiberTask;
+            timers.insert(t, i, i, 0);
+        }
+        auto heap = timers.storage.ptr;
+        foreach (i, t; sleepers[0 .. 32])
+        {
+            assert(timers.remove(t));
+            timers.insert(t, 100 + i, 100 + i, 0);
+        }
+        assert(timers.storage.ptr is heap);
+        FiberTask expired;
+        ulong expiredWord;
+        while (timers.takeExpired(long.max, expired, expiredWord)) {}
+        assert(timers.earliest == long.max);
+        assert(timers.storage.ptr is heap);
+        foreach (t; timers.storage) assert(t.task is null);
+
+        auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
+                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
+        scope (exit) farm.destroy();
+        auto domain = new FiberDomain(farm);
+        auto token = farm.registerProducer(Tier.small);
+        scope (exit) farm.unregisterProducer(token);
+        ConsumerView view;
+        subscribeOrThrow(view, farm);
+        scope (exit) view.unsubscribe();
+        foreach (i; 0 .. 64) domain.spawn({});
+        drainUntilEmpty(domain, token, view);
+        // Completed but untaken tasks stay rooted; churn one at a time.
+        assert(domain.roots.length == 64);
+        auto rootsBlock = domain.roots.ptr;
+        foreach (i; 0 .. 32)
+        {
+            domain.releaseAll(domain.takeCompletions(1));
+            domain.spawn({});
+            drainUntilEmpty(domain, token, view);
+        }
+        assert(domain.roots.length == 64);
+        assert(domain.roots.ptr is rootsBlock);
         domain.releaseAll(domain.takeCompletions());
     }
 }

@@ -87,11 +87,15 @@ credit and wake-pending bit so each ownership transition has one arbiter.
    records a wake-pending bit; it cannot publish a second runnable activation.
    After `Fiber.call` returns, the owning worker atomically settles parked
    versus ready and transfers the single execution credit.
-3. **Wake:** one winner claims the current wait generation and unlinks that
-   membership before publication. A signal's detached chain must clear
-   membership while holding its bucket lock; a timer must claim the current
-   wait before allowing the task to enter a later wait. Preserve the two
-   races fixed on the parent branch rather than merely moving their nodes.
+3. **Wake:** one winner claims the wait and only it publishes. `ant_fibers`
+   now does this with a per-task claim word (see
+   [the scheduler design](ant_fibers.md#waits-timers-joins-and-cancellation)):
+   each wait arms a fresh count, every waker CASes it, timer entries carry
+   the exact word they may claim, and waiters unlink themselves after they
+   resume. Reuse that protocol, and its arm/cancel fence pairing, rather than
+   reintroducing removal-wins arbitration; per-worker timer heaps then need
+   no cross-container locking. Keep the deterministic schedules for the two
+   races fixed earlier on the parent branch.
 4. **Publish/wake worker:** release-publish a ticket, then use the pool's
    arm/recheck protocol with the required publication-to-armed-read fence.
    Check local deque, owned overflow, remote inbox, and due timer/reactor work

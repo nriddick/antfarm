@@ -6,7 +6,7 @@ import ant_fibers;
 import core.atomic;
 import core.lifetime : move;
 import core.thread : Thread;
-import core.time : MonoTime, hours, seconds;
+import core.time : MonoTime, hours, msecs, seconds, usecs;
 import std.exception : enforce;
 import service_plan_tests : synthetic;
 
@@ -1095,6 +1095,120 @@ void syncPrimitiveStress()
     domain.releaseAll(domain.takeCompletions());
 }
 
+/// Permit conservation under concurrent service: four worker threads pump the
+/// domain (timers, cancellation drain, flush, consume) while producers post
+/// and consumers acquire, half untimed and half with short timeouts. The
+/// Director keeps cancelling consumers and admitting replacements, so woken,
+/// parked and registering waiters are all cancelled. Once every permit is
+/// posted, cancellation stops and consumers wait untimed, so the run ends
+/// only if the parked consumers are woken for every remaining permit. The
+/// final count must account for every posted permit. Looping consumers can
+/// absorb a swallowed wake mid-run; semaphore.d pins pass-on itself.
+void semaphoreConservationStress()
+{
+    enum producers = 8;
+    enum perProducer = 4_000;
+    enum total = producers * perProducer;
+    enum consumers = 16;
+    // One small producer token per worker.
+    auto farm = AntFarm.create(4, 8, 4, 0, 0, 4, 16_384,
+                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
+    scope (exit) farm.destroy();
+    auto domain = new FiberDomain(farm);
+    auto sem = new FiberSemaphore(domain, 0);
+    shared long taken, posted;
+    shared int stop;
+
+    void delegate() consumer(bool timed)
+    {
+        return () {
+            while (atomicLoad(taken) < total)
+            {
+                if (timed && atomicLoad(posted) < total)
+                {
+                    if (!sem.wait(usecs(50))) continue;
+                }
+                else
+                    sem.wait();
+                atomicFetchAdd(taken, 1L);
+            }
+        };
+    }
+
+    Thread[4] workers;
+    foreach (ref worker; workers)
+    {
+        worker = new Thread({
+            auto token = farm.registerProducer(Tier.small);
+            ConsumerView view;
+            subscribeOrThrow(view, farm);
+            while (atomicLoad!(MemoryOrder.acq)(stop) == 0)
+            {
+                domain.pollTimers();
+                if (domain.pendingCancellationRequests != 0)
+                    cast(void) domain.drainCancellationRequests();
+                immutable flushed = domain.flush(token);
+                if (!view.consumeNext() && flushed == 0) Thread.yield();
+            }
+            while (view.consumeNext()) {}
+            view.unsubscribe();
+            farm.unregisterProducer(token);
+        });
+        worker.start();
+    }
+
+    TaskHandle[consumers] live;
+    foreach (i, ref h; live)
+        h = domain.spawnHandle(consumer(i % 2 == 1));
+    foreach (_; 0 .. producers)
+        domain.spawn({
+            foreach (i; 0 .. perProducer)
+            {
+                sem.post();
+                atomicFetchAdd(posted, 1L);
+                if (i % 64 == 0) FiberDomain.yieldReady();
+            }
+        });
+
+    ulong cancelled, rng = 0x9E37_79B9_7F4A_7C15UL;
+    immutable start = MonoTime.currTime;
+    while (atomicLoad(taken) < total)
+    {
+        enforce(MonoTime.currTime - start < seconds(20),
+            "semaphore conservation stress stalled: a permit's wake was lost");
+        if (atomicLoad(posted) == total)
+        {
+            Thread.sleep(msecs(1));
+            continue;
+        }
+        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+        immutable i = cast(size_t)(rng % consumers);
+        if (domain.requestCancel(live[i]) == CancellationSubmission.queued)
+        {
+            ++cancelled;
+            live[i] = domain.spawnHandle(consumer(i % 2 == 1));
+        }
+        Thread.sleep(usecs(200));
+    }
+    // Every consumer still waiting is parked or polling with no permit left.
+    foreach (h; live) cast(void) domain.requestCancel(h);
+    immutable drainStart = MonoTime.currTime;
+    while (!domain.drained)
+    {
+        enforce(MonoTime.currTime - drainStart < seconds(10),
+            "semaphore conservation stress: shutdown drain stalled");
+        Thread.sleep(msecs(1));
+    }
+    atomicStore!(MemoryOrder.rel)(stop, 1);
+    foreach (worker; workers) worker.join();
+    enforce(atomicLoad(taken) + sem.available == total,
+        "semaphore conservation stress: permits created or lost");
+    enforce(sem.available == 0 && domain.waiting == 0,
+        "semaphore conservation stress: residual permits or waits");
+    enforce(cancelled != 0, "semaphore conservation stress cancelled nothing");
+    domain.releaseAll(domain.takeCompletions());
+}
+
 void main()
 {
     auto farm = AntFarm.create(4, 8, 4, 0, 0, 1, 16_384,
@@ -1223,6 +1337,7 @@ void main()
     remoteSweeperStress();
     actorWaveGenerationStress();
     syncPrimitiveStress();
+    semaphoreConservationStress();
 
     import core.stdc.stdio : printf;
     printf("fiber stress passed\n");

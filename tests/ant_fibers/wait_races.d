@@ -2,7 +2,9 @@ module ant_fibers.wait_race_tests;
 
 import antfarm;
 import ant_fibers.scheduler;
-import core.time : MonoTime, hours, msecs;
+import core.atomic;
+import core.thread : Thread;
+import core.time : MonoTime, hours, msecs, seconds;
 
 /// Deterministic schedules for the two arbitration windows a wake leaves
 /// open after it has won: a signal that detached its waiters but has not
@@ -14,6 +16,7 @@ void waitRaceSmoke()
     detachedWaiterCancellation();
     timerClaimBeforeJoinCompletion();
     timerClaimBeforeCancellation();
+    signalAfterWaitingCount();
 }
 
 private struct Rig
@@ -204,4 +207,54 @@ private void timerClaimBeforeCancellation()
     assert(sleeper.generation == generation);
     assert(sleeper.terminated && sleeper.outcome == FiberOutcome.cancelled
         && !slept);
+}
+
+/// A signal is an edge: `await` must be deliverable as soon as it counts in
+/// `waiting`. A worker thread runs each waiter while the Director spins on the
+/// count and signals once; a wait counted before it was linked would miss its
+/// signal (matched 0) and never finish.
+private void signalAfterWaitingCount()
+{
+    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
+                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
+    scope (exit) farm.destroy();
+    auto domain = new FiberDomain(farm);
+    shared int stop;
+    auto worker = new Thread({
+        auto token = farm.registerProducer(Tier.small);
+        ConsumerView view;
+        subscribeOrThrow(view, farm);
+        while (atomicLoad!(MemoryOrder.acq)(stop) == 0)
+        {
+            immutable flushed = domain.flush(token);
+            if (!view.consumeNext() && flushed == 0) Thread.yield();
+        }
+        while (view.consumeNext()) {}
+        view.unsubscribe();
+        farm.unregisterProducer(token);
+    });
+    worker.start();
+    scope (exit)
+    {
+        atomicStore!(MemoryOrder.rel)(stop, 1);
+        worker.join();
+    }
+    immutable deadline = MonoTime.currTime + seconds(20);
+    foreach (i; 0 .. 2_000)
+    {
+        immutable Signal key = 100 + i;
+        domain.spawn({ FiberDomain.await(key); });
+        while (domain.waiting != 1)
+        {
+            assert(MonoTime.currTime < deadline, "await never registered");
+            Thread.yield();
+        }
+        assert(domain.signal(key) == 1, "a counted await missed its signal");
+        while (!domain.drained)
+        {
+            assert(MonoTime.currTime < deadline, "signalled await never ran");
+            Thread.yield();
+        }
+        domain.releaseAll(domain.takeCompletions());
+    }
 }

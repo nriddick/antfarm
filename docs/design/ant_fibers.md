@@ -90,9 +90,10 @@ At most one thread may execute it.
 The supported suspension boundaries are:
 
 - `FiberDomain.yieldReady()` for voluntary republishing;
-- `await`, `FiberEvent.wait`, and `FiberSemaphore.wait` for application waits;
+- `await`, `FiberEvent.wait`, and `FiberSemaphore.wait` (each event and
+  semaphore wait optionally bounded by a deadline) for application waits;
 - `sleepFor` and `sleepUntil` for timer waits;
-- `TaskHandle.joinFiber` for managed joins;
+- `TaskHandle.joinFiber`, optionally bounded, for managed joins;
 - cooperative cancellation checks at scheduler boundaries.
 
 Calling `core.thread.Fiber.yield()` directly does not publish an activation. If
@@ -124,32 +125,64 @@ consumers to abandon partially processed tables.
 
 ## Waits, timers, joins, and cancellation
 
-`WaitSet` uses mutex-striped signal maps with intrusive doubly linked waiter
-chains. Individual removal is O(1). Whole-signal detach unlinks the bucket in
-O(1) and clears each detached waiter's membership before the stripe lock
-drops, so a cancellation that loses to the signal sees a non-member and leaves
-both the detached chain and any bucket recreated for the signal alone; the
-signal then wakes it. `FiberEvent` and
-`FiberSemaphore` register and then recheck their state so a signal cannot be
-lost between observing it and parking. A reusable `FiberGenerationTrigger`
-retains one empty map bucket after first use, avoiding delete/reinsert
-allocation on every generation; ordinary events, semaphores, arbitrary
-application signals, and one-shot timer keys are removed normally. Trigger
-instances are intended to be stable streams because the retained bucket lives
-until its domain does.
+Every wait is arbitrated by one claim word per task. The word counts waits in
+its high bits and records how the latest one ended in its low bits: `armed`,
+`signalled`, `timedOut`, `cancelled`, or `withdrawn` by the fiber itself. A
+running fiber arms a fresh count (`armWait`), registers with whatever can end
+the wait, and parks. Every waker (signal delivery, an event or semaphore,
+managed-join completion, timer expiry, cancellation) CASes the armed word to
+its cause; exactly one succeeds, and only it adds WAKE. Containers therefore
+need no removal protocol among themselves and take no each other's locks. A
+claim against an older count fails, so a stale timer entry or detached waiter
+can never end a later wait. The count is never reset, including on recycling,
+and every container entry references a GC-retained task, so a stale reference
+is memory-safe as well as harmless.
 
-`TimerSet` assigns private signals and stores them in an indexed binary
-min-heap ordered by `(deadline, sequence)`. Nearest-deadline lookup is O(1),
-insert and removal are O(log N), and expiry does not allocate after the heap
-has reached its high-water capacity. Expiry pops an entry and claims its wait
-(join-list or wait-set removal) under the heap mutex. Every other waker
-removes the entry before publishing its wake, so while an expiry arbitrates,
-the task cannot resume, park on a later wait or be recycled; the claim
-therefore removes the wait the timer was armed for.
+The waiter, not the winner, cleans up: after it resumes it unlinks itself
+from its waiter queue or join list and removes its timer entry, each under
+that container's own lock, before it can arm again. A container waker claims
+members while holding its lock, unlinking each one; a member a different
+cause already claimed is dropped there, and its own resume then finds it
+unlinked. Winners are rechained through the waiter link and stay suspended
+until their WAKE, so the waker walks the chain after the lock drops, reading
+each link before it delivers that task's wake.
 
-Managed joins use a generation-checked intrusive list on the target. Target
-completion, joiner cancellation, and timer expiry arbitrate removal so exactly
-one path wakes the joiner. External thread joins use a reusable manual-reset
+A waiter that finds its unit during registration (the recheck that prevents a
+lost signal) withdraws its own claim. If a waker claimed first, it consumes
+that waker's WAKE by suspending once, so no wake is ever left outstanding.
+
+`FiberEvent` and `FiberSemaphore` own FIFO waiter queues under their own
+mutex, with no signal key or map. A permit or an auto-reset set wakes one
+waiter, oldest first; a manual-reset set wakes all. A woken waiter that leaves
+without the unit it was woken for (cancelled) passes the wake on if units
+remain. One whose registration recheck took a unit owes nothing: it spent one
+wake on one unit, and any waiter that linked after a unit arrived rechecks. A cancelled wait that took a unit
+returns it, and that refund wakes a waiter in turn. Both have timed forms; a
+timed-out waiter tries the unit once more before returning false, since a
+wake that lost to its timer went to another waiter or left the unit.
+
+`FiberDomain.await` and `signal` keep mutex-striped buckets of these queues for
+arbitrary application signals; delivery claims the whole bucket and removes
+it, so a later wait on the same signal starts a new one. A signal is an edge
+with no state for the waiter to recheck, so `await` links and arms in one step
+under the bucket's stripe lock: a wait never counts in `waiting` before
+delivery can find it, and a caller may wait for that count and then signal.
+Event, semaphore and join waits arm first; their registration recheck covers
+the gap.
+
+`TimerSet` is an indexed binary min-heap ordered by `(deadline, sequence)`,
+each entry tagged with the armed word it may claim. Nearest-deadline lookup is
+a lock-free load of a cached top deadline (stale reads only wake early or
+race an insert that raises its own wake), so an idle poll costs one load.
+Insert and removal are O(log N), the heap keeps its block across removals, and
+nothing allocates after it reaches its high-water capacity. Expiry pops the
+entry under the heap mutex and claims after dropping it. A sleep registers
+only the timer.
+
+Managed joins use a generation-checked intrusive list on the target.
+Registration links an already-armed waiter, refusing under the list lock if
+the target has terminated. Target completion detaches the list and claims each
+joiner under that lock. External thread joins use a reusable manual-reset
 event and a registration gate that prevents release/reuse from resetting the
 event beneath an older generation.
 
@@ -190,8 +223,10 @@ the next thread calls it. The handoff chain is explicit at every boundary.
 | yielded/woken task to runnable | control-word transition, then MPSC release link | accumulator acquire |
 | accumulator to Farm | snapshot copy, then Farm sentinel release | consumer sentinel acquire |
 | Farm to executing Fiber | sentinel acquire, then ENTER/phase transition | precedes `Fiber.call` |
-| event post to waiter | event state under stripe lock, then WAKE | PARK/WAKE arbitration and ready publication |
-| timer/cancel to waiter | one remover wins timer/stripe ownership | ready MPSC/Farm chain |
+| arm to any waker | armed word release store, then seq_cst fence | waker's acquire CAS of that word |
+| cancellation vs arm | CANCEL add, seq_cst fence, then claim attempt | arm's fence, then the waiter's cancellation check |
+| event/semaphore post to waiter | unit store, then claim under the queue mutex, then WAKE | waiter's recheck after linking under that mutex; PARK/WAKE arbitration |
+| timer/cancel/join completion to waiter | the one successful claim CAS, then WAKE | PARK/WAKE arbitration and ready publication |
 | remote cancel to drainer | append and release-store queued count under request mutex, then wake | acquire count hint, swap under request mutex; apply under admission mutex |
 | terminal data to completion | outcome/failure stores, then completion MPSC release | completion acquire or stable handle snapshot |
 | terminal data to thread join | terminal transition, then event set | event wake, then generation-stable acquire read |
@@ -207,8 +242,12 @@ reading the body. Ant Farm provides those edges.
 
 - `queueNext` belongs to a `PublishAccumulator` only while a task is queued.
   Flush detaches it before Farm publication.
-- `waitNext` belongs either to `WaitSet` or the recycle freelist, never both
-  for a live generation. Wait stripes and the recycle pool use separate locks.
+- `waitNext`/`waitPrev`/`waitOwner` belong to at most one waiter queue (an
+  event, a semaphore or a signal bucket), under that queue's lock, or to a
+  waker's private chain of claimed tasks until it adds WAKE, or `waitNext`
+  to the recycle freelist. A waiter unlinks itself before it can arm again
+  or terminate, so a released task is linked nowhere. The managed-join
+  membership words follow the same rule under the target's list lock.
 - Consumers and producer tokens are persistent and worker-owned. Responders
   serving a lane by an edge register and destroy those views on that same
   worker.
@@ -228,7 +267,8 @@ reading the body. Ant Farm provides those edges.
   pass: enqueue wakes the pool, whose park protocol arms before its final pump.
   A nonempty drain reports work so the pump makes another pass. Concurrent
   drainers serialize; a loser may return an empty result after acquiring admission.
-- Lock order is admission before request/pool/wait/join/timer locks. Submission
+- Lock order is admission before request/pool/wait/join/timer locks. Wait
+  queue, join list and timer locks are never nested in one another. Submission
   releases the request lock before notifying lanes and never acquires admission.
   No Fiber body or arbitrary handler runs under admission; wake notifiers may
   only signal. Release may wait for external join readers to unregister; that
@@ -254,9 +294,10 @@ owner objects.
 
 After warm-up, the ready path does not allocate: MPSC publication, snapshot
 flush, fixed-width Farm write, callback, ready republish, established waits,
-timer expiry, lifecycle publication, and recycled `Fiber.reset` reuse are all
-allocation-free. Cold Fiber/stack creation, roots or heap growth, new signal
-keys, returned drain arrays, shutdown snapshots, exceptions, and user code may
+timer arming and expiry, event and semaphore waits, lifecycle publication, and
+recycled `Fiber.reset` reuse are all allocation-free. Cold Fiber/stack
+creation, roots or heap growth, a new bucket for an application signal,
+returned drain arrays, shutdown snapshots, exceptions, and user code may
 allocate.
 
 ## Migration and TLS

@@ -59,15 +59,17 @@ assertion-build diagnostics. On Linux, the smoke suite re-executes child cases
 and requires each release violation's fatal message; `--release-death` runs only
 these cases.
 
-The deterministic semaphore cancellation regression can be selected with
+The deterministic semaphore regression can be selected with
 `dub run -c unittest --compiler=ldc2 -- --semaphore-cancellation-only`. It covers
-cancellation after an ordinary wake and after consuming a permit during wait
-registration, including waking a second waiter that has already re-parked.
+one wake per permit, a woken waiter cancelled before it runs (its wake passes
+to the next waiter), the refund of a permit consumed during wait registration,
+and timed waits.
 
-The deterministic event cancellation regression can be selected with
+The deterministic event regression can be selected with
 `dub run -c unittest --compiler=ldc2 -- --event-cancellation-only`. It covers
-ordinary wake cancellation, auto-reset consumption during registration with a
-second waiter already re-parked, a retained refund, and manual-reset behavior.
+one wake per auto-reset set, pass-on from a cancelled woken waiter, auto-reset
+consumption during registration with a retained refund, a refund that must wake
+a waiter already re-parked, manual-reset behavior, and timed waits.
 
 ## Run one lane on the current thread
 
@@ -124,13 +126,18 @@ void fiberBody()
   scheduler boundary.
 - `FiberDomain.yieldReady()` republishes the task.
 - `await`, `FiberEvent.wait`, `FiberSemaphore.wait`, `sleep*`, and
-  `TaskHandle.joinFiber` park without blocking the worker.
+  `TaskHandle.joinFiber` park without blocking the worker. The event and
+  semaphore waits and `joinFiber` also take a `Duration` (events and
+  semaphores also `waitUntil(MonoTime)`); the timed event and semaphore forms
+  return false on timeout.
+- `FiberSemaphore.post(n)` and an auto-reset `FiberEvent.set` wake one waiter
+  per unit, oldest first; a manual-reset `set` wakes every waiter. A woken
+  waiter that is cancelled before it takes the unit passes its wake on.
 - If `FiberSemaphore.wait` throws `FiberCancelled`, it retains no permit: a
-  permit acquired during wait registration is returned and other waiters are
-  woken. An immediate successful acquisition can still return before observing
+  permit acquired during wait registration is returned and wakes a waiter. An immediate successful acquisition can still return before observing
   cancellation; a later cancellation does not undo a completed wait.
 - If auto-reset `FiberEvent.wait` throws `FiberCancelled`, a set consumed
-  during registration is restored and waiters are woken. The refund acts as
+  during registration is restored and wakes a waiter. The refund acts as
   another `set`: it can coalesce with a set or follow a concurrent reset.
   Immediate acquisition may return before observing cancellation; a later
   cancellation does not undo a completed wait. Manual-reset waits consume

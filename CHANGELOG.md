@@ -75,6 +75,33 @@ Fixes:
   return at once. Expiry now claims the wait under the heap mutex; every
   other waker already removes the entry before publishing.
   tests/ant_fibers/wait_races.d pauses in each window through unittest seams.
+- Fibers: removing a task root or a timer shrank its array slice, so the next
+  spawn or timer arm copied the whole array into a new block (D's append
+  stomping protection); `FiberDomain.reserve` stopped helping after the first
+  release. With 10,000 fibers asleep, one spawn-sleep-complete-release cycle
+  took 1.33 ms and 504 KB of GC allocation; it now takes 0.80 µs and 32 B
+  (one thread, 5900XT). The batched coroutine benchmark amortized the copies,
+  so its FiberDomain figures did not show them.
+- Fibers: every responder took the domain timer mutex on every pump, even
+  with no timer armed. A heap that is empty or not yet due now costs one
+  atomic load, and the pre-park deadline query takes no lock.
+- Fibers: wait arbitration is one claim word per task. Each wait arms a fresh
+  count; signal delivery, event and semaphore wakes, join completion, timer
+  expiry and cancellation each CAS it, and only the winner adds WAKE. Waiters
+  unlink themselves after they resume, and timer entries name the exact wait
+  they may end. This replaces winning by removal across the wait map, join
+  lists and timer heap, and with it the cross-container lock order. The two
+  fixes above keep their regression schedules, which pass unchanged.
+- `FiberEvent` and `FiberSemaphore` own FIFO waiter queues, so a wait no
+  longer allocates a signal-map bucket (a semaphore round trip went from
+  354-386 ns and 64 GC bytes to 284-290 ns and none). Auto-reset `set` and
+  `post(n)` wake one waiter per unit, oldest first, instead of every waiter;
+  a woken waiter that is cancelled passes its wake on. Manual-reset `set`
+  still wakes all. Both gain timed waits, `wait(Duration)` and
+  `waitUntil(MonoTime)`, which return false on timeout. `set` and `post` are
+  `nothrow @nogc`. `sleepUntil` no longer registers a signal wait.
+  `FiberDomain.signal` returns the waiters it woke: one that a timer or
+  cancellation is already waking is no longer counted.
 - Threadpool: `shutdown()` on a pool that was not the live one (rejected by
   `start`, never started, already shut down) stopped the live pool's workers
   and cleared their process-wide records and hooks without joining them, so
