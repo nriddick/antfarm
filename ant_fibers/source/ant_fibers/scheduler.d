@@ -183,7 +183,9 @@ struct FiberDomainOptions
     size_t recordRetention = defaultRecordRetention;
     /// Each terminal task, before it is recycled; null recycles silently.
     FiberCompletionHandler onCompletion;
-    /// Each lifecycle record, in sequence order; null discards records.
+    /// Each lifecycle record, in sequence order. Null: no record is emitted
+    /// (there would be no reader), while admission still reserves and
+    /// bounds as if they were.
     FiberLifecycleHandler onRecord;
     /// Who may retire records and terminal tasks.
     FiberRetirement retirement = FiberRetirement.director;
@@ -2889,6 +2891,10 @@ final class FiberDomain
         CancellationDisposition disposition = CancellationDisposition.none)
         nothrow @nogc
     {
+        // Without a handler every record would be discarded unread at
+        // retirement, so none is emitted: the reservation accounting (and
+        // the live-task bound) is unchanged, the ring traffic is not paid.
+        if (options_.onRecord is null) return;
         // The slot was reserved at admission; emission cannot fail.
         records.emit(kind, task.handle, outcome, cancellation, disposition,
             failure);
@@ -3103,11 +3109,15 @@ final class FiberDomain
                 CancellationResult.staleHandle, failure, disposition);
         // Return the unused part of the admission reservation: the task holds
         // no record slot from here on, so recycling never waits on records.
-        uint emitted = 2; // admitted + terminal
-        if (atomicLoad!(MemoryOrder.acq)(task.cancellationEventEmitted) == 2)
-            ++emitted;
-        if (outcome == FiberOutcome.failed) ++emitted;
-        assert(emitted <= lifecycleRecordsPerTask);
+        uint emitted;
+        if (options_.onRecord !is null)
+        {
+            emitted = 2; // admitted + terminal
+            if (atomicLoad!(MemoryOrder.acq)(task.cancellationEventEmitted) == 2)
+                ++emitted;
+            if (outcome == FiberOutcome.failed) ++emitted;
+            assert(emitted <= lifecycleRecordsPerTask);
+        }
         releaseRecordBudget(lifecycleRecordsPerTask - emitted);
         // Publish completion after its terminal record and before dropping
         // activeCount, so an observer of drained can retire every task.

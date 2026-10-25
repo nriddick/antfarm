@@ -370,7 +370,12 @@ Recycling waits for external join readers of the generation to unregister.
 
 Lifecycle records live in a bounded multi-producer, single-consumer ring that
 the domain allocates at construction, with per-slot stamps as in a bounded
-MPMC queue. Spawn reserves a task's worst case (admitted, cancellation,
+MPMC queue. Without an `onRecord` handler nothing would read them, so none is
+emitted and the ring stays empty; admission still reserves and bounds as if
+they were, so a handler can be added without changing capacity planning. The
+emission is two ring operations per lifetime on one shared tail line, which
+the warm Fiber experiment measured at 8–17% of a spawn/complete/retire
+lifetime on 1–32 threads; that is the cost a handler buys. Spawn reserves a task's worst case (admitted, cancellation,
 terminal, failure) against `recordRetention` and refuses past it with
 `FiberLifecycleBackpressure`. Termination returns the unused part, and each
 retired record releases its slot, so retention bounds live plus unretired

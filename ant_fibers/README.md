@@ -250,9 +250,11 @@ retiring generation reports `alreadyTerminal` rather than a stale handle.
 so cleanup scopes can unwind. Fibers that never cooperate still cannot be
 forced to stop.
 
-Every domain records admitted, accepted-cancellation, terminal and failure
-events in a bounded ring sized by `FiberDomainOptions.recordRetention`
-(default 16,384, about 1.2 MiB). Spawn reserves room for a task's worst case
+With an `onRecord` handler, a domain records admitted, accepted-cancellation,
+terminal and failure events in a bounded ring of
+`FiberDomainOptions.recordRetention` records (default 16,384, about 1.2 MiB);
+without one no record is emitted, and admission still reserves as if they
+were. Spawn reserves room for a task's worst case
 (4 records), held while the task is live and until its records are retired,
 and throws `FiberLifecycleBackpressure` past the limit. Retention therefore
 bounds concurrent fibers as well as unretired ones: the default admits 4,096,

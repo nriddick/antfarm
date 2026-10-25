@@ -245,7 +245,11 @@ Fibers (API changes; see the [completions, records and hosting design](docs/desi
   hands records, then terminal tasks, to the handlers and recycles each task
   when its handler returns; a throwing handler leaves its item and the rest
   queued in order. `takeCompletions`' per-drain array is gone.
-- Fibers: lifecycle records are always on and live in a domain-owned ring
+- Fibers: lifecycle records are emitted only when `onRecord` is set (nothing
+  would read them otherwise); the reservation, backpressure and live-task
+  bound apply either way. Emitting them cost 8–17% of a warm
+  spawn/complete/retire lifetime in the Fiber experiment's `domain` mode.
+- Fibers: lifecycle records live in a domain-owned ring
   (record values unscanned, failure references scanned), not in four node
   objects per task. Records no longer pin or delay recycling of their task;
   the sequence is assigned at emission; handlers receive records by value.
@@ -292,6 +296,19 @@ Fork-join frame pool and wrappers:
   druntime skips `main` after module unittests, so the suite driver had run
   only in the sanitizer lanes.
 
+- The warm Fiber experiment is re-run on the reworked scheduler
+  ([docs/performance/coroutines-2026-10-25-rework](docs/performance/coroutines-2026-10-25-rework/README.md)):
+  the production `domain` mode completes 6.42 M lifetimes/s at one thread and
+  1.65 M at 32 with zero GC bytes per lifetime (13.9–47.6 before); against
+  the pre-rework scheduler in the same session it is +3% at one thread and
+  −10% at 32 (0 yields), 0% and −6% with three yields, the high-count gap
+  being the Director-bound retirement path.
+- PERFORMANCE.md's fork-join table is re-taken at `e44e0f9` under the
+  harness's rules (tcmalloc, library defaults, no layout flags) with the
+  frame-pool ports: the dispatcher leads fib, skynet and nqueens at every
+  thread count (fib 103.7 ms vs citor 107.8 at 32 threads; 134.8 at 2.0.0),
+  and matmul converges within 3 ms. Raw samples: fwbench
+  `results/20261025-e44e0f9-harness-threads.json`.
 - PERFORMANCE.md's fork-join table is re-taken under the benchmark harness's
   own build rules: the harness's allocator (tcmalloc here, not Ant Farm's
   bundled mimalloc), no function-alignment flag, library-default dispatcher

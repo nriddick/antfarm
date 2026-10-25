@@ -12,8 +12,11 @@ The [warm reuse measurements](../performance/coroutines-2026-10-25/README.md)
 support this direction on the 5900XT: at 32 dispatch threads a minimal deque
 executor completes 141.77 M warm Fiber lifetimes/s versus 35.80 M through a
 shared Farm; with three yields those rates are 23.18 M and 8.25 M, or 92.74 M
-and 32.98 M dispatches/s. Existing FiberDomain's complete lifecycle measures
-1.85 M and 1.17 M lifetimes/s. Those last comparisons have different feature
+and 32.98 M dispatches/s. The production FiberDomain's complete lifecycle
+measures 1.65 M and 1.08 M lifetimes/s at 32 threads after the 2.1.0 rework
+([re-run](../performance/coroutines-2026-10-25-rework/README.md): zero GC
+bytes per lifetime, within a few percent of the pre-rework scheduler in the
+same session, Director-bound). Those last comparisons have different feature
 sets and are not a prediction of replacement speed. At one thread the Farm
 beats the deque, so keep a simple owner-local path when there are no thieves.
 

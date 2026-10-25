@@ -1,0 +1,4412 @@
+[
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 131072,
+    "dispatches_per_second": 27411269.21211632,
+    "fibers_per_second": 27411269.21211632,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.004781683,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 0
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 131072,
+    "dispatches_per_second": 20034798.60114698,
+    "fibers_per_second": 20034798.60114698,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 2048,
+    "seconds": 0.006542217,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 0
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 131072,
+    "dispatches_per_second": 20251355.86374956,
+    "fibers_per_second": 20251355.86374956,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.006472258,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 0
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 131072,
+    "dispatches_per_second": 19380249.56921114,
+    "fibers_per_second": 19380249.56921114,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.006763174,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 0
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 131072,
+    "dispatches_per_second": 6446982.384124306,
+    "fibers_per_second": 6446982.384124306,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.020330752,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 0
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 262144,
+    "dispatches_per_second": 37690079.38173915,
+    "fibers_per_second": 37690079.38173915,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.006955252,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 0
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 262144,
+    "dispatches_per_second": 10976261.46467755,
+    "fibers_per_second": 10976261.46467755,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 134061,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 30,
+    "ring_tables": 63118,
+    "seconds": 0.023882813,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 0
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 262144,
+    "dispatches_per_second": 34450597.317246996,
+    "fibers_per_second": 34450597.317246996,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 1,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.007609273,
+    "steal_attempts": 195,
+    "steals": 4,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 0
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 262144,
+    "dispatches_per_second": 34348989.52826483,
+    "fibers_per_second": 34348989.52826483,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 60,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.007631782,
+    "steal_attempts": 64,
+    "steals": 60,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 0
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 262144,
+    "dispatches_per_second": 4939094.940018345,
+    "fibers_per_second": 4939094.940018345,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.053075311,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 0
+  },
+  {
+    "completions": 524288,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 97259060.8080608,
+    "fibers_per_second": 97259060.8080608,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.005390634,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 0
+  },
+  {
+    "completions": 524288,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 16632983.285039578,
+    "fibers_per_second": 16632983.285039578,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 392008,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 65467,
+    "seconds": 0.031520984,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 0
+  },
+  {
+    "completions": 524288,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 50258959.87358571,
+    "fibers_per_second": 50258959.87358571,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 144,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.010431732,
+    "steal_attempts": 1799,
+    "steals": 168,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 0
+  },
+  {
+    "completions": 524288,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 57305867.42225138,
+    "fibers_per_second": 57305867.42225138,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 179,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.009148941,
+    "steal_attempts": 291,
+    "steals": 179,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 0
+  },
+  {
+    "completions": 524288,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 4727600.651055014,
+    "fibers_per_second": 4727600.651055014,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.110899384,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 0
+  },
+  {
+    "completions": 1048576,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 164924118.38444272,
+    "fibers_per_second": 164924118.38444272,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.00635793,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 0
+  },
+  {
+    "completions": 1048576,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 25853589.247481346,
+    "fibers_per_second": 25853589.247481346,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 917475,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 112,
+    "ring_tables": 237089,
+    "seconds": 0.040558237,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 0
+  },
+  {
+    "completions": 1048576,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 72275540.57289913,
+    "fibers_per_second": 72275540.57289913,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 738,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.014508034,
+    "steal_attempts": 11392,
+    "steals": 768,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 0
+  },
+  {
+    "completions": 1048576,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 70740125.55276686,
+    "fibers_per_second": 70740125.55276686,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 376,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.014822931,
+    "steal_attempts": 1093,
+    "steals": 376,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 0
+  },
+  {
+    "completions": 65536,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 65536,
+    "dispatches_per_second": 4855464.434923248,
+    "fibers_per_second": 4855464.434923248,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.01349737,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 0
+  },
+  {
+    "completions": 2097152,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 2097152,
+    "dispatches_per_second": 150392188.9506111,
+    "fibers_per_second": 150392188.9506111,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.013944554,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 0
+  },
+  {
+    "completions": 2097152,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 2097152,
+    "dispatches_per_second": 24044741.3949053,
+    "fibers_per_second": 24044741.3949053,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 1965300,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 222,
+    "ring_tables": 485791,
+    "seconds": 0.087218738,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 0
+  },
+  {
+    "completions": 2097152,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 2097152,
+    "dispatches_per_second": 58859218.14072969,
+    "fibers_per_second": 58859218.14072969,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 2471,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.035629967,
+    "steal_attempts": 72756,
+    "steals": 2555,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 0
+  },
+  {
+    "completions": 2097152,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 2097152,
+    "dispatches_per_second": 58935223.642682046,
+    "fibers_per_second": 58935223.642682046,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 2155,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.035584017,
+    "steal_attempts": 34575,
+    "steals": 2155,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 0
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 131072,
+    "dispatches_per_second": 2327906.577545573,
+    "fibers_per_second": 2327906.577545573,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.056304665,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 0
+  },
+  {
+    "completions": 4194304,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 4194304,
+    "dispatches_per_second": 340955252.58205706,
+    "fibers_per_second": 340955252.58205706,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.012301626,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 0
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 262144,
+    "dispatches_per_second": 15928332.226861587,
+    "fibers_per_second": 15928332.226861587,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": 251955,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 21,
+    "ring_tables": 47017,
+    "seconds": 0.016457718,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 0
+  },
+  {
+    "completions": 4194304,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 4194304,
+    "dispatches_per_second": 123271317.81624319,
+    "fibers_per_second": 123271317.81624319,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 3443,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.034024979,
+    "steal_attempts": 193081,
+    "steals": 3729,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 0
+  },
+  {
+    "completions": 4194304,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 4194304,
+    "dispatches_per_second": 122915305.74109143,
+    "fibers_per_second": 122915305.74109143,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 2642,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.034123529,
+    "steal_attempts": 26442,
+    "steals": 2642,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 0
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 262144,
+    "dispatches_per_second": 1672232.972856336,
+    "fibers_per_second": 1672232.972856336,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.156762846,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 0
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 25018295.315597534,
+    "fibers_per_second": 6254573.828899384,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.020956184,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 3
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 17836586.523798335,
+    "fibers_per_second": 4459146.630949584,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 8192,
+    "seconds": 0.029393965,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 3
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 18462529.451190423,
+    "fibers_per_second": 4615632.362797606,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.028397409,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 3
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 18463095.097610313,
+    "fibers_per_second": 4615773.774402578,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.028396539,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 3
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 11315538.387639375,
+    "fibers_per_second": 2828884.596909844,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.046333456,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 1,
+    "warm_fibers": 64,
+    "yields": 3
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 48613502.9111513,
+    "fibers_per_second": 12153375.727787824,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.021569645,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 3
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 16477558.80651784,
+    "fibers_per_second": 4119389.70162946,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 503128,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 131019,
+    "seconds": 0.063636611,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 3
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 35803539.304912634,
+    "fibers_per_second": 8950884.826228159,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 94,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.029286937,
+    "steal_attempts": 1373,
+    "steals": 94,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 3
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 29620849.53275331,
+    "fibers_per_second": 7405212.383188328,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 63,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.03539993,
+    "steal_attempts": 71,
+    "steals": 63,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 3
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 9529660.935155416,
+    "fibers_per_second": 2382415.233788854,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.110032876,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 2,
+    "warm_fibers": 128,
+    "yields": 3
+  },
+  {
+    "completions": 524288,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 2097152,
+    "dispatches_per_second": 93640857.92563516,
+    "fibers_per_second": 23410214.48140879,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.022395694,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 3
+  },
+  {
+    "completions": 524288,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 2097152,
+    "dispatches_per_second": 24584962.46727445,
+    "fibers_per_second": 6146240.616818612,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 1613856,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 262066,
+    "seconds": 0.085302225,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 3
+  },
+  {
+    "completions": 524288,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 2097152,
+    "dispatches_per_second": 64061255.83890382,
+    "fibers_per_second": 16015313.959725956,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 401,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.032736667,
+    "steal_attempts": 6399,
+    "steals": 401,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 3
+  },
+  {
+    "completions": 524288,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 2097152,
+    "dispatches_per_second": 62940323.362562,
+    "fibers_per_second": 15735080.8406405,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 178,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.033319689,
+    "steal_attempts": 303,
+    "steals": 178,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 3
+  },
+  {
+    "completions": 32768,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 131072,
+    "dispatches_per_second": 9922170.402103314,
+    "fibers_per_second": 2480542.6005258285,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.013210013,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 4,
+    "warm_fibers": 256,
+    "yields": 3
+  },
+  {
+    "completions": 1048576,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 4194304,
+    "dispatches_per_second": 187700603.34612715,
+    "fibers_per_second": 46925150.83653179,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.022345714,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 3
+  },
+  {
+    "completions": 65536,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 262144,
+    "dispatches_per_second": 17864664.724395037,
+    "fibers_per_second": 4466166.181098759,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": 228581,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 23,
+    "ring_tables": 41110,
+    "seconds": 0.014673883,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 3
+  },
+  {
+    "completions": 1048576,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 4194304,
+    "dispatches_per_second": 86573396.13199359,
+    "fibers_per_second": 21643349.032998398,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 2360,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.048447955,
+    "steal_attempts": 45549,
+    "steals": 2363,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 3
+  },
+  {
+    "completions": 1048576,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 4194304,
+    "dispatches_per_second": 86537777.5012144,
+    "fibers_per_second": 21634444.3753036,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 361,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.048467896,
+    "steal_attempts": 1153,
+    "steals": 361,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 3
+  },
+  {
+    "completions": 65536,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      }
+    ],
+    "dispatches": 262144,
+    "dispatches_per_second": 10772920.380152453,
+    "fibers_per_second": 2693230.095038113,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.024333606,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 8,
+    "warm_fibers": 512,
+    "yields": 3
+  },
+  {
+    "completions": 2097152,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 8388608,
+    "dispatches_per_second": 307610967.802382,
+    "fibers_per_second": 76902741.9505955,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.027270185,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 3
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 20584498.493131537,
+    "fibers_per_second": 5146124.623282884,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": 490688,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 65372,
+    "seconds": 0.02547004,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 3
+  },
+  {
+    "completions": 2097152,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 8388608,
+    "dispatches_per_second": 65477551.05481622,
+    "fibers_per_second": 16369387.763704056,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 6964,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.12811426,
+    "steal_attempts": 223178,
+    "steals": 6972,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 3
+  },
+  {
+    "completions": 2097152,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 8388608,
+    "dispatches_per_second": 64820196.64533896,
+    "fibers_per_second": 16205049.16133474,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 882,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.129413492,
+    "steal_attempts": 6116,
+    "steals": 882,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 3
+  },
+  {
+    "completions": 131072,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 524288,
+    "dispatches_per_second": 5341720.362475454,
+    "fibers_per_second": 1335430.0906188635,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.098149653,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 16,
+    "warm_fibers": 1024,
+    "yields": 3
+  },
+  {
+    "completions": 4194304,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 16777216,
+    "dispatches_per_second": 403228846.40445006,
+    "fibers_per_second": 100807211.60111251,
+    "gc_bytes": 0,
+    "iterations_per_slot": 2048,
+    "migrations": 0,
+    "mode": "local",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.041607182,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 3
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 25867761.00868519,
+    "fibers_per_second": 6466940.252171298,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": 1012933,
+    "mode": "ring",
+    "ring_chunk": 8,
+    "ring_refusals": 89,
+    "ring_tables": 196931,
+    "seconds": 0.040536017,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 3
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 93970607.12083368,
+    "fibers_per_second": 23492651.78020842,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": 800,
+    "mode": "deque",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.011158553,
+    "steal_attempts": 47040,
+    "steals": 813,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 3
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 95045449.9144517,
+    "fibers_per_second": 23761362.478612926,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": 472,
+    "mode": "deque-fair",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.011032364,
+    "steal_attempts": 8084,
+    "steals": 472,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 3
+  },
+  {
+    "completions": 262144,
+    "cpus": [
+      {
+        "cpu": 0,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 1,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 2,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 3,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 4,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 5,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 6,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 7,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 8,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 9,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 10,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 11,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 12,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 13,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 14,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 15,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 16,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 17,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 18,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 19,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 20,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 21,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 22,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 23,
+        "group": 0,
+        "llc": 0
+      },
+      {
+        "cpu": 24,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 25,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 26,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 27,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 28,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 29,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 30,
+        "group": 0,
+        "llc": 1
+      },
+      {
+        "cpu": 31,
+        "group": 0,
+        "llc": 1
+      }
+    ],
+    "dispatches": 1048576,
+    "dispatches_per_second": 4257148.883244228,
+    "fibers_per_second": 1064287.220811057,
+    "gc_bytes": 0,
+    "iterations_per_slot": 128,
+    "migrations": null,
+    "mode": "domain",
+    "ring_chunk": 8,
+    "ring_refusals": 0,
+    "ring_tables": 0,
+    "seconds": 0.24630945,
+    "steal_attempts": 0,
+    "steals": 0,
+    "threads": 32,
+    "warm_fibers": 2048,
+    "yields": 3
+  }
+]

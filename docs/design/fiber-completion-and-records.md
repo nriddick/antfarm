@@ -295,8 +295,10 @@ its `install` hook and serves the worker's home lane in `serve`; see
   retires, except a managed pool in `director` mode, whose Director must call
   `retire`. Its documentation and the wake event say so.
 - `tail` is one contended line shared by all emitters, with one emission per
-  spawn and per terminal event. This cost is now paid by every domain;
-  measure it on the cold spawn path.
+  spawn and per terminal event. Measured (warm Fiber experiment, `domain`
+  mode, 2.1.0): emitting records cost 8–17% of a lifetime across 1–32
+  threads, so a domain without an `onRecord` handler emits none; its
+  reservation accounting is unchanged.
 - The 4-record worst-case reservation per task is unchanged; see above for
   the 2-record follow-up. Claiming optional records at emission instead
   would need a fallible emission path, which emission must never have.

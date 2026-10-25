@@ -134,8 +134,11 @@ Remaining for 2.1.0:
 
 - The deque-based Fiber executor in the
   [coroutine replacement proposal](docs/design/coroutine-replacement.md).
-  Re-measure the FiberDomain baseline first: its numbers predate the 2.1.0
-  rework. `tools/coroutines/warm_fibers.d` is ported. Its wake
+  The FiberDomain baseline was re-measured after the 2.1.0 rework
+  ([re-run](docs/performance/coroutines-2026-10-25-rework/README.md)): 6.42 M
+  lifetimes/s at one thread and 1.65 M at 32, zero GC bytes, Director-bound
+  at high counts, which is what per-worker admission and completion would
+  remove. Its wake
   step reuses the claim word, and timers can become per-worker.
 - Async I/O stays out of the runtime. An I/O library can run in a worker loop
   beside `serve` (the `GroupHost` attachment hook above gives it a place).
