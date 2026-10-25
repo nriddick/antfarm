@@ -32,7 +32,18 @@ cannot do once claimed. The contract is in
 
 The Farm forms below are for work that is published and left to run:
 asynchronous regions with a completion hook, and raw grain tables that
-compose with other entries in one `write`.
+compose with other entries in one `write`. Measured against each other on
+the same participants (fwbench `forkloop`, Ryzen 9 5900XT, October 2026):
+with elements of a few nanoseconds on one CCD the table is two to four times
+cheaper per loop than the deque split, because one chunk claim amortizes 16
+to 128 elements while every leaf pays its own deque operations; once the
+consumers span both CCDs the table's header and shard lines cross the die
+and the deque loop wins by up to 2.4x; at 50 ns per element the two are
+within 20% everywhere, and at 500 ns they are indistinguishable. So the
+table is the asynchronous bulk path, admitted from any thread and composable
+with other entries, and it gains a little on very cheap uniform items served
+within one group; size its chunk (`costClass`) so a short table leaves at
+least two chunks per consumer, or one consumer claims it whole.
 
 ## Asynchronous submission
 

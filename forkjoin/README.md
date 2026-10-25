@@ -54,8 +54,13 @@ Idle participants pop their own deque (LIFO: the newest, smallest subtree),
 then poll the Farm, then steal from the top of another deque (FIFO: the
 oldest, largest subtree): the last successful victim first, then the SMT
 sibling, then one random same-LLC victim seven times in eight. A full deque
-spills its surplus into the Farm as one table; a refusing Farm runs the
-children inline, as does a caller whose group Farm nobody else consumes.
+runs its surplus inline on the forking thread (`DispatcherOptions.spillInline`,
+the default since 2.1.1); the children already on the deque stay stealable.
+With `spillInline = false` the surplus goes to the home Farm as one table and
+a refusing Farm runs the children inline, as does a caller whose group Farm
+nobody else consumes; a subtree delivered through the Farm runs inside a Farm
+callback and cannot spill again, which is why that path measured 5 to 80%
+slower than inline on a 64-wide tree (fwbench `widetree`).
 With one participant children run inline directly, and since there is no
 worker, a root submitted from another thread runs only while participant 0
 is inside `runRoot` or `stop`.

@@ -90,8 +90,14 @@ struct DispatcherOptions
     /// idle subscribed view pins ring reclamation, and a stream of
     /// `submitRoot` calls from other threads then stalls once the ring laps.
     bool callerConsumes = false;
-    /// Test knob: deque overflow runs inline instead of going to the Farm.
-    bool spillInline = false;
+    /// Deque overflow runs inline on the forking thread (the default since
+    /// 2.1.1); the children already on the deque stay stealable. `false`
+    /// publishes the refused suffix into the home Farm as one table, and what
+    /// the Farm refuses still runs inline. A subtree delivered through the
+    /// Farm runs inside a Farm callback and cannot spill again, so on a
+    /// 64-wide tree the Farm path measured 5 to 80% slower than inline at
+    /// every thread count (fwbench `widetree`).
+    bool spillInline = true;
 
     /// The documented default shape: one Farm shared by every group, workers
     /// pinned, idle workers parked. Equal to `DispatcherOptions.init`.

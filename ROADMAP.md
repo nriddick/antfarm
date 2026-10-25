@@ -123,8 +123,11 @@ Remaining for 2.1.0:
   doubles the default concurrent-fiber bound (4,096 at retention 16,384).
   Timed parks keep millisecond resolution.
 
-## 2.1.1
+## 2.1.1 — in progress on `2.1.1-progress`
 
+- Done: `spillInline` is the dispatcher's default (D and C); the Farm spill
+  is opt-in, after the fwbench `widetree` experiment measured it slower than
+  the inline fallback wherever it engages.
 - Private trees retreat to typed results and tracked outcomes.
 - Private-root deadlines are lazy. Decide whether to document or close two
   gaps: a root parked in `waitChildren` is not woken when its deadline passes,

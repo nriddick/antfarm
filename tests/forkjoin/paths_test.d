@@ -172,11 +172,13 @@ bool runPathsTest()
         if (counters().soloChildren == 0) { printf("paths_test: solo path not taken\n"); ok = false; }
     }
 
-    // 2. Overflow: capacity 64, a 300-wide fork spills to the Farm.
+    // 2. Overflow: capacity 64, a 300-wide fork spills to the Farm (opt-in
+    //    since 2.1.1).
     if (eligible.length >= 2)
     {
         DispatcherOptions o;
         o.dequeCapacity = 64;
+        o.spillInline = false;
         o.park = false; // the spin policy path
         Dispatcher d;
         d.start(eligible[0 .. eligible.length < 4 ? eligible.length : 4], o);
@@ -188,7 +190,7 @@ bool runPathsTest()
         if (counters().spilledChildren == 0) { printf("paths_test: spill path not taken\n"); ok = false; }
     }
 
-    // 3. Overflow with the Farm bypassed: children run inline.
+    // 3. Overflow with the default policy: children run inline.
     if (eligible.length >= 2)
     {
         DispatcherOptions o;

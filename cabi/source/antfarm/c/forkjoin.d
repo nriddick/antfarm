@@ -158,7 +158,7 @@ extern(C) void af_dispatcher_options_default(af_dispatcher_options* o) nothrow @
 {
     if (o is null) fatal("C forkjoin: null options output");
     *o = af_dispatcher_options(72, AF_ABI_VERSION, 8, 4096, 4096, 256, 7, 8,
-        1, 1024, 0, 1, 4096, 0, 0, 0, 0);
+        1, 1024, 0, 1, 4096, 0, 0, 1, 0); // spill_inline = 1, as DispatcherOptions.init
 }
 extern(C) uint af_dispatcher_start(const(af_dispatcher_options)* supplied,
     const(af_processor)* cpus, size_t count, af_dispatcher** output) nothrow

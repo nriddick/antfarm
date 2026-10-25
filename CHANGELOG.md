@@ -4,6 +4,26 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
+## 2.1.1 development
+
+- forkjoin: `DispatcherOptions.spillInline` defaults to `true`, and so does
+  the C `af_dispatcher_options_default` field `spill_inline`: deque overflow
+  runs inline on the forking thread while the deque's contents stay
+  stealable. Spilling into the Farm is opt-in. The fwbench `widetree`
+  experiment (a 64-wide, depth-4 tree overflowing a 64- or 128-entry deque)
+  measured the Farm path 5 to 80% slower than inline at every thread count
+  and leaf weight, with about 85% of the overflow running inline anyway: a
+  subtree delivered through the Farm runs inside a Farm callback, where
+  nothing spills, so it is private below its first level; a larger ring or
+  producer quota does not change that share. The harness benchmarks never
+  overflow the default 4,096-entry deque, so their numbers are unchanged.
+- Docs: the parallel-loops guide states the measured positioning of a Farm
+  table against the deque loop (fwbench `forkloop`): asynchronous bulk
+  admission from any thread, two to four times cheaper for elements of a few
+  nanoseconds within one CCD, slower by up to 2.4x once consumers span both
+  CCDs, equal from about 500 ns per element; chunk a short table so at least
+  two chunks remain per consumer.
+
 ## 2.1.0 — 2026-10-25
 
 2.1.0 puts one host under everything: the fork-join dispatcher, Fibers and a

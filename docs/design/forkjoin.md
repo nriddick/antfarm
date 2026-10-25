@@ -39,10 +39,17 @@ when a deque is full. One frame pointer is the unit in both.
 - **Fork.** `fork(parent, kids)` sets each child's `parent` and `depth`,
   stores `pending = kids.length` (raw: the deque's release store or the Farm
   write publishes it), pushes `kids[0 .. $-1]` with one release store and
-  returns `kids[$-1]`. Overflow: the refused suffix goes to the home Farm as
-  one uniform one-word table; what the Farm refuses runs inline, to
-  completion, on the forking thread. It also runs inline inside a Farm
-  callback, and on a thread whose home Farm no participant consumes: the
+  returns `kids[$-1]`. Overflow: the refused suffix runs inline, to
+  completion, on the forking thread (`spillInline`, the default since 2.1.1;
+  the deque's contents stay stealable). With `spillInline = false` it goes to
+  the home Farm as one uniform one-word table and what the Farm refuses runs
+  inline. The Farm path is bounded by design: a child delivered through the
+  Farm runs inside a Farm callback, where nothing spills, so a Farm-delivered
+  subtree is private below its first level; on a 64-wide, depth-4 tree it
+  measured 5 to 80% slower than inline at every thread count, with 85% of the
+  overflow running inline anyway (fwbench `widetree`, October 2026). Overflow
+  also runs inline inside a Farm callback, and on a thread whose home Farm no
+  participant consumes: the
   caller alone in its group under `farmPerGroup` without `callerConsumes`,
   whose group Farm the host creates but nobody polls. With one participant
   the deferred children run inline directly (no thief can exist).
