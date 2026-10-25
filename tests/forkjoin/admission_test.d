@@ -14,7 +14,12 @@ import core.thread;
 import core.time;
 import core.stdc.stdio : printf;
 import core.stdc.stdlib : malloc, free;
-import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
+version (Windows)
+{
+    import core.sys.windows.winbase : FILETIME, GetCurrentProcess, GetProcessTimes;
+}
+else
+    import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
 
 private struct Fib
 {
@@ -51,9 +56,19 @@ private Node* fibJoin(Node* node) nothrow @nogc @system
 
 private double cpuSeconds()
 {
-    rusage u;
-    getrusage(RUSAGE_SELF, &u);
-    return u.ru_utime.tv_sec + u.ru_utime.tv_usec * 1e-6 + u.ru_stime.tv_sec + u.ru_stime.tv_usec * 1e-6;
+    version (Windows)
+    {
+        FILETIME created, exited, kernel, user;
+        GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+        static double seconds(FILETIME t) { return ((cast(ulong) t.dwHighDateTime << 32) | t.dwLowDateTime) * 1e-7; }
+        return seconds(kernel) + seconds(user);
+    }
+    else
+    {
+        rusage u;
+        getrusage(RUSAGE_SELF, &u);
+        return u.ru_utime.tv_sec + u.ru_utime.tv_usec * 1e-6 + u.ru_stime.tv_sec + u.ru_stime.tv_usec * 1e-6;
+    }
 }
 
 private immutable ulong[] fibs = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987,

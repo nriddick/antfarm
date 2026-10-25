@@ -41,8 +41,11 @@ when a deque is full. One frame pointer is the unit in both.
   write publishes it), pushes `kids[0 .. $-1]` with one release store and
   returns `kids[$-1]`. Overflow: the refused suffix goes to the home Farm as
   one uniform one-word table; what the Farm refuses runs inline, to
-  completion, on the forking thread. With one participant the deferred
-  children run inline directly (no thief can exist).
+  completion, on the forking thread. It also runs inline inside a Farm
+  callback, and on a thread whose home Farm no participant consumes: the
+  caller alone in its group under `farmPerGroup` without `callerConsumes`,
+  whose group Farm the host creates but nobody polls. With one participant
+  the deferred children run inline directly (no thief can exist).
 - **Completion.** `complete(node)`: `atomicOp!"-="` on `parent.pending`
   (seq_cst; acq_rel would do). The decrementer that reaches zero runs
   `join`. Climbing continues through `join == null` returns. The root's
@@ -73,9 +76,18 @@ when a deque is full. One frame pointer is the unit in both.
   exchanges the armed word: a worker armed but not yet asleep returns from
   `parkWorker` at once, so no wake is lost. Wakers: a push that made an empty deque non-empty, a
   spill, a root submission. Each wakes one; a woken worker that forks wakes
-  the next.
+  the next. The sleeper's arming is locked RMWs, then its recheck reads the
+  work; the waker's publication is a release store (a plain `mov` on
+  x86-64), then its bitmap read. That is the store-buffering shape, which
+  TSO permits to miss on both sides, so the spill and root-submission
+  wakers issue a seq_cst fence between the two: those works may have no
+  other awake reader (a non-consuming caller spilling, a foreign
+  submitter), and a missed wake there is a hang. The push waker does not
+  fence; a missed wake costs parallelism only, since the owner pops its own
+  work.
 - **Admission.** The caller is participant 0 and runs `runRoot`, which runs
-  the root's chain then steps until `g_rootsLive == 0`. Other threads call
+  the root's chain then steps until the root's own sentinel completes, so a
+  nested `runRoot` waits only for its own tree. Other threads call
   `submitRoot`: the root's parent is a sentinel `Node` whose `join` sets an
   `Event`; the root goes into the first Farm as a one-entry table through a
   token shared under a spinlock; one parked worker is woken. `waitRoot`
@@ -87,7 +99,9 @@ when a deque is full. One frame pointer is the unit in both.
   Both run on the caller when it is a participant (`runRoot`, which waits on
   the root's own sentinel, so a nested loop waits only for its own tree) and
   through `submitRoot`/`waitRoot` otherwise. `submitDetached` is `submitRoot`
-  without a completion; `stop` drains `g_rootsLive` before shutdown.
+  without a completion: the root's parent is null, so its `join` runs only
+  after children (as for any node), and a root that forks nothing must
+  finish in its `run`; `stop` drains `g_rootsLive` before shutdown.
 - **Host.** The dispatcher runs on `threadpool.groups.GroupHost`, which owns
   the pool, the caller's pin (`callerProcessor`), one Farm per group
   (`farmPerGroup`) or one shared Farm, the `GroupSlot` registry and the
@@ -97,6 +111,15 @@ when a deque is full. One frame pointer is the unit in both.
 - **Shutdown.** `Dispatcher.stop` drains outstanding roots, then closes the host, which shuts the pool down (every worker runs its
   stop hook: flush counters, unsubscribe, unregister), then the caller
   leaves, the registry is uninstalled, and deques and Farms are destroyed.
+  It returns at once when no start succeeded (never started, a failed
+  start, a second stop), and is fatal off the thread that started it.
+- **Start.** `start()` takes every eligible processor up to
+  `maxParticipants` (128) in topology order, with one Farm per group;
+  `start(opt)` takes the same processors and `opt` unchanged, so
+  `DispatcherOptions.oneFarm()` shares one Farm. An unknown or ineligible
+  processor and `bodySteps == 0` are rejected with an exception. SMT
+  siblings are matched on `(group, package, core)`, as the topology keys
+  cores.
 - **Map and scan.** `forkJoinMap` runs the loop tree over a source slice
   paired with an output slice that splits identically. `forkJoinScan` runs
   two passes over one retained tree: pass one writes `fn(element)` into the
@@ -173,9 +196,13 @@ whole list into its free list only when the list and the bump cursor are
 empty, so remote frees never touch the owner's fast path and the Treiber
 stack has no pop, hence no ABA. Slots outlive threads: `releaseFrames`,
 which `leaveThread` calls, parks the slot, and the next thread to allocate
-adopts it with its chunks, lists and pending remote frees, so dispatcher
-restarts do not grow the footprint. Chunks are never returned to the process
-allocator; requests above `frameMax` get a chunk of their own and are.
+adopts it with its chunks, lists and pending remote frees, and allocates
+from the adopted list first, so dispatcher restarts do not grow the
+footprint. Chunks are never returned to the process allocator; requests
+above `frameMax` get a chunk of their own and are. Chunks come from
+`posix_memalign`, or on Windows from `VirtualAlloc`, whose 64 KiB allocation
+granularity is the chunk alignment; slots and deques from the core's
+64-byte aligned allocator.
 
 Measured on the 5900XT at 32 threads against the same binaries with `malloc`
 frames, same session: fib(39) 102 ms under tcmalloc, glibc and mimalloc alike
@@ -186,4 +213,6 @@ executes 7% fewer instructions and runs within 2% of the mimalloc build.
 Not done: one-way remote tables into another group's Farm (nothing spills in
 these benchmarks); a submit token per submitting thread (one shared token
 under a spinlock suits occasional roots, not a stream); Windows validation
-of the wake path (`threadpool.sys.win_wait` is imported but has not run).
+of the wake path (`threadpool.sys.win_wait` is imported but has not run;
+the package type-checks for x86_64-windows-msvc and `check-windows.py` has
+a `forkjoin` lane, which has not run yet).

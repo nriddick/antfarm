@@ -14,7 +14,8 @@
 /// the hot victim first, then the SMT sibling, then one random victim,
 /// same-group with probability (1 - 1/crossDiv) and another group otherwise.
 /// A full deque spills into the home Farm; a refusing Farm runs the children
-/// inline.
+/// inline, and so does a thread whose home Farm nobody else consumes (the
+/// caller alone in its group without `callerConsumes`).
 ///
 /// Parking: after `spinSteps` consecutive failed steps a worker returns
 /// `false` to the pool, which arms its wait slot and its bit in the pool's
@@ -23,7 +24,12 @@
 /// submission each wake one armed worker (`wakeOneArmed`: clear its bit,
 /// `wakeWorker`); `wakeWorker` exchanges the armed word, so a wake that lands
 /// before the futex wait is not lost, and a woken worker that forks wakes
-/// the next one. Threads that are not participants submit
+/// the next one. A sleeper arms with locked RMWs and then rechecks; a waker
+/// publishes with a plain release store and then reads the bitmap, which
+/// x86 may reorder (store buffering), so both could miss. A spill and a root
+/// submission, whose work no awake thread may otherwise take, fence before
+/// the read; a push only loses parallelism if it misses, since its owner
+/// pops it. Threads that are not participants submit
 /// roots with `submitRoot` and wait on a `RootCompletion`.
 ///
 /// Counters on the hot path (`pushed`, `popped`, `dequeHighWater`) are
@@ -46,6 +52,7 @@ version (linux) import threadpool.sys.linux_wait : wakeWorker;
 version (Windows) import threadpool.sys.win_wait : wakeWorker;
 
 /// Participants a dispatcher can have: the caller plus pool workers.
+/// `Dispatcher.start()` without a processor list takes the first this many.
 enum maxParticipants = 128;
 
 /// Tuning. Every field has a measured default from the fork-join benchmarks
@@ -104,7 +111,7 @@ struct DispatcherOptions
 private __gshared GroupHost g_host;
 private __gshared AntFarm*[maxParticipants] g_farms;    // g_host.farms
 private __gshared size_t g_farmCount;
-private __gshared uint[][maxParticipants] g_members;    // per LLC group: participant ids (caller is 0)
+private __gshared uint[][] g_members;    // per LLC index: participant ids (caller is 0)
 private __gshared Deque*[maxParticipants] g_deques;
 private __gshared uint[][maxParticipants] g_cross;  // per participant: ids in other groups
 private __gshared uint[maxParticipants] g_sibling;  // per participant: the SMT sibling's id, or uint.max
@@ -113,7 +120,7 @@ private __gshared DispatcherOptions g_opt;
 private __gshared ushort g_submitLlc;         // the group whose Farm takes submitted roots
 private __gshared Token g_submitToken;              // shared by foreign submitters under g_submitLock
 private shared bool g_submitLock;
-private shared uint g_epoch;             // bumped before the timed run; counts from epoch 0 are discarded
+private shared uint g_epoch = 1;         // bumped by discardCounters; counts from earlier epochs are dropped
 
 /// Counters summed over participants by `counters()`. The first three need
 /// `-version=ForkjoinHotStats`.
@@ -149,6 +156,7 @@ private bool t_inCallback;    // inside nodeCall: the view walk is running, do n
 private uint t_id;
 private ConsumerView t_view;
 private bool t_consumes;
+private bool t_canSpill;      // some participant consumes t_farm: this one, or another in its group
 private uint t_pops;
 private uint t_hotVictim = uint.max;
 private ulong t_rng;
@@ -178,6 +186,11 @@ private extern (C) void nodeCall(const(ulong)* body, size_t) nothrow @nogc @syst
 Node* fork(Node* parent, Node*[] kids) nothrow @nogc @system
 {
     if (kids.length == 0) fatal("fork without children");
+    // Off the hot path's code layout in release builds, where a call from a
+    // non-participant still crashes on the null deque.
+    version (assert)
+        if (t_deque is null)
+            fatal("forkjoin: fork off a participant; use runRoot, submitRoot or runRootAny");
     auto depth = parent.depth + 1;
     foreach (k; kids)
     {
@@ -234,11 +247,14 @@ private struct OneWordBodies
 /// Deque overflow: one table into the home Farm, then inline for what it
 /// refuses. Inside a Farm callback everything runs inline: the nested wait
 /// cannot poll the view that is running, so a child in the Farm could be
-/// reachable by no one when this is the only active consumer.
+/// reachable by no one when this is the only active consumer. So does a
+/// thread that does not consume its home Farm when no other participant
+/// does either: the caller alone in its group under `farmPerGroup`, whose
+/// Farm the host still creates.
 private void spill(Node*[] kids) nothrow @nogc @system
 {
     size_t done;
-    while (!g_opt.spillInline && !t_inCallback && done < kids.length)
+    while (!g_opt.spillInline && !t_inCallback && t_canSpill && done < kids.length)
     {
         auto n = cast(size_t) t_farm.write(&nodeCall, OneWordBodies(kids[done .. $]), 1,
             *t_token, g_opt.avgCost);
@@ -247,7 +263,13 @@ private void spill(Node*[] kids) nothrow @nogc @system
         t_stats.spilledTables++;
     }
     t_stats.spilledChildren += done;
-    if (done && anyParked()) wakeOneIn(t_llc);
+    if (done)
+    {
+        // Order the table's publication before the bitmap read (see the
+        // module comment): the spiller may not consume its own Farm.
+        atomicFence!(MemoryOrder.seq)();
+        if (anyParked()) wakeOneIn(t_llc);
+    }
     if (done < kids.length)
     {
         t_stats.inlineChildren += kids.length - done;
@@ -491,6 +513,10 @@ private void publishRoot(Node* root) nothrow @nogc @system
         pause();
     }
     atomicStore!(MemoryOrder.rel)(g_submitLock, false);
+    // Order the root's publication before the bitmap read (see the module
+    // comment): no awake thread is bound to poll this Farm, and the caller
+    // never does by default.
+    atomicFence!(MemoryOrder.seq)();
     wakeOneIn(g_submitLlc);
 }
 
@@ -502,8 +528,11 @@ void waitRoot(RootCompletion* c) nothrow @nogc @system
 }
 
 /// Publishes `root` from a thread that is not a participant and does not
-/// wait. The root's own `join` is its completion callback and owns the
-/// frame's lifetime. `Dispatcher.stop` drains outstanding roots first.
+/// wait. Nothing signals its completion: as for every node, the root's
+/// `join` runs after its children, so a root that forks finds out there,
+/// while a root that forks nothing never has its `join` called and must
+/// finish (release its frame, record its result) in `run` before calling
+/// `complete`. `Dispatcher.stop` drains outstanding roots first.
 void submitDetached(Node* root) nothrow @nogc @system
 {
     if (t_deque !is null) fatal("submitDetached from a participant; use fork or runRoot");
@@ -540,6 +569,10 @@ struct TaskGroup
     private Node sentinel;  // the roots' parent; holds one count for the group itself until wait
     private Event done;
     private bool open;
+
+    // Members point at `sentinel`, and `done` is an OS event: a copy would
+    // be a second group the roots never signal.
+    @disable this(this);
 
     /// Publishes `root` as a member of the group and returns at once.
     void add(Node* root) nothrow @nogc @system
@@ -662,6 +695,9 @@ private void enterThread(uint id, ushort llc, bool consumes) nothrow @nogc @syst
     t_pops = 0;
     t_token = &groupToken(llc);
     t_consumes = consumes;
+    // Workers always consume; without farmPerGroup every worker consumes the
+    // one Farm, with it only the home group's members do.
+    t_canSpill = consumes || (g_opt.farmPerGroup ? t_same.length > 1 : g_participants > 1);
     if (consumes && t_view.subscribe(t_farm) < 0)
         fatal("consumer subscription failed");
 }
@@ -677,6 +713,7 @@ private void leaveThread() nothrow @nogc @system
     t_stats = Stats.init;
     if (t_consumes) t_view.unsubscribe();
     t_consumes = false;
+    t_canSpill = false;
     releaseFrames(); // park this thread's frame slot for the next participant
     t_token = null; // released by the GroupHost after this hook
     t_deque = null;
@@ -692,15 +729,23 @@ struct Dispatcher
     /// The host that owns the pool, the Farms and the caller's pin.
     GroupHost host;
 
-    /// Starts the dispatcher on every eligible processor: the calling thread
-    /// on the first, a pool worker on each of the rest, one Farm per LLC group.
-    void start(DispatcherOptions opt = DispatcherOptions.init)
+    /// Starts the dispatcher on every eligible processor (the first
+    /// `maxParticipants` in topology order): the calling thread on the
+    /// first, a pool worker on each of the rest, one Farm per LLC group
+    /// (`DispatcherOptions.perGroup()`).
+    void start()
+    {
+        start(DispatcherOptions.perGroup());
+    }
+
+    /// As `start()`, with `opt` as given: `DispatcherOptions.oneFarm()`
+    /// shares one Farm, `.perGroup()` gives each group its own.
+    void start(DispatcherOptions opt)
     {
         auto topo = CacheAwarePool.topology();
         ProcessorId[] cpus;
         foreach (ref p; topo.processors)
-            if (topo.isEligible(p)) cpus ~= ProcessorId.of(p);
-        opt.farmPerGroup = true;
+            if (topo.isEligible(p) && cpus.length < maxParticipants) cpus ~= ProcessorId.of(p);
         start(cpus, opt);
     }
 
@@ -712,6 +757,9 @@ struct Dispatcher
         import std.exception : enforce;
         enforce(cpus.length >= 1 && cpus.length <= maxParticipants, "forkjoin: bad participant count");
         enforce(g_participants == 0, "forkjoin: a dispatcher is already running");
+        // Zero steps per body call would return to the pool without ever
+        // stepping, so workers would spin and never take work.
+        enforce(opt.bodySteps > 0, "forkjoin: bodySteps must be at least 1");
         g_opt = opt;
         immutable callerConsumes = opt.callerConsumes || cpus.length == 1;
         scope (failure)
@@ -721,6 +769,8 @@ struct Dispatcher
             g_host = null;
             foreach (i; 0 .. g_participants)
                 if (g_deques[i] !is null) { g_deques[i].destroy(); g_deques[i] = null; }
+            g_farms[] = null;
+            g_submitToken = Token.init;
             g_farmCount = 0;
             g_participants = 0;
         }
@@ -753,15 +803,19 @@ struct Dispatcher
         idOf[0] = cpus[0];
         foreach (i, id; res.workers) idOf[i + 1] = id;
         auto llcOfId = new ushort[cpus.length];
-        auto coreOf = new ushort[cpus.length];
+        auto coreOf = new ulong[cpus.length];
         foreach (i; 0 .. cpus.length)
         {
             auto lp = topo.byId(idOf[i]);
+            enforce(lp !is null && topo.isEligible(*lp),
+                "forkjoin: processor " ~ formatCpuList(idOf[i .. i + 1]) ~ " is unknown or ineligible");
             llcOfId[i] = lp.llcIndex;
-            coreOf[i] = lp.coreIndex;
+            // A core is unique per (group, package, core index): Linux core
+            // ids repeat across packages, Windows ones across groups.
+            coreOf[i] = (cast(ulong) lp.group << 32) | (cast(ulong) lp.packageIndex << 16) | lp.coreIndex;
             g_deques[i] = Deque.create(opt.dequeCapacity);
         }
-        foreach (ref m; g_members) m = null;
+        g_members = new uint[][](topo.llcCount);
         foreach (i; 0 .. cpus.length)
             g_members[llcOfId[i]] ~= cast(uint) i;
         foreach (i; 0 .. cpus.length)
@@ -789,20 +843,26 @@ struct Dispatcher
     /// destroys the deques.
     void stop()
     {
+        // Never started, a failed start, or stopped already: nothing to undo.
+        if (g_participants == 0) return;
+        if (t_deque is null || t_id != 0) fatal("forkjoin: Dispatcher.stop off the thread that started it");
         while (atomicLoad!(MemoryOrder.acq)(g_rootsLive) != 0)
         {
             if (step()) t_idle = 0;
             else idlePause();
         }
         g_farms[0].unregisterProducer(g_submitToken);
+        g_submitToken = Token.init;
         leaveThread();
-        host.close(); // joins workers, releases tokens, destroys the Farms
+        g_host.close(); // joins workers, releases tokens, destroys the Farms
         g_host = null;
+        host = null;
         foreach (i; 0 .. g_participants)
         {
             g_deques[i].destroy();
             g_deques[i] = null;
         }
+        g_farms[] = null;
         g_farmCount = 0;
         g_participants = 0;
     }
@@ -819,8 +879,10 @@ void printCounters(ref const Stats s) nothrow @nogc
 
 /// Discards every participant's counters so far: counts belong to the epoch
 /// in which they were flushed, `counters` sums only the current one, and the
-/// sum itself restarts from zero. Call before a measured region, while no
-/// participant is leaving (participants flush only in `Dispatcher.stop`).
+/// sum itself restarts from zero. Call before a measured region (after a
+/// warmup), while no participant is leaving (participants flush only in
+/// `Dispatcher.stop`). Without it, `counters` sums every run since the
+/// process started.
 void discardCounters() nothrow @nogc
 {
     atomicOp!"+="(g_epoch, 1);

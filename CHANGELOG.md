@@ -52,6 +52,43 @@ Fixes:
   tests/threadpool/topology_parse.d adds a simulated two-socket host of 256
   processors in four groups, where every group-relative index aliases, under
   both record layouts and with no records.
+- forkjoin: with `farmPerGroup` and the caller alone in its LLC group (any
+  CPU mask that isolates the first eligible CPU, including the no-argument
+  `start()` under `taskset`), a deque overflow on the caller spilled into its
+  group Farm, which no participant consumes, and `runRoot` never returned.
+  A thread whose home Farm nobody else consumes now runs its overflow
+  inline (completion_test case 5b).
+- forkjoin: the spill and root-submission wakes publish with a release store
+  and then read the armed bitmap, which x86 may reorder against the
+  sleeper's arm-and-recheck; both sides could miss and a foreign `submitRoot`
+  (or a non-consuming caller's spill) could wait on parked workers forever.
+  Both now fence before the read; the push wake, which only costs
+  parallelism when it misses, does not.
+- forkjoin.frames: a thread that adopted a parked slot skipped the slot's
+  free list, so its first allocation of a class carved a new chunk while the
+  list was full, or, with remote frees pending, replaced the list with them
+  and lost every block on it. Adoption now allocates from the list first;
+  a module unittest builds both slot states and requires no new chunk.
+- `Dispatcher.start(opt)` forced `farmPerGroup`, so `start(oneFarm())` got
+  per-group Farms; it now honours `opt`, and `start()` is `perGroup()`.
+  `start()` takes at most `maxParticipants` processors instead of throwing
+  on larger machines. `Dispatcher.stop()` returns at once without a
+  successful start (it crashed before `start`, after a failed one, and on a
+  second call). `start` rejects `bodySteps == 0` (workers never stepped)
+  and an unknown processor (a null dereference before), sizes its group
+  table by LLC count rather than `maxParticipants`, and matches SMT
+  siblings on `(group, package, core)`. `fork` off a participant is a
+  diagnostic in builds with assertions. `TaskGroup` cannot be copied.
+- `counters()` reported zeros unless `discardCounters()` had been called,
+  because counts from the initial epoch were dropped; they now accumulate
+  from process start until the first `discardCounters()`.
+- forkjoin builds for Windows x64: the deque and frame slots use the core's
+  64-byte aligned allocator, chunks come from `VirtualAlloc` (whose 64 KiB
+  granularity is the chunk alignment), and the admission test reads CPU
+  time through `GetProcessTimes`. `check-windows.py` has a `forkjoin` lane.
+- Docs: a detached root's `join` runs after its children like any node's,
+  never for a root that forks nothing (the docs called it the completion
+  callback); `runRoot` waits on its own sentinel, not on `g_rootsLive`.
 
 - `forkjoin.frames`: a frame pool for task frames (`allocFrame`,
   `allocFrames!T`, `freeFrame`, `releaseFrames`, `frameStats`). Headerless

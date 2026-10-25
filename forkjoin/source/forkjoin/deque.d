@@ -14,8 +14,8 @@
 module forkjoin.deque;
 
 import core.atomic;
-import core.stdc.stdlib : aligned_alloc, free;
 import core.stdc.string : memset;
+import antfarm.allocation : allocateAligned64, freeAligned64;
 import forkjoin.node : Node;
 
 /// One participant's deque of frame pointers.
@@ -32,9 +32,11 @@ struct Deque
     {
         size_t cap = 64;
         while (cap < capacity) cap <<= 1;
-        auto d = cast(Deque*) aligned_alloc(64, Deque.sizeof);
+        auto d = cast(Deque*) allocateAligned64(Deque.sizeof);
+        if (d is null) assert(0, "forkjoin.deque: out of memory");
         memset(d, 0, Deque.sizeof);
-        d.slots = cast(shared(ulong)*) aligned_alloc(64, cap * ulong.sizeof);
+        d.slots = cast(shared(ulong)*) allocateAligned64(cap * ulong.sizeof);
+        if (d.slots is null) assert(0, "forkjoin.deque: out of memory");
         d.mask = cap - 1;
         d.capacity = cast(long) cap;
         return d;
@@ -43,8 +45,8 @@ struct Deque
     /// Frees the deque; no thief may still be probing it.
     void destroy() nothrow @nogc @system
     {
-        free(cast(void*) slots);
-        free(&this);
+        freeAligned64(cast(void*) slots);
+        freeAligned64(&this);
     }
 
     /// Owner only. Pushes a prefix of `xs`, all published by one release

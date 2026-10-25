@@ -29,8 +29,16 @@
 module forkjoin.frames;
 
 import core.atomic;
-import core.stdc.stdlib : calloc, free, malloc, realloc;
-import core.sys.posix.stdlib : posix_memalign;
+import core.stdc.stdlib : free, realloc;
+import core.stdc.string : memset;
+import antfarm.allocation : allocateAligned64;
+version (Windows)
+{
+    import core.sys.windows.winbase : VirtualAlloc, VirtualFree;
+    import core.sys.windows.winnt : MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE;
+}
+else
+    import core.sys.posix.stdlib : posix_memalign;
 
 /// Chunk size and alignment; the pool works in these units.
 enum size_t frameChunkBytes = 64 * 1024;
@@ -139,7 +147,7 @@ private void freeSlow(ChunkHeader* h, void* p) nothrow @nogc @system
     if (h.flags & flagLarge)
     {
         atomicOp!"-="(g_large, 1);
-        free(h);
+        freeChunk(h);
         return;
     }
     auto s = h.slot;
@@ -177,6 +185,33 @@ private void unlock() nothrow @nogc @system
     atomicStore!(MemoryOrder.rel)(g_lock, false);
 }
 
+/// `bytes`, a multiple of `frameChunkBytes`, aligned to `frameChunkBytes`;
+/// null when the system refuses. Windows has no `posix_memalign`, and its
+/// `VirtualAlloc` regions start on the 64 KiB allocation granularity, which
+/// is exactly the chunk alignment, with nothing wasted to reach it.
+private void* allocChunk(size_t bytes) nothrow @nogc @system
+{
+    version (Windows)
+    {
+        static assert(frameChunkBytes == 64 * 1024);
+        return VirtualAlloc(null, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    }
+    else
+    {
+        void* chunk;
+        return posix_memalign(&chunk, frameChunkBytes, bytes) == 0 ? chunk : null;
+    }
+}
+
+/// Returns a chunk from `allocChunk`; only large chunks are ever returned.
+private void freeChunk(void* chunk) nothrow @nogc @system
+{
+    version (Windows)
+        VirtualFree(chunk, 0, MEM_RELEASE);
+    else
+        free(chunk);
+}
+
 /// Adopts a parked slot or creates one.
 private Slot* attach() nothrow @nogc @system
 {
@@ -189,8 +224,10 @@ private Slot* attach() nothrow @nogc @system
             t_slot = s;
             return s;
         }
-    auto s = cast(Slot*) calloc(1, Slot.sizeof);
+    // Aligned, so the `align(64)` fields really start their own lines.
+    auto s = cast(Slot*) allocateAligned64(Slot.sizeof);
     if (s is null) assert(0, "forkjoin.frames: out of memory");
+    memset(s, 0, Slot.sizeof);
     atomicStore!(MemoryOrder.raw)(s.taken, true);
     if (g_slotCount == g_slots.length)
     {
@@ -210,7 +247,18 @@ pragma(inline, false)
 private void* allocSlow(size_t cls) nothrow @nogc @system
 {
     auto s = t_slot;
-    if (s is null) s = attach();
+    if (s is null)
+    {
+        // An adopted slot brings the lists its last owner left. Take from
+        // them first: the remote drain below replaces the list outright,
+        // and the cursor may be spent while the list is full.
+        s = attach();
+        if (auto q = s.free[cls])
+        {
+            s.free[cls] = *cast(void**) q;
+            return q;
+        }
+    }
     immutable size = (cls + 1) * frameGranule;
     auto p = s.bump[cls];
     if (p !is null && p + size <= s.bumpEnd[cls])
@@ -227,8 +275,8 @@ private void* allocSlow(size_t cls) nothrow @nogc @system
             return r;
         }
     }
-    void* chunk;
-    if (posix_memalign(&chunk, frameChunkBytes, frameChunkBytes) != 0) return null;
+    auto chunk = allocChunk(frameChunkBytes);
+    if (chunk is null) return null;
     auto h = cast(ChunkHeader*) chunk;
     h.slot = s;
     h.blockBytes = cast(uint) size;
@@ -245,8 +293,8 @@ pragma(inline, false)
 private void* allocLarge(size_t bytes) nothrow @nogc @system
 {
     immutable total = (headerBytes + bytes + frameChunkBytes - 1) & ~(frameChunkBytes - 1);
-    void* chunk;
-    if (posix_memalign(&chunk, frameChunkBytes, total) != 0) return null;
+    auto chunk = allocChunk(total);
+    if (chunk is null) return null;
     auto h = cast(ChunkHeader*) chunk;
     h.slot = null;
     h.blockBytes = 0;
@@ -268,4 +316,72 @@ unittest
     auto big = allocFrame(frameMax + 1);
     assert(big !is null && (cast(size_t) big & 15) == 0);
     freeFrame(big);
+}
+
+unittest
+{
+    // Adopting a parked slot reuses its free list. The slot below has one
+    // class's list full, that class's bump cursor spent, and (second round)
+    // a free pushed onto its remote list after it parked: the adopter must
+    // hand out every one of those blocks without carving a chunk. Other
+    // parked slots are held aside so the adopter can only take this one.
+    import core.thread : Thread;
+    enum size_t bytes = 112;
+    enum size_t perChunk = (frameChunkBytes - headerBytes) / bytes;
+    Slot*[] aside;
+    lock();
+    foreach (s; g_slots[0 .. g_slotCount])
+        if (!atomicLoad!(MemoryOrder.acq)(s.taken))
+        {
+            atomicStore!(MemoryOrder.raw)(s.taken, true);
+            aside ~= s;
+        }
+    unlock();
+    scope (exit)
+        foreach (s; aside) atomicStore!(MemoryOrder.rel)(s.taken, false);
+
+    foreach (remoteFree; [false, true])
+    {
+        __gshared Slot* parked;
+        __gshared void* handed;
+        __gshared bool fresh;
+        auto owner = new Thread({
+            void*[perChunk] blocks;
+            foreach (ref b; blocks) b = allocFrame(bytes);
+            parked = t_slot;
+            fresh = parked.chunks == 1 && parked.bump[(bytes - 1) / frameGranule]
+                + bytes > parked.bumpEnd[(bytes - 1) / frameGranule];
+            foreach (b; blocks[0 .. $ - 1]) freeFrame(b);
+            handed = blocks[$ - 1];
+            if (!remoteFree) freeFrame(handed);
+            releaseFrames();
+        });
+        owner.start();
+        owner.join();
+        assert(fresh, "the owner filled exactly one new chunk");
+        if (remoteFree) freeFrame(handed); // a remote push onto the parked slot
+        immutable chunks = atomicLoad!(MemoryOrder.raw)(g_chunks);
+        __gshared bool adopted, distinct;
+        auto adopter = new Thread({
+            void*[perChunk] blocks;
+            foreach (ref b; blocks) b = allocFrame(bytes);
+            adopted = t_slot is parked;
+            distinct = true;
+            foreach (i, b; blocks)
+                foreach (c; blocks[0 .. i])
+                    if (b is c) distinct = false;
+            foreach (b; blocks) freeFrame(b);
+            releaseFrames();
+        });
+        adopter.start();
+        adopter.join();
+        assert(adopted && distinct);
+        assert(atomicLoad!(MemoryOrder.raw)(g_chunks) == chunks,
+            "the adopter carved a chunk while the adopted slot held free blocks");
+        // Keep this slot out of the next round's way too.
+        lock();
+        atomicStore!(MemoryOrder.raw)(parked.taken, true);
+        unlock();
+        aside ~= parked;
+    }
 }

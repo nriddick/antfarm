@@ -55,7 +55,10 @@ then poll the Farm, then steal from the top of another deque (FIFO: the
 oldest, largest subtree): the last successful victim first, then the SMT
 sibling, then one random same-LLC victim seven times in eight. A full deque
 spills its surplus into the Farm as one table; a refusing Farm runs the
-children inline. With one participant children run inline directly.
+children inline, as does a caller whose group Farm nobody else consumes.
+With one participant children run inline directly, and since there is no
+worker, a root submitted from another thread runs only while participant 0
+is inside `runRoot` or `stop`.
 
 Idle workers park on the pool's futex after a spin budget and are woken by a
 push onto an empty deque, a spill, or a root submission; a woken worker that
@@ -84,7 +87,7 @@ auto last = forkJoinScan!(term, add)(iota(n), prefix, 0.0, 64);   // prefix[i] =
 `forkJoinInvoke` runs a fixed set of callables as the children of one node
 and returns when all have returned; the frames live on the caller's stack.
 A `TaskGroup` lets a thread that is not a participant submit a batch of
-roots and wait for them together, and may be reused.
+roots and wait for them together, and may be reused; it cannot be copied.
 
 ```d
 forkJoinInvoke(&buildIndex, () nothrow @nogc { total = sum(parts); });
@@ -94,7 +97,10 @@ g.wait();
 ```
 
 `DispatcherOptions.oneFarm()` and `DispatcherOptions.perGroup()` are the
-two documented shapes; `printCounters(counters())` prints a run's counters.
+two documented shapes, honored by `start(opt)` and `start(cpus, opt)`;
+`start()` alone is `perGroup`. `printCounters(counters())` prints the
+counters flushed by `Dispatcher.stop`: every run since the process started,
+or since the last `discardCounters()` (call it after a warmup).
 
 The split points depend only on the length and the grain, so
 `forkJoinReduce` is bit-identical across participant counts: leaf folds run
@@ -102,9 +108,11 @@ left to right and the tree combines in a fixed shape. `combine` must be
 associative for the result to equal a sequential fold; it need not be
 commutative. A participant helps while it waits; any other thread submits
 the root and waits on its completion; a loop may start inside a node or a
-Farm callback. `submitDetached(root)` publishes a root without waiting
-(its `join` is the completion callback); `Dispatcher.stop` drains
-outstanding roots first.
+Farm callback. `submitDetached(root)` publishes a root without waiting;
+nothing signals its completion, its `join` runs after its children as for
+any node (never, for a root that forks nothing, whose `run` must finish the
+work and release the frame before `complete`), and `Dispatcher.stop`
+drains outstanding roots first.
 
 ## Run it
 
@@ -137,8 +145,9 @@ overflow channel, and the parked bitmap over the threadpool's wait protocol.
 - `run` and `join` are `nothrow @nogc @system` and must return; they are
   Farm callbacks when a frame arrives through the Farm. Never call a blocking
   parallel loop or `consumeNext` from them.
-- Frames belong to the application. `malloc` through mimalloc measured
-  faster than a per-participant frame allocator; free a cohort in the join.
+- Frames belong to the application; the frame pool (`allocFrames`,
+  `freeFrame`) is the fast way to get them, and a cohort is freed in the
+  join.
 - One `Dispatcher` per process, like one `CacheAwarePool`. The calling thread
   is participant 0 and must call `runRoot` itself; other threads use
   `submitRoot`.

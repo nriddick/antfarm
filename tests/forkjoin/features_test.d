@@ -163,14 +163,26 @@ bool runFeaturesTest()
         d.stop(); // would hang if the group left a live root behind
     }
 
-    // 5. Presets and the counters printer.
+    // 5. Presets and the counters printer. Both overloads keep the preset's
+    //    shape; start() alone is perGroup.
     {
         Dispatcher d;
         d.start(cpus, DispatcherOptions.perGroup());
+        if (d.host.farms.length != d.host.groups.length) fail("perGroup on a processor list");
         forkJoinFor!((size_t) {})(iota(size_t(100)), 10);
         d.stop();
         d.start(cpus, DispatcherOptions.oneFarm());
+        if (d.host.farms.length != 1) fail("oneFarm on a processor list");
         forkJoinFor!((size_t) {})(iota(size_t(100)), 10);
+        d.stop();
+        d.start(DispatcherOptions.oneFarm());
+        if (d.host.farms.length != 1) fail("oneFarm on every processor");
+        d.stop();
+        d.start(DispatcherOptions.perGroup());
+        if (d.host.farms.length != d.host.groups.length) fail("perGroup on every processor");
+        d.stop();
+        d.start();
+        if (d.host.farms.length != d.host.groups.length) fail("start() is perGroup");
         d.stop();
         auto s = counters();
         printf("features_test: counters follow\n");

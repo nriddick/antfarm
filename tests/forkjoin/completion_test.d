@@ -128,6 +128,41 @@ private Node* seventyRun(Node* node) nothrow @nogc @system
 // A leaf root for the sustained stream.
 private Node* leafRun(Node* node) nothrow @nogc @system { return complete(node); }
 
+// A flat root over `hits`: one fork of every leaf, so a small deque overflows.
+private struct FlatLeaf
+{
+    Node node;
+    size_t index;
+}
+
+private struct Flat
+{
+    Node node;
+    FlatLeaf[] leaves;
+    Node*[] kids;
+}
+
+private Node* flatLeafRun(Node* node) nothrow @nogc @system
+{
+    visit((cast(FlatLeaf*) node).index);
+    return complete(node);
+}
+
+private Node* flatJoin(Node*) nothrow @nogc @system { return null; }
+
+private Node* flatRun(Node* node) nothrow @nogc @system
+{
+    auto f = cast(Flat*) node;
+    f.node.join = &flatJoin;
+    foreach (i, ref l; f.leaves)
+    {
+        l.node.run = &flatLeafRun;
+        l.index = i;
+        f.kids[i] = &l.node;
+    }
+    return fork(node, f.kids);
+}
+
 private __gshared int g_failures;
 private shared uint g_watchdogArmed;
 
@@ -330,6 +365,38 @@ bool runCompletionTest()
         d.stop();
     }
 
+    // 5b. The same selection with one Farm per group and a deque that
+    //     overflows: the caller's group Farm has no consumer (the caller
+    //     does not consume by default), so its overflow must run inline
+    //     rather than wait in that Farm forever.
+    if (groups == 2)
+    {
+        printf("completion_test: case 5b (caller alone in its group, per-group Farms, deque overflow)\n");
+        ProcessorId other = cpus[0];
+        foreach (c; cpus) if (topo.byId(c).llcIndex != firstLlc) { other = c; break; }
+        auto o = DispatcherOptions.perGroup();
+        o.dequeCapacity = 64;
+        Dispatcher d;
+        d.start([cpus[0], other], o);
+        if (d.host.farms.length != 2) { printf("completion_test: case 5b expected two Farms\n"); ok = false; }
+        discardCounters();
+        hits = new shared(uint)[300];
+        Flat root;
+        root.leaves = new FlatLeaf[300];
+        root.kids = new Node*[300];
+        root.node.run = &flatRun;
+        runRoot(&root.node);
+        ok &= hitsOnce(300, "caller-alone overflow");
+        d.stop();
+        auto s = counters();
+        if (s.inlineChildren == 0 || s.spilledTables != 0)
+        {
+            printf("completion_test: case 5b: spilled %llu tables, inline %llu children\n",
+                s.spilledTables, s.inlineChildren);
+            ok = false;
+        }
+    }
+
     // 6. A failed start rolls back so a later start succeeds.
     printf("completion_test: case 6 (failed start, then a valid one)\n");
     {
@@ -346,6 +413,31 @@ bool runCompletionTest()
             try { d.start(cpus[0 .. 2]); d.stop(); }
             catch (Exception e) { printf("completion_test: retry after a failed start: %.*s\n", cast(int) e.msg.length, e.msg.ptr); ok = false; }
         }
+    }
+
+    // 7. stop is a no-op unless a start succeeded: never started, after a
+    //    failed start, and twice.
+    printf("completion_test: case 7 (stop without a running dispatcher)\n");
+    {
+        Dispatcher d;
+        d.stop();
+        DispatcherOptions bad;
+        bad.bodySteps = 0; // rejected: workers would never step
+        bool threw;
+        try d.start(cpus, bad);
+        catch (Exception e) threw = true;
+        if (!threw) { printf("completion_test: bodySteps 0 was accepted\n"); ok = false; d.stop(); }
+        d.stop();
+        d.start(cpus[0 .. 2]);
+        d.stop();
+        d.stop();
+        threw = false;
+        try d.start([ProcessorId(0, 4000)]); // unknown: an exception, not a crash
+        catch (Exception e) threw = true;
+        if (!threw) { printf("completion_test: an unknown processor was accepted\n"); ok = false; d.stop(); }
+        d.stop();
+        d.start(cpus[0 .. 2]);
+        d.stop();
     }
 
     atomicStore(g_watchdogArmed, 0u);

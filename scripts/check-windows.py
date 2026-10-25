@@ -10,7 +10,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / ".build/windows-check"
-LANES = ("packages", "threadpool", "ordering", "review", "actors", "private", "examples")
+LANES = ("packages", "threadpool", "forkjoin", "ordering", "review", "actors", "private", "examples")
 QUICK_LANES = ("packages", "review", "examples")
 HARDWARE_SKIPS = ("SKIP worker cases", "SKIP affinity regression", "SKIP confine-test")
 
@@ -87,6 +87,10 @@ class Checks:
         self.dub("run", ":threadpool", "-c", "wait-races", "--build=release")
         if self.compiler == "ldc2":
             self.dub("run", ":threadpool", "-c", "host-test", "--build=release")
+
+    def forkjoin(self):
+        # The runtime flag runs the suite driver after the module unittests.
+        self.dub("test", ":forkjoin", "--", "--DRT-testmode=run-main")
 
     def ordering(self):
         self.run([sys.executable, "-B", "scripts/check-ring-stores.py"])
