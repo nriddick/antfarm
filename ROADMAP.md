@@ -48,10 +48,10 @@ and tracked outcomes (2.1.1), and Windows validation of the wake path (with
 the next Windows matrix). `FarmHost` runs on `GroupHost` and routes its
 runtimes and parks by group (2.1.0, below).
 
-## 2.1.0 — in progress on `2.1.0-progress`
+## 2.1.0 — released 2026-10-25
 
 Everything since 2.0.0 is collected here; there are no separate 2.0.1 or 2.0.2
-releases. Done:
+releases. Shipped:
 
 - **Fork-join frame pool and wrappers** (planned as 2.0.1).
   `forkjoin.frames` takes the process allocator out of the fork-join hot path
@@ -111,11 +111,12 @@ Remaining for 2.1.0:
   application decides which group runs which actors. The dispatcher's
   participant tables (`g_host`, `g_participants`) stay process globals: one
   dispatcher per process, like one host.
-- Before the release: the full `make check` on the branch tip; the native
-  Windows matrix, once features and fixes settle; re-take the PERFORMANCE.md
-  fork-join table under the harness's build rules with the frame pool; and
-  point the staged upstream runtime-benchmarks port at the tag (convert its
-  ports to `allocFrames`).
+- Released after the full `make check` on `a8c84a3`, the native Windows
+  matrix on `a8c84a3` plus its follow-up (a one-LLC host, so live multi-LLC
+  cases are validated on Linux only), and the PERFORMANCE.md fork-join table
+  re-taken under the harness's rules with the frame pool at `e44e0f9`. Still
+  open: point the staged upstream runtime-benchmarks port at the tag (convert
+  its ports to `allocFrames`).
 - Optional Fiber follow-up, only if the bound matters: reserve 2 lifecycle
   records per task instead of 4. Fold the failure record into the terminal
   record, and reserve a cancellation record when a request is accepted. This

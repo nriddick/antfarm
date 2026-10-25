@@ -4,13 +4,69 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
-## 2.1.0 development
+## 2.1.0 — 2026-10-25
 
-Everything since 2.0.0, on `2.1.0-progress`: the fork-join frame pool and
-wrappers (planned as 2.0.1), the C ABI for the dispatcher and `GroupHost`
-(planned as 2.0.2), fixes across actors, threadpool and fork-join, and a Fiber
-rework that changes the `ant_fibers` source API (see "Fibers (API changes)"
-below). Native Windows follow-up is recorded below.
+2.1.0 puts one host under everything: the fork-join dispatcher, Fibers and a
+`FarmHost` with workers all run on an application-owned `GroupHost` as
+attachments of its one pool. The dispatcher gains a frame pool and the loop
+wrappers, the C ABI covers the dispatcher and the group host, and the Fiber
+scheduler's waits, completions and lifecycle records are reworked, which
+changes the `ant_fibers` source API (see "Fibers (API changes)" below). On
+the tzcnt/runtime-benchmarks programs the dispatcher leads citor, libfork,
+TooManyCooks and TBB on fib, skynet and nqueens at every thread count and is
+within 1% of the best on matmul at 32 threads (the table at the top of
+PERFORMANCE.md). Everything since 2.0.0 is here; there are no separate 2.0.1
+or 2.0.2 releases.
+
+Highlights:
+
+- `forkjoin.frames`: a frame pool for task frames that takes the process
+  allocator out of the hot path (fib(39) at 32 threads 102 ms under tcmalloc,
+  glibc and mimalloc alike). Wrappers `forkJoinMap`, `forkJoinScan`,
+  `forkJoinInvoke`, `TaskGroup`, `runRootAny`, and the
+  `DispatcherOptions.oneFarm()`/`.perGroup()` presets.
+- C ABI: `antfarm_forkjoin.h` (dispatcher, C nodes, loops, foreign
+  submission, completions) and `antfarm_groups.h` (worker resolution, raw C
+  worker hooks, group Farms, per-thread tokens, wake), with release-build
+  fatal diagnostics for contract violations.
+- `GroupHost` attachments: a worker loop composed from `@nogc` bodies and
+  GC-enabled service hooks, the pool lane chosen at start. The dispatcher has
+  an attachment form (`Dispatcher.attachment` + `start(host)`), a `FarmHost`
+  with workers runs on a `GroupHost` and routes its runtimes and parks by
+  group (`farmPerGroup`), and `ant_fibers.groups.FiberGroups` hosts a Fiber
+  domain with one lane per group Farm served by every worker.
+- Fibers: one claim word arbitrates every wait; `FiberEvent` and
+  `FiberSemaphore` wake one waiter per unit from FIFO queues and gain timed
+  waits; `FiberDomainOptions` with `retire()`, a domain-owned record ring
+  (records emitted only with an `onRecord` handler) and one service pass
+  `serve` replace the completion and lifecycle drains. Zero GC bytes per
+  warm lifetime.
+- Fixes across actors (a retirement race that stranded an accepted reply),
+  Fibers (a lost signal and a cancellation race), threadpool and fork-join,
+  recorded below.
+
+Breaking changes:
+
+- `ant_fibers`: `installFiberPlan`/`uninstallFiberPlan`, `FiberLane`,
+  `FiberServicePlan`, `FiberWakePolicy`, `FiberWakeEvent`, the mailbox
+  notifier and `fiberWorkerHooks` are removed; Fibers on a pool are
+  `ant_fibers.groups.FiberGroups` on a `GroupHost`. `takeCompletions`,
+  `release`, `releaseAll`, `enableLifecycleEvents`, `takeLifecycleEvents` and
+  `handleLifecycleEvents` are removed in favour of `FiberDomainOptions` and
+  `retire()`; `pendingEvents`/`lifecycleReserved` are
+  `pendingRecords`/`reservedRecords`; `FiberDomain.signal` counts only the
+  waiters it woke; `attachFiberDomain` requires the domain's Director.
+- A `Dispatcher` and a `FarmHost` with workers exclude each other unless the
+  dispatcher is an attachment of that host ("another host owns the pool");
+  a `FarmHost` now retires Fibers in every `step()` rather than at `close()`.
+
+Validation: Linux `make check` (both compilers, the fork-join TSan and ASan
+lanes, the Fiber TSan lane, C ABI, examples, docs coverage) passed at
+`a8c84a3`; the native Windows matrix passed on `a8c84a3` plus the follow-up
+below on a single-LLC host, so live multi-LLC routing is validated on Linux
+only.
+
+The entries below record the work in the order it landed, newest first.
 
 Windows follow-up:
 
