@@ -55,6 +55,18 @@ final class GroupFiberLane : FiberReadyLane
 
     protected override void noteExternalReady() nothrow @nogc { wakeWorkers(); }
     protected override void noteCancellationRequested() nothrow @nogc { wakeWorkers(); }
+    // A refused write means the ring is full of tables that parked peers'
+    // views still pin: wake every consumer so they advance and release. A
+    // written batch chain-wakes one parked peer of the Farm's consumers.
+    protected override void noteFlushed(size_t written, bool refused) nothrow @nogc
+    {
+        if (refused) host_.wakeAll();
+        else if (written != 0 && host_.pool !is null && host_.pool.anyWorkerArmed())
+        {
+            if (shared_) host_.wakeOne();
+            else host_.wakeOneIn(llc_);
+        }
+    }
     // Every worker polls the domain's timers; one of them must leave its park
     // to adopt the new earliest deadline.
     protected override void noteTimerArmed() nothrow @nogc { host_.wakeAll(); }

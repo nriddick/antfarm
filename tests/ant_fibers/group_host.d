@@ -32,6 +32,7 @@ void groupHostFiberSmoke()
     directorRetirement();
     serviceThreadRetirement();
     besideConsumingAttachment();
+    smallRingBurst();
 }
 
 private GroupHostOptions hostOptions()
@@ -125,6 +126,38 @@ private void serviceThreadRetirement()
     enforce(atomicLoad(completed) == count && domain.reservedRecords == 0);
     domain.beginShutdown();
     writeln("PASS group host fibers: serviceThreads retirement on ", host.workers, " workers");
+}
+
+/// A burst larger than the ring on the smallest Farm, workers parked until
+/// woken. A worker whose flush the full ring refuses wakes its peers (whose
+/// idle views pin reclamation) and a written batch chain-wakes a sleeper;
+/// without those wakes every worker parked with the ring full and the
+/// burst never drained (found with a 1 MiB ring in the warm-burst
+/// benchmark, 2.1.1).
+private void smallRingBurst()
+{
+    enum count = 200_000; // about 6,250 tables of 32 one-word bodies, many laps of 128 Ki words
+    FiberDomainOptions options;
+    options.recordRetention = 4 * count + 4; // the whole burst is live before the Director retires
+    auto domain = new FiberDomain(options);
+    auto fibers = new FiberGroups(domain);
+    auto o = hostOptions();
+    o.farm.ringMiB = 1;
+    o.farmPerGroup = false;
+    o.farm.quotaSmall = 2048;
+    o.pool.skipSmtSiblings = false; // every logical CPU: more flushers than the ring holds
+    o.attachments = [fibers.attachment];
+    auto host = new GroupHost(o);
+    scope (exit) host.close();
+    shared int ran;
+    foreach (i; 0 .. count)
+        domain.spawnOn(fibers.lanes[0], { atomicOp!"+="(ran, 1); });
+    host.wakeAll();
+    waitFor(() => domain.drained, "a burst larger than a 1 MiB ring");
+    enforce(atomicLoad(ran) == count);
+    domain.retire();
+    domain.beginShutdown();
+    writeln("PASS group host fibers: ", count, " tasks through a 1 MiB ring with parked workers");
 }
 
 private shared ulong consumedByAttachment;

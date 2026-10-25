@@ -339,7 +339,7 @@ void testCheckGeometry()
         check(e.osError == 0, what);
     }
     enum kMsg = "K must be a power of 2 in [2, KMAX]";
-    enum ringMsg = "ringMiB must be a power of 2 >= 2 (the ring size is in MiB, not ulongs)";
+    enum ringMsg = "ringMiB must be a power of 2 >= 1 (the ring size is in MiB, not ulongs)";
     enum exmaxMsg = "Exmax exceeds K-1 segments' capacities";
     check(AntFarm.checkGeometry(8, 8, 4, 2, 0, 16, 4096).kind == FarmCreateFailure.none,
         "create defaults accepted");
@@ -348,12 +348,13 @@ void testCheckGeometry()
     rejects(AntFarm.checkGeometry(8, 1, 4, 0, 0, 1, 4096), kMsg, "k 1");
     rejects(AntFarm.checkGeometry(8, 3, 4, 0, 0, 1, 4096), kMsg, "k 3");
     rejects(AntFarm.checkGeometry(8, KMAX * 2, 4, 0, 0, 1, 4096), kMsg, "k > KMAX");
-    rejects(AntFarm.checkGeometry(1, 8, 4, 0, 0, 1, 4096), ringMsg, "ringMiB below minimum");
+    rejects(AntFarm.checkGeometry(0, 8, 4, 0, 0, 1, 4096), ringMsg, "ringMiB below minimum");
+    check(AntFarm.checkGeometry(1, 8, 4, 0, 0, 1, 4096).kind == FarmCreateFailure.none, "1 MiB ring accepted");
     rejects(AntFarm.checkGeometry(6, 8, 4, 0, 0, 1, 4096), ringMsg, "ringMiB not a power of 2");
     rejects(AntFarm.checkGeometry(MAX_RING_MIB * 2, 8, 4, 0, 0, 1, 4096),
         "ringMiB exceeds MAX_RING_MIB (the ring size is in MiB, not ulongs)", "ringMiB above maximum");
     // "segment capacity too small" is subsumed: MIN_RING_MIB with KMAX
-    // segments still gives 2^14 ulongs per segment.
+    // segments still gives 2^13 ulongs per segment.
     check(AntFarm.checkGeometry(MIN_RING_MIB, KMAX, 1, 0, 0, 1, 64).kind == FarmCreateFailure.none,
         "smallest ring with KMAX segments");
     rejects(AntFarm.checkGeometry(8, 8, 0, 0, 0, 1, 4096), "expected consumers must be > 0", "consumers 0");

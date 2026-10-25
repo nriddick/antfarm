@@ -79,10 +79,10 @@ The guidance:
    several groups' Farms can share a few tokens through a mutex, as long as
    each token has one active user at a time; tokens are move-only and never
    used concurrently.
-5. **Size a channel Farm for its traffic.** The ring floor is 2 MiB
+5. **Size a channel Farm for its traffic.** The ring floor is 1 MiB
    (`MIN_RING_MIB`), double-mapped, plus a 15 KiB Farm structure, and every
    page of the ring is resident after one lap, so a channel costs about
-   2 MiB of memory however little it carries. Its cache footprint is only the
+   1 MiB of memory however little it carries. Its cache footprint is only the
    live segment, not the ring. Give a remote channel a larger ring than a
    local one when its producer is busy, so reclamation sweeps, which cross
    the interconnect, happen less often; give it one or two small producer

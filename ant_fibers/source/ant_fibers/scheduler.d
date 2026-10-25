@@ -1783,6 +1783,14 @@ class FiberReadyLane
     /// `retirementPending`. A lane may record it for diagnostics.
     protected void noteRetirementPending() nothrow @nogc {}
 
+    /// After `flush` wrote `written` activations and the Farm refused the
+    /// rest (`refused`). Pool lanes wake consumers here: a parked worker's
+    /// idle view pins ring reclamation, so a refused write with every peer
+    /// parked would otherwise never succeed (the flusher parks too, and the
+    /// ring stays full of consumed, unreleased tables), and a batch written
+    /// while peers sleep needs one of them awake to be consumed.
+    protected void noteFlushed(size_t written, bool refused) nothrow @nogc {}
+
     private enum size_t retirePerPass = 256;
 
     /// One service pass of this lane by a thread holding `token` on its Farm.
@@ -1871,6 +1879,7 @@ class FiberReadyLane
                 publishable.putBackChain(nodes[written], nodes[n - 1], n - written);
                 retractPublished(n - written);
             }
+            noteFlushed(written, written < n);
         }
         return written;
     }

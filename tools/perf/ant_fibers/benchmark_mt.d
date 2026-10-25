@@ -103,12 +103,14 @@ void main(string[] args)
         options.workers = cast(uint) workers;
     }
 
-    // Size each Farm as before: a 2^22-word ring in 8 segments, one small
-    // producer per worker (flush token) plus the control thread, and the
-    // small quota capped at 16384.
-    enum ln = 1 << 22;
+    // Size each Farm as before: a 2^22-word ring (32 MiB) in 8 segments, one
+    // small producer per worker (flush token) plus the control thread, and
+    // the small quota capped at 16384. ANT_FIBERS_RING_WORDS overrides the
+    // ring length (a power of two, at least 2^18) for ring-size experiments.
+    import std.process : environment;
+    immutable ln = environment.get("ANT_FIBERS_RING_WORDS", "4194304").to!ulong;
     enum k = 8;
-    enum segCap = ln / k;
+    immutable segCap = ln / k;
     immutable planned = GroupHost.resolve(options).workers.length;
     immutable slots = planned + 1;
     immutable quotaHeadroom = (k - 1) * segCap / slots;

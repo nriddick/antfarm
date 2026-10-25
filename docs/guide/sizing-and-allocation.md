@@ -12,6 +12,17 @@ Start with the defaults, then choose the ring for the LLC working set and quota
 for a phase's burst. Four or eight segments are the characterized choices. Use the parameter meanings and quota formula in
 [Sizing one Farm](../../ARCHITECTURE.md#sizing-one-farm) before tuning.
 
+The ring's cache footprint is its live window, a few tables wide, not its
+length: in the [ring size study](../performance/ring-size-2026-10-25.md)
+the headline payload cell ran the same through 1 MiB and 32 MiB rings, and
+only a ring larger than the L3 (64 MiB on a 32 MiB CCD) lost throughput,
+about 25%. So 8 MiB (the host defaults) suits bulk work up to tables of a
+few MiB, 16 MiB covers the largest `parallelFor` tables without partial
+admission, and a channel used occasionally, a Fiber lane or a priority ring,
+is fine at 1 or 2 MiB (`MIN_RING_MIB` is 1). What bounds a small ring is the
+quota rule `Exmax <= (K-1)·segCap`: a 1 MiB ring with K = 8 and 32 producers
+needs quotas of about 3,000 words or fewer.
+
 A tier left at `max* = 0` is disabled. Size each enabled tier for every thread
 that can hold one of its tokens simultaneously, including workers that publish.
 Register a bulk token only when the small quota cannot admit the batch you

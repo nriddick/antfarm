@@ -17,6 +17,22 @@ Older release notes are in [docs/releases/](docs/releases/):
   nothing spills, so it is private below its first level; a larger ring or
   producer quota does not change that share. The harness benchmarks never
   overflow the default 4,096-entry deque, so their numbers are unchanged.
+- `MIN_RING_MIB` is 1 (was 2); `AntFarm.create` accepts a 1 MiB ring. The
+  [ring size study](docs/performance/ring-size-2026-10-25.md) found the
+  ring's cache footprint is its live window, not its length: the headline
+  payload cell is flat from 1 to 32 MiB and 25% slower at 64 MiB, above the
+  L3; the fork-join harness, loop tables and the Fiber burst are unchanged
+  down to 1 MiB (a 16 MiB `parallelFor` table loses 30% to partial admission
+  at 1–2 MiB). The quota rule, not the segment floor, is what bounds a small
+  ring's producers.
+- Fibers: a `GroupHost` lane wakes its consumers when a flush is refused and
+  chain-wakes a parked peer after a written batch
+  (`FiberReadyLane.noteFlushed`). With a ring the burst could lap, the
+  worker whose flush the full ring refused parked without waking anyone, and
+  the parked peers' idle views pinned the segments that would have freed it,
+  so every worker ended parked with the ring full (a 1 MiB ring hung the
+  warm-burst benchmark at 20,000 tasks, 2 MiB at 100,000). Regression:
+  `tests/ant_fibers/group_host.d` drains 60,000 tasks through a 1 MiB ring.
 - Docs: the parallel-loops guide states the measured positioning of a Farm
   table against the deque loop (fwbench `forkloop`): asynchronous bulk
   admission from any thread, two to four times cheaper for elements of a few

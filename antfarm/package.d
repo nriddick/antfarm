@@ -527,8 +527,12 @@ uint rootCostHintFor(size_t count, ulong consumers, uint smallThreshold)
         if (hint == MAX_AVG_COST || claims >= target) return hint;
     }
 }
-/// Smallest ring accepted by `AntFarm.create`, in MiB (2^18 ulongs).
-enum uint MIN_RING_MIB = 2;
+/// Smallest ring accepted by `AntFarm.create`, in MiB (2^17 ulongs). Lowered
+/// from 2 in 2.1.1 after the ring-size study: a ring's cache footprint is its
+/// live window, not its length, and a 1 MiB ring with K = 8 still leaves
+/// 16 Ki-word segments; the quota rule `Exmax <= (K-1)*segCap` is what bounds
+/// how many producers such a ring can plan.
+enum uint MIN_RING_MIB = 1;
 /// Largest ring accepted by `AntFarm.create`, in MiB (64 GiB). Far beyond any
 /// characterized size; it mainly rejects a length accidentally given in ulongs.
 enum uint MAX_RING_MIB = 1 << 16;
@@ -1474,8 +1478,7 @@ struct AntFarm
         }
         // Construction constraints (spec 1, 4a):
         //  - K is the useful power-of-two range [2, KMAX=16].
-        //  - ringMiB >= 2 (Ln >= 2^18 ulongs); smaller rings were never
-        //    studied and per-table header overhead would dominate. The upper
+        //  - ringMiB >= MIN_RING_MIB (1 MiB, Ln >= 2^17 ulongs). The upper
         //    bound mainly catches a legacy caller passing a length in ulongs.
         //  - segCap = Ln/K has a floor so header/pad space never dominates a
         //    segment's capacity (subsumed by Ln >= 2^18 with K <= 16).
@@ -1486,7 +1489,7 @@ struct AntFarm
         //    takes no part in Exmax.
         if (k < 2 || k > KMAX || (k & (k - 1)) != 0) return reject("K must be a power of 2 in [2, KMAX]");
         if (ringMiB < MIN_RING_MIB || (ringMiB & (ringMiB - 1)) != 0)
-            return reject("ringMiB must be a power of 2 >= 2 (the ring size is in MiB, not ulongs)");
+            return reject("ringMiB must be a power of 2 >= 1 (the ring size is in MiB, not ulongs)");
         if (ringMiB > MAX_RING_MIB)
             return reject("ringMiB exceeds MAX_RING_MIB (the ring size is in MiB, not ulongs)");
         immutable ln = cast(ulong) ringMiB << ULONGS_PER_MIB_SHIFT;

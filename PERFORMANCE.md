@@ -5,7 +5,9 @@ two 8-core CCDs with one L3 each) at runtime revision `d00b37c` on
 `1.9.0-progress`, with LDC 1.43.0 `-O2 -release` and mimalloc 3.5.3. Every
 figure is the **median ± sample standard deviation of five independent
 process samples**; the tail tables aggregate five processes of 10,000
-observations each. Major performance comparisons use the Ryzen 9 5900XT.
+observations each. Major performance comparisons use the Ryzen 9 5900XT. Ring size is studied
+separately in [docs/performance/ring-size-2026-10-25.md](docs/performance/ring-size-2026-10-25.md):
+throughput is flat from 1 to 32 MiB and falls only above the L3.
 The i7-12700H laptop is not expected to sustain stable clocks over long runs;
 its tables are retired with no refresh planned. The previous page is archived in
 [docs/performance/archive-2026-10-20.md](docs/performance/archive-2026-10-20.md).

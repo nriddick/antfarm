@@ -269,8 +269,8 @@ Safety argument in one paragraph: producers only ever write within quota verifie
 | Constraint | Current value | Kind |
 | --- | --- | --- |
 | `K` in `[2, KMAX]` | `KMAX = 16` (section 1 suggests 4 or 8) | implementation limit, power-of-two |
-| `ringMiB` power of two in `[2, MAX_RING_MIB]` | `Ln >= 2^18` ulongs (2 MiB); `MAX_RING_MIB = 65536` (64 GiB) | implementation limit; smaller rings were never studied, and the upper bound rejects a length mistakenly given in ulongs |
-| `segCap` floor | 2048, subsumed by `Ln >= 2^18` with `K <= 16` | keeps per-table header/pad space from dominating a segment |
+| `ringMiB` power of two in `[1, MAX_RING_MIB]` | `Ln >= 2^17` ulongs (1 MiB; 2 MiB before 2.1.1); `MAX_RING_MIB = 65536` (64 GiB) | implementation limit; the 2.1.1 ring-size study found a ring's cache footprint is its live window, not its length; the upper bound rejects a length mistakenly given in ulongs |
+| `segCap` floor | 2048, subsumed by `Ln >= 2^17` with `K <= 16` | keeps per-table header/pad space from dominating a segment |
 | `Exmax <= (K-1)*segCap` | enforced | algorithmic invariant (I1) |
 | quota role | `quotaRole > 0` iff `maxRole > 0` | algorithmic invariant |
 
