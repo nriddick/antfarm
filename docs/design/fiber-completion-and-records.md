@@ -264,16 +264,17 @@ them. Under this design `step()` retires every pass, so the ring and roots
 stay bounded while the host runs. `finish` retires whatever remains after the
 consumer join. The `drained` precondition is unchanged.
 
-`GroupHost` stays without Fibers in this change. Hosting them there needs
-three things:
-- a per-worker attachment hook in `GroupHost`'s raw worker loop;
-- a park-until-deadline channel from that hook to the worker's idle policy;
-- one `FiberReadyLane` per group Farm.
-
-That is the same work as the deferred `FarmHost`-on-`GroupHost` item
-(ROADMAP, 2.1). With the shared service pass in place, the Fiber side of it
-becomes a small adapter: build the lanes, then call `serve` and the worker
-loop's consume from the hook.
+`GroupHost` stays without Fibers in this change. Its workers run a raw
+`WorkerBody` (`@nogc nothrow`, one process-global function), and the pool
+makes that lane and the managed lane (`ManagedWorkerHooks`) mutually
+exclusive. `serve` is GC-enabled and throws, so Fibers need `GroupHost` to
+run the managed lane; that lane already carries the park-until-deadline
+channel (`ManagedPumpResult.until`). Hosting Fibers there therefore means a
+managed-lane mode for `GroupHost` whose pump consumes the home Farm, runs
+the application's `@nogc` hook, runs `serve` on the group's lane and returns
+`again`/`idle`/`until(deadline)`, chosen at start only when a GC-enabled
+attachment exists so the fork-join hot path keeps the raw body. That is the
+`FarmHost`-on-`GroupHost` item in ROADMAP (2.1.0).
 
 ## Costs and limits
 

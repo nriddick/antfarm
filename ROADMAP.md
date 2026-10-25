@@ -91,10 +91,25 @@ Remaining for 2.1.0:
   worker bodies; the fork-join dispatcher runs on it. The actor host still
   owns one Farm on one group. The measurements are in
   [several physical groups](docs/guide/scaling-groups.md#several-physical-groups).
-  The same work gives `GroupHost` Fibers: a per-worker attachment hook in its
-  raw worker loop, a park-until-deadline channel from that hook to the idle
-  policy, and one `FiberReadyLane` per group Farm driven by `serve`
+  Shape: `GroupHost` gains an attachment registry (a `@nogc` worker hook, a
+  GC-enabled service hook, a control-thread emit hook, a drained predicate
+  and a finish) and picks its worker lane at `start`: the raw `WorkerBody`
+  when only `@nogc` hooks are attached, so the fork-join hot path is
+  unchanged, or the pool's managed lane when a GC-enabled hook is. The
+  managed lane is required for Fibers, whose `serve` is GC-enabled and
+  throws, and it already carries the park-until-deadline channel
+  (`ManagedPumpResult.until`); the raw body cannot host either. The
+  dispatcher becomes the first attachment, `FarmHost` a thin layer that
+  attaches its runtimes and parks (one shared Farm first, `farmPerGroup`
+  routing of runtimes and parks last), and `attachFiberDomain` targets the
+  group host with one `FiberReadyLane` per group Farm
   ([hosting a domain](docs/design/fiber-completion-and-records.md#hosting-a-domain)).
+  Acceptance for the first step: fib(39) at 32 threads unchanged with the
+  dispatcher alone. The four process-global owners (`gWorkerBody`, the
+  dispatcher's `g_host`, `FarmHost`'s `gHostFarm`, `installedFiberPool`)
+  converge on the one `GroupHost`; keep `installFiberPlan` and the
+  standalone `FarmHost` through 2.1.0 and remove them once the composed host
+  has a release behind it.
 - Before the release: the full `make check` on the branch tip; the native
   Windows matrix, once features and fixes settle; re-take the PERFORMANCE.md
   fork-join table under the harness's build rules with the frame pool; and

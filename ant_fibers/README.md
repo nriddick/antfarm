@@ -107,7 +107,12 @@ and its stack with `Fiber.reset`. Every host retires for you: the caller's own
 loop through `drainUntilEmpty` or `serve`, a `FarmHost` in each `step()`, a
 managed pool's workers under `FiberRetirement.serviceThreads`. Under the
 default `FiberRetirement.director`, a managed pool's Director calls `retire`
-itself, prompted by `FiberWakeEvent.lifecycle` in its lanes' mailboxes.
+itself: retirement latency is its polling cadence. `FiberWakeEvent.lifecycle`
+in the lane mailbox says retirement is pending, but the mailbox coalesces, so
+a Director that relies on the notifier sees no new edge while other bits are
+already set; poll `retirementPending` on each pass instead. Do not call
+`retire` from a Fiber body: on the Director thread it is accepted and runs
+the handlers on that Fiber's stack.
 
 ## Fiber bodies
 

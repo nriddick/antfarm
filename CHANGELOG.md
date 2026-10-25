@@ -29,6 +29,16 @@ C dispatcher and `GroupHost` ABI:
   borrowed resources alive between joining workers and final close. C close
   refuses outstanding views/tokens/actors/waves/private parks. Foreign token
   holders cannot detach until their cache is released.
+- A C `run` that returned without `af_complete`/`af_fork`, or returned a
+  pointer other than the one they produced, was not diagnosed: the tree never
+  completed (waits and `af_dispatcher_stop` spun) or the trampoline ran an
+  arbitrary pointer. Both are now fatal in every build, as the header
+  promised, as is a `join` that returns non-NULL without forking. Range
+  callbacks (`each`/`leaf`/`join`) run with no active C node, so a leaf can
+  no longer complete or fork the node that started the range. Four death
+  cases cover these. The headers no longer suggest a NULL join pointer
+  completes the parent (`af_fork` requires one), and state that `stop` runs
+  on every started worker.
 - Keep all previous ABI 1 lock rows and the BetterC core unchanged. New
   services participate in explicit runtime-session lifetime accounting. DMD
   materializes Farm GC metadata in the runtime archive without a second core.
