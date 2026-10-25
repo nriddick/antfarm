@@ -382,8 +382,7 @@ final class CacheAwarePool
     /// Discovers topology on first use (a setup operation).
     PoolResolution resolve() const
     {
-        auto snap = discover();
-        return resolvePool(snap, options);
+        return resolvePool(liveTopology(), options);
     }
 
     /// After `start`: the resolution including each worker's `StartState` and

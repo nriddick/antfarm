@@ -20,7 +20,7 @@ import std.stdio : writeln;
 void main()
 {
     Dispatcher d;
-    d.start();                 // the caller plus one pinned worker per core
+    d.start();                 // the caller plus a pinned worker per eligible CPU
     scope (exit) d.stop();
     writeln("sum of squares: ", forkJoinReduce!((ulong x) => x * x,
         (ulong a, ulong b) => a + b)(iota(1UL, 257UL), 0UL, 16));

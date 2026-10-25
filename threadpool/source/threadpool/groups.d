@@ -15,7 +15,7 @@
  + The worker loop is composed from `GroupAttachment`s. With only `@nogc`
  + attachments the pool runs its raw `WorkerBody` lane, and a single
  + attachment's body is installed as is; an attachment with a GC-enabled
- + hook (`install`, `start`, `serve`, `finish`) selects the pool's managed
+ + per-worker hook (`start`, `serve`, `finish`) selects the pool's managed
  + lane, whose pump runs every attachment and parks until the earliest
  + deadline the service hooks report. A consuming attachment subscribes its
  + own view of the worker's home Farm; when none does, the host consumes it.
@@ -41,7 +41,7 @@ import threadpool.pin : PinOutcome, pinProcessor, ThreadAffinity, confineCalling
     restoreCallingThread;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.resolution : GroupDisposition, PoolResolution;
-import threadpool.topology : noLlcIndex, ProcessorId, TopologySnapshot;
+import threadpool.topology : liveTopology, noLlcIndex, ProcessorId, TopologySnapshot;
 
 /// One LLC group's Farm, installed on the threadpool registry.
 struct GroupSlot
@@ -62,7 +62,9 @@ struct GroupServiceResult
 }
 
 /// One participant in the host's worker loop. `@nogc` hooks run in either
-/// lane; the GC-enabled hooks select the managed lane.
+/// lane; a GC-enabled per-worker hook (`start`, `serve`, `finish`) selects
+/// the managed lane. `install`/`uninstall` run on the control thread and
+/// select nothing.
 struct GroupAttachment
 {
     /// For reports.
@@ -77,10 +79,10 @@ struct GroupAttachment
     /// unsubscribes it). When no attachment consumes, the host does.
     bool consumes;
     /// Control thread, after the Farms and registry exist and before the pool
-    /// starts; build per-Farm state here. Managed lane.
+    /// starts; build per-Farm state here. Either lane.
     void delegate(GroupHost host) install;
     /// Control thread, after the pool stopped and before the Farms are
-    /// destroyed. Managed lane.
+    /// destroyed. Either lane.
     void delegate(GroupHost host) uninstall;
     /// Once per worker before its first step. Managed lane.
     void delegate(WorkerSelf* worker) start;
@@ -89,11 +91,10 @@ struct GroupAttachment
     /// Once per worker after its loop, before `stop`. Managed lane.
     void delegate(WorkerSelf* worker) finish;
 
-    /// Needs the pool's managed lane.
+    /// Needs the pool's managed lane: a GC-enabled hook runs on workers.
     @property bool managed() const @nogc nothrow
     {
-        return install !is null || uninstall !is null || start !is null
-            || serve !is null || finish !is null;
+        return start !is null || serve !is null || finish !is null;
     }
 }
 
@@ -264,8 +265,7 @@ final class GroupHost
     /// `FarmHost.resolve` with the mapped options).
     static PoolResolution resolve(const GroupHostOptions options)
     {
-        const snap = CacheAwarePool.topology();
-        return planHost(snap, mapOptions(options)).resolution;
+        return planHost(liveTopology(), mapOptions(options)).resolution;
     }
 
     /// As `this(options)` with one consuming `@nogc` attachment, `body`/`stop`,
@@ -289,8 +289,8 @@ final class GroupHost
             enforce(a.body !is null || a.managed, "GroupHost: an attachment needs a body or a managed hook");
         if (options.workers != 0 && options.attachments.length == 0)
             throw new FarmHostException("GroupHost: workers need at least one attachment");
-        const snap = CacheAwarePool.topology();
         auto mapped = mapOptions(options);
+        ref const(TopologySnapshot) snap = liveTopology();
         plan_ = planHost(snap, mapped);
         resolution_ = plan_.resolution;
         control_ = Thread.getThis();
@@ -347,8 +347,11 @@ final class GroupHost
                 throw new FarmHostException(format("GroupHost: caller %s to %s failed: %s",
                     callerPlacement_, callerCpus_, outcome));
         }
-        foreach (ref a; options_.attachments)
-            if (a.install !is null) { a.install(this); ++installedAttachments_; }
+        foreach (i, ref a; options_.attachments)
+        {
+            if (a.install !is null) a.install(this);
+            installedThrough_ = i + 1; // so a failure undoes exactly the installed prefix
+        }
         if (plan_.workers != 0)
             startPool();
         open_ = true;
@@ -477,7 +480,7 @@ private:
     AntFarm*[] farms_;
     GroupSlot[] slots_;
     bool installed_, claimed_, poolRunning_, affinityChanged_, open_, leakFarms_;
-    size_t installedAttachments_;
+    size_t installedThrough_;
     CacheAwarePool pool_;
     Director director_;
     ThreadAffinity previousAffinity_;
@@ -512,19 +515,25 @@ private:
         immutable callerConsumes = options_.callerConsumes || plan_.workers == 0;
         immutable participants = (options_.workerTokens ? cast(uint) resolution_.workers.length : 0) + 1;
         immutable smallProducers = participants + options_.farm.extraSmallProducers;
+        // Every consuming attachment subscribes its own view per worker; the
+        // host's own view stands in when none does.
+        uint viewsPerWorker;
+        foreach (ref a; options_.attachments) if (a.consumes) ++viewsPerWorker;
+        if (viewsPerWorker == 0) viewsPerWorker = 1;
         const f = options_.farm;
         if (options_.farmPerGroup)
         {
             foreach (g; groups_)
             {
-                uint consumers = cast(uint) resolution_.workersIn(g).length
+                uint consumers = cast(uint) resolution_.workersIn(g).length * viewsPerWorker
                     + (callerConsumes && g == callerGroup_ ? 1 : 0) + f.extraConsumers;
                 farms_ ~= createOne(consumers == 0 ? 1 : consumers, smallProducers, g);
             }
         }
         else
         {
-            uint consumers = cast(uint) resolution_.workers.length + (callerConsumes ? 1 : 0) + f.extraConsumers;
+            uint consumers = cast(uint) resolution_.workers.length * viewsPerWorker
+                + (callerConsumes ? 1 : 0) + f.extraConsumers;
             farms_ ~= createOne(consumers == 0 ? 1 : consumers, smallProducers, groups_[0]);
         }
         gFarms = farms_;
@@ -605,10 +614,10 @@ private:
     void undoConstruction()
     {
         stopWorkers();
-        // Reverse order; only the hooks whose install ran.
-        foreach_reverse (i; 0 .. installedAttachments_)
+        // Reverse order, over the prefix whose install ran.
+        foreach_reverse (i; 0 .. installedThrough_)
             if (options_.attachments[i].uninstall !is null) options_.attachments[i].uninstall(this);
-        installedAttachments_ = 0;
+        installedThrough_ = 0;
         gAttachments = null;
         releaseThreadTokens(); // the caller's
         if (installed_)

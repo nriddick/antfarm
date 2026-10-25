@@ -124,7 +124,7 @@ final class FiberGroups
 
     /// Admit a task whose activations prefer group `llc`'s Farm.
     FiberTask spawnOn(Body)(ushort llc, Body body, size_t stackSize = 0)
-        if (is(Body == void delegate()) || is(Body == void function()))
+        if (is(Body : void delegate()) || is(Body : void function()))
     {
         auto lane = requireLane(llc);
         auto task = domain_.spawnOn(lane, body, stackSize);
@@ -147,7 +147,7 @@ final class FiberGroups
 
     /// ditto, on group `llc`'s lane.
     TaskHandle spawnHandleOn(Body)(ushort llc, Body body, size_t stackSize = 0)
-        if (is(Body == void delegate()) || is(Body == void function()))
+        if (is(Body : void delegate()) || is(Body : void function()))
     {
         auto lane = requireLane(llc);
         auto handle = domain_.spawnHandleOn(lane, body, stackSize);

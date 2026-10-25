@@ -134,7 +134,7 @@ Parallel loop adapters are a separate module:
 | --- | --- | --- |
 | Options and placement | `FarmHost`, `FarmHost.resolve`, `FarmHost.resolution`, `FarmHost.callerCpus`, `FarmHost.summary`, `FarmHost.toString`, `FarmHostOptions`, `HostGroups`, `CallerPlacement`, `WorkerIdle`, `FarmSizing`, `autoWorkers`, `defaultHostPoolOptions` | [hosting.md](../guide/hosting.md#placement) |
 | Progress, waits and publication | `FarmHost.step`, `FarmHost.waitUntil`, `FarmHost.token`, `FarmHost.flush`, `FarmHost.pump`, `FarmHost.publish`, `FarmHost.wake` | [hosting.md](../guide/hosting.md#progress-and-waking) |
-| Host-owned infrastructure | `FarmHost.createRuntime`, `FarmHost.createPark`, `FarmHost.attach`, `HostAttachment`, `FarmHost.registerProducer`, `FarmHost.unregisterProducer` | [hosting.md](../guide/hosting.md#setup) |
+| Host-owned infrastructure | `FarmHost.createRuntime`, `FarmHost.createPark`, `FarmHost.attach`, `HostAttachment`, `FarmHostOptions.attachments` (`GroupAttachment`, worker-loop participants), `FarmHost.groupHost`, `FarmHost.registerProducer`, `FarmHost.unregisterProducer` | [hosting.md](../guide/hosting.md#setup) |
 | Retirement, teardown and failures | `FarmHost.retire`, `FarmHost.close`, `FarmHost.closeOrAbandon`, `FarmHost.abandon`, `HostState`, `FarmHostException`, `FarmHostNotDrained`, `FarmHostResolveException`, `FarmHostTimeout`, `FarmHostFailed` | [hosting.md](../guide/hosting.md#teardown) |
 
 ## Contracts

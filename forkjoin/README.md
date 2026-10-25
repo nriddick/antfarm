@@ -148,8 +148,12 @@ overflow channel, and the parked bitmap over the threadpool's wait protocol.
 - Frames belong to the application; the frame pool (`allocFrames`,
   `freeFrame`) is the fast way to get them, and a cohort is freed in the
   join.
-- One `Dispatcher` per process, like one `CacheAwarePool`. The calling thread
-  is participant 0 and must call `runRoot` itself; other threads use
-  `submitRoot`.
+- One `Dispatcher` per process, on the process's one `GroupHost`: a
+  `Dispatcher` and a `FarmHost` with workers exclude each other unless the
+  dispatcher is an attachment of that host (`d.attachment(opt)` in
+  `GroupHostOptions.attachments` or `FarmHostOptions.attachments`, then
+  `d.start(host)` on the host's caller thread instead of `d.start()`). The
+  calling thread is participant 0 and must call `runRoot` itself; other
+  threads use `submitRoot`.
 - `DispatcherOptions.pollEvery` is load-bearing: a busy participant's Farm
   poll keeps its view advancing reclamation pins, not only fairness.

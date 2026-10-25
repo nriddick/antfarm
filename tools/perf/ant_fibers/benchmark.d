@@ -21,7 +21,11 @@ void main(string[] args)
 
     auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 16_384);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    // Every admitted task reserves four lifecycle records until it is
+    // retired; size the ring for the whole burst, outside the timed region.
+    FiberDomainOptions options;
+    options.recordRetention = 4 * taskCount + 4;
+    auto domain = new FiberDomain(farm, options);
     domain.reserve(taskCount);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);

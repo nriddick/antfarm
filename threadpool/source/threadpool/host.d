@@ -32,7 +32,7 @@ import threadpool.hybrid : ManagedWorkerHooks, WorkerSelf, gWorkers;
 import threadpool.worker : requestStop;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.resolution : PoolResolution, Reject, reasonsText, resolvePool;
-import threadpool.topology : ProcessorId, TopologySnapshot, formatCpuList;
+import threadpool.topology : ProcessorId, TopologySnapshot, formatCpuList, liveTopology;
 
 /// `FarmHostOptions.workers` sentinel: every CPU the host can staff in the
 /// selected group(s), after the caller reservation.
@@ -167,6 +167,11 @@ struct FarmHostOptions
     /// a round with no publications ends the burst early. Must be positive.
     /// 1 restores single-round stepping; larger bursts amortize park/wake cost.
     uint maxEmitRounds = 16;
+    /// Further `GroupAttachment`s for the host's `GroupHost`, stepped after
+    /// the host's own consuming body (`ant_fibers.groups.FiberGroups`, the
+    /// fork-join dispatcher's attachment). A GC-enabled hook among them puts
+    /// the workers on the pool's managed lane. Ignored when `workers == 0`.
+    GroupAttachment[] attachments;
 }
 
 /// Internal: the full host placement `planHost` computes. The public views
@@ -470,8 +475,7 @@ final class FarmHost
     /// constructor or a SKIP probe such as `workersFit()`.
     static PoolResolution resolve(const FarmHostOptions options = FarmHostOptions.init)
     {
-        const snap = CacheAwarePool.topology();
-        return resolve(snap, options);
+        return resolve(liveTopology(), options);
     }
 
     /// The worker selection for an explicit snapshot, whose OS scope fields
@@ -496,8 +500,7 @@ final class FarmHost
         import std.format : format;
 
         director_ = Director.init;
-        const snap = CacheAwarePool.topology();
-        plan_ = planHost(snap, options);
+        plan_ = planHost(liveTopology(), options);
         resolution_ = plan_.resolution;
         control_ = Thread.getThis();
         parkMode_ = plan_.workers != 0 && options.idle == WorkerIdle.park;
@@ -516,9 +519,16 @@ final class FarmHost
                     error.kind, error.osError ? format(", os error %s", error.osError) : "",
                     error.detail, plan_.summary()));
         }
-        token_ = farm_.registerProducer(Tier.small);
-        if (!token_.valid)
-            throw new FarmHostException("FarmHost: control token registration failed");
+        if (group_ !is null)
+            // The group host's caller token: planned as the caller's
+            // participant slot and released by the group host at close.
+            tokenRef_ = &group_.token(group_.callerGroup);
+        else
+        {
+            token_ = farm_.registerProducer(Tier.small);
+            if (!token_.valid)
+                throw new FarmHostException("FarmHost: control token registration failed");
+        }
         if (plan_.callerConsumes)
         {
             immutable result = view_.subscribe(farm_);
@@ -604,7 +614,7 @@ final class FarmHost
     /// `idleTimeout`, or call `wake()`.
     @property ref Token token() return @nogc nothrow
     {
-        return token_;
+        return control();
     }
 
     /// An extra producer, counted against `FarmSizing.extraSmallProducers`
@@ -721,7 +731,7 @@ final class FarmHost
         if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
             fatal("FarmHost.flush after close/abandon or worker failure");
         version (assert) assertControl();
-        immutable n = runtime.flush(token_, maximum);
+        immutable n = runtime.flush(control(), maximum);
         if (n != 0 && parkMode_) group_.wakeAll();
         return n;
     }
@@ -735,7 +745,7 @@ final class FarmHost
         if (atomicLoad!(MemoryOrder.raw)(state_) != HostState.open)
             fatal("FarmHost.pump after close/abandon or worker failure");
         version (assert) assertControl();
-        immutable count = park.pumpCounted(token_);
+        immutable count = park.pumpCounted(control());
         if (count.tables != 0 && parkMode_) group_.wakeAll();
         return count.roots;
     }
@@ -753,7 +763,7 @@ final class FarmHost
         size_t offset;
         while (offset < actors.length)
         {
-            immutable written = wave.publish!operation(actors[offset .. $], token_);
+            immutable written = wave.publish!operation(actors[offset .. $], control());
             if (written != 0)
             {
                 offset += written;
@@ -813,16 +823,16 @@ final class FarmHost
     void step()
     {
         requireOpen("step");
-        if (!token_.valid)
+        if (!control().valid)
             throw new FarmHostException("control token was moved out of host.token");
         foreach (round; 0 .. plan_.options.maxEmitRounds)
         {
             bool published;
             foreach (ref o; owned_)
-                published |= o.emit(token_) != 0;
+                published |= o.emit(control()) != 0;
             foreach (ref a; attachments_)
                 if (a.emit !is null)
-                    published |= a.emit(token_) != 0;
+                    published |= a.emit(control()) != 0;
             // Do not spin here on backpressure: the workers may need the
             // wake below to release completed epochs before another write.
             if (!published) break;
@@ -964,7 +974,7 @@ final class FarmHost
         if (extraSmall_ + extraBulk_ != 0)
             offenders ~= format("%s extra producer token%s outstanding (unregisterProducer first)",
                 extraSmall_ + extraBulk_, extraSmall_ + extraBulk_ == 1 ? "" : "s");
-        if (!token_.valid)
+        if (!control().valid)
             offenders ~= "the control token was moved out of host.token";
         if (offenders.length)
             throw new FarmHostNotDrained("FarmHost.close: not drained: " ~ offenders.join("; ")
@@ -985,11 +995,11 @@ final class FarmHost
             o.destroy();
         owned_ = null;
         attachments_ = null;
-        farm_.unregisterProducer(token_);
+        if (group_ is null) farm_.unregisterProducer(token_);
         if (group_ !is null)
         {
-            // Restores the caller's affinity, releases the registry and the
-            // pool claim, destroys the Farm.
+            // Restores the caller's affinity, releases the registry, the
+            // caller's tokens and the pool claim, destroys the Farm.
             try group_.close(); // group_ stays: `pool` still reports the stopped pool
             catch (Exception e) errors ~= e;
         }
@@ -1046,10 +1056,10 @@ final class FarmHost
         else
             drainWakers(); // failed or stopping: state is already non-open
         cast(void) stopConsumers();
-        if (token_.valid)
+        if (group_ is null && token_.valid)
             farm_.unregisterProducer(token_);
         if (group_ !is null)
-            group_.abandon(); // affinity, registry and claim back; the Farm leaks
+            group_.abandon(); // affinity, registry, caller tokens and claim back; the Farm leaks
         releaseClaim();
         atomicStore!(MemoryOrder.rel)(state_, HostState.abandoned);
     }
@@ -1068,7 +1078,8 @@ private:
     HostPlan plan_;
     Rebindable!(const PoolResolution) resolution_;
     AntFarm* farm_;
-    Token token_;
+    Token token_;      // standalone (workers == 0): the host's own control token
+    Token* tokenRef_;  // hosted: the group host's caller token
     ConsumerView view_;
     bool viewSubscribed_;
     GroupHost group_;   // with workers: owns pool, Farm, caller placement, claim; kept after close
@@ -1082,6 +1093,11 @@ private:
     // Keep layout and initialization identical across assertion modes: clients
     // can instantiate templates against a release-built threadpool library.
     Thread control_;
+
+    ref Token control() return @nogc nothrow
+    {
+        return tokenRef_ !is null ? *tokenRef_ : token_;
+    }
 
     void assertControl() @nogc nothrow
     {
@@ -1122,10 +1138,13 @@ private:
         go.pool = options.pool;
         go.farm = options.farm;
         go.farmPerGroup = false; // one Farm, every selected group consumes it
-        go.workerTokens = false; // workers only consume: the Farm plans 1 + extraSmallProducers
+        // Alone, the host's workers only consume, so the Farm plans exactly
+        // 1 + extraSmallProducers and refuses a producer beyond that; other
+        // attachments' workers may publish (`groupToken`).
+        go.workerTokens = options.attachments.length != 0;
         // workerBody/workerStop, not the managed lane: the hot path is one
         // bool return, and a single raw attachment's body is installed as is.
-        go.attachments = [GroupAttachment("FarmHost", &hostBody, &hostStop, true)];
+        go.attachments = GroupAttachment("FarmHost", &hostBody, &hostStop, true) ~ options.attachments;
         try
             group_ = new GroupHost(go);
         catch (FarmHostException e)
@@ -1218,10 +1237,10 @@ private:
     void undoConstruction()
     {
         cast(void) stopConsumers();
-        if (farm_ !is null && token_.valid)
+        if (group_ is null && farm_ !is null && token_.valid)
             farm_.unregisterProducer(token_);
         if (group_ !is null)
-            group_.close(); // affinity, registry, claim, Farm
+            group_.close(); // affinity, registry, caller tokens, claim, Farm
         else if (farm_ !is null)
             farm_.destroy();
         farm_ = null;

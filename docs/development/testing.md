@@ -114,6 +114,12 @@ cancellation and exception unwinding). The full smoke run includes both checks.
 
 - DMD 2.112+ and LDC 1.42+, with the LDC ThreadSanitizer runtime installed (the
   TSan lanes fail to link without it).
+  The ASan lane runs with `detect_stack_use_after_return=0`: ASan's fake
+  stack puts locals in a region the D GC does not scan, so a class object
+  referenced only by a local can be collected while in use and read as
+  garbage (the fork-join suite's `PoolResolution` between `resolve` and the
+  host's start did, deterministically). Keep that option on any ASan run of
+  D code that allocates.
 - Dub, GNU make, Python 3, Bash and C11/C++11 compilers (`cc` and `c++` by
   default; set `CC` and `CXX` to override).
 - `/bin/sh` is not required. GNU make execs recipes without shell metacharacters

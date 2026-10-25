@@ -232,8 +232,9 @@ FiberServiceResult FiberReadyLane.serve(ref Token token,
                                         FiberServicePass pass);
 ```
 
-`FiberLane` already has a `service` property (its planned `LaneService`),
-hence `serve`. `FiberDomain.serve` forwards to a one-lane domain's lane.
+The name `serve` avoided a clash with the `service` property of the
+since-removed `FiberLane`. `FiberDomain.serve` forwards to a one-lane
+domain's lane.
 
 In order, one pass:
 1. drains queued cancellation requests (counted);
@@ -256,7 +257,6 @@ the steps.
 | --- | --- | --- | --- | --- |
 | Caller-driven (`drainUntilEmpty`, custom loops) | the caller's view | the caller, as responder | the caller is the Director | the caller's own |
 | `FarmHost` (`attachFiberDomain`; with workers, itself a `GroupHost` layer) | pool workers on the host Farm | the control thread in each `step()` (emit), as responder | the control thread, which must have constructed the domain; `attach` checks | control thread steps; workers park as the host configures |
-| `CacheAwarePool` (`installFiberPlan`) | managed workers on their lane | every managed worker, responders by plan | the Director calls `retire`, woken by `FiberWakeEvent.lifecycle`, or the domain uses `serviceThreads` | `ManagedPumpResult.until(deadline)` |
 | `GroupHost` (`FiberGroups`) | the host's view, or a consuming attachment's (the dispatcher) | every worker's managed pump, as responder | the Director calls `retire`, or the domain uses `serviceThreads` | `until(deadline)` from the pump |
 
 Today `FarmHost` holds completions until `close()`, and its `finish` releases

@@ -144,6 +144,15 @@ Fixes:
   list was full, or, with remote frees pending, replaced the list with them
   and lost every block on it. Adoption now allocates from the list first;
   a module unittest builds both slot states and requires no new chunk.
+- `resolvePool` built its result's `topology` pointer from `[snap].ptr`, an
+  array literal the optimizer may place on the stack; the resolution now
+  owns a heap copy, and the planning entry points (`FarmHost.resolve`,
+  `GroupHost.resolve`, `CacheAwarePool.resolve`, both host constructors)
+  plan against the process snapshot by reference (`liveTopology`) instead
+  of a stack copy. The gate's ASan lane sets
+  `detect_stack_use_after_return=0`: ASan's fake stack is invisible to the
+  D GC, which collected a `PoolResolution` held only by a local during the
+  host's start, deterministically once the fork-join suite grew.
 - `Dispatcher.start(opt)` forced `farmPerGroup`, so `start(oneFarm())` got
   per-group Farms; it now honours `opt`, and `start()` is `perGroup()`.
   `start()` takes at most `maxParticipants` processors instead of throwing
@@ -184,7 +193,9 @@ Fixes:
   group host owning pool, caller placement and the pool claim while
   `FarmHost` keeps its control token, caller view, state machine, owned
   runtimes and parks and `step()`/`waitUntil()`; `FarmHost.groupHost`
-  exposes it, and `GroupHost` gains `director` and a Farm-leaking `abandon`.
+  exposes it, `FarmHostOptions.attachments` forwards further attachments to
+  it (then its workers may publish: `GroupHostOptions.workerTokens`), and
+  `GroupHost` gains `director` and a Farm-leaking `abandon`.
   A second host of either kind is refused ("another host owns the pool");
   `FarmHost(0)` stays a standalone Farm and may exist beside any host. The
   whole FarmHost live suite passes unchanged apart from that message.
@@ -196,6 +207,17 @@ Fixes:
 
 Fibers (API changes; see the [completions, records and hosting design](docs/design/fiber-completion-and-records.md)):
 
+- Fibers: the pool integration is `ant_fibers.groups` on a `GroupHost`.
+  `installFiberPlan`/`uninstallFiberPlan`, `FiberLane`, `FiberServicePlan`
+  (rescue/assist edges, lane service states), `FiberWakePolicy`,
+  `FiberWakeEvent`, the mailbox notifier, `fiberWorkerHooks` and the
+  topology presets are removed (`threadpool_driver.d`, `service_plan.d`).
+  `FiberReadyLane`, `attachReadyLane`, `spawnOn` and `spawnHandleOn` are
+  public for a caller's own multi-lane embedding. The smoke tests of lane
+  admission states, wake policies and edges went with them; the remaining
+  pool behaviour (timer deadlines ending parks, Director signals and
+  cancellation applied by worker passes, cross-group joins, both retirement
+  modes) is covered on the group host.
 - Fibers: wait arbitration is one claim word per task. Each wait arms a fresh
   count; signal delivery, event and semaphore wakes, join completion, timer
   expiry and cancellation each CAS it, and only the winner adds WAKE. Waiters
@@ -230,8 +252,9 @@ Fibers (API changes; see the [completions, records and hosting design](docs/desi
   Admission backpressure (`FiberLifecycleBackpressure`) and its accounting are
   unchanged. `pendingEvents`/`lifecycleReserved` are `pendingRecords`/
   `reservedRecords`. The per-pump `pendingEvents` read raced a Director-owned
-  count; pending retirement is now recorded in the lane mailbox only, where
-  under `broadcast` it used to wake every pool worker on every pump.
+  count and woke every pool worker on every pump while records were pending;
+  pending retirement now wakes nobody, and the Director polls
+  `retirementPending`.
 - Fibers: one service pass, `FiberReadyLane.serve` / `FiberDomain.serve`
   (cancellation requests, timers, triggers, flush, retirement, deadline),
   drives the managed pump, `attachFiberDomain` and `drainUntilEmpty`. A

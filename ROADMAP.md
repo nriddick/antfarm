@@ -43,7 +43,8 @@ the onboarding pass (three rules first, a ten-line first program on every
 core, the hosting guide split). The ordered plan with each step's checks is
 [docs/development/cleanup-plan-2.0.md](docs/development/cleanup-plan-2.0.md).
 The fork-join suite runs under ThreadSanitizer and AddressSanitizer in
-`make check`. Left after 2.0.0: `FarmHost` on `GroupHost` (2.1.0, below),
+`make check`. Left after 2.0.0: `farmPerGroup` routing of `FarmHost`'s
+runtimes and parks (2.1.0, below; `FarmHost` itself runs on `GroupHost`),
 private trees retreating to typed results and tracked outcomes (2.1.1), and
 Windows validation of the wake path (with the next Windows matrix).
 
@@ -86,10 +87,11 @@ releases. Done:
 Remaining for 2.1.0:
 
 - Route `FarmHost`'s runtimes and parks by group on top of `GroupHost`
-  (`threadpool.groups`), which since 2.0.0 owns the pool, caller
-  placement, one Farm per accepted group and per-thread tokens for raw
-  worker bodies; the fork-join dispatcher runs on it. The actor host still
-  owns one Farm on one group. The measurements are in
+  (`threadpool.groups`), the one owner of the pool, caller placement, one
+  Farm per accepted group and per-thread tokens, whose worker loop is
+  composed from attachments; the dispatcher, `FarmHost` and `FiberGroups`
+  run on it. A `FarmHost` still puts its runtimes and parks on one Farm. The
+  measurements are in
   [several physical groups](docs/guide/scaling-groups.md#several-physical-groups).
   Done so far: `GroupHost` composes its worker loop from
   `GroupHostOptions.attachments` and picks the lane at start (raw
@@ -101,12 +103,13 @@ Remaining for 2.1.0:
   ([design](docs/design/threadpool.md#group-host)), and a `FarmHost` with
   workers runs on a `GroupHost` with one shared Farm, its body the single raw
   attachment, keeping its API, state machine and owned runtimes and parks
-  (`FarmHost.groupHost`). Remaining: `farmPerGroup` routing of `FarmHost`'s
-  actor runtimes and private parks, which is an application-level routing
-  decision as much as a host one; then the process-global owners (the
-  dispatcher's `g_host`, `installedFiberPool`) converge on the one
-  `GroupHost`. Keep `installFiberPlan` through 2.1.0 and remove it once
-  `ant_fibers.groups` has a release behind it.
+  (`FarmHost.groupHost`), and the dispatcher has an attachment form
+  (`Dispatcher.attachment` + `start(host)`) so dispatcher, Fibers and a
+  `FarmHost` share one host. Remaining: `farmPerGroup` routing of
+  `FarmHost`'s actor runtimes and private parks, which is an application-level
+  routing decision as much as a host one. The dispatcher's participant
+  tables (`g_host`, `g_participants`) stay process globals: one dispatcher
+  per process, like one host.
 - Before the release: the full `make check` on the branch tip; the native
   Windows matrix, once features and fixes settle; re-take the PERFORMANCE.md
   fork-join table under the harness's build rules with the frame pool; and
@@ -150,10 +153,10 @@ admission (deque owner end, Farm injection), topology-aware stealing
 (same-LLC bias, measured as neutral on the 5900XT), bounded storage (fixed
 deques, Farm spill, inline fallback), completion (continuation-passing join,
 exactly-once by deque and Farm claims) and fairness and parking (periodic
-Farm poll, Director parking with a parked bitmap) are done. Still open: a
-TSan lane for the dispatcher, Windows validation of the wake path, a submit
-token per foreign thread, and actor or Fiber adapters, which wait for their
-ownership mappings. The cleanup that follows the addition (one owner of the
+Farm poll, Director parking with a parked bitmap) are done, and so are the
+TSan/ASan lanes and the Fiber adapter (`FiberGroups` beside the dispatcher
+on one `GroupHost`, 2.1.0). Still open: Windows validation of the wake path
+and a submit token per foreign thread. The cleanup that follows the addition (one owner of the
 pool, idle machinery, loops over fork-join, private trees, stubs,
 onboarding, duplicated status) is ordered in
 [docs/development/cleanup-plan-2.0.md](docs/development/cleanup-plan-2.0.md).
@@ -279,10 +282,11 @@ are not promised yet.
   run. Known limits: T01 and T17 are POSIX-only
   fork/abort probes, and ThreadSanitizer is unavailable in the Windows LDC
   runtime (`Scoped EH not supported`).
-- Multi-LLC Fiber service: native-only service by default; rescue/assist
-  validated on the 2-LLC host; selective wake (`servingGroups`) is opt-in
-  until it is performance-characterized. Topology-specific
-  performance and lost-worker-group claims still need their own evidence.
+- Fibers on several groups: `FiberGroups` serves each group's Farm with that
+  group's workers; the former cross-group service policy (rescue/assist
+  edges, selective wake) was removed with the service plans in 2.1.0 and
+  returns only for a workload that needs it. Topology-specific performance
+  claims still need their own evidence.
 - Fiber ThreadSanitizer: migration is covered. The scheduler keeps a TSan
   context per task behind an uninstrumented switch bridge, which assumes the
   standard, uninstrumented DRuntime

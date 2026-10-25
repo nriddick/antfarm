@@ -8,7 +8,6 @@ import core.lifetime : move;
 import core.thread : Thread;
 import core.time : MonoTime, hours, msecs, seconds, usecs;
 import std.exception : enforce;
-import service_plan_tests : synthetic;
 
 enum taskCount = 256;
 shared int subscribed;
@@ -636,9 +635,13 @@ void sharedDomainLaneStress()
     auto farmB = AntFarm.create(4, 8, 2, 0, 0, 1, 16_384,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmB.destroy();
+    // Two ready lanes on two Farms share one domain; each Farm has its own
+    // consumer threads, and the Director flushes both lanes.
     auto domain = new FiberDomain;
-    auto laneA = new FiberLane(domain, farmA);
-    auto laneB = new FiberLane(domain, farmB);
+    auto laneA = new FiberReadyLane(farmA);
+    auto laneB = new FiberReadyLane(farmB);
+    domain.attachReadyLane(laneA);
+    domain.attachReadyLane(laneB);
     auto tokenA = farmA.registerProducer(Tier.small);
     auto tokenB = farmB.registerProducer(Tier.small);
     scope (exit)
@@ -653,11 +656,11 @@ void sharedDomainLaneStress()
     tasksB.reserve(tasksPerLane);
     foreach (_; 0 .. tasksPerLane)
     {
-        tasksA ~= laneA.spawn({
+        tasksA ~= domain.spawnOn(laneA, {
             FiberDomain.yieldReady();
             atomicFetchAdd(ran, 1u);
         });
-        tasksB ~= laneB.spawn({
+        tasksB ~= domain.spawnOn(laneB, {
             FiberDomain.yieldReady();
             atomicFetchAdd(ran, 1u);
         });
@@ -735,112 +738,6 @@ void sharedDomainLaneStress()
     atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
     assert(atomicLoad!(MemoryOrder.acq)(ran) == tasksPerLane * 2);
     assert(laneA.ready == 0 && laneB.ready == 0 && domain.ready == 0);
-    assert(domain.retire() == tasksPerLane * 2);
-}
-
-void remoteSweeperStress()
-{
-    enum tasksPerLane = 400;
-    auto farmA = AntFarm.create(4, 8, 2, 0, 0, 2, 16_384,
-                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farmA.destroy();
-    auto farmB = AntFarm.create(4, 8, 2, 0, 0, 2, 16_384,
-                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farmB.destroy();
-    auto domain = new FiberDomain;
-    auto laneA = new FiberLane(domain, farmA);
-    auto laneB = new FiberLane(domain, farmB);
-    // Group 0 (A) has the two covering workers and rescues group 1 (B), which
-    // has no native consumer.
-    installFiberPlan(new FiberServicePlan(synthetic([2, 0]))
-        .bind(0, laneA).bind(1, laneB).rescue(1, 0), null);
-    scope (exit) uninstallFiberPlan();
-    shared uint ran;
-    FiberTask[] tasks;
-    tasks.reserve(tasksPerLane * 2);
-    foreach (_; 0 .. tasksPerLane)
-    {
-        tasks ~= laneA.spawn({
-            FiberDomain.yieldReady();
-            atomicFetchAdd(ran, 1u);
-        });
-        tasks ~= laneB.spawn({
-            FiberDomain.yieldReady();
-            atomicFetchAdd(ran, 1u);
-        });
-    }
-
-    shared uint subscribed;
-    shared int stopConsumers;
-    // Native B is disabled. Covering workers own home (A) and remote (B)
-    // ConsumerViews plus producer tokens, matching a managed responder.
-    Thread coveringWorker()
-    {
-        return new Thread({
-            auto tokenA = farmA.registerProducer(Tier.small);
-            auto tokenB = farmB.registerProducer(Tier.small);
-            if (!tokenA.valid || !tokenB.valid)
-                throw new Exception("remoteSweeperStress: producer registration failed");
-            scope (exit)
-            {
-                farmA.unregisterProducer(tokenA);
-                farmB.unregisterProducer(tokenB);
-            }
-            ConsumerView home;
-            ConsumerView remote;
-            subscribeOrThrow(home, farmA);
-            scope (exit) home.unsubscribe();
-            subscribeOrThrow(remote, farmB);
-            scope (exit) remote.unsubscribe();
-            atomicFetchAdd(subscribed, 1u);
-            while (atomicLoad!(MemoryOrder.acq)(stopConsumers) == 0)
-            {
-                immutable consumedHome = home.consumeNext();
-                if (laneA.ready != 0) laneA.flush(tokenA);
-                immutable consumedRemote = remote.consumeNext();
-                if (laneB.ready != 0) laneB.flush(tokenB);
-                if (!consumedHome && !consumedRemote
-                    && laneA.ready == 0 && laneB.ready == 0
-                    && laneA.published == 0 && laneB.published == 0)
-                    Thread.yield();
-            }
-            while (home.consumeNext()) {}
-            while (remote.consumeNext()) {}
-        });
-    }
-    auto consumers = [coveringWorker(), coveringWorker()];
-    foreach (consumer; consumers) consumer.start();
-    scope (exit)
-    {
-        atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
-        foreach (consumer; consumers) consumer.join();
-    }
-    while (atomicLoad!(MemoryOrder.acq)(subscribed) != consumers.length)
-        Thread.yield();
-    auto spinStart = MonoTime.currTime;
-    ulong spins;
-    while (!domain.drained)
-    {
-        Thread.yield();
-        ++spins;
-        if ((spins & 0x3FFF) == 0
-            && MonoTime.currTime - spinStart > seconds(8))
-        {
-            import std.stdio : stderr, writefln;
-            stderr.writefln(
-                "remoteSweeperStress stall: active=%s ran=%s readyA=%s readyB=%s " ~
-                "publishedA=%s publishedB=%s",
-                domain.active, atomicLoad!(MemoryOrder.acq)(ran),
-                laneA.ready, laneB.ready, laneA.published, laneB.published);
-            assert(false, "remoteSweeperStress: drain stalled");
-        }
-    }
-    atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
-    assert(atomicLoad!(MemoryOrder.acq)(ran) == tasksPerLane * 2);
-    assert(laneA.ready == 0 && laneB.ready == 0);
-    assert(laneA.published == 0 && laneB.published == 0);
-    foreach (task; tasks)
-        assert(task.terminated && task.resumeCount == 2);
     assert(domain.retire() == tasksPerLane * 2);
 }
 
@@ -1401,7 +1298,6 @@ void main()
     timerCancellationRaceStress();
     lifecycleRetentionStress();
     sharedDomainLaneStress();
-    remoteSweeperStress();
     actorWaveGenerationStress();
     syncPrimitiveStress();
     semaphoreConservationStress();

@@ -12,17 +12,17 @@ import ant_fibers;
 import antfarm;
 import core.atomic;
 import core.stdc.stdio : printf;
-import service_plan_tests;
 import host_attach_tests;
 import ant_fibers.semaphore_tests : semaphoreCancellationSmoke;
 import ant_fibers.event_tests : eventCancellationSmoke;
 import ant_fibers.wait_race_tests : waitRaceSmoke;
 import ant_fibers.record_tests : recordSmoke;
 import ant_fibers.group_host_tests : groupHostFiberSmoke;
-import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
-import threadpool.resolution : PoolResolution;
+import threadpool.bins : home;
+import threadpool.groups : GroupHost, GroupHostOptions, GroupSlot;
+import threadpool.host : HostGroups;
 import core.thread : Fiber, Thread;
-import core.time : msecs;
+import core.time : Duration, msecs;
 
 shared int steps;
 shared int barePayloadRuns;
@@ -33,12 +33,6 @@ void functionSpawnBody()
     atomicFetchAdd(functionSpawnRuns, 1);
     FiberDomain.yieldReady();
     atomicFetchAdd(functionSpawnRuns, 1);
-}
-
-void wakeNotifier(void* context) nothrow @nogc
-{
-    auto count = cast(shared(int)*) context;
-    atomicFetchAdd(*count, 1);
 }
 
 extern(C) void barePayloadCallback(const(ulong)* bodyPtr, size_t bodyWords) nothrow @nogc @system
@@ -109,14 +103,16 @@ final class RetireLog
     }
 }
 
+// The function-pointer spawn form and `drainUntilEmpty` on a one-lane domain:
+// the drain retires on the Director, and the next spawn reuses the pooled task
+// under the default and a wider flush batch.
 void uxHelpersSmoke()
 {
-    import threadpool : PoolOptions;
-
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto lane = new FiberLane(farm);
+    auto domain = new FiberDomain(farm);
+    assert(domain.laneCount == 1);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -124,28 +120,18 @@ void uxHelpersSmoke()
     scope (exit) view.unsubscribe();
 
     atomicStore(functionSpawnRuns, 0);
-    auto first = lane.spawn(&functionSpawnBody);
+    auto first = domain.spawn(&functionSpawnBody);
     // drainUntilEmpty retires on the Director: `first` is recycled by the
     // time it returns and is used below for identity only.
-    drainUntilEmpty(lane.domain, token, view);
+    drainUntilEmpty(domain, token, view);
     assert(atomicLoad(functionSpawnRuns) == 2);
-    assert(!lane.domain.retirementPending && lane.domain.pooled == 1);
+    assert(!domain.retirementPending && domain.pooled == 1);
 
-    auto recycled = lane.spawn(&functionSpawnBody);
+    auto recycled = domain.spawn(&functionSpawnBody);
     assert(recycled is first);
-    drainUntilEmpty(lane.domain, token, view, 256, avgCostForChunk(32));
+    drainUntilEmpty(domain, token, view, 256, avgCostForChunk(32));
     assert(atomicLoad(functionSpawnRuns) == 4);
-    assert(!lane.domain.retirementPending && lane.domain.pooled == 1);
-
-    PoolOptions options;
-    applyFiberTopologyPreset(
-        FiberTopologyPreset.fiberThroughput, [lane], options);
-    assert(!options.skipSmtSiblings && options.managedWorker.pump !is null);
-    assert(lane.flushBatch == 256 && lane.avgCost == avgCostForChunk(32));
-    applyFiberTopologyPreset(
-        FiberTopologyPreset.payloadThroughput, [lane], options);
-    assert(options.skipSmtSiblings);
-    assert(lane.flushBatch == 32 && lane.avgCost == avgCostForChunk(8));
+    assert(!domain.retirementPending && domain.pooled == 1);
 }
 
 void cancellationOwnershipSmoke()
@@ -1150,9 +1136,13 @@ void sharedDomainLaneSmoke()
     auto farmB = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                 DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farmB.destroy();
+    // Two ready lanes on two Farms share one domain: waits, signals and joins
+    // are domain-wide, while readiness lands on the spawning lane.
     auto domain = new FiberDomain;
-    auto laneA = new FiberLane(domain, farmA);
-    auto laneB = new FiberLane(domain, farmB);
+    auto laneA = new FiberReadyLane(farmA);
+    auto laneB = new FiberReadyLane(farmB);
+    domain.attachReadyLane(laneA);
+    domain.attachReadyLane(laneB);
     assert(domain.laneCount == 2);
     auto tokenA = farmA.registerProducer(Tier.small);
     auto tokenB = farmB.registerProducer(Tier.small);
@@ -1172,39 +1162,32 @@ void sharedDomainLaneSmoke()
     }
 
     FiberJoinResult joined;
-    auto target = laneA.spawn({ FiberDomain.await(0xD04A); });
-    auto joiner = laneB.spawn({ joined = target.handle.joinFiber(); });
+    auto target = domain.spawnOn(laneA, { FiberDomain.await(0xD04A); });
+    auto joiner = domain.spawnOn(laneB, { joined = target.handle.joinFiber(); });
     assert(laneA.ready == 1 && laneB.ready == 1 && domain.ready == 2);
-    auto wakeA = laneA.takeWakeEvents();
-    auto wakeB = laneB.takeWakeEvents();
-    assert(wakeA == FiberWakeEvent.spawned);
-    assert(wakeB == FiberWakeEvent.spawned);
 
     auto flushed = laneA.flush(tokenA);
-    assert(flushed == 1);
+    assert(flushed == 1 && laneA.published == 1);
     auto consumed = viewA.consumeNext();
     assert(consumed);
     assert(domain.waiting == 1 && laneA.ready == 0 && laneB.ready == 1);
+    assert(laneA.published == 0);
     flushed = laneB.flush(tokenB);
     assert(flushed == 1);
     consumed = viewB.consumeNext();
     assert(consumed);
     assert(domain.waiting == 2 && laneA.ready == 0 && laneB.ready == 0);
 
+    // The signal readies the target on its own lane only.
     auto signalled = domain.signal(0xD04A);
     assert(signalled == 1);
     assert(laneA.ready == 1 && laneB.ready == 0);
-    wakeA = laneA.takeWakeEvents();
-    wakeB = laneB.takeWakeEvents();
-    assert(wakeA == FiberWakeEvent.signalled);
-    assert(wakeB == FiberWakeEvent.none);
     flushed = laneA.flush(tokenA);
     assert(flushed == 1);
     consumed = viewA.consumeNext();
     assert(consumed);
+    // The target's completion readies the cross-lane joiner on lane B.
     assert(target.terminated && laneA.ready == 0 && laneB.ready == 1);
-    wakeB = laneB.takeWakeEvents();
-    assert(wakeB == FiberWakeEvent.signalled);
     flushed = laneB.flush(tokenB);
     assert(flushed == 1);
     consumed = viewB.consumeNext();
@@ -1212,75 +1195,9 @@ void sharedDomainLaneSmoke()
     assert(joiner.terminated && domain.drained);
     assert(joined.status == FiberJoinStatus.completed
         && joined.task == target.handle);
+    assert(laneA.published == 0 && laneB.published == 0);
 
     assert(domain.retire() == 2);
-}
-
-void remoteSweeperSmoke()
-{
-    auto farmA = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
-                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farmA.destroy();
-    auto farmB = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
-                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farmB.destroy();
-    auto domain = new FiberDomain;
-    auto laneA = new FiberLane(domain, farmA);
-    auto laneB = new FiberLane(domain, farmB);
-    // Group 0 (A) has one worker and rescues group 1 (B), which has none.
-    auto plan = new FiberServicePlan(synthetic([1, 0]))
-        .bind(0, laneA).bind(1, laneB).rescue(1, 0);
-    installFiberPlan(plan, null);
-    scope (exit) uninstallFiberPlan();
-    assert(plan.edges == [ServiceEdge(0, 1, ServiceKind.rescue)]);
-    assert(laneB.service == LaneService.rescued);
-
-    auto tokenA = farmA.registerProducer(Tier.small);
-    auto tokenB = farmB.registerProducer(Tier.small);
-    scope (exit)
-    {
-        farmA.unregisterProducer(tokenA);
-        farmB.unregisterProducer(tokenB);
-    }
-    ConsumerView home;
-    ConsumerView remote;
-    subscribeOrThrow(home, farmA);
-    scope (exit) home.unsubscribe();
-    subscribeOrThrow(remote, farmB);
-    scope (exit) remote.unsubscribe();
-
-    laneA.takeWakeEvents();
-    laneB.takeWakeEvents();
-    shared uint ran;
-    enum count = 32;
-    FiberTask[] tasks;
-    foreach (_; 0 .. count)
-        tasks ~= laneB.spawn({
-            FiberDomain.yieldReady();
-            atomicFetchAdd(ran, 1u);
-        });
-    auto wakeB = laneB.takeWakeEvents();
-    auto wakeA = laneA.takeWakeEvents();
-    assert(wakeB == FiberWakeEvent.spawned);
-    assert((cast(uint) wakeA & cast(uint) FiberWakeEvent.remoteReady) != 0);
-
-    // Native B is disabled: only A's home consumer plus its remote view of B
-    // may drain B's activations.
-    foreach (_; 0 .. 200_000)
-    {
-        home.consumeNext();
-        if (laneA.ready != 0) laneA.flush(tokenA);
-        remote.consumeNext();
-        if (laneB.ready != 0) laneB.flush(tokenB);
-        if (domain.drained) break;
-        Thread.yield();
-    }
-    assert(domain.drained);
-    assert(atomicLoad(ran) == count);
-    assert(laneA.published == 0 && laneB.published == 0);
-    foreach (task; tasks)
-        assert(task.terminated && task.resumeCount == 2);
-    assert(domain.retire() == count);
 }
 
 /// Consume the next single-activation table from a fresh OS thread. Publishing
@@ -1425,49 +1342,6 @@ void migrationSmoke()
         && failed.exception.msg == "failure after migration");
     completed = log.retire(domain);
     assert(completed.length == 1 && completed[0].task is failed);
-}
-
-void wakePolicySmoke()
-{
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
-                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farm.destroy();
-    auto lane = new FiberLane(farm);
-    lane.wakePolicy = FiberWakePolicy.directorOwned;
-    shared int notifications;
-    lane.setWakeNotifier(&wakeNotifier, cast(void*) &notifications);
-
-    auto task = lane.spawn({});
-    assert(atomicLoad(notifications) == 1);
-    auto spawnEvents = cast(uint) lane.takeWakeEvents();
-    assert((spawnEvents & cast(uint) FiberWakeEvent.spawned) != 0);
-    auto clearedEvents = lane.takeWakeEvents();
-    assert(clearedEvents == FiberWakeEvent.none);
-
-    auto submitted = lane.requestCancel(task);
-    assert(submitted == CancellationSubmission.queued);
-    auto applications = lane.drainCancellationRequests();
-    assert(applications.length == 1
-        && applications[0].result == CancellationResult.wonBeforeEntry);
-    lane.beginShutdown(true);
-    // Cancellation creates one new empty→nonempty edge; shutdown coalesces.
-    assert(atomicLoad(notifications) == 2);
-    immutable events = cast(uint) lane.takeWakeEvents();
-    assert((events & cast(uint) FiberWakeEvent.cancelled) != 0);
-    assert((events & cast(uint) FiberWakeEvent.shutdown) != 0);
-
-    // Complete the cancelled activation so the domain GC root is retired
-    // before the Farm is destroyed.
-    auto token = farm.registerProducer(Tier.small);
-    scope (exit) farm.unregisterProducer(token);
-    ConsumerView view;
-    auto subscription = subscribeOrThrow(view, farm);
-    scope (exit) view.unsubscribe();
-    auto flushed = lane.domain.flush(token);
-    assert(flushed == 1);
-    auto consumed = view.consumeNext();
-    assert(consumed);
-    assert(lane.retire() == 1);
 }
 
 void mixedPayloadSmoke()
@@ -1784,225 +1658,29 @@ void sharedSignalAndTimerCancellationSmoke()
     assert(domain.retire() == count + 1);
 }
 
-void threadpoolSmoke()
+/// `GroupHostOptions` for the Fiber pool tests: every group, one Farm per
+/// group when there are several, and workers that park until woken so only
+/// the lanes' wakes and the earliest timer deadline can end a park.
+GroupHostOptions fiberHostOptions()
 {
-    import core.thread : Thread;
-    import core.time : MonoTime, msecs;
-    import threadpool;
-
-    auto topology = CacheAwarePool.topology();
-    auto log = new RetireLog;
-    AntFarm*[] farms;
-    FiberLane[] lanes;
-    foreach (_; 0 .. topology.llcCount)
-    {
-        auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
-                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
-        farms ~= farm;
-        lanes ~= new FiberLane(farm, log.options);
-    }
-    scope (exit)
-    {
-        uninstallFiberPlan();
-        foreach (farm; farms) farm.destroy();
-    }
-    ushort selectedLp;
-    ushort selectedGroup;
-    ushort selectedLlc;
-    bool found;
-    foreach (ref lp; topology.processors)
-    {
-        if (!topology.isEligible(lp)) continue;
-        selectedLp = lp.lpIndex;
-        selectedGroup = lp.group;
-        selectedLlc = lp.llcIndex;
-        found = true;
-        break;
-    }
-    assert(found);
-
-    shared int ran;
-    shared int observedLlc = -1;
-    PoolOptions options;
-    options.processors = [ProcessorId(selectedGroup, selectedLp)];
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    // Lanes outside the selected CPU's group are bound but unstaffed.
-    auto plan = new FiberServicePlan(pool.resolve());
-    foreach (llcIndex, lane; lanes)
-        plan.bind(cast(ushort) llcIndex, lane);
-    installFiberPlan(plan, pool);
-    auto task = lanes[selectedLlc].spawn({
-        auto worker = currentWorker();
-        assert(worker !is null);
-        atomicStore(observedLlc, worker.llcIndex);
-        atomicFetchAdd(ran, 1);
-    });
-    pool.start();
-    foreach (_; 0 .. 400)
-    {
-        if (task.terminated) break;
-        Thread.sleep(msecs(5));
-    }
-    pool.shutdown();
-    assert(task.terminated && atomicLoad(ran) == 1);
-    assert(atomicLoad(observedLlc) == selectedLlc);
-    assert(pool.workerFailures.length == 0);
-    // Under `director` retirement workers never retire: they leave the
-    // terminal task (still valid) for the Director, and only note it in the
-    // lane mailbox.
-    assert(lanes[selectedLlc].domain.pendingCompletions == 1);
-    assert((cast(uint) lanes[selectedLlc].takeWakeEvents()
-        & cast(uint) FiberWakeEvent.lifecycle) != 0);
-    auto retired = log.retire(lanes[selectedLlc].domain);
-    assert(retired.length == 1 && retired[0].task is task);
-
-    shared int enteredFailure;
-    // Start idle, then spawn externally: FiberLane must wake the waiting pool.
-    auto pool2 = new CacheAwarePool(options);
-    installFiberPlan(plan, pool2);
-    pool2.start();
-    Thread.sleep(msecs(10));
-    auto failed = lanes[selectedLlc].spawn({
-        atomicFetchAdd(enteredFailure, 1);
-        throw new Exception("fiber failure");
-    });
-    foreach (_; 0 .. 400)
-    {
-        if (failed.terminated) break;
-        Thread.sleep(msecs(5));
-    }
-    pool2.shutdown();
-    assert(atomicLoad(enteredFailure) == 1);
-    assert(failed.outcome == FiberOutcome.failed);
-    assert(failed.exception !is null && failed.exception.msg == "fiber failure");
-    retired = log.retire(lanes[selectedLlc].domain);
-    assert(retired.length == 1 && retired[0].task is failed
-        && retired[0].outcome == FiberOutcome.failed);
-
-    // The managed pump hands its nearest deadline to the default wait policy;
-    // no timer thread or cadence polling is involved.
-    auto pool3 = new CacheAwarePool(options);
-    installFiberPlan(plan, pool3);
-    pool3.start();
-    MonoTime timerStart;
-    MonoTime timerEnd;
-    auto timed = lanes[selectedLlc].spawn({
-        timerStart = MonoTime.currTime;
-        FiberDomain.sleepFor(msecs(30));
-        timerEnd = MonoTime.currTime;
-    });
-    foreach (_; 0 .. 400)
-    {
-        if (timed.terminated) break;
-        Thread.sleep(msecs(5));
-    }
-    pool3.shutdown();
-    assert(timed.outcome == FiberOutcome.completed);
-    assert(timerEnd - timerStart >= msecs(20));
-    retired = log.retire(lanes[selectedLlc].domain);
-    assert(retired.length == 1 && retired[0].task is timed);
-
-    // A custom selector which chooses no responder fails the lane's domain
-    // at managed start instead of silently parking live work.
-    foreach (lane; lanes)
-        lane.responderSelector = (WorkerSelf*) => false;
-    auto pool4 = new CacheAwarePool(options);
-    installFiberPlan(plan, pool4);
-    pool4.start();
-    // Wait for the failing pump to stop its worker, not just for `failed`:
-    // a shutdown before the first pump would record no failure.
-    foreach (_; 0 .. 2_000)
-    {
-        if (lanes[selectedLlc].state == FiberLaneState.failed
-            && lanes[selectedLlc].liveServers == 0)
-            break;
-        Thread.sleep(msecs(1));
-    }
-    assert(lanes[selectedLlc].managedWorkers == 1);
-    assert(lanes[selectedLlc].responders == 0);
-    assert(lanes[selectedLlc].state == FiberLaneState.failed);
-    pool4.shutdown();
-    assert(pool4.workerFailures.length == 1);
-    assert(lanes[selectedLlc].state == FiberLaneState.failed);
-    foreach (lane; lanes) lane.responderSelector = null;
-
-    // Installed lanes outside the pool's selected processors are unstaffed:
-    // closed from installation and rejecting new work.
-    foreach (llcIndex, lane; lanes)
-    {
-        if (llcIndex == selectedLlc) continue;
-        assert(lane.service == LaneService.unstaffed);
-        assert(lane.state == FiberLaneState.closed);
-        assert(refusedSpawn(lane) !is null);
-    }
-
-    // Cancellation removes a long waiter, republishes it, and unwinds the
-    // fiber through FiberCancelled without turning it into a worker failure.
-    uninstallFiberPlan();
-    auto cancelFarm = farms[selectedLlc];
-    auto cancelLane = lanes[selectedLlc];
-    ConsumerView cancelView;
-    auto cancelSubscription = subscribeOrThrow(cancelView, cancelFarm);
-    auto cancelToken = cancelFarm.registerProducer(Tier.small);
-    while (cancelView.consumeNext()) {}
-    bool cleaned;
-    auto cancelled = cancelLane.domain.spawn({
-        scope (exit) cleaned = true;
-        FiberDomain.await(999);
-    });
-    auto cancelFlushed = cancelLane.domain.flush(cancelToken);
-    assert(cancelFlushed == 1);
-    auto cancelConsumed = cancelView.consumeNext();
-    assert(cancelConsumed);
-    assert(cancelLane.domain.waiting == 1);
-    cancelLane.beginShutdown(true);
-    cancelFlushed = cancelLane.domain.flush(cancelToken);
-    assert(cancelFlushed == 1);
-    cancelConsumed = cancelView.consumeNext();
-    assert(cancelConsumed);
-    assert(cancelled.outcome == FiberOutcome.cancelled && cleaned);
-    assert(cancelLane.drained);
-    retired = log.retire(cancelLane.domain);
-    assert(retired.length == 1 && retired[0].task is cancelled);
-    cancelView.unsubscribe();
-    cancelFarm.unregisterProducer(cancelToken);
-
-    // Fatal Error is retained in the Fiber callback, then rethrown only from
-    // the managed pump so threadpool records the failure and requests stop.
-    auto fatalLog = new RetireLog;
-    auto fatalLane = new FiberLane(cancelFarm, fatalLog.options);
-    lanes[selectedLlc] = fatalLane;
-    auto pool5 = new CacheAwarePool(options);
-    auto plan5 = new FiberServicePlan(pool5.resolve());
-    foreach (llcIndex, lane; lanes)
-        plan5.bind(cast(ushort) llcIndex, lane);
-    installFiberPlan(plan5, pool5);
-    pool5.start();
-    auto fatalTask = fatalLane.spawn({ throw new Error("managed fatal"); });
-    foreach (_; 0 .. 400)
-    {
-        if (fatalTask.terminated) break;
-        Thread.sleep(msecs(5));
-    }
-    pool5.shutdown();
-    assert(fatalTask.terminated && fatalLane.domain.fatal);
-    assert(pool5.workerFailures.length == 1);
-    assert(cast(Error) pool5.workerFailures[0] !is null
-        && pool5.workerFailures[0].msg == "managed fatal");
-    auto fatalCompletions = fatalLog.retire(fatalLane.domain);
-    auto fatalEvents = fatalLog.takeRecords();
-    assert(fatalCompletions.length == 1 && fatalEvents.length == 3);
-    assert(fatalCompletions[0].task is fatalTask);
-    foreach (farm; farms)
-        assert(atomicLoad(farm.Cf) == 0, "fiber lane leaked a consumer");
+    GroupHostOptions o;
+    o.groups = HostGroups.all();
+    o.farmPerGroup = GroupHost.resolve(o).groups.length > 1;
+    o.idleTimeout = Duration.max;
+    o.farm.ringMiB = 2;
+    return o;
 }
 
-FiberLaneUnavailable refusedSpawn(FiberLane lane)
+/// True after printing SKIP when the default resolution starts no pool worker.
+bool skipWithoutPoolWorkers(string test)
 {
-    try lane.spawn({});
-    catch (FiberLaneUnavailable refused) return refused;
-    return null;
+    import std.string : toStringz;
+
+    GroupHostOptions probe;
+    probe.groups = HostGroups.all();
+    if (GroupHost.resolve(probe).workers.length != 0) return false;
+    printf("SKIP %s: no pool workers\n", test.toStringz);
+    return true;
 }
 
 void waitTerminated(FiberTask task)
@@ -2015,111 +1693,185 @@ void waitTerminated(FiberTask task)
     }
 }
 
-// L4: stopping the last server closes admission instead of stranding work.
-void admissionAfterStopSmoke()
+// Fibers on a GroupHost through `FiberGroups`: activations run on the workers
+// consuming the target group's Farm; an await is released by a Director
+// signal; a timer wakes a parked worker (no idle timeout) and fires on time; a
+// fiber joins one spawned on another group's lane; a failing fiber records its
+// exception without failing its worker; under `director` retirement the
+// workers leave every terminal task for the Director; and `beginShutdown(true)`
+// unwinds a parked waiter through the workers' service passes.
+void threadpoolSmoke()
 {
-    import core.stdc.stdio : printf;
-    import threadpool;
+    import core.time : MonoTime;
 
-    auto topology = CacheAwarePool.topology();
-    ProcessorId cpu;
-    ushort group;
-    bool found;
-    foreach (ref lp; topology.processors)
+    if (skipWithoutPoolWorkers("threadpool smoke")) return;
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(log.options);
+    auto fibers = new FiberGroups(domain);
+    auto o = fiberHostOptions();
+    o.attachments = [fibers.attachment];
+    auto host = new GroupHost(o);
+    scope (exit) host.close();
+    assert(host.managedLane && host.workers != 0);
+    assert(fibers.host is host && fibers.domain is domain);
+    assert(fibers.lanes.length == host.farms.length);
+    assert(domain.laneCount == host.farms.length);
+    foreach (llc; host.groups)
     {
-        if (!topology.isEligible(lp)) continue;
-        cpu = ProcessorId.of(lp);
-        group = lp.llcIndex;
-        found = true;
-        break;
+        auto lane = fibers.laneOf(llc);
+        assert(lane !is null);
+        // One Farm per group maps each group to its own lane; one shared Farm
+        // maps every group to the home group's lane.
+        assert(lane.llc == (host.farms.length > 1 ? llc : host.groups[0]));
     }
-    assert(found);
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
-                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farm.destroy();
-    auto lane = new FiberLane(farm);
-    PoolOptions options;
-    options.processors = [cpu];
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane), pool);
-    scope (exit) uninstallFiberPlan();
-    assert(lane.group == group && lane.service == LaneService.native);
-    assert(lane.state == FiberLaneState.pending);
+    immutable ushort groupA = host.groups[0];
+    immutable ushort groupB = host.groups[$ - 1];
 
-    pool.start();
-    auto task = lane.spawn({});
-    waitTerminated(task);
-    assert(task.terminated);
-    assert(lane.state == FiberLaneState.open && lane.liveServers == 1);
-    pool.shutdown();
-    assert(pool.workerFailures.length == 0);
-    assert(lane.state == FiberLaneState.stopped && lane.liveServers == 0);
-
-    immutable active = lane.domain.active;
-    auto refused = refusedSpawn(lane);
-    assert(refused !is null && refused.state == FiberLaneState.stopped);
-    assert(refused.service == LaneService.native && refused.group == group);
-    assert(lane.domain.active == active);
-    assert(lane.retire() == 1);
-    printf("L4 admission after stop: lane %u stopped, spawn refused\n",
-        cast(uint) group);
-}
-
-/// A one-worker pool over the first eligible CPU with one lane bound to its group.
-struct OneLanePool
-{
-    import threadpool : CacheAwarePool;
-
-    CacheAwarePool pool;
-    FiberLane lane;
-    ushort group;
-}
-
-OneLanePool oneLanePool(AntFarm* farm, bool boundPool)
-{
-    import threadpool;
-
-    auto topology = CacheAwarePool.topology();
-    ProcessorId cpu;
-    ushort group;
-    bool found;
-    foreach (ref lp; topology.processors)
+    // A spawn on a group's lane runs on a worker whose home Farm is that
+    // group's Farm.
+    shared int ran;
+    shared bool homeFarmMatched;
+    auto onA = fibers.spawnOn(groupA, {
+        auto slot = home!GroupSlot();
+        atomicStore(homeFarmMatched, slot !is null && slot.farm is host.farmOf(groupA));
+        atomicFetchAdd(ran, 1);
+    });
+    waitTerminated(onA);
+    assert(onA.terminated && atomicLoad(ran) == 1);
+    assert(atomicLoad(homeFarmMatched), "a fiber ran on a worker of another Farm");
+    assert(onA.outcome == FiberOutcome.completed);
+    // Under `director` retirement workers never retire: the terminal task is
+    // still valid and waits for the Director. The terminal phase is published
+    // just before the completion is pushed, so wait for the push.
+    foreach (_; 0 .. 2_000)
     {
-        if (!topology.isEligible(lp)) continue;
-        cpu = ProcessorId.of(lp);
-        group = lp.llcIndex;
-        found = true;
-        break;
+        if (domain.retirementPending) break;
+        Thread.sleep(msecs(1));
     }
-    assert(found);
-    auto lane = new FiberLane(farm);
-    PoolOptions options;
-    options.processors = [cpu];
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane),
-        boundPool ? pool : null);
-    return OneLanePool(pool, lane, group);
+    assert(domain.pendingCompletions == 1 && domain.retirementPending);
+    auto retired = log.retire(domain);
+    assert(retired.length == 1 && retired[0].task is onA);
+
+    // A parked waiter released by the Director's signal through the lane wake.
+    shared int signalled;
+    auto waiter = fibers.spawnOn(groupB, {
+        FiberDomain.await(0xD04A);
+        atomicFetchAdd(signalled, 1);
+    });
+    foreach (_; 0 .. 2_000)
+    {
+        if (domain.waiting == 1) break;
+        Thread.sleep(msecs(1));
+    }
+    assert(domain.waiting == 1 && !waiter.terminated);
+    Thread.sleep(msecs(10)); // let the workers park without a deadline
+    assert(domain.signal(0xD04A) == 1);
+    waitTerminated(waiter);
+    assert(waiter.terminated && atomicLoad(signalled) == 1);
+    retired = log.retire(domain);
+    assert(retired.length == 1 && retired[0].task is waiter);
+
+    // A timer armed on a worker: the lane wakes a worker to adopt the
+    // deadline, and the pool parks until it.
+    MonoTime timerStart;
+    MonoTime timerEnd;
+    auto timed = fibers.spawnOn(groupB, {
+        timerStart = MonoTime.currTime;
+        FiberDomain.sleepFor(msecs(30));
+        timerEnd = MonoTime.currTime;
+    });
+    waitTerminated(timed);
+    assert(timed.terminated && timed.outcome == FiberOutcome.completed);
+    assert(timerEnd - timerStart >= msecs(20));
+    retired = log.retire(domain);
+    assert(retired.length == 1 && retired[0].task is timed);
+
+    // A join across lanes: the target sleeps on group A, the joiner on group
+    // B is readied by the target's completion.
+    FiberJoinResult joined;
+    auto sleeper = fibers.spawnHandleOn(groupA, { FiberDomain.sleepFor(msecs(20)); });
+    auto joiner = fibers.spawnOn(groupB, { joined = sleeper.joinFiber(); });
+    waitTerminated(joiner);
+    assert(joiner.terminated && joined.status == FiberJoinStatus.completed
+        && joined.task == sleeper);
+    foreach (_; 0 .. 400)
+    {
+        if (domain.drained) break;
+        Thread.sleep(msecs(5));
+    }
+    assert(domain.drained);
+    retired = log.retire(domain);
+    assert(retired.length == 2);
+
+    // A failing fiber: its exception is retained on the task; the worker
+    // continues (no worker failure), so later work still runs.
+    shared int enteredFailure;
+    auto failed = fibers.spawn({
+        atomicFetchAdd(enteredFailure, 1);
+        throw new Exception("fiber failure");
+    });
+    waitTerminated(failed);
+    assert(failed.terminated && atomicLoad(enteredFailure) == 1);
+    assert(failed.outcome == FiberOutcome.failed);
+    assert(failed.exception !is null && failed.exception.msg == "fiber failure");
+    retired = log.retire(domain);
+    assert(retired.length == 1 && retired[0].task is failed
+        && retired[0].outcome == FiberOutcome.failed);
+    auto afterFailure = fibers.spawn({ atomicFetchAdd(ran, 1); });
+    waitTerminated(afterFailure);
+    assert(afterFailure.terminated && atomicLoad(ran) == 2);
+    retired = log.retire(domain);
+    assert(retired.length == 1 && retired[0].task is afterFailure);
+
+    // Cancellation by shutdown removes a long waiter, republishes it on its
+    // lane, and unwinds the fiber through FiberCancelled on a worker without
+    // turning it into a worker failure.
+    shared bool cleaned;
+    auto cancelled = fibers.spawnOn(groupB, {
+        scope (exit) atomicStore(cleaned, true);
+        FiberDomain.await(999);
+    });
+    foreach (_; 0 .. 2_000)
+    {
+        if (domain.waiting == 1) break;
+        Thread.sleep(msecs(1));
+    }
+    assert(domain.waiting == 1);
+    domain.beginShutdown(true);
+    waitTerminated(cancelled);
+    assert(cancelled.terminated && cancelled.outcome == FiberOutcome.cancelled);
+    assert(atomicLoad(cleaned));
+    assert(domain.drained);
+    retired = log.retire(domain);
+    assert(retired.length == 1 && retired[0].task is cancelled
+        && retired[0].outcome == FiberOutcome.cancelled);
+    assert(!domain.retirementPending);
+
+    host.stopWorkers();
+    assert(host.pool.workerFailures.length == 0);
+    printf("threadpool smoke: %u workers, %u Farm(s), groups %u and %u\n",
+        host.workers, cast(uint) host.farms.length, cast(uint) groupA, cast(uint) groupB);
 }
 
 // T9: the constructing Director only joins the requesting third thread while
-// the pool worker must apply cancellation and unwind the parked fiber itself.
+// a pool worker must apply cancellation and unwind the parked fiber itself.
+// The request arrives while the workers are parked without a deadline, so the
+// lane's cancellation wake is what gets it applied.
 void workerCancellationSmoke()
 {
     import core.time : MonoTime;
-    foreach (policy; [FiberWakePolicy.broadcast, FiberWakePolicy.servingGroups,
-                     FiberWakePolicy.directorOwned])
-    foreach (throughLane; [false, true])
+
+    if (skipWithoutPoolWorkers("T9 worker cancellation")) return;
+    foreach (throughHandle; [false, true])
     {
-        auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
-                                   DEFAULT_SMALL_TABLE_THRESHOLD, false);
-        scope (exit) farm.destroy();
-        auto fixture = oneLanePool(farm, true);
-        scope (exit) uninstallFiberPlan();
-        fixture.lane.wakePolicy = policy;
+        auto domain = new FiberDomain;
+        auto fibers = new FiberGroups(domain);
+        auto o = fiberHostOptions();
+        o.attachments = [fibers.attachment];
+        auto host = new GroupHost(o);
+        scope (exit) host.close();
         shared int observedCancellation;
-        auto task = fixture.lane.spawn({
+        auto task = fibers.spawn({
             try FiberDomain.await(0xCA09);
             catch (FiberCancelled cancelled)
             {
@@ -2131,16 +1883,15 @@ void workerCancellationSmoke()
         shared int succeeded;
         auto requester = new Thread({
             immutable deadline = MonoTime.currTime + msecs(2_000);
-            while (fixture.lane.domain.waiting != 1
-                && MonoTime.currTime < deadline)
+            while (domain.waiting != 1 && MonoTime.currTime < deadline)
                 Thread.sleep(msecs(1));
-            if (fixture.lane.domain.waiting != 1) return;
-            // Let the idle worker park; correctness also covers a request
-            // arriving between its final pump and parking.
+            if (domain.waiting != 1) return;
+            // Let the idle workers park; correctness also covers a request
+            // arriving between a worker's final service pass and parking.
             Thread.sleep(msecs(10));
-            immutable submitted = throughLane
-                ? fixture.lane.requestCancel(handle)
-                : fixture.lane.domain.requestCancel(handle);
+            immutable submitted = throughHandle
+                ? domain.requestCancel(handle)
+                : domain.requestCancel(task);
             if (submitted != CancellationSubmission.queued) return;
             auto joined = handle.join(msecs(2_000));
             if (joined.status == FiberJoinStatus.timedOut)
@@ -2151,434 +1902,66 @@ void workerCancellationSmoke()
                 && atomicLoad(observedCancellation) == 1)
                 atomicStore(succeeded, 1);
         });
-        fixture.pool.start();
         requester.start();
         requester.join(); // No Director service while cancellation is pending.
         immutable passed = atomicLoad(succeeded) == 1;
         // Cleanup also makes a pre-fix timeout finite rather than stranding a
         // live fiber or leaking the domain root after the failed assertion.
-        if (!passed) fixture.lane.beginShutdown(true);
+        if (!passed) domain.beginShutdown(true);
         waitTerminated(task);
-        fixture.pool.shutdown();
-        assert(fixture.pool.workerFailures.length == 0);
-        fixture.lane.retire();
+        assert(task.terminated && domain.drained);
+        assert(domain.retire() == 1);
+        host.stopWorkers();
+        assert(host.pool.workerFailures.length == 0);
         assert(passed, "worker cancellation bounded wait expired without Director service");
     }
 }
 
-// L5: a shutdown that beats every start hook leaves no server to retire the
-// lane; shutdown itself must, so a later spawn throws instead of stranding.
-void admissionAfterEarlyShutdownSmoke()
+// 2-LLC: a fiber on the second group's lane arms a new earliest timer while
+// every worker is parked without a deadline. Every worker polls the domain's
+// timers, so the lane's timer wake must reach one of them and the timer must
+// fire on time.
+void offResponderTimerSmoke(string test)
 {
-    import core.stdc.stdio : printf;
-
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
-                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farm.destroy();
-    // The race is between the worker reaching its start hook and the
-    // shutdown; either outcome must leave the lane unavailable.
-    foreach (round; 0 .. 100)
-    {
-        auto fixture = oneLanePool(farm, true);
-        auto lane = fixture.lane;
-        assert(lane.state == FiberLaneState.pending);
-        fixture.pool.start();
-        fixture.pool.shutdown();
-        assert(fixture.pool.workerFailures.length == 0);
-        assert(lane.liveServers == 0);
-        assert(lane.state == FiberLaneState.stopped,
-            "a lane whose pool stopped must not stay pending");
-        immutable active = lane.domain.active;
-        assert(refusedSpawn(lane) !is null);
-        assert(lane.domain.active == active);
-        uninstallFiberPlan();
-    }
-    printf("L5 admission after early shutdown: 100 start/shutdown rounds, spawn refused\n");
-}
-
-// L6: a failing start hook stops the pool; its lane has no server and must
-// close as soon as the failure is known, not only at the caller's shutdown.
-void admissionAfterStartFailureSmoke()
-{
-    import core.stdc.stdio : printf;
-
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
-                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farm.destroy();
-    // A custom responder selector without a bound pool makes the start hook
-    // throw before it counts a server.
-    auto fixture = oneLanePool(farm, false);
-    scope (exit) uninstallFiberPlan();
-    auto lane = fixture.lane;
-    lane.responderSelector = (WorkerSelf*) => true;
-    assert(lane.state == FiberLaneState.pending);
-
-    fixture.pool.start();
-    foreach (_; 0 .. 2_000)
-    {
-        if (lane.state != FiberLaneState.pending) break;
-        Thread.sleep(msecs(1));
-    }
-    assert(lane.state == FiberLaneState.stopped,
-        "a start failure left its lane pending before shutdown");
-    assert(refusedSpawn(lane) !is null);
-    fixture.pool.shutdown();
-    assert(fixture.pool.workerFailures.length == 1);
-    assert(lane.liveServers == 0 && lane.state == FiberLaneState.stopped);
-    assert(refusedSpawn(lane) !is null);
-    printf("L6 admission after start failure: lane %u stopped, spawn refused\n",
-        cast(uint) fixture.group);
-}
-
-// L7: uninstalling a plan whose pool never started retires its lanes.
-void admissionAfterUninstallSmoke()
-{
-    import core.stdc.stdio : printf;
-
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
-                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    scope (exit) farm.destroy();
-    auto fixture = oneLanePool(farm, true);
-    assert(fixture.lane.state == FiberLaneState.pending);
-    uninstallFiberPlan();
-    assert(fixture.lane.state == FiberLaneState.stopped);
-    assert(refusedSpawn(fixture.lane) !is null);
-    printf("L7 admission after uninstall: lane %u stopped, spawn refused\n",
-        cast(uint) fixture.group);
-}
-
-/// The unfiltered default resolution, or null after printing SKIP when it
-/// has fewer than two accepted groups.
-PoolResolution twoGroupResolution(string test)
-{
-    import core.stdc.stdio : printf;
-    import std.string : toStringz;
-    import threadpool;
-
-    auto snapshot = discover();
-    auto full = resolvePool(snapshot, PoolOptions.init);
-    if (full.acceptedGroupCount >= 2) return full;
-    printf("SKIP %s (needs 2 LLCs)\n", test.toStringz);
-    return null;
-}
-
-ushort[2] firstTwoGroups(const PoolResolution full)
-{
-    ushort[2] groups;
-    size_t n;
-    foreach (ref g; full.acceptedGroups)
-        if (n < 2) groups[n++] = g.llcIndex;
-    return groups;
-}
-
-bool waitOpen(FiberLane[] lanes...)
-{
-    foreach (_; 0 .. 2_000)
-    {
-        bool open = true;
-        foreach (lane; lanes)
-            if (lane.state != FiberLaneState.open) open = false;
-        if (open) return true;
-        Thread.sleep(msecs(1));
-    }
-    return false;
-}
-
-// L1 (2-LLC): one shared domain over two groups and no edges. A timer on one
-// lane and a join from the other drain through native service alone.
-void sharedDomainNoEdgesSmoke()
-{
-    import core.stdc.stdio : printf;
-    import threadpool;
-
-    auto full = twoGroupResolution("L1 shared domain without edges");
-    if (full is null) return;
-    immutable groups = firstTwoGroups(full);
-    PoolOptions options;
-    options.processors = [full.workersIn(groups[0])[0], full.workersIn(groups[1])[0]];
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    auto plan = new FiberServicePlan(pool.resolve());
-    auto domain = new FiberDomain;
-    AntFarm*[] farms;
-    FiberLane[] lanes;
-    scope (exit) foreach (farm; farms) farm.destroy();
-    foreach (group; groups)
-    {
-        farms ~= farmFor(plan, group);
-        lanes ~= new FiberLane(domain, farms[$ - 1]);
-        plan.bind(group, lanes[$ - 1]);
-    }
-    assert(plan.edges.length == 0);
-    installFiberPlan(plan, pool);
-    scope (exit) uninstallFiberPlan();
-
-    FiberJoinResult joined;
-    auto sleeper = lanes[0].spawnHandle({ FiberDomain.sleepFor(msecs(20)); });
-    auto joiner = lanes[1].spawn({ joined = sleeper.joinFiber(); });
-    pool.start();
-    assert(waitOpen(lanes));
-    foreach (farm; farms)
-        assert(atomicLoad(farm.Cf) == 1, "a lane gained a foreign consumer");
-    waitTerminated(joiner);
-    pool.shutdown();
-    assert(pool.workerFailures.length == 0);
-    assert(joiner.terminated && joined.status == FiberJoinStatus.completed);
-    assert(domain.drained);
-    assert(domain.retire() == 2);
-    printf("L1 shared domain without edges: groups %u and %u\n",
-        cast(uint) groups[0], cast(uint) groups[1]);
-}
-
-// L2 (2-LLC): work pre-admitted to a staffed lane runs even when another
-// bound lane of the same domain has no workers; that lane is closed.
-void preAdmissionUnusedGroupSmoke()
-{
-    import core.stdc.stdio : printf;
-    import threadpool;
-
-    auto full = twoGroupResolution("L2 pre-admission with an unused group");
-    if (full is null) return;
-    immutable groups = firstTwoGroups(full);
-    PoolOptions options;
-    options.processors = full.workersIn(groups[0]);
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    auto plan = new FiberServicePlan(pool.resolve());
-    auto domain = new FiberDomain;
-    AntFarm*[] farms;
-    FiberLane[] lanes;
-    scope (exit) foreach (farm; farms) farm.destroy();
-    foreach (ushort g; 0 .. full.physicalGroupCount)
-    {
-        farms ~= farmFor(plan, g);
-        lanes ~= new FiberLane(domain, farms[g]);
-        plan.bind(g, lanes[g]);
-    }
-    installFiberPlan(plan, pool);
-    scope (exit) uninstallFiberPlan();
-    auto staffed = lanes[groups[0]];
-    auto unused = lanes[groups[1]];
-    assert(staffed.service == LaneService.native);
-    assert(unused.service == LaneService.unstaffed);
-    assert(unused.state == FiberLaneState.closed);
-    auto refused = refusedSpawn(unused);
-    assert(refused !is null && refused.state == FiberLaneState.closed
-        && refused.service == LaneService.unstaffed && refused.group == groups[1]);
-
-    shared int ran;
-    auto task = staffed.spawn({ atomicFetchAdd(ran, 1); });
-    pool.start();
-    waitTerminated(task);
-    assert(task.terminated, "pre-admitted work on the staffed lane did not run");
-    assert(staffed.state == FiberLaneState.open);
-    assert(refusedSpawn(unused) !is null);
-    pool.shutdown();
-    assert(pool.workerFailures.length == 0);
-    assert(atomicLoad(ran) == 1);
-    assert(domain.drained);
-    assert(domain.retire() == 1);
-    printf("L2 pre-admission with an unused group: %u workers in group %u\n",
-        cast(uint) full.workersIn(groups[0]).length, cast(uint) groups[0]);
-}
-
-// L3 (2-LLC): a deliberate rescue serves a group without accepted workers.
-void unstaffedLaneRescueSmoke()
-{
-    import core.stdc.stdio : printf;
-    import threadpool;
-
-    auto full = twoGroupResolution("L3 unstaffed-lane rescue");
-    if (full is null) return;
-    immutable groups = firstTwoGroups(full);
-    immutable workers = full.workersIn(groups[0]).length;
-    PoolOptions options;
-    options.processors = full.workersIn(groups[0]);
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    auto plan = new FiberServicePlan(pool.resolve()).rescue(groups[1], groups[0]);
-    assert(plan.requirement(groups[1]).foreignConsumers == workers);
-    auto domain = new FiberDomain;
-    AntFarm*[] farms;
-    FiberLane[] lanes;
-    scope (exit) foreach (farm; farms) farm.destroy();
-    foreach (group; groups)
-    {
-        farms ~= farmFor(plan, group);
-        lanes ~= new FiberLane(domain, farms[$ - 1]);
-        plan.bind(group, lanes[$ - 1]);
-    }
-    installFiberPlan(plan, pool);
-    scope (exit) uninstallFiberPlan();
-    auto rescued = lanes[1];
-    assert(rescued.service == LaneService.rescued);
-
-    pool.start();
-    assert(waitOpen(lanes));
-    assert(atomicLoad(farms[1].Cf) == workers);
-    assert(rescued.liveServers == workers);
-    shared int observedLlc = -1;
-    auto task = rescued.spawn({
-        atomicStore(observedLlc, cast(int) currentWorker().llcIndex);
-    });
-    waitTerminated(task);
-    pool.shutdown();
-    assert(pool.workerFailures.length == 0);
-    assert(task.terminated && atomicLoad(observedLlc) == groups[0]);
-    assert(domain.drained);
-    assert(rescued.state == FiberLaneState.stopped && rescued.liveServers == 0);
-    assert(refusedSpawn(rescued) !is null);
-    assert(domain.retire() == 1);
-    printf("L3 unstaffed-lane rescue: group %u served by %u workers of group %u\n",
-        cast(uint) groups[1], cast(uint) workers, cast(uint) groups[0]);
-}
-
-// 2-LLC: the domain's only responder is in another group than the lane whose
-// fiber arms a new earliest timer while that responder is parked without a
-// deadline. The armed timer must still wake it and fire on time.
-void offResponderTimerSmoke(string test, FiberWakePolicy policy)
-{
-    import core.stdc.stdio : printf;
     import core.time : MonoTime;
     import std.string : toStringz;
-    import threadpool;
 
-    auto full = twoGroupResolution(test);
-    if (full is null) return;
-    immutable groups = firstTwoGroups(full);
-    PoolOptions options;
-    options.processors = [full.workersIn(groups[0])[0], full.workersIn(groups[1])[0]];
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    auto plan = new FiberServicePlan(pool.resolve());
-    auto domain = new FiberDomain;
-    AntFarm*[] farms;
-    FiberLane[] lanes;
-    scope (exit) foreach (farm; farms) farm.destroy();
-    foreach (group; groups)
+    if (skipWithoutPoolWorkers(test)) return;
+    auto o = fiberHostOptions();
+    if (GroupHost.resolve(o).groups.length < 2)
     {
-        farms ~= farmFor(plan, group);
-        lanes ~= new FiberLane(domain, farms[$ - 1]);
-        lanes[$ - 1].wakePolicy = policy;
-        plan.bind(group, lanes[$ - 1]);
+        printf("SKIP %s (needs 2 LLCs)\n", test.toStringz);
+        return;
     }
-    lanes[1].responderSelector = (WorkerSelf*) => false;
-    installFiberPlan(plan, pool);
-    scope (exit) uninstallFiberPlan();
-    pool.start();
-    assert(waitOpen(lanes));
-    assert(lanes[0].responders == 1 && lanes[1].responders == 0);
+    auto domain = new FiberDomain;
+    auto fibers = new FiberGroups(domain);
+    o.attachments = [fibers.attachment];
+    auto host = new GroupHost(o);
+    scope (exit) host.close();
+    assert(host.groups.length >= 2 && host.farms.length >= 2);
+    immutable ushort groupA = host.groups[0];
+    immutable ushort groupB = host.groups[1];
+    assert(fibers.laneOf(groupB) !is fibers.laneOf(groupA));
 
     shared long sleptMs = -1;
-    auto task = lanes[1].spawn({
+    auto task = fibers.spawnOn(groupB, {
         // Outlast every wake caused by the spawn and its publication, so
-        // the responder is parked without a deadline when the timer arms.
+        // the other workers are parked without a deadline when the timer arms.
         Thread.sleep(msecs(50));
         immutable before = MonoTime.currTime;
         FiberDomain.sleepFor(msecs(20));
         atomicStore(sleptMs, (MonoTime.currTime - before).total!"msecs");
     });
     waitTerminated(task);
-    pool.shutdown();
-    assert(pool.workerFailures.length == 0);
-    assert(task.terminated, "a timer armed away from the responder never fired");
+    assert(task.terminated, "a timer armed on the second group's lane never fired");
     immutable slept = atomicLoad(sleptMs);
-    assert(slept >= 20 && slept < 250, "the off-responder timer fired late");
+    assert(slept >= 20 && slept < 250, "the second group's timer fired late");
     assert(domain.drained);
     assert(domain.retire() == 1);
-    printf("%s: group %u timer fired after %lld ms, responder in group %u\n",
-        test.toStringz, cast(uint) groups[1], slept, cast(uint) groups[0]);
-}
-
-__gshared ManagedWorkerHooks busyLaneFiberHooks;
-__gshared ushort busyLaneIdleGroup;
-shared bool busyLaneCounting;
-shared ulong busyLaneIdlePumps;
-shared ulong busyLaneBusyPumps;
-
-ManagedPumpResult busyLaneCountingPump(WorkerSelf* worker)
-{
-    if (atomicLoad(busyLaneCounting))
-    {
-        if (worker.llcIndex == busyLaneIdleGroup)
-            atomicFetchAdd(busyLaneIdlePumps, 1);
-        else
-            atomicFetchAdd(busyLaneBusyPumps, 1);
-    }
-    return busyLaneFiberHooks.pump(worker);
-}
-
-/// One run of W1's workload under `policy`: one shared domain, one worker
-/// and one lane per group, no edges, default responders (389's layout), and
-/// only the first lane loaded. Returns the idle group's pumps.
-ulong busyLanePumps(const PoolResolution full, FiberWakePolicy policy,
-                    out ulong busyPumps)
-{
-    import threadpool;
-
-    enum tasks = 64;
-    enum yields = 2_000;
-    immutable groups = firstTwoGroups(full);
-    busyLaneFiberHooks = fiberWorkerHooks();
-    busyLaneIdleGroup = groups[1];
-    PoolOptions options;
-    options.processors = [full.workersIn(groups[0])[0], full.workersIn(groups[1])[0]];
-    options.managedWorker = ManagedWorkerHooks(busyLaneFiberHooks.start,
-        &busyLaneCountingPump, busyLaneFiberHooks.stop);
-    auto pool = new CacheAwarePool(options);
-    auto plan = new FiberServicePlan(pool.resolve());
-    auto domain = new FiberDomain;
-    AntFarm*[] farms;
-    FiberLane[] lanes;
-    scope (exit) foreach (farm; farms) farm.destroy();
-    foreach (group; groups)
-    {
-        farms ~= farmFor(plan, group);
-        lanes ~= new FiberLane(domain, farms[$ - 1]);
-        lanes[$ - 1].wakePolicy = policy;
-        plan.bind(group, lanes[$ - 1]);
-    }
-    installFiberPlan(plan, pool);
-    scope (exit) uninstallFiberPlan();
-    pool.start();
-    assert(waitOpen(lanes));
-    // Startup pumps spin until finalization; count only the loaded phase.
-    atomicStore(busyLaneIdlePumps, 0UL);
-    atomicStore(busyLaneBusyPumps, 0UL);
-    atomicStore(busyLaneCounting, true);
-    FiberTask[] spawned;
-    foreach (_; 0 .. tasks)
-        spawned ~= lanes[0].spawn({
-            foreach (_; 0 .. yields) FiberDomain.yieldReady();
-        });
-    foreach (task; spawned) waitTerminated(task);
-    atomicStore(busyLaneCounting, false);
-    pool.shutdown();
-    assert(pool.workerFailures.length == 0);
-    foreach (task; spawned) assert(task.terminated);
-    assert(domain.drained);
-    assert(domain.retire() == tasks);
-    busyPumps = atomicLoad(busyLaneBusyPumps);
-    return atomicLoad(busyLaneIdlePumps);
-}
-
-// W1 (2-LLC): under `servingGroups`, one busy lane does not wake the idle
-// group's worker; `broadcast` is measured alongside for contrast.
-void busyLaneWakeSmoke()
-{
-    import core.stdc.stdio : printf;
-
-    auto full = twoGroupResolution("W1 busy-lane wake isolation");
-    if (full is null) return;
-    ulong broadcastBusy, servingBusy;
-    immutable broadcastIdle = busyLanePumps(full, FiberWakePolicy.broadcast,
-        broadcastBusy);
-    immutable servingIdle = busyLanePumps(full, FiberWakePolicy.servingGroups,
-        servingBusy);
-    printf("W1 busy-lane wake isolation: idle-group pumps %llu servingGroups, "
-        ~ "%llu broadcast (busy-group pumps %llu, %llu)\n",
-        servingIdle, broadcastIdle, servingBusy, broadcastBusy);
-    assert(servingIdle < 64, "servingGroups woke the idle group's worker");
+    host.stopWorkers();
+    assert(host.pool.workerFailures.length == 0);
+    printf("%s: group %u timer fired after %lld ms beside group %u\n",
+        test.toStringz, cast(uint) groupB, slept, cast(uint) groupA);
 }
 
 void fiberParitySmoke()
@@ -2787,9 +2170,7 @@ void main(string[] args)
     lifecycleRetentionSmoke();
     lifecycleBacklogSmoke();
     sharedDomainLaneSmoke();
-    remoteSweeperSmoke();
     migrationSmoke();
-    wakePolicySmoke();
     mixedPayloadSmoke();
     syncPrimitiveSmoke();
     eventCancellationSmoke();
@@ -2799,21 +2180,8 @@ void main(string[] args)
     recordSmoke();
     groupHostFiberSmoke();
     threadpoolSmoke();
-    admissionAfterStopSmoke();
-    admissionAfterEarlyShutdownSmoke();
-    admissionAfterStartFailureSmoke();
-    admissionAfterUninstallSmoke();
-    servicePlanTests();
     hostAttachSmoke();
-    sharedDomainNoEdgesSmoke();
-    preAdmissionUnusedGroupSmoke();
-    unstaffedLaneRescueSmoke();
-    offResponderTimerSmoke("T1 off-responder timer, broadcast",
-        FiberWakePolicy.broadcast);
-    busyLaneWakeSmoke();
-    offResponderTimerSmoke("W2 off-responder timer, servingGroups",
-        FiberWakePolicy.servingGroups);
+    offResponderTimerSmoke("T1 second-group timer");
 
-    import core.stdc.stdio : printf;
     printf("fiber smoke passed\n");
 }

@@ -1777,8 +1777,8 @@ class FiberReadyLane
     protected void noteTimerArmed() nothrow @nogc {}
 
     /// Retirement is pending under `FiberRetirement.director` on a thread
-    /// that may not retire. Threadpool lanes record it in the Director's
-    /// mailbox (and notifier); no worker is woken for it.
+    /// that may not retire. No worker is woken for it; the Director polls
+    /// `retirementPending`. A lane may record it for diagnostics.
     protected void noteRetirementPending() nothrow @nogc {}
 
     private enum size_t retirePerPass = 256;
@@ -2003,10 +2003,11 @@ final class FiberDomain
 
     ~this() nothrow @nogc { freeCacheLine(control); }
 
-    /// Attach a ready lane during setup. The first lane is the compatibility
-    /// default used by `spawn` and `flush`; lane-aware embeddings call
-    /// `spawnOn` and flush the selected lane directly.
-    package void attachReadyLane(FiberReadyLane lane)
+    /// Attach a ready lane during setup, before admission. The first lane is
+    /// the default used by `spawn`, `flush` and `serve`; multi-lane
+    /// embeddings (`ant_fibers.groups`, or a custom one with a
+    /// `FiberReadyLane` per Farm) spawn on and serve the selected lane.
+    void attachReadyLane(FiberReadyLane lane)
     {
         if (lane is null)
             throw new Exception("ant_fibers: cannot attach a null lane");
@@ -2111,9 +2112,11 @@ final class FiberDomain
     }
 
     /// Admit a task whose runnable activations prefer `lane`.
-    package FiberTask spawnOn(Body)(FiberReadyLane lane, Body body,
-                                    size_t stackSize = 0)
-        if (is(Body == void delegate()) || is(Body == void function()))
+    /// Admit a task whose runnable activations prefer `lane`, one of this
+    /// domain's attached lanes.
+    FiberTask spawnOn(Body)(FiberReadyLane lane, Body body,
+                            size_t stackSize = 0)
+        if (is(Body : void delegate()) || is(Body : void function()))
     {
         TaskHandle unused;
         return admit(lane, body, stackSize, unused);
@@ -2235,9 +2238,10 @@ final class FiberDomain
         return spawnHandleOn(defaultReadyLane, body, stackSize);
     }
 
-    package TaskHandle spawnHandleOn(Body)(FiberReadyLane lane,
+    /// `spawnOn` returning the generation handle.
+    TaskHandle spawnHandleOn(Body)(FiberReadyLane lane,
         Body body, size_t stackSize = 0)
-        if (is(Body == void delegate()) || is(Body == void function()))
+        if (is(Body : void delegate()) || is(Body : void function()))
     {
         TaskHandle handle;
         cast(void) admit(lane, body, stackSize, handle);

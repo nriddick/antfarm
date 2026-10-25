@@ -144,8 +144,8 @@ wrote. On one measured host, that cost was invisible except where consumers
 were the bottleneck and often found nothing.
 
 The comparison ran [tools/perf/actor_churn](../../tools/perf/README.md#actor_churn)
-on each workload twice: with `ANTFARM_CHURN_HOST=1`, where a `FarmHost` owns
-the Farm, the control token and the pinned consumers, and without it, on the
+on each workload twice: with `ANTFARM_CHURN_HOST=1`, where a `FarmHost` runs
+the Farm's pinned consumers and holds the control token, and without it, on the
 benchmark's own hand-written consumers. The controller and every consumer CPU
 sat in one LLC of a Ryzen 9 5900XT; each configuration was measured as twenty
 paired runs and reported as throughput change (negative is slower than the

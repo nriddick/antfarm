@@ -15,8 +15,15 @@
  + `--sweep` runs every worker-count prefix of the selected topology.
  +
  + Workers come from one LLC group (the group of the first eligible CPU),
- + because the single lane binds to one group: on multi-LLC hosts runs are
- + capped to one LLC's CPUs.
+ + because the host binds its single Farm to one group (`HostGroups.only`):
+ + on multi-LLC hosts runs are capped to one LLC's CPUs.
+ +
+ + Port note (GroupHost): the producer Fibers used to run on a `FiberLane`
+ + installed on a `CacheAwarePool` with `installFiberPlan`; they now run on a
+ + `FiberGroups` attachment of a `GroupHost` that owns the Farm and the pool.
+ + The Director's `spin()` became `GroupHostOptions.idle = WorkerIdle.spin`;
+ + `host.summary()` replaces the pool resolution summary. The actor runtime is
+ + built on the host's Farm. CLI unchanged.
  +/
 module actor_wave;
 
@@ -291,7 +298,8 @@ private final class TwoFiberRun
 }
 
 /// Eligible CPUs of one LLC group (that of the first eligible CPU), physical
-/// cores first, then SMT siblings.
+/// cores first, then SMT siblings. The host binds its single Farm to that
+/// group.
 private ProcessorId[] pickWorkerLps(size_t maximum, bool includeSmt)
 {
     auto topology = CacheAwarePool.topology();
@@ -429,10 +437,32 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     immutable quotaSmall = quotaHeadroom > 16_384
         ? 16_384 : quotaHeadroom;
 
-    auto farm = AntFarm.create(ringMiBFromUlongs(ringLength), segmentCount,
-        cast(uint) workerLps.length, 0, 0, cast(uint) producerSlots,
-        quotaSmall);
-    scope (exit) farm.destroy();
+    // The host's Farm: `workerLps.length` worker consumers, and small
+    // producers for every worker's flush token, the control thread, plus one
+    // extra so both wave producers of the two-Fiber run fit (the former
+    // `producerSlots`).
+    immutable group = CacheAwarePool.topology().byId(workerLps[0]).llcIndex;
+    auto domain = new FiberDomain;
+    auto fibers = new FiberGroups(domain, 32, avgCostForChunk(8));
+    GroupHostOptions options;
+    options.workers = cast(uint) workerLps.length;
+    options.groups = HostGroups.only(group);
+    options.pool.processors = workerLps;
+    options.pool.skipSmtSiblings = false; // `--smt` selected the siblings already
+    options.caller = CallerPlacement.unchanged; // the control thread stays unpinned
+    // Keep workers polling for this throughput characterization. Parking and
+    // wake policy are a separate effect that would dominate short waves.
+    options.idle = WorkerIdle.spin;
+    options.farm.ringMiB = ringMiBFromUlongs(ringLength);
+    options.farm.k = segmentCount;
+    options.farm.quotaSmall = quotaSmall;
+    options.farm.extraSmallProducers = 1;
+    options.attachments = [fibers.attachment];
+    auto host = new GroupHost(options);
+    scope (exit) host.close();
+    scope (exit) domain.beginShutdown();
+    auto farm = host.farmOf(group);
+    writefln("worker group %s (one LLC): %s", group, host.summary());
 
     immutable totalActors = actorsPerSet * 2;
     auto runtime = ActorRuntime.create(farm, totalActors);
@@ -452,25 +482,6 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     }
     auto sets = [setA, setB];
 
-    auto lane = new FiberLane(farm);
-    lane.flushBatch = 32;
-    lane.avgCost = avgCostForChunk(8);
-    PoolOptions options;
-    options.processors = workerLps;
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
-    immutable group = CacheAwarePool.topology().byId(workerLps[0]).llcIndex;
-    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane), pool);
-    scope (exit) uninstallFiberPlan();
-    pool.start();
-    scope (exit) pool.shutdown();
-    writefln("worker group %s (one LLC): %s", group, pool.resolution.summary());
-
-    // Keep workers polling for this throughput characterization. Parking and
-    // wake policy are a separate effect that would dominate short waves.
-    auto director = pool.director();
-    director.spin();
-
     writefln("actor wave: sets=2 actors/set=%s generations=%s warmup=%s",
         actorsPerSet, measuredGenerations, warmupGenerations);
     immutable smtWorkers = countSmtWorkers(workerLps);
@@ -481,9 +492,9 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     atomicStore!(MemoryOrder.raw)(publishedGeneration.value, 0UL);
     auto oneProducer = farm.registerProducer(Tier.small);
     enforce(oneProducer.valid, "one-Fiber producer registration failed");
-    auto one = new OneFiberRun(lane.domain, farm, move(oneProducer), sets,
+    auto one = new OneFiberRun(domain, farm, move(oneProducer), sets,
         avgCost);
-    auto oneTask = lane.spawn({
+    auto oneTask = fibers.spawn({
         one.run(warmupGenerations, measuredGenerations);
     });
     joinOrThrow(oneTask);
@@ -497,19 +508,19 @@ private SweepResult runBenchmark(BenchmarkConfig config,
         one.cooperativeYields, oneTask.resumeCount,
         oneTask.migrationCount);
     farm.unregisterProducer(one.producer);
-    lane.domain.retire();
+    domain.retire();
 
     atomicStore!(MemoryOrder.raw)(publishedGeneration.value, 0UL);
     auto producerA = farm.registerProducer(Tier.small);
     auto producerB = farm.registerProducer(Tier.small);
     enforce(producerA.valid && producerB.valid,
         "two-Fiber producer registration failed");
-    auto two = new TwoFiberRun(lane.domain, farm, move(producerA),
+    auto two = new TwoFiberRun(domain, farm, move(producerA),
         move(producerB), sets, avgCost);
-    auto taskA = lane.spawn({
+    auto taskA = fibers.spawn({
         two.runSet(0, warmupGenerations, measuredGenerations);
     });
-    auto taskB = lane.spawn({
+    auto taskB = fibers.spawn({
         two.runSet(1, warmupGenerations, measuredGenerations);
     });
     joinOrThrow(taskA);
@@ -527,7 +538,7 @@ private SweepResult runBenchmark(BenchmarkConfig config,
         cast(double) one.elapsedNsecs / two.elapsedNsecs);
     farm.unregisterProducer(two.producers[0]);
     farm.unregisterProducer(two.producers[1]);
-    lane.domain.retire();
+    domain.retire();
 
     writefln("\npublished generation=%s active-public=%s",
         expectedGeneration, expectedGeneration & 1UL);

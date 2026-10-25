@@ -3,15 +3,23 @@
  +   1. farm ST (producer thread also consumes)
  +   2. farm MT spin (pinned OS threads, tight consumeNext)
  +   3. threadpool managed pump that only consumeNext (spin vs idle)
- +   4. FiberLane managed pump (timers, coverage, flush)
+ +   4. GroupHost with a FiberGroups attachment: the host's view consumes,
+ +      the Fiber lane is served every pass (timers, flush, retirement)
  +
  + (2) is Ant Farm-specific throughput. (3) isolates the pool. (4) is the
  + fiber embedding. Page backing follows Ant Farm's default or the
  + ANTFARM_HUGE_PAGES override.
  +
  + Every scene draws its workers from one LLC group (the group of the first
- + eligible CPU), because (4) binds its single lane to one group. On
- + multi-LLC hosts the scenes are therefore capped to one LLC's CPUs.
+ + eligible CPU), because (4) binds its single Farm to one group
+ + (`HostGroups.only`). On multi-LLC hosts the scenes are therefore capped to
+ + one LLC's CPUs.
+ +
+ + Port note (GroupHost): (4) used to be a `FiberLane` managed pump on a
+ + `CacheAwarePool` with `installFiberPlan`; the `GroupHost` now owns that
+ + scene's Farm and pool (`host.summary()` replaces the pool resolution
+ + summary). Scenes 1-3 are unchanged. CLI unchanged:
+ + benchmark_farm_embed [n] [avgCost].
  +/
 module benchmark_farm_embed;
 
@@ -19,7 +27,7 @@ import antfarm;
 import ant_fibers;
 import core.atomic;
 import core.thread : Thread;
-import core.time : MonoTime, seconds;
+import core.time : Duration, MonoTime, seconds;
 import std.conv : to;
 import std.stdio : stdout, writefln, writeln;
 import threadpool;
@@ -44,8 +52,8 @@ final class PoolCons
 }
 
 /// Up to `workers` (0 = all) eligible CPUs of ONE LLC group, the group of the
-/// first eligible CPU. A Fiber plan binds the single lane to one group, so on
-/// multi-LLC hosts these runs are capped to that group's CPUs.
+/// first eligible CPU. The fiber scene's host binds its single Farm to one
+/// group, so on multi-LLC hosts these runs are capped to that group's CPUs.
 ProcessorId[] pickLps(bool skipSmt, size_t workers)
 {
     auto snap = CacheAwarePool.topology();
@@ -270,23 +278,33 @@ double runPool(size_t n, uint avgCost, ProcessorId[] lps, bool spin)
 
 double runFiberPump(size_t n, uint avgCost, ProcessorId[] lps)
 {
-    auto farm = makeFarm(cast(uint) lps.length);
-    scope (exit) farm.destroy();
-    auto lane = new FiberLane(farm);
-    lane.flushBatch = 256;
-    lane.avgCost = avgCost;
-    PoolOptions opt;
-    opt.processors = lps;
-    opt.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(opt);
+    // The host's Farm, sized as makeFarm: one small producer per worker
+    // (flush token) plus the control thread, quota capped at 16384.
+    enum ln = 1 << 22;
+    enum k = 8;
+    enum segCap = ln / k;
+    immutable slots = cast(uint) lps.length + 1;
+    immutable quotaHeadroom = (k - 1) * segCap / slots;
     immutable group = CacheAwarePool.topology().byId(lps[0]).llcIndex;
-    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane), pool);
-    scope (exit) uninstallFiberPlan();
-    pool.start();
-    scope (exit) pool.shutdown();
-    writefln("  fiber lane on group %s: %s", group, pool.resolution.summary());
+    auto domain = new FiberDomain;
+    auto fibers = new FiberGroups(domain, 256, avgCost);
+    GroupHostOptions opt;
+    opt.workers = cast(uint) lps.length;
+    opt.groups = HostGroups.only(group);
+    opt.pool.processors = lps;
+    opt.pool.skipSmtSiblings = false;
+    opt.caller = CallerPlacement.unchanged; // the producer thread stays unpinned
+    opt.idleTimeout = Duration.max;         // park until woken, as before
+    opt.farm.ringMiB = ringMiBFromUlongs(ln);
+    opt.farm.k = k;
+    opt.farm.quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
+    opt.attachments = [fibers.attachment];
+    auto host = new GroupHost(opt);
+    scope (exit) host.close();
+    scope (exit) domain.beginShutdown();
+    writefln("  fiber lane on group %s: %s", group, host.summary());
     atomicStore(gHits, 0);
-    return produceWait(farm, n, avgCost, pool);
+    return produceWait(host.farmOf(group), n, avgCost, host.pool);
 }
 
 void report(string name, size_t n, double seconds)

@@ -734,6 +734,16 @@ const(TopologySnapshot)* cachedSnapshot() @nogc nothrow
     return gTopology;
 }
 
+/// The process's snapshot, discovered on first use, by reference. A
+/// `PoolResolution` keeps a pointer to the snapshot it was planned against,
+/// so planning must use this (or another snapshot that outlives the result),
+/// never a by-value copy of `discover()` on the caller's stack.
+ref const(TopologySnapshot) liveTopology() @trusted
+{
+    cast(void) discover();
+    return *gTopology;
+}
+
 /// Allowed-processor key: `(group << 16) | lpIndex`. Linux uses group 0.
 ulong affinityKey(ushort group, ushort lpIndex) @nogc nothrow
 {

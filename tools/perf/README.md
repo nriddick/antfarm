@@ -59,6 +59,23 @@ PERFORMANCE.md uses. Generated tables omit the multithreaded residual drain
 rate; its diagnostic fields remain in the raw results. Fiber counts name
 pinned workers with a separate control thread, rather than total threads.
 
+The Fiber tools under `tools/perf/ant_fibers` are the `ant_fibers` dub
+configurations `benchmark_mt`, `benchmark_vs_druntime`, `benchmark_farm_embed`
+and `benchmark_actor_wave`. Each multithreaded scene runs a `FiberGroups`
+attachment on a `GroupHost`, which owns the Farm(s) and the pool and whose own
+view consumes them. `benchmark_mt [tasks] [private|shared] [workers]` spans
+every accepted LLC group (`HostGroups.all`): `private` is `farmPerGroup`, one
+Farm and lane per group consumed only by its workers; `shared` is one Farm
+consumed by every group's workers. Its former `assist` mode (lane assist
+edges) has no GroupHost equivalent and was dropped; its report line prints
+`farms=` where it printed `edges=`. The other three bind one Farm to the group
+of the first eligible CPU (`HostGroups.only`) with exactly the scene's CPUs as
+workers; `actor_wave` keeps its workers spinning through
+`GroupHostOptions.idle`, the others park until woken as the raw pool did. The
+burst benchmarks size the domain's lifecycle record ring to the burst
+(`recordRetention = 4 * tasks`), since the default admits 4096 unretired
+tasks. Timing regions and warm-up semantics are unchanged.
+
 The `headline` section sweeps four workloads over `--threads` (default
 `2,4,8,16,20,24,32,40`): payload throughput with about one small producer per
 two consumers, unpinned (`payload_split`); private root lifecycles

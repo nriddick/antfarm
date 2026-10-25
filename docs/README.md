@@ -10,8 +10,17 @@ each to its owner.
 
 ## Run something
 
-Start with First payload, then follow these steps. Each step pairs a program
-with its owning page; leave the path as soon as the layer fits your workload.
+Start with the first program, then follow these steps. Each step pairs a
+program with its owning page; leave the path as soon as the layer fits your
+workload. Words you will meet: a **Farm** is the shared ring (the "ring" in
+the three rules); a **token** is a producer's registration on a Farm and a
+**view** a consumer's cursor on it; an **LLC group** is the set of CPUs
+sharing one last-level cache, and a **GroupHost** owns the pinned worker pool
+and one Farm per group; **attachments** are what a host runs on its workers
+(the fork-join dispatcher, Fibers, a `FarmHost`'s actor consumers); the
+**Director** is the pool's one policy owner and, for Fibers, the thread that
+constructed a domain; a **lane** is a Fiber domain's publication queue onto
+one Farm.
 
 1. **See it work (5 min).** Run the [first program](guide/quickstart.md#first-program):
    a reduction on every core through the fork-join dispatcher.
@@ -33,8 +42,9 @@ with its owning page; leave the path as soon as the layer fits your workload.
    [private actors](guide/private-actors.md) and [outcomes](guide/outcomes-and-cancellation.md).
    Fork-join trees and loops: [forkjoin_fib.d](../forkjoin/examples/forkjoin_fib.d), then
    [the fork-join README](../forkjoin/README.md).
-   Fibers: [hello_fibers.d](../ant_fibers/examples/hello_fibers.d), then
-   [Fibers through handles, joins, and cancellation](../ant_fibers/README.md#handles-joins-and-cancellation).
+   Fibers: [hello_fibers.d](../ant_fibers/examples/hello_fibers.d) on one
+   thread, then [Fibers on a GroupHost](../ant_fibers/README.md#run-on-a-grouphost)
+   for the pool, and [handles, joins, and cancellation](../ant_fibers/README.md#handles-joins-and-cancellation).
 6. **Size it.** Read [Sizing one Farm](../ARCHITECTURE.md#sizing-one-farm) and
    [work-cost hints](guide/sizing-and-allocation.md#work-cost-hints); for a
    second LLC group, [scaling across groups](guide/scaling-groups.md).
@@ -50,7 +60,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 
 | Page | Read it to |
 | --- | --- |
-| [quickstart.md](guide/quickstart.md) | run the single-threaded First payload, then a public service on pinned workers |
+| [quickstart.md](guide/quickstart.md) | run the first program on the dispatcher, see the same sum on the raw ring, then a public service on pinned workers |
 | [using-it-well.md](guide/using-it-well.md) | check correctness and tuning rules before building on the Farm |
 | [hosting.md](guide/hosting.md) | run actors on a `FarmHost`: setup, placement, waiting, teardown |
 | [scaling-groups.md](guide/scaling-groups.md) | cross a second LLC group: what it costs, `GroupHost`, the host loop against a hand-written one, tuning cheap work |
@@ -103,7 +113,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | First payload and the initial producer/consumer/actor model | [guide/quickstart.md](guide/quickstart.md) |
 | Runnable actor programs and their commands | [examples/README.md](../examples/README.md) |
 | FarmHost setup, placement, idle and wake, control-thread rule, close and abandon | [guide/hosting.md](guide/hosting.md) |
-| Structuring across LLC groups: consumers per group, one-way cross-group publication, Farms as channels | [guide/hosting.md](guide/scaling-groups.md#several-physical-groups) |
+| Structuring across LLC groups: consumers per group, one-way cross-group publication, Farms as channels | [guide/scaling-groups.md](guide/scaling-groups.md#several-physical-groups) |
 | Actor API topic index and the generated reference command | [reference/README.md](reference/README.md) |
 | Actor authority, completion, storage, drain and shutdown contracts shared by both models | [reference/actor-lifecycle.md](reference/actor-lifecycle.md) |
 | Public actor creation, inbox, retirement and wave API | [guide/public-actors.md](guide/public-actors.md) |

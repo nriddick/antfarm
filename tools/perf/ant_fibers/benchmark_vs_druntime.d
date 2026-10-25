@@ -8,10 +8,19 @@
  +
  + After the ST table, the same binary sweeps Ant Farm + threadpool worker
  + sets on this machine (SMT on/off, 1..N LPs, flush/avgCost) and reports
- + warm fiber drain and bare-payload drain against that ST baseline. The
- + worker sets come from one LLC group (the group of the first eligible CPU),
- + because the single lane binds to one group: on multi-LLC hosts they are
- + capped to one LLC's CPUs.
+ + warm fiber drain and bare-payload drain against that ST baseline. Each
+ + worker set is a `GroupHost` over one LLC group (the group of the first
+ + eligible CPU, `HostGroups.only`) with exactly those CPUs as workers, one
+ + Farm, and a `FiberGroups` attachment serving the one lane; the host's own
+ + view consumes the Farm, so bare payloads run on the same workers. On
+ + multi-LLC hosts the sets are capped to that one LLC's CPUs.
+ +
+ + Port note (GroupHost): the former `FiberLane` + `installFiberPlan` path is
+ + gone; the host owns the Farm and the pool (`host.summary()` replaces the
+ + pool resolution summary). The control thread's payload token is the host's
+ + caller token. Both domains size their lifecycle record ring to the burst
+ + (`recordRetention = 4 * n`): the default admits only 4096 unretired tasks.
+ + CLI unchanged: benchmark_vs_druntime [n] [flush].
  +/
 module benchmark_vs_druntime;
 
@@ -20,7 +29,7 @@ import ant_fibers;
 import core.atomic;
 import core.memory : GC;
 import core.thread : Fiber, Thread;
-import core.time : MonoTime, seconds;
+import core.time : Duration, MonoTime, seconds;
 import std.conv : to;
 import std.stdio : stdout, writefln, writeln;
 import threadpool;
@@ -66,7 +75,7 @@ struct Topo
 }
 
 /// Up to `workers` (0 = all) eligible CPUs of ONE LLC group, the group of the
-/// first eligible CPU. A Fiber plan binds the single lane to one group, so on
+/// first eligible CPU. The host binds its single Farm to one group, so on
 /// multi-LLC hosts these runs are capped to that group's CPUs.
 ProcessorId[] pickLps(bool skipSmt, size_t workers)
 {
@@ -101,8 +110,16 @@ void waitUntil(bool delegate() done, string what)
     }
 }
 
-/// One FiberLane on this host's LLC map, `lps.length` pinned workers.
-/// Returns warm fiber drain /s and payload drain /s.
+/// Lifecycle records for a burst of `n` tasks held until the Director retires.
+FiberDomainOptions burstDomainOptions(size_t n)
+{
+    FiberDomainOptions options;
+    options.recordRetention = 4 * n + 4;
+    return options;
+}
+
+/// One `GroupHost` on one LLC group with `lps.length` pinned workers and a
+/// `FiberGroups` lane. Returns warm fiber drain /s and payload drain /s.
 Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
 {
     enum ln = 1 << 22;
@@ -111,44 +128,47 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
     immutable slots = cast(uint)(lps.length + 1); // workers + control payload producer
     immutable quotaHeadroom = (k - 1) * segCap / slots;
     immutable quotaSmall = quotaHeadroom > 16_384 ? 16_384 : quotaHeadroom;
-    auto farm = AntFarm.create(ringMiBFromUlongs(ln), k, cast(uint) lps.length, 0, 0, slots, quotaSmall);
-    scope (exit) farm.destroy();
-    auto lane = new FiberLane(farm);
-    lane.flushBatch = topo.flushBatch;
-    lane.avgCost = topo.avgCost;
-
-    PoolOptions options;
-    options.skipSmtSiblings = topo.skipSmt;
-    options.processors = lps;
-    options.managedWorker = fiberWorkerHooks();
-    auto pool = new CacheAwarePool(options);
     immutable group = CacheAwarePool.topology().byId(lps[0]).llcIndex;
-    installFiberPlan(new FiberServicePlan(pool.resolve()).bind(group, lane), pool);
-    scope (exit) uninstallFiberPlan();
-    pool.start();
-    scope (exit) pool.shutdown();
-    writefln("    group %s: %s", group, pool.resolution.summary());
-    lane.domain.reserve(n);
+
+    auto domain = new FiberDomain(burstDomainOptions(n));
+    auto fibers = new FiberGroups(domain, topo.flushBatch, topo.avgCost);
+    GroupHostOptions options;
+    options.workers = cast(uint) lps.length;
+    options.groups = HostGroups.only(group);
+    options.pool.processors = lps;
+    options.pool.skipSmtSiblings = topo.skipSmt;
+    options.caller = CallerPlacement.unchanged; // the control thread stays unpinned
+    options.idleTimeout = Duration.max;         // park until woken, as before
+    options.farm.ringMiB = ringMiBFromUlongs(ln);
+    options.farm.k = k;
+    options.farm.quotaSmall = quotaSmall;
+    options.attachments = [fibers.attachment];
+    auto host = new GroupHost(options);
+    scope (exit) host.close();
+    scope (exit) domain.beginShutdown();
+    auto farm = host.farmOf(group);
+    writefln("    group %s: %s", group, host.summary());
+    domain.reserve(n);
 
     void burst()
     {
         foreach (_; 0 .. n)
-            lane.domain.spawn({ atomicFetchAdd(mtHits, 1L); });
-        pool.wakeAll();
+            domain.spawn({ atomicFetchAdd(mtHits, 1L); });
+        host.wakeAll();
     }
 
     atomicStore(mtHits, 0);
     burst();
-    waitUntil(() => lane.drained, topo.name ~ " cold drain");
-    lane.domain.retire();
+    waitUntil(() => domain.drained, topo.name ~ " cold drain");
+    domain.retire();
 
     atomicStore(mtHits, 0);
     burst();
     auto t0 = MonoTime.currTime;
-    waitUntil(() => lane.drained, topo.name ~ " warm drain");
+    waitUntil(() => domain.drained, topo.name ~ " warm drain");
     immutable fiberSec = (MonoTime.currTime - t0).total!"nsecs" / 1e9;
     assert(atomicLoad(mtHits) == n);
-    lane.domain.retire();
+    domain.retire();
 
     atomicStore(mtHits, 0);
     Callback header;
@@ -158,9 +178,9 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
     PayloadEntry[256] chunk;
     foreach (i; 0 .. chunk.length)
         chunk[i] = PayloadEntry(header, (&word)[0 .. 1]);
-    auto token = farm.registerProducer(Tier.small);
-    scope (exit) farm.unregisterProducer(token);
-    pool.wakeAll();
+    // The caller's planned small-tier token, released by host.close().
+    auto token = &host.token(group);
+    host.wakeAll();
     t0 = MonoTime.currTime;
     size_t written;
     while (written < n || atomicLoad(mtHits) < n)
@@ -169,17 +189,17 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
         {
             immutable take = n - written;
             immutable batch = take < chunk.length ? take : chunk.length;
-            immutable w = farm.write(chunk[0 .. batch], token, topo.avgCost);
+            immutable w = farm.write(chunk[0 .. batch], *token, topo.avgCost);
             if (w == 0)
             {
-                pool.wakeAll();
+                host.wakeAll();
                 Thread.yield();
             }
             else written += w;
         }
         else
         {
-            pool.wakeAll();
+            host.wakeAll();
             Thread.yield();
         }
     }
@@ -209,7 +229,7 @@ void main(string[] args)
 
     auto farm = AntFarm.create(8, 8, 1, 0, 0, 1, 16_384);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    auto domain = new FiberDomain(farm, burstDomainOptions(n));
     domain.reserve(n);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
@@ -360,7 +380,7 @@ void main(string[] args)
     writefln("topology: %s LLC(s), %s LP(s), %s P-cores, hugePages=%s",
              snap.llcCount, snap.logicalProcessorCount, snap.pCoreCount,
              farm.usedLargePages);
-    writefln("MT worker sets: LLC group %s only (one lane, one group)",
+    writefln("MT worker sets: LLC group %s only (one Farm, one group)",
              firstEligibleGroup());
 
     Topo[] topos = [

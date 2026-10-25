@@ -2,8 +2,8 @@
 
 `ant_fibers` is a freely migrating DRuntime Fiber scheduler built on Ant
 Farm. It owns suspendable task lifecycle; Ant Farm transports only runnable
-activations, and `threadpool` supplies pinned workers and wake policy when the
-scheduler is used concurrently.
+activations, and a `GroupHost` (`ant_fibers.groups`) supplies pinned workers,
+their parks and wakes when the scheduler is used concurrently.
 
 This document records the current design and its synchronization
 invariants. Start with [ant_fibers/README.md](../../ant_fibers/README.md) for usage and
@@ -58,18 +58,15 @@ payloads and suspendable Fibers remain separate work representations.
 - completions and the lifecycle record ring;
 - admission, shutdown, and recycled task/stack pools.
 
-`FiberLane` owns locality and transport state:
-
-- its physical group (bound by a `FiberServicePlan`) and Ant Farm;
-- its runnable publication accumulator;
-- its planned service, runtime admission state and service edges;
-- batching parameters and its wake mailbox.
+`FiberReadyLane` owns locality and transport state: one Ant Farm and the
+runnable publication accumulator that flushes into it. `GroupFiberLane`
+(`ant_fibers.groups`) is the lane of one `GroupHost` Farm, whose wake hooks
+reach the workers that consume that Farm.
 
 A task belongs to one domain. Each runnable generation is assigned a preferred
-lane, but any eligible consumer may resume it. One domain can attach multiple
-lanes before admission. Domain membership implies no cross-lane service:
-lanes sharing a domain are each served natively unless the plan adds an
-edge.
+lane, but any consumer of that lane's Farm may resume it. One domain can
+attach multiple lanes before admission (`attachReadyLane`); a lane is served
+by whoever consumes its Farm, and nothing moves activations between lanes.
 
 `FiberTask` owns one DRuntime `Fiber`, scheduler state, a retained failure,
 intrusive queue links, stack-size class, and migration diagnostics. Cold spawn
@@ -250,9 +247,9 @@ reading the body. Ant Farm provides those edges.
   to the recycle freelist. A waiter unlinks itself before it can arm again
   or terminate, so a released task is linked nowhere. The managed-join
   membership words follow the same rule under the target's list lock.
-- Consumers and producer tokens are persistent and worker-owned. Responders
-  serving a lane by an edge register and destroy those views on that same
-  worker.
+- Consumers and producer tokens are persistent and worker-owned: a worker's
+  view of its home Farm and its `groupToken` live from its first step to its
+  stop hook.
 - Cancellation requests live in a GC-visible handle array protected by the
   request mutex. Drainers hold the admission mutex through detaching and applying
   one finite snapshot. Synchronous Director cancellation takes the same mutex;
@@ -274,8 +271,8 @@ reading the body. Ant Farm provides those edges.
 - Lock order is admission before request/pool/wait/join/timer locks. Wait
   queue, join list and timer locks are never nested in one another. Submission
   releases the request lock before notifying lanes and never acquires admission.
-  No Fiber body or arbitrary handler runs under admission; wake notifiers may
-  only signal. Release may wait for external join readers to unregister; that
+  No Fiber body or arbitrary handler runs under admission; lane wake hooks
+  only wake workers. Release may wait for external join readers to unregister; that
   path takes no admission lock. Finite snapshot draining bounds each lock hold
   by the accepted batch, though heavy bursts can delay admission or other drainers.
 - Managed-join inbound-list and waiter-membership state occupy separate aligned
@@ -324,100 +321,31 @@ embedding policy.
 
 ## Pool integration and wake ownership
 
-The intended concurrent layout binds one `FiberLane` to each accepted LLC
-group through a `FiberServicePlan`, built from `pool.resolve()` and installed
-by `installFiberPlan`, the only installer. The plan is validated as a whole
-(`problems()`), must select the same workers as the pool, and installs the
-lanes as a physical-group-indexed bin table. Each managed worker keeps
-persistent Farm consumer and producer registrations on its own group's lane.
-Selected responders poll timers, accept timer-bounded parks, and sweep Farm
-holes and leftovers.
+Workers come from a `GroupHost` through `ant_fibers.groups.FiberGroups`, an
+attachment of the host ([the threadpool design](threadpool.md#group-host)).
+Its `install` hook, run on the control thread after the host created its
+Farms and before the pool starts, builds one `GroupFiberLane` per Farm and
+attaches each to the domain. Its `serve` hook runs in every worker's managed
+pump: it serves the worker's home lane with the worker's group token
+(cancellation requests, timers, triggers, flush, retirement when the worker
+may) and returns the earliest timer deadline, which the host parks the worker
+until. Every worker polls the domain's timers; an idle poll is one load of
+the heap's cached top. Activations are Farm payloads, so whichever view
+consumes the Farm resumes them: the host's own, or a consuming attachment's
+such as the fork-join dispatcher's.
 
-Service is native-only by default. A lane gets foreign consumers only through
-an explicit plan edge: `rescue` for a group with no accepted workers, or the
-experimental, opt-in `assist` (and `assistRing`) for a staffed group. Every
-responder of the serving group then holds one more view and one more small
-producer token on the served Farm, which `FarmRequirement` counts. Edges are
-one hop and same-domain only. A disabled group's workers idle without Farm
-registrations.
+Wakes are the lane's: a spawn, a signal to a parked waiter and a cancellation
+request wake the workers that consume the lane's Farm (`wakeLlc`, or
+`wakeAll` with one shared Farm), and a newly armed earliest timer wakes every
+worker so one adopts the deadline. Pending Director retirement wakes nobody;
+the Director polls `retirementPending`. The pool's arm/recheck protocol
+makes a wake that races a park safe.
 
-Each lane has a planned service, decided before start from the pool
-resolution (`native`, `rescued`, `unstaffed`, `disabled`, `absent`), and a
-runtime `FiberLaneState`. Served lanes start `pending` and admit work before
-start; unserved lanes start `closed` and refuse it. When the last planned
-worker finishes managed start, each served lane becomes `open` if its domain
-has at least one responder (timers are domain-wide) and the lane has a live
-server, and `failed` otherwise; the pumps then throw. Queued work on a lane
-that did not open fails startup; the check reads only that lane's
-accumulator and published count. Managed stop decrements `liveServers` on
-the worker's home lane and on every lane it served; the last stop moves a
-`pending` or `open` lane to `stopped`, and later spawns throw
-`FiberLaneUnavailable`. A `pending` lane with no live server also becomes
-`stopped` when a worker's start hook fails, when the pool has stopped
-(`ManagedWorkerHooks.poolStopped`, which runs even if shutdown beat every
-start hook) and when the plan is uninstalled. A spawn racing the last
-server's stop, or the failure or shutdown that retires a server-less lane, is
-not locked out: it can strand its task, visible afterwards as
-`state == stopped` with `domain.active` still counting it. Close domain
-admission and drain before `pool.shutdown`.
-
-Responders retain one remote `ConsumerView` per lane they serve by an edge.
-Every 16 local
-Farm pumps they visit the next remote, even when local consumption succeeds.
-With R remote views, each gets a `consumeNext()` attempt within at most 16×R
-local `consumeNext()` calls. Startup-barrier polls do not count. When local
-consumption misses, the worker scans from the same round-robin cursor until a remote succeeds or all have been attempted. The
-cursor advances on both success and failure. Empty views must still be pumped:
-a false return performs Farm frontier migration and leftover/reclamation work.
-The interval amortizes empty-remote polling over busy local work; it is a
-service guarantee in pump calls, not a wall-clock or throughput guarantee.
-
-The cursor and counter belong exclusively to the worker. Service edges stay
-fixed between managed start and stop; no Farm atomic or memory order changes.
-Repeated visits walk a finite backlog when a producer stalls on an old pin,
-then the Farm's idle re-walk releases confirmed prefix pins. One visit need not
-release a pin, and the current frontier remains protected. This assumes workers
-continue pumping and callbacks return or yield. A lagging view can still limit
-producer throughput; the rule prevents indefinite starvation, not backpressure.
-Persistent subscriptions avoid O(K) root walks, `Cf` churn and retry/full handling
-on reattachment (including the SPEC 6b fallback validation). All reclamation and
-Sub0 invariants remain those of SPEC 6b/6c/6e and 8.
-
-Managed stop runs after that worker's last pump/callback. It unsubscribes each
-remote view before unregistering its remote producer, then does the same for
-the local view. This also handles partial startup rollback. Pool shutdown/join
-must precede lane uninstallation and Farm destruction; unsubscribing preserves
-abandoned work through the existing Sub0 protocol and does not drain the domain.
-
-The default `broadcast` wake policy signals the pool for external admission,
-signal, cancellation, shutdown, and worker publication. Pending retirement
-under `FiberRetirement.director` is recorded as `lifecycle` in the mailbox
-(and notifier) only: the Director, not a worker, acts on it. Under
-`directorOwned`, lanes coalesce those reasons into a mailbox. The thread that
-owns `pool.director()` drains it and chooses which workers to signal. Queued
-cancellation is the exception: domain and lane `requestCancel` notify every
-attached lane, recording `cancelled` and waking service even under `directorOwned`.
-Application also wakes a cancelled waiter's destination, which may have parked
-since the initial request wake; synchronous Director cancellation shares this
-wake path. This permits cancellation without Director polling.
-An optional `nothrow @nogc` notifier fires on an empty-to-nonempty mailbox edge so
-an external event loop can wake without running arbitrary handlers on workers.
-
-Successful Fiber publication relays `remoteReady` to the lanes serving it by
-an edge, including
-when the publishing worker also consumed local work. With `directorOwned`, the
-Director must act on those events. Direct Farm writes or direct domain use
-still require the embedding to arrange pool wakes, except for domain cancellation
-requests and other domain operations with explicit wake hooks; the pump-count bound
-does not wake a parked worker by itself.
-
-Native-only service, rescue edges and the explicit assist ring are validated
-on a two-LLC host (smoke L1-L3). The default broadcast wake still reaches every
-pool worker. The opt-in `servingGroups` policy wakes only a lane's own group and
-its edge server groups, and a newly armed earliest timer wakes the groups
-hosting the domain's native lanes; it is validated on the two-LLC host (smoke
-W1-W2). Making it the default awaits a performance characterization. Current release evidence
-does not claim multi-LLC performance or failover guarantees.
+Service is per Farm: a group's workers consume their group's Farm and no
+other. Cross-group service (the former rescue and assist edges, lane
+admission states and wake policies of `installFiberPlan`) was removed in
+2.1.0; a group that should run Fibers gets workers, or its tasks are spawned
+on another group's lane with `spawnOn`.
 
 ## Completion, lifecycle records, and shutdown
 
@@ -434,8 +362,8 @@ newer completions.
 
 Every service pass retires when its thread may: always under
 `FiberRetirement.serviceThreads`, only on the Director under the default
-`director`. Elsewhere it records the pending retirement for the Director (see
-wake policy above). A worker may apply queued cancellation requests before an
+`director`. Elsewhere it wakes nobody: the Director polls `retirementPending`
+(pool integration above). A worker may apply queued cancellation requests before an
 explicit drain, which then returns only its own snapshot's applications; use
 task outcomes or cancellation records to observe pump-applied requests.
 Recycling waits for external join readers of the generation to unregister.
@@ -464,11 +392,11 @@ reaches a scheduler boundary.
 
 Smoke and stress coverage includes forced migration, GC retention across
 migration, park/wake and timer/cancel races, generation reuse, joins,
-cancellation cutoff behavior, lifecycle backpressure and retry, cross-lane
-wakes, per-domain responder validation, lane admission states, service-plan
-validation, and repeated concurrent drain. The two-LLC live tests (no-edge
-shared domain, unused-group pre-admission, rescue) print SKIP on single-LLC
-hosts.
+cancellation cutoff behavior, record backpressure and retry, two-lane
+domains with cross-lane joins, and Fibers on a `GroupHost`: timer deadlines
+ending indefinite parks, Director signals and cancellation requests applied
+by worker service passes, both retirement modes, and a timer on the second
+group's lane. The two-group cases print SKIP on single-LLC hosts.
 
 Under `version(TSan)` the scheduler keeps a ThreadSanitizer context per task,
 so the dedicated Fiber TSan smoke suite covers migration

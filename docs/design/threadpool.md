@@ -392,8 +392,9 @@ through `makeBins`/`install`: a worker finds its Farm with
 `home!GroupSlot()`, a control thread with `farmOf(llc)`. Without it, one
 Farm serves every selected group and every slot names it. Every Farm plans
 one small-tier producer for the caller, one per worker with `workerTokens`
-(the default; `FarmHost` turns it off, since its workers only consume, so the
-Farm itself refuses a producer beyond `extraSmallProducers`), plus
+(the default; a `FarmHost` without further attachments turns it off, since
+its workers only consume, so the Farm itself refuses a producer beyond
+`extraSmallProducers`), plus
 `FarmSizing.extraSmallProducers`;
 `groupToken(llc)` (or `host.token(llc)`) registers the calling thread's
 token on that Farm lazily, and `releaseThreadTokens` returns them: after a
@@ -402,11 +403,12 @@ thread that published.
 
 The worker loop is composed from `GroupHostOptions.attachments`, each a
 `GroupAttachment`: a `@nogc` per-worker `body` and `stop`, a `consumes` flag
-(the body subscribes the worker's own view of its home Farm), and the
-GC-enabled hooks `install`/`uninstall` (control thread, after the Farms and
-registry exist and before the pool starts; after the pool stopped and before
-the Farms die), `start`/`finish` (once per worker) and `serve` (per step,
-returning progress and the earliest deadline). The `(options, body, stop)`
+(the body subscribes the worker's own view of its home Farm; the host plans
+one consumer per worker per consuming attachment), control-thread hooks
+`install`/`uninstall` (after the Farms and registry exist and before the pool
+starts; after the pool stopped and before the Farms die; either lane), and
+the GC-enabled per-worker hooks `start`/`finish` (once per worker) and
+`serve` (per step, returning progress and the earliest deadline). The `(options, body, stop)`
 constructor is one consuming `@nogc` attachment.
 
 The host picks the pool lane at start. With only `@nogc` attachments it runs
@@ -414,7 +416,7 @@ the raw `WorkerBody` lane: a single attachment's body is installed as the
 pool's body, so the fork-join dispatcher's burst loop is byte-identical to a
 pool it ran alone on (fib(39) at 32 threads measured unchanged, 101.5 vs
 101.9 ms interleaved); several are stepped in order by one composed body. A
-GC-enabled hook selects the managed lane, whose pump consumes the home Farm
+GC-enabled per-worker hook selects the managed lane, whose pump consumes the home Farm
 through the host's own view when no attachment consumes, steps every body,
 runs every `serve`, and returns `again` on progress, `until(deadline)` for
 the earliest reported deadline, or `idle`; the pool's arm/recheck protocol

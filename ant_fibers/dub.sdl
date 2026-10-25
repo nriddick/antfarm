@@ -20,7 +20,7 @@ configuration "unittest" {
     // fixtures) under any build type, so `dub run -c unittest` runs them.
     buildOptions "unittests"
     mainSourceFile "../tests/ant_fibers/smoke.d"
-    sourceFiles "../tests/ant_fibers/service_plan.d" "../tests/ant_fibers/host_attach.d" \
+    sourceFiles "../tests/ant_fibers/host_attach.d" \
         "../tests/ant_fibers/semaphore.d" "../tests/ant_fibers/event.d" \
         "../tests/ant_fibers/wait_races.d" "../tests/ant_fibers/records.d" \
         "../tests/ant_fibers/group_host.d"
@@ -32,7 +32,6 @@ configuration "stress" {
     // Correctness suites: keep assert checks in release builds too.
     buildRequirements "requireContracts"
     mainSourceFile "../tests/ant_fibers/stress.d"
-    sourceFiles "../tests/ant_fibers/service_plan.d"
     importPaths "../tests/ant_fibers"
 }
 

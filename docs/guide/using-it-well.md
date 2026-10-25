@@ -77,12 +77,12 @@ The owning model is [SPEC](../../SPEC.md#1-model-scope-and-terminology).
    whole cliff ([measured](../../PERFORMANCE.md#headline-throughput)).
    A producer may publish into another group's Farm one-way when its tables
    have 256 entries or more and each payload carries about 100 ns of work;
-   trivial payloads stay local. `FarmHost` defaults to one group and
-   `FiberServicePlan` to native-only lane service; `HostGroups.span` and
-   assist edges are explicit opt-ins. See
-   [several physical groups](scaling-groups.md#several-physical-groups),
-   [LLC service](../../ARCHITECTURE.md#one-llc-and-many-llcs) and the
-   [assist-ring measurements](../performance/archive-2026-10-20.md#assist-ring-ab).
+   trivial payloads stay local. `FarmHost` defaults to one group, and a
+   `GroupHost` with `farmPerGroup` gives each group its own Farm, served only
+   by that group's workers; `HostGroups.span` is the explicit opt-in.
+   [Several physical groups](scaling-groups.md#several-physical-groups) owns
+   the rule, the measurements and the token, quota and ring-size
+   consequences.
 6. **Account for idle costs.** Polling consumes CPU; arrange waiting through
    the Director or host idle policy. `host.waitUntil` drives control-thread
    progress; it is not automatic core parking. A stalled older segment makes
@@ -110,17 +110,6 @@ One conductor with typed results, non-POD state or tracked deadlines:
 private tree. Work that waits, throws, or allocates: Fiber. A Fiber that
 never suspends usually belongs on the payload path.
 The [choice guide](choosing-work.md) owns the full comparison.
-
-## Several LLC groups
-
-A Farm's consumers belong to one last-level-cache group; a second group gets
-its own Farm, fed one-way by a producer that publishes tables of 256 entries
-or more whose payloads carry about 100 ns of work each. Trivial payloads stay
-on their own group, tokens are held per publishing thread, and a channel Farm
-costs about 2 MiB. The measurements, the structures for private and public
-actors, and the token, quota and ring-size consequences are in
-[several physical groups](scaling-groups.md#several-physical-groups); the host
-primitive that packages it is on the [roadmap](../../ROADMAP.md#next).
 
 ## Application policies
 

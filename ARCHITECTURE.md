@@ -233,20 +233,16 @@ For ring, tier, batch, work-cost, and page-backing decisions, use
 
 ## One LLC and many LLCs
 
-A `FiberServicePlan` binds one lane to each accepted LLC group of the pool
-resolution, and lanes may share one domain-wide Fiber lifecycle. Service is
-native-only by default: domain membership adds no cross-group consumers. A
-group without accepted workers is either refused (`unstaffed`, spawns throw)
-or served through an explicit `rescue` edge. `assist` edges, including the
-explicit `assistRing`, are experimental and opt-in for staffed groups. The
-plan derives each Farm's consumer and producer sizing from these edges.
+`ant_fibers.groups.FiberGroups` gives a Fiber domain one lane per `GroupHost`
+Farm, and lanes share one domain-wide Fiber lifecycle. Service is per Farm: a
+group's workers consume their group's Farm and no other, and a spawn names
+the group whose Farm its activations prefer (`spawnOn(llc)`). The host sizes
+each Farm's consumers and producers from its attachments.
 
-Native-only service, unused-group admission and rescue are validated on a
-two-LLC host (Ryzen 9 5900XT). The default broadcast wake still reaches
-every worker; the opt-in `FiberWakePolicy.servingGroups` wakes only the groups
-serving a lane. Topology-specific performance and
-lost-worker-group claims still need their own evidence before they are treated
-as release evidence.
+Fibers on two groups (timers, signals, cancellation, cross-group joins) are
+validated on a two-LLC host (Ryzen 9 5900XT). Topology-specific performance
+claims still need their own evidence before they are treated as release
+evidence.
 
 The same rule holds below the Fiber layer: a Farm's consumers belong to one
 group, and a second group is reached by giving it its own Farm and publishing

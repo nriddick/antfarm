@@ -5,6 +5,7 @@ module host_live;
 // print SKIP otherwise; the workers-0 cases run anywhere.
 
 import core.atomic : atomicLoad, atomicOp, atomicStore;
+import core.atomic : atomicExchange;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, msecs, seconds;
 import std.algorithm.searching : canFind;
@@ -1178,6 +1179,36 @@ void groupHostAttachments()
         managed.workers, " workers woke ", during, " times in 100 ms idle for a 5 ms deadline");
 }
 
+/// A service hook that throws on the managed lane fails its worker: the pool
+/// records the failure and stops, the other workers leave, and `close()`
+/// still tears the host down in order.
+void groupHostServiceFailure()
+{
+    GroupHostOptions o;
+    o.groups = HostGroups.all();
+    o.idleTimeout = Duration.max;
+    o.farm.ringMiB = 2;
+    shared int thrown;
+    GroupAttachment service;
+    service.name = "throwing service";
+    service.serve = (WorkerSelf* w) {
+        if (w.workerIndex == 0 && atomicExchange(&thrown, 1) == 0)
+            throw new Exception("service hook failure");
+        return GroupServiceResult(false, (MonoTime.currTime + 5.msecs).ticks);
+    };
+    o.attachments = [service];
+    auto host = new GroupHost(o);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (!host.pool.stopRequested && MonoTime.currTime < deadline)
+        Thread.sleep(1.msecs);
+    enforce(host.pool.stopRequested, "a throwing service hook stops the pool");
+    host.close();
+    auto failures = host.pool.workerFailures();
+    enforce(failures.length == 1 && failures[0].msg == "service hook failure",
+        "the failure is recorded on its worker");
+    writeln("PASS group host service failure: a throwing serve hook stops the pool and is recorded");
+}
+
 /// A FarmHost with workers runs on a GroupHost (one shared Farm, its body the
 /// one raw attachment) and excludes other hosts both ways; without workers it
 /// is a standalone Farm that may exist beside an open GroupHost.
@@ -1273,6 +1304,7 @@ int main(string[] args)
         groupHostPerGroup();
         groupHostSingleton();
         groupHostAttachments();
+        groupHostServiceFailure();
         farmHostOnGroupHost();
         rejectedPoolShutdown();
         return 0;
@@ -1313,6 +1345,7 @@ int main(string[] args)
     groupHostPerGroup();
     groupHostSingleton();
     groupHostAttachments();
+    groupHostServiceFailure();
     farmHostOnGroupHost();
     rejectedPoolShutdown();
     timeoutThenCancel(2);

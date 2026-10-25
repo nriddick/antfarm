@@ -129,7 +129,10 @@ place to drain `takeOutcome`. Neither call ever infers idle from a zero flush,
 pump or `consumeNext`.
 
 Each round visits every emitter in registration order (host-owned emitters,
-then attachments), including emitters that returned zero in an earlier round.
+then `HostAttachment`s, the control-thread emitters registered with
+`attach`; the `GroupAttachment`s of `FarmHostOptions.attachments` are
+worker-loop participants, not emitters), including emitters that returned
+zero in an earlier round.
 This batches publications before a wake without draining one busy emitter
 indefinitely. The bound counts rounds, not tables or elapsed time: a park may
 publish several pending child tables per pump and a runtime flushes up to four
@@ -211,9 +214,15 @@ application-started pool, is rejected with a `FarmHostException`, and the
 running one is left alone. Hosts with `workers == 0` start no pool and can
 coexist with any of them.
 
-A caller-driven `FiberDomain` joins the same host with
-`ant_fibers.host.attachFiberDomain(host, new FiberDomain(host.farm))`.
-[examples/fiber_cancel_at.d](../../examples/fiber_cancel_at.d) shows it.
+Fibers join a host two ways. `ant_fibers.host.attachFiberDomain(host,
+new FiberDomain(host.farm))` serves a one-lane domain from the control
+thread's `step()` and runs its Fibers on the host's consumers; use it when
+the control thread already drives the host
+([examples/fiber_cancel_at.d](../../examples/fiber_cancel_at.d)). To have the
+pool workers serve the domain (timers, retirement under `serviceThreads`,
+one lane per group with `farmPerGroup`), put `FiberGroups.attachment` in
+`FarmHostOptions.attachments` instead
+([ant_fibers/README.md](../../ant_fibers/README.md#run-on-a-grouphost)).
 
 ## Parallel regions
 

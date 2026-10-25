@@ -724,10 +724,20 @@ private void leaveThread() nothrow @nogc @system
 // ---------------------------------------------------------------------------
 
 /// The dispatcher: start it, run or submit roots, stop it. One per process.
+///
+/// Two ways to run it. `start()`/`start(cpus, opt)` build a `GroupHost` the
+/// dispatcher owns, with the caller pinned to `cpus[0]`. Or compose it on an
+/// application-owned host: put `attachment(opt)` in `GroupHostOptions.
+/// attachments` beside other attachments (`ant_fibers.groups.FiberGroups`,
+/// or through `FarmHostOptions.attachments`), construct the host, then call
+/// `start(host)` on the host's caller thread, which becomes participant 0.
+/// That host must plan `farm.extraSmallProducers >= 1` for the shared submit
+/// token, and `callerConsumes` to match `DispatcherOptions.callerConsumes`.
 struct Dispatcher
 {
     /// The host that owns the pool, the Farms and the caller's pin.
     GroupHost host;
+    private bool ownsHost_;
 
     /// Starts the dispatcher on every eligible processor (the first
     /// `maxParticipants` in topology order): the calling thread on the
@@ -749,30 +759,119 @@ struct Dispatcher
         start(cpus, opt);
     }
 
-    /// Starts the dispatcher on a `GroupHost`. `cpus[0]` is the calling
-    /// thread's processor, pinned here; the rest become pool workers. Throws
-    /// if the host does not accept every requested processor.
-    void start(const(ProcessorId)[] cpus, DispatcherOptions opt = DispatcherOptions.init)
+    /// The dispatcher as a `GroupAttachment` for an application-owned host.
+    /// Its `install` builds the participant tables from the host's
+    /// resolution (the caller is participant 0, pool worker i is i + 1) and
+    /// registers the submit token on the first Farm; `uninstall` frees them
+    /// after the pool stopped. Call `start(host)` once the host exists.
+    GroupAttachment attachment(DispatcherOptions opt = DispatcherOptions.init)
     {
         import std.exception : enforce;
-        enforce(cpus.length >= 1 && cpus.length <= maxParticipants, "forkjoin: bad participant count");
         enforce(g_participants == 0, "forkjoin: a dispatcher is already running");
         // Zero steps per body call would return to the pool without ever
         // stepping, so workers would spin and never take work.
         enforce(opt.bodySteps > 0, "forkjoin: bodySteps must be at least 1");
         g_opt = opt;
+        GroupAttachment a;
+        a.name = "forkjoin";
+        a.body = &workerBody;
+        a.stop = &workerStop;
+        a.consumes = true;
+        a.install = (GroupHost h) { installOn(h); };
+        a.uninstall = (GroupHost h) { uninstallFrom(h); };
+        return a;
+    }
+
+    /// Enter the calling thread as participant 0 of a host that installed
+    /// `attachment`. The host stays the application's: `stop()` drains the
+    /// roots and leaves, and the host's `close()` frees the dispatcher's
+    /// tables through `uninstall`.
+    void start(GroupHost host)
+    {
+        import std.exception : enforce;
+        enforce(host !is null && g_participants != 0 && g_host is null,
+            "forkjoin: start(host) needs a host that installed the dispatcher's attachment");
+        ownsHost_ = this.host is host && ownsHost_; // set by start(cpus) for its own host
+        this.host = host;
+        g_host = host;
+        enterThread(0, host.callerGroup, g_opt.callerConsumes || g_participants == 1);
+    }
+
+    private static void installOn(GroupHost host)
+    {
+        import std.exception : enforce;
+        auto res = host.resolution;
+        immutable count = res.workers.length + 1;
+        enforce(count <= maxParticipants, "forkjoin: too many participants for the dispatcher");
+        auto topo = CacheAwarePool.topology();
+        // Participant ids: caller 0, pool worker i -> i + 1; group of each.
+        auto llcOfId = new ushort[count];
+        auto coreOf = new ulong[count];
+        llcOfId[0] = host.callerGroup;
+        coreOf[0] = ulong.max; // a confined caller has no one core: no SMT sibling
+        if (host.callerCpus.length == 1)
+            if (auto lp = topo.byId(host.callerCpus[0]))
+                coreOf[0] = (cast(ulong) lp.group << 32) | (cast(ulong) lp.packageIndex << 16) | lp.coreIndex;
+        foreach (i, id; res.workers)
+        {
+            auto lp = topo.byId(id);
+            enforce(lp !is null, "forkjoin: a pool worker's processor is unknown");
+            llcOfId[i + 1] = lp.llcIndex;
+            // A core is unique per (group, package, core index): Linux core
+            // ids repeat across packages, Windows ones across groups.
+            coreOf[i + 1] = (cast(ulong) lp.group << 32) | (cast(ulong) lp.packageIndex << 16) | lp.coreIndex;
+        }
+        foreach (i; 0 .. count)
+            g_deques[i] = Deque.create(g_opt.dequeCapacity);
+        g_members = new uint[][](topo.llcCount);
+        foreach (i; 0 .. count)
+            g_members[llcOfId[i]] ~= cast(uint) i;
+        foreach (i; 0 .. count)
+        {
+            g_cross[i] = null;
+            foreach (j; 0 .. count)
+                if (llcOfId[j] != llcOfId[i]) g_cross[i] ~= cast(uint) j;
+            g_sibling[i] = uint.max;
+            foreach (j; 0 .. count)
+                if (j != i && coreOf[i] != ulong.max && coreOf[j] == coreOf[i]) g_sibling[i] = cast(uint) j;
+        }
+        g_farmCount = host.farms.length;
+        foreach (i, f; host.farms) g_farms[i] = f;
+        g_submitLlc = host.groups[0];
+        g_submitToken = g_farms[0].registerProducer(Tier.small);
+        enforce(g_submitToken.valid,
+            "forkjoin: the host must plan farm.extraSmallProducers >= 1 for the submit token");
+        g_participants = count;
+    }
+
+    private static void uninstallFrom(GroupHost host)
+    {
+        // After the pool stopped (workers left) and before the Farms die.
+        if (g_submitToken.valid) g_farms[0].unregisterProducer(g_submitToken);
+        g_submitToken = Token.init;
+        foreach (i; 0 .. g_participants)
+            if (g_deques[i] !is null) { g_deques[i].destroy(); g_deques[i] = null; }
+        g_farms[] = null;
+        g_farmCount = 0;
+        g_participants = 0;
+        g_host = null;
+    }
+
+    /// Starts the dispatcher on a `GroupHost` it owns. `cpus[0]` is the
+    /// calling thread's processor, pinned here; the rest become pool workers.
+    /// Throws if the host does not accept every requested processor.
+    void start(const(ProcessorId)[] cpus, DispatcherOptions opt = DispatcherOptions.init)
+    {
+        import std.exception : enforce;
+        enforce(cpus.length >= 1 && cpus.length <= maxParticipants, "forkjoin: bad participant count");
         immutable callerConsumes = opt.callerConsumes || cpus.length == 1;
+        auto a = attachment(opt);
         scope (failure)
         {
-            // Undo every stage so a later start can succeed.
-            if (host !is null) { host.close(); host = null; }
+            // Undo every stage so a later start can succeed. close joins the
+            // workers and runs uninstall; without a host nothing ran install.
+            if (host !is null) { host.close(); host = null; ownsHost_ = false; }
             g_host = null;
-            foreach (i; 0 .. g_participants)
-                if (g_deques[i] !is null) { g_deques[i].destroy(); g_deques[i] = null; }
-            g_farms[] = null;
-            g_submitToken = Token.init;
-            g_farmCount = 0;
-            g_participants = 0;
         }
 
         GroupHostOptions ho;
@@ -791,83 +890,50 @@ struct Dispatcher
         ho.farm.extraSmallProducers = 1; // the shared submit token
         ho.farmPerGroup = opt.farmPerGroup;
         // Workers run their first body call inside the host constructor, so
-        // every table they read is built from the resolution beforehand.
+        // every table they read is built in the attachment's install, from
+        // the resolution, beforehand.
         auto res = GroupHost.resolve(ho);
         enforce(res.workers.length == cpus.length - 1,
             "forkjoin: the threadpool accepted " ~ res.summary());
         auto topo = CacheAwarePool.topology();
-
-        // Participant ids: caller 0, pool worker i -> i + 1; group of each.
-        g_participants = cpus.length;
-        auto idOf = new ProcessorId[cpus.length];
-        idOf[0] = cpus[0];
-        foreach (i, id; res.workers) idOf[i + 1] = id;
-        auto llcOfId = new ushort[cpus.length];
-        auto coreOf = new ulong[cpus.length];
-        foreach (i; 0 .. cpus.length)
+        foreach (id; cpus)
         {
-            auto lp = topo.byId(idOf[i]);
+            auto lp = topo.byId(id);
             enforce(lp !is null && topo.isEligible(*lp),
-                "forkjoin: processor " ~ formatCpuList(idOf[i .. i + 1]) ~ " is unknown or ineligible");
-            llcOfId[i] = lp.llcIndex;
-            // A core is unique per (group, package, core index): Linux core
-            // ids repeat across packages, Windows ones across groups.
-            coreOf[i] = (cast(ulong) lp.group << 32) | (cast(ulong) lp.packageIndex << 16) | lp.coreIndex;
-            g_deques[i] = Deque.create(opt.dequeCapacity);
-        }
-        g_members = new uint[][](topo.llcCount);
-        foreach (i; 0 .. cpus.length)
-            g_members[llcOfId[i]] ~= cast(uint) i;
-        foreach (i; 0 .. cpus.length)
-        {
-            g_cross[i] = null;
-            foreach (j; 0 .. cpus.length)
-                if (llcOfId[j] != llcOfId[i]) g_cross[i] ~= cast(uint) j;
-            g_sibling[i] = uint.max;
-            foreach (j; 0 .. cpus.length)
-                if (j != i && coreOf[j] == coreOf[i]) g_sibling[i] = cast(uint) j;
+                "forkjoin: processor " ~ formatCpuList((&id)[0 .. 1]) ~ " is unknown or ineligible");
         }
         // The dispatcher is the host's one attachment: the raw lane installs
         // `workerBody` directly, so the burst loop is unchanged.
-        ho.attachments = [GroupAttachment("forkjoin", &workerBody, &workerStop, true)];
+        ho.attachments = [a];
+        // Owned from construction: a failure below closes it (joining the
+        // workers) before the failure path frees the participant tables.
         host = new GroupHost(ho);
-        g_host = host;
-        enforce(host.resolution.workers == res.workers, "forkjoin: the host started a different selection");
-        g_farmCount = host.farms.length;
-        foreach (i, f; host.farms) g_farms[i] = f;
-        g_submitLlc = host.groups[0];
-        g_submitToken = g_farms[0].registerProducer(Tier.small);
-        if (!g_submitToken.valid) fatal("submit token registration failed");
-        enterThread(0, llcOfId[0], callerConsumes);
+        ownsHost_ = true;
+        enforce(host.resolution.workers == res.workers, "forkjoin: the host started a different selection: "
+            ~ "planned " ~ res.summary() ~ "; started " ~ host.resolution.summary());
+        start(host);
     }
 
-    /// Drains every outstanding root (detached roots included), then closes
-    /// the host (pool shutdown runs each worker's stop hook), leaves, and
-    /// destroys the deques.
+    /// Drains every outstanding root (detached roots included) and leaves.
+    /// On a host the dispatcher owns it then closes the host (pool shutdown
+    /// runs each worker's stop hook) and frees the deques. On an
+    /// application's host the workers keep running the host's other
+    /// attachments; the host's `close()` frees the dispatcher's tables.
     void stop()
     {
         // Never started, a failed start, or stopped already: nothing to undo.
-        if (g_participants == 0) return;
+        if (g_participants == 0 || g_host is null) return;
         if (t_deque is null || t_id != 0) fatal("forkjoin: Dispatcher.stop off the thread that started it");
         while (atomicLoad!(MemoryOrder.acq)(g_rootsLive) != 0)
         {
             if (step()) t_idle = 0;
             else idlePause();
         }
-        g_farms[0].unregisterProducer(g_submitToken);
-        g_submitToken = Token.init;
         leaveThread();
-        g_host.close(); // joins workers, releases tokens, destroys the Farms
-        g_host = null;
+        if (ownsHost_)
+            host.close(); // joins workers, releases tokens, uninstalls, destroys the Farms
         host = null;
-        foreach (i; 0 .. g_participants)
-        {
-            g_deques[i].destroy();
-            g_deques[i] = null;
-        }
-        g_farms[] = null;
-        g_farmCount = 0;
-        g_participants = 0;
+        ownsHost_ = false;
     }
 }
 

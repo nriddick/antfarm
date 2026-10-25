@@ -48,8 +48,8 @@ The fork-join dispatcher (`import forkjoin;`, [forkjoin/README.md](forkjoin/READ
 runs on the threadpool with one work-stealing deque per participant and the
 Farm as its admission and overflow channel.
 The D actor programs in [examples/](examples/README.md) run on a `FarmHost`
-(`import threadpool.host;`), which owns the Farm, the token, the pinned
-workers and the shutdown order.
+(`import threadpool.host;`), which runs one Farm's pinned workers on the
+`GroupHost` and owns the token, the actor runtimes and the shutdown order.
 
 ## Start here
 
@@ -81,7 +81,7 @@ import std.stdio : writeln;
 void main()
 {
     Dispatcher d;
-    d.start();                 // the caller plus one pinned worker per core
+    d.start();                 // the caller plus a pinned worker per eligible CPU
     scope (exit) d.stop();
     writeln("sum of squares: ", forkJoinReduce!((ulong x) => x * x,
         (ulong a, ulong b) => a + b)(iota(1UL, 257UL), 0UL, 16));

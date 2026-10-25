@@ -490,7 +490,11 @@ PoolResolution resolvePool(ref const TopologySnapshot snap, in PoolOptions optio
             }
     }
 
-    return new PoolResolution([snap].ptr, cpus, requests, workers, false);
+    // The resolution outlives its caller's snapshot, so it owns a heap copy.
+    // A bare `[snap].ptr` may be a stack temporary under optimization: the
+    // ASan fork-join lane read a dead frame through `topology`.
+    const(TopologySnapshot)[] owned = [snap];
+    return new PoolResolution(owned.ptr, cpus, requests, workers, false);
 }
 
 /// `"osExcluded,smtSecondary"`, or `"-"` for none.

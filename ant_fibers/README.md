@@ -2,8 +2,8 @@
 
 `ant_fibers` runs freely migrating DRuntime Fibers on Ant Farm work lanes.
 It supplies Fiber lifecycle, waits, timers, cancellation, joins, completion,
-and stack recycling; it deliberately leaves worker topology and wake policy to
-the embedding application.
+records and stack recycling. Workers come from the embedding: a caller's own
+loop, a `FarmHost`, or the pool through `ant_fibers.groups` on a `GroupHost`.
 
 Use a Fiber when work needs ordinary D control flow, allocation, cleanup
 scopes, or suspension. Use a bare Ant Farm payload for short
@@ -43,10 +43,9 @@ dub run -c stress --compiler=ldc2 --build=release
 ```
 
 Both `dub test` and `dub run -c unittest` run this package's module
-`unittest` blocks (including the remote-service fixtures in
-`threadpool_driver.d`) and then the smoke executable (`tests/smoke.d`),
-covering lifecycle backlog, cancellation, generation-trigger contention, and
-worker integration. The `unittest` configuration compiles those blocks under
+`unittest` blocks and then the smoke executable (`tests/smoke.d`), covering
+lifecycle records and backpressure, cancellation, generation-trigger
+contention, multi-lane domains, and Fibers on a `GroupHost`. The `unittest` configuration compiles those blocks under
 any build type, so Dub prints a warning about `buildOptions "unittests"`.
 The `stress` configuration runs
 `tests/stress.d`. Each suite prints a final `passed` line. Both configurations
@@ -107,12 +106,10 @@ and its stack with `Fiber.reset`. Every host retires for you: the caller's own
 loop through `drainUntilEmpty` or `serve`, a `FarmHost` in each `step()`, a
 managed pool's workers under `FiberRetirement.serviceThreads`. Under the
 default `FiberRetirement.director`, a managed pool's Director calls `retire`
-itself: retirement latency is its polling cadence. `FiberWakeEvent.lifecycle`
-in the lane mailbox says retirement is pending, but the mailbox coalesces, so
-a Director that relies on the notifier sees no new edge while other bits are
-already set; poll `retirementPending` on each pass instead. Do not call
-`retire` from a Fiber body: on the Director thread it is accepted and runs
-the handlers on that Fiber's stack.
+itself: retirement latency is its polling cadence, and nothing wakes it, so
+poll `retirementPending` on each pass. Do not call `retire` from a Fiber
+body: on the Director thread it is accepted and runs the handlers on that
+Fiber's stack.
 
 ## Fiber bodies
 
@@ -172,79 +169,9 @@ trigger.waitNext();
 assert(completion.finished);
 ```
 
-The managed threadpool driver and `drainUntilEmpty` deliver these deferred
-edges automatically. A custom scheduler pump must call
-`domain.pollGenerationTriggers()` in its service loop.
-
-## Bind lanes to the cache-aware pool
-
-The intended concurrent embedding binds one `FiberLane` to each accepted LLC
-group of the pool and shares one `FiberDomain` for application-wide lifecycle
-ownership. A `FiberServicePlan` makes that binding explicit and derives each
-Farm's sizing before the Farms exist. This fragment assumes a `makeFarm`
-helper that takes the consumer and producer counts:
-
-```d
-enum preset = FiberTopologyPreset.fiberThroughput;
-PoolOptions options;
-applyFiberTopologyPreset(preset, null, options);   // worker selection first
-auto pool = new CacheAwarePool(options);
-
-auto plan = new FiberServicePlan(pool.resolve());
-auto domain = new FiberDomain;
-AntFarm*[] farms;
-FiberLane[] lanes;
-foreach (ref group; plan.resolution.acceptedGroups)
-{
-    auto need = plan.requirement(group.llcIndex);
-    auto farm = makeFarm(need.consumerViews, need.smallProducerSlots);
-    farms ~= farm;
-    lanes ~= new FiberLane(domain, farm);
-    plan.bind(group.llcIndex, lanes[$ - 1]);
-}
-applyFiberTopologyPreset(preset, lanes, options);  // then lane batching
-
-installFiberPlan(plan, pool);   // validates; throws FiberPlanException
-scope (exit) uninstallFiberPlan();
-pool.start();
-scope (exit) pool.shutdown();
-
-lanes[0].spawn(&fiberBody);
-```
-
-Service is native-only by default: each lane is consumed by the accepted
-workers of its own group, even when lanes share a domain. Cross-group
-consumers exist only through explicit edges on the plan. `rescue(g, by)`
-serves a group with no accepted workers. `assist(g, by)` and
-`assistRing(groups)` are experimental and opt-in: they add consumers to
-staffed groups. `plan.problems()` lists every mistake together, and
-`plan.toString` prints the per-group service, edges and sizing. Groups
-without accepted workers may stay unbound (`absent`), and `disable(g)` closes
-a group whose workers then idle.
-
-`applyFiberTopologyPreset` installs the managed-worker hooks and chooses a
-measured starting point:
-
-- `fiberThroughput`: all logical processors, `flushBatch=256`, `avgCost=2`
-  (runs of 32 entries).
-- `payloadThroughput`: skip SMT siblings, `flushBatch=32`, `avgCost=4` (runs of
-  8 entries).
-
-`avgCost` is a Farm work-cost class, `0 .. 7`: consumers claim `128 >> avgCost`
-entries at a time, and the default is 3 (16). Lower classes are for very cheap
-uniform work, higher ones for expensive work.
-
-These are starting points measured on a Ryzen 5 5500, not portable guarantees.
-Mixed workloads should benchmark both.
-
-Each worker keeps a persistent Farm consumer and producer token, and each
-responder of a serving group one more of each per served lane:
-`plan.requirement(g)` counts them. An unstaffed or disabled lane refuses
-spawns with `FiberLaneUnavailable`, before and after start. A domain whose
-served lanes have no responder fails explicitly (`lane.state == failed`), and
-a lane whose servers all stopped is `stopped` and refuses spawns.
-Multi-LLC hardware validation remains required before making topology-specific
-performance or failover claims.
+Every `serve` pass (`FiberGroups` on a `GroupHost`, `attachFiberDomain`,
+`drainUntilEmpty`) delivers these deferred edges. A custom scheduler pump
+must call `domain.pollGenerationTriggers()` in its service loop.
 
 ## Run on a GroupHost
 
@@ -276,27 +203,6 @@ wakes every worker. Under `FiberRetirement.director` the Director (the
 constructing thread) calls `domain.retire()`; under `serviceThreads` the
 workers retire. Drain and retire before `host.close()`.
 
-## Wake policy
-
-The default `FiberWakePolicy.broadcast` wakes the pool for external spawn,
-signal, cancellation, and cancelling shutdown.
-
-`FiberWakePolicy.servingGroups` (opt-in) wakes only the physical groups that
-serve the lane: its own group and its `rescue`/`assist` server groups. A fiber
-that arms a new earliest timer on a worker which is not a responder of its
-domain also wakes the groups hosting the domain's native lanes, so timers still
-reach a responder. With one busy lane on a shared domain, the other group's
-workers stay parked.
-
-`FiberWakePolicy.directorOwned` instead records coalesced wake events. The
-single thread that owns `pool.director()` consumes those events and selects
-which LLC, worker class, or label to signal. An optional `@nogc nothrow`
-notifier can wake that control thread's event loop when a lane mailbox changes
-from empty to nonempty.
-
-Configure wake policy, responder selection, and notifiers before starting the
-pool. They are setup-time state, not concurrently mutable policy.
-
 ## Handles, joins, and cancellation
 
 Raw `FiberTask` identity is valid only until retirement: until the
@@ -311,9 +217,9 @@ slot with its generation and refuses stale reuse.
 - `handle.joinFiber()` and timed Fiber join suspend a managed Fiber.
 - `requestCancel(handle)` queues a generation-specific request.
 - Any thread may call `drainCancellationRequests()` to apply queued requests.
-  The managed threadpool pump does this automatically, including waking parked
-  workers under `directorOwned`; the constructing thread need not poll.
-  An explicit drain returns only the requests it applied, since another worker
+  Every `serve` pass does so, and a request wakes the lane's parked workers,
+  so the constructing thread need not poll. An explicit drain returns only
+  the requests it applied, since another worker
   may already have drained them. Observe task outcomes or lifecycle records
   when the pump owns delivery.
 
@@ -369,11 +275,11 @@ dub run -c benchmark_vs_druntime --build=release --compiler=ldc2
 dub run -c benchmark_farm_embed --build=release --compiler=ldc2
 ```
 
-`benchmark_mt` takes the fibers per burst, the domain mode (`private`,
-`shared` or `assist`) and an optional worker count, which pins exactly that
-many pool workers in placement order (one physical group at a time, cores
-before SMT siblings); without it the pool keeps one worker per core on every
-group.
+`benchmark_mt` takes the fibers per burst, the Farm layout (`private`: one
+Farm and lane per group; `shared`: one Farm for every group) and an optional
+worker count, which pins exactly that many pool workers in placement order
+(one physical group at a time, cores before SMT siblings); without it the
+pool keeps one worker per core on every group.
 
 The current scheduler model and synchronization invariants live in
 [docs/design/ant_fibers.md](../docs/design/ant_fibers.md). Benchmark evidence and
