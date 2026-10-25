@@ -16,17 +16,6 @@ Windows validation is separate and is not part of the local gate.
   actors, waves, private root/child exports and the optional non-Fiber host
   before promoting them; shared-library packaging and language adapters can
   follow the static distributions.
-- Route `FarmHost`'s runtimes and parks by group on top of `GroupHost`
-  (`threadpool.groups`), which since 2.0.0 owns the pool, caller
-  placement, one Farm per accepted group and per-thread tokens for raw
-  worker bodies; the fork-join dispatcher runs on it. The actor host still
-  owns one Farm on one group. The measurements are in
-  [several physical groups](docs/guide/scaling-groups.md#several-physical-groups).
-  The same work gives `GroupHost` Fibers: a per-worker attachment hook in its
-  raw worker loop, a park-until-deadline channel from that hook to the idle
-  policy, and one `FiberReadyLane` per group Farm driven by `serve`
-  ([hosting a domain](docs/design/fiber-completion-and-records.md#hosting-a-domain)).
-
 - Continue public-actor tuning from the fused retirement and occupancy path.
   The [lifecycle optimization record](docs/performance/archive-2026-10-20.md#public-actor-lifecycle-optimization-190-progress)
   compares both the value-owner baseline and the pre-refresh implementation,
@@ -54,50 +43,87 @@ the onboarding pass (three rules first, a ten-line first program on every
 core, the hosting guide split). The ordered plan with each step's checks is
 [docs/development/cleanup-plan-2.0.md](docs/development/cleanup-plan-2.0.md).
 The fork-join suite runs under ThreadSanitizer and AddressSanitizer in
-`make check`. Left for 2.1: `FarmHost` on `GroupHost` (above, under Next),
-private trees retreating to typed results and tracked outcomes, Windows
-validation of the wake path.
+`make check`. Left after 2.0.0: `FarmHost` on `GroupHost` (2.1.0, below),
+private trees retreating to typed results and tracked outcomes (2.1.1), and
+Windows validation of the wake path (with the next Windows matrix).
 
-## 2.0.1 — wrappers and small features
+## 2.1.0 — in progress on `2.1.0-progress`
 
-A short release on top of the dispatcher, each item a thin layer over
-`fork`/`complete` or `forkJoinReduce` with a test and a measured cost:
+Everything since 2.0.0 is collected here; there are no separate 2.0.1 or 2.0.2
+releases. Done:
 
-All done on `2.0.1-progress`:
+- **Fork-join frame pool and wrappers** (planned as 2.0.1).
+  `forkjoin.frames` takes the process allocator out of the fork-join hot path
+  (fib(39) at 32 threads: 102 ms under any allocator, from 106 to 135 with
+  `malloc`). `forkJoinScan`, `forkJoinInvoke`, `forkJoinMap`, `TaskGroup`,
+  and `DispatcherOptions.oneFarm()`/`.perGroup()` with `printCounters`.
+- **C ABI for the dispatcher and `GroupHost`** (planned as 2.0.2). This adds
+  dispatcher start/stop/counters; caller-owned C nodes with run/join
+  callbacks; fork/complete, synchronous and foreign roots, reusable
+  completions and detached submission; and deterministic callback for/reduce.
+  On the `GroupHost` side it adds resolve/start, per-thread tokens, group
+  Farms and two-phase close. The contract and validation are in
+  [the C dispatcher design](docs/design/c-dispatcher.md), with a
+  [native C example](cabi/examples/forkjoin.c). Existing ABI 1 rows are
+  unchanged, and Fibers have no C exports. Promoting the ABI still needs
+  native Windows execution, production C-host usage, and a decision on
+  optional map/scan/invoke/task-group/frame-allocation helpers.
+- **Fiber rework, which changes the `ant_fibers` source API.** It has three
+  parts:
+  - wait arbitration by a per-task claim word, with one wake per event or
+    semaphore unit and timed waits;
+  - `FiberDomainOptions` with `retire()` in place of
+    `takeCompletions`/`release`;
+  - always-on lifecycle records in a domain-owned ring, and one service pass
+    (`serve`) shared by every host.
 
-- `forkjoin.frames`, a per-thread frame pool that takes the process
-  allocator out of the fork-join hot path (fib(39) at 32 threads: 102 ms
-  under any allocator, from 106 to 135 with `malloc`).
-- `forkJoinScan`: an inclusive prefix fold with the same deterministic split
-  as `forkJoinReduce`, two passes over one retained tree.
-- `forkJoinInvoke`: a fixed set of callables as the children of one node,
-  frames on the caller's stack (the `invoke` of citor and TBB).
-- `forkJoinMap`: the loop tree writing into a preallocated output slice.
-- `TaskGroup`: a batch of roots from a thread that is not a participant,
-  waited for together, reusable.
-- `DispatcherOptions.oneFarm()`/`.perGroup()` and `printCounters`, so a
-  first measurement needs no glue.
+  See the
+  [completions, records and hosting design](docs/design/fiber-completion-and-records.md).
+- Fixes across actors, threadpool (pool ownership, Windows NUMA identity) and
+  fork-join (lost spills, wake fences, frame adoption, start/stop); see
+  CHANGELOG.
 
-Before the release: re-take the PERFORMANCE.md table under the harness's
-build rules with the pool, and point the staged upstream runtime at the tag.
+Remaining for 2.1.0:
 
-## 2.0.2 — the C ABI grows to the dispatcher
+- Route `FarmHost`'s runtimes and parks by group on top of `GroupHost`
+  (`threadpool.groups`), which since 2.0.0 owns the pool, caller
+  placement, one Farm per accepted group and per-thread tokens for raw
+  worker bodies; the fork-join dispatcher runs on it. The actor host still
+  owns one Farm on one group. The measurements are in
+  [several physical groups](docs/guide/scaling-groups.md#several-physical-groups).
+  The same work gives `GroupHost` Fibers: a per-worker attachment hook in its
+  raw worker loop, a park-until-deadline channel from that hook to the idle
+  policy, and one `FiberReadyLane` per group Farm driven by `serve`
+  ([hosting a domain](docs/design/fiber-completion-and-records.md#hosting-a-domain)).
+- Before the release: the full `make check` on the branch tip; the native
+  Windows matrix, once features and fixes settle; re-take the PERFORMANCE.md
+  fork-join table under the harness's build rules with the frame pool; and
+  point the staged upstream runtime-benchmarks port at the tag (convert its
+  ports to `allocFrames`).
+- Optional Fiber follow-up, only if the bound matters: reserve 2 lifecycle
+  records per task instead of 4. Fold the failure record into the terminal
+  record, and reserve a cancellation record when a request is accepted. This
+  doubles the default concurrent-fiber bound (4,096 at retention 16,384).
+  Timed parks keep millisecond resolution.
 
-Implemented on `2.0.2-progress`: dispatcher start/stop/counters; caller-owned
-C nodes with run/join callbacks; fork/complete, synchronous and foreign roots,
-reusable completions and detached submission; deterministic callback for/reduce;
-and GroupHost resolve/start, per-thread tokens, group Farms and two-phase close.
-The owning contract and validation are in
-[the C dispatcher design](docs/design/c-dispatcher.md), with a
-[native C example](cabi/examples/forkjoin.c). Existing ABI 1 rows are unchanged;
-Fibers have no C exports.
+## 2.1.1
 
-Remaining before promotion: native Windows execution, production C-host usage,
-and a decision on optional map/scan/invoke/task-group/frame-allocation helpers.
-The coroutine replacement is an isolated experiment and proposal; see
-[deque-based coroutines](docs/design/coroutine-replacement.md). It does not
-change the current `ant_fibers` scheduler.
+- Private trees retreat to typed results and tracked outcomes.
+- Private-root deadlines are lazy. Decide whether to document or close two
+  gaps: a root parked in `waitChildren` is not woken when its deadline passes,
+  and a root that keeps returning `again` never observes its deadline. Closing
+  them is the deferred "timed or external wake of a waiting private root"
+  below.
 
+## Later
+
+- The deque-based Fiber executor in the
+  [coroutine replacement proposal](docs/design/coroutine-replacement.md).
+  Re-measure the FiberDomain baseline first: its numbers predate the 2.1.0
+  rework. `tools/coroutines/warm_fibers.d` is ported. Its wake
+  step reuses the claim word, and timers can become per-worker.
+- Async I/O stays out of the runtime. An I/O library can run in a worker loop
+  beside `serve` (the `GroupHost` attachment hook above gives it a place).
 
 ## 2.0 goals — draft
 

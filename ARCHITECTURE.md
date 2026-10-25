@@ -96,8 +96,9 @@ The pool discovers CPU/cache topology, pins persistent workers, and associates
 application-owned state with LLC and NUMA domains. It does not impose a job
 queue. A worker body can pump a Farm, an application queue, or any other source.
 
-One owner controls Director policy. Workers may spin, wait, sleep, or wake on a
-cadence; ordinary producers use `wakeAll()`.
+One owner controls Director policy. Workers may spin, wait, or sleep (cadence
+wakes exist only behind `version (ThreadpoolCadence)`); ordinary producers use
+`wakeAll()`.
 
 ### Fibers
 

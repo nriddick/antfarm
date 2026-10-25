@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-/// 2.0.1 features: forkJoinMap writes every element once; forkJoinScan
+/// 2.1.0 wrappers: forkJoinMap writes every element once; forkJoinScan
 /// matches a sequential prefix fold, is bit-identical between one
 /// participant and many, handles empty and single-element inputs and every
 /// grain; forkJoinInvoke runs function pointers and borrowing delegates from

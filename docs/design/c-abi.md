@@ -10,7 +10,7 @@ adapters [antfarm.hpp](../../include/antfarm.hpp) and
 remain in [SPEC](../../SPEC.md). ABI 1 supports 64-bit Windows and Linux;
 all exports and callbacks use C linkage.
 
-The 2.0.2 development additions export the dispatcher, continuation nodes,
+The 2.1.0 development additions export the dispatcher, continuation nodes,
 callback ranges and GroupHost through [the C dispatcher surface](c-dispatcher.md),
 [antfarm_forkjoin.h](../../include/antfarm_forkjoin.h) and
 [antfarm_groups.h](../../include/antfarm_groups.h). They live in the optional

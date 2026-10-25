@@ -166,7 +166,7 @@ interpreter and arguments.
 | --- | --- |
 | `packages` | BetterC/native-C and core C/C++ ABI checks; root, threadpool and Fiber unit/smoke suites via Dub |
 | `threadpool` | C runtime ABI lifecycle and worker checks; process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release, FarmHost lifecycle; also optimized LDC host tests |
-| `forkjoin` | The fork-join suite via Dub (`dub test :forkjoin -- --DRT-testmode=run-main`): frame pool, deque, admission, paths, ranges, completion and 2.0.1 features |
+| `forkjoin` | The fork-join suite via Dub (`dub test :forkjoin -- --DRT-testmode=run-main`): frame pool, deque, admission, paths, ranges, completion and the 2.1.0 wrappers |
 | `ordering` | Raw ring-store audit, controlled Farm ordering and leaf reuse |
 | `review` | Plain torture suite, sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
 | `actors` | Public actor deterministic/contention suite with the mimalloc stub |

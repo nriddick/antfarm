@@ -1,6 +1,6 @@
 # Fiber completions, lifecycle records and hosting
 
-**Implemented on `2.0.2-progress`.** The resulting behaviour is folded into
+**Implemented on `2.1.0-progress`.** The resulting behaviour is folded into
 [the scheduler design](ant_fibers.md); this records the reasoning and the
 choices made. Names below match the code: the pass is `serve`, its options
 are a `FiberServicePass`, and record handlers take the record by value.

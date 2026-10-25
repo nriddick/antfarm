@@ -4,7 +4,15 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
-## 2.0.2 development — C dispatcher and coroutine investigation
+## 2.1.0 development
+
+Everything since 2.0.0, on `2.1.0-progress`: the fork-join frame pool and
+wrappers (planned as 2.0.1), the C ABI for the dispatcher and `GroupHost`
+(planned as 2.0.2), fixes across actors, threadpool and fork-join, and a Fiber
+rework that changes the `ant_fibers` source API (see "Fibers (API changes)"
+below). Native Windows validation has not been run on it yet.
+
+C dispatcher and `GroupHost` ABI:
 
 - Add `antfarm_forkjoin.h`: dispatcher configuration/lifecycle/counters,
   eligible CPU enumeration, caller-owned C nodes with C-linkage run/join
@@ -25,7 +33,7 @@ Older release notes are in [docs/releases/](docs/releases/):
   services participate in explicit runtime-session lifetime accounting. DMD
   materializes Farm GC metadata in the runtime archive without a second core.
   The contract is [C dispatcher and GroupHost](docs/design/c-dispatcher.md).
-- Leave production Fibers unchanged and outside the ABI. Add an isolated
+- Fibers stay outside the ABI. Add an isolated
   [warm reuse experiment](docs/performance/coroutines-2026-10-25/README.md)
   and [replacement proposal](docs/design/coroutine-replacement.md). At 32
   threads on the 5900XT, zero-yield raw deque reuse measured 141.77 M/s
@@ -35,8 +43,9 @@ Older release notes are in [docs/releases/](docs/releases/):
   ring 8.25 M and existing lifecycle 1.17 M. These are deliberately different
   feature sets, not a production speedup claim. All per-thread-count results,
   allocations, migrations, compiler/host metadata and raw samples are retained.
+  The experiment predates the Fiber rework below.
 
-Validation: `make check SHELL=/usr/bin/bash` passed on Linux x86-64
+Validation of the C ABI increment (`769eb3c`): `make check SHELL=/usr/bin/bash` passed on Linux x86-64
 (7.2.9-2-cachyos), Ryzen 9 5900XT, LDC 1.43.0, DMD 2.113.0 and GCC 16.2.1:
 C/C++ ABI/death tests, core/pool/Fiber/fork-join suites, the gate's TSan and
 ASan lanes, actor/private-tree/order tests, documentation and examples.
@@ -46,9 +55,7 @@ separately covers workers stopped before first entry. Thirty repetitions
 passed with each compiler. The 300 benchmark samples checked completion
 counts/checksums and retained the warmed Fiber pool. No native Windows run,
 standard `perf-gate`, async-I/O benchmark or custom context-engine performance
-is claimed. No push or release is made by this development increment.
-
-## Unreleased
+is claimed.
 
 Fixes:
 
@@ -194,6 +201,8 @@ Fibers (API changes; see the [completions, records and hosting design](docs/desi
   thread. `drainUntilEmpty` retires too, so read results through
   `onCompletion`, `onRecord` or a `TaskHandle`.
 
+Fork-join frame pool and wrappers:
+
 - `forkjoin.frames`: a frame pool for task frames (`allocFrame`,
   `allocFrames!T`, `freeFrame`, `releaseFrames`, `frameStats`). Headerless
   64 KiB chunks whose first line names the owning slot and block size,
@@ -205,7 +214,7 @@ Fibers (API changes; see the [completions, records and hosting design](docs/desi
   against 39; skynet 3% faster; matmul unchanged. The fib example uses it.
   tests/forkjoin/frames_test.d covers classes, patterns, reuse without new
   chunks, large requests, cross-thread drains, restarts and parked slots.
-- 2.0.1 features. `forkJoinMap!fn(source, output, grain)` writes a transform
+- Wrappers. `forkJoinMap!fn(source, output, grain)` writes a transform
   into an output slice over the loop tree. `forkJoinScan!(fn, combine)(source,
   output, seed, grain)` is an inclusive prefix fold in two passes over one
   retained tree, `fn` once per element, bit-identical across participant

@@ -168,7 +168,7 @@ Findings that shaped the defaults:
   avoided it, at the price of no redistribution.
 - A first per-participant frame allocator (64-byte classes, a 16-byte block
   header, 256 KiB chunks) was slower than mimalloc by 8% and raised RSS; the
-  2.0.1 pool (`forkjoin.frames`) is headerless with 16-byte classes and
+  2.1.0 pool (`forkjoin.frames`) is headerless with 16-byte classes and
   64 KiB chunks and its fast paths inline into the caller. It beats
   `malloc` under every allocator (below).
 - Code layout moved fib by 4 to 10% at equal instruction counts: the worker

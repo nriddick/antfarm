@@ -61,7 +61,7 @@ whichever thread runs the join, and tcmalloc's cross-thread free path costs
 what citor's arena-allocated frames do not. With Ant Farm's bundled mimalloc
 instead, the same binary runs fib(39) at 32 threads in 107 ms and ties citor;
 the other three programs are allocator-neutral. Taking frame allocation out of
-the port, with a per-participant frame pool in the library, is on the 2.0.1
+the port, with a per-participant frame pool in the library, is on the 2.1.0
 list. matmul has real leaves and the runtimes converge within 3%; the
 dispatcher is fastest at 24 and 32 threads. From 16 threads on, every added
 thread is an SMT sibling of a busy core, and the spawn-bound programs gain
