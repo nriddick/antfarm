@@ -171,13 +171,13 @@ interpreter and arguments.
 | Lane | Native coverage |
 | --- | --- |
 | `packages` | BetterC/native-C and core C/C++ ABI checks; root, threadpool and Fiber unit/smoke suites via Dub |
-| `threadpool` | C runtime ABI lifecycle and worker checks; process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release, FarmHost lifecycle; also optimized LDC host tests |
+| `threadpool` | C runtime ABI lifecycle, GroupHost token/borrowed-resource cleanup, and fork-join/range/death checks; process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release, FarmHost lifecycle; also optimized LDC host tests |
 | `forkjoin` | The fork-join suite via Dub (`dub test :forkjoin -- --DRT-testmode=run-main`): frame pool, deque, admission, paths, ranges, completion and the 2.1.0 wrappers |
 | `ordering` | Raw ring-store audit, controlled Farm ordering and leaf reuse |
 | `review` | Plain torture suite, sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
 | `actors` | Public actor deterministic/contention suite with the mimalloc stub |
 | `private` | Private actor suite and six extracted documentation programs |
-| `examples` | quickstart payload and actor/headless examples in debug/release with 0 and 2 workers |
+| `examples` | both complete quickstart programs (fork-join reduction and raw payload), plus actor/headless examples in debug/release with 0 and 2 workers |
 
 The runner forces `ANTFARM_HUGE_PAGES=0`, keeps generated binaries and Dub's
 home under `.build/windows-check/`, and uses local dependencies without registry
@@ -189,11 +189,19 @@ nonzero exits stop the matrix. Live affinity/host coverage skips fail by default
 final pass accordingly. Examples still require two eligible worker CPUs in one
 LLC for their threaded runs.
 
+The Windows fork-join test executable sets `gcopt=parallel:0`: the supported
+druntime's parallel GC helpers can consume CPU after the deque allocation
+stress and contaminate the admission probe's whole-process idle-CPU reading.
+The probe retains its 30 ms CPU limit over 300 ms idle. This setting belongs
+only to the test executable; library users keep their own GC policy.
+
 Success prints `WINDOWS CHECKS PASSED`. This is separate from `make check`:
 TSan, POSIX fork/death probes (including T01/T17), the Life terminal front end,
 real mimalloc and timing gates are excluded. Existing POSIX-only tests may print
-their own skips within a native suite; Fiber multi-LLC probes also skip on
-single-LLC hosts. Use the separate
+their own skips within a native suite; Fiber multi-LLC and FarmHost
+`farmPerGroup` routing probes also skip on single-LLC hosts. Synthetic
+multi-group topology tests still run there, but do not establish live
+cross-LLC routing. Use the separate
 [Windows mimalloc commands](../../tests/actors/README.md) for
 real allocator pairing.
 

@@ -1,4 +1,4 @@
-# Ant Farm: An M:N Concurrent Queue with Superlative Scaling
+# Ant Farm: An M:N Concurrent Ring with Superlative Scaling
 
 Living spec, matching the implementation in this directory. The farmer metaphor and the field names are the original; the structure is the current one — held-epoch pins, last-releaser Sub0, ticketed write, pin-before-read subscribe — written as the design, with the concurrency arguments that accumulated during bug-fixing kept beside the rules they justify.
 

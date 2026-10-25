@@ -41,7 +41,7 @@ static uint64_t reference(size_t b, size_t e, size_t grain, uint64_t seed) {
 static void ranges(void) {
     unsigned visits[1003] = {0};
     ok(af_forkjoin_for(dispatch, 3, 1003, 7, visit, visits));
-    for (size_t i=0;i<1003;++i) CHECK(visits[i] == (i>=3));
+    for (size_t i=0;i<1003;++i) CHECK(visits[i] == (i>=3 ? 1u : 0u));
     uint64_t seed=11, out=0;
     ok(af_forkjoin_reduce(dispatch,3,1003,7,sizeof out,&seed,reduce_leaf,reduce_join,NULL,&out));
     CHECK(out == reference(3,1003,7,seed));

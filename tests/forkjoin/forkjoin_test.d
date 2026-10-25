@@ -3,6 +3,14 @@
 /// admission test. Prints `passed` on success.
 module forkjoin_test;
 
+// The admission probe measures whole-process CPU while dispatcher workers
+// are parked. On Windows, the supported druntime's parallel GC helpers can
+// keep consuming CPU after the deque test's large allocations, even with
+// every pool worker asleep. Keep those unrelated helpers out of this test
+// executable's idle measurement; this does not change the library's GC policy.
+version (Windows)
+    extern(C) __gshared string[] rt_options = ["gcopt=parallel:0"];
+
 import deque_test;
 import admission_test;
 import paths_test;

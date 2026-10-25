@@ -53,24 +53,33 @@ class ExamplesMatrixTest(unittest.TestCase):
 
 
 class QuickstartExtractionTest(unittest.TestCase):
-    def test_extracts_and_runs_first_payload_from_quickstart(self):
+    def test_extracts_and_runs_dispatcher_and_payload_from_quickstart(self):
         with tempfile.TemporaryDirectory() as directory:
             build = Path(directory)
             with mock.patch.object(examples, "build", build), \
                     mock.patch.object(examples.subprocess, "run") as run, \
                     contextlib.redirect_stdout(io.StringIO()):
                 examples.check_quickstart_programs(examples.configs)
-            source = build / "quickstart_payload.d"
-            program = source.read_text()
-            self.assertEqual(program.count("void main"), 1)
-            self.assertIn("payloadRange!addSquare", program)
-            self.assertIn("first payload: 256 squares summed to", program)
-            self.assertEqual(run.call_count, 2 * len(examples.configs))
+            sources = sorted(build.glob("quickstart_*.d"))
+            self.assertEqual(len(sources), 2)
+            programs = [source.read_text() for source in sources]
+            for program in programs:
+                self.assertEqual(program.count("void main"), 1)
+            self.assertIn("forkJoinReduce", programs[0])
+            self.assertIn("payloadRange!addSquare", programs[1])
+            self.assertIn("first payload: 256 squares summed to", programs[1])
+            self.assertEqual(run.call_count, 2 * len(examples.configs) * len(sources))
+            compiled_sources = []
             for compile_call, execute_call in zip(run.call_args_list[::2],
                                                   run.call_args_list[1::2]):
-                self.assertIn(str(source), compile_call.args[0])
+                command = compile_call.args[0]
+                compiled_sources.append(next(arg for arg in command if arg.endswith(".d")))
+                self.assertIn("-Iforkjoin/source", command)
+                self.assertEqual(command[-1], "-of=" + execute_call.args[0][0])
                 self.assertEqual(execute_call.kwargs["env"]["ANTFARM_HUGE_PAGES"], "0")
                 self.assertEqual(execute_call.kwargs["timeout"], examples.run_timeout)
+            self.assertEqual(compiled_sources,
+                             [str(source) for source in sources for _ in examples.configs])
 
     def test_rejects_unmarked_fragment_in_quickstart(self):
         with tempfile.TemporaryDirectory() as directory:

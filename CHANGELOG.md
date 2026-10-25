@@ -10,7 +10,40 @@ Everything since 2.0.0, on `2.1.0-progress`: the fork-join frame pool and
 wrappers (planned as 2.0.1), the C ABI for the dispatcher and `GroupHost`
 (planned as 2.0.2), fixes across actors, threadpool and fork-join, and a Fiber
 rework that changes the `ant_fibers` source API (see "Fibers (API changes)"
-below). Native Windows validation has not been run on it yet.
+below). Native Windows follow-up is recorded below.
+
+Windows follow-up:
+
+- Fix the C fork-join range test's signed/unsigned comparison so MSVC
+  `/W4 /WX` compiles the new runtime ABI lane.
+- Make the fork-join failed-start quota invalid with as few as two
+  participants. The previous value assumed eight participants across two
+  LLCs and was accepted on this single-LLC host.
+- Use serial GC in the Windows fork-join test executable so the admission
+  probe measures dispatcher parking without parallel-GC helper CPU. With
+  LDC 1.42.0, the default reported 5.4–5.8 CPU-seconds during the 300 ms idle
+  window; serial GC reported zero. The 30 ms limit and production GC policy
+  are unchanged.
+- Update the quickstart extraction regression to check both the new
+  dispatcher reduction and the raw payload program in every compiler/build
+  configuration, including matching each compiled binary to its run.
+
+Validation (2026-10-25, `a8c84a3` plus this follow-up): all native Windows
+matrix lanes passed on Windows 11 x64 build 26200, i7-12700H (20 logical
+processors, one LLC), LDC 1.42.0, DMD 2.112.1 and MSVC. The initial
+`python -B scripts/check-windows.py` run was resumed with LDC lane selectors
+after the fixes; `--compiler dmd` passed as a complete matrix invocation.
+This covers the new C dispatcher/GroupHost ABI and fatal diagnostics,
+fork-join frames/completion/composition, managed Fiber timers/signals and
+retirement, host lifecycle, affinity/wait races, actors, ordering and
+debug/release examples. Both fork-join admission runs measured zero idle CPU
+and completed all 40 foreign submissions. The documented Python checks had
+246 passes and six platform/privilege skips; the timeout probes passed when
+rerun outside the sandbox that denied `taskkill`. Documentation links passed.
+Live multi-LLC Fiber/FarmHost/fork-join cases remain untested on this host;
+synthetic multi-group topology checks passed. Linux `make check`, TSan, real
+mimalloc and performance gates were not run. No runtime implementation or
+measured path changed.
 
 C dispatcher and `GroupHost` ABI:
 

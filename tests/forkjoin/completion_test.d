@@ -402,7 +402,10 @@ bool runCompletionTest()
     {
         DispatcherOptions bad;
         bad.ringMiB = 2;
-        bad.smallQuota = 30_000; // 9 producers times 30,000 words do not fit 7/8 of a 2 MiB ring
+        // Even the minimum selection (caller, one worker, submit token)
+        // exceeds 7/8 of a 2 MiB ring. Do not assume two LLCs / eight CPUs:
+        // this suite selects at most four CPUs on a single-LLC host.
+        bad.smallQuota = 100_000;
         Dispatcher d;
         bool threw;
         try d.start(cpus, bad);
