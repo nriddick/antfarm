@@ -87,7 +87,73 @@ ubyte[] makeTwoGroupLlcSlpiex()
         putU16(b, 0);
         putU16(b, 0);
     }
+    // Both groups belong to NUMA node 0 (their CPU sets both say 0, but that
+    // index is group-relative; only this record makes it one node).
+    putNumaRecord(b, 0, [GroupMask(0, 0xF), GroupMask(1, 0xF)]);
     return b;
+}
+
+private struct GroupMask
+{
+    ushort group;
+    ulong mask;
+}
+
+private void putGroupMask(ref ubyte[] b, GroupMask m)
+{
+    putU64(b, m.mask);
+    putU16(b, m.group);
+    putZeros(b, 6);
+}
+
+/// RelationNumaNode. `oldLayout` is the single-mask form (Reserved[20],
+/// GroupCount reads as 0) returned before Windows 11 / Server 2022.
+private void putNumaRecord(ref ubyte[] b, uint node, const(GroupMask)[] masks,
+    bool oldLayout = false)
+{
+    assert(!oldLayout || masks.length == 1);
+    putU32(b, 1);
+    putU32(b, cast(uint)(8 + 24 + 16 * masks.length));
+    putU32(b, node);
+    if (oldLayout)
+        putZeros(b, 20);
+    else
+    {
+        putZeros(b, 18);
+        putU16(b, cast(ushort) masks.length);
+    }
+    foreach (m; masks)
+        putGroupMask(b, m);
+}
+
+/// RelationProcessorPackage spanning several groups.
+private void putPackageRecordGroups(ref ubyte[] b, const(GroupMask)[] masks)
+{
+    putU32(b, 3);
+    putU32(b, cast(uint)(8 + 24 + 16 * masks.length));
+    putU8(b, 0);
+    putU8(b, 0);
+    putZeros(b, 20);
+    putU16(b, cast(ushort) masks.length);
+    foreach (m; masks)
+        putGroupMask(b, m);
+}
+
+/// RelationGroup with `count` full groups of 64.
+private void putFullGroups(ref ubyte[] b, ushort count)
+{
+    putU32(b, 4);
+    putU32(b, 32 + count * 48);
+    putU16(b, count);
+    putU16(b, count);
+    putZeros(b, 20);
+    foreach (_; 0 .. count)
+    {
+        putU8(b, 64);
+        putU8(b, 64);
+        putZeros(b, 38);
+        putU64(b, ulong.max);
+    }
 }
 
 private void putCpuSet(ref ubyte[] b, ushort group, ubyte lp, ubyte core, ubyte llc,
@@ -245,8 +311,193 @@ void checkCacheAcrossProcessorGroups()
         assert(p.l3.sizeBytes == 32 * 1024 * 1024 && p.llcIndex == 0);
 }
 
+/// How the simulated host reports NUMA in SLPIEx.
+enum SimulatedNuma
+{
+    /// RelationAll on Windows 11 / Server 2022: one record per node with a
+    /// mask for every group it spans.
+    perNode,
+    /// The single-mask layout, one record per (node, group), as on older
+    /// Windows; the same NodeNumber appears in two records.
+    singleMask,
+    /// No NUMA records at all (a capture that omitted them).
+    none,
+}
+
+/// A simulated large Windows host: two sockets, each with 64 SMT cores (128
+/// logical processors), which Windows splits into four processor groups of
+/// 64, two per socket. Each socket is one NUMA node (NPS1) spanning its two
+/// groups; eight-core CCDs give each group four L3s. Every CPU-set field
+/// Windows defines as relative to the processor group (LogicalProcessorIndex,
+/// CoreIndex, LastLevelCacheIndex, NumaNodeIndex) repeats in each group, so
+/// NumaNodeIndex is 0 on every processor and only the RelationNumaNode
+/// records tell the sockets apart. No discovery, pinning or worker startup.
+struct SimulatedHost
+{
+    uint sockets = 2;
+    uint groupsPerSocket = 2;
+    uint coresPerGroup = 32;
+    uint coresPerLlc = 8;
+    SimulatedNuma numa = SimulatedNuma.perNode;
+
+    @property uint groups() const { return sockets * groupsPerSocket; }
+    @property uint lpsPerGroup() const { return coresPerGroup * 2; }
+
+    void build(out ubyte[] cpu, out ubyte[] slp) const
+    {
+        assert(lpsPerGroup <= 64 && coresPerGroup % coresPerLlc == 0);
+        immutable ulong full = lpsPerGroup == 64 ? ulong.max : (1UL << lpsPerGroup) - 1;
+        immutable lpsPerLlc = coresPerLlc * 2;
+        foreach (g; 0 .. groups)
+        {
+            foreach (lp; 0 .. lpsPerGroup)
+                putCpuSet(cpu, cast(ushort) g, cast(ubyte) lp, cast(ubyte)(lp / 2),
+                    cast(ubyte)(lp / lpsPerLlc), 0, 1);
+            foreach (llc; 0 .. coresPerGroup / coresPerLlc)
+                putCacheRecord(slp, 3, ((1UL << lpsPerLlc) - 1) << (llc * lpsPerLlc),
+                    cast(ushort) g, 32 * 1024 * 1024);
+        }
+        foreach (socket; 0 .. sockets)
+        {
+            GroupMask[] masks;
+            foreach (h; 0 .. groupsPerSocket)
+                masks ~= GroupMask(cast(ushort)(socket * groupsPerSocket + h), full);
+            putPackageRecordGroups(slp, masks);
+            final switch (numa)
+            {
+            case SimulatedNuma.perNode:
+                putNumaRecord(slp, socket, masks);
+                break;
+            case SimulatedNuma.singleMask:
+                foreach (m; masks)
+                    putNumaRecord(slp, socket, [m], true);
+                break;
+            case SimulatedNuma.none:
+                break;
+            }
+        }
+        putFullGroups(slp, cast(ushort) groups);
+    }
+}
+
+private ProcessorId[] groupProcessors(uint firstGroup, uint groupCount, uint lps)
+{
+    ProcessorId[] ids;
+    foreach (g; firstGroup .. firstGroup + groupCount)
+        foreach (lp; 0 .. lps)
+            ids ~= ProcessorId(cast(ushort) g, cast(ushort) lp);
+    return ids;
+}
+
+/// NUMA identity on the simulated host follows the socket under both record
+/// layouts, so a node spanning two groups stays one neighbourhood and the
+/// other socket's LLCs stay remote despite the shared local index 0. Without
+/// records the parser cannot tell, and keeps every group's node separate.
+void checkSimulatedFourGroupHost()
+{
+    import threadpool.pool : PoolOptions;
+    import threadpool.resolution : resolvePool;
+
+    foreach (layout; [SimulatedNuma.perNode, SimulatedNuma.singleMask])
+    {
+        SimulatedHost h;
+        h.numa = layout;
+        ubyte[] cpu, slp;
+        h.build(cpu, slp);
+        auto snap = parseWindowsTopology(cpu, slp);
+        assert(snap.logicalProcessorCount == 256 && snap.groupCount == 4);
+        assert(snap.packages.length == 2 && snap.llcCount == 16);
+        assert(snap.cores.length == 128, "group-relative CoreIndex must not merge cores across groups");
+        assertCoresSorted(snap);
+        assert(snap.numaNodes.length == 2, "group-relative NumaNodeIndex 0 must not merge the sockets");
+        foreach (ref p; snap.processors)
+        {
+            assert(p.numaIndex == p.group / 2);
+            assert(p.packageIndex == snap.byId(ProcessorId(cast(ushort)(p.group & ~1), 0)).packageIndex);
+        }
+        foreach (ref n; snap.numaNodes)
+        {
+            assert(n.processors == groupProcessors(n.numaIndex * 2, 2, 64));
+            auto llcs = snap.llcsInNuma(n.numaIndex);
+            assert(llcs.length == 8);
+            foreach (llc; llcs)
+                foreach (id; snap.processorsInLlc(llc))
+                    assert(id.group / 2 == n.numaIndex);
+        }
+        foreach (llc; 0 .. snap.llcCount)
+        {
+            auto ids = snap.processorsInLlc(cast(ushort) llc);
+            assert(ids.length == 16);
+            foreach (id; ids)
+                assert(id.group == ids[0].group);
+        }
+
+        auto home = snap.byId(ProcessorId(0, 0));
+        WorkerSelf w;
+        w.llcIndex = home.llcIndex;
+        w.numaIndex = home.numaIndex;
+        bindNumaNeighborhood(w, snap);
+        assert(w.numaLlcCount == 8 && w.homeLlc == home.llcIndex);
+        assert(w.llcIsNumaLocal(snap.byId(ProcessorId(1, 63)).llcIndex),
+            "the socket's other group is in the same NUMA neighbourhood");
+        foreach (g; 2 .. 4)
+            foreach (lp; [0, 63])
+                assert(!w.llcIsNumaLocal(snap.byId(ProcessorId(cast(ushort) g, cast(ushort) lp)).llcIndex),
+                    "the other socket's LLCs are remote");
+        assert(snap.byId(ProcessorId(3, 63)).smtSibling && !snap.byId(ProcessorId(3, 62)).smtSibling);
+
+        PoolOptions opt;
+        auto res = resolvePool(snap, opt);
+        assert(res.workers.length == 256 && res.acceptedGroupCount == 16);
+    }
+
+    SimulatedHost h;
+    h.numa = SimulatedNuma.none;
+    ubyte[] cpu, slp;
+    h.build(cpu, slp);
+    auto snap = parseWindowsTopology(cpu, slp);
+    assert(snap.numaNodes.length == 4, "without records each group's local node stays its own");
+    bool[ushort] ids;
+    foreach (ref n; snap.numaNodes)
+    {
+        assert(n.processors.length == 64);
+        ids[n.numaIndex] = true;
+    }
+    assert(ids.length == 4);
+    WorkerSelf w;
+    auto home = snap.byId(ProcessorId(0, 0));
+    w.llcIndex = home.llcIndex;
+    w.numaIndex = home.numaIndex;
+    bindNumaNeighborhood(w, snap);
+    assert(w.numaLlcCount == 4);
+    assert(!w.llcIsNumaLocal(snap.byId(ProcessorId(1, 0)).llcIndex));
+}
+
+/// One group: a CPU set's NUMA index is used as is when no record covers it,
+/// and a record's NodeNumber wins when one does.
+void checkSingleGroupNumaIndex()
+{
+    ubyte[] cpu;
+    foreach (lp; 0 .. 4)
+        putCpuSet(cpu, 0, cast(ubyte) lp, cast(ubyte) lp, 0, cast(ubyte)(lp / 2), 1);
+    auto bare = parseWindowsTopology(cpu, null);
+    assert(bare.numaNodes.length == 2);
+    foreach (ref p; bare.processors)
+        assert(p.numaIndex == p.lpIndex / 2);
+
+    ubyte[] slp;
+    putNumaRecord(slp, 5, [GroupMask(0, 0x3)]);
+    putNumaRecord(slp, 3, [GroupMask(0, 0xC)], true);
+    auto recorded = parseWindowsTopology(cpu, slp);
+    assert(recorded.byId(ProcessorId(0, 1)).numaIndex == 5);
+    assert(recorded.byId(ProcessorId(0, 2)).numaIndex == 3);
+    assert(recorded.llcsInNuma(5) == [ushort(0)] && recorded.llcsInNuma(3) == [ushort(0)]);
+}
+
 unittest { checkFullProcessorGroups(); }
 unittest { checkCacheAcrossProcessorGroups(); }
+unittest { checkSimulatedFourGroupHost(); }
+unittest { checkSingleGroupNumaIndex(); }
 
 // `TopologySnapshot.cores` is sorted by each core's first ProcessorId.
 private void assertCoresSorted(ref const TopologySnapshot snap)

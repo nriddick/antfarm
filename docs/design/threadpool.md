@@ -62,6 +62,13 @@ cache), and `cpuSetLlcIndex` when Windows has no L3 record and the CPU-set
 source present. A group is a CCD only when its source is `l3` on a chiplet
 part; callers that mean "CCD" should check the source.
 
+`numaIndex` is the system-wide node: the Linux node id, or on Windows the
+`NodeNumber` of the `RelationNumaNode` record that covers the processor. The
+CPU-set `NumaNodeIndex` is relative to its processor group (two groups can
+both say 0 for different nodes, and one node can span groups), so it is used
+only for a processor no record covers, and then qualified by group when there
+is more than one.
+
 The CPU identity is `ProcessorId(group, lp)`: the Windows processor group and
 the group-relative LP number, or group 0 and the system CPU number on Linux.
 Its text form is `g:lp`. The membership lists of `PhysicalCore`, `LlcDomain`,
@@ -461,7 +468,8 @@ related counters without transferring queue ownership. Managed failures are
 available only after workers have joined.
 
 The test suite covers captured Windows topology records, synthetic processor
-groups and LLC identities, Linux topology parsing, bin/class lookup, NUMA-local
+groups and LLC identities, a simulated 256-processor, four-group, two-node
+Windows host whose group-relative indices all alias, Linux topology parsing, bin/class lookup, NUMA-local
 search, worker selection, pin/start failure, Director
 ownership and filtering, cadence arithmetic, wake behavior, managed hook
 lifecycle, and live topology/pinning where the host supports it.

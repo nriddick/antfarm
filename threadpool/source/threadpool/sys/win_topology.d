@@ -113,6 +113,28 @@ private AffinityMask[] decodeCacheMasks(const(ubyte)[] payload)
     return out_;
 }
 
+/// NUMA_NODE_RELATIONSHIP: NodeNumber, Reserved[18], GroupCount at 22, masks
+/// at 24. Before Windows 11 / Server 2022 (and for RelationNumaNode requested
+/// alone) GroupCount reads as 0 and one GroupMask follows.
+private AffinityMask[] decodeNumaMasks(const(ubyte)[] payload)
+{
+    AffinityMask[] out_;
+    if (payload.length < 24 + GROUP_AFFINITY.sizeof) return out_;
+    size_t groupCount = load!ushort(payload.ptr + 22);
+    if (groupCount == 0 || groupCount > 64
+        || 24 + groupCount * GROUP_AFFINITY.sizeof > payload.length)
+        groupCount = 1;
+    foreach (g; 0 .. groupCount)
+    {
+        auto base = payload.ptr + 24 + g * GROUP_AFFINITY.sizeof;
+        AffinityMask m;
+        m.mask = cast(ulong) load!KAFFINITY(base);
+        m.group = load!ushort(base + KAFFINITY.sizeof);
+        out_ ~= m;
+    }
+    return out_;
+}
+
 private void eachBit(ushort group, ulong mask, scope void delegate(ushort group, ushort lp) dg)
 {
     foreach (bit; 0 .. 64)
@@ -492,6 +514,51 @@ TopologySnapshot parseWindowsTopology(const(ubyte)[] cpuSets, const(ubyte)[] slp
         d.processors.sort();
         d.pCoreIndices.sort();
         d.eCoreIndices.sort();
+    }
+
+    // A CPU set's NumaNodeIndex is relative to its processor group: two
+    // groups can both report 0 for different nodes, and one node can span
+    // several groups. RelationNumaNode records carry the system-wide
+    // NodeNumber with its masks, so they decide. An LP no record covers keeps
+    // its local index qualified by group: with one group that is the index
+    // itself, with several each (group, index) pair gets its own id past the
+    // recorded nodes, since nothing says two groups share a node.
+    ushort[ulong] numaOfLp;
+    uint nextNuma;
+    walkSlpiex(slpiex, (rel, payload, recSize) {
+        if (rel != LOGICAL_PROCESSOR_RELATIONSHIP.RelationNumaNode
+            && rel != LOGICAL_PROCESSOR_RELATIONSHIP.RelationNumaNodeEx) return;
+        if (payload.length < 4) return;
+        immutable node = load!uint(payload.ptr);
+        if (node >= ushort.max) return;
+        foreach (m; decodeNumaMasks(payload))
+        {
+            eachBit(m.group, m.mask, (g, lp) {
+                auto k = lpKey(g, lp);
+                if (k !in numaOfLp)
+                    numaOfLp[k] = cast(ushort) node;
+            });
+        }
+        if (node + 1 > nextNuma) nextNuma = node + 1;
+    });
+    bool oneGroup = true;
+    foreach (ref p; procs)
+        if (p.group != procs[0].group) oneGroup = false;
+    ushort[ulong] numaOfLocal;
+    foreach (ref p; procs)
+    {
+        if (auto np = lpKey(p.group, p.lpIndex) in numaOfLp)
+            p.numaIndex = *np;
+        else if (!oneGroup || numaOfLp.length != 0)
+        {
+            auto lk = (cast(ulong) p.group << 16) | p.numaIndex;
+            if (lk !in numaOfLocal)
+            {
+                enforce(nextNuma < ushort.max, "threadpool: too many NUMA nodes");
+                numaOfLocal[lk] = cast(ushort) nextNuma++;
+            }
+            p.numaIndex = numaOfLocal[lk];
+        }
     }
 
     NumaNode[] numa;

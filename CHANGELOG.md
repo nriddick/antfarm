@@ -42,6 +42,16 @@ Fixes:
   fatal. The rejection now happens before the cleanup guard is installed,
   and a second host without workers (which takes no pool claim) is rejected
   too. tests/threadpool/host_live.d covers both with tokens registered.
+- Windows topology: NUMA identity came from the CPU-set `NumaNodeIndex`,
+  which is relative to the processor group, so on a host with more than one
+  group two sockets that both report index 0 merged into one node and a
+  worker's NUMA-local neighbourhood (and `search!T`) took in the other
+  socket's LLCs. The parser now decodes `RelationNumaNode` records (multi-
+  and single-mask layouts) and uses their `NodeNumber`; a processor no record
+  covers keeps its local index, qualified by group when there are several.
+  tests/threadpool/topology_parse.d adds a simulated two-socket host of 256
+  processors in four groups, where every group-relative index aliases, under
+  both record layouts and with no records.
 
 - `forkjoin.frames`: a frame pool for task frames (`allocFrame`,
   `allocFrames!T`, `freeFrame`, `releaseFrames`, `frameStats`). Headerless
