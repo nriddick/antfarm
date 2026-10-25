@@ -99,8 +99,9 @@ signal that nobody will deliver; signal or cancel such tasks before a shutdown
 drain.
 
 A domain is the opt-in to Fibers; `FiberDomainOptions` configures it once, at
-construction. `retire` hands every lifecycle record to `onRecord` (or drops
-it), then every terminal task to `onCompletion` while it is still valid, and
+construction. `retire` hands every lifecycle record to `onRecord` (none is
+kept without a handler), then every terminal task to `onCompletion` while it
+is still valid, and
 recycles the task when the handler returns. Later spawns reuse both the task
 and its stack with `Fiber.reset`. Every host retires for you: the caller's own
 loop through `drainUntilEmpty` or `serve`, a `FarmHost` in each `step()`, a

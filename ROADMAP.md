@@ -75,8 +75,8 @@ releases. Done:
     semaphore unit and timed waits;
   - `FiberDomainOptions` with `retire()` in place of
     `takeCompletions`/`release`;
-  - always-on lifecycle records in a domain-owned ring, and one service pass
-    (`serve`) shared by every host.
+  - lifecycle records in a domain-owned ring, emitted when `onRecord` is
+    set, and one service pass (`serve`) shared by every host.
 
   See the
   [completions, records and hosting design](docs/design/fiber-completion-and-records.md).
@@ -147,8 +147,8 @@ Remaining for 2.1.0:
 
 ### Work-stealing deques for worker-pool dispatch
 
-**Status (October 24, 2026): implemented as the `forkjoin` subpackage** on
-the `forkjoin` branch, with the deque exactly-once test, the admission test
+**Status (October 24, 2026): implemented as the `forkjoin` subpackage**,
+released in 2.0.0, with the deque exactly-once test, the admission test
 and the design page [docs/design/forkjoin.md](docs/design/forkjoin.md). The
 measurements against citor, libfork, TooManyCooks and TBB are in
 antfarm-fwbench. Of the requirements below: local dispatch and external
