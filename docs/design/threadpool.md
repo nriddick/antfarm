@@ -257,7 +257,9 @@ Failure during setup requests stop, joins created workers, destroys wait
 state, and releases the process-wide slot.
 
 `shutdown()` requests stop and joins all workers, then captures failures and
-clears process-wide worker state. Each `WorkerBody` worker finishes its current
+clears process-wide worker state. Only the live pool (the instance whose
+`start` succeeded) owns that state; `shutdown()` on any other instance returns
+without touching it. Each `WorkerBody` worker finishes its current
 visit and then runs the optional `WorkerStop` hook on its own thread, so
 thread-local resources such as a Farm `ConsumerView` are released before
 `shutdown()` returns. The pool cannot generically drain because it does not own
@@ -389,7 +391,10 @@ constructor, so everything a body reads must be built before `new GroupHost`
 (the dispatcher builds its tables from `GroupHost.resolve`). `close` is the
 ordered teardown: pool shutdown (stop hooks, then token release), the
 caller's tokens, the registry, the Farms, the caller's affinity, the pool
-claim. `wakeOne`, `anyWorkerArmed`, `wakeAll` and `wakeLlc` pass through to
+claim. The registry and the per-thread tokens are process-wide, so one
+`GroupHost` is open at a time: a second is rejected before it acquires
+anything, with or without workers (a host without workers takes no pool
+claim), and the open host is left as it was. `wakeOne`, `anyWorkerArmed`, `wakeAll` and `wakeLlc` pass through to
 the pool.
 
 ## Ant Farm embedding

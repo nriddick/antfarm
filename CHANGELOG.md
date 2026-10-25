@@ -31,6 +31,17 @@ Fixes:
   return at once. Expiry now claims the wait under the heap mutex; every
   other waker already removes the entry before publishing.
   tests/ant_fibers/wait_races.d pauses in each window through unittest seams.
+- Threadpool: `shutdown()` on a pool that was not the live one (rejected by
+  `start`, never started, already shut down) stopped the live pool's workers
+  and cleared their process-wide records and hooks without joining them, so
+  their stop hooks were skipped and the live pool's own `shutdown` returned
+  early. It now returns unless the receiver is the live pool.
+- `GroupHost`: a second host, rejected for the pool claim, ran its failure
+  cleanup anyway, releasing the open host's caller tokens and clearing its
+  Farm list; the open host's `close` then met a live worker ticket and was
+  fatal. The rejection now happens before the cleanup guard is installed,
+  and a second host without workers (which takes no pool claim) is rejected
+  too. tests/threadpool/host_live.d covers both with tokens registered.
 
 - `forkjoin.frames`: a frame pool for task frames (`allocFrame`,
   `allocFrames!T`, `freeFrame`, `releaseFrames`, `frameStats`). Headerless

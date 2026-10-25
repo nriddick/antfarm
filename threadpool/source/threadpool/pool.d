@@ -515,13 +515,16 @@ final class CacheAwarePool
     /// Stop every worker and join it. Each worker finishes its current
     /// `workerBody` call and then runs `workerStop`, if set; the pool has no
     /// queue of its own, so any draining of application work must happen
-    /// before this call. Not thread-safe vs `start` or a second `shutdown`
-    /// on another thread.
+    /// before this call. A pool that is not the live one (never started,
+    /// rejected by `start`, already shut down) returns at once. Not
+    /// thread-safe vs `start` or a second `shutdown` on another thread.
     void shutdown()
     {
         version (ThreadpoolOs)
         {
-            if (atomicLoad(gRunning) == 0)
+            // The worker records, hooks and run flag are process-wide and
+            // belong to the live pool; only it may stop and clear them.
+            if (atomicLoad(gRunning) == 0 || gLivePool !is this)
                 return;
             requestStop();
             joinAll();
@@ -529,8 +532,7 @@ final class CacheAwarePool
                 if (rec.failure !is null && rec.failure.value !is null)
                     failures ~= rec.failure.value;
             clearWorkerState();
-            if (gLivePool is this)
-                gLivePool = null;
+            gLivePool = null;
             atomicStore(gRunning, 0);
         }
     }

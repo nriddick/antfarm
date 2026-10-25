@@ -186,14 +186,20 @@ final class GroupHost
             callerCpus_ = plan_.callerCpus.dup;
             callerPlacement_ = plan_.caller;
         }
-        scope (failure) undoConstruction();
-
+        // Claim before the failure guard: undoConstruction releases the
+        // calling thread's tokens and clears the Farm registry, which belong
+        // to whichever host is open, so a rejected host must leave first.
+        // The registry is process-wide even without a pool to claim.
+        if (gFarms !is null)
+            throw new FarmHostException("GroupHost: another GroupHost is open [" ~ plan_.summary() ~ "]");
         if (plan_.workers != 0)
         {
             if (!cas(&gHostClaimed, false, true))
                 throw new FarmHostException("GroupHost: another host owns the pool [" ~ plan_.summary() ~ "]");
             claimed_ = true;
         }
+        scope (failure) undoConstruction();
+
         createFarms();
         installSlots();
         if (callerPlacement_ != CallerPlacement.unchanged)

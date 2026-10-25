@@ -139,7 +139,9 @@ assert(pool.resolution.sameSelection(plan));
 
 `shutdown()` stops every worker after its current `pump` call, runs
 `workerStop` once on each worker thread, and joins them. The pool owns no
-queue, so finish or cancel application work before calling it.
+queue, so finish or cancel application work before calling it. On a pool
+that is not the running one (never started, rejected by `start`, already
+shut down) it returns at once.
 
 The default policy after `start()` is `wait`. One owner thread controls the
 Director and may select workers by LLC, P/E class, or application label before

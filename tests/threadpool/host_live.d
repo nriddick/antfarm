@@ -980,6 +980,148 @@ void groupHostPerGroup()
         " group(s), one Farm each, tokens per thread, teardown and pool release");
 }
 
+/// Worker body that registers the worker's own token on its group Farm
+/// before consuming, so a host holds worker tickets as well as the caller's.
+__gshared shared(uint) groupWorkerTokens;
+bool tGroupTokenTaken;
+
+bool groupTokenBody(WorkerSelf* w) nothrow @nogc @system
+{
+    import threadpool.groups : groupToken;
+    if (!tGroupTokenTaken)
+    {
+        if (!groupToken(w.llcIndex).valid) return false;
+        tGroupTokenTaken = true;
+        atomicOp!"+="(groupWorkerTokens, 1u);
+    }
+    return groupBody(w);
+}
+
+void groupTokenStopHook(WorkerSelf* w) nothrow @nogc @system
+{
+    tGroupTokenTaken = false;
+    groupStopHook(w);
+}
+
+/// A second GroupHost is rejected before it acquires anything, so its
+/// failure cleanup cannot release the first host's caller tokens or clear
+/// its Farm registry: the first host's producer tickets stay registered,
+/// its Farms keep running jobs, and its close (worker tokens released
+/// after the stop hooks, then the Farms destroyed) does not meet a live
+/// ticket. A host with no workers takes no pool claim but is rejected too,
+/// because the registry is process-wide.
+void groupHostSingleton()
+{
+    import antfarm.templates : payloadRange;
+    import std.range : repeat;
+    GroupHostOptions o;
+    o.groups = HostGroups.all();
+    o.farmPerGroup = true;
+    o.idleTimeout = Duration.max;
+    o.farm.ringMiB = 2;
+    atomicStore(groupWorkerTokens, 0u);
+    auto first = new GroupHost(o, &groupTokenBody, &groupTokenStopHook);
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad(groupWorkerTokens) < first.workers && MonoTime.currTime < deadline)
+    {
+        first.wakeAll();
+        Thread.sleep(1.msecs);
+    }
+    enforce(atomicLoad(groupWorkerTokens) == first.workers, "every worker took a token");
+    immutable llc = first.groups[0];
+    auto farm = first.farmOf(llc);
+    enforce(first.token(llc).valid, "caller token");
+    immutable producers = atomicLoad(farm.Prsm);
+
+    foreach (attempt; 0 .. 2)
+    {
+        auto e = expectThrow!FarmHostException(() { new GroupHost(o, &groupBody, &groupStopHook); },
+            "second GroupHost");
+        enforce(e.msg.canFind("another GroupHost is open") || e.msg.canFind("another host owns the pool"),
+            e.msg);
+    }
+    enforce(first.isOpen && first.farmOf(llc) is farm, "first host's registry untouched");
+    enforce(atomicLoad(farm.Prsm) == producers, "first host's tokens still registered");
+    auto none = o;
+    none.workers = 0;
+    auto e = expectThrow!FarmHostException(() { new GroupHost(none, &groupBody, &groupStopHook); },
+        "GroupHost without workers beside an open one");
+    enforce(e.msg.canFind("another GroupHost is open"), e.msg);
+    enforce(first.farmOf(llc) is farm && atomicLoad(farm.Prsm) == producers,
+        "first host untouched by the rejected host without workers");
+
+    atomicStore(groupJobs, 0UL);
+    auto jobs = payloadRange!groupJob(repeat(cast(ulong) llc, 1000));
+    ulong left = 1000;
+    while (left)
+    {
+        immutable w = farm.write(jobs, first.token(llc));
+        if (w == 0) { first.wakeAll(); Thread.yield(); continue; }
+        jobs.popFrontN(cast(size_t) w);
+        left -= w;
+        first.wakeOne();
+    }
+    deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad(groupJobs) < 1000 && MonoTime.currTime < deadline)
+    {
+        first.wakeAll();
+        Thread.sleep(1.msecs);
+    }
+    enforce(atomicLoad(groupJobs) == 1000, "first host still runs its group's jobs");
+    first.close();
+    auto next = new GroupHost(o, &groupBody, &groupStopHook); // the claim was released once
+    next.close();
+    writeln("PASS group host singleton: a rejected second host leaves the first's tokens, registry and close intact");
+}
+
+__gshared shared(int) blockedEntered, blockedRelease, blockedStops;
+
+bool blockedBody(WorkerSelf*) nothrow @nogc @system
+{
+    atomicStore(blockedEntered, 1);
+    while (atomicLoad(blockedRelease) == 0) Thread.yield();
+    return false;
+}
+
+void blockedStop(WorkerSelf*) nothrow @nogc @system
+{
+    atomicOp!"+="(blockedStops, 1);
+}
+
+/// shutdown on a pool that is not the live one (here rejected by start)
+/// leaves the live pool alone: it neither requests stop nor clears the
+/// shared worker records and hooks while the live pool's worker is still
+/// inside its body, and the live pool's own shutdown still runs the stop
+/// hook and joins.
+void rejectedPoolShutdown()
+{
+    PoolOptions options;
+    options.processors = [FarmHost.resolve(guarded(1)).workers[0]];
+    options.workerBody = &blockedBody;
+    options.workerStop = &blockedStop;
+    atomicStore(blockedEntered, 0);
+    atomicStore(blockedRelease, 0);
+    atomicStore(blockedStops, 0);
+    auto live = new CacheAwarePool(options);
+    live.start();
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad(blockedEntered) == 0 && MonoTime.currTime < deadline)
+        Thread.yield();
+    enforce(atomicLoad(blockedEntered) == 1, "live pool worker entered its body");
+    auto rejected = new CacheAwarePool(options);
+    auto e = expectThrow!Exception(() { rejected.start(); }, "second pool start");
+    enforce(e.msg.canFind("a pool is already running"), e.msg);
+    rejected.shutdown();
+    enforce(!live.stopRequested && live.workerCount == 1, "live pool still running");
+    enforce(atomicLoad(blockedStops) == 0, "live worker not stopped by the rejected pool");
+    atomicStore(blockedRelease, 1);
+    live.shutdown();
+    enforce(atomicLoad(blockedStops) == 1, "live pool's shutdown ran its stop hook");
+    rejected.shutdown();
+    live.shutdown();
+    writeln("PASS pool shutdown: a rejected pool's shutdown leaves the live pool running");
+}
+
 int main(string[] args)
 {
     if (args.length == 2 && args[1] == "--parallel-only")
@@ -992,6 +1134,8 @@ int main(string[] args)
     {
         enforce(workersFit(), "group host test requires two worker CPUs");
         groupHostPerGroup();
+        groupHostSingleton();
+        rejectedPoolShutdown();
         return 0;
     }
     if (args.length == 2 && args[1] == "--reclamation-only")
@@ -1028,6 +1172,8 @@ int main(string[] args)
     confineCaller();
     rawTokenPickup();
     groupHostPerGroup();
+    groupHostSingleton();
+    rejectedPoolShutdown();
     timeoutThenCancel(2);
     version (assert) workerFailure();
     singleton();
