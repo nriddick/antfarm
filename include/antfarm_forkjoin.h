@@ -12,9 +12,14 @@ typedef af_node *(*af_node_callback)(af_node *);
 /* Initialize with af_node_init. Stable caller-owned storage, never copy or
    mutate while admitted. private_words is scheduler-owned. Embed this header
    first in a larger C frame, or use context. run/join must not throw/longjmp.
-   run returns af_complete(self), af_fork(self, ...), or a continuation.
-   join runs once after all children; NULL completes the parent automatically.
-   Do not call af_complete(self) from join. A leaf's join is never called.
+   run must return exactly the value af_complete(self) or af_fork(self, ...)
+   returned to it. join runs once after all children (a forking parent
+   needs one); it returns NULL, which completes the parent, or exactly the
+   value af_fork returned when it forked again. Any other return, or a run
+   that neither completes nor forks, is fatal in every build. Do not call
+   af_complete(self) from join. A leaf's join is never called. Range
+   callbacks (each/leaf/join of af_forkjoin_for/reduce) run with no active
+   node: they cannot complete or fork the node that started the range.
    A join may free its own frame as its final access. A leaf must retain its
    header through af_complete. A terminal join may free its frame; other
    frames stay live through their tree completion.

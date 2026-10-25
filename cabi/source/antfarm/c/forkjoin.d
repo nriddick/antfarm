@@ -46,6 +46,45 @@ struct af_root_completion { RootCompletion value; bool pending; }
 private __gshared af_dispatcher* current;
 private af_node* activeNode;
 private bool activeJoin, transferred;
+private Node* lastTransfer; // what af_fork/af_complete returned to the active callback
+
+// A C callback that neither completes nor forks, or returns anything but the
+// value af_fork/af_complete gave it, would leave the tree incomplete (every
+// wait spins) or hand the trampoline an arbitrary pointer. Diagnose both in
+// every build.
+private Node* checkedReturn(Node* result, bool join) nothrow @nogc
+{
+    if (transferred)
+    {
+        if (result !is lastTransfer)
+            fatal(join ? "C forkjoin: join must return the value af_fork returned"
+                       : "C forkjoin: run must return the value af_fork/af_complete returned");
+    }
+    else if (join)
+    {
+        if (result !is null) fatal("C forkjoin: join without af_fork must return NULL");
+    }
+    else
+        fatal("C forkjoin: run returned without af_complete or af_fork");
+    return result;
+}
+
+// Range callbacks (each/leaf/join) run inside a scheduler-owned frame, not a
+// C node: no C node is active while they run, so a leaf cannot complete or
+// fork the node that called af_forkjoin_for/reduce.
+private struct NoActiveNode
+{
+    af_node* node; bool join, moved; Node* last;
+    this(int) nothrow @nogc
+    {
+        node = activeNode; join = activeJoin; moved = transferred; last = lastTransfer;
+        activeNode = null; activeJoin = false; transferred = false; lastTransfer = null;
+    }
+    ~this() nothrow @nogc
+    {
+        activeNode = node; activeJoin = join; transferred = moved; lastTransfer = last;
+    }
+}
 
 private Node* callRun(Node* p) nothrow @nogc
 {
@@ -56,7 +95,7 @@ private Node* callRun(Node* p) nothrow @nogc
     scope(exit) { activeNode = outer; activeJoin = outerJoin; transferred = outerTransferred; }
     runtimeEnterCallback();
     scope(exit) runtimeLeaveCallback();
-    return cast(Node*) n.run(n);
+    return checkedReturn(cast(Node*) n.run(n), false);
 }
 private Node* callJoin(Node* p) nothrow @nogc
 {
@@ -68,7 +107,7 @@ private Node* callJoin(Node* p) nothrow @nogc
     scope(exit) { activeNode = outer; activeJoin = outerJoin; transferred = outerTransferred; }
     runtimeEnterCallback();
     scope(exit) runtimeLeaveCallback();
-    return cast(Node*) n.join(n);
+    return checkedReturn(cast(Node*) n.join(n), true);
 }
 private void requireNode(af_node* n) nothrow @nogc
 {
@@ -230,7 +269,8 @@ extern(C) af_node* af_fork(af_node* parent, af_node** children, size_t count) no
         fatal("C forkjoin: invalid children span");
     foreach (i; 0 .. count) { requireNode(children[i]); if (children[i] is parent) fatal("C forkjoin: self child"); }
     transferred = true;
-    return cast(af_node*) fork(cast(Node*)parent, (cast(Node**)children)[0 .. count]);
+    lastTransfer = fork(cast(Node*)parent, (cast(Node**)children)[0 .. count]);
+    return cast(af_node*) lastTransfer;
 }
 extern(C) af_node* af_complete(af_node* n) nothrow @nogc
 {
@@ -238,7 +278,8 @@ extern(C) af_node* af_complete(af_node* n) nothrow @nogc
     requireNode(n);
     if (activeNode !is n || activeJoin || transferred) fatal("C forkjoin: complete requires the current uncompleted run callback");
     transferred = true;
-    return cast(af_node*) complete(cast(Node*)n);
+    lastTransfer = complete(cast(Node*)n);
+    return cast(af_node*) lastTransfer;
 }
 extern(C) uint af_run_root(af_dispatcher* d, af_node* root) nothrow @nogc
 {
@@ -317,6 +358,7 @@ private Node* rangeJoin(Node* node) nothrow @nogc
     auto f = cast(RangeFrame*)node;
     if (f.job.leaf !is null)
     {
+        auto guard = NoActiveNode(0);
         runtimeEnterCallback();
         scope(exit) runtimeLeaveCallback();
         f.job.join(f.job.context, resultOf(f.kids), resultOf(rightOf(f)), resultOf(f));
@@ -330,6 +372,7 @@ private Node* rangeRun(Node* node) nothrow @nogc
     auto j = f.job;
     if (f.end - f.begin <= j.grain)
     {
+        auto guard = NoActiveNode(0);
         runtimeEnterCallback();
         scope(exit) runtimeLeaveCallback();
         if (j.leaf !is null) j.leaf(j.context, f.begin, f.end, j.seed, resultOf(f));

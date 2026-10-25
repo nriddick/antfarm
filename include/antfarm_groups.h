@@ -15,8 +15,9 @@ typedef struct af_group_options {
 /* A worker body owns its consumer view; return 0 when idle, 1 on progress.
    The pool arms, rechecks body, then parks. stop must unsubscribe/destroy the
    worker's views. Both callbacks must not throw/longjmp or retain callback
-   arguments. A worker stopped before entering its loop may have no stop
-   callback; it acquired no user resources. host/context stay live through
+   arguments. stop runs on every started worker, including one stopped
+   before its body ever ran, which acquired no user resources. host/context
+   stay live through
    stop_workers. Workers can call
    farm/token during startup, before af_group_start returns. Start is not a
    user-body barrier: synchronize consumer readiness before first publication. */

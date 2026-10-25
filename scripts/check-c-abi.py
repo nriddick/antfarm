@@ -320,6 +320,10 @@ def runtime_checks(compiler, build, core):
                           ("double", "current uncompleted run callback"),
                           ("outside", "current uncompleted run callback"),
                           ("join", "current uncompleted run callback"),
+                          ("noreturn", "run returned without af_complete or af_fork"),
+                          ("stale", "run must return the value af_fork/af_complete returned"),
+                          ("joinvalue", "join without af_fork must return NULL"),
+                          ("leafcomplete", "current uncompleted run callback"),
                           ("stop", "control operation inside runtime callback"),
                           ("destroy", "stopped dispatcher"),
                           ("uninitialized", "node must be initialized")):

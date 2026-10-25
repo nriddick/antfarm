@@ -108,13 +108,19 @@ TEST_THREAD(producer) {
     ok(af_druntime_detach_thread()); TEST_RETURN;
 }
 static const char *death_case;
+static void complete_enclosing(void *ctx, size_t i) { (void)i; (void)af_complete((af_node *)ctx); }
 static af_node *bad_run(af_node *n) {
     if (!strcmp(death_case,"zero")) return af_fork(n,NULL,0);
     if (!strcmp(death_case,"double")) { (void)af_complete(n); return af_complete(n); }
     if (!strcmp(death_case,"stop")) { af_dispatcher_stop(dispatch); return NULL; }
+    if (!strcmp(death_case,"noreturn")) return NULL;
+    if (!strcmp(death_case,"stale")) { static af_node child; af_node_init(&child,leaf_run,NULL,NULL);
+        af_node *kids[1]={&child}; (void)af_fork(n,kids,1); return n; }
+    if (!strcmp(death_case,"leafcomplete")) { (void)af_forkjoin_for(dispatch,0,1,1,complete_enclosing,n); return NULL; }
     af_node *kids[1]={n}; return af_fork(n,kids,1);
 }
 static af_node *bad_join(af_node *n) { return af_complete(n); }
+static af_node *value_join(af_node *n) { return n; }
 static af_node *join_death_run(af_node *n) {
     static af_node child; af_node_init(&child,leaf_run,NULL,NULL);
     af_node *kids[1]={&child}; return af_fork(n,kids,1);
@@ -139,6 +145,7 @@ int main(int argc,char **argv) {
         af_node n; af_node_init(&n,bad_run,flat_join,NULL);
         if (!strcmp(death_case,"outside")) af_complete(&n);
         if (!strcmp(death_case,"join")) af_node_init(&n,join_death_run,bad_join,NULL);
+        if (!strcmp(death_case,"joinvalue")) af_node_init(&n,join_death_run,value_join,NULL);
         if (!strcmp(death_case,"destroy")) af_dispatcher_destroy(dispatch);
         if (!strcmp(death_case,"uninitialized")) memset(&n,0,sizeof n);
         af_run_root(dispatch,&n); return 0;
