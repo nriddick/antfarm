@@ -13,6 +13,12 @@ import threadpool.host : FarmHost, FarmHostOptions, FarmHostResolveException, Fa
     CallerPlacement, WorkerIdle, HostState, HostAttachment;
 import threadpool.pool : CacheAwarePool;
 
+// GroupHost keeps GC arrays of AntFarm pointers. DMD emits their TypeInfo in
+// the runtime archive but otherwise leaves the imported Farm's pointer bitmap
+// to its defining module, built with BetterC here. Materialize that metadata
+// here without compiling a second Farm implementation or identity allocator.
+private immutable farmGcLayout = RTInfo!AntFarm;
+
 extern(C) void rt_moduleTlsCtor();
 extern(C) void rt_moduleTlsDtor();
 
@@ -32,7 +38,22 @@ private __gshared bool active, attachedOwner, retired;
 private __gshared Thread owner;
 private __gshared uint hosts;
 private shared uint attachments;
+private shared uint services;
+private uint callbackDepth, threadResources;
 private bool attachedHere, ownsAttachment;
+
+// Shared by the additive dispatcher and GroupHost adapters. Their native
+// handles must keep the explicit runtime session alive, including completions
+// created on foreign threads.
+package uint runtimeAttached() nothrow @nogc { return attached(); }
+package uint runtimeControl() nothrow @nogc { return control(); }
+package uint runtimeException(Throwable e) nothrow @nogc { return exception(e); }
+package void runtimeRetain() nothrow @nogc { atomicOp!"+="(services, 1u); }
+package void runtimeRelease() nothrow @nogc { atomicOp!"-="(services, 1u); }
+package void runtimeEnterCallback() nothrow @nogc { ++callbackDepth; }
+package void runtimeLeaveCallback() nothrow @nogc { --callbackDepth; }
+package void runtimeAcquireThreadResource() nothrow @nogc { ++threadResources; }
+package void runtimeReleaseThreadResource() nothrow @nogc { --threadResources; }
 
 private uint attached() nothrow @nogc @system
 {
@@ -45,6 +66,7 @@ private uint control() nothrow @nogc @system
     if (auto status = attached()) return status;
     if (Thread.getThis() !is owner) return setError(AF_INVALID, "runtime operation requires the control thread");
     if (inFarmCallback()) fatal("C runtime control operation inside Farm callback");
+    if (callbackDepth) fatal("C runtime control operation inside runtime callback");
     return AF_OK;
 }
 private uint exception(Throwable e) nothrow @nogc @system
@@ -111,7 +133,8 @@ uint af_druntime_init()
 uint af_druntime_shutdown()
 {
     if (auto status = control()) return status;
-    if (hosts || atomicLoad(attachments)) return setError(AF_BUSY, "runtime still has hosts or thread attachments");
+    if (hosts || atomicLoad(attachments) || atomicLoad(services))
+        return setError(AF_BUSY, "runtime still has hosts, services or thread attachments");
     active = false;
     retired = true;
     owner = null;
@@ -155,6 +178,7 @@ uint af_druntime_attach_thread()
 uint af_druntime_detach_thread()
 {
     if (!active || !attachedHere) return setError(AF_INVALID, "no ABI thread attachment");
+    if (callbackDepth || threadResources) return setError(AF_BUSY, "thread still has runtime callbacks or tokens");
     uint result = AF_OK;
     if (ownsAttachment)
     {

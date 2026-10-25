@@ -84,9 +84,10 @@ def audit_symbols(library, headers, build, core=False):
 # struct's size, alignment and field offsets. One C++ program then checks every
 # prototype with static_assert and prints the same layout from the headers.
 DECLARATION_MODULES = ["cabi/source/antfarm/c/core.d", "cabi/source/antfarm/c/runtime.d",
+                       "cabi/source/antfarm/c/forkjoin.d", "cabi/source/antfarm/c/groups.d",
                        "cabi/source/antfarm/actors/cabi.d",
                        "cabi/source/antfarm/actors/private_cabi.d"]
-DECLARATION_HEADERS = ["antfarm.h", "antfarm_runtime.h", "antfarm_actors.h", "antfarm_private.h"]
+DECLARATION_HEADERS = ["antfarm.h", "antfarm_runtime.h", "antfarm_actors.h", "antfarm_private.h", "antfarm_forkjoin.h", "antfarm_groups.h"]
 # Header struct -> D type, where the D spelling differs.
 D_STRUCT_NAMES = {"af_completion_hook": "TableCompletionHook"}
 # Header structs that are deliberately opaque storage (C sees padding words, D
@@ -191,7 +192,7 @@ def audit_declarations(compiler, build, write_lock=False):
     then the header-side result with the committed ABI 1 lock."""
     work = build / "declarations"
     work.mkdir(parents=True, exist_ok=True)
-    includes = ["-I.", "-Icabi/source", "-Ithreadpool/source"]
+    includes = ["-I.", "-Icabi/source", "-Ithreadpool/source", "-Iforkjoin/source"]
     generated = work / "d_prototypes.h"
     build_api.run([compiler, "-o-", *includes, d_option(compiler, "HC"),
                    d_option(compiler, "HCf=") + str(generated), *DECLARATION_MODULES])
@@ -295,7 +296,7 @@ def native_runtime(source, build, libraries, compiler, probe=False):
 
 def runtime_checks(compiler, build, core):
     runtime = build_api.build_runtime(compiler, build)
-    audit_symbols(runtime, ["antfarm_runtime.h"], build)
+    audit_symbols(runtime, ["antfarm_runtime.h", "antfarm_forkjoin.h", "antfarm_groups.h"], build)
     libraries = [runtime, core]
     binary = native_runtime("tests/cabi/runtime.c", build, libraries, compiler, probe=True)
     execute(binary)
@@ -312,6 +313,18 @@ def runtime_checks(compiler, build, core):
                    "-of=" + str(embedded)])
     execute(embedded)
     execute(native_runtime("examples/c_host.c", build, libraries, compiler))
+    execute(native_runtime("tests/cabi/groups.c", build, libraries, compiler))
+    forkjoin = native_runtime("tests/cabi/forkjoin.c", build, libraries, compiler)
+    execute(forkjoin)
+    for case, message in (("zero", "invalid children span"), ("self", "self child"),
+                          ("double", "current uncompleted run callback"),
+                          ("outside", "current uncompleted run callback"),
+                          ("join", "current uncompleted run callback"),
+                          ("stop", "control operation inside runtime callback"),
+                          ("destroy", "stopped dispatcher"),
+                          ("uninitialized", "node must be initialized")):
+        execute(forkjoin, case, death=message)
+    execute(native_runtime("cabi/examples/forkjoin.c", build, libraries, compiler))
 
 
 def execute(binary, *args, death=None):

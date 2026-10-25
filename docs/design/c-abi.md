@@ -10,6 +10,12 @@ adapters [antfarm.hpp](../../include/antfarm.hpp) and
 remain in [SPEC](../../SPEC.md). ABI 1 supports 64-bit Windows and Linux;
 all exports and callbacks use C linkage.
 
+The 2.0.2 development additions export the dispatcher, continuation nodes,
+callback ranges and GroupHost through [the C dispatcher surface](c-dispatcher.md),
+[antfarm_forkjoin.h](../../include/antfarm_forkjoin.h) and
+[antfarm_groups.h](../../include/antfarm_groups.h). They live in the optional
+runtime archive; Fibers remain outside the C ABI.
+
 ## Distribution boundary
 
 - **antfarm_core**: Farm, tokens, views, publication, table hooks, public actors,
@@ -18,7 +24,7 @@ all exports and callbacks use C linkage.
   native TLS in every build. libc, platform mapping APIs, and pthread on Linux
   are ordinary native dependencies.
 - **antfarm_runtime**: optional druntime-inclusive non-Fiber worker pool and
-  FarmHost. It depends on the same core instance: never embed a second copy
+  FarmHost, GroupHost and fork-join dispatcher. It depends on the same core instance: never embed a second copy
   of the Farm identity allocator or fatal-handler state. Runtime initialization
   and shutdown are explicit. Runtime-owned worker threads are attached;
   foreign threads entering runtime services other than wake/state must attach

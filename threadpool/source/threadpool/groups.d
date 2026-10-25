@@ -277,6 +277,21 @@ final class GroupHost
 
     // ---- teardown -------------------------------------------------------------
 
+    /// Stop and join the workers, keeping the registry and Farms alive so a
+    /// native host can return borrowed views/tokens before `close`. Does not
+    /// drain application work; establish application completion first. Only
+    /// the control thread may call it. Repeated calls are harmless.
+    void stopWorkers()
+    {
+        enforce(Thread.getThis() is control_, "GroupHost.stopWorkers: control thread required");
+        if (poolRunning_)
+        {
+            director_ = Director.init;
+            pool_.shutdown();
+            poolRunning_ = false;
+        }
+    }
+
     /// Shut the pool down (stop hooks run and release worker tokens), release
     /// the caller's tokens, uninstall the registry, destroy the Farms and
     /// restore the caller's affinity. Control thread only; a no-op once closed.
@@ -410,12 +425,7 @@ private:
 
     void undoConstruction()
     {
-        if (poolRunning_)
-        {
-            director_ = Director.init;
-            pool_.shutdown();
-            poolRunning_ = false;
-        }
+        stopWorkers();
         releaseThreadTokens(); // the caller's
         if (installed_)
         {

@@ -29,7 +29,8 @@ typedef struct af_host_options {
    One explicit session per process. Call init/shutdown serially on the same
    control thread, with lifecycle operations in other D libraries quiescent.
    A balanced druntime reference preserves an embedding D application's own
-   initialization. Shutdown returns AF_BUSY until hosts and attachments close.
+   initialization. Shutdown returns AF_BUSY until hosts, dispatcher/GroupHost handles, root
+   completions and attachments close.
    No runtime function may race shutdown. ABI 1 does not support restarting
    a session after shutdown. A failed init that had already initialized
    druntime (topology discovery failing, for example) terminates it and ends

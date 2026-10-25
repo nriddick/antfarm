@@ -74,7 +74,9 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/farm-ordering.md](design/farm-ordering.md) | see the Farm subscription/reclamation ordering audit and its TSan lanes |
 | [design/c-abi.md](design/c-abi.md) | build and use the C/C++ ABI, runtime-free core/public actors and optional non-Fiber worker host |
 | [design/threadpool.md](design/threadpool.md) | get the topology, worker, Director, registry and OS-backend contracts |
+| [design/c-dispatcher.md](design/c-dispatcher.md) | use C continuation nodes, callback ranges and GroupHost; own their completion and teardown |
 | [design/forkjoin.md](design/forkjoin.md) | get the fork-join dispatcher's frame, deque, parking and admission contracts, and what the benchmarks found |
+| [design/coroutine-replacement.md](design/coroutine-replacement.md) | review the measured deque experiment and proposed druntime/async-I/O coroutine tiers |
 | [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
 
 ## Development

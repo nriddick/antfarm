@@ -4,6 +4,50 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
+## 2.0.2 development — C dispatcher and coroutine investigation
+
+- Add `antfarm_forkjoin.h`: dispatcher configuration/lifecycle/counters,
+  eligible CPU enumeration, caller-owned C nodes with C-linkage run/join
+  adapters, fork/complete, nested synchronous roots, foreign submission,
+  reusable completions and detached roots. Invalid callback completion/fork
+  contracts have release-build fatal diagnostics.
+- Add callback-based for/reduce with the D range tree's deterministic midpoint
+  split, generic POD results, checked sizes and explicit empty-range behavior.
+  Add `cabi/examples/forkjoin.c` and native C tests for recursive/nested trees,
+  overflow, re-forking joins, backpressure streams, completion reuse, detached
+  drain and invalid admission/teardown.
+- Add `antfarm_groups.h`: worker resolution/start, raw C worker hooks, group
+  Farms, cached per-thread tokens and wake. `GroupHost.stopWorkers` keeps
+  borrowed resources alive between joining workers and final close. C close
+  refuses outstanding views/tokens/actors/waves/private parks. Foreign token
+  holders cannot detach until their cache is released.
+- Keep all previous ABI 1 lock rows and the BetterC core unchanged. New
+  services participate in explicit runtime-session lifetime accounting. DMD
+  materializes Farm GC metadata in the runtime archive without a second core.
+  The contract is [C dispatcher and GroupHost](docs/design/c-dispatcher.md).
+- Leave production Fibers unchanged and outside the ABI. Add an isolated
+  [warm reuse experiment](docs/performance/coroutines-2026-10-25/README.md)
+  and [replacement proposal](docs/design/coroutine-replacement.md). At 32
+  threads on the 5900XT, zero-yield raw deque reuse measured 141.77 M/s
+  (141.16–152.93), shared-Farm dispatch 35.80 M/s (34.90–37.28), and existing
+  FiberDomain lifecycle 1.85 M/s (1.81–1.86), five samples per cell. With
+  three yields, raw deque measured 23.18 M completed lifetimes/s versus
+  ring 8.25 M and existing lifecycle 1.17 M. These are deliberately different
+  feature sets, not a production speedup claim. All per-thread-count results,
+  allocations, migrations, compiler/host metadata and raw samples are retained.
+
+Validation: `make check SHELL=/usr/bin/bash` passed on Linux x86-64
+(7.2.9-2-cachyos), Ryzen 9 5900XT, LDC 1.43.0, DMD 2.113.0 and GCC 16.2.1:
+C/C++ ABI/death tests, core/pool/Fiber/fork-join suites, the gate's TSan and
+ASan lanes, actor/private-tree/order tests, documentation and examples.
+All 324 original ABI-lock rows remain identical, with 84 additions. The new
+GroupHost cleanup test waits for user-body readiness; an immediate-stop test
+separately covers workers stopped before first entry. Thirty repetitions
+passed with each compiler. The 300 benchmark samples checked completion
+counts/checksums and retained the warmed Fiber pool. No native Windows run,
+standard `perf-gate`, async-I/O benchmark or custom context-engine performance
+is claimed. No push or release is made by this development increment.
+
 ## Unreleased
 
 Fixes:

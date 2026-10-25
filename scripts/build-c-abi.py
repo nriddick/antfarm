@@ -49,13 +49,14 @@ def build_core(compiler, build, audit=False, sanitize=False, debug=False):
 
 
 def build_runtime(compiler, build):
-    sources = ["cabi/source/antfarm/c/runtime.d", "antfarm/templates.d", "antfarm/parallel.d",
+    sources = ["cabi/source/antfarm/c/runtime.d", "cabi/source/antfarm/c/forkjoin.d", "cabi/source/antfarm/c/groups.d", "antfarm/templates.d", "antfarm/parallel.d",
                "antfarm/actors/package.d"]
     sources += [str(p.relative_to(ROOT)) for p in sorted((ROOT / "threadpool/source").rglob("*.d"))]
+    sources += [str(p.relative_to(ROOT)) for p in sorted((ROOT / "forkjoin/source").rglob("*.d"))]
     result = library(build, "antfarm_runtime")
     result.unlink(missing_ok=True)
     run([compiler, "-O", "-release", "-op", "-I.", "-Icabi/source", "-Ithreadpool/source",
-         "-lib", *sources, "-of=" + str(result)])
+         "-Iforkjoin/source", "-lib", *sources, "-of=" + str(result)])
     return result
 
 

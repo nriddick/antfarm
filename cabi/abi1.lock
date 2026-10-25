@@ -56,13 +56,32 @@ PROTO uint32_t af_actor_wave_ready(const af_actor_wave_handle *)
 PROTO void af_actor_wave_seal(af_actor_wave *)
 PROTO uint32_t af_actor_wave_valid(const af_actor_wave_handle *)
 PROTO uint32_t af_can_fit(const af_farm *farm, af_callback call, size_t body_words, af_tier tier)
+PROTO af_node *af_complete(af_node *)
 PROTO uint32_t af_consume_next(af_view *)
 PROTO af_status af_create(const af_options *options, af_farm **out)
 PROTO void af_destroy(af_farm *farm)
+PROTO af_status af_dispatcher_counters(const af_dispatcher *, af_dispatcher_stats *out)
+PROTO void af_dispatcher_destroy(af_dispatcher *)
+PROTO void af_dispatcher_options_default(af_dispatcher_options *out)
+PROTO af_status af_dispatcher_start(const af_dispatcher_options *, const af_processor *, size_t count, af_dispatcher **out)
+PROTO af_status af_dispatcher_stop(af_dispatcher *)
 PROTO af_status af_druntime_attach_thread(void)
 PROTO af_status af_druntime_detach_thread(void)
 PROTO af_status af_druntime_init(void)
 PROTO af_status af_druntime_shutdown(void)
+PROTO af_node *af_fork(af_node *parent, af_node **children, size_t count)
+PROTO af_status af_forkjoin_for(af_dispatcher *, size_t begin, size_t end, size_t grain, af_for_callback, void *context)
+PROTO af_status af_forkjoin_reduce(af_dispatcher *, size_t begin, size_t end, size_t grain, size_t value_size, const void *seed, af_reduce_leaf, af_reduce_join, void *context, void *out)
+PROTO af_status af_group_caller_llc(af_group_host *, uint32_t *out)
+PROTO af_status af_group_close(af_group_host *)
+PROTO af_status af_group_farm(af_group_host *, uint32_t llc, af_farm **out)
+PROTO void af_group_options_default(af_group_options *out)
+PROTO af_status af_group_release_tokens(af_group_host *)
+PROTO af_status af_group_resolve(const af_group_options *, af_processor *out, size_t capacity, size_t *count)
+PROTO af_status af_group_start(const af_group_options *, af_group_body, af_group_stop, void *context, af_group_host **out)
+PROTO af_status af_group_stop_workers(af_group_host *)
+PROTO af_status af_group_token(af_group_host *, uint32_t llc, af_token **out)
+PROTO af_status af_group_wake(af_group_host *, uint32_t llc)
 PROTO af_status af_host_abandon(af_host *)
 PROTO af_status af_host_close(af_host *)
 PROTO af_status af_host_create(const af_host_options *, af_host **out)
@@ -75,6 +94,7 @@ PROTO af_status af_host_step(af_host *)
 PROTO af_status af_host_wake(af_host *)
 PROTO const char *af_last_error_message(void)
 PROTO int32_t af_last_os_error(void)
+PROTO void af_node_init(af_node *, af_node_callback run, af_node_callback join, void *context)
 PROTO void af_options_default(af_options *out)
 PROTO void af_private_cancel_children(af_private_context *)
 PROTO void af_private_cancel_peers(af_private_context *)
@@ -105,13 +125,20 @@ PROTO af_status af_private_roots_create(af_farm *, const af_private_root_options
 PROTO void af_private_roots_destroy(af_private_roots *)
 PROTO size_t af_private_roots_live(af_private_roots *)
 PROTO af_private_pump_count af_private_roots_pump(af_private_roots *, af_token *, size_t limit, uint32_t avg_cost)
+PROTO af_status af_processors(af_processor *out, size_t capacity, size_t *count)
 PROTO af_status af_register_producer(af_farm *farm, af_tier tier, af_token **out)
+PROTO af_status af_root_completion_create(af_root_completion **out)
+PROTO af_status af_root_completion_destroy(af_root_completion *)
+PROTO af_status af_run_root(af_dispatcher *, af_node *)
 PROTO void af_set_fatal_handler(af_fatal_handler, void *context)
+PROTO af_status af_submit_detached(af_dispatcher *, af_node *)
+PROTO af_status af_submit_root(af_dispatcher *, af_node *, af_root_completion *)
 PROTO af_status af_subscribe(af_view *, af_farm *)
 PROTO void af_unregister_producer(af_farm *farm, af_token *token)
 PROTO void af_unsubscribe(af_view *)
 PROTO af_status af_view_create(af_view **out)
 PROTO void af_view_destroy(af_view *)
+PROTO af_status af_wait_root(af_root_completion *)
 PROTO size_t af_write(af_farm *, const af_entry *, size_t count, af_token *, uint32_t avg_cost, const af_completion_hook *)
 PROTO size_t af_write_bodies(af_farm *, af_callback, const af_body *, size_t count, af_token *, uint32_t avg_cost, const af_completion_hook *)
 PROTO size_t af_write_fixed(af_farm *, af_callback, const uint64_t *bodies, size_t body_words, size_t count, af_token *, uint32_t avg_cost, const af_completion_hook *)
@@ -146,6 +173,9 @@ CONST AF_CALLER_PIN 2
 CONST AF_CALLER_UNCHANGED 0
 CONST AF_DEFAULT_COST 3
 CONST AF_FULL 2
+CONST AF_GROUP_ALL 1
+CONST AF_GROUP_AUTOMATIC 0
+CONST AF_GROUP_ONLY 2
 CONST AF_HOST_ABANDONED 3
 CONST AF_HOST_CLOSED 2
 CONST AF_HOST_FAILED 1
@@ -238,10 +268,54 @@ LAYOUT F af_body count 8 8
 LAYOUT S af_completion_hook 16 8
 LAYOUT F af_completion_hook context 0 8
 LAYOUT F af_completion_hook call 8 8
+LAYOUT S af_dispatcher_options 72 8
+LAYOUT F af_dispatcher_options struct_size 0 4
+LAYOUT F af_dispatcher_options abi_version 4 4
+LAYOUT F af_dispatcher_options ring_mib 8 4
+LAYOUT F af_dispatcher_options small_quota 12 4
+LAYOUT F af_dispatcher_options deque_capacity 16 4
+LAYOUT F af_dispatcher_options poll_every 20 4
+LAYOUT F af_dispatcher_options avg_cost 24 4
+LAYOUT F af_dispatcher_options cross_div 28 4
+LAYOUT F af_dispatcher_options sibling_first 32 4
+LAYOUT F af_dispatcher_options body_steps 36 4
+LAYOUT F af_dispatcher_options idle_max 40 4
+LAYOUT F af_dispatcher_options park 44 4
+LAYOUT F af_dispatcher_options spin_steps 48 4
+LAYOUT F af_dispatcher_options farm_per_group 52 4
+LAYOUT F af_dispatcher_options caller_consumes 56 4
+LAYOUT F af_dispatcher_options spill_inline 60 4
+LAYOUT F af_dispatcher_options reserved 64 8
+LAYOUT S af_dispatcher_stats 136 8
+LAYOUT F af_dispatcher_stats pushed 0 8
+LAYOUT F af_dispatcher_stats popped 8 8
+LAYOUT F af_dispatcher_stats steal_attempts 16 8
+LAYOUT F af_dispatcher_stats steal_successes 24 8
+LAYOUT F af_dispatcher_stats cross_attempts 32 8
+LAYOUT F af_dispatcher_stats cross_successes 40 8
+LAYOUT F af_dispatcher_stats sibling_successes 48 8
+LAYOUT F af_dispatcher_stats spilled_tables 56 8
+LAYOUT F af_dispatcher_stats spilled_children 64 8
+LAYOUT F af_dispatcher_stats inline_children 72 8
+LAYOUT F af_dispatcher_stats solo_children 80 8
+LAYOUT F af_dispatcher_stats farm_polls 88 8
+LAYOUT F af_dispatcher_stats farm_hits 96 8
+LAYOUT F af_dispatcher_stats deque_high_water 104 8
+LAYOUT F af_dispatcher_stats parks 112 8
+LAYOUT F af_dispatcher_stats wakes 120 8
+LAYOUT F af_dispatcher_stats submits 128 8
 LAYOUT S af_entry 24 8
 LAYOUT F af_entry call 0 8
 LAYOUT F af_entry body 8 8
 LAYOUT F af_entry body_words 16 8
+LAYOUT S af_group_options 112 8
+LAYOUT F af_group_options struct_size 0 4
+LAYOUT F af_group_options abi_version 4 4
+LAYOUT F af_group_options host 8 88
+LAYOUT F af_group_options group_mode 96 4
+LAYOUT F af_group_options group_index 100 4
+LAYOUT F af_group_options farm_per_group 104 4
+LAYOUT F af_group_options reserved 108 4
 LAYOUT S af_host_options 88 8
 LAYOUT F af_host_options struct_size 0 4
 LAYOUT F af_host_options abi_version 4 4
@@ -261,6 +335,11 @@ LAYOUT F af_host_options small_table_threshold 68 4
 LAYOUT F af_host_options huge_pages 72 4
 LAYOUT F af_host_options skip_smt_siblings 76 4
 LAYOUT F af_host_options reserved 80 8
+LAYOUT S af_node 56 8
+LAYOUT F af_node private_words 0 32
+LAYOUT F af_node run 32 8
+LAYOUT F af_node join 40 8
+LAYOUT F af_node context 48 8
 LAYOUT S af_options 56 8
 LAYOUT F af_options struct_size 0 4
 LAYOUT F af_options abi_version 4 4
@@ -326,3 +405,8 @@ LAYOUT F af_private_wave_outcome first_failure_code 20 4
 LAYOUT F af_private_wave_outcome first_failure_position 24 8
 LAYOUT F af_private_wave_outcome cancelled 32 4
 LAYOUT F af_private_wave_outcome reserved 36 4
+LAYOUT S af_processor 8 2
+LAYOUT F af_processor group 0 2
+LAYOUT F af_processor processor 2 2
+LAYOUT F af_processor llc 4 2
+LAYOUT F af_processor reserved 6 2

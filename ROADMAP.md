@@ -79,25 +79,20 @@ build rules with the pool, and point the staged upstream runtime at the tag.
 
 ## 2.0.2 — the C ABI grows to the dispatcher
 
-[The C ABI](docs/design/c-abi.md) exports the Farm, actors and waves; the
-2.0 additions have no C surface yet. Candidates, in the order a C caller
-needs them:
+Implemented on `2.0.2-progress`: dispatcher start/stop/counters; caller-owned
+C nodes with run/join callbacks; fork/complete, synchronous and foreign roots,
+reusable completions and detached submission; deterministic callback for/reduce;
+and GroupHost resolve/start, per-thread tokens, group Farms and two-phase close.
+The owning contract and validation are in
+[the C dispatcher design](docs/design/c-dispatcher.md), with a
+[native C example](cabi/examples/forkjoin.c). Existing ABI 1 rows are unchanged;
+Fibers have no C exports.
 
-- `antfarm_dispatcher_start`/`_stop` over `DispatcherOptions`, and
-  `antfarm_dispatcher_counters` in the same flat struct the D side
-  reports.
-- Nodes as C structs with `run`/`join` function pointers, plus
-  `antfarm_fork`, `antfarm_complete`, `antfarm_run_root`,
-  `antfarm_submit_root`/`_wait_root` and `antfarm_submit_detached`, so a
-  C program writes the same continuation-passing tree as the D one.
-- `antfarm_forkjoin_for` and `antfarm_forkjoin_reduce` over callbacks with
-  a `void*` context, with the deterministic split documented as part of
-  the contract.
-- `GroupHost` exports (`resolve`, `start`, the per-thread token and the
-  group Farm) for hosts written in C that want one Farm per group without
-  the dispatcher.
-- A `cabi/examples` fork-join program and a death-test lane mirroring the
-  D suite's admission and completion cases.
+Remaining before promotion: native Windows execution, production C-host usage,
+and a decision on optional map/scan/invoke/task-group/frame-allocation helpers.
+The coroutine replacement is an isolated experiment and proposal; see
+[deque-based coroutines](docs/design/coroutine-replacement.md). It does not
+change the current `ant_fibers` scheduler.
 
 
 ## 2.0 goals — draft
