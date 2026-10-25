@@ -1074,6 +1074,110 @@ void groupHostSingleton()
     writeln("PASS group host singleton: a rejected second host leaves the first's tokens, registry and close intact");
 }
 
+// ---- GroupHost attachments: raw composition, managed lane, deadline parks ----
+
+import threadpool.groups : GroupAttachment, GroupServiceResult;
+
+__gshared shared(ulong) countingSteps;
+
+bool countingBody(WorkerSelf*) nothrow @nogc @system
+{
+    atomicOp!"+="(countingSteps, 1UL);
+    return false; // never progress of its own
+}
+
+/// Two `@nogc` attachments, one consuming: the raw lane composes them, jobs
+/// still run on the consuming one's view, the other is stepped. Then a
+/// GC-enabled service attachment alone: the managed lane, the host's own
+/// view consumes the jobs, and with workers parked until woken the service
+/// hook's deadline is the only thing that ends a park, so it keeps being
+/// called while the host is otherwise idle.
+void groupHostAttachments()
+{
+    import antfarm.templates : payloadRange;
+    import std.range : repeat;
+
+    GroupHostOptions o;
+    o.groups = HostGroups.all();
+    o.idleTimeout = Duration.max;
+    o.farm.ringMiB = 2;
+    o.attachments = [GroupAttachment("consumer", &groupBody, &groupStopHook, true),
+                     GroupAttachment("counter", &countingBody, null, false)];
+    atomicStore(groupJobs, 0UL);
+    atomicStore(countingSteps, 0UL);
+    auto raw = new GroupHost(o);
+    enforce(!raw.managedLane, "only @nogc attachments: the raw lane");
+    enforce(raw.attachments.length == 2);
+    immutable llc = raw.groups[0];
+    auto jobs = payloadRange!groupJob(repeat(cast(ulong) llc, 1000));
+    ulong left = 1000;
+    while (left)
+    {
+        immutable w = raw.farmOf(llc).write(jobs, raw.token(llc));
+        if (w == 0) { raw.wakeAll(); Thread.yield(); continue; }
+        jobs.popFrontN(cast(size_t) w);
+        left -= w;
+        raw.wakeOne();
+    }
+    auto deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad(groupJobs) < 1000 && MonoTime.currTime < deadline)
+    {
+        raw.wakeAll();
+        Thread.sleep(1.msecs);
+    }
+    enforce(atomicLoad(groupJobs) == 1000, "composed raw lane ran the jobs");
+    enforce(atomicLoad(countingSteps) != 0, "the second attachment was stepped");
+    raw.close();
+
+    shared ulong serves, started, finished, installs;
+    GroupAttachment service;
+    service.name = "service";
+    service.install = (GroupHost h) { atomicOp!"+="(installs, 1UL); enforce(h.farms.length != 0, "Farms exist at install"); };
+    service.uninstall = (GroupHost h) { atomicOp!"-="(installs, 1UL); };
+    service.start = (WorkerSelf*) { atomicOp!"+="(started, 1UL); };
+    service.finish = (WorkerSelf*) { atomicOp!"+="(finished, 1UL); };
+    service.serve = (WorkerSelf*) {
+        atomicOp!"+="(serves, 1UL);
+        // Wake again in 5 ms whether or not anything happened.
+        return GroupServiceResult(false, (MonoTime.currTime + 5.msecs).ticks);
+    };
+    o.attachments = [service];
+    atomicStore(groupJobs, 0UL);
+    auto managed = new GroupHost(o);
+    enforce(managed.managedLane, "a GC-enabled hook selects the managed lane");
+    enforce(atomicLoad(installs) == 1, "install ran once on the control thread");
+    deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad(started) < managed.workers && MonoTime.currTime < deadline)
+        Thread.sleep(1.msecs);
+    enforce(atomicLoad(started) == managed.workers, "start ran once per worker");
+    jobs = payloadRange!groupJob(repeat(cast(ulong) llc, 1000));
+    left = 1000;
+    while (left)
+    {
+        immutable w = managed.farmOf(llc).write(jobs, managed.token(llc));
+        if (w == 0) { managed.wakeAll(); Thread.yield(); continue; }
+        jobs.popFrontN(cast(size_t) w);
+        left -= w;
+        managed.wakeOne();
+    }
+    deadline = MonoTime.currTime + 10.seconds;
+    while (atomicLoad(groupJobs) < 1000 && MonoTime.currTime < deadline)
+        Thread.sleep(1.msecs);
+    enforce(atomicLoad(groupJobs) == 1000, "the host's view consumed the jobs");
+    // Idle: no wakes from here on. Each worker must still come back from its
+    // park for the 5 ms deadline the service hook reports.
+    immutable before = atomicLoad(serves);
+    Thread.sleep(100.msecs);
+    immutable during = atomicLoad(serves) - before;
+    enforce(during >= managed.workers * 5,
+        "parked workers did not wake for the service deadline");
+    managed.close();
+    enforce(atomicLoad(finished) == managed.workers, "finish ran once per worker");
+    enforce(atomicLoad(installs) == 0, "uninstall ran at close");
+    writeln("PASS group host attachments: raw lane composed 2 attachments; managed lane, ",
+        managed.workers, " workers woke ", during, " times in 100 ms idle for a 5 ms deadline");
+}
+
 __gshared shared(int) blockedEntered, blockedRelease, blockedStops;
 
 bool blockedBody(WorkerSelf*) nothrow @nogc @system
@@ -1135,6 +1239,7 @@ int main(string[] args)
         enforce(workersFit(), "group host test requires two worker CPUs");
         groupHostPerGroup();
         groupHostSingleton();
+        groupHostAttachments();
         rejectedPoolShutdown();
         return 0;
     }
@@ -1173,6 +1278,7 @@ int main(string[] args)
     rawTokenPickup();
     groupHostPerGroup();
     groupHostSingleton();
+    groupHostAttachments();
     rejectedPoolShutdown();
     timeoutThenCancel(2);
     version (assert) workerFailure();

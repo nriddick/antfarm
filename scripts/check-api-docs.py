@@ -44,6 +44,7 @@ COVERAGE_MODULES = [
     "antfarm/actors/private_actor.d",
     "threadpool/source/threadpool/host.d",
     "threadpool/source/threadpool/groups.d",
+    "ant_fibers/source/ant_fibers/groups.d",
     "forkjoin/source/forkjoin/node.d",
     "forkjoin/source/forkjoin/deque.d",
     "forkjoin/source/forkjoin/dispatcher.d",
@@ -78,7 +79,8 @@ def compile_inventory(scratch):
     arguments = ["-c", "-o-", "-D", "-Dd.", "-X", "-Xf=api.json",
                  "-version=AntfarmMimallocV3", "-I" + str(ROOT),
                  "-I" + str(ROOT / "threadpool/source"),
-                 "-I" + str(ROOT / "forkjoin/source")]
+                 "-I" + str(ROOT / "forkjoin/source"),
+                 "-I" + str(ROOT / "ant_fibers/source")]
     arguments += [str(ROOT / m) for m in INDEX_MODULES]
     try:
         result = subprocess.run(["dmd"] + arguments, cwd=scratch,

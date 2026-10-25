@@ -40,7 +40,7 @@ module forkjoin.dispatcher;
 
 import antfarm;
 import threadpool;
-import threadpool.groups : GroupHost, GroupHostOptions, GroupSlot, groupFarmOf, groupToken;
+import threadpool.groups : GroupAttachment, GroupHost, GroupHostOptions, GroupSlot, groupFarmOf, groupToken;
 import threadpool.host : HostGroups, CallerPlacement, WorkerIdle;
 import forkjoin.frames : releaseFrames;
 import forkjoin.node;
@@ -827,7 +827,10 @@ struct Dispatcher
             foreach (j; 0 .. cpus.length)
                 if (j != i && coreOf[j] == coreOf[i]) g_sibling[i] = cast(uint) j;
         }
-        host = new GroupHost(ho, &workerBody, &workerStop);
+        // The dispatcher is the host's one attachment: the raw lane installs
+        // `workerBody` directly, so the burst loop is unchanged.
+        ho.attachments = [GroupAttachment("forkjoin", &workerBody, &workerStop, true)];
+        host = new GroupHost(ho);
         g_host = host;
         enforce(host.resolution.workers == res.workers, "forkjoin: the host started a different selection");
         g_farmCount = host.farms.length;

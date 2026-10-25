@@ -246,6 +246,36 @@ a lane whose servers all stopped is `stopped` and refuses spawns.
 Multi-LLC hardware validation remains required before making topology-specific
 performance or failover claims.
 
+## Run on a GroupHost
+
+`ant_fibers.groups.FiberGroups` attaches a domain to a `threadpool.groups`
+`GroupHost`, the owner of the pool, Farms and tokens that the fork-join
+dispatcher runs on. Construct the domain without a lane, put the attachment
+in the host options, construct the host, then spawn:
+
+```d
+auto domain = new FiberDomain(options);      // the caller is the Director
+auto fibers = new FiberGroups(domain);
+GroupHostOptions o;
+o.groups = HostGroups.all();
+o.farmPerGroup = true;
+o.attachments = [fibers.attachment];         // beside the dispatcher's, if any
+auto host = new GroupHost(o);
+fibers.spawn({ FiberDomain.sleepFor(1.msecs); });
+fibers.spawnOn(host.groups[1], &body);       // prefer another group's Farm
+```
+
+The host builds one `GroupFiberLane` per Farm when it installs the
+attachment and runs its managed lane: every worker's pump serves its home
+lane (`serve`: cancellation requests, timers, triggers, flush with the
+worker's group token, retirement when it may) and parks until the earliest
+timer deadline. Activations are Farm payloads, so whichever view consumes
+the group Farm resumes them: the host's own, or the dispatcher's. Spawns,
+signals and cancellations wake the Farm's workers; a new earliest timer
+wakes every worker. Under `FiberRetirement.director` the Director (the
+constructing thread) calls `domain.retire()`; under `serviceThreads` the
+workers retire. Drain and retire before `host.close()`.
+
 ## Wake policy
 
 The default `FiberWakePolicy.broadcast` wakes the pool for external spawn,

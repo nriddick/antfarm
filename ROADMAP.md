@@ -91,25 +91,21 @@ Remaining for 2.1.0:
   worker bodies; the fork-join dispatcher runs on it. The actor host still
   owns one Farm on one group. The measurements are in
   [several physical groups](docs/guide/scaling-groups.md#several-physical-groups).
-  Shape: `GroupHost` gains an attachment registry (a `@nogc` worker hook, a
-  GC-enabled service hook, a control-thread emit hook, a drained predicate
-  and a finish) and picks its worker lane at `start`: the raw `WorkerBody`
-  when only `@nogc` hooks are attached, so the fork-join hot path is
-  unchanged, or the pool's managed lane when a GC-enabled hook is. The
-  managed lane is required for Fibers, whose `serve` is GC-enabled and
-  throws, and it already carries the park-until-deadline channel
-  (`ManagedPumpResult.until`); the raw body cannot host either. The
-  dispatcher becomes the first attachment, `FarmHost` a thin layer that
-  attaches its runtimes and parks (one shared Farm first, `farmPerGroup`
-  routing of runtimes and parks last), and `attachFiberDomain` targets the
-  group host with one `FiberReadyLane` per group Farm
-  ([hosting a domain](docs/design/fiber-completion-and-records.md#hosting-a-domain)).
-  Acceptance for the first step: fib(39) at 32 threads unchanged with the
-  dispatcher alone. The four process-global owners (`gWorkerBody`, the
-  dispatcher's `g_host`, `FarmHost`'s `gHostFarm`, `installedFiberPool`)
-  converge on the one `GroupHost`; keep `installFiberPlan` and the
-  standalone `FarmHost` through 2.1.0 and remove them once the composed host
-  has a release behind it.
+  Done so far: `GroupHost` composes its worker loop from
+  `GroupHostOptions.attachments` and picks the lane at start (raw
+  `WorkerBody` with only `@nogc` attachments, the dispatcher's body installed
+  as is: fib(39) at 32 threads 101.5 vs 101.9 ms interleaved; the pool's
+  managed lane when a GC-enabled hook attaches), and
+  `ant_fibers.groups.FiberGroups` hosts a domain with one lane per group
+  Farm, served by every worker with `until(deadline)` parks
+  ([design](docs/design/threadpool.md#group-host)). Remaining: `FarmHost`
+  as a layer over `GroupHost` that attaches its actor runtimes and private
+  parks and keeps `step()`/`waitUntil()`, one shared Farm first and
+  `farmPerGroup` routing of runtimes and parks last; then the four
+  process-global owners (`gWorkerBody`, the dispatcher's `g_host`,
+  `FarmHost`'s `gHostFarm`, `installedFiberPool`) converge on the one
+  `GroupHost`. Keep `installFiberPlan` and the standalone `FarmHost` through
+  2.1.0 and remove them once the composed host has a release behind it.
 - Before the release: the full `make check` on the branch tip; the native
   Windows matrix, once features and fixes settle; re-take the PERFORMANCE.md
   fork-join table under the harness's build rules with the frame pool; and

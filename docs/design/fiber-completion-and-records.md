@@ -257,24 +257,22 @@ the steps.
 | Caller-driven (`drainUntilEmpty`, custom loops) | the caller's view | the caller, as responder | the caller is the Director | the caller's own |
 | `FarmHost` (`attachFiberDomain`) | pool workers on the host Farm | the control thread in each `step()` (emit), as responder | the control thread, which must have constructed the domain; `attach` checks | control thread steps; workers park as the host configures |
 | `CacheAwarePool` (`installFiberPlan`) | managed workers on their lane | every managed worker, responders by plan | the Director calls `retire`, woken by `FiberWakeEvent.lifecycle`, or the domain uses `serviceThreads` | `ManagedPumpResult.until(deadline)` |
-| `GroupHost` | group workers on group Farms | not yet: raw worker bodies have no deadline channel | n/a | n/a |
+| `GroupHost` (`FiberGroups`) | the host's view, or a consuming attachment's (the dispatcher) | every worker's managed pump, as responder | the Director calls `retire`, or the domain uses `serviceThreads` | `until(deadline)` from the pump |
 
 Today `FarmHost` holds completions until `close()`, and its `finish` releases
 them. Under this design `step()` retires every pass, so the ring and roots
 stay bounded while the host runs. `finish` retires whatever remains after the
 consumer join. The `drained` precondition is unchanged.
 
-`GroupHost` stays without Fibers in this change. Its workers run a raw
-`WorkerBody` (`@nogc nothrow`, one process-global function), and the pool
-makes that lane and the managed lane (`ManagedWorkerHooks`) mutually
-exclusive. `serve` is GC-enabled and throws, so Fibers need `GroupHost` to
-run the managed lane; that lane already carries the park-until-deadline
-channel (`ManagedPumpResult.until`). Hosting Fibers there therefore means a
-managed-lane mode for `GroupHost` whose pump consumes the home Farm, runs
-the application's `@nogc` hook, runs `serve` on the group's lane and returns
-`again`/`idle`/`until(deadline)`, chosen at start only when a GC-enabled
-attachment exists so the fork-join hot path keeps the raw body. That is the
-`FarmHost`-on-`GroupHost` item in ROADMAP (2.1.0).
+`GroupHost` hosts Fibers through `ant_fibers.groups.FiberGroups`. The pool
+makes the raw `WorkerBody` lane (`@nogc nothrow`) and the managed lane
+mutually exclusive, and `serve` is GC-enabled and throws, so a Fiber
+attachment selects the host's managed lane, which already carries the
+park-until-deadline channel (`ManagedPumpResult.until`). The host picks the
+lane at start, so a host with only the dispatcher attached keeps the raw
+body and its measured hot path. `FiberGroups` builds one lane per Farm in
+its `install` hook and serves the worker's home lane in `serve`; see
+[the threadpool design](threadpool.md#group-host).
 
 ## Costs and limits
 

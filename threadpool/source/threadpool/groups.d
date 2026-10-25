@@ -4,7 +4,7 @@
  +
  + A `GroupHost` resolves workers with `FarmHost`'s planner, creates one Farm
  + per selected LLC group (`farmPerGroup`) or one Farm for all of them, pins
- + or confines the caller, starts the pool with the caller's raw worker body
+ + or confines the caller, starts the pool with the attached worker hooks
  + and installs one `GroupSlot` per group so a worker finds its Farm with
  + `home!GroupSlot()` and a control thread with `farmOf(llc)`. Every thread
  + gets a lazily registered token per Farm from `token(llc)`; a worker's
@@ -12,10 +12,15 @@
  + Teardown is ordered: pool shutdown (stop hooks run), the caller's tokens,
  + the registry, the Farms, the caller's affinity.
  +
- + The host owns no consumer views and no queue: the worker body subscribes
- + its own view (and unsubscribes it in the stop hook) and decides what to
- + pump, as `CacheAwarePool` already required. One host owns the process's
- + single pool; a `FarmHost` and a `GroupHost` exclude each other.
+ + The worker loop is composed from `GroupAttachment`s. With only `@nogc`
+ + attachments the pool runs its raw `WorkerBody` lane, and a single
+ + attachment's body is installed as is; an attachment with a GC-enabled
+ + hook (`install`, `start`, `serve`, `finish`) selects the pool's managed
+ + lane, whose pump runs every attachment and parks until the earliest
+ + deadline the service hooks report. A consuming attachment subscribes its
+ + own view of the worker's home Farm; when none does, the host consumes it.
+ + One host owns the process's single pool; a `FarmHost` and a `GroupHost`
+ + exclude each other.
  +/
 module threadpool.groups;
 
@@ -30,7 +35,8 @@ import threadpool.bins : at, home, install, uninstall, makeBins;
 import threadpool.host : autoWorkers, CallerPlacement, FarmHostOptions, FarmHostException,
     FarmHostResolveException, FarmSizing, gHostClaimed, HostGroups, HostPlan, planHost,
     WorkerIdle, defaultHostPoolOptions;
-import threadpool.hybrid : anyArmed, wakeOneArmed, wakeOneArmedIn, WorkerBody, WorkerSelf, WorkerStop;
+import threadpool.hybrid : anyArmed, ManagedPumpResult, ManagedWorkerHooks, wakeOneArmed,
+    wakeOneArmedIn, WorkerBody, WorkerSelf, WorkerStop;
 import threadpool.pin : PinOutcome, pinProcessor, ThreadAffinity, confineCallingThread,
     restoreCallingThread;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
@@ -45,10 +51,59 @@ struct GroupSlot
     uint farmIndex; /// index into `GroupHost.farms`
 }
 
+/// What a GC-enabled service hook did in one step.
+struct GroupServiceResult
+{
+    /// Something ran, was published, delivered or retired.
+    bool progress;
+    /// Earliest deadline the worker should wake for, in `MonoTime` ticks;
+    /// `long.max` for none.
+    long deadlineTicks = long.max;
+}
+
+/// One participant in the host's worker loop. `@nogc` hooks run in either
+/// lane; the GC-enabled hooks select the managed lane.
+struct GroupAttachment
+{
+    /// For reports.
+    string name;
+    /// `@nogc` per-worker step; true means it made progress. Keeps the pool's
+    /// arm/recheck contract: the pool arms the worker's wait slot and calls
+    /// once more before parking.
+    WorkerBody body;
+    /// `@nogc`, once per worker after its loop, before its tokens are released.
+    WorkerStop stop;
+    /// `body` subscribes the worker's own view of its home Farm (and `stop`
+    /// unsubscribes it). When no attachment consumes, the host does.
+    bool consumes;
+    /// Control thread, after the Farms and registry exist and before the pool
+    /// starts; build per-Farm state here. Managed lane.
+    void delegate(GroupHost host) install;
+    /// Control thread, after the pool stopped and before the Farms are
+    /// destroyed. Managed lane.
+    void delegate(GroupHost host) uninstall;
+    /// Once per worker before its first step. Managed lane.
+    void delegate(WorkerSelf* worker) start;
+    /// Per step, after the `@nogc` bodies. Managed lane.
+    GroupServiceResult delegate(WorkerSelf* worker) serve;
+    /// Once per worker after its loop, before `stop`. Managed lane.
+    void delegate(WorkerSelf* worker) finish;
+
+    /// Needs the pool's managed lane.
+    @property bool managed() const @nogc nothrow
+    {
+        return install !is null || uninstall !is null || start !is null
+            || serve !is null || finish !is null;
+    }
+}
+
 /// Everything `GroupHost` reads. `.init` is one Farm, automatic group,
 /// autoWorkers, confined caller, parked workers.
 struct GroupHostOptions
 {
+    /// The worker loop's participants, in step order. Required when
+    /// `workers != 0`; the `(options, body, stop)` constructor prepends one.
+    GroupAttachment[] attachments;
     /// Pool workers in total across the selected groups. 0 = no pool.
     uint workers = autoWorkers;
     /// Which groups supply workers: `automatic`, `only`, `span`, `all`.
@@ -74,11 +129,73 @@ struct GroupHostOptions
     bool farmPerGroup = false;
 }
 
-private __gshared WorkerStop gGroupUserStop;
+private __gshared GroupAttachment[] gAttachments;
+private __gshared bool gHostConsumes; // no attachment consumes: the host's view does
+private ConsumerView tHostView;
+private bool tHostSubscribed;
 
+// Raw lane, one attachment: its body is installed directly, so the fork-join
+// dispatcher's loop is byte-identical to a pool it ran alone on.
 private void groupStop(WorkerSelf* self) @nogc nothrow
 {
-    if (gGroupUserStop !is null) gGroupUserStop(self);
+    foreach (ref a; gAttachments)
+        if (a.stop !is null) a.stop(self);
+    releaseThreadTokens();
+}
+
+// Raw lane, several `@nogc` attachments.
+private bool groupRawBody(WorkerSelf* self) @nogc nothrow
+{
+    bool progress;
+    foreach (ref a; gAttachments)
+        if (a.body !is null && a.body(self)) progress = true;
+    return progress;
+}
+
+private bool hostConsume() @nogc nothrow
+{
+    if (!tHostSubscribed)
+    {
+        auto slot = home!GroupSlot();
+        if (slot is null || slot.farm is null) return false;
+        if (tHostView.subscribe(slot.farm) < 0) fatal("GroupHost: worker view subscription failed");
+        tHostSubscribed = true;
+    }
+    return tHostView.consumeNext();
+}
+
+// Managed lane: every attachment per step; park until the earliest deadline.
+private void groupManagedStart(WorkerSelf* self)
+{
+    foreach (ref a; gAttachments)
+        if (a.start !is null) a.start(self);
+}
+
+private ManagedPumpResult groupManagedPump(WorkerSelf* self)
+{
+    bool progress;
+    long deadline = long.max;
+    if (gHostConsumes && hostConsume()) progress = true;
+    foreach (ref a; gAttachments)
+        if (a.body !is null && a.body(self)) progress = true;
+    foreach (ref a; gAttachments)
+        if (a.serve !is null)
+        {
+            auto r = a.serve(self);
+            if (r.progress) progress = true;
+            if (r.deadlineTicks < deadline) deadline = r.deadlineTicks;
+        }
+    if (progress) return ManagedPumpResult.again();
+    return deadline != long.max ? ManagedPumpResult.until(deadline) : ManagedPumpResult.idle();
+}
+
+private void groupManagedStop(WorkerSelf* self)
+{
+    foreach (ref a; gAttachments)
+        if (a.finish !is null) a.finish(self);
+    foreach (ref a; gAttachments)
+        if (a.stop !is null) a.stop(self);
+    if (tHostSubscribed) { tHostView.unsubscribe(); tHostSubscribed = false; }
     releaseThreadTokens();
 }
 
@@ -133,7 +250,8 @@ ref Token groupToken(ushort llc) @nogc nothrow
     return *t;
 }
 
-/// The host. Construct it with a worker body; `close` it from the same thread.
+/// The host. Construct it with attachments (or one worker body); `close` it
+/// from the same thread.
 final class GroupHost
 {
     /// The worker selection `options` would start (the test seam is
@@ -144,14 +262,27 @@ final class GroupHost
         return planHost(snap, mapOptions(options)).resolution;
     }
 
-    /// Plan, create the Farms, install the registry, place the caller and
-    /// start the pool with `body`/`stop`. All or nothing.
+    /// As `this(options)` with one consuming `@nogc` attachment, `body`/`stop`,
+    /// prepended to `options.attachments`.
     this(GroupHostOptions options, WorkerBody body, WorkerStop stop = null)
+    {
+        enforce(body !is null, "GroupHost: null worker body");
+        options.attachments = GroupAttachment("worker body", body, stop, true) ~ options.attachments;
+        this(options);
+    }
+
+    /// Plan, create the Farms, install the registry, place the caller, run
+    /// the attachments' `install` hooks and start the pool. All or nothing.
+    this(GroupHostOptions options)
     {
         import std.format : format;
 
         director_ = Director.init;
         options_ = options;
+        foreach (ref a; options.attachments)
+            enforce(a.body !is null || a.managed, "GroupHost: an attachment needs a body or a managed hook");
+        if (options.workers != 0 && options.attachments.length == 0)
+            throw new FarmHostException("GroupHost: workers need at least one attachment");
         const snap = CacheAwarePool.topology();
         auto mapped = mapOptions(options);
         plan_ = planHost(snap, mapped);
@@ -210,9 +341,20 @@ final class GroupHost
                 throw new FarmHostException(format("GroupHost: caller %s to %s failed: %s",
                     callerPlacement_, callerCpus_, outcome));
         }
+        foreach (ref a; options_.attachments)
+            if (a.install !is null) { a.install(this); ++installedAttachments_; }
         if (plan_.workers != 0)
-            startPool(body, stop);
+            startPool();
         open_ = true;
+    }
+
+    /// The worker loop's participants.
+    @property const(GroupAttachment)[] attachments() const @nogc nothrow { return options_.attachments; }
+    /// The pool runs its managed lane (a GC-enabled attachment hook exists).
+    @property bool managedLane() const @nogc nothrow
+    {
+        foreach (ref a; options_.attachments) if (a.managed) return true;
+        return false;
     }
 
     // ---- inspection ----------------------------------------------------------
@@ -313,6 +455,7 @@ private:
     AntFarm*[] farms_;
     GroupSlot[] slots_;
     bool installed_, claimed_, poolRunning_, affinityChanged_, open_;
+    size_t installedAttachments_;
     CacheAwarePool pool_;
     Director director_;
     ThreadAffinity previousAffinity_;
@@ -399,14 +542,28 @@ private:
         installed_ = true;
     }
 
-    void startPool(WorkerBody body, WorkerStop stop)
+    void startPool()
     {
         auto poolOptions = options_.pool;
         poolOptions.processors = resolution_.workers.dup;
-        gGroupUserStop = stop;
-        poolOptions.workerBody = body;
-        poolOptions.workerStop = &groupStop;
-        poolOptions.managedWorker = typeof(poolOptions.managedWorker).init;
+        gAttachments = options_.attachments;
+        gHostConsumes = true;
+        foreach (ref a; gAttachments) if (a.consumes) gHostConsumes = false;
+        poolOptions.workerBody = null;
+        poolOptions.workerStop = null;
+        poolOptions.managedWorker = ManagedWorkerHooks.init;
+        if (managedLane)
+        {
+            poolOptions.managedWorker.start = &groupManagedStart;
+            poolOptions.managedWorker.pump = &groupManagedPump;
+            poolOptions.managedWorker.stop = &groupManagedStop;
+        }
+        else
+        {
+            enforce(!gHostConsumes, "GroupHost: a raw-lane host needs a consuming attachment");
+            poolOptions.workerBody = gAttachments.length == 1 ? gAttachments[0].body : &groupRawBody;
+            poolOptions.workerStop = &groupStop;
+        }
         pool_ = new CacheAwarePool(poolOptions);
         try
             pool_.start(cast(PoolResolution) resolution_);
@@ -426,6 +583,11 @@ private:
     void undoConstruction()
     {
         stopWorkers();
+        // Reverse order; only the hooks whose install ran.
+        foreach_reverse (i; 0 .. installedAttachments_)
+            if (options_.attachments[i].uninstall !is null) options_.attachments[i].uninstall(this);
+        installedAttachments_ = 0;
+        gAttachments = null;
         releaseThreadTokens(); // the caller's
         if (installed_)
         {

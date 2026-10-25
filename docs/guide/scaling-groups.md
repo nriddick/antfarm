@@ -96,14 +96,15 @@ counts the other groups' workers as foreign consumers. It is the
 configuration the table above measures and advises against, kept for work
 heavy enough per payload (about 1 µs) that the control lines do not matter.
 
-`GroupHost` (`import threadpool.groups;`) packages this for programs with a
-raw worker body: `HostGroups.all` and `farmPerGroup` give one Farm per
-accepted group with that group's workers on it, `farmOf(llc)` and
-`token(llc)` route a control thread's publications group by group, and
-`close` tears everything down in order. The fork-join dispatcher runs on it
-([design](../design/threadpool.md#group-host)). `FarmHost` still owns one
-Farm on one group for actor programs; routing its runtimes and parks by
-group is the remaining step.
+`GroupHost` (`import threadpool.groups;`) packages this: `HostGroups.all`
+and `farmPerGroup` give one Farm per accepted group with that group's
+workers on it, `farmOf(llc)` and `token(llc)` route a control thread's
+publications group by group, and `close` tears everything down in order.
+Its worker loop is composed from attachments: the fork-join dispatcher is a
+raw `@nogc` one, and `ant_fibers.groups.FiberGroups` attaches a Fiber domain
+with one lane per group Farm ([design](../design/threadpool.md#group-host)).
+`FarmHost` still owns one Farm on one group for actor programs; routing its
+runtimes and parks by group is the remaining step.
 
 ## Performance and tuning
 

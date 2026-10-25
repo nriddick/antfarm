@@ -391,14 +391,36 @@ token on that Farm lazily, and `releaseThreadTokens` returns them: after a
 worker's stop hook, in `close` for the caller, and by hand on any other
 thread that published.
 
-The host owns no consumer views and no queue: the raw `WorkerBody` it is
-given subscribes its own view and unsubscribes it in its stop hook, as a
-hand-written pool did. Workers run their first body call inside the
-constructor, so everything a body reads must be built before `new GroupHost`
-(the dispatcher builds its tables from `GroupHost.resolve`). `close` is the
-ordered teardown: pool shutdown (stop hooks, then token release), the
-caller's tokens, the registry, the Farms, the caller's affinity, the pool
-claim. The registry and the per-thread tokens are process-wide, so one
+The worker loop is composed from `GroupHostOptions.attachments`, each a
+`GroupAttachment`: a `@nogc` per-worker `body` and `stop`, a `consumes` flag
+(the body subscribes the worker's own view of its home Farm), and the
+GC-enabled hooks `install`/`uninstall` (control thread, after the Farms and
+registry exist and before the pool starts; after the pool stopped and before
+the Farms die), `start`/`finish` (once per worker) and `serve` (per step,
+returning progress and the earliest deadline). The `(options, body, stop)`
+constructor is one consuming `@nogc` attachment.
+
+The host picks the pool lane at start. With only `@nogc` attachments it runs
+the raw `WorkerBody` lane: a single attachment's body is installed as the
+pool's body, so the fork-join dispatcher's burst loop is byte-identical to a
+pool it ran alone on (fib(39) at 32 threads measured unchanged, 101.5 vs
+101.9 ms interleaved); several are stepped in order by one composed body. A
+GC-enabled hook selects the managed lane, whose pump consumes the home Farm
+through the host's own view when no attachment consumes, steps every body,
+runs every `serve`, and returns `again` on progress, `until(deadline)` for
+the earliest reported deadline, or `idle`; the pool's arm/recheck protocol
+and `applyIdlePolicy` then park the worker until that deadline or a wake.
+Fiber lanes attach this way ([ant_fibers.groups](ant_fibers.md)). Payloads
+are self-describing, so a consuming attachment's view resumes another
+attachment's work (Fiber activations beside the dispatcher).
+
+Workers run their first body call inside the constructor, so everything a
+body reads must be built before `new GroupHost` (the dispatcher builds its
+tables from `GroupHost.resolve`; a managed attachment builds per-Farm state
+in `install`). `close` is the ordered teardown: pool shutdown (finish and
+stop hooks, then token release), the attachments' `uninstall` in reverse,
+the caller's tokens, the registry, the Farms, the caller's affinity, the
+pool claim. The registry and the per-thread tokens are process-wide, so one
 `GroupHost` is open at a time: a second is rejected before it acquires
 anything, with or without workers (a host without workers takes no pool
 claim), and the open host is left as it was. `wakeOne`, `anyWorkerArmed`, `wakeAll` and `wakeLlc` pass through to

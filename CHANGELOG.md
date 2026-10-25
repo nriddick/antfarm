@@ -165,6 +165,26 @@ Fixes:
   never for a root that forks nothing (the docs called it the completion
   callback); `runRoot` waits on its own sentinel, not on `g_rootsLive`.
 
+`GroupHost` attachments and Fibers on it:
+
+- `GroupHostOptions.attachments`: the worker loop is composed from
+  `GroupAttachment`s (`@nogc` body/stop with a `consumes` flag; GC-enabled
+  `install`/`uninstall` on the control thread, `start`/`finish` per worker
+  and `serve` per step with progress and a deadline). The host picks the
+  pool lane at start: the raw `WorkerBody` with only `@nogc` attachments (a
+  single attachment's body is installed as is; the dispatcher is one, and
+  fib(39) at 32 threads measured 101.5 vs 101.9 ms interleaved against the
+  previous build), the managed lane otherwise, whose pump consumes the home
+  Farm through a host-owned view when no attachment does and parks until
+  the earliest deadline. `host.attachments` and `host.managedLane` report
+  the result. The `(options, body, stop)` constructor remains as one
+  consuming attachment.
+- `ant_fibers.groups.FiberGroups`: a Fiber domain on a `GroupHost`, one
+  `GroupFiberLane` per group Farm built at install, served by every worker
+  (`serve` on its home lane, group token, `until` deadline parks), with
+  `spawn`/`spawnOn(llc)`/`spawnHandle*` that wake the Farm's workers. Works
+  beside the dispatcher: its consuming view resumes the activations.
+
 Fibers (API changes; see the [completions, records and hosting design](docs/design/fiber-completion-and-records.md)):
 
 - Fibers: wait arbitration is one claim word per task. Each wait arms a fresh

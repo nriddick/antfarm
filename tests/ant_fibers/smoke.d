@@ -18,6 +18,7 @@ import ant_fibers.semaphore_tests : semaphoreCancellationSmoke;
 import ant_fibers.event_tests : eventCancellationSmoke;
 import ant_fibers.wait_race_tests : waitRaceSmoke;
 import ant_fibers.record_tests : recordSmoke;
+import ant_fibers.group_host_tests : groupHostFiberSmoke;
 import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
 import threadpool.resolution : PoolResolution;
 import core.thread : Fiber, Thread;
@@ -2796,6 +2797,7 @@ void main(string[] args)
     sharedSignalAndTimerCancellationSmoke();
     waitRaceSmoke();
     recordSmoke();
+    groupHostFiberSmoke();
     threadpoolSmoke();
     admissionAfterStopSmoke();
     admissionAfterEarlyShutdownSmoke();
