@@ -34,7 +34,10 @@ version (TSan)
 alias Signal = ulong;
 // Application signals keep the high bit clear (reserved, as it always was).
 private enum Signal timerSignalBit = 1UL << 63;
-enum size_t defaultLifecycleRetention = 65_536;
+/// Default `FiberDomainOptions.recordRetention`: the worst-case records of
+/// 4,096 tasks that are live or terminal but not yet retired (about 1.2 MiB
+/// per domain, 128 KiB of it scanned by the GC).
+enum size_t defaultRecordRetention = 16_384;
 private enum uint lifecycleRecordsPerTask = 4;
 // Cost class of a Fiber flush table: claims of 8 entries.
 private enum uint flushAvgCost = avgCostForChunk(8);
@@ -147,7 +150,70 @@ struct FiberLifecycleEvent
     Throwable failure;
 }
 
-alias FiberLifecycleHandler = void delegate(ref const FiberLifecycleEvent);
+/// Receives each lifecycle record during `FiberDomain.retire`, by value: the
+/// copy, including its failure reference, is the handler's to keep.
+alias FiberLifecycleHandler = void delegate(FiberLifecycleEvent);
+
+/// Receives each terminal task during `FiberDomain.retire`, before the task
+/// is recycled. The task is valid only for the duration of the call.
+alias FiberCompletionHandler = void delegate(FiberTask);
+
+/// Which threads may retire a domain's records and terminal tasks.
+enum FiberRetirement : ubyte
+{
+    /// Only the constructing (Director) thread: a `FiberTask` stays valid
+    /// until the Director's own `retire` hands it to `onCompletion`.
+    director,
+    /// Any thread running a service pass. A task may be recycled at any time
+    /// after it terminates, so identify tasks by `TaskHandle`. Handlers run
+    /// one at a time on whichever service thread retires, must not block,
+    /// and a throwing handler fails that thread's service pass.
+    serviceThreads,
+}
+
+/// Construction-time configuration of a `FiberDomain`.
+struct FiberDomainOptions
+{
+    /// Lifecycle record capacity. Spawn reserves room for 4 records per task,
+    /// held from admission until termination (unused ones are returned then)
+    /// and for emitted records until they are retired, and throws
+    /// `FiberLifecycleBackpressure` past this limit. It therefore bounds
+    /// concurrent fibers as well as unretired ones, at retention / 4. At
+    /// least 4.
+    size_t recordRetention = defaultRecordRetention;
+    /// Each terminal task, before it is recycled; null recycles silently.
+    FiberCompletionHandler onCompletion;
+    /// Each lifecycle record, in sequence order; null discards records.
+    FiberLifecycleHandler onRecord;
+    /// Who may retire records and terminal tasks.
+    FiberRetirement retirement = FiberRetirement.director;
+}
+
+/// Parameters of one `FiberReadyLane.serve` pass.
+struct FiberServicePass
+{
+    /// Poll timers and report the earliest deadline.
+    bool responder = true;
+    /// The caller consumed Farm work just before this pass: flush only a full
+    /// batch, so publication accumulates while work flows.
+    bool consumedWork;
+    /// Ready tasks per flushed table; must be nonzero.
+    size_t flushBatch = 32;
+    /// Ant Farm cost class of a flushed table.
+    uint avgCost = flushAvgCost;
+}
+
+/// What one service pass did.
+struct FiberServiceResult
+{
+    /// Anything was applied, woken, delivered, flushed or retired.
+    bool progress;
+    /// Ready tasks published to the Farm.
+    size_t flushed;
+    /// Earliest armed timer deadline in MonoTime ticks (responders only),
+    /// or long.max.
+    long deadline = long.max;
+}
 
 final class FiberCancelled : Exception
 {
@@ -446,15 +512,6 @@ struct TaskHandle
     }
 }
 
-private final class LifecycleEventNode
-{
-    FiberTask owner;
-    LifecycleEventNode next;
-    FiberLifecycleEvent event;
-
-    this(FiberTask owner) { this.owner = owner; }
-}
-
 static assert(size_t.sizeof == 8, "ant_fibers is 64-bit only");
 
 /// Exclusive-owner execution phase. Cancelled/signalled twins live in the
@@ -511,11 +568,8 @@ align(64) private struct FiberTaskControl
     shared ulong lastResumeIdentityState;
     shared ulong resumeCountState;
     shared ulong migrationCountState;
-    shared uint pendingLifecycleEvents;
     shared ubyte cancellationEventEmitted;
-    shared ubyte completionTaken;
     shared ubyte cancellationDispositionState;
-    shared ubyte lifecycleReservations;
 }
 static assert(FiberTaskControl.sizeof == cacheLineSize);
 
@@ -582,20 +636,25 @@ align(64) private struct FiberDomainControl
     ubyte[56] lifecycleReservationPadding;
     shared size_t cancellationRequestCount;
     ubyte[cacheLineSize - size_t.sizeof] cancellationRequestPadding;
+    // Retirement: one gate holder; the backlog count is read by any thread.
+    shared int retireGate;
+    shared uint retireBacklogCount;
+    ubyte[56] retirePadding;
 }
-static assert(FiberDomainControl.sizeof == 7 * cacheLineSize);
+static assert(FiberDomainControl.sizeof == 8 * cacheLineSize);
 static assert(FiberDomainControl.waitingCount.offsetof
     == 4 * cacheLineSize);
 static assert(FiberDomainControl.lifecycleReservationCount.offsetof
     == 5 * cacheLineSize);
 
-align(64) private struct LifecycleQueueControl
+align(64) private struct RecordRingControl
 {
-    shared size_t headWord;
-    shared long count;
-    ubyte[48] padding;
+    shared ulong tail; // next ticket; fetch_add by emitters
+    ubyte[56] tailPadding;
+    shared ulong head; // next ticket to consume; retirement gate holder
+    ubyte[56] headPadding;
 }
-static assert(LifecycleQueueControl.sizeof == cacheLineSize);
+static assert(RecordRingControl.sizeof == 2 * cacheLineSize);
 
 align(64) private struct FiberReadyLaneControl
 {
@@ -649,7 +708,6 @@ final class FiberTask
     /// Double-release guard for the recycling pool (pool mutex held).
     package bool pooledFlag;
     package bool rootedFlag;
-    private LifecycleEventNode[4] lifecycleNodes;
 
     @property package ref shared(ulong) controlWord() const return nothrow @nogc
     { return (cast(FiberTaskControl*) control).controlWord; }
@@ -721,17 +779,10 @@ final class FiberTask
     { return (cast(FiberTaskControl*) control).resumeCountState; }
     @property package ref shared(ulong) migrationCountState() const return nothrow @nogc
     { return (cast(FiberTaskControl*) control).migrationCountState; }
-    @property package ref shared(uint) pendingLifecycleEvents() const return nothrow @nogc
-    { return (cast(FiberTaskControl*) control).pendingLifecycleEvents; }
     @property package ref shared(ubyte) cancellationEventEmitted() const return nothrow @nogc
     { return (cast(FiberTaskControl*) control).cancellationEventEmitted; }
-    @property package ref shared(ubyte) completionTaken() const return nothrow @nogc
-    { return (cast(FiberTaskControl*) control).completionTaken; }
     @property package ref shared(ubyte) cancellationDispositionState() const return nothrow @nogc
     { return (cast(FiberTaskControl*) control).cancellationDispositionState; }
-    @property private ref shared(ubyte) lifecycleReservations() const
-        return nothrow @nogc
-    { return (cast(FiberTaskControl*) control).lifecycleReservations; }
     @property private ref shared(uint) joinState() const return nothrow @nogc
     { return (cast(FiberJoinControl*) joinControl).state; }
 
@@ -821,19 +872,12 @@ final class FiberTask
         this.readyLane = readyLane;
         this.stackSize = stackSize;
         payloadWord = cast(ulong) cast(void*) this;
-        if (domain.lifecycleEventsEnabled) ensureLifecycleNodes();
     }
 
     private void initializeJoinControl() nothrow @nogc
     {
         joinControl = allocateCacheLine!FiberJoinControl();
         joinControl.terminalEvent.initialize(true, false);
-    }
-
-    private void ensureLifecycleNodes()
-    {
-        foreach (i, ref node; lifecycleNodes)
-            if (node is null) node = new LifecycleEventNode(this);
     }
 
     private bool registerJoinWaiter(ulong expectedGeneration) nothrow @nogc
@@ -1579,51 +1623,110 @@ private struct TaskBodySnapshotRange
 /// Ordered, allocation-free MPSC publication for the task's four reusable
 /// lifecycle nodes. The aligned head is a raw word; task roots remain installed
 /// until every emitted node and the completion have both been drained.
-private final class LifecycleEventQueue
-{
-    private LifecycleQueueControl* control;
+version (unittest)
+    /// Scheduling seam: runs on the emitting thread after it takes a record
+    /// ticket and before it publishes the record.
+    package __gshared void function(FiberLifecycleKind) nothrow @nogc
+        recordAfterTicketHook;
 
-    this() { control = allocateCacheLine!LifecycleQueueControl(); }
+/// One lifecycle record by value. The failure reference lives in the ring's
+/// separate scanned array; this struct sits in unscanned memory.
+private struct RecordSlot
+{
+    shared ulong stamp; // lap marker: `t` free for ticket t, `t + 1` published
+    FiberLifecycleKind kind;
+    FiberOutcome outcome;
+    CancellationResult cancellation;
+    CancellationDisposition disposition;
+    TaskHandle task;
+}
+
+/// Bounded multi-producer, single-consumer ring of lifecycle records, with
+/// the per-slot stamps of a bounded MPMC queue. Emitters never see it full:
+/// admission reserves every record's slot in the domain's budget first, so
+/// a ticket's slot was consumed a lap earlier. The stamp acquire orders that
+/// consumption's clearing before the emitter's writes.
+///
+/// Record data is in a NO_SCAN block so a large ring adds nothing to marking.
+/// Its `TaskHandle` points at a task object the domain retains (roots or
+/// recycle pool) for its whole lifetime; only `failures` needs scanning.
+private final class RecordRing
+{
+    private RecordRingControl* control;
+    private RecordSlot* slots;
+    private Throwable[] failures;
+    private size_t mask;
+
+    this(size_t capacity)
+    {
+        assert(capacity != 0 && (capacity & (capacity - 1)) == 0);
+        control = allocateCacheLine!RecordRingControl();
+        slots = cast(RecordSlot*) GC.calloc(capacity * RecordSlot.sizeof,
+            GC.BlkAttr.NO_SCAN);
+        foreach (i; 0 .. capacity)
+            atomicStore!(MemoryOrder.raw)(slots[i].stamp, cast(ulong) i);
+        failures = new Throwable[capacity];
+        mask = capacity - 1;
+    }
+
     ~this() nothrow @nogc { freeCacheLine(control); }
 
-    void push(LifecycleEventNode node) nothrow @nogc
+    @property size_t capacity() const nothrow @nogc { return mask + 1; }
+
+    void emit(FiberLifecycleKind kind, TaskHandle task, FiberOutcome outcome,
+        CancellationResult cancellation, CancellationDisposition disposition,
+        Throwable failure) nothrow @nogc
     {
-        atomicFetchAdd!(MemoryOrder.rel)(control.count, 1L);
-        auto observed = atomicLoad!(MemoryOrder.acq)(control.headWord);
-        while (true)
-        {
-            node.next = cast(LifecycleEventNode) cast(void*) observed;
-            immutable replacement = cast(size_t) cast(void*) node;
-            if (cas!(MemoryOrder.acq_rel, MemoryOrder.acq)(
-                    &control.headWord, observed, replacement))
-                return;
-            observed = atomicLoad!(MemoryOrder.acq)(control.headWord);
-        }
+        immutable t = atomicFetchAdd!(MemoryOrder.raw)(control.tail, 1UL);
+        version (unittest)
+            if (recordAfterTicketHook !is null)
+                recordAfterTicketHook(kind);
+        auto slot = &slots[t & mask];
+        // The previous lap was consumed (reservations bound the tickets in
+        // flight); this waits out only its stamp store.
+        while (atomicLoad!(MemoryOrder.acq)(slot.stamp) != t)
+            Thread.yield();
+        slot.kind = kind;
+        slot.outcome = outcome;
+        slot.cancellation = cancellation;
+        slot.disposition = disposition;
+        slot.task = task;
+        failures[t & mask] = failure;
+        atomicStore!(MemoryOrder.rel)(slot.stamp, t + 1);
     }
 
-    LifecycleEventNode takeAll(out size_t count) nothrow @nogc
+    /// Consumer: copy the oldest record if it is published. False at an empty
+    /// ring or at a slot whose emitter has its ticket but has not published.
+    bool front(out FiberLifecycleEvent event) nothrow @nogc
     {
-        auto word = atomicExchange!(MemoryOrder.acq_rel)(
-            &control.headWord, size_t.init);
-        auto node = cast(LifecycleEventNode) cast(void*) word;
-        LifecycleEventNode ordered;
-        while (node !is null)
-        {
-            auto next = node.next;
-            node.next = ordered;
-            ordered = node;
-            node = next;
-            ++count;
-        }
-        if (count != 0)
-            atomicFetchSub!(MemoryOrder.rel)(control.count, cast(long) count);
-        return ordered;
+        immutable h = atomicLoad!(MemoryOrder.raw)(control.head);
+        auto slot = &slots[h & mask];
+        if (atomicLoad!(MemoryOrder.acq)(slot.stamp) != h + 1)
+            return false;
+        event = FiberLifecycleEvent(h + 1, slot.kind, slot.task, slot.outcome,
+            slot.cancellation, slot.disposition, failures[h & mask]);
+        return true;
     }
 
+    /// Consumer: retire the record `front` returned and free its slot for
+    /// the next lap.
+    void popFront() nothrow @nogc
+    {
+        immutable h = atomicLoad!(MemoryOrder.raw)(control.head);
+        auto slot = &slots[h & mask];
+        slot.task = TaskHandle.init;
+        failures[h & mask] = null; // the ring must not retain exceptions
+        atomicStore!(MemoryOrder.rel)(slot.stamp, h + capacity);
+        atomicStore!(MemoryOrder.rel)(control.head, h + 1);
+    }
+
+    /// Records ticketed and not yet consumed, including ones still being
+    /// written.
     @property size_t length() const nothrow @nogc
     {
-        immutable count = atomicLoad!(MemoryOrder.acq)(control.count);
-        return count < 0 ? 0 : cast(size_t) count;
+        immutable h = atomicLoad!(MemoryOrder.acq)(control.head);
+        immutable t = atomicLoad!(MemoryOrder.acq)(control.tail);
+        return cast(size_t)(t - h);
     }
 }
 
@@ -1672,6 +1775,62 @@ class FiberReadyLane
     /// is polled, so threadpool lanes override this to wake a worker which
     /// polls the domain's timers.
     protected void noteTimerArmed() nothrow @nogc {}
+
+    /// Retirement is pending under `FiberRetirement.director` on a thread
+    /// that may not retire. Threadpool lanes record it in the Director's
+    /// mailbox (and notifier); no worker is woken for it.
+    protected void noteRetirementPending() nothrow @nogc {}
+
+    private enum size_t retirePerPass = 256;
+
+    /// One service pass of this lane by a thread holding `token` on its Farm.
+    /// In order: apply queued cancellation requests, poll timers (responders),
+    /// deliver generation triggers, flush ready tasks, retire (when this
+    /// thread may: `serviceThreads`, or the Director), and report the
+    /// earliest deadline (responders). It never consumes Farm work: a host's
+    /// loop is `service`, consume its views, and park until `deadline` when
+    /// neither made progress. Throws the domain's fatal failure.
+    FiberServiceResult serve(ref Token token,
+        FiberServicePass pass = FiberServicePass.init)
+    {
+        if (pass.flushBatch == 0)
+            throw new Exception("ant_fibers: flushBatch must be greater than zero");
+        auto domain = ownerDomain;
+        FiberServiceResult result;
+        if (domain.pendingCancellationRequests != 0
+            && domain.drainCancellationRequestsCounted() != 0)
+            result.progress = true;
+        if (pass.responder && domain.pollTimers() != 0)
+            result.progress = true;
+        if (domain.pollGenerationTriggers() != 0)
+            result.progress = true;
+        if (domain.fatal)
+            throw domain.fatalException;
+        // Accumulate while Farm work flows: flush a full batch, or a short
+        // tail when this thread would otherwise idle.
+        immutable waiting = ready;
+        if (waiting >= pass.flushBatch || (!pass.consumedWork && waiting != 0))
+            result.flushed = flush(token, pass.flushBatch, pass.avgCost);
+        if (result.flushed != 0)
+            result.progress = true;
+        if (domain.retirementPending)
+        {
+            if (domain.options_.retirement == FiberRetirement.serviceThreads
+                || domain.isDirectorThread)
+            {
+                size_t recordsRetired;
+                if (domain.retireUnchecked(retirePerPass, recordsRetired) != 0
+                    || recordsRetired != 0)
+                    result.progress = true;
+            }
+            else
+                noteRetirementPending();
+        }
+        long deadline;
+        if (pass.responder && domain.nextTimerDeadline(deadline))
+            result.deadline = deadline;
+        return result;
+    }
 
     /// Publish up to `maximum` accumulated activations using a caller-owned
     /// producer token for this lane's Farm.
@@ -1770,12 +1929,12 @@ final class FiberDomain
     private FiberReadyLane defaultReadyLane;
     private shared(FiberGenerationTrigger) deferredTriggerHead;
     private PublishAccumulator completions;
-    private LifecycleEventQueue lifecycleQueue;
-    private LifecycleEventNode lifecycleBacklog;
-    private size_t lifecycleBacklogCount;
-    private bool lifecycleEventsEnabled;
-    private size_t lifecycleRetentionLimitState;
-    private ulong lifecycleDrainSequence;
+    // Completions taken but not yet retired after a throwing handler: a FIFO
+    // through queueNext, owned by the retirement gate holder.
+    private FiberTask retireBacklogFirst;
+    private FiberTask retireBacklogLast;
+    private RecordRing records;
+    private FiberDomainOptions options_; // set once by the constructor
     private shared(Throwable) fatalFailure;
     private Mutex admissionMutex;
     private Mutex directorMutex;
@@ -1803,9 +1962,24 @@ final class FiberDomain
     @property private ref shared(long) lifecycleReservationCount() const
         return nothrow @nogc
     { return (cast(FiberDomainControl*) control).lifecycleReservationCount; }
+    @property private ref shared(int) retireGate() const return nothrow @nogc
+    { return (cast(FiberDomainControl*) control).retireGate; }
+    @property private ref shared(uint) retireBacklogCount() const
+        return nothrow @nogc
+    { return (cast(FiberDomainControl*) control).retireBacklogCount; }
 
-    this()
+    /// A domain without a lane; lanes attach before admission. The
+    /// constructing thread is the Director.
+    this(FiberDomainOptions options = FiberDomainOptions.init)
     {
+        if (options.recordRetention < lifecycleRecordsPerTask
+            || options.recordRetention > (size_t(1) << 40))
+            throw new Exception(
+                "ant_fibers: recordRetention must be 4 .. 2^40 records");
+        options_ = options;
+        size_t capacity = 1;
+        while (capacity < options.recordRetention) capacity <<= 1;
+        records = new RecordRing(capacity);
         control = allocateCacheLine!FiberDomainControl();
         atomicStore!(MemoryOrder.raw)(control.accepting, 1);
         directorMutex = new Mutex;
@@ -1819,12 +1993,10 @@ final class FiberDomain
         poolMutex = new Mutex;
     }
 
-    /// Compatibility construction for a one-lane domain.
-    this(AntFarm* farm, size_t accumulatorCapacity = 65_536)
+    /// A one-lane domain over `farm`.
+    this(AntFarm* farm, FiberDomainOptions options = FiberDomainOptions.init)
     {
-        this();
-        // Retained for source compatibility; intrusive queues are unbounded.
-        cast(void) accumulatorCapacity;
+        this(options);
         defaultReadyLane = new FiberReadyLane(farm);
         attachReadyLane(defaultReadyLane);
     }
@@ -1877,51 +2049,38 @@ final class FiberDomain
     /// Setup-time only, before any spawn. Each admitted task reserves its
     /// maximum four records until records are acknowledged and unused terminal
     /// capacity is returned.
-    void enableLifecycleEvents(
-        size_t retentionLimit = defaultLifecycleRetention)
+    /// This domain's construction-time configuration.
+    @property FiberDomainOptions options() nothrow @nogc
     {
-        if (retentionLimit < lifecycleRecordsPerTask
-            || retentionLimit > cast(size_t) long.max)
-            throw new Exception(
-                "ant_fibers: lifecycle retention limit must be 4..long.max");
-        synchronized (admissionMutex)
-        {
-            if (active != 0 || roots.length != 0)
-                throw new Exception(
-                    "ant_fibers: enable lifecycle events before spawning");
-            if (!lifecycleEventsEnabled)
-            {
-                lifecycleQueue = new LifecycleEventQueue;
-                lifecycleEventsEnabled = true;
-                lifecycleRetentionLimitState = retentionLimit;
-            }
-            else if (lifecycleRetentionLimitState != retentionLimit)
-                throw new Exception(
-                    "ant_fibers: lifecycle retention already configured");
-        }
+        return options_;
     }
 
-    @property bool lifecycleEnabled() const nothrow @nogc
+    /// Lifecycle records published or being written and not yet retired.
+    @property size_t pendingRecords() const nothrow @nogc
     {
-        return lifecycleEventsEnabled;
+        return records.length;
     }
 
-    @property size_t pendingEvents() const nothrow @nogc
-    {
-        return lifecycleQueue is null ? 0
-            : lifecycleBacklogCount + lifecycleQueue.length;
-    }
-
-    @property size_t lifecycleReserved() const nothrow @nogc
+    /// Record slots reserved by admitted tasks or held by unretired records;
+    /// spawn refuses past `options.recordRetention`.
+    @property size_t reservedRecords() const nothrow @nogc
     {
         immutable count = atomicLoad!(MemoryOrder.acq)(
             lifecycleReservationCount);
         return count < 0 ? 0 : cast(size_t) count;
     }
 
-    @property size_t lifecycleRetentionLimit() const nothrow @nogc
+    /// Terminal tasks not yet retired.
+    @property size_t pendingCompletions() nothrow @nogc
     {
-        return lifecycleRetentionLimitState;
+        return completions.length
+            + atomicLoad!(MemoryOrder.acq)(retireBacklogCount);
+    }
+
+    /// Records or terminal tasks await `retire`.
+    @property bool retirementPending() nothrow @nogc
+    {
+        return pendingRecords != 0 || pendingCompletions != 0;
     }
 
     @property bool fatal() const nothrow @nogc
@@ -1933,106 +2092,6 @@ final class FiberDomain
     {
         if (!fatal) return null;
         return cast(Throwable) atomicLoad!(MemoryOrder.acq)(fatalFailure);
-    }
-
-    /// Drain all currently published lifecycle records in MPSC enqueue order.
-    /// Director/control-side only. The returned copy owns any failure refs;
-    /// draining may release the last scheduler root of completed tasks.
-    FiberLifecycleEvent[] takeLifecycleEvents(size_t maximum = size_t.max)
-    {
-        if (lifecycleQueue is null || maximum == 0) return null;
-        size_t available;
-        auto chain = takeLifecycleChain(available);
-        if (chain is null) return null;
-        immutable count = available < maximum ? available : maximum;
-        auto result = new FiberLifecycleEvent[count];
-        size_t i;
-        while (chain !is null && i != count)
-        {
-            auto node = chain;
-            chain = node.next;
-            node.next = null;
-            assignLifecycleSequence(node);
-            result[i++] = node.event;
-            acknowledgeLifecycleNode(node);
-        }
-        retainLifecycleBacklog(chain, available - count);
-        return result;
-    }
-
-    /// Invoke a GC-enabled Director-side handler in lifecycle order. A record
-    /// is acknowledged only after the handler returns normally. If it throws,
-    /// that record and every later record remain queued for retry with stable
-    /// sequence numbers.
-    size_t handleLifecycleEvents(FiberLifecycleHandler handler,
-        size_t maximum = size_t.max)
-    {
-        if (handler is null)
-            throw new Exception("ant_fibers: null lifecycle handler");
-        if (lifecycleQueue is null || maximum == 0) return 0;
-        size_t available;
-        auto chain = takeLifecycleChain(available);
-        if (chain is null) return 0;
-        size_t handled;
-        while (chain !is null && handled != maximum)
-        {
-            auto node = chain;
-            assignLifecycleSequence(node);
-            try handler(node.event);
-            catch (Throwable failure)
-            {
-                retainLifecycleBacklog(node, available - handled);
-                throw failure;
-            }
-            chain = node.next;
-            node.next = null;
-            acknowledgeLifecycleNode(node);
-            ++handled;
-        }
-        retainLifecycleBacklog(chain, available - handled);
-        return handled;
-    }
-
-    private LifecycleEventNode takeLifecycleChain(out size_t count) nothrow @nogc
-    {
-        if (lifecycleBacklog !is null)
-        {
-            auto chain = lifecycleBacklog;
-            count = lifecycleBacklogCount;
-            lifecycleBacklog = null;
-            lifecycleBacklogCount = 0;
-            return chain;
-        }
-        // takeAll already counts while reversing its detached stack. Keep
-        // that count with the backlog so bounded drains never rescan it.
-        return lifecycleQueue.takeAll(count);
-    }
-
-    private void retainLifecycleBacklog(LifecycleEventNode chain, size_t count)
-        nothrow @nogc
-    {
-        assert((chain is null) == (count == 0));
-        lifecycleBacklog = chain;
-        lifecycleBacklogCount = count;
-    }
-
-    private void assignLifecycleSequence(LifecycleEventNode node)
-        nothrow @nogc
-    {
-        if (node.event.sequence == 0)
-            node.event.sequence = ++lifecycleDrainSequence;
-    }
-
-    private void acknowledgeLifecycleNode(LifecycleEventNode node)
-    {
-        node.event = FiberLifecycleEvent.init;
-        immutable previous = atomicFetchSub!(MemoryOrder.acq_rel)(
-            node.owner.pendingLifecycleEvents, 1u);
-        assert(previous != 0);
-        releaseLifecycleReservations(node.owner, 1);
-        if (previous == 1
-            && atomicLoad!(MemoryOrder.acq)(node.owner.completionTaken) != 0)
-            releaseTaskRoot(node.owner);
     }
 
     /// Spawn reuses a released task of matching stack size when the pool has
@@ -2056,6 +2115,15 @@ final class FiberDomain
                                     size_t stackSize = 0)
         if (is(Body == void delegate()) || is(Body == void function()))
     {
+        TaskHandle unused;
+        return admit(lane, body, stackSize, unused);
+    }
+
+    // `handle` is captured before publication: under serviceThreads
+    // retirement the task can terminate and be recycled before admit returns.
+    private FiberTask admit(Body)(FiberReadyLane lane, Body body,
+        size_t stackSize, out TaskHandle handle)
+    {
         if (lane is null || lane.ownerDomain !is this)
             throw new Exception(
                 "ant_fibers: spawn requires a lane in this domain");
@@ -2065,24 +2133,19 @@ final class FiberDomain
         {
             if (atomicLoad!(MemoryOrder.acq)(accepting) == 0)
                 throw new Exception("ant_fibers: domain is shutting down");
-            if (lifecycleEventsEnabled)
-            {
-                immutable reserved = lifecycleReserved;
-                if (reserved > lifecycleRetentionLimitState
-                        - lifecycleRecordsPerTask)
-                    throw new FiberLifecycleBackpressure(
-                        lifecycleRetentionLimitState, reserved);
-            }
+            immutable reserved = reservedRecords;
+            if (reserved > options_.recordRetention - lifecycleRecordsPerTask)
+                throw new FiberLifecycleBackpressure(
+                    options_.recordRetention, reserved);
             synchronized (poolMutex)
             {
-                if (auto head = stackSize in pool)
+                // An emptied size class keeps its key (null head), so a
+                // steady spawn/retire cycle never deletes and reinserts it.
+                auto head = stackSize in pool;
+                if (head !is null && *head !is null)
                 {
                     task = *head;
-                    auto next = task.waitNext;
-                    if (next is null)
-                        pool.remove(stackSize);
-                    else
-                        *head = next;
+                    *head = task.waitNext;
                     task.waitNext = null;
                     task.pooledFlag = false;
                     recycled = true;
@@ -2097,9 +2160,6 @@ final class FiberDomain
             atomicStore!(MemoryOrder.rel)(task.generationState, nextGeneration);
             if (recycled)
             {
-                assert(atomicLoad!(MemoryOrder.acq)(task.pendingLifecycleEvents) == 0);
-                assert(atomicLoad!(MemoryOrder.acq)(
-                    task.lifecycleReservations) == 0);
                 assert(atomicLoad!(MemoryOrder.acq)(
                         task.managedJoinControl.waiterCount) == 0
                     && atomicLoad!(MemoryOrder.acq)(
@@ -2122,12 +2182,9 @@ final class FiberDomain
                 atomicStore!(MemoryOrder.rel)(task.migrationCountState, 0UL);
                 atomicStore!(MemoryOrder.rel)(task.cancellationEventEmitted,
                     cast(ubyte) 0);
-                atomicStore!(MemoryOrder.rel)(task.completionTaken,
-                    cast(ubyte) 0);
                 atomicStore!(MemoryOrder.rel)(task.cancellationDispositionState,
                     cast(ubyte) CancellationDisposition.none);
                 task.readyLane = lane;
-                if (lifecycleEventsEnabled) task.ensureLifecycleNodes();
                 if (task.fiber.state == Fiber.State.TERM)
                     task.fiber.reset(body);
                 else
@@ -2149,16 +2206,14 @@ final class FiberDomain
                 task.rootsIndex = roots.length;
                 task.rootedFlag = true;
                 roots ~= task;
-                if (lifecycleEventsEnabled)
-                {
-                    atomicStore!(MemoryOrder.rel)(task.lifecycleReservations,
-                        cast(ubyte) lifecycleRecordsPerTask);
-                    atomicFetchAdd!(MemoryOrder.rel)(lifecycleReservationCount,
-                        cast(long) lifecycleRecordsPerTask);
-                }
+                // Worst case: admitted, cancellation, terminal, failure.
+                // finishTerminal returns the unused part.
+                atomicFetchAdd!(MemoryOrder.rel)(lifecycleReservationCount,
+                    cast(long) lifecycleRecordsPerTask);
                 atomicFetchAdd(activeCount, 1L);
             }
             emitLifecycle(task, FiberLifecycleKind.admitted);
+            handle = task.handle;
             // Publication is inside the admission transaction. Shutdown either
             // precedes this entire generation or observes it in roots.
             task.readyLane.push(task);
@@ -2166,80 +2221,199 @@ final class FiberDomain
         return task;
     }
 
-    /// Spawn and capture the admitted generation in one API operation.
+    /// Spawn and capture the admitted generation in one API operation. Under
+    /// `FiberRetirement.serviceThreads` this is the safe form: the task may
+    /// be recycled as soon as it terminates.
     TaskHandle spawnHandle(void delegate() body, size_t stackSize = 0)
     {
-        return spawn(body, stackSize).handle;
+        return spawnHandleOn(defaultReadyLane, body, stackSize);
     }
 
+    /// ditto
     TaskHandle spawnHandle(void function() body, size_t stackSize = 0)
     {
-        return spawn(body, stackSize).handle;
+        return spawnHandleOn(defaultReadyLane, body, stackSize);
     }
 
     package TaskHandle spawnHandleOn(Body)(FiberReadyLane lane,
         Body body, size_t stackSize = 0)
         if (is(Body == void delegate()) || is(Body == void function()))
     {
-        return spawnOn(lane, body, stackSize).handle;
+        TaskHandle handle;
+        cast(void) admit(lane, body, stackSize, handle);
+        return handle;
     }
 
-    /// Return a terminated task to the recycling pool. After release the
-    /// handle must not be read again: a later spawn hands the same object to
-    /// a new fiber. Releasing a live or already-released task is a contract
-    /// violation that is fatal in debug and release builds.
-    void release(FiberTask task)
+    /// Retire up to `maximum` lifecycle records, then up to `maximum`
+    /// terminal tasks, and return the number of tasks recycled. Records go to
+    /// `options.onRecord` (or are discarded) in sequence order. Each terminal
+    /// task goes to `options.onCompletion` while it is still valid and is
+    /// recycled when the handler returns; the task, and any `FiberTask`
+    /// reference to it, must not be used afterwards.
+    ///
+    /// Under `FiberRetirement.director` only the Director may call this. One
+    /// retirer runs at a time: a concurrent call returns 0 at once. A handler
+    /// that throws leaves its record or task, and everything after it, queued
+    /// in order for the next call; tasks already handled are recycled.
+    /// Handlers run without scheduler locks and may spawn, but must not call
+    /// `retire`.
+    size_t retire(size_t maximum = size_t.max)
     {
-        requireDirector();
-        synchronized (admissionMutex)
-        {
-            requireCancellationRequestsDrained();
-            releaseOne(task);
-        }
+        if (options_.retirement == FiberRetirement.director)
+            requireDirector();
+        size_t recordsRetired;
+        return retireUnchecked(maximum, recordsRetired);
     }
 
-    private void releaseOne(FiberTask task)
+    package size_t retireUnchecked(size_t maximum, out size_t recordsRetired)
     {
-        // Release guard: cheap identity/phase checks prevent recycling live or foreign tasks.
-        if (task is null || task.domain !is this || !task.terminated)
-            antfarm.fatal("ant_fibers: only terminated tasks of this domain can be released");
-        // Release guard: three loads and a flag prevent reuse while queues/roots still own the task.
-        if (atomicLoad!(MemoryOrder.acq)(task.completionTaken) == 0
-            || atomicLoad!(MemoryOrder.acq)(task.pendingLifecycleEvents) != 0
-            || atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) != 0
-            || task.rootedFlag)
-            antfarm.fatal("ant_fibers: drain completion and lifecycle events before release");
-        synchronized (poolMutex)
-        {
-            // Release guard: one flag check under the pool lock prevents a cyclic free list.
-            if (task.pooledFlag)
-                antfarm.fatal("ant_fibers: task released twice");
-            task.closeJoinWaiters();
-            while (atomicLoad!(MemoryOrder.acq)(task.joinState)
-                    != FiberTask.joinClosed)
-                Thread.yield();
-            task.pooledFlag = true;
-            task.waitNext = pool.get(task.stackSize, null);
-            pool[task.stackSize] = task;
-        }
-    }
-
-    /// ditto, for a batch of completions.
-    void releaseAll(FiberTask[] tasks)
-    {
-        requireDirector();
-        synchronized (admissionMutex)
-        {
-            requireCancellationRequestsDrained();
-            foreach (task; tasks) releaseOne(task);
-        }
-    }
-
-    private void requireCancellationRequestsDrained()
-    {
+        int expected = 0;
+        if (!cas!(MemoryOrder.acq, MemoryOrder.raw)(
+                &control.retireGate, expected, 1))
+            return 0;
+        scope (exit) atomicStore!(MemoryOrder.rel)(retireGate, 0);
+        // Requests for these generations then apply before reuse and report
+        // alreadyTerminal rather than a stale handle.
         if (pendingCancellationRequests != 0)
-            throw new Exception(
-                "ant_fibers: drain cancellation requests before release");
+            cast(void) drainCancellationRequestsCounted();
+        recordsRetired = retireRecords(maximum);
+        return retireCompletions(maximum);
+    }
+
+    private size_t retireRecords(size_t maximum)
+    {
+        auto handler = options_.onRecord;
+        FiberLifecycleEvent event;
+        size_t n;
+        for (; n < maximum && records.front(event); ++n)
+        {
+            if (handler !is null) handler(event);
+            records.popFront();
+            releaseRecordBudget(1);
+        }
+        return n;
+    }
+
+    private size_t retireCompletions(size_t maximum)
+    {
+        enum batchSize = 64;
+        auto handler = options_.onCompletion;
+        size_t retired;
+        while (retired < maximum)
+        {
+            immutable want = maximum - retired < batchSize
+                ? maximum - retired : batchSize;
+            FiberTask first, last;
+            immutable taken = takeRetirementBatch(want, first, last);
+            if (taken == 0) break;
+            auto task = first;
+            size_t handled;
+            try
+            {
+                for (; handled < taken; ++handled)
+                {
+                    auto next = cast(FiberTask) atomicLoad!(MemoryOrder.raw)(
+                        task.queueNext);
+                    if (handler !is null) handler(task);
+                    task = next;
+                }
+            }
+            catch (Throwable failure)
+            {
+                // `task` threw: it and the rest of the batch go back first.
+                restoreRetirementBacklog(task, last, taken - handled);
+                recycle(first, handled);
+                throw failure;
+            }
+            recycle(first, handled);
+            retired += handled;
+        }
+        return retired;
+    }
+
+    // Oldest first: a backlog left by a throwing handler, then new
+    // completions. The batch is a chain through queueNext ending in null.
+    private size_t takeRetirementBatch(size_t want, out FiberTask first,
+        out FiberTask last) nothrow @nogc
+    {
+        if (retireBacklogFirst is null)
+        {
+            auto chain = completions.stealChain(want);
+            first = chain.first;
+            last = chain.last;
+            return chain.length;
+        }
+        first = last = retireBacklogFirst;
+        size_t n = 1;
+        for (FiberTask next; n < want
+            && (next = cast(FiberTask) atomicLoad!(MemoryOrder.raw)(
+                last.queueNext)) !is null; ++n)
+            last = next;
+        retireBacklogFirst = cast(FiberTask) atomicLoad!(MemoryOrder.raw)(
+            last.queueNext);
+        if (retireBacklogFirst is null) retireBacklogLast = null;
+        atomicStore!(MemoryOrder.raw)(last.queueNext, cast(shared(FiberTask)) null);
+        atomicFetchSub!(MemoryOrder.rel)(retireBacklogCount, cast(uint) n);
+        return n;
+    }
+
+    private void restoreRetirementBacklog(FiberTask first, FiberTask last,
+        size_t count) nothrow @nogc
+    {
+        if (count == 0) return;
+        atomicStore!(MemoryOrder.raw)(last.queueNext,
+            cast(shared(FiberTask)) retireBacklogFirst);
+        if (retireBacklogFirst is null) retireBacklogLast = last;
+        retireBacklogFirst = first;
+        atomicFetchAdd!(MemoryOrder.rel)(retireBacklogCount, cast(uint) count);
+    }
+
+    // Unroot and pool `count` handled tasks from a queueNext chain. Admission
+    // excludes generation reuse while a detached cancellation still applies.
+    private void recycle(FiberTask first, size_t count)
+    {
+        if (count == 0) return;
+        synchronized (admissionMutex)
+        {
+            synchronized (rootsMutex)
+            {
+                auto task = first;
+                foreach (_; 0 .. count)
+                {
+                    releaseTaskRootLocked(task);
+                    task = cast(FiberTask) atomicLoad!(MemoryOrder.raw)(
+                        task.queueNext);
+                }
+            }
+            synchronized (poolMutex)
+            {
+                auto task = first;
+                foreach (_; 0 .. count)
+                {
+                    auto next = cast(FiberTask) atomicLoad!(MemoryOrder.raw)(
+                        task.queueNext);
+                    atomicStore!(MemoryOrder.raw)(task.queueNext,
+                        cast(shared(FiberTask)) null);
+                    recycleLocked(task);
+                    task = next;
+                }
+            }
+        }
+    }
+
+    private void recycleLocked(FiberTask task)
+    {
+        if (task.domain !is this || !task.terminated)
+            antfarm.fatal("ant_fibers: retired a task that is not terminal in this domain");
+        if (task.pooledFlag)
+            antfarm.fatal("ant_fibers: task retired twice");
+        task.closeJoinWaiters();
+        while (atomicLoad!(MemoryOrder.acq)(task.joinState)
+                != FiberTask.joinClosed)
+            Thread.yield();
+        task.pooledFlag = true;
+        task.waitNext = pool.get(task.stackSize, null);
+        pool[task.stackSize] = task;
     }
 
     /// Tasks currently held by the recycling pool.
@@ -2478,6 +2652,12 @@ final class FiberDomain
 
     /// Verify the construction thread which owns synchronous cancellation,
     /// shutdown and release/recycle for this domain.
+    /// The calling thread constructed this domain.
+    @property bool isDirectorThread() const nothrow @nogc
+    {
+        return Thread.getThis() is directorThread;
+    }
+
     private void requireDirector()
     {
         auto self = Thread.getThis();
@@ -2705,27 +2885,17 @@ final class FiberDomain
         CancellationDisposition disposition = CancellationDisposition.none)
         nothrow @nogc
     {
-        if (!lifecycleEventsEnabled) return;
-        assert(atomicLoad!(MemoryOrder.acq)(task.lifecycleReservations) != 0,
-            "ant_fibers: lifecycle event exceeded its reservation");
-        auto node = task.lifecycleNodes[cast(size_t) kind];
-        assert(node !is null && node.next is null);
-        node.event = FiberLifecycleEvent(0, kind, task.handle, outcome,
-                                         cancellation, disposition, failure);
-        atomicFetchAdd!(MemoryOrder.rel)(task.pendingLifecycleEvents, 1u);
-        lifecycleQueue.push(node);
+        // The slot was reserved at admission; emission cannot fail.
+        records.emit(kind, task.handle, outcome, cancellation, disposition,
+            failure);
     }
 
-    private void releaseLifecycleReservations(FiberTask task, uint count)
-        nothrow @nogc
+    private void releaseRecordBudget(uint count) nothrow @nogc
     {
         if (count == 0) return;
-        immutable previousTask = atomicFetchSub!(MemoryOrder.acq_rel)(
-            task.lifecycleReservations, cast(ubyte) count);
-        assert(previousTask >= count);
-        immutable previousDomain = atomicFetchSub!(MemoryOrder.acq_rel)(
+        immutable previous = atomicFetchSub!(MemoryOrder.acq_rel)(
             lifecycleReservationCount, cast(long) count);
-        assert(previousDomain >= count);
+        assert(previous >= count);
     }
 
     /// Reject future spawns. With cancellation, request cancellation for all
@@ -2752,6 +2922,15 @@ final class FiberDomain
         return atomicLoad!(MemoryOrder.acq)(activeCount);
     }
 
+    /// `FiberReadyLane.serve` on a one-lane domain's lane.
+    FiberServiceResult serve(ref Token token,
+        FiberServicePass pass = FiberServicePass.init)
+    {
+        if (defaultReadyLane is null)
+            throw new Exception("ant_fibers: domain has no ready lane");
+        return defaultReadyLane.serve(token, pass);
+    }
+
     /// Compatibility flush for a one-lane domain. Multi-lane embeddings flush
     /// each selected `FiberReadyLane` with a token registered on its Farm.
     size_t flush(ref Token token, size_t maximum = 32, uint avgCost = flushAvgCost)
@@ -2772,44 +2951,6 @@ final class FiberDomain
         size_t total;
         foreach (lane; readyLanes) total += lane.ready;
         return total;
-    }
-
-    /// Drain terminal tasks for control-thread reporting and release the
-    /// domain's GC roots. Returned tasks remain alive while the caller holds
-    /// them and expose their outcome/exception.
-    FiberTask[] takeCompletions(size_t maximum = size_t.max)
-    {
-        auto chain = completions.stealChain(maximum);
-        if (chain.first is null) return null;
-        auto result = new FiberTask[chain.length];
-        size_t n;
-        for (auto task = chain.first; task !is null;
-             task = cast(FiberTask) atomicLoad!(MemoryOrder.raw)(task.queueNext))
-            result[n++] = task;
-        synchronized (rootsMutex)
-        {
-            foreach (done; result)
-            {
-                atomicStore!(MemoryOrder.rel)(done.completionTaken,
-                    cast(ubyte) 1);
-                if (atomicLoad!(MemoryOrder.acq)(
-                        done.pendingLifecycleEvents) == 0)
-                    releaseTaskRootLocked(done);
-            }
-        }
-        return result;
-    }
-
-    private void releaseTaskRoot(FiberTask task)
-    {
-        synchronized (rootsMutex)
-        {
-            if (task.rootedFlag
-                && atomicLoad!(MemoryOrder.acq)(task.completionTaken) != 0
-                && atomicLoad!(MemoryOrder.acq)(
-                    task.pendingLifecycleEvents) == 0)
-                releaseTaskRootLocked(task);
-        }
     }
 
     private void releaseTaskRootLocked(FiberTask task)
@@ -2956,18 +3097,16 @@ final class FiberDomain
         if (outcome == FiberOutcome.failed)
             emitLifecycle(task, FiberLifecycleKind.failure, outcome,
                 CancellationResult.staleHandle, failure, disposition);
-        if (lifecycleEventsEnabled)
-        {
-            uint emitted = 2; // admitted + terminal
-            if (atomicLoad!(MemoryOrder.acq)(task.cancellationEventEmitted) == 2)
-                ++emitted;
-            if (outcome == FiberOutcome.failed) ++emitted;
-            assert(emitted <= lifecycleRecordsPerTask);
-            releaseLifecycleReservations(task,
-                lifecycleRecordsPerTask - emitted);
-        }
-        // Publish completion before dropping activeCount so an observer of
-        // drained can take every terminal task.
+        // Return the unused part of the admission reservation: the task holds
+        // no record slot from here on, so recycling never waits on records.
+        uint emitted = 2; // admitted + terminal
+        if (atomicLoad!(MemoryOrder.acq)(task.cancellationEventEmitted) == 2)
+            ++emitted;
+        if (outcome == FiberOutcome.failed) ++emitted;
+        assert(emitted <= lifecycleRecordsPerTask);
+        releaseRecordBudget(lifecycleRecordsPerTask - emitted);
+        // Publish completion after its terminal record and before dropping
+        // activeCount, so an observer of drained can retire every task.
         completions.push(task);
         atomicFetchSub(activeCount, 1L);
     }
@@ -3409,26 +3548,30 @@ long subscribeOrThrow(ref ConsumerView consumer, AntFarm* farm)
 }
 
 /// Drive a one-lane domain on the calling thread until every admitted task is
-/// terminal. `consumer` is deliberately passed by reference because a
-/// ConsumerView is a unique cursor and must never be copied.
+/// terminal, retiring as it goes when this thread may (the Director, or any
+/// thread under `serviceThreads`), and once more at the end. Inspect results
+/// through `options.onCompletion`, `options.onRecord` or a `TaskHandle`, not
+/// a `FiberTask` reference kept across the drain. `consumer` is passed by
+/// reference because a ConsumerView is a unique cursor and must never be
+/// copied.
 void drainUntilEmpty(FiberDomain domain, ref Token token,
                      ref ConsumerView consumer, size_t flushBatch = 32,
                      uint avgCost = flushAvgCost)
 {
     if (domain is null)
         throw new Exception("ant_fibers: cannot drain a null domain");
-    if (flushBatch == 0)
-        throw new Exception("ant_fibers: flushBatch must be greater than zero");
+    auto pass = FiberServicePass(true, false, flushBatch, avgCost);
     while (!domain.drained)
     {
-        if (domain.pendingCancellationRequests != 0)
-            cast(void) domain.drainCancellationRequestsCounted();
-        domain.pollGenerationTriggers();
-        domain.pollTimers();
-        immutable flushed = domain.flush(token, flushBatch, avgCost);
-        immutable consumed = consumer.consumeNext();
-        if (!consumed && flushed == 0)
+        immutable progress = domain.serve(token, pass).progress;
+        if (!consumer.consumeNext() && !progress)
             Thread.yield();
+    }
+    if (domain.options.retirement == FiberRetirement.serviceThreads
+        || domain.isDirectorThread)
+    {
+        size_t recordsRetired;
+        cast(void) domain.retireUnchecked(size_t.max, recordsRetired);
     }
 }
 
@@ -3591,20 +3734,20 @@ version (unittest)
         ConsumerView view;
         subscribeOrThrow(view, farm);
         scope (exit) view.unsubscribe();
-        auto first = domain.spawn({});
-        auto second = domain.spawn({});
-        assert(domain.requestCancel(first.handle) == CancellationSubmission.queued);
-        assert(domain.requestCancel(first.handle) == CancellationSubmission.queued);
-        assert(domain.requestCancel(second.handle) == CancellationSubmission.queued);
+        auto first = domain.spawnHandle({});
+        auto second = domain.spawnHandle({});
+        assert(domain.requestCancel(first) == CancellationSubmission.queued);
+        assert(domain.requestCancel(first) == CancellationSubmission.queued);
+        assert(domain.requestCancel(second) == CancellationSubmission.queued);
         immutable before = GC.allocatedInCurrentThread;
         immutable applied = domain.drainCancellationRequestsCounted();
         assert(GC.allocatedInCurrentThread == before);
         assert(applied == 3 && domain.pendingCancellationRequests == 0);
         assert(domain.drainCancellationRequestsCounted() == 0);
         drainUntilEmpty(domain, token, view);
-        assert(first.outcome == FiberOutcome.cancelled);
-        assert(second.outcome == FiberOutcome.cancelled);
-        domain.releaseAll(domain.takeCompletions());
+        // Retired, not yet reused: the handles still read their generation.
+        assert(first.poll().status == FiberJoinStatus.cancelled);
+        assert(second.poll().status == FiberJoinStatus.cancelled);
     }
 
     unittest
@@ -3642,19 +3785,28 @@ version (unittest)
         ConsumerView view;
         subscribeOrThrow(view, farm);
         scope (exit) view.unsubscribe();
+        // Run without retiring (flush and consume only): terminal tasks
+        // stay rooted until `retire`.
+        void run()
+        {
+            while (!domain.drained)
+            {
+                domain.flush(token);
+                view.consumeNext();
+            }
+        }
         foreach (i; 0 .. 64) domain.spawn({});
-        drainUntilEmpty(domain, token, view);
-        // Completed but untaken tasks stay rooted; churn one at a time.
+        run();
         assert(domain.roots.length == 64);
         auto rootsBlock = domain.roots.ptr;
         foreach (i; 0 .. 32)
         {
-            domain.releaseAll(domain.takeCompletions(1));
+            assert(domain.retire(1) == 1);
             domain.spawn({});
-            drainUntilEmpty(domain, token, view);
+            run();
         }
         assert(domain.roots.length == 64);
         assert(domain.roots.ptr is rootsBlock);
-        domain.releaseAll(domain.takeCompletions());
+        assert(domain.retire() == 64 && domain.roots.length == 0);
     }
 }

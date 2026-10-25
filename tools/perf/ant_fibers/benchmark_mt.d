@@ -168,7 +168,7 @@ void main(string[] args)
 
     // Second generation: every spawn recycles a pooled task/fiber/stack.
     foreach (lane; lanes)
-        lane.domain.releaseAll(lane.domain.takeCompletions());
+        lane.domain.retire();
     auto warmCreateStart = MonoTime.currTime;
     burstSpawn();
     auto warmRunStart = MonoTime.currTime;

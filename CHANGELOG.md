@@ -85,23 +85,10 @@ Fixes:
 - Fibers: every responder took the domain timer mutex on every pump, even
   with no timer armed. A heap that is empty or not yet due now costs one
   atomic load, and the pre-park deadline query takes no lock.
-- Fibers: wait arbitration is one claim word per task. Each wait arms a fresh
-  count; signal delivery, event and semaphore wakes, join completion, timer
-  expiry and cancellation each CAS it, and only the winner adds WAKE. Waiters
-  unlink themselves after they resume, and timer entries name the exact wait
-  they may end. This replaces winning by removal across the wait map, join
-  lists and timer heap, and with it the cross-container lock order. The two
-  fixes above keep their regression schedules, which pass unchanged.
-- `FiberEvent` and `FiberSemaphore` own FIFO waiter queues, so a wait no
-  longer allocates a signal-map bucket (a semaphore round trip went from
-  354-386 ns and 64 GC bytes to 284-290 ns and none). Auto-reset `set` and
-  `post(n)` wake one waiter per unit, oldest first, instead of every waiter;
-  a woken waiter that is cancelled passes its wake on. Manual-reset `set`
-  still wakes all. Both gain timed waits, `wait(Duration)` and
-  `waitUntil(MonoTime)`, which return false on timeout. `set` and `post` are
-  `nothrow @nogc`. `sleepUntil` no longer registers a signal wait.
-  `FiberDomain.signal` returns the waiters it woke: one that a timer or
-  cancellation is already waking is no longer counted.
+- Fibers: `spawnHandle` captures the generation inside admission; reading
+  `spawn(...).handle` afterwards could name a later generation once a
+  service thread recycled the task. An emptied recycle-pool size class keeps
+  its key instead of being deleted and reinserted on every spawn/retire.
 - Threadpool: `shutdown()` on a pool that was not the live one (rejected by
   `start`, never started, already shut down) stopped the live pool's workers
   and cleared their process-wide records and hooks without joining them, so
@@ -160,6 +147,52 @@ Fixes:
 - Docs: a detached root's `join` runs after its children like any node's,
   never for a root that forks nothing (the docs called it the completion
   callback); `runRoot` waits on its own sentinel, not on `g_rootsLive`.
+
+Fibers (API changes; see the [completions, records and hosting design](docs/design/fiber-completion-and-records.md)):
+
+- Fibers: wait arbitration is one claim word per task. Each wait arms a fresh
+  count; signal delivery, event and semaphore wakes, join completion, timer
+  expiry and cancellation each CAS it, and only the winner adds WAKE. Waiters
+  unlink themselves after they resume, and timer entries name the exact wait
+  they may end. This replaces winning by removal across the wait map, join
+  lists and timer heap, and with it the cross-container lock order. The two
+  fixes above keep their regression schedules, which pass unchanged.
+- `FiberEvent` and `FiberSemaphore` own FIFO waiter queues, so a wait no
+  longer allocates a signal-map bucket (a semaphore round trip went from
+  354-386 ns and 64 GC bytes to 284-290 ns and none). Auto-reset `set` and
+  `post(n)` wake one waiter per unit, oldest first, instead of every waiter;
+  a woken waiter that is cancelled passes its wake on. Manual-reset `set`
+  still wakes all. Both gain timed waits, `wait(Duration)` and
+  `waitUntil(MonoTime)`, which return false on timeout. `set` and `post` are
+  `nothrow @nogc`. `sleepUntil` no longer registers a signal wait.
+  `FiberDomain.signal` returns the waiters it woke: one that a timer or
+  cancellation is already waking is no longer counted.
+- Fibers: retirement replaces `takeCompletions`, `release`, `releaseAll`,
+  `enableLifecycleEvents`, `takeLifecycleEvents` and `handleLifecycleEvents`
+  ([design](docs/design/fiber-completion-and-records.md)). A domain is the
+  opt-in to Fibers and is configured once by `FiberDomainOptions`: record
+  retention (default 16,384 records; it also bounds live tasks, at a quarter
+  of it), `onCompletion` and `onRecord` handlers, and
+  `FiberRetirement.director` (default) or `serviceThreads`. `retire(maximum)`
+  hands records, then terminal tasks, to the handlers and recycles each task
+  when its handler returns; a throwing handler leaves its item and the rest
+  queued in order. `takeCompletions`' per-drain array is gone.
+- Fibers: lifecycle records are always on and live in a domain-owned ring
+  (record values unscanned, failure references scanned), not in four node
+  objects per task. Records no longer pin or delay recycling of their task;
+  the sequence is assigned at emission; handlers receive records by value.
+  Admission backpressure (`FiberLifecycleBackpressure`) and its accounting are
+  unchanged. `pendingEvents`/`lifecycleReserved` are `pendingRecords`/
+  `reservedRecords`. The per-pump `pendingEvents` read raced a Director-owned
+  count; pending retirement is now recorded in the lane mailbox only, where
+  under `broadcast` it used to wake every pool worker on every pump.
+- Fibers: one service pass, `FiberReadyLane.serve` / `FiberDomain.serve`
+  (cancellation requests, timers, triggers, flush, retirement, deadline),
+  drives the managed pump, `attachFiberDomain` and `drainUntilEmpty`. A
+  `FarmHost` now retires in every `step()` instead of at `close()`, and
+  `attachFiberDomain` refuses a domain whose Director is not the calling
+  thread. `drainUntilEmpty` retires too, so read results through
+  `onCompletion`, `onRecord` or a `TaskHandle`.
 
 - `forkjoin.frames`: a frame pool for task frames (`allocFrame`,
   `allocFrames!T`, `freeFrame`, `releaseFrames`, `frameStats`). Headerless

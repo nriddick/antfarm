@@ -267,13 +267,12 @@ work-cost class as in `actor_churn`.
 
 ```text
 scaling create <actors>
-scaling lifecycle <fibers> <batch> [handle|take]
+scaling lifecycle <fibers> <batch>
 ```
 
 `create` times actor slot reservation and state allocation for an initially
-empty runtime. `lifecycle` times draining admitted Fiber lifecycle records;
-`handle` invokes a counting delegate and `take` also allocates the returned
-arrays.
+empty runtime. `lifecycle` times retiring admitted Fiber lifecycle records
+`batch` at a time through a counting `onRecord` handler.
 
 ## Performance report
 

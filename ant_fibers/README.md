@@ -51,13 +51,9 @@ any build type, so Dub prints a warning about `buildOptions "unittests"`.
 The `stress` configuration runs
 `tests/stress.d`. Each suite prints a final `passed` line. Both configurations
 require contracts, so test `assert` checks stay enabled even with
-`--build=release`. The task-release guards use `fatal` independently of those
-test settings: releasing a null, foreign, live, already-pooled, or still-rooted
-task aborts in debug and ordinary `-release` builds. Completion and lifecycle
-events must be drained before recycling. Other scheduler assertions remain
-assertion-build diagnostics. On Linux, the smoke suite re-executes child cases
-and requires each release violation's fatal message; `--release-death` runs only
-these cases.
+`--build=release`. Scheduler assertions are assertion-build diagnostics;
+retiring a task twice or a non-terminal task is a `fatal` scheduler bug in
+every build.
 
 The deterministic semaphore regression can be selected with
 `dub run -c unittest --compiler=ldc2 -- --semaphore-cancellation-only`. It covers
@@ -81,7 +77,10 @@ auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                            DEFAULT_SMALL_TABLE_THRESHOLD, false);
 scope (exit) farm.destroy();
 
-auto domain = new FiberDomain(farm);
+FiberOutcome outcome;
+FiberDomainOptions options;
+options.onCompletion = (FiberTask task) { outcome = task.outcome; };
+auto domain = new FiberDomain(farm, options);
 auto token = farm.registerProducer(Tier.small);
 scope (exit) farm.unregisterProducer(token);
 
@@ -91,18 +90,24 @@ scope (exit) consumer.unsubscribe();
 
 domain.spawn(&fiberBody);
 drainUntilEmpty(domain, token, consumer, 256, avgCostForChunk(32));
-
-auto completed = domain.takeCompletions();
-domain.releaseAll(completed);
+assert(outcome == FiberOutcome.completed);
 ```
 
-`drainUntilEmpty` takes `ConsumerView` by reference and also polls timers. It
-waits indefinitely if a task is parked on an application signal that nobody
-will deliver; signal or cancel such tasks before shutdown drain.
+`drainUntilEmpty` takes `ConsumerView` by reference. Each pass is one
+`serve` (cancellation requests, timers, triggers, flush, retirement) followed
+by a consume. It waits indefinitely if a task is parked on an application
+signal that nobody will deliver; signal or cancel such tasks before a shutdown
+drain.
 
-Completed tasks are not automatically recycled. Drain them with
-`takeCompletions`, inspect their outcomes, then call `release` or `releaseAll`.
-Later spawns reuse both the task and its stack with `Fiber.reset`.
+A domain is the opt-in to Fibers; `FiberDomainOptions` configures it once, at
+construction. `retire` hands every lifecycle record to `onRecord` (or drops
+it), then every terminal task to `onCompletion` while it is still valid, and
+recycles the task when the handler returns. Later spawns reuse both the task
+and its stack with `Fiber.reset`. Every host retires for you: the caller's own
+loop through `drainUntilEmpty` or `serve`, a `FarmHost` in each `step()`, a
+managed pool's workers under `FiberRetirement.serviceThreads`. Under the
+default `FiberRetirement.director`, a managed pool's Director calls `retire`
+itself, prompted by `FiberWakeEvent.lifecycle` in its lanes' mailboxes.
 
 ## Fiber bodies
 
@@ -259,8 +264,11 @@ pool. They are setup-time state, not concurrently mutable policy.
 
 ## Handles, joins, and cancellation
 
-Raw `FiberTask` identity is valid only until `release`. Retain `task.handle` or
-use `spawnHandle` when identity must survive recycling. A `TaskHandle` pairs a
+Raw `FiberTask` identity is valid only until retirement: until the
+Director's `retire` hands the task to `onCompletion` under
+`FiberRetirement.director`, and only until the task terminates under
+`serviceThreads`. Retain `task.handle` or use `spawnHandle` when identity must
+survive recycling. A `TaskHandle` pairs a
 slot with its generation and refuses stale reuse.
 
 - `handle.poll()` reads outcome without blocking.
@@ -290,20 +298,29 @@ separate application policy; the general scheduler does not infer it.
 
 ## Lifecycle and shutdown
 
-The constructing thread is the domain's Director. `release`, `releaseAll`,
-`beginShutdown`, and synchronous `directorCancel` remain Director-only; draining
-queued requests does not transfer that role. Release waits for in-flight request
-application and refuses release while queued requests remain.
+The constructing thread is the domain's Director. `beginShutdown`, synchronous
+`directorCancel` and, under `FiberRetirement.director`, `retire` are
+Director-only; draining queued requests does not transfer that role.
+Retirement applies queued cancellation requests first, so a request for a
+retiring generation reports `alreadyTerminal` rather than a stale handle.
 
 `beginShutdown(false)` stops admission and drains cooperative work.
 `beginShutdown(true)` also requests cancellation and wakes indefinite waiters
 so cleanup scopes can unwind. Fibers that never cooperate still cannot be
 forced to stop.
 
-Optional lifecycle events provide bounded admitted, cancellation, terminal,
-and failure records. Enable them before spawning, drain them on the Director
-thread, and retire both completion and lifecycle records before releasing a
-task.
+Every domain records admitted, accepted-cancellation, terminal and failure
+events in a bounded ring sized by `FiberDomainOptions.recordRetention`
+(default 16,384, about 1.2 MiB). Spawn reserves room for a task's worst case
+(4 records), held while the task is live and until its records are retired,
+and throws `FiberLifecycleBackpressure` past the limit. Retention therefore
+bounds concurrent fibers as well as unretired ones: the default admits 4,096,
+and a domain that is never retired stops admitting at that many tasks. Raise
+`recordRetention` for more (about 72 bytes per record). Records are values
+with their own failure reference: they never delay recycling, and a record may
+outlive its task, whose handle inside it then reports stale. A task's terminal
+record is published before its completion, and `retire` delivers records
+before completions.
 
 ## Benchmarks and internals
 

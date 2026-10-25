@@ -32,6 +32,9 @@ enum FiberWakeEvent : uint
     cancelled    = 1 << 2,
     shutdown     = 1 << 3,
     published    = 1 << 4,
+    /// Records or terminal tasks await the Director's `retire`
+    /// (`FiberRetirement.director` only). Mailbox and notifier only: no
+    /// pool worker is woken for it.
     lifecycle    = 1 << 5,
     remoteReady  = 1 << 6,
 }
@@ -178,14 +181,13 @@ final class FiberLane : FiberReadyLane
         return atomicLoad!(MemoryOrder.acq)(control.responderCount);
     }
 
-    this(AntFarm* farm, size_t accumulatorCapacity = 65_536)
+    /// A lane over `farm` with its own new domain.
+    this(AntFarm* farm, FiberDomainOptions options = FiberDomainOptions.init)
     {
         super(farm);
         control = allocateCacheLine!FiberLaneControl();
         control.service = LaneService.absent;
-        // Retained for source compatibility; intrusive queues are unbounded.
-        cast(void) accumulatorCapacity;
-        domain = new FiberDomain;
+        domain = new FiberDomain(options);
         domain.attachReadyLane(this);
     }
 
@@ -244,14 +246,15 @@ final class FiberLane : FiberReadyLane
         return handle;
     }
 
-    void enableLifecycleEvents(size_t retentionLimit = defaultLifecycleRetention)
+    /// `FiberDomain.retire` on this lane's domain.
+    size_t retire(size_t maximum = size_t.max)
     {
-        domain.enableLifecycleEvents(retentionLimit);
+        return domain.retire(maximum);
     }
 
-    FiberLifecycleEvent[] takeLifecycleEvents(size_t maximum = size_t.max)
+    protected override void noteRetirementPending() nothrow @nogc
     {
-        return domain.takeLifecycleEvents(maximum);
+        recordWake(FiberWakeEvent.lifecycle);
     }
 
     protected override void noteExternalReady() nothrow @nogc
@@ -354,6 +357,25 @@ final class FiberLane : FiberReadyLane
     //   `directorOwned` origin leaves its wakes to the Director.
     package void noteWake(FiberWakeEvent event, bool relay = true) nothrow @nogc
     {
+        recordWake(event);
+        if (pool !is null)
+        {
+            if (wakePolicy == FiberWakePolicy.broadcast)
+                pool.wakeAll();
+            else if (wakePolicy == FiberWakePolicy.servingGroups && relay)
+                foreach (g; wakeGroups_)
+                    pool.wakeLlc(g);
+        }
+        if (relay)
+        {
+            foreach (serving; servingLanes_)
+                serving.noteWake(FiberWakeEvent.remoteReady, false);
+        }
+    }
+
+    // Mailbox and notifier only. An already-recorded event is one load.
+    private void recordWake(FiberWakeEvent event) nothrow @nogc
+    {
         immutable bits = cast(uint) event;
         auto observed = atomicLoad!(MemoryOrder.acq)(control.pendingWakeEvents);
         while (true)
@@ -371,19 +393,6 @@ final class FiberLane : FiberReadyLane
                 break;
             }
             observed = atomicLoad!(MemoryOrder.acq)(control.pendingWakeEvents);
-        }
-        if (pool !is null)
-        {
-            if (wakePolicy == FiberWakePolicy.broadcast)
-                pool.wakeAll();
-            else if (wakePolicy == FiberWakePolicy.servingGroups && relay)
-                foreach (g; wakeGroups_)
-                    pool.wakeLlc(g);
-        }
-        if (relay)
-        {
-            foreach (serving; servingLanes_)
-                serving.noteWake(FiberWakeEvent.remoteReady, false);
         }
     }
 
@@ -838,27 +847,10 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
         break;
     }
 
-    immutable cancellationsApplied =
-        state.lane.domain.drainCancellationRequestsCounted();
-    immutable timersWoken = state.responder
-        ? state.lane.domain.pollTimers() : 0;
     bool consumed = state.consumer.consumeNext();
-    immutable triggersDelivered =
-        state.lane.domain.pollGenerationTriggers();
-    if (state.lane.domain.pendingEvents != 0)
-        state.lane.noteWake(FiberWakeEvent.lifecycle);
-    if (state.lane.domain.fatal)
-        throw state.lane.domain.fatalException;
-    size_t flushed;
-    immutable ready = state.lane.ready;
-    if (state.lane.flushBatch == 0)
-        throw new Exception("ant_fibers: flushBatch must be greater than zero");
-    // Accumulate while useful farm work is flowing. Flush a full batch, or a
-    // short tail immediately before this worker would otherwise idle/cadence.
-    if (ready >= state.lane.flushBatch || (!consumed && ready != 0))
-        flushed = state.lane.flush(
-            state.producer, state.lane.flushBatch, state.lane.avgCost);
-    if (flushed != 0)
+    immutable local = state.lane.serve(state.producer, FiberServicePass(
+        state.responder, consumed, state.lane.flushBatch, state.lane.avgCost));
+    if (local.flushed != 0)
         state.lane.noteWake(FiberWakeEvent.published);
 
     bool remoteWork;
@@ -904,14 +896,11 @@ private ManagedPumpResult fiberWorkerPump(WorkerSelf* worker)
     // empty while published-but-not-entered activations remain, or while a
     // served remote lane still has transport. Table size (flushBatch) bounds
     // a visit; a claimed table is consumed according to the Farm contract.
-    if (cancellationsApplied != 0 || timersWoken != 0 || triggersDelivered != 0
-        || consumed || flushed != 0 || remoteWork
+    if (local.progress || consumed || remoteWork
         || state.lane.ready != 0 || state.lane.published != 0)
         return ManagedPumpResult.again;
-    long deadline;
-    return state.responder
-        && state.lane.domain.nextTimerDeadline(deadline)
-        ? ManagedPumpResult.until(deadline) : ManagedPumpResult.idle;
+    return local.deadline != long.max
+        ? ManagedPumpResult.until(local.deadline) : ManagedPumpResult.idle;
 }
 
 private void fiberWorkerStop(WorkerSelf* worker)

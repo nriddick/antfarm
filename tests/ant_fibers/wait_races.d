@@ -37,7 +37,7 @@ private struct Rig
 
     void close()
     {
-        domain.releaseAll(domain.takeCompletions());
+        domain.retire();
         view.unsubscribe();
         farm.unregisterProducer(token);
         farm.destroy();
@@ -255,6 +255,6 @@ private void signalAfterWaitingCount()
             assert(MonoTime.currTime < deadline, "signalled await never ran");
             Thread.yield();
         }
-        domain.releaseAll(domain.takeCompletions());
+        domain.retire();
     }
 }

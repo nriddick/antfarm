@@ -23,7 +23,11 @@ void main()
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
 
-    auto domain = new FiberDomain(farm);
+    // A terminal task is handed to onCompletion, then recycled.
+    FiberOutcome outcome;
+    FiberDomainOptions options;
+    options.onCompletion = (FiberTask task) { outcome = task.outcome; };
+    auto domain = new FiberDomain(farm, options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
 
@@ -31,11 +35,11 @@ void main()
     subscribeOrThrow(consumer, farm);
     scope (exit) consumer.unsubscribe();
 
-    auto task = domain.spawn(&fiberBody);
+    domain.spawn(&fiberBody);
+    // Runs every task to its end, retiring as it goes.
     drainUntilEmpty(domain, token, consumer, 256, avgCostForChunk(32));
 
-    assert(task.outcome == FiberOutcome.completed);
+    assert(outcome == FiberOutcome.completed);
     assert(atomicLoad(steps) == 3);
-    domain.releaseAll(domain.takeCompletions());
     writeln("fiber yielded, slept, and completed");
 }

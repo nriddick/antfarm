@@ -30,9 +30,9 @@ spawn / yield / signal / timer / cancellation
           terminal      ready / wait
              |             |
              v             +----> republish when runnable
-      completions MPSC
+      completions MPSC              (terminal record first, into the record ring)
              |
-      takeCompletions -> release -> recycle
+      retire: records -> onRecord, tasks -> onCompletion -> recycle
 ```
 
 Every runnable activation is a one-shot serial Farm payload:
@@ -55,7 +55,7 @@ payloads and suspendable Fibers remain separate work representations.
 
 - task generations and active GC roots;
 - wait sets, timers, cancellation requests, and managed joins;
-- completions and optional lifecycle records;
+- completions and the lifecycle record ring;
 - admission, shutdown, and recycled task/stack pools.
 
 `FiberLane` owns locality and transport state:
@@ -73,12 +73,12 @@ edge.
 
 `FiberTask` owns one DRuntime `Fiber`, scheduler state, a retained failure,
 intrusive queue links, stack-size class, and migration diagnostics. Cold spawn
-creates and maps a stack. Explicit release pools terminal tasks by stack size;
-later spawn reuses the task and stack with `Fiber.reset`.
+creates and maps a stack. Retirement pools terminal tasks by stack size; later
+spawn reuses the task and stack with `Fiber.reset`.
 
 Each admitted generation increments the slot's 64-bit generation. A
 `TaskHandle` is the stable `(slot, generation)` identity. A raw `FiberTask`
-reference is valid only until `release`; handle operations validate the
+reference is valid only until retirement; handle operations validate the
 generation before observing or changing task state.
 
 ## Task states and scheduler boundaries
@@ -190,7 +190,8 @@ Arbitrary threads request cancellation by appending a GC-visible
 `(slot, generation)` handle to the domain control queue. Any thread may call
 `drainCancellationRequests()`; the managed threadpool pump runs the same drain,
 counting instead of allocating results, at the start of each service pass. The constructing thread remains the Director: synchronous
-`directorCancel`, `release`, `releaseAll`, and `beginShutdown` are Director-only.
+`directorCancel` and `beginShutdown` are Director-only, and so is `retire` under
+the default `FiberRetirement.director`.
 The currently executing Fiber may cancel itself directly. Cancellation is
 cooperative: a body that never reaches a scheduler boundary cannot be forcibly
 unwound.
@@ -228,11 +229,12 @@ the next thread calls it. The handoff chain is explicit at every boundary.
 | event/semaphore post to waiter | unit store, then claim under the queue mutex, then WAKE | waiter's recheck after linking under that mutex; PARK/WAKE arbitration |
 | timer/cancel/join completion to waiter | the one successful claim CAS, then WAKE | PARK/WAKE arbitration and ready publication |
 | remote cancel to drainer | append and release-store queued count under request mutex, then wake | acquire count hint, swap under request mutex; apply under admission mutex |
-| terminal data to completion | outcome/failure stores, then completion MPSC release | completion acquire or stable handle snapshot |
+| terminal data to completion | outcome/failure stores, terminal record publication, then completion MPSC release | completion acquire or stable handle snapshot |
 | terminal data to thread join | terminal transition, then event set | event wake, then generation-stable acquire read |
-| lifecycle event to Director | initialized record and release publication | acquire drain into ordered backlog |
+| record emission to retirer | ticket fetch_add, acquire of the slot's free stamp, field stores, release of the published stamp | retirer's acquire of the published stamp |
+| record retirement to next lap | slot cleared, release of the next-lap stamp, then budget release | emitter's acquire of that stamp |
 | completion to drained | completion push before active-count decrement | acquire observation of zero active tasks |
-| release to reuse | Director ownership, admission and recycle-pool mutexes | initialization under admission before the next ready publication |
+| retirement to reuse | retirement gate, handler return, then admission, roots and recycle-pool mutexes | initialization under admission before the next ready publication |
 
 The Farm portion depends on the root implementation writing table contents
 before its release sentinel and consumers acquiring that sentinel before
@@ -256,11 +258,13 @@ reading the body. Ant Farm provides those edges.
   one finite snapshot. Synchronous Director cancellation takes the same mutex;
   only the current Fiber's local cancellation can race an external CANCEL add.
   Thus duplicates coalesce and the counted CANCEL field has at most two adds.
-- Spawn, release and releaseAll also hold admission, excluding generation reuse
-  and recycle-list mutation while a detached cancellation is still applying.
-  The queued count excludes detached requests; release's admission lock waits
-  for those before checking that no queued requests remain. A request appended
-  after that check is safe: application revalidates its generation under admission.
+- Spawn and retirement's recycling also hold admission, excluding generation
+  reuse and recycle-list mutation while a detached cancellation is still
+  applying. Retirement applies queued requests first; a request appended later
+  is safe because application revalidates its generation under admission.
+- One retirer holds the retirement gate at a time; it alone owns the record
+  ring's head and the completion backlog a throwing handler leaves. Handlers
+  run under the gate but under no scheduler lock.
 - The empty drain path is one acquire load, with no lock or allocation. Producers
   release-store the count after append; array access still requires the request
   mutex. A zero observed before a concurrent append can defer service to the next
@@ -283,9 +287,15 @@ reading the body. Ant Farm provides those edges.
 
 Farm bodies and intrusive integer links are not treated as GC roots. Before
 first publication, the domain registers itself as an explicit root; its roots
-array retains every active task until completion and any enabled lifecycle
-records have been taken. The task retains its DRuntime Fiber, and DRuntime
-registers suspended stacks for scanning.
+array retains every task from admission until retirement recycles it. The
+task retains its DRuntime Fiber, and DRuntime registers suspended stacks for
+scanning. Recycled tasks stay referenced by the recycle pool for the domain's
+lifetime.
+
+The record ring keeps record values in a NO_SCAN block and their failure
+references in a parallel scanned array, so its capacity adds little to marking.
+A record's `TaskHandle` points into that unscanned block; this is safe because
+the domain never frees a task object while it lives.
 
 Reference-free control records are manually aligned to isolate contended task,
 wait, admission, timer, wake, join, and queue state. GC-visible delegates,
@@ -380,7 +390,9 @@ must precede lane uninstallation and Farm destruction; unsubscribing preserves
 abandoned work through the existing Sub0 protocol and does not drain the domain.
 
 The default `broadcast` wake policy signals the pool for external admission,
-signal, cancellation, shutdown, and worker publication. Under
+signal, cancellation, shutdown, and worker publication. Pending retirement
+under `FiberRetirement.director` is recorded as `lifecycle` in the mailbox
+(and notifier) only: the Director, not a worker, acts on it. Under
 `directorOwned`, lanes coalesce those reasons into a mailbox. The thread that
 owns `pool.director()` drains it and chooses which workers to signal. Queued
 cancellation is the exception: domain and lane `requestCancel` notify every
@@ -409,26 +421,39 @@ does not claim multi-LLC performance or failover guarantees.
 
 ## Completion, lifecycle records, and shutdown
 
-Terminal tasks enter the completion MPSC and remain rooted. The Director calls
-`takeCompletions`, inspects immutable outcomes, and then calls `release` or
-`releaseAll`. A worker may consume queued cancellation results before an explicit
-drain: that drain returns only its own snapshot's applications. Use task outcomes
-or enabled lifecycle cancellation records to observe pump-applied requests.
-Release refuses unsafe reuse while cancellation or join state for
-the generation remains outstanding.
+`FiberDomainOptions` fixes a domain's record retention, its `onCompletion` and
+`onRecord` handlers, and who may retire, at construction. `retire(maximum)`
+first retires up to `maximum` records in sequence order, then up to `maximum`
+terminal tasks in completion order. Each task is still rooted and valid
+during its handler and is recycled when the handler returns; the roots and
+pool mutexes are taken once per batch. A throwing handler leaves its record
+or task, and everything after it, queued in order; tasks already handled are
+recycled. Records keep their sequence across that retry, and completions
+keep their order through a backlog that the next retirement drains before
+newer completions.
 
-Optional lifecycle reporting reserves bounded capacity before admission and
-emits ordered admitted, cancellation, terminal, and failure records. A
-throwing Director handler preserves its untouched suffix for retry. Lifecycle
-records and completions must both be retired before the final task root is
-removed.
+Every service pass retires when its thread may: always under
+`FiberRetirement.serviceThreads`, only on the Director under the default
+`director`. Elsewhere it records the pending retirement for the Director (see
+wake policy above). A worker may apply queued cancellation requests before an
+explicit drain, which then returns only its own snapshot's applications; use
+task outcomes or cancellation records to observe pump-applied requests.
+Recycling waits for external join readers of the generation to unregister.
 
-The lifecycle queue counts nodes during its one-time detached-list reversal.
-The Director carries that count with any retained suffix, including handler
-failure retries. Bounded `takeLifecycleEvents` and `handleLifecycleEvents`
-therefore drain a backlog in linear total work instead of recounting the
-shrinking list on every call. The initial reversal still visits the complete
-detached batch; `maximum` bounds returned/handled records, not that first walk.
+Lifecycle records live in a bounded multi-producer, single-consumer ring that
+the domain allocates at construction, with per-slot stamps as in a bounded
+MPMC queue. Spawn reserves a task's worst case (admitted, cancellation,
+terminal, failure) against `recordRetention` and refuses past it with
+`FiberLifecycleBackpressure`. Termination returns the unused part, and each
+retired record releases its slot, so retention bounds live plus unretired
+tasks at a quarter of it (4,096 at the default 16,384). Emission therefore never fails or blocks: a
+ticket's slot was consumed a lap earlier, and the stamp acquire orders that
+consumption's clearing before the new writes. The sequence number is the
+ticket, assigned at emission. Retirement stops at a ticketed but unpublished
+record rather than skipping or spinning. Per task, records are emitted in
+admitted, cancellation, terminal, failure order, and the terminal record is
+published before the completion. A record is a value; it never pins its task,
+and its handle reports stale once the task is reused.
 
 `beginShutdown(false)` closes admission and drains cooperative work.
 `beginShutdown(true)` also requests cancellation and wakes indefinite waiters.

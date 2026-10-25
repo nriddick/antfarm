@@ -52,8 +52,8 @@ void main(string[] args)
     hostOptions.waitTimeout = 30.seconds; // example policy: a stuck drain fails instead of hanging
     auto host = new FarmHost(hostOptions);
     scope (exit) host.closeOrAbandon();
-    // The domain's timers, triggers and flush run in every host step; its
-    // tasks run on the host's consumers.
+    // Every host step runs one service pass of the domain (timers, triggers,
+    // flush, retirement); its tasks run on the host's consumers.
     auto domain = new FiberDomain(host.farm);
     attachFiberDomain(host, domain);
 
@@ -81,8 +81,8 @@ void main(string[] args)
             || outcome.cause != PrivateCancelCause.requested)
         fatal("fiber cancelAt did not cancel the root");
 
-    // host.close() recycles the terminal fiber (the attachment's finish)
-    // after the consumers stop and before the Farm goes away.
+    // Host steps retired the terminal fiber as it finished; host.close()
+    // retires anything left after the consumers stop.
     writeln("fiber cancelAt: sleeping fiber requested root cancellation"
         ~ ", workers=", host.resolution.workers.length);
 }

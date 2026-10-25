@@ -22,6 +22,10 @@ Windows validation is separate and is not part of the local gate.
   worker bodies; the fork-join dispatcher runs on it. The actor host still
   owns one Farm on one group. The measurements are in
   [several physical groups](docs/guide/scaling-groups.md#several-physical-groups).
+  The same work gives `GroupHost` Fibers: a per-worker attachment hook in its
+  raw worker loop, a park-until-deadline channel from that hook to the idle
+  policy, and one `FiberReadyLane` per group Farm driven by `serve`
+  ([hosting a domain](docs/design/fiber-completion-and-records.md#hosting-a-domain)).
 
 - Continue public-actor tuning from the fused retirement and occupancy path.
   The [lifecycle optimization record](docs/performance/archive-2026-10-20.md#public-actor-lifecycle-optimization-190-progress)

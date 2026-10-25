@@ -2,7 +2,7 @@
 // Experimental dispatch mechanics only: deliberately not a replacement scheduler.
 module warm_fibers;
 import antfarm;
-import ant_fibers.scheduler : FiberDomain, FiberTask;
+import ant_fibers.scheduler : FiberDomain, FiberDomainOptions, FiberTask;
 import core.atomic;
 import core.memory : GC;
 import core.thread : Thread, Fiber;
@@ -252,23 +252,29 @@ int main(string[] args)
     long startTicks;
     if (mode == Mode.domain)
     {
-        auto domain = new FiberDomain(farm);
+        // Retirement hands each terminal task to onCompletion, then recycles
+        // it; the preallocated buffer keeps the warm path allocation-free.
+        auto completed = new FiberTask[total];
+        size_t completedCount;
+        FiberDomainOptions options;
+        options.recordRetention = total * 4;
+        options.onCompletion = (FiberTask t) { completed[completedCount++] = t; };
+        auto domain = new FiberDomain(farm, options);
         domain.reserve(total);
         auto token = farm.registerProducer(Tier.small); enforce(token.valid);
         scope(exit) farm.unregisterProducer(token);
         atomicStore!(MemoryOrder.rel)(go, 1u);
-        FiberTask[] completed;
         void batch()
         {
+            completedCount = 0;
             foreach (ref t; tickets) domain.spawn(&t.managedBody, 64 * 1024);
             while (!domain.drained)
             {
                 domain.flush(token, 256, avgCostForChunk(ringChunk));
                 self.view.consumeNext();
             }
-            completed = domain.takeCompletions();
-            enforce(completed.length == total, "missing managed completions");
-            domain.releaseAll(completed);
+            enforce(domain.retire() == total && completedCount == total,
+                "missing managed completions");
         }
         foreach (_; 0 .. 4) batch();
         foreach (t; completed) warmAddresses ~= cast(size_t)cast(void*)t;
@@ -278,7 +284,7 @@ int main(string[] args)
         foreach (_; 0 .. iterations) batch();
         workers[0].endTicks = MonoTime.currTime.ticks;
         workers[0].gcBytes = GC.allocatedInCurrentThread() - gcBefore;
-        // Identity check only: no task state is read after release.
+        // Identity check only: no task state is read after retirement.
         foreach (t; completed) finalAddresses ~= cast(size_t)cast(void*)t;
         enforce(equal(sort(warmAddresses), sort(finalAddresses)), "warm Fiber pool did not reuse its slots");
         atomicStore!(MemoryOrder.rel)(stop, 1u);

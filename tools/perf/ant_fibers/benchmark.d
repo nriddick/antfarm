@@ -35,7 +35,7 @@ void main(string[] args)
     void burst(bool recycle)
     {
         if (recycle)
-            domain.releaseAll(domain.takeCompletions());
+            domain.retire();
         auto createStart = MonoTime.currTime;
         foreach (_; 0 .. taskCount)
         {

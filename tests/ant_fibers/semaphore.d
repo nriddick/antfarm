@@ -37,7 +37,7 @@ private struct Rig
 
     void close()
     {
-        domain.releaseAll(domain.takeCompletions());
+        domain.retire();
         view.unsubscribe();
         farm.unregisterProducer(token);
         farm.destroy();

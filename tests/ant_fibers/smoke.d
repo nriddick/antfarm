@@ -17,6 +17,7 @@ import host_attach_tests;
 import ant_fibers.semaphore_tests : semaphoreCancellationSmoke;
 import ant_fibers.event_tests : eventCancellationSmoke;
 import ant_fibers.wait_race_tests : waitRaceSmoke;
+import ant_fibers.record_tests : recordSmoke;
 import threadpool.hybrid : ManagedPumpResult, ManagedWorkerHooks, WorkerSelf;
 import threadpool.resolution : PoolResolution;
 import core.thread : Fiber, Thread;
@@ -53,6 +54,60 @@ final class MigrationBox
     this(int value) { this.value = value; }
 }
 
+/// What `onCompletion` saw for one retired task. The handler copies what a
+/// test inspects while the task is still valid; `retire` recycles the task
+/// when the handler returns, so `task` is kept for identity comparison only.
+struct Retired
+{
+    FiberTask task;
+    TaskHandle handle;
+    FiberOutcome outcome;
+    Throwable exception;
+    CancellationDisposition cancellationDisposition;
+}
+
+/// Collects the tasks and lifecycle records a domain retires, in order.
+final class RetireLog
+{
+    Retired[] completions;
+    FiberLifecycleEvent[] records;
+
+    FiberDomainOptions options(size_t recordRetention = defaultRecordRetention)
+    {
+        FiberDomainOptions result;
+        result.recordRetention = recordRetention;
+        result.onCompletion = (FiberTask task) {
+            completions ~= Retired(task, task.handle, task.outcome,
+                task.exception, task.cancellationDisposition);
+        };
+        result.onRecord = (FiberLifecycleEvent event) { records ~= event; };
+        return result;
+    }
+
+    /// `domain.retire(maximum)`, returning the completions it delivered.
+    Retired[] retire(FiberDomain domain, size_t maximum = size_t.max)
+    {
+        immutable recycled = domain.retire(maximum);
+        auto taken = takeCompleted();
+        assert(taken.length == recycled);
+        return taken;
+    }
+
+    Retired[] takeCompleted()
+    {
+        auto taken = completions;
+        completions = null;
+        return taken;
+    }
+
+    FiberLifecycleEvent[] takeRecords()
+    {
+        auto taken = records;
+        records = null;
+        return taken;
+    }
+}
+
 void uxHelpersSmoke()
 {
     import threadpool : PoolOptions;
@@ -69,15 +124,17 @@ void uxHelpersSmoke()
 
     atomicStore(functionSpawnRuns, 0);
     auto first = lane.spawn(&functionSpawnBody);
+    // drainUntilEmpty retires on the Director: `first` is recycled by the
+    // time it returns and is used below for identity only.
     drainUntilEmpty(lane.domain, token, view);
     assert(atomicLoad(functionSpawnRuns) == 2);
-    lane.domain.releaseAll(lane.domain.takeCompletions());
+    assert(!lane.domain.retirementPending && lane.domain.pooled == 1);
 
     auto recycled = lane.spawn(&functionSpawnBody);
     assert(recycled is first);
     drainUntilEmpty(lane.domain, token, view, 256, avgCostForChunk(32));
     assert(atomicLoad(functionSpawnRuns) == 4);
-    lane.domain.releaseAll(lane.domain.takeCompletions());
+    assert(!lane.domain.retirementPending && lane.domain.pooled == 1);
 
     PoolOptions options;
     applyFiberTopologyPreset(
@@ -95,17 +152,19 @@ void cancellationOwnershipSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
-    domain.enableLifecycleEvents();
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
     subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
 
+    // Under the default `director` retirement only the constructing thread
+    // may retire.
     shared int nonDirectorRejected;
     auto intruder = new Thread({
-        try domain.releaseAll(null);
+        try domain.retire();
         catch (Exception)
             atomicStore(nonDirectorRejected, 1);
     });
@@ -113,6 +172,16 @@ void cancellationOwnershipSmoke()
     intruder.join();
     assert(atomicLoad(nonDirectorRejected) == 1);
 
+    size_t cancellationRecords()
+    {
+        size_t n;
+        foreach (record; log.takeRecords())
+            if (record.kind == FiberLifecycleKind.cancellation) ++n;
+        return n;
+    }
+
+    // drainUntilEmpty retires: results come from the completion log, and
+    // handles are captured before the drain recycles their tasks.
     CancellationResult localResult;
     auto local = domain.spawn({
         localResult = FiberDomain.cancelCurrent();
@@ -120,33 +189,25 @@ void cancellationOwnershipSmoke()
     });
     drainUntilEmpty(domain, token, view);
     assert(localResult == CancellationResult.requestedRunning);
-    assert(local.outcome == FiberOutcome.cancelled
-        && local.cancellationDisposition == CancellationDisposition.acknowledged);
-    auto events = domain.takeLifecycleEvents();
-    size_t cancellationEvents;
-    foreach (event; events)
-        if (event.kind == FiberLifecycleKind.cancellation)
-            ++cancellationEvents;
-    assert(cancellationEvents == 1);
-    domain.releaseAll(domain.takeCompletions());
+    auto done = log.takeCompleted();
+    assert(done.length == 1 && done[0].task is local);
+    assert(done[0].outcome == FiberOutcome.cancelled
+        && done[0].cancellationDisposition == CancellationDisposition.acknowledged);
+    assert(cancellationRecords() == 1);
 
     auto remote = domain.spawn({});
-    assert(domain.requestCancel(remote.handle) == CancellationSubmission.queued);
-    assert(domain.requestCancel(remote.handle) == CancellationSubmission.queued);
+    auto remoteHandle = remote.handle;
+    assert(domain.requestCancel(remoteHandle) == CancellationSubmission.queued);
+    assert(domain.requestCancel(remoteHandle) == CancellationSubmission.queued);
     auto applications = domain.drainCancellationRequests();
     assert(applications.length == 2);
     assert(applications[0].result == CancellationResult.wonBeforeEntry);
     assert(applications[1].result == CancellationResult.alreadyRequested);
     drainUntilEmpty(domain, token, view);
-    assert(remote.outcome == FiberOutcome.cancelled);
-    events = domain.takeLifecycleEvents();
-    cancellationEvents = 0;
-    foreach (event; events)
-        if (event.kind == FiberLifecycleKind.cancellation)
-            ++cancellationEvents;
-    assert(cancellationEvents == 1);
-    auto remoteHandle = remote.handle;
-    domain.releaseAll(domain.takeCompletions());
+    done = log.takeCompleted();
+    assert(done.length == 1 && done[0].handle == remoteHandle
+        && done[0].outcome == FiberOutcome.cancelled);
+    assert(cancellationRecords() == 1);
 
     // Two worker-style drainers and the Director can contend for one batch.
     // Queue more duplicates than the 8-bit CANCEL field can represent: only
@@ -185,44 +246,44 @@ void cancellationOwnershipSmoke()
         }
     assert(winners == 1 && domain.pendingCancellationRequests == 0);
     drainUntilEmpty(domain, token, view);
-    assert(concurrent.outcome == FiberOutcome.cancelled);
-    events = domain.takeLifecycleEvents();
-    cancellationEvents = 0;
-    foreach (event; events)
-        if (event.kind == FiberLifecycleKind.cancellation) ++cancellationEvents;
-    assert(cancellationEvents == 1);
-    domain.releaseAll(domain.takeCompletions());
+    done = log.takeCompleted();
+    assert(done.length == 1 && done[0].task is concurrent
+        && done[0].outcome == FiberOutcome.cancelled);
+    assert(cancellationRecords() == 1);
 
     auto replacement = domain.spawn({});
     assert(replacement is remote);
     assert(domain.requestCancel(remoteHandle)
         == CancellationSubmission.staleHandle);
     drainUntilEmpty(domain, token, view);
-    assert(replacement.outcome == FiberOutcome.completed
-        && replacement.cancellationDisposition == CancellationDisposition.none);
-    domain.takeLifecycleEvents();
-    domain.releaseAll(domain.takeCompletions());
+    done = log.takeCompleted();
+    assert(done.length == 1 && done[0].task is replacement
+        && done[0].outcome == FiberOutcome.completed
+        && done[0].cancellationDisposition == CancellationDisposition.none);
+    log.takeRecords();
 
+    // drainUntil does not retire, so `terminal` stays valid until retire.
+    // A request for a terminal, unretired generation applies as
+    // alreadyTerminal and leaves its outcome alone.
     auto terminal = domain.spawn({});
     auto terminalHandle = terminal.handle;
-    drainUntilEmpty(domain, token, view);
+    drainUntil(domain, token, view);
     assert(domain.requestCancel(terminalHandle)
         == CancellationSubmission.queued);
-    auto terminalCompletions = domain.takeCompletions();
-    assert(terminalCompletions.length == 1
-        && terminalCompletions[0] is terminal);
-    domain.takeLifecycleEvents();
-    bool pendingRejected;
-    try domain.release(terminal);
-    catch (Exception)
-        pendingRejected = true;
-    assert(pendingRejected);
     applications = domain.drainCancellationRequests();
     assert(applications.length == 1
         && applications[0].result == CancellationResult.alreadyTerminal);
     assert(terminal.outcome == FiberOutcome.completed
         && terminal.cancellationDisposition == CancellationDisposition.none);
-    domain.release(terminal);
+    // A queued request no longer blocks retirement (release refused it):
+    // retire applies it before the generation can be reused.
+    assert(domain.requestCancel(terminalHandle)
+        == CancellationSubmission.queued);
+    done = log.retire(domain);
+    assert(domain.pendingCancellationRequests == 0);
+    assert(done.length == 1 && done[0].task is terminal
+        && done[0].outcome == FiberOutcome.completed
+        && done[0].cancellationDisposition == CancellationDisposition.none);
 }
 
 void manualSmoke()
@@ -230,7 +291,8 @@ void manualSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -263,9 +325,12 @@ void manualSmoke()
     consumed = view.consumeNext();
     assert(consumed);
     assert(atomicLoad(steps) == 3 && task.terminated);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == 1 && completed[0] is task);
     assert(task.outcome == FiberOutcome.completed && task.exception is null);
+    assert(domain.pendingCompletions == 1);
+    auto completed = log.retire(domain);
+    assert(completed.length == 1 && completed[0].task is task);
+    assert(completed[0].outcome == FiberOutcome.completed
+        && completed[0].exception is null);
 }
 
 void defaultBatchSmoke()
@@ -291,7 +356,7 @@ void defaultBatchSmoke()
         if (domain.drained) break;
     }
     assert(domain.drained);
-    assert(domain.takeCompletions().length == count);
+    assert(domain.pendingCompletions == count && domain.retire() == count);
 }
 
 void recycleSmoke()
@@ -299,7 +364,8 @@ void recycleSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -315,14 +381,16 @@ void recycleSmoke()
     auto consumed = view.consumeNext();
     assert(consumed);
     assert(task.terminated && task.outcome == FiberOutcome.completed);
-    auto done = domain.takeCompletions();
-    assert(done.length == 1 && done[0] is task);
     FiberOutcome observedOutcome;
     auto observed = firstHandle.tryOutcome(observedOutcome);
     assert(observed);
     assert(observedOutcome == FiberOutcome.completed);
-    domain.release(task);
+    auto done = log.retire(domain);
+    assert(done.length == 1 && done[0].task is task);
     assert(domain.pooled == 1);
+    // Retired but not yet reused: the handle still reads its generation.
+    observed = firstHandle.tryOutcome(observedOutcome);
+    assert(observed && observedOutcome == FiberOutcome.completed);
 
     // The pool hands the same object back with fresh scheduling state.
     auto recycled = domain.spawn({ atomicFetchAdd(runs, 1); });
@@ -343,9 +411,8 @@ void recycleSmoke()
     assert(recycled.terminated && recycled.outcome == FiberOutcome.completed);
     assert(atomicLoad(runs) == 2);
     assert(domain.drained);
-    done = domain.takeCompletions();
-    assert(done.length == 1 && done[0] is recycled);
-    domain.release(recycled);
+    done = log.retire(domain);
+    assert(done.length == 1 && done[0].task is recycled);
 
     // A valid newer cancellation is a generation tag, not a resettable bool.
     // A stale request cannot overwrite/clear it after another reuse.
@@ -362,8 +429,9 @@ void recycleSmoke()
     assert(consumed);
     assert(cancelledTask.outcome == FiberOutcome.cancelled);
     assert(atomicLoad(runs) == 2); // cancellation won before user-body entry
-    done = domain.takeCompletions();
-    assert(done.length == 1 && done[0] is cancelledTask);
+    done = log.retire(domain);
+    assert(done.length == 1 && done[0].task is cancelledTask
+        && done[0].outcome == FiberOutcome.cancelled);
 }
 
 void externalJoinSmoke()
@@ -371,7 +439,8 @@ void externalJoinSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -403,11 +472,10 @@ void externalJoinSmoke()
     assert(flushed == 1);
     auto consumed = view.consumeNext();
     assert(consumed && domain.drained);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == 1 && completed[0] is task);
-    // release closes old-generation waiter admission and cannot reset the
+    // retire closes old-generation waiter admission and cannot reset the
     // manual-reset event until an already registered joiner has awakened.
-    domain.release(task);
+    auto completed = log.retire(domain);
+    assert(completed.length == 1 && completed[0].task is task);
     joiner.join();
     assert(atomicLoad(joinFinished) == 1);
     assert(atomicLoad(joinedStatus) == FiberJoinStatus.completed);
@@ -427,13 +495,12 @@ void externalJoinSmoke()
     assert(flushed == 1);
     consumed = view.consumeNext();
     assert(consumed && domain.drained);
-    completed = domain.takeCompletions();
-    assert(completed.length == 1 && completed[0] is recycled);
     assert(atomicLoad(managedJoinStatus) == FiberJoinStatus.wouldBlock);
     auto joined = recycled.handle.join();
     assert(joined.terminal && joined.status == FiberJoinStatus.completed);
     assert(joined.outcome == FiberOutcome.completed && joined.failure is null);
-    domain.release(recycled);
+    completed = log.retire(domain);
+    assert(completed.length == 1 && completed[0].task is recycled);
 }
 
 void fiberJoinSmoke()
@@ -441,7 +508,8 @@ void fiberJoinSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -470,9 +538,7 @@ void fiberJoinSmoke()
     consumed = view.consumeNext();
     assert(consumed && joiner.terminated && domain.drained);
     assert(joined.status == FiberJoinStatus.completed && joined.terminal);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == 2);
-    domain.releaseAll(completed);
+    assert(log.retire(domain).length == 2);
 
     FiberJoinResult timedJoin;
     auto timedTarget = domain.spawn({ FiberDomain.await(0x4A02); });
@@ -500,9 +566,7 @@ void fiberJoinSmoke()
     assert(flushed == 1);
     consumed = view.consumeNext();
     assert(consumed && timedTarget.terminated && domain.drained);
-    completed = domain.takeCompletions();
-    assert(completed.length == 2);
-    domain.releaseAll(completed);
+    assert(log.retire(domain).length == 2);
 
     FiberJoinResult timerCancelledJoin;
     auto earlyTarget = domain.spawn({ FiberDomain.await(0x4A04); });
@@ -530,9 +594,7 @@ void fiberJoinSmoke()
     long unusedDeadline;
     auto timerRemains = domain.nextTimerDeadline(unusedDeadline);
     assert(!timerRemains);
-    completed = domain.takeCompletions();
-    assert(completed.length == 2);
-    domain.releaseAll(completed);
+    assert(log.retire(domain).length == 2);
 
     shared int joinCleanup;
     auto cancelTarget = domain.spawn({ FiberDomain.await(0x4A03); });
@@ -561,9 +623,7 @@ void fiberJoinSmoke()
     assert(flushed == 1);
     consumed = view.consumeNext();
     assert(consumed && cancelTarget.terminated && domain.drained);
-    completed = domain.takeCompletions();
-    assert(completed.length == 2);
-    domain.releaseAll(completed);
+    assert(log.retire(domain).length == 2);
 
     TaskHandle selfHandle;
     FiberJoinStatus selfStatus;
@@ -574,11 +634,11 @@ void fiberJoinSmoke()
     consumed = view.consumeNext();
     assert(consumed && self.terminated && domain.drained);
     assert(selfStatus == FiberJoinStatus.wouldBlock);
-    completed = domain.takeCompletions();
-    assert(completed.length == 1 && completed[0] is self);
-    domain.release(self);
+    auto retired = log.retire(domain);
+    assert(retired.length == 1 && retired[0].task is self);
 
-    auto otherDomain = new FiberDomain(farm);
+    auto otherLog = new RetireLog;
+    auto otherDomain = new FiberDomain(farm, otherLog.options);
     auto foreignTarget = otherDomain.spawn({});
     auto foreignHandle = foreignTarget.handle;
     FiberJoinStatus foreignStatus;
@@ -590,9 +650,8 @@ void fiberJoinSmoke()
     consumed = view.consumeNext();
     assert(consumed && foreignProbe.terminated && domain.drained);
     assert(foreignStatus == FiberJoinStatus.wrongDomain);
-    completed = domain.takeCompletions();
-    assert(completed.length == 1 && completed[0] is foreignProbe);
-    domain.release(foreignProbe);
+    retired = log.retire(domain);
+    assert(retired.length == 1 && retired[0].task is foreignProbe);
 
     cancellation = otherDomain.directorCancelDetailed(foreignHandle);
     assert(cancellation == CancellationResult.wonBeforeEntry);
@@ -600,9 +659,8 @@ void fiberJoinSmoke()
     assert(flushed == 1);
     consumed = view.consumeNext();
     assert(consumed && foreignTarget.terminated && otherDomain.drained);
-    completed = otherDomain.takeCompletions();
-    assert(completed.length == 1 && completed[0] is foreignTarget);
-    otherDomain.release(foreignTarget);
+    retired = otherLog.retire(otherDomain);
+    assert(retired.length == 1 && retired[0].task is foreignTarget);
 }
 
 void cancellationSemanticsSmoke()
@@ -610,7 +668,8 @@ void cancellationSemanticsSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -629,11 +688,10 @@ void cancellationSemanticsSmoke()
     assert(preEntry.cancellationDisposition
         == CancellationDisposition.acknowledged);
     assert(atomicLoad(entered) == 0);
-    auto done = domain.takeCompletions();
-    assert(done.length == 1);
     cancellation = domain.directorCancelDetailed(preEntry.handle);
     assert(cancellation == CancellationResult.alreadyTerminal);
-    domain.release(preEntry);
+    auto done = log.retire(domain);
+    assert(done.length == 1 && done[0].task is preEntry);
     // A HOLD Fiber rejected before entry is replaced safely on pool reuse.
     auto replacement = domain.spawn({ atomicFetchAdd(entered, 1); });
     assert(replacement is preEntry);
@@ -644,8 +702,8 @@ void cancellationSemanticsSmoke()
     assert(replacement.outcome == FiberOutcome.completed);
     assert(replacement.cancellationDisposition == CancellationDisposition.none);
     assert(atomicLoad(entered) == 1);
-    done = domain.takeCompletions();
-    domain.release(replacement);
+    done = log.retire(domain);
+    assert(done.length == 1 && done[0].task is replacement);
 
     auto ready = domain.spawn({ FiberDomain.yieldReady(); });
     flushed = domain.flush(token);
@@ -661,8 +719,8 @@ void cancellationSemanticsSmoke()
     assert(ready.outcome == FiberOutcome.cancelled);
     assert(ready.cancellationDisposition
         == CancellationDisposition.acknowledged);
-    done = domain.takeCompletions();
-    domain.release(ready);
+    done = log.retire(domain);
+    assert(done.length == 1 && done[0].task is ready);
 
     shared int runningEntered;
     auto running = domain.spawn({
@@ -695,8 +753,8 @@ void cancellationSemanticsSmoke()
     assert(running.outcome == FiberOutcome.cancelled);
     assert(running.cancellationDisposition
         == CancellationDisposition.resultAbrogated);
-    done = domain.takeCompletions();
-    domain.release(running);
+    done = log.retire(domain);
+    assert(done.length == 1 && done[0].task is running);
     while (view.consumeNext()) {}
 
     auto cleanupFailure = domain.spawn({
@@ -719,8 +777,12 @@ void cancellationSemanticsSmoke()
         == CancellationDisposition.cleanupFailed);
     assert(cleanupFailure.exception !is null
         && cleanupFailure.exception.msg == "cleanup failure");
-    done = domain.takeCompletions();
-    assert(done.length == 1 && done[0] is cleanupFailure);
+    done = log.retire(domain);
+    assert(done.length == 1 && done[0].task is cleanupFailure);
+    assert(done[0].exception !is null
+        && done[0].exception.msg == "cleanup failure"
+        && done[0].cancellationDisposition
+            == CancellationDisposition.cleanupFailed);
 }
 
 void lifecycleEventSmoke()
@@ -728,8 +790,8 @@ void lifecycleEventSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
-    domain.enableLifecycleEvents();
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -737,30 +799,38 @@ void lifecycleEventSmoke()
     scope (exit) view.unsubscribe();
 
     auto completedTask = domain.spawn({});
-    auto events = domain.takeLifecycleEvents();
+    auto completedHandle = completedTask.handle;
+    assert(domain.pendingRecords == 1 && domain.reservedRecords == 4);
+    // Nothing is terminal yet, so retire delivers only the admitted record.
+    assert(domain.retire() == 0);
+    auto events = log.takeRecords();
     assert(events.length == 1);
     assert(events[0].kind == FiberLifecycleKind.admitted);
-    assert(events[0].task == completedTask.handle);
-    immutable firstSequence = events[0].sequence;
+    assert(events[0].task == completedHandle);
+    // Sequences are assigned at emission, from 1 in each domain.
+    assert(events[0].sequence == 1);
     auto flushed = domain.flush(token);
     assert(flushed == 1);
     auto consumed = view.consumeNext();
     assert(consumed);
-    auto completions = domain.takeCompletions();
-    assert(completions.length == 1);
-    // The terminal event retains the scheduler root after completion drain.
-    assert(domain.pendingEvents == 1);
-    events = domain.takeLifecycleEvents();
+    // Termination returned the two unused reservations; the terminal record
+    // holds the last one until it is retired, ahead of the completion.
+    assert(domain.pendingRecords == 1 && domain.pendingCompletions == 1);
+    assert(domain.reservedRecords == 1);
+    auto completions = log.retire(domain);
+    assert(completions.length == 1 && completions[0].task is completedTask);
+    events = log.takeRecords();
     assert(events.length == 1);
     assert(events[0].kind == FiberLifecycleKind.terminal);
     assert(events[0].outcome == FiberOutcome.completed);
-    assert(events[0].sequence == firstSequence + 1);
-    domain.release(completedTask);
+    assert(events[0].task == completedHandle && events[0].sequence == 2);
+    assert(domain.reservedRecords == 0);
 
     auto failed = domain.spawn({
         scope (failure) throw new Exception("event cleanup failure");
         FiberDomain.await(0xE7E7);
     });
+    auto oldHandle = failed.handle;
     flushed = domain.flush(token);
     assert(flushed == 1);
     consumed = view.consumeNext();
@@ -772,10 +842,21 @@ void lifecycleEventSmoke()
     consumed = view.consumeNext();
     assert(consumed);
     assert(failed.outcome == FiberOutcome.failed);
-    completions = domain.takeCompletions();
-    assert(completions.length == 1 && completions[0] is failed);
-    events = domain.takeLifecycleEvents();
-    assert(events.length == 4);
+    // Records no longer root their task: retire(1) retires one record, then
+    // recycles `failed` while its cancellation, terminal and failure records
+    // are still queued.
+    assert(domain.pendingRecords == 4 && domain.pendingCompletions == 1);
+    completions = log.retire(domain, 1);
+    assert(completions.length == 1 && completions[0].task is failed);
+    assert(domain.pendingRecords == 3 && domain.pendingCompletions == 0);
+    assert(domain.pooled == 1);
+
+    auto reused = domain.spawn({});
+    assert(reused is failed && !oldHandle.current);
+    // The old generation's remaining records, then the reuse's admission.
+    assert(domain.retire() == 0);
+    events = log.takeRecords();
+    assert(events.length == 5);
     assert(events[0].kind == FiberLifecycleKind.admitted);
     assert(events[1].kind == FiberLifecycleKind.cancellation);
     assert(events[1].cancellation == CancellationResult.requestedWaiting);
@@ -790,24 +871,27 @@ void lifecycleEventSmoke()
         && events[3].failure.msg == "event cleanup failure");
     assert(events[3].cancellationDisposition
         == CancellationDisposition.cleanupFailed);
+    foreach (i; 0 .. 4)
+        assert(events[i].task == oldHandle);
+    assert(events[4].kind == FiberLifecycleKind.admitted
+        && events[4].task == reused.handle);
+    assert(events[0].sequence == 3);
     foreach (i; 1 .. events.length)
         assert(events[i].sequence == events[i - 1].sequence + 1);
+    // A record outlives its recycled task: the handle it carries is stale,
+    // but its outcome and failure are its own.
+    assert(!events[3].task.current);
     auto retainedFailure = events[3].failure;
-    auto oldHandle = events[3].task;
-    domain.release(failed);
-
-    auto reused = domain.spawn({});
-    assert(reused is failed && !oldHandle.current);
-    assert(retainedFailure.msg == "event cleanup failure");
     // Drain the reused generation fully to leave no explicit domain root.
     flushed = domain.flush(token);
     assert(flushed == 1);
     consumed = view.consumeNext();
     assert(consumed);
-    completions = domain.takeCompletions();
-    events = domain.takeLifecycleEvents();
-    assert(completions.length == 1 && events.length == 2);
-    domain.release(reused);
+    completions = log.retire(domain);
+    events = log.takeRecords();
+    assert(completions.length == 1 && completions[0].task is reused);
+    assert(events.length == 1 && events[0].kind == FiberLifecycleKind.terminal);
+    assert(retainedFailure.msg == "event cleanup failure");
 
     auto fatalTask = domain.spawn({ throw new Error("fatal event"); });
     flushed = domain.flush(token);
@@ -821,16 +905,16 @@ void lifecycleEventSmoke()
     try domain.spawn({});
     catch (Exception) admissionRejected = true;
     assert(admissionRejected);
-    completions = domain.takeCompletions();
-    events = domain.takeLifecycleEvents();
-    assert(completions.length == 1 && completions[0] is fatalTask);
+    completions = log.retire(domain);
+    events = log.takeRecords();
+    assert(completions.length == 1 && completions[0].task is fatalTask);
+    assert(cast(Error) completions[0].exception !is null);
     assert(events.length == 3);
     assert(events[0].kind == FiberLifecycleKind.admitted);
     assert(events[1].kind == FiberLifecycleKind.terminal);
     assert(events[2].kind == FiberLifecycleKind.failure);
     assert(cast(Error) events[2].failure !is null);
-    assert(domain.lifecycleReserved == 0);
-    domain.release(fatalTask);
+    assert(domain.reservedRecords == 0 && domain.pendingRecords == 0);
 }
 
 void lifecycleRetentionSmoke()
@@ -838,17 +922,14 @@ void lifecycleRetentionSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    // Retention is construction-time configuration of at least 4 records.
     bool invalidLimit;
-    try domain.enableLifecycleEvents(3);
+    try cast(void) new FiberDomain(farm, log.options(3));
     catch (Exception) invalidLimit = true;
     assert(invalidLimit);
-    domain.enableLifecycleEvents(8);
-    assert(domain.lifecycleRetentionLimit == 8);
-    bool reconfigurationRejected;
-    try domain.enableLifecycleEvents(12);
-    catch (Exception) reconfigurationRejected = true;
-    assert(reconfigurationRejected);
+    auto domain = new FiberDomain(farm, log.options(8));
+    assert(domain.options.recordRetention == 8);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -857,7 +938,7 @@ void lifecycleRetentionSmoke()
 
     auto first = domain.spawn({});
     auto second = domain.spawn({});
-    assert(domain.lifecycleReserved == 8 && domain.pendingEvents == 2);
+    assert(domain.reservedRecords == 8 && domain.pendingRecords == 2);
     bool rejected;
     try domain.spawn({});
     catch (FiberLifecycleBackpressure failure)
@@ -871,22 +952,29 @@ void lifecycleRetentionSmoke()
     assert(flushed == 1);
     auto consumed = view.consumeNext();
     assert(consumed && first.terminated);
-    assert(domain.lifecycleReserved == 6 && domain.pendingEvents == 3);
+    assert(domain.reservedRecords == 6 && domain.pendingRecords == 3);
 
-    auto one = domain.takeLifecycleEvents(1);
+    // retire(1) retires one record and then one terminal task: `first` is
+    // recycled while its terminal record is still queued.
+    auto retired = log.retire(domain, 1);
+    assert(retired.length == 1 && retired[0].task is first);
+    auto one = log.takeRecords();
     assert(one.length == 1 && one[0].kind == FiberLifecycleKind.admitted);
-    assert(domain.lifecycleReserved == 5 && domain.pendingEvents == 2);
+    assert(domain.reservedRecords == 5 && domain.pendingRecords == 2);
     rejected = false;
     try domain.spawn({});
     catch (FiberLifecycleBackpressure) rejected = true;
     assert(rejected);
 
-    auto two = domain.takeLifecycleEvents(1);
+    assert(domain.retire(1) == 0);
+    auto two = log.takeRecords();
     assert(two.length == 1 && two[0].kind == FiberLifecycleKind.admitted);
     assert(two[0].sequence == one[0].sequence + 1);
-    assert(domain.lifecycleReserved == 4 && domain.pendingEvents == 1);
+    assert(domain.reservedRecords == 4 && domain.pendingRecords == 1);
+    // The refused spawns left the pool alone: `first`'s storage is reused.
     auto third = domain.spawn({});
-    assert(domain.lifecycleReserved == 8);
+    assert(third is first);
+    assert(domain.reservedRecords == 8);
 
     flushed = domain.flush(token);
     assert(flushed == 2);
@@ -894,79 +982,89 @@ void lifecycleRetentionSmoke()
     assert(consumed);
     consumed = view.consumeNext();
     assert(second.terminated && third.terminated && domain.drained);
-    assert(domain.lifecycleReserved == 4);
-    FiberLifecycleEvent[] remainder;
-    while (domain.pendingEvents != 0)
-        remainder ~= domain.takeLifecycleEvents(2);
-    assert(remainder.length == 4 && domain.lifecycleReserved == 0);
+    assert(domain.reservedRecords == 4);
+    // Each retire(2) retires up to two records, then up to two tasks.
+    size_t recycled = retired.length;
+    while (domain.pendingRecords != 0)
+        recycled += log.retire(domain, 2).length;
+    auto remainder = log.takeRecords();
+    assert(remainder.length == 4 && domain.reservedRecords == 0);
+    assert(remainder[0].sequence == two[0].sequence + 1);
     foreach (i; 1 .. remainder.length)
         assert(remainder[i].sequence == remainder[i - 1].sequence + 1);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == 3);
-    domain.releaseAll(completed);
+    assert(recycled == 3 && domain.pendingCompletions == 0);
 
-    auto handlerDomain = new FiberDomain(farm);
-    handlerDomain.enableLifecycleEvents(8);
+    // A throwing record handler leaves that record, and every later one,
+    // queued with the same sequence numbers; that call recycles no task.
+    size_t calls;
+    bool failRecords = true;
+    ulong failedSequence;
+    FiberLifecycleKind failedKind;
+    FiberLifecycleEvent[] handled;
+    FiberTask[] handledTasks;
+    FiberDomainOptions handlerOptions;
+    handlerOptions.recordRetention = 8;
+    handlerOptions.onRecord = (FiberLifecycleEvent event)
+    {
+        ++calls;
+        if (failRecords)
+        {
+            failedSequence = event.sequence;
+            failedKind = event.kind;
+            throw new Exception("handler retry");
+        }
+        handled ~= event;
+    };
+    handlerOptions.onCompletion = (FiberTask task) { handledTasks ~= task; };
+    auto handlerDomain = new FiberDomain(farm, handlerOptions);
     auto handledTask = handlerDomain.spawn({});
     flushed = handlerDomain.flush(token);
     assert(flushed == 1);
     consumed = view.consumeNext();
     assert(consumed && handledTask.terminated && handlerDomain.drained);
-    completed = handlerDomain.takeCompletions();
-    assert(completed.length == 1 && completed[0] is handledTask);
-    assert(handlerDomain.pendingEvents == 2
-        && handlerDomain.lifecycleReserved == 2);
+    assert(handlerDomain.pendingRecords == 2
+        && handlerDomain.reservedRecords == 2
+        && handlerDomain.pendingCompletions == 1);
 
-    size_t calls;
-    ulong failedSequence;
-    FiberLifecycleKind failedKind;
-    FiberLifecycleHandler failing =
-        (ref const FiberLifecycleEvent event)
-        {
-            ++calls;
-            failedSequence = event.sequence;
-            failedKind = event.kind;
-            throw new Exception("handler retry");
-        };
     bool handlerFailed;
-    try handlerDomain.handleLifecycleEvents(failing, 1);
+    try handlerDomain.retire(1);
     catch (Exception failure)
     {
         handlerFailed = failure.msg == "handler retry";
     }
     assert(handlerFailed && calls == 1);
-    assert(handlerDomain.pendingEvents == 2
-        && handlerDomain.lifecycleReserved == 2);
+    assert(handlerDomain.pendingRecords == 2
+        && handlerDomain.reservedRecords == 2);
+    assert(handlerDomain.pendingCompletions == 1 && handledTasks.length == 0);
 
-    ulong retriedSequence;
-    FiberLifecycleKind retriedKind;
-    FiberLifecycleHandler retry =
-        (ref const FiberLifecycleEvent event)
-        {
-            ++calls;
-            retriedSequence = event.sequence;
-            retriedKind = event.kind;
-        };
-    auto handled = handlerDomain.handleLifecycleEvents(retry, 1);
-    assert(handled == 1 && calls == 2);
-    assert(retriedSequence == failedSequence && retriedKind == failedKind);
-    assert(handlerDomain.pendingEvents == 1
-        && handlerDomain.lifecycleReserved == 1);
-    auto terminal = handlerDomain.takeLifecycleEvents(1);
-    assert(terminal.length == 1
-        && terminal[0].kind == FiberLifecycleKind.terminal);
-    assert(terminal[0].sequence == retriedSequence + 1);
-    assert(handlerDomain.pendingEvents == 0
-        && handlerDomain.lifecycleReserved == 0);
-    handlerDomain.release(handledTask);
+    // The retry sees the same record. retire counts tasks: one record, then
+    // the one terminal task.
+    failRecords = false;
+    assert(handlerDomain.retire(1) == 1 && calls == 2);
+    assert(handled.length == 1 && handled[0].sequence == failedSequence
+        && handled[0].kind == failedKind);
+    assert(handledTasks.length == 1 && handledTasks[0] is handledTask);
+    assert(handlerDomain.pendingRecords == 1
+        && handlerDomain.reservedRecords == 1);
+    assert(handlerDomain.retire(1) == 0);
+    assert(handled.length == 2
+        && handled[1].kind == FiberLifecycleKind.terminal);
+    assert(handled[1].sequence == failedSequence + 1);
+    assert(handlerDomain.pendingRecords == 0
+        && handlerDomain.reservedRecords == 0);
 }
 
 void lifecycleBacklogSmoke()
 {
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
-    domain.enableLifecycleEvents(4 * 128);
+    // onRecord is fixed at construction; it forwards to `check`, which the
+    // test swaps between phases.
+    FiberLifecycleHandler check;
+    FiberDomainOptions options;
+    options.recordRetention = 4 * 128;
+    options.onRecord = (FiberLifecycleEvent event) { check(event); };
+    auto domain = new FiberDomain(farm, options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -977,7 +1075,7 @@ void lifecycleBacklogSmoke()
     foreach (_; 0 .. 96) tasks ~= domain.spawn({});
     size_t seen;
     ulong sequence;
-    FiberLifecycleHandler checkAdmitted = (ref const FiberLifecycleEvent event)
+    FiberLifecycleHandler checkAdmitted = (FiberLifecycleEvent event)
     {
         assert(event.kind == FiberLifecycleKind.admitted);
         assert(event.task == tasks[seen].handle);
@@ -985,59 +1083,62 @@ void lifecycleBacklogSmoke()
         sequence = event.sequence;
         ++seen;
     };
-    foreach (ref event; domain.takeLifecycleEvents(3)) checkAdmitted(event);
-    // New head entries must remain behind the already detached backlog.
+    check = checkAdmitted;
+    assert(domain.retire(3) == 0 && seen == 3);
+    // Records emitted after a partial retire queue behind the unretired ones.
     foreach (_; 0 .. 17) tasks ~= domain.spawn({});
-    assert(domain.pendingEvents == tasks.length - seen);
-    assert(domain.takeLifecycleEvents(0).length == 0);
-    assert(domain.handleLifecycleEvents(checkAdmitted, 0) == 0);
+    assert(domain.pendingRecords == tasks.length - seen);
+    assert(domain.retire(0) == 0 && seen == 3);
     bool failed;
     ulong failedSequence;
-    FiberLifecycleHandler failing = (ref const FiberLifecycleEvent event)
+    check = (FiberLifecycleEvent event)
     {
         if (seen == 19)
         {
             failedSequence = event.sequence;
-            throw new Exception("retry in a partially acknowledged backlog");
+            throw new Exception("retry in a partially retired ring");
         }
         checkAdmitted(event);
     };
-    try domain.handleLifecycleEvents(failing, 32);
+    try domain.retire(32);
     catch (Exception) failed = true;
     assert(failed && seen == 19 && failedSequence == sequence + 1);
-    assert(domain.pendingEvents == tasks.length - seen);
-    while (domain.pendingEvents != 0)
+    assert(domain.pendingRecords == tasks.length - seen);
+    check = checkAdmitted;
+    while (domain.pendingRecords != 0)
     {
-        auto batch = domain.takeLifecycleEvents(5);
-        assert(batch.length <= 5);
-        foreach (ref event; batch) checkAdmitted(event);
-        assert(domain.pendingEvents == tasks.length - seen);
-        auto handled = domain.handleLifecycleEvents(checkAdmitted, 11);
-        assert(handled <= 11);
-        assert(domain.pendingEvents == tasks.length - seen);
+        auto before = seen;
+        assert(domain.retire(5) == 0 && seen - before <= 5);
+        assert(domain.pendingRecords == tasks.length - seen);
+        before = seen;
+        assert(domain.retire(11) == 0 && seen - before <= 11);
+        assert(domain.pendingRecords == tasks.length - seen);
     }
     assert(seen == tasks.length);
-    assert(domain.takeLifecycleEvents(1).length == 0);
-    assert(domain.handleLifecycleEvents(checkAdmitted, 1) == 0);
+    assert(domain.retire(1) == 0 && seen == tasks.length);
 
-    drainUntilEmpty(domain, token, view);
-    auto completions = domain.takeCompletions();
-    assert(completions.length == tasks.length);
+    // drainUntil does not retire: the terminal records and tasks wait for
+    // the retire(7) batches below, each of which retires records first.
+    drainUntil(domain, token, view);
+    assert(domain.pendingCompletions == tasks.length);
     size_t terminals;
-    while (domain.pendingEvents != 0)
+    check = (FiberLifecycleEvent event)
     {
-        foreach (ref event; domain.takeLifecycleEvents(7))
-        {
-            assert(event.kind == FiberLifecycleKind.terminal);
-            assert(event.outcome == FiberOutcome.completed);
-            ++sequence;
-            assert(event.sequence == sequence);
-            ++terminals;
-        }
-        assert(domain.pendingEvents == tasks.length - terminals);
+        assert(event.kind == FiberLifecycleKind.terminal);
+        assert(event.outcome == FiberOutcome.completed);
+        ++sequence;
+        assert(event.sequence == sequence);
+        ++terminals;
+    };
+    size_t recycled;
+    while (domain.pendingRecords != 0)
+    {
+        recycled += domain.retire(7);
+        assert(domain.pendingRecords == tasks.length - terminals);
     }
-    assert(terminals == tasks.length && domain.lifecycleReserved == 0);
-    domain.releaseAll(completions);
+    recycled += domain.retire();
+    assert(terminals == tasks.length && recycled == tasks.length);
+    assert(domain.reservedRecords == 0 && domain.pendingCompletions == 0);
 }
 
 void sharedDomainLaneSmoke()
@@ -1111,9 +1212,7 @@ void sharedDomainLaneSmoke()
     assert(joined.status == FiberJoinStatus.completed
         && joined.task == target.handle);
 
-    auto completed = domain.takeCompletions();
-    assert(completed.length == 2);
-    domain.releaseAll(completed);
+    assert(domain.retire() == 2);
 }
 
 void remoteSweeperSmoke()
@@ -1180,9 +1279,7 @@ void remoteSweeperSmoke()
     assert(laneA.published == 0 && laneB.published == 0);
     foreach (task; tasks)
         assert(task.terminated && task.resumeCount == 2);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == count);
-    domain.releaseAll(completed);
+    assert(domain.retire() == count);
 }
 
 /// Consume the next single-activation table from a fresh OS thread. Publishing
@@ -1232,7 +1329,8 @@ void migrationSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
 
@@ -1304,11 +1402,12 @@ void migrationSmoke()
         assert(identities[i] != 0);
         if (i != 0) assert(identities[i] != identities[i - 1]);
     }
-    auto completed = domain.takeCompletions();
-    assert(completed.length == 1 && completed[0] is task);
+    auto completed = log.retire(domain);
+    assert(completed.length == 1 && completed[0].task is task);
 
     // An exception retained by druntime must cross back from a migrated
-    // fiber without escaping the @nogc/nothrow Ant Farm callback.
+    // fiber without escaping the @nogc/nothrow Ant Farm callback. `failed`
+    // reuses the storage `task` was retired to.
     auto failed = domain.spawn({
         FiberDomain.yieldReady();
         throw new Exception("failure after migration");
@@ -1323,8 +1422,8 @@ void migrationSmoke()
     assert(failed.outcome == FiberOutcome.failed);
     assert(failed.exception !is null
         && failed.exception.msg == "failure after migration");
-    completed = domain.takeCompletions();
-    assert(completed.length == 1 && completed[0] is failed);
+    completed = log.retire(domain);
+    assert(completed.length == 1 && completed[0].task is failed);
 }
 
 void wakePolicySmoke()
@@ -1367,8 +1466,7 @@ void wakePolicySmoke()
     assert(flushed == 1);
     auto consumed = view.consumeNext();
     assert(consumed);
-    auto completions = lane.domain.takeCompletions();
-    assert(completions.length == 1);
+    assert(lane.retire() == 1);
 }
 
 void mixedPayloadSmoke()
@@ -1377,7 +1475,8 @@ void mixedPayloadSmoke()
     auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
     ConsumerView view;
@@ -1419,10 +1518,10 @@ void mixedPayloadSmoke()
     assert(atomicLoad(barePayloadRuns) == count);
     assert(atomicLoad(fiberRuns) == count * 2);
     assert(domain.drained);
-    auto completed = domain.takeCompletions();
+    auto completed = log.retire(domain);
     assert(completed.length == count);
-    foreach (task; completed)
-        assert(task.outcome == FiberOutcome.completed);
+    foreach (retired; completed)
+        assert(retired.outcome == FiberOutcome.completed);
 }
 
 void drainUntil(FiberDomain domain, ref Token token, ref ConsumerView view,
@@ -1486,7 +1585,7 @@ void syncPrimitiveSmoke()
     posted.set();
     drainUntil(domain, token, view);
     assert(atomicLoad(ran) == 1);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     auto generations = new FiberGenerationTrigger(domain);
     shared uint generationsSeen;
@@ -1504,7 +1603,7 @@ void syncPrimitiveSmoke()
     drainUntil(domain, token, view);
     assert(atomicLoad(generationsSeen) == 2
         && generations.completed == 2);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     // Advances may coalesce before the consumer Fiber begins waiting.
     auto prepostedGenerations = new FiberGenerationTrigger(domain);
@@ -1519,7 +1618,7 @@ void syncPrimitiveSmoke()
     drainUntil(domain, token, view);
     assert(atomicLoad(generationsSeen) == 2
         && prepostedGenerations.completed == 2);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     // Distinct completion callbacks may publish into the deferred MPSC stack
     // concurrently. Force a burst of producers so a failed head CAS must
@@ -1555,7 +1654,7 @@ void syncPrimitiveSmoke()
     assert(domain.directorCancel(cancelledWaiter));
     drainUntil(domain, token, view);
     assert(cancelledWaiter.outcome == FiberOutcome.cancelled);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
     atomicStore(generationsSeen, 0u);
     domain.spawn({
         cancelledGenerations.waitNext();
@@ -1565,7 +1664,7 @@ void syncPrimitiveSmoke()
     cancelledGenerations.advance();
     drainUntil(domain, token, view);
     assert(atomicLoad(generationsSeen) == 1);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     auto ready = new FiberEvent(domain);
     ready.set();
@@ -1576,7 +1675,7 @@ void syncPrimitiveSmoke()
     });
     drainUntil(domain, token, view);
     assert(atomicLoad(ran) == 1);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     auto gate = new FiberEvent(domain, FiberEventMode.manualReset);
     shared uint manualRan;
@@ -1593,7 +1692,7 @@ void syncPrimitiveSmoke()
     gate.set();
     drainUntil(domain, token, view);
     assert(atomicLoad(manualRan) == 2);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 2);
 
     auto sem = new FiberSemaphore(domain, 0);
     shared uint semRan;
@@ -1610,7 +1709,7 @@ void syncPrimitiveSmoke()
     sem.post(2);
     drainUntil(domain, token, view);
     assert(atomicLoad(semRan) == 2);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 2);
 
     auto permits = new FiberSemaphore(domain, 2);
     shared uint permitRan;
@@ -1621,7 +1720,7 @@ void syncPrimitiveSmoke()
     });
     drainUntil(domain, token, view);
     assert(atomicLoad(permitRan) == 1 && permits.available == 0);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 }
 
 void sharedSignalAndTimerCancellationSmoke()
@@ -1678,11 +1777,10 @@ void sharedSignalAndTimerCancellationSmoke()
     long unusedDeadline;
     auto hasDeadline = domain.nextTimerDeadline(unusedDeadline);
     assert(!hasDeadline);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == count + 1);
     assert(timer.outcome == FiberOutcome.cancelled);
     assert(timer.cancellationDisposition
         == CancellationDisposition.acknowledged);
+    assert(domain.retire() == count + 1);
 }
 
 void threadpoolSmoke()
@@ -1692,6 +1790,7 @@ void threadpoolSmoke()
     import threadpool;
 
     auto topology = CacheAwarePool.topology();
+    auto log = new RetireLog;
     AntFarm*[] farms;
     FiberLane[] lanes;
     foreach (_; 0 .. topology.llcCount)
@@ -1699,7 +1798,7 @@ void threadpoolSmoke()
         auto farm = AntFarm.create(2, 8, 1, 0, 0, 2, 4096,
                                    DEFAULT_SMALL_TABLE_THRESHOLD, false);
         farms ~= farm;
-        lanes ~= new FiberLane(farm);
+        lanes ~= new FiberLane(farm, log.options);
     }
     scope (exit)
     {
@@ -1748,6 +1847,14 @@ void threadpoolSmoke()
     assert(task.terminated && atomicLoad(ran) == 1);
     assert(atomicLoad(observedLlc) == selectedLlc);
     assert(pool.workerFailures.length == 0);
+    // Under `director` retirement workers never retire: they leave the
+    // terminal task (still valid) for the Director, and only note it in the
+    // lane mailbox.
+    assert(lanes[selectedLlc].domain.pendingCompletions == 1);
+    assert((cast(uint) lanes[selectedLlc].takeWakeEvents()
+        & cast(uint) FiberWakeEvent.lifecycle) != 0);
+    auto retired = log.retire(lanes[selectedLlc].domain);
+    assert(retired.length == 1 && retired[0].task is task);
 
     shared int enteredFailure;
     // Start idle, then spawn externally: FiberLane must wake the waiting pool.
@@ -1768,8 +1875,9 @@ void threadpoolSmoke()
     assert(atomicLoad(enteredFailure) == 1);
     assert(failed.outcome == FiberOutcome.failed);
     assert(failed.exception !is null && failed.exception.msg == "fiber failure");
-    auto outcomes = lanes[selectedLlc].domain.takeCompletions();
-    assert(outcomes.length >= 1);
+    retired = log.retire(lanes[selectedLlc].domain);
+    assert(retired.length == 1 && retired[0].task is failed
+        && retired[0].outcome == FiberOutcome.failed);
 
     // The managed pump hands its nearest deadline to the default wait policy;
     // no timer thread or cadence polling is involved.
@@ -1791,8 +1899,8 @@ void threadpoolSmoke()
     pool3.shutdown();
     assert(timed.outcome == FiberOutcome.completed);
     assert(timerEnd - timerStart >= msecs(20));
-    auto timedCompletions = lanes[selectedLlc].domain.takeCompletions();
-    assert(timedCompletions.length == 1 && timedCompletions[0] is timed);
+    retired = log.retire(lanes[selectedLlc].domain);
+    assert(retired.length == 1 && retired[0].task is timed);
 
     // A custom selector which chooses no responder fails the lane's domain
     // at managed start instead of silently parking live work.
@@ -1854,15 +1962,15 @@ void threadpoolSmoke()
     assert(cancelConsumed);
     assert(cancelled.outcome == FiberOutcome.cancelled && cleaned);
     assert(cancelLane.drained);
-    auto cancelledCompletions = cancelLane.domain.takeCompletions();
-    assert(cancelledCompletions.length == 1);
+    retired = log.retire(cancelLane.domain);
+    assert(retired.length == 1 && retired[0].task is cancelled);
     cancelView.unsubscribe();
     cancelFarm.unregisterProducer(cancelToken);
 
     // Fatal Error is retained in the Fiber callback, then rethrown only from
     // the managed pump so threadpool records the failure and requests stop.
-    auto fatalLane = new FiberLane(cancelFarm);
-    fatalLane.enableLifecycleEvents();
+    auto fatalLog = new RetireLog;
+    auto fatalLane = new FiberLane(cancelFarm, fatalLog.options);
     lanes[selectedLlc] = fatalLane;
     auto pool5 = new CacheAwarePool(options);
     auto plan5 = new FiberServicePlan(pool5.resolve());
@@ -1881,10 +1989,10 @@ void threadpoolSmoke()
     assert(pool5.workerFailures.length == 1);
     assert(cast(Error) pool5.workerFailures[0] !is null
         && pool5.workerFailures[0].msg == "managed fatal");
-    auto fatalCompletions = fatalLane.domain.takeCompletions();
-    auto fatalEvents = fatalLane.takeLifecycleEvents();
+    auto fatalCompletions = fatalLog.retire(fatalLane.domain);
+    auto fatalEvents = fatalLog.takeRecords();
     assert(fatalCompletions.length == 1 && fatalEvents.length == 3);
-    fatalLane.domain.release(fatalTask);
+    assert(fatalCompletions[0].task is fatalTask);
     foreach (farm; farms)
         assert(atomicLoad(farm.Cf) == 0, "fiber lane leaked a consumer");
 }
@@ -1952,7 +2060,7 @@ void admissionAfterStopSmoke()
     assert(refused !is null && refused.state == FiberLaneState.stopped);
     assert(refused.service == LaneService.native && refused.group == group);
     assert(lane.domain.active == active);
-    lane.domain.releaseAll(lane.domain.takeCompletions());
+    assert(lane.retire() == 1);
     printf("L4 admission after stop: lane %u stopped, spawn refused\n",
         cast(uint) group);
 }
@@ -2052,7 +2160,7 @@ void workerCancellationSmoke()
         waitTerminated(task);
         fixture.pool.shutdown();
         assert(fixture.pool.workerFailures.length == 0);
-        fixture.lane.domain.releaseAll(fixture.lane.domain.takeCompletions());
+        fixture.lane.retire();
         assert(passed, "worker cancellation bounded wait expired without Director service");
     }
 }
@@ -2216,7 +2324,7 @@ void sharedDomainNoEdgesSmoke()
     assert(pool.workerFailures.length == 0);
     assert(joiner.terminated && joined.status == FiberJoinStatus.completed);
     assert(domain.drained);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 2);
     printf("L1 shared domain without edges: groups %u and %u\n",
         cast(uint) groups[0], cast(uint) groups[1]);
 }
@@ -2268,7 +2376,7 @@ void preAdmissionUnusedGroupSmoke()
     assert(pool.workerFailures.length == 0);
     assert(atomicLoad(ran) == 1);
     assert(domain.drained);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
     printf("L2 pre-admission with an unused group: %u workers in group %u\n",
         cast(uint) full.workersIn(groups[0]).length, cast(uint) groups[0]);
 }
@@ -2319,7 +2427,7 @@ void unstaffedLaneRescueSmoke()
     assert(domain.drained);
     assert(rescued.state == FiberLaneState.stopped && rescued.liveServers == 0);
     assert(refusedSpawn(rescued) !is null);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
     printf("L3 unstaffed-lane rescue: group %u served by %u workers of group %u\n",
         cast(uint) groups[1], cast(uint) workers, cast(uint) groups[0]);
 }
@@ -2376,7 +2484,7 @@ void offResponderTimerSmoke(string test, FiberWakePolicy policy)
     immutable slept = atomicLoad(sleptMs);
     assert(slept >= 20 && slept < 250, "the off-responder timer fired late");
     assert(domain.drained);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
     printf("%s: group %u timer fired after %lld ms, responder in group %u\n",
         test.toStringz, cast(uint) groups[1], slept, cast(uint) groups[0]);
 }
@@ -2448,7 +2556,7 @@ ulong busyLanePumps(const PoolResolution full, FiberWakePolicy policy,
     assert(pool.workerFailures.length == 0);
     foreach (task; spawned) assert(task.terminated);
     assert(domain.drained);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == tasks);
     busyPumps = atomicLoad(busyLaneBusyPumps);
     return atomicLoad(busyLaneIdlePumps);
 }
@@ -2490,7 +2598,7 @@ void fiberParitySmoke()
     });
     drainUntil(domain, token, view);
     assert(atomicLoad(cleaned) == 1);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     domain.spawn({
         scope (exit) atomicFetchAdd(cleaned, 1);
@@ -2498,7 +2606,7 @@ void fiberParitySmoke()
     });
     drainUntil(domain, token, view);
     assert(atomicLoad(cleaned) == 2);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     auto waiting = domain.spawn({
         scope (exit) atomicFetchAdd(cleaned, 1);
@@ -2510,7 +2618,7 @@ void fiberParitySmoke()
     drainUntil(domain, token, view);
     assert(atomicLoad(cleaned) == 3);
     assert(waiting.outcome == FiberOutcome.cancelled);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     auto failed = domain.spawn({
         scope (exit) atomicFetchAdd(cleaned, 1);
@@ -2521,7 +2629,7 @@ void fiberParitySmoke()
     assert(failed.outcome == FiberOutcome.failed
         && failed.exception !is null
         && failed.exception.msg == "parity failure");
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     auto nested = domain.spawn({
         FiberDomain.yieldReady();
@@ -2540,11 +2648,11 @@ void fiberParitySmoke()
         Thread.yield();
     }
     assert(nested.outcome == FiberOutcome.completed);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     auto first = domain.spawn({});
     drainUntil(domain, token, view);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
     shared int recycledRuns;
     auto recycled = domain.spawn({
         FiberDomain.yieldReady();
@@ -2553,78 +2661,14 @@ void fiberParitySmoke()
     assert(recycled is first);
     drainUntil(domain, token, view);
     assert(atomicLoad(recycledRuns) == 1);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == 1);
 
     auto raw = domain.spawn({ Fiber.yield(); });
     drainUntil(domain, token, view);
     assert(raw.outcome == FiberOutcome.failed);
     assert(raw.exception !is null
         && raw.exception.msg == "ant_fibers: Fiber.yield without scheduler suspend");
-    domain.releaseAll(domain.takeCompletions());
-}
-
-private void releaseDeathChild(string mode)
-{
-    auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
-                               DEFAULT_SMALL_TABLE_THRESHOLD, false);
-    auto domain = new FiberDomain(farm);
-    if (mode == "null")
-    {
-        domain.release(null);
-        return;
-    }
-    if (mode == "lifecycle-root") domain.enableLifecycleEvents();
-    auto task = domain.spawn({});
-    if (mode == "live")
-    {
-        domain.release(task);
-        return;
-    }
-    auto token = farm.registerProducer(Tier.small);
-    ConsumerView view;
-    subscribeOrThrow(view, farm);
-    drainUntilEmpty(domain, token, view);
-    if (mode == "completion-root")
-    {
-        domain.release(task);
-        return;
-    }
-    domain.takeCompletions();
-    if (mode == "foreign")
-    {
-        auto other = new FiberDomain(farm);
-        other.release(task);
-        return;
-    }
-    if (mode == "double") domain.release(task);
-    domain.release(task);
-}
-
-private void releaseDeathSmoke()
-{
-    version (linux)
-    {
-        import std.algorithm.searching : canFind;
-        import std.process : execute;
-
-        foreach (mode; ["double", "completion-root", "lifecycle-root",
-                       "live", "foreign", "null"])
-        {
-            immutable message = mode == "double"
-                ? "ant_fibers: task released twice"
-                : mode == "completion-root" || mode == "lifecycle-root"
-                ? "ant_fibers: drain completion and lifecycle events before release"
-                : "ant_fibers: only terminated tasks of this domain can be released";
-            auto result = execute(["/proc/self/exe", "--release-child", mode]);
-            if (result.status == 0
-                || !result.output.canFind("antfarm fatal: " ~ message))
-                throw new Exception("fiber release child " ~ mode
-                    ~ " failed:\n" ~ result.output);
-            printf("PASS fiber release child %.*s\n",
-                cast(int) mode.length, mode.ptr);
-        }
-    }
-    else printf("SKIP fiber release death checks: Linux re-exec required\n");
+    assert(domain.retire() == 1);
 }
 
 // A native thread and each suspended task need separate TSan call stacks.
@@ -2637,12 +2681,24 @@ private void tsanContextSmoke()
         auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,
                                    DEFAULT_SMALL_TABLE_THRESHOLD, false);
         scope (exit) farm.destroy();
-        auto domain = new FiberDomain(farm);
+        auto log = new RetireLog;
+        auto domain = new FiberDomain(farm, log.options);
         auto token = farm.registerProducer(Tier.small);
         scope (exit) farm.unregisterProducer(token);
         ConsumerView view;
         subscribeOrThrow(view, farm);
         scope (exit) view.unsubscribe();
+        // drainUntilEmpty retires: results come from the completion log.
+        void checkRetired(size_t expected)
+        {
+            auto retired = log.takeCompleted();
+            assert(retired.length == expected);
+            foreach (task; retired)
+            {
+                if (task.exception !is null) throw task.exception;
+                assert(task.outcome == FiberOutcome.completed);
+            }
+        }
         void* firstContext;
         domain.spawn({
             firstContext = __tsan_get_current_fiber();
@@ -2660,24 +2716,12 @@ private void tsanContextSmoke()
         drainUntilEmpty(domain, token, view);
         assert(__tsan_get_current_fiber() == nativeContext,
             "scheduler must restore its caller's TSan context");
-        auto completed = domain.takeCompletions();
-        foreach (task; completed)
-        {
-            if (task.exception !is null) throw task.exception;
-            assert(task.outcome == FiberOutcome.completed);
-        }
-        domain.releaseAll(completed);
+        checkRetired(2);
         // Reuse a task after termination as well as after suspension.
         domain.spawn({ assert(__tsan_get_current_fiber() != nativeContext); });
         drainUntilEmpty(domain, token, view);
         assert(__tsan_get_current_fiber() == nativeContext);
-        completed = domain.takeCompletions();
-        foreach (task; completed)
-        {
-            if (task.exception !is null) throw task.exception;
-            assert(task.outcome == FiberOutcome.completed);
-        }
-        domain.releaseAll(completed);
+        checkRetired(1);
     }
 }
 
@@ -2710,16 +2754,6 @@ void main(string[] args)
         printf("migration smoke passed\n");
         return;
     }
-    if (args.length == 3 && args[1] == "--release-child")
-    {
-        releaseDeathChild(args[2]);
-        return;
-    }
-    if (args.length == 2 && args[1] == "--release-death")
-    {
-        releaseDeathSmoke();
-        return;
-    }
     if (args.length == 2 && args[1] == "--worker-cancellation-only")
     {
         workerCancellationSmoke();
@@ -2738,7 +2772,6 @@ void main(string[] args)
         return;
     }
     tsanContextSmoke();
-    releaseDeathSmoke();
     workerCancellationSmoke();
     uxHelpersSmoke();
     cancellationOwnershipSmoke();
@@ -2762,6 +2795,7 @@ void main(string[] args)
     semaphoreCancellationSmoke();
     sharedSignalAndTimerCancellationSmoke();
     waitRaceSmoke();
+    recordSmoke();
     threadpoolSmoke();
     admissionAfterStopSmoke();
     admissionAfterEarlyShutdownSmoke();

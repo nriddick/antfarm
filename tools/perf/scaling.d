@@ -24,7 +24,7 @@ private double millisecondsSince(MonoTime start)
 void main(string[] args)
 {
     if (args.length < 3 || (args[1] != "create" && args[1] != "lifecycle"))
-        throw new Exception("usage: scaling create <actors> | lifecycle <fibers> <batch> [handle|take]");
+        throw new Exception("usage: scaling create <actors> | lifecycle <fibers> <batch>");
     immutable n = to!size_t(args[2]);
     if (n == 0 || n > cast(size_t) long.max / 4)
         throw new Exception("count must be positive and fit lifecycle reservation accounting");
@@ -55,25 +55,22 @@ void main(string[] args)
     if (args.length < 4)
         throw new Exception("lifecycle mode requires a batch size");
     immutable batch = to!size_t(args[3]);
-    immutable mode = args.length > 4 ? args[4] : "handle";
-    if (batch == 0 || (mode != "handle" && mode != "take"))
-        throw new Exception("batch must be positive; mode must be handle or take");
-    auto domain = new FiberDomain(farm);
-    domain.reserve(n);
-    domain.enableLifecycleEvents(n * 4);
-    foreach (_; 0 .. n) domain.spawn(&fiberBody, 4096);
+    if (batch == 0)
+        throw new Exception("batch must be positive");
     size_t calls;
-    FiberLifecycleHandler sink = (ref const FiberLifecycleEvent event) { ++calls; };
+    FiberDomainOptions options;
+    options.recordRetention = n * 4;
+    options.onRecord = (FiberLifecycleEvent event) { ++calls; };
+    auto domain = new FiberDomain(farm, options);
+    domain.reserve(n);
+    foreach (_; 0 .. n) domain.spawn(&fiberBody, 4096);
+    // Only admitted records exist yet, and no task is terminal: each retire
+    // drains up to `batch` records.
     immutable start = MonoTime.currTime;
-    while (domain.pendingEvents != 0)
-    {
-        if (mode == "handle")
-            domain.handleLifecycleEvents(sink, batch);
-        else
-            calls += domain.takeLifecycleEvents(batch).length;
-    }
-    writefln("lifecycle n=%s batch=%s mode=%s ms=%.3f",
-        n, batch, mode, millisecondsSince(start));
+    while (domain.pendingRecords != 0)
+        domain.retire(batch);
+    writefln("lifecycle n=%s batch=%s ms=%.3f",
+        n, batch, millisecondsSince(start));
     if (calls != n) throw new Exception("bad admitted count");
     auto token = farm.registerProducer(Tier.small);
     if (!token.valid) throw new Exception("producer registration failed");
@@ -82,6 +79,4 @@ void main(string[] args)
     subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
     drainUntilEmpty(domain, token, view, 256, avgCostForChunk(32));
-    domain.handleLifecycleEvents(sink);
-    domain.releaseAll(domain.takeCompletions());
 }

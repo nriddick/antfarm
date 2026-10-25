@@ -37,6 +37,52 @@ struct TimerCancellationRaceContext
     shared int stop;
 }
 
+/// What `onCompletion` saw for one retired task. The handler copies what a
+/// test inspects while the task is still valid; `retire` recycles the task
+/// when the handler returns, so `task` is kept for identity comparison only.
+struct Retired
+{
+    FiberTask task;
+    FiberOutcome outcome;
+    CancellationDisposition cancellationDisposition;
+}
+
+/// Collects the tasks and lifecycle records a domain retires, in order.
+final class RetireLog
+{
+    Retired[] completions;
+    FiberLifecycleEvent[] records;
+
+    FiberDomainOptions options(size_t recordRetention = defaultRecordRetention)
+    {
+        FiberDomainOptions result;
+        result.recordRetention = recordRetention;
+        result.onCompletion = (FiberTask task) {
+            completions ~= Retired(task, task.outcome,
+                task.cancellationDisposition);
+        };
+        result.onRecord = (FiberLifecycleEvent event) { records ~= event; };
+        return result;
+    }
+
+    /// `domain.retire(maximum)`, returning the completions it delivered.
+    Retired[] retire(FiberDomain domain, size_t maximum = size_t.max)
+    {
+        immutable recycled = domain.retire(maximum);
+        auto taken = completions;
+        completions = null;
+        assert(taken.length == recycled);
+        return taken;
+    }
+
+    FiberLifecycleEvent[] takeRecords()
+    {
+        auto taken = records;
+        records = null;
+        return taken;
+    }
+}
+
 Thread notifierThread(NotifierContext* context)
 {
     return new Thread({
@@ -57,7 +103,8 @@ void handleReuseStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
@@ -68,10 +115,9 @@ void handleReuseStress()
     // This table contains exactly one Fiber activation.
     auto consumed = view.consumeNext();
     assert(consumed);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == 1);
     auto oldHandle = first.handle;
-    domain.release(first);
+    auto completed = log.retire(domain);
+    assert(completed.length == 1 && completed[0].task is first);
 
     shared int stop;
     shared int violation;
@@ -100,9 +146,9 @@ void handleReuseStress()
         assert(flushed == 1);
         consumed = view.consumeNext();
         assert(consumed);
-        completed = domain.takeCompletions();
-        assert(completed.length == 1 && completed[0] is task);
-        domain.release(task);
+        completed = log.retire(domain);
+        assert(completed.length == 1 && completed[0].task is task);
+        log.takeRecords();
     }
     atomicStore!(MemoryOrder.rel)(stop, 1);
     reader.join();
@@ -154,8 +200,7 @@ void shutdownAdmissionStress()
             Thread.yield();
         }
         assert(domain.drained);
-        auto completed = domain.takeCompletions();
-        assert(completed.length == cast(size_t)
+        assert(domain.retire() == cast(size_t)
             atomicLoad!(MemoryOrder.acq)(admitted));
     }
 }
@@ -168,7 +213,8 @@ void cancellationReturnRaceStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     shared uint entered;
     shared uint gate;
     shared int stop;
@@ -222,9 +268,9 @@ void cancellationReturnRaceStress()
             assert(task.cancellationDisposition
                 == CancellationDisposition.resultAbrogated);
         }
-        auto completed = domain.takeCompletions();
-        assert(completed.length == 1 && completed[0] is task);
-        domain.release(task);
+        auto completed = log.retire(domain);
+        assert(completed.length == 1 && completed[0].task is task);
+        log.takeRecords();
     }
 }
 
@@ -287,9 +333,7 @@ void managedJoinCompletionRaceStress()
         }
         assert(target.terminated && joiner.terminated);
         assert(joinedStatus == FiberJoinStatus.completed);
-        auto completed = domain.takeCompletions();
-        assert(completed.length == 2);
-        domain.releaseAll(completed);
+        assert(domain.retire() == 2);
     }
 }
 
@@ -366,9 +410,7 @@ void managedJoinFanoutCancellationStress()
         foreach (joiner; joiners)
             assert(joiner.outcome == FiberOutcome.completed
                 || joiner.outcome == FiberOutcome.cancelled);
-        auto completed = domain.takeCompletions();
-        assert(completed.length == width + 1);
-        domain.releaseAll(completed);
+        assert(domain.retire() == width + 1);
     }
 }
 
@@ -380,7 +422,8 @@ void timerCancellationRaceStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto domain = new FiberDomain(farm);
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
@@ -486,9 +529,9 @@ void timerCancellationRaceStress()
         assert(task.outcome == FiberOutcome.cancelled);
         assert(task.cancellationDisposition
             == CancellationDisposition.acknowledged);
-        auto completed = domain.takeCompletions();
-        assert(completed.length == 1 && completed[0] is task);
-        domain.release(task);
+        auto completed = log.retire(domain);
+        assert(completed.length == 1 && completed[0].task is task);
+        log.takeRecords();
     }
     assert(waitingWins != 0 && readyWins != 0);
 }
@@ -504,8 +547,26 @@ void lifecycleRetentionStress()
     scope (exit) farm.destroy();
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
-    auto domain = new FiberDomain(farm);
-    domain.enableLifecycleEvents(retentionLimit);
+    // The Director retires records (checked gapless in sequence order) and
+    // terminal tasks in small batches while four threads spawn into
+    // backpressure.
+    ulong previousSequence;
+    size_t recordsRetired;
+    size_t tasksRetired;
+    FiberDomainOptions options;
+    options.recordRetention = retentionLimit;
+    options.onRecord = (FiberLifecycleEvent event)
+    {
+        assert(event.sequence == previousSequence + 1);
+        previousSequence = event.sequence;
+        ++recordsRetired;
+    };
+    options.onCompletion = (FiberTask task)
+    {
+        assert(task.outcome == FiberOutcome.completed);
+        ++tasksRetired;
+    };
+    auto domain = new FiberDomain(farm, options);
     ConsumerView view;
     auto subscription = subscribeOrThrow(view, farm);
     scope (exit) view.unsubscribe();
@@ -547,27 +608,23 @@ void lifecycleRetentionStress()
     while (atomicLoad!(MemoryOrder.acq)(backpressured) == 0
         && atomicLoad!(MemoryOrder.acq)(producersDone) != producerCount)
         Thread.yield();
-    ulong previousSequence;
     while (atomicLoad!(MemoryOrder.acq)(producersDone) != producerCount
-        || !domain.drained || domain.pendingEvents != 0)
+        || !domain.drained || domain.retirementPending)
     {
         if (domain.ready != 0) domain.flush(token);
         view.consumeNext();
-        auto events = domain.takeLifecycleEvents(3);
-        foreach (event; events)
-        {
-            assert(event.sequence == previousSequence + 1);
-            previousSequence = event.sequence;
-        }
-        assert(domain.lifecycleReserved <= retentionLimit);
-        if (events.length == 0) Thread.yield();
+        immutable before = recordsRetired;
+        cast(void) domain.retire(3);
+        assert(domain.reservedRecords <= retentionLimit);
+        if (recordsRetired == before) Thread.yield();
     }
     assert(atomicLoad!(MemoryOrder.acq)(admitted) == totalTasks);
     assert(atomicLoad!(MemoryOrder.acq)(backpressured) != 0);
-    assert(domain.lifecycleReserved == 0 && domain.pendingEvents == 0);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == totalTasks);
-    domain.releaseAll(completed);
+    assert(domain.reservedRecords == 0 && domain.pendingRecords == 0);
+    // Admitted and terminal per task; no cancellation or failure records.
+    assert(recordsRetired == 2 * totalTasks
+        && previousSequence == 2 * totalTasks);
+    assert(tasksRetired == totalTasks && domain.pendingCompletions == 0);
 }
 
 void sharedDomainLaneStress()
@@ -678,9 +735,7 @@ void sharedDomainLaneStress()
     atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
     assert(atomicLoad!(MemoryOrder.acq)(ran) == tasksPerLane * 2);
     assert(laneA.ready == 0 && laneB.ready == 0 && domain.ready == 0);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == tasksPerLane * 2);
-    domain.releaseAll(completed);
+    assert(domain.retire() == tasksPerLane * 2);
 }
 
 void remoteSweeperStress()
@@ -786,9 +841,7 @@ void remoteSweeperStress()
     assert(laneA.published == 0 && laneB.published == 0);
     foreach (task; tasks)
         assert(task.terminated && task.resumeCount == 2);
-    auto completed = domain.takeCompletions();
-    assert(completed.length == tasksPerLane * 2);
-    domain.releaseAll(completed);
+    assert(domain.retire() == tasksPerLane * 2);
 }
 
 private struct ActorWaveStressResult
@@ -1024,7 +1077,8 @@ void actorWaveGenerationStress()
             "actor-wave stress did not produce the expected physical tables");
         farm.unregisterProducer(jobs[stream].producer);
     }
-    domain.releaseAll(domain.takeCompletions());
+    enforce(domain.retire() == streamCount,
+        "actor-wave stress retired an unexpected task count");
     farm.unregisterProducer(schedulerProducer);
 
     foreach (i; 0 .. totalActors)
@@ -1092,7 +1146,7 @@ void syncPrimitiveStress()
             assert(false, "syncPrimitiveStress: drain stalled");
     }
     assert(atomicLoad(ran) == waiters);
-    domain.releaseAll(domain.takeCompletions());
+    assert(domain.retire() == waiters);
 }
 
 /// Permit conservation under concurrent service: four worker threads pump the
@@ -1103,7 +1157,9 @@ void syncPrimitiveStress()
 /// posted, cancellation stops and consumers wait untimed, so the run ends
 /// only if the parked consumers are woken for every remaining permit. The
 /// final count must account for every posted permit. Looping consumers can
-/// absorb a swallowed wake mid-run; semaphore.d pins pass-on itself.
+/// absorb a swallowed wake mid-run; semaphore.d pins pass-on itself. The
+/// Director also retires as it goes, recycling cancelled consumers while the
+/// workers terminate others, and every admitted task must be retired.
 void semaphoreConservationStress()
 {
     enum producers = 8;
@@ -1114,7 +1170,10 @@ void semaphoreConservationStress()
     auto farm = AntFarm.create(4, 8, 4, 0, 0, 4, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
+    size_t spawned, retired;
+    FiberDomainOptions options;
+    options.onCompletion = (FiberTask task) { ++retired; };
+    auto domain = new FiberDomain(farm, options);
     auto sem = new FiberSemaphore(domain, 0);
     shared long taken, posted;
     shared int stop;
@@ -1160,6 +1219,7 @@ void semaphoreConservationStress()
     TaskHandle[consumers] live;
     foreach (i, ref h; live)
         h = domain.spawnHandle(consumer(i % 2 == 1));
+    spawned = consumers + producers;
     foreach (_; 0 .. producers)
         domain.spawn({
             foreach (i; 0 .. perProducer)
@@ -1176,6 +1236,9 @@ void semaphoreConservationStress()
     {
         enforce(MonoTime.currTime - start < seconds(20),
             "semaphore conservation stress stalled: a permit's wake was lost");
+        // Without this, the replacements alone would exhaust the default
+        // record retention (about 1,024 unretired tasks).
+        cast(void) domain.retire();
         if (atomicLoad(posted) == total)
         {
             Thread.sleep(msecs(1));
@@ -1187,6 +1250,7 @@ void semaphoreConservationStress()
         {
             ++cancelled;
             live[i] = domain.spawnHandle(consumer(i % 2 == 1));
+            ++spawned;
         }
         Thread.sleep(usecs(200));
     }
@@ -1206,7 +1270,9 @@ void semaphoreConservationStress()
     enforce(sem.available == 0 && domain.waiting == 0,
         "semaphore conservation stress: residual permits or waits");
     enforce(cancelled != 0, "semaphore conservation stress cancelled nothing");
-    domain.releaseAll(domain.takeCompletions());
+    cast(void) domain.retire();
+    enforce(retired == spawned && domain.reservedRecords == 0,
+        "semaphore conservation stress: a task was not retired");
 }
 
 void main()
@@ -1214,8 +1280,8 @@ void main()
     auto farm = AntFarm.create(4, 8, 4, 0, 0, 1, 16_384,
                                DEFAULT_SMALL_TABLE_THRESHOLD, false);
     scope (exit) farm.destroy();
-    auto domain = new FiberDomain(farm);
-    domain.enableLifecycleEvents();
+    auto log = new RetireLog;
+    auto domain = new FiberDomain(farm, log.options);
     auto token = farm.registerProducer(Tier.small);
     scope (exit) farm.unregisterProducer(token);
 
@@ -1276,7 +1342,8 @@ void main()
     atomicStore!(MemoryOrder.rel)(stopConsumers, 1);
     foreach (thread; consumers) thread.join();
 
-    auto outcomes = domain.takeCompletions();
+    // One retire delivers every record, then every terminal task.
+    auto outcomes = log.retire(domain);
     assert(outcomes.length == taskCount);
     size_t cancelled, succeeded;
     foreach (task; outcomes)
@@ -1288,7 +1355,7 @@ void main()
     assert(cancelled == taskCount / 2);
     assert(succeeded == taskCount / 2);
     assert(atomicLoad(completedNormally) == taskCount / 2);
-    auto events = domain.takeLifecycleEvents();
+    auto events = log.takeRecords();
     size_t admittedEvents, cancellationEvents, terminalEvents, failureEvents;
     ubyte[ulong] phase;
     foreach (event; events)
@@ -1324,7 +1391,7 @@ void main()
     assert(cancellationEvents == taskCount / 2);
     assert(terminalEvents == taskCount);
     assert(failureEvents == 0);
-    assert(domain.lifecycleReserved == 0);
+    assert(domain.reservedRecords == 0 && domain.pendingRecords == 0);
 
     handleReuseStress();
     shutdownAdmissionStress();

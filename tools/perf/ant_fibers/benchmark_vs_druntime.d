@@ -140,7 +140,7 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
     atomicStore(mtHits, 0);
     burst();
     waitUntil(() => lane.drained, topo.name ~ " cold drain");
-    lane.domain.releaseAll(lane.domain.takeCompletions());
+    lane.domain.retire();
 
     atomicStore(mtHits, 0);
     burst();
@@ -148,7 +148,7 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
     waitUntil(() => lane.drained, topo.name ~ " warm drain");
     immutable fiberSec = (MonoTime.currTime - t0).total!"nsecs" / 1e9;
     assert(atomicLoad(mtHits) == n);
-    lane.domain.releaseAll(lane.domain.takeCompletions());
+    lane.domain.retire();
 
     atomicStore(mtHits, 0);
     Callback header;
@@ -241,7 +241,7 @@ void main(string[] args)
         drainUntilEmpty(domain, token, consumer, flushMax, avgCostForChunk(32));
         note(runName, n, t0);
         assert(atomicLoad(ran) == expected);
-        domain.releaseAll(domain.takeCompletions());
+        domain.retire();
     }
 
     farmComplete({ workFn(); }, "antfarm fiber create", "antfarm fiber run", n);
