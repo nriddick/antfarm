@@ -112,15 +112,60 @@ bool runFramesTest()
 
     // 4. Frames on the dispatcher, twice: slots and chunks are adopted, not grown.
     {
+        import core.time : MonoTime, msecs, seconds;
+        import std.exception : enforce;
+        import threadpool.groups : GroupHost, GroupHostOptions;
+        import threadpool.host : HostGroups;
+        import threadpool.hybrid : WorkerSelf;
+
         Dispatcher d;
-        d.start();
-        if (fibOnDispatcher(25) != 75_025) fail("fib result");
-        d.stop();
-        immutable after1 = frameStats();
-        d.start();
-        if (fibOnDispatcher(25) != 75_025) fail("fib result (second run)");
-        d.stop();
-        immutable after2 = frameStats();
+        FrameStats runOnce()
+        {
+            shared uint ready;
+            auto a = d.attachment(DispatcherOptions.perGroup());
+            auto body = a.body;
+            a.start = (WorkerSelf* worker) {
+                // Enter the dispatcher before allocating, so its stop hook
+                // owns the release even if no Fibonacci work reaches us.
+                body(worker);
+                auto p = allocFrames!Fib(2);
+                enforce(p !is null, "frame warmup allocation failed");
+                freeFrame(p);
+                atomicOp!"+="(ready, 1u);
+            };
+            GroupHostOptions o;
+            o.groups = HostGroups.all();
+            o.farmPerGroup = true;
+            o.farm.extraSmallProducers = 1;
+            o.pool.skipSmtSiblings = false;
+            o.workers = cast(uint) GroupHost.resolve(o).workers.length;
+            if (o.workers >= maxParticipants) o.workers = maxParticipants - 1;
+            o.callerConsumes = o.workers == 0;
+            o.attachments = [a];
+            auto host = new GroupHost(o);
+            scope (exit) host.close();
+            d.start(host);
+            scope (exit) d.stop();
+            auto p = allocFrames!Fib(2);
+            enforce(p !is null, "caller frame warmup allocation failed");
+            freeFrame(p);
+            immutable deadline = MonoTime.currTime + 10.seconds;
+            while (atomicLoad(ready) != host.workers)
+            {
+                enforce(MonoTime.currTime < deadline, "frame warmup timed out");
+                Thread.sleep(1.msecs);
+            }
+            if (fibOnDispatcher(25) != 75_025) fail("fib result");
+            d.stop();
+            host.close();
+            return frameStats();
+        }
+
+        // Fibonacci alone need not allocate on every participant: e.g. 19
+        // threads on the first run and 20 on the second is legitimate growth.
+        // Warm every participant on both runs before checking slot adoption.
+        immutable after1 = runOnce();
+        immutable after2 = runOnce();
         if (after2.slots != after1.slots) fail("slots grew across a restart");
         if (after2.chunks > after1.chunks + after1.slots) fail("chunks grew across a restart");
     }
