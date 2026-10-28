@@ -1,14 +1,21 @@
-# Farm review torture suite
+# Farm sanity and torture tests
 
-Adversarial tests + code review for `antfarm/package.d` (`SPEC.md`).
+Checks for the contracts and invariants of [the Farm](../../SPEC.md), with
+separate entry points for deterministic sanity checks, concurrent torture,
+and controlled interleavings. The complete unit suite retains its table-format,
+completion-ordering, and actor checks; `sanity` is a focused subset, not a
+replacement for the correctness gate.
 
 ## Build & run
 
 From the repository root:
 
 ```
-make -C tests/farm
-make -C tests/farm run
+make -C tests/farm sanity               # geometry, membership, Live, capacity
+make -C tests/farm torture              # T00–T02, T04, T06, T09, T10, T13, T15–T18, T20–T26, T28, T29
+make -C tests/farm check-farm-ordering  # controlled schedules, LDC and DMD
+make -C tests/farm baseline             # complete antfarm_test.d, without dub
+make -C tests/farm run                  # torture + sweep cursor + parallel adapters
 ```
 
 Or:
@@ -25,26 +32,89 @@ Optional:
 ```
 make -C tests/farm run-tsan
 make -C tests/farm run-dmd
-make -C tests/farm baseline   # antfarm_test.d unit suite built without dub
+make -C tests/farm run-farm-tsan
 ```
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | All tests green, no defects |
-| 2 | Correctness paths green; defect probes confirmed bugs |
-| abort/1 | Correctness failure |
+| 0 | Every selected check passed |
+| 64 | Invalid selector (including a name that would run no tests) |
+| other nonzero / abort | Contract, correctness, or watchdog failure |
+
+T01/T17/T26 expect a child to abort with `SIGABRT` for invalid calls; a clean
+return, another signal, failed fork/wait, or ten-second timeout fails the
+parent. These POSIX death probes explicitly skip on Windows. There is no
+"known defect but green" mode.
+
+The unit binary accepts `sanity`, `join-only`, `stale-quota-only`, or
+`compact-only`. The torture binary accepts one or more of its T-names; T19
+and T27 have separate executables. `subscription_live` accepts one of the
+schedule names below, with an optional `0..3` trigger for D1, D2, or E.
+
+## Invariants and their checks
+
+| Obligation | Sanity / controlled check | Torture / concurrency check |
+| --- | --- | --- |
+| Construction leaves only epoch 0 Live; membership never clears an open epoch | `testLiveMembership`, K=2/4/8/16, shared leaves, cached leaf identity, repeated detach | `testBacklog` departure mid-backlog; T18 abandoned backlog; T28 sleeping cohorts |
+| Stable root reference count equals the number of occupied leaves; no negative leaves, reserved bits, or leftover `Sub` | `checkStableTallies`; exact quiescent roots and leaves | Full-word root/leaf cleanup checks after departures; all subscription schedules |
+| FULL/INVALID do not leak membership or pins; one released capacity slot is reusable | `testSubscriptionCap` at 128; null/already-attached sanity cases | T10 capacity; T28 simultaneous arrival/departure |
+| Initialized unfinished epochs retain Live without any consumer | `testSingleThreaded`, `testBacklog`; schedules A–C | T18 abandoned backlog; T23/T24 quiescent Live checks; T28 prefill with zero members |
+| Confirmed epochs can discharge; Live need not be contiguous | H leaves a confirmed interior between two Live epochs | T20 checks confirmed roots; fully drained T28 leaves exactly the frontier Live |
+| Discovery survives a moving consumer, out-of-order initialization, stale tail, and reused slots | D1/D2, E/I, F/P, G; J1 rejects a candidate discharged before its pinned re-read and releases its pin; J2 and J3 attach either side of a discharge; K interleaves two subscribers on one candidate; X attaches on an exact boundary; L and LN attach inside a three-boundary table, with the successor `Es` acquire and its negative control | T23 late attachment after wrap; T28 wake/drained cohorts |
+| Increment-ahead references and spanning bodies survive reuse | `farm_ordering.d`, `leaf_reuse.d`, `write_protection.d` | `testSpannedTables`; T16 position-reference progress; T21 body integrity over multiple laps |
+| Every published payload executes exactly once, with the right callback and contents | T00 harness negative controls; per-ID ledger in `subscription_live.d` | Per-ID checks alongside totals, including T16/T18/T20/T28; T21 word-for-word bodies; T25 borrowed callback metadata |
+| Attached consumers make progress without another subscription rescuing them | `subscription_live.d` decides failure before its diagnostic rescue | T28 checks the existing cohort before departure, with no steady helper or final rescue; T29 lets 24 herd arrivals and departures overlap production over eight laps |
+
+Root/leaf equality and quiescent Live scans run only after operations have
+stopped or reached a barrier. A leaf zero-edge propagation is not an atomic
+multi-counter snapshot: asserting that equality during propagation would reject
+legal executions. A drained Farm must have exactly one Live, on the initialized
+frontier; an abandoned Farm may have several, including holes between them.
+
+The per-ID ledger is required even when totals balance. T00 demonstrates that
+`[0, 2]` calls is a failure when `[1, 1]` was expected, and checks that the batch
+builder preserves the callback supplied by a test. All callback IDs are checked
+before indexing the ledger.
+
+T18 deliberately permits a later subscriber to recover an abandoned backlog.
+T06/T07/T23 and other steady-consumer arms remain useful contention checks, but
+cannot alone establish that a churner's attachment makes progress. T28 tests
+progress without those helpers, using four complete cohorts per configuration: 16 and 32
+threads at K=2 and K=16 on a 1 MiB ring, alternating a full-ring wake and an
+immediate resubscribe into the drained ring. Each configuration reuses the ring
+for multiple laps. A watchdog bounds the test; barriers make arrivals and
+departures contend and separate observations from activity. There is no CPU
+affinity requirement or assertion of hardware-wide simultaneous execution, and
+this is not a performance benchmark.
+
+### Evidence limits
+
+Controlled schedules check specific interleavings. Stress and TSan provide
+execution evidence on the tested compiler and hardware; hook/barrier ordering
+can strengthen those executions. They do not prove the I3 no-lap induction or
+oldest-first discovery under the D/C++ weak-memory model. The existing
+plain-write completion/leaf-reuse TSan checks remain separate from the new
+barrier-controlled lifetime tests.
+
+The `K + 2` subscribe-round budget remains unproved. `SUBSCRIBE_RETRY` stays
+recoverable, and the herd test retries it. Tests do not assume a hard two-pin
+limit: an attempt can retain up to K `Sub` pins. See [SPEC 11](../../SPEC.md#11-rationale-and-history-appendix)
+for those open obligations.
 
 ## Layout
 
 - `torture_common.d` — counters, batch builder, producer/consumer helpers
-- `torture_tests.d` — T01, T02, T04, T06, T09, T10, T13, T15–T18, T20–T26
-  and T28. T03, T05, T07, T08, T11 and T12 duplicated `antfarm_test.d`
-  tests with the same geometry and were folded into them; T14's K
-  geometry runs inside T04. T28 is a 24-thread subscribe herd at the 1 MiB
-  ring minimum that counts `RETRY` and checks exactly-once and quiescent
-  `Live` afterwards. T20 checks Live discharge under
+- `antfarm_test.d` — deterministic `sanity` entry point and the complete
+  Farm/actor unit suite. The normal no-argument run includes sanity.
+- `torture_tests.d` — T00–T02, T04, T06, T09, T10, T13, T15–T18, T20–T26,
+  T28 and T29. T03, T05, T07, T08, T11 and T12 duplicated `antfarm_test.d`
+  tests with the same geometry and were folded into them; T14's K geometry
+  runs inside T04. T28 runs barrier-gated 16/32-member cohorts at K=2 and
+  K=16; T29 is a 24-thread subscribe herd at the 1 MiB ring minimum whose
+  arrivals and departures overlap production over about eight laps, counting
+  `RETRY` and checking exactly-once and a drained Farm afterwards. T20 checks Live discharge under
   write crossings and churn: at quiescence no confirmed segment is still
   Live or referenced, and only the frontier is Live. Small bodies keep the
   arm an invariant scan rather than a memcpy bench. T21 laps the ring several times and verifies payload body contents
@@ -61,7 +131,7 @@ make -C tests/farm baseline   # antfarm_test.d unit suite built without dub
   subscription churn (four arms: no mid-tick, pure churn, consuming churn,
   steady consumer) plus a forged-token quota test
 - `subscription_live.d` — deterministic subscription schedules for the Live
-  lifecycle (SPEC 3, 6b, 6c, 6e): a non-last departure during a producer's
+  lifecycle (SPEC 3, 6b, 6c): a non-last departure during a producer's
   unpublished crossing (A, B, C); a consumer moving during the scan (D1, D2);
   out-of-order initialization racing the scan (E); a stale tail probe (F,
   P); a new lap's `Live` beside the old `Es` (G); a discharged epoch between
@@ -75,7 +145,8 @@ make -C tests/farm baseline   # antfarm_test.d unit suite built without dub
   during its first validation as an instrumentation negative control (LN).
   Every payload carries an id that must execute exactly once, and progress
   is judged with the views that already exist, before any new subscription;
-  a rescue subscriber afterwards is diagnostic only. Run all with no
+  a rescue subscriber afterwards is diagnostic only. Every schedule ends by
+  requiring that no member, reference, pin or leaf remains. Run all with no
   argument, or one schedule by name with an optional trigger. The design
   record, with the ablations that show each schedule fails on the defect it
   targets, is [docs/design/farm-live-lifecycle.md](../../docs/design/farm-live-lifecycle.md).
@@ -169,9 +240,9 @@ Ordinary builds contain no scheduling hook calls. The producer phases are
 consumer's discharge between its load and its CAS. Each is listed with its
 arguments beside the enum in `antfarm/package.d`.
 
-Shared test counters must be `__gshared shared(T)` (see comments). Plain
-`shared T` module globals are TLS and will silently break multi-threaded
-accounting under LDC.
+The ledger is process-wide and its entries are accessed atomically. Allocate
+it before starting worker threads and free it after they join; a missing or
+out-of-range callback ID fails the test.
 
 Stormer threads (T06/T18) are one `StormJob` class instance per thread.
 A loop-local delegate capturing `&hctx[i]` made every thread alias the
@@ -179,7 +250,7 @@ last slot — that was a real harness race, not a sanitizer artifact.
 
 ## ThreadSanitizer
 
-1.0.1. `make -C tests/farm run-tsan` and `run-t19-tsan` build with LDC
+`make -C tests/farm run-tsan` and `run-t19-tsan` build with LDC
 `-fsanitize=thread -d-version=TSan`. The TSan build defaults to
 `history_size=7 halt_on_error=1` (`__tsan_default_options`; override with
 `TSAN_OPTIONS`). A TSan report is a defect.

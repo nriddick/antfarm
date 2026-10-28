@@ -94,7 +94,9 @@ class Checks:
 
     def ordering(self):
         self.run([sys.executable, "-B", "scripts/check-ring-stores.py"])
-        for name, versions in (("farm_ordering", ("AntfarmWriteAuditHooks",)), ("leaf_reuse", ())):
+        for name, versions in (("farm_ordering", ("AntfarmWriteAuditHooks",)),
+                               ("subscription_live", ("AntfarmWriteAuditHooks",)),
+                               ("leaf_reuse", ())):
             self.build_run(name, ["tests/farm/" + name + ".d",
                                  "antfarm/package.d", "antfarm/allocation.d"], versions)
 

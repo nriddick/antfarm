@@ -12,9 +12,7 @@ import core.stdc.stdlib : malloc, free, abort, exit;
 
 enum DEFAULT_WATCHDOG_SECS = 90;
 
-// Must be __gshared: consumer/producer threads need the same counters.
-// (`shared T` alone is TLS-to-shared in D for module globals under some ABIs;
-// match antfarm_test.d: __gshared shared(T).)
+// Process-wide ledgers, accessed atomically by producer and consumer threads.
 __gshared shared(long) g_totalCalls;
 __gshared shared(long)* g_calls;
 __gshared size_t g_npayloads;
@@ -31,6 +29,7 @@ void check(bool cond, const(char)[] msg, string file = __FILE__, int line = __LI
 
 void allocCalls(size_t n)
 {
+    check(g_calls is null, "previous callback ledger was freed");
     g_calls = cast(shared long*) malloc(n * long.sizeof);
     check(g_calls !is null, "malloc g_calls");
     g_npayloads = n;
@@ -49,8 +48,9 @@ void freeCalls()
 long countingCb(size_t idx) nothrow @nogc @system
 {
     // body[0] = payload index
-    if (g_calls !is null && idx < g_npayloads)
-        atomicFetchAdd(g_calls[idx], 1L);
+    if (g_calls is null || idx >= g_npayloads)
+        fatal("test callback id outside the allocated ledger");
+    atomicFetchAdd(g_calls[idx], 1L);
     atomicFetchAdd(g_totalCalls, 1L);
     return 1;
 }
@@ -89,10 +89,9 @@ PayloadBatch makeBatch(size_t n, scope void delegate(size_t i, ref Callback h, r
     // the ring, but should not reserve thousands of unused words per entry.
     foreach (i; 0 .. n)
     {
-        b.headers[i] = Callback.init;
+        b.headers[i] = callbackFor!countingCb();
         size_t plen = 2;
         fill(i, b.headers[i], plen);
-        b.headers[i] = callbackFor!countingCb();
         b.lengths[i] = plen;
         check(plen <= size_t.max - b.bodyCap, "body arena overflow");
         b.bodyCap += plen;
@@ -211,9 +210,21 @@ final class ConsJob
     void run() { consumerMain(c); }
 }
 
-void expectExactCalls(PayloadBatch* b, const(char)[] label)
+// Quiescent observations only. In particular, a total equal to the expected
+// count cannot substitute for this per-id oracle: losses and duplicates cancel.
+bool exactCallRange(size_t first, size_t end)
 {
-    foreach (i; 0 .. b.count)
+    check(first <= end && end <= g_npayloads, "valid ledger range");
+    foreach (i; first .. end)
+        if (atomicLoad!(MemoryOrder.raw)(g_calls[i]) != 1)
+            return false;
+    return true;
+}
+
+void expectCallRange(size_t first, size_t end, const(char)[] label)
+{
+    check(first <= end && end <= g_npayloads, "valid ledger range");
+    foreach (i; first .. end)
     {
         immutable got = atomicLoad!(MemoryOrder.raw)(g_calls[i]);
         if (got != 1U)
@@ -223,6 +234,11 @@ void expectExactCalls(PayloadBatch* b, const(char)[] label)
             abort();
         }
     }
+}
+
+void expectExactCalls(PayloadBatch* b, const(char)[] label)
+{
+    expectCallRange(0, b.count, label);
     check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == b.expectedCalls, label);
 }
 
@@ -234,26 +250,6 @@ uint countLive(AntFarm* f)
         if ((atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & LIVE) != 0)
             ++n;
     return n;
-}
-
-// Quiescent only: every view has left and every producer is done. Exactly
-// one slot is Live, it is the write tail's, and no count, Sub or leaf
-// remains anywhere (spec 6e postconditions).
-void expectFrontierLiveOnly(AntFarm* f, const(char)[] label)
-{
-    immutable frontier = cast(uint)((atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift) & f.kMask);
-    foreach (ki; 0 .. f.K)
-    {
-        immutable rt = atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]);
-        immutable want = ki == frontier ? LIVE : 0UL;
-        if (rt != want)
-        {
-            fprintf(stderr, "%.*s ki=%u rt=%llx expected %llx (frontier ki=%u)\n",
-                cast(int) label.length, label.ptr, ki, rt, want, frontier);
-            abort();
-        }
-    }
-    expectNoLiveConsumerRefs(f, label);
 }
 
 void expectNoLeftoverSub(AntFarm* f, const(char)[] label)
@@ -270,37 +266,38 @@ void expectNoLeftoverSub(AntFarm* f, const(char)[] label)
     }
 }
 
-int countUnprotectedIncomplete(AntFarm* f)
+// Quiescent only: even with zero members, every initialized, unconfirmed
+// epoch (including the frontier) must retain Live. References cannot stand
+// in for this epoch-owned obligation. Inspect current slot identities, not
+// an ever-growing walk from epoch zero.
+int countMissingLive(AntFarm* f)
 {
-    int orphans;
-    immutable eg = cast(long)(atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift);
-    foreach (e; 0 .. eg + 1)
+    int missing;
+    foreach (ki; 0 .. f.K)
     {
-        immutable ki = cast(uint)(e & f.kMask);
-        if (atomicLoad!(MemoryOrder.raw)(f.stats[ki].es) != e)
-            continue;
+        immutable e = atomicLoad!(MemoryOrder.raw)(f.stats[ki].es);
+        if (e < 0) continue;
         immutable ki1 = cast(uint)((e + 1) & f.kMask);
-        if (atomicLoad!(MemoryOrder.raw)(f.stats[ki1].es) != e + 1)
-            continue;
         immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt);
         immutable seqtN = atomicLoad!(MemoryOrder.raw)(f.stats[ki1].seqt);
         immutable sd = atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd);
-        immutable complete = seqt >= seqtN || seqt + sd >= seqtN;
-        immutable rtlow = atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & LOWMASK;
-        if (!complete && rtlow == 0)
-            ++orphans;
+        immutable confirmed = atomicLoad!(MemoryOrder.raw)(f.stats[ki1].es) == e + 1
+            && seqt + sd >= seqtN;
+        if (!confirmed && (atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & LIVE) == 0)
+            ++missing;
     }
-    return orphans;
+    return missing;
 }
 
 void expectNoLiveConsumerRefs(AntFarm* f, const(char)[] label)
 {
+    check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, label);
     foreach (ki; 0 .. f.K)
     {
         immutable rt = atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]);
-        if ((rt & COUNTMASK) != 0)
+        if ((rt & ~LIVE) != 0)
         {
-            fprintf(stderr, "%.*s leaked count bits ki=%u rt=%llx\n",
+            fprintf(stderr, "%.*s unexpected root bits after departure ki=%u rt=%llx\n",
                 cast(int) label.length, label.ptr, ki, rt);
             abort();
         }
@@ -315,6 +312,19 @@ void expectNoLiveConsumerRefs(AntFarm* f, const(char)[] label)
             }
         }
     }
+}
+
+// All producers stopped; every payload was drained by the departing cohort.
+// There must be exactly one Live bit at the initialized frontier, with no
+// references, subscriber pins, reserved root bits, or occupied leaves.
+void expectDrainedFarm(AntFarm* f, const(char)[] label)
+{
+    expectNoLiveConsumerRefs(f, label);
+    immutable epoch = atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift;
+    immutable frontier = cast(uint)(epoch & f.kMask);
+    check(atomicLoad!(MemoryOrder.raw)(f.stats[frontier].es) == cast(long) epoch, label);
+    foreach (ki; 0 .. f.K)
+        check(atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) == (ki == frontier ? LIVE : 0UL), label);
 }
 
 void say(const(char)[] msg)

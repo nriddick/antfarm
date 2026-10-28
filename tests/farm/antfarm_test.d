@@ -230,6 +230,8 @@ void actorWaveObserve(scope ref ActorBorrow!ActorWaveState actor)
 
 private long incCalls(size_t idx) nothrow @nogc @system
 {
+    if (g_calls is null || idx >= g_npayloads)
+        fatal("test callback id outside the allocated ledger");
     atomicFetchAdd(g_calls[idx], 1L);
     atomicFetchAdd(g_totalCalls, 1L);
     return 1;
@@ -253,14 +255,16 @@ long testCb1(size_t idx) nothrow @nogc @system
 
 void allocCalls(size_t n)
 {
+    check(g_calls is null, "previous callback ledger was freed");
     g_calls = cast(shared(long)*) malloc(n * long.sizeof);
+    check(g_calls !is null, "callback ledger allocation");
     g_npayloads = n;
     foreach (i; 0 .. n)
         g_calls[i] = 0;
     atomicStore!(MemoryOrder.raw)(g_totalCalls, 0L);
 }
 
-void freeCalls() { free(cast(void*) g_calls); g_calls = null; }
+void freeCalls() { free(cast(void*) g_calls); g_calls = null; g_npayloads = 0; }
 
 void check(bool cond, const(char)[] msg, string file = __FILE__, int line = __LINE__)
 {
@@ -301,16 +305,37 @@ uint liveSlots(AntFarm* f)
 // one Live slot and no references remain anywhere (spec 6e postconditions).
 void checkQuiescentLive(AntFarm* f, const(char)[] msg)
 {
-    check(liveSlots(f) == 1, msg);
+    checkStableTallies(f, 0, msg);
+    immutable epoch = atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift;
+    immutable frontier = cast(uint)(epoch & f.kMask);
+    check(atomicLoad!(MemoryOrder.raw)(f.stats[frontier].es) == cast(long) epoch, msg);
+    foreach (ki; 0 .. f.K)
+        check(atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) == (ki == frontier ? LIVE : 0UL), msg);
+}
+
+// Stable observation only: no subscribe, reference move/drop, or producer is
+// running. During a leaf zero-edge propagation the equality need not hold.
+void checkStableTallies(AntFarm* f, long members, const(char)[] msg)
+{
+    check(atomicLoad!(MemoryOrder.raw)(f.Cf) == members, msg);
     foreach (ki; 0 .. f.K)
     {
-        check((lowHalf(f, cast(uint) ki) & COUNTMASK) == 0, msg);
+        immutable rt = atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]);
+        check((rt & ~(COUNTMASK | LIVE)) == 0, msg); // no Sub or reserved bits
+        uint occupied;
         foreach (l; 0 .. MAX_LEAVES)
-            check(atomicLoad!(MemoryOrder.raw)(f.Lt[ki * MAX_LEAVES + l][0]) == 0, msg);
+        {
+            immutable count = atomicLoad!(MemoryOrder.raw)(f.Lt[ki * MAX_LEAVES + l][0]);
+            check(count >= 0, msg);
+            if (count != 0)
+            {
+                check(members != 0, msg);
+                check(l < atomicLoad!(MemoryOrder.raw)(f.stats[ki].sqcs), msg);
+                ++occupied;
+            }
+        }
+        check((rt & COUNTMASK) == occupied, msg);
     }
-    checkNoLeftoverSub(f, msg);
-    immutable frontier = cast(uint)((atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift) & f.kMask);
-    check((lowHalf(f, frontier) & LIVE) != 0, msg);
 }
 
 // Quiescent only: every initialized epoch that is not yet confirmed is Live.
@@ -357,7 +382,7 @@ void testMagicWrap()
 
 void testRingSizeUnits()
 {
-    foreach (mib; [2u, 4u, 8u])
+    foreach (mib; [1u, 2u, 4u, 8u])
     {
         auto f = AntFarm.create(ringMiB: mib, k: 8, expectedConsumers: 1,
                                 maxBulk: 0, maxSmall: 1, quotaSmall: 512);
@@ -366,6 +391,7 @@ void testRingSizeUnits()
         check(f.bufBytes == cast(ulong) mib * 1024 * 1024, "ring bytes");
         f.destroy();
     }
+    check(ringMiBFromUlongs(1UL << 17) == 1, "2^17 ulongs is 1 MiB");
     check(ringMiBFromUlongs(1UL << 18) == 2, "2^18 ulongs is 2 MiB");
     check(ringMiBFromUlongs(1UL << 20) == 8, "2^20 ulongs is 8 MiB");
     printf("testRingSizeUnits OK\n"); fflush(stdout);
@@ -481,6 +507,51 @@ void testArithmetic()
             check(sum == tlen, "shard partition");
         }
     printf("testArithmetic OK\n"); fflush(stdout);
+}
+
+// Live is epoch-owned: membership changes neither discharge it nor create
+// extra Live units. Exercise shared leaves and cached leaf identity at every K.
+void testLiveMembership()
+{
+    foreach (k; [2u, 4u, 8u, 16u])
+    {
+        auto f = AntFarm.create(1, k, 64, 0, 0, 1, 512);
+        scope (exit) f.destroy();
+        checkQuiescentLive(f, "constructed Farm: Live frontier, no membership or pins");
+        ConsumerView invalid;
+        check(invalid.subscribeOnce(null) == SUBSCRIBE_INVALID, "null Farm rejected");
+        invalid.unsubscribe();
+        check(!invalid.hasRef && invalid.F is null, "invalid/default view remains detached");
+
+        ConsumerView[27] views;
+        foreach (i, ref v; views)
+        {
+            check(v.subscribeOnce(f) == 0, "empty epoch 0 subscription succeeds");
+            check(v.oldestEi == 0 && v.newestEi == 0, "new view holds one epoch");
+            checkStableTallies(f, cast(long) i + 1, "arrival propagates occupied leaves only");
+            immutable sq = atomicLoad(f.stats[0].sqcs);
+            check(lowHalf(f, 0) == LIVE + (i + 1 < sq ? i + 1 : sq),
+                "Live remains one bit while consumers share leaves");
+        }
+        check(views[0].subscribeOnce(f) == SUBSCRIBE_INVALID, "already attached rejected");
+        checkStableTallies(f, views.length, "invalid attempt leaves all tallies unchanged");
+
+        // Scheduler nudges must not change which leaf a held reference drops.
+        views[0].IDc += 1;
+        long members = views.length;
+        foreach (parity; 0 .. 2)
+            for (size_t i = parity; i < views.length; i += 2)
+            {
+                views[i].unsubscribe();
+                --members;
+                checkStableTallies(f, members, "departure drops its cached leaf");
+                check((lowHalf(f, 0) & LIVE) != 0, "departure never discharges an open epoch");
+                views[i].unsubscribe();
+                checkStableTallies(f, members, "repeated unsubscribe is a no-op");
+            }
+        checkQuiescentLive(f, "empty Farm still has exactly its constructed Live");
+    }
+    printf("testLiveMembership OK\n"); fflush(stdout);
 }
 
 // ---------------------------------------------------------------------
@@ -1130,10 +1201,18 @@ void testSubscriptionCap()
         check(views[i].subscribe(f) >= 0, "subscribe within cap");
     }
     ConsumerView extra;
-    check(extra.subscribe(f) == SUBSCRIBE_FULL, "oversubscription reports full");
+    immutable before = atomicLoad(f.Rt[0][0]);
+    check(extra.subscribeOnce(f) == SUBSCRIBE_FULL, "oversubscription reports full");
+    check(!extra.hasRef && extra.F is null, "FULL leaves the attempted view detached");
+    check(atomicLoad(f.Rt[0][0]) == before, "FULL did not change the root");
+    checkStableTallies(f, MAX_CONSUMERS_LIMIT, "FULL unwinds membership without leaking pins");
     check(views[0].subscribe(f) == SUBSCRIBE_INVALID,
         "resubscribing a live view reports invalid");
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == MAX_CONSUMERS_LIMIT, "Cf at cap");
+    views[0].unsubscribe();
+    check(extra.subscribeOnce(f) == 0, "a single released membership slot can be reused");
+    checkStableTallies(f, MAX_CONSUMERS_LIMIT, "replacement restores cap with balanced leaves");
+    extra.unsubscribe();
     foreach (i; 0 .. MAX_CONSUMERS_LIMIT)
         views[i].unsubscribe();
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained");
@@ -4068,8 +4147,37 @@ void testCanFit()
     printf("testCanFit OK\n");
 }
 
+// Fast, deterministic API and lifetime checks. The default run also retains
+// concurrent, table-format, completion-ordering, and actor coverage below.
+void runFarmSanity()
+{
+    testMagicWrap();
+    testRingSizeUnits();
+    testCheckGeometry();
+    testTryCreate();
+    testArithmetic();
+    testCanFit();
+    testLiveMembership();
+    testSingleThreaded();
+    testSubscriptionCap();
+}
+
 void main(string[] args)
 {
+    if (args.length > 2 || (args.length == 2 && args[1] != "sanity"
+            && args[1] != "join-only" && args[1] != "stale-quota-only"
+            && args[1] != "compact-only"))
+    {
+        fprintf(stderr, "usage: antfarm_test [sanity|join-only|stale-quota-only|compact-only]\n");
+        import core.stdc.stdlib : exit;
+        exit(64);
+    }
+    if (args.length == 2 && args[1] == "sanity")
+    {
+        runFarmSanity();
+        printf("ALL FARM SANITY CHECKS PASSED\n");
+        return;
+    }
     if (args.length > 1 && args[1] == "join-only")
     {
         testSameShardPlainWriteJoin();
@@ -4101,22 +4209,15 @@ void main(string[] args)
         printf("ALL COMPACT TESTS PASSED\n");
         return;
     }
-    testMagicWrap();
-    testRingSizeUnits();
-    testCheckGeometry();
-    testTryCreate();
-    testArithmetic();
-    testCanFit();
+    runFarmSanity();
     testSweptQuotaBalance();
     testProducerLifecycleChurn();
-    testSingleThreaded();
     testInputRangeWrite();
     testPayloadRange();
     testUniformRanges();
     testSeparateRanges();
     testConcurrent();
     testWraparound();
-    testSubscriptionCap();
     testChurn(3);
     testChurn(1);
     testBacklog();

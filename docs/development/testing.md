@@ -134,6 +134,8 @@ cancellation and exception unwinding). The full smoke run includes both checks.
 | Command | Use |
 | --- | --- |
 | `make check-c-abi` | core C/C++ and optional runtime ABI; select `C_ABI_ARGS='--core-only'`, `'--runtime-only'`, or `'--tsan'` for focused coverage |
+| `make -C tests/farm sanity` | deterministic Farm geometry, membership, Live/reference lifecycle, and capacity checks; the normal root suite also runs these |
+| `make -C tests/farm torture` | Farm torture only, including per-ID oracles and 16/32-thread wake/drained subscription cohorts; `tests/farm/torture_tests T28` selects the cohorts after building |
 | `make -C tests/farm check-farm-ordering` | the Farm ordering and leaf-reuse tests (LDC and DMD) and the raw ring-store check |
 | `make -C tests/farm run-farm-tsan` | the Farm suite under ThreadSanitizer |
 | `make -C tests/actors run run-dmd run-tsan` | public actor suite |
@@ -173,8 +175,8 @@ interpreter and arguments.
 | `packages` | BetterC/native-C and core C/C++ ABI checks; root, threadpool and Fiber unit/smoke suites via Dub |
 | `threadpool` | C runtime ABI lifecycle, GroupHost token/borrowed-resource cleanup, and fork-join/range/death checks; process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release, FarmHost lifecycle; also optimized LDC host tests |
 | `forkjoin` | The fork-join suite via Dub (`dub test :forkjoin -- --DRT-testmode=run-main`): frame pool, deque, admission, paths, ranges, completion and the 2.1.0 wrappers |
-| `ordering` | Raw ring-store audit, controlled Farm ordering and leaf reuse |
-| `review` | Plain torture suite, sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
+| `ordering` | Raw ring-store audit, controlled Farm ordering, Live subscription schedules, and leaf reuse |
+| `review` | Plain torture suite (including T28 subscription cohorts), sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
 | `actors` | Public actor deterministic/contention suite with the mimalloc stub |
 | `private` | Private actor suite and six extracted documentation programs |
 | `examples` | both complete quickstart programs (fork-join reduction and raw payload), plus actor/headless examples in debug/release with 0 and 2 workers |

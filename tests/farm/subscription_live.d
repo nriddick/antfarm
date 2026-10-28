@@ -1,9 +1,10 @@
 // Deterministic subscription schedules for the Live lifecycle (SPEC 3 I3,
 // 6b, 6c, 6e). Each schedule holds actors at write-audit hooks, either
 // inline on the main thread or, where a producer must stay paused inside its
-// own write while others run, on a worker thread released by flags. Every
-// schedule here failed on some earlier protocol or prototype; the history is
-// in SPEC 11.
+// own write while others run, on a worker thread released by flags. A to I
+// and P failed on some earlier protocol or prototype (SPEC 11); J1 to J3, Q,
+// K, X, L and LN were added by the audit of the implementation and each
+// fails on an ablation of the defect it targets (docs/design/farm-live-lifecycle.md).
 //
 // Oracles, per schedule:
 //   safety     no producer enters the next lap of a slot whose work is still
@@ -17,7 +18,7 @@
 //              subscription is allowed; a rescue afterwards is diagnostic only.
 //
 // usage: subscription_live            (every schedule and trigger)
-//        subscription_live <A|B|C|D1|D2|E|F|G|H|I|P|J1|J2|J3|Q|K|X|L|LN> [trigger 0..3]
+//        subscription_live <A|B|C|D1|D2|E|F|G|H|I|P|J1|J2|J3|Q|K|X|L|LN> [trigger 0..3 for D1/D2/E]
 module subscription_live;
 
 import antfarm;
@@ -25,7 +26,6 @@ import core.atomic;
 import core.thread;
 import core.stdc.stdio : printf, fflush, stdout;
 import core.stdc.stdlib : malloc, free, exit;
-import std.conv : to;
 
 version (AntfarmWriteAuditHooks) {} else
     static assert(false, "build with AntfarmWriteAuditHooks");
@@ -107,8 +107,22 @@ void newFarm() nothrow @nogc @system
     g_seg = g_f.segCap;
 }
 
+// Every schedule must leave the Farm with no member, root reference,
+// transient pin, reserved bit or leaf; only Live bits may remain.
+void requireDetached() nothrow @nogc @system
+{
+    require(atomicLoad(g_f.Cf) == 0, "all scheduled views detached");
+    foreach (ki; 0 .. g_f.K)
+    {
+        require((atomicLoad(g_f.Rt[ki][0]) & ~LIVE) == 0, "no root refs, transient pins or reserved bits");
+        foreach (leaf; 0 .. MAX_LEAVES)
+            require(atomicLoad(g_f.Lt[ki * MAX_LEAVES + leaf][0]) == 0, "no leaked leaf references");
+    }
+}
+
 void endFarm() nothrow @nogc @system
 {
+    requireDetached();
     g_f.unregisterProducer(g_q);
     g_f.unregisterProducer(g_p);
     g_f.destroy();
@@ -805,7 +819,7 @@ void setupJ(bool twoLeaves) nothrow @nogc @system
 
 void hookJ(AntFarm*, WriteAuditPhase phase, ulong a1, ulong a2) nothrow @nogc @system
 {
-    if (g_stage != 1) return;
+    if (g_stage != 1 && !(g_mode == '1' && g_stage == 2)) return;
     final switch (g_mode)
     {
     case '1':
@@ -814,6 +828,13 @@ void hookJ(AntFarm*, WriteAuditPhase phase, ulong a1, ulong a2) nothrow @nogc @s
             g_stage = 2;
             while (g_C.consumeNext()) {}
             require(g_C.newestEi == 2 && g_C.oldestEi == 2, "C discharged 1 at the re-read");
+        }
+        else if (g_stage == 2 && phase == WriteAuditPhase.subscriberRead && a1 == 2 && a2 == 2)
+        {
+            // The rejected candidate's fresh Sub is already gone; the tail's stays.
+            require((atomicLoad(g_f.Rt[1][0]) >> 32) == 0, "rejected candidate pin released");
+            require((atomicLoad(g_f.Rt[2][0]) >> 32) == 1, "tail pin retained");
+            g_stage = 3;
         }
         break;
     case '2':
@@ -869,7 +890,7 @@ bool scheduleJ(char mode)
     {
         r = g_S.subscribe(g_f);
         writeAuditHook = null;
-        require(g_stage == 2, "schedule ran");
+        require(g_stage == (mode == '1' ? 3 : 2), "schedule ran");
     }
     else
     {
@@ -1027,6 +1048,7 @@ void newFarmBulk() nothrow @nogc @system
 
 void endFarmBulk() nothrow @nogc @system
 {
+    requireDetached();
     g_f.unregisterProducer(g_q);
     g_f.destroy();
     g_f = null;
@@ -1093,12 +1115,29 @@ bool scheduleL(char mode)
     return verdict(mode == 'N' ? "LN".ptr : "L".ptr, ok);
 }
 
+immutable string[] SCHEDULES = ["A", "B", "C", "D1", "D2", "E", "F", "G", "H", "I", "P",
+    "J1", "J2", "J3", "Q", "K", "X", "L", "LN"];
+
 int main(string[] args)
 {
+    bool valid = args.length == 1;
+    if (args.length >= 2)
+        foreach (name; SCHEDULES)
+            if (args[1] == name) valid = true;
+    if (args.length == 3)
+        valid = valid && (args[1] == "D1" || args[1] == "D2" || args[1] == "E")
+            && args[2].length == 1 && args[2][0] >= '0' && args[2][0] <= '3';
+    if (!valid || args.length > 3)
+    {
+        printf("usage: subscription_live [<schedule> [trigger 0..3 for D1/D2/E]]; schedules: ");
+        foreach (name; SCHEDULES) printf("%s ", name.ptr);
+        printf("\n");
+        return 64;
+    }
     bool all = args.length == 1;
     bool ok = true;
     bool want(string name) { return all || args[1] == name; }
-    int trigger(int dflt) { return args.length > 2 ? args[2].to!int : dflt; }
+    int trigger(int dflt) { return args.length > 2 ? args[2][0] - '0' : dflt; }
     foreach (name; ["A", "B", "C"])
         if (want(name)) { printf("schedule %s\n", name.ptr); ok &= scheduleABC(name[0]); }
     foreach (name; ["D1", "D2"])
