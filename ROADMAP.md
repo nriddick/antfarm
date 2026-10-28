@@ -40,8 +40,8 @@ raw worker bodies; the pool's `wakeOne`/`anyWorkerArmed`; blocking parallel
 loops removed in favour of fork-join; `threadpool.exchange` removed;
 counters and cadence verbs behind versions; MIT licensing; `VERSION`; and
 the onboarding pass (three rules first, a ten-line first program on every
-core, the hosting guide split). The ordered plan with each step's checks is
-[docs/development/cleanup-plan-2.0.md](docs/development/cleanup-plan-2.0.md).
+core, the hosting guide split). The ordered plan with each step's checks was
+`docs/development/cleanup-plan-2.0.md`, kept in git history.
 The fork-join suite runs under ThreadSanitizer and AddressSanitizer in
 `make check`. Left after 2.0.0: private trees retreating to typed results
 and tracked outcomes (2.1.1), and Windows validation of the wake path (with
@@ -166,8 +166,8 @@ TSan/ASan lanes and the Fiber adapter (`FiberGroups` beside the dispatcher
 on one `GroupHost`, 2.1.0). Still open: Windows validation of the wake path
 and a submit token per foreign thread. The cleanup that follows the addition (one owner of the
 pool, idle machinery, loops over fork-join, private trees, stubs,
-onboarding, duplicated status) is ordered in
-[docs/development/cleanup-plan-2.0.md](docs/development/cleanup-plan-2.0.md).
+onboarding, duplicated status) was ordered in
+`docs/development/cleanup-plan-2.0.md`, kept in git history.
 The text below is the original proposal.
 
 Add a dispatch layer with worker-local work-stealing deques to the

@@ -644,7 +644,7 @@ The entries below record the work in the order it landed, newest first.
   `step()`; the parallel death probes for nested blocking waits and
   `break` are gone with the adapters.
 
-- Cleanup for 2.0, step 5 and 7 of [the plan](docs/development/cleanup-plan-2.0.md):
+- Cleanup for 2.0, step 5 and 7 of the plan (`docs/development/cleanup-plan-2.0.md`, in git history):
   `threadpool.exchange` (a self-described stub) is removed; `HostGroups.span`
   moved out of the placement defaults into a "when you know better" note;
   the MT-payload removal history moved from SPEC section 11 to the

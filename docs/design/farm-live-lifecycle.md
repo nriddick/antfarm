@@ -53,9 +53,10 @@ veto had been answering the wrong question. Packed membership and the
 higher ceiling became separate policy choices and were not adopted; `Cf`
 stays a plain capacity and sizing count (SPEC 2a).
 
-Two scratch models from that work, `anchor-protocol-model.py` and
-`xfer-handoff-model.py`, were not carried into the repository: they model
-the dropped handoff, not the adopted protocol.
+The proposals, their patch and the two scratch models of the handoff
+(`anchor-protocol-model.py`, `xfer-handoff-model.py`) are recorded in git
+history (commit 0a2473f) and removed from the tree: they describe the dropped
+handoff, not the adopted protocol.
 
 ## 3. Choosing the subscribe scan
 
