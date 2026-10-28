@@ -109,12 +109,12 @@ for those open obligations.
 - `antfarm_test.d` — deterministic `sanity` entry point and the complete
   Farm/actor unit suite. The normal no-argument run includes sanity.
 - `torture_tests.d` — T00–T02, T04, T06, T09, T10, T13, T15–T18, T20–T26,
-  T28 and T29. T03, T05, T07, T08, T11 and T12 duplicated `antfarm_test.d`
-  tests with the same geometry and were folded into them; T14's K geometry
-  runs inside T04. T28 runs barrier-gated 16/32-member cohorts at K=2 and
-  K=16; T29 is a 24-thread subscribe herd at the 1 MiB ring minimum whose
-  arrivals and departures overlap production over about eight laps, counting
-  `RETRY` and checking exactly-once and a drained Farm afterwards. T20 checks Live discharge under
+  T28 and T29 (the unit suite covers the same-geometry runs that used to
+  sit between them). T04 runs twelve consumers at K = 4, 8 and 16. T28 runs
+  barrier-gated 16/32-member cohorts at K=2 and K=16; T29 is a 24-thread
+  subscribe herd at the 1 MiB ring minimum whose arrivals and departures
+  overlap production over about eight laps, counting `RETRY` and checking
+  exactly-once and a drained Farm afterwards. T20 checks Live discharge under
   write crossings and churn: at quiescence no confirmed segment is still
   Live or referenced, and only the frontier is Live. Small bodies keep the
   arm an invariant scan rather than a memcpy bench. T21 laps the ring several times and verifies payload body contents
@@ -207,9 +207,10 @@ in dedicated sessions; the methodology and measurements are in
 [PERFORMANCE.md](../../PERFORMANCE.md).
 
 - `boundary_runoff.d`: one producer with quota 512, one consumer parked at
-  epoch zero, and 512-word tables. The pre-`d6b2eff` automatic-renewal code
-  admits an unchecked exact-boundary reservation and laps the live pin.
-  Current code stops at `Wt=229376` and rejects 10,000 further attempts.
+  epoch zero, and 512-word tables. A reservation that ends exactly on a
+  boundary initializes the next segment and must come out of a checked
+  grant (SPEC 5a, 5c): the producer stops at `Wt=229376` and rejects 10,000
+  further attempts instead of lapping the pin.
   The `live` argument subscribes no consumer, so only epoch zero's
   construction-time `Live` protects it; it tests the same protection for
   unexecuted work.
@@ -253,9 +254,9 @@ The ledger is process-wide and its entries are accessed atomically. Allocate
 it before starting worker threads and free it after they join; a missing or
 out-of-range callback ID fails the test.
 
-Stormer threads (T06/T18) are one `StormJob` class instance per thread.
-A loop-local delegate capturing `&hctx[i]` made every thread alias the
-last slot — that was a real harness race, not a sanitizer artifact.
+Stormer threads (T06/T18) are one `StormJob` class instance per thread: a
+loop-local delegate capturing a slot address would alias every thread to
+the last slot.
 
 ## ThreadSanitizer
 

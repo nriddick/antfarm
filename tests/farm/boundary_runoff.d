@@ -1,8 +1,9 @@
-// Deterministic regression for the pre-d6b2eff unchecked equality boundary.
-// One producer, exact quota-sized tables, and epoch zero protected either by a
-// consumer pinned there or (mode "live") only by its construction-time Live.
-// The old space >= Exmax gate admitted a write ending exactly at a boundary,
-// then reused the next segment's metadata without ever needing an Rt sweep.
+// Deterministic regression for an exact boundary landing (SPEC 5a, 5c): a
+// reservation that ends exactly on a segment boundary initializes the next
+// segment, so it must come out of a checked grant and never from implicit
+// renewal. One producer, exact quota-sized tables, and epoch zero protected
+// either by a consumer pinned there or (mode "live") only by its
+// construction-time Live.
 module boundary_runoff;
 
 import antfarm;

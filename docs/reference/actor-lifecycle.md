@@ -48,7 +48,7 @@ Subscribe one persistent `ConsumerView` per consuming thread. Ordinary copying
 is disabled; it is a unique cursor, not a POD value to duplicate.
 `subscribe(AntFarm*)` returns a non-negative starting epoch, or a negative code:
 `SUBSCRIBE_FULL` (128 views) or `SUBSCRIBE_INVALID` (null Farm or an already
-subscribed view). It retries the transient frontier race itself;
+subscribed view). It retries the transient `SUBSCRIBE_RETRY` outcome (the write tail outran an attempt's rounds) itself;
 `subscribeOnce` is the single attempt that reports it as `SUBSCRIBE_RETRY`.
 
 `consumeNext() == false` means nothing is ready at this cursor right now. It may

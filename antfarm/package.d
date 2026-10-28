@@ -528,11 +528,11 @@ uint rootCostHintFor(size_t count, ulong consumers, uint smallThreshold)
         if (hint == MAX_AVG_COST || claims >= target) return hint;
     }
 }
-/// Smallest ring accepted by `AntFarm.create`, in MiB (2^17 ulongs). Lowered
-/// from 2 in 2.1.1 after the ring-size study: a ring's cache footprint is its
-/// live window, not its length, and a 1 MiB ring with K = 8 still leaves
-/// 16 Ki-word segments; the quota rule `Exmax <= (K-1)*segCap` is what bounds
-/// how many producers such a ring can plan.
+/// Smallest ring accepted by `AntFarm.create`, in MiB (2^17 ulongs). A ring's
+/// cache footprint is its live window, not its length (the ring-size study in
+/// docs/performance), and a 1 MiB ring with K = 8 still leaves 16 Ki-word
+/// segments; the quota rule `Exmax <= (K-1)*segCap` is what bounds how many
+/// producers such a ring can plan.
 enum uint MIN_RING_MIB = 1;
 /// Largest ring accepted by `AntFarm.create`, in MiB (64 GiB). Far beyond any
 /// characterized size; it mainly rejects a length accidentally given in ulongs.
@@ -1494,9 +1494,9 @@ struct AntFarm
         // Construction constraints (spec 1, 4a):
         //  - K is the useful power-of-two range [2, KMAX=16].
         //  - ringMiB >= MIN_RING_MIB (1 MiB, Ln >= 2^17 ulongs). The upper
-        //    bound mainly catches a legacy caller passing a length in ulongs.
+        //    bound mainly catches a length mistakenly given in ulongs.
         //  - segCap = Ln/K has a floor so header/pad space never dominates a
-        //    segment's capacity (subsumed by Ln >= 2^18 with K <= 16).
+        //    segment's capacity (subsumed by Ln >= 2^17 with K <= 16).
         //  - Exmax <= (K-1)*segCap so a full quota excursion is strictly
         //    less than a lap (spec 3 safety argument).
         //  - quotaRole > 0 iff maxRole > 0: an enabled role must declare a
@@ -1511,9 +1511,9 @@ struct AntFarm
         immutable segCap = ln / k;
         if (segCap < 2048) return reject("segment capacity too small");
         if (expectedConsumers == 0) return reject("expected consumers must be > 0");
-        // Quota-role rule (spec 4d): normalize disabled roles, validate
+        // Quota-role rule (spec 4a): normalize disabled roles, validate
         // enabled ones. Bulk auto-defaults to segCap when enabled with an
-        // unspecified quota (legacy convenience); small rejects 0.
+        // unspecified quota; small rejects 0.
         if (maxBulk == 0)
             quotaBulk = 0;
         else if (quotaBulk == 0)

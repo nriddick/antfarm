@@ -182,7 +182,7 @@ auto farm = AntFarm.create(ringMiB: 8, k: 8, expectedConsumers: workers,
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `ringMiB` | `8` | ring size in MiB; power of two, `>= 2` (at most `MAX_RING_MIB`, 64 GiB) |
+| `ringMiB` | `8` | ring size in MiB; power of two, `>= 1` (`MIN_RING_MIB`) and at most `MAX_RING_MIB` (64 GiB) |
 | `k` | `8` | segment count; power of two in `[2, 16]` |
 | `expectedConsumers` | `4` | initial sharding hint, not a cap |
 | `maxBulk` | `2` | simultaneous bulk-tier tokens; `0` disables the tier |
@@ -223,7 +223,7 @@ cost against its tier quota; its answer uses the current consumer-count snapshot
 and can change as consumers join or leave (see [SPEC 5b.3](SPEC.md#5b-write-call-and-return)).
 
 Quotas and payload sizes are in ulongs (8 bytes); only the ring size is in MiB.
-`ringMiBFromUlongs` converts a former ulong length exactly.
+`ringMiBFromUlongs` converts a length given in ulongs exactly.
 `expectedConsumers` seeds the first epoch's leaf sharding; later epochs use
 the live count. The hard limit is `MAX_CONSUMERS_LIMIT` (128) simultaneously
 subscribed views, beyond which `subscribe()` returns `SUBSCRIBE_FULL`.
