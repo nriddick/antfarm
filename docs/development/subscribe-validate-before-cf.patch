@@ -1,0 +1,543 @@
+diff --git a/antfarm/package.d b/antfarm/package.d
+--- a/antfarm/package.d
++++ b/antfarm/package.d
+@@ -631,7 +631,7 @@
+ // neither the hook nor its call sites.
+ version (AntfarmWriteAuditHooks)
+ {
+-    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned, tablePublished, subscriberProbed, plantChecked, plantPublished }
++    enum WriteAuditPhase { subscriberFull, subscriberValidated, subscriberCommitted, anchorProbed, quotaSwept, tailReserved, subscriberPinned, tablePublished, subscriberProbed, plantChecked, plantPublished }
+     __gshared void function(AntFarm*, WriteAuditPhase, ulong, ulong)
+         nothrow @nogc @system writeAuditHook;
+ }
+@@ -1356,7 +1356,9 @@
+ 
+     // ---- farm-level mutable metadata (spec 2a), one cache line each ----
+     align(64) shared ulong Wt;      /// write tail sequence
+-    align(64) shared long Cf;       /// current number of subscribed consumers
++    align(64) shared long Cf;       /// validated subscriptions, including committed attaches
++    /// Internal: bounded admission slots held by probes, members and leaving views.
++    align(64) shared long consumerSlots;
+     align(64) shared ulong Reqs_c;  /// consumer subscription counter; source of IDc
+     align(64) shared ulong Reqs_p;  /// producer registration counter; Token hash input
+     align(64) shared long Prbulk;   /// current number of bulk producers
+@@ -1608,6 +1610,8 @@
+     /// ticket arrays and the Farm storage itself.
+     void destroy() nothrow @nogc @system
+     {
++        if (atomicLoad!(MemoryOrder.raw)(consumerSlots) != 0)
++            fatal("destroy with admitted consumers or subscription probes");
+         if (atomicLoad!(MemoryOrder.raw)(Cf) != 0)
+             fatal("destroy with live consumers");
+         foreach (i; 0 .. maxBulk)
+@@ -1637,17 +1641,39 @@
+     // Registration (spec 4c, 4d, 6b, 6e)
+     // ------------------------------------------------------------------
+ 
+-    /// Internal: subscribe half used by ConsumerView.subscribe. fetch-inc Cf;
+-    /// on success fetch-inc Reqs_c and return it (the IDc).
+-    /// Returns SUBSCRIBE_FULL if oversubscribed.
+-    long add_consumer() nothrow @nogc @system
+-    {
+-        immutable prev = atomicFetchAdd!(MemoryOrder.raw)(Cf, 1);
+-        if (prev >= MAX_CONSUMERS_LIMIT)
+-        {
+-            atomicFetchSub!(MemoryOrder.raw)(Cf, 1);
+-            return SUBSCRIBE_FULL;
+-        }
++    /// Reserve capacity without publishing consumer membership. The slot is
++    /// retained until a failed probe has dropped every Sub, or a successful
++    /// view has released every reference in unsubscribe.
++    private bool reserveConsumerSlot() nothrow @nogc @system
++    {
++        for (;;)
++        {
++            immutable slots = atomicLoad!(MemoryOrder.raw)(consumerSlots);
++            if (slots >= MAX_CONSUMERS_LIMIT)
++            {
++                version (AntfarmWriteAuditHooks)
++                    if (writeAuditHook !is null)
++                        writeAuditHook(&this, WriteAuditPhase.subscriberFull, 0, 0);
++                return false;
++            }
++            if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(
++                    &consumerSlots, slots, slots + 1))
++                return true;
++        }
++    }
++
++    private void releaseConsumerSlot() nothrow @nogc @system
++    {
++        immutable prev = atomicFetchSub!(MemoryOrder.rel)(consumerSlots, 1);
++        if (prev <= 0) fatal("consumer slot underflow");
++    }
++
++    /// Commit only after 6b validation while retaining the candidate Sub.
++    /// A reserved capacity slot makes this increment infallible.
++    private long add_consumer() nothrow @nogc @system
++    {
++        immutable prev = atomicFetchAdd!(MemoryOrder.rel)(Cf, 1);
++        if (prev < 0 || prev >= MAX_CONSUMERS_LIMIT) fatal("consumer admission invariant");
+         return cast(long) atomicFetchAdd!(MemoryOrder.raw)(Reqs_c, 1);
+     }
+ 
+@@ -1656,7 +1682,7 @@
+     /// unsubscriber (spec 6e).
+     long sub_consumer() nothrow @nogc @system
+     {
+-        immutable prev = atomicFetchSub!(MemoryOrder.raw)(Cf, 1);
++        immutable prev = atomicFetchSub!(MemoryOrder.acq_rel)(Cf, 1);
+         if (prev <= 0) fatal("Cf underflow");
+         return prev;
+     }
+@@ -2415,8 +2441,10 @@
+     long subscribeOnce(AntFarm* f) nothrow @nogc @system
+     {
+         if (f is null || hasRef) return SUBSCRIBE_INVALID;
+-        immutable idc = f.add_consumer();
+-        if (idc < 0) return idc;
++        if (!f.reserveConsumerSlot()) return SUBSCRIBE_FULL;
++        // Transfer the slot to the view only when attachment completes.
++        bool attached;
++        scope (exit) if (!attached) f.releaseConsumerSlot();
+ 
+         // Spec 6b: derive the walk range from the write tail (the only
+         // unpinned read), then walk backwards pinning each slot with Sub
+@@ -2462,7 +2490,6 @@
+         {
+             foreach (i; 0 .. nPinned)
+                 atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
+-            f.sub_consumer();
+             return SUBSCRIBE_RETRY;
+         }
+ 
+@@ -2483,9 +2510,17 @@
+         {
+             foreach (i; 0 .. nPinned)
+                 atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
+-            f.sub_consumer();
+             return SUBSCRIBE_RETRY;
+         }
++        version (AntfarmWriteAuditHooks)
++            if (writeAuditHook !is null)
++                writeAuditHook(f, WriteAuditPhase.subscriberValidated, seg, esU);
++        // The selected epoch has passed every validation. From this point
++        // attachment cannot return RETRY or FULL. Keep its Sub through incLeaf.
++        immutable idc = f.add_consumer();
++        version (AntfarmWriteAuditHooks)
++            if (writeAuditHook !is null)
++                writeAuditHook(f, WriteAuditPhase.subscriberCommitted, seg, esU);
+         F = f;
+         IDc = cast(ulong) idc;
+         immutable lti = cast(uint)(IDc % sq);
+@@ -2501,6 +2536,7 @@
+         oldSweepSeq = 0;
+         sdCheckCounter = 0;
+         hasRef = true;
++        attached = true;
+         return es;
+     }
+ 
+@@ -2539,6 +2575,7 @@
+         // An unpinned scan here could resurrect a reclaimed, quota-certified
+         // slot with a stale Sub0 plant before its post-CAS retract.
+         F = null;
++        f.releaseConsumerSlot();
+     }
+ 
+     /// Consume one table if available. Returns false when no valid table is
+diff --git a/SPEC.md b/SPEC.md
+--- a/SPEC.md
++++ b/SPEC.md
+@@ -82,8 +82,9 @@
+ 
+ The shared mutable Farm fields:
+ 
+-- `Cf` — the current number of subscribed consumers.
+-- `Reqs_c` — a monotonically increasing counter of consumer subscription requests. `IDc` is taken from this counter alone, so producer registration cannot fragment consumer shard assignment.
++- `Cf` — committed consumer memberships, including validated subscribers attaching under a held `Sub`. Unvalidated probes do not contribute.
++- `consumerSlots` — bounded admission reservations held by probes, committed consumers, and views finishing unsubscription. Each party holds one slot until its final reference or provisional pin is released; at most `MAX_CONSUMERS_LIMIT` slots exist.
++- `Reqs_c` — a monotonically increasing counter of committed consumer subscriptions. `IDc` is taken from this counter alone, so producer registration cannot fragment consumer shard assignment.
+ - `Reqs_p` — a monotonically increasing counter of successful producer registrations (4d). It is separate from `Reqs_c` so Token hashes do not walk the consumer ID space.
+ - `FarmId` — a process-unique identity taken from a global issuance counter at Farm creation and never reused for the process lifetime. Every Token carries a copy, binding it to its issuing Farm (4d).
+ - `Prbulk` — the current number of bulk producers.
+@@ -286,7 +287,11 @@
+ 
+ ### 4c. Consumer Capacity
+ 
+-A subscriber `Si` calls `F.add_consumer()`, which fetch_incs `Cf`. If a slot is available, it fetch-incs `Reqs_c` and returns that result as `IDc`. If not, `F` is oversubscribed and `Si` fetch-decs `Cf` and returns `SUBSCRIBE_FULL`. Every subsequent subscription failure path also unwinds `Cf` (6b).
++A subscriber first reserves one `consumerSlots` unit with an acquire-release CAS only while the observed count is below `MAX_CONSUMERS_LIMIT`. A full observation returns `SUBSCRIBE_FULL` without incrementing any counter or depositing any pin. Failed CAS attempts reload and retry; admission is not wait-free under contention.
++
++The slot is held through the probe and, on success, throughout the view's membership. A failed probe drops all of its Subs before release-decrementing `consumerSlots`. An unsubscriber releases its slot only after every held reference has been released under the unsubscribe mutex. Capacity includes admitted probes and retiring views; either finishing can free a slot.
++
++Only after every 6b validation succeeds does `add_consumer()` release-increment `Cf`, then fetch-increment `Reqs_c` to issue `IDc`. The reserved slot makes this commit infallible: no `FULL` or `RETRY` path follows it. Every `Cf` decrement belongs to an ordinary serialized unsubscription (6e), never to a failed probe or capacity rollback. In the logical state, `0 <= Cf <= consumerSlots <= MAX_CONSUMERS_LIMIT`; separate diagnostic loads do not form an atomic snapshot of both counters.
+ 
+ ### 4d. Producer Tiers and Tickets
+ 
+@@ -397,15 +402,15 @@
+ 
+ The subscription protocol:
+ 
+-**a.** The subscriber `Si` calls `F.add_consumer()` (4c). If `Cf` is full, `F` is oversubscribed and `Si` returns `SUBSCRIBE_FULL`. Every subsequent failure path unwinds `Cf` too.
+-
+-**b.** Acquire-load `F.Wt` — the only unpinned read — and use `Wt >> segShift` as the walk range. Walk backwards through the corresponding segments (at most `K`, stopping at epoch 0). On each step, *before* inspecting that slot's metadata, fetch_add-release a `Sub` onto its `Rt`. The `d=0` step is the heuristic pin on the frontier slot `(Wt >> segShift) & (K-1)`: a held Sub is visible to producers as `Rt != 0`, so it blocks a full lap through the current view and segments ahead of it (5a contiguous-forward sweep). Older slots sit first in that sweep, so each older step pins before reading. After the pin, acquire-load `Rtlow` and acquire-load `Es`, and rank by earliest `Es` among `Rtlow != 0`. The pulse invariant (6c) guarantees a candidate exists. Several segments may hold Sub0 at once (one per abandoned unconfirmed segment); the walk picks the earliest, which is the frontier of unconsumed work.
++**a.** The subscriber `Si` reserves an admission slot (4c), returning `SUBSCRIBE_FULL` if capacity is occupied. This does not change `Cf` or `Reqs_c`. Until commit in step e, failure cleanup releases only the deposited Subs and then this slot.
++
++**b.** Acquire-load `F.Wt` — the only unpinned read — and use `Wt >> segShift` as the walk range. Walk backwards through the corresponding segments (at most `K`, stopping at epoch 0). On each step, *before* inspecting that slot's metadata, fetch_add-release a `Sub` onto its `Rt`. The `d=0` step is a provisional pin on the frontier slot `(Wt >> segShift) & (K-1)`. A held Sub stops later sweeps at that slot, but cannot revoke quota certified before the pin; the initial tail observation may already be stale. Only step c's validation and the candidate's ownership history justify attaching. Older slots sit first in that sweep, so each older step pins before reading. After the pin, acquire-load `Rtlow` and acquire-load `Es`, and rank by earliest `Es` among `Rtlow != 0`. Protected backlog retains a count or pulse (6c), although a stale walk range can miss it. Several segments may hold Sub0 at once (one per abandoned unconfirmed segment); the walk picks the earliest, which is the frontier of unconsumed work.
+ 
+ Groping an unpinned slot's `Rtlow`/`Es` is incorrect: those reads are not protected against wrap, so the snapshot can mix generations and `Si` can attach with no valid table while still holding a pin.
+ 
+-Race note: the one case where the walk finds no `Rtlow != 0` candidate is a transient race with a *not-last* unsubscribe of a *confirmed* pin, in which case `Si` stands at the frontier. The second `Wt` read and the bounds below still validate that frontier before attach.
+-
+-**c.** After the attach candidate is read, and while all Sub pins are still held, `Si` re-reads `F.Wt` and validates the following bounds, all compared as epoch numbers after shifting by `segShift`. `Seqt >> segShift` must lie in `[Es, Es + K - 1]`; this rejects a mixed snapshot where `Es` is still the previous lap's value while `Seqt` has already been advanced. `Wt >> segShift` must be `< Es + K`; this rejects a slot whose next lap was already reserved before the pin. When no live candidate was found (`bestSeg < 0`), the fallback must also satisfy `Es == Wt >> segShift`. A delayed initial tail probe can name an already reclaimed slot; another producer may have swept that slot into retained quota without reserving its next lap yet. The fallback therefore must still be the current frontier. This extra bound applies only to the fallback: an older live candidate remains protected and must stay available to drain a backed-up Farm. If any bound fails, `Si` unwinds every Sub and `Cf` and returns `SUBSCRIBE_RETRY`.
++Race note: concurrent ownership changes or a stale walk range can leave the walk without an observed `Rtlow != 0` candidate. The fallback is only provisional; the second `Wt` read and the bounds below must validate it as the current frontier before attach.
++
++**c.** Read the attach candidate's metadata while all Sub pins are held. If `Es < 0` or `SqCs == 0`, drop the Subs, release the admission slot, and return `SUBSCRIBE_RETRY`. Otherwise `Si` re-reads `F.Wt` and validates the following bounds, all compared as epoch numbers after shifting by `segShift`. `Seqt >> segShift` must lie in `[Es, Es + K - 1]`; this rejects a mixed snapshot where `Es` is still the previous lap's value while `Seqt` has already been advanced. `Wt >> segShift` must be `< Es + K`; this rejects a slot whose next lap was already reserved before the pin. When no live candidate was found (`bestSeg < 0`), the fallback must also satisfy `Es == Wt >> segShift`. A delayed initial tail probe can name an already reclaimed slot; another producer may have swept that slot into retained quota without reserving its next lap yet. The fallback therefore must still be the current frontier. This extra bound applies only to the fallback: an older live candidate remains protected and must stay available to drain a backed-up Farm. If any bound fails, `Si` drops every Sub, releases its admission slot, and returns `SUBSCRIBE_RETRY` without changing `Cf` or planting Sub0.
+ 
+ **Fallback ordering proof.** The acquire root read after the subscriber's
+ `Sub` RMW imports earlier root releases: all post-construction root writes
+@@ -421,15 +426,17 @@
+ turn a reclaimed epoch into an accepted fallback. This argument uses the
+ actual reclamation history, not a presumed globally fresh acquire load.
+ 
+-**d.** `Sub` is `2^32` such that it tracks subscribers in the most significant half, apart from normal consumers incrementing in `Rtlow`. The walk of 6b-b already holds one Sub on every inspected slot, including the attach candidate. The number of unique subscribers (and thus Sub units per segment) is bounded by `MAX_CONSUMERS_LIMIT = 128`; one `Si` pins each physical segment at most once, so `K × 128` is well under `2^32`. Sub is only the establish-leaf window; it does not plant or clear Sub0.
+-
+-**e.** `Si` attaches *in place*, regardless of what `Rtlow` did in the interim. The held Subs are all the same to a producer (`Rt != 0`), so they block any lap of the pinned window while `Si` establishes a real reference. If an in-flight write had already reserved past the selected slot before the pin, the `Wt` re-read bound of 6b-c fails and `Si` fails closed; it does not attach to a slot whose next lap is already reserved. If `Es < 0` or `SqCs == 0` the frontier was never written; fail closed (unwind `Cf` and every deposited Sub) rather than divide by a zero snapshot. Otherwise `Si` performs the normal leaf tally increment and root propagation, caching the `Lti` used. The 0→1 on `Rt` subtracts a live Sub0 if present (6c). `Si` is fully established as a consumer `Ci`.
++**d.** `Sub` is `2^32` such that it tracks subscribers in the most significant half, apart from normal consumers incrementing in `Rtlow`. The walk of 6b-b already holds one Sub on every inspected slot, including the attach candidate. Admission slots bound simultaneous probes and members by `MAX_CONSUMERS_LIMIT = 128`, even before any probe enters `Cf`. One `Si` pins each physical segment at most once, so each root holds at most 128 Sub units. The slot is not released until all of that attempt's Subs have been dropped. Sub is only the establish-leaf window; it does not plant or clear Sub0.
++
++**e.** With every validation passed and all Subs retained, `Si` calls `add_consumer()` (4c) to commit membership and obtain `IDc`. No recoverable operation follows this commit. `Si` attaches *in place*, regardless of what `Rtlow` did in the interim, using the validated `SqCs` and caching the `Lti` actually incremented. The ordinary leaf increment and root propagation establish a real reference before any Sub is released. The 0→1 on `Rt` subtracts a live Sub0 if present (6c). `Si` is fully established as a consumer `Ci`.
+ 
+ **f.** `Si` fetch_sub-releases every Sub deposited in 6b-b, including the attach slot. The 0→1 of 6b-e already retracted Sub0 if present.
+ 
+-Failure reasons — capacity, mixed/wrapped snapshot, or uninitialized frontier — all unwind `Cf` and every deposited Sub before returning `SUBSCRIBE_FULL` or `SUBSCRIBE_RETRY`.
++Failure reasons — capacity, mixed/wrapped snapshot, or uninitialized frontier — occur before membership commit. `FULL` deposits nothing; `RETRY` drops all deposited Subs and releases the admission slot. Neither changes `Cf` nor plants or clears Sub0. A successful view retains its admission slot until unsubscription finishes.
+ 
+ ### 6c. The Sub0 State Machine
++
++**Membership handoff.** A counted subscriber retains a Sub on an epoch accepted by 6b-c until its real leaf/root ownership is established. An unvalidated probe is never a reason for the last consumer to skip its empty-farm pulse. If commit precedes a leaver's `Cf` decrement, the acquire-release decrement imports the candidate's earlier pin through the release increment; the leaver can release plainly while the validated subscriber continues to hold protection. If the decrement precedes commit, the leaver follows the existing last-of-farm protocol. A departing last consumer may still hold its reference between `Cf` reaching zero and the pulse CAS, so `Cf == 0` alone is not an instantaneous assertion that a pulse already exists. At quiescence an empty, fully confirmed Farm retains exactly one pulse; abandoned incomplete epochs can require additional pulses.
+ 
+ This is the root-tally lifecycle in one place. Keep the bit layout from 2b next to it; the transitions are:
+ 
+@@ -500,13 +507,15 @@
+ 
+ **a.** `Ci` first releases the confirmed prefix from `oldestEi` toward `newestEi` (8). Only the old end moves; confirmed interiors stay pinned until they become oldest. Confirmed release is the plain leaf-root propagation of 2b. A confirmed segment that is not the empty-farm pulse must be allowed to reach `Rt == 0` so producers can reclaim it; the last-releaser helper's confirmation recheck (6c) removes a transient pulse when completion races that release.
+ 
+-**b.** `Ci` calls `F.sub_consumer()`. The return value 1 means `Ci` is the last unsubscriber of the farm (`Cf` went 1→0). That flag is used only in step c; it is not itself a Sub0 plant.
++**b.** `Ci` calls `F.sub_consumer()` with acquire-release order. The return value 1 means `Ci` is the last unsubscriber of the farm (`Cf` went 1→0). That flag is used only in step c; it is not itself a Sub0 plant.
+ 
+ **c.** Then `Ci` releases every remaining epoch in `[oldestEi, newestEi]` — confirmed interiors with the plain release of 2b, unconfirmed interiors with the last-releaser helper, then the position (`newestEi`) as follows.
+ 
+ - Unconfirmed interior or unconfirmed non-last position: the last-releaser CAS helper of 6c. The helper re-checks confirmation after its CAS; if the segment was completed concurrently, it retracts the pulse it just left with the same low-half masked CAS as `plantIfUnprotected`. An incomplete segment therefore never becomes visible as `Rt == 0`, even when the releaser is not last of the farm. This is what closes pure-churn orphans: a non-last unsubscriber who is the last pin on an early incomplete segment leaves Sub0 there, and a later subscriber's walk (6b-b) attaches at that earliest pulse.
+ - Confirmed interior or confirmed non-last position: plain release, no Sub0.
+ - Confirmed position, and `Ci` is last of the farm: the same CAS helper, not a bare add. This is the empty-farm pulse. The CAS makes the "plant only if the count actually hit zero" decision atomic with the count decrement, so a concurrent first subscriber either sees the pulse and clears it on its 0→1, or increments first and causes the helper's CAS to fail; it can no longer pull the pulse out from under a stale retract.
++
++After all references have been released, `Ci` release-decrements its admission slot before unlocking. The slot cannot be reused while its departing view still holds roots or Subs.
+ 
+ Do not extra-plant `fetch_add(Sub0)` and then run the helper on the same segment — that is two plants. If the position is unconfirmed, the helper already leaves the pulse.
+ 
+@@ -644,7 +653,9 @@
+ | segment metadata publication | release-store `Es` last | acquire-load and validate expected `Es` | raw-atomic `Seqt`, `SqCs`, initial `Sd` |
+ | table accounting join | acq_rel completion RMWs on `Shc`, then acq_rel RMW on `Tprogress` | the finisher's acq_rel `Tprogress` RMW lands on `Tlen` (raw skip checks order nothing) | run callback writes join within each shard, then across shards, before optional table-completion notification; every payload callback contributes |
+ | producer reuses a segment | release root transition toward zero | acquire-load `Rt == 0` in quota sweep; then, for any other producer reusing the swept space, the acq_rel `Wt` reservation chain | prior consumers' ring accesses happen before reuse, including reuse by a producer spending quota granted before those accesses |
+-| temporary subscriber pin | release add/sub of `Sub` plus acquire metadata/root validation | producer acquire of nonzero `Rt` | pinned wrap window cannot be lapped while attaching |
++| temporary subscriber pin | release add/sub of `Sub` plus acquire metadata/root validation | producer acquire of nonzero `Rt` | blocks later certification; validated candidate history and 6b-c separately exclude already-certified or reserved reuse |
++| validated subscription commit | candidate Sub add, then release `Cf` increment | acquire-release `Cf` decrement, then the leaver's root release | a producer acquiring that release also acquires the subscriber's preceding pin; candidate validation supplies the lifetime argument |
++| admission slot reuse | final Sub/root drop, then release decrement of `consumerSlots` | acquire-release successful slot CAS through the RMW release sequence | capacity is not reused before the previous holder releases its pins; admission never determines pulse ownership |
+ | unsubscription | unlock of the Farm's unsubscribe mutex after the position release | the next `unsubscribe`'s lock, before its `Cf` decrement | every earlier unsubscription's root releases, so the view that empties `Cf` releases last and leaves the empty-farm pulse (6e) |
+ 
+ The operational sections cite these edges by name rather than restating the orders.
+@@ -686,7 +697,7 @@
+ | Situation | Result |
+ | --- | --- |
+ | producer tier has no registration slot | invalid Token; recoverable |
+-| consumer capacity exceeded | `subscribe()` returns `SUBSCRIBE_FULL` (-1); recoverable after another view unsubscribes |
++| consumer capacity exceeded | `subscribe()` returns `SUBSCRIBE_FULL` (-1); recoverable after an admitted probe or departing view releases capacity |
+ | subscribe sees an uninitialized or generation-inconsistent frontier | `subscribe` unwinds its temporary pins and retries immediately; `subscribeOnce` returns `SUBSCRIBE_RETRY` (-2) instead |
+ | subscribe with a null Farm or an already subscribed view | `SUBSCRIBE_INVALID` (-3); caller error |
+ | assigning over a still-valid Token | fatal |
+@@ -697,7 +708,7 @@
+ | payload cannot fit a singleton table in the caller's tier | fatal |
+ | size arithmetic or packed counter wraps | fatal |
+ | tally underflow or invalid ownership transition | fatal |
+-| destroy with live consumers or producer tickets | fatal |
++| destroy with admitted probes, live/retiring consumers, or producer tickets | fatal; destruction still requires externally synchronized exclusive lifetime |
+ 
+ A process-wide `setFatalHandler` observer (C: `af_set_fatal_handler`) may log
+ or dump before the default diagnostic and abort. Install or replace it only
+diff --git a/tests/farm/subscription_admission.d b/tests/farm/subscription_admission.d
+new file mode 100644
+--- /dev/null
++++ b/tests/farm/subscription_admission.d
+@@ -0,0 +1,231 @@
++// Deterministic schedules for admission slots and validated membership.
++// Every hook runs another actor at an exact pause; no sleeps are needed.
++module subscription_admission;
++import antfarm;
++import core.atomic;
++import core.stdc.stdlib : malloc, free;
++import core.stdc.stdio : puts;
++version (AntfarmWriteAuditHooks) {} else static assert(false);
++
++__gshared ConsumerView[128] views;
++__gshared ConsumerView nested;
++__gshared Token producer;
++__gshared uint probes;
++__gshared bool twoFailures, fired;
++__gshared WriteAuditPhase pauseAt;
++
++void require(bool ok, string message) nothrow @nogc @system
++{
++    if (!ok) fatal(message);
++}
++extern(C) void callback(const(ulong)*, size_t) nothrow @nogc @system {}
++struct PreparedRange
++{
++    PayloadEntry[] entries;
++    bool permit;
++    @property bool empty() const nothrow @nogc { return entries.length == 0; }
++    @property PayloadEntry front() nothrow @nogc { return entries[0]; }
++    void popFront() nothrow @nogc { entries = entries[1 .. $]; }
++    @property PreparedRange save() nothrow @nogc { return this; }
++    bool prepareTableFrontN(size_t) nothrow @nogc { return permit; }
++}
++ulong writeWords(AntFarm* f, ulong words, bool permit = true) nothrow @nogc @system
++{
++    immutable cf = atomicLoad(f.Cf);
++    immutable overhead = 29 + 8UL * sqcsOf(cf > 0 ? cast(ulong) cf : 1);
++    immutable n = cast(size_t)(words - overhead);
++    auto body = cast(ulong*) malloc(n * ulong.sizeof);
++    require(body !is null, "admission test allocation");
++    scope(exit) free(body);
++    body[0 .. n] = 0;
++    PayloadEntry[1] entries = [PayloadEntry(&callback, body[0 .. n])];
++    return f.write(PreparedRange(entries[], permit), producer);
++}
++AntFarm* createFarm() nothrow @nogc @system
++{
++    auto f = AntFarm.create(1, 4, 1, 1, 3 * (1 << 15), 0, 0, 64);
++    producer = f.registerProducer(Tier.bulk);
++    require(producer.valid, "admission producer registration");
++    return f;
++}
++void checkEmpty(AntFarm* f) nothrow @nogc @system
++{
++    require(atomicLoad(f.Cf) == 0, "membership empty");
++    require(atomicLoad(f.consumerSlots) == 0, "admission slots balanced");
++    uint pulses;
++    foreach (i; 0 .. f.K)
++    {
++        immutable rt = atomicLoad(f.Rt[i][0]);
++        require((rt >> 32) == 0, "no temporary pins remain");
++        require((rt & COUNTMASK) == 0, "no live roots remain");
++        pulses += cast(uint)((rt & LOWMASK) / SUB0);
++    }
++    require(pulses == 1, "one pulse on drained empty farm");
++}
++
++void staleProbe(AntFarm* f, WriteAuditPhase phase, ulong, ulong)
++    nothrow @nogc @system
++{
++    if (phase == WriteAuditPhase.subscriberProbed)
++    {
++        if (probes++ == 0 && twoFailures)
++        {
++            require(nested.subscribeOnce(f) == SUBSCRIBE_RETRY, "inner stale probe retries");
++            return;
++        }
++        require(writeWords(f, f.segCap) == 1, "publish epoch zero");
++        while (views[0].consumeNext()) {}
++        require(views[0].oldestEi == 1, "consumer migrated to one");
++        require(atomicLoad(f.Rt[0][0]) == 0, "old slot reclaimed");
++        require(writeWords(f, 3 * f.segCap, false) == 0, "prepare rejects after grant");
++        require(atomicLoad(f.Wt) == f.segCap, "grant did not move tail");
++    }
++    else if (phase == WriteAuditPhase.subscriberPinned && views[0].hasRef)
++        views[0].unsubscribe();
++}
++void retainedGrant(bool two)
++{
++    auto f = createFarm();
++    scope(exit) f.destroy();
++    scope(exit) f.unregisterProducer(producer);
++    require(views[0].subscribe(f) == 0, "initial consumer");
++    probes = 0;
++    twoFailures = two;
++    writeAuditHook = &staleProbe;
++    ConsumerView s;
++    require(s.subscribeOnce(f) == SUBSCRIBE_RETRY, "stale probe retries");
++    writeAuditHook = null;
++    require(atomicLoad(f.Rt[0][0]) == 0, "failed probe did not resurrect certified slot");
++    checkEmpty(f);
++    require(writeWords(f, 3 * f.segCap) == 1, "retained grant remains spendable");
++    require(s.subscribe(f) >= 0, "later subscriber finds remaining anchor");
++    while (s.consumeNext()) {}
++    s.unsubscribe();
++    checkEmpty(f);
++    puts(two ? "PASS two failed probes preserve retained grant" : "PASS failed probe preserves retained grant");
++}
++
++// Make all views hold epoch zero, with epoch zero confirmed and Wt in one.
++AntFarm* confirmedPosition(uint count)
++{
++    auto f = createFarm();
++    require(views[0].subscribe(f) == 0, "first setup view");
++    require(writeWords(f, 11000) == 1, "setup first table");
++    require(writeWords(f, 11000) == 1, "setup second table");
++    require(writeWords(f, f.segCap - 300 - 22000) == 1, "setup near boundary");
++    while (views[0].consumeNext()) {}
++    foreach (i; 1 .. count) require(views[i].subscribe(f) == 0, "setup views");
++    require(writeWords(f, 1000) == 1, "setup crossing table");
++    foreach (_; 0 .. 4) require(views[1].consumeNext(), "setup view traverses tables");
++    require(!views[1].consumeNext(), "idle rewalk confirms zero");
++    require(views[1].newestEi == 0, "confirmed position stays at zero");
++    return f;
++}
++void rejectWhileLeaving(AntFarm* f, WriteAuditPhase phase, ulong, ulong)
++    nothrow @nogc @system
++{
++    if (phase != WriteAuditPhase.subscriberFull || fired) return;
++    fired = true;
++    require(atomicLoad(f.Cf) == 128, "rejected subscriber was not counted");
++    foreach (ref v; views) v.unsubscribe();
++    checkEmpty(f);
++}
++void fullWithDepartures()
++{
++    auto f = confirmedPosition(128);
++    scope(exit) f.destroy();
++    scope(exit) f.unregisterProducer(producer);
++    fired = false;
++    writeAuditHook = &rejectWhileLeaving;
++    ConsumerView s;
++    require(s.subscribeOnce(f) == SUBSCRIBE_FULL, "capacity rejection");
++    writeAuditHook = null;
++    require(fired, "full hook reached");
++    checkEmpty(f);
++    require(s.subscribe(f) >= 0, "capacity usable after rejection");
++    s.unsubscribe();
++    checkEmpty(f);
++    puts("PASS full rejection overlapping all 128 departures");
++}
++void leaveAtHandoff(AntFarm* f, WriteAuditPhase phase, ulong, ulong)
++    nothrow @nogc @system
++{
++    if (phase != pauseAt || fired) return;
++    fired = true;
++    views[1].unsubscribe();
++    if (phase == WriteAuditPhase.subscriberCommitted)
++    {
++        require(atomicLoad(f.Cf) == 1, "committed subscriber remains counted");
++        immutable rt = atomicLoad(f.Rt[0][0]);
++        require((rt & LOWMASK) == 0 && (rt >> 32) != 0, "validated Sub carries protection");
++    }
++    else
++    {
++        require(atomicLoad(f.Cf) == 0, "uncommitted probe is not membership");
++        require((atomicLoad(f.Rt[0][0]) & LOWMASK) == SUB0, "last consumer left its pulse");
++    }
++    // A fresh grant from epoch one would need to certify slot zero.
++    require(writeWords(f, 3 * f.segCap) == 0, "protected grant refused");
++}
++void handoff(WriteAuditPhase phase)
++{
++    auto f = confirmedPosition(4);
++    scope(exit) f.destroy();
++    scope(exit) f.unregisterProducer(producer);
++    views[0].unsubscribe();
++    views[2].unsubscribe();
++    views[3].unsubscribe();
++    pauseAt = phase;
++    fired = false;
++    writeAuditHook = &leaveAtHandoff;
++    ConsumerView s;
++    require(s.subscribeOnce(f) == 0, "handoff attaches to protected epoch");
++    writeAuditHook = null;
++    require(fired, "handoff hook reached");
++    require(atomicLoad(f.Cf) == 1 && atomicLoad(f.consumerSlots) == 1, "one admitted member");
++    require((atomicLoad(f.Rt[0][0]) & LOWMASK) == 1, "real root replaces pin or pulse");
++    s.unsubscribe();
++    checkEmpty(f);
++    puts("PASS departure at subscription handoff");
++}
++void nestedProbe(AntFarm* f, WriteAuditPhase phase, ulong, ulong)
++    nothrow @nogc @system
++{
++    if (phase != WriteAuditPhase.subscriberPinned) return;
++    if (probes < 128)
++    {
++        immutable i = probes++;
++        require(views[i].subscribeOnce(f) == 0, "nested admitted probe succeeds");
++    }
++    else
++    {
++        require(atomicLoad(f.Cf) == 0, "128 probes are not members");
++        require(atomicLoad(f.consumerSlots) == 128, "128 probes reserve capacity");
++        require((atomicLoad(f.Rt[0][0]) >> 32) == 128, "Sub count bounded by admission");
++        require(nested.subscribeOnce(f) == SUBSCRIBE_FULL, "129th probe rejected before pinning");
++    }
++}
++void pendingCapacity()
++{
++    auto f = createFarm();
++    scope(exit) f.destroy();
++    scope(exit) f.unregisterProducer(producer);
++    probes = 1;
++    writeAuditHook = &nestedProbe;
++    require(views[0].subscribeOnce(f) == 0, "outer probe succeeds");
++    writeAuditHook = null;
++    require(atomicLoad(f.Cf) == 128 && atomicLoad(f.consumerSlots) == 128, "all admitted probes committed");
++    foreach (ref v; views) v.unsubscribe();
++    checkEmpty(f);
++    puts("PASS admission bounds 128 simultaneous probes");
++}
++void main()
++{
++    retainedGrant(false);
++    retainedGrant(true);
++    fullWithDepartures();
++    handoff(WriteAuditPhase.subscriberProbed);
++    handoff(WriteAuditPhase.subscriberValidated);
++    handoff(WriteAuditPhase.subscriberCommitted);
++    pendingCapacity();
++}
+diff --git a/tests/farm/Makefile b/tests/farm/Makefile
+--- a/tests/farm/Makefile
++++ b/tests/farm/Makefile
+@@ -88,6 +88,10 @@
+ 	./antfarm_test_ordering
+ 	dmd -g -version=AntfarmWriteAuditHooks -I$(ROOT) farm_ordering.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_ordering_dmd
+ 	./antfarm_test_ordering_dmd
++	ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -I$(ROOT) subscription_admission.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_admission
++	./antfarm_test_admission
++	dmd -g -version=AntfarmWriteAuditHooks -I$(ROOT) subscription_admission.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_admission_dmd
++	./antfarm_test_admission_dmd
+ 	ldc2 -g -O1 -I$(ROOT) leaf_reuse.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_leaf
+ 	./antfarm_test_leaf
+ 	dmd -g -I$(ROOT) leaf_reuse.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_leaf_dmd
+@@ -95,4 +99,9 @@
+ 
+ clean:
+ 	rm -f torture_tests sweep_cursor torture_tests_tsan torture_tests_dmd t19 t19_tsan t19_dmd write_protection_allwrite boundary_runoff_allwrite *.o
+-	rm -f antfarm_test_review antfarm_test_tsan antfarm_test_leaf_tsan antfarm_test_ordering antfarm_test_ordering_dmd antfarm_test_leaf antfarm_test_leaf_dmd
++	rm -f antfarm_test_review antfarm_test_tsan antfarm_test_leaf_tsan antfarm_test_ordering antfarm_test_ordering_dmd antfarm_test_leaf antfarm_test_leaf_dmd antfarm_test_admission antfarm_test_admission_dmd antfarm_test_admission_tsan
++
++.PHONY: run-subscription-admission-tsan
++run-subscription-admission-tsan:
++	ldc2 -g -O1 -fsanitize=thread -d-version=TSan -d-version=AntfarmWriteAuditHooks -I$(ROOT) subscription_admission.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_admission_tsan
++	TSAN_OPTIONS='$(TSAN_OPTIONS)' ./antfarm_test_admission_tsan
+diff --git a/tests/farm/README.md b/tests/farm/README.md
+--- a/tests/farm/README.md
++++ b/tests/farm/README.md
+@@ -55,6 +55,12 @@
+ - `t19_flood_lap.d` — T19: interleaved bulk dump + mid-tick small writes +
+   subscription churn (four arms: no mid-tick, pure churn, consuming churn,
+   steady consumer) plus a forged-token quota test
++- `subscription_admission.d` — controlled retained-quota retries, capacity
++  rejection overlapping 128 departures, departures before and after membership
++  commit, and 128 simultaneous uncommitted probes. Included in
++  `check-farm-ordering` for LDC and DMD. The separate
++  `run-subscription-admission-tsan` target runs these schedules under TSan;
++  the synchronous hooks test logical interleavings, not weak-memory execution.
+ - `Makefile`
+ 
+ Run T19 on its own: `make -C tests/farm run-t19` (LDC),
