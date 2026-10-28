@@ -3,8 +3,8 @@
  +
  +   make -C tests/farm run
  +
- + Exit 0 = all green. Exit 2 = correctness green, defect probes confirmed.
- + Abort/1 = correctness failure.
+ + Exit 0 = every selected check passed. Invalid selectors exit 64;
+ + any contract or correctness failure fails the process.
  +/
 module torture_tests;
 
@@ -13,10 +13,9 @@ import torture_common;
 import core.atomic;
 import core.thread;
 import core.time;
+import core.sync.barrier : Barrier;
 import core.stdc.stdio;
 import core.stdc.stdlib : malloc, free, abort, exit;
-
-__gshared shared(int) g_defects;
 
 // T21: payload-body content verification over several laps of the ring.
 // Shared counters must be __gshared shared(T) (see torture_common.d).
@@ -70,15 +69,73 @@ extern(C) void contentSumCb(const(ulong)* bodyPtr, size_t bodyWords) nothrow @no
     return;
 }
 
-void defect(const(char)[] id, const(char)[] msg)
+version (Posix)
 {
-    atomicFetchAdd(g_defects, 1);
-    fprintf(stderr, "DEFECT %.*s: %.*s\n",
-        cast(int) id.length, id.ptr, cast(int) msg.length, msg.ptr);
-    fflush(stderr);
+    import core.sys.posix.sys.types : pid_t;
+
+    // A rejected write must abort deliberately, not segfault, return, or hang.
+    // Bound every child wait, including acceptance cases at the quota boundary.
+    void expectChild(pid_t pid, bool wantAbort, const(char)[] label)
+    {
+        import core.sys.posix.sys.wait : waitpid, WNOHANG;
+        import core.sys.posix.signal : SIGABRT, SIGKILL, kill;
+        import core.stdc.errno : errno, EINTR, ESRCH;
+
+        check(pid > 0, "contract probe fork succeeded");
+        int status;
+        immutable deadline = MonoTime.currTime + 10.seconds;
+        for (;;)
+        {
+            immutable waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) break;
+            if (waited < 0 && errno == EINTR) continue;
+            check(waited >= 0, "contract probe waitpid succeeded");
+            if (MonoTime.currTime > deadline)
+            {
+                check(kill(pid, SIGKILL) == 0 || errno == ESRCH, "contract probe timeout kill");
+                while (waitpid(pid, &status, 0) < 0)
+                    check(errno == EINTR, "contract probe timeout reap");
+                fprintf(stderr, "%.*s: child watchdog (no exit)\n", cast(int) label.length, label.ptr);
+                abort();
+            }
+            Thread.sleep(1.msecs);
+        }
+        if (wantAbort ? (status & 0x7f) == SIGABRT : status == 0) return;
+        fprintf(stderr, "%.*s: child status=%d (want %s)\n",
+            cast(int) label.length, label.ptr, status, wantAbort ? "SIGABRT".ptr : "exit 0".ptr);
+        abort();
+    }
 }
 
-// ---------------- defect probes (non-fatal) ----------------
+// ---------------- contract checks (failures are fatal to the suite) ----------------
+
+__gshared uint g_harnessCallback;
+long harnessCallback(size_t i) nothrow @nogc @system
+{
+    ++g_harnessCallback;
+    return countingCb(i);
+}
+
+void t00_harness_oracles()
+{
+    allocCalls(2);
+    scope (exit) freeCalls();
+    auto batch = makeBatch(2, (size_t i, ref Callback h, ref size_t plen) {
+        h = callbackFor!harnessCallback();
+        plen = 1;
+    });
+    scope (exit) freeBatch(batch);
+    g_harnessCallback = 0;
+    foreach (e; batch.entries[0 .. batch.count])
+        e.call(e.body.ptr, e.body.length);
+    check(g_harnessCallback == 2, "T00 batch preserves the supplied callback");
+    expectExactCalls(&batch, "T00 exact ledger");
+    atomicStore(g_calls[0], 0L);
+    atomicStore(g_calls[1], 2L);
+    check(atomicLoad(g_totalCalls) == batch.expectedCalls, "T00 totals still balance");
+    check(!exactCallRange(0, 2), "T00 lost/duplicate pair cannot pass the per-id oracle");
+    say("T00 harness callback and loss/duplicate negative control OK");
+}
 
 void t01_bad_header()
 {
@@ -92,14 +149,12 @@ void t01_bad_header()
     // write() must fatal (abort) on a null callback. A clean
     // return is a miss; SIGILL/SIGSEGV is still a smash.
     import core.sys.posix.unistd : fork, _exit;
-    import core.sys.posix.sys.wait : waitpid;
-    import core.sys.posix.signal : SIGABRT;
 
     auto f = AntFarm.create(2, 4, 1, 1, 2048, 1, 512);
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "T01 reg");
 
-    bool expectAbort(const(char)[] label)
+    void expectAbort(const(char)[] label)
     {
         Callback h;
         h = callbackFor!countingCb();
@@ -114,23 +169,13 @@ void t01_bad_header()
             cast(void) f.write((&e)[0 .. 1], tok);
             _exit(0);
         }
-        int st;
-        waitpid(pid, &st, 0);
-        immutable signaled = ((st & 0x7f) != 0) && ((st & 0x7f) != 0x7f);
-        immutable sig = st & 0x7f;
-        if (signaled && sig == SIGABRT)
-            return true;
-        char[96] buf;
-        auto n = snprintf(buf.ptr, buf.length, "%.*s: st=%d signaled=%d sig=%d",
-            cast(int) label.length, label.ptr, st, signaled, sig);
-        defect("T01", buf[0 .. n]);
-        return false;
+        expectChild(pid, true, label);
     }
 
-    immutable ok = expectAbort("null callback");
+    expectAbort("T01 null callback");
     f.unregisterProducer(tok);
     f.destroy();
-    say(ok ? "T01 write rejects null callback OK" : "T01 DEFECT confirmed");
+    say("T01 write rejects null callback OK");
     }
 }
 
@@ -256,6 +301,8 @@ void t16_position_ref_stall()
 
     foreach (i; 0 .. 2)
         cs[i].unsubscribe();
+    expectCallRange(0, N, "T16 every written payload executed once");
+    expectDrainedFarm(f, "T16 drained tallies");
     foreach (i; 0 .. N)
         free(bodies[i]);
     free(headers);
@@ -325,9 +372,8 @@ void t03_concurrent_exact()
 
 void t04_many_consumers_two_producers()
 {
-    // High consumer count + bulk/small producers. Multi-small-producer
-    // geometries repeatedly stalled near completion (see review); kept out
-    // of the green path until the position-ref / leftover-claim story is fixed.
+    // High consumer count + bulk/small producers. T24 separately exercises
+    // the multi-small-producer topologies that exposed earlier stalls.
     auto f = AntFarm.create(2, 8, 16, 1, 16384, 8, 4096);
     scope (exit) f.destroy();
     enum N = 3000;
@@ -686,11 +732,13 @@ void t10_caps()
         check(views[i].subscribe(f) >= 0, "cap");
     }
     ConsumerView extra;
-    check(extra.subscribe(f) < 0, "reject");
+    check(extra.subscribeOnce(f) == SUBSCRIBE_FULL, "capacity rejects with FULL");
+    check(!extra.hasRef && atomicLoad(f.Cf) == MAX_CONSUMERS_LIMIT,
+        "FULL leaves membership and the attempted view balanced");
     foreach (i; 0 .. MAX_CONSUMERS_LIMIT)
         views[i].unsubscribe();
     check(atomicLoad(f.Cf) == 0, "drain");
-    check(countLive(f) == 1, "only the frontier Live");
+    expectDrainedFarm(f, "T10 only the frontier Live, all tallies empty");
     say("T10 caps OK");
 }
 
@@ -857,14 +905,12 @@ void t17_write_size_wrap()
     {
     // Wrap and unsizable payloads must fatal (abort), not smash or return.
     import core.sys.posix.unistd : fork, _exit;
-    import core.sys.posix.sys.wait : waitpid, WNOHANG;
-    import core.sys.posix.signal : SIGABRT, SIGKILL, kill;
 
     auto f = AntFarm.create(2, 4, 1, 1, 2048, 1, 512);
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "T17 reg");
 
-    bool expectAbort(PayloadEntry e, const(char)[] label)
+    void expectAbort(PayloadEntry e, const(char)[] label)
     {
         auto pid = fork();
         if (pid == 0)
@@ -872,17 +918,7 @@ void t17_write_size_wrap()
             cast(void) f.write((&e)[0 .. 1], tok);
             _exit(0);
         }
-        int st;
-        waitpid(pid, &st, 0);
-        immutable signaled = ((st & 0x7f) != 0) && ((st & 0x7f) != 0x7f);
-        immutable sig = st & 0x7f;
-        if (signaled && sig == SIGABRT)
-            return true;
-        char[112] buf;
-        auto n = snprintf(buf.ptr, buf.length, "%.*s: st=%d signaled=%d sig=%d (want SIGABRT)",
-            cast(int) label.length, label.ptr, st, signaled, sig);
-        defect("T17", buf[0 .. n]);
-        return false;
+        expectChild(pid, true, label);
     }
 
     Callback h;
@@ -902,8 +938,8 @@ void t17_write_size_wrap()
     unsized.call = h;
     unsized.body = big[0 .. unsizedLen];
 
-    immutable okWrap = expectAbort(wrap, "wrap");
-    immutable okBig = expectAbort(unsized, "unsizable");
+    expectAbort(wrap, "T17 wrap");
+    expectAbort(unsized, "T17 unsizable");
     free(big);
 
     // The arithmetic fixed-length path must reject a caller-supplied body
@@ -911,7 +947,6 @@ void t17_write_size_wrap()
     Callback mh;
     mh = callbackFor!countingCb();
     PayloadBody[1] fixedBodies = [p[0 .. 1]];
-    bool okFixedWrap;
     {
         auto pid = fork();
         if (pid == 0)
@@ -919,17 +954,7 @@ void t17_write_size_wrap()
             cast(void) f.write(mh, fixedBodies[], ulong.max - 17, tok);
             _exit(0);
         }
-        int st;
-        waitpid(pid, &st, 0);
-        immutable sig = st & 0x7f;
-        okFixedWrap = sig != 0 && sig != 0x7f && sig == SIGABRT;
-        if (!okFixedWrap)
-        {
-            char[112] buf;
-            auto n = snprintf(buf.ptr, buf.length, "fixed-wrap: st=%d sig=%d (want SIGABRT)",
-                st, sig);
-            defect("T17", buf[0 .. n]);
-        }
+        expectChild(pid, true, "T17 fixed-wrap");
     }
 
     // Per-tier sizing: a payload that fits only the bulk tier's quota
@@ -943,7 +968,7 @@ void t17_write_size_wrap()
     PayloadEntry midsize;
     midsize.call = h;
     midsize.body = mid[0 .. midLen];
-    immutable okMidSmall = expectAbort(midsize, "midsize-small");
+    expectAbort(midsize, "T17 midsize-small");
     auto tokb = f.registerProducer(Tier.bulk);
     check(tokb.valid, "T17 bulk reg");
     immutable wrote = f.write((&midsize)[0 .. 1], tokb);
@@ -990,25 +1015,7 @@ void t17_write_size_wrap()
                         wroteBoundary = boundaryFarm.write(header, bodies[], bodyWords, token);
                     _exit(wroteBoundary == 1 ? 0 : 1);
                 }
-                check(pid > 0, "T17 boundary fork");
-                int status;
-                auto deadline = MonoTime.currTime + 10.seconds;
-                for (;;)
-                {
-                    immutable waited = waitpid(pid, &status, WNOHANG);
-                    if (waited == pid) break;
-                    check(waited >= 0, "T17 boundary waitpid");
-                    if (MonoTime.currTime > deadline)
-                    {
-                        cast(void) kill(pid, SIGKILL);
-                        waitpid(pid, &status, 0);
-                        check(false, "T17 boundary watchdog");
-                    }
-                    Thread.sleep(1.msecs);
-                }
-                immutable sig = status & 0x7f;
-                check(fits ? status == 0 : sig == SIGABRT,
-                    "T17 canFit agrees with write acceptance/fatal");
+                expectChild(pid, !fits, "T17 canFit agrees with write acceptance/fatal");
                 printf("T17 canFit %s %s bodyWords=%llu -> %s, write %s (form=%d)\n",
                     (tier == Tier.small ? "small" : "bulk").ptr,
                     "ST".ptr, bodyWords,
@@ -1017,9 +1024,7 @@ void t17_write_size_wrap()
                 fflush(stdout);
             }
         }
-    say((okWrap && okBig && okFixedWrap && okMidSmall && wrote == 1)
-        ? "T17 fatal on wrap/unsizable/per-tier OK"
-        : "T17 DEFECT confirmed");
+    say("T17 fatal on wrap/unsizable/per-tier OK");
     }
 }
 
@@ -1036,8 +1041,6 @@ void t26_compact_singleton_contract()
     else version (Posix)
     {
     import core.sys.posix.unistd : fork, _exit;
-    import core.sys.posix.sys.wait : waitpid, WNOHANG;
-    import core.sys.posix.signal : SIGABRT, SIGKILL, kill;
 
     enum size_t Lmax = 100;        // ST compact singleton == Qsmall.
     enum ulong Qsmall = 37 + Lmax; // base 35 + index 1 + Call 1 + Plen.
@@ -1046,7 +1049,7 @@ void t26_compact_singleton_contract()
     auto tok = f.registerProducer(Tier.small);
     check(tok.valid, "T26 reg");
 
-    bool expectAbort(PayloadEntry e, const(char)[] label)
+    void expectAbort(PayloadEntry e, const(char)[] label)
     {
         auto pid = fork();
         if (pid == 0)
@@ -1054,37 +1057,7 @@ void t26_compact_singleton_contract()
             cast(void) f.write((&e)[0 .. 1], tok);
             _exit(0);
         }
-        // Bounded wait: a mutated singleton check can admit a payload whose
-        // full table exceeds the tier quota and then spin in refreshQuota, so
-        // report a survivor instead of hanging the suite.
-        int st;
-        auto deadline = MonoTime.currTime + 10.seconds;
-        for (;;)
-        {
-            auto r = waitpid(pid, &st, WNOHANG);
-            if (r == pid) break;
-            if (r < 0) break;
-            if (MonoTime.currTime > deadline)
-            {
-                cast(void) kill(pid, SIGKILL);
-                waitpid(pid, &st, 0);
-                char[112] buf;
-                auto n = snprintf(buf.ptr, buf.length, "%.*s: watchdog (no exit)",
-                    cast(int) label.length, label.ptr);
-                defect("T26", buf[0 .. n]);
-                return false;
-            }
-            Thread.sleep(1.msecs);
-        }
-        immutable signaled = ((st & 0x7f) != 0) && ((st & 0x7f) != 0x7f);
-        immutable sig = st & 0x7f;
-        if (signaled && sig == SIGABRT)
-            return true;
-        char[112] buf;
-        auto n = snprintf(buf.ptr, buf.length, "%.*s: st=%d signaled=%d sig=%d (want SIGABRT)",
-            cast(int) label.length, label.ptr, st, signaled, sig);
-        defect("T26", buf[0 .. n]);
-        return false;
+        expectChild(pid, true, label);
     }
 
     auto okBody = cast(ulong*) malloc(Lmax * ulong.sizeof);
@@ -1104,15 +1077,13 @@ void t26_compact_singleton_contract()
     PayloadEntry stOver;
     stOver.call = st;
     stOver.body = overBody[0 .. Lmax + 1];
-    immutable okSt = expectAbort(stOver, "compact-one-word-over");
+    expectAbort(stOver, "T26 compact-one-word-over");
 
     free(okBody);
     free(overBody);
     f.unregisterProducer(tok);
     f.destroy();
-    say((wrote == 1 && okSt)
-        ? "T26 compact singleton contract OK"
-        : "T26 DEFECT confirmed");
+    say("T26 compact singleton contract OK");
     }
 }
 
@@ -1201,6 +1172,9 @@ void t18_pure_churn_orphan()
 
         if (orphans > 0 || calls2 != batch.expectedCalls)
             ++bad;
+
+        expectExactCalls(&batch, "T18 abandoned backlog recovered exactly once");
+        expectDrainedFarm(f, "T18 recovery leaves no pins or confirmed Live");
 
         freeBatch(batch);
         freeCalls();
@@ -1342,6 +1316,8 @@ void t20_confirmed_discharged()
             ++bad;
         }
         immutable got = atomicLoad(g_totalCalls);
+        expectCallRange(0, N, "T20 per-id completion");
+        expectDrainedFarm(f, "T20 drained roots, leaves, and membership");
         if (got != expected)
         {
             fprintf(stderr, "T20 trial %d: calls=%lld expected=%lld\n", trial, got, expected);
@@ -1378,8 +1354,7 @@ void t21_payload_content_multilap()
     atomicStore!(MemoryOrder.raw)(g_contentSum, 0L);
     atomicStore!(MemoryOrder.raw)(g_contentBad, 0L);
 
-    // Manual exact-size allocation; makeBatch's 4096-ulong-per-slot body
-    // arena would be far larger than needed for N=30000.
+    // Custom bodies carry the index-dependent pattern checked by contentSumCb.
     auto headers = cast(Callback*) malloc(N * Callback.sizeof);
     auto bodies = cast(ulong*) malloc(N * BODY_LEN * ulong.sizeof);
     auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
@@ -1656,7 +1631,7 @@ void t23_late_attach_under_wrap()
         expectExactCalls(&batch, "T23");
         expectNoLiveConsumerRefs(f, "T23");
         expectNoLeftoverSub(f, "T23");
-        check(countUnprotectedIncomplete(f) == 0, "T23 unprotected incomplete");
+        check(countMissingLive(f) == 0, "T23 every unconfirmed epoch remains Live");
         printf("T23 trial %d OK Wt=%llu\n",
             trial, cast(ulong) atomicLoad!(MemoryOrder.raw)(f.Wt));
         fflush(stdout);
@@ -1728,7 +1703,7 @@ void t24_topology_hang_canary()
         expectExactCalls(&batch, "T24");
         expectNoLiveConsumerRefs(f, "T24");
         expectNoLeftoverSub(f, "T24");
-        check(countUnprotectedIncomplete(f) == 0, "T24 unprotected incomplete");
+        check(countMissingLive(f) == 0, "T24 every unconfirmed epoch remains Live");
         printf("T24 ns=%u OK Wt=%llu\n",
             ns, cast(ulong) atomicLoad!(MemoryOrder.raw)(f.Wt));
         fflush(stdout);
@@ -1736,8 +1711,190 @@ void t24_topology_hang_canary()
     say("T24 topology hang canary OK");
 }
 
+// T28: a complete cohort joins, drains, and departs before the next cohort
+// can subscribe. No steady consumer or final rescue can cover a bad attach.
+// Barriers control phases only; this is a lifetime/progress test, not a test
+// of the callback publication happens-before edges (those have separate lanes).
+private enum HERD_ROUNDS = 4;
+private enum HERD_PAYLOADS = 4096;
+
+private class HerdRound
+{
+    AntFarm* farm;
+    Barrier gate;
+    MonoTime deadline;
+    shared long target;
+    shared bool finished;
+
+    this(AntFarm* f, uint members)
+    {
+        farm = f;
+        gate = new Barrier(members + 1);
+        deadline = MonoTime.currTime + DEFAULT_WATCHDOG_SECS.seconds;
+    }
+
+    void watchdog()
+    {
+        while (!atomicLoad(finished))
+        {
+            if (MonoTime.currTime > deadline)
+            {
+                fprintf(stderr, "T28 cohort watchdog: calls=%lld target=%lld Cf=%lld Wt=%llu\n",
+                    atomicLoad(g_totalCalls), atomicLoad(target), atomicLoad(farm.Cf), atomicLoad(farm.Wt));
+                abort();
+            }
+            Thread.sleep(5.msecs);
+        }
+    }
+}
+
+private class HerdMember
+{
+    HerdRound round;
+    uint completed;
+    this(HerdRound r) { round = r; }
+
+    void run()
+    {
+        foreach (_; 0 .. HERD_ROUNDS)
+        {
+            round.gate.wait(); // controller finished the optional no-member fill
+            ConsumerView view;
+            long result;
+            do
+            {
+                result = view.subscribeOnce(round.farm);
+                if (result == SUBSCRIBE_RETRY) Thread.yield();
+            } while (result == SUBSCRIBE_RETRY);
+            check(result >= 0, "T28 admitted herd member attaches");
+            round.gate.wait(); // all members attached, none consuming yet
+            round.gate.wait(); // controller starts remaining production
+            while (atomicLoad(g_totalCalls) < atomicLoad(round.target))
+                if (!view.consumeNext()) Thread.yield();
+            while (view.consumeNext()) {}
+            round.gate.wait(); // all callbacks returned; keep these views alive
+            round.gate.wait(); // controller checked per-id completion before departure
+            view.unsubscribe();
+            ++completed;
+            round.gate.wait(); // controller can inspect quiescent state
+        }
+    }
+}
+
+void t28_subscription_herds()
+{
+    foreach (k; [2u, 16u]) foreach (members; [16u, 32u])
+    {
+        immutable segCap = (1UL << ULONGS_PER_MIB_SHIFT) / k;
+        auto f = AntFarm.create(1, k, members, 0, 0, 2, segCap / 2);
+        scope (exit) f.destroy();
+        enum N = HERD_ROUNDS * HERD_PAYLOADS;
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
+            plen = 32;
+        });
+        scope (exit) freeBatch(batch);
+        auto round = new HerdRound(f, members);
+        auto watchdog = new Thread(&round.watchdog);
+        watchdog.start();
+        auto jobs = new HerdMember[members];
+        auto threads = new Thread[members];
+        foreach (i; 0 .. members)
+        {
+            jobs[i] = new HerdMember(round);
+            threads[i] = new Thread(&jobs[i].run);
+            threads[i].start();
+        }
+        foreach (cycle; 0 .. HERD_ROUNDS)
+        {
+            immutable first = cycle * HERD_PAYLOADS;
+            immutable end = first + HERD_PAYLOADS;
+            enum half = HERD_PAYLOADS / 2;
+            size_t[2] written;
+            atomicStore(round.target, cast(long) end);
+            if ((cycle & 1) == 0)
+            {
+                // Wake into backpressure: fill until both producers refuse,
+                // while no view exists. Each producer owns a disjoint ID range.
+                auto q0 = f.registerProducer(Tier.small);
+                auto q1 = f.registerProducer(Tier.small);
+                check(q0.valid && q1.valid, "T28 prefill tokens");
+                Token*[2] tokens = [&q0, &q1];
+                for (;;)
+                {
+                    ulong progress;
+                    foreach (p; 0 .. 2)
+                    {
+                        immutable start = first + p * half + written[p];
+                        immutable count = half - written[p] < 64 ? half - written[p] : 64;
+                        immutable n = f.write(batch.entries[start .. start + count], *tokens[p]);
+                        written[p] += n;
+                        progress += n;
+                    }
+                    if (progress == 0) break;
+                }
+                f.unregisterProducer(q0);
+                f.unregisterProducer(q1);
+                check(written[0] + written[1] > 0 && written[0] + written[1] < HERD_PAYLOADS,
+                    "T28 wake begins with a refused write and unfinished backlog");
+                check(atomicLoad(g_totalCalls) == first, "T28 sleeping cohort executed nothing");
+                expectNoLiveConsumerRefs(f, "T28 backlog is protected without any consumers");
+                check(countMissingLive(f) == 0, "T28 sleeping backlog remains Live");
+            }
+            round.gate.wait();
+            round.gate.wait();
+            check(atomicLoad(f.Cf) == members, "T28 entire cohort is attached");
+            expectNoLeftoverSub(f, "T28 successful attachments dropped every transient pin");
+
+            ProdCtx[2] contexts;
+            Thread[2] producers;
+            foreach (p; 0 .. 2)
+            {
+                contexts[p] = ProdCtx(f, batch.entries + first + p * half + written[p],
+                    half - written[p], Tier.small, 64);
+                auto job = new ProdJob(&contexts[p]);
+                producers[p] = new Thread(&job.run);
+                producers[p].start();
+            }
+            round.gate.wait();
+            foreach (p; producers) p.join();
+            round.gate.wait();
+            expectCallRange(0, end, "T28 existing cohort completed every published id exactly once");
+            foreach (i; end .. N)
+                check(atomicLoad(g_calls[i]) == 0, "T28 unpublished future payload never executed");
+            check(atomicLoad(g_totalCalls) == end, "T28 no extra callback execution");
+            round.gate.wait();
+            round.gate.wait();
+            expectDrainedFarm(f, "T28 last departures leave only the Live frontier");
+        }
+        foreach (t; threads) t.join();
+        atomicStore(round.finished, true);
+        watchdog.join();
+        foreach (job; jobs) check(job.completed == HERD_ROUNDS, "T28 every thread finished every cycle");
+        check(atomicLoad(f.Wt) > 3 * f.Ln, "T28 actual ring reuse across cohort changes");
+        expectExactCalls(&batch, "T28 final ledger, without a fresh subscriber");
+        printf("T28 K=%u members=%u wake/drained cohorts OK\n", k, members);
+        fflush(stdout);
+    }
+}
+
 void main(string[] args)
 {
+    immutable names = ["T00", "T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08",
+        "T09", "T10", "T11", "T12", "T13", "T14", "T15", "T16", "T17", "T18",
+        "T20", "T21", "T22", "T23", "T24", "T25", "T26", "T28"];
+    foreach (arg; args[1 .. $])
+    {
+        bool valid;
+        foreach (name; names) if (arg == name) valid = true;
+        if (!valid)
+        {
+            fprintf(stderr, "unknown torture selector: %.*s (T19 and T27 have separate binaries)\n",
+                cast(int) arg.length, arg.ptr);
+            exit(64);
+        }
+    }
     bool runAll = args.length <= 1;
     bool want(string name)
     {
@@ -1749,6 +1906,10 @@ void main(string[] args)
         return false;
     }
 
+    if (want("T00"))
+        t00_harness_oracles();
+    if (want("T28"))
+        t28_subscription_herds();
     if (want("T01"))
         t01_bad_header();
     if (want("T16"))
@@ -1801,13 +1962,5 @@ void main(string[] args)
     if (want("T15"))
         t15_wave_consumers();
 
-    immutable d = atomicLoad(g_defects);
-    if (d == 0)
-    {
-        say("ALL TORTURE TESTS PASSED");
-        exit(0);
-    }
-    printf("CORRECTNESS PASSED; DEFECTS CONFIRMED: %d\n", d);
-    fflush(stdout);
-    exit(2);
+    say("ALL TORTURE TESTS PASSED");
 }

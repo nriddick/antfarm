@@ -1,13 +1,13 @@
-# Farm suites: the adversarial review torture tests, the antfarm_test.d unit
-# suite under TSan, and the controlled ordering schedules.
+# Farm sanity checks, adversarial torture tests, the complete antfarm_test.d
+# suite (also under TSan), and controlled ordering schedules.
 ROOT := ../..
 DFLAGS ?= -g -O1
 DC ?= ldc2
 # Default for the TSan binaries; also baked into __tsan_default_options.
 TSAN_OPTIONS ?= history_size=7 halt_on_error=1
 
-.PHONY: all run run-tsan run-dmd run-t19 clean baseline allwrite run-allwrite \
-	farm-tsan run-farm-tsan check-farm-ordering
+.PHONY: all sanity torture run run-tsan run-dmd run-t19 clean baseline allwrite run-allwrite \
+	farm-unit-build farm-tsan run-farm-tsan check-farm-ordering
 
 all: torture_tests t19 sweep_cursor
 
@@ -36,6 +36,9 @@ sweep_cursor: torture_common.d sweep_cursor.d $(ROOT)/antfarm/package.d $(ROOT)/
 run: torture_tests sweep_cursor check-parallel
 	./torture_tests
 	./sweep_cursor
+
+torture: torture_tests
+	./torture_tests
 
 run-t19: t19
 	./t19
@@ -68,9 +71,16 @@ FARM_TEST_SOURCES := $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(RO
 	$(ROOT)/antfarm/actors/package.d $(ROOT)/antfarm/actors/actor.d $(ROOT)/antfarm/actors/wave.d \
 	$(ROOT)/antfarm/actors/private_actor.d $(ROOT)/antfarm/actors/mimalloc.d antfarm_test.d
 
-# The Farm unit suite (antfarm_test.d) built with $(DC) outside dub.
-baseline: $(FARM_TEST_SOURCES)
+# Keep this build phony: switching DC/DFLAGS must rebuild the unit binary.
+farm-unit-build: $(FARM_TEST_SOURCES)
 	$(DC) $(DFLAGS) -I$(ROOT) $(FARM_TEST_SOURCES) -of=antfarm_test_review
+
+# Fast deterministic geometry, membership, Live, reference, and capacity checks.
+sanity: farm-unit-build
+	./antfarm_test_review sanity
+
+# The complete Farm/actor unit suite (antfarm_test.d), built outside dub.
+baseline: farm-unit-build
 	./antfarm_test_review
 
 # ThreadSanitizer build of the Farm unit suite (antfarm_test.d). Part of `make check`.

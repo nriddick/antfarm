@@ -1,9 +1,9 @@
 // Deterministic subscription schedules for the Live lifecycle (SPEC 3 I3,
 // 6b, 6c, 6e). Each schedule holds actors at write-audit hooks, either
 // inline on the main thread or, where a producer must stay paused inside its
-// own write while others run, on a worker thread released by flags. Every
-// schedule here failed on some earlier protocol or prototype; the history is
-// in SPEC 11.
+// own write while others run, on a worker thread released by flags. A-I and P
+// failed on earlier protocols or prototypes (SPEC 11); J exercises rejection
+// and pin cleanup when a candidate is discharged before its pinned re-read.
 //
 // Oracles, per schedule:
 //   safety     no producer enters the next lap of a slot whose work is still
@@ -17,7 +17,7 @@
 //              subscription is allowed; a rescue afterwards is diagnostic only.
 //
 // usage: subscription_live            (every schedule and trigger)
-//        subscription_live <A|B|C|D1|D2|E|F|G|H|I|P> [trigger 0..3]
+//        subscription_live <A|B|C|D1|D2|E|F|G|H|I|J|P> [trigger 0..3 for D1/D2/E]
 module subscription_live;
 
 import antfarm;
@@ -25,7 +25,6 @@ import core.atomic;
 import core.thread;
 import core.stdc.stdio : printf, fflush, stdout;
 import core.stdc.stdlib : malloc, free, exit;
-import std.conv : to;
 
 version (AntfarmWriteAuditHooks) {} else
     static assert(false, "build with AntfarmWriteAuditHooks");
@@ -104,6 +103,13 @@ void newFarm() nothrow @nogc @system
 
 void endFarm() nothrow @nogc @system
 {
+    require(atomicLoad(g_f.Cf) == 0, "all scheduled views detached");
+    foreach (ki; 0 .. g_f.K)
+    {
+        require((atomicLoad(g_f.Rt[ki][0]) & ~LIVE) == 0, "no root refs, transient pins or reserved bits");
+        foreach (leaf; 0 .. MAX_LEAVES)
+            require(atomicLoad(g_f.Lt[ki * MAX_LEAVES + leaf][0]) == 0, "no leaked leaf references");
+    }
     g_f.unregisterProducer(g_q);
     g_f.unregisterProducer(g_p);
     g_f.destroy();
@@ -750,12 +756,69 @@ bool scheduleP()
     return verdict("P", ok);
 }
 
+// ---------------------------------------------------------------------------
+// J. S has pinned tail epoch 1 and seen a Live hint for epoch 0. At the
+// candidate's pin, C completes epoch 0 and leaves. S must reject that hint,
+// drop the fresh candidate pin, and attach at epoch 1. This uses real
+// confirmation and departure, without forging any Rt or metadata values.
+// ---------------------------------------------------------------------------
+
+void hookJ(AntFarm*, WriteAuditPhase phase, ulong ki, ulong) nothrow @nogc @system
+{
+    if (g_stage == 1 && phase == WriteAuditPhase.subscriberPinned && ki == 0)
+    {
+        g_stage = 2;
+        require((atomicLoad(g_f.Rt[0][0]) & LIVE) != 0, "J candidate began Live");
+        while (g_C.consumeNext()) {}
+        g_C.unsubscribe();
+        require((atomicLoad(g_f.Rt[0][0]) & LIVE) == 0, "J candidate discharged under its Sub");
+    }
+    else if (g_stage == 2 && phase == WriteAuditPhase.subscriberRead && ki == 1)
+    {
+        require(atomicLoad(g_f.Rt[0][0]) == 0, "J rejected candidate pin was released");
+        require((atomicLoad(g_f.Rt[1][0]) >> 32) == 1, "J tail pin retained");
+        g_stage = 3;
+    }
+}
+
+bool scheduleJ()
+{
+    newFarm();
+    require(g_C.subscribe(g_f) == 0, "J C attaches at epoch 0");
+    require(put(g_q, 11000, true) == 1, "J e0 t1");
+    require(put(g_q, 11000, true) == 1, "J e0 t2");
+    require(put(g_q, g_seg - 300 - 22000, true) == 1, "J e0 t3");
+    require(put(g_q, 1000, true) == 1, "J crossing initializes epoch 1");
+    g_stage = 1;
+    writeAuditHook = &hookJ;
+    immutable r = g_S.subscribeOnce(g_f);
+    writeAuditHook = null;
+    require(g_stage == 3, "J exercised candidate recheck and rejection");
+    bool ok = r == 1;
+    ok = survivorProgress(g_S, "J") && ok;
+    g_S.unsubscribe();
+    endFarm();
+    return verdict("J", ok);
+}
+
 int main(string[] args)
 {
+    bool valid = args.length == 1;
+    if (args.length >= 2)
+        foreach (name; ["A", "B", "C", "D1", "D2", "E", "F", "G", "H", "I", "J", "P"])
+            if (args[1] == name) valid = true;
+    if (args.length == 3)
+        valid = valid && (args[1] == "D1" || args[1] == "D2" || args[1] == "E")
+            && args[2].length == 1 && args[2][0] >= '0' && args[2][0] <= '3';
+    if (!valid || args.length > 3)
+    {
+        printf("usage: subscription_live <A|B|C|D1|D2|E|F|G|H|I|J|P> [trigger 0..3 for D1/D2/E]\n");
+        return 64;
+    }
     bool all = args.length == 1;
     bool ok = true;
     bool want(string name) { return all || args[1] == name; }
-    int trigger(int dflt) { return args.length > 2 ? args[2].to!int : dflt; }
+    int trigger(int dflt) { return args.length > 2 ? args[2][0] - '0' : dflt; }
     foreach (name; ["A", "B", "C"])
         if (want(name)) { printf("schedule %s\n", name.ptr); ok &= scheduleABC(name[0]); }
     foreach (name; ["D1", "D2"])
@@ -777,6 +840,7 @@ int main(string[] args)
     if (want("G")) { printf("schedule G\n"); ok &= scheduleFG('G'); }
     if (want("H")) { printf("schedule H\n"); ok &= scheduleH(); }
     if (want("I")) { printf("schedule I\n"); ok &= scheduleEI('I', 0); }
+    if (want("J")) { printf("schedule J\n"); ok &= scheduleJ(); }
     if (want("P")) { printf("schedule P\n"); ok &= scheduleP(); }
     printf(ok ? "SUBSCRIPTION LIVE SCHEDULES PASSED\n".ptr : "SUBSCRIPTION LIVE SCHEDULES FAILED\n".ptr);
     return ok ? 0 : 1;
