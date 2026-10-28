@@ -502,15 +502,15 @@ the stable slot's two identity words after the ready-queue acquire.
 release `Tsent`. A consumer validates `Tsent` with acquire before entering the
 payload and the actor trampoline raw-loads those same ring words.
 
-A Farm subscription with no live root/pulse candidate validates that its
-fallback epoch still equals the second acquired tail's epoch. A retained
-producer grant can already cover a reclaimed old frontier before its next lap is
-reserved; the reservation bound alone cannot authorize that attach. A rejected
-attempt unwinds provisional pins and registration before retry. Unsubscribe
-protects incomplete epochs in the atomic last-releaser drop; it does not scan
-and plant after releasing ownership. The only independent plant is the
-producer's, before publishing its own table, which prevents that epoch from
-being completed and recycled during the plant.
+A Farm subscription attaches only at an epoch it saw `Live` under its own
+`Sub`, after re-reading that `Es` still names the epoch and that the tail has
+not reserved its next lap (SPEC 6b). A retained producer grant can already
+cover a reclaimed slot that a stale tail probe pinned; that `Sub` does not
+revoke the grant, which is why attachment rests on `Live` rather than on the
+pin. A failed attempt unwinds every `Sub` and its registration before retry.
+Unsubscribe creates no protection: an incomplete epoch keeps the `Live` its
+producer raised at initialization, and only a holder that observed the
+epoch confirmed clears it (SPEC 6c).
 
 Ring reuse is ordered by the Farm, not by the actor layer. A consumer's ring
 reads precede its tally release. A producer's zero-`Rt` sweep acquires that

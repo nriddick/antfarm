@@ -318,7 +318,7 @@ void t03_concurrent_exact()
     foreach (t; consumers) t.join();
 
     expectExactCalls(&batch, "T03");
-    check(countSub0Pulses(f) == 1, "T03 pulse");
+    check(countLive(f) == 1, "T03 only the frontier Live");
     expectNoLiveConsumerRefs(f, "T03");
     say("T03 concurrent exact OK");
 }
@@ -385,7 +385,7 @@ void t05_zero_consumer_gap()
         a.consumeNext();
     a.unsubscribe();
     check(atomicLoad(f.Cf) == 0, "gap");
-    check(countSub0Pulses(f) >= 1, "pulse");
+    check(countLive(f) >= 1, "frontier Live");
     Thread.sleep(40.msecs);
 
     ConsCtx cctx = ConsCtx(f, batch.expectedCalls, MonoTime.currTime + 60.seconds);
@@ -690,7 +690,7 @@ void t10_caps()
     foreach (i; 0 .. MAX_CONSUMERS_LIMIT)
         views[i].unsubscribe();
     check(atomicLoad(f.Cf) == 0, "drain");
-    check(countSub0Pulses(f) == 1, "pulse");
+    check(countLive(f) == 1, "only the frontier Live");
     say("T10 caps OK");
 }
 
@@ -1118,10 +1118,10 @@ void t26_compact_singleton_contract()
 
 void t18_pure_churn_orphan()
 {
-    // Pure subscription churn with NO steady consumer. Non-last unsubscribers
-    // drop trails on incomplete early segments; last unsubscriber may plant
-    // Sub0 only on a later held segment. Early incomplete work is then
-    // unprotected (Rt_low==0) and skipped by attach-in-place at the pulse.
+    // Pure subscription churn with NO steady consumer. Churners leave early
+    // epochs incomplete, departing in any order. Every incomplete epoch must
+    // keep the Live it has had since initialization (no Rt_low == 0 orphan),
+    // and a late subscriber must find the earliest one and salvage all work.
     // Existing antfarm_test.testChurn always keeps nsteady >= 1.
     enum TRIALS = 3;
     int bad;
@@ -1195,8 +1195,8 @@ void t18_pure_churn_orphan()
             if (atomicLoad(g_calls[i]) == 0)
                 ++zeros;
 
-        printf("T18 trial %d: pre=%lld post=%lld exp=%lld orphans=%d zeros=%zu pulses=%u\n",
-            trial, calls1, calls2, batch.expectedCalls, orphans, zeros, countSub0Pulses(f));
+        printf("T18 trial %d: pre=%lld post=%lld exp=%lld orphans=%d zeros=%zu live=%u\n",
+            trial, calls1, calls2, batch.expectedCalls, orphans, zeros, countLive(f));
         fflush(stdout);
 
         if (orphans > 0 || calls2 != batch.expectedCalls)
@@ -1210,20 +1210,21 @@ void t18_pure_churn_orphan()
     say("T18 pure-churn OK");
 }
 
-void t20_plant_confirmed_segment()
+void t20_confirmed_discharged()
 {
-    // Stress the producer plant and atomic last-releaser pulse protocol.
-    // Unsubscribe must cover every held incomplete epoch in its last drop;
-    // there is deliberately no unpinned orphan scan afterward. The controlled
-    // stale-scan regression is in farm_ordering.d. At quiescence, confirmed
-    // epochs carry no stray pulse beyond the legitimate empty-farm anchor.
+    // Stress Live raise and discharge: many crossings, finishers, churners
+    // and departures. Unsubscribe leaves Live on every unconfirmed epoch it
+    // held and creates no protection of its own. At quiescence, after a full
+    // drain by steady consumers that pass every epoch, no confirmed epoch may
+    // still be Live: a confirmed epoch that kept Live would block reuse with
+    // no holder obliged to discharge it (spec 6c).
     enum TRIALS = 8;
     int bad;
     foreach (trial; 0 .. TRIALS)
     {
         // K=16 and one-payload tables make the producer cross segments often.
         // Tiny bodies keep this an invariant scan (many crossings, finishers,
-        // last-releaser drops) rather than a memcpy bench. 10000 single-payload
+        // Live raises and discharges) rather than a memcpy bench. 10000 single-payload
         // tables write roughly three Ln laps.
         auto f = AntFarm.create(2, 16, 6, 1, 9000, 3, 2048);
         scope (exit) f.destroy();
@@ -1269,7 +1270,7 @@ void t20_plant_confirmed_segment()
                 if (v.subscribe(f) < 0) { Thread.yield(); continue; }
                 foreach (_; 0 .. 3)
                     v.consumeNext();
-                v.unsubscribe(); // preserves incomplete pins with the last-releaser CAS
+                v.unsubscribe(); // unconfirmed epochs it held keep their Live
                 ++done;
             }
         }
@@ -1305,12 +1306,9 @@ void t20_plant_confirmed_segment()
         foreach (t; steady) t.join();
 
         // Invariant scan: after full drain and all unsubscribed, every
-        // confirmed segment must have Rt_low == 0, except the single
-        // legitimate empty-farm pulse (last-of-farm leaves it on its
-        // confirmed position).  A D2 stale plant shows as a confirmed
-        // segment with Rt_low != 0 in addition to that pulse.
-        uint pulses;
-        uint confirmedWithPulse;
+        // confirmed segment must have Rt_low == 0: discharged, with no
+        // reference left. Only the unconfirmed frontier may stay Live.
+        uint confirmedProtected;
         uint confirmedCount;
         foreach (ki; 0 .. 16)
         {
@@ -1325,20 +1323,22 @@ void t20_plant_confirmed_segment()
             immutable seqtN = atomicLoad!(MemoryOrder.raw)(f.stats[ki1].seqt);
             immutable sd = atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd);
             if (seqt + sd < seqtN)
-                continue; // still incomplete: legitimately may carry Sub0
+                continue; // still incomplete: legitimately Live
             ++confirmedCount;
             immutable rt = atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]);
             if ((rt & LOWMASK) != 0)
-            {
-                ++confirmedWithPulse;
-                ++pulses;
-            }
+                ++confirmedProtected;
         }
-        // The empty-farm pulse is one confirmed segment with Rt_low != 0.
-        if (confirmedWithPulse > 1)
+        if (confirmedProtected != 0)
         {
-            fprintf(stderr, "T20 trial %d: %u confirmed segments with pulse (expected <= 1)\n",
-                trial, confirmedWithPulse);
+            fprintf(stderr, "T20 trial %d: %u confirmed segments still Live or referenced\n",
+                trial, confirmedProtected);
+            ++bad;
+        }
+        if (countLive(f) != 1)
+        {
+            fprintf(stderr, "T20 trial %d: %u Live slots at quiescence (expected the frontier only)\n",
+                trial, countLive(f));
             ++bad;
         }
         immutable got = atomicLoad(g_totalCalls);
@@ -1347,12 +1347,12 @@ void t20_plant_confirmed_segment()
             fprintf(stderr, "T20 trial %d: calls=%lld expected=%lld\n", trial, got, expected);
             ++bad;
         }
-        fprintf(stderr, "T20 trial %d: confirmed=%u pulses=%u calls=%lld/%lld\n",
-            trial, confirmedCount, pulses, got, expected);
+        fprintf(stderr, "T20 trial %d: confirmed=%u live=%u calls=%lld/%lld\n",
+            trial, confirmedCount, countLive(f), got, expected);
         fflush(stderr);
     }
-    check(bad == 0, "T20 stale plant on confirmed segment or lost work");
-    say("T20 plant-confirmed-segment OK");
+    check(bad == 0, "T20 confirmed segment left Live or lost work");
+    say("T20 confirmed segments discharged OK");
 }
 
 void t21_payload_content_multilap()
@@ -1513,7 +1513,7 @@ void t22_avgcost_sharding()
         t.join();
 
     expectExactCalls(&batch, "T22");
-    check(countSub0Pulses(f) == 1, "T22 pulse");
+    check(countLive(f) == 1, "T22 only the frontier Live");
     expectNoLiveConsumerRefs(f, "T22");
     say("T22 avgCost sharding exact OK");
 }
@@ -1581,7 +1581,7 @@ void t25_single_shot_claim_contract()
 void t23_late_attach_under_wrap()
 {
     // Protocol hole T11/T06/T18 miss: attach once, no retry, while the ring
-    // is already wrapping. Producers cannot lap a quiet farm (epoch-0 Sub0),
+    // is already wrapping. Producers cannot lap a quiet farm (epoch 0 is Live),
     // so one primer consumer starts with them; late subscribers join after
     // Wt > Ln. Fail on watchdog, lost work, leftover Sub, or unprotected
     // incomplete segments.
@@ -1762,7 +1762,7 @@ void main(string[] args)
     if (want("T18"))
         t18_pure_churn_orphan();
     if (want("T20"))
-        t20_plant_confirmed_segment();
+        t20_confirmed_discharged();
     if (want("T21"))
         t21_payload_content_multilap();
     if (want("T22"))

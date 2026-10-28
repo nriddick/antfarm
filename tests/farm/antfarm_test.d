@@ -288,6 +288,42 @@ void checkNoLeftoverSub(AntFarm* f, const(char)[] msg)
         check(highHalf(f, cast(uint) ki) == 0, msg);
 }
 
+// Slots whose epoch is still Live (spec 6c).
+uint liveSlots(AntFarm* f)
+{
+    uint n;
+    foreach (ki; 0 .. f.K)
+        if ((lowHalf(f, cast(uint) ki) & LIVE) != 0) ++n;
+    return n;
+}
+
+// Quiescent only: after every view drained and left, the frontier epoch is the
+// one Live slot and no references remain anywhere (spec 6e postconditions).
+void checkQuiescentLive(AntFarm* f, const(char)[] msg)
+{
+    check(liveSlots(f) == 1, msg);
+    foreach (ki; 0 .. f.K)
+        check((lowHalf(f, cast(uint) ki) & COUNTMASK) == 0, msg);
+    immutable frontier = cast(uint)((atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift) & f.kMask);
+    check((lowHalf(f, frontier) & LIVE) != 0, msg);
+}
+
+// Quiescent only: every initialized epoch that is not yet confirmed is Live.
+void checkUnconfirmedLive(AntFarm* f, const(char)[] msg)
+{
+    foreach (ki; 0 .. f.K)
+    {
+        immutable e = atomicLoad!(MemoryOrder.raw)(f.stats[ki].es);
+        if (e < 0) continue;
+        immutable k1 = cast(uint)((e + 1) & f.kMask);
+        immutable confirmed = atomicLoad!(MemoryOrder.raw)(f.stats[k1].es) == e + 1
+            && atomicLoad!(MemoryOrder.raw)(f.stats[ki].seqt) + atomicLoad!(MemoryOrder.raw)(f.stats[ki].sd)
+                >= atomicLoad!(MemoryOrder.raw)(f.stats[k1].seqt);
+        if (!confirmed)
+            check((lowHalf(f, cast(uint) ki) & LIVE) != 0, msg);
+    }
+}
+
 // ---------------------------------------------------------------------
 // Test 1: arithmetic
 // ---------------------------------------------------------------------
@@ -443,7 +479,7 @@ void testArithmetic()
 }
 
 // ---------------------------------------------------------------------
-// Test 2: single-threaded end to end, Sub0 lifecycle, resubscription
+// Test 2: single-threaded end to end, Live lifecycle, resubscription
 // ---------------------------------------------------------------------
 
 void testSingleThreaded()
@@ -451,8 +487,8 @@ void testSingleThreaded()
     auto f = AntFarm.create(2, 8, 2, 1, 8192, 4, 2048);
     scope (exit) f.destroy();
 
-    // Epoch 0: Sub0 pulse present, blocking reclamation of segment 0.
-    check(lowHalf(f, 0) == SUB0, "Sub0 at construction");
+    // Epoch 0 is constructed Live, blocking reclamation of segment 0.
+    check(lowHalf(f, 0) == LIVE, "epoch 0 Live at construction");
     foreach (ki; 1 .. 8)
         check(lowHalf(f, cast(uint) ki) == 0, "other Rt zero");
 
@@ -472,8 +508,8 @@ void testSingleThreaded()
     ConsumerView v;
     immutable r = v.subscribe(f);
     check(r == 0, "first subscribe returns epoch 0");
-    // First subscriber cleared Sub0 and holds one consumer reference.
-    check(lowHalf(f, 0) == 1, "Sub0 cleared, one consumer ref");
+    // The first reference leaves Live alone: epoch 0 is still unconfirmed.
+    check(lowHalf(f, 0) == (LIVE | 1), "epoch 0 Live with one consumer ref");
     checkNoLeftoverSub(f, "no leftover Sub after first subscribe");
 
     auto tok = f.registerProducer(Tier.small);
@@ -492,18 +528,16 @@ void testSingleThreaded()
 
     v.unsubscribe();
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf back to 0");
-    // Last unsubscriber deposited Sub0 at its current segment: exactly one
-    // pulse in the whole farm.
-    uint pulses;
-    foreach (ki; 0 .. 8)
-        if (lowHalf(f, cast(uint) ki) >= SUB0) ++pulses;
-    check(pulses == 1, "exactly one Sub0 pulse after unsubscribe");
+    // Leaving created no protection: the unconfirmed frontier epoch keeps
+    // the Live it had, and it is the only Live slot.
+    checkQuiescentLive(f, "only the frontier stays Live after unsubscribe");
 
-    // Resubscribe: succeeds, clears Sub0 again, catches up to the write tail.
+    // Resubscribe: finds the frontier by its Live and takes a reference there.
     ConsumerView v2;
-    check(v2.subscribe(f) >= 0, "resubscribe");
-    foreach (ki; 0 .. 8)
-        check(lowHalf(f, cast(uint) ki) < SUB0, "Sub0 cleared on resubscribe");
+    check(v2.subscribe(f) == 0, "resubscribe at the Live frontier");
+    check(lowHalf(f, 0) == (LIVE | 1), "frontier Live with the new reference");
+    foreach (ki; 1 .. 8)
+        check(lowHalf(f, cast(uint) ki) == 0, "other roots still zero");
     checkNoLeftoverSub(f, "no leftover Sub after resubscribe");
     while (v2.consumeNext()) {}
     // No payload was re-executed: tables were already complete.
@@ -1012,10 +1046,7 @@ void testConcurrent()
         check(g_calls[i] == 1, "concurrent exact call count");
     check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == expected, "concurrent total");
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained");
-    uint pulses;
-    foreach (ki; 0 .. 8)
-        if (lowHalf(f, cast(uint) ki) >= SUB0) ++pulses;
-    check(pulses == 1, "Sub0 pulse after all consumers left");
+    checkQuiescentLive(f, "only the frontier Live after all consumers left");
 
     printf("testConcurrent OK\n"); fflush(stdout);
 }
@@ -1024,7 +1055,7 @@ __gshared ProdCtx p1ctx, p2ctx;
 
 // ---------------------------------------------------------------------
 // Test 4: wraparound over several laps; consumer starts late (producer
-// stalls on the Sub0 pulse until the consumer arrives and keeps up).
+// stalls on epoch 0's Live until the consumer arrives and keeps up).
 // ---------------------------------------------------------------------
 
 void testWraparound()
@@ -1061,9 +1092,9 @@ void testWraparound()
     auto c = new Thread({ consumerMain(&cctx); });
 
     p.start();
-    Thread.sleep(50.msecs); // let the producer run ahead and stall on Sub0
+    Thread.sleep(50.msecs); // let the producer run ahead and stall on epoch 0's Live
     check(atomicLoad!(MemoryOrder.raw)(f.Wt) > 0, "producer ran ahead");
-    check(atomicLoad!(MemoryOrder.raw)(f.Wt) < f.Ln, "producer blocked before lapping Sub0");
+    check(atomicLoad!(MemoryOrder.raw)(f.Wt) < f.Ln, "producer blocked before lapping Live epoch 0");
     c.start();
     p.join();
     c.join();
@@ -1100,10 +1131,7 @@ void testSubscriptionCap()
     foreach (i; 0 .. MAX_CONSUMERS_LIMIT)
         views[i].unsubscribe();
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained");
-    uint pulses;
-    foreach (ki; 0 .. 8)
-        if (lowHalf(f, cast(uint) ki) >= SUB0) ++pulses;
-    check(pulses == 1, "single Sub0 pulse after mass unsubscribe");
+    checkQuiescentLive(f, "only the frontier Live after mass unsubscribe");
     // Slot reuse works after leaving.
     check(views[0].subscribe(f) >= 0, "resubscribe after cap");
     views[0].unsubscribe();
@@ -1113,7 +1141,7 @@ void testSubscriptionCap()
 // ---------------------------------------------------------------------
 // Test 6: subscribe/unsubscribe churn while production is ongoing.
 // Steady consumers drain the stream; churners keep joining and leaving
-// (exercising the first/last subscriber and Sub0 handoff paths).
+// (exercising arrivals and departures with no last-of-Farm special case).
 // ---------------------------------------------------------------------
 
 __gshared shared(int) g_churnStop;
@@ -1198,17 +1226,14 @@ void testChurn(size_t nsteady)
     foreach (i; 0 .. N)
         check(g_calls[i] == 1, "churn exact call count");
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained after churn");
-    uint pulses;
-    foreach (ki; 0 .. 8)
-        if (lowHalf(f, cast(uint) ki) >= SUB0) ++pulses;
-    check(pulses == 1, "single Sub0 pulse after churn");
+    checkQuiescentLive(f, "only the frontier Live after churn");
 
     printf("testChurn(%zu) OK\n", nsteady); fflush(stdout);
 }
 
 // ---------------------------------------------------------------------
 // Test 7: lossless backlog. Producer outruns consumers; A consumes part
-// and unsubscribes (planting Sub0 at its earliest unconfirmed segment);
+// and unsubscribes (its unconfirmed epochs keep their Live);
 // B subscribes later and drains the rest. Every payload executes exactly
 // exactly once.
 // ---------------------------------------------------------------------
@@ -1243,18 +1268,16 @@ void testBacklog()
     p1ctx = ProdCtx(f, entries, N, Tier.small);
     auto p = new Thread({ producerMain(&p1ctx); });
     p.start();
-    Thread.sleep(30.msecs); // producer fills the buffer and stalls on Sub0
+    Thread.sleep(30.msecs); // producer fills the buffer and stalls on epoch 0's Live
 
     ConsumerView a;
     check(a.subscribe(f) >= 0, "A subscribes");
     foreach (_; 0 .. 20)
         a.consumeNext();
     a.unsubscribe();
-    // Last-releaser Sub0: every abandoned unconfirmed segment may pulse.
-    uint pulses;
-    foreach (ki; 0 .. 8)
-        if (lowHalf(f, cast(uint) ki) >= SUB0) ++pulses;
-    check(pulses >= 1, "Sub0 planted on abandoned unconfirmed segments");
+    // A's departure created nothing: the epochs it left unconfirmed, and
+    // those it never reached, are still Live.
+    check(liveSlots(f) >= 1, "abandoned work still Live");
 
     ConsumerView b;
     check(b.subscribe(f) >= 0, "B subscribes");
@@ -1275,6 +1298,7 @@ void testBacklog()
     foreach (i; 0 .. N)
         check(g_calls[i] == 1, "backlog exact call count");
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained");
+    checkQuiescentLive(f, "backlog drained: only the frontier stays Live");
 
     printf("testBacklog OK\n"); fflush(stdout);
 }

@@ -1,5 +1,6 @@
 // Deterministic regression for the pre-d6b2eff unchecked equality boundary.
-// One producer, one consumer pinned at epoch zero, exact quota-sized tables.
+// One producer, exact quota-sized tables, and epoch zero protected either by a
+// consumer pinned there or (mode "live") only by its construction-time Live.
 // The old space >= Exmax gate admitted a write ending exactly at a boundary,
 // then reused the next segment's metadata without ever needing an Rt sweep.
 module boundary_runoff;
@@ -19,9 +20,9 @@ void main(string[] args)
     setvbuf(stdout, null, _IONBF, 0);
     auto f = AntFarm.create(2, 8, 1, 0, 0, 1, 512);
     ConsumerView held;
-    immutable pulse = args.length > 1 && args[1] == "pulse";
-    if (!pulse && held.subscribe(f) < 0) fatal("boundary test subscribe");
-    printf("boundary runoff mode=%s\n", pulse ? "Sub0".ptr : "live-root".ptr);
+    immutable liveOnly = args.length > 1 && args[1] == "live";
+    if (!liveOnly && held.subscribe(f) < 0) fatal("boundary test subscribe");
+    printf("boundary runoff mode=%s\n", liveOnly ? "Live-only".ptr : "live-root".ptr);
     auto token = f.registerProducer(Tier.small);
     Callback header;
 

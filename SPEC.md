@@ -1,6 +1,6 @@
 # Ant Farm: An M:N Concurrent Ring with Superlative Scaling
 
-Living spec, matching the implementation in this directory. The farmer metaphor and the field names are the original; the structure is the current one — held-epoch pins, last-releaser Sub0, ticketed write, pin-before-read subscribe — written as the design, with the concurrency arguments that accumulated during bug-fixing kept beside the rules they justify.
+Living spec, matching the implementation in this directory. The farmer metaphor and the field names are the original; the structure is the current one — held-epoch pins, initialization-time Live, ticketed write, pin-before-read subscribe — written as the design, with the concurrency arguments that accumulated during bug-fixing kept beside the rules they justify.
 
 - [1. Model, Scope, and Terminology](#1-model-scope-and-terminology)
 - [2. Data Layout](#2-data-layout)
@@ -24,7 +24,7 @@ Living spec, matching the implementation in this directory. The farmer metaphor 
 - [6. Consumer Pin Lifecycle](#6-consumer-pin-lifecycle)
   - [6a. ConsumerView](#6a-consumerview)
   - [6b. Subscription](#6b-subscription)
-  - [6c. The Sub0 State Machine](#6c-the-sub0-state-machine)
+  - [6c. The Live Lifecycle](#6c-the-live-lifecycle)
   - [6d. Orientation and Frontier Migration](#6d-orientation-and-frontier-migration)
   - [6e. Unsubscription](#6e-unsubscription)
 - [7. Work Scheduling](#7-work-scheduling)
@@ -42,7 +42,7 @@ Living spec, matching the implementation in this directory. The farmer metaphor 
 
 ## 1. Model, Scope, and Terminology
 
-Picture a farmer walking along a path placing down objects which a swarm of ants are picking up and taking away. He can't see the ants. He doesn't know how many there are. How can he avoid stepping on the ants? The answer: the ants maintain signage at regular intervals tallying how many ants are in the area. If it's higher than zero, the farmer waits. The last ant to leave a *confirmed-complete* area changes the tally (a reference counter) to zero. The last ant to leave an *incomplete* area instead leaves a Sub0 mark, so the farmer still sees a nonzero tally and will not step there. Thus the farmer only needs to watch for one signal to change, and doesn't need to try and communicate directly with any ants. And the ants have a panoply of strategies to break down and haul away their work pieces. Really the Ant Farm is a combination of known techniques and a disregard of FIFO guarantees; towards objectives of minimal synchronization upkeep, enhanced cache performance, and flexible role switching and load balancing.
+Picture a farmer walking along a path placing down objects which a swarm of ants are picking up and taking away. He can't see the ants. He doesn't know how many there are. How can he avoid stepping on the ants? The answer: the ants maintain signage at regular intervals tallying how many ants are in the area. If it's higher than zero, the farmer waits. Whenever the farmer lays down a new stretch of path he also plants a flag beside it, and only an ant that has seen the stretch cleared takes the flag down. The last ant to leave an area changes the tally (a reference counter) to zero; an area left half-done keeps its flag, so the farmer still sees a nonzero signal and will not step there. Thus the farmer only needs to watch for one signal to change, and doesn't need to try and communicate directly with any ants. And the ants have a panoply of strategies to break down and haul away their work pieces. Really the Ant Farm is a combination of known techniques and a disregard of FIFO guarantees; towards objectives of minimal synchronization upkeep, enhanced cache performance, and flexible role switching and load balancing.
 
 The implementation of this idea: a circular buffer using the "magic buffer" memory mapping such that the second half of the buffer wraps the first half. The buffer has a power-of-two length `Ln` in sizes to fit the mapping requirements of Linux and Windows and uses 64-bit `ulong` as its base unit. The buffer has a power-of-two number `K` (probably 4 or 8) of segments at regular intervals, each segment representing a successive epoch `E` of data. A sequence number `Seq` is the element number of the buffer as it wraps around; `Seq & (Ln-1)` gives the array index for that sequence. `Seq * K / Ln` is the epoch for that Seq. `Ei & (K-1)` is the segment index `Ki` for that `Ei` and span of Seqs.
 
@@ -64,13 +64,14 @@ The qualified completion states:
 | --- | --- | --- |
 | table complete | the finisher's acq_rel `Tprogress` increment reaches `Tlen` | Every payload callback has returned and the finisher has joined their writes. The finisher can account `Tsize` into `Sd`; a hook may still be running under its view pin. |
 | segment confirmed | matching `Es` values and `Seqt + Sd >= SeqtNext` | No more table accounting is missing from the segment. Confirmation alone does not make the bytes reusable. |
-| slot admitted by a quota sweep | a producer observes `Rt == 0` for that following slot while scanning contiguously from its tail anchor | No consumer, subscriber, or Sub0 pin blocks the sweep there. In this reuse context, the pulse and contiguous-sweep invariants make zero sufficient; the producer does not recheck `Sd`. A current write-frontier epoch may be incomplete with `Rt == 0` because it is not a following slot being reclaimed, so `Rt == 0` is not globally synonymous with confirmation. |
+| segment discharged | a consumer holding the segment observed it confirmed and cleared its Live bit (6c) | The epoch no longer blocks reuse by itself; references and subscriber Subs still do. A discharged epoch is confirmed; a confirmed epoch may stay Live until its next holder releases it. |
+| slot admitted by a quota sweep | a producer observes `Rt == 0` for that following slot while scanning contiguously from its tail anchor | No consumer reference, subscriber Sub, or Live bit blocks the sweep there. Because every undischarged epoch is Live (I3), zero is sufficient in this reuse context; the producer does not recheck `Sd`. The slot of an epoch whose initialization is still in flight also reads `Rt == 0` until its producer raises Live, but no qualifying sweep can reach it (I3), so `Rt == 0` is not globally synonymous with discharge. |
 
 ### Synchronization, runtime, and error policy
 
-Pains are taken to *eliminate* CAS operations from the hot paths of the module. Hot-path synchronization is fetch-add / fetch-sub plus acquire/release load/store. The CAS sites are cold: producer-ticket claim, the last-releaser pulse on unsubscribe, and `plantIfUnprotected`'s plant / retract. They do not retry the same expected snapshot indefinitely; every failure reloads and revalidates the reason for the operation, and often the reload invalidates the reason to plant — count or pulse already present — so the loop bails or takes a different action against the new snapshot. The current implementation uses a *strong* CAS (D's `cas` does not fail spuriously). Whether a weak CAS would suffice is a rationale question, not a normative requirement; see 11.
+Pains are taken to *eliminate* CAS operations from the hot paths of the module. Hot-path synchronization is fetch-add / fetch-sub plus acquire/release load/store. The CAS sites are cold: producer-ticket claim and the per-epoch Live discharge (6c). They do not retry the same expected snapshot indefinitely; every failure reloads and revalidates the reason for the operation, and a discharge stops as soon as the reload shows Live already clear. The current implementation uses a *strong* CAS (D's `cas` does not fail spuriously). Whether a weak CAS would suffice is a rationale question, not a normative requirement; see 11.
 
-The reference implementation is in D and the Farm must be allocated into 64-byte-aligned memory with manual lifetime; at the time of writing D's garbage collector only guarantees alignment to 16 bytes (10). Just about every interface to the Farm is `@nogc nothrow @system` code, and this system is designed such that most errors are fatal with very few exceptions. The recoverable exceptions are registration-full, oversubscription, an uninitialized or generation-inconsistent subscribe frontier, and backpressure.
+The reference implementation is in D and the Farm must be allocated into 64-byte-aligned memory with manual lifetime; at the time of writing D's garbage collector only guarantees alignment to 16 bytes (10). Just about every interface to the Farm is `@nogc nothrow @system` code, and this system is designed such that most errors are fatal with very few exceptions. The recoverable exceptions are registration-full, oversubscription, a subscribe attempt whose bounded rounds the write tail outran (6b), and backpressure.
 
 Throughout, I use conceptual `fetch_add`/`fetch_sub` for the implementation's `atomicFetchAdd`/`atomicFetchSub`.
 
@@ -82,7 +83,7 @@ Throughout, I use conceptual `fetch_add`/`fetch_sub` for the implementation's `a
 
 The shared mutable Farm fields:
 
-- `Cf` — the current number of subscribed consumers.
+- `Cf` — the current number of subscribed consumers, including subscriptions still attaching. It bounds capacity (4c) and sizes new tables' `SqCs`; no lifetime or protection decision depends on its value, in particular not on a departure being last (6e).
 - `Reqs_c` — a monotonically increasing counter of consumer subscription requests. `IDc` is taken from this counter alone, so producer registration cannot fragment consumer shard assignment.
 - `Reqs_p` — a monotonically increasing counter of successful producer registrations (4d). It is separate from `Reqs_c` so Token hashes do not walk the consumer ID space.
 - `FarmId` — a process-unique identity taken from a global issuance counter at Farm creation and never reused for the process lifetime. Every Token carries a copy, binding it to its issuing Farm (4d).
@@ -106,19 +107,20 @@ Consumers **must** always increment a tally ahead before decrementing their curr
 
 | Bits | Field | Unit | Role |
 | ---: | --- | ---: | --- |
-| 63..32 | `Sub` | `2^32` | prospective subscribers (6b) |
-| 31..16 | `Sub0` | `2^16` | pulse pin on incomplete / empty-farm space |
-| 15..0 | count | 1 | active consumers; `COUNTMASK = Sub0 - 1` |
+| 63..32 | `Sub` | `2^32` | provisional subscriber pins (6b) |
+| 31..17 | reserved | — | zero |
+| 16 | `Live` | bit | the epoch in this slot is initialized and not yet discharged (6c) |
+| 15..0 | count | 1 | propagated leaf references; `COUNTMASK = Live - 1` |
 
-Let `Rtlow` be the least significant half (`LOWMASK`). `COUNTMASK` is the count bits below Sub0. Underflow checks on `Rt` test only `COUNTMASK`.
+Let `Rtlow` be the least significant half (`LOWMASK`): `Live` and the count. Underflow checks on `Rt` test only `COUNTMASK`.
 
-Sub0 is a counted pin in units of `2^16`, not a bit. At rest each segment has 0 or 1 × Sub0; transiently more than one unit may be present while several last-leaf releases race, still bounded well below `Sub` at `MAX_CONSUMERS_LIMIT`. The count field and Sub0 field never overlap, and `Rtlow` underflow tests are built around that. OR and AND are not used on this field: they cannot share accounting with the counted last-releaser chain (6c).
+`Live` is one bit, not a counted unit. It is raised once per epoch by the producer whose reservation initializes that epoch, and cleared once by a consumer holding the epoch after it observes confirmation (6c). No reference transition touches it: taking a root's first count and releasing its last one change only the count bits, and a `Sub` add or drop changes only the high half. Every post-construction write to `Rt` is an RMW (`fetch_add`, `fetch_sub`, or CAS), never a plain store, so each release on `Rt` heads a release sequence that later RMWs extend (9). No legal operation borrows or carries between fields.
 
 Because a segment's `SqCs` snapshot changes across epochs, a `Ci` must cache the `Lti` used at each increment and decrement that same leaf. The ConsumerView keeps one `Lti` per held physical slot (`ltiRing`, 6a). `IDc` may later be nudged (7d, 7e); already-incremented leaves are not moved.
 
-All leaf counters subject to dec are signed integer types, and underflow below 0 is fatal in any context. The root tally is unsigned; its underflow is detected on the count bits via `COUNTMASK`, so a live Sub0 can never mask a genuine count underflow.
+All leaf counters subject to dec are signed integer types, and underflow below 0 is fatal in any context. The root tally is unsigned; its underflow is detected on the count bits via `COUNTMASK`, so neither `Live` nor `Sub` can mask a genuine count underflow.
 
-The full root/leaf propagation protocol — taking a count, the last-releaser CAS, and the Sub0 lifecycle — is specified once in 6c.
+Root propagation is the plain edge rule above. The `Live` lifecycle is specified once in 6c.
 
 ### 2c. Segment Statistics
 
@@ -240,23 +242,28 @@ These are the load-bearing rules. Later sections describe mechanisms; this secti
 
 **I2 — Consumer pins form a contiguous epoch range and move increment-ahead.** A consumer holding any tally protects not just that segment but everything ahead of it within one lap: any sweep far enough ahead to threaten the consumer's unread data must pass contiguously through the held segment and break. Conversely, a producer cannot jump a lap on blind quota alone, so the protection cannot be outflanked. Consumers always increment a tally ahead before decrementing their current one, so the protected span has no zero gap.
 
-**I3 — Incomplete unowned epochs remain protected from reuse.** The last
-releaser of an unconfirmed epoch replaces its last count with Sub0 atomically
-(6c), so abandoned work has no zero gap. A crossing producer covers a
-never-entered epoch before publishing its own table. A current frontier or
-the producer's pre-plant window can have `Rt == 0`; this is not permission
-to reclaim it. A qualifying contiguous sweep is still blocked by an earlier
-held pin or the empty-farm pulse under I1/I2. Thus the invariant concerns
-admission for reuse, not every isolated zero-root observation. Confirmation
-rechecks on last-releaser pulses avoid retaining a confirmed non-empty-farm
-segment. Idle consumers keep a live frontier pin (6d), and the last-of-farm
-release retains a subscribe anchor.
+**I3 — Every epoch is protected from its initialization until it is discharged.** The producer whose reservation crosses into epoch `e` raises `Live` on `e`'s slot before it release-stores `Es[e]` (5c), and `Live` is cleared only by a consumer that holds `e` and has observed it confirmed (6c). A slot whose `Live` is set never reads `Rt == 0`, so no sweep admits it while its epoch is undischarged, whoever is or is not subscribed. Unfinished work needs no other protection; departures, including the last one, create none (6e).
+
+The only zero-root interval of an epoch before its discharge lies between its producer's reservation and that producer's `Live` raise. A qualifying sweep still cannot admit the slot for its next lap. A sweep that reaches `e`'s slot as `e + K` either passed `e - 1`'s slot earlier in the same scan or, when `e`'s slot is its first, acquired through the `Wt` reservation chain (9) the sweep that admitted `e - 1`'s slot for its own next lap. Either way it acquired a zero root for `e - 1`, which by induction can only follow `e - 1`'s discharge:
+
+```text
+raise Live(e)                         the producer of e, before Es[e]
+  -> release-store Es[e]
+  -> acquire Es[e]                    the holder confirming e - 1 (8)
+  -> release CAS clears Live(e - 1)   that holder's discharge (6c)
+  -> acquire a zero Rt for e - 1      the sweep, directly or via Wt (9)
+  -> that sweep's read of e's slot sees Live(e) or a later value
+```
+
+Epoch 0, which the Farm publishes Live (4b), is the base case. Hence a sweep admits only slots whose current epoch has been confirmed and discharged, and I1 with the retained-quota chain (9) extends this to every producer spending a grant. The induction is over slot generations: a zero from an earlier lap is not evidence about a later epoch.
+
+A consequence used by subscription (6b): the earliest unconfirmed epoch is always initialized and Live, even on a Farm with no consumers, because confirming its predecessor required its `Es`, which is published after its `Live`.
 
 **I4 — Raw ring reads occur only after publication and while pinned.** The ring is read without acquire only after an acquire-validated `Es` or `Tsent` publishes the initialized values, and only while the reader holds a tally on the relevant segment (9).
 
 **I5 — Producer reuse requires a contiguous sweep observing `Rt == 0`.** Confirmation says table accounting is complete; it does not itself grant reuse. A producer admits a slot for reuse only when `refreshQuota`'s contiguous forward sweep observes `Rt == 0` for that slot. The sweep's anchor and contiguity, plus I2 and I3, make zero sufficient there.
 
-Safety argument in one paragraph: producers only ever write within quota verified by sweeps of contiguously-forward zero Rts, and total maximum quota `Exmax` is bounded by K-1 segments' capacities, strictly less than a lap. A consumer holding any tally therefore protects not just that segment but everything ahead of it within one lap. Incomplete epochs remain protected against qualifying reuse sweeps, and confirmed non-empty-farm epochs do not retain Sub0. Idle consumers keep a live pin on the frontier segment, so the system never drops to zero pins while anyone is still subscribed. Consumers retain references until segments are confirmed (8). Consumers' unread data is always protected, and the system never overwrites unexecuted work.
+Safety argument in one paragraph: producers only ever write within quota verified by sweeps of contiguously-forward zero Rts, and total maximum quota `Exmax` is bounded by K-1 segments' capacities, strictly less than a lap. Every epoch is Live from its initialization until a consumer that confirmed it discharges it, so unfinished work is never admitted for reuse, whether or not anyone is subscribed (I3). A consumer holding any tally also protects everything ahead of it within one lap (I2), which covers the data it is still reading; consumers retain references until segments are confirmed (8), and idle consumers keep a pin on the frontier segment (6d). Consumers' unread data is always protected, and the system never overwrites unexecuted work.
 
 ---
 
@@ -280,13 +287,13 @@ An enabled tier must declare a positive quota. Bulk auto-defaults to `segCap` wh
 
 ### 4b. Epoch 0
 
-At Farm creation we prevent a state where all segments have no references and producers might happily loop through the buffer with no one to block them. There are also zero known subscribers and no leaves or shards in which to distribute them. Thus we construct epoch 0's `Rt` with a dummy Sub0 value, blocking producers from overwriting Seq 0 until consumers digest it. The first subscriber's leaf 0→1 on `Rt` (6c) subtracts that dummy Sub0. On a fresh farm the first subscription should succeed — the construction guarantees it — and a failure (oversubscription or an uninitialized frontier) returns a negative code per 6b; it is not itself fatal.
+At Farm creation epoch 0 is initialized exactly as a producer would initialize an epoch: `Es[0] = 0`, `Seqt[0] = 0`, `SqCs` from the expected consumer count, and its root constructed as `Live`. There are zero known subscribers and no leaves or shards in which to distribute them, and none are needed: `Live` keeps producers from lapping Seq 0 until a consumer confirms epoch 0 and discharges it (6c), and the first subscriber finds epoch 0 by the ordinary scan (6b). Construction publishes these values with the Farm, which is the base case of I3. On a fresh farm the first subscription should succeed; a failure (oversubscription, or RETRY under a racing producer) returns a negative code per 6b and is not itself fatal.
 
-Note that Sub0 does not block producers from writing to epoch 0. The segment where a write tail resides is not breached if there are consumers ahead of it, and epoch 0 begins with a full segment length ahead of the write tail and consumers bounded behind it.
+Note that `Live` does not block producers from writing into epoch 0. The segment where the write tail resides is never examined by its own producer's sweep, and epoch 0 begins with a full segment length ahead of the write tail and consumers bounded behind it.
 
 ### 4c. Consumer Capacity
 
-A subscriber `Si` calls `F.add_consumer()`, which fetch_incs `Cf`. If a slot is available, it fetch-incs `Reqs_c` and returns that result as `IDc`. If not, `F` is oversubscribed and `Si` fetch-decs `Cf` and returns `SUBSCRIBE_FULL`. Every subsequent subscription failure path also unwinds `Cf` (6b).
+A subscriber `Si` calls `F.add_consumer()`, which fetch_incs `Cf`. If a slot is available, it fetch-incs `Reqs_c` and returns that result as `IDc`. If not, `F` is oversubscribed and `Si` fetch-decs `Cf` and returns `SUBSCRIBE_FULL`. Every subsequent subscription failure path also unwinds `Cf` (6b). A rejected or failed attempt can make `Cf` overcount briefly; that can only make another attempt conservatively `SUBSCRIBE_FULL` or size a table's `SqCs` high, because nothing derives protection or lifetime from `Cf` (2a, 6e).
 
 ### 4d. Producer Tiers and Tickets
 
@@ -312,7 +319,7 @@ Every quota grant requires a fresh acquire-load of `Wt` followed by a forward-se
 
 Once a sweep grants quota, the producer may spend that finite balance across table writes and segment boundaries. If no next payload fits the balance, `write()` probes `Wt` and attempts a new sweep; a failed sweep returns 0 without granting additional space. There is no separate unchecked-leftover state or `quotaSwept` flag. Reservations of `Wt` are acq_rel RMWs. Release pairs with the acquire probe used for each grant. Acquire is the producer-to-producer reclamation handoff: a producer may spend a retained balance long after its sweep, while other producers sweep and lap the ring. Its reservation must acquire the history those producers imported (consumer pin drops → `Rt` release → zero-`Rt` sweep acquire) before it stores into the words it reserved (9).
 
-If a `Pi` has depleted its swept quota, probed its `Wt` position, and needs to check following segments to make `Exmax` space, then it scans the K-1 segments ahead of the probe for contiguous 0 Rts, adding their full capacities until it has found `>= Exmax` space or encounters a live segment and breaks. The same acquire-load is the sweep's anchor; a second probe is not taken. If sweeping fails then backpressure is simply too high; full for `Pi`'s purposes. A stalled producer may subscribe a ConsumerView, drain, and retry `write()` — that is the supported escape hatch, not an out-of-band trick. The sweep cannot land on spuriously orphaned islands of space because consumers maintain continuous reference spans without gaps.
+If a `Pi` has depleted its swept quota, probed its `Wt` position, and needs to check following segments to make `Exmax` space, then it scans the K-1 segments ahead of the probe for contiguous 0 Rts, adding their full capacities until it has found `>= Exmax` space or encounters a live segment and breaks. The same acquire-load is the sweep's anchor; a second probe is not taken. If sweeping fails then backpressure is simply too high; full for `Pi`'s purposes. A stalled producer may subscribe a ConsumerView, drain, and retry `write()` — that is the supported escape hatch, not an out-of-band trick. The sweep cannot land on spuriously orphaned islands of space: consumers maintain continuous reference spans without gaps, and every undischarged epoch is Live (I3).
 
 ### 5b. write() Call and Return
 
@@ -367,7 +374,7 @@ The ordered contract of a write:
 
 1. Reserve `Wt` with an acq_rel RMW; the returned `Wret` plus the reserved size gives `Wt'`, the sequence after this write. The acquire half imports other producers' reclamation history before any ring store (5a, 9).
 2. Deduct the reserved size from the checked quota grant; do not renew it.
-3. For every segment/epoch boundary the reservation crosses, initialize that segment's metadata (2c) and, for segments crossed *out of* that are incomplete, plant Sub0 protection via `plantIfUnprotected` (6c).
+3. If the reservation crosses into new epochs, run the fresh-segment diagnostic: each such slot's `Rtlow` must be zero (a provisional `Sub` is allowed), else fatal. Then, for each new epoch in order, initialize its metadata (2c), raise its `Live` with a release RMW, and release-store its `Es` last. A `Live` raise that finds the low half nonzero is fatal: no qualifying sweep could have admitted such a slot. From here until a holder confirms and discharges it, `Live` protects the epoch (I3, 6c); the write needs no later protection step.
 4. Write the table parts described in 2e/2f/2g, into the reserved space.
 5. Release-store `Tsent` last; it is computed from `Wret`, and consumers validating the expected sentinel by its matching sequence also validate the following contents.
 
@@ -391,91 +398,67 @@ Then derived and tracked stats as are convenient.
 
 ### 6b. Subscription
 
-ConsumerView is initialized with `subscribe(AntFarm* F)`, which runs the one-attempt protocol below (`subscribeOnce`) until it does not report a transient frontier inconsistency.
+ConsumerView is initialized with `subscribe(AntFarm* F)`, which runs the one-attempt protocol below (`subscribeOnce`) until it does not report a transient outcome.
 
-**Returns:** the non-negative starting epoch on success. Failures are negative: `SUBSCRIBE_FULL` (-1, capacity) or `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed view). `subscribeOnce` additionally returns `SUBSCRIBE_RETRY` (-2, transient frontier inconsistency; every pin was unwound) instead of retrying. Epoch 0 is a valid success.
+**Returns:** the non-negative starting epoch on success. Failures are negative: `SUBSCRIBE_FULL` (-1, capacity) or `SUBSCRIBE_INVALID` (-3, null Farm or already subscribed view). `subscribeOnce` additionally returns `SUBSCRIBE_RETRY` (-2: the write tail outran the attempt's bounded rounds; every `Sub` and `Cf` was unwound) instead of retrying. Epoch 0 is a valid success.
 
-The subscription protocol:
+An attempt finds the earliest Live epoch it can see, protects it with a `Sub`, validates it, and attaches there.
 
-**a.** The subscriber `Si` calls `F.add_consumer()` (4c). If `Cf` is full, `F` is oversubscribed and `Si` returns `SUBSCRIBE_FULL`. Every subsequent failure path unwinds `Cf` too.
+**a. Admission.** The subscriber `Si` calls `F.add_consumer()` (4c). If `Cf` is full, `Si` returns `SUBSCRIBE_FULL`. Every later failure path unwinds `Cf` too.
 
-**b.** Acquire-load `F.Wt` — the only unpinned read — and use `Wt >> segShift` as the walk range. Walk backwards through the corresponding segments (at most `K`, stopping at epoch 0). On each step, *before* inspecting that slot's metadata, fetch_add-release a `Sub` onto its `Rt`. The `d=0` step is the heuristic pin on the frontier slot `(Wt >> segShift) & (K-1)`: a held Sub is visible to producers as `Rt != 0`, so it blocks a full lap through the current view and segments ahead of it (5a contiguous-forward sweep). Older slots sit first in that sweep, so each older step pins before reading. After the pin, acquire-load `Rtlow` and acquire-load `Es`, and rank by earliest `Es` among `Rtlow != 0`. The pulse invariant (6c) guarantees a candidate exists. Several segments may hold Sub0 at once (one per abandoned unconfirmed segment); the walk picks the earliest, which is the frontier of unconsumed work.
+**b. Rounds.** The attempt runs at most `K + 2` rounds. Each round:
 
-Groping an unpinned slot's `Rtlow`/`Es` is incorrect: those reads are not protected against wrap, so the snapshot can mix generations and `Si` can attach with no valid table while still holding a pin.
+1. acquire-loads `Wt`; `eg = Wt >> segShift` is the round's frontier and the logical epochs `[lo, eg]`, `lo = max(0, eg - K + 1)`, are its window;
+2. adds a `Sub` (`fetch_add`, release) to the frontier's slot, unless this attempt already holds one there;
+3. reads the window in increasing epoch order as *hints*: for epoch `x`, acquire-load `Es` of `x`'s slot, then acquire-load its `Rt`, with no RMW. The slot qualifies for `x` only if `Es == x` and `Live` is set;
+4. at the first qualifying `x`, adds a `Sub` to its slot and reads it again the same way. If it no longer qualifies (discharged or reused between the two reads), the round drops that `Sub`, unless the attempt already held it, and continues with `x + 1`;
+5. validates the re-read candidate (c) and attaches (e), or ends the round when validation fails.
 
-Race note: the one case where the walk finds no `Rtlow != 0` candidate is a transient race with a *not-last* unsubscribe of a *confirmed* pin, in which case `Si` stands at the frontier. The second `Wt` read and the bounds below still validate that frontier before attach.
+A round ends without attaching only when the write tail moved past what the round read. After `K + 2` such rounds `Si` drops every `Sub` it holds, unwinds `Cf`, and returns `SUBSCRIBE_RETRY`. The bound is a budget, not a proven sufficient count: `RETRY` must stay recoverable, and no watchdog may treat a long run of retries as corruption. An attempt holds at most one `Sub` per physical slot, so at most `K`; frontier `Sub`s accumulate across its rounds and are dropped together at attachment or `RETRY`.
 
-**c.** After the attach candidate is read, and while all Sub pins are still held, `Si` re-reads `F.Wt` and validates the following bounds, all compared as epoch numbers after shifting by `segShift`. `Seqt >> segShift` must lie in `[Es, Es + K - 1]`; this rejects a mixed snapshot where `Es` is still the previous lap's value while `Seqt` has already been advanced. `Wt >> segShift` must be `< Es + K`; this rejects a slot whose next lap was already reserved before the pin. When no live candidate was found (`bestSeg < 0`), the fallback must also satisfy `Es == Wt >> segShift`. A delayed initial tail probe can name an already reclaimed slot; another producer may have swept that slot into retained quota without reserving its next lap yet. The fallback therefore must still be the current frontier. This extra bound applies only to the fallback: an older live candidate remains protected and must stay available to drain a backed-up Farm. If any bound fails, `Si` unwinds every Sub and `Cf` and returns `SUBSCRIBE_RETRY`.
+**The frontier `Sub`.** At a current probe the frontier epoch cannot be confirmed, because its successor is not initialized, so it is `Live`, and by I3 no sweep can already have admitted its slot for the next lap. While held, that `Sub` keeps the write tail from lapping the slot, so the window can move at most one lap during the attempt. A `Sub` on an older, already-discharged slot has no such guarantee: quota granted before the `Sub` landed ignores it (5a). Protection of the attach target therefore never rests on extra pins; it rests on `Live` observed under the target's own `Sub` (e). With a stale probe the frontier `Sub` may land on a slot the tail has already passed; that round fails validation or finds nothing, and the next round pins the current frontier.
 
-**Fallback ordering proof.** The acquire root read after the subscriber's
-`Sub` RMW imports earlier root releases: all post-construction root writes
-are RMWs. If epoch `e` was entered and then reclaimed, the release that
-made its low half zero follows `confirmed(e)`, whose acquire of `Es[e+1]`
-imports the reservation crossing out of `e`. Thus the second tail read
-cannot still name `e`. A preceding producer plant also releases that
-crossing reservation through the root chain. If `e` was never entered and
-is a trivially complete interior of a spanning table, acquiring `Es[e]`
-itself imports a reservation ending beyond `e`. The remaining accepted
-case is a current, initialized frontier: its reuse still requires completion
-and the contiguous-sweep/pulse invariant I3. A stale tail load alone cannot
-turn a reclaimed epoch into an accepted fallback. This argument uses the
-actual reclamation history, not a presumed globally fresh acquire load.
+**`Es` before `Rt`.** A producer raises `Live` before it release-stores `Es` (5c). Loading `Es` first means a matching `Es` imports that raise, so the following `Rt` load observes `Live` unless the epoch has since been discharged: "`Es` names `x` but `Live` is clear" means discharged, never "not yet raised". An older `Es` is an initialization still in flight; a newer one means the slot was already reused for a later lap. The oldest-first scan does not depend on this order for discovery: an epoch whose initialization lands between the two loads cannot be the earliest unconfirmed one, because its predecessor could not yet be confirmed, and the discovery argument below never needs it. The order makes each classification exact, which a scan that stops at a discharged slot would require; loading `Rt` first could make an initializing epoch look discharged.
 
-**d.** `Sub` is `2^32` such that it tracks subscribers in the most significant half, apart from normal consumers incrementing in `Rtlow`. The walk of 6b-b already holds one Sub on every inspected slot, including the attach candidate. The number of unique subscribers (and thus Sub units per segment) is bounded by `MAX_CONSUMERS_LIMIT = 128`; one `Si` pins each physical segment at most once, so `K × 128` is well under `2^32`. Sub is only the establish-leaf window; it does not plant or clear Sub0.
+**Discovery.** Let `B(t)` be the earliest unconfirmed epoch at time `t`. `B` only increases, and `B(t)` is always initialized and `Live` (I3). At the probe `B >= lo`, since `B`'s slot cannot be lapped while it is `Live`. Reading in increasing epoch order, each read of `x` either finds `x < B(t_x)`, a confirmed epoch the scan may pass whatever it reads, or is the first read with `x >= B(t_x)`. That `x` equals `B(t_x)`: for `x = lo` because `B >= lo`, otherwise because the previous read had `x - 1 < B(t_{x-1}) <= B(t_x)`. `B(t_x)` is initialized and `Live` at `t_x`, so it qualifies. A pinned re-read that no longer qualifies means `x` has since been confirmed, and the induction continues from `x + 1`. The round's first qualifying slot is therefore at or before the earliest unconfirmed epoch at some instant of the round, and because `B` only advances, attaching there skips no unfinished work. If the whole window was confirmed during the round, the round finds nothing and the next one re-probes.
 
-**e.** `Si` attaches *in place*, regardless of what `Rtlow` did in the interim. The held Subs are all the same to a producer (`Rt != 0`), so they block any lap of the pinned window while `Si` establishes a real reference. If an in-flight write had already reserved past the selected slot before the pin, the `Wt` re-read bound of 6b-c fails and `Si` fails closed; it does not attach to a slot whose next lap is already reserved. If `Es < 0` or `SqCs == 0` the frontier was never written; fail closed (unwind `Cf` and every deposited Sub) rather than divide by a zero snapshot. Otherwise `Si` performs the normal leaf tally increment and root propagation, caching the `Lti` used. The 0→1 on `Rt` subtracts a live Sub0 if present (6c). `Si` is fully established as a consumer `Ci`.
+Under weak memory the same induction is carried by happens-before rather than by instants. The probe's acquire of `Wt` imports, through the reservation chain (9), the discharge of the epoch whose slot the frontier reused, and so `lo`'s initialization (for `eg < K - 1`, `lo = 0` and epoch 0 is published with the Farm). Passing `x` because its slot reads discharged imports, through the discharging holder's release CAS, that holder's acquire of `Es[x + 1]`; passing it because the slot was reused imports, through the reusing producer's `Live` raise and reservation, the same discharge. Either way `x + 1`'s initialization is visible before the next read. This chain is argued here, not machine-checked; see the open obligations in 11.
 
-**f.** `Si` fetch_sub-releases every Sub deposited in 6b-b, including the attach slot. The 0→1 of 6b-e already retracted Sub0 if present.
+**c. Validation.** Under the candidate's `Sub`, `Si` re-loads its `Es` (acquire), `SqCs` and `Seqt` (raw, ordered by that acquire), then `Wt` (acquire). It accepts only if `Es` still equals the candidate epoch `c`, `SqCs != 0`, `Seqt >> segShift` lies in `[c, c + K - 1]`, and `Wt >> segShift < c + K`. The `Es` identity rejects a slot reused after the re-read, and the `Seqt` range rejects a snapshot that mixes generations. The `Wt` bound rejects the one way a matching `Es` can come with another epoch's `Live`: a new lap's `Live`, raised before its `Es` is published, acquired beside the old lap's `Es`. That raise is a release RMW sequenced after its producer's `Wt` reservation, so acquiring it imports the reservation, and the `Wt` re-load names the candidate's next lap. A failed validation drops the candidate's `Sub`, unless the attempt already held it, and ends the round.
 
-Failure reasons — capacity, mixed/wrapped snapshot, or uninitialized frontier — all unwind `Cf` and every deposited Sub before returning `SUBSCRIBE_FULL` or `SUBSCRIBE_RETRY`.
+**d. `Sub`.** `Sub` is `2^32` such that it tracks subscribers in the most significant half, apart from consumers' counts and `Live`. An attempt holds at most one `Sub` per physical slot, and concurrent attempts are bounded by admission (4c), so `K × MAX_CONSUMERS_LIMIT` is far below `2^32`. A `Sub` only stops sweeps that read the slot after it lands; it does not revoke quota already granted (5a), and it never raises or clears `Live`.
 
-### 6c. The Sub0 State Machine
+Hint reads take no `Sub`; they only choose where to pin. Attachment never rests on a hint: the candidate is re-read under its own `Sub` and validated before any leaf increment. That is why unpinned reads, which could mix generations, are acceptable here and nowhere else.
 
-This is the root-tally lifecycle in one place. Keep the bit layout from 2b next to it; the transitions are:
+**e. Attachment.** While its `Sub` on the candidate is held, `Si` performs the normal leaf tally increment and root propagation (2b), caching the `Lti` used, and takes the candidate epoch as its position with `nextSeq = Seqt`. The candidate cannot be reclaimed meanwhile. `Live` for one epoch is raised once and never again, and `Si` observed it under its `Sub`, with the `Wt` bound excluding a newer lap's `Live`. So no sweep before the `Sub` landed can have admitted the slot, since that would have required this `Live` clear, and none after can while the `Sub`, and then `Si`'s reference, is held, even if the epoch is confirmed and discharged in between. Epochs after the candidate within the lap are covered the same way, because any sweep reaching them first passes the candidate's slot (I2). `Si` is now a consumer `Ci`.
 
-| Event | Preconditions | `Rt` transition | Purpose |
+**f.** `Si` fetch_sub-releases every `Sub` the attempt holds, including the attach slot.
+
+Failure reasons, capacity or a tail that outran the attempt's rounds, unwind `Cf` and every `Sub` before returning `SUBSCRIBE_FULL` or `SUBSCRIBE_RETRY`.
+
+### 6c. The Live Lifecycle
+
+`Live` is one bit per root (2b) and belongs to the epoch currently in that slot. This is its whole lifecycle:
+
+| Event | Actor and preconditions | `Rt` transition | Purpose |
 | --- | --- | --- | --- |
-| first real root | count 0, optional Sub0 | increment count and remove the observed Sub0 units | replace the pulse with ownership |
-| non-final root release | count greater than 1 | decrement count | ordinary release |
-| final root, incomplete segment | count 1 | atomically replace count with one Sub0 | preserve backlog discoverability and prevent reuse |
-| final root, confirmed non-empty-farm segment | count 1 | decrement to zero | admit producer reclamation |
-| final root of an empty Farm | count 1 | atomically replace count with one Sub0 | retain a subscribe anchor |
-| producer crossing before table publication | incomplete, count 0, no pulse | CAS in one Sub0, then recheck confirmation | cover a segment no consumer entered or retained |
-| confirmation recheck after last-releaser pulse | count remains zero and a pulse is present | CAS out that unit | avoid a confirmed-segment capacity leak |
+| construction | `tryCreate`, for epoch 0 | `Rt[0] = Live` | epoch 0 starts initialized and protected (4b) |
+| raise | the producer whose reservation crosses into epoch `e`, after the fresh-segment diagnostic and before `Es[e]` (5c) | release `fetch_add(Live)` on a zero low half; fatal otherwise | protect `e` from initialization on (I3) |
+| discharge | a consumer that holds `e` and observed it confirmed (8), before releasing its reference | load; if `Live` is set, release CAS clearing it | allow reuse once no reference or `Sub` remains |
 
-**Taking a count** (leaf 0→1, subscribe or `moveRef`): `old = fetch_add(Rt, 1)`; if `(old & COUNTMASK) == 0` and `(old & Sub0MASK) != 0`, `fetch_sub(Rt, extra)` where `extra = old & Sub0MASK`, the Sub0 units the thread observed (normally one). Only one thread observes the count 0→1, so that thread is the unique subtractor for that segment. Construction's dummy Sub0 (4b) clears on this same edge.
+Nothing else writes `Live`. Taking a root's first count and releasing its last change only the count bits, and `Sub`s never touch it.
 
-**Last-releaser** (6e): only when the leaf dec will propagate to `Rt` (the dec returned 1). The naive sequence — plant Sub0, decrement the count, retract the plant if another consumer arrived — is not atomic. A racing first subscriber can clear the precautionary Sub0 after the count hits zero and before the delayed retract, whereupon that retract underflows `Rtlow` and borrows from the Sub field.
+**Discharge rule.** A consumer clears `Live` on epoch `e` only while it holds a reference on `e`, and only after observing confirmation: `Es[e] == e` and `Es[e+1] == e+1` by acquire loads, and `Seqt[e] + Sd[e] >= Seqt[e+1]`. Its reference keeps the slot from reuse until the clear lands, so the clear cannot hit a later generation's `Live`; an unpinned or delayed clearer could. Clearing is idempotent across confirmers. Each loads first and returns when `Live` already reads clear, so passers that find it discharged do not write the root line, and the CAS retries only while another field (a count or a `Sub`) changes under it. The release CAS forwards the confirmer's acquire of `Es[e+1]` to every later acquire of the root; that edge is the inductive step of I3 and of subscription's discovery argument (6b).
 
-So the "leave a pulse only if this decrement actually hits zero" decision is one CAS on `Rt`. Load `old`; if `(old & COUNTMASK) == 0` the count underflowed (fatal); if the count is 1, the new value clears the count bits and leaves one Sub0 (adding a unit only if none is present); if > 1, the new value is `old - 1` with Sub0 unchanged. CAS that in. A failed CAS means another thread changed `Rt` — often the reason to plant is already gone — so reload and retry against the new word, not spin on the same snapshot (section 1).
+Two release paths discharge: the confirmed-prefix release (`tryReleaseOldest`, run after movement, on the idle re-walks of 8, and first in departure), and departure itself for any remaining held epoch that is confirmed (6e). Releasing an unconfirmed epoch leaves `Live` in place.
 
-**Deposition sites.** Deposition happens at exactly three sites, all CAS-gated or cold:
+**Every `Live` bit has a discharge path.** A consumer enters every epoch it passes: movement increments each epoch through the new position (6d), including interiors of spanning tables, which confirm trivially, so a passer releases and discharges them. An epoch abandoned while unconfirmed keeps `Live` with no holder. It is at or after the earliest unconfirmed epoch, so the next subscription attaches at or before it (6b), and that consumer's movement discharges it once its work is done. An epoch that confirms only after its last holder has left, such as an interior a subscriber attached to before its successor existed, likewise keeps `Live` until the next consumer passes it. Until then it blocks reuse of its slot as an unfinished epoch would, and the next subscriber's scan reaches it because it is `Live`.
 
-1. Construction places the dummy pulse on `Rt[0]` (4b).
-2. `plantIfUnprotected(e)` CAS-plants one unit on an incomplete epoch (`Es[e] == e`, `Es[e+1] == e+1`, `Seqt + Sd < Seqt[e+1]`, and `Rt` with count 0 and no pulse). Invoked only by `write()` for every segment its reservation crosses out of (5c), before publishing its table.
-3. `releaseRootLeavePulse`, the last-releaser helper: clears the count bits and leaves one unit (only if none is present) when the final root of an unconfirmed — or last-of-farm confirmed — segment is released.
+**No departure creates protection.** The last consumer to leave simply releases its references. Its unfinished epochs keep the `Live` they have had since initialization, its confirmed ones are discharged, and the frontier epoch stays `Live` because it cannot be confirmed. A Farm with no consumers therefore keeps producers from lapping its earliest `Live` epoch, and the next subscriber's scan finds that epoch (I3, 6b). There is no empty-Farm anchor and no last-of-Farm case.
 
-**Plant ownership.** Only the crossing producer may call the plant helper.
-Its own table starts in `eold` and is unpublished until after the plant;
-`Sd[eold]` therefore cannot confirm that epoch meanwhile. Interior crossed
-epochs have equal `Seqt`/`SeqtNext` and need no pulse. Any consumer that
-enters and leaves the incomplete start epoch replaces its last count with
-Sub0 atomically, so the root cannot ABA back to zero under this producer.
-Unsubscription already applies that last-releaser protocol to every held
-incomplete epoch; no unpinned follow-up scan is needed. Such a scan could
-read incompleteness, pause through completion and quota certification,
-then CAS a stale Sub0 onto zero. Even immediate post-CAS retraction is too
-late: a subscriber can convert the transient pulse into a pin on certified
-space. Moving the reads nearer the CAS cannot eliminate a zero/count/zero
-ABA. Removing the scan also removes this invalid source of live candidates.
+Producers see the signal in `refreshQuota`'s `Rt == 0` check, where `Live` alone reads as occupied, and subscribers see it in the scan's `Live` test, so an abandoned incomplete epoch is both protected from overwrite and discoverable for reclamation.
 
-**Clear sites.** The primary clear is the 0→1 retract in `takeRootCount`, where the unique thread whose fetch_add observed count 0 subtracts the Sub0 units it saw (normally one). A last-releaser helper may replace its last count with a pulse just as accounting confirms the epoch; it re-checks confirmation and retracts that pulse when requested. `plantIfUnprotected` also retains its defensive post-CAS completeness check and masked retract, although its producer's unpublished table prevents confirmation during supported use. Neither check authorizes a plant after ownership has been relinquished. The retract is a low-half masked CAS retry loop: it reloads `Rt`, checks that the low half is still exactly the `Sub0` that was planted, and then CASes `cur → cur - Sub0` against the freshly observed full word. A concurrent subscriber's `Sub` pin/unpin only changes the high half, so it can make a one-shot exact-value CAS fail while the planted `Sub0` is still present; the masked loop retries against the new high half and succeeds. The loop is bounded by the low-half state — it either removes the exact `Sub0`, or a racing 0→1 has already changed the low half and that same edge cleared the pulse, so the loop bails.
-
-**Race proof, once.** The two deposition sides are symmetric. Plants are CAS-gated and only fire while the count is zero, so a plant cannot straddle a racing first subscriber: the CAS fails and retries against the new word, or bails if the count or pulse is now present — the race that invalidated the plant. Clears are keyed to the 0→1 edge or to the plant's own post-CAS re-check, and only the thread that observed the edge subtracts, so a clear cannot underflow `Rtlow` or borrow into the Sub field.
-
-The contract is the hard invariant: **a confirmed non-empty-farm segment cannot retain Sub0.** A segment that ever carried Sub0 and later becomes confirmed must have been entered by a consumer: either a table starts there and the finisher held that starting segment, or the segment was already incomplete and pulsed, and the only way to confirm it later is for a table starting there to complete — which again means a finisher held it. A segment that confirms trivially because a spanning table made `Seqt + Sd >= SeqtNext` without any local accounting was never incomplete at the moment `plantIfUnprotected` inspected it, so it never received a plant pulse in the first place. Therefore every path to confirmation either passes through a first real root, whose 0→1 edge clears any pulse, or races the last-releaser helper's confirmation recheck. That helper's acquire/release root CAS joins preceding root releases, and its expected-epoch acquires validate the completion values before retraction (9). There is no accepted residual case.
-
-Producers see the signal in `refreshQuota`'s `Rt == 0` check — a lone pulse reads as occupied — and subscribers see it in the subscribe walk's `Rtlow != 0` test, so an abandoned incomplete segment is both protected from overwrite and discoverable for reclamation.
+**The hard invariant.** A discharged epoch is confirmed. The converse need not hold at every instant: a confirmed epoch keeps `Live` until its next holder releases it.
 
 ### 6d. Orientation and Frontier Migration
 
@@ -496,19 +479,13 @@ Thead is defined in 2e. Orientation uses `Tsent`, `Tnext`, `Tlen`, `Tkind`,
 
 Inactive consumers block reclamation unless they `unsubscribe()` from `F`.
 
-**a.** `Ci` first releases the confirmed prefix from `oldestEi` toward `newestEi` (8). Only the old end moves; confirmed interiors stay pinned until they become oldest. Confirmed release is the plain leaf-root propagation of 2b. A confirmed segment that is not the empty-farm pulse must be allowed to reach `Rt == 0` so producers can reclaim it; the last-releaser helper's confirmation recheck (6c) removes a transient pulse when completion races that release.
+**a.** `Ci` first releases the confirmed prefix from `oldestEi` toward `newestEi` (8), discharging each epoch (6c) before its reference drops. Only the old end moves; confirmed interiors stay pinned until they become oldest.
 
-**b.** `Ci` calls `F.sub_consumer()`. The return value 1 means `Ci` is the last unsubscriber of the farm (`Cf` went 1→0). That flag is used only in step c; it is not itself a Sub0 plant.
+**b.** `Ci` calls `F.sub_consumer()`. `Cf` is a capacity and sizing count (2a); the returned value is used only to detect underflow.
 
-**c.** Then `Ci` releases every remaining epoch in `[oldestEi, newestEi]` — confirmed interiors with the plain release of 2b, unconfirmed interiors with the last-releaser helper, then the position (`newestEi`) as follows.
+**c.** `Ci` releases every remaining epoch in `[oldestEi, newestEi]`, oldest first. A confirmed epoch is discharged before its reference drops; an unconfirmed one keeps its `Live` and is released with the plain edge rule of 2b. There is no last-of-Farm case and no protection to manufacture: unfinished epochs have been `Live` since initialization (I3), and the next subscriber finds the earliest of them by the ordinary scan (6b). A non-last unsubscriber that was the only holder of an early incomplete epoch leaves that epoch exactly as protected and discoverable as the last one would.
 
-- Unconfirmed interior or unconfirmed non-last position: the last-releaser CAS helper of 6c. The helper re-checks confirmation after its CAS; if the segment was completed concurrently, it retracts the pulse it just left with the same low-half masked CAS as `plantIfUnprotected`. An incomplete segment therefore never becomes visible as `Rt == 0`, even when the releaser is not last of the farm. This is what closes pure-churn orphans: a non-last unsubscriber who is the last pin on an early incomplete segment leaves Sub0 there, and a later subscriber's walk (6b-b) attaches at that earliest pulse.
-- Confirmed interior or confirmed non-last position: plain release, no Sub0.
-- Confirmed position, and `Ci` is last of the farm: the same CAS helper, not a bare add. This is the empty-farm pulse. The CAS makes the "plant only if the count actually hit zero" decision atomic with the count decrement, so a concurrent first subscriber either sees the pulse and clears it on its 0→1, or increments first and causes the helper's CAS to fail; it can no longer pull the pulse out from under a stale retract.
-
-Do not extra-plant `fetch_add(Sub0)` and then run the helper on the same segment — that is two plants. If the position is unconfirmed, the helper already leaves the pulse.
-
-Postconditions: with `Rt[0]` constructed as Sub0, last-releasers leaving Sub0 on every abandoned unconfirmed segment, and last-of-farm leaving Sub0 on a confirmed frontier, there is always a live "pulse" somewhere in the buffer for the `Si` in 6b-b to walk back and find a segment untrodden by producers. Several pulses may exist at once: that is required, not a leak. Farm-empty with everything confirmed still has exactly one.
+Postconditions: every unconfirmed epoch `Ci` held is still `Live`, and every confirmed epoch it released is discharged. A Farm whose consumers drained every published table and then left keeps exactly one `Live` epoch, its frontier: each passer discharged the epochs behind it.
 
 ---
 
@@ -617,7 +594,7 @@ Only `oldestEi` advances; a confirmed interior stays pinned until it is oldest. 
 
 The target is exact: tables are contiguous, so the sizes of all tables starting in `Ki` sum to precisely `Seqt[Ki+1] - Seqt[Ki]`, and `Sd` accrues each table's size exactly once, only on completion. A large table completing ahead of a small one leaves the small one's size missing and cannot force the crossing. A segment completely spanned by one table gets a `Seqt` at or past `Seqt[Ki+1]` and confirms trivially. While any reference on `Ki` is held, no producer can lap past it, so the next segment's stats remain at epoch `Ei+1` once initialized. (The rejected signed-balance `Sbal` design that this replaces lives in 11.)
 
-**Retained-reference invariant.** Every consumer holds a reference on every segment it has entered but not yet confirmed complete. An incomplete segment is therefore protected by every passerby still subscribed. Protection does not end when those passerby unsubscribe. The last *releaser* of an unconfirmed segment — not only the last unsubscriber of the farm — leaves Sub0 via the last-releaser helper of 6c/6e. New subscribers land at the earliest `Rtlow > 0`, which is the earliest such pin, and drain the backlog exactly once. A non-last unsubscriber may drop its references; if it was the last pin on an early incomplete segment, Sub0 stays behind. Planting Sub0 only at `Cf == 1` on the last unsubscriber's own earliest held ref is not enough: that last unsubscriber may never have entered the orphan.
+**Retained-reference invariant.** Every consumer holds a reference on every segment it has entered but not yet confirmed complete. An incomplete segment is therefore protected by every passerby still subscribed. Protection does not end when those passerby unsubscribe: an unconfirmed segment keeps the `Live` it has had since initialization, whoever released it last and whether or not that releaser was the Farm's last consumer (6c, 6e). New subscribers attach at or before the earliest `Live` epoch their scan can see (6b) and drain the backlog exactly once.
 
 **Position and frontier.** The position (`newestEi`) participates in the same confirmation story. After a spanning table, or on the idle path, a confirmed position is advanced onto the initialized segment of `nextSeq` (6d) and the old pin remains in the range until the confirmed prefix reaches it. An idle subscribed consumer is therefore always pinned on the frontier, never on a completed interior segment as its `newestEi`.
 
@@ -625,7 +602,7 @@ Consumers consult `Sd` only on position changes and on idleness, never per paylo
 
 **Deadlock freedom and the idle re-walk.** If producers stall on a held trailing reference, consumers catch up to `Wt` and their next-table sentinels stop validating. On that idle path a consumer first advances a confirmed position onto `nextSeq`'s segment (6d), then re-walks its oldest unconfirmed epoch if `Es` still names that epoch, claiming any leftover runs in every shard (the data is guaranteed present and intact while `Es` matches: the consumer's own held reference forbids overwrite), then releases the confirmed prefix. It also re-walks its current position segment. Each re-walk resumes from a per-consumer cursor instead of rescanning the whole segment. The position cursor (`sweepSeq`) remembers the sequence up to which the position segment has been drained, so a park costs O(new tables) rather than O(tables in the segment); it resets whenever the position moves to a new segment (`moveRef`). The oldest-epoch cursor (`oldSweepSeq`) starts at `Seqt` and advances only over the leading run of tables this consumer observed with `Tprogress == Tlen`; the first incomplete table stops cursor advancement for that pass, while the walk continues through later tables to claim their leftovers. A stalled oldest epoch therefore costs each park O(tables from the first incomplete one). It resets whenever the oldest held epoch advances. Neither cursor affects confirmation or which pins are held. Blocking creates the idleness that resolves it. If refresh still fails, a producer may itself subscribe and drain (5a).
 
-**Reuse condition.** Confirmation permits pins to be released; producer reuse occurs only after the contiguous acquire sweep observes zero roots (I5). `Sd` is the accounting gate; `Rt` is the memory-protection gate.
+**Reuse condition.** Confirmation permits pins to be released and `Live` to be discharged (6c); producer reuse occurs only after the contiguous acquire sweep observes zero roots (I5). `Sd` is the accounting gate; `Rt` is the memory-protection gate.
 
 ---
 
@@ -635,14 +612,17 @@ Atomic memory orders, in one place:
 
 | Object/transition | Publishing operation | Observing operation | Ordered data |
 | --- | --- | --- | --- |
-| root-tally RMWs | release `fetch_add`/`fetch_sub` on `Rt` | acquire loads of `Rt` (producers, subscribers, last-releaser CAS) | prior ring reads by the counted consumer join the tally's release sequence |
+| root-tally RMWs | release `fetch_add`/`fetch_sub` on `Rt` | acquire loads of `Rt` (producers, subscribers, discharge CAS) | prior ring reads by the counted consumer join the tally's release sequence |
+| `Live` raise | release `fetch_add(Live)` on `Rt`, after the producer's `Wt` reservation and before its `Es` release-store | acquire `Es` (confirmers, subscriber reads); acquire `Rt` (sweeps, subscriber reads) | the epoch's protection (I3); a subscriber that acquires a new lap's `Live` beside an old `Es` imports that lap's reservation, so its `Wt` re-load rejects the old epoch (6b-c) |
+| `Live` discharge | release CAS clearing `Live`, after confirmation's acquire of `Es[e+1]`, while the clearer holds its reference | acquire `Rt` by sweeps and subscriber reads, directly or through the release sequence of later `Rt` RMWs | the successor's `Live` raise and `Es` before any read that passes the discharged slot (I3, 6b discovery) |
 | write-tail reservation | acq_rel RMW on `Wt` | acquire probe used by quota logic and subscription; the acquire half of every later reservation | published tail position and bounded sweep anchor; each reserver's acquired reclamation history, handed to producers that later spend retained quota without sweeping |
 | leaf-tally RMWs | acq_rel on `Lt` | acq_rel edge decrement and release root update | a non-edge consumer's ring reads join the leaf release sequence carried by the last-on-leaf's `Rt` release |
 | table publication | release-store `Tsent` last | acquire-load and validate `Tsent` | raw-atomic Thead remainder, indexes, counters, payload metadata/body, compact `[Call][Pbody]` records (2f) or uniform `Tcall`/`Tblen` and `[Pbody]` records (2g) |
 | segment metadata publication | release-store `Es` last | acquire-load and validate expected `Es` | raw-atomic `Seqt`, `SqCs`, initial `Sd` |
 | table accounting join | acq_rel completion RMWs on `Shc`, then acq_rel RMW on `Tprogress` | the finisher's acq_rel `Tprogress` RMW lands on `Tlen` (raw skip checks order nothing) | run callback writes join within each shard, then across shards, before optional table-completion notification; every payload callback contributes |
 | producer reuses a segment | release root transition toward zero | acquire-load `Rt == 0` in quota sweep; then, for any other producer reusing the swept space, the acq_rel `Wt` reservation chain | prior consumers' ring accesses happen before reuse, including reuse by a producer spending quota granted before those accesses |
-| temporary subscriber pin | release add/sub of `Sub` plus acquire metadata/root validation | producer acquire of nonzero `Rt` | pinned wrap window cannot be lapped while attaching |
+| temporary subscriber pin | release add/sub of `Sub` plus acquire metadata/root validation | producer acquire of nonzero `Rt` | a sweep that reads the slot after the `Sub` cannot admit it while the subscriber attaches; quota granted earlier is not revoked (5a) |
+| subscribe hint reads | none (no RMW) | acquire `Es`, then acquire `Rt`, per window slot | candidate choice only; attachment rests on the re-read under `Sub` and on validation (6b) |
 
 The operational sections cite these edges by name rather than restating the orders.
 
@@ -657,14 +637,13 @@ subject to publication and lifetime validation.
 
 The raw ring-read rule: acquire-validate `Es` or `Tsent` first, then raw-load the published sibling fields, and only while holding the tally that protects that segment.
 
-**Pulse ownership and the recheck.** The last-releaser helper changes count
-to Sub0 atomically, so no producer can certify a zero gap before its
-confirmation recheck. Its acquire/release root CAS and expected-epoch
-acquires import accounting history before retraction. A producer's separate
-plant is protected by its unpublished table (6c). An unpinned scan would
-have neither guarantee: a transient stale pulse can be consumed by a
-subscriber before a post-CAS recheck removes it. The ordering argument is
-not specific to x86 TSO.
+**`Live` ownership.** Only the producer that reserved an epoch raises its
+`Live`, and only a holder that observed the epoch confirmed clears it. The
+raiser's valid reservation and the clearer's held reference keep each
+operation on the generation it was decided for. A raise by anyone else, or a
+clear without a held reference, would break I3's induction; departures and
+subscription attempts do neither. The ordering argument is not specific to
+x86 TSO.
 
 **Sanitizer evidence.** TSan builds use the same real atomic edges as ordinary
 builds. `version(TSan)` selects runtime options, not synchronization hooks.
@@ -684,7 +663,7 @@ are absent; see [the ordering audit](docs/design/farm-ordering.md).
 | --- | --- |
 | producer tier has no registration slot | invalid Token; recoverable |
 | consumer capacity exceeded | `subscribe()` returns `SUBSCRIBE_FULL` (-1); recoverable after another view unsubscribes |
-| subscribe sees an uninitialized or generation-inconsistent frontier | `subscribe` unwinds its temporary pins and retries immediately; `subscribeOnce` returns `SUBSCRIBE_RETRY` (-2) instead |
+| the write tail outruns a subscribe attempt's bounded rounds (6b) | `subscribe` unwinds its `Sub`s and `Cf` and retries immediately; `subscribeOnce` returns `SUBSCRIBE_RETRY` (-2) instead |
 | subscribe with a null Farm or an already subscribed view | `SUBSCRIBE_INVALID` (-3); caller error |
 | assigning over a still-valid Token | fatal |
 | `write()` has no safe quota at present | returns 0; backpressure |
@@ -693,7 +672,7 @@ are absent; see [the ordering audit](docs/design/farm-ordering.md).
 | null payload callback, out-of-range `avgCost`, or a non-null completion hook with a null callback | fatal |
 | payload cannot fit a singleton table in the caller's tier | fatal |
 | size arithmetic or packed counter wraps | fatal |
-| tally underflow or invalid ownership transition | fatal |
+| tally underflow or invalid ownership transition, including a `Live` raise on a slot whose low half is not zero | fatal |
 | destroy with live consumers or producer tickets | fatal |
 
 A process-wide `setFatalHandler` observer (C: `af_set_fatal_handler`) may log
@@ -730,15 +709,23 @@ These details are worth preserving, but they are history, alternatives, or tunin
 
 **Lineage of the tallies.** The leaf/root tally is a refinement of indirect reference counting (Piquer, "Indirect reference counting: a distributed garbage collection algorithm," PARLE 1991, LNCS 505). In Piquer's scheme a reference holder that hands out copies counts them locally and becomes their parent; a holder sends a single decrement to its parent only when its own count reaches zero; and the owner's count reaches zero only when the whole tree has collapsed. The parent's count includes a child before the child exists, so no decrement can ever precede the increment it cancels. The Farm keeps that invariant and that upward-on-zero-only rule. `Lt` are the intermediate counters, `Rt` is the owner, and a consumer's root add is ordered before any matching root subtract by the acq_rel release sequence through its leaf: a leaf returns to zero only after every consumer that incremented it has decremented it, including the one whose 0→1 took the root count, and its root add precedes its own leaf decrement in program order.
 
-Four things are specialized or added. The tree is a fixed two-level fan-out per segment, `SqCs` leaves chosen by `IDc % SqCs` and cached in `ltiRing`, in place of Piquer's unbounded copy-history tree; the fan-out is sized from the live consumer count so contention per counter and counters per segment are both about `√Cs`. Shared-memory RMWs replace messages. There is a concurrent reader: producers acquire-load `Rt` in a contiguous forward sweep (5a), where Piquer's owner only waits for zero. And membership is open. Piquer's zero is final because a reference can only be obtained from an existing holder; a `ConsumerView` subscribes from outside the tree. `Sub` (6b) makes the subscriber a provisional member of the root before it holds any leaf, and `Sub0` (6c) is a member that never leaves, standing in for Piquer's owner, so an abandoned incomplete segment stays unreclaimable and discoverable and the empty Farm keeps one anchor. The last-releaser CAS that swaps the final count for a `Sub0` unit is the open-membership rule this requires; it has no counterpart in the closed-membership original.
+Four things are specialized or added. The tree is a fixed two-level fan-out per segment, `SqCs` leaves chosen by `IDc % SqCs` and cached in `ltiRing`, in place of Piquer's unbounded copy-history tree; the fan-out is sized from the live consumer count so contention per counter and counters per segment are both about `√Cs`. Shared-memory RMWs replace messages. There is a concurrent reader: producers acquire-load `Rt` in a contiguous forward sweep (5a), where Piquer's owner only waits for zero. And membership is open. Piquer's zero is final because a reference can only be obtained from an existing holder; a `ConsumerView` subscribes from outside the tree. `Sub` (6b) makes the subscriber a provisional member of the root before it holds any leaf, and `Live` (6c) stands in for Piquer's owner: a per-epoch member that the reserving producer enrolls at initialization and that only a holder who confirmed the epoch retires. An abandoned incomplete segment therefore stays unreclaimable and discoverable without any departure having to create protection; open membership needs no counterpart to the closed-membership original's final zero beyond that.
 
-SNZI (Ellen, Lev, Luchangco, Moir, PODC 2007) is the shared-memory member of this family and the Farm’s closest relative: a fixed tree of counters, arrivals and departures at any node, propagation only on zero/nonzero edges, and a concurrent Query. SNZI buys linearizability, a Query correct at every instant, with an intermediate ½ state, helping, and version numbers on CAS-updated nodes. The Farm gives that up. Its hot path is fetch-add only: the Farm's CAS sites are cold (section 1), and the last-releaser CAS runs once when a segment's final root is released, not once per operation (6c). It needs only the weaker guarantee that a sweep never certifies protected space. The increment-ahead rule (I2) and the subscriber’s Sub keep any leaf-1/root-0 window behind a pin that already stops the sweep. The subscribe walk tolerates a miss by validating and retrying (6b-c). The release sequence rules out underflow. What the Farm adds lies above the counter: a per-epoch ring of indicators swept contiguously, fan-out resized each epoch, and the Sub/Sub0 fields that make membership provisional and keep abandoned work protected and discoverable. Dijkstra and Scholten’s termination detection (1980) is an early form of the upward-on-zero tree.
+SNZI (Ellen, Lev, Luchangco, Moir, PODC 2007) is the shared-memory member of this family and the Farm’s closest relative: a fixed tree of counters, arrivals and departures at any node, propagation only on zero/nonzero edges, and a concurrent Query. SNZI buys linearizability, a Query correct at every instant, with an intermediate ½ state, helping, and version numbers on CAS-updated nodes. The Farm gives that up. Its hot path is fetch-add only: the Farm's CAS sites are cold (section 1), and the discharge CAS runs about once per epoch, not once per operation (6c). It needs only the weaker guarantee that a sweep never certifies protected space. The increment-ahead rule (I2) and the subscriber’s Sub keep any leaf-1/root-0 window behind a pin that already stops the sweep. The subscribe scan tolerates a moving tail by validating under its `Sub` and retrying (6b-c). The release sequence rules out underflow. What the Farm adds lies above the counter: a per-epoch ring of indicators swept contiguously, fan-out resized each epoch, the `Sub` field that makes membership provisional, and the `Live` bit that keeps abandoned work protected and discoverable. Dijkstra and Scholten’s termination detection (1980) is an early form of the upward-on-zero tree.
+
+**Sub0 replaced by `Live` (2.1.1 development).** Earlier versions kept a counted `Sub0` pulse in bits 31..16 of `Rt`. The last releaser of an incomplete epoch, a crossing producer's `plantIfUnprotected`, and the last departing consumer each deposited one, and an epoch's first reference removed it. One field carried protection of abandoned work, coverage of a producer's pre-plant window, discovery, and an empty-Farm anchor, and each depended on consumer positions or membership. Deterministic schedules reproduced the consequences: a non-last departure could strip the pin that covered a producer's pre-plant window and let another producer lap unpublished work; the backward subscribe walk could miss a consumer moving forward; a last consumer leaving during a walk could see the subscriber already counted and leave the ring unpinned, and counting the subscriber after its walk instead left a late last-departure pulse behind every member, stalling producers. `Live` is raised at initialization and cleared only by a confirming holder, so protection no longer depends on who is subscribed, every last-of-Farm decision disappears, and subscription only has to find the earliest `Live` epoch. The schedules, including the scan-order and stale-window cases found while designing 6b, are in `tests/farm/subscription_live.d`. The design record is the Fmembers/Xfer/Live proposal and its review (sections 13 and 14), which also explains why the Xfer handoff and handoff mutex it first proposed are unnecessary once `Live` exists.
+
+**Open obligations.** These are recorded rather than proved:
+
+- The discovery argument of 6b is exact for sequentially consistent interleavings. Its weak-memory form, the happens-before chain sketched there, has not been machine-checked under the D/C++ memory model, nor has the I3 induction of section 3.
+- The subscribe round budget (`K + 2`) is not proven sufficient. `RETRY` stays recoverable; no watchdog may treat a run of retries as corruption.
+- One attempt's `Sub`s accumulate across its rounds, up to `K`. Measurements of the common case should be taken with instrumentation outside the timed path.
 
 **Provenance.** The tally design predates the lineage note. It was worked out from the LMAX Disruptor articles, a magic-buffer write-up, and C++ memory-order references, without knowledge of Piquer’s indirect reference counting or SNZI. Both were found afterward through a literature review, which prompted the comparison above. This is recorded as history, not as a claim of priority over the earlier work.
 
 **Rejected `Sbal` design.** An earlier draft computed the confirmation boundary arithmetically and kept a signed outstanding balance `Sbal`, incremented by producers for tables starting in a segment and decremented by finishers. It had a producer-producer race — one producer initializing the segment could zero the balance after another had already incremented it for a table starting there — and a stale-balance deadlock mode. Comparing `Seqt[Ki] + Sd[Ki]` against `Seqt[Ki+1]` removes the balance entirely.
 
-**Strong versus weak CAS.** The current implementation uses a strong CAS (D's `cas` does not fail spuriously). A weak CAS would extra-retry on the looping sites, and the one-shot retract already treats failure as harmless because a later 0→1 clears the pulse; whether weak CAS would suffice is an open question, not a contract point.
+**Strong versus weak CAS.** The current implementation uses a strong CAS (D's `cas` does not fail spuriously). A weak CAS would only add retries to the discharge loop, which reloads and stops once `Live` reads clear, and to ticket claims; whether weak CAS would suffice is an open question, not a contract point.
 
 **Ring geometry.** "Probably 4 or 8" segments is a characterization, not a requirement. The 2 MiB minimum (`Ln >= 2^18`) and the 2048-word segment floor are documented for later investigation: smaller rings were never studied, and the floor keeps per-table header/pad space from dominating a segment's capacity.
 

@@ -226,13 +226,14 @@ void expectExactCalls(PayloadBatch* b, const(char)[] label)
     check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == b.expectedCalls, label);
 }
 
-uint countSub0Pulses(AntFarm* f)
+// Slots whose epoch is still Live (spec 6c). Quiescent callers only.
+uint countLive(AntFarm* f)
 {
-    uint pulses;
+    uint n;
     foreach (ki; 0 .. f.K)
-        if ((atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & LOWMASK) >= SUB0)
-            ++pulses;
-    return pulses;
+        if ((atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & LIVE) != 0)
+            ++n;
+    return n;
 }
 
 void expectNoLeftoverSub(AntFarm* f, const(char)[] label)

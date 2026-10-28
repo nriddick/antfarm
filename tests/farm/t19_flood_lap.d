@@ -237,7 +237,7 @@ void runArm(Arm arm)
 
     expectExactCalls(&batch, "T19 exact batch calls");
     expectNoLiveConsumerRefs(f, "T19 reference cleanup");
-    check(countSub0Pulses(f) >= 1, "T19 pulse");
+    check(countLive(f) >= 1, "T19 frontier Live");
 
     immutable sent = atomicLoad!(MemoryOrder.raw)(g_sentinelCalls);
     if (arm == Arm.steady)

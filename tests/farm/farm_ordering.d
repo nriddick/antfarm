@@ -71,7 +71,7 @@ void delayedSubscriber(AntFarm* f, WriteAuditPhase phase, ulong, ulong)
     reclaimAndGrant(f);
 }
 
-void staleFallback()
+void staleProbe()
 {
     auto f = AntFarm.create(2, 4, 1, 1, 3 * (1 << 16), 0, 0);
     scope(exit) f.destroy();
@@ -89,41 +89,22 @@ void staleFallback()
     auto result = s.subscribeOnce(f);
     writeAuditHook = null;
     require(fired, "subscriber pause reached");
-    // cf2aa91 accepts epoch zero. Spending the grant then hits the always-on
-    // fresh-segment guard. Keep that production diagnostic as the oracle.
+    // S's first round probed Wt == 0 and pinned slot 0 after P had already
+    // been granted it: a Sub on granted space protects nothing. Epoch zero is
+    // discharged, so S must not attach there; its next round re-probes and
+    // attaches at Live epoch one. Spending the grant passes the always-on
+    // fresh-segment guard only if S left nothing on slot 0; keep that
+    // production diagnostic as the oracle.
+    require(result == 1, "stale probe attaches at the Live current epoch");
     require(writeWords(f, 3 * f.segCap) == 1, "spend retained grant");
-    require(result == SUBSCRIBE_RETRY, "stale fallback must retry");
-    require(atomicLoad(f.Cf) == 1, "retry unwinds registration");
+    require(atomicLoad(f.Cf) == 2, "both views counted");
     foreach (i; 0 .. f.K)
-        require((atomicLoad(f.Rt[i][0]) >> 32) == 0, "retry unwinds SUB");
+        require((atomicLoad(f.Rt[i][0]) >> 32) == 0, "attach unwinds every Sub");
     while (c.consumeNext()) {}
+    while (s.consumeNext()) {}
     require(calls == 2, "each table executes once");
-    require(s.subscribe(f) >= 0, "retry attaches to live frontier");
     s.unsubscribe();
-    puts("PASS stale fallback: retained grant, balanced retry, wrap and resubscribe");
-}
-
-__gshared ConsumerView laggard;
-__gshared bool advanced;
-
-void delayedUnsubscribe(AntFarm* f, WriteAuditPhase phase, ulong e, ulong)
-    nothrow @nogc @system
-{
-    if (e != 0) return;
-    if (phase == WriteAuditPhase.plantChecked && !advanced)
-    {
-        advanced = true;
-        // U has dropped its own pins and checked incomplete epoch zero.
-        // C now completes it and P certifies its reuse before U's plant.
-        reclaimAndGrant(f);
-    }
-    else if (phase == WriteAuditPhase.plantPublished && advanced)
-    {
-        // Even a subsequently retracted pulse is unsafe: S can convert it
-        // into a real pin before the retract. The fallback fix cannot help
-        // this main-walk candidate selected through nonzero Rtlow.
-        require(laggard.subscribe(f) == 0, "stale pulse selected epoch zero");
-    }
+    puts("PASS stale probe: no attach on granted space, Subs unwound, exact accounting");
 }
 
 void checkIncompletePins(AntFarm* f) nothrow @nogc @system
@@ -137,12 +118,12 @@ void checkIncompletePins(AntFarm* f) nothrow @nogc @system
         if (atomicLoad(f.stats[next].es) != e + 1) continue;
         if (atomicLoad(f.stats[i].seqt) + atomicLoad(f.stats[i].sd) <
                 atomicLoad(f.stats[next].seqt))
-            require((atomicLoad(f.Rt[i][0]) & LOWMASK) != 0,
-                "crossed incomplete epoch lost its pin or pulse");
+            require((atomicLoad(f.Rt[i][0]) & LIVE) != 0,
+                "crossed incomplete epoch is not Live");
     }
 }
 
-void staleUnsubscribe()
+void departureLeavesLive()
 {
     auto f = AntFarm.create(2, 4, 1, 1, 3 * (1 << 16), 0, 0);
     scope(exit) f.destroy();
@@ -155,18 +136,23 @@ void staleUnsubscribe()
     scope(exit) c.unsubscribe();
     calls = 0;
     require(writeWords(f, f.segCap) == 1, "publish before unsubscribe");
-    advanced = false;
-    writeAuditHook = &delayedUnsubscribe;
+    // U leaves epoch zero incomplete and creates nothing: the epoch keeps
+    // the Live it was constructed with, and C's reference.
     u.unsubscribe();
-    writeAuditHook = null;
     checkIncompletePins(f);
-    if (!advanced) reclaimAndGrant(f);
+    require((atomicLoad(f.Rt[0][0]) & LIVE) != 0, "incomplete epoch zero still Live");
+    // C completes and discharges epoch zero; P certifies its slot for reuse.
+    reclaimAndGrant(f);
+    // A subscriber arriving now must not select the reclaimed, granted epoch.
+    ConsumerView late;
+    require(late.subscribe(f) == 1, "late subscriber attaches at Live epoch one");
     require(writeWords(f, 3 * f.segCap) == 1, "reuse after unsubscribe");
     while (c.consumeNext()) {}
+    while (late.consumeNext()) {}
     require(calls == 2, "unsubscribe preserves exact accounting");
-    laggard.unsubscribe();
+    late.unsubscribe();
     checkIncompletePins(f);
-    puts("PASS unsubscribe: no stale pulse can resurrect reclaimed epoch");
+    puts("PASS unsubscribe: departure creates no protection; reclaimed epoch never selected");
 }
 
 struct EarlyCompletion { bool returned; size_t notifications; }
@@ -206,6 +192,6 @@ void earlyCompletion()
 void main(string[] args)
 {
     if (args.length == 1 || args[1] == "early") earlyCompletion();
-    if (args.length == 1 || args[1] == "s1") staleFallback();
-    if (args.length == 1 || args[1] == "s2") staleUnsubscribe();
+    if (args.length == 1 || args[1] == "s1") staleProbe();
+    if (args.length == 1 || args[1] == "s2") departureLeavesLive();
 }

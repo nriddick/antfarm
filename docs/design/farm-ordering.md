@@ -3,7 +3,15 @@
 Baseline: local `cf2aa91` (the acq_rel Wt reservation fix). These follow-ups
 change ownership/validation, not memory-order strengths.
 
-## Subscription (S1)
+Status: S1 and S2 audit the Sub0-era protocol. The Live lifecycle (SPEC 3
+I3, 6b, 6c) has since removed the frontier fallback, the producer plant and
+every pulse: each epoch is `Live` from initialization until a confirming
+holder discharges it, and a subscriber attaches only at an epoch it saw
+`Live` under its own `Sub`. The two sections stay as the record of why those
+rules existed. The regression schedules, sanitizer evidence and fast-path
+audit below are current.
+
+## Subscription (S1, Sub0 era)
 
 The original mixed `Es`/`SqCs` theory is not a separate ordering bug.
 Any initialized `SqCs` selects a preallocated leaf, and the view remembers
@@ -28,7 +36,7 @@ SPEC 6b records the case split and the reliance on the existing I1/I3
 reclamation invariants. Older live candidates must remain admissible:
 rejecting them by a blanket maximum-grant bound can prevent backlog drain.
 
-## Plant ownership (S2)
+## Plant ownership (S2, Sub0 era)
 
 The producer invocation is safe: it plants before publishing its own table,
 whose size is necessary to confirm its starting epoch. The epoch cannot
@@ -51,13 +59,26 @@ an unpinned scan safe: zero/count/zero ABA remains possible.
 ## Regressions and mutation
 
 `make -C tests/farm check-farm-ordering` builds and runs the controlled schedules with
-LDC and DMD. `farm_ordering.d` uses production-elided scheduling hooks to
-execute other actors' operations during an exact pause. No sleeps or random
-interleavings are needed. Both schedules abort on cf2aa91 with only hooks
-added: the always-on fresh-segment guard sees a live root when Wt moves
-65536 -> 262144. Each fix passes; individually restoring its old behavior
-reproduces the abort. The tests also check balanced retries, resubscription,
-exact callback accounting and quiescent protection of incomplete epochs.
+LDC and DMD. They use production-elided scheduling hooks to execute other
+actors' operations during an exact pause; no sleeps or random interleavings
+are needed. On cf2aa91 both original `farm_ordering.d` schedules aborted with
+only hooks added, when the always-on fresh-segment guard saw a live root as
+Wt moved 65536 -> 262144.
+
+Both schedules now state the Live-era property of the same interleaving.
+S1's subscriber probes Wt == 0 and pins slot 0 after a producer has already
+been granted it. It must attach at Live epoch one, not at the reclaimed
+epoch, and spending the grant must pass the fresh-segment guard. S2's
+departure leaves an incomplete epoch `Live` and creates no protection, and a
+subscriber arriving after reclamation never selects the reclaimed epoch.
+Both check exact callback accounting and quiescent protection of incomplete
+epochs.
+
+`subscription_live.d` holds the schedules found while designing the Live
+scan (SPEC 11). Each payload carries an id that must execute exactly once,
+and progress is judged by the views that already exist, before any new
+subscription. Built against the rejected newest-down scan's ablations, those
+oracles strand work and stall the producer, so the schedules are not vacuous.
 
 `leaf_reuse.d` tests the memory-order chain separately. C reads one table,
 R consumes a distinct crossing table and migrates before C drops, then C
@@ -101,8 +122,16 @@ by TSan, particularly cross-alias accesses or atomic-only lifecycle errors.
 - Root updates remain release RMWs: they forward the leaf acq_rel join;
   they need not acquire other roots because a zero-root acquire observes
   the all-RMW release sequences from each root contributor.
-- SUB increments are followed by acquire root/metadata validation. Their
-  release ordering is not a producer-to-producer reclamation gap.
+- The `Live` raise is a release RMW sequenced after the producer's Wt
+  reservation and before its release-store of Es. The `Live` discharge is a
+  release CAS after confirmation's acquire of Es[e+1], by a holder that
+  keeps its reference until the CAS lands. A sweep that passes a
+  discharged slot therefore acquires the next epoch's initialization
+  (SPEC 3, 9).
+- SUB increments are followed by an acquire re-read of the candidate and
+  its metadata, and the Wt lap bound. Their release ordering is not a
+  producer-to-producer reclamation gap, and a Sub never revokes quota a
+  producer was already granted.
 - Raw Sd is accounting under a pin; the pin-drop/sweep/Wt chain orders it
   before next-lap reset. Raw claim counters reserve disjoint work and do
   not publish completion. Shc and Tprogress completion RMWs remain acq_rel.
@@ -121,5 +150,5 @@ Consultation rejected two proposals after checking full histories: moving
 plant checks inside CAS does not cure ABA, and an abstract store-buffering
 counterexample omitted the confirming release's acquisition of Es[e+1].
 No speculative seq_cst strengthening was made. This is a source-level proof
-using the existing quota/pulse invariants, not a model checker proof of the
+using the quota and Live invariants, not a model checker proof of the
 entire Farm or cross-architecture execution evidence.

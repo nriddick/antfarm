@@ -21,7 +21,7 @@ boundary_runoff_allwrite: boundary_runoff.d $(ROOT)/antfarm/package.d $(ROOT)/an
 
 run-allwrite: allwrite
 	./boundary_runoff_allwrite
-	./boundary_runoff_allwrite pulse
+	./boundary_runoff_allwrite live
 	./write_protection_allwrite
 
 torture_tests: torture_common.d torture_tests.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d $(ROOT)/antfarm/templates.d
@@ -88,6 +88,10 @@ check-farm-ordering:
 	./antfarm_test_ordering
 	dmd -g -version=AntfarmWriteAuditHooks -I$(ROOT) farm_ordering.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_ordering_dmd
 	./antfarm_test_ordering_dmd
+	ldc2 -g -O1 -d-version=AntfarmWriteAuditHooks -I$(ROOT) subscription_live.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_subscription
+	./antfarm_test_subscription
+	dmd -g -version=AntfarmWriteAuditHooks -I$(ROOT) subscription_live.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_subscription_dmd
+	./antfarm_test_subscription_dmd
 	ldc2 -g -O1 -I$(ROOT) leaf_reuse.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_leaf
 	./antfarm_test_leaf
 	dmd -g -I$(ROOT) leaf_reuse.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_leaf_dmd
@@ -96,3 +100,4 @@ check-farm-ordering:
 clean:
 	rm -f torture_tests sweep_cursor torture_tests_tsan torture_tests_dmd t19 t19_tsan t19_dmd write_protection_allwrite boundary_runoff_allwrite *.o
 	rm -f antfarm_test_review antfarm_test_tsan antfarm_test_leaf_tsan antfarm_test_ordering antfarm_test_ordering_dmd antfarm_test_leaf antfarm_test_leaf_dmd
+	rm -f antfarm_test_subscription antfarm_test_subscription_dmd

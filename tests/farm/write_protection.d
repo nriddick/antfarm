@@ -255,39 +255,86 @@ void delays()
     }
 }
 
-void subHook(AntFarm* f, WriteAuditPhase phase, ulong ki, ulong)
+// One-payload range whose preparation refuses: write() sizes it, refreshes
+// quota if the balance is short, then returns 0 without reserving.
+struct GrantOnly
+{
+    PayloadEntry[1] entry;
+    bool done;
+    @property bool empty() const nothrow @nogc { return done; }
+    @property PayloadEntry front() nothrow @nogc { return entry[0]; }
+    void popFront() nothrow @nogc { done = true; }
+    @property GrantOnly save() nothrow @nogc { return this; }
+    bool prepareTableFrontN(size_t) nothrow @nogc { return false; }
+}
+
+ulong grantOnly(AntFarm* f, ref Token tok, ulong words) nothrow @nogc @system
+{
+    immutable cf = atomicLoad!(MemoryOrder.raw)(f.Cf);
+    immutable sq = sqcsOf(cf > 0 ? cast(ulong) cf : 1);
+    immutable overhead = 37 + 8 * (sq - 1);
+    auto mem = cast(ulong*) malloc((words - overhead) * ulong.sizeof);
+    require(mem !is null, "grant allocation");
+    scope (exit) free(mem);
+    Callback h = &bodyCallback;
+    GrantOnly r;
+    r.entry[0] = PayloadEntry(h, mem[0 .. cast(size_t)(words - overhead)]);
+    return f.write(r, tok);
+}
+
+__gshared int raceStage;
+
+void racePinHook(AntFarm* f, WriteAuditPhase phase, ulong a1, ulong)
     nothrow @nogc @system
 {
-    if (phase != WriteAuditPhase.subscriberPinned || ki != 1 || fired) return;
-    fired = true;
-    writeAuditHook = null;
-    // A legal spend of already-swept quota while the subscriber has only a
-    // provisional SUB on a confirmed slot from the previous lap.
-    require(writeWords(f, *otherToken, 200) == 1, "subscriber race publication");
+    if (phase == WriteAuditPhase.subscriberProbed && raceStage == 0)
+    {
+        raceStage = 1;
+        // The late subscriber sampled Wt == 0 and holds no Sub yet. Epoch 0
+        // is published, drained and discharged, and the producer refreshes
+        // quota that covers slot 0 for its next lap without reserving it.
+        require(writeWords(f, *otherToken, f.segCap) == 1, "publish epoch zero");
+        drain(*drainer);
+        require(atomicLoad(f.Rt[0][0]) == 0, "epoch zero discharged");
+        require(grantOnly(f, *otherToken, 3 * f.segCap) == 0, "grant without reserving");
+    }
+    else if (phase == WriteAuditPhase.subscriberPinned && raceStage == 1 && a1 == 0)
+    {
+        raceStage = 2;
+        // The subscriber's first Sub, from its stale probe, landed on slot 0
+        // inside that grant: provisional, and not a revocation. Spend the
+        // grant now; it initializes epoch 4 on slot 0 under the Sub, which
+        // allWriteCheck must ignore.
+        require((atomicLoad(f.Rt[0][0]) >> 32) != 0, "subscriber Sub present on slot 0");
+        require(writeWords(f, *otherToken, 3 * f.segCap) == 1, "spend the grant under the Sub");
+        require(atomicLoad(f.stats[0].es) == 4, "epoch 4 initialized under the Sub");
+    }
 }
 
 void subscriptionRace()
 {
     reset();
-    auto f = AntFarm.create(2, 8, 2, 1, 65536, 0, 0);
+    raceStage = 0;
+    // K = 4 and one bulk producer whose quota is three segments: Exmax is
+    // (K - 1) * segCap, so one grant can reach the next lap of slot 0.
+    auto f = AntFarm.create(2, 4, 2, 1, 3 * (1 << 16), 0, 0);
     ConsumerView c, late;
-    require(c.subscribe(f) >= 0, "subscriber race initial subscribe");
+    require(c.subscribe(f) == 0, "subscriber race initial subscribe");
     auto tok = f.registerProducer(Tier.bulk);
-    foreach (i; 0 .. 8)
-    {
-        require(writeWords(f, tok, f.segCap) == 1, "subscriber race warmup");
-        drain(c);
-    }
-    require(writeWords(f, tok, f.segCap - 100) == 1, "subscriber race boundary setup");
-    drain(c);
     otherToken = &tok;
-    writeAuditHook = &subHook;
-    require(late.subscribe(f) >= 0, "subscriber race late subscribe");
+    drainer = &c;
+    writeAuditHook = &racePinHook;
+    immutable at = late.subscribe(f);
     writeAuditHook = null;
-    require(fired, "subscriber race hook");
+    require(raceStage == 2, "subscriber race hooks");
+    // Round 0 found slot 0 already reused; a later round attached at the
+    // earliest Live epoch, which C still holds.
+    require(at == 1, "late subscriber attaches at Live epoch one");
+    foreach (ki; 0 .. f.K)
+        require((atomicLoad(f.Rt[ki][0]) >> 32) == 0, "subscriber race Subs unwound");
     drain(c); drain(late);
-    require(atomicLoad(calls) == 10, "subscriber race exact callbacks");
-    printf("subscription race: provisional SUB ignored; all 10 payloads intact PASS\n");
+    require(atomicLoad(calls) == 2, "subscriber race exact callbacks");
+    printf("subscription race: stale probe's Sub on granted slot ignored; payloads intact PASS\n");
     late.unsubscribe(); c.unsubscribe(); f.unregisterProducer(tok); f.destroy();
 }
 
@@ -305,7 +352,7 @@ void injection(string mode)
     auto f = AntFarm.create(2, 8, 1, 1, 110_000, 0, 0);
     auto tok = f.registerProducer(Tier.bulk);
     injectSegment = mode == "inject-second" ? 2 : 1;
-    injectValue = mode == "inject-sub0" ? SUB0 : mode == "inject-both" ? SUB0 + 1 : 1;
+    injectValue = mode == "inject-live" ? LIVE : mode == "inject-both" ? LIVE + 1 : 1;
     writeAuditHook = &injectionHook;
     // Exact boundary landing, or a later segment in a spanning reservation.
     writeWords(f, tok, mode == "inject-second" ? 100_000 : f.segCap);

@@ -6,6 +6,37 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 ## 2.1.1 development
 
+- Farm lifecycle: a `Live` bit per epoch replaces the counted `Sub0` pulse
+  (SPEC 3, 6b, 6c, 6e).
+  - **Protection.** The producer whose reservation initializes an epoch
+    raises `Live` before it publishes `Es`; only a consumer that holds the
+    epoch and has seen it confirmed clears it. Unfinished work is
+    therefore protected whoever is or is not subscribed, and unsubscription
+    has neither a last-of-Farm case nor a plant.
+  - **Subscription.** A subscriber pins the tail's slot, scans the window
+    oldest-first with acquire loads, then pins and re-reads the first `Live`
+    epoch and validates it before attaching. A tail that outruns the
+    attempt's bounded rounds still returns the recoverable
+    `SUBSCRIBE_RETRY`.
+  - **Why.** Deterministic schedules reproduced these failures of the old
+    protocol:
+    - a non-last departure removed the pin that covered a producer's
+      unpublished crossing, so another producer could overwrite that
+      unpublished table;
+    - the subscribe walk missed a consumer moving forward, and a producer
+      then lapped work that no member would reach;
+    - a last consumer leaving during a walk saw the subscriber already
+      counted and left the ring unpinned. Counting the subscriber after its
+      walk instead left a late pulse behind every member, which stalled
+      producers.
+
+    They are in the new `tests/farm/subscription_live.d`, together with the
+    scan-order and stale-window cases found while designing the new scan.
+  - **Removed and renamed.** `LIVE` replaces the internal `SUB0` constant,
+    and the `plantIfUnprotected` and `releaseRootLeavePulse` helpers are
+    gone. Among the test-only `WriteAuditPhase` hooks, `liveRaised`
+    replaces `plantChecked` and `plantPublished`, and `subscriberCounted`,
+    `subscriberRead` and `subscriberReadMid` are new.
 - forkjoin: `DispatcherOptions.spillInline` defaults to `true`, and so does
   the C `af_dispatcher_options_default` field `spill_inline`: deque overflow
   runs inline on the forking thread while the deque's contents stay

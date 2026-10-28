@@ -1,6 +1,6 @@
 """Bounded, sequentially consistent model of the producer quota arithmetic.
 
-This is deliberately not a model of all Ant Farm: publication, Sub0, initial
+This is deliberately not a model of all Ant Farm: publication, Live, initial
 subscription, leaf/root propagation and weak memory are omitted. One established
 consumer holds a contiguous [oldest, newest] range; it may extend up to Wt's
 epoch and release its prefix. Producer probes, individual forward loads, grants

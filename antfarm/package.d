@@ -17,10 +17,10 @@
  + memory mapping, K segments with root/leaf reference tallies, quota-bounded
  + producers and sharded consumers. No CAS on hot paths; hot-path
  + synchronization is fetch-add / fetch-sub plus acquire/release load/store.
- + Cold-path CAS: ticket claim, last-releaser pulse, plantIfUnprotected
- + plant/retract (SPEC.md 4d, 6c, 6e). Retry loops reload fresh state;
- + their retries are bounded by the low-half/confirmation state settling,
- + not by back-and-forth noise. Strong CAS (spec 1).
+ + Cold-path CAS: ticket claim and the per-epoch Live discharge (SPEC.md 4d,
+ + 6c). Retry loops reload fresh state; a discharge CAS retries only while
+ + another root field changes under it and stops once Live reads clear.
+ + Strong CAS (spec 1).
  + Producer registration/deregistration uses a Farm-local blocking mutex;
  + publishing and consuming never acquire it.
  +
@@ -421,8 +421,9 @@ enum MAX_CONSUMERS_LIMIT = 128;
 /// The Farm already has MAX_CONSUMERS_LIMIT subscribed views. Retry only
 /// after another view unsubscribes.
 enum long SUBSCRIBE_FULL = -1;
-/// `subscribeOnce` only: the frontier was uninitialized or moved during the
-/// attach walk. Transient; `subscribe` retries it internally.
+/// `subscribeOnce` only: the write tail kept moving past every candidate for
+/// the attempt's bounded rounds. Transient and recoverable; `subscribe`
+/// retries it internally.
 enum long SUBSCRIBE_RETRY = -2;
 /// Caller error: a null Farm, or a view that is already subscribed.
 enum long SUBSCRIBE_INVALID = -3;
@@ -557,20 +558,30 @@ enum KMAX = 16;
 /// the stride (not the natural ulong size) must carry the isolation.
 private enum size_t PROD_SLOT_STRIDE = 8;
 
-/// Internal: spec 2b/6b — a subscriber reference lives in the most significant half of Rt.
+/// Internal: spec 2b/6b — one subscriber's provisional Sub pin, counted in the
+/// most significant half of Rt.
 enum ulong SUB = 1UL << 32;
-/// Internal: spec 2b/6c — Sub0 is a counted pin in units of 2^16, not a bit.
-enum ulong SUB0 = 1UL << 16;
-/// Internal: mask for Rtlow (least significant half of Rt).
+/// Internal: spec 2b/6c — Live, one bit: the epoch in this slot was initialized
+/// and has not been discharged after confirmation. Bits 17..31 are zero.
+enum ulong LIVE = 1UL << 16;
+/// Internal: mask for Rtlow (least significant half of Rt): Live and the count.
 enum ulong LOWMASK = 0xFFFF_FFFFUL;
-/// Internal: mask for the active-consumer count bits within Rtlow (below the Sub0 bit).
-enum ulong COUNTMASK = SUB0 - 1;
+/// Internal: mask for the active-consumer count bits within Rtlow (below Live).
+enum ulong COUNTMASK = LIVE - 1;
 // Test-only scheduling points, elided in production builds. Tests may pause a
-// producer here without changing quota or tally state; ordinary builds contain
-// neither the hook nor its call sites.
+// producer or subscriber here without changing quota or tally state; ordinary
+// builds contain neither the hook nor its call sites.
+//   liveRaised(e)              producer: Live raised on epoch e, Es[e] not yet published
+//   subscriberCounted          subscriber: admitted and counted, before any probe
+//   subscriberProbed(wt, round) subscriber: tail sampled for this round
+//   subscriberPinned(ki, eg)   subscriber: Sub added on slot ki
+//   subscriberRead(ki, x)      subscriber: about to read slot ki as epoch x
+//   subscriberReadMid(ki, x)   subscriber: between that read's Es and Rt loads
 version (AntfarmWriteAuditHooks)
 {
-    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned, tablePublished, subscriberProbed, plantChecked, plantPublished }
+    enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned,
+        tablePublished, subscriberProbed, liveRaised, subscriberCounted,
+        subscriberRead, subscriberReadMid }
     __gshared void function(AntFarm*, WriteAuditPhase, ulong, ulong)
         nothrow @nogc @system writeAuditHook;
 }
@@ -1446,9 +1457,9 @@ struct AntFarm
 
         foreach (i; 0 .. KMAX)
             atomicStore!(MemoryOrder.raw)(f.stats[i].es, -1L);
-        // Spec 4b: epoch 0's Rt is constructed with a dummy Sub0 value,
-        // blocking producers from overwriting Seq 0 until consumers digest it.
-        atomicStore!(MemoryOrder.raw)(f.Rt[0][0], SUB0);
+        // Spec 4b: epoch 0 starts initialized and Live, so no producer can lap
+        // Seq 0 until a consumer confirms epoch 0 and discharges it.
+        atomicStore!(MemoryOrder.raw)(f.Rt[0][0], LIVE);
         atomicStore!(MemoryOrder.raw)(f.stats[0].es, 0L);
         atomicStore!(MemoryOrder.raw)(f.stats[0].seqt, 0UL);
         atomicStore!(MemoryOrder.raw)(f.stats[0].sqcs, cast(ulong) sqcsOf(expectedConsumers));
@@ -1568,9 +1579,9 @@ struct AntFarm
         return cast(long) atomicFetchAdd!(MemoryOrder.raw)(Reqs_c, 1);
     }
 
-    /// Internal: unsubscribe half used by ConsumerView.unsubscribe.
-    /// Returns the previous Cf; when it returns 1 the caller is the last
-    /// unsubscriber (spec 6e).
+    /// Internal: unsubscribe half used by ConsumerView.unsubscribe and failed
+    /// subscription attempts. Returns the previous Cf. Cf is a capacity and
+    /// sizing count only: no lifetime decision depends on being last (6e).
     long sub_consumer() nothrow @nogc @system
     {
         immutable prev = atomicFetchSub!(MemoryOrder.raw)(Cf, 1);
@@ -1660,78 +1671,6 @@ struct AntFarm
         atomicStore!(MemoryOrder.raw)(*prodSlotQuota(hashes, tok.slot), tok.quotaLeft);
     }
 
-    /// Bits 16..31 of Rtlow: Sub0 units. At rest 0 or 1; transiently more.
-    private enum ulong SUB0MASK = LOWMASK ^ COUNTMASK;
-
-    /// Plant one Sub0 on an incomplete epoch with count 0 and no pulse
-    /// (spec 6c). Retain the defensive post-CAS completeness recheck and
-    /// masked retract, although producer ownership rules out confirmation
-    /// of its start epoch before this call returns.
-    /// Producer-only: the caller's unpublished table prevents e from
-    /// confirming/recycling before this plant. Never call from an unpinned
-    /// scan after unsubscribe; a zero->count->zero ABA can resurrect a slot.
-    private void plantIfUnprotected(ulong e) nothrow @nogc @system
-    {
-        immutable ki = cast(uint)(e & kMask);
-        if (atomicLoad!(MemoryOrder.acq)(stats[ki].es) != cast(long) e)
-            return;
-        immutable ei1 = e + 1;
-        immutable ki1 = cast(uint)(ei1 & kMask);
-        // Acquire pairs with the producer's release-store of Es[ki1], so a
-        // matching epoch also orders the Seqt[ki1] read below (valid Es
-        // implies valid header metadata, as with the table sentinel).
-        if (atomicLoad!(MemoryOrder.acq)(stats[ki1].es) != cast(long) ei1)
-            return;
-        immutable seqt = atomicLoad!(MemoryOrder.raw)(stats[ki].seqt);
-        immutable seqtN = atomicLoad!(MemoryOrder.raw)(stats[ki1].seqt);
-        immutable sd = atomicLoad!(MemoryOrder.raw)(stats[ki].sd);
-        if (seqt >= seqtN || seqt + sd >= seqtN)
-            return;
-        version (AntfarmWriteAuditHooks)
-            if (writeAuditHook !is null)
-                writeAuditHook(&this, WriteAuditPhase.plantChecked, e, 0);
-        // Spec 6c: CAS the plant so a racing 0->1 cannot be straddled by a
-        // bare fetch_add(SUB0). Count or pulse appearing bails — the race
-        // invalidated the plant. Not an open loop; strong CAS (spec 1).
-        for (;;)
-        {
-            immutable rt = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
-            if ((rt & COUNTMASK) != 0 || (rt & SUB0MASK) != 0)
-                return;
-            if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&Rt[ki][0], rt, rt + SUB0))
-            {
-                version (AntfarmWriteAuditHooks)
-                    if (writeAuditHook !is null)
-                        writeAuditHook(&this, WriteAuditPhase.plantPublished, e, 0);
-                // Spec 6c defensive post-CAS retract. Producer ownership
-                // prevents confirmation during a supported plant; this check
-                // alone would not make an unpinned caller safe.
-                // Retract exactly the unit we planted. The full-word CAS is
-                // masked to the low half: a concurrent subscriber's SUB
-                // pin/unpin changes the high half and would make a one-shot
-                // exact-value CAS fail while our SUB0 is still present.
-                // The retry is bounded by the low-half state -- it is either
-                // exactly SUB0 (we remove it) or a racing 0->1 has already
-                // changed it (and that same edge clears the pulse).
-                immutable sd2 = atomicLoad!(MemoryOrder.raw)(stats[ki].sd);
-                immutable seqt2 = atomicLoad!(MemoryOrder.raw)(stats[ki].seqt);
-                immutable seqtN2 = atomicLoad!(MemoryOrder.raw)(stats[ki1].seqt);
-                if (seqt2 + sd2 >= seqtN2)
-                {
-                    for (;;)
-                    {
-                        immutable cur = atomicLoad!(MemoryOrder.acq)(Rt[ki][0]);
-                        if ((cur & LOWMASK) != SUB0)
-                            return;
-                        if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&Rt[ki][0], cur, cur - SUB0))
-                            return;
-                    }
-                }
-                return;
-            }
-        }
-    }
-
     // ------------------------------------------------------------------
     // Production (spec 5)
     // ------------------------------------------------------------------
@@ -1774,11 +1713,13 @@ struct AntFarm
     /// Diagnostic tripwire, not a reservation protocol. Wt has already
     /// advanced, but no metadata or body from this reservation is written.
     /// Check the exact metadata-transition range, including a tail landing
-    /// exactly on a boundary. Epoch zero is not fresh (it starts with Sub0).
+    /// exactly on a boundary. Epoch zero is not fresh (it starts Live).
     /// Do not use wtprime-1 here: an exact landing initializes the next
     /// segment's metadata even though its body storage is not written yet.
     /// A concurrent subscription can add a provisional SUB after the sweep.
-    /// Ignore that high half, but both active roots and Sub0 remain fatal.
+    /// Ignore that high half; an active root, or the previous epoch's Live
+    /// not yet discharged, remains fatal. This runs before the reservation
+    /// raises its own Live on the segment (spec 5c).
     private void checkFreshWriteSegments(ulong wret, ulong wtprime)
         nothrow @nogc @system
     {
@@ -1789,13 +1730,13 @@ struct AntFarm
             immutable low = rt & LOWMASK;
             if (low == 0) continue;
             immutable roots = low & COUNTMASK;
-            immutable pulses = (low & SUB0MASK) / SUB0;
+            immutable live = (low & LIVE) != 0;
             immutable kind = roots != 0
-                ? (pulses != 0 ? "roots+Sub0" : "roots") : "Sub0";
+                ? (live ? "roots+Live" : "roots") : (live ? "Live" : "reserved bits");
             fprintf(stderr,
-                "allWriteCheck: protected fresh segment kind=%s wret=%llu wtprime=%llu size=%llu e=%llu ki=%llu Rt=%llx roots=%llu Sub0=%llu Sub=%llu Wt=%llu Exmax=%llu K=%u\n",
+                "allWriteCheck: protected fresh segment kind=%s wret=%llu wtprime=%llu size=%llu e=%llu ki=%llu Rt=%llx roots=%llu Live=%u Sub=%llu Wt=%llu Exmax=%llu K=%u\n",
                 kind.ptr, wret, wtprime, wtprime - wret, e, ki, rt,
-                roots, pulses, rt / SUB,
+                roots, live ? 1u : 0u, rt / SUB,
                 atomicLoad!(MemoryOrder.raw)(Wt), exmax, K);
             // This is a best-effort concurrent snapshot, not an atomic one.
             foreach (uint s; 0 .. K)
@@ -1810,11 +1751,13 @@ struct AntFarm
                         atomicLoad!(MemoryOrder.raw)(Lt[s * MAX_LEAVES + l][0]));
                 fprintf(stderr, "\n");
             }
-            if (roots != 0 && pulses != 0)
-                fatal("allWriteCheck: fresh segment has live roots and Sub0 pulses");
+            if (roots != 0 && live)
+                fatal("allWriteCheck: fresh segment has live roots and is still Live");
             if (roots != 0)
                 fatal("allWriteCheck: fresh segment has live roots");
-            fatal("allWriteCheck: fresh segment has Sub0 pulses");
+            if (live)
+                fatal("allWriteCheck: fresh segment is still Live");
+            fatal("allWriteCheck: fresh segment has reserved root bits set");
         }
     }
 
@@ -2118,23 +2061,29 @@ struct AntFarm
         tok.quotaLeft -= size;
         syncQuota(tok);
 
-        // Segment/epoch transitions (spec 2c): initialize metadata for each
-        // crossed segment, release-storing Es last.
+        // Segment/epoch transitions (spec 2c, 5c, 6c): initialize metadata for
+        // each crossed segment and raise its Live, release-storing Es last.
+        // Live protects the epoch from here until a holder confirms and
+        // discharges it, so no later step needs to manufacture protection.
+        // The raise is a release RMW: a subscriber that acquires this Live
+        // under a stale Es also acquires this reservation, and its tail
+        // re-read then rejects the old epoch (6b). The fresh-segment check
+        // above already saw a zero low half; a raise that finds otherwise
+        // means a reference or Live arrived on a slot that was never covered.
         foreach (e; eold + 1 .. enew + 1)
         {
             immutable ki = e & kMask;
             atomicStore!(MemoryOrder.raw)(stats[ki].seqt, wtprime);
             atomicStore!(MemoryOrder.raw)(stats[ki].sqcs, cast(ulong) sq);
             atomicStore!(MemoryOrder.raw)(stats[ki].sd, 0UL); // fresh epoch: nothing consumed
+            immutable before = atomicFetchAdd!(MemoryOrder.rel)(Rt[ki][0], LIVE);
+            if ((before & LOWMASK) != 0)
+                fatal("Live raised on a segment that still carries protection");
+            version (AntfarmWriteAuditHooks)
+                if (writeAuditHook !is null)
+                    writeAuditHook(&this, WriteAuditPhase.liveRaised, e, 0);
             atomicStore!(MemoryOrder.rel)(stats[ki].es, cast(long) e);
         }
-
-        // Spec 5c/6c: a write that crossed past Ki made Ki unable to accept
-        // more tables. If no consumer ever entered it, last-releaser never
-        // runs and Rt stays 0 — plant Sub0 so the next subscribe walk can
-        // find it.
-        foreach (e; eold + 1 .. enew + 1)
-            plantIfUnprotected(e - 1);
 
         // Write the table (spec 5c/2e). The magic buffer makes the linear
         // address range contiguous even across the Ln wrap point. Ring words
@@ -2244,11 +2193,10 @@ struct AntFarm
 /// Invariants:
 ///  - Every subscribed consumer always holds at least one pin; an idle
 ///    consumer advances newestEi onto nextSeq's initialized segment.
-///  - The last *releaser* of an unconfirmed segment plants Sub0 via the
-///    last-releaser CAS (2b/6c). First consumer of a segment (count 0→1)
-///    subtracts it.
-///  - Farm-empty with everything confirmed still plants exactly one pulse,
-///    using the same last-releaser helper on the confirmed position.
+///  - Live (2b/6c) is raised by the initializing producer and cleared only
+///    by a holder that observes confirmation, before it releases that
+///    epoch. Releasing an unconfirmed epoch leaves its Live in place, so
+///    abandoned work stays protected and discoverable.
 struct ConsumerView
 {
     @disable this(this);
@@ -2313,8 +2261,8 @@ struct ConsumerView
     /// Subscribe this view to `f`. Returns the non-negative starting epoch,
     /// or SUBSCRIBE_FULL (the Farm already has MAX_CONSUMERS_LIMIT views) or
     /// SUBSCRIBE_INVALID (null Farm, or this view is already subscribed).
-    /// The transient frontier inconsistency that `subscribeOnce` reports as
-    /// SUBSCRIBE_RETRY is retried here immediately, as spec 6b directs.
+    /// The transient outcome that `subscribeOnce` reports as SUBSCRIBE_RETRY
+    /// (spec 6b) is retried here immediately.
     long subscribe(AntFarm* f) nothrow @nogc @system
     {
         long result;
@@ -2324,128 +2272,158 @@ struct ConsumerView
     }
 
     /// Spec 6b, one attempt. Returns the (non-negative) starting epoch on
-    /// success, or SUBSCRIBE_FULL, SUBSCRIBE_RETRY (a producer moved the
-    /// frontier during the snapshot; every pin was unwound, call again), or
+    /// success, or SUBSCRIBE_FULL, SUBSCRIBE_RETRY (the tail kept moving past
+    /// every candidate for this attempt's bounded rounds; every pin was
+    /// unwound and the registration undone, call again), or
     /// SUBSCRIBE_INVALID. `subscribe` is this with the retry folded in.
     long subscribeOnce(AntFarm* f) nothrow @nogc @system
     {
         if (f is null || hasRef) return SUBSCRIBE_INVALID;
         immutable idc = f.add_consumer();
         if (idc < 0) return idc;
-
-        // Spec 6b: derive the walk range from the write tail (the only
-        // unpinned read), then walk backwards pinning each slot with Sub
-        // *before* inspecting Rtlow/Es. d=0 is the heuristic pin on the
-        // frontier. bestSeg is the earliest Es among Rtlow != 0; else the
-        // frontier.
-        immutable wt0 = atomicLoad!(MemoryOrder.acq)(f.Wt);
         version (AntfarmWriteAuditHooks)
             if (writeAuditHook !is null)
-                writeAuditHook(f, WriteAuditPhase.subscriberProbed, wt0, 0);
-        immutable eg = wt0 >> f.segShift;
-        uint[KMAX] pinned;
-        uint nPinned = 0;
-        long bestE = long.max;
-        long bestSeg = -1;
-        foreach (ulong d; 0 .. f.K)
+                writeAuditHook(f, WriteAuditPhase.subscriberCounted, 0, 0);
+
+        // Physical slots this attempt holds a Sub on (K <= KMAX = 16).
+        uint held;
+        void pin(uint ki, ulong eg) nothrow @nogc @system
         {
-            if (d > eg) break;
-            immutable ki = cast(uint)((eg - d) & f.kMask);
+            if ((held >> ki) & 1) return;
             atomicFetchAdd!(MemoryOrder.rel)(f.Rt[ki][0], SUB);
+            held |= 1u << ki;
             version (AntfarmWriteAuditHooks)
                 if (writeAuditHook !is null)
                     writeAuditHook(f, WriteAuditPhase.subscriberPinned, ki, eg);
-            pinned[nPinned++] = ki;
+        }
+        void unpin(uint ki) nothrow @nogc @system
+        {
+            atomicFetchSub!(MemoryOrder.rel)(f.Rt[ki][0], SUB);
+            held &= ~(1u << ki);
+        }
+        void unpinAll() nothrow @nogc @system
+        {
+            foreach (uint ki; 0 .. f.K)
+                if ((held >> ki) & 1)
+                    unpin(ki);
+        }
+        // Whether the slot of window epoch x names x and is still Live. Es
+        // is loaded first: a matching Es was release-stored after that
+        // epoch's Live raise, so the Rt load then observes the raise, and a
+        // clear Live means discharged rather than "not yet raised". An older
+        // Es is an initialization still in flight; a newer one is a slot
+        // already reused. Both loads are acquire (spec 6b, 9). Discovery does
+        // not rely on the order; it keeps every classification exact.
+        bool liveAt(ulong x) nothrow @nogc @system
+        {
+            immutable ki = cast(uint)(x & f.kMask);
+            version (AntfarmWriteAuditHooks)
+                if (writeAuditHook !is null)
+                    writeAuditHook(f, WriteAuditPhase.subscriberRead, ki, x);
+            immutable es = atomicLoad!(MemoryOrder.acq)(f.stats[ki].es);
+            version (AntfarmWriteAuditHooks)
+                if (writeAuditHook !is null)
+                    writeAuditHook(f, WriteAuditPhase.subscriberReadMid, ki, x);
             immutable rt = atomicLoad!(MemoryOrder.acq)(f.Rt[ki][0]);
-            if ((rt & LOWMASK) != 0)
+            return es == cast(long) x && (rt & LIVE) != 0;
+        }
+
+        // Spec 6b: rounds. Each probes the tail, holds a Sub on the newest
+        // slot, and scans the probed window oldest-first with acquire loads
+        // only; the first Live slot naming its window epoch is the earliest
+        // Live epoch the round saw. That candidate is pinned and re-read
+        // before it is validated. A round fails only when the tail moved
+        // past what it read; the newest slot's Sub keeps the tail within one
+        // lap of the first probe, so the bound below is a budget, not a
+        // proof of success: exhausting it returns the recoverable RETRY.
+        foreach (ulong round; 0 .. f.K + 2)
+        {
+            immutable wt = atomicLoad!(MemoryOrder.acq)(f.Wt);
+            version (AntfarmWriteAuditHooks)
+                if (writeAuditHook !is null)
+                    writeAuditHook(f, WriteAuditPhase.subscriberProbed, wt, round);
+            immutable eg = wt >> f.segShift;
+            immutable ulong lo = eg + 1 > f.K ? eg + 1 - f.K : 0;
+            pin(cast(uint)(eg & f.kMask), eg);
+            long cand = -1;
+            bool candFresh;
+            foreach (ulong x; lo .. eg + 1)
             {
-                immutable esi = atomicLoad!(MemoryOrder.acq)(f.stats[ki].es);
-                if (esi >= 0 && esi < bestE)
+                if (!liveAt(x)) continue;
+                immutable ki = cast(uint)(x & f.kMask);
+                candFresh = ((held >> ki) & 1) == 0;
+                pin(ki, eg);
+                if (liveAt(x))
                 {
-                    bestE = esi;
-                    bestSeg = ki;
+                    cand = cast(long) x;
+                    break;
                 }
+                // Discharged or reused between the hint and the pin.
+                if (candFresh) unpin(ki);
             }
-        }
-        immutable seg = bestSeg >= 0 ? cast(uint) bestSeg : cast(uint)(eg & f.kMask);
+            if (cand < 0) continue;
 
-        // Spec 6b: attach in place. Fail closed if the frontier was never written.
-        immutable es = atomicLoad!(MemoryOrder.acq)(f.stats[seg].es);
-        immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(f.stats[seg].sqcs);
-        immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[seg].seqt);
-        if (es < 0 || sq == 0)
-        {
-            foreach (i; 0 .. nPinned)
-                atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
-            f.sub_consumer();
-            return SUBSCRIBE_RETRY;
+            // Validate under the candidate's Sub. Es must still name the
+            // candidate: a new lap's Live can be acquired before its Es is
+            // published, and that acquire imports the new lap's reservation,
+            // so the tail re-read below rejects the old epoch. Seqt must lie
+            // in [Es, Es + K - 1] and the tail must not have reserved the
+            // candidate's next lap.
+            immutable seg = cast(uint)(cast(ulong) cand & f.kMask);
+            immutable es = atomicLoad!(MemoryOrder.acq)(f.stats[seg].es);
+            immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(f.stats[seg].sqcs);
+            immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[seg].seqt);
+            immutable wt1 = atomicLoad!(MemoryOrder.acq)(f.Wt);
+            immutable esU = cast(ulong) es;
+            immutable seqtEpoch = seqt >> f.segShift;
+            if (es != cand || sq == 0 ||
+                seqtEpoch < esU || seqtEpoch > esU + f.K - 1 ||
+                (wt1 >> f.segShift) >= esU + f.K)
+            {
+                if (candFresh) unpin(seg);
+                continue;
+            }
+            F = f;
+            IDc = cast(ulong) idc;
+            immutable lti = cast(uint)(IDc % sq);
+            incLeaf(seg, lti);
+            // Spec 6b: the reference now protects the epoch; drop every Sub.
+            unpinAll();
+            nextSeq = seqt;
+            oldestEi = newestEi = esU;
+            ltiRing[seg] = lti;
+            sweeperNext = false;
+            sweepSeq = 0;
+            oldSweepSeq = 0;
+            sdCheckCounter = 0;
+            hasRef = true;
+            return es;
         }
-
-        // Re-read the write tail now that every slot is pinned. The first
-        // read established the walk range; this one validates that the tail
-        // has not already reserved past the selected epoch. The two reads
-        // are also a cheap invalidation check: a later read cannot see an
-        // older tail than an earlier read of the same atomic.
-        immutable wt1 = atomicLoad!(MemoryOrder.acq)(f.Wt);
-        immutable esU = cast(ulong) es;
-        immutable seqtEpoch = seqt >> f.segShift;
-        // With no live candidate the old frontier may already have been
-        // reclaimed and swept into retained quota, even before Wt reserves
-        // its next lap. Only attach to a still-current fallback frontier.
-        if ((bestSeg < 0 && esU != (wt1 >> f.segShift)) ||
-            seqtEpoch < esU || seqtEpoch > esU + f.K - 1 ||
-            (wt1 >> f.segShift) >= esU + f.K)
-        {
-            foreach (i; 0 .. nPinned)
-                atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
-            f.sub_consumer();
-            return SUBSCRIBE_RETRY;
-        }
-        F = f;
-        IDc = cast(ulong) idc;
-        immutable lti = cast(uint)(IDc % sq);
-        incLeaf(seg, lti);
-        // Spec 6b: unwind every Sub. The 0→1 on Rt already retracted Sub0 if present.
-        foreach (i; 0 .. nPinned)
-            atomicFetchSub!(MemoryOrder.rel)(f.Rt[pinned[i]][0], SUB);
-        nextSeq = seqt;
-        oldestEi = newestEi = cast(ulong) es;
-        ltiRing[seg] = lti;
-        sweeperNext = false;
-        sweepSeq = 0;
-        oldSweepSeq = 0;
-        sdCheckCounter = 0;
-        hasRef = true;
-        return es;
+        unpinAll();
+        f.sub_consumer();
+        return SUBSCRIBE_RETRY;
     }
 
-    /// Spec 6e. Confirmed prefix drops with a plain dec. Confirmed
-    /// interiors do too; unconfirmed interiors use the last-releaser
-    /// helper. The position uses the helper if unconfirmed or
-    /// last-of-farm; a non-last confirmed position drops plain.
+    /// Spec 6e. Release the confirmed prefix (discharging it), then every
+    /// remaining held epoch: a confirmed one is discharged before its
+    /// reference drops, and an unconfirmed one keeps its Live, which
+    /// protects the abandoned work until a later holder confirms it. No
+    /// case depends on whether this view was the Farm's last.
     void unsubscribe() nothrow @nogc @system
     {
         if (!hasRef) return;
         auto f = F;
         tryReleaseOldest();
-        immutable lastOfFarm = f.sub_consumer() == 1;
-        foreach (e; oldestEi .. newestEi)
+        f.sub_consumer();
+        foreach (e; oldestEi .. newestEi + 1)
         {
             immutable ki = cast(uint)(e & f.kMask);
-            // Interiors are never the empty-farm pulse: a confirmed
-            // interior must be allowed to reach Rt == 0, and an
-            // unconfirmed one keeps a pulse only while it is still
-            // unconfirmed (retractIfConfirmed closes the race).
-            immutable leavePulse = !confirmed(ki, e);
-            decRef(ki, ltiOf(e), leavePulse, e, true);
+            if (confirmed(ki, e))
+                clearLive(ki);
+            decRef(ki, ltiOf(e));
         }
-        immutable posPulse = lastOfFarm || !confirmed(posKi(), newestEi);
-        decRef(posKi(), ltiOf(newestEi), posPulse, newestEi, !lastOfFarm);
         hasRef = false;
         IDc = 0;
-        // Every incomplete held epoch was protected by its last drop above.
-        // An unpinned scan here could resurrect a reclaimed, quota-certified
-        // slot with a stale Sub0 plant before its post-CAS retract.
         F = null;
     }
 
@@ -2573,70 +2551,34 @@ private:
         return t < 16 ? 16 : (t > 256 ? 256 : t);
     }
 
-    /// Spec 6c: take a count. Only the thread that observes 0→1 retracts Sub0.
+    /// Spec 6c: propagate a leaf's 0→1 edge to the root. Nothing else in the
+    /// root changes: Live belongs to the epoch, not to its first reference.
     void takeRootCount(uint ki) nothrow @nogc @system
     {
-        immutable old = atomicFetchAdd!(MemoryOrder.rel)(F.Rt[ki][0], 1);
-        immutable extra = old & AntFarm.SUB0MASK;
-        if ((old & COUNTMASK) == 0 && extra != 0)
-            atomicFetchSub!(MemoryOrder.rel)(F.Rt[ki][0], extra);
+        atomicFetchAdd!(MemoryOrder.rel)(F.Rt[ki][0], 1);
     }
 
-    /// Spec 6c/6e last-releaser. Plant-then-dec-then-retract is not atomic
-    /// (a racing 0→1 can clear Sub0 before the retract, underflowing
-    /// Rtlow). One CAS: if count is 1, clear COUNTMASK and leave one Sub0
-    /// (add a unit only if none is present); if > 1, old - 1 with Sub0
-    /// unchanged. A failed CAS retries against the new word, not the same
-    /// snapshot (spec 1, strong CAS).
-    ///
-    /// When `retractIfConfirmed` is set, the caller wants a pulse only
-    /// while the segment is still unconfirmed. After the last-root CAS
-    /// succeeds, the segment is re-checked; if it has become confirmed in
-    /// the meantime, the pulse we just left is retracted with the same
-    /// low-half masked CAS as plantIfUnprotected. A racing 0->1 changes
-    /// the low half away from Sub0, so the retry loop is bounded by that
-    /// completion state and cannot underflow Rtlow.
-    void releaseRootLeavePulse(uint ki, ulong ei = ulong.max,
-                               bool retractIfConfirmed = false) nothrow @nogc @system
+    /// Spec 6c: discharge a confirmed epoch this view still holds. The caller
+    /// observed confirmation, including the acquire of the next epoch's Es,
+    /// and keeps its own reference until after this returns, so the slot
+    /// cannot be reused under it. The release CAS forwards that history to
+    /// any sweep that later acquires the root (spec 3, I3). Load first: a
+    /// passer that finds Live already clear does not write the root line.
+    /// Idempotent across confirmers; the CAS retries only while another root
+    /// field changes under it.
+    void clearLive(uint ki) nothrow @nogc @system
     {
         for (;;)
         {
             immutable old = atomicLoad!(MemoryOrder.acq)(F.Rt[ki][0]);
-            immutable c = old & COUNTMASK;
-            if (c == 0) fatal("root tally underflow");
-            ulong nv;
-            if (c == 1)
-            {
-                // Last root: leave one pulse. Preserve any pulse already
-                // present; add one only if none exists.
-                nv = old & ~COUNTMASK;
-                if ((old & AntFarm.SUB0MASK) == 0)
-                    nv += SUB0;
-            }
-            else
-            {
-                // Not last: plain decrement, SUB0 field unchanged.
-                nv = old - 1;
-            }
-            if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&F.Rt[ki][0], old, nv))
-            {
-                if (c == 1 && retractIfConfirmed && confirmed(ki, ei))
-                {
-                    for (;;)
-                    {
-                        immutable cur = atomicLoad!(MemoryOrder.acq)(F.Rt[ki][0]);
-                        if ((cur & COUNTMASK) != 0 || (cur & AntFarm.SUB0MASK) == 0)
-                            return; // a racing 0->1 took the count and cleared the pulse
-                        if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&F.Rt[ki][0], cur, cur - SUB0))
-                            return;
-                    }
-                }
+            if ((old & LIVE) == 0)
                 return;
-            }
+            if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&F.Rt[ki][0], old, old - LIVE))
+                return;
         }
     }
 
-    /// Increment a leaf; on 0→1 propagate to Rt and retract Sub0 if present.
+    /// Increment a leaf; on 0→1 propagate to Rt.
     void incLeaf(uint ki, uint lti) nothrow @nogc @system
     {
         immutable lo = atomicFetchAdd!(MemoryOrder.acq_rel)(F.Lt[ki * MAX_LEAVES + lti][0], 1);
@@ -2645,27 +2587,17 @@ private:
     }
 
     /// Decrement a held leaf tally with root propagation (spec 2b). Edge
-    /// transition (dec returns 1) repeats on Rt; underflows are fatal.
-    /// `leavePulse` uses the last-releaser helper so an unconfirmed (or
-    /// last-of-farm confirmed) drop never becomes visible as Rt == 0.
-    /// `ei` is the epoch being released; `retractIfConfirmed` asks the
-    /// last-releaser helper to take the pulse back if the segment turns
-    /// out to be confirmed after the CAS (closing the check/release race).
-    void decRef(uint ki, uint lti, bool leavePulse = false,
-                ulong ei = ulong.max, bool retractIfConfirmed = false) nothrow @nogc @system
+    /// transition (dec returns 1) repeats on Rt; underflows are fatal. The
+    /// root decrement never touches Live; discharge is clearLive's job.
+    void decRef(uint ki, uint lti) nothrow @nogc @system
     {
         auto f = F;
         immutable lo = atomicFetchSub!(MemoryOrder.acq_rel)(f.Lt[ki * MAX_LEAVES + lti][0], 1);
         if (lo <= 0) fatal("leaf tally underflow");
         if (lo == 1)
         {
-            if (leavePulse)
-                releaseRootLeavePulse(ki, ei, retractIfConfirmed);
-            else
-            {
-                immutable ro = atomicFetchSub!(MemoryOrder.rel)(f.Rt[ki][0], 1);
-                if ((ro & COUNTMASK) == 0) fatal("root tally underflow");
-            }
+            immutable ro = atomicFetchSub!(MemoryOrder.rel)(f.Rt[ki][0], 1);
+            if ((ro & COUNTMASK) == 0) fatal("root tally underflow");
         }
     }
 
@@ -2752,8 +2684,9 @@ private:
         return seqt + sd >= seqtNext;
     }
 
-    /// Release confirmed prefix epochs from the old end only. Confirmed
-    /// interiors stay pinned until they become oldest.
+    /// Release confirmed prefix epochs from the old end only, discharging
+    /// each before its reference drops (6c). Confirmed interiors stay pinned
+    /// until they become oldest.
     void tryReleaseOldest() nothrow @nogc @system
     {
         auto f = F;
@@ -2762,6 +2695,7 @@ private:
             immutable ki = cast(uint)(oldestEi & f.kMask);
             if (!confirmed(ki, oldestEi))
                 break;
+            clearLive(ki);
             decRef(ki, ltiOf(oldestEi));
             ++oldestEi;
             oldSweepSeq = 0; // new oldest segment: re-walk from its Seqt
