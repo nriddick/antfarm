@@ -24,6 +24,9 @@ check-tail check-throughput check-dual: check-%:
 	$(DC) -g -unittest -i -I$(ROOT)/threadpool/source $*.d $(FARM_SOURCES) -of=$*_tests
 	./$*_tests --DRT-testmode=test-only
 
+subscribe_cost: subscribe_cost.d $(FARM_SOURCES)
+	$(DC) $(DFLAGS) subscribe_cost.d $(FARM_SOURCES) -of=$@
+
 parallel: parallel.d $(FARM_SOURCES) $(ROOT)/antfarm/parallel.d $(ROOT)/antfarm/templates.d
 	$(DC) $(DFLAGS) -I$(ROOT) $^ -of=$@
 
@@ -112,4 +115,4 @@ offccd-smoke: offccd c2c
 	python3 -B offccd_sweep.py --suite smoke --out /tmp/offccd-smoke-$$$$
 
 clean:
-	rm -f throughput tail tail_tests throughput_tests dual_tests dual actor_ready actor_churn actor_churn_mimalloc scaling offccd c2c parallel *.o
+	rm -f throughput tail tail_tests throughput_tests dual_tests dual actor_ready actor_churn actor_churn_mimalloc scaling offccd c2c parallel subscribe_cost *.o

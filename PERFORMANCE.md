@@ -7,7 +7,11 @@ figure is the **median ± sample standard deviation of five independent
 process samples**; the tail tables aggregate five processes of 10,000
 observations each. Major performance comparisons use the Ryzen 9 5900XT. Ring size is studied
 separately in [docs/performance/ring-size-2026-10-25.md](docs/performance/ring-size-2026-10-25.md):
-throughput is flat from 1 to 32 MiB and falls only above the L3.
+throughput is flat from 1 to 32 MiB and falls only above the L3. The 2.1.1
+`Live` lifecycle was compared against the commit before it in
+[docs/performance/live-lifecycle-ab-2026-10-28.md](docs/performance/live-lifecycle-ab-2026-10-28.md):
+paired samples on this host found it neutral for the Farm, the actor gate,
+Fibers and loop tables.
 The i7-12700H laptop is not expected to sustain stable clocks over long runs;
 its tables are retired with no refresh planned. The previous page is archived in
 [docs/performance/archive-2026-10-20.md](docs/performance/archive-2026-10-20.md).

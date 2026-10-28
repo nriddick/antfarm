@@ -54,6 +54,13 @@ Older release notes are in [docs/releases/](docs/releases/):
     interleaving, every schedule ends by requiring a detached Farm, and the
     schedules also run under TSan. The design record is
     [docs/design/farm-live-lifecycle.md](docs/design/farm-live-lifecycle.md).
+  - **Performance.** Paired against the commit before the change on the
+    5900XT, the Live lifecycle is neutral: every Farm, Fiber, loop-table,
+    `actor_ready` and actor-gate cell stays inside its pair spread, the one
+    single-run difference reversed under a function-alignment control, and
+    subscribe and unsubscribe cost is measured directly for the first time.
+    The record is
+    [docs/performance/live-lifecycle-ab-2026-10-28.md](docs/performance/live-lifecycle-ab-2026-10-28.md).
   - **Tests condensed and strengthened.** Torture tests that duplicated
     `antfarm_test.d` runs with the same geometry (T03, T05, T07, T08, T11,
     T12) were folded into those unit tests; T14's K geometry runs inside

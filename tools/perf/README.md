@@ -149,6 +149,12 @@ cells are included only when `--dual-threads` includes 6.
   Use `check-benchmarks` to include the throughput and dual argument-parsing
   tests as well; their C numeric conversions also respect D string boundaries.
 
+- **`subscribe_cost`** — nanoseconds per subscribe, three `consumeNext`
+  calls and unsubscribe on a 1 MiB, K = 8 Farm, once idle and once beside
+  two producers and two steady consumers (the T29 geometry); 200,000 cycles
+  after 2,000 warm-ups, `RETRY` counted. It times the path the 2.1.1 `Live`
+  lifecycle rewrote; the comparison that introduced it is
+  [docs/performance/live-lifecycle-ab-2026-10-28.md](../../docs/performance/live-lifecycle-ab-2026-10-28.md).
 - **`llc_split.py`** — the headline payload and private child cells laid out
   by the [several-groups rules](../../docs/guide/scaling-groups.md#several-physical-groups).
   Each thread count runs twice in the same session: as the headline command,
