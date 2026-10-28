@@ -7,7 +7,7 @@ DC ?= ldc2
 TSAN_OPTIONS ?= history_size=7 halt_on_error=1
 
 .PHONY: all sanity torture run run-tsan run-dmd run-t19 clean baseline allwrite run-allwrite \
-	farm-unit-build farm-tsan run-farm-tsan check-farm-ordering
+	farm-unit-build farm-tsan run-farm-tsan check-farm-ordering run-subscription-live-tsan
 
 all: torture_tests t19 sweep_cursor
 
@@ -107,6 +107,11 @@ check-farm-ordering:
 	./antfarm_test_leaf
 	dmd -g -I$(ROOT) leaf_reuse.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_leaf_dmd
 	./antfarm_test_leaf_dmd
+
+# The Live schedules alone under TSan; run-farm-tsan includes the same run.
+run-subscription-live-tsan:
+	ldc2 -g -O1 -fsanitize=thread -d-version=TSan -d-version=AntfarmWriteAuditHooks -I$(ROOT) subscription_live.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_subscription_tsan
+	TSAN_OPTIONS='$(TSAN_OPTIONS)' ./antfarm_test_subscription_tsan
 
 clean:
 	rm -f torture_tests sweep_cursor torture_tests_tsan torture_tests_dmd t19 t19_tsan t19_dmd write_protection_allwrite boundary_runoff_allwrite *.o

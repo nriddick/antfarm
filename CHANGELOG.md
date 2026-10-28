@@ -32,30 +32,45 @@ Older release notes are in [docs/releases/](docs/releases/):
 
     They are in the new `tests/farm/subscription_live.d`, together with the
     scan-order and stale-window cases found while designing the new scan.
-  - **Audit.** A review of the implementation added one hardening and eight
-    schedules. Validation now acquire-loads the `Es` of the candidate's
-    `Seqt` epoch when that epoch lies beyond the candidate, so a fresh
-    subscriber's first advance through a spanning table's interior epochs
-    has a happens-before edge to their initialization on weak memory models
-    (SPEC 6b-c, 9); under sequential consistency the case was unreachable.
-    Schedules J1 to J3 and Q interleave a discharge with the subscriber's
-    re-read, validation and attach and with a `Sub` landing in the
-    discharge's CAS window; K interleaves two subscribers on one candidate;
-    X attaches on an exact boundary landing; L and LN attach inside a
-    table spanning three boundaries, the latter hiding the successor `Es`
-    as a negative control. Each was checked against an ablation of the
-    defect it targets. The design record is
+  - **Audit.** Three reviews of the implementation converged on one
+    hardening: validation acquire-loads the `Es` of the candidate's `Seqt`
+    epoch when that epoch lies beyond the candidate, so a fresh subscriber's
+    first advance through a spanning table's interior epochs has a
+    happens-before edge to their initialization under the C++ memory model,
+    not only on multi-copy-atomic hardware (SPEC 6b-c, 6d, 9); under
+    sequential consistency the case was unreachable, and the exhaustive
+    RC11 litmus `tests/farm/rc11_spanned_attach.py` finds stale-metadata
+    executions only without the acquire, all of them RC11-only. New
+    deterministic schedules: J1 to J3 and Q interleave a
+    discharge with the subscriber's re-read, validation and attach and with
+    a `Sub` landing in the discharge's CAS window; K interleaves two
+    subscribers on one candidate; X attaches on an exact boundary landing;
+    L and LN attach inside a table spanning three boundaries, the latter
+    hiding the successor `Es` as a negative control; R drives every
+    supported K until accumulated frontier pins refuse the next grant;
+    `farm_ordering.d`'s `spannedAttach` reaches the interior-attach path
+    through an idle re-walk finisher and a discharger that never read the
+    sentinel. D, E, F and G now fail if they miss their requested
+    interleaving, every schedule ends by requiring a detached Farm, and the
+    schedules also run under TSan. The design record is
     [docs/design/farm-live-lifecycle.md](docs/design/farm-live-lifecycle.md).
-  - **Tests condensed.** Torture tests that duplicated `antfarm_test.d`
-    runs with the same geometry (T03, T05, T07, T08, T11, T12) were folded
-    into those unit tests, which now also check quiescent `Live`, leaves
-    and `Sub`s; T14's K geometry runs inside T04. T18 no longer waits a
-    fixed three seconds per trial and, like T19, T20 and the other churn
-    tests, now checks per-payload exactly-once and that only the frontier
-    is `Live` with nothing else on any root (`expectFrontierLiveOnly`); the
-    old `countLive >= 1` checks could not fail. The new T28 runs a
-    24-thread subscribe herd at the 1 MiB ring minimum over several laps,
-    counting `RETRY`. The suite runs in about a second instead of ten.
+  - **Tests condensed and strengthened.** Torture tests that duplicated
+    `antfarm_test.d` runs with the same geometry (T03, T05, T07, T08, T11,
+    T12) were folded into those unit tests; T14's K geometry runs inside
+    T04. Oracles are per-payload everywhere (`expectCallRange`), quiescent
+    state is an exact drained Farm (`expectDrainedFarm`: one `Live` at the
+    frontier, no reference, pin, leaf or member), stable root counts equal
+    occupied leaves (`checkStableTallies`), and the former `countLive >= 1`
+    checks, which could not fail, are gone. T00 is a harness negative
+    control for a lost/duplicated pair with balanced totals; T18 no longer
+    waits a fixed three seconds per trial; fatal-contract child waits are
+    bounded. `make -C tests/farm sanity` runs the deterministic geometry,
+    membership, `Live` and capacity checks (`testLiveMembership` at every
+    K); invalid selectors exit 64. T28 runs barrier-gated 16- and 32-member
+    subscribe/drain/depart cohorts at K=2 and K=16 with real ring reuse; T29
+    runs a 24-thread subscribe herd whose arrivals and departures overlap
+    production at the 1 MiB ring minimum over about eight laps, counting
+    `RETRY`. The torture suite runs in a few seconds instead of ten.
   - **Removed and renamed.** `LIVE` replaces the internal `SUB0` constant,
     and the `plantIfUnprotected` and `releaseRootLeavePulse` helpers are
     gone. Among the test-only `WriteAuditPhase` hooks, `liveRaised`

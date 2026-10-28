@@ -2,9 +2,11 @@
 // 6b, 6c, 6e). Each schedule holds actors at write-audit hooks, either
 // inline on the main thread or, where a producer must stay paused inside its
 // own write while others run, on a worker thread released by flags. A to I
-// and P failed on some earlier protocol or prototype (SPEC 11); J1 to J3, Q,
-// K, X, L and LN were added by the audit of the implementation and each
-// fails on an ablation of the defect it targets (docs/design/farm-live-lifecycle.md).
+// and P failed on some earlier protocol or prototype (SPEC 11); R drives the
+// round ceiling; J1 to J3, Q, K, X, L and LN were added by the audit of the
+// implementation and each fails on an ablation of the defect it targets
+// (docs/design/farm-live-lifecycle.md). D, E, F and G fail if they miss
+// their requested interleaving; only I permits its after-attach path.
 //
 // Oracles, per schedule:
 //   safety     no producer enters the next lap of a slot whose work is still
@@ -18,7 +20,7 @@
 //              subscription is allowed; a rescue afterwards is diagnostic only.
 //
 // usage: subscription_live            (every schedule and trigger)
-//        subscription_live <A|B|C|D1|D2|E|F|G|H|I|P|J1|J2|J3|Q|K|X|L|LN> [trigger 0..3 for D1/D2/E]
+//        subscription_live <A|B|C|D1|D2|E|F|G|H|I|P|R|J1|J2|J3|Q|K|X|L|LN> [trigger 0..3 for D1/D2/E]
 module subscription_live;
 
 import antfarm;
@@ -95,12 +97,12 @@ void resetLedger() nothrow @nogc @system
     g_failed = false;
 }
 
-void newFarm() nothrow @nogc @system
+void newFarm(uint k = 4) nothrow @nogc @system
 {
     resetLedger();
-    // 1 MiB, K = 4 (segCap 32768); two small producers of 16384: Exmax is
-    // one segment.
-    g_f = AntFarm.create(1, 4, 1, 0, 0, 2, 16384, 64);
+    // 1 MiB; two small producers of 16384: Exmax is 32768 words, one segment
+    // at the usual K = 4 (segCap 32768).
+    g_f = AntFarm.create(1, k, 1, 0, 0, 2, 16384, 64);
     g_q = g_f.registerProducer(Tier.small);
     g_p = g_f.registerProducer(Tier.small);
     require(g_q.valid && g_p.valid, "two producers");
@@ -310,8 +312,9 @@ void insideD() nothrow @nogc @system
     require(g_subResult >= 0, "S subscribes");
     if (g_stage != 3)
     {
+        printf("  MISSED D read #%d; Lg moves only after S attached\n", g_trigger);
+        g_failed = true;
         g_stage = 3;
-        printf("  scan finished before read #%d; Lg moves after S attached\n", g_trigger);
         moverD();
     }
     printf("  S attached at epoch %lld\n", g_subResult);
@@ -537,17 +540,19 @@ bool scheduleEI(char which, int trigger)
 
     g_stage = 2;
     immutable r = g_S.subscribeOnce(g_f);
-    if (g_stage != 3)
+    immutable missed = g_stage != 3;
+    if (missed)
     {
         g_stage = 3;
-        printf("  scan finished before its trigger; the mid-scan steps run after S attached\n");
+        printf("  %s trigger; the mid-scan steps run after S attached\n",
+            which == 'E' ? "MISSED E".ptr : "expected I after-attach".ptr);
         moverEI();
     }
     t0.join();
     writeAuditHook = null;
     require(r >= 0, "S subscribed");
     printf("  S attached at epoch %lld\n", r);
-    bool ok = r <= 2;
+    bool ok = (which == 'I' || !missed) && r <= 2;
     ok = survivorProgress(g_S, which == 'E' ? "E".ptr : "I".ptr) && ok;
     g_S.unsubscribe();
     endFarm();
@@ -653,10 +658,11 @@ bool scheduleFG(char which)
     long r;
     int retries;
     while ((r = g_S.subscribeOnce(g_f)) == SUBSCRIBE_RETRY) ++retries;
-    if (g_stage == 2)
+    immutable missed = g_stage == 2;
+    if (missed)
     {
         g_stage = 3;
-        printf("  scan never read slot 1; the mid-scan steps run after S attached\n");
+        printf("  MISSED F/G slot-1 trigger; the mid-scan steps run after S attached\n");
         midFG();
     }
     writeAuditHook = null;
@@ -664,7 +670,7 @@ bool scheduleFG(char which)
     if (t1 !is null) t1.join();
     require(r >= 0, "S subscribed");
     printf("  S attached at epoch %lld after %d RETRY\n", r, retries);
-    bool ok = r <= (which == 'F' ? 4 : 3);
+    bool ok = !missed && r <= (which == 'F' ? 4 : 3);
     ok = survivorProgress(g_S, which == 'F' ? "F".ptr : "G".ptr) && ok;
     g_S.unsubscribe();
     endFarm();
@@ -1115,8 +1121,77 @@ bool scheduleL(char mode)
     return verdict(mode == 'N' ? "LN".ptr : "L".ptr, ok);
 }
 
+// ---------------------------------------------------------------------------
+// R. Adversarial round ceiling. After each tail probe C tries to drain one
+// complete epoch. Accumulated frontier Subs must eventually refuse the next
+// producer grant instead of letting the tail outrun every candidate forever.
+// S then attaches at the Live frontier and drops every accumulated pin.
+// These frontier Subs are all on time: this schedule never needs rounds K+1
+// or K+2, and is not evidence that those extra rounds suffice or a forced
+// RETRY path.
+// ---------------------------------------------------------------------------
+
+bool advanceOneEpoch() nothrow @nogc @system
+{
+    immutable before = g_C.newestEi;
+    require(atomicLoad(g_f.Wt) == before * g_seg,
+        "R mover starts at a drained boundary");
+    ulong remaining = g_seg;
+    while (remaining != 0)
+    {
+        immutable words = remaining < 15000 ? remaining : 15000UL;
+        if (put(g_q, words, true) == 0) return false;
+        while (g_C.consumeNext()) {}
+        remaining -= words;
+    }
+    while (g_C.consumeNext()) {}
+    require(g_C.oldestEi == before + 1 && g_C.newestEi == before + 1,
+        "R mover discharged the probed frontier");
+    require(atomicLoad(g_f.Wt) == (before + 1) * g_seg,
+        "R mover advanced exactly one epoch");
+    return true;
+}
+
+void hookR(AntFarm*, WriteAuditPhase phase, ulong, ulong) nothrow @nogc @system
+{
+    if (phase != WriteAuditPhase.subscriberProbed || g_stage != 1) return;
+    ++g_reads;
+    if (!advanceOneEpoch()) g_stage = 2; // retained frontier pins blocked the grant
+}
+
+bool scheduleR(uint k)
+{
+    newFarm(k);
+    require(g_C.subscribe(g_f) == 0, "R initial consumer");
+    g_stage = 1;
+    writeAuditHook = &hookR;
+    immutable r = g_S.subscribeOnce(g_f);
+    writeAuditHook = null;
+    printf("  R K=%u attach=%lld rounds=%d moverStage=%d Cepoch=%llu\n",
+        k, r, g_reads, g_stage, g_C.newestEi);
+    require(r > 0 && g_stage == 2 && g_reads <= k,
+        "R frontier pins stop the mover without using an extra round");
+    require(g_C.newestEi == r && g_S.newestEi == r,
+        "R did not skip unfinished work");
+    require(atomicLoad(g_f.Cf) == 2, "R both views remain members");
+    foreach (ki; 0 .. k)
+        require((atomicLoad(g_f.Rt[ki][0]) >> 32) == 0,
+            "R attach unwinds every accumulated frontier Sub");
+    ulong missing, duplicated;
+    tally(missing, duplicated);
+    require(missing == 0 && duplicated == 0, "R mover exact payload accounting");
+
+    g_C.unsubscribe();
+    immutable ok = survivorProgress(g_S, "R");
+    g_S.unsubscribe();
+    endFarm();
+    char[12] nm;
+    nm[0 .. 4] = ['R', '#', cast(char)('0' + k / 10), cast(char)('0' + k % 10)];
+    nm[4] = 0;
+    return verdict(nm.ptr, ok);
+}
 immutable string[] SCHEDULES = ["A", "B", "C", "D1", "D2", "E", "F", "G", "H", "I", "P",
-    "J1", "J2", "J3", "Q", "K", "X", "L", "LN"];
+    "R", "J1", "J2", "J3", "Q", "K", "X", "L", "LN"];
 
 int main(string[] args)
 {
@@ -1149,7 +1224,7 @@ int main(string[] args)
                     ok &= scheduleD(name[1], t);
                 }
     if (want("E"))
-        foreach (t; 0 .. 4)
+        foreach (t; 0 .. 3)
             if (all || args.length < 3 || t == trigger(0))
             {
                 printf("schedule E, mover at read #%d\n", t);
@@ -1160,6 +1235,12 @@ int main(string[] args)
     if (want("H")) { printf("schedule H\n"); ok &= scheduleH(); }
     if (want("I")) { printf("schedule I\n"); ok &= scheduleEI('I', 0); }
     if (want("P")) { printf("schedule P\n"); ok &= scheduleP(); }
+    if (want("R"))
+        foreach (k; [2u, 4u, 8u, 16u])
+        {
+            printf("schedule R, K=%u\n", k);
+            ok &= scheduleR(k);
+        }
     foreach (name; ["J1", "J2", "J3", "Q"])
         if (want(name)) { printf("schedule %s\n", name.ptr); ok &= scheduleJ(name == "Q" ? 'Q' : name[1]); }
     if (want("K")) { printf("schedule K\n"); ok &= scheduleK(); }

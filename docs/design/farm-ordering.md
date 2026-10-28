@@ -1,4 +1,4 @@
-# Farm ordering audit: S1, S2, and sanitizer evidence
+# Farm ordering audit: S1, S2, Live follow-ups, and sanitizer evidence
 
 Baseline: local `cf2aa91` (the acq_rel Wt reservation fix). These follow-ups
 change ownership/validation, not memory-order strengths.
@@ -57,6 +57,35 @@ by the last-releaser CAS; never-entered epochs are covered by the crossing
 producer. Keep the producer helper private and preserve its defensive
 post-CAS check. Moving metadata reads inside its CAS loop would not make
 an unpinned scan safe: zero/count/zero ABA remains possible.
+
+## Live follow-up: spanning-interior initialization visibility
+
+A subscriber can attach at an interior epoch of a spanning table with
+`nextSeq` in a later epoch. Its discovery history includes that interior's
+`Es`, but not necessarily the spanning table's sentinel. Another consumer
+can finish the table and a third can confirm and discharge its start epoch
+without ever acquiring that sentinel. The C++ memory model then permits the
+subscriber's first hot-path `moveRef` to see the later epoch's `Es` as
+uninitialized, even though sequentially consistent execution and the
+multi-copy-atomic x86/ARM hardware used for testing cannot produce that
+outcome.
+
+Subscription validation now acquires `Es` at `Seqt`'s epoch when that differs
+from the attach epoch and requires it to match. A spanning producer publishes
+crossed epochs in order, so this one acquire supplies every intermediate
+initialization before the subscriber's first advance. The candidate, Seqt and
+Wt bounds remain; the Wt lap check is defense in depth because the new lap's
+Seqt store already precedes its Live raise.
+
+`farm_ordering.d`'s `spannedAttach` schedule reaches this exact path: one
+consumer finishes the spanning table on an idle re-walk, another discharges
+its start without reading the sentinel, and the subscriber attaches at the
+interior before consuming the next table. It runs under both LDC and DMD.
+This is deterministic path coverage, not a claim that the unmodified code
+fails on x86; the discriminating evidence is the memory-model analysis, not
+this hardware execution. The `LN` schedule in `subscription_live.d` is the
+instrumentation negative control: it hides the successor `Es` during the
+first validation and fails when the acquire is removed.
 
 ## Regressions and mutation
 
@@ -147,7 +176,10 @@ by TSan, particularly cross-alias accesses or atomic-only lifecycle errors.
 - Every payload callback contributes through its shard completion join.
   Table hooks run after that join and retain their view pin through return.
 
-No additional missing-acquire fast-path defect was confirmed. Cancellation
+No additional missing-acquire fast-path defect remains open after the
+Seqt-epoch validation above. The I3 induction and oldest-first discovery
+argument still have the separate weak-memory proof obligations recorded in
+SPEC 11. Cancellation
 must not abandon a reserved table or callback; shutdown still drains/joins
 views before unregistering producers and destroying the Farm. Neither fix
 adds blocking or retries beyond the existing subscription RETRY behavior.

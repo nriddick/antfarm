@@ -142,14 +142,18 @@ for those open obligations.
   interleaved on one candidate (K); an exact boundary landing with an empty
   frontier (X); and a subscriber attaching at the interior of a table that
   spans three boundaries, with the successor `Es` visible (L) or hidden
-  during its first validation as an instrumentation negative control (LN).
+  during its first validation as an instrumentation negative control (LN);
+  and adversarial rounds that drive the tail until retained frontier pins
+  refuse renewal (R, for every supported K). D, E, F and G fail if they miss
+  their requested interleaving; I alone permits its after-attach path.
   Every payload carries an id that must execute exactly once, and progress
   is judged with the views that already exist, before any new subscription;
   a rescue subscriber afterwards is diagnostic only. Every schedule ends by
   requiring that no member, reference, pin or leaf remains. Run all with no
-  argument, or one schedule by name with an optional trigger. The design
-  record, with the ablations that show each schedule fails on the defect it
-  targets, is [docs/design/farm-live-lifecycle.md](../../docs/design/farm-live-lifecycle.md).
+  argument, or one schedule by name with an optional trigger; the schedules
+  alone under TSan are `make -C tests/farm run-subscription-live-tsan`. The
+  design record, with the ablations that show each schedule fails on the
+  defect it targets, is [docs/design/farm-live-lifecycle.md](../../docs/design/farm-live-lifecycle.md).
 - `Makefile`
 
 Run T19 on its own: `make -C tests/farm run-t19` (LDC),
@@ -224,6 +228,11 @@ in dedicated sessions; the methodology and measurements are in
   there under that `Sub`. The masked check must permit this schedule, the
   subscriber must attach at the earliest Live epoch, and both payloads must
   arrive intact. It also runs in the default suite.
+- `rc11_spanned_attach.py`: exhaustive RC11 enumeration of the
+  spanned-interior attach chain (SPEC 6b-c, 6d) with and without the
+  successor `Es` acquire; the stale-metadata executions it finds without
+  the acquire are all RC11-only, which is why no schedule can reach them.
+  Its header states what the last variant over-approximates.
 - `quota_model.py`: exhaustive exploration within a two-lap bound of a
   small sequentially consistent quota model. Probe, each scan load, grant,
   reservation, and consumer pin movement can interleave. It omits the
@@ -259,7 +268,7 @@ last slot — that was a real harness race, not a sanitizer artifact.
 The Farm, actor, private-actor, review, and example lanes all use these
 flags. Farm has no manual acquire/release TSan annotations: the sanitizer
 must observe the real leaf/root/sweep/reservation chain. The root-level
-`make -C tests/farm check-farm-ordering` target adds deterministic S1/S2 schedules, the
+`make -C tests/farm check-farm-ordering` target adds deterministic S1/S2/span schedules, the
 subscription schedules of `subscription_live.d`, and the leaf-reuse test under LDC and DMD; `make -C tests/farm run-farm-tsan` includes leaf reuse
 and the subscription schedules under TSan. See [the ordering audit](../../docs/design/farm-ordering.md) for proofs and mutation
 evidence, including a leaf-acquire defect hidden by the former annotations.

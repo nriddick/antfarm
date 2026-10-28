@@ -110,10 +110,14 @@ on that code.
 
 ## 5. Audit of the implementation (this branch)
 
-The audit re-derived I1 to I5 and 6b to 6e against the code and added
-schedules for the interleavings the first set did not cover. Every schedule
-is built with write-audit hooks that compile out of ordinary builds; two
-hooks were added for it, `subscriberValidating` and `liveClearing`.
+Three sessions reviewed `8275359` in parallel on sibling branches and were
+merged here: this audit (`review/live-lifecycle-audit`), a second review
+(`review/farm-live-lifecycle`), and a test-invariants pass
+(`test/farm-live-invariants`). The audit re-derived I1 to I5 and 6b to 6e
+against the code and added schedules for the interleavings the first set
+did not cover. Every schedule is built with write-audit hooks that compile
+out of ordinary builds; two hooks were added for it, `subscriberValidating`
+and `liveClearing`.
 
 **One hardening.** A fresh subscriber attaching at epoch `c` validates `Es[c]`
 and takes `nextSeq = Seqt[c]`. When the write that crossed into `c` spanned
@@ -129,7 +133,23 @@ crossing table completed, which is after those stores; under the C++ model
 there was no happens-before edge, and `moveRef` would fatal on the mismatch.
 Validation now acquire-loads `Es` of `s` when `s > c` and ends the round on a
 mismatch (SPEC 6b-c, 9). The `Wt` bound already excludes reuse of those
-slots, so a mismatch can only be an initialization still in flight.
+slots, so a mismatch can only be an initialization still in flight. The
+second review found the same gap independently and wrote the same fix; a
+follow-up review of that branch checked it with an exhaustive RC11 litmus of
+the path, now kept as `tests/farm/rc11_spanned_attach.py` and re-run for
+this record: on `8275359` the first `moveRef` reads stale `Es` or `SqCs` in
+eight consistent executions, all of them RC11-only, and in none with the
+acquire; with the acquire the only non-OK outcomes are rejections, and every
+rejection is RC11-only, so the check never rejects a candidate under
+sequential consistency. The model's last variant lets a later lap overwrite
+`Es` without modelling the quota sweep, so its two SC outcomes there are
+executions the subscriber's `Sub` and reference forbid. The second review
+also added `farm_ordering.d`'s
+`spannedAttach`, which reaches the path deterministically: one consumer
+finishes the spanning table on an idle re-walk, another discharges its start
+epoch without ever reading the sentinel, and the subscriber attaches at the
+interior before consuming the next table. It is path coverage, not a
+discriminator; `LN` below is the discriminator.
 
 **Schedules added.** All run under LDC and DMD in `check-farm-ordering`.
 
@@ -143,6 +163,15 @@ slots, so a mismatch can only be an initialization still in flight.
 | X | the last table of epoch 0 ends exactly at the boundary, initializing epoch 1 with `Seqt == S` and no table | S attaches at 1 with `nextSeq == S`, with C present and after C has left; the next table starts at the boundary |
 | L | a bulk table spans 0 to 3; while C is paused discharging interior epoch 1, S attaches there with its first table in epoch 3 | S attaches at 1 in one round; its first advance pins 2 and 3 and releases the prefix |
 | LN | L with `Es[3]` hidden during S's first validation (instrumentation negative control) | the round is rejected; the next round attaches at 1 |
+| R (second review) | after each tail probe, C drains one whole epoch, so the frontier `Sub`s accumulate until they refuse the next grant; K = 2, 4, 8, 16 | S attaches at the Live frontier within K rounds and drops every accumulated pin; the schedule never needs rounds K+1 or K+2, so it is not evidence about the budget |
+
+The test-invariants pass made the harness stricter around all of these:
+D, E, F and G now fail if they miss their requested interleaving (only I
+keeps its documented after-attach path), every schedule ends by requiring
+a detached Farm (no member, reference, pin or leaf), and its own schedule
+J, a discharge between the hint and the pinned re-read, is folded into J1
+as the check that the rejected candidate's `Sub` is already gone when the
+next slot is read while the tail's `Sub` stays.
 
 **Ablations.** Each targeted defect was reintroduced on a private copy and
 the schedules re-run:
@@ -183,17 +212,23 @@ design sessions and were not re-run on this branch.
   path (discharge is one acquire load per confirmed epoch per passer and one
   CAS per epoch) nor subscribe latency with instrumentation outside the
   timed path.
-- The torture suite's new T28 runs a 24-thread subscribe herd beside two
-  steady consumers and two producers at the 1 MiB ring minimum, over
-  eight laps: about 55,000 herd attaches per trial under LDC and 20,000
-  under TSan, with no `RETRY`, every payload executed exactly once, and
-  nothing but the frontier `Live` afterwards. It is a stress for `Sub`
-  accounting and attachment under churn, not evidence about the round
-  budget: a round fails only when the tail outruns an attempt, and these
-  producers cannot move a window's width in the time one attempt takes.
-- The schedules run under LDC, DMD and TSan (`run-farm-tsan` now builds
-  them); the condensed torture suite, T19 and the unit suite passed under
-  LDC, DMD and TSan on this branch. The rest of `scripts/check.sh` (actors,
-  private actors, threadpool, fibers, forkjoin, C ABI, examples) was not
-  re-run here; `antfarm/package.d` changed only on the subscribe path and
-  in hook sites that compile out.
+- Two herd tests now exist. T28 (test-invariants pass) runs barrier-gated
+  cohorts of 16 and 32 members at K = 2 and K = 16 on a 1 MiB ring: every
+  other round starts with producers already refused by a backlog no member
+  has seen, the cohort that joined must drain it with no steady helper and
+  no rescue subscriber, and each departure must leave an exactly drained
+  Farm, over at least three laps. T29 (this audit) lets 24 herd arrivals
+  and departures overlap two producers and two steady consumers at the
+  same ring size over about eight laps: roughly 40,000 to 55,000 attaches
+  per trial under LDC and 20,000 under TSan, no `RETRY`, every payload
+  exactly once, a drained Farm afterwards. Neither is evidence about the
+  round budget: a round fails only when the tail outruns an attempt, and
+  these producers cannot move a window's width in the time one attempt
+  takes.
+- The schedules run under LDC, DMD and TSan (`run-farm-tsan` builds them;
+  `run-subscription-live-tsan` runs them alone); the condensed torture
+  suite, T19, the sanity entry point and the unit suite passed under LDC,
+  DMD and TSan on the merged branch. The rest of `scripts/check.sh`
+  (actors, private actors, threadpool, fibers, forkjoin, C ABI, examples)
+  was not re-run here; `antfarm/package.d` changed only on the subscribe
+  path and in hook sites that compile out.

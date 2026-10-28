@@ -36,8 +36,10 @@ struct PreparedRange
 
 ulong writeWords(AntFarm* f, ulong words, bool permit = true) nothrow @nogc @system
 {
-    // Compact ST singleton (spec 2f): 37 words at SqCs=1 (at most two views).
-    auto n = cast(size_t)(words - 37);
+    // Singleton total: table base plus two words and the payload body.
+    immutable cf = atomicLoad(f.Cf);
+    immutable base = 27 + 8UL * sqcsOf(cf > 0 ? cast(ulong) cf : 1);
+    auto n = cast(size_t)(words - base - 2);
     auto body = cast(ulong*) malloc(n * ulong.sizeof);
     require(body !is null, "ordering allocation");
     scope(exit) free(body);
@@ -189,9 +191,61 @@ void earlyCompletion()
     puts("PASS completion: zero-body uniform table joins and notifies before write returns");
 }
 
+// A subscriber attaches at a spanning table's interior and then advances on
+// the hot path. D never acquired the spanning table's sentinel, but confirms
+// epoch 0 after F finishes it. S therefore has Es[1] in its history, not
+// necessarily Es[2]. The Seqt-epoch acquire in subscribe validation must make
+// every crossed-epoch initialization visible before S's first moveRef(2).
+void spannedAttach()
+{
+    auto farm = AntFarm.create(1, 4, 1, 1, 48000, 1, 16384, 64);
+    scope(exit) farm.destroy();
+    auto q = farm.registerProducer(Tier.small);
+    auto b = farm.registerProducer(Tier.bulk);
+    scope(exit) farm.unregisterProducer(q);
+    scope(exit) farm.unregisterProducer(b);
+    ConsumerView h, f, d, s;
+    calls = 0;
+    require(h.subscribe(farm) == 0 && f.subscribe(farm) == 0 && d.subscribe(farm) == 0,
+        "span: three initial consumers");
+    producer = &q;
+    require(writeWords(farm, 15000) == 1 && writeWords(farm, 15000) == 1,
+        "span: small fillers");
+    while (f.consumeNext()) {}
+    require(f.nextSeq == 30000 && !f.sweeperNext, "span: F parked without sweeper role");
+
+    producer = &b;
+    require(writeWords(farm, 66045 - 30000) == 1, "span: crossing table");
+    require(farm.stats[1].seqt == 66045 && farm.stats[2].seqt == 66045,
+        "span: epoch 1 is an interior");
+    require(f.consumeNext(), "span: F passes crossing table");
+    require(f.nextSeq == 66045 && f.newestEi == 0, "span: F remains on epoch 0");
+    require(!f.consumeNext(), "span: F's idle re-walk finishes the table");
+    require(f.oldestEi == 0 && f.newestEi == 0, "span: F parked on confirmed epoch 0");
+
+    d.unsubscribe();
+    require((atomicLoad(farm.Rt[0][0]) & LIVE) == 0, "span: D discharged epoch 0");
+    h.unsubscribe();
+    require((atomicLoad(farm.Rt[1][0]) & LIVE) != 0 &&
+        (atomicLoad(farm.Rt[2][0]) & LIVE) != 0, "span: interior and frontier remain Live");
+    immutable at = s.subscribe(farm);
+    require(at == 1 && s.nextSeq == 66045, "span: S attaches at the interior");
+
+    producer = &q;
+    require(writeWords(farm, 1000) == 1, "span: next table from retained quota");
+    require(s.consumeNext() && s.newestEi == 2,
+        "span: first advance sees every crossed-epoch Es");
+    while (s.consumeNext() || f.consumeNext()) {}
+    s.unsubscribe();
+    f.unsubscribe();
+    require(calls == 4, "span: every table executes exactly once");
+    puts("PASS spanned interior attach: Seqt validation publishes every crossed epoch");
+}
+
 void main(string[] args)
 {
     if (args.length == 1 || args[1] == "early") earlyCompletion();
     if (args.length == 1 || args[1] == "s1") staleProbe();
     if (args.length == 1 || args[1] == "s2") departureLeavesLive();
+    if (args.length == 1 || args[1] == "span") spannedAttach();
 }
