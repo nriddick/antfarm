@@ -10,7 +10,7 @@ tables of work into a shared ring; any subscribed consumer may claim them. It su
 unordered compute where the next available worker should take the work.
 Use it alone, or add pinned workers, actors, and suspendable Fibers.
 
-The released version is the one line in [VERSION](VERSION); what each
+The released version is the latest tag and the top heading of [CHANGELOG.md](CHANGELOG.md); what each
 release changed is in [CHANGELOG.md](CHANGELOG.md), including the
 [C/C++ ABI](docs/design/c-abi.md).
 Supported platforms are Linux x86-64 and Windows x64.

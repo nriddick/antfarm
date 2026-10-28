@@ -4,8 +4,24 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
-## 2.1.1 development
+## 2.1.1 — 2026-10-28
 
+2.1.1 replaces the Farm's `Sub0` pulse with a per-epoch `Live` bit, raised by
+the producer that initializes an epoch and cleared by the consumer that
+confirms it, after deterministic schedules showed the pulse could strip the
+protection of unpublished work and miss a moving consumer. The subscribe scan
+now pins only the newest slot and its candidate, the lifecycle is audited
+with schedules, ablations and an RC11 model, and a paired comparison against
+the previous commit found it neutral on every existing cell and about half
+the cost on subscribe under load. Also here: `spillInline` is the fork-join
+default, the ring minimum is 1 MiB after the ring-size study, Fiber lanes
+wake on a refused flush, the Farm test suites are condensed and
+strengthened, and the interim design reports are recorded in history and
+removed from the tree.
+
+- forkjoin: the frame-reuse test warms every participant through a
+  `GroupHost` attachment before it checks reuse, closing a spurious
+  assertion seen on the Windows host.
 - Farm lifecycle: a `Live` bit per epoch replaces the counted `Sub0` pulse
   (SPEC 3, 6b, 6c, 6e).
   - **Protection.** The producer whose reservation initializes an epoch

@@ -1,7 +1,7 @@
 # Ant Farm roadmap
 
-This page lists remaining and next work only; the version is in
-[VERSION](VERSION) and delivered work is in [CHANGELOG.md](CHANGELOG.md).
+This page lists remaining and next work only; the version is the latest
+tag and delivered work is in [CHANGELOG.md](CHANGELOG.md).
 Windows validation is separate and is not part of the local gate.
 
 ## Next
@@ -123,19 +123,33 @@ Remaining for 2.1.0:
   doubles the default concurrent-fiber bound (4,096 at retention 16,384).
   Timed parks keep millisecond resolution.
 
-## 2.1.1 — in progress on `2.1.1-progress`
+## 2.1.1 — released 2026-10-28
 
-- Done: `spillInline` is the dispatcher's default (D and C); the Farm spill
-  is opt-in, after the fwbench `widetree` experiment measured it slower than
+Shipped:
+
+- **Farm `Live` lifecycle.** A per-epoch `Live` bit, raised by the producer
+  that initializes an epoch and cleared by the consumer that confirms it,
+  replaces the `Sub0` pulse (SPEC 3, 6b, 6c, 6e). The design record is
+  [docs/design/farm-live-lifecycle.md](docs/design/farm-live-lifecycle.md)
+  and the paired comparison against the previous commit is
+  [docs/performance/live-lifecycle-ab-2026-10-28.md](docs/performance/live-lifecycle-ab-2026-10-28.md).
+- `spillInline` is the dispatcher's default (D and C); the Farm spill is
+  opt-in, after the fwbench `widetree` experiment measured it slower than
   the inline fallback wherever it engages.
+- `MIN_RING_MIB` is 1, from the
+  [ring-size study](docs/performance/ring-size-2026-10-25.md); Fiber lanes
+  wake their consumers on a refused flush.
+- The Farm test suites are condensed and strengthened, and the interim
+  design reports live in git history rather than the tree.
+
+## Later
+
 - Private trees retreat to typed results and tracked outcomes.
 - Private-root deadlines are lazy. Decide whether to document or close two
   gaps: a root parked in `waitChildren` is not woken when its deadline passes,
   and a root that keeps returning `again` never observes its deadline. Closing
   them is the deferred "timed or external wake of a waiting private root"
   below.
-
-## Later
 
 - The deque-based Fiber executor in the
   [coroutine replacement proposal](docs/design/coroutine-replacement.md).

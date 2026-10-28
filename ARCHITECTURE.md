@@ -1,6 +1,6 @@
 # Ant Farm architecture
 
-Ant Farm (version in [VERSION](VERSION)) is one repository
+Ant Farm (the version is the latest tag and the top heading of [CHANGELOG.md](CHANGELOG.md)) is one repository
 with five cooperating packages. They separate transport, worker placement,
 stateful identities, and suspendable control flow so an application can choose
 the narrowest representation for each kind of work.
