@@ -252,6 +252,7 @@ void t16_position_ref_stall()
                 atomicLoad(f.stats[ki].seqt), atomicLoad(f.stats[ki].sd));
         abort();
     }
+    check(atomicLoad(g_totalCalls) == N, "T16 every payload executed after the producer finished");
     say("T16 producer completed OK");
 
     foreach (i; 0 .. 2)
@@ -283,119 +284,49 @@ void runPair(AntFarm* f, PayloadBatch* batch, uint nCons, Tier tier, size_t maxB
     foreach (t; consumers) t.join();
 }
 
-void t03_concurrent_exact()
+void t04_consumers_by_k()
 {
-    // Closest to antfarm_test.testConcurrent geometry.
-    auto f = AntFarm.create(2, 8, 4, 1, 16384, 8, 4096);
-    scope (exit) f.destroy();
-    enum N = 6000;
-    allocCalls(N);
-    scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
-        plen = 2;
-    });
-    scope (exit) freeBatch(batch);
-
-    // split bulk+small like original
-    Thread[3] consumers;
-    ConsCtx[3] cctx;
-    auto deadline = MonoTime.currTime + 90.seconds;
-    foreach (i; 0 .. 3)
+    // Twelve consumers, bulk and small producers writing in small batches,
+    // and varied body lengths, at K = 4, 8 and 16: on a 2 MiB ring the same
+    // stream crosses one, two and four times as many segment boundaries
+    // (segCap 65536, 32768, 16384). Absorbs the former T14 K-geometry run.
+    foreach (k; [cast(uint) 4, cast(uint) 8, cast(uint) 16])
     {
-        cctx[i] = ConsCtx(f, batch.expectedCalls, deadline);
-        auto cc = &cctx[i];
-        consumers[i] = new Thread({ consumerMain(cc); });
+        auto f = AntFarm.create(2, k, 16, 1, 16384, 8, 4096);
+        scope (exit) f.destroy();
+        enum N = 3000;
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
+            plen = 2 + (i % 10);
+        });
+        scope (exit) freeBatch(batch);
+
+        enum NC = 12;
+        Thread[NC] consumers;
+        ConsCtx[NC] cctx;
+        auto deadline = MonoTime.currTime + 120.seconds;
+        foreach (i; 0 .. NC)
+        {
+            cctx[i] = ConsCtx(f, batch.expectedCalls, deadline);
+            auto cc = &cctx[i];
+            consumers[i] = new Thread({ consumerMain(cc); });
+        }
+        ProdCtx p1 = ProdCtx(f, batch.entries, N / 2, Tier.bulk, 24);
+        ProdCtx p2 = ProdCtx(f, batch.entries + N / 2, N - N / 2, Tier.small, 6);
+        auto t1 = new Thread({ producerMain(&p1); });
+        auto t2 = new Thread({ producerMain(&p2); });
+        foreach (t; consumers) t.start();
+        t1.start();
+        t2.start();
+        t1.join();
+        t2.join();
+        foreach (t; consumers) t.join();
+        expectExactCalls(&batch, "T04");
+        expectFrontierLiveOnly(f, "T04 quiescent Live and references");
+        printf("T04 K=%u twelve consumers two producers OK\n", k);
+        fflush(stdout);
     }
-    ProdCtx p1 = ProdCtx(f, batch.entries, N / 2, Tier.bulk);
-    ProdCtx p2 = ProdCtx(f, batch.entries + N / 2, N - N / 2, Tier.small);
-    auto t1 = new Thread({ producerMain(&p1); });
-    auto t2 = new Thread({ producerMain(&p2); });
-    foreach (t; consumers) t.start();
-    t1.start();
-    t2.start();
-    t1.join();
-    t2.join();
-    foreach (t; consumers) t.join();
-
-    expectExactCalls(&batch, "T03");
-    check(countLive(f) == 1, "T03 only the frontier Live");
-    expectNoLiveConsumerRefs(f, "T03");
-    say("T03 concurrent exact OK");
-}
-
-void t04_many_consumers_two_producers()
-{
-    // High consumer count + bulk/small producers. Multi-small-producer
-    // geometries repeatedly stalled near completion (see review); kept out
-    // of the green path until the position-ref / leftover-claim story is fixed.
-    auto f = AntFarm.create(2, 8, 16, 1, 16384, 8, 4096);
-    scope (exit) f.destroy();
-    enum N = 3000;
-    allocCalls(N);
-    scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
-        plen = 2 + (i % 4);
-    });
-    scope (exit) freeBatch(batch);
-
-    enum NC = 12;
-    Thread[NC] consumers;
-    ConsCtx[NC] cctx;
-    auto deadline = MonoTime.currTime + 120.seconds;
-    foreach (i; 0 .. NC)
-    {
-        cctx[i] = ConsCtx(f, batch.expectedCalls, deadline);
-        auto cc = &cctx[i];
-        consumers[i] = new Thread({ consumerMain(cc); });
-    }
-    ProdCtx p1 = ProdCtx(f, batch.entries, N / 2, Tier.bulk, 24);
-    ProdCtx p2 = ProdCtx(f, batch.entries + N / 2, N - N / 2, Tier.small, 6);
-    auto t1 = new Thread({ producerMain(&p1); });
-    auto t2 = new Thread({ producerMain(&p2); });
-    foreach (t; consumers) t.start();
-    t1.start();
-    t2.start();
-    t1.join();
-    t2.join();
-    foreach (t; consumers) t.join();
-    expectExactCalls(&batch, "T04");
-    expectNoLiveConsumerRefs(f, "T04");
-    say("T04 many consumers two producers OK");
-}
-
-void t05_zero_consumer_gap()
-{
-    auto f = AntFarm.create(2, 8, 2, 1, 2048, 2, 1024);
-    scope (exit) f.destroy();
-    enum N = 1600;
-    allocCalls(N);
-    scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
-        plen = 2 + (i % 3);
-    });
-    scope (exit) freeBatch(batch);
-
-    ConsumerView a;
-    check(a.subscribe(f) >= 0, "A");
-    ProdCtx pctx = ProdCtx(f, batch.entries, N, Tier.small);
-    auto p = new Thread({ producerMain(&pctx); });
-    p.start();
-    Thread.sleep(25.msecs);
-    foreach (_; 0 .. 40)
-        a.consumeNext();
-    a.unsubscribe();
-    check(atomicLoad(f.Cf) == 0, "gap");
-    check(countLive(f) >= 1, "frontier Live");
-    Thread.sleep(40.msecs);
-
-    ConsCtx cctx = ConsCtx(f, batch.expectedCalls, MonoTime.currTime + 60.seconds);
-    auto c = new Thread({ consumerMain(&cctx); });
-    c.start();
-    p.join();
-    c.join();
-    expectExactCalls(&batch, "T05");
-    expectNoLiveConsumerRefs(f, "T05");
-    say("T05 zero-consumer gap OK");
 }
 
 __gshared shared(int) g_stormStop;
@@ -494,110 +425,6 @@ void t06_subscription_storm()
     fflush(stdout);
 }
 
-void t07_small_table_churn()
-{
-    auto f = AntFarm.create(2, 8, 8, 1, 4096, 6, 2048);
-    scope (exit) f.destroy();
-    enum N = 4500;
-    allocCalls(N);
-    scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
-        plen = 2;
-    });
-    scope (exit) freeBatch(batch);
-    atomicStore(g_stormStop, 0);
-    auto deadline = MonoTime.currTime + 120.seconds;
-    Thread[2] steady;
-    ConsCtx[2] sctx;
-    foreach (i; 0 .. 2)
-    {
-        sctx[i] = ConsCtx(f, batch.expectedCalls, deadline);
-        auto cc = &sctx[i];
-        steady[i] = new Thread({ consumerMain(cc); });
-    }
-    Thread[4] storm;
-    StormJob[4] jobs;
-    foreach (i; 0 .. 4)
-    {
-        jobs[i] = new StormJob(f, deadline, 30);
-        storm[i] = new Thread(&jobs[i].run);
-    }
-    ProdCtx pctx = ProdCtx(f, batch.entries, N, Tier.bulk, 10);
-    auto p = new Thread({ producerMain(&pctx); });
-    foreach (t; steady) t.start();
-    foreach (t; storm) t.start();
-    p.start();
-    p.join();
-    foreach (t; steady) t.join();
-    atomicStore(g_stormStop, 1);
-    foreach (t; storm) t.join();
-    expectExactCalls(&batch, "T07");
-    expectNoLiveConsumerRefs(f, "T07");
-    say("T07 small-table churn OK");
-}
-
-void t08_spanning_tables()
-{
-    // segCap = 2^18/8 = 32768; huge (100k) spans ~3 segments, large (34k)
-    // spans a boundary, the rest small. Bulk quota 110000 covers the huge
-    // singleton and keeps Exmax <= (K-1)*segCap.
-    auto f = AntFarm.create(2, 8, 4, 1, 110000, 2, 1024);
-    scope (exit) f.destroy();
-    enum N = 64;
-    allocCalls(N);
-    scope (exit) freeCalls();
-    auto headers = cast(Callback*) malloc(N * Callback.sizeof);
-    auto entries = cast(PayloadEntry*) malloc(N * PayloadEntry.sizeof);
-    auto huge = cast(ulong*) malloc(100000 * ulong.sizeof);
-    auto large = cast(ulong*) malloc(34000 * ulong.sizeof);
-    auto small = cast(ulong*) malloc((N - 2) * 2 * ulong.sizeof);
-    long expected;
-    foreach (i; 0 .. N)
-    {
-        headers[i] = callbackFor!countingCb();
-        ++expected;
-    }
-    huge[0] = 0;
-    large[0] = 1;
-    entries[0] = PayloadEntry(headers[0], huge[0 .. 100000]);
-    entries[1] = PayloadEntry(headers[1], large[0 .. 34000]);
-    foreach (i; 2 .. N)
-    {
-        small[(i - 2) * 2] = i;
-        small[(i - 2) * 2 + 1] = 1;
-        entries[i] = PayloadEntry(headers[i], small[(i - 2) * 2 .. (i - 2) * 2 + 2]);
-    }
-    PayloadBatch batch;
-    batch.headers = headers;
-    batch.entries = entries;
-    batch.count = N;
-    batch.expectedCalls = expected;
-
-    ConsCtx cctx = ConsCtx(f, expected, MonoTime.currTime + 60.seconds);
-    auto c = new Thread({ consumerMain(&cctx); });
-    c.start();
-    auto tok = f.registerProducer(Tier.bulk);
-    check(tok.valid, "reg");
-    size_t off;
-    while (off < N)
-    {
-        immutable n = f.write(entries[off .. N], tok);
-        off += n;
-        if (n == 0)
-            Thread.yield();
-    }
-    f.unregisterProducer(tok);
-    c.join();
-    expectExactCalls(&batch, "T08");
-    expectNoLiveConsumerRefs(f, "T08");
-    free(huge);
-    free(large);
-    free(small);
-    free(headers);
-    free(entries);
-    say("T08 spanning OK");
-}
-
 // Per-payload in-flight tracking: body[2] holds a pointer-sized slot index
 // into g_payInflight[].
 __gshared shared(long)* g_payInflight;
@@ -690,67 +517,8 @@ void t10_caps()
     foreach (i; 0 .. MAX_CONSUMERS_LIMIT)
         views[i].unsubscribe();
     check(atomicLoad(f.Cf) == 0, "drain");
-    check(countLive(f) == 1, "only the frontier Live");
+    expectFrontierLiveOnly(f, "T10 only the frontier Live after mass unsubscribe");
     say("T10 caps OK");
-}
-
-void t11_late_subscriber_multilap()
-{
-    auto f = AntFarm.create(2, 8, 1, 1, 2048, 2, 1024);
-    scope (exit) f.destroy();
-    // Variable body lengths exercise indexed uniform tables over multiple laps.
-    enum N = 300000;
-    allocCalls(N);
-    scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
-        plen = 2 + (i % 4);
-    });
-    scope (exit) freeBatch(batch);
-    ProdCtx pctx = ProdCtx(f, batch.entries, N, Tier.small);
-    auto p = new Thread({ producerMain(&pctx); });
-    p.start();
-    Thread.sleep(40.msecs);
-    check(atomicLoad(f.Wt) > 0, "progress");
-    check(atomicLoad(f.Wt) < f.Ln, "blocked");
-    ConsCtx cctx = ConsCtx(f, batch.expectedCalls, MonoTime.currTime + 90.seconds);
-    auto c = new Thread({ consumerMain(&cctx); });
-    c.start();
-    p.join();
-    c.join();
-    check(atomicLoad(f.Wt) > 2 * f.Ln, "wrap");
-    expectExactCalls(&batch, "T11");
-    expectNoLiveConsumerRefs(f, "T11");
-    say("T11 late sub multilap OK");
-}
-
-void t12_no_reexecution_on_resub()
-{
-    auto f = AntFarm.create(2, 8, 2, 1, 4096, 4, 2048);
-    scope (exit) f.destroy();
-    enum N = 200;
-    allocCalls(N);
-    scope (exit) freeCalls();
-    auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
-        plen = 2;
-    });
-    scope (exit) freeBatch(batch);
-    ConsCtx c1 = ConsCtx(f, batch.expectedCalls, MonoTime.currTime + 60.seconds);
-    auto ct = new Thread({ consumerMain(&c1); });
-    ct.start();
-    ProdCtx pctx = ProdCtx(f, batch.entries, N, Tier.small);
-    auto p = new Thread({ producerMain(&pctx); });
-    p.start();
-    p.join();
-    ct.join();
-    expectExactCalls(&batch, "T12a");
-    immutable before = atomicLoad(g_totalCalls);
-    ConsumerView v;
-    check(v.subscribe(f) >= 0, "resub");
-    foreach (_; 0 .. 10_000)
-        v.consumeNext();
-    v.unsubscribe();
-    check(atomicLoad(g_totalCalls) == before, "no reexec");
-    say("T12 no reexecution OK");
 }
 
 void t13_create_validation()
@@ -775,27 +543,6 @@ void t13_create_validation()
     f0.unregisterProducer(tok);
     f0.destroy();
     say("T13 create OK");
-}
-
-void t14_k_geometry()
-{
-    foreach (k; [cast(uint) 4, cast(uint) 16])
-    {
-        auto f = AntFarm.create(2, k, 4, 1, 4096, 4, 1024);
-        scope (exit) f.destroy();
-        enum N = 800;
-        allocCalls(N);
-        scope (exit) freeCalls();
-        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
-            plen = 2 + (i % 10);
-        });
-        scope (exit) freeBatch(batch);
-        runPair(f, &batch, 3, Tier.bulk, 0, 90);
-        expectExactCalls(&batch, "T14");
-        expectNoLiveConsumerRefs(f, "T14");
-        printf("T14 K=%u OK\n", k);
-        fflush(stdout);
-    }
 }
 
 void t15_wave_consumers()
@@ -1151,32 +898,14 @@ void t18_pure_churn_orphan()
         foreach (t; storm) t.start();
         p.start();
         p.join();
-        // bounded mop-up window (not a pass criterion)
-        auto mop = MonoTime.currTime + 3.seconds;
-        while (MonoTime.currTime < mop)
-            Thread.yield();
+        // Stop the churn as soon as the producer is done: what the churners
+        // left behind is the point, and the salvage below must find it all.
         atomicStore(g_stormStop, 1);
         foreach (t; storm) t.join();
 
-        // orphan incomplete segments with no protection
-        int orphans;
-        immutable eg = cast(long)(atomicLoad(f.Wt) >> f.segShift);
-        foreach (e; 0 .. eg + 1)
-        {
-            immutable ki = cast(uint)(e & f.kMask);
-            if (atomicLoad(f.stats[ki].es) != e)
-                continue;
-            immutable ki1 = cast(uint)((e + 1) & f.kMask);
-            if (atomicLoad(f.stats[ki1].es) != e + 1)
-                continue;
-            immutable seqt = atomicLoad(f.stats[ki].seqt);
-            immutable seqtN = atomicLoad(f.stats[ki1].seqt);
-            immutable sd = atomicLoad(f.stats[ki].sd);
-            immutable complete = seqt >= seqtN || seqt + sd >= seqtN;
-            immutable rtlow = atomicLoad(f.Rt[ki][0]) & LOWMASK;
-            if (!complete && rtlow == 0)
-                ++orphans;
-        }
+        // Incomplete epochs with no reference and no Live: none may exist.
+        immutable orphans = countUnprotectedIncomplete(f);
+        expectNoLeftoverSub(f, "T18 Subs after churn");
 
         immutable calls1 = atomicLoad(g_totalCalls);
         // late salvage
@@ -1199,8 +928,13 @@ void t18_pure_churn_orphan()
             trial, calls1, calls2, batch.expectedCalls, orphans, zeros, countLive(f));
         fflush(stdout);
 
-        if (orphans > 0 || calls2 != batch.expectedCalls)
+        if (orphans > 0 || zeros != 0 || calls2 != batch.expectedCalls)
             ++bad;
+        else
+        {
+            expectExactCalls(&batch, "T18 exact calls after salvage");
+            expectFrontierLiveOnly(f, "T18 only the frontier Live after salvage");
+        }
 
         freeBatch(batch);
         freeCalls();
@@ -1335,16 +1069,21 @@ void t20_confirmed_discharged()
                 trial, confirmedProtected);
             ++bad;
         }
-        if (countLive(f) != 1)
+        immutable frontier = cast(uint)((atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift) & f.kMask);
+        if (countLive(f) != 1 || (atomicLoad!(MemoryOrder.raw)(f.Rt[frontier][0]) & LIVE) == 0)
         {
             fprintf(stderr, "T20 trial %d: %u Live slots at quiescence (expected the frontier only)\n",
                 trial, countLive(f));
             ++bad;
         }
         immutable got = atomicLoad(g_totalCalls);
-        if (got != expected)
+        size_t notOnce;
+        foreach (i; 0 .. N)
+            if (atomicLoad(g_calls[i]) != 1) ++notOnce;
+        if (got != expected || notOnce != 0)
         {
-            fprintf(stderr, "T20 trial %d: calls=%lld expected=%lld\n", trial, got, expected);
+            fprintf(stderr, "T20 trial %d: calls=%lld expected=%lld, %zu payloads not executed exactly once\n",
+                trial, got, expected, notOnce);
             ++bad;
         }
         fprintf(stderr, "T20 trial %d: confirmed=%u live=%u calls=%lld/%lld\n",
@@ -1513,8 +1252,7 @@ void t22_avgcost_sharding()
         t.join();
 
     expectExactCalls(&batch, "T22");
-    check(countLive(f) == 1, "T22 only the frontier Live");
-    expectNoLiveConsumerRefs(f, "T22");
+    expectFrontierLiveOnly(f, "T22 only the frontier Live");
     say("T22 avgCost sharding exact OK");
 }
 
@@ -1736,6 +1474,101 @@ void t24_topology_hang_canary()
     say("T24 topology hang canary OK");
 }
 
+
+// ---------------------------------------------------------------------------
+// T28: a subscribe herd under rapid wrap at the 1 MiB minimum ring. K = 8
+// gives segCap 16384; the two producers' quotas (8192 + 4096) keep the tail
+// moving while 24 herd threads loop subscribeOnce, consume three tables and
+// leave, beside two steady consumers. RETRY is counted and must stay
+// recoverable; every payload must execute exactly once, and at quiescence
+// no Sub, count or leaf may remain and only the frontier may be Live.
+// ---------------------------------------------------------------------------
+
+__gshared shared(int) g_herdStop;
+
+final class HerdJob
+{
+    AntFarm* f;
+    MonoTime deadline;
+    long cycles, retries;
+    this(AntFarm* f, MonoTime deadline) { this.f = f; this.deadline = deadline; }
+    void run()
+    {
+        while (atomicLoad(g_herdStop) == 0 && MonoTime.currTime < deadline)
+        {
+            ConsumerView v;
+            immutable r = v.subscribeOnce(f);
+            if (r == SUBSCRIBE_RETRY) { ++retries; continue; }
+            check(r >= 0, "T28 subscribeOnce");
+            foreach (_; 0 .. 3)
+                v.consumeNext();
+            v.unsubscribe();
+            ++cycles;
+        }
+    }
+}
+
+void t28_subscribe_herd()
+{
+    enum TRIALS = 2;
+    foreach (trial; 0 .. TRIALS)
+    {
+        auto f = AntFarm.create(1, 8, 32, 1, 8192, 1, 4096);
+        scope (exit) f.destroy();
+        // 40000 payloads of 16 words in tables of at most 16 lap the ring
+        // about six times.
+        enum N = 40000;
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
+            plen = 16;
+        });
+        scope (exit) freeBatch(batch);
+
+        atomicStore(g_herdStop, 0);
+        auto deadline = MonoTime.currTime + 90.seconds;
+        enum NSTEADY = 2;
+        Thread[NSTEADY] steady;
+        ConsCtx[NSTEADY] sctx;
+        foreach (i; 0 .. NSTEADY)
+        {
+            sctx[i] = ConsCtx(f, batch.expectedCalls, deadline);
+            auto cc = &sctx[i];
+            steady[i] = new Thread({ consumerMain(cc); });
+        }
+        enum NHERD = 24;
+        HerdJob[NHERD] jobs;
+        Thread[NHERD] herd;
+        foreach (i; 0 .. NHERD)
+        {
+            jobs[i] = new HerdJob(f, deadline);
+            herd[i] = new Thread(&jobs[i].run);
+        }
+        ProdCtx p1 = ProdCtx(f, batch.entries, N / 2, Tier.bulk, 16);
+        ProdCtx p2 = ProdCtx(f, batch.entries + N / 2, N - N / 2, Tier.small, 4);
+        auto t1 = new Thread({ producerMain(&p1); });
+        auto t2 = new Thread({ producerMain(&p2); });
+        foreach (t; steady) t.start();
+        foreach (t; herd) t.start();
+        t1.start();
+        t2.start();
+        t1.join();
+        t2.join();
+        foreach (t; steady) t.join();
+        atomicStore(g_herdStop, 1);
+        foreach (t; herd) t.join();
+
+        long cycles, retries;
+        foreach (j; jobs) { cycles += j.cycles; retries += j.retries; }
+        expectExactCalls(&batch, "T28 exact calls under the herd");
+        expectFrontierLiveOnly(f, "T28 quiescent after the herd");
+        printf("T28 trial %d: %ld herd cycles, %ld RETRY, Wt=%llu (%llu laps)\n", trial,
+            cycles, retries, atomicLoad(f.Wt), atomicLoad(f.Wt) / f.Ln);
+        fflush(stdout);
+    }
+    say("T28 subscribe herd OK");
+}
+
 void main(string[] args)
 {
     bool runAll = args.length <= 1;
@@ -1773,31 +1606,19 @@ void main(string[] args)
         t24_topology_hang_canary();
     if (want("T25"))
         t25_single_shot_claim_contract();
+    if (want("T28"))
+        t28_subscribe_herd();
 
-    if (want("T03"))
-        t03_concurrent_exact();
     if (want("T04"))
-        t04_many_consumers_two_producers();
-    if (want("T05"))
-        t05_zero_consumer_gap();
+        t04_consumers_by_k();
     if (want("T06"))
         t06_subscription_storm();
-    if (want("T07"))
-        t07_small_table_churn();
-    if (want("T08"))
-        t08_spanning_tables();
     if (want("T09"))
         t09_slow_single_shot();
     if (want("T10"))
         t10_caps();
-    if (want("T11"))
-        t11_late_subscriber_multilap();
-    if (want("T12"))
-        t12_no_reexecution_on_resub();
     if (want("T13"))
         t13_create_validation();
-    if (want("T14"))
-        t14_k_geometry();
     if (want("T15"))
         t15_wave_consumers();
 

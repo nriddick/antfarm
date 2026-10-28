@@ -577,11 +577,15 @@ enum ulong COUNTMASK = LIVE - 1;
 //   subscriberPinned(ki, eg)   subscriber: Sub added on slot ki
 //   subscriberRead(ki, x)      subscriber: about to read slot ki as epoch x
 //   subscriberReadMid(ki, x)   subscriber: between that read's Es and Rt loads
+//   subscriberValidating(ki, x) subscriber: candidate x re-read Live under its
+//                              Sub, before the validation loads
+//   liveClearing(ki, rt)       consumer: discharge loaded rt (Live set) on slot
+//                              ki, before its CAS
 version (AntfarmWriteAuditHooks)
 {
     enum WriteAuditPhase { anchorProbed, quotaSwept, tailReserved, subscriberPinned,
         tablePublished, subscriberProbed, liveRaised, subscriberCounted,
-        subscriberRead, subscriberReadMid }
+        subscriberRead, subscriberReadMid, subscriberValidating, liveClearing }
     __gshared void function(AntFarm*, WriteAuditPhase, ulong, ulong)
         nothrow @nogc @system writeAuditHook;
 }
@@ -2370,6 +2374,9 @@ struct ConsumerView
             // in [Es, Es + K - 1] and the tail must not have reserved the
             // candidate's next lap.
             immutable seg = cast(uint)(cast(ulong) cand & f.kMask);
+            version (AntfarmWriteAuditHooks)
+                if (writeAuditHook !is null)
+                    writeAuditHook(f, WriteAuditPhase.subscriberValidating, seg, cast(ulong) cand);
             immutable es = atomicLoad!(MemoryOrder.acq)(f.stats[seg].es);
             immutable sq = cast(uint) atomicLoad!(MemoryOrder.raw)(f.stats[seg].sqcs);
             immutable seqt = atomicLoad!(MemoryOrder.raw)(f.stats[seg].seqt);
@@ -2379,6 +2386,24 @@ struct ConsumerView
             if (es != cand || sq == 0 ||
                 seqtEpoch < esU || seqtEpoch > esU + f.K - 1 ||
                 (wt1 >> f.segShift) >= esU + f.K)
+            {
+                if (candFresh) unpin(seg);
+                continue;
+            }
+            // Seqt beyond the candidate's epoch names the end of the write
+            // that crossed into it, so the first table lies in a later epoch
+            // and the first advance pins every epoch up to it (6d). Those
+            // epochs' Es were stored by that producer after Es[cand], and no
+            // edge acquired so far orders them: the discharges and reuses
+            // this scan passed carry only their own successor's Es, and the
+            // tail probe carries only reservations. Acquire the last of them
+            // here; its release-store follows every earlier one, so the
+            // attach imports them all. A mismatch is that initialization
+            // still in flight (the tail bound above rules out reuse), and
+            // the round ends.
+            if (seqtEpoch > esU &&
+                atomicLoad!(MemoryOrder.acq)(f.stats[cast(uint)(seqtEpoch & f.kMask)].es)
+                    != cast(long) seqtEpoch)
             {
                 if (candFresh) unpin(seg);
                 continue;
@@ -2573,6 +2598,9 @@ private:
             immutable old = atomicLoad!(MemoryOrder.acq)(F.Rt[ki][0]);
             if ((old & LIVE) == 0)
                 return;
+            version (AntfarmWriteAuditHooks)
+                if (writeAuditHook !is null)
+                    writeAuditHook(F, WriteAuditPhase.liveClearing, ki, old);
             if (cas!(MemoryOrder.acq_rel, MemoryOrder.raw)(&F.Rt[ki][0], old, old - LIVE))
                 return;
         }

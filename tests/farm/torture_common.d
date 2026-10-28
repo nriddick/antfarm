@@ -236,6 +236,26 @@ uint countLive(AntFarm* f)
     return n;
 }
 
+// Quiescent only: every view has left and every producer is done. Exactly
+// one slot is Live, it is the write tail's, and no count, Sub or leaf
+// remains anywhere (spec 6e postconditions).
+void expectFrontierLiveOnly(AntFarm* f, const(char)[] label)
+{
+    immutable frontier = cast(uint)((atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift) & f.kMask);
+    foreach (ki; 0 .. f.K)
+    {
+        immutable rt = atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]);
+        immutable want = ki == frontier ? LIVE : 0UL;
+        if (rt != want)
+        {
+            fprintf(stderr, "%.*s ki=%u rt=%llx expected %llx (frontier ki=%u)\n",
+                cast(int) label.length, label.ptr, ki, rt, want, frontier);
+            abort();
+        }
+    }
+    expectNoLiveConsumerRefs(f, label);
+}
+
 void expectNoLeftoverSub(AntFarm* f, const(char)[] label)
 {
     foreach (ki; 0 .. f.K)

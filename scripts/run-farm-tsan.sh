@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Run the Farm ThreadSanitizer binary. Extra arguments are forwarded
-# (for example `join-only` or `stale-quota-only`).
-# Full runs also exercise the real leaf-to-root reclamation handoff.
+# Run the Farm ThreadSanitizer binaries. Extra arguments are forwarded to
+# the unit suite (for example `join-only` or `stale-quota-only`).
+# Full runs also exercise the real leaf-to-root reclamation handoff and the
+# hook-driven Live lifecycle schedules.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export ANTFARM_HUGE_PAGES=0
@@ -10,4 +11,5 @@ if (( $# )); then
     exec ./tests/farm/antfarm_test_tsan "$@"
 fi
 ./tests/farm/antfarm_test_tsan
-exec ./tests/farm/antfarm_test_leaf_tsan
+./tests/farm/antfarm_test_leaf_tsan
+exec ./tests/farm/antfarm_test_subscription_tsan

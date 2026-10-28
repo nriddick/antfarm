@@ -82,6 +82,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/private-actor-ordering.md](design/private-actor-ordering.md) | see the private join, outcome and cancellation proof chains |
 | [design/private-actor-layout.md](design/private-actor-layout.md) | see the Entry/Service/cohort layout invariants and slab reuse proof |
 | [design/farm-ordering.md](design/farm-ordering.md) | see the Farm subscription/reclamation ordering audit and its TSan lanes |
+| [design/farm-live-lifecycle.md](design/farm-live-lifecycle.md) | see why the per-epoch `Live` bit replaced `Sub0`, how the subscribe scan was chosen, and what the audit's schedules and ablations established |
 | [design/c-abi.md](design/c-abi.md) | build and use the C/C++ ABI, runtime-free core/public actors and optional non-Fiber worker host |
 | [design/threadpool.md](design/threadpool.md) | get the topology, worker, Director, registry and OS-backend contracts |
 | [design/c-dispatcher.md](design/c-dispatcher.md) | use C continuation nodes, callback ranges and GroupHost; own their completion and teardown |
@@ -128,6 +129,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | The push gate | [CONTRIBUTING.md](../CONTRIBUTING.md#the-push-gate) |
 | CyDo agent session routing and local iteration | [development/agent-workflow.md](development/agent-workflow.md) |
 | Farm ordering audit and real-atomic TSan lanes | [design/farm-ordering.md](design/farm-ordering.md) |
+| Farm `Live` lifecycle design record, subscribe scan evidence and open obligations | [design/farm-live-lifecycle.md](design/farm-live-lifecycle.md) |
 | C ABI headers, compatibility and runtime separation | [design/c-abi.md](design/c-abi.md) |
 | Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |
 | Fiber scheduler model and invariants | [design/ant_fibers.md](design/ant_fibers.md) |

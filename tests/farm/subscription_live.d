@@ -17,7 +17,7 @@
 //              subscription is allowed; a rescue afterwards is diagnostic only.
 //
 // usage: subscription_live            (every schedule and trigger)
-//        subscription_live <A|B|C|D1|D2|E|F|G|H|I|P> [trigger 0..3]
+//        subscription_live <A|B|C|D1|D2|E|F|G|H|I|P|J1|J2|J3|Q|K|X|L|LN> [trigger 0..3]
 module subscription_live;
 
 import antfarm;
@@ -82,7 +82,7 @@ ulong put(ref Token tok, ulong words, bool exact) nothrow @nogc @system
     return r;
 }
 
-void newFarm() nothrow @nogc @system
+void resetLedger() nothrow @nogc @system
 {
     foreach (i; 0 .. MAX_IDS)
     {
@@ -93,6 +93,11 @@ void newFarm() nothrow @nogc @system
     g_stage = 0;
     g_reads = 0;
     g_failed = false;
+}
+
+void newFarm() nothrow @nogc @system
+{
+    resetLedger();
     // 1 MiB, K = 4 (segCap 32768); two small producers of 16384: Exmax is
     // one segment.
     g_f = AntFarm.create(1, 4, 1, 0, 0, 2, 16384, 64);
@@ -750,6 +755,344 @@ bool scheduleP()
     return verdict("P", ok);
 }
 
+// ---------------------------------------------------------------------------
+// J and Q. C, the only consumer, idles on epoch 1 with that epoch's three
+// tables unconsumed; epoch 2 is already initialized, so epoch 1 confirms the
+// moment C drains it. S's candidate is epoch 1, confirmed-but-Live at the
+// instant the schedule chooses:
+//   J1  C drains and discharges 1 at S's pinned re-read of slot 1. The
+//       re-read finds Live clear; S drops that Sub and attaches at 2.
+//   J2  C drains at S's validation, after the re-read saw Live. S attaches
+//       at the now discharged epoch 1: its Sub covered the slot throughout,
+//       so its reference lands on protected space.
+//   J3  C is paused inside its discharge, between the load and the CAS; S
+//       subscribes completely and attaches at 1 while it is Live and
+//       confirmed. S lands on a second leaf, so C's CAS fails against the
+//       new count, reloads, and clears Live under S's reference.
+//   Q   C is paused the same way; a Sub lands on slot 1 and stays. C's CAS
+//       retries against it and clears Live with the Sub intact.
+// ---------------------------------------------------------------------------
+
+__gshared int g_clears;
+
+void setupJ(bool twoLeaves) nothrow @nogc @system
+{
+    immutable S = g_seg;
+    require(g_C.subscribe(g_f) == 0, "C");                                     // IDc 0
+    ConsumerView h1, h2;
+    if (twoLeaves)
+        require(h1.subscribe(g_f) == 0 && h2.subscribe(g_f) == 0, "h1, h2"); // IDc 1, 2
+    require(put(g_q, 11000, true) == 1, "e0 t1");
+    require(put(g_q, 11000, true) == 1, "e0 t2");
+    require(put(g_q, S - 300 - 22000, true) == 1, "e0 t3");
+    require(put(g_q, 1000, true) == 1, "e0 crossing");                         // S + 700
+    if (twoLeaves)
+    {
+        // Epoch 1 was sized for three consumers: SqCs 2, two leaves.
+        require(atomicLoad(g_f.stats[1].sqcs) == 2, "two leaves on epoch 1");
+        h1.unsubscribe();
+        h2.unsubscribe();
+    }
+    while (g_C.consumeNext()) {}
+    require(g_C.oldestEi == 1 && g_C.newestEi == 1, "C on epoch 1");
+    require(put(g_q, 15884, true) == 1, "e1 t1");
+    require(put(g_q, 15884, true) == 1, "e1 t2");                              // 2S - 300
+    require(put(g_q, 1000, true) == 1, "e1 crossing into 2");                  // 2S + 700
+    require((atomicLoad(g_f.Rt[0][0]) & LOWMASK) == 0, "epoch 0 discharged");
+    require((atomicLoad(g_f.Rt[1][0]) & LOWMASK) == (LIVE | 1), "epoch 1 Live, held by C");
+    require(atomicLoad(g_f.Rt[2][0]) == LIVE, "epoch 2 Live, unentered");
+}
+
+void hookJ(AntFarm*, WriteAuditPhase phase, ulong a1, ulong a2) nothrow @nogc @system
+{
+    if (g_stage != 1) return;
+    final switch (g_mode)
+    {
+    case '1':
+        if (phase == WriteAuditPhase.subscriberRead && a1 == 1 && a2 == 1 && ++g_reads == 2)
+        {
+            g_stage = 2;
+            while (g_C.consumeNext()) {}
+            require(g_C.newestEi == 2 && g_C.oldestEi == 2, "C discharged 1 at the re-read");
+        }
+        break;
+    case '2':
+        if (phase == WriteAuditPhase.subscriberValidating && a1 == 1 && a2 == 1)
+        {
+            g_stage = 2;
+            while (g_C.consumeNext()) {}
+            require(g_C.newestEi == 2 && g_C.oldestEi == 2, "C discharged 1 under S's Sub");
+        }
+        break;
+    case '3':
+        if (phase == WriteAuditPhase.liveClearing && a1 == 1)
+        {
+            if (++g_clears == 1)
+            {
+                require(((a2 & LIVE) != 0) && (a2 & COUNTMASK) == 1, "C loaded Live with its own count");
+                g_subResult = g_S.subscribe(g_f);
+                require(g_subResult == 1, "S attached at Live epoch 1 during the discharge");
+                require((atomicLoad(g_f.Rt[1][0]) & LOWMASK) == (LIVE | 2), "second leaf took a root count");
+            }
+            else
+            {
+                g_stage = 2;
+                require((a2 & COUNTMASK) == 2, "C's CAS retried against the new count");
+            }
+        }
+        break;
+    case 'Q':
+        if (phase == WriteAuditPhase.liveClearing && a1 == 1)
+        {
+            if (++g_clears == 1)
+                atomicFetchAdd!(MemoryOrder.rel)(g_f.Rt[1][0], SUB);
+            else
+            {
+                g_stage = 2;
+                require((a2 >> 32) == 1 && (a2 & LIVE) != 0, "C's CAS retried against the Sub");
+            }
+        }
+        break;
+    }
+}
+
+bool scheduleJ(char mode)
+{
+    newFarm();
+    g_mode = mode;
+    g_clears = 0;
+    setupJ(mode == '3');
+    g_stage = 1;
+    writeAuditHook = &hookJ;
+    long r;
+    if (mode == '1' || mode == '2')
+    {
+        r = g_S.subscribe(g_f);
+        writeAuditHook = null;
+        require(g_stage == 2, "schedule ran");
+    }
+    else
+    {
+        // C drains alone; its discharge of epoch 1 is where the schedule acts.
+        while (g_C.consumeNext()) {}
+        writeAuditHook = null;
+        require(g_stage == 2 && g_clears == 2, "discharge CAS retried exactly once");
+        r = mode == '3' ? g_subResult : -1;
+    }
+    bool ok = true;
+    immutable rt1 = atomicLoad(g_f.Rt[1][0]);
+    if (mode == 'Q')
+        printf("  discharge retried against the Sub; slot 1 Rt=%llx\n", rt1);
+    else
+        printf("  S attached at epoch %lld; slot 1 Rt=%llx\n", r, rt1);
+    final switch (mode)
+    {
+    case '1':
+        ok = r == 2 && (rt1 & LOWMASK) == 0;
+        break;
+    case '2':
+        ok = r == 1 && (rt1 & LIVE) == 0 && (rt1 & COUNTMASK) == 1;
+        break;
+    case '3':
+        ok = r == 1 && (rt1 & LIVE) == 0 && (rt1 & COUNTMASK) == 1;
+        break;
+    case 'Q':
+        ok = (rt1 & LIVE) == 0 && (rt1 >> 32) == 1 && (rt1 & COUNTMASK) == 0;
+        atomicFetchSub!(MemoryOrder.rel)(g_f.Rt[1][0], SUB);
+        ok = ok && atomicLoad(g_f.Rt[1][0]) == 0;
+        break;
+    }
+    foreach (uint i; 0 .. g_f.K)
+        ok = ok && (atomicLoad(g_f.Rt[i][0]) >> 32) == 0;
+    if (mode == 'Q')
+    {
+        require(g_S.subscribe(g_f) == 2, "S attaches at the frontier");
+    }
+    g_C.unsubscribe();
+    char[8] nm = ['J', mode, 0, 0, 0, 0, 0, 0];
+    if (mode == 'Q') nm[0 .. 2] = ['Q', 0];
+    ok = survivorProgress(g_S, nm.ptr) && ok;
+    g_S.unsubscribe();
+    endFarm();
+    return verdict(nm.ptr, ok);
+}
+
+// ---------------------------------------------------------------------------
+// K. Two subscribers interleaved on one candidate. In J's setup, S1 has just
+// pinned slot 1 (its candidate) when S2 subscribes completely: S2 pins the
+// same frontier and candidate slots, attaches at 1, and drops its Subs. S1
+// then re-reads under the remaining Sub, validates, and attaches at 1 too.
+// Every Sub must be gone, both references must be on epoch 1, and the root
+// count must equal the number of occupied leaves.
+// ---------------------------------------------------------------------------
+
+__gshared ConsumerView g_S2;
+
+void hookK(AntFarm*, WriteAuditPhase phase, ulong a1, ulong) nothrow @nogc @system
+{
+    if (g_stage != 1 || phase != WriteAuditPhase.subscriberPinned || a1 != 1) return;
+    g_stage = 2;
+    require((atomicLoad(g_f.Rt[1][0]) >> 32) == 1, "S1's Sub is on slot 1");
+    g_subResult = g_S2.subscribe(g_f);
+    require(g_subResult == 1, "S2 attached at 1 while S1 holds its Sub");
+    require((atomicLoad(g_f.Rt[1][0]) >> 32) == 1, "S2 dropped its Subs, S1's remains");
+}
+
+bool scheduleK()
+{
+    newFarm();
+    setupJ(true);
+    g_stage = 1;
+    writeAuditHook = &hookK;
+    immutable r = g_S.subscribe(g_f);
+    writeAuditHook = null;
+    require(g_stage == 2, "schedule ran");
+    printf("  S1 attached at epoch %lld, S2 at %lld\n", r, g_subResult);
+    bool ok = r == 1 && g_subResult == 1;
+    foreach (uint i; 0 .. g_f.K)
+        ok = ok && (atomicLoad(g_f.Rt[i][0]) >> 32) == 0;
+    // C (IDc 0) and S2 (IDc 2) share leaf 0; S1 (IDc 1) is alone on leaf 1.
+    immutable rt1 = atomicLoad(g_f.Rt[1][0]);
+    ok = ok && (rt1 & LOWMASK) == (LIVE | 2)
+        && atomicLoad(g_f.Lt[1 * MAX_LEAVES + 0][0]) == 2
+        && atomicLoad(g_f.Lt[1 * MAX_LEAVES + 1][0]) == 1;
+    while (g_S2.consumeNext()) {}
+    g_S2.unsubscribe();
+    g_C.unsubscribe();
+    ok = survivorProgress(g_S, "K") && ok;
+    g_S.unsubscribe();
+    endFarm();
+    return verdict("K", ok);
+}
+
+// ---------------------------------------------------------------------------
+// X. An exact boundary landing. The last table of epoch 0 ends at Wt == S, so
+// the write initializes epoch 1 with Seqt[1] == S before any table exists
+// there. C migrates onto that empty frontier and discharges 0. S must attach
+// at 1 with nextSeq == S, both while C holds the frontier and after C has
+// left; the next table then starts exactly at the boundary.
+// ---------------------------------------------------------------------------
+
+bool scheduleX()
+{
+    newFarm();
+    immutable S = g_seg;
+    require(g_C.subscribe(g_f) == 0, "C");
+    require(put(g_q, 11000, true) == 1, "e0 t1");
+    require(put(g_q, 11000, true) == 1, "e0 t2");
+    require(put(g_q, S - 300 - 22000, true) == 1, "e0 t3");
+    require(put(g_q, 300, true) == 1, "exact landing");
+    require(atomicLoad(g_f.Wt) == S && atomicLoad(g_f.stats[1].es) == 1
+        && atomicLoad(g_f.stats[1].seqt) == S, "epoch 1 initialized at the boundary");
+    while (g_C.consumeNext()) {}
+    require(g_C.oldestEi == 1 && g_C.newestEi == 1 && g_C.nextSeq == S, "C idle on the empty frontier");
+    require(atomicLoad(g_f.Rt[0][0]) == 0, "epoch 0 discharged");
+    immutable r1 = g_S.subscribe(g_f);
+    printf("  S attached at epoch %lld, nextSeq %llu (boundary %llu)\n", r1, g_S.nextSeq, S);
+    bool ok = r1 == 1 && g_S.nextSeq == S;
+    g_C.unsubscribe();
+    g_S.unsubscribe();
+    require(atomicLoad(g_f.Rt[1][0]) == LIVE, "empty Farm: only the boundary frontier Live");
+    immutable r2 = g_S.subscribe(g_f);
+    ok = ok && r2 == 1 && g_S.nextSeq == S;
+    require(put(g_q, 1000, true) == 1, "table at the boundary");
+    require(g_S.consumeNext() && g_S.nextSeq == S + 1000, "S reads the boundary table");
+    ok = survivorProgress(g_S, "X") && ok;
+    g_S.unsubscribe();
+    endFarm();
+    return verdict("X", ok);
+}
+
+// ---------------------------------------------------------------------------
+// L and LN. A bulk table spans three boundaries (0 -> 3), so epochs 1 and 2
+// are interiors with Seqt == 3S + 300. C finishes it, migrates to 3 and
+// discharges 0; while C is paused inside its discharge of 1, S attaches at
+// interior epoch 1. Its first table lies in epoch 3, so validation must
+// acquire Es[3] before attaching (SPEC 6b-c). LN is the negative control
+// for that load: the hook hides Es[3] during S's first validation, which
+// must reject the round; the next round, with Es[3] visible again, attaches.
+// ---------------------------------------------------------------------------
+
+__gshared int g_probes;
+
+void newFarmBulk() nothrow @nogc @system
+{
+    resetLedger();
+    // 1 MiB, K = 4; one bulk producer whose quota is three segments.
+    g_f = AntFarm.create(1, 4, 1, 1, 3 * 32768, 0, 0);
+    g_q = g_f.registerProducer(Tier.bulk);
+    require(g_q.valid, "bulk producer");
+    g_seg = g_f.segCap;
+}
+
+void endFarmBulk() nothrow @nogc @system
+{
+    g_f.unregisterProducer(g_q);
+    g_f.destroy();
+    g_f = null;
+}
+
+void hookL(AntFarm*, WriteAuditPhase phase, ulong a1, ulong a2) nothrow @nogc @system
+{
+    if (g_stage == 1 && phase == WriteAuditPhase.liveClearing && a1 == 1)
+    {
+        g_stage = 2;
+        g_subResult = g_S.subscribe(g_f);
+        atomicStore(g_f.stats[3].es, 3L);           // LN: whatever S did, restore Es[3]
+        g_stage = 3;
+        return;
+    }
+    if (g_stage != 2) return;
+    if (phase == WriteAuditPhase.subscriberProbed) ++g_probes;
+    if (g_mode != 'N') return;
+    // Instrumentation negative control: Es[3] reads as unpublished during S's
+    // first validation only. Nothing else runs meanwhile (C is paused on this
+    // thread), and the value is restored before S's first advance.
+    if (phase == WriteAuditPhase.subscriberValidating && a1 == 1 && a2 == 1 && g_probes == 1)
+        atomicStore(g_f.stats[3].es, -1L);
+    else if (phase == WriteAuditPhase.subscriberProbed && g_probes == 2)
+        atomicStore(g_f.stats[3].es, 3L);
+}
+
+bool scheduleL(char mode)
+{
+    newFarmBulk();
+    g_mode = mode;
+    g_probes = 0;
+    immutable S = g_seg;
+    require(g_C.subscribe(g_f) == 0, "C");
+    require(put(g_q, S - 300, true) == 1, "e0 fill");
+    require(put(g_q, 2 * S + 600, true) == 1, "spanning 0 -> 3");                 // 3S + 300
+    require(put(g_q, 1000, true) == 1, "first table of epoch 3");                 // 3S + 1300
+    foreach (e; 1 .. 4)
+        require(atomicLoad(g_f.stats[e].es) == e && atomicLoad(g_f.stats[e].seqt) == 3 * S + 300,
+            "interiors share Seqt");
+    g_stage = 1;
+    writeAuditHook = &hookL;
+    while (g_C.consumeNext()) {}
+    writeAuditHook = null;
+    require(g_stage == 3, "schedule ran");
+    require(g_C.oldestEi == 3 && g_C.newestEi == 3, "C on epoch 3");
+    printf("  S attached at epoch %lld after %d probe(s), nextSeq %llu (epoch %llu)\n",
+        g_subResult, g_probes, g_S.nextSeq, g_S.nextSeq >> g_f.segShift);
+    bool ok = g_subResult == 1 && g_S.nextSeq == 3 * S + 300
+        && g_probes == (mode == 'N' ? 2 : 1);
+    // C cleared Live(1) under S's reference and released 1 and 2.
+    ok = ok && (atomicLoad(g_f.Rt[1][0]) & LOWMASK) == 1
+        && atomicLoad(g_f.Rt[2][0]) == 0
+        && (atomicLoad(g_f.Rt[3][0]) & LOWMASK) == (LIVE | 1);
+    // S's first advance pins 2 and 3 through the epoch-3 table, then releases
+    // the confirmed prefix.
+    require(g_S.consumeNext(), "S reads the epoch-3 table");
+    ok = ok && g_S.oldestEi == 3 && g_S.newestEi == 3
+        && atomicLoad(g_f.Rt[1][0]) == 0 && atomicLoad(g_f.Rt[2][0]) == 0;
+    g_C.unsubscribe();
+    ok = survivorProgress(g_S, mode == 'N' ? "LN".ptr : "L".ptr) && ok;
+    g_S.unsubscribe();
+    endFarmBulk();
+    return verdict(mode == 'N' ? "LN".ptr : "L".ptr, ok);
+}
+
 int main(string[] args)
 {
     bool all = args.length == 1;
@@ -778,6 +1121,12 @@ int main(string[] args)
     if (want("H")) { printf("schedule H\n"); ok &= scheduleH(); }
     if (want("I")) { printf("schedule I\n"); ok &= scheduleEI('I', 0); }
     if (want("P")) { printf("schedule P\n"); ok &= scheduleP(); }
+    foreach (name; ["J1", "J2", "J3", "Q"])
+        if (want(name)) { printf("schedule %s\n", name.ptr); ok &= scheduleJ(name == "Q" ? 'Q' : name[1]); }
+    if (want("K")) { printf("schedule K\n"); ok &= scheduleK(); }
+    if (want("X")) { printf("schedule X\n"); ok &= scheduleX(); }
+    if (want("L")) { printf("schedule L\n"); ok &= scheduleL('L'); }
+    if (want("LN")) { printf("schedule LN\n"); ok &= scheduleL('N'); }
     printf(ok ? "SUBSCRIPTION LIVE SCHEDULES PASSED\n".ptr : "SUBSCRIPTION LIVE SCHEDULES FAILED\n".ptr);
     return ok ? 0 : 1;
 }

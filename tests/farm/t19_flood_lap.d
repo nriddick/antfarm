@@ -233,11 +233,15 @@ void runArm(Arm arm)
         if (MonoTime.currTime > salvageDeadline)
             break;
     }
+    // Every incomplete epoch the churners abandoned must still be Live.
+    check(countUnprotectedIncomplete(f) == 0, "T19 abandoned incomplete epoch without Live");
+    // The batch is done; the mid-tick sentinel tables that followed it are
+    // not. Drain them too, so the Farm is quiescent for the check below.
+    while (late.consumeNext()) {}
     late.unsubscribe();
 
     expectExactCalls(&batch, "T19 exact batch calls");
-    expectNoLiveConsumerRefs(f, "T19 reference cleanup");
-    check(countLive(f) >= 1, "T19 frontier Live");
+    expectFrontierLiveOnly(f, "T19 quiescent after a full drain: only the frontier Live, no references");
 
     immutable sent = atomicLoad!(MemoryOrder.raw)(g_sentinelCalls);
     if (arm == Arm.steady)

@@ -32,11 +32,36 @@ Older release notes are in [docs/releases/](docs/releases/):
 
     They are in the new `tests/farm/subscription_live.d`, together with the
     scan-order and stale-window cases found while designing the new scan.
+  - **Audit.** A review of the implementation added one hardening and eight
+    schedules. Validation now acquire-loads the `Es` of the candidate's
+    `Seqt` epoch when that epoch lies beyond the candidate, so a fresh
+    subscriber's first advance through a spanning table's interior epochs
+    has a happens-before edge to their initialization on weak memory models
+    (SPEC 6b-c, 9); under sequential consistency the case was unreachable.
+    Schedules J1 to J3 and Q interleave a discharge with the subscriber's
+    re-read, validation and attach and with a `Sub` landing in the
+    discharge's CAS window; K interleaves two subscribers on one candidate;
+    X attaches on an exact boundary landing; L and LN attach inside a
+    table spanning three boundaries, the latter hiding the successor `Es`
+    as a negative control. Each was checked against an ablation of the
+    defect it targets. The design record is
+    [docs/design/farm-live-lifecycle.md](docs/design/farm-live-lifecycle.md).
+  - **Tests condensed.** Torture tests that duplicated `antfarm_test.d`
+    runs with the same geometry (T03, T05, T07, T08, T11, T12) were folded
+    into those unit tests, which now also check quiescent `Live`, leaves
+    and `Sub`s; T14's K geometry runs inside T04. T18 no longer waits a
+    fixed three seconds per trial and, like T19, T20 and the other churn
+    tests, now checks per-payload exactly-once and that only the frontier
+    is `Live` with nothing else on any root (`expectFrontierLiveOnly`); the
+    old `countLive >= 1` checks could not fail. The new T28 runs a
+    24-thread subscribe herd at the 1 MiB ring minimum over several laps,
+    counting `RETRY`. The suite runs in about a second instead of ten.
   - **Removed and renamed.** `LIVE` replaces the internal `SUB0` constant,
     and the `plantIfUnprotected` and `releaseRootLeavePulse` helpers are
     gone. Among the test-only `WriteAuditPhase` hooks, `liveRaised`
     replaces `plantChecked` and `plantPublished`, and `subscriberCounted`,
-    `subscriberRead` and `subscriberReadMid` are new.
+    `subscriberRead`, `subscriberReadMid`, `subscriberValidating` and
+    `liveClearing` are new.
 - forkjoin: `DispatcherOptions.spillInline` defaults to `true`, and so does
   the C `af_dispatcher_options_default` field `spill_inline`: deque overflow
   runs inline on the forking thread while the deque's contents stay

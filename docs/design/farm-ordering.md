@@ -8,8 +8,10 @@ I3, 6b, 6c) has since removed the frontier fallback, the producer plant and
 every pulse: each epoch is `Live` from initialization until a confirming
 holder discharges it, and a subscriber attaches only at an epoch it saw
 `Live` under its own `Sub`. The two sections stay as the record of why those
-rules existed. The regression schedules, sanitizer evidence and fast-path
-audit below are current.
+rules existed; the design record for the replacement, with the schedules
+that broke `Sub0` and the audit of the new scan, is
+[farm-live-lifecycle.md](farm-live-lifecycle.md). The regression schedules,
+sanitizer evidence and fast-path audit below are current.
 
 ## Subscription (S1, Sub0 era)
 
@@ -75,10 +77,14 @@ Both check exact callback accounting and quiescent protection of incomplete
 epochs.
 
 `subscription_live.d` holds the schedules found while designing the Live
-scan (SPEC 11). Each payload carries an id that must execute exactly once,
+scan (SPEC 11) and those added by the audit that followed (J1 to J3, Q, K,
+X, L and LN). Each payload carries an id that must execute exactly once,
 and progress is judged by the views that already exist, before any new
-subscription. Built against the rejected newest-down scan's ablations, those
-oracles strand work and stall the producer, so the schedules are not vacuous.
+subscription. Built against the rejected newest-down scan's ablations, the
+design-time oracles strand work and stall the producer; the audit's
+schedules were checked the same way, against a copy without the successor
+`Es` acquire (LN fails) and one whose discharge CAS does not retry (J3 and
+Q fail). The schedules are not vacuous.
 
 `leaf_reuse.d` tests the memory-order chain separately. C reads one table,
 R consumes a distinct crossing table and migrates before C drops, then C

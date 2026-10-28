@@ -74,9 +74,10 @@ baseline: $(FARM_TEST_SOURCES)
 	./antfarm_test_review
 
 # ThreadSanitizer build of the Farm unit suite (antfarm_test.d). Part of `make check`.
-farm-tsan: $(FARM_TEST_SOURCES) leaf_reuse.d
+farm-tsan: $(FARM_TEST_SOURCES) leaf_reuse.d subscription_live.d
 	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I$(ROOT) $(FARM_TEST_SOURCES) -of=antfarm_test_tsan
 	ldc2 -fsanitize=thread -d-version=TSan -g -O1 -I$(ROOT) leaf_reuse.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_leaf_tsan
+	ldc2 -fsanitize=thread -d-version=TSan -d-version=AntfarmWriteAuditHooks -g -O1 -I$(ROOT) subscription_live.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_subscription_tsan
 
 run-farm-tsan: farm-tsan
 	$(ROOT)/scripts/run-farm-tsan.sh
@@ -100,4 +101,4 @@ check-farm-ordering:
 clean:
 	rm -f torture_tests sweep_cursor torture_tests_tsan torture_tests_dmd t19 t19_tsan t19_dmd write_protection_allwrite boundary_runoff_allwrite *.o
 	rm -f antfarm_test_review antfarm_test_tsan antfarm_test_leaf_tsan antfarm_test_ordering antfarm_test_ordering_dmd antfarm_test_leaf antfarm_test_leaf_dmd
-	rm -f antfarm_test_subscription antfarm_test_subscription_dmd
+	rm -f antfarm_test_subscription antfarm_test_subscription_dmd antfarm_test_subscription_tsan

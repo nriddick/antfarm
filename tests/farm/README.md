@@ -39,7 +39,12 @@ make -C tests/farm baseline   # antfarm_test.d unit suite built without dub
 ## Layout
 
 - `torture_common.d` — counters, batch builder, producer/consumer helpers
-- `torture_tests.d` — T01–T18, T20–T26. T20 checks Live discharge under
+- `torture_tests.d` — T01, T02, T04, T06, T09, T10, T13, T15–T18, T20–T26
+  and T28. T03, T05, T07, T08, T11 and T12 duplicated `antfarm_test.d`
+  tests with the same geometry and were folded into them; T14's K
+  geometry runs inside T04. T28 is a 24-thread subscribe herd at the 1 MiB
+  ring minimum that counts `RETRY` and checks exactly-once and quiescent
+  `Live` afterwards. T20 checks Live discharge under
   write crossings and churn: at quiescence no confirmed segment is still
   Live or referenced, and only the frontier is Live. Small bodies keep the
   arm an invariant scan rather than a memcpy bench. T21 laps the ring several times and verifies payload body contents
@@ -56,15 +61,24 @@ make -C tests/farm baseline   # antfarm_test.d unit suite built without dub
   subscription churn (four arms: no mid-tick, pure churn, consuming churn,
   steady consumer) plus a forged-token quota test
 - `subscription_live.d` — deterministic subscription schedules for the Live
-  lifecycle (SPEC 3, 6b, 6c): a non-last departure during a producer's
+  lifecycle (SPEC 3, 6b, 6c, 6e): a non-last departure during a producer's
   unpublished crossing (A, B, C); a consumer moving during the scan (D1, D2);
   out-of-order initialization racing the scan (E); a stale tail probe (F,
   P); a new lap's `Live` beside the old `Es` (G); a discharged epoch between
-  two Live ones (H); and an initialization landing between a read's two
-  loads (I). Every payload carries an id that must execute exactly once, and
-  progress is judged with the views that already exist, before any new
-  subscription; a rescue subscriber afterwards is diagnostic only. Run all
-  with no argument, or one schedule by name with an optional trigger.
+  two Live ones (H); an initialization landing between a read's two loads
+  (I); a discharge landing at the subscriber's re-read, at its validation,
+  or around its attach while the discharger is between its load and CAS
+  (J1, J2, J3); a `Sub` landing in that same CAS window (Q); two subscribers
+  interleaved on one candidate (K); an exact boundary landing with an empty
+  frontier (X); and a subscriber attaching at the interior of a table that
+  spans three boundaries, with the successor `Es` visible (L) or hidden
+  during its first validation as an instrumentation negative control (LN).
+  Every payload carries an id that must execute exactly once, and progress
+  is judged with the views that already exist, before any new subscription;
+  a rescue subscriber afterwards is diagnostic only. Run all with no
+  argument, or one schedule by name with an optional trigger. The design
+  record, with the ablations that show each schedule fails on the defect it
+  targets, is [docs/design/farm-live-lifecycle.md](../../docs/design/farm-live-lifecycle.md).
 - `Makefile`
 
 Run T19 on its own: `make -C tests/farm run-t19` (LDC),
@@ -147,7 +161,13 @@ in dedicated sessions; the methodology and measurements are in
   Its automatic-refill negative control is intentionally simplified.
 
 The audit scheduling hooks are compiled only with `AntfarmWriteAuditHooks`.
-Ordinary builds contain no scheduling hook calls.
+Ordinary builds contain no scheduling hook calls. The producer phases are
+`anchorProbed`, `quotaSwept`, `tailReserved`, `liveRaised` and
+`tablePublished`; the subscriber phases are `subscriberCounted`,
+`subscriberProbed`, `subscriberPinned`, `subscriberRead`,
+`subscriberReadMid` and `subscriberValidating`; `liveClearing` pauses a
+consumer's discharge between its load and its CAS. Each is listed with its
+arguments beside the enum in `antfarm/package.d`.
 
 Shared test counters must be `__gshared shared(T)` (see comments). Plain
 `shared T` module globals are TLS and will silently break multi-threaded
@@ -170,7 +190,7 @@ flags. Farm has no manual acquire/release TSan annotations: the sanitizer
 must observe the real leaf/root/sweep/reservation chain. The root-level
 `make -C tests/farm check-farm-ordering` target adds deterministic S1/S2 schedules, the
 subscription schedules of `subscription_live.d`, and the leaf-reuse test under LDC and DMD; `make -C tests/farm run-farm-tsan` includes leaf reuse
-under TSan. See [the ordering audit](../../docs/design/farm-ordering.md) for proofs and mutation
+and the subscription schedules under TSan. See [the ordering audit](../../docs/design/farm-ordering.md) for proofs and mutation
 evidence, including a leaf-acquire defect hidden by the former annotations.
 
 ## Parallel-loop adapters

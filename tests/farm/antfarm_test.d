@@ -303,7 +303,12 @@ void checkQuiescentLive(AntFarm* f, const(char)[] msg)
 {
     check(liveSlots(f) == 1, msg);
     foreach (ki; 0 .. f.K)
+    {
         check((lowHalf(f, cast(uint) ki) & COUNTMASK) == 0, msg);
+        foreach (l; 0 .. MAX_LEAVES)
+            check(atomicLoad!(MemoryOrder.raw)(f.Lt[ki * MAX_LEAVES + l][0]) == 0, msg);
+    }
+    checkNoLeftoverSub(f, msg);
     immutable frontier = cast(uint)((atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift) & f.kMask);
     check((lowHalf(f, frontier) & LIVE) != 0, msg);
 }
@@ -1103,6 +1108,7 @@ void testWraparound()
     foreach (i; 0 .. N)
         check(g_calls[i] == 1, "wraparound exact call count");
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained");
+    checkQuiescentLive(f, "wraparound: only the frontier Live, no references");
 
     printf("testWraparound OK\n"); fflush(stdout);
 }
@@ -1367,8 +1373,7 @@ void testSpannedTables()
 
     foreach (i; 0 .. N)
         check(g_calls[i] == 1, "spanned exact call count");
-    foreach (ki; 0 .. 8)
-        check((atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & COUNTMASK) == 0, "no leaked refs");
+    checkQuiescentLive(f, "spanned tables: only the frontier Live, no references");
     printf("testSpannedTables OK\n"); fflush(stdout);
 }
 
@@ -1443,8 +1448,7 @@ void testSmallTableChurn()
     foreach (i; 0 .. N)
         check(g_calls[i] == 1, "small-table churn exact call count");
     check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, "Cf drained after small-table churn");
-    foreach (ki; 0 .. 8)
-        check((atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) & COUNTMASK) == 0, "no leaked refs");
+    checkQuiescentLive(f, "small-table churn: only the frontier Live, no references");
 
     printf("testSmallTableChurn OK\n"); fflush(stdout);
 }
