@@ -39,7 +39,10 @@ make -C tests/farm baseline   # antfarm_test.d unit suite built without dub
 ## Layout
 
 - `torture_common.d` — counters, batch builder, producer/consumer helpers
-- `torture_tests.d` — T01–T18, T20–T26. T20 checks Live discharge under
+- `torture_tests.d` — T01–T18, T20–T26 and T28. T28 runs complete 16/32-member
+  subscription cohorts at K=2 and K=16, including backlog-refused wakeups and
+  actual ring reuse; only the cohort that joined at the round's start may drain
+  it, and every departure leaves exactly the Live frontier. T20 checks Live discharge under
   write crossings and churn: at quiescence no confirmed segment is still
   Live or referenced, and only the frontier is Live. Small bodies keep the
   arm an invariant scan rather than a memcpy bench. T21 laps the ring several times and verifies payload body contents
@@ -60,11 +63,15 @@ make -C tests/farm baseline   # antfarm_test.d unit suite built without dub
   unpublished crossing (A, B, C); a consumer moving during the scan (D1, D2);
   out-of-order initialization racing the scan (E); a stale tail probe (F,
   P); a new lap's `Live` beside the old `Es` (G); a discharged epoch between
-  two Live ones (H); and an initialization landing between a read's two
-  loads (I). Every payload carries an id that must execute exactly once, and
+  two Live ones (H); an initialization landing between a read's two loads
+  (I); and adversarial subscription rounds that drive the tail until retained
+  frontier pins refuse renewal (R, for every supported K). D, E, F and G fail
+  if they miss their requested interleaving; I alone intentionally permits its
+  documented after-attachment path. Every payload carries an id that must execute exactly once, and
   progress is judged with the views that already exist, before any new
   subscription; a rescue subscriber afterwards is diagnostic only. Run all
-  with no argument, or one schedule by name with an optional trigger.
+  with no argument, or one schedule by name with an optional trigger. Run the
+  same schedules under TSan with `make -C tests/farm run-subscription-live-tsan`.
 - `Makefile`
 
 Run T19 on its own: `make -C tests/farm run-t19` (LDC),

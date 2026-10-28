@@ -211,9 +211,10 @@ final class ConsJob
     void run() { consumerMain(c); }
 }
 
-void expectExactCalls(PayloadBatch* b, const(char)[] label)
+void expectCallRange(size_t first, size_t end, const(char)[] label)
 {
-    foreach (i; 0 .. b.count)
+    check(first <= end && end <= g_npayloads, "valid callback ledger range");
+    foreach (i; first .. end)
     {
         immutable got = atomicLoad!(MemoryOrder.raw)(g_calls[i]);
         if (got != 1U)
@@ -223,6 +224,11 @@ void expectExactCalls(PayloadBatch* b, const(char)[] label)
             abort();
         }
     }
+}
+
+void expectExactCalls(PayloadBatch* b, const(char)[] label)
+{
+    expectCallRange(0, b.count, label);
     check(atomicLoad!(MemoryOrder.raw)(g_totalCalls) == b.expectedCalls, label);
 }
 
@@ -294,6 +300,22 @@ void expectNoLiveConsumerRefs(AntFarm* f, const(char)[] label)
                 abort();
             }
         }
+    }
+}
+
+// Quiescent, fully drained Farm: all producers and consumers have stopped.
+// Only the initialized frontier remains Live; every other root and leaf is 0.
+void expectDrainedFarm(AntFarm* f, const(char)[] label)
+{
+    check(atomicLoad!(MemoryOrder.raw)(f.Cf) == 0, label);
+    immutable epoch = atomicLoad!(MemoryOrder.raw)(f.Wt) >> f.segShift;
+    immutable frontier = cast(uint)(epoch & f.kMask);
+    check(atomicLoad!(MemoryOrder.raw)(f.stats[frontier].es) == cast(long) epoch, label);
+    foreach (ki; 0 .. f.K)
+    {
+        check(atomicLoad!(MemoryOrder.raw)(f.Rt[ki][0]) == (ki == frontier ? LIVE : 0UL), label);
+        foreach (l; 0 .. MAX_LEAVES)
+            check(atomicLoad!(MemoryOrder.raw)(f.Lt[ki * MAX_LEAVES + l][0]) == 0, label);
     }
 }
 

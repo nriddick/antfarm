@@ -13,6 +13,7 @@ import torture_common;
 import core.atomic;
 import core.thread;
 import core.time;
+import core.sync.barrier : Barrier;
 import core.stdc.stdio;
 import core.stdc.stdlib : malloc, free, abort, exit;
 
@@ -1736,6 +1737,171 @@ void t24_topology_hang_canary()
     say("T24 topology hang canary OK");
 }
 
+// T28: complete 16/32-member cohorts join, drain and depart together. The
+// only consumers allowed to finish each round are the ones that joined at its
+// start; a later rescue subscription cannot hide a missed earliest-Live
+// epoch. Alternating rounds begin with producers already refused by backlog.
+private enum HERD_ROUNDS = 4;
+private enum HERD_PAYLOADS = 4096;
+
+private class HerdRound
+{
+    AntFarm* farm;
+    Barrier gate;
+    MonoTime deadline;
+    shared long target;
+    shared bool finished;
+
+    this(AntFarm* f, uint members)
+    {
+        farm = f;
+        gate = new Barrier(members + 1);
+        deadline = MonoTime.currTime + DEFAULT_WATCHDOG_SECS.seconds;
+    }
+
+    void watchdog()
+    {
+        while (!atomicLoad(finished))
+        {
+            if (MonoTime.currTime > deadline)
+            {
+                fprintf(stderr, "T28 watchdog: calls=%lld target=%lld Cf=%lld Wt=%llu\n",
+                    atomicLoad(g_totalCalls), atomicLoad(target), atomicLoad(farm.Cf), atomicLoad(farm.Wt));
+                abort();
+            }
+            Thread.sleep(5.msecs);
+        }
+    }
+}
+
+private class HerdMember
+{
+    HerdRound round;
+    uint completed;
+    this(HerdRound r) { round = r; }
+
+    void run()
+    {
+        foreach (_; 0 .. HERD_ROUNDS)
+        {
+            round.gate.wait();
+            ConsumerView view;
+            long result;
+            do
+            {
+                result = view.subscribeOnce(round.farm);
+                if (result == SUBSCRIBE_RETRY) Thread.yield();
+            } while (result == SUBSCRIBE_RETRY);
+            check(result >= 0, "T28 herd member attaches");
+            round.gate.wait();
+            round.gate.wait();
+            while (atomicLoad(g_totalCalls) < atomicLoad(round.target))
+                if (!view.consumeNext()) Thread.yield();
+            while (view.consumeNext()) {}
+            round.gate.wait();
+            round.gate.wait();
+            view.unsubscribe();
+            ++completed;
+            round.gate.wait();
+        }
+    }
+}
+
+void t28_subscription_herds()
+{
+    foreach (k; [2u, 16u]) foreach (members; [16u, 32u])
+    {
+        immutable segCap = (1UL << ULONGS_PER_MIB_SHIFT) / k;
+        auto f = AntFarm.create(1, k, members, 0, 0, 2, segCap / 2);
+        scope (exit) f.destroy();
+        enum N = HERD_ROUNDS * HERD_PAYLOADS;
+        allocCalls(N);
+        scope (exit) freeCalls();
+        auto batch = makeBatch(N, (size_t i, ref Callback h, ref size_t plen) {
+            plen = 32;
+        });
+        scope (exit) freeBatch(batch);
+        auto round = new HerdRound(f, members);
+        auto watchdog = new Thread(&round.watchdog);
+        watchdog.start();
+        auto jobs = new HerdMember[members];
+        auto threads = new Thread[members];
+        foreach (i; 0 .. members)
+        {
+            jobs[i] = new HerdMember(round);
+            threads[i] = new Thread(&jobs[i].run);
+            threads[i].start();
+        }
+        foreach (cycle; 0 .. HERD_ROUNDS)
+        {
+            immutable first = cycle * HERD_PAYLOADS;
+            immutable end = first + HERD_PAYLOADS;
+            enum half = HERD_PAYLOADS / 2;
+            size_t[2] written;
+            atomicStore(round.target, cast(long) end);
+            if ((cycle & 1) == 0)
+            {
+                auto q0 = f.registerProducer(Tier.small);
+                auto q1 = f.registerProducer(Tier.small);
+                check(q0.valid && q1.valid, "T28 prefill tokens");
+                Token*[2] tokens = [&q0, &q1];
+                for (;;)
+                {
+                    ulong progress;
+                    foreach (p; 0 .. 2)
+                    {
+                        immutable start = first + p * half + written[p];
+                        immutable count = half - written[p] < 64 ? half - written[p] : 64;
+                        immutable n = f.write(batch.entries[start .. start + count], *tokens[p]);
+                        written[p] += n;
+                        progress += n;
+                    }
+                    if (progress == 0) break;
+                }
+                f.unregisterProducer(q0);
+                f.unregisterProducer(q1);
+                check(written[0] + written[1] > 0 && written[0] + written[1] < HERD_PAYLOADS,
+                    "T28 wake starts with refused production and unfinished backlog");
+                check(atomicLoad(g_totalCalls) == first, "T28 sleeping cohort executed nothing");
+                expectNoLiveConsumerRefs(f, "T28 backlog protected without consumers");
+            }
+            round.gate.wait();
+            round.gate.wait();
+            check(atomicLoad(f.Cf) == members, "T28 complete cohort attached");
+            expectNoLeftoverSub(f, "T28 attachments dropped transient pins");
+
+            ProdCtx[2] contexts;
+            Thread[2] producers;
+            foreach (p; 0 .. 2)
+            {
+                contexts[p] = ProdCtx(f, batch.entries + first + p * half + written[p],
+                    half - written[p], Tier.small, 64);
+                auto job = new ProdJob(&contexts[p]);
+                producers[p] = new Thread(&job.run);
+                producers[p].start();
+            }
+            round.gate.wait();
+            foreach (p; producers) p.join();
+            round.gate.wait();
+            expectCallRange(0, end, "T28 existing cohort executed every published id once");
+            foreach (i; end .. N)
+                check(atomicLoad(g_calls[i]) == 0, "T28 unpublished future id never executed");
+            check(atomicLoad(g_totalCalls) == end, "T28 no extra callbacks");
+            round.gate.wait();
+            round.gate.wait();
+            expectDrainedFarm(f, "T28 departures leave only the Live frontier");
+        }
+        foreach (t; threads) t.join();
+        atomicStore(round.finished, true);
+        watchdog.join();
+        foreach (job; jobs) check(job.completed == HERD_ROUNDS, "T28 every member finished every round");
+        check(atomicLoad(f.Wt) > 3 * f.Ln, "T28 exercised actual ring reuse");
+        expectExactCalls(&batch, "T28 final ledger without a rescue subscriber");
+        printf("T28 K=%u members=%u subscription herds OK\n", k, members);
+        fflush(stdout);
+    }
+}
+
 void main(string[] args)
 {
     bool runAll = args.length <= 1;
@@ -1749,6 +1915,8 @@ void main(string[] args)
         return false;
     }
 
+    if (want("T28"))
+        t28_subscription_herds();
     if (want("T01"))
         t01_bad_header();
     if (want("T16"))

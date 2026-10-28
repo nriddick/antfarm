@@ -7,7 +7,7 @@ DC ?= ldc2
 TSAN_OPTIONS ?= history_size=7 halt_on_error=1
 
 .PHONY: all run run-tsan run-dmd run-t19 clean baseline allwrite run-allwrite \
-	farm-tsan run-farm-tsan check-farm-ordering
+	farm-tsan run-farm-tsan check-farm-ordering run-subscription-live-tsan
 
 all: torture_tests t19 sweep_cursor
 
@@ -97,7 +97,11 @@ check-farm-ordering:
 	dmd -g -I$(ROOT) leaf_reuse.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_leaf_dmd
 	./antfarm_test_leaf_dmd
 
+run-subscription-live-tsan:
+	ldc2 -g -O1 -fsanitize=thread -d-version=TSan -d-version=AntfarmWriteAuditHooks -I$(ROOT) subscription_live.d $(ROOT)/antfarm/package.d $(ROOT)/antfarm/allocation.d -of=antfarm_test_subscription_tsan
+	TSAN_OPTIONS='$(TSAN_OPTIONS)' ./antfarm_test_subscription_tsan
+
 clean:
 	rm -f torture_tests sweep_cursor torture_tests_tsan torture_tests_dmd t19 t19_tsan t19_dmd write_protection_allwrite boundary_runoff_allwrite *.o
 	rm -f antfarm_test_review antfarm_test_tsan antfarm_test_leaf_tsan antfarm_test_ordering antfarm_test_ordering_dmd antfarm_test_leaf antfarm_test_leaf_dmd
-	rm -f antfarm_test_subscription antfarm_test_subscription_dmd
+	rm -f antfarm_test_subscription antfarm_test_subscription_dmd antfarm_test_subscription_tsan

@@ -32,6 +32,14 @@ Older release notes are in [docs/releases/](docs/releases/):
 
     They are in the new `tests/farm/subscription_live.d`, together with the
     scan-order and stale-window cases found while designing the new scan.
+  - **Review hardening.** Subscription validation also acquires `Es` at
+    `Seqt`'s epoch when a spanning interior's next table starts later, so
+    the first advance has every crossed-epoch initialization under the C++
+    memory model, not only on multi-copy-atomic hardware. New deterministic
+    schedules cover that advance and adversarial subscription rounds at every
+    K; the complete schedule suite has a TSan lane. Torture T28 runs 16- and
+    32-member subscribe/drain/depart cohorts at K=2 and K=16, with exact
+    per-payload accounting and actual ring reuse.
   - **Removed and renamed.** `LIVE` replaces the internal `SUB0` constant,
     and the `plantIfUnprotected` and `releaseRootLeavePulse` helpers are
     gone. Among the test-only `WriteAuditPhase` hooks, `liveRaised`

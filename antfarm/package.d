@@ -2376,7 +2376,13 @@ struct ConsumerView
             immutable wt1 = atomicLoad!(MemoryOrder.acq)(f.Wt);
             immutable esU = cast(ulong) es;
             immutable seqtEpoch = seqt >> f.segShift;
-            if (es != cand || sq == 0 ||
+            // A spanning table's Seqt can name a later epoch. Acquiring that
+            // epoch's Es orders every earlier crossed-epoch Es store by the
+            // same initializing producer, so the first hot-path moveRef
+            // cannot see an uninitialized spanned interior (6b-c/6d).
+            immutable seqtEs = seqtEpoch == esU ? es :
+                atomicLoad!(MemoryOrder.acq)(f.stats[cast(uint)(seqtEpoch & f.kMask)].es);
+            if (es != cand || sq == 0 || seqtEs != cast(long) seqtEpoch ||
                 seqtEpoch < esU || seqtEpoch > esU + f.K - 1 ||
                 (wt1 >> f.segShift) >= esU + f.K)
             {
