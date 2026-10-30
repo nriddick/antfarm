@@ -1,0 +1,23 @@
+name "ant_uv"
+description "One libuv event loop on a dedicated thread beside the Ant Farm worker pool"
+authors "Nathan Riddick"
+license "MIT"
+targetType "library"
+targetPath "bin"
+sourcePaths "source"
+importPaths "source"
+dependency "antfarm" path=".."
+dependency "threadpool" path="../threadpool"
+dependency "ant_fibers" path="../ant_fibers"
+// The system libuv (1.19 or later). On Windows, point the linker at a
+// libuv build (uv.lib); the Windows path is not validated yet.
+libs "uv"
+
+toolchainRequirements {
+	dmd ">=2.112.0"
+	ldc ">=1.42.0"
+}
+
+configuration "library" {
+	targetType "library"
+}

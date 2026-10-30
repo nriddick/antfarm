@@ -1,0 +1,16 @@
+# ThreadSanitizer suppressions for the ant_uv suite.
+#
+# druntime's garbage collector stops the world with a signal; its handler is
+# reported for spoiling errno when it interrupts the loop thread inside
+# epoll_wait. That is a runtime matter (the fork-join lane suppresses the
+# same report), not a loop race. libuv itself is deliberately not
+# suppressed: suppressing calls from it would also hide its mutexes, which
+# carry the happens-before edges from its auxiliary threads.
+signal:thread_suspendHandler
+#
+# druntime is not instrumented, so TSan cannot see the GC's lock but does see
+# the libc memset the allocator calls when it clears large blocks. Worker
+# Fibers allocating large buffers concurrently therefore report a race whose
+# both sides are inside the conservative GC's allocator. Only frames of that
+# implementation match this pattern.
+race:_D4core8internal2gc4impl12conservative

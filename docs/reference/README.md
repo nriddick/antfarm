@@ -122,6 +122,20 @@ Parallel loop adapters are a separate module:
 | --- | --- | --- |
 | Function adaptation | `payloadEntry`, `callbackFor`, `payloadRange`, `PayloadGrainRange`, `PayloadArgRange`, `packedLen`, `paramOffset`, `argsConvert` | [SPEC.md](../../SPEC.md), [First payload](../guide/quickstart.md#what-the-dispatcher-does-for-you-the-raw-ring-one-thread) |
 
+## Slot ring
+
+| Topic | Symbols | Explanation |
+| --- | --- | --- |
+| One-element handoff in 64-byte slots (provisional in 2.2.x) | `SlotRing`, `RingPush`, `RingElement`, `RING_ELEMENT_MAX`, `RING_MIN_CAPACITY`, `RING_MAX_CAPACITY` | [event loop design](../design/event-loop.md#32-elements-a-ring-the-loop-thread-owns) |
+
+## Event loop
+
+| Topic | Symbols | Explanation |
+| --- | --- | --- |
+| The loop thread: lifecycle, placement and failures | `UvLoop`, `UvLoop.create`, `UvLoop.close`, `UvLoop.current`, `UvLoop.summary`, `UvLoop.auxThreads`, `UvLoopOptions`, `UvStepResult`, `UvAuxPriority`, `UvAuxThread`, `UvCloseReport`, `UvLoopException`, `noProcessor` | [ant_uv/README.md](../../ant_uv/README.md), [event loop design](../design/event-loop.md#31-the-loop-thread) |
+| Requests and their completion | `UvRequest`, `UvOp`, `UvRequestState`, `UvSubmit`, `UvCompletionCallback`, `UvLoop.submit`, `UvLoop.cancel`, `UvLoop.wake` | [event loop design](../design/event-loop.md#33-completion-delivery) |
+| Fibers and the loop | `UvFibers`, `submitAndWait` | [ant_uv/README.md](../../ant_uv/README.md) |
+
 ## Group host
 
 | Topic | Symbols | Explanation |

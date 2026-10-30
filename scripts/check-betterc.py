@@ -8,7 +8,8 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ["antfarm/package.d", "antfarm/allocation.d", "antfarm/templates.d",
            "antfarm/parallel.d", "antfarm/actors/actor.d",
-           "antfarm/actors/private_actor.d", "antfarm/actors/wave.d"]
+           "antfarm/actors/private_actor.d", "antfarm/actors/wave.d",
+           "antfarm/ring.d"]
 
 def run(command, **kwargs):
     print("==>", subprocess.list2cmdline([str(x) for x in command]), flush=True)
@@ -25,7 +26,7 @@ def main():
     for source in MODULES + ["tests/farm/betterc_probe.d"]:
         obj = build / (source.replace("/", "_").removesuffix(".d") + suffix)
         run([args.compiler, "-betterC", "-O", "-I.", "-c", source, "-of=" + str(obj)])
-        if source in (MODULES[0], MODULES[1], "tests/farm/betterc_probe.d"):
+        if source in (MODULES[0], MODULES[1], "antfarm/ring.d", "tests/farm/betterc_probe.d"):
             objects.append(obj)
     binary = build / ("native-c.exe" if os.name == "nt" else "native-c")
     source = ROOT / "tests/farm/betterc_main.c"

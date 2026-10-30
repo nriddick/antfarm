@@ -85,3 +85,12 @@ examples/fiber_cancel_at
 examples/iota_sum
 examples/life/headless
 forkjoin/bin/
+tools/perf/slot_ring
+tests/ring/ring_test
+tests/ring/ring_test_dmd
+tests/ring/ring_test_tsan
+tests/ant_uv/uv_test
+tests/ant_uv/uv_test_dmd
+tests/ant_uv/uv_test_tsan
+tests/ant_uv/.obj-*/
+ant_uv/examples/read_files

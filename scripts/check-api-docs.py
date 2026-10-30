@@ -51,6 +51,9 @@ COVERAGE_MODULES = [
     "forkjoin/source/forkjoin/range.d",
     "forkjoin/source/forkjoin/frames.d",
     "forkjoin/source/forkjoin/invoke.d",
+    "antfarm/ring.d",
+    "ant_uv/source/ant_uv/loop.d",
+    "ant_uv/source/ant_uv/fibers.d",
 ]
 
 # Everything compiled for the inventory; the index may name symbols here.
@@ -80,7 +83,8 @@ def compile_inventory(scratch):
                  "-version=AntfarmMimallocV3", "-I" + str(ROOT),
                  "-I" + str(ROOT / "threadpool/source"),
                  "-I" + str(ROOT / "forkjoin/source"),
-                 "-I" + str(ROOT / "ant_fibers/source")]
+                 "-I" + str(ROOT / "ant_fibers/source"),
+                 "-I" + str(ROOT / "ant_uv/source")]
     arguments += [str(ROOT / m) for m in INDEX_MODULES]
     try:
         result = subprocess.run(["dmd"] + arguments, cwd=scratch,

@@ -21,5 +21,16 @@ extern(C) int antfarm_test_c(Callback call, TableCompletionHook* hook) nothrow @
     PayloadBody[3] fixed = [words[0 .. 1], words[0 .. 1], words[0 .. 1]];
     if (farm.write(call, fixed[], 1, token, 7, hook) != 3) return 4;
     while (view.consumeNext()) {}
+    // The slot ring is runtime-free too.
+    import antfarm.ring : RingElement, RingPush, SlotRing;
+    auto ring = SlotRing!RingElement.create(4);
+    if (ring is null) return 5;
+    scope(exit) ring.destroy();
+    RingElement element;
+    element.tag = 11;
+    if (ring.tryPush(element) != RingPush.pushed) return 6;
+    ring.close();
+    RingElement got;
+    if (!ring.tryPop(got) || got.tag != 11 || !ring.drained) return 7;
     return 0;
 }

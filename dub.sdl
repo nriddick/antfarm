@@ -17,6 +17,7 @@ toolchainRequirements {
 subPackage "threadpool"
 subPackage "ant_fibers"
 subPackage "forkjoin"
+subPackage "ant_uv"
 
 configuration "library" {
 	targetType "library"

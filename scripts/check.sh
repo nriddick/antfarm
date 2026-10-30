@@ -84,6 +84,7 @@ if [[ "$quick" -eq 1 ]]; then
     run dub test :threadpool --compiler=ldc2
     run dub test :ant_fibers --compiler=ldc2
     run dub test :forkjoin --compiler=ldc2 -- --DRT-testmode=run-main
+    run "${make_cmd[@]}" -C tests/ring run
     run python3 examples/run_examples.py --ldc-only
     echo "ALL QUICK CHECKS PASSED"
     exit 0
@@ -164,6 +165,14 @@ run "${make_cmd[@]}" -C tests/actors run run-dmd run-tsan death
 run "${make_cmd[@]}" -C tests/farm run run-tsan
 run "${make_cmd[@]}" -C tests/private run run-dmd run-tsan doc-example death
 run "${make_cmd[@]}" -C examples check
+run "${make_cmd[@]}" -C tests/ring run run-dmd run-tsan
+# ant_uv needs libuv (1.19+) and its header; without them the lane is
+# skipped with the reason printed, never silently.
+if pkg-config --exists 'libuv >= 1.19' 2>/dev/null; then
+    run "${make_cmd[@]}" -C tests/ant_uv run run-dmd run-tsan
+else
+    echo "SKIP ant_uv: libuv 1.19 or later not found by pkg-config"
+fi
 
 if [[ "$mimalloc" -eq 1 ]]; then
     if [[ ! -f third_party/mimalloc/CMakeLists.txt ]]; then
