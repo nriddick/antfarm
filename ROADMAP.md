@@ -145,26 +145,26 @@ Shipped:
 ## 2.2.0 — in progress
 
 Opened 2026-10-30 on `2.2.0-progress`. The series' feature is an event loop
-on worker hosts, designed in
-[docs/design/event-loop.md](docs/design/event-loop.md): Ant Farm supplies
-the seams (a bounded 64-byte element ring in the core, a designated-worker
-attachment on `GroupHost`, later a park-owner hook in `threadpool`) and an
-optional subpackage that binds libuv on a designated worker; applications
-own what a request means. Planned content:
+beside the worker pool, designed in
+[docs/design/event-loop.md](docs/design/event-loop.md): Ant Farm supplies a
+bounded 64-byte element ring in the core and an optional subpackage that
+owns one libuv loop thread per application, placed on a CPU the
+application keeps out of the worker set; the pool is unchanged and
+applications own what a request means. Planned content:
 
 - `antfarm.ring`: the Vyukov slot ring from the `exp/slot-ring` study, with
   a provisional interface, its ordering and drained contract, exactly-once
   tests, a TSan lane and the `slot_ring` harness re-run with the request
   layout. The Element Farm prototype from the same branch is recorded as a
   later channel kind, not a drop-in.
-- The designated-worker attachment helper, `wakeWorker(index)` on the host
-  and a pre-shutdown step in `threadpool.groups`.
 - `ant_uv` (name open): the hand-declared libuv binding over the
-  opaque-handle API, the loop attachment with a polling `serve` and a
-  finite deadline, in-flight credits, the completion sink and the Fiber
-  trigger wake. Optional, skipped by `make check` without libuv.
-- 2.2.1: the park-owner hook and the libuv park, as a separate change with
-  its own review of the wake proof and wait-race validation.
+  opaque-handle API, the `UvLoop` thread that owns the loop and the request
+  ring, in-flight credits, the completion sink, auxiliary-pool placement by
+  affinity inheritance, and the Fiber trigger wake. Optional, skipped by
+  `make check` without libuv.
+- Optionally `reservedProcessors` on `GroupHostOptions`.
+- 2.2.1: sockets, pipes and process spawn; latency measurements; the
+  Windows pinned libuv build.
 
 ## Later
 
@@ -184,8 +184,8 @@ own what a request means. Planned content:
   remove. Its wake
   step reuses the claim word, and timers can become per-worker.
 - Async I/O stays out of the runtime. An I/O library runs in a worker loop
-  beside `serve`; the 2.2.x event loop design above is that library, as an
-  optional subpackage on a designated worker. Native, batched,
+  the pool; the 2.2.x event loop design above is that library, as an
+  optional subpackage owning one loop thread. Native, batched,
   reactor-owned continuations remain Tier 2 of the coroutine proposal.
 
 ## 2.0 goals — draft

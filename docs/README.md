@@ -89,7 +89,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/forkjoin.md](design/forkjoin.md) | get the fork-join dispatcher's frame, deque, parking and admission contracts, and what the benchmarks found |
 | [design/coroutine-replacement.md](design/coroutine-replacement.md) | review the measured deque experiment and proposed druntime/async-I/O coroutine tiers |
 | [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
-| [design/event-loop.md](design/event-loop.md) | see the 2.2.x plan for a libuv loop on a designated worker: the element ring, the loop attachment, the park owner hook and the binding |
+| [design/event-loop.md](design/event-loop.md) | see the 2.2.x plan for one libuv loop thread beside the pool: the element ring, the loop thread and its placement, completion delivery and the binding |
 
 ## Development
 
@@ -131,7 +131,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | C ABI headers, compatibility and runtime separation | [design/c-abi.md](design/c-abi.md) |
 | Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |
 | Fiber scheduler model and invariants | [design/ant_fibers.md](design/ant_fibers.md) |
-| Event loop on worker hosts (libuv) design and release plan | [design/event-loop.md](design/event-loop.md) |
+| Event loop beside the worker pool (libuv) design and release plan | [design/event-loop.md](design/event-loop.md) |
 | Test suites (`tests/farm`, `tests/actors`, `tests/private`, `tests/threadpool`, `tests/ant_fibers`) | each suite's README and [development/testing.md](development/testing.md) |
 | Benchmark harness and optimization gate | [tools/perf/README.md](../tools/perf/README.md) |
 | What changed in each candidate and its compatibility notes | [CHANGELOG.md](../CHANGELOG.md) (current and latest release), [releases/](releases/) (older) |

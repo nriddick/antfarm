@@ -7,7 +7,8 @@ Older release notes are in [docs/releases/](docs/releases/):
 ## 2.2.0 development
 
 Opened 2026-10-30 on `2.2.0-progress`, from 2.1.1. The series' feature is an
-event loop on worker hosts with libuv: the design is
+event loop beside the worker pool, one libuv loop thread per application,
+with a ring in the core: the design is
 [docs/design/event-loop.md](docs/design/event-loop.md), the roadmap section
 "2.2.0 — in progress" lists the planned content. No code has landed yet.
 
