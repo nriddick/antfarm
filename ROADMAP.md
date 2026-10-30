@@ -153,15 +153,18 @@ optional subpackage that binds libuv on a designated worker; applications
 own what a request means. Planned content:
 
 - `antfarm.ring`: the Vyukov slot ring from the `exp/slot-ring` study, with
-  its exactly-once and drained tests, a TSan lane and the `slot_ring`
-  harness. The Element Farm prototype from the same branch is recorded as
-  the alternative behind the same interface.
-- The designated-worker attachment helper in `threadpool.groups`.
+  a provisional interface, its ordering and drained contract, exactly-once
+  tests, a TSan lane and the `slot_ring` harness re-run with the request
+  layout. The Element Farm prototype from the same branch is recorded as a
+  later channel kind, not a drop-in.
+- The designated-worker attachment helper, `wakeWorker(index)` on the host
+  and a pre-shutdown step in `threadpool.groups`.
 - `ant_uv` (name open): the hand-declared libuv binding over the
-  opaque-handle API, the loop attachment with a polling `serve`, the
-  completion sink and the Fiber event wake. Optional, skipped by `make
-  check` without libuv.
-- 2.2.1: the park-owner hook and the libuv park, with wait-race validation.
+  opaque-handle API, the loop attachment with a polling `serve` and a
+  finite deadline, in-flight credits, the completion sink and the Fiber
+  trigger wake. Optional, skipped by `make check` without libuv.
+- 2.2.1: the park-owner hook and the libuv park, as a separate change with
+  its own review of the wake proof and wait-race validation.
 
 ## Later
 
@@ -182,8 +185,8 @@ own what a request means. Planned content:
   step reuses the claim word, and timers can become per-worker.
 - Async I/O stays out of the runtime. An I/O library runs in a worker loop
   beside `serve`; the 2.2.x event loop design above is that library, as an
-  optional subpackage on a designated worker. A symmetric multi-waiter
-  reactor remains Tier 2 of the coroutine proposal.
+  optional subpackage on a designated worker. Native, batched,
+  reactor-owned continuations remain Tier 2 of the coroutine proposal.
 
 ## 2.0 goals — draft
 
