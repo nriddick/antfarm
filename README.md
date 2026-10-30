@@ -42,6 +42,7 @@ waits, throws or allocates is a Fiber. The table carries the exceptions.
 | recursive fork-join: divide and conquer, irregular trees, no identity | the fork-join dispatcher | [forkjoin_fib.d](forkjoin/examples/forkjoin_fib.d) |
 | tracked requests with deadlines and cancellation | private actors with tracking | [request_deadline.d](examples/request_deadline.d) |
 | exceptions, allocation, or waits during work | a managed Fiber | [hello_fibers.d](ant_fibers/examples/hello_fibers.d) |
+| file reads and timers off the workers' CPUs (libuv) | the `ant_uv` loop thread | [read_files.d](ant_uv/examples/read_files.d) |
 
 The [choice guide](docs/guide/choosing-work.md) owns the detailed comparison.
 The fork-join dispatcher (`import forkjoin;`, [forkjoin/README.md](forkjoin/README.md))

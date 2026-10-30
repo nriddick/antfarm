@@ -150,21 +150,28 @@ beside the worker pool, designed in
 bounded 64-byte element ring in the core and an optional subpackage that
 owns one libuv loop thread per application, placed on a CPU the
 application keeps out of the worker set; the pool is unchanged and
-applications own what a request means. Planned content:
+applications own what a request means.
 
-- `antfarm.ring`: the Vyukov slot ring from the `exp/slot-ring` study, with
-  a provisional interface, its ordering and drained contract, exactly-once
-  tests, a TSan lane and the `slot_ring` harness re-run with the request
-  layout. The Element Farm prototype from the same branch is recorded as a
-  later channel kind, not a drop-in.
-- `ant_uv` (name open): the hand-declared libuv binding over the
-  opaque-handle API, the `UvLoop` thread that owns the loop and the request
-  ring, in-flight credits, the completion sink, auxiliary-pool placement by
-  affinity inheritance, and the Fiber trigger wake. Optional, skipped by
-  `make check` without libuv.
-- Optionally `reservedProcessors` on `GroupHostOptions`.
-- 2.2.1: sockets, pipes and process spawn; latency measurements; the
-  Windows pinned libuv build.
+Implemented on the branch (see the CHANGELOG's 2.2.0 section):
+
+- `antfarm.ring`: the slot ring, with a provisional interface, an exact
+  drained test after `close`, its tests under LDC, DMD and TSan, and the
+  `slot_ring` harness re-run with the request layout. The Element Farm
+  prototype stays on `exp/slot-ring` as a later channel kind, not a drop-in.
+- `ant_uv`: the hand-declared libuv binding, `UvLoop` with its request and
+  control rings, credits, cancellation, the completion sink, a three-phase
+  close with abandonment, direct placement of libuv's auxiliary threads,
+  `UvFibers` and `submitAndWait`. Optional; `make check` skips it without
+  libuv.
+
+Remaining before 2.2.0: completion latency from a worker's push to Fiber
+resume, a full `make check`, and the native Windows matrix with a pinned
+libuv build (or an explicit Linux-only release note). `reservedProcessors`
+was dropped: `pool.processors` already keeps the loop's CPU out of the
+worker set.
+
+- 2.2.1: sockets, pipes and process spawn as the first consumer needs
+  them; the Windows pinned build if it misses 2.2.0.
 
 ## Later
 

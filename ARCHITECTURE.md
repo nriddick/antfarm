@@ -1,9 +1,10 @@
 # Ant Farm architecture
 
 Ant Farm (the version is the latest tag and the top heading of [CHANGELOG.md](CHANGELOG.md)) is one repository
-with five cooperating packages. They separate transport, worker placement,
-stateful identities, and suspendable control flow so an application can choose
-the narrowest representation for each kind of work.
+with five cooperating packages and one optional one (`ant_uv`, which needs
+libuv). They separate transport, worker placement, stateful identities,
+suspendable control flow and I/O so an application can choose the narrowest
+representation for each kind of work.
 
 ```text
 application
@@ -89,6 +90,18 @@ continuations, so the worker loop is a trampoline and the join never blocks a
 thread. Idle workers park through the Director and are woken by a push onto
 an empty deque, a spill or a submission. The contract and measurements are
 in [docs/design/forkjoin.md](docs/design/forkjoin.md).
+
+### Event loop
+
+`ant_uv` runs one libuv loop on a dedicated thread beside the pool, on a CPU
+the application keeps out of the worker set. Any thread submits caller-owned
+requests on a `SlotRing` (`antfarm.ring`, a bounded ring of 64-byte slots in
+the core); the loop thread alone calls libuv, issues work as its credits
+allow, and publishes each request once to a Fiber trigger or event, a
+callback or a completion ring. libuv's own auxiliary threads, which block in
+file I/O, are placed by the loop when it starts. The contract is
+[docs/design/event-loop.md](docs/design/event-loop.md); the guide is
+[ant_uv/README.md](ant_uv/README.md).
 
 ### Threadpool
 
@@ -267,6 +280,8 @@ including the Fiber steps there; `FarmHost.close()` implements the host's teardo
   registry contracts.
 - [docs/design/ant_fibers.md](docs/design/ant_fibers.md): Fiber architecture, ownership, and
   synchronization invariants.
+- [docs/design/event-loop.md](docs/design/event-loop.md): the slot ring and the libuv loop
+  thread: ownership, credits, cancellation, completion and close.
 - [PERFORMANCE.md](PERFORMANCE.md#fibers): Fiber benchmark evidence and
   tuning guidance.
 - [docs/guide/public-actors.md](docs/guide/public-actors.md): public actor ownership, retirement, and

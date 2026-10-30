@@ -89,7 +89,8 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/forkjoin.md](design/forkjoin.md) | get the fork-join dispatcher's frame, deque, parking and admission contracts, and what the benchmarks found |
 | [design/coroutine-replacement.md](design/coroutine-replacement.md) | review the measured deque experiment and proposed druntime/async-I/O coroutine tiers |
 | [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
-| [design/event-loop.md](design/event-loop.md) | see the 2.2.x plan for one libuv loop thread beside the pool: the element ring, the loop thread and its placement, completion delivery and the binding |
+| [design/event-loop.md](design/event-loop.md) | see the 2.2.x design of one libuv loop thread beside the pool: the slot ring, the loop thread and its placement, credits, cancellation, completion delivery and close, and where the implementation departed from the plan |
+| [../ant_uv/README.md](../ant_uv/README.md) | use `ant_uv`: create the loop, submit file and timer requests, wait from Fibers, cancel and close |
 
 ## Development
 

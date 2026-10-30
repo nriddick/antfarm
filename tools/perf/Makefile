@@ -24,6 +24,9 @@ check-tail check-throughput check-dual: check-%:
 	$(DC) -g -unittest -i -I$(ROOT)/threadpool/source $*.d $(FARM_SOURCES) -of=$*_tests
 	./$*_tests --DRT-testmode=test-only
 
+slot_ring: slot_ring.d $(FARM_SOURCES) $(ROOT)/antfarm/ring.d
+	$(DC) $(DFLAGS) -I$(ROOT) slot_ring.d $(FARM_SOURCES) $(ROOT)/antfarm/ring.d -of=$@
+
 subscribe_cost: subscribe_cost.d $(FARM_SOURCES)
 	$(DC) $(DFLAGS) subscribe_cost.d $(FARM_SOURCES) -of=$@
 

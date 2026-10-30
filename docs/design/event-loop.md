@@ -7,11 +7,17 @@ ownership, backpressure, shutdown ordering and the measurement citations,
 all folded in), then narrowed: the loop runs on **one dedicated thread per
 application**, not inside a pool worker. The in-worker variant with its
 park-owner hook is recorded in this page's history (`ca9d7ba`) and is not
-planned. Nothing on this page is implemented yet. It coalesces the exploratory work of
-2026-10-30 (the singleton-write study, the Vyukov slot-ring and partitioned
-ring measurements, the Element Farm prototype, and the OMMe game-engine
-requirements) into one plan. The measurements it cites are on the
-`exp/slot-ring` branch and land here together with the ring.
+planned. It coalesces the exploratory work of 2026-10-30 (the
+singleton-write study, the Vyukov slot-ring and partitioned ring
+measurements, the Element Farm prototype, and the OMMe game-engine
+requirements) into one plan. The study's records stay on the `exp/slot-ring`
+branch.
+
+**Implemented on `2.2.0-progress`**: the 2.2.0 content of section 6, in
+`antfarm/ring.d`, `ant_uv/` (guide: [ant_uv/README.md](../../ant_uv/README.md)),
+`tests/ring/`, `tests/ant_uv/` and `tools/perf/slot_ring.d`. Where the
+implementation settled a point the plan left open, or departed from it, this
+page now says what was built; the departures are listed in section 8.
 
 The line this design draws: **Ant Farm supplies a ring and an optional,
 separately linked subpackage that owns one libuv loop thread; the
@@ -84,14 +90,12 @@ runs the loop". The facts that shape the design:
   runs there. The contract states this rather than claiming the workers are
   the only threads in the process: they are the only threads that
   *dispatch*.
-- **Pool threads inherit the creating thread's affinity**, and on Linux its
-  nice value too (`pthread_create`); Windows threads start at normal
-  priority within the process class whatever their creator's. libuv creates
-  the pool lazily on the first request. This is the placement mechanism:
-  the loop thread warms the pool while it temporarily carries the mask and
-  priority the application wants the auxiliary threads to have, then
-  restores its own. Left to chance, a pool first used from a pinned thread
-  is pinned to that one CPU.
+- **Pool threads inherit the creating thread's affinity** on Linux, and
+  its nice value too (`pthread_create`). libuv creates every pool thread on
+  the first request, so a pool first used from a pinned thread is pinned to
+  that one CPU. The loop therefore warms the pool itself and places each
+  auxiliary thread from inside it (section 3.4) rather than relying on
+  inheritance, which Windows does not provide for thread affinity at all.
 - **Cancellation is not a release fence.** `uv_cancel` succeeds only for
   pool work that has not started; a cancelled request still delivers its
   callback later with `UV_ECANCELED`, and a read already executing runs to
@@ -130,41 +134,58 @@ pool's park and wake contract, that thread is not a pool worker.
 the application's control thread and joined by it:
 
 - **Creation.** The control thread calls `UvLoop.create(options)`:
-  the CPU to pin to, the ring capacity, the credit limit, the auxiliary pool
-  size and placement (section 3.4), and an optional application **step**
-  hook (section 3.6). `create` spawns the thread; the thread pins itself,
-  initializes the loop, the wake handle (`uv_async_t`, referenced, with a
-  callback that only returns `uv_run`), the request ring and the auxiliary
-  pool, then publishes *open*. Every later `uv_*` call happens on this
-  thread.
-- **Serving.** The thread's loop is: drain the request ring in a bounded
-  batch (`submitBatch`, default 64) into libuv submissions, subject to the
-  in-flight credit; run the application step if one is installed;
-  `uv_run(loop, UV_RUN_ONCE)`, which blocks until at least one event (a
-  completion, a timer, or the wake handle). No bounding timer is needed:
-  the thread has no other duties, and anything that wants periodic service
-  arms a `uv_timer_t`.
-- **Waking.** A producer publishes its element on the ring and calls
+  the CPU to pin to, the ring and control-ring capacities, the credit limit,
+  the auxiliary pool size and placement (section 3.4), and optional
+  application `start`, `step` and `stop` hooks (section 3.6). `create`
+  claims the process's one loop, spawns the thread and waits; the thread
+  captures its inherited affinity, pins itself, checks `uv_version()`,
+  initializes the loop, warms and places the auxiliary pool, creates the
+  bounding timer and the wake handle (`uv_async_t`, referenced, with a
+  callback that only returns `uv_run`), then opens the wake gate and
+  publishes *open*. A failure anywhere unwinds what was created and
+  `create` throws. Every later `uv_*` call happens on this thread, and
+  `UvLoop.current` names the loop there.
+- **Serving.** The thread's loop is: drain the control ring (cancels);
+  retry deliveries that waited for room; drain the request ring in a
+  bounded batch (`submitBatch`, default 64) into libuv submissions, subject
+  to the in-flight credit; run the step hook; then poll libuv. When
+  something made progress it polls with `UV_RUN_NOWAIT`. Otherwise it
+  blocks in `UV_RUN_ONCE` until a completion, a timer or the wake handle.
+  The step hook can report a deadline (a loop-thread Fiber's timer), and a
+  delivery waiting for room needs a retry in about a millisecond. Since
+  `UV_RUN_ONCE` has no timeout argument, a reusable timer bounds that one
+  poll and is stopped afterwards.
+- **Waking.** `submit` publishes its element on the ring and calls
   `UvLoop.wake()`, which is `uv_async_send`: callable from any thread and
   from inside a Farm callback, coalescing, and effective whether the loop
   thread is blocked in `uv_run` or between iterations, because the pending
-  flag persists until the loop processes it.
-- **Shutdown**, driven by the control thread through `UvLoop.close()`:
-  close admission (pushes return a closed status); the thread keeps serving
-  until the in-flight credit returns to zero or the close deadline passes;
-  cancel what is still pending and wait for those terminal callbacks; run
-  the sequence of section 2 (`uv_close` every handle, run until the close
-  callbacks have run, `uv_loop_close` returning 0); exit the thread; the
-  control thread joins it. Work that cannot reach a terminal callback in
-  time is reported as an abort outcome, never dropped. The wake handle is
-  closed last, after admission has been closed long enough that no producer
-  holds a reference; `wake()` on a closed loop is a no-op. Fibers on the
-  pool that wait on an aborted operation are woken with the abort outcome
-  before the host stops, so the order is: `UvLoop.close()`, then the Fiber
-  domain's drain and retirement, then `host.close()`.
-- **Failure.** libuv callbacks capture failures into the loop's state; the
-  thread reports them through `UvLoop.failure` and stops serving, and no D
-  exception unwinds through C. `close()` then runs the same teardown.
+  flag persists until the loop processes it. A wake gate (a count of wakers
+  in progress plus a closed bit) keeps `uv_async_send` off the handle once
+  teardown has begun: teardown sets the bit and waits for the count to
+  drain before it closes the handle.
+- **Shutdown**, driven by any thread but the loop's through
+  `UvLoop.close()`, in three phases:
+  1. Close admission: the ring's close bit makes every later push fail.
+  2. Grace: keep serving for `closeGrace` until the ring is drained, no
+     operation is in libuv and no delivery waits.
+  3. Cancelling: publish everything still queued as `UV_ECANCELED`, cancel
+     every operation in libuv (timers stop at once; file work libuv has not
+     started is cancelled), and wait `abandonAfter` for the final callbacks.
+  An operation that is still running after that wait is published
+  `abandoned`: its buffer stays libuv's, so the application must leak it.
+  Then the `stop` hook runs, every handle is closed, and the loop is closed
+  (`uv_loop_close` returning 0); when something was abandoned, the loop and
+  its memory are instead left allocated, since libuv may still write to
+  them. The thread exits and `close` joins it. Fibers waiting on the loop
+  are woken by those publications, so the order is: retire the Fibers that
+  use the loop, `UvLoop.close()`, then `host.close()`.
+- **Failure.** Every callback the loop registers with libuv is
+  `nothrow @nogc`, so no D exception unwinds through C. The only throwing
+  code on the loop thread is the application's hooks. If `start` or `step`
+  throws, the loop records the failure, stops calling the step, closes
+  admission and goes straight to the cancelling phase, then tears down as
+  above. `close()` throws a `UvLoopException` that carries the failure and
+  the close report.
 
 ### 3.2 Elements: a ring the loop thread owns
 
@@ -176,9 +197,9 @@ resource manager on the loop thread, most I/O decisions never touch the
 ring; it carries the requests of workers, Fibers and the main thread.
 
 The 2026-10-30 study (`docs/performance/slot-ring-2026-10-30.md` on
-`exp/slot-ring`) settles the ring's shape for this use. Its elements were
-three words (24 bytes) in 32- or 64-byte slots; the numbers below are for
-that layout and are re-run with the real request layout before 2.2.0:
+`exp/slot-ring`) settled the ring's shape for this use. Its elements were
+three words (24 bytes) in 32- or 64-byte slots. The shipped ring re-run with
+the real request element follows the study's findings:
 
 - A **Vyukov bounded MPMC ring** (a sequence word per slot, check-then-CAS
   cursors, FIFO by reservation, no membership) is the baseline. With one
@@ -196,6 +217,16 @@ that layout and are re-run with the real request layout before 2.2.0:
   was varied in. For this design the shape is many producers and one
   consumer per loop, which is the ring's weakest shape, so the request ring
   is sized for occupancy, not throughput, and 1024 slots is the default.
+- **The shipped ring with the request layout**, measured with the ported
+  harness ([slot-ring-shipped-2026-10-30.md](../performance/slot-ring-shipped-2026-10-30.md)):
+  `SlotRing!RingElement` (a 56-byte element in a 64-byte slot) costs 10 to
+  11 ns per element single-ended and delivers in 40 ns (p50) on one CCD,
+  190 ns across CCDs. The shape a loop's request ring sees, many producers
+  and one consumer, costs 44, 63 and 81 ns at two, four and seven
+  producers. That is better than the 32-byte reference (54, 81, 110 ns),
+  because a line per slot removes neighbour-slot sharing, and worse than the
+  Farm from four producers on (22 ns), as the study predicted. At file-I/O
+  rates none of these numbers matters; the ring is sized for occupancy.
 - The **Element Farm** (`docs/design/element-farm.md` on `exp/slot-ring`)
   is a fixed-element Ant Farm: 64-byte slots holding an 8-byte state word
   (lap, publication, claim) and a 56-byte payload, peek-then-fetch-add
@@ -210,15 +241,21 @@ that layout and are re-run with the real request layout before 2.2.0:
 
 **Ring contract.** The ring is dependency-free and useful without libuv
 (any single-consumer channel, the main thread's rings in section 4),
-so it lives in the core as `antfarm.ring`. Its public status in 2.2.0 is
-**provisional**: the module ships for `ant_uv` and the harness, and its
-interface is marked experimental until these points are settled and tested:
+so it lives in the core as `antfarm.ring` (`SlotRing!T`, `RingElement`,
+`RingPush`), compiles as BetterC, and is exercised from the native C probe.
+Its public status in 2.2.0 is **provisional**: the module ships for `ant_uv`
+and the harness, and its interface may change. The contract, as implemented
+and tested by `tests/ring` (including a producer stalled between reservation
+and publication through a test hook):
 
 - Ordering is FIFO by reservation. A dequeue may return false while a
   later reservation is already published, because an earlier producer has
   reserved but not yet written; false therefore does not mean drained, and
   a stalled producer blocks the consumer behind it. The drained test is
-  "every producer closed and the ring empty", not "dequeue returned false".
+  exact: `close` sets a bit in the enqueue cursor, so a push's existing
+  load and CAS refuse every later reservation at no extra cost, and
+  `drained` is true once the dequeue cursor has reached the cursor's value
+  at the close.
 - A full ring returns false and the caller keeps ownership of the element.
   A worker whose pool must drain the ring never spins on it; a Fiber
   yields, a job hands the request back to its owner, the main thread tries
@@ -237,13 +274,28 @@ stale element after a reload, is the application's table.
 
 **Credits.** A bounded ring bounds ingress, not outstanding work: draining
 it into libuv frees slots while native requests and buffers accumulate. The
-loop holds an in-flight credit (default equal to the ring's capacity) that
-covers queued, executing and undelivered operations; the drain stops
-submitting when it is spent and the ring keeps its backpressure. The
-completion path never spins and never drops: a second-hop ring reserves
-capacity for completions (the loop keeps completions it could not push and
-retries them on its next iteration), and an undeliverable completion holds
-its credit until it is delivered.
+loop holds an in-flight credit (default equal to the ring's capacity, at
+most 65536). An operation in libuv, including a timer handle until its
+close callback, holds one credit. A completion waiting for room in a
+completion ring also holds one. The drain stops dequeuing when the credit
+is spent, so the ring keeps its backpressure. A `nop`, and a request
+cancelled before it starts, publish at once and hold none. Each credit is
+an operation slot preallocated at creation, sized for both a `uv_fs_t` and
+a `uv_timer_t`.
+
+The completion path never spins and never drops. Deliveries that find a
+completion ring full wait in a FIFO and are retried on every iteration,
+which a one-millisecond poll bound guarantees. Only a closed completion
+ring, or a close that gives up waiting, counts a delivery as undelivered.
+
+**Cancellation** travels on a second, small control ring, so it never waits
+behind requests the credit is holding back. `UvLoop.cancel` first sets a
+flag in the request, which the loop checks when it dequeues the request.
+It then pushes the request's address and ticket to the control ring, and
+the loop matches those against its operation slots without touching the
+record. So a cancel never races a reclaimed record, and it is never lost:
+a request not yet dequeued sees the flag, and one in libuv is found by
+address and ticket.
 
 ### 3.3 Completion delivery
 
@@ -271,6 +323,21 @@ libuv's own callback. Nothing on this path allocates.
    above. A trigger or event referenced only from the record must be kept
    alive by whoever owns the record.
 
+As built, the four targets are `trigger`, `event`, `callback` and
+`completions`, delivered in that order. A request may not name both a
+`callback` and a `completions` ring, because each hands the record to a
+party that may reclaim it. The completion element carries `user` as its tag
+and `result`, `size`, `op` and the terminal state as payload, so a consumer
+can dispatch without reading the record.
+
+`submitAndWait`, the helper a managed Fiber uses, handles one more case: the
+Fiber is cancelled while it waits. A Fiber's cancellation is sticky, so it
+cannot park again, and the loop must never write into a request on a dead
+stack. The helper cancels the request and waits for its publication before
+rethrowing `FiberCancelled`. On a worker the wait is short sleeps of the
+worker's thread. On the loop thread it serves the loop, which is safe
+because Fibers run from the step hook and never inside `uv_run`.
+
 **What roots what.** Native ring slots and `uv_req_t.data` are not GC roots.
 The library requires stable request, record and buffer storage through the
 terminal callback, independently of Fiber cancellation or reload: native
@@ -290,19 +357,32 @@ thread's CPU and the loop's. A `reservedProcessors` convenience on
 `GroupHostOptions` (excluded from the worker set, printed in `summary()`)
 is a small optional addition; nothing in the planner has to change.
 
-libuv's auxiliary pool is sized with `UV_THREADPOOL_SIZE` before any loop in
-the process first uses it, and placed by inheritance (section 2): the loop
-thread sets the mask and, on Linux, the nice value intended for the
-auxiliary threads, issues one trivial request to create them, waits for its
-callback, and restores its own pin and priority. The intended placement is
-an application choice; the obvious ones are the reserved core's SMT sibling
-(blocking reads beside the loop, off the workers), or the confined set the
-host left to the caller. On Windows only the mask is inherited; priority
-comes from the process class. `UvLoop.create` takes both as options and
-`UvLoop.summary()` reports what the auxiliary threads ended up with, so the
-placement is measured rather than assumed. The pool is process-global, so a
-second `UvLoop` in one process would share it; the library allows one loop
-per process and says so.
+libuv's auxiliary pool is sized with `UV_THREADPOOL_SIZE` (`auxThreads`),
+set before any loop in the process first uses the pool, and placed directly.
+During creation the loop queues one warm-up work item per expected pool
+thread. Each item, running on an auxiliary thread, applies the requested
+mask and priority to its own thread and records what it reads back. It then
+waits, up to 250 ms, until every item has arrived, so each lands on a
+distinct thread.
+
+The mask is `auxCpus`, or the creating thread's affinity when that is empty,
+so the threads never inherit the loop's pin. The priority is
+`UvAuxPriority`: on Linux five more nice levels, or nice 19; on Windows
+`THREAD_PRIORITY_BELOW_NORMAL` or `THREAD_PRIORITY_LOWEST`. The items call
+only OS functions and atomics, because the auxiliary threads are not
+registered with druntime.
+
+Direct placement replaces the plan's inheritance trick, which Windows cannot
+support (thread affinity is not inherited there) and which needed the loop
+thread to change its own pin and priority back and forth.
+`UvLoop.auxThreads` and `summary()` report each thread's id, CPUs and
+priority, so the placement is measured rather than assumed.
+
+The intended placement is an application choice. The obvious ones are the
+reserved core's SMT sibling, for blocking reads beside the loop and off the
+workers, or the confined set the host left to the caller. The pool is
+process-global, so a second `UvLoop` would share it. `create` therefore
+claims the process's one loop, and the claim is released at close.
 
 ### 3.5 Binding without ImportC
 
@@ -343,13 +423,18 @@ demand into file requests and completions into decode jobs for the pool.
 Two shapes are available without any new mechanism:
 
 - **Plain code.** The step is a function; the manager keeps its state in
-  the loop thread's TLS and issues `ant_uv` requests directly, with no ring
-  hop, since it already runs on the loop thread.
-- **Fibers on the loop thread.** The manager constructs a private
-  `AntFarm` (one consumer, a few producers) and a `FiberDomain` with the
-  loop thread as Director; the step serves the domain and consumes that
-  Farm on the loop thread's own view, as a `FarmHost` with `workers == 0`
-  does. Manager logic is then Fibers that wait on `FiberEvent`s which the
+  the loop thread's TLS and issues `ant_uv` requests like any other thread.
+  As built there is one submission path: loop-thread submissions also go
+  through the ring and are dequeued on the next iteration, which keeps the
+  credit and cancellation rules identical for every submitter.
+- **Fibers on the loop thread.** `ant_uv.fibers.UvFibers` packages this:
+  a private `AntFarm` with the loop thread as its only consumer and
+  producer, a `FiberDomain` with the loop thread as Director, and a ready
+  lane whose wakes call `UvLoop.wake`. The application builds it in the
+  `start` hook, returns its `step` from the `step` hook, and calls its
+  `shutdown` from the `stop` hook. The step serves the domain and consumes
+  that Farm on the loop thread's own view, as a `FarmHost` with
+  `workers == 0` does. Manager logic is then Fibers that wait on `FiberEvent`s which the
   completion sink sets on the same thread (the waiter-queue mutex is
   uncontended), and suspended I/O work resumes where it was issued. This
   does not touch the pool's `GroupHost`, which stays process-unique for
@@ -366,12 +451,14 @@ the host closes).
 | Piece | Where | Dependencies |
 | --- | --- | --- |
 | Bounded 64-byte slot ring (provisional interface), tests, TSan lane, perf harness | `antfarm.ring` (core) | none |
-| Optional `reservedProcessors` on `GroupHostOptions` | `threadpool.groups` | none |
-| libuv binding, `UvLoop` thread, ring ownership, credits, completion sink, auxiliary pool placement, fs/timer/async wrappers | subpackage `ant_uv` (name open) | `antfarm`, `threadpool` for pinning and tokens, `ant_fibers` for the trigger wake, libuv |
+| libuv binding (`ant_uv.binding`), `UvLoop` thread, rings, credits, cancellation, completion sink, auxiliary pool placement, file, whole-file and timer requests (`ant_uv.loop`), Fibers on the loop thread and `submitAndWait` (`ant_uv.fibers`) | subpackage `ant_uv` | `antfarm`, `threadpool` for pinning, `ant_fibers` for the trigger and event wakes, libuv |
 | Request kinds, tag table, generations, the resource manager, main-thread rings, quiesce | the application | |
 
-`ant_uv` follows `ant_fibers` in shape: one owning class, a `dub.sdl`
-configuration for its tests, and a C-free D API over the binding. It is
+`ant_uv` follows `ant_fibers` in shape: one owning class and a C-free D
+API over the binding; its tests build through `tests/ant_uv/Makefile`
+because the layout check links a C translation unit compiled against the
+real `uv.h`. `reservedProcessors` was not added: `pool.processors` already
+keeps the loop's CPU out of the worker set. It is
 optional in every sense: not built by `make check` unless libuv is present,
 not referenced by any core module, and absent from the C ABI until it has
 production use. The D API is called behind an application-owned resident
@@ -402,40 +489,75 @@ requests, wait for their terminal callbacks, retire its Fibers, then unload.
 
 ## 5. Validation
 
-- **Ring:** exactly-once under M producers and one consumer; the drained
-  check as "all producers closed and empty"; the stalled-producer and
-  false-not-drained cases; the loser and foreign counters from the study;
-  a TSan lane; the `slot_ring` harness re-run with the request layout as a
-  regression table (single-ended, shared-end, per-CCD partition, latency).
-- **Loop thread:** timers only (no auxiliary pool involved); the auxiliary
-  pool created under the requested mask and priority and its threads'
-  placement read back; file reads requested from several worker Fibers
-  and from the main thread with exactly-once completion; cancellation of a
-  pending batch with every terminal callback observed before buffers are
-  released; a full request ring returning ownership while the pool keeps
-  draining; the credit limit under a flood; a full second-hop ring with
-  completions retained and retried; `close()` with requests in flight,
-  checked by the credit returning to zero and `uv_loop_close` returning 0;
-  a failure captured inside a callback; the step hook with a private
-  Fiber domain waiting on completions.
-- **Measurement:** completion latency from a worker's push to Fiber
-  resume, and from the main thread's push to its inbound ring; the ring
-  numbers re-taken.
-- **Platforms:** Linux under both compilers in `make check` when libuv is
-  present (skipped with a printed reason otherwise); the native Windows
-  matrix with the pinned libuv build, including the `uv_buf_t` layout check
-  and the priority-not-inherited difference.
+What runs, and where:
+
+- **Ring** (`tests/ring`, LDC, DMD and ThreadSanitizer; the module's
+  unittests run in the root `dub test`; BetterC through the native C
+  probe):
+  - per-producer FIFO with four producers and one consumer;
+  - exactly-once delivery with four producers and four consumers;
+  - close under contention, five rounds, ending only on the exact drained
+    test;
+  - a producer stalled between reservation and publication, which hides
+    the published element behind it and keeps the ring from draining;
+  - backpressure on a two-slot ring.
+- **Loop** (`tests/ant_uv`, LDC, DMD and ThreadSanitizer):
+  - the binding's `uv_buf_t` and `uv_stat_t` layouts and every constant it
+    declares, against a C translation unit compiled with the real `uv.h`;
+  - lifecycle and placement: the loop thread's pin, and the auxiliary pool's
+    size, CPUs and nice value read back;
+  - 20,000 `nop`s from four threads through a 64-slot completion ring, each
+    delivered once, after publication, in its producer's order;
+  - timers firing no earlier than their timeouts;
+  - a two-slot completion ring holding 98 deliveries until it has room;
+  - eight credits under a flood of 1,000 timers from four threads;
+  - a full four-slot ring refusing and leaving the request untouched;
+    malformed and doubly submitted requests refused;
+  - cancellation of timers both in libuv and queued behind the credit, and
+    of a batch of 200 `stat`s;
+  - close cancelling ten long timers after its grace period;
+  - a throwing step hook failing the loop, which cancels its work and
+    reports the failure at close;
+  - Fibers on the loop thread reading a file and, when cancelled, waiting
+    for their request;
+  - 96 worker Fibers on a two-group `GroupHost` reading files three ways
+    (loop allocation, caller buffer, and `open`/`fstat`/`read`/`close` on a
+    counted trigger), with publications equal to submissions, and a
+    cancelled worker Fiber waiting for its request;
+  - an `open` of a FIFO with no writer abandoned by close, with the loop
+    left allocated.
+- **Stability:** 30 consecutive LDC runs, 10 DMD and 10 ThreadSanitizer
+  runs of the loop suite, and 10 ThreadSanitizer runs of the ring suite,
+  without a failure. ThreadSanitizer needs two suppressions, both explained
+  in `tests/ant_uv/tsan.supp`: druntime's GC suspend handler and races
+  internal to druntime's uninstrumented GC allocator. libuv itself is
+  deliberately not suppressed, because suppressing calls from it would also
+  hide the mutexes that order its auxiliary threads' writes.
+- **`make check`** runs the ring lanes always and the loop lanes when
+  `pkg-config` finds libuv 1.19 or later, printing the reason when it skips
+  them.
+- **Still to do:** completion latency from a worker's push to Fiber resume
+  and from the main thread's push to an inbound ring (the ring's own latency
+  is measured); the native Windows matrix with a pinned libuv build,
+  including the `uv_buf_t` width and the placement calls, none of which has
+  run.
 
 ## 6. Release plan
 
-- **2.2.0:** `antfarm.ring` from the `exp/slot-ring` work with the contract
-  of section 3.2 and a provisional interface; `ant_uv` with `UvLoop`, the
-  ring, credits, the completion sink, auxiliary pool placement and the
-  file, timer and async wrappers; the optional `reservedProcessors`.
-  Everything an application needs to load files from worker Fibers and a
-  loop-affine resource manager.
+- **2.2.0** (implemented on `2.2.0-progress`, unreleased):
+  - `antfarm.ring` with the contract of section 3.2 and a provisional
+    interface;
+  - `ant_uv` with `UvLoop`, its rings and credits, cancellation, the
+    completion sink, auxiliary pool placement, file, whole-file and timer
+    requests, `UvFibers` and `submitAndWait`;
+  - the slot-ring harness ported to the shipped ring.
+
+  That is everything an application needs to load files from worker Fibers
+  and from a loop-affine resource manager. Before the release it still
+  needs the latency measurements above, a full `make check`, and the
+  Windows matrix or an explicit Linux-only statement.
 - **2.2.1:** sockets, pipes and process spawn in the binding as the first
-  consumer needs them; the latency measurements; the Windows pinned build.
+  consumer needs them; the Windows pinned build if it is not in 2.2.0.
 - **Later:** the Element Farm, once its ordering and membership contract is
   written, as a second channel kind rather than a drop-in; `ant_uv` in the
   C ABI after production use; a loop inside a pool worker (the park-owner
@@ -445,12 +567,29 @@ requests, wait for their terminal callbacks, retire its Fibers, then unload.
 
 ## 7. Open questions
 
-- The subpackage and class names (`ant_uv` matches `ant_fibers`; `UvLoop`).
 - When `antfarm.ring` leaves provisional status: after a second user, or
   after the Element Farm contract shows what the common interface is.
-- Where the auxiliary threads go by default when the application gives no
-  placement: the loop's SMT sibling, or unpinned at lower priority. The
-  flood test on the 5900XT decides.
+- Whether the auxiliary threads' default should stay the creating thread's
+  affinity, or become the loop core's SMT sibling at lower priority. A
+  flood of file reads on the 5900XT beside a busy pool decides.
 - Whether the credit default should follow the ring's capacity or the
-  auxiliary pool size; the flood test decides that too.
-- Whether `reservedProcessors` is worth adding over `pool.processors`.
+  auxiliary pool size; the same flood decides that too.
+
+## 8. Where the implementation departed from the plan
+
+- **Placement is direct, not inherited** (section 3.4). Windows does not
+  inherit thread affinity, and the inheritance trick needed the loop thread
+  to change its own pin and priority back and forth.
+- **One submission path** (section 3.6). The loop thread submits through
+  the ring like every other thread, rather than through a separate local
+  path.
+- **Cancellation has its own ring** (section 3.2). The plan was silent on
+  how a cancel reaches a request held back by the credit. The control ring
+  and the request flag make cancellation independent of the credit.
+- **An abandoned close is observable** (section 3.1). It publishes
+  `abandoned`, distinct from `done`, and reports `UV_EBUSY` as `loopClose`.
+  The plan said only "an abort outcome".
+- **`reservedProcessors` was not added** (section 3.7).
+- **`submitAndWait` survives Fiber cancellation** (section 3.3). The plan
+  did not address a cancelled waiter. Without this, a cancelled Fiber would
+  unwind while the loop still owned a request on its stack.

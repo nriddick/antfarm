@@ -149,6 +149,15 @@ cells are included only when `--dual-threads` includes 6.
   Use `check-benchmarks` to include the throughput and dual argument-parsing
   tests as well; their C numeric conversions also respect D string boundaries.
 
+- **`slot_ring`** — the shipped slot ring (`antfarm.ring.SlotRing` with the
+  56-byte `RingElement`, `--impl ring`) against the study's 32-byte-slot
+  Vyukov ring (`--impl vyukov`) and one uniform-fixed Farm table per element
+  (`--impl farm`), through the same loops: one thread, N dual-role threads,
+  one producer with N consumers, N producers with one consumer, one-way
+  latency between two pinned cores, and `--rings P` with
+  `--policy own|rr|local` for a few rings per CCD. Ported from the
+  `exp/slot-ring` study without its Element Farm prototype; the record is
+  [docs/performance/slot-ring-shipped-2026-10-30.md](../../docs/performance/slot-ring-shipped-2026-10-30.md).
 - **`subscribe_cost`** — nanoseconds per subscribe, three `consumeNext`
   calls and unsubscribe on a 1 MiB, K = 8 Farm, once idle and once beside
   two producers and two steady consumers (the T29 geometry); 200,000 cycles

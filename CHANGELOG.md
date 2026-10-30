@@ -8,9 +8,58 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 Opened 2026-10-30 on `2.2.0-progress`, from 2.1.1. The series' feature is an
 event loop beside the worker pool, one libuv loop thread per application,
-with a ring in the core: the design is
-[docs/design/event-loop.md](docs/design/event-loop.md), the roadmap section
-"2.2.0 — in progress" lists the planned content. No code has landed yet.
+with a ring in the core. The design is
+[docs/design/event-loop.md](docs/design/event-loop.md); its section 8 lists
+where the implementation departed from the plan.
+
+- Core: `antfarm.ring` (provisional interface). `SlotRing!T` is a bounded
+  multi-producer, multi-consumer ring of 64-byte slots (Vyukov's queue)
+  with a close bit folded into the enqueue cursor. Closing costs a push
+  nothing, and `drained` is exact after `close`: it never reports a
+  reservation that has not been published. `RingElement` is the 56-byte
+  default element; `RingPush` reports `pushed`, `full` or `closed`. The
+  module is BetterC and is exercised from the native C probe.
+- New subpackage `ant_uv`, which needs libuv 1.19 or later.
+  - `UvLoop` runs one libuv loop on a dedicated, optionally pinned thread.
+    Any thread submits caller-owned `UvRequest`s (`nop`, `timer`, `open`,
+    `close`, `read`, `write`, `stat`, `fstat`, `readFile`) on a bounded
+    request ring.
+  - Operations in libuv are bounded by credits. Cancellation travels on its
+    own control ring.
+  - Completion is published once, with release ordering, then delivered
+    through a `FiberGenerationTrigger`, a `FiberEvent`, a loop-thread
+    callback, or a completion ring that is retried, never dropped.
+  - `close` serves for a grace period, cancels, and publishes what libuv
+    cannot finish as `abandoned`, leaving the loop allocated.
+  - A throwing hook fails the loop, which cancels its work and reports the
+    failure from `close`.
+  - libuv's auxiliary pool is sized and each of its threads placed from
+    inside itself: CPUs and priority, read back in `UvLoop.auxThreads`.
+  - `UvFibers` runs a private Fiber domain on the loop thread.
+    `submitAndWait` parks a managed Fiber anywhere and survives the Fiber's
+    cancellation without unwinding while the loop owns its request.
+  - The binding is declared by hand over libuv's opaque-handle API, because
+    ImportC cannot read the system `uv.h`.
+  - Guide: [ant_uv/README.md](ant_uv/README.md); example:
+    [read_files.d](ant_uv/examples/read_files.d).
+- Tests: `tests/ring` and `tests/ant_uv`, each under LDC, DMD and
+  ThreadSanitizer. `ant_uv`'s layout check compares the binding with a C
+  translation unit compiled against the real `uv.h`. `make check` runs both
+  suites, `ant_uv` only when `pkg-config` finds libuv 1.19 or later;
+  `make check-quick` runs the ring. The API docs check covers the ring and
+  `ant_uv`.
+- `tools/perf/slot_ring`: the study's harness ported to the shipped ring
+  (`--impl ring|vyukov|farm`). The record is
+  [slot-ring-shipped-2026-10-30.md](docs/performance/slot-ring-shipped-2026-10-30.md):
+  with its real 56-byte element the ring costs 10 to 11 ns single-ended and
+  delivers in 40 ns on one CCD.
+
+Validation so far, Linux x86-64 (Ryzen 9 5900XT, LDC 1.43.0, DMD 2.113.0,
+libuv 1.53.0): both new suites pass under LDC, DMD and ThreadSanitizer. In
+repeated runs, 30 LDC, 10 DMD and 10 ThreadSanitizer runs of the `ant_uv`
+suite and 10 ThreadSanitizer runs of the ring suite all passed. The BetterC
+check, the API docs check and the link check pass. No Windows run has been
+made.
 
 ## 2.1.1 — 2026-10-28
 
