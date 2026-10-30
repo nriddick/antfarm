@@ -142,6 +142,27 @@ Shipped:
 - The Farm test suites are condensed and strengthened, and the interim
   design reports live in git history rather than the tree.
 
+## 2.2.0 — in progress
+
+Opened 2026-10-30 on `2.2.0-progress`. The series' feature is an event loop
+on worker hosts, designed in
+[docs/design/event-loop.md](docs/design/event-loop.md): Ant Farm supplies
+the seams (a bounded 64-byte element ring in the core, a designated-worker
+attachment on `GroupHost`, later a park-owner hook in `threadpool`) and an
+optional subpackage that binds libuv on a designated worker; applications
+own what a request means. Planned content:
+
+- `antfarm.ring`: the Vyukov slot ring from the `exp/slot-ring` study, with
+  its exactly-once and drained tests, a TSan lane and the `slot_ring`
+  harness. The Element Farm prototype from the same branch is recorded as
+  the alternative behind the same interface.
+- The designated-worker attachment helper in `threadpool.groups`.
+- `ant_uv` (name open): the hand-declared libuv binding over the
+  opaque-handle API, the loop attachment with a polling `serve`, the
+  completion sink and the Fiber event wake. Optional, skipped by `make
+  check` without libuv.
+- 2.2.1: the park-owner hook and the libuv park, with wait-race validation.
+
 ## Later
 
 - Private trees retreat to typed results and tracked outcomes.
@@ -159,8 +180,10 @@ Shipped:
   at high counts, which is what per-worker admission and completion would
   remove. Its wake
   step reuses the claim word, and timers can become per-worker.
-- Async I/O stays out of the runtime. An I/O library can run in a worker loop
-  beside `serve` (the `GroupHost` attachment hook above gives it a place).
+- Async I/O stays out of the runtime. An I/O library runs in a worker loop
+  beside `serve`; the 2.2.x event loop design above is that library, as an
+  optional subpackage on a designated worker. A symmetric multi-waiter
+  reactor remains Tier 2 of the coroutine proposal.
 
 ## 2.0 goals — draft
 

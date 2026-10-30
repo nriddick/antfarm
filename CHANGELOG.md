@@ -4,6 +4,13 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
+## 2.2.0 development
+
+Opened 2026-10-30 on `2.2.0-progress`, from 2.1.1. The series' feature is an
+event loop on worker hosts with libuv: the design is
+[docs/design/event-loop.md](docs/design/event-loop.md), the roadmap section
+"2.2.0 — in progress" lists the planned content. No code has landed yet.
+
 ## 2.1.1 — 2026-10-28
 
 2.1.1 replaces the Farm's `Sub0` pulse with a per-epoch `Live` bit, raised by
