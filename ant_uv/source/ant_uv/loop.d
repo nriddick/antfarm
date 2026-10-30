@@ -459,9 +459,19 @@ final class UvLoop
             atomicStore(gLoopClaimed, 0);
             throw t;
         }
-        loop.thread_ = new Thread(&loop.threadMain);
-        loop.thread_.isDaemon = false;
-        loop.thread_.start();
+        try
+        {
+            loop.thread_ = new Thread(&loop.threadMain);
+            loop.thread_.isDaemon = false;
+            loop.thread_.start();
+        }
+        catch (Throwable t)
+        {
+            // No loop thread: release what the constructor took.
+            loop.releaseRings();
+            atomicStore(gLoopClaimed, 0);
+            throw t;
+        }
         while (atomicLoad!(MemoryOrder.acq)(loop.state_) == State.starting)
             Thread.sleep(50.usecs);
         if (atomicLoad!(MemoryOrder.acq)(loop.state_) == State.failed)

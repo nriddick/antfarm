@@ -53,13 +53,17 @@ where the implementation departed from the plan.
   [slot-ring-shipped-2026-10-30.md](docs/performance/slot-ring-shipped-2026-10-30.md):
   with its real 56-byte element the ring costs 10 to 11 ns single-ended and
   delivers in 40 ns on one CCD.
+- `tools/perf/uv_latency`: a request's round trip through the loop. The
+  record is [uv-latency-2026-10-30.md](docs/performance/uv-latency-2026-10-30.md):
+  0.4 to 0.5 µs for a spinning thread on the loop's CCD, 1.2 µs for a Fiber
+  on the loop thread, and 7 µs at p50 for a parked worker Fiber.
 
 Validation so far, Linux x86-64 (Ryzen 9 5900XT, LDC 1.43.0, DMD 2.113.0,
-libuv 1.53.0): both new suites pass under LDC, DMD and ThreadSanitizer. In
-repeated runs, 30 LDC, 10 DMD and 10 ThreadSanitizer runs of the `ant_uv`
-suite and 10 ThreadSanitizer runs of the ring suite all passed. The BetterC
-check, the API docs check and the link check pass. No Windows run has been
-made.
+libuv 1.53.0): `make check` passed with both new suites in it, each under
+LDC, DMD and ThreadSanitizer. In repeated runs, 30 LDC, 10 DMD and 10
+ThreadSanitizer runs of the `ant_uv` suite and 10 ThreadSanitizer runs of
+the ring suite all passed. No Windows run has been made; the Windows code
+paths have only been type-checked for an `x86_64-pc-windows-msvc` target.
 
 ## 2.1.1 — 2026-10-28
 

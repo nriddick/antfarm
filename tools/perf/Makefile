@@ -24,6 +24,11 @@ check-tail check-throughput check-dual: check-%:
 	$(DC) -g -unittest -i -I$(ROOT)/threadpool/source $*.d $(FARM_SOURCES) -of=$*_tests
 	./$*_tests --DRT-testmode=test-only
 
+# Needs libuv (1.19+); not part of `all`.
+uv_latency: uv_latency.d $(ROOT)/antfarm/ring.d $(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(FIBER_SOURCES) $(THREADPOOL_SOURCES)
+	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$(ROOT)/ant_uv/source \
+		uv_latency.d -L-luv -of=$@ -od=.obj-uv_latency
+
 slot_ring: slot_ring.d $(FARM_SOURCES) $(ROOT)/antfarm/ring.d
 	$(DC) $(DFLAGS) -I$(ROOT) slot_ring.d $(FARM_SOURCES) $(ROOT)/antfarm/ring.d -of=$@
 

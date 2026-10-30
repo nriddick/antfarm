@@ -164,9 +164,9 @@ Implemented on the branch (see the CHANGELOG's 2.2.0 section):
   `UvFibers` and `submitAndWait`. Optional; `make check` skips it without
   libuv.
 
-Remaining before 2.2.0: completion latency from a worker's push to Fiber
-resume, a full `make check`, and the native Windows matrix with a pinned
-libuv build (or an explicit Linux-only release note). `reservedProcessors`
+Remaining before 2.2.0: the native Windows matrix with a pinned libuv
+build (or an explicit Linux-only release note). The round-trip latency is
+measured and `make check` passes with the new lanes. `reservedProcessors`
 was dropped: `pool.processors` already keeps the loop's CPU out of the
 worker set.
 

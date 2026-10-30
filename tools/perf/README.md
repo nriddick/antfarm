@@ -158,6 +158,11 @@ cells are included only when `--dual-threads` includes 6.
   `--policy own|rr|local` for a few rings per CCD. Ported from the
   `exp/slot-ring` study without its Element Farm prototype; the record is
   [docs/performance/slot-ring-shipped-2026-10-30.md](../../docs/performance/slot-ring-shipped-2026-10-30.md).
+- **`uv_latency`** — a request's round trip through `ant_uv` (needs
+  libuv): a `nop` from `UvLoop.submit` until the waiter runs again, for a
+  thread spinning on `done`, a worker Fiber parked on a `FiberEvent`, and a
+  Fiber on the loop thread; p50/p90/p99/max in microseconds. The record is
+  [docs/performance/uv-latency-2026-10-30.md](../../docs/performance/uv-latency-2026-10-30.md).
 - **`subscribe_cost`** — nanoseconds per subscribe, three `consumeNext`
   calls and unsubscribe on a 1 MiB, K = 8 Farm, once idle and once beside
   two producers and two steady consumers (the T29 geometry); 200,000 cycles

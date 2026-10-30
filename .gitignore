@@ -94,3 +94,5 @@ tests/ant_uv/uv_test_dmd
 tests/ant_uv/uv_test_tsan
 tests/ant_uv/.obj-*/
 ant_uv/examples/read_files
+tools/perf/uv_latency
+tools/perf/.obj-uv_latency/

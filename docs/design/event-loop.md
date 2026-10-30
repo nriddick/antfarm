@@ -536,11 +536,19 @@ What runs, and where:
 - **`make check`** runs the ring lanes always and the loop lanes when
   `pkg-config` finds libuv 1.19 or later, printing the reason when it skips
   them.
-- **Still to do:** completion latency from a worker's push to Fiber resume
-  and from the main thread's push to an inbound ring (the ring's own latency
-  is measured); the native Windows matrix with a pinned libuv build,
-  including the `uv_buf_t` width and the placement calls, none of which has
-  run.
+- **Latency**, measured
+  ([uv-latency-2026-10-30.md](../performance/uv-latency-2026-10-30.md)):
+  a request's round trip from `submit` to the waiter running again. It is
+  0.4 to 0.5 µs for a thread on the loop's CCD spinning on `done` (1.0 µs
+  across CCDs), 1.2 µs for a Fiber on the loop thread, and 7 µs at p50
+  (10 µs at p99) for a worker Fiber parked on an event. The worker figure
+  is mostly the parked worker's wake and the Fiber's resume, not the loop.
+- **The full gate:** `make check` passed on `2.2.0-progress`, with the ring
+  and `ant_uv` lanes in it.
+- **Still to do:** the native Windows matrix with a pinned libuv build,
+  covering the `uv_buf_t` width and the placement calls. Only a type-check
+  for an `x86_64-pc-windows-msvc` target has been done (`ldc2 -mtriple ...
+  -o-`), so the Windows paths compile but have never linked or run.
 
 ## 6. Release plan
 
@@ -553,8 +561,8 @@ What runs, and where:
   - the slot-ring harness ported to the shipped ring.
 
   That is everything an application needs to load files from worker Fibers
-  and from a loop-affine resource manager. Before the release it still
-  needs the latency measurements above, a full `make check`, and the
+  and from a loop-affine resource manager. The latency measurement and a
+  full `make check` are done. Before the release it still needs the
   Windows matrix or an explicit Linux-only statement.
 - **2.2.1:** sockets, pipes and process spawn in the binding as the first
   consumer needs them; the Windows pinned build if it is not in 2.2.0.
