@@ -6,7 +6,7 @@
  + Fibers on the loop thread, files read by worker Fibers on a GroupHost,
  + readFile's allocators, and abandonment of an operation that cannot
  + finish. Built with `AntfarmMimallocV3` and the real mimalloc library, it
- + also reads into mimalloc v3. Linux.
+ + also reads into mimalloc v3. Linux and Windows.
  +/
 module uv_test;
 
@@ -18,11 +18,10 @@ import ant_uv;
 import ant_uv.binding;
 import antfarm.ring;
 import core.atomic;
+import core.stdc.config : c_long;
 import core.stdc.errno : errno;
 import core.stdc.stdio : fflush, printf, stdout;
 import core.stdc.stdlib : abort, free;
-import core.sys.linux.sched : cpu_set_t, CPU_ISSET, sched_getaffinity;
-import core.sys.posix.sys.resource : getpriority, PRIO_PROCESS;
 import core.thread : Thread;
 import core.time;
 import std.conv : to;
@@ -34,13 +33,24 @@ import threadpool.groups : GroupHost, GroupHostOptions;
 import threadpool.host : CallerPlacement, HostGroups;
 import threadpool.topology : ProcessorId;
 
+version (linux)
+{
+    import core.sys.linux.sched : cpu_set_t, CPU_ISSET, sched_getaffinity;
+    import core.sys.posix.sys.resource : getpriority, PRIO_PROCESS;
+}
+else version (Windows)
+{
+    import core.sys.windows.windows : GetCurrentThread, THREAD_PRIORITY_BELOW_NORMAL;
+    import threadpool.sys.win_bindings : GetThreadGroupAffinity, GROUP_AFFINITY;
+}
+
 extern (C) size_t antuv_c_sizeof_buf();
 extern (C) size_t antuv_c_offsetof_buf_base();
 extern (C) size_t antuv_c_offsetof_buf_len();
 extern (C) size_t antuv_c_sizeof_buf_len();
 extern (C) size_t antuv_c_offsetof_stat_size();
 extern (C) size_t antuv_c_sizeof_stat();
-extern (C) long antuv_c_constant(int which);
+extern (C) c_long antuv_c_constant(int which); // C long: 32-bit on Windows
 
 alias Ring = SlotRing!RingElement;
 
@@ -80,11 +90,21 @@ Thread spawn(void delegate() body)
 
 ProcessorId[] threadCpus()
 {
-    cpu_set_t set;
-    sched_getaffinity(0, cpu_set_t.sizeof, &set);
     ProcessorId[] cpus;
-    foreach (cpu; 0 .. cpu_set_t.sizeof * 8)
-        if (CPU_ISSET(cpu, &set)) cpus ~= ProcessorId(0, cast(ushort) cpu);
+    version (linux)
+    {
+        cpu_set_t set;
+        sched_getaffinity(0, cpu_set_t.sizeof, &set);
+        foreach (cpu; 0 .. cpu_set_t.sizeof * 8)
+            if (CPU_ISSET(cpu, &set)) cpus ~= ProcessorId(0, cast(ushort) cpu);
+    }
+    else version (Windows)
+    {
+        GROUP_AFFINITY affinity;
+        check(GetThreadGroupAffinity(GetCurrentThread(), &affinity) != 0, "GetThreadGroupAffinity");
+        foreach (lp; 0 .. 64)
+            if ((affinity.Mask >> lp) & 1) cpus ~= ProcessorId(affinity.Group, cast(ushort) lp);
+    }
     return cpus;
 }
 
@@ -154,8 +174,16 @@ void lifecycleAndPlacement(ProcessorId[] cpus)
         atomicStore(started, true);
     };
     o.stop = () { atomicStore(stopped, true); };
-    errno = 0;
-    immutable baseNice = getpriority(PRIO_PROCESS, 0);
+    // Linux raises the threads' nice value by five; Windows sets
+    // THREAD_PRIORITY_BELOW_NORMAL.
+    version (linux)
+    {
+        errno = 0;
+        immutable baseNice = getpriority(PRIO_PROCESS, 0);
+        immutable wantPriority = baseNice + 5 > 19 ? 19 : baseNice + 5;
+    }
+    else version (Windows)
+        immutable wantPriority = THREAD_PRIORITY_BELOW_NORMAL;
     auto loop = UvLoop.create(o);
     check(UvLoop.current is null && !loop.onLoopThread, "current is null off the loop thread");
     check(waitUntil(() => atomicLoad(started)), "start hook did not run");
@@ -163,12 +191,11 @@ void lifecycleAndPlacement(ProcessorId[] cpus)
     printf("  %.*s\n", cast(int) summary.length, summary.ptr);
     auto aux = loop.auxThreads;
     check(aux.length == 3, "three auxiliary threads");
-    immutable wantNice = baseNice + 5 > 19 ? 19 : baseNice + 5;
     foreach (ref t; aux)
     {
         check(t.placed && t.error == 0, "auxiliary placement failed");
         check(t.cpus == [cpus[$ - 1]], "auxiliary thread not on the requested CPU");
-        check(t.priority == wantNice, "auxiliary nice not raised by five");
+        check(t.priority == wantPriority, "auxiliary priority not lowered");
     }
     check(loop.isOpen && !loop.failed, "loop not open");
     auto report = loop.close();
@@ -767,14 +794,43 @@ struct CountingHeap
     size_t lastBytes, lastAlignment;
 }
 
+// The Microsoft C runtime has no aligned_alloc: over-allocate and keep the
+// malloc block just below the aligned address.
+version (CRuntime_Microsoft)
+{
+    void* alignedAllocate(size_t alignment, size_t bytes) nothrow @nogc @system
+    {
+        import core.stdc.stdlib : malloc;
+        auto raw = malloc(bytes + alignment + (void*).sizeof);
+        if (raw is null) return null;
+        auto aligned = (cast(size_t) raw + (void*).sizeof + alignment - 1) & ~(alignment - 1);
+        (cast(void**) aligned)[-1] = raw;
+        return cast(void*) aligned;
+    }
+
+    void alignedFree(void* memory) nothrow @nogc @system
+    {
+        if (memory !is null) free((cast(void**) memory)[-1]);
+    }
+}
+else
+{
+    void* alignedAllocate(size_t alignment, size_t bytes) nothrow @nogc @system
+    {
+        import core.stdc.stdlib : aligned_alloc;
+        return aligned_alloc(alignment, bytes);
+    }
+
+    alias alignedFree = free;
+}
+
 void* countingAllocate(void* context, size_t bytes, size_t alignment) nothrow @nogc @system
 {
-    import core.stdc.stdlib : aligned_alloc;
     auto heap = cast(CountingHeap*) context;
     atomicOp!"+="(heap.allocations, 1);
     if (UvLoop.current is null) atomicOp!"+="(heap.offLoopAllocations, 1);
     if (atomicLoad(heap.refuse)) return null;
-    auto block = aligned_alloc(alignment, (bytes + alignment - 1) & ~(alignment - 1));
+    auto block = alignedAllocate(alignment, (bytes + alignment - 1) & ~(alignment - 1));
     heap.lastBlock = block;
     heap.lastBytes = bytes;
     heap.lastAlignment = alignment;
@@ -789,7 +845,7 @@ void countingDeallocate(void* context, void* memory, size_t bytes, size_t alignm
     if (UvLoop.current !is null) atomicOp!"+="(heap.loopFrees, 1);
     if (memory !is heap.lastBlock || bytes != heap.lastBytes || alignment != heap.lastAlignment)
         atomicOp!"+="(heap.mismatches, 1);
-    free(memory);
+    alignedFree(memory);
 }
 
 // Submit from this thread and spin until the loop publishes.
@@ -853,19 +909,49 @@ void readFileAllocators(string dir, string path, const(ubyte)[] expected, string
         && (cast(size_t) plainFile.bytes.ptr & 63) == 0, "default block");
     plainFile.free();
 
-    // A read that fails after allocating: the loop frees the block. A
-    // directory opens and reports a size, then its read fails with EISDIR.
-    import std.file : getSize;
-    if (getSize(dir) == 0)
+    // A read that fails after allocating: the loop frees the block. On
+    // Linux a directory opens and reports a size, then its read fails with
+    // EISDIR. libuv on Windows reports every directory's size as 0, so there
+    // the file is one whose bytes another handle has locked: it opens (libuv
+    // shares everything) and reports its size, then its read fails with
+    // EBUSY.
+    version (Windows)
+    {
+        import core.sys.windows.windows : CloseHandle, CreateFileW, FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_READ, GENERIC_WRITE,
+            INVALID_HANDLE_VALUE, LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+            OPEN_EXISTING, OVERLAPPED;
+        import std.utf : toUTF16z;
+        auto failedPath = buildPath(dir, "locked");
+        write(failedPath, pattern(7, 4096));
+        auto locker = CreateFileW(failedPath.toUTF16z, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, null, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, null);
+        check(locker != INVALID_HANDLE_VALUE, "open the file to lock");
+        scope (exit) CloseHandle(locker);
+        OVERLAPPED whole;
+        check(LockFileEx(locker, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+            uint.max, uint.max, &whole) != 0, "lock the file");
+        enum failedError = "EBUSY";
+        immutable failedReports = true;
+    }
+    else
+    {
+        import std.file : getSize;
+        auto failedPath = dir;
+        enum failedError = "EISDIR";
+        immutable failedReports = getSize(dir) != 0;
+    }
+    if (!failedReports)
         printf("  SKIP failed-read free: the directory reports size 0\n");
     else
     {
         UvRequest failed;
         failed.op = UvOp.readFile;
-        failed.path = dir.toStringz;
+        failed.path = failedPath.toStringz;
         failed.allocator = counting;
-        check(readNow(loop, &failed) && failed.done && failed.errorName == "EISDIR"
-            && !failed.ownsBuffer, "reading a directory fails");
+        check(readNow(loop, &failed) && failed.done && failed.errorName == failedError
+            && !failed.ownsBuffer, "a read that fails after allocating");
         check(allocations == 3 && deallocations == 3 && atomicLoad(heap.loopFrees) == 1
             && atomicLoad(heap.mismatches) == 0, "the loop freed the failed read's block");
     }
@@ -957,33 +1043,70 @@ version (AntfarmMimallocV3)
     }
 }
 
-// An open of a FIFO with no writer blocks in an auxiliary thread, so libuv
-// cannot cancel it: close abandons it and leaves the loop allocated. A
-// writer then completes the open so the auxiliary thread is free again.
-void abandonFifo(string dir)
+// An operation that blocks in an auxiliary thread cannot be cancelled by
+// libuv: close abandons it and leaves the loop allocated. The test then
+// unblocks it so the auxiliary thread is free again. Linux opens a FIFO
+// that has no writer; Windows opens a named pipe and reads it before its
+// server writes, because opening a pipe there does not block.
+void abandonBlocked(string dir)
 {
-    import core.sys.posix.fcntl : open, O_WRONLY;
-    import core.sys.posix.sys.stat : mkfifo;
-    import core.sys.posix.unistd : close;
-    auto fifo = buildPath(dir, "fifo");
-    auto cfifo = fifo.toStringz;
-    check(mkfifo(cfifo, 0x180) == 0, "mkfifo");
     UvLoopOptions o;
     o.closeGrace = 20.msecs;
     o.abandonAfter = 50.msecs;
-    auto loop = UvLoop.create(o);
-    auto r = new UvRequest;
-    r.op = UvOp.open;
-    r.path = cfifo;
-    r.flags = UV_FS_O_RDONLY;
-    check(loop.submit(r) == UvSubmit.accepted, "fifo open submit");
+    version (linux)
+    {
+        import core.sys.posix.fcntl : open, O_WRONLY;
+        import core.sys.posix.sys.stat : mkfifo;
+        import core.sys.posix.unistd : close;
+        auto fifo = buildPath(dir, "fifo");
+        auto cfifo = fifo.toStringz;
+        check(mkfifo(cfifo, 0x180) == 0, "mkfifo");
+        auto loop = UvLoop.create(o);
+        auto r = new UvRequest;
+        r.op = UvOp.open;
+        r.path = cfifo;
+        r.flags = UV_FS_O_RDONLY;
+        check(loop.submit(r) == UvSubmit.accepted, "fifo open submit");
+    }
+    else version (Windows)
+    {
+        import core.sys.windows.windows : CloseHandle, CreateNamedPipeA, DWORD, HANDLE,
+            INVALID_HANDLE_VALUE, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE, PIPE_WAIT, WriteFile;
+        auto pipe = ("\\\\.\\pipe\\antuv-test-" ~ thisProcessID.to!string).toStringz;
+        HANDLE server = CreateNamedPipeA(pipe, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT,
+            1, 4096, 4096, 0, null);
+        check(server != INVALID_HANDLE_VALUE, "CreateNamedPipe");
+        scope (exit) CloseHandle(server);
+        auto loop = UvLoop.create(o);
+        UvRequest client;
+        client.op = UvOp.open;
+        client.path = pipe;
+        client.flags = UV_FS_O_RDONLY;
+        check(readNow(loop, &client) && client.succeeded, "pipe open");
+        auto r = new UvRequest;
+        r.op = UvOp.read;
+        r.file = cast(int) client.result;
+        r.buffer = (new ubyte[16]).ptr;
+        r.length = 16;
+        check(loop.submit(r) == UvSubmit.accepted, "pipe read submit");
+    }
     Thread.sleep(30.msecs);
     auto report = loop.close();
-    check(report.abandoned == 1 && report.loopClose == UV_EBUSY, "close did not abandon the open");
+    check(report.abandoned == 1 && report.loopClose == UV_EBUSY, "close did not abandon the operation");
     check(r.state == UvRequestState.abandoned && r.result == UV_ECANCELED, "abandoned request state");
-    immutable writer = open(cfifo, O_WRONLY);
-    check(writer >= 0, "fifo writer");
-    close(writer);
+    version (linux)
+    {
+        immutable writer = open(cfifo, O_WRONLY);
+        check(writer >= 0, "fifo writer");
+        close(writer);
+    }
+    else version (Windows)
+    {
+        ubyte[16] data;
+        DWORD written;
+        check(WriteFile(server, data.ptr, data.length, &written, null) && written == data.length,
+            "pipe writer");
+    }
     pass("close abandons an operation libuv cannot cancel and leaves the loop allocated");
 }
 
@@ -1024,7 +1147,7 @@ int main()
     workerFiberReads(paths, contents);
     readFileAllocators(dir, paths[8], contents[8], paths[0]);
     version (AntfarmMimallocV3) mimallocReads(paths[8], contents[8]);
-    abandonFifo(dir);
+    abandonBlocked(dir);
     printf("ALL UV TESTS PASSED (%lld ms)\n", (MonoTime.currTime - started).total!"msecs");
     return 0;
 }

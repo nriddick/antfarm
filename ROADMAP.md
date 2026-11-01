@@ -164,14 +164,14 @@ Implemented on the branch (see the CHANGELOG's 2.2.0 section):
   `UvFibers` and `submitAndWait`. Optional; `make check` skips it without
   libuv.
 
-Remaining before 2.2.0: the native Windows matrix with a pinned libuv
-build (or an explicit Linux-only release note). The round-trip latency is
-measured and `make check` passes with the new lanes. `reservedProcessors`
+The round-trip latency is measured, `make check` passes with the new
+lanes, and the native Windows matrix passes with a pinned libuv build
+(`scripts/build-libuv-windows.py`) and the `ring` and `ant_uv` lanes. `reservedProcessors`
 was dropped: `pool.processors` already keeps the loop's CPU out of the
 worker set.
 
 - 2.2.1: sockets, pipes and process spawn as the first consumer needs
-  them; the Windows pinned build if it misses 2.2.0.
+  them.
 
 ## Later
 

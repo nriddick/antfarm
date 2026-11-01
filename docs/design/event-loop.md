@@ -412,7 +412,10 @@ API libuv provides for exactly this purpose**:
 
 Linking: the system `libuv` on Linux; a pinned libuv source archive built by
 CMake on Windows, checksummed, in the style of OMMe's Jolt bridge. Neither is
-pulled in by the core packages.
+pulled in by the core packages. As built
+(`scripts/build-libuv-windows.py`), the Windows library is libuv 1.53.0 as
+`uv.dll` with its import library `uv.lib`: the DLL carries its own C
+runtime, so D programs keep their static one.
 
 ### 3.6 The resource manager on the loop thread
 
@@ -525,7 +528,8 @@ What runs, and where:
     counted trigger), with publications equal to submissions, and a
     cancelled worker Fiber waiting for its request;
   - an `open` of a FIFO with no writer abandoned by close, with the loop
-    left allocated.
+    left allocated (on Windows, where opening a pipe does not block, a read
+    of a named pipe before its server writes).
 - **Stability:** 30 consecutive LDC runs, 10 DMD and 10 ThreadSanitizer
   runs of the loop suite, and 10 ThreadSanitizer runs of the ring suite,
   without a failure. ThreadSanitizer needs two suppressions, both explained
@@ -545,10 +549,14 @@ What runs, and where:
   is mostly the parked worker's wake and the Fiber's resume, not the loop.
 - **The full gate:** `make check` passed on `2.2.0-progress`, with the ring
   and `ant_uv` lanes in it.
-- **Still to do:** the native Windows matrix with a pinned libuv build,
-  covering the `uv_buf_t` width and the placement calls. Only a type-check
-  for an `x86_64-pc-windows-msvc` target has been done (`ldc2 -mtriple ...
-  -o-`), so the Windows paths compile but have never linked or run.
+- **Windows x64:** the native matrix passed with the pinned libuv build,
+  the `ring` and `ant_uv` lanes in it, under LDC and DMD. The layout oracle,
+  compiled by MSVC against the real `uv.h`, confirms the 16-byte `uv_buf_t`
+  with its 32-bit length first; the loop pin, the auxiliary threads' CPUs
+  and `THREAD_PRIORITY_BELOW_NORMAL` read back as asked. One difference
+  from Linux: libuv on Windows reports every directory's size as 0, so a
+  `readFile` of a directory succeeds with no bytes there, where Linux
+  fails it with `EISDIR` (section 7).
 
 ## 6. Release plan
 
@@ -561,11 +569,11 @@ What runs, and where:
   - the slot-ring harness ported to the shipped ring.
 
   That is everything an application needs to load files from worker Fibers
-  and from a loop-affine resource manager. The latency measurement and a
-  full `make check` are done. Before the release it still needs the
-  Windows matrix or an explicit Linux-only statement.
+  and from a loop-affine resource manager. The latency measurement, a full
+  `make check` and the native Windows matrix with the pinned libuv build
+  are done.
 - **2.2.1:** sockets, pipes and process spawn in the binding as the first
-  consumer needs them; the Windows pinned build if it is not in 2.2.0.
+  consumer needs them.
 - **Later:** the Element Farm, once its ordering and membership contract is
   written, as a second channel kind rather than a drop-in; `ant_uv` in the
   C ABI after production use; a loop inside a pool worker (the park-owner
@@ -582,6 +590,11 @@ What runs, and where:
   flood of file reads on the 5900XT beside a busy pool decides.
 - Whether the credit default should follow the ring's capacity or the
   auxiliary pool size; the same flood decides that too.
+- Whether `readFile` should refuse a directory itself, from the mode its
+  `fstat` already returns. libuv on Windows reports a directory's size as
+  0, so a `readFile` of one succeeds there with no bytes and no
+  allocation; on Linux it allocates the reported size and the read fails
+  with `EISDIR`, unless the filesystem also reports 0.
 
 ## 8. Where the implementation departed from the plan
 

@@ -158,13 +158,15 @@ the installation for the native C link test. No Bash, GNU make or administrator
 privileges are needed:
 
 ```text
+python -B scripts/build-libuv-windows.py
 python -B scripts/check-windows.py
 python -B scripts/check-windows.py --quick
 python -B scripts/check-windows.py --compiler dmd --lanes threadpool examples
 ```
 
 The default runs LDC and DMD. `--quick` uses only LDC and runs the packages,
-plain review torture (including sweep cursor), and debug/release examples.
+the ring, plain review torture (including sweep cursor), and debug/release
+examples.
 `--lanes` selects one or more rows below; `--compiler ldc2` or `--compiler dmd`
 restricts the compiler. With GNU make available, `make check-windows` invokes
 the same runner; use `WINDOWS_PYTHON` and `WINDOWS_CHECK_ARGS` to override its
@@ -176,10 +178,24 @@ interpreter and arguments.
 | `threadpool` | C runtime ABI lifecycle, GroupHost token/borrowed-resource cleanup, and fork-join/range/death checks; process affinity, caller confinement/restoration, armed wait races and missing wait API rejection in debug/release, FarmHost lifecycle; also optimized LDC host tests |
 | `forkjoin` | The fork-join suite via Dub (`dub test :forkjoin -- --DRT-testmode=run-main`): frame pool, deque, admission, paths, ranges, completion and the 2.1.0 wrappers |
 | `ordering` | Raw ring-store audit, controlled Farm ordering, Live subscription schedules, and leaf reuse |
+| `ring` | The `antfarm.ring` suite (`tests/ring`) |
+| `ant_uv` | The `ant_uv` suite (`tests/ant_uv`) against the pinned libuv, with its layout oracle compiled by MSVC against the real `uv.h`; then both `ant_uv` examples |
 | `review` | Plain torture suite (including T28 subscription cohorts), sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
 | `actors` | Public actor deterministic/contention suite with the mimalloc stub |
 | `private` | Private actor suite and six extracted documentation programs |
 | `examples` | both complete quickstart programs (fork-join reduction and raw payload), plus actor/headless examples in debug/release with 0 and 2 workers |
+
+The `ant_uv` lane needs libuv. `scripts/build-libuv-windows.py` downloads
+the pinned libuv 1.53.0 release archive, checks its SHA-256, and builds it
+with CMake (on PATH, or the one Visual Studio installs) into
+`.build/libuv/1.53.0/`: `include/`, the import library `lib/uv.lib` and
+`bin/uv.dll`. The DLL carries its own C runtime, so the D programs keep
+their static one. `--archive` takes a copy of the archive already on disk.
+The runner uses that installation, or the one `--libuv DIR` names, and puts
+its `bin` on PATH for the runs. Without one, the default matrix skips the
+lane, prints the reason, and says `ant_uv skipped` in its pass line, as
+`make check` skips it without libuv; `--lanes ant_uv` or `--libuv` makes a
+missing libuv an error.
 
 The runner forces `ANTFARM_HUGE_PAGES=0`, keeps generated binaries and Dub's
 home under `.build/windows-check/`, and uses local dependencies without registry
@@ -199,7 +215,8 @@ only to the test executable; library users keep their own GC policy.
 
 Success prints `WINDOWS CHECKS PASSED`. This is separate from `make check`:
 TSan, POSIX fork/death probes (including T01/T17), the Life terminal front end,
-real mimalloc and timing gates are excluded. Existing POSIX-only tests may print
+real mimalloc (including `ant_uv`'s `run-mimalloc`) and timing gates are
+excluded. Existing POSIX-only tests may print
 their own skips within a native suite; Fiber multi-LLC and FarmHost
 `farmPerGroup` routing probes also skip on single-LLC hosts. Synthetic
 multi-group topology tests still run there, but do not establish live

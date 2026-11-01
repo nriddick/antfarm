@@ -59,6 +59,33 @@ where the implementation departed from the plan.
   `make check-quick` runs the ring. `make check-mimalloc` adds `ant_uv`'s
   reads into the real mimalloc v3. The API docs check covers the ring and
   `ant_uv`.
+- Windows x64:
+  - `scripts/build-libuv-windows.py` builds the pinned libuv 1.53.0 from
+    its release archive, whose SHA-256 it checks, with CMake (on PATH or
+    Visual Studio's). The archive's signature was checked against the
+    signing maintainer's key, listed in libuv's `MAINTAINERS.md`, when it
+    was pinned. It installs `uv.dll`, its import library `uv.lib` and the
+    headers under `.build/libuv/1.53.0/`; the DLL carries its own C
+    runtime, so D programs keep their static one.
+  - `scripts/check-windows.py` gains a `ring` lane, also in `--quick`, and
+    an `ant_uv` lane: the suite, with its layout oracle compiled by MSVC
+    against that `uv.h`, then both examples. Without libuv the default
+    matrix skips the lane and says `ant_uv skipped` in its pass line;
+    `--lanes ant_uv` or `--libuv DIR` makes a missing libuv an error.
+  - The `ant_uv` suite runs on Windows. It reads CPUs from the thread's
+    group affinity, expects `THREAD_PRIORITY_BELOW_NORMAL` on the auxiliary
+    threads, declares the oracle's C `long` as `c_long` (32-bit on
+    Windows), and gives its counting allocator a path for the Microsoft C
+    runtime, which has no `aligned_alloc`. Its uncancellable operation is
+    a read of a named pipe before the server writes, since opening a pipe
+    does not block on Windows. Its read that fails after allocating is of
+    a locked file (`EBUSY`), because libuv on Windows reports every
+    directory's size as 0. A `readFile` of a directory therefore succeeds
+    there with no bytes, where Linux fails it with `EISDIR`; the design's
+    open questions record it.
+- Fixed `ant_uv/examples/read_files.d`, which no longer compiled once
+  `takeBuffer` returned a `UvBuffer`. It frees the file with
+  `UvBuffer.free`, which returns the block to the allocator that made it.
 - Fixed an intermittent `make check` failure, present since 2.1.1, at
   `tests/ant_fibers/smoke.d:1751`. It failed about 5% of runs under each of
   DMD and LDC. The test waited for `terminated`, then for
@@ -84,8 +111,23 @@ Validation so far, Linux x86-64 (Ryzen 9 5900XT, LDC 1.43.0, DMD 2.113.0,
 libuv 1.53.0): `make check` passed with both new suites in it, each under
 LDC, DMD and ThreadSanitizer. In repeated runs, 30 LDC, 10 DMD and 10
 ThreadSanitizer runs of the `ant_uv` suite and 10 ThreadSanitizer runs of
-the ring suite all passed. No Windows run has been made; the Windows code
-paths have only been type-checked for an `x86_64-pc-windows-msvc` target.
+the ring suite all passed.
+
+Windows x64 (2026-11-01, `68df049` plus the Windows follow-up): Windows 11
+build 26200, i7-12700H (20 logical processors, one LLC), LDC 1.42.0, DMD
+2.112.1, MSVC 14.51 and the pinned libuv 1.53.0. `python -B
+scripts/check-windows.py` passed as one complete invocation under both
+compilers, with the `ring` and `ant_uv` lanes and both `ant_uv` examples
+in it. The `ant_uv` suite covered the binding's layout against the real
+`uv.h` (the 16-byte `uv_buf_t` with its 32-bit length first), the loop pin
+and the auxiliary threads' CPUs and priority as read back, ordering,
+timers, credits, cancellation, close, failure, Fibers on both sides,
+`readFile`'s allocators and abandonment. In repeated runs, 30 LDC and 30
+DMD runs of the `ant_uv` suite all passed. Both fork-join admission runs
+measured zero idle CPU. As on 2.1.0, the T1 second-group timer and
+`farmPerGroup` routing skip on this single-LLC host. Not run on Windows:
+ThreadSanitizer, `ant_uv`'s real-mimalloc lane, and the latency
+benchmark.
 
 ## 2.1.1 — 2026-10-28
 

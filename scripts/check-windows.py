@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Native Windows x64 integration checks; no Bash, make or TSan required."""
 import argparse
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -10,9 +11,31 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / ".build/windows-check"
-LANES = ("packages", "threadpool", "forkjoin", "ordering", "review", "actors", "private", "examples")
-QUICK_LANES = ("packages", "review", "examples")
-HARDWARE_SKIPS = ("SKIP worker cases", "SKIP affinity regression", "SKIP confine-test")
+LANES = ("packages", "threadpool", "forkjoin", "ordering", "ring", "ant_uv", "review", "actors",
+         "private", "examples")
+QUICK_LANES = ("packages", "ring", "review", "examples")
+HARDWARE_SKIPS = ("SKIP worker cases", "SKIP affinity regression", "SKIP confine-test",
+                  "SKIP worker Fiber reads")
+
+
+def load_script(name, path):
+    spec = importlib.util.spec_from_file_location(name, ROOT / path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+build_api = load_script("cabi_build", "scripts/build-c-abi.py")
+# The pinned build's installation.
+DEFAULT_LIBUV = load_script("libuv_build", "scripts/build-libuv-windows.py").PREFIX
+
+
+def libuv_missing(prefix):
+    """The first file of a libuv installation that is absent, else None."""
+    for name in ("include/uv.h", "lib/uv.lib", "bin/uv.dll"):
+        if not (prefix / name).is_file():
+            return prefix / name
+    return None
 
 
 def stop_tree(proc):
@@ -57,8 +80,8 @@ class Checks:
         self.version_flag = "-version=" if compiler == "dmd" else "-d-version="
         self.flags = ["-g"] if compiler == "dmd" else ["-g", "-O1"]
 
-    def run(self, cmd):
-        run(cmd, self.env, self.args.timeout, self.args.allow_hardware_skips)
+    def run(self, cmd, env=None):
+        run(cmd, env or self.env, self.args.timeout, self.args.allow_hardware_skips)
 
     def dub(self, command, package=None, *options):
         cmd = ["dub", command]
@@ -99,6 +122,30 @@ class Checks:
                                ("leaf_reuse", ())):
             self.build_run(name, ["tests/farm/" + name + ".d",
                                  "antfarm/package.d", "antfarm/allocation.d"], versions)
+
+    def ring(self):
+        self.build_run("ring_test", ["tests/ring/ring_test.d", "antfarm/ring.d",
+                                     "antfarm/allocation.d"], ("AntfarmRingTestHooks",))
+
+    def ant_uv(self):
+        # The layout oracle is C against the real uv.h; libuv's own headers
+        # are external so /W4 /WX applies to the oracle alone.
+        libuv = self.args.libuv
+        layout = BUILD / "uv_layout.obj"
+        build_api.msvc(["cl", "/nologo", "/O1", "/W4", "/WX", "/MT", "/c", "tests/ant_uv/layout.c",
+                        "/external:I", libuv / "include", "/external:W0", "/Fo" + str(layout)], BUILD)
+        env = dict(self.env)
+        env["PATH"] = str(libuv / "bin") + os.pathsep + env.get("PATH", "")
+        # The suite, then both examples as a user builds them.
+        for name, sources, arguments in (
+                ("uv_test", ["tests/ant_uv/uv_test.d", layout], ()),
+                ("read_files", ["ant_uv/examples/read_files.d"], ("README.md", "ant_uv/README.md")),
+                ("load_assets", ["ant_uv/examples/load_assets.d"], ())):
+            binary = BUILD / (name + "_" + self.compiler + ".exe")
+            self.run([self.compiler, *self.flags, "-i", "-I.", "-Ithreadpool/source",
+                      "-Iant_fibers/source", "-Iant_uv/source", *sources, libuv / "lib/uv.lib",
+                      "-of=" + str(binary), "-od=" + str(BUILD / (name + "_obj_" + self.compiler))])
+            self.run([binary, *arguments], env)
 
     def review(self):
         self.run([sys.executable, "-B", "tests/farm/run_parallel.py",
@@ -142,6 +189,9 @@ def parse_args(argv=None):
     parser.add_argument("--timeout", type=int, default=300, help="seconds per build or run (default: 300)")
     parser.add_argument("--allow-hardware-skips", action="store_true",
                         help="accept missing CPUs/groups for live affinity and host probes")
+    parser.add_argument("--libuv", type=Path,
+                        help="libuv installation (include/uv.h, lib/uv.lib, bin/uv.dll) for the ant_uv "
+                             "lane; default: the pinned build of scripts/build-libuv-windows.py")
     args = parser.parse_args(argv)
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -164,12 +214,27 @@ def main(argv=None):
     # Confine Dub's generated files to the checkout.
     env["DUB_HOME"] = str(BUILD / "dub-home")
     lanes = QUICK_LANES if args.quick else (args.lanes or LANES)
+    uv_skipped = False
+    if "ant_uv" in lanes:
+        explicit = args.libuv is not None or (args.lanes is not None and "ant_uv" in args.lanes)
+        args.libuv = (args.libuv or DEFAULT_LIBUV).resolve()
+        missing = libuv_missing(args.libuv)
+        if missing is not None:
+            hint = "; python -B scripts/build-libuv-windows.py builds the pinned one"
+            if explicit:
+                raise RuntimeError("ant_uv needs libuv: " + str(missing) + " not found" + hint)
+            print("SKIP ant_uv: " + str(missing) + " not found" + hint, flush=True)
+            lanes = tuple(lane for lane in lanes if lane != "ant_uv")
+            uv_skipped = True
     for compiler in compilers:
         checks = Checks(compiler, args, env)
         for lane in lanes:
             getattr(checks, lane)()
-    print("Excluded: TSan, POSIX fork/death probes, Life terminal UI, real mimalloc and timing gates.", flush=True)
-    print("WINDOWS CHECKS PASSED" + (" (hardware skips allowed)" if args.allow_hardware_skips else ""), flush=True)
+    print("Excluded: TSan, POSIX fork/death probes, Life terminal UI, real mimalloc and timing gates"
+          + ("; ant_uv (no libuv)." if uv_skipped else "."), flush=True)
+    notes = [note for note, on in (("hardware skips allowed", args.allow_hardware_skips),
+                                   ("ant_uv skipped", uv_skipped)) if on]
+    print("WINDOWS CHECKS PASSED" + (" (" + ", ".join(notes) + ")" if notes else ""), flush=True)
 
 
 if __name__ == "__main__":

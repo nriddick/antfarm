@@ -24,11 +24,39 @@ class WindowsChecksTest(unittest.TestCase):
                 mock.patch.object(windows.shutil, "which", return_value="tool"), \
                 mock.patch.object(windows, "BUILD", test_build), \
                 mock.patch.object(windows.Checks, "packages", lambda self: calls.append((self.compiler, "packages"))), \
+                mock.patch.object(windows.Checks, "ring", lambda self: calls.append((self.compiler, "ring"))), \
                 mock.patch.object(windows.Checks, "review", lambda self: calls.append((self.compiler, "review"))), \
                 mock.patch.object(windows.Checks, "examples", lambda self: calls.append((self.compiler, "examples"))), \
                 contextlib.redirect_stdout(io.StringIO()):
             windows.main(["--quick"])
         self.assertEqual(calls, [("ldc2", lane) for lane in windows.QUICK_LANES])
+
+    def test_missing_libuv_skips_default_matrix_but_fails_when_requested(self):
+        test_build = Path(tempfile.gettempdir())
+        absent = test_build / "antfarm-no-libuv"
+        lanes = [lane for lane in windows.LANES if lane != "ant_uv"]
+        patches = [mock.patch.object(windows.Checks, lane) for lane in lanes]
+        with mock.patch.object(windows.os, "name", "nt"), \
+                mock.patch.object(windows.shutil, "which", return_value="tool"), \
+                mock.patch.object(windows, "BUILD", test_build), \
+                mock.patch.object(windows, "DEFAULT_LIBUV", absent), \
+                mock.patch.object(windows.Checks, "ant_uv") as uv_lane, \
+                contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                windows.main(["--compiler", "ldc2"])
+            uv_lane.assert_not_called()
+            self.assertIn("SKIP ant_uv", output.getvalue())
+            self.assertIn("WINDOWS CHECKS PASSED (ant_uv skipped)", output.getvalue())
+            for argv in (["--lanes", "ant_uv"], ["--libuv", str(absent)]):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    with self.assertRaisesRegex(RuntimeError, "ant_uv needs libuv"):
+                        windows.main(["--compiler", "ldc2", *argv])
+                self.assertNotIn("WINDOWS CHECKS PASSED", output.getvalue())
+            uv_lane.assert_not_called()
 
     def test_failure_stops_matrix_without_pass_message(self):
         output = io.StringIO()

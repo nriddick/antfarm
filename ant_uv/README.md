@@ -14,8 +14,7 @@ is [docs/design/event-loop.md](../docs/design/event-loop.md). The contracts
 are the comments in [loop.d](source/ant_uv/loop.d) and
 [fibers.d](source/ant_uv/fibers.d).
 
-Status: new in 2.2.0, Linux only so far. The binding compiles for Windows,
-but no Windows run has been made.
+Status: new in 2.2.0, on Linux x86-64 and Windows x64.
 
 ## Use it
 
@@ -23,9 +22,13 @@ but no Windows run has been made.
 dependency "antfarm:ant_uv" path="path/to/antfarm"
 ```
 
-It links the system libuv (1.19 or later; `libs "uv"`), so install the
-library and its header first. [read_files.d](examples/read_files.d) is the
-smallest complete program: worker Fibers on a `GroupHost` read files through
+It links libuv 1.19 or later (`libs "uv"`), so install the library and its
+header first. On Linux that is the system libuv. On Windows,
+`python -B scripts/build-libuv-windows.py` builds the pinned libuv 1.53.0
+into `.build/libuv/1.53.0/`; put its `lib` on the linker's `LIB` path and
+its `bin`, which holds `uv.dll`, on `PATH` when the program runs.
+
+[read_files.d](examples/read_files.d) is the smallest complete program: worker Fibers on a `GroupHost` read files through
 the loop. [load_assets.d](examples/load_assets.d) loads files from the main
 thread, uses them on later frames and unloads them;
 [Loading files](../docs/guide/loading-files.md) walks through it.
@@ -249,6 +252,9 @@ The suite checks the binding's layout and constants against the real
 `uv.h`, through a small C translation unit. It then covers lifecycle and
 placement, ordering, timers, credits, a full ring, cancellation, close,
 failure, Fibers on both sides, `readFile`'s allocators, and abandonment.
-`make check` runs it when `pkg-config` finds libuv 1.19 or later.
+`make check` runs it when `pkg-config` finds libuv 1.19 or later. On
+Windows, the `ant_uv` lane of `python -B scripts/check-windows.py` builds
+and runs it under LDC and DMD against the pinned libuv, then both examples
+([Testing](../docs/development/testing.md#windows-x64-integration)).
 `make -C tests/ant_uv run-mimalloc`, which `make check-mimalloc` runs, adds
 reads into the real mimalloc v3.

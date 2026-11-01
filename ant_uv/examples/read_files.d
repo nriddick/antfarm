@@ -10,7 +10,6 @@ module read_files;
 import ant_fibers;
 import ant_uv;
 import core.atomic;
-import core.stdc.stdlib : free;
 import core.thread : Thread;
 import core.time : msecs;
 import std.stdio : writefln, writeln;
@@ -32,10 +31,10 @@ void delegate() reader(UvLoop loop, FiberDomain domain, string path, shared(long
             writefln("%s: %s", path, request.errorName);
             return;
         }
-        auto bytes = request.takeBuffer();
-        scope (exit) free(bytes.ptr);
-        atomicOp!"+="(*total, cast(long) bytes.length);
-        writefln("%s: %s bytes", path, bytes.length);
+        auto file = request.takeBuffer();
+        scope (exit) file.free(); // back to the allocator that made it
+        atomicOp!"+="(*total, cast(long) file.bytes.length);
+        writefln("%s: %s bytes", path, file.bytes.length);
     };
 }
 
