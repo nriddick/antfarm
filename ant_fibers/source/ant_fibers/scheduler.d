@@ -2266,6 +2266,12 @@ final class FiberDomain
     /// recycled when the handler returns; the task, and any `FiberTask`
     /// reference to it, must not be used afterwards.
     ///
+    /// A task is retirable a moment after `terminated` reads true: its worker
+    /// publishes the terminal phase, wakes joiners and emits the terminal
+    /// record before it pushes the completion. `pendingCompletions` counts
+    /// the tasks this call can retire, and `drained` turns true only after
+    /// the last completion is pushed.
+    ///
     /// Under `FiberRetirement.director` only the Director may call this. One
     /// retirer runs at a time: a concurrent call returns 0 at once. A handler
     /// that throws leaves its record or task, and everything after it, queued

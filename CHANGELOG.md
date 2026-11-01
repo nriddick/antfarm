@@ -59,6 +59,17 @@ where the implementation departed from the plan.
   `make check-quick` runs the ring. `make check-mimalloc` adds `ant_uv`'s
   reads into the real mimalloc v3. The API docs check covers the ring and
   `ant_uv`.
+- Fixed an intermittent `make check` failure, present since 2.1.1, at
+  `tests/ant_fibers/smoke.d:1751`. It failed about 5% of runs under each of
+  DMD and LDC. The test waited for `terminated`, then for
+  `retirementPending`, which the task's spawn-time `admitted` record had
+  already set. A worker pushes a task's completion about a microsecond after
+  publishing its terminal phase, so the check could find none. The smoke
+  suite now waits for `pendingCompletions` or `drained` at that check and
+  at seven more with the same shape. With a 10 ms delay forced into the
+  window, each unfixed site fails and the fixed suite passes. Unforced, the
+  fixed suite passed 120 runs under each compiler. `FiberDomain.retire`
+  documents the window.
 - `tools/perf/slot_ring`: the study's harness ported to the shipped ring
   (`--impl ring|vyukov|farm`). The record is
   [slot-ring-shipped-2026-10-30.md](docs/performance/slot-ring-shipped-2026-10-30.md):

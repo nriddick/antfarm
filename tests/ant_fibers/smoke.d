@@ -1693,6 +1693,31 @@ void waitTerminated(FiberTask task)
     }
 }
 
+// A worker publishes a task's terminal phase, wakes its joiners and emits its
+// terminal record before it pushes the completion, its last touch of the
+// task. So `terminated` can be observed about a microsecond before the task
+// is retirable: wait for the completion (or for `drained`, which drops after
+// the push) before counting or retiring under `director` retirement.
+void waitCompletions(FiberDomain domain, size_t count)
+{
+    import core.time : msecs;
+    foreach (_; 0 .. 2_000)
+    {
+        if (domain.pendingCompletions >= count) return;
+        Thread.sleep(msecs(1));
+    }
+}
+
+void waitDrained(FiberDomain domain)
+{
+    import core.time : msecs;
+    foreach (_; 0 .. 2_000)
+    {
+        if (domain.drained) return;
+        Thread.sleep(msecs(1));
+    }
+}
+
 // Fibers on a GroupHost through `FiberGroups`: activations run on the workers
 // consuming the target group's Farm; an await is released by a Director
 // signal; a timer wakes a parked worker (no idle timeout) and fires on time; a
@@ -1743,11 +1768,8 @@ void threadpoolSmoke()
     // Under `director` retirement workers never retire: the terminal task is
     // still valid and waits for the Director. The terminal phase is published
     // just before the completion is pushed, so wait for the push.
-    foreach (_; 0 .. 2_000)
-    {
-        if (domain.retirementPending) break;
-        Thread.sleep(msecs(1));
-    }
+    // (`retirementPending` is no signal: the admitted record set it at spawn.)
+    waitCompletions(domain, 1);
     assert(domain.pendingCompletions == 1 && domain.retirementPending);
     auto retired = log.retire(domain);
     assert(retired.length == 1 && retired[0].task is onA);
@@ -1767,6 +1789,7 @@ void threadpoolSmoke()
     Thread.sleep(msecs(10)); // let the workers park without a deadline
     assert(domain.signal(0xD04A) == 1);
     waitTerminated(waiter);
+    waitCompletions(domain, 1);
     assert(waiter.terminated && atomicLoad(signalled) == 1);
     retired = log.retire(domain);
     assert(retired.length == 1 && retired[0].task is waiter);
@@ -1781,6 +1804,7 @@ void threadpoolSmoke()
         timerEnd = MonoTime.currTime;
     });
     waitTerminated(timed);
+    waitCompletions(domain, 1);
     assert(timed.terminated && timed.outcome == FiberOutcome.completed);
     assert(timerEnd - timerStart >= msecs(20));
     retired = log.retire(domain);
@@ -1811,6 +1835,7 @@ void threadpoolSmoke()
         throw new Exception("fiber failure");
     });
     waitTerminated(failed);
+    waitCompletions(domain, 1);
     assert(failed.terminated && atomicLoad(enteredFailure) == 1);
     assert(failed.outcome == FiberOutcome.failed);
     assert(failed.exception !is null && failed.exception.msg == "fiber failure");
@@ -1819,6 +1844,7 @@ void threadpoolSmoke()
         && retired[0].outcome == FiberOutcome.failed);
     auto afterFailure = fibers.spawn({ atomicFetchAdd(ran, 1); });
     waitTerminated(afterFailure);
+    waitCompletions(domain, 1);
     assert(afterFailure.terminated && atomicLoad(ran) == 2);
     retired = log.retire(domain);
     assert(retired.length == 1 && retired[0].task is afterFailure);
@@ -1839,6 +1865,7 @@ void threadpoolSmoke()
     assert(domain.waiting == 1);
     domain.beginShutdown(true);
     waitTerminated(cancelled);
+    waitDrained(domain);
     assert(cancelled.terminated && cancelled.outcome == FiberOutcome.cancelled);
     assert(atomicLoad(cleaned));
     assert(domain.drained);
@@ -1909,6 +1936,7 @@ void workerCancellationSmoke()
         // live fiber or leaking the domain root after the failed assertion.
         if (!passed) domain.beginShutdown(true);
         waitTerminated(task);
+        waitDrained(domain);
         assert(task.terminated && domain.drained);
         assert(domain.retire() == 1);
         host.stopWorkers();
@@ -1956,6 +1984,7 @@ void offResponderTimerSmoke(string test)
     assert(task.terminated, "a timer armed on the second group's lane never fired");
     immutable slept = atomicLoad(sleptMs);
     assert(slept >= 20 && slept < 250, "the second group's timer fired late");
+    waitDrained(domain);
     assert(domain.drained);
     assert(domain.retire() == 1);
     host.stopWorkers();
