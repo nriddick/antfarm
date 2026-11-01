@@ -26,10 +26,13 @@ dependency "antfarm:ant_uv" path="path/to/antfarm"
 It links the system libuv (1.19 or later; `libs "uv"`), so install the
 library and its header first. [read_files.d](examples/read_files.d) is the
 smallest complete program: worker Fibers on a `GroupHost` read files through
-the loop.
+the loop. [load_assets.d](examples/load_assets.d) loads files from the main
+thread, uses them on later frames and unloads them;
+[Loading files](../docs/guide/loading-files.md) walks through it.
 
 ```sh
 dub run --single ant_uv/examples/read_files.d -- /etc/hostname /etc/os-release
+dub run --single ant_uv/examples/load_assets.d
 ```
 
 ## Create the loop
@@ -78,15 +81,15 @@ request.event = new FiberEvent(domain);
 submitAndWait(loop, &request);       // in a managed Fiber
 if (request.succeeded)
 {
-    auto bytes = request.takeBuffer();   // the loop's malloc block
-    scope (exit) free(bytes.ptr);
-    // ...
+    auto file = request.takeBuffer();    // the block the loop allocated
+    scope (exit) file.free();
+    // ... file.bytes
 }
 ```
 
 | `op` | Inputs | Outputs |
 | --- | --- | --- |
-| `readFile` | `path`; `buffer` and `length`, or null to have the loop allocate | `result` = bytes read, `size` = file size |
+| `readFile` | `path`; `buffer` and `length`, or null to have the loop allocate from `allocator` at `alignment` | `result` = bytes read, `size` = file size |
 | `open` | `path`, `flags` (`UV_FS_O_*`), `mode` | `result` = the file |
 | `read`, `write` | `file`, `buffer`, `length`, `offset` (negative uses the file position) | `result` = bytes |
 | `close` | `file` | `result` |
@@ -108,6 +111,40 @@ A negative `result` is a libuv error code; `errorName` names it.
 The loop issues at most `credits` operations to libuv at once; the rest
 wait in the ring. A completion that waits for room in a completion ring also
 holds a credit.
+
+### Where `readFile` puts a file
+
+Give `readFile` a `buffer` and `length` and it reads into them, stopping
+when the buffer is full. With a null `buffer` the loop opens the file, then
+allocates its size from `request.allocator`, an `ActorAllocator`, at
+`request.alignment`:
+
+- Leaving `allocator` unset gives `ActorAllocator.cRuntime()`, the C
+  runtime with alignments up to 64. `alignment` is 64 unless you set
+  another power of two.
+- `allocate` runs on the loop thread, so it must not block.
+- `deallocate` runs wherever the block is freed. That is any thread, or the
+  loop thread when the read fails after allocating.
+- An allocator that returns null fails the request with `UV_ENOMEM`.
+- An empty file allocates nothing.
+- `submit` returns `invalid` for an alignment that is not a power of two,
+  or for an allocator with only one of its halves set.
+
+After a successful read the request owns the block, and `buffer[0 .. length]`
+is the file. `submit` refuses the request until you free the block with
+`freeBuffer` or hand it over with `takeBuffer`. `takeBuffer` returns a
+`UvBuffer`, which keeps the allocator that made the block. Its `free`
+returns the block to that allocator from any thread. If the read fails,
+the loop frees the block itself.
+
+Any `ActorAllocator` works, including the one the actor runtimes use. For
+mimalloc v3, set `request.allocator = mimallocV3ActorAllocator()` from
+`antfarm.actors.mimalloc`. It is compiled only with `AntfarmMimallocV3`
+and needs mimalloc linked. With Dub, depend on `antfarm` as well and add
+`subConfiguration "antfarm" "mimalloc-v3"`, as
+[load_assets.d](examples/load_assets.d) does in its `mimalloc`
+configuration. The adapter itself is described in
+[the allocation guide](../docs/guide/sizing-and-allocation.md#the-mimalloc-v3-adapter).
 
 ## Completion
 
@@ -180,8 +217,8 @@ loop, and joins the thread.
 
 An operation libuv cannot cancel is published `abandoned` if it outlasts the
 wait, for example an `open` of a FIFO with no writer. Its `buffer` must then
-be leaked, and the loop's memory is left allocated (`loopClose` is
-`UV_EBUSY`). The returned `UvCloseReport` counts completed, cancelled,
+be leaked, as the loop leaks a block it allocated for it. The loop's memory
+is left allocated (`loopClose` is `UV_EBUSY`). The returned `UvCloseReport` counts completed, cancelled,
 abandoned and undelivered requests.
 
 Shut down in this order:
@@ -211,5 +248,7 @@ make -C tests/ant_uv run run-dmd run-tsan
 The suite checks the binding's layout and constants against the real
 `uv.h`, through a small C translation unit. It then covers lifecycle and
 placement, ordering, timers, credits, a full ring, cancellation, close,
-failure, Fibers on both sides, and abandonment. `make check` runs it when
-`pkg-config` finds libuv 1.19 or later.
+failure, Fibers on both sides, `readFile`'s allocators, and abandonment.
+`make check` runs it when `pkg-config` finds libuv 1.19 or later.
+`make -C tests/ant_uv run-mimalloc`, which `make check-mimalloc` runs, adds
+reads into the real mimalloc v3.

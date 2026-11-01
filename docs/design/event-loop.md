@@ -601,3 +601,9 @@ What runs, and where:
 - **`submitAndWait` survives Fiber cancellation** (section 3.3). The plan
   did not address a cancelled waiter. Without this, a cancelled Fiber would
   unwind while the loop still owned a request on its stack.
+- **Whole-file reads take an allocator** (section 3.6). The plan left the
+  allocation unspecified, and the first build used C `malloc`. A `readFile`
+  now allocates from the request's `ActorAllocator`, whose `allocate` half
+  runs only on the loop thread. A resource manager can load into an
+  allocator it owns, mimalloc included. The block is handed over as a
+  `UvBuffer`, which frees it through the same allocator.

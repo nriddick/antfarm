@@ -28,6 +28,10 @@
  + - A trigger or event named by a request must be kept alive by its owner.
  + - Cancellation is not a release fence: a cancelled operation still
  +   publishes, with `UV_ECANCELED`, and only after libuv's terminal callback.
+ + - A block the loop allocates for a `readFile` is freed exactly once: by the
+ +   loop when the read fails, or by its owner through `UvRequest.freeBuffer`
+ +   or the `UvBuffer` that `UvRequest.takeBuffer` hands over. An abandoned
+ +   request's block is never freed.
  +
  + One `UvLoop` may be open per process at a time: libuv's auxiliary pool is
  + process-global, and its size is fixed by the first use anywhere in the
@@ -37,6 +41,9 @@ module ant_uv.loop;
 
 import ant_fibers.scheduler : FiberEvent, FiberGenerationTrigger;
 import ant_uv.binding;
+// The allocator a readFile takes, shared with the actor runtimes; its
+// mimalloc v3 adapter is antfarm.actors.mimalloc.mimallocV3ActorAllocator.
+public import antfarm.actors.actor : ActorAllocator;
 import antfarm.allocation : allocateAligned64, freeAligned64;
 import antfarm.ring : RingElement, RingPush, SlotRing;
 import core.atomic;
@@ -94,8 +101,9 @@ enum UvOp : ubyte
     /// Open `path`, read it from the start until end of file or a full
     /// buffer, and close it. `result` is the bytes read and `size` the
     /// file's size, so `size > result` means the buffer was too small. With a
-    /// null `buffer` the loop allocates the file's size with C `malloc` and
-    /// hands it over: see `UvRequest.takeBuffer`.
+    /// null `buffer` the loop allocates the file's size from the request's
+    /// `allocator` and hands the block over: see `UvRequest.takeBuffer`. An
+    /// empty file allocates nothing.
     readFile,
 }
 
@@ -164,10 +172,22 @@ struct UvRequest
     /// publication.
     const(char)* path;
     /// `read`, `write`, `readFile`: the bytes, valid and unmoved until
-    /// publication. Null for `readFile` asks the loop to allocate.
+    /// publication. Null for `readFile` asks the loop to allocate; once that
+    /// succeeds, `buffer[0 .. length]` is the file until `takeBuffer` or
+    /// `freeBuffer`.
     ubyte* buffer;
     /// Bytes at `buffer`.
     size_t length;
+    /// `readFile` with a null `buffer`: the allocator for the file's block.
+    /// `allocate` runs on the loop thread and must not block; `deallocate`
+    /// runs where the block is freed, on any thread, or on the loop thread
+    /// when the read fails. A null result fails the request with
+    /// `UV_ENOMEM`. Unset (`ActorAllocator.init`) is
+    /// `ActorAllocator.cRuntime()`.
+    ActorAllocator allocator;
+    /// `readFile` with a null `buffer`: the block's alignment, a power of
+    /// two. `ActorAllocator.cRuntime()` gives at most 64.
+    size_t alignment = 64;
     /// `read`, `write`: the file offset; negative uses the file position.
     long offset = -1;
     /// `timer`: milliseconds of loop time.
@@ -201,7 +221,9 @@ struct UvRequest
     private shared uint state_;
     private shared uint cancel_;
     private ulong ticket_;
-    private bool ownsBuffer_;
+    // The loop's readFile block, with the allocator that made it, so that
+    // freeing it never depends on fields the owner may have changed since.
+    private UvBuffer owned_;
 
     /// The request's state, read with acquire: after `done` or `abandoned`
     /// the outputs are visible.
@@ -244,31 +266,83 @@ struct UvRequest
         return name is null ? "" : name[0 .. strlen(name)];
     }
 
-    /// True when `buffer` holds the loop's `readFile` allocation, which the
-    /// request owns until `takeBuffer` or `freeBuffer`.
+    /// True when `buffer` holds the block the loop allocated for a
+    /// `readFile`. The request owns it, and `submit` refuses the request,
+    /// until `takeBuffer` or `freeBuffer`.
     @property bool ownsBuffer() const nothrow @nogc
     {
-        return ownsBuffer_;
+        return owned_.block_ !is null;
     }
 
-    /// Hand over the loop's `readFile` allocation (C `malloc`; release it
-    /// with C `free`) and clear `buffer`. Empty when the request owns none.
-    ubyte[] takeBuffer() nothrow @nogc
+    /// Hand over the block the loop allocated for a `readFile`, as a
+    /// `UvBuffer` that frees it, and clear `buffer`. Empty when the request
+    /// owns none, as after reading an empty file.
+    UvBuffer takeBuffer() nothrow @nogc
     {
-        if (!ownsBuffer_) return null;
-        auto taken = buffer[0 .. length];
+        if (owned_.block_ is null) return UvBuffer.init;
+        auto taken = owned_;
+        owned_ = UvBuffer.init;
         buffer = null;
         length = 0;
-        ownsBuffer_ = false;
         return taken;
     }
 
-    /// Free the loop's `readFile` allocation, if the request owns one.
+    /// Free the block the loop allocated for a `readFile`, if the request
+    /// owns one.
     void freeBuffer() nothrow @nogc
     {
         auto taken = takeBuffer();
-        if (taken.ptr !is null) free(taken.ptr);
+        taken.free();
     }
+}
+
+/// A file that `readFile` read into a block the loop allocated, handed over
+/// by `UvRequest.takeBuffer`. It owns the block until `free`, which returns
+/// the block to the allocator that made it, from any thread. Copies name the
+/// same block: free one of them, once.
+struct UvBuffer
+{
+    private ubyte* block_;
+    private size_t length_;
+    private size_t capacity_;
+    private size_t alignment_;
+    private ActorAllocator allocator_;
+
+    /// The file's bytes, at the start of the block. Empty after `free`.
+    @property inout(ubyte)[] bytes() inout nothrow @nogc
+    {
+        return block_[0 .. length_];
+    }
+
+    /// Bytes allocated: the file's size when the loop opened it, so at
+    /// least `bytes.length`.
+    @property size_t capacity() const nothrow @nogc
+    {
+        return capacity_;
+    }
+
+    /// The block's alignment, as the request asked.
+    @property size_t alignment() const nothrow @nogc
+    {
+        return alignment_;
+    }
+
+    /// Return the block to its allocator and empty this copy. Does nothing
+    /// when it is already empty.
+    void free() nothrow @nogc
+    {
+        if (block_ is null) return;
+        allocator_.deallocate(allocator_.context, block_, capacity_, alignment_);
+        this = UvBuffer.init;
+    }
+}
+
+// The allocator a readFile allocates from: the request's, or the C
+// runtime's when it is unset.
+private ActorAllocator effectiveAllocator(ref const ActorAllocator a) pure nothrow @nogc
+{
+    if (a.allocate is null && a.deallocate is null) return ActorAllocator.cRuntime();
+    return ActorAllocator(cast(void*) a.context, a.allocate, a.deallocate);
 }
 
 /// What the application's step hook did in one loop iteration.
@@ -405,7 +479,9 @@ private struct OpSlot
     ulong filled;
     ubyte* buffer;
     size_t capacity;
-    bool allocated;
+    bool allocated; // `buffer` came from `allocator` at `alignment`
+    size_t alignment;
+    ActorAllocator allocator;
 }
 
 private struct PendingDelivery
@@ -778,7 +854,13 @@ private:
         case UvOp.read, UvOp.write:
             return r.file >= 0 && (r.buffer !is null || r.length == 0);
         case UvOp.readFile:
-            return r.path !is null && !r.ownsBuffer_ && (r.buffer !is null || r.length == 0);
+            if (r.path is null || r.ownsBuffer) return false;
+            if (r.buffer !is null) return true;
+            // The loop allocates: a power-of-two alignment, and an allocator
+            // that is either unset or whole.
+            return r.length == 0 && r.alignment != 0 && (r.alignment & (r.alignment - 1)) == 0
+                && (r.allocator.valid
+                    || (r.allocator.allocate is null && r.allocator.deallocate is null));
         }
     }
 
@@ -1243,16 +1325,22 @@ private:
             if (request.buffer is null)
             {
                 if (statSize > size_t.max) { slot.status = UV_ENOMEM; closeReadFile(slot); return; }
-                auto p = cast(ubyte*) malloc(statSize == 0 ? 1 : cast(size_t) statSize);
-                if (p is null)
+                if (statSize != 0) // an empty file allocates nothing
                 {
-                    slot.status = UV_ENOMEM;
-                    closeReadFile(slot);
-                    return;
+                    slot.allocator = effectiveAllocator(request.allocator);
+                    slot.alignment = request.alignment;
+                    auto p = cast(ubyte*) slot.allocator.allocate(slot.allocator.context,
+                        cast(size_t) statSize, slot.alignment);
+                    if (p is null)
+                    {
+                        slot.status = UV_ENOMEM;
+                        closeReadFile(slot);
+                        return;
+                    }
+                    slot.buffer = p;
+                    slot.capacity = cast(size_t) statSize;
+                    slot.allocated = true;
                 }
-                slot.buffer = p;
-                slot.capacity = cast(size_t) statSize;
-                slot.allocated = true;
             }
             else
             {
@@ -1331,10 +1419,13 @@ private:
         {
             request.buffer = slot.buffer;
             request.length = cast(size_t) slot.filled;
-            request.ownsBuffer_ = true;
+            request.owned_ = UvBuffer(slot.buffer, cast(size_t) slot.filled, slot.capacity,
+                slot.alignment, slot.allocator);
         }
         else if (slot.allocated)
-            free(slot.buffer);
+            slot.allocator.deallocate(slot.allocator.context, slot.buffer, slot.capacity,
+                slot.alignment);
+        slot.allocated = false;
         slot.request = null;
         releaseSlot(slot);
         if (request !is null) publish(request, status, size);

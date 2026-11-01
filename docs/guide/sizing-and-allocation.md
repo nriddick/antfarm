@@ -212,6 +212,10 @@ The allocator must allow allocate on one thread and free on another. The
 allocating thread is not necessarily the freeing thread. Non-thread-safe hooks
 are not checked.
 
+`ant_uv`'s `readFile` takes an `ActorAllocator` too, for the files it loads.
+The same allocator, the mimalloc adapter below included, can serve actors and
+file loads; [Loading files](loading-files.md#where-the-bytes-live) shows it.
+
 ### The mimalloc v3 adapter
 
 `antfarm/actors/mimalloc.d` is a deliberately thin, optional mimalloc v3 adapter. It

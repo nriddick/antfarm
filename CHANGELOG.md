@@ -40,13 +40,24 @@ where the implementation departed from the plan.
     cancellation without unwinding while the loop owns its request.
   - The binding is declared by hand over libuv's opaque-handle API, because
     ImportC cannot read the system `uv.h`.
-  - Guide: [ant_uv/README.md](ant_uv/README.md); example:
-    [read_files.d](ant_uv/examples/read_files.d).
+  - `readFile` without a buffer allocates the file from the request's
+    `allocator`, any `ActorAllocator`, at its `alignment`. The default is
+    the C runtime at 64 bytes, and the mimalloc v3 adapter works unchanged.
+    `allocate` runs on the loop thread. `takeBuffer` returns a `UvBuffer`
+    that frees the block through the allocator that made it, from any
+    thread. An empty file allocates nothing.
+  - Guide: [ant_uv/README.md](ant_uv/README.md), and
+    [Loading files](docs/guide/loading-files.md), which walks through the
+    API and an asset table. Examples:
+    [read_files.d](ant_uv/examples/read_files.d) and
+    [load_assets.d](ant_uv/examples/load_assets.d), whose `mimalloc`
+    configuration loads into mimalloc v3.
 - Tests: `tests/ring` and `tests/ant_uv`, each under LDC, DMD and
   ThreadSanitizer. `ant_uv`'s layout check compares the binding with a C
   translation unit compiled against the real `uv.h`. `make check` runs both
   suites, `ant_uv` only when `pkg-config` finds libuv 1.19 or later;
-  `make check-quick` runs the ring. The API docs check covers the ring and
+  `make check-quick` runs the ring. `make check-mimalloc` adds `ant_uv`'s
+  reads into the real mimalloc v3. The API docs check covers the ring and
   `ant_uv`.
 - `tools/perf/slot_ring`: the study's harness ported to the shipped ring
   (`--impl ring|vyukov|farm`). The record is

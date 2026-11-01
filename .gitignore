@@ -92,7 +92,9 @@ tests/ring/ring_test_tsan
 tests/ant_uv/uv_test
 tests/ant_uv/uv_test_dmd
 tests/ant_uv/uv_test_tsan
+tests/ant_uv/uv_test_mimalloc
 tests/ant_uv/.obj-*/
 ant_uv/examples/read_files
+ant_uv/examples/load_assets
 tools/perf/uv_latency
 tools/perf/.obj-uv_latency/

@@ -180,6 +180,9 @@ if [[ "$mimalloc" -eq 1 ]]; then
         exit 1
     fi
     run "${make_cmd[@]}" -C tests/actors run-mimalloc run-mimalloc-tsan
+    if pkg-config --exists 'libuv >= 1.19' 2>/dev/null; then
+        run "${make_cmd[@]}" -C tests/ant_uv run-mimalloc
+    fi
 fi
 
 echo "ALL CHECKS PASSED"

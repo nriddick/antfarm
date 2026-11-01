@@ -1,7 +1,9 @@
 # ant_uv tests: the binding's layout against the real uv.h, and UvLoop
 # behaviour (lifecycle, placement, ordering, timers, files from worker
 # Fibers, cancellation, backpressure, close, failure, abandonment, Fibers
-# on the loop thread). Needs libuv 1.19 or later and its header.
+# on the loop thread, readFile's allocators). Needs libuv 1.19 or later and
+# its header. run-mimalloc adds reads into the real mimalloc v3, built from
+# the third_party/mimalloc submodule by the actors suite's rule.
 ROOT := ../..
 DC ?= ldc2
 DFLAGS ?= -g -O1
@@ -9,8 +11,10 @@ CC ?= cc
 UV_LIBS ?= -luv
 TSAN_OPTIONS ?= history_size=7 halt_on_error=1 report_thread_leaks=0
 IMPORTS := -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$(ROOT)/ant_uv/source
+MIMALLOC_LIBRARY := $(ROOT)/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a
+MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
-.PHONY: run run-dmd run-tsan clean
+.PHONY: run run-dmd run-tsan run-mimalloc clean
 
 layout.o: layout.c
 	$(CC) -O1 -c layout.c -o $@
@@ -29,5 +33,14 @@ run-tsan: layout.o
 	ldc2 -g -O1 -fsanitize=thread -d-version=TSan -i $(IMPORTS) uv_test.d layout.o -L$(UV_LIBS) -of=uv_test_tsan -od=.obj-tsan
 	TSAN_OPTIONS='$(TSAN_OPTIONS) suppressions=tsan.supp' ./uv_test_tsan
 
+$(MIMALLOC_LIBRARY):
+	$(MAKE) -C $(ROOT)/tests/actors .build/mimalloc-v3.5.3/libmimalloc.a
+
+run-mimalloc: layout.o $(MIMALLOC_LIBRARY)
+	$(DC) $(DFLAGS) -d-version=AntfarmMimallocV3 -i $(IMPORTS) uv_test.d layout.o \
+		$(MIMALLOC_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) -L$(UV_LIBS) -of=uv_test_mimalloc -od=.obj-mimalloc
+	./uv_test_mimalloc
+
 clean:
-	rm -rf uv_test uv_test_dmd uv_test_tsan layout.o .obj-ldc .obj-dmd .obj-tsan
+	rm -rf uv_test uv_test_dmd uv_test_tsan uv_test_mimalloc layout.o .obj-ldc .obj-dmd \
+		.obj-tsan .obj-mimalloc

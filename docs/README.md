@@ -45,6 +45,8 @@ one Farm.
    Fibers: [hello_fibers.d](../ant_fibers/examples/hello_fibers.d) on one
    thread, then [Fibers on a GroupHost](../ant_fibers/README.md#run-on-a-grouphost)
    for the pool, and [handles, joins, and cancellation](../ant_fibers/README.md#handles-joins-and-cancellation).
+   Files through the libuv loop thread: [load_assets.d](../ant_uv/examples/load_assets.d),
+   then [loading files](guide/loading-files.md) and the [ant_uv README](../ant_uv/README.md).
 6. **Size it.** Read [Sizing one Farm](../ARCHITECTURE.md#sizing-one-farm) and
    [work-cost hints](guide/sizing-and-allocation.md#work-cost-hints); for a
    second LLC group, [scaling across groups](guide/scaling-groups.md).
@@ -71,6 +73,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [private-results-and-waits.md](guide/private-results-and-waits.md) | result ports, subsets, continuations, `waitChildren`, folds |
 | [outcomes-and-cancellation.md](guide/outcomes-and-cancellation.md) | domain failures, tracked roots, deadlines, cooperative cancellation |
 | [sizing-and-allocation.md](guide/sizing-and-allocation.md) | choose quotas, batches, work-cost hints, allocators, and slabs |
+| [loading-files.md](guide/loading-files.md) | load files through the `ant_uv` loop thread: the API at a glance, assets loaded, used and unloaded, and where their bytes live |
 
 ## Reference and design
 
@@ -133,6 +136,8 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |
 | Fiber scheduler model and invariants | [design/ant_fibers.md](design/ant_fibers.md) |
 | Event loop beside the worker pool (libuv) design and release plan | [design/event-loop.md](design/event-loop.md) |
+| `ant_uv` request, completion, cancellation, close and `readFile` allocation contracts | [ant_uv/README.md](../ant_uv/README.md) |
+| Loading files through the loop: the load, use and unload pattern and the choice of allocator | [guide/loading-files.md](guide/loading-files.md) |
 | Test suites (`tests/farm`, `tests/actors`, `tests/private`, `tests/threadpool`, `tests/ant_fibers`) | each suite's README and [development/testing.md](development/testing.md) |
 | Benchmark harness and optimization gate | [tools/perf/README.md](../tools/perf/README.md) |
 | What changed in each candidate and its compatibility notes | [CHANGELOG.md](../CHANGELOG.md) (current and latest release), [releases/](releases/) (older) |

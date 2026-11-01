@@ -4,7 +4,9 @@
  + order and ring retention, timers, credits under a flood, a full request
  + ring, cancellation, close with work in flight, a failing step hook,
  + Fibers on the loop thread, files read by worker Fibers on a GroupHost,
- + and abandonment of an operation that cannot finish. Linux.
+ + readFile's allocators, and abandonment of an operation that cannot
+ + finish. Built with `AntfarmMimallocV3` and the real mimalloc library, it
+ + also reads into mimalloc v3. Linux.
  +/
 module uv_test;
 
@@ -554,8 +556,8 @@ void loopFibers(string path, const(ubyte)[] expected)
             bool good = submitAndWait(loop, &r) == UvSubmit.accepted && r.done
                 && r.result == expected.length && r.size == expected.length;
             auto data = r.takeBuffer();
-            good = good && data == expected && loop.onLoopThread;
-            free(data.ptr);
+            good = good && data.bytes == expected && loop.onLoopThread;
+            data.free();
             atomicStore(outcome, good ? 1 : 2);
         });
     };
@@ -608,8 +610,8 @@ void delegate() readerBody(UvLoop loop, FiberDomain domain, size_t index, string
             good = submitted(submitAndWait(loop, &r)) && r.done
                 && r.result == expected.length && r.size == expected.length;
             auto data = r.takeBuffer();
-            good = good && data == expected;
-            free(data.ptr);
+            good = good && data.bytes == expected;
+            data.free();
         }
         else if (index % 3 == 1)
         {
@@ -753,6 +755,208 @@ void workerFiberReads(string[] paths, ubyte[][] contents)
     pass("worker Fibers on a GroupHost read files through the loop; a cancelled one outwaits its request");
 }
 
+// An allocator that counts its calls, checks each free against the block it
+// last allocated, and notes whether it ran on the loop thread. Allocations
+// happen on the loop thread and are published before anyone frees them, so
+// the `last*` fields need no atomics.
+struct CountingHeap
+{
+    shared long allocations, deallocations, offLoopAllocations, loopFrees, mismatches;
+    shared bool refuse;
+    void* lastBlock;
+    size_t lastBytes, lastAlignment;
+}
+
+void* countingAllocate(void* context, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    import core.stdc.stdlib : aligned_alloc;
+    auto heap = cast(CountingHeap*) context;
+    atomicOp!"+="(heap.allocations, 1);
+    if (UvLoop.current is null) atomicOp!"+="(heap.offLoopAllocations, 1);
+    if (atomicLoad(heap.refuse)) return null;
+    auto block = aligned_alloc(alignment, (bytes + alignment - 1) & ~(alignment - 1));
+    heap.lastBlock = block;
+    heap.lastBytes = bytes;
+    heap.lastAlignment = alignment;
+    return block;
+}
+
+void countingDeallocate(void* context, void* memory, size_t bytes, size_t alignment)
+    nothrow @nogc @system
+{
+    auto heap = cast(CountingHeap*) context;
+    atomicOp!"+="(heap.deallocations, 1);
+    if (UvLoop.current !is null) atomicOp!"+="(heap.loopFrees, 1);
+    if (memory !is heap.lastBlock || bytes != heap.lastBytes || alignment != heap.lastAlignment)
+        atomicOp!"+="(heap.mismatches, 1);
+    free(memory);
+}
+
+// Submit from this thread and spin until the loop publishes.
+bool readNow(UvLoop loop, UvRequest* r)
+{
+    return loop.submit(r) == UvSubmit.accepted && waitUntil(() => r.finished);
+}
+
+void readFileAllocators(string dir, string path, const(ubyte)[] expected, string emptyPath)
+{
+    auto loop = UvLoop.create();
+    CountingHeap heap;
+    auto counting = ActorAllocator(&heap, &countingAllocate, &countingDeallocate);
+    auto cpath = path.toStringz;
+    long allocations() { return atomicLoad(heap.allocations); }
+    long deallocations() { return atomicLoad(heap.deallocations); }
+
+    // The request's allocator at page alignment: allocated on the loop
+    // thread, freed here with the block, size and alignment it allocated,
+    // even after the request's own field changed.
+    UvRequest r;
+    r.op = UvOp.readFile;
+    r.path = cpath;
+    r.allocator = counting;
+    r.alignment = 4096;
+    check(readNow(loop, &r) && r.succeeded && r.ownsBuffer, "read into the request's allocator");
+    check(r.buffer[0 .. r.length] == expected, "the file in place");
+    check(allocations == 1 && atomicLoad(heap.offLoopAllocations) == 0,
+        "allocated once, on the loop thread");
+    r.allocator = ActorAllocator.init;
+    auto file = r.takeBuffer();
+    check(!r.ownsBuffer && r.buffer is null && r.length == 0, "takeBuffer clears the request");
+    check(file.bytes == expected && file.capacity == expected.length && file.alignment == 4096
+        && (cast(size_t) file.bytes.ptr & 4095) == 0, "the handed-over block");
+    check(r.takeBuffer().bytes is null, "a second take hands over nothing");
+    file.free();
+    check(file.bytes is null && file.capacity == 0, "free empties the buffer");
+    file.free();
+    check(deallocations == 1 && atomicLoad(heap.mismatches) == 0
+        && atomicLoad(heap.loopFrees) == 0, "freed once, here, as allocated");
+
+    // freeBuffer frees through the same allocator.
+    r = UvRequest.init;
+    r.op = UvOp.readFile;
+    r.path = cpath;
+    r.allocator = counting;
+    r.alignment = 16;
+    check(readNow(loop, &r) && r.succeeded, "second read");
+    check(loop.submit(&r) == UvSubmit.invalid, "a request owning a block is refused");
+    r.freeBuffer();
+    check(allocations == 2 && deallocations == 2 && atomicLoad(heap.mismatches) == 0,
+        "freeBuffer frees through the allocator");
+
+    // Unset: the C runtime's 64-byte-aligned pair.
+    UvRequest plain;
+    plain.op = UvOp.readFile;
+    plain.path = cpath;
+    check(readNow(loop, &plain) && plain.succeeded, "default allocator read");
+    auto plainFile = plain.takeBuffer();
+    check(plainFile.bytes == expected && plainFile.alignment == 64
+        && (cast(size_t) plainFile.bytes.ptr & 63) == 0, "default block");
+    plainFile.free();
+
+    // A read that fails after allocating: the loop frees the block. A
+    // directory opens and reports a size, then its read fails with EISDIR.
+    import std.file : getSize;
+    if (getSize(dir) == 0)
+        printf("  SKIP failed-read free: the directory reports size 0\n");
+    else
+    {
+        UvRequest failed;
+        failed.op = UvOp.readFile;
+        failed.path = dir.toStringz;
+        failed.allocator = counting;
+        check(readNow(loop, &failed) && failed.done && failed.errorName == "EISDIR"
+            && !failed.ownsBuffer, "reading a directory fails");
+        check(allocations == 3 && deallocations == 3 && atomicLoad(heap.loopFrees) == 1
+            && atomicLoad(heap.mismatches) == 0, "the loop freed the failed read's block");
+    }
+    immutable before = allocations;
+    immutable freed = deallocations;
+
+    // An allocator that returns null fails the request with ENOMEM.
+    atomicStore(heap.refuse, true);
+    UvRequest refused;
+    refused.op = UvOp.readFile;
+    refused.path = cpath;
+    refused.allocator = counting;
+    check(readNow(loop, &refused) && refused.done && refused.result == UV_ENOMEM
+        && !refused.ownsBuffer, "a refused allocation is ENOMEM");
+    check(allocations == before + 1 && deallocations == freed, "nothing to free after a refusal");
+    atomicStore(heap.refuse, false);
+
+    // An empty file allocates nothing and hands over nothing.
+    UvRequest empty;
+    empty.op = UvOp.readFile;
+    empty.path = emptyPath.toStringz;
+    empty.allocator = counting;
+    check(readNow(loop, &empty) && empty.succeeded && empty.result == 0 && !empty.ownsBuffer,
+        "empty file read");
+    auto none = empty.takeBuffer();
+    check(none.bytes is null && none.capacity == 0, "an empty file hands over nothing");
+    none.free();
+    check(allocations == before + 1, "an empty file allocated");
+
+    // Allocation fields are checked only when the loop allocates.
+    UvRequest bad;
+    bad.op = UvOp.readFile;
+    bad.path = cpath;
+    bad.alignment = 0;
+    check(loop.submit(&bad) == UvSubmit.invalid, "alignment 0 accepted");
+    bad.alignment = 48;
+    check(loop.submit(&bad) == UvSubmit.invalid, "alignment 48 accepted");
+    bad.alignment = 64;
+    bad.allocator.allocate = counting.allocate;
+    check(loop.submit(&bad) == UvSubmit.invalid, "half an allocator accepted");
+    ubyte[16] small;
+    bad.buffer = small.ptr;
+    bad.length = small.length;
+    bad.alignment = 0;
+    check(readNow(loop, &bad) && bad.succeeded && bad.result == 16 && !bad.ownsBuffer
+        && small[] == expected[0 .. 16], "a caller buffer ignores the allocation fields");
+
+    auto report = loop.close();
+    check(report.failure is null && report.loopClose == 0, "allocators close report");
+    check(allocations == before + 1 && deallocations == freed, "unbalanced allocator calls");
+    pass("readFile allocates from the request's allocator at its alignment and frees once");
+}
+
+version (AntfarmMimallocV3)
+{
+    import antfarm.actors.mimalloc : mimallocV3ActorAllocator;
+
+    extern (C) int mi_version() nothrow @nogc;
+    extern (C) bool mi_is_in_heap_region(const(void)* p) nothrow @nogc;
+    extern (C) size_t mi_usable_size(const(void)* p) nothrow @nogc;
+
+    // The real mimalloc v3 adapter: blocks allocated on the loop thread,
+    // freed on this one.
+    void mimallocReads(string path, const(ubyte)[] expected)
+    {
+        immutable v = mi_version();
+        check(v >= 30000 && v < 40000, "mimalloc is not v3");
+        auto loop = UvLoop.create();
+        UvBuffer[16] files;
+        foreach (ref file; files)
+        {
+            UvRequest r;
+            r.op = UvOp.readFile;
+            r.path = path.toStringz;
+            r.allocator = mimallocV3ActorAllocator();
+            r.alignment = 256;
+            check(readNow(loop, &r) && r.succeeded, "mimalloc read");
+            file = r.takeBuffer();
+            check(file.bytes == expected && (cast(size_t) file.bytes.ptr & 255) == 0
+                && mi_is_in_heap_region(file.bytes.ptr)
+                && mi_usable_size(file.bytes.ptr) >= expected.length, "a mimalloc block");
+        }
+        foreach (ref file; files)
+            file.free();
+        auto report = loop.close();
+        check(report.completed == files.length && report.loopClose == 0, "mimalloc close report");
+        printf("  mimalloc %d.%d.%d\n", v / 10000, v / 100 % 100, v % 100);
+        pass("readFile into mimalloc v3 on the loop thread, freed on another");
+    }
+}
+
 // An open of a FIFO with no writer blocks in an auxiliary thread, so libuv
 // cannot cancel it: close abandons it and leaves the loop allocated. A
 // writer then completes the open so the auxiliary thread is free again.
@@ -818,6 +1022,8 @@ int main()
     stepFailure();
     loopFibers(paths[7], contents[7]);
     workerFiberReads(paths, contents);
+    readFileAllocators(dir, paths[8], contents[8], paths[0]);
+    version (AntfarmMimallocV3) mimallocReads(paths[8], contents[8]);
     abandonFifo(dir);
     printf("ALL UV TESTS PASSED (%lld ms)\n", (MonoTime.currTime - started).total!"msecs");
     return 0;

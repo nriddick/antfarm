@@ -76,8 +76,11 @@ alias ActorDeallocate = void function(void* context, void* memory,
 /// Value-type allocator vtable: one context pointer plus the allocate and
 /// deallocate halves. Copyable and equality-free; pass it by value to
 /// runtime and park constructors. `valid` checks that both halves are set.
+/// `ant_uv`'s `UvRequest.allocator` takes it too, for the files a
+/// `readFile` loads.
 /// See_Also:
-///     docs/guide/sizing-and-allocation.md (choosing an allocator)
+///     docs/guide/sizing-and-allocation.md (choosing an allocator),
+///     docs/guide/loading-files.md (where loaded files live)
 struct ActorAllocator
 {
     /// Opaque state passed back to both function pointers.
