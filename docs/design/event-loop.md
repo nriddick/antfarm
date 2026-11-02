@@ -177,7 +177,10 @@ the application's control thread and joined by it:
      every operation in libuv (timers stop at once; file work libuv has not
      started is cancelled), and wait `abandonAfter` for the final callbacks.
   An operation that is still running after that wait is published
-  `abandoned`: its buffer stays libuv's, so the application must leak it.
+  `abandoned`. A `readFile` job among them frees the block it allocated
+  when it ends and counts itself out of `UvLoop.abandonedJobs`, so its
+  allocator and buffer must outlive it; any other operation's buffer stays
+  libuv's, so the application must leak it.
   Then the `stop` hook runs, every handle is closed, and the loop is closed
   (`uv_loop_close` returning 0); when something was abandoned, the loop and
   its memory are instead left allocated, since libuv may still write to
@@ -300,10 +303,18 @@ already asks of every `ActorAllocator`, and the druntime rule excludes only
 `gcRooted`, which is meaningless for bytes. A variant that kept a
 loop-thread-only allocator was built and dropped: it cost a second job and
 a flag for an allocator nobody had. libuv's queue mutex orders the slot's
-fields both ways; a
-cancel sets an atomic flag in the slot, which a running job checks before
-each step, and `uv_cancel` removes a job that has not started. This
-replaced a chain of four requests (open, `fstat`, read, close), each a
+fields both ways; a cancel sets an atomic flag in the slot, which the job
+checks before `open`, after it, before allocating and before each read,
+and `uv_cancel` removes a job that has not started. The job's end is a
+handoff through a phase word in the slot: the job moves it from running to
+done, and `close`, when it gives up waiting, from running to abandoned;
+whoever moves it owns the block. A job that finds itself abandoned frees
+its block and decrements `abandonedJobs`, both on libuv's thread; a job
+the loop finds already done has its callback posted, so the loop runs until
+it arrives and the read completes instead. Before this handoff an abandoned
+job could allocate after `close` returned, and its block was never freed
+([record](../development/readfile-allocator-after-close-2026-11-02/README.md)).
+The job replaced a chain of four requests (open, `fstat`, read, close), each a
 round trip between the loop and the pool. `UvLoopOptions.ioUring` does not
 route `readFile` through the ring: measured with the chain through it, the
 kernel's one polling thread copied every whole file in turn, and 8 MiB files
@@ -624,6 +635,10 @@ What runs, and where:
 - **An abandoned close is observable** (section 3.1). It publishes
   `abandoned`, distinct from `done`, and reports `UV_EBUSY` as `loopClose`.
   The plan said only "an abort outcome".
+- **An abandoned `readFile` frees its own block** (section 3.2). The plan
+  left an abandoned operation's buffer to libuv. A whole-file job can end
+  after `close` returned, so it frees what it allocated and counts itself
+  out of `UvLoop.abandonedJobs`, which the allocator's owner waits on.
 - **`reservedProcessors` was not added** (section 3.7).
 - **`submitAndWait` survives Fiber cancellation** (section 3.3). The plan
   did not address a cancelled waiter. Without this, a cancelled Fiber would

@@ -29,9 +29,14 @@
  + - Cancellation is not a release fence: a cancelled operation still
  +   publishes, with `UV_ECANCELED`, and only after libuv's terminal callback.
  + - A block the loop allocates for a `readFile` is freed exactly once: by the
- +   loop when the read fails, or by its owner through `UvRequest.freeBuffer`
- +   or the `UvBuffer` that `UvRequest.takeBuffer` hands over. An abandoned
- +   request's block is never freed.
+ +   loop when the read fails, by its owner through `UvRequest.freeBuffer` or
+ +   the `UvBuffer` that `UvRequest.takeBuffer` hands over, or by the job
+ +   itself when `close` abandoned it. An abandoned `readFile` job runs on
+ +   until its file operation returns, then frees the block it allocated and
+ +   counts itself out of `UvLoop.abandonedJobs`; until that count is zero
+ +   the job may call its allocator and write into a caller-provided
+ +   `buffer`, so both must stay valid. Another abandoned operation gives no
+ +   such signal: its buffer must be leaked.
  +
  + One `UvLoop` may be open per process at a time: libuv's auxiliary pool is
  + process-global, and its size is fixed by the first use anywhere in the
@@ -134,8 +139,9 @@ enum UvRequestState : uint
     /// submitter's again.
     done,
     /// Published by `close` after it stopped waiting: the operation may
-    /// still be running inside libuv, so its `buffer` must be leaked. The
-    /// record itself is the submitter's again.
+    /// still be running inside libuv. A `readFile`'s `buffer` and allocator
+    /// stay in use until `UvLoop.abandonedJobs` is zero; another operation's
+    /// `buffer` must be leaked. The record itself is the submitter's again.
     abandoned,
 }
 
@@ -200,8 +206,10 @@ struct UvRequest
     /// thread-safe, may block, and must not touch the GC or druntime
     /// (`ActorAllocator.cRuntime()` and `mimallocV3ActorAllocator()`
     /// qualify; `ActorAllocator.gcRooted` does not). `deallocate` runs where
-    /// the block is freed, on any thread, or on the loop thread when the
-    /// read fails. A null result fails the request with `UV_ENOMEM`.
+    /// the block is freed, on any thread; on the loop thread when the read
+    /// fails; or on the auxiliary thread when `close` abandoned the job,
+    /// which may be after `close` returned. A null result fails the request
+    /// with `UV_ENOMEM`.
     ActorAllocator allocator;
     /// `readFile` with a null `buffer`: the block's alignment, a power of
     /// two. `ActorAllocator.cRuntime()` gives at most 64.
@@ -999,7 +1007,9 @@ struct UvLoopOptions
     /// How long `close` keeps serving before it cancels what is outstanding.
     Duration closeGrace = 5.seconds;
     /// How long `close` then waits for terminal callbacks before it
-    /// abandons the rest.
+    /// abandons the rest. An abandoned `readFile` job frees its own block
+    /// when it ends and counts itself out of `UvLoop.abandonedJobs`; zero
+    /// here means accepting such jobs on every close that finds one running.
     Duration abandonAfter = 5.seconds;
     /// Linux: let libuv issue `open`, `close`, `read`, `write`, `stat` and
     /// `fstat` through io_uring (`UV_LOOP_USE_IO_URING_SQPOLL`, libuv 1.49
@@ -1037,7 +1047,9 @@ struct UvCloseReport
     ulong completed;
     /// Requests published with `UV_ECANCELED`.
     ulong cancelled;
-    /// Requests published `abandoned`: libuv may still use their buffers.
+    /// Requests published `abandoned`: their operations may still be
+    /// running. `UvLoop.abandonedJobs` counts the `readFile` jobs among them
+    /// that have not ended.
     ulong abandoned;
     /// Completion ring elements never pushed: the ring was closed, or the
     /// loop gave up waiting for room.
@@ -1080,6 +1092,10 @@ private enum size_t maxRingCommits = 64; // distinct rings UDP sockets may deliv
 
 private enum State : int { starting, open, failed, closed }
 private enum ClosePhase : ubyte { open, grace, cancelling }
+// A readFile job's handoff with the loop thread, in `OpSlot.phase`. The job
+// moves `running` to `done` at its end; `abandonOutstanding` moves `running`
+// to `abandoned`. Whoever moves it owns the block from then on.
+private enum JobPhase : uint { running, done, abandoned }
 // A readFile job's uv_fs_t lives on the auxiliary thread's stack.
 private enum size_t jobFsBytes = 1024;
 
@@ -1099,7 +1115,10 @@ private struct OpSlot
     bool inUse;
     bool handleOpen; // `uv` is an initialized timer handle: close before reuse
     bool cancelling;
+    bool queueCancelled; // uv_cancel took the job before a thread did: its callback is posted
     shared bool stop; // a cancel the running job polls between steps
+    shared uint phase; // JobPhase
+    shared(uint)* abandonedJobs; // the loop's count, in memory that outlives the loop
     UvOp op;
     const(char)* path;
     int file = -1;
@@ -1255,8 +1274,11 @@ final class UvLoop
     /// Close: refuse new requests, keep serving for `closeGrace`, then
     /// cancel what is outstanding and wait `abandonAfter` for libuv's
     /// terminal callbacks, publish anything still running as `abandoned`,
-    /// run the `stop` hook, close the loop and join its thread. Any thread
-    /// but the loop's; concurrent and repeated calls return the same report.
+    /// run the `stop` hook, close the loop and join its thread. A `readFile`
+    /// job that finished during the wait but whose callback the loop had
+    /// not yet run is collected rather than abandoned; one still running is
+    /// counted in `abandonedJobs`. Any thread but the loop's; concurrent
+    /// and repeated calls return the same report.
     /// Throws `UvLoopException`, carrying the report, when the loop thread
     /// failed.
     UvCloseReport close()
@@ -1349,6 +1371,17 @@ final class UvLoop
     @property ulong deferredDeliveries() const nothrow @nogc { return atomicLoad(deferred_); }
     /// The credit limit in effect.
     @property uint credits() const nothrow @nogc { return slotCount_; }
+
+    /// `readFile` jobs that `close` abandoned and that have not ended. Each
+    /// may still call its allocator and write into its `buffer`; when it
+    /// ends it frees the block it allocated and leaves this count. Zero
+    /// after `close` means no abandoned job will touch an allocator again.
+    /// Any thread, at any time; zero before `close`.
+    @property uint abandonedJobs() const nothrow @nogc
+    {
+        auto cell = abandonedJobs_;
+        return cell is null ? 0 : atomicLoad!(MemoryOrder.acq)(*cell);
+    }
     /// libuv's auxiliary threads as placed by `create`.
     @property const(UvAuxThread)[] auxThreads() const nothrow @nogc { return auxThreads_; }
     /// True when `UvLoopOptions.ioUring` took effect: Linux 5.10.186 or
@@ -1437,6 +1470,7 @@ private:
     ClosePhase closePhase_;
     long phaseDeadline_;
     bool loopAbandoned_;
+    shared(uint)* abandonedJobs_; // leaked with the slots when a job is abandoned
     version (linux) cpu_set_t inheritedMask_;
     else version (Windows) GROUP_AFFINITY inheritedAffinity_;
 
@@ -1457,6 +1491,9 @@ private:
     ~this()
     {
         releaseRings();
+        // Abandoned jobs still subtract from the cell: leave it to them.
+        if (abandonedJobs_ !is null && !loopAbandoned_) free(cast(void*) abandonedJobs_);
+        abandonedJobs_ = null;
     }
 
     void releaseRings() nothrow @nogc
@@ -1743,12 +1780,18 @@ private:
                 cancelSlot(&slots_[i]);
     }
 
+    // Close gave up waiting. A readFile job still running is abandoned: it
+    // frees its own block when it ends and counts itself out of
+    // `abandonedJobs`. One that already ended, or that uv_cancel took before
+    // any thread did, has its callback posted: that one is collected here,
+    // a completion rather than an abandonment.
     void abandonOutstanding() nothrow @nogc
     {
         foreach (i; 0 .. slotCount_)
         {
             auto slot = &slots_[i];
             if (!slot.inUse) continue;
+            if (slot.op == UvOp.readFile && collectReadJob(slot)) continue;
             loopAbandoned_ = true; // libuv still holds this slot's memory
             if (slot.request is null) continue;
             auto request = slot.request;
@@ -1766,6 +1809,29 @@ private:
         }
         atomicStore(undelivered_, atomicLoad(undelivered_) + pendingCount_);
         pendingCount_ = 0;
+    }
+
+    // True when the job's callback ran and released the slot; false when the
+    // job is still running and is now abandoned.
+    bool collectReadJob(OpSlot* slot) nothrow @nogc
+    {
+        if (!slot.queueCancelled)
+        {
+            // Count before the move: a job that finds itself abandoned
+            // subtracts, and must never see zero.
+            atomicFetchAdd!(MemoryOrder.acq_rel)(*abandonedJobs_, 1u);
+            if (cas(&slot.phase, cast(uint) JobPhase.running, cast(uint) JobPhase.abandoned))
+                return false;
+            atomicFetchSub!(MemoryOrder.acq_rel)(*abandonedJobs_, 1u);
+        }
+        // The job returned, or never ran: libuv posts its callback within
+        // microseconds of that. Run the loop until the callback has run.
+        while (slot.inUse)
+        {
+            uv_run(loop_, uv_run_mode.UV_RUN_NOWAIT);
+            if (slot.inUse) core.atomic.pause();
+        }
+        return true;
     }
 
     // ---- starting operations --------------------------------------------------
@@ -1798,7 +1864,9 @@ private:
         slot.ticket = ticket;
         slot.op = request.op;
         slot.cancelling = false;
+        slot.queueCancelled = false;
         atomicStore!(MemoryOrder.raw)(slot.stop, false);
+        atomicStore!(MemoryOrder.raw)(slot.phase, cast(uint) JobPhase.running);
         slot.path = null;
         slot.file = -1;
         slot.status = 0;
@@ -1887,8 +1955,25 @@ private:
 
     // A readFile on one of libuv's auxiliary threads, which druntime does
     // not know: only libuv's synchronous calls (they store the loop and never
-    // touch it), the allocator, and atomics.
+    // touch it), the allocator, and atomics. The read, then the handoff.
     static void runReadJob(OpSlot* slot) nothrow @nogc
+    {
+        readJobSteps(slot);
+        // A job that ends first is the loop thread's: its after-work callback
+        // hands the block over or frees it. A job that close abandoned has no
+        // callback coming: it frees the block itself and counts itself out,
+        // so the allocator's owner can learn when the job is over.
+        if (cas(&slot.phase, cast(uint) JobPhase.running, cast(uint) JobPhase.done)) return;
+        if (slot.allocated)
+        {
+            slot.allocator.deallocate(slot.allocator.context, slot.buffer, slot.capacity,
+                slot.alignment);
+            slot.allocated = false;
+        }
+        atomicFetchSub!(MemoryOrder.acq_rel)(*slot.abandonedJobs, 1u);
+    }
+
+    static void readJobSteps(OpSlot* slot) nothrow @nogc
     {
         align(16) ubyte[jobFsBytes] storage = void;
         auto fs = cast(uv_fs_t*) storage.ptr;
@@ -1902,6 +1987,13 @@ private:
             slot.file = -1;
         }
 
+        // A cancel can land before the job runs, so `path` is read only once
+        // the job knows it was not cancelled.
+        if (stopped())
+        {
+            slot.status = UV_ECANCELED;
+            return;
+        }
         immutable fd = uv_fs_open(loop, fs, slot.path, UV_FS_O_RDONLY, 0, null);
         uv_fs_req_cleanup(fs);
         if (fd < 0)
@@ -1920,6 +2012,8 @@ private:
         // before anything is allocated or read, with size 0 everywhere.
         if ((st.st_mode & UV_S_IFMT) == UV_S_IFDIR) return closeFile(UV_EISDIR);
         slot.fileSize = st.st_size;
+        // The fstat may have waited past a cancel: do not allocate for it.
+        if (stopped()) return closeFile(UV_ECANCELED);
         if (slot.buffer is null && st.st_size != 0) // an empty file allocates nothing
         {
             if (st.st_size > size_t.max) return closeFile(UV_ENOMEM);
@@ -2323,7 +2417,9 @@ private:
         // completes, and a readFile job stops at its next step, which it
         // learns from `stop`.
         if (slot.op == UvOp.readFile) atomicStore!(MemoryOrder.rel)(slot.stop, true);
-        uv_cancel(cast(uv_req_t*) slot.uv);
+        // 0: the request was still queued and its callback is now posted
+        // with UV_ECANCELED. UV_EBUSY: a thread has it, or the ring does.
+        slot.queueCancelled = uv_cancel(cast(uv_req_t*) slot.uv) == 0;
     }
 
     // ---- completions --------------------------------------------------------
@@ -2355,7 +2451,7 @@ private:
     {
         auto request = slot.request;
         immutable size = slot.fileSize;
-        if (status >= 0 && slot.allocated)
+        if (status >= 0 && slot.allocated && request !is null)
         {
             request.buffer = slot.buffer;
             request.length = cast(size_t) slot.filled;
@@ -2568,7 +2664,9 @@ private:
         pendingCap_ = slotCount_ + options_.ringCapacity;
         pending_ = cast(PendingDelivery*) calloc(pendingCap_, PendingDelivery.sizeof);
         udpSockets_ = cast(UdpSocket*) calloc(maxUdpSockets, UdpSocket.sizeof);
-        if (slotMemory_ is null || slots_ is null || pending_ is null || udpSockets_ is null)
+        if (abandonedJobs_ is null) abandonedJobs_ = cast(shared(uint)*) calloc(1, uint.sizeof);
+        if (slotMemory_ is null || slots_ is null || pending_ is null || udpSockets_ is null
+            || abandonedJobs_ is null)
             throw new UvLoopException("ant_uv: slot allocation failed");
         foreach (i; 0 .. slotCount_)
         {
@@ -2577,6 +2675,7 @@ private:
             slot.uv = cast(ubyte*) slotMemory_ + i * slotStride_;
             slot.owner = cast(void*) this;
             slot.uvLoop = loop_;
+            slot.abandonedJobs = abandonedJobs_;
             slot.index = i;
             slot.next = i + 1 < slotCount_ ? i + 1 : noSlot;
         }

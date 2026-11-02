@@ -5,11 +5,11 @@
  + ring, cancellation, close with work in flight, a failing step hook,
  + Fibers on the loop thread, files read by worker Fibers on a GroupHost,
  + readFile's allocators, the per-operation constructors, whole-file reads
- + cancelled in flight, UDP sockets on the loopback, and abandonment of an
- + operation that cannot finish. With ANTUV_TEST_IO_URING=1 every loop uses
- + io_uring, and create must have built the ring. Built with
- + `AntfarmMimallocV3` and the real mimalloc library, it also reads into
- + mimalloc v3. Linux and Windows.
+ + cancelled in flight, UDP sockets on the loopback, a whole-file read
+ + abandoned inside its allocator, and abandonment of an operation that
+ + cannot finish. With ANTUV_TEST_IO_URING=1 every loop uses io_uring, and
+ + create must have built the ring. Built with `AntfarmMimallocV3` and the
+ + real mimalloc library, it also reads into mimalloc v3. Linux and Windows.
  +/
 module uv_test;
 
@@ -1508,6 +1508,75 @@ void udpLoopback()
         ~ "holds across close, the ring check, and resolution");
 }
 
+// A whole-file read abandoned inside its allocator, which waits for the
+// thread that calls close: close abandons the job, the job frees the block
+// itself once the allocator returns, and abandonedJobs says when it ended.
+struct GateHeap
+{
+    shared long allocations, deallocations, wrongBlocks;
+    shared int open;
+    void* block; // written and read on the job's thread
+}
+
+// On libuv's thread: no druntime.
+void napMs(uint ms) nothrow @nogc @system
+{
+    version (Windows)
+    {
+        import core.sys.windows.winbase : Sleep;
+        Sleep(ms);
+    }
+    else
+    {
+        import core.sys.posix.time : nanosleep, timespec;
+        auto ts = timespec(ms / 1000, (ms % 1000) * 1_000_000L);
+        nanosleep(&ts, null);
+    }
+}
+
+void* gateAllocate(void* context, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    auto heap = cast(GateHeap*) context;
+    atomicOp!"+="(heap.allocations, 1);
+    while (atomicLoad!(MemoryOrder.acq)(heap.open) == 0) napMs(1);
+    heap.block = alignedAllocate(alignment, (bytes + alignment - 1) & ~(alignment - 1));
+    return heap.block;
+}
+
+void gateDeallocate(void* context, void* memory, size_t, size_t) nothrow @nogc @system
+{
+    auto heap = cast(GateHeap*) context;
+    atomicOp!"+="(heap.deallocations, 1);
+    if (memory !is heap.block) atomicOp!"+="(heap.wrongBlocks, 1);
+    alignedFree(memory);
+}
+
+void abandonReadFileInAllocator(string path)
+{
+    UvLoopOptions o = testOptions();
+    o.closeGrace = 20.msecs;
+    o.abandonAfter = 50.msecs;
+    auto loop = UvLoop.create(o);
+    GateHeap heap;
+    auto r = new UvRequest;
+    *r = UvRequest.readFile(path.toStringz, ActorAllocator(&heap, &gateAllocate, &gateDeallocate));
+    check(loop.submit(r) == UvSubmit.accepted, "gated submit");
+    check(waitUntil(() => atomicLoad(heap.allocations) == 1), "the job did not reach the allocator");
+    check(loop.abandonedJobs == 0, "abandonedJobs before close");
+    auto report = loop.close();
+    check(report.abandoned == 1 && report.loopClose == UV_EBUSY, "close did not abandon the read");
+    check(r.state == UvRequestState.abandoned && r.result == UV_ECANCELED && !r.ownsBuffer,
+        "abandoned read state");
+    // The job is still inside the allocator: nothing can have been freed.
+    check(loop.abandonedJobs == 1 && atomicLoad(heap.deallocations) == 0,
+        "abandonedJobs after close");
+    atomicStore!(MemoryOrder.rel)(heap.open, 1);
+    check(waitUntil(() => loop.abandonedJobs == 0), "the abandoned job did not end");
+    check(atomicLoad(heap.deallocations) == 1 && atomicLoad(heap.wrongBlocks) == 0,
+        "the abandoned job did not free its block once");
+    pass("close abandons a readFile inside its allocator; the job frees the block and leaves abandonedJobs");
+}
+
 // An operation that blocks in an auxiliary thread cannot be cancelled by
 // libuv: close abandons it and leaves the loop allocated. The test then
 // unblocks it so the auxiliary thread is free again. Linux opens a FIFO
@@ -1635,6 +1704,7 @@ int main()
     readFileCancelStorm(paths[8], contents[8]);
     udpLoopback();
     version (AntfarmMimallocV3) mimallocReads(paths[8], contents[8]);
+    abandonReadFileInAllocator(paths[8]);
     abandonBlocked(dir);
     printf("ALL UV TESTS PASSED (%lld ms)\n", (MonoTime.currTime - started).total!"msecs");
     return 0;

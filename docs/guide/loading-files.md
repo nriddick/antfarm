@@ -187,7 +187,11 @@ zero.
 `loop.close()` publishes every request before it returns. A completion the
 ring could not take is still published. So `shutdown`, which runs after
 `close`, steps once more, settles any finished request it did not see,
-queues every asset for release, and steps again.
+queues every asset for release, and steps again. A read that `close`
+abandoned frees its own block later, on libuv's thread, so a table whose
+allocator does not live for the process would wait for
+`loop.abandonedJobs` to reach zero before tearing the allocator down; this
+example's allocators do live for the process.
 
 ```d
 // fragment: main calls loop.close(), then this
@@ -234,7 +238,11 @@ An allocator for `readFile` must work like this:
   know. It must be thread-safe, may block, and must not touch the GC or
   druntime.
 - `deallocate` runs on whichever thread frees the block. That is the owner
-  of the `UvBuffer`, or the loop thread when a read fails after allocating.
+  of the `UvBuffer`; the loop thread when a read fails after allocating; or
+  libuv's auxiliary thread when `close` abandoned the read, possibly after
+  `close` returned. After a close that reports abandonment, keep the
+  allocator alive until `loop.abandonedJobs` is zero
+  ([Close](../../ant_uv/README.md#close)).
 - Returning null from `allocate` fails the request with `UV_ENOMEM`.
 
 A `UvBuffer` carries its block, the block's size and alignment, and the

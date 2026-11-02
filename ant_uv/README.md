@@ -156,8 +156,10 @@ one auxiliary thread, then one completion on the loop thread.
   be thread-safe, may block, and must not touch the GC or druntime.
   `ActorAllocator.cRuntime()` and `mimallocV3ActorAllocator()` qualify;
   `ActorAllocator.gcRooted` does not.
-- `deallocate` runs wherever the block is freed: any thread, or the loop
-  thread when the read fails after allocating.
+- `deallocate` runs wherever the block is freed: any thread; the loop
+  thread when the read fails after allocating; or libuv's thread when
+  `close` abandoned the job, which can be after `close` returned (see
+  [Close](#close)).
 - An allocator that returns null fails the request with `UV_ENOMEM`. An
   empty file allocates nothing. A directory fails with `UV_EISDIR` and
   `size` 0 on every platform, before anything is read or allocated.
@@ -322,11 +324,25 @@ loop, and joins the thread.
 
 An operation libuv cannot cancel is published `abandoned` if it outlasts the
 wait, for example an `open` of a FIFO with no writer on the pool. (Through
-io_uring that open did not wait for a writer on Linux 6.6.) Its `buffer`
-must then be leaked, as the loop leaks a block it allocated for it. The
-loop's memory is left allocated (`loopClose` is `UV_EBUSY`). The returned
+io_uring that open did not wait for a writer on Linux 6.6.) The loop's
+memory is left allocated (`loopClose` is `UV_EBUSY`). The returned
 `UvCloseReport` counts completed, cancelled, abandoned and undelivered
 requests.
+
+An abandoned `readFile` job runs on until its file operation returns. Then
+it frees the block it allocated, on libuv's thread, and leaves
+`loop.abandonedJobs`; a job that ended during the wait is collected as a
+completion instead. At most one job per auxiliary thread can be abandoned,
+since queued jobs are cancelled. Until `abandonedJobs` is zero a job may
+still call its allocator and write into a buffer you gave it, so keep both
+valid: after a close that reports abandonment, do not reset an arena or
+destroy a mimalloc heap until the count is zero, and do not let `allocate`
+wait on the thread that calls `close`, which the loop cannot interrupt; a
+bounded wait that returns null fails the read with `UV_ENOMEM`. A job
+stuck in a file operation that never returns, such as a read from a dead
+network mount, holds one of libuv's auxiliary threads for the rest of the
+process. Any other abandoned operation gives no signal when it ends: its
+buffer must be leaked.
 
 Shut down in this order:
 

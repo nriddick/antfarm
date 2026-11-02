@@ -183,6 +183,39 @@ where the implementation departed from the plan.
     closes descriptors and creates the ring with raw system calls, which
     ThreadSanitizer does not see, so it was a false report. With the ring
     built at `create`, none of 90 such runs reported it.
+- An abandoned `readFile` no longer leaks its block, and says when it is
+  over. `close` abandons a job still running on libuv's pool after
+  `abandonAfter`. Before this, such a job could call its allocator after
+  `close` had returned, when nothing checked for the cancel between its
+  `fstat` and its allocation, and its block was never freed, since the loop
+  thread that would have collected it had exited
+  ([record](docs/development/readfile-allocator-after-close-2026-11-02/README.md)).
+  Now:
+  - The job checks for its cancel before `open`, so it never reads a
+    `path` for a request that is already published, and again before
+    allocating.
+  - The job's end is a handoff with the loop thread. A job that `close`
+    abandoned frees its own block when it ends, on libuv's thread, and
+    counts itself out of the new `UvLoop.abandonedJobs`; a job that ended
+    during the wait, with its callback still posted, is collected as a
+    completion rather than abandoned.
+  - The contract, in `loop.d`, the README and the guide: an abandoned
+    `readFile`'s allocator and buffer stay valid until `abandonedJobs` is
+    zero. At most one job per auxiliary thread can be abandoned, since
+    queued jobs are cancelled. Any other abandoned operation gives no
+    signal, and its buffer must still be leaked.
+  - The suite abandons a read inside an allocator that waits for the
+    closing thread, then checks that the job frees the block once and
+    leaves `abandonedJobs`.
+  Under the record's FUSE stall, the allocator is no longer called after
+  `close`, and a job abandoned inside its allocator freed its block about
+  a millisecond after `close` returned; with `abandonAfter` zero and 64
+  reads in flight, every block an abandoned job had allocated was freed,
+  and the collection path ran in a third of the runs at a 5 µs delay,
+  plain and under ThreadSanitizer. The five `ant_uv` lanes passed, then
+  50 LDC, 30 DMD, 50 io_uring, 30 ThreadSanitizer, 30 io_uring
+  ThreadSanitizer, 20 mimalloc and 20 io_uring mimalloc runs of the suite,
+  and `make check` on the final tree.
 - Fixed an intermittent `make check` failure, present since 2.1.1, at
   `tests/ant_fibers/smoke.d:1751`. It failed about 5% of runs under each of
   DMD and LDC. The test waited for `terminated`, then for

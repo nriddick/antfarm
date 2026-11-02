@@ -214,6 +214,17 @@ None of them mentions the allocator.
 - **io_uring.** `readFile` stays a pool job with `ioUring` set, so the
   steps are the same; it was not run.
 
+## Outcome
+
+Applied on `2.2.0-progress` after this record, as the CHANGELOG describes:
+the job checks for its cancel before `open` and before allocating; a job
+that ends after `close` abandoned it frees its own block and counts itself
+out of `UvLoop.abandonedJobs`; a job that ended during the wait is
+collected instead of abandoned; and the contract says the allocator and
+buffer stay valid until that count is zero. Against the same stub, the
+`fstat` stall no longer called the allocator, and the job abandoned inside
+its allocator freed its block about a millisecond after `close` returned.
+
 ## Files
 
 | File | What it is |
