@@ -1,0 +1,126 @@
+tree: a3ffacc
+host: 7.3.1-1-cachyos; LDC - the LLVM D compiler (1.43.0):; libuv 1.53.0; fuse3 3.18.3; ldd (GNU libc) 2.44
+work directory: tmpfs
+--- probe /tmp/antuv-alloc-after-close/final/mnt/slow-fstat.bin
+submitted at 100873281.437 ms (CLOCK_MONOTONIC); close called at +300.4 ms, returned at +452.1 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 1
+  #0 entered +1048.5 ms, returned +1048.5 ms, relative to close returning
+deallocate calls: 0
+    slowfs 100873281.516 getattr after open (fi null): stalls 1500 ms
+    slowfs 100874781.914 getattr returns
+--- probe /tmp/antuv-alloc-after-close/final/mnt/slow-open.bin
+submitted at 100876239.360 ms (CLOCK_MONOTONIC); close called at +300.1 ms, returned at +451.7 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 0
+deallocate calls: 0
+    slowfs 100876239.437 open stalls 1500 ms
+    slowfs 100877739.942 open returns
+--- probe /tmp/antuv-alloc-after-close/final/local16k.bin blocking
+submitted at 100879196.616 ms (CLOCK_MONOTONIC); close called at +300.1 ms, returned at +451.0 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 1
+  #0 entered -450.9 ms, returned +0.9 ms, relative to close returning
+deallocate calls: 0
+--- probe-check /tmp/antuv-alloc-after-close/final/mnt/slow-fstat.bin
+submitted at 100882153.436 ms (CLOCK_MONOTONIC); close called at +300.4 ms, returned at +451.7 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 0
+deallocate calls: 0
+    slowfs 100882153.522 getattr after open (fi null): stalls 1500 ms
+    slowfs 100883653.947 getattr returns
+--- probe-check /tmp/antuv-alloc-after-close/final/mnt/slow-open.bin
+submitted at 100885110.900 ms (CLOCK_MONOTONIC); close called at +300.5 ms, returned at +451.9 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 0
+deallocate calls: 0
+    slowfs 100885110.965 open stalls 1500 ms
+    slowfs 100886611.043 open returns
+--- probe-check /tmp/antuv-alloc-after-close/final/local16k.bin blocking
+submitted at 100888068.485 ms (CLOCK_MONOTONIC); close called at +300.1 ms, returned at +450.9 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 1
+  #0 entered -450.9 ms, returned +0.6 ms, relative to close returning
+deallocate calls: 0
+--- probe /tmp/antuv-alloc-after-close/final/mnt/slow-fstat.bin
+submitted at 100891024.742 ms (CLOCK_MONOTONIC); close called at +300.2 ms, returned at +451.8 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 1
+  #0 entered +1048.7 ms, returned +1048.7 ms, relative to close returning
+deallocate calls: 0
+    slowfs 100891024.801 getattr after open (fi null): stalls 1500 ms
+    slowfs 100892525.199 getattr returns
+--- probe /tmp/antuv-alloc-after-close/final/mnt/slow-open.bin
+submitted at 100893981.866 ms (CLOCK_MONOTONIC); close called at +300.2 ms, returned at +451.8 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 0
+deallocate calls: 0
+    slowfs 100893981.917 open stalls 1500 ms
+    slowfs 100895482.337 open returns
+--- probe /tmp/antuv-alloc-after-close/final/local16k.bin blocking
+submitted at 100896939.007 ms (CLOCK_MONOTONIC); close called at +300.1 ms, returned at +450.9 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 1
+  #0 entered -450.9 ms, returned +0.2 ms, relative to close returning
+deallocate calls: 0
+--- probe-check /tmp/antuv-alloc-after-close/final/mnt/slow-fstat.bin
+submitted at 100899895.988 ms (CLOCK_MONOTONIC); close called at +300.4 ms, returned at +451.7 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 0
+deallocate calls: 0
+    slowfs 100899896.086 getattr after open (fi null): stalls 1500 ms
+    slowfs 100901396.474 getattr returns
+--- probe-check /tmp/antuv-alloc-after-close/final/mnt/slow-open.bin
+submitted at 100902853.572 ms (CLOCK_MONOTONIC); close called at +300.1 ms, returned at +451.3 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 0
+deallocate calls: 0
+    slowfs 100902853.639 open stalls 1500 ms
+    slowfs 100904354.033 open returns
+--- probe-check /tmp/antuv-alloc-after-close/final/local16k.bin blocking
+submitted at 100905810.489 ms (CLOCK_MONOTONIC); close called at +300.1 ms, returned at +450.6 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 1
+  #0 entered -450.5 ms, returned +0.2 ms, relative to close returning
+deallocate calls: 0
+--- probe /tmp/antuv-alloc-after-close/final/mnt/slow-fstat.bin
+submitted at 100908766.801 ms (CLOCK_MONOTONIC); close called at +300.1 ms, returned at +451.6 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 1
+  #0 entered +1048.5 ms, returned +1048.6 ms, relative to close returning
+deallocate calls: 0
+    slowfs 100908766.864 getattr after open (fi null): stalls 1500 ms
+    slowfs 100910266.942 getattr returns
+--- probe /tmp/antuv-alloc-after-close/final/mnt/slow-open.bin
+submitted at 100911723.903 ms (CLOCK_MONOTONIC); close called at +300.4 ms, returned at +452.0 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 0
+deallocate calls: 0
+    slowfs 100911723.957 open stalls 1500 ms
+    slowfs 100913224.371 open returns
+--- probe /tmp/antuv-alloc-after-close/final/local16k.bin blocking
+submitted at 100914681.381 ms (CLOCK_MONOTONIC); close called at +300.1 ms, returned at +450.9 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 1
+  #0 entered -450.9 ms, returned +1.0 ms, relative to close returning
+deallocate calls: 0
+--- probe-check /tmp/antuv-alloc-after-close/final/mnt/slow-fstat.bin
+submitted at 100917637.865 ms (CLOCK_MONOTONIC); close called at +300.2 ms, returned at +451.7 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 0
+deallocate calls: 0
+    slowfs 100917637.937 getattr after open (fi null): stalls 1500 ms
+    slowfs 100919138.352 getattr returns
+--- probe-check /tmp/antuv-alloc-after-close/final/mnt/slow-open.bin
+submitted at 100920595.110 ms (CLOCK_MONOTONIC); close called at +300.2 ms, returned at +451.7 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 0
+deallocate calls: 0
+    slowfs 100920595.168 open stalls 1500 ms
+    slowfs 100922095.264 open returns
+--- probe-check /tmp/antuv-alloc-after-close/final/local16k.bin blocking
+submitted at 100923551.817 ms (CLOCK_MONOTONIC); close called at +300.1 ms, returned at +450.9 ms
+report: completed 1, cancelled 1, abandoned 1, loopClose -16; request state 3, result -125
+allocate calls: 1
+  #0 entered -450.9 ms, returned +0.1 ms, relative to close returning
+deallocate calls: 0

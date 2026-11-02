@@ -172,6 +172,11 @@ lanes, and the native Windows matrix passes with a pinned libuv build
 was dropped: `pool.processors` already keeps the loop's CPU out of the
 worker set.
 
+Open: an abandoned `readFile` can still call its allocator after `close`
+returns ([record](docs/development/readfile-allocator-after-close-2026-11-02/README.md)).
+The stop check before the allocation and the ownership rule for the
+allocator that the record proposes are not applied yet.
+
 - 2.2.1: UDP sockets, designed in
   [the event loop design's section 9](docs/design/event-loop.md#9-221-udp-sockets)
   from the first consumer's netcode; then TCP streams, pipes and process

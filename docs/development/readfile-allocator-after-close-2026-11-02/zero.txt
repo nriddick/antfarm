@@ -1,0 +1,27 @@
+tree: a3ffacc
+host: 7.3.1-1-cachyos; LDC - the LLVM D compiler (1.43.0):; libuv 1.53.0; fuse3 3.18.3; ldd (GNU libc) 2.44
+work directory: tmpfs
+probe       local16k.bin delay    0 us, 30 runs: close took 40-70 us; abandoned 116, allocate 103, started after close returned 0, running when it returned 97, deallocate 0
+probe       local16k.bin delay   20 us, 30 runs: close took 26-84 us; abandoned 40, allocate 215, started after close returned 0, running when it returned 4, deallocate 33
+probe       local16k.bin delay   50 us, 30 runs: close took 28-93 us; abandoned 27, allocate 480, started after close returned 0, running when it returned 0, deallocate 18
+probe       local16k.bin delay  100 us, 30 runs: close took 25-111 us; abandoned 29, allocate 871, started after close returned 0, running when it returned 0, deallocate 31
+probe       local16k.bin delay  300 us, 30 runs: close took 22-70 us; abandoned 13, allocate 1919, started after close returned 0, running when it returned 0, deallocate 1
+probe       local16k.bin delay 1000 us, 30 runs: close took 50-82 us; abandoned 0, allocate 1920, started after close returned 0, running when it returned 0, deallocate 0
+probe       local8m.bin  delay    0 us, 30 runs: close took 38-71 us; abandoned 107, allocate 98, started after close returned 0, running when it returned 98, deallocate 0
+probe       local8m.bin  delay   20 us, 30 runs: close took 36-236 us; abandoned 120, allocate 120, started after close returned 0, running when it returned 105, deallocate 0
+probe       local8m.bin  delay   50 us, 30 runs: close took 34-187 us; abandoned 119, allocate 120, started after close returned 0, running when it returned 109, deallocate 1
+probe       local8m.bin  delay  100 us, 30 runs: close took 40-194 us; abandoned 120, allocate 120, started after close returned 0, running when it returned 93, deallocate 0
+probe       local8m.bin  delay  300 us, 30 runs: close took 33-138 us; abandoned 112, allocate 120, started after close returned 0, running when it returned 8, deallocate 8
+probe       local8m.bin  delay 1000 us, 30 runs: close took 34-188 us; abandoned 120, allocate 120, started after close returned 0, running when it returned 0, deallocate 0
+probe-check local16k.bin delay    0 us, 30 runs: close took 36-84 us; abandoned 80, allocate 65, started after close returned 0, running when it returned 56, deallocate 0
+probe-check local16k.bin delay   20 us, 30 runs: close took 28-84 us; abandoned 43, allocate 190, started after close returned 0, running when it returned 0, deallocate 17
+probe-check local16k.bin delay   50 us, 30 runs: close took 29-131 us; abandoned 22, allocate 368, started after close returned 0, running when it returned 0, deallocate 22
+probe-check local16k.bin delay  100 us, 30 runs: close took 24-81 us; abandoned 28, allocate 854, started after close returned 0, running when it returned 0, deallocate 24
+probe-check local16k.bin delay  300 us, 30 runs: close took 23-90 us; abandoned 16, allocate 1911, started after close returned 0, running when it returned 0, deallocate 1
+probe-check local16k.bin delay 1000 us, 30 runs: close took 49-105 us; abandoned 0, allocate 1920, started after close returned 0, running when it returned 0, deallocate 0
+probe-check local8m.bin  delay    0 us, 30 runs: close took 42-106 us; abandoned 87, allocate 73, started after close returned 0, running when it returned 73, deallocate 0
+probe-check local8m.bin  delay   20 us, 30 runs: close took 32-212 us; abandoned 120, allocate 120, started after close returned 0, running when it returned 111, deallocate 0
+probe-check local8m.bin  delay   50 us, 30 runs: close took 34-206 us; abandoned 119, allocate 120, started after close returned 0, running when it returned 108, deallocate 1
+probe-check local8m.bin  delay  100 us, 30 runs: close took 41-208 us; abandoned 112, allocate 120, started after close returned 0, running when it returned 83, deallocate 8
+probe-check local8m.bin  delay  300 us, 30 runs: close took 34-98 us; abandoned 120, allocate 120, started after close returned 0, running when it returned 7, deallocate 0
+probe-check local8m.bin  delay 1000 us, 30 runs: close took 39-112 us; abandoned 120, allocate 120, started after close returned 0, running when it returned 0, deallocate 0

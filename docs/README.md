@@ -101,6 +101,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | --- | --- |
 | [development/testing.md](development/testing.md) | run and understand the local correctness lanes and their limits |
 | [development/agent-workflow.md](development/agent-workflow.md) | follow the CyDo agent process for local iteration and the push gate |
+| [development/readfile-allocator-after-close-2026-11-02](development/readfile-allocator-after-close-2026-11-02/README.md) | see when an abandoned `readFile` still calls its allocator after `UvLoop.close` returns, how that was reproduced, and what a stop check would change |
 | [../tools/perf/README.md](../tools/perf/README.md) | run a benchmark and the committed-ref performance report |
 | [../PERFORMANCE.md](../PERFORMANCE.md) | find the measured numbers, method, and tuning guide |
 | [performance/archive-2026-10-20.md](performance/archive-2026-10-20.md) | inspect the superseded Ryzen 5500 / Intel 12700H tables and 1.9 optimization reports |

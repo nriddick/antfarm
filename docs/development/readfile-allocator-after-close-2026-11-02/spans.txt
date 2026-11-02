@@ -1,0 +1,36 @@
+tree: a3ffacc
+host: 7.3.1-1-cachyos; LDC - the LLVM D compiler (1.43.0):; libuv 1.53.0; fuse3 3.18.3; ldd (GNU libc) 2.44
+work directory: tmpfs
+--- local16k.bin
+  call 0: entered -32.9 us, returned +12.6 us, relative to close returning; took 45.5 us
+  call 1: entered -32.5 us, returned +23.1 us, relative to close returning; took 55.7 us
+  call 2: entered -28.8 us, returned +30.2 us, relative to close returning; took 59.0 us
+  call 3: entered -28.4 us, returned +29.4 us, relative to close returning; took 57.9 us
+zero delay_us=0 close_us=51.4 completed=64 cancelled=64 abandoned=4 allocate=4 started_after_close=0 running_at_close=4 deallocate=0
+--- local16k.bin
+  call 0: entered -32.8 us, returned +11.8 us, relative to close returning; took 44.6 us
+  call 1: entered -32.7 us, returned +14.8 us, relative to close returning; took 47.5 us
+  call 2: entered -28.1 us, returned +14.8 us, relative to close returning; took 42.9 us
+  call 3: entered -27.8 us, returned +12.5 us, relative to close returning; took 40.3 us
+zero delay_us=0 close_us=47.7 completed=64 cancelled=64 abandoned=4 allocate=4 started_after_close=0 running_at_close=4 deallocate=0
+--- local16k.bin
+  call 0: entered -34.3 us, returned +3.0 us, relative to close returning; took 37.2 us
+  call 1: entered -31.3 us, returned +6.8 us, relative to close returning; took 38.1 us
+  call 2: entered -31.2 us, returned +12.7 us, relative to close returning; took 44.0 us
+zero delay_us=0 close_us=65.3 completed=64 cancelled=64 abandoned=4 allocate=3 started_after_close=0 running_at_close=3 deallocate=0
+--- local8m.bin
+  call 0: entered -28.8 us, returned +288.6 us, relative to close returning; took 317.4 us
+  call 1: entered -28.8 us, returned +281.5 us, relative to close returning; took 310.3 us
+  call 2: entered -28.4 us, returned +280.4 us, relative to close returning; took 308.8 us
+zero delay_us=0 close_us=47.4 completed=64 cancelled=64 abandoned=3 allocate=3 started_after_close=0 running_at_close=3 deallocate=0
+--- local8m.bin
+  call 0: entered -27.2 us, returned +317.9 us, relative to close returning; took 345.2 us
+  call 1: entered -27.2 us, returned +318.0 us, relative to close returning; took 345.3 us
+  call 2: entered -27.2 us, returned +319.5 us, relative to close returning; took 346.8 us
+  call 3: entered -24.5 us, returned +133.3 us, relative to close returning; took 157.8 us
+zero delay_us=0 close_us=46.8 completed=64 cancelled=64 abandoned=4 allocate=4 started_after_close=0 running_at_close=4 deallocate=0
+--- local8m.bin
+  call 0: entered -23.2 us, returned +289.2 us, relative to close returning; took 312.4 us
+  call 1: entered -23.2 us, returned +289.1 us, relative to close returning; took 312.4 us
+  call 2: entered -22.8 us, returned +290.8 us, relative to close returning; took 313.6 us
+zero delay_us=0 close_us=39.9 completed=64 cancelled=64 abandoned=4 allocate=3 started_after_close=0 running_at_close=3 deallocate=0
