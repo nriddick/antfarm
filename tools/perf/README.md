@@ -163,6 +163,15 @@ cells are included only when `--dual-threads` includes 6.
   thread spinning on `done`, a worker Fiber parked on a `FiberEvent`, and a
   Fiber on the loop thread; p50/p90/p99/max in microseconds. The record is
   [docs/performance/uv-latency-2026-10-30.md](../../docs/performance/uv-latency-2026-10-30.md).
+- **`file_loading`** — cached file loading through SDL3's AsyncIO and
+  through `ant_uv`, from one thread playing a game's main thread (needs
+  libuv, SDL 3.2+ and the pinned mimalloc; `make file_loading`, with
+  `SDL3_LIBS` naming SDL's library). Whole files of 16 KiB and 8 MiB, random
+  64 KiB reads from one open file, and one file at a time; throughput, the
+  calling thread's time per request, and round-trip quantiles. Each process
+  reports its GC collections, which must be 0. `file_loading_matrix.py` runs
+  configurations interleaved. The record is
+  [docs/performance/file-loading-sdl3-2026-11-02.md](../../docs/performance/file-loading-sdl3-2026-11-02.md).
 - **`subscribe_cost`** — nanoseconds per subscribe, three `consumeNext`
   calls and unsubscribe on a 1 MiB, K = 8 Farm, once idle and once beside
   two producers and two steady consumers (the T29 geometry); 200,000 cycles

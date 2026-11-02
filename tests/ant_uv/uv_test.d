@@ -129,6 +129,17 @@ bool allFinished(const(UvRequest)[] requests)
     return true;
 }
 
+// ANTUV_TEST_IO_URING=1 runs every loop with UvLoopOptions.ioUring, so open,
+// close, read, write, stat and fstat go through the ring (Linux only).
+__gshared bool gIoUring;
+
+UvLoopOptions testOptions()
+{
+    UvLoopOptions o;
+    o.ioUring = gIoUring;
+    return o;
+}
+
 // ---------------------------------------------------------------------------
 
 void layout()
@@ -153,6 +164,9 @@ void layout()
     check(antuv_c_constant(24) == UV_EISDIR, "UV_EISDIR");
     check(antuv_c_constant(25) == UV_S_IFMT && antuv_c_constant(26) == UV_S_IFDIR,
         "st_mode's S_IFMT and S_IFDIR");
+    immutable sqpoll = antuv_c_constant(27); // -1: a uv.h older than 1.49
+    check(sqpoll == -1 || sqpoll == uv_loop_option.UV_LOOP_USE_IO_URING_SQPOLL,
+        "UV_LOOP_USE_IO_URING_SQPOLL");
     check(antuv_c_constant(20) >= UV_MINIMUM_VERSION && uv_version() >= UV_MINIMUM_VERSION,
         "libuv older than 1.19");
     printf("  uv.h %#lx, library %#x\n", antuv_c_constant(20), uv_version());
@@ -163,7 +177,7 @@ void layout()
 // pool size, CPUs and priority set here are exact.
 void lifecycleAndPlacement(ProcessorId[] cpus)
 {
-    UvLoopOptions o;
+    UvLoopOptions o = testOptions();
     immutable pin = cpus.length >= 2;
     if (pin) o.cpu = cpus[1];
     o.auxThreads = 3;
@@ -189,6 +203,11 @@ void lifecycleAndPlacement(ProcessorId[] cpus)
         immutable wantPriority = THREAD_PRIORITY_BELOW_NORMAL;
     auto loop = UvLoop.create(o);
     check(UvLoop.current is null && !loop.onLoopThread, "current is null off the loop thread");
+    version (linux)
+        check(loop.ioUring == gIoUring, gIoUring ? "io_uring requested but not configured "
+            ~ "(needs libuv 1.49 and Linux 5.10.186)" : "io_uring configured unasked");
+    else
+        check(!loop.ioUring, "io_uring outside Linux");
     check(waitUntil(() => atomicLoad(started)), "start hook did not run");
     auto summary = loop.summary();
     printf("  %.*s\n", cast(int) summary.length, summary.ptr);
@@ -230,7 +249,7 @@ void nopOrdering()
 {
     enum producers = 4, perProducer = 5000;
     auto completions = Ring.create(64);
-    auto loop = UvLoop.create();
+    auto loop = UvLoop.create(testOptions());
     auto records = new UvRequest[](producers * perProducer);
     foreach (i, ref r; records)
     {
@@ -292,7 +311,7 @@ void onTimerDone(UvRequest* r, void* context) nothrow @nogc
 void timers()
 {
     enum n = 40;
-    auto loop = UvLoop.create();
+    auto loop = UvLoop.create(testOptions());
     auto state = new TimerState;
     state.submitted = new MonoTime[n];
     state.elapsed = new shared(long)[n];
@@ -320,7 +339,7 @@ void timers()
 void completionRetention()
 {
     auto ring = Ring.create(2);
-    auto loop = UvLoop.create();
+    auto loop = UvLoop.create(testOptions());
     auto records = new UvRequest[100];
     foreach (i, ref r; records)
     {
@@ -367,7 +386,7 @@ void delegate() timerProducer(UvLoop loop, UvRequest[] mine)
 void creditFlood()
 {
     enum producers = 4, perProducer = 250;
-    UvLoopOptions o;
+    UvLoopOptions o = testOptions();
     o.credits = 8;
     o.ringCapacity = 32;
     auto loop = UvLoop.create(o);
@@ -388,7 +407,7 @@ void noopCallback(UvRequest*, void*) nothrow @nogc {}
 
 void fullRingAndValidation()
 {
-    UvLoopOptions o;
+    UvLoopOptions o = testOptions();
     o.ringCapacity = 4;
     o.credits = 1;
     o.closeGrace = 10.msecs;
@@ -429,7 +448,7 @@ void fullRingAndValidation()
 
 void cancellation(string path)
 {
-    UvLoopOptions o;
+    UvLoopOptions o = testOptions();
     o.credits = 2;
     o.ringCapacity = 64;
     auto loop = UvLoop.create(o);
@@ -484,7 +503,7 @@ void cancellation(string path)
 
 void closeInFlight()
 {
-    UvLoopOptions o;
+    UvLoopOptions o = testOptions();
     o.closeGrace = 20.msecs;
     auto loop = UvLoop.create(o);
     auto records = new UvRequest[10];
@@ -505,7 +524,7 @@ void closeInFlight()
 
 void stepFailure()
 {
-    UvLoopOptions o;
+    UvLoopOptions o = testOptions();
     shared int calls;
     o.step = () {
         if (atomicOp!"+="(calls, 1) == 2) throw new Exception("step failure probe");
@@ -551,7 +570,7 @@ void loopFibers(string path, const(ubyte)[] expected)
     UvFibers fibers;
     shared int outcome, cancelOutcome, waiterReady;
     auto cpath = path.toStringz;
-    UvLoopOptions o;
+    UvLoopOptions o = testOptions();
     o.start = () {
         auto loop = UvLoop.current;
         fibers = new UvFibers(loop);
@@ -724,7 +743,7 @@ void workerFiberReads(string[] paths, ubyte[][] contents)
         printf("SKIP worker Fiber reads: no pool workers\n");
         return;
     }
-    auto loop = UvLoop.create();
+    auto loop = UvLoop.create(testOptions());
     auto domain = new FiberDomain;
     auto fibers = new FiberGroups(domain);
     auto o = probe;
@@ -862,7 +881,7 @@ bool readNow(UvLoop loop, UvRequest* r)
 
 void readFileAllocators(string dir, string path, const(ubyte)[] expected, string emptyPath)
 {
-    auto loop = UvLoop.create();
+    auto loop = UvLoop.create(testOptions());
     CountingHeap heap;
     auto counting = ActorAllocator(&heap, &countingAllocate, &countingDeallocate);
     auto cpath = path.toStringz;
@@ -879,8 +898,8 @@ void readFileAllocators(string dir, string path, const(ubyte)[] expected, string
     r.alignment = 4096;
     check(readNow(loop, &r) && r.succeeded && r.ownsBuffer, "read into the request's allocator");
     check(r.buffer[0 .. r.length] == expected, "the file in place");
-    check(allocations == 1 && atomicLoad(heap.offLoopAllocations) == 0,
-        "allocated once, on the loop thread");
+    check(allocations == 1 && atomicLoad(heap.offLoopAllocations) == 1,
+        "allocated once, on libuv's thread");
     r.allocator = ActorAllocator.init;
     auto file = r.takeBuffer();
     check(!r.ownsBuffer && r.buffer is null && r.length == 0, "takeBuffer clears the request");
@@ -1054,7 +1073,7 @@ version (AntfarmMimallocV3)
     {
         immutable v = mi_version();
         check(v >= 30000 && v < 40000, "mimalloc is not v3");
-        auto loop = UvLoop.create();
+        auto loop = UvLoop.create(testOptions());
         UvBuffer[16] files;
         foreach (ref file; files)
         {
@@ -1074,8 +1093,141 @@ version (AntfarmMimallocV3)
         auto report = loop.close();
         check(report.completed == files.length && report.loopClose == 0, "mimalloc close report");
         printf("  mimalloc %d.%d.%d\n", v / 10000, v / 100 % 100, v % 100);
-        pass("readFile into mimalloc v3 on the loop thread, freed on another");
+        pass("readFile into mimalloc v3 on libuv's thread, freed on another");
     }
+}
+
+// The per-operation constructors, and the loop's default allocator: a
+// readFile that names no allocator takes the loop's, a request's own wins,
+// and both run on libuv's thread.
+void constructorsAndDefaultAllocator(string path, const(ubyte)[] expected)
+{
+    CountingHeap loopHeap, ownHeap;
+    auto loopAllocator = ActorAllocator(&loopHeap, &countingAllocate, &countingDeallocate);
+    auto ownAllocator = ActorAllocator(&ownHeap, &countingAllocate, &countingDeallocate);
+    auto o = testOptions();
+    o.allocator = loopAllocator;
+    auto loop = UvLoop.create(o);
+    auto cpath = path.toStringz;
+
+    auto r = UvRequest.readFile(cpath);
+    check(readNow(loop, &r) && r.succeeded && r.buffer[0 .. r.length] == expected
+        && (cast(size_t) r.buffer & 63) == 0, "readFile(path) through the loop's allocator");
+    check(atomicLoad(loopHeap.allocations) == 1 && atomicLoad(loopHeap.offLoopAllocations) == 1
+        && atomicLoad(ownHeap.allocations) == 0, "the loop's allocator, on libuv's thread");
+    r.freeBuffer();
+    check(atomicLoad(loopHeap.deallocations) == 1 && atomicLoad(loopHeap.mismatches) == 0, "freed once");
+
+    r = UvRequest.readFile(cpath, ownAllocator, 128);
+    check(readNow(loop, &r) && r.succeeded && (cast(size_t) r.buffer & 127) == 0,
+        "readFile(path, allocator, alignment)");
+    check(atomicLoad(ownHeap.allocations) == 1 && atomicLoad(loopHeap.allocations) == 1,
+        "the request's allocator wins");
+    r.freeBuffer();
+
+    auto into = new ubyte[expected.length];
+    r = UvRequest.readFile(cpath, into);
+    check(readNow(loop, &r) && r.succeeded && r.result == expected.length && !r.ownsBuffer
+        && into == expected, "readFile(path, buffer)");
+
+    r = UvRequest.stat(cpath);
+    check(readNow(loop, &r) && r.succeeded && r.size == expected.length, "stat(path)");
+    r = UvRequest.open(cpath, UV_FS_O_RDONLY);
+    check(readNow(loop, &r) && r.succeeded, "open(path, flags)");
+    immutable file = cast(int) r.result;
+    r = UvRequest.fstat(file);
+    check(readNow(loop, &r) && r.succeeded && r.size == expected.length, "fstat(file)");
+    ubyte[16] tail;
+    immutable offset = expected.length > 16 ? expected.length - 16 : 0;
+    r = UvRequest.read(file, tail[], cast(long) offset);
+    check(readNow(loop, &r) && r.succeeded && r.result == expected.length - offset
+        && tail[0 .. expected.length - offset] == expected[offset .. $], "read(file, buffer, offset)");
+    r = UvRequest.close(file);
+    check(readNow(loop, &r) && r.succeeded, "close(file)");
+    r = UvRequest.timer(1);
+    check(readNow(loop, &r) && r.succeeded, "timer(ms)");
+    r = UvRequest.nop();
+    check(readNow(loop, &r) && r.succeeded, "nop()");
+
+    auto report = loop.close();
+    check(report.completed == 10 && report.loopClose == 0, "constructors close report");
+    check(atomicLoad(loopHeap.allocations) == atomicLoad(loopHeap.deallocations)
+        && atomicLoad(ownHeap.allocations) == atomicLoad(ownHeap.deallocations), "unbalanced allocators");
+    pass("one fresh record per operation; the loop's default allocator and the request's own");
+}
+
+// An allocator that only counts, with atomics: several pool threads may
+// allocate at once.
+struct StormHeap
+{
+    shared long allocations, deallocations;
+}
+
+void* stormAllocate(void* context, size_t bytes, size_t alignment) nothrow @nogc @system
+{
+    atomicOp!"+="((cast(StormHeap*) context).allocations, 1);
+    return alignedAllocate(alignment, (bytes + alignment - 1) & ~(alignment - 1));
+}
+
+void stormDeallocate(void* context, void* memory, size_t, size_t) nothrow @nogc @system
+{
+    atomicOp!"+="((cast(StormHeap*) context).deallocations, 1);
+    alignedFree(memory);
+}
+
+// Whole-file reads cancelled in flight, through a counting allocator and the
+// C runtime: every request publishes once, a cancelled one with UV_ECANCELED
+// and no block, and every block allocated is freed exactly once.
+void readFileCancelStorm(string path, const(ubyte)[] expected)
+{
+    auto loop = UvLoop.create(testOptions());
+    StormHeap heap;
+    auto storm = ActorAllocator(&heap, &stormAllocate, &stormDeallocate);
+    enum perKind = 72;
+    auto requests = new UvRequest[2 * perKind];
+    auto cpath = path.toStringz;
+    foreach (i, ref r; requests)
+    {
+        r = i < perKind ? UvRequest.readFile(cpath, storm) : UvRequest.readFile(cpath);
+        check(loop.submit(&r) == UvSubmit.accepted, "storm submit");
+    }
+    // Let the pool get going, so the cancels below meet jobs that are queued,
+    // running, or between their two halves, and blocks already allocated.
+    size_t finishedCount()
+    {
+        size_t n;
+        foreach (ref r; requests) n += r.finished;
+        return n;
+    }
+    check(waitUntil(() => finishedCount() >= 6), "storm reads did not start");
+    foreach_reverse (ref r; requests)
+        check(loop.cancel(&r), "storm cancel refused");
+    check(waitUntil(() => allFinished(requests)), "storm requests did not publish");
+    size_t cancelled, completed;
+    foreach (ref r; requests)
+    {
+        check(r.done, "a storm request was abandoned");
+        if (r.result == UV_ECANCELED)
+        {
+            ++cancelled;
+            check(!r.ownsBuffer, "a cancelled read owns a block");
+        }
+        else
+        {
+            ++completed;
+            check(r.succeeded && r.length == expected.length && r.buffer[0 .. r.length] == expected,
+                "a storm read that completed");
+            r.freeBuffer();
+        }
+    }
+    check(completed >= 6 && cancelled > 0, "the storm did not mix completed and cancelled reads");
+    auto report = loop.close();
+    check(report.loopClose == 0 && report.cancelled == cancelled, "storm close report");
+    check(atomicLoad(heap.allocations) == atomicLoad(heap.deallocations),
+        "a storm block leaked or was freed twice");
+    printf("  %d cancelled, %d completed, %lld blocks\n", cast(int) cancelled, cast(int) completed,
+        atomicLoad(heap.allocations));
+    pass("readFile cancelled in flight publishes once and frees every block");
 }
 
 // An operation that blocks in an auxiliary thread cannot be cancelled by
@@ -1085,7 +1237,7 @@ version (AntfarmMimallocV3)
 // server writes, because opening a pipe there does not block.
 void abandonBlocked(string dir)
 {
-    UvLoopOptions o;
+    UvLoopOptions o = testOptions();
     o.closeGrace = 20.msecs;
     o.abandonAfter = 50.msecs;
     version (linux)
@@ -1127,6 +1279,20 @@ void abandonBlocked(string dir)
     }
     Thread.sleep(30.msecs);
     auto report = loop.close();
+    version (linux) if (loop.ioUring)
+    {
+        // Through io_uring no thread blocks here: the kernel's open of a
+        // FIFO did not wait for a writer (Linux 6.6), and libuv could cancel
+        // it in the kernel if it did. Close has nothing to abandon.
+        check(report.abandoned == 0 && report.loopClose == 0 && r.done
+            && (r.result >= 0 || r.result == UV_ECANCELED),
+            "close through io_uring: abandoned " ~ report.abandoned.to!string ~ ", loopClose "
+            ~ report.loopClose.to!string ~ "; the open " ~ r.state.to!string ~ " with "
+            ~ r.result.to!string);
+        if (r.result >= 0) close(cast(int) r.result);
+        pass("close through io_uring: an open of a FIFO with no writer blocks no thread");
+        return;
+    }
     check(report.abandoned == 1 && report.loopClose == UV_EBUSY, "close did not abandon the operation");
     check(r.state == UvRequestState.abandoned && r.result == UV_ECANCELED, "abandoned request state");
     version (linux)
@@ -1148,6 +1314,11 @@ void abandonBlocked(string dir)
 int main()
 {
     immutable started = MonoTime.currTime;
+    {
+        import std.process : environment;
+        gIoUring = environment.get("ANTUV_TEST_IO_URING", "") == "1";
+        if (gIoUring) printf("readFile through io_uring (ANTUV_TEST_IO_URING=1)\n");
+    }
     auto dir = buildPath(tempDir, "antuv-test-" ~ thisProcessID.to!string);
     mkdirRecurse(dir);
     scope (exit) rmdirRecurse(dir);
@@ -1181,6 +1352,8 @@ int main()
     loopFibers(paths[7], contents[7]);
     workerFiberReads(paths, contents);
     readFileAllocators(dir, paths[8], contents[8], paths[0]);
+    constructorsAndDefaultAllocator(paths[8], contents[8]);
+    readFileCancelStorm(paths[8], contents[8]);
     version (AntfarmMimallocV3) mimallocReads(paths[8], contents[8]);
     abandonBlocked(dir);
     printf("ALL UV TESTS PASSED (%lld ms)\n", (MonoTime.currTime - started).total!"msecs");

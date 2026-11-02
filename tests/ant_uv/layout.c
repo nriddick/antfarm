@@ -51,6 +51,9 @@ long antuv_c_constant(int which)
     case 24: return UV_EISDIR;
     case 25: return ANTUV_S_IFMT;
     case 26: return ANTUV_S_IFDIR;
+#ifdef UV_LOOP_USE_IO_URING_SQPOLL /* libuv 1.49 and later */
+    case 27: return UV_LOOP_USE_IO_URING_SQPOLL;
+#endif
     }
     return -1;
 }

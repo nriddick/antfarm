@@ -43,9 +43,53 @@ where the implementation departed from the plan.
   - `readFile` without a buffer allocates the file from the request's
     `allocator`, any `ActorAllocator`, at its `alignment`. The default is
     the C runtime at 64 bytes, and the mimalloc v3 adapter works unchanged.
-    `allocate` runs on the loop thread. `takeBuffer` returns a `UvBuffer`
-    that frees the block through the allocator that made it, from any
-    thread. An empty file allocates nothing.
+    `allocate` runs on libuv's auxiliary thread, so it must be thread-safe,
+    which every actor allocator already promises, and must not touch the GC
+    or druntime. `UvLoopOptions.allocator` is the loop's default, for an
+    application that sets a switch between arenas and mimalloc once.
+    `takeBuffer` returns a `UvBuffer` that frees the block through the
+    allocator that made it, from any thread. An empty file allocates
+    nothing.
+  - A `readFile` is one job on libuv's pool. On one auxiliary thread it
+    opens, stats, allocates, reads and closes with libuv's synchronous
+    calls, then publishes from one completion on the loop thread. It used
+    to be four chained requests, each a round trip between the loop and the
+    pool.
+    - The job, and the allocator it calls, touch neither the GC nor
+      druntime.
+    - A cancel sets a flag the running job checks before each step;
+      `uv_cancel` removes a job that has not started.
+    - On the test laptop under WSL2, batched 16 KiB loads went from 0.84 to
+      3.00 GiB/s (3.47 with mimalloc, level with SDL3's io_uring), and one
+      file's round trip from 133 to 40 µs. On Windows the round trip went
+      from 66 to 44 µs, and batched throughput, already pool-bound, did not
+      move.
+  - `UvLoopOptions.ioUring` (Linux) has libuv issue `open`, `close`, `read`,
+    `write`, `stat` and `fstat` through io_uring.
+    - libuv 1.53 needs both the loop option `UV_LOOP_USE_IO_URING_SQPOLL`
+      and a positive `UV_USE_IO_URING`. `create` sets the variable unless
+      the environment already sets it, and requires Linux 5.10.186 or
+      later.
+    - `UvLoop.ioUring` reports whether it took effect, and `summary()`
+      names the path file operations take.
+    - Random 64 KiB reads from an open file doubled, to 10.8 GiB/s, level
+      with SDL3's io_uring.
+    - `readFile` stays a pool job. Through the ring, the kernel's one
+      polling thread copied every whole file in turn, at a fifth to a half
+      of the job's rate.
+  - The binding gains `uv_loop_configure` and `uv_loop_option`.
+  - `UvRequest` has one constructor per operation (`readFile`, `open`,
+    `close`, `read`, `write`, `stat`, `fstat`, `timer`, `nop`), each a
+    fresh record with only its inputs set, so nothing carries over from the
+    last operation; `read` and `write` take the offset, since the file
+    position races with several reads in flight. `userPointer` is gone
+    (`user` carries application data), and `UvLoopOptions` loses
+    `submitBatch` and `controlCapacity`, now constants, and gains
+    `allocator`.
+  - The README and the loading guide recommend mimalloc for large files.
+    The system allocators return a large block to the OS on `free`: an
+    8 MiB free cost the freeing thread 100 to 350 µs, against 1 to 2 µs
+    with mimalloc.
   - `readFile` refuses a directory with `UV_EISDIR` and `size` 0 on every
     platform. It reads the file type from the `fstat` it already makes,
     before allocating or reading. Without the check, Linux allocated the
@@ -58,8 +102,11 @@ where the implementation departed from the plan.
     [Loading files](docs/guide/loading-files.md), which walks through the
     API and an asset table. Examples:
     [read_files.d](ant_uv/examples/read_files.d) and
-    [load_assets.d](ant_uv/examples/load_assets.d), whose `mimalloc`
-    configuration loads into mimalloc v3.
+    [load_assets.d](ant_uv/examples/load_assets.d), a resource manager at
+    the start of every tick: releases queue during the tick and apply at
+    the next tick's step, after the fork-join work has returned, so the
+    work never reads a freed block. Its `mimalloc` configuration loads
+    into mimalloc v3 through the loop's default allocator.
 - Tests: `tests/ring` and `tests/ant_uv`, each under LDC, DMD and
   ThreadSanitizer. `ant_uv`'s layout check compares the binding with a C
   translation unit compiled against the real `uv.h`. `make check` runs both
@@ -67,6 +114,15 @@ where the implementation departed from the plan.
   `make check-quick` runs the ring. `make check-mimalloc` adds `ant_uv`'s
   reads into the real mimalloc v3. The API docs check covers the ring and
   `ant_uv`.
+  - `ant_uv` adds the constructors with the loop's default allocator and a
+    request's own, and 144 whole-file reads cancelled in flight through a
+    counting allocator and the C runtime. Every request publishes once, a
+    cancelled one owns no block, and every block is freed exactly once.
+  - `make -C tests/ant_uv run-iouring` runs the suite with
+    `UvLoopOptions.ioUring` on every loop. `make check` runs it when
+    `pkg-config` finds libuv 1.49. Through the ring, an open of a FIFO with
+    no writer completed at once (Linux 6.6), so that lane checks for no
+    abandonment instead.
 - Windows x64:
   - `scripts/build-libuv-windows.py` builds the pinned libuv 1.53.0 from
     its release archive, whose SHA-256 it checks, with CMake (on PATH or
@@ -121,6 +177,20 @@ where the implementation departed from the plan.
   record is [uv-latency-2026-10-30.md](docs/performance/uv-latency-2026-10-30.md):
   0.4 to 0.5 µs for a spinning thread on the loop's CCD, 1.2 µs for a Fiber
   on the loop thread, and 7 µs at p50 for a parked worker Fiber.
+- `tools/perf/file_loading` and `file_loading_matrix.py`: cached file
+  loading through `ant_uv` and through SDL3's AsyncIO (needs SDL 3.2 or
+  later and mimalloc). It is GC-free after start-up, and every process must
+  report 0 collections. The record is
+  [file-loading-sdl3-2026-11-02.md](docs/performance/file-loading-sdl3-2026-11-02.md).
+  - SDL's kernel-ring backends (IoRing, io_uring) open, allocate and copy a
+    cached file on the calling thread: 0.9 to 2.8 ms of main-thread time
+    per 8 MiB file.
+  - `ant_uv`'s submit costs 0.1 to 1.2 µs at any size.
+  - SDL's rings keep the lowest single-file latency.
+  - `SDL_SetMemoryFunctions` with mimalloc ran stably.
+  - The benchmark's first, GC-allocating version showed druntime's 19
+    parallel mark threads spinning at full CPU after a collection in some
+    processes. That is unexplained and left open.
 
 Validation so far, Linux x86-64 (Ryzen 9 5900XT, LDC 1.43.0, DMD 2.113.0,
 libuv 1.53.0): `make check` passed with both new suites in it, each under
@@ -151,8 +221,10 @@ and 10 DMD runs of the suite. Linux under WSL2 on the same machine (Ubuntu
 pinned archive with GCC 13.3) ran the lanes that need no CMake. The ring and
 `ant_uv` suites passed under LDC, DMD and ThreadSanitizer, and so did 30
 LDC, 10 DMD and 10 ThreadSanitizer runs of `ant_uv`, both examples and the
-root `dub test`. It is not the Linux gate: `make check` on the 5900XT has
-not been re-run since these changes.
+root `dub test`. The same lanes passed again after the whole-file job, the
+constructors and the loop's default allocator, with the io_uring lane and
+20 of its repeats added on Linux. It is not the Linux gate: `make check` on
+the 5900XT has not been re-run since these changes.
 
 ## 2.1.1 — 2026-10-28
 

@@ -143,7 +143,8 @@ class Checks:
                 ("load_assets", ["ant_uv/examples/load_assets.d"], ())):
             binary = BUILD / (name + "_" + self.compiler + ".exe")
             self.run([self.compiler, *self.flags, "-i", "-I.", "-Ithreadpool/source",
-                      "-Iant_fibers/source", "-Iant_uv/source", *sources, libuv / "lib/uv.lib",
+                      "-Iant_fibers/source", "-Iant_uv/source", "-Iforkjoin/source", *sources,
+                      libuv / "lib/uv.lib",
                       "-of=" + str(binary), "-od=" + str(BUILD / (name + "_obj_" + self.compiler))])
             self.run([binary, *arguments], env)
 

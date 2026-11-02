@@ -83,13 +83,18 @@ runs the loop". The facts that shape the design:
   delivered on the loop thread. Sockets, pipes and timers are asynchronous
   through epoll and IOCP. `UV_THREADPOOL_SIZE` must be set before the pool
   is first used anywhere in the process, by any loop. libuv can also submit
-  some filesystem operations through io_uring on Linux; since 1.49 that is
-  off by default and `UV_USE_IO_URING=1` opts in, so the pool is the path
-  to plan for. The pool's threads execute only libuv's own C work; the
-  binding never offers `uv_queue_work`, so no Ant Farm or application code
-  runs there. The contract states this rather than claiming the workers are
-  the only threads in the process: they are the only threads that
-  *dispatch*.
+  some filesystem operations through io_uring on Linux. Since 1.49 that is
+  off by default, and turning it on takes both the loop option
+  `UV_LOOP_USE_IO_URING_SQPOLL` and a positive `UV_USE_IO_URING`: libuv
+  1.53 reads an unset variable as off, despite its comment, and the
+  variable alone does nothing. The pool is the path to plan for. The
+  binding never offers `uv_queue_work`, so no application code runs on the
+  pool's threads. `ant_uv` runs two kinds of its own work there, neither of
+  which touches the GC or druntime: the placement items (section 3.4) and
+  the whole-file job (section 3.2) with the allocator it takes. The
+  contract states this rather than
+  claiming the workers are the only threads in the process: they are the
+  only threads that *dispatch*.
 - **Pool threads inherit the creating thread's affinity** on Linux, and
   its nice value too (`pthread_create`). libuv creates every pool thread on
   the first request, so a pool first used from a pinned thread is pinned to
@@ -147,7 +152,7 @@ the application's control thread and joined by it:
   `UvLoop.current` names the loop there.
 - **Serving.** The thread's loop is: drain the control ring (cancels);
   retry deliveries that waited for room; drain the request ring in a
-  bounded batch (`submitBatch`, default 64) into libuv submissions, subject
+  bounded batch (64) into libuv submissions, subject
   to the in-flight credit; run the step hook; then poll libuv. When
   something made progress it polls with `UV_RUN_NOWAIT`. Otherwise it
   blocks in `UV_RUN_ONCE` until a completion, a timer or the wake handle.
@@ -280,8 +285,29 @@ close callback, holds one credit. A completion waiting for room in a
 completion ring also holds one. The drain stops dequeuing when the credit
 is spent, so the ring keeps its backpressure. A `nop`, and a request
 cancelled before it starts, publish at once and hold none. Each credit is
-an operation slot preallocated at creation, sized for both a `uv_fs_t` and
-a `uv_timer_t`.
+an operation slot preallocated at creation, sized for a `uv_fs_t`, a
+`uv_timer_t` and a `uv_work_t`.
+
+**The whole-file job.** A `readFile` is one `uv_queue_work` item: on an
+auxiliary thread it opens, stats, allocates, reads and closes with libuv's
+synchronous calls, which store the loop pointer and never touch the loop
+(`INIT`/`POST` in both platforms' `fs.c` register a request only when a
+callback is given), on a `uv_fs_t` on that thread's stack; then one
+after-work callback publishes on the loop thread. The job runs no code that
+touches the GC or druntime, and the allocator runs in it, so it must be
+thread-safe and druntime-free: thread safety is what the actor contract
+already asks of every `ActorAllocator`, and the druntime rule excludes only
+`gcRooted`, which is meaningless for bytes. A variant that kept a
+loop-thread-only allocator was built and dropped: it cost a second job and
+a flag for an allocator nobody had. libuv's queue mutex orders the slot's
+fields both ways; a
+cancel sets an atomic flag in the slot, which a running job checks before
+each step, and `uv_cancel` removes a job that has not started. This
+replaced a chain of four requests (open, `fstat`, read, close), each a
+round trip between the loop and the pool. `UvLoopOptions.ioUring` does not
+route `readFile` through the ring: measured with the chain through it, the
+kernel's one polling thread copied every whole file in turn, and 8 MiB files
+loaded at a fifth to a half of the job's rate.
 
 The completion path never spins and never drops. Deliveries that find a
 completion ring full wait in a FIFO and are retried on every iteration,
@@ -494,48 +520,19 @@ requests, wait for their terminal callbacks, retire its Fibers, then unload.
 
 What runs, and where:
 
-- **Ring** (`tests/ring`, LDC, DMD and ThreadSanitizer; the module's
-  unittests run in the root `dub test`; BetterC through the native C
-  probe):
-  - per-producer FIFO with four producers and one consumer;
-  - exactly-once delivery with four producers and four consumers;
-  - close under contention, five rounds, ending only on the exact drained
-    test;
-  - a producer stalled between reservation and publication, which hides
-    the published element behind it and keeps the ring from draining;
-  - backpressure on a two-slot ring.
-- **Loop** (`tests/ant_uv`, LDC, DMD and ThreadSanitizer):
-  - the binding's `uv_buf_t` and `uv_stat_t` layouts and every constant it
-    declares, against a C translation unit compiled with the real `uv.h`;
-  - lifecycle and placement: the loop thread's pin, and the auxiliary pool's
-    size, CPUs and nice value read back;
-  - 20,000 `nop`s from four threads through a 64-slot completion ring, each
-    delivered once, after publication, in its producer's order;
-  - timers firing no earlier than their timeouts;
-  - a two-slot completion ring holding 98 deliveries until it has room;
-  - eight credits under a flood of 1,000 timers from four threads;
-  - a full four-slot ring refusing and leaving the request untouched;
-    malformed and doubly submitted requests refused;
-  - cancellation of timers both in libuv and queued behind the credit, and
-    of a batch of 200 `stat`s;
-  - close cancelling ten long timers after its grace period;
-  - a throwing step hook failing the loop, which cancels its work and
-    reports the failure at close;
-  - Fibers on the loop thread reading a file and, when cancelled, waiting
-    for their request;
-  - 96 worker Fibers on a two-group `GroupHost` reading files three ways
-    (loop allocation, caller buffer, and `open`/`fstat`/`read`/`close` on a
-    counted trigger), with publications equal to submissions once close
-    has joined the loop thread, and a cancelled worker Fiber waiting for
-    its request;
-  - `readFile` into the request's allocator, at its alignment, freed
-    exactly once; a directory refused with `EISDIR` before any allocation;
-    a read that fails after allocating, freed by the loop (a locked file
-    on Windows, a sysfs attribute on Linux); a refused allocation and an
-    empty file;
-  - an `open` of a FIFO with no writer abandoned by close, with the loop
-    left allocated (on Windows, where opening a pipe does not block, a read
-    of a named pipe before its server writes).
+- **The suites.** `tests/ring` (LDC, DMD and ThreadSanitizer; the
+  module's unittests run in the root `dub test`, and BetterC through the
+  native C probe) and `tests/ant_uv` (LDC, DMD and ThreadSanitizer, plus
+  `run-iouring` on Linux, the same suite with `UvLoopOptions.ioUring` on
+  every loop). Each file's header lists its cases. The loop suite's layout
+  check compares the binding against a C translation unit compiled with the
+  real `uv.h`; its other cases are the contracts of section 3 exercised
+  from both sides of the loop: ordering, credits, a full ring,
+  cancellation, close with abandonment, failure, Fibers on workers and on
+  the loop thread, `readFile`'s allocators, and whole-file reads cancelled
+  in flight. Through io_uring the FIFO open that the abandonment case
+  relies on did not wait for a writer (Linux 6.6), so that lane checks for
+  no abandonment instead.
 - **Stability:** 30 consecutive LDC runs, 10 DMD and 10 ThreadSanitizer
   runs of the loop suite, and 10 ThreadSanitizer runs of the ring suite,
   without a failure. ThreadSanitizer needs two suppressions, both explained
@@ -600,6 +597,9 @@ What runs, and where:
   flood of file reads on the 5900XT beside a busy pool decides.
 - Whether the credit default should follow the ring's capacity or the
   auxiliary pool size; the same flood decides that too.
+- Whether `UvLoopOptions.ioUring` should become the Linux default. The same
+  flood decides, since the kernel's polling thread spins while the ring is
+  busy and nothing in `ant_uv` places it.
 
 ## 8. Where the implementation departed from the plan
 
@@ -621,10 +621,22 @@ What runs, and where:
   unwind while the loop still owned a request on its stack.
 - **Whole-file reads take an allocator** (section 3.6). The plan left the
   allocation unspecified, and the first build used C `malloc`. A `readFile`
-  now allocates from the request's `ActorAllocator`, whose `allocate` half
-  runs only on the loop thread. A resource manager can load into an
-  allocator it owns, mimalloc included. The block is handed over as a
-  `UvBuffer`, which frees it through the same allocator.
+  now allocates from the request's `ActorAllocator`, or the loop's default
+  (`UvLoopOptions.allocator`), whose `allocate` half runs on libuv's thread
+  under the actor allocator contract. A resource manager can load into an
+  allocator it owns, mimalloc included.
+  The block is handed over as a `UvBuffer`, which frees it through the same
+  allocator.
+- **A whole-file read is one pool job** (section 3.2). The first build
+  chained four requests through the loop. A single small file then took
+  three times SDL3's round trip on Windows and thirty-five times under
+  WSL2, and batched small files loaded at a quarter of SDL's io_uring rate
+  ([measurements](../performance/file-loading-sdl3-2026-11-02.md)). The job
+  keeps the loop thread's allocation only where the allocator needs it.
+- **io_uring is an option** (section 2). `UvLoopOptions.ioUring` configures
+  libuv's ring on Linux and sets `UV_USE_IO_URING=1` unless the user set
+  it; without both, libuv uses the pool. It doubled random reads from an
+  open file and is not used for `readFile` (section 3.2).
 - **`readFile` refuses directories** (section 5). The plan did not
   consider them. A directory opens on both platforms; Linux then reported
   its size, and the read failed with `EISDIR` after the allocation, while

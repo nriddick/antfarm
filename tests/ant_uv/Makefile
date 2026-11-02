@@ -14,7 +14,7 @@ IMPORTS := -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$
 MIMALLOC_LIBRARY := $(ROOT)/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
-.PHONY: run run-dmd run-tsan run-mimalloc clean
+.PHONY: run run-iouring run-dmd run-tsan run-mimalloc clean
 
 layout.o: layout.c
 	$(CC) -O1 -c layout.c -o $@
@@ -24,6 +24,11 @@ uv_test: uv_test.d layout.o $(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(ROOT)
 
 run: uv_test
 	./uv_test
+
+# Every loop with UvLoopOptions.ioUring: open, close, read, write, stat and
+# fstat through io_uring. Linux 5.10.186 and libuv 1.49 or later.
+run-iouring: uv_test
+	ANTUV_TEST_IO_URING=1 ./uv_test
 
 run-dmd: layout.o
 	dmd -g -i $(IMPORTS) uv_test.d layout.o -L$(UV_LIBS) -of=uv_test_dmd -od=.obj-dmd

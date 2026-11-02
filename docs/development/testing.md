@@ -34,6 +34,8 @@ lists every target.
 | Review torture | `tests/farm`: adversarial Farm tests | LDC, LDC TSan |
 | Private actors | `tests/private`: unit suite, the extracted private-actor documentation programs, and the fatal-death harness | LDC, DMD, LDC TSan |
 | Examples | `examples/`: the First payload program extracted from [quickstart.md](../guide/quickstart.md#what-the-dispatcher-does-for-you-the-raw-ring-one-thread), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
+| Ring | `make -C tests/ring run run-dmd run-tsan`: the `antfarm.ring` suite | LDC, DMD, LDC TSan |
+| `ant_uv` | `make -C tests/ant_uv run run-dmd run-tsan` when `pkg-config` finds libuv 1.19 or later, then `run-iouring`, the same suite with `UvLoopOptions.ioUring`, from libuv 1.49; each skip prints its reason | LDC, DMD, LDC TSan, libuv |
 
 `make check-quick` runs the BetterC/native-C and core C/C++ ABI checks, root unit suite, `make -C tests/farm run`
 (including `sweep_cursor`), threadpool unit suite, fiber smoke suite, fork-join suite, and

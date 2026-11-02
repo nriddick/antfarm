@@ -170,6 +170,13 @@ run "${make_cmd[@]}" -C tests/ring run run-dmd run-tsan
 # skipped with the reason printed, never silently.
 if pkg-config --exists 'libuv >= 1.19' 2>/dev/null; then
     run "${make_cmd[@]}" -C tests/ant_uv run run-dmd run-tsan
+    # The same suite with file operations through io_uring, which needs
+    # libuv 1.49 and Linux 5.10.186.
+    if pkg-config --exists 'libuv >= 1.49' 2>/dev/null; then
+        run "${make_cmd[@]}" -C tests/ant_uv run-iouring
+    else
+        echo "SKIP ant_uv io_uring: libuv 1.49 or later not found by pkg-config"
+    fi
 else
     echo "SKIP ant_uv: libuv 1.19 or later not found by pkg-config"
 fi

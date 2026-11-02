@@ -29,6 +29,14 @@ uv_latency: uv_latency.d $(ROOT)/antfarm/ring.d $(wildcard $(ROOT)/ant_uv/source
 	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$(ROOT)/ant_uv/source \
 		uv_latency.d -L-luv -of=$@ -od=.obj-uv_latency
 
+# Needs libuv (1.19+), SDL 3.2+ and the pinned mimalloc; not part of `all`.
+UV_LIBS ?= -L-luv
+SDL3_LIBS ?= -L-lSDL3
+file_loading: file_loading.d $(ROOT)/antfarm/ring.d $(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(FIBER_SOURCES) $(THREADPOOL_SOURCES) $(MIMALLOC_LIBRARY)
+	$(DC) $(DFLAGS) $(MIMALLOC_VERSION) -i -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source \
+		-I$(ROOT)/ant_uv/source file_loading.d $(MIMALLOC_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) $(UV_LIBS) $(SDL3_LIBS) \
+		-of=$@ -od=.obj-file_loading
+
 slot_ring: slot_ring.d $(FARM_SOURCES) $(ROOT)/antfarm/ring.d
 	$(DC) $(DFLAGS) -I$(ROOT) slot_ring.d $(FARM_SOURCES) $(ROOT)/antfarm/ring.d -of=$@
 
@@ -123,4 +131,5 @@ offccd-smoke: offccd c2c
 	python3 -B offccd_sweep.py --suite smoke --out /tmp/offccd-smoke-$$$$
 
 clean:
-	rm -f throughput tail tail_tests throughput_tests dual_tests dual actor_ready actor_churn actor_churn_mimalloc scaling offccd c2c parallel subscribe_cost *.o
+	rm -f throughput tail tail_tests throughput_tests dual_tests dual actor_ready actor_churn actor_churn_mimalloc scaling offccd c2c parallel subscribe_cost file_loading *.o
+	rm -rf .obj-file_loading

@@ -98,3 +98,5 @@ ant_uv/examples/read_files
 ant_uv/examples/load_assets
 tools/perf/uv_latency
 tools/perf/.obj-uv_latency/
+tools/perf/file_loading
+tools/perf/.obj-file_loading/

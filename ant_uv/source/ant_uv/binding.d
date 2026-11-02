@@ -86,6 +86,14 @@ enum uv_run_mode : int
     UV_RUN_NOWAIT,      /// poll once without blocking
 }
 
+/// `uv_loop_option`, for `uv_loop_configure`.
+enum uv_loop_option : int
+{
+    UV_LOOP_BLOCK_SIGNAL = 0,    ///
+    UV_METRICS_IDLE_TIME,        ///
+    UV_LOOP_USE_IO_URING_SQPOLL, /// libuv 1.49 and later; Linux only
+}
+
 /// `uv_file`: an `int` descriptor on every platform.
 alias uv_file = int;
 
@@ -225,6 +233,7 @@ int uv_os_setenv(const(char)* name, const(char)* value); ///
 // ---- loops ----
 size_t uv_loop_size();                ///
 int uv_loop_init(uv_loop_t* loop);    ///
+int uv_loop_configure(uv_loop_t* loop, uv_loop_option option, ...); ///
 int uv_loop_close(uv_loop_t* loop);   ///
 int uv_run(uv_loop_t* loop, uv_run_mode mode); ///
 void uv_stop(uv_loop_t* loop);        ///

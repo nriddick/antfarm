@@ -99,12 +99,13 @@ enum UvOp : ubyte
     /// `uv_fs_fstat(file)`; `size` is the file's size.
     fstat,
     /// Open `path`, read it from the start until end of file or a full
-    /// buffer, and close it. `result` is the bytes read and `size` the
-    /// file's size, so `size > result` means the buffer was too small. With a
-    /// null `buffer` the loop allocates the file's size from the request's
-    /// `allocator` and hands the block over: see `UvRequest.takeBuffer`. An
-    /// empty file allocates nothing. A directory fails with `UV_EISDIR` and
-    /// `size` 0 on every platform, before anything is allocated or read.
+    /// buffer, and close it, as one job on libuv's auxiliary pool. `result`
+    /// is the bytes read and `size` the file's size, so `size > result` means
+    /// the buffer was too small. With a null `buffer` the job allocates the
+    /// file's size from the request's `allocator` and hands the block over:
+    /// see `UvRequest.takeBuffer`. An empty file allocates nothing. A
+    /// directory fails with `UV_EISDIR` and `size` 0 on every platform,
+    /// before anything is allocated or read.
     readFile,
 }
 
@@ -179,25 +180,27 @@ struct UvRequest
     ubyte* buffer;
     /// Bytes at `buffer`.
     size_t length;
-    /// `readFile` with a null `buffer`: the allocator for the file's block.
-    /// `allocate` runs on the loop thread and must not block; `deallocate`
-    /// runs where the block is freed, on any thread, or on the loop thread
-    /// when the read fails. A null result fails the request with
-    /// `UV_ENOMEM`. Unset (`ActorAllocator.init`) is
-    /// `ActorAllocator.cRuntime()`.
+    /// `readFile` with a null `buffer`: the allocator for the file's block;
+    /// unset means the loop's `UvLoopOptions.allocator`. `allocate` runs on
+    /// libuv's auxiliary thread, which druntime does not know: it must be
+    /// thread-safe, may block, and must not touch the GC or druntime
+    /// (`ActorAllocator.cRuntime()` and `mimallocV3ActorAllocator()`
+    /// qualify; `ActorAllocator.gcRooted` does not). `deallocate` runs where
+    /// the block is freed, on any thread, or on the loop thread when the
+    /// read fails. A null result fails the request with `UV_ENOMEM`.
     ActorAllocator allocator;
     /// `readFile` with a null `buffer`: the block's alignment, a power of
     /// two. `ActorAllocator.cRuntime()` gives at most 64.
     size_t alignment = 64;
-    /// `read`, `write`: the file offset; negative uses the file position.
+    /// `read`, `write`: the file offset. Negative uses the file position,
+    /// which races when several reads of one file are in flight; the `read`
+    /// and `write` constructors take an explicit offset.
     long offset = -1;
     /// `timer`: milliseconds of loop time.
     ulong timeoutMs;
     /// Application data the loop never reads, except that it becomes the
     /// `tag` of the completion ring element.
     ulong user;
-    /// Application data the loop never reads.
-    void* userPointer;
 
     /// Advanced once after publication, if set.
     FiberGenerationTrigger trigger;
@@ -295,6 +298,113 @@ struct UvRequest
         auto taken = takeBuffer();
         taken.free();
     }
+
+    // ---- one fresh record per operation ---------------------------------------
+    // Each sets only its operation's inputs. Set the delivery targets and
+    // `user` on the result. A record is reusable once published, but a fresh
+    // one carries nothing over from the last operation.
+
+    /// Read all of `path` into a block allocated from `allocator`, or from
+    /// the loop's default when `allocator` is unset, at `alignment`.
+    static UvRequest readFile(const(char)* path, ActorAllocator allocator = ActorAllocator.init,
+        size_t alignment = 64) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.readFile;
+        r.path = path;
+        r.allocator = allocator;
+        r.alignment = alignment;
+        return r;
+    }
+
+    /// Read all of `path` into `buffer`, stopping when it is full.
+    static UvRequest readFile(const(char)* path, ubyte[] buffer) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.readFile;
+        r.path = path;
+        r.buffer = buffer.ptr;
+        r.length = buffer.length;
+        return r;
+    }
+
+    /// `uv_fs_open(path, flags, mode)`; `result` is the file.
+    static UvRequest open(const(char)* path, int flags, int mode = 0x1A4) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.open;
+        r.path = path;
+        r.flags = flags;
+        r.mode = mode;
+        return r;
+    }
+
+    /// `uv_fs_close(file)`.
+    static UvRequest close(int file) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.close;
+        r.file = file;
+        return r;
+    }
+
+    /// Read up to `buffer.length` bytes of `file` at `offset` into `buffer`;
+    /// `result` is the bytes read, 0 at end of file.
+    static UvRequest read(int file, ubyte[] buffer, long offset) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.read;
+        r.file = file;
+        r.buffer = buffer.ptr;
+        r.length = buffer.length;
+        r.offset = offset;
+        return r;
+    }
+
+    /// Write `bytes` to `file` at `offset`; `result` is the bytes written.
+    static UvRequest write(int file, const(ubyte)[] bytes, long offset) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.write;
+        r.file = file;
+        r.buffer = cast(ubyte*) bytes.ptr; // only read, for a write
+        r.length = bytes.length;
+        r.offset = offset;
+        return r;
+    }
+
+    /// `uv_fs_stat(path)`; `size` is the file's size.
+    static UvRequest stat(const(char)* path) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.stat;
+        r.path = path;
+        return r;
+    }
+
+    /// `uv_fs_fstat(file)`; `size` is the file's size.
+    static UvRequest fstat(int file) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.fstat;
+        r.file = file;
+        return r;
+    }
+
+    /// Published `timeoutMs` milliseconds of loop time after it starts.
+    static UvRequest timer(ulong timeoutMs) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.timer;
+        r.timeoutMs = timeoutMs;
+        return r;
+    }
+
+    /// Published in order with the requests around it.
+    static UvRequest nop() nothrow @nogc
+    {
+        return UvRequest.init;
+    }
 }
 
 /// A file that `readFile` read into a block the loop allocated, handed over
@@ -338,14 +448,6 @@ struct UvBuffer
     }
 }
 
-// The allocator a readFile allocates from: the request's, or the C
-// runtime's when it is unset.
-private ActorAllocator effectiveAllocator(ref const ActorAllocator a) pure nothrow @nogc
-{
-    if (a.allocate is null && a.deallocate is null) return ActorAllocator.cRuntime();
-    return ActorAllocator(cast(void*) a.context, a.allocate, a.deallocate);
-}
-
 /// What the application's step hook did in one loop iteration.
 struct UvStepResult
 {
@@ -364,13 +466,14 @@ struct UvLoopOptions
     ProcessorId cpu = noProcessor;
     /// Request ring slots: a power of two, 2 to 2^20.
     uint ringCapacity = 1024;
-    /// Control ring slots (cancellations): a power of two, 2 to 2^20.
-    uint controlCapacity = 256;
     /// Operations in libuv at once, plus completions waiting for a full
     /// completion ring; 0 means `ringCapacity`. At most 65536.
     uint credits;
-    /// Requests dequeued per loop iteration, at least 1.
-    uint submitBatch = 64;
+    /// The allocator for a `readFile` that names neither a `buffer` nor an
+    /// `allocator`; unset means `ActorAllocator.cRuntime()`. Set it once to
+    /// the application's switch between arenas and a general allocator such
+    /// as mimalloc. The contract is `UvRequest.allocator`'s.
+    ActorAllocator allocator;
     /// libuv's auxiliary pool size (`UV_THREADPOOL_SIZE`, 1 to 1024); 0
     /// keeps the environment's value or libuv's default of 4. Effective only
     /// if nothing in the process used the pool before.
@@ -395,6 +498,18 @@ struct UvLoopOptions
     /// How long `close` then waits for terminal callbacks before it
     /// abandons the rest.
     Duration abandonAfter = 5.seconds;
+    /// Linux: let libuv issue `open`, `close`, `read`, `write`, `stat` and
+    /// `fstat` through io_uring (`UV_LOOP_USE_IO_URING_SQPOLL`, libuv 1.49
+    /// or later) instead of its auxiliary pool. `create` sets
+    /// `UV_USE_IO_URING=1` unless the environment sets it already; a value
+    /// of 0 there keeps the pool. The kernel runs the operations on a
+    /// polling thread of its own, which spins while the ring is busy. It
+    /// suits many reads from files already open; `readFile` stays a pool
+    /// job, because that one kernel thread would copy every whole file in
+    /// turn. libuv falls back to the pool for an operation the ring cannot
+    /// take. Ignored on other systems; `UvLoop.ioUring` reports whether it
+    /// was configured.
+    bool ioUring;
 }
 
 /// One of libuv's auxiliary threads as placed and read back by `UvLoop.create`.
@@ -454,17 +569,23 @@ private enum ulong tagCancel = 2;
 private enum ulong gateClosed = 1UL << 63;
 private enum uint noSlot = uint.max;
 private enum size_t readChunk = size_t(1) << 30; // a Windows uv_buf_t length is 32-bit
+private enum uint submitBatch = 64; // requests dequeued per loop iteration
+private enum uint controlCapacity = 256; // control ring slots (cancellations)
 
 private enum State : int { starting, open, failed, closed }
 private enum ClosePhase : ubyte { open, grace, cancelling }
-private enum ReadPhase : ubyte { open, stat, read, close }
+// A readFile job's uv_fs_t lives on the auxiliary thread's stack.
+private enum size_t jobFsBytes = 1024;
 
 // Loop-thread bookkeeping for one in-flight operation. `uv` points at the
-// operation's libuv storage, used as a uv_fs_t or a uv_timer_t.
+// operation's libuv storage, used as a uv_fs_t, a uv_timer_t or a uv_work_t.
+// While a readFile job runs, the auxiliary thread owns the read fields
+// (`file` through `allocator`); libuv's queue orders them both ways.
 private struct OpSlot
 {
     void* uv;
     void* owner; // the UvLoop
+    uv_loop_t* uvLoop; // for the job's synchronous calls, which only store it
     UvRequest* request; // null once published
     ulong ticket;
     uint index;
@@ -472,8 +593,9 @@ private struct OpSlot
     bool inUse;
     bool handleOpen; // `uv` is an initialized timer handle: close before reuse
     bool cancelling;
+    shared bool stop; // a cancel the running job polls between steps
     UvOp op;
-    ReadPhase phase;
+    const(char)* path;
     int file = -1;
     long status;
     ulong fileSize;
@@ -723,8 +845,13 @@ final class UvLoop
     @property uint credits() const nothrow @nogc { return slotCount_; }
     /// libuv's auxiliary threads as placed by `create`.
     @property const(UvAuxThread)[] auxThreads() const nothrow @nogc { return auxThreads_; }
+    /// True when `UvLoopOptions.ioUring` took effect: Linux 5.10.186 or
+    /// later, libuv accepted the option, and `UV_USE_IO_URING` is positive.
+    /// The kernel may still refuse the ring, and libuv then uses its pool.
+    @property bool ioUring() const nothrow @nogc { return ioUring_; }
 
-    /// One line: libuv version, loop CPU, ring, credits, auxiliary threads.
+    /// One line: libuv version, loop CPU, ring, credits, file I/O path,
+    /// auxiliary threads.
     string summary() const
     {
         import std.format : format;
@@ -734,11 +861,11 @@ final class UvLoop
         foreach (i, ref t; auxThreads_)
             aux ~= format("%s%s:%s%s", i == 0 ? "" : " ", t.threadId, formatCpus(t.cpus),
                 t.error == 0 ? "" : format("(error %s)", t.error));
-        return format("UvLoop: libuv %s, loop thread %s, ring %s, credits %s, "
+        return format("UvLoop: libuv %s, loop thread %s, ring %s, credits %s, file operations through %s, "
             ~ "%s auxiliary thread(s) priority %s [%s]",
             v[0 .. strlen(v)],
             options_.cpu == noProcessor ? "unpinned" : format("%s:%s", options_.cpu.group, options_.cpu.lp),
-            requests_.capacity, slotCount_, auxThreads_.length,
+            requests_.capacity, slotCount_, ioUring_ ? "io_uring" : "the pool", auxThreads_.length,
             auxThreads_.length == 0 ? 0 : auxThreads_[0].priority, aux);
     }
 
@@ -773,6 +900,7 @@ private:
     size_t slotStride_;
     PendingDelivery* pending_;
     size_t pendingCap_, pendingHead_, pendingCount_;
+    bool ioUring_; // set before the loop opens; read anywhere after
     ClosePhase closePhase_;
     long phaseDeadline_;
     bool loopAbandoned_;
@@ -785,7 +913,7 @@ private:
         options_.auxCpus = options.auxCpus.dup;
         slotCount_ = options.credits == 0 ? options.ringCapacity : options.credits;
         requests_ = SlotRing!RingElement.create(options.ringCapacity);
-        controls_ = SlotRing!RingElement.create(options.controlCapacity);
+        controls_ = SlotRing!RingElement.create(controlCapacity);
         if (requests_ is null || controls_ is null)
         {
             releaseRings();
@@ -813,13 +941,10 @@ private:
         if (!Ring.validCapacity(o.ringCapacity))
             throw new UvLoopException(format("ant_uv: ringCapacity %s is not a power of two in 2 .. 2^20",
                 o.ringCapacity));
-        if (!Ring.validCapacity(o.controlCapacity))
-            throw new UvLoopException(format("ant_uv: controlCapacity %s is not a power of two in 2 .. 2^20",
-                o.controlCapacity));
         if (o.credits > 65_536)
             throw new UvLoopException(format("ant_uv: credits %s exceeds 65536", o.credits));
-        if (o.submitBatch == 0)
-            throw new UvLoopException("ant_uv: submitBatch must be at least 1");
+        if (!o.allocator.valid && (o.allocator.allocate !is null || o.allocator.deallocate !is null))
+            throw new UvLoopException("ant_uv: allocator has only one of its halves set");
         if (o.auxThreads > 1024)
             throw new UvLoopException(format("ant_uv: auxThreads %s exceeds libuv's 1024", o.auxThreads));
         if (o.closeGrace < Duration.zero || o.abandonAfter < Duration.zero)
@@ -1038,7 +1163,7 @@ private:
     {
         uint taken;
         RingElement e;
-        while (taken < options_.submitBatch && haveCredit() && requests_.tryPop(e))
+        while (taken < submitBatch && haveCredit() && requests_.tryPop(e))
         {
             ++taken;
             start(cast(UvRequest*) cast(size_t) e.pointer, e.generation);
@@ -1107,7 +1232,8 @@ private:
         slot.ticket = ticket;
         slot.op = request.op;
         slot.cancelling = false;
-        slot.phase = ReadPhase.open;
+        atomicStore!(MemoryOrder.raw)(slot.stop, false);
+        slot.path = null;
         slot.file = -1;
         slot.status = 0;
         slot.fileSize = 0;
@@ -1152,7 +1278,7 @@ private:
             rc = armed(slot, uv_fs_fstat(loop_, fs, request.file, &onFsDone));
             break;
         case UvOp.readFile:
-            rc = armed(slot, uv_fs_open(loop_, fs, request.path, UV_FS_O_RDONLY, 0, &onFsDone));
+            rc = startReadJob(slot, request);
             break;
         }
         if (rc < 0)
@@ -1162,6 +1288,93 @@ private:
             finishSlot(slot);
             publish(request, rc, 0);
         }
+    }
+
+    // A readFile: copy what the job reads into the slot and queue it.
+    int startReadJob(OpSlot* slot, UvRequest* request) nothrow @nogc
+    {
+        slot.path = request.path;
+        if (request.buffer !is null)
+        {
+            slot.buffer = request.buffer;
+            slot.capacity = request.length;
+        }
+        else
+        {
+            slot.allocator = request.allocator.valid ? request.allocator
+                : options_.allocator.valid ? options_.allocator : ActorAllocator.cRuntime();
+            slot.alignment = request.alignment;
+        }
+        // The job may run before uv_queue_work returns: name the slot first.
+        uv_req_set_data(cast(uv_req_t*) slot.uv, slot);
+        return uv_queue_work(loop_, cast(uv_work_t*) slot.uv, &onReadJob, &onReadJobDone);
+    }
+
+    // A readFile on one of libuv's auxiliary threads, which druntime does
+    // not know: only libuv's synchronous calls (they store the loop and never
+    // touch it), the allocator, and atomics.
+    static void runReadJob(OpSlot* slot) nothrow @nogc
+    {
+        align(16) ubyte[jobFsBytes] storage = void;
+        auto fs = cast(uv_fs_t*) storage.ptr;
+        auto loop = slot.uvLoop;
+        bool stopped() { return atomicLoad!(MemoryOrder.acq)(slot.stop); }
+        void closeFile(long status)
+        {
+            slot.status = status;
+            uv_fs_close(loop, fs, slot.file, null);
+            uv_fs_req_cleanup(fs);
+            slot.file = -1;
+        }
+
+        immutable fd = uv_fs_open(loop, fs, slot.path, UV_FS_O_RDONLY, 0, null);
+        uv_fs_req_cleanup(fs);
+        if (fd < 0)
+        {
+            slot.status = fd;
+            return;
+        }
+        slot.file = fd;
+        if (stopped()) return closeFile(UV_ECANCELED);
+        immutable rc = uv_fs_fstat(loop, fs, slot.file, null);
+        immutable st = *uv_fs_get_statbuf(fs);
+        uv_fs_req_cleanup(fs);
+        if (rc < 0) return closeFile(rc);
+        // A directory opens on both platforms, then reports a size Linux
+        // would fail to read and Windows reports as 0: refuse it here,
+        // before anything is allocated or read, with size 0 everywhere.
+        if ((st.st_mode & UV_S_IFMT) == UV_S_IFDIR) return closeFile(UV_EISDIR);
+        slot.fileSize = st.st_size;
+        if (slot.buffer is null && st.st_size != 0) // an empty file allocates nothing
+        {
+            if (st.st_size > size_t.max) return closeFile(UV_ENOMEM);
+            auto p = cast(ubyte*) slot.allocator.allocate(slot.allocator.context,
+                cast(size_t) st.st_size, slot.alignment);
+            if (p is null) return closeFile(UV_ENOMEM);
+            slot.buffer = p;
+            slot.capacity = cast(size_t) st.st_size;
+            slot.allocated = true;
+        }
+        while (slot.filled < slot.capacity)
+        {
+            if (stopped()) return closeFile(UV_ECANCELED);
+            auto remaining = slot.capacity - cast(size_t) slot.filled;
+            if (remaining > readChunk) remaining = readChunk;
+            auto buf = makeBuf(slot.buffer + cast(size_t) slot.filled, remaining);
+            immutable n = uv_fs_read(loop, fs, slot.file, &buf, 1, cast(long) slot.filled, null);
+            uv_fs_req_cleanup(fs);
+            if (n < 0) return closeFile(n);
+            if (n == 0) break;
+            slot.filled += n;
+        }
+        closeFile(cast(long) slot.filled);
+    }
+
+    // libuv's after-work callback for a readFile job, on the loop thread.
+    // UV_ECANCELED means the job never ran: nothing is open or allocated.
+    void readJobDone(OpSlot* slot, int status) nothrow @nogc
+    {
+        finishReadFile(slot, status == UV_ECANCELED ? UV_ECANCELED : slot.status);
     }
 
     // libuv calls the request's callback from uv_run only, so naming the slot
@@ -1252,10 +1465,10 @@ private:
             timerDone(slot, UV_ECANCELED);
             return;
         }
-        // Closing a readFile's descriptor is never cancelled: that would leak it.
-        if (slot.op == UvOp.readFile && slot.phase == ReadPhase.close) return;
         // Only work libuv has not started can be cancelled; started work
-        // completes and readFile stops at its next step.
+        // completes, and a readFile job stops at its next step, which it
+        // learns from `stop`.
+        if (slot.op == UvOp.readFile) atomicStore!(MemoryOrder.rel)(slot.stop, true);
         uv_cancel(cast(uv_req_t*) slot.uv);
     }
 
@@ -1272,159 +1485,18 @@ private:
     void fsDone(OpSlot* slot, uv_fs_t* req) nothrow @nogc
     {
         immutable result = cast(long) uv_fs_get_result(req);
-        ulong statSize, statMode;
-        if (result >= 0 && (slot.op == UvOp.stat || slot.op == UvOp.fstat
-                || (slot.op == UvOp.readFile && slot.phase == ReadPhase.stat)))
-        {
-            auto statbuf = uv_fs_get_statbuf(req);
-            statSize = statbuf.st_size;
-            statMode = statbuf.st_mode;
-        }
+        ulong statSize;
+        if (result >= 0 && (slot.op == UvOp.stat || slot.op == UvOp.fstat))
+            statSize = uv_fs_get_statbuf(req).st_size;
         uv_fs_req_cleanup(req);
-        if (slot.op == UvOp.readFile)
-        {
-            readFileStep(slot, result, statSize, statMode);
-            return;
-        }
         auto request = slot.request;
         slot.request = null;
         releaseSlot(slot);
         if (request !is null) publish(request, result, statSize);
     }
 
-    void readFileStep(OpSlot* slot, long result, ulong statSize, ulong statMode) nothrow @nogc
-    {
-        auto fs = cast(uv_fs_t*) slot.uv;
-        final switch (slot.phase)
-        {
-        case ReadPhase.open:
-            if (result < 0)
-            {
-                finishReadFile(slot, result);
-                return;
-            }
-            slot.file = cast(int) result;
-            if (slot.cancelling)
-            {
-                slot.status = UV_ECANCELED;
-                closeReadFile(slot);
-                return;
-            }
-            slot.phase = ReadPhase.stat;
-            immutable rc = armed(slot, uv_fs_fstat(loop_, fs, slot.file, &onFsDone));
-            if (rc < 0)
-            {
-                slot.status = rc;
-                closeReadFile(slot);
-            }
-            return;
-        case ReadPhase.stat:
-            if (result < 0 || slot.cancelling)
-            {
-                slot.status = result < 0 ? result : UV_ECANCELED;
-                closeReadFile(slot);
-                return;
-            }
-            // A directory opens on both platforms, then reports a size Linux
-            // would fail to read and Windows reports as 0: refuse it here,
-            // before anything is allocated or read, with size 0 everywhere.
-            if ((statMode & UV_S_IFMT) == UV_S_IFDIR)
-            {
-                slot.status = UV_EISDIR;
-                closeReadFile(slot);
-                return;
-            }
-            slot.fileSize = statSize;
-            auto request = slot.request;
-            if (request.buffer is null)
-            {
-                if (statSize > size_t.max) { slot.status = UV_ENOMEM; closeReadFile(slot); return; }
-                if (statSize != 0) // an empty file allocates nothing
-                {
-                    slot.allocator = effectiveAllocator(request.allocator);
-                    slot.alignment = request.alignment;
-                    auto p = cast(ubyte*) slot.allocator.allocate(slot.allocator.context,
-                        cast(size_t) statSize, slot.alignment);
-                    if (p is null)
-                    {
-                        slot.status = UV_ENOMEM;
-                        closeReadFile(slot);
-                        return;
-                    }
-                    slot.buffer = p;
-                    slot.capacity = cast(size_t) statSize;
-                    slot.allocated = true;
-                }
-            }
-            else
-            {
-                slot.buffer = request.buffer;
-                slot.capacity = request.length;
-            }
-            readNext(slot);
-            return;
-        case ReadPhase.read:
-            if (result < 0)
-            {
-                slot.status = result;
-                closeReadFile(slot);
-                return;
-            }
-            slot.filled += result;
-            if (result == 0 || slot.filled >= slot.capacity)
-            {
-                slot.status = cast(long) slot.filled;
-                closeReadFile(slot);
-                return;
-            }
-            if (slot.cancelling)
-            {
-                slot.status = UV_ECANCELED;
-                closeReadFile(slot);
-                return;
-            }
-            readNext(slot);
-            return;
-        case ReadPhase.close:
-            slot.file = -1; // released whatever close returned
-            finishReadFile(slot, slot.status);
-            return;
-        }
-    }
-
-    void readNext(OpSlot* slot) nothrow @nogc
-    {
-        if (slot.filled >= slot.capacity)
-        {
-            slot.status = cast(long) slot.filled;
-            closeReadFile(slot);
-            return;
-        }
-        slot.phase = ReadPhase.read;
-        auto remaining = slot.capacity - cast(size_t) slot.filled;
-        if (remaining > readChunk) remaining = readChunk;
-        auto buf = makeBuf(slot.buffer + cast(size_t) slot.filled, remaining);
-        immutable rc = armed(slot, uv_fs_read(loop_, cast(uv_fs_t*) slot.uv, slot.file, &buf,
-            1, cast(long) slot.filled, &onFsDone));
-        if (rc < 0)
-        {
-            slot.status = rc;
-            closeReadFile(slot);
-        }
-    }
-
-    void closeReadFile(OpSlot* slot) nothrow @nogc
-    {
-        slot.phase = ReadPhase.close;
-        immutable rc = armed(slot, uv_fs_close(loop_, cast(uv_fs_t*) slot.uv, slot.file,
-            &onFsDone));
-        if (rc < 0)
-        {
-            slot.file = -1;
-            finishReadFile(slot, slot.status);
-        }
-    }
-
+    // A readFile's publication, on the loop thread: hand the block over, or
+    // free it when the read failed after allocating.
     void finishReadFile(OpSlot* slot, long status) nothrow @nogc
     {
         auto request = slot.request;
@@ -1559,6 +1631,15 @@ private:
         bool done;
         scope (exit) if (!done) abortInitialization();
         uv_loop_set_data(loop_, cast(void*) this);
+        version (linux) if (options_.ioUring && ioUringKernel())
+        {
+            // libuv reads the variable once, when it first builds the ring,
+            // and treats unset as off; an explicit value is the user's.
+            if (getenv("UV_USE_IO_URING") is null) uv_os_setenv("UV_USE_IO_URING", "1");
+            auto env = getenv("UV_USE_IO_URING");
+            ioUring_ = env !is null && strtol(env, null, 10) > 0
+                && uv_loop_configure(loop_, uv_loop_option.UV_LOOP_USE_IO_URING_SQPOLL) == 0;
+        }
         allocateSlots();
         warmAuxPool();
         stepTimer_ = cast(uv_timer_t*) malloc(uv_handle_size(uv_handle_type.UV_TIMER));
@@ -1575,6 +1656,19 @@ private:
         done = true;
     }
 
+    // libuv builds its polling ring only on 5.10.186 or later; earlier
+    // kernels' polling thread could spin at full CPU.
+    version (linux) static bool ioUringKernel() nothrow @nogc
+    {
+        import core.stdc.stdio : sscanf;
+        import core.sys.posix.sys.utsname : uname, utsname;
+        utsname u;
+        int major, minor, patch;
+        if (uname(&u) != 0 || sscanf(u.release.ptr, "%d.%d.%d", &major, &minor, &patch) < 2)
+            return false;
+        return major > 5 || (major == 5 && (minor > 10 || (minor == 10 && patch >= 186)));
+    }
+
     static UvLoopException uvFailure(string call, int rc)
     {
         import std.format : format;
@@ -1589,7 +1683,10 @@ private:
         import std.algorithm.comparison : max;
         immutable fsSize = uv_req_size(uv_req_type.UV_FS);
         immutable timerSize = uv_handle_size(uv_handle_type.UV_TIMER);
-        slotStride_ = (max(fsSize, timerSize) + 63) & ~cast(size_t) 63;
+        immutable workSize = uv_req_size(uv_req_type.UV_WORK);
+        if (fsSize > jobFsBytes)
+            throw new UvLoopException("ant_uv: this libuv's uv_fs_t is larger than a readFile job reserves");
+        slotStride_ = (max(fsSize, timerSize, workSize) + 63) & ~cast(size_t) 63;
         slotMemory_ = allocateAligned64(slotStride_ * slotCount_);
         slots_ = cast(OpSlot*) calloc(slotCount_, OpSlot.sizeof);
         pendingCap_ = slotCount_ + options_.ringCapacity;
@@ -1602,6 +1699,7 @@ private:
             *slot = OpSlot.init;
             slot.uv = cast(ubyte*) slotMemory_ + i * slotStride_;
             slot.owner = cast(void*) this;
+            slot.uvLoop = loop_;
             slot.index = i;
             slot.next = i + 1 < slotCount_ ? i + 1 : noSlot;
         }
@@ -1804,6 +1902,18 @@ private extern (C) void onFsDone(uv_fs_t* req) nothrow @nogc
 {
     auto slot = cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) req);
     ownerOf(slot).fsDone(slot, req);
+}
+
+// Runs on one of libuv's auxiliary threads.
+private extern (C) void onReadJob(uv_work_t* work) nothrow @nogc
+{
+    UvLoop.runReadJob(cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) work));
+}
+
+private extern (C) void onReadJobDone(uv_work_t* work, int status) nothrow @nogc
+{
+    auto slot = cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) work);
+    ownerOf(slot).readJobDone(slot, status);
 }
 
 private extern (C) void onOpTimer(uv_timer_t* timer) nothrow @nogc

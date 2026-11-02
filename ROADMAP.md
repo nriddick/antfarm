@@ -162,7 +162,9 @@ Implemented on the branch (see the CHANGELOG's 2.2.0 section):
   control rings, credits, cancellation, the completion sink, a three-phase
   close with abandonment, direct placement of libuv's auxiliary threads,
   `UvFibers` and `submitAndWait`. Optional; `make check` skips it without
-  libuv.
+  libuv. `readFile` is one pool job, and `UvLoopOptions.ioUring` puts the
+  other file operations on io_uring, after a comparison with SDL3's AsyncIO
+  ([record](docs/performance/file-loading-sdl3-2026-11-02.md)).
 
 The round-trip latency is measured, `make check` passes with the new
 lanes, and the native Windows matrix passes with a pinned libuv build
@@ -349,6 +351,12 @@ are not promised yet.
   smoke disables DRuntime's parallel GC marking, whose mark stack TSan
   reports, and runs outside `make check`; the Fiber gate stays the DMD/LDC
   smoke, release, deterministic-migration and repeated-stress matrix.
+- druntime's parallel GC marking: in a GC-allocating benchmark on Windows
+  (LDC 1.42), all 19 mark threads of some processes spun at full CPU after
+  a collection, over a minute in the one inspected, saturating the machine. A
+  minimal program did not reproduce it. Find the trigger, and report it
+  upstream if it is druntime's. Until then, `--DRT-gcopt=parallel:0`
+  avoids it.
 - Profile multi-producer cold Fiber admission before deciding whether stack
   preparation or moving `mmap` outside the admission lock is justified.
 - Add higher-level synchronization or task-group facilities only in response to

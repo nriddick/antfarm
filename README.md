@@ -10,6 +10,12 @@ tables of work into a shared ring; any subscribed consumer may claim them. It su
 unordered compute where the next available worker should take the work.
 Use it alone, or add pinned workers, actors, and suspendable Fibers.
 
+**Status: alpha, for now indefinitely.** The interfaces are being settled
+toward a definite shape, and what ships is tested and measured, but no
+application has been written against them yet. Expect them to change
+between minor versions until one has; [CHANGELOG.md](CHANGELOG.md) records
+each change.
+
 The released version is the latest tag and the top heading of [CHANGELOG.md](CHANGELOG.md); what each
 release changed is in [CHANGELOG.md](CHANGELOG.md), including the
 [C/C++ ABI](docs/design/c-abi.md).
@@ -46,8 +52,8 @@ waits, throws or allocates is a Fiber. The table carries the exceptions.
 
 The [choice guide](docs/guide/choosing-work.md) owns the detailed comparison.
 [Loading files](docs/guide/loading-files.md) walks through the `ant_uv` loop
-thread: its API at a glance, then files loaded, used on later frames and
-unloaded, and where their bytes live.
+thread: a resource manager at the start of every tick, where the loaded
+bytes live, and a worker Fiber waiting for its own load.
 The fork-join dispatcher (`import forkjoin;`, [forkjoin/README.md](forkjoin/README.md))
 runs on the threadpool with one work-stealing deque per participant and the
 Farm as its admission and overflow channel.

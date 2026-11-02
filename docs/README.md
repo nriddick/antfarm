@@ -73,7 +73,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [private-results-and-waits.md](guide/private-results-and-waits.md) | result ports, subsets, continuations, `waitChildren`, folds |
 | [outcomes-and-cancellation.md](guide/outcomes-and-cancellation.md) | domain failures, tracked roots, deadlines, cooperative cancellation |
 | [sizing-and-allocation.md](guide/sizing-and-allocation.md) | choose quotas, batches, work-cost hints, allocators, and slabs |
-| [loading-files.md](guide/loading-files.md) | load files through the `ant_uv` loop thread: the API at a glance, assets loaded, used and unloaded, and where their bytes live |
+| [loading-files.md](guide/loading-files.md) | load files through the `ant_uv` loop thread: a resource manager at tick start, where the bytes live, and a worker Fiber's own load |
 
 ## Reference and design
 
