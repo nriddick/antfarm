@@ -46,6 +46,14 @@ where the implementation departed from the plan.
     `allocate` runs on the loop thread. `takeBuffer` returns a `UvBuffer`
     that frees the block through the allocator that made it, from any
     thread. An empty file allocates nothing.
+  - `readFile` refuses a directory with `UV_EISDIR` and `size` 0 on every
+    platform. It reads the file type from the `fstat` it already makes,
+    before allocating or reading. Without the check, Linux allocated the
+    directory's reported size and then failed the read with `EISDIR`, and
+    Windows, where libuv reports every directory's size as 0, succeeded
+    with no bytes. The binding gains `UV_EISDIR` and `st_mode`'s
+    `UV_S_IFMT` and `UV_S_IFDIR`, which the layout oracle checks against
+    the C headers.
   - Guide: [ant_uv/README.md](ant_uv/README.md), and
     [Loading files](docs/guide/loading-files.md), which walks through the
     API and an asset table. Examples:
@@ -79,10 +87,17 @@ where the implementation departed from the plan.
     runtime, which has no `aligned_alloc`. Its uncancellable operation is
     a read of a named pipe before the server writes, since opening a pipe
     does not block on Windows. Its read that fails after allocating is of
-    a locked file (`EBUSY`), because libuv on Windows reports every
-    directory's size as 0. A `readFile` of a directory therefore succeeds
-    there with no bytes, where Linux fails it with `EISDIR`; the design's
-    open questions record it.
+    a locked file (`EBUSY`); on Linux it is the loopback device's sysfs
+    link speed, which reports a page as its size and then fails to read
+    with `EINVAL`. The suite skips that case on a kernel where the file
+    does not both report a size and fail.
+- Fixed an intermittent failure of the `ant_uv` suite's worker-Fiber case,
+  "publications differ from submissions", seen once in ten runs under WSL2.
+  The loop runs a request's callback after its trigger or event has woken
+  the Fiber, as documented, and the case counted publications in that
+  callback. The last Fibers could therefore finish, and the domain drain,
+  before the loop thread had counted their requests. The suite now compares
+  the counts after `close`, which joins the loop thread.
 - Fixed `ant_uv/examples/read_files.d`, which no longer compiled once
   `takeBuffer` returned a `UvBuffer`. It frees the file with
   `UvBuffer.free`, which returns the block to the allocator that made it.
@@ -128,6 +143,16 @@ measured zero idle CPU. As on 2.1.0, the T1 second-group timer and
 `farmPerGroup` routing skip on this single-LLC host. Not run on Windows:
 ThreadSanitizer, `ant_uv`'s real-mimalloc lane, and the latency
 benchmark.
+
+After the directory refusal and the worker-Fiber fix (2026-11-02, same
+host): the Windows `ant_uv` lane passed under both compilers, then 30 LDC
+and 10 DMD runs of the suite. Linux under WSL2 on the same machine (Ubuntu
+24.04, kernel 6.6.87.2, LDC 1.42.0, DMD 2.112.1, libuv 1.53.0 built from the
+pinned archive with GCC 13.3) ran the lanes that need no CMake. The ring and
+`ant_uv` suites passed under LDC, DMD and ThreadSanitizer, and so did 30
+LDC, 10 DMD and 10 ThreadSanitizer runs of `ant_uv`, both examples and the
+root `dub test`. It is not the Linux gate: `make check` on the 5900XT has
+not been re-run since these changes.
 
 ## 2.1.1 — 2026-10-28
 

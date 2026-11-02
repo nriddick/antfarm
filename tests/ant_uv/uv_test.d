@@ -150,6 +150,9 @@ void layout()
     check(antuv_c_constant(21) == uv_handle_type.UV_CHECK, "UV_CHECK");
     check(antuv_c_constant(22) == uv_handle_type.UV_SIGNAL, "UV_SIGNAL");
     check(antuv_c_constant(23) == uv_req_type.UV_RANDOM, "UV_RANDOM");
+    check(antuv_c_constant(24) == UV_EISDIR, "UV_EISDIR");
+    check(antuv_c_constant(25) == UV_S_IFMT && antuv_c_constant(26) == UV_S_IFDIR,
+        "st_mode's S_IFMT and S_IFDIR");
     check(antuv_c_constant(20) >= UV_MINIMUM_VERSION && uv_version() >= UV_MINIMUM_VERSION,
         "libuv older than 1.19");
     printf("  uv.h %#lx, library %#x\n", antuv_c_constant(20), uv_version());
@@ -744,7 +747,6 @@ void workerFiberReads(string[] paths, ubyte[][] contents)
         "worker Fiber reads stalled");
     check(atomicLoad(bad) == 0, "a worker Fiber read the wrong bytes");
     check(waitUntil(() => domain.drained), "worker Fibers did not finish");
-    check(atomicLoad(gPublished) == atomicLoad(gSubmitted), "publications differ from submissions");
     // A worker Fiber cancelled while parked on a long timer holds its worker
     // until the loop publishes the request, then unwinds.
     shared int waiterReady, workerCancel;
@@ -775,6 +777,10 @@ void workerFiberReads(string[] paths, ubyte[][] contents)
     auto report = loop.close();
     host.close();
     domain.beginShutdown();
+    // The loop runs a request's callback after its trigger or event has
+    // woken the Fiber, so the count can trail until close joins the loop
+    // thread; after that every callback has run.
+    check(atomicLoad(gPublished) == atomicLoad(gSubmitted), "publications differ from submissions");
     check(report.completed == cast(ulong) atomicLoad(gSubmitted) + 1 && report.cancelled == 1
         && report.loopClose == 0, "worker reads close report");
     printf("  %d reads, %lld requests on %u workers in %zu group(s)\n", readers,
@@ -909,12 +915,33 @@ void readFileAllocators(string dir, string path, const(ubyte)[] expected, string
         && (cast(size_t) plainFile.bytes.ptr & 63) == 0, "default block");
     plainFile.free();
 
+    // A directory fails with EISDIR and size 0 on every platform, before the
+    // loop allocates or reads anything, with or without a caller buffer.
+    {
+        immutable allocated = allocations;
+        UvRequest directory;
+        directory.op = UvOp.readFile;
+        directory.path = dir.toStringz;
+        directory.allocator = counting;
+        check(readNow(loop, &directory) && directory.done && directory.result == UV_EISDIR
+            && directory.errorName == "EISDIR" && directory.size == 0 && !directory.ownsBuffer
+            && allocations == allocated, "a directory is refused before allocating");
+        ubyte[64] into;
+        directory = UvRequest.init;
+        directory.op = UvOp.readFile;
+        directory.path = dir.toStringz;
+        directory.buffer = into.ptr;
+        directory.length = into.length;
+        check(readNow(loop, &directory) && directory.done && directory.result == UV_EISDIR
+            && directory.size == 0, "a directory is refused with a caller buffer");
+    }
+
     // A read that fails after allocating: the loop frees the block. On
-    // Linux a directory opens and reports a size, then its read fails with
-    // EISDIR. libuv on Windows reports every directory's size as 0, so there
-    // the file is one whose bytes another handle has locked: it opens (libuv
-    // shares everything) and reports its size, then its read fails with
-    // EBUSY.
+    // Windows the file is one whose bytes another handle has locked: it
+    // opens (libuv shares everything) and reports its size, then its read
+    // fails with EBUSY. On Linux it is a sysfs attribute, which reports a
+    // page as its size; the loopback device's link speed then fails to read
+    // with EINVAL.
     version (Windows)
     {
         import core.sys.windows.windows : CloseHandle, CreateFileW, FILE_ATTRIBUTE_NORMAL,
@@ -932,28 +959,36 @@ void readFileAllocators(string dir, string path, const(ubyte)[] expected, string
         OVERLAPPED whole;
         check(LockFileEx(locker, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
             uint.max, uint.max, &whole) != 0, "lock the file");
-        enum failedError = "EBUSY";
         immutable failedReports = true;
     }
     else
     {
-        import std.file : getSize;
-        auto failedPath = dir;
-        enum failedError = "EISDIR";
-        immutable failedReports = getSize(dir) != 0;
+        // Checked first, so another kernel skips rather than fails.
+        import std.exception : collectException;
+        import std.file : exists, getSize, read;
+        auto failedPath = "/sys/class/net/lo/speed";
+        immutable failedReports = exists(failedPath) && getSize(failedPath) != 0
+            && collectException(read(failedPath)) !is null;
     }
     if (!failedReports)
-        printf("  SKIP failed-read free: the directory reports size 0\n");
+        printf("  SKIP failed-read free: %s does not report a size and fail to read\n",
+            failedPath.toStringz);
     else
     {
+        immutable allocated = allocations, freedBefore = deallocations;
         UvRequest failed;
         failed.op = UvOp.readFile;
         failed.path = failedPath.toStringz;
         failed.allocator = counting;
-        check(readNow(loop, &failed) && failed.done && failed.errorName == failedError
-            && !failed.ownsBuffer, "a read that fails after allocating");
-        check(allocations == 3 && deallocations == 3 && atomicLoad(heap.loopFrees) == 1
-            && atomicLoad(heap.mismatches) == 0, "the loop freed the failed read's block");
+        check(readNow(loop, &failed) && failed.done && failed.result < 0 && !failed.ownsBuffer,
+            "a read that fails after allocating");
+        version (Windows)
+            check(failed.errorName == "EBUSY", "the locked read is EBUSY");
+        check(allocations == allocated + 1 && deallocations == freedBefore + 1
+            && atomicLoad(heap.loopFrees) == 1 && atomicLoad(heap.mismatches) == 0,
+            "the loop freed the failed read's block");
+        printf("  a read failing with %.*s after allocating: the loop freed the block\n",
+            cast(int) failed.errorName.length, failed.errorName.ptr);
     }
     immutable before = allocations;
     immutable freed = deallocations;

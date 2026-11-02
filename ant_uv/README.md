@@ -118,7 +118,9 @@ holds a credit.
 ### Where `readFile` puts a file
 
 Give `readFile` a `buffer` and `length` and it reads into them, stopping
-when the buffer is full. With a null `buffer` the loop opens the file, then
+when the buffer is full. A directory fails with `UV_EISDIR` and `size` 0 on
+every platform, before anything is read or allocated. With a null `buffer`
+the loop opens the file, then
 allocates its size from `request.allocator`, an `ActorAllocator`, at
 `request.alignment`:
 

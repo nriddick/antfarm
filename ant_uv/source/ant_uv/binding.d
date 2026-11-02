@@ -188,19 +188,29 @@ version (Windows)
     enum int UV_EBUSY = -4082;     ///
     enum int UV_ECANCELED = -4081; ///
     enum int UV_EINVAL = -4071;    ///
+    enum int UV_EISDIR = -4068;    ///
     enum int UV_ENOMEM = -4057;    ///
 }
 else version (Posix)
 {
-    import core.stdc.errno : EBADF, EBUSY, ECANCELED, EINVAL, ENOMEM;
+    import core.stdc.errno : EBADF, EBUSY, ECANCELED, EINVAL, EISDIR, ENOMEM;
     enum int UV_EBADF = -EBADF;         ///
     enum int UV_EBUSY = -EBUSY;         ///
     enum int UV_ECANCELED = -ECANCELED; ///
     enum int UV_EINVAL = -EINVAL;       ///
+    enum int UV_EISDIR = -EISDIR;       ///
     enum int UV_ENOMEM = -ENOMEM;       ///
 }
 /// End of file; the same number on every platform.
 enum int UV_EOF = -4095;
+
+/// The file-type bits of `uv_stat_t.st_mode` and the value for a directory.
+/// They are not uv.h names: they are POSIX's `S_IFMT` and `S_IFDIR`, which
+/// libuv's Windows `stat` sets too, and the test checks them against the C
+/// headers.
+enum ulong UV_S_IFMT = 0xF000;
+/// ditto
+enum ulong UV_S_IFDIR = 0x4000;
 
 /// The smallest libuv `ant_uv` supports: the accessor API arrived in 1.19.
 enum uint UV_MINIMUM_VERSION = (1 << 16) | (19 << 8);

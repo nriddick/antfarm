@@ -1,7 +1,18 @@
 /* Layout and constant oracle for ant_uv.binding, compiled by the system C
  * compiler against the real uv.h (ImportC cannot read it). */
 #include <stddef.h>
+#include <sys/stat.h>
 #include <uv.h>
+
+/* The st_mode bits libuv reports: the kernel's on Unix, and on Windows the
+ * CRT's, which libuv's stat sets. */
+#ifdef _WIN32
+#define ANTUV_S_IFMT _S_IFMT
+#define ANTUV_S_IFDIR _S_IFDIR
+#else
+#define ANTUV_S_IFMT S_IFMT
+#define ANTUV_S_IFDIR S_IFDIR
+#endif
 
 size_t antuv_c_sizeof_buf(void) { return sizeof(uv_buf_t); }
 size_t antuv_c_offsetof_buf_base(void) { return offsetof(uv_buf_t, base); }
@@ -37,6 +48,9 @@ long antuv_c_constant(int which)
     case 21: return UV_CHECK;
     case 22: return UV_SIGNAL;
     case 23: return UV_RANDOM;
+    case 24: return UV_EISDIR;
+    case 25: return ANTUV_S_IFMT;
+    case 26: return ANTUV_S_IFDIR;
     }
     return -1;
 }

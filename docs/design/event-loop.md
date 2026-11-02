@@ -525,8 +525,14 @@ What runs, and where:
     for their request;
   - 96 worker Fibers on a two-group `GroupHost` reading files three ways
     (loop allocation, caller buffer, and `open`/`fstat`/`read`/`close` on a
-    counted trigger), with publications equal to submissions, and a
-    cancelled worker Fiber waiting for its request;
+    counted trigger), with publications equal to submissions once close
+    has joined the loop thread, and a cancelled worker Fiber waiting for
+    its request;
+  - `readFile` into the request's allocator, at its alignment, freed
+    exactly once; a directory refused with `EISDIR` before any allocation;
+    a read that fails after allocating, freed by the loop (a locked file
+    on Windows, a sysfs attribute on Linux); a refused allocation and an
+    empty file;
   - an `open` of a FIFO with no writer abandoned by close, with the loop
     left allocated (on Windows, where opening a pipe does not block, a read
     of a named pipe before its server writes).
@@ -553,10 +559,14 @@ What runs, and where:
   the `ring` and `ant_uv` lanes in it, under LDC and DMD. The layout oracle,
   compiled by MSVC against the real `uv.h`, confirms the 16-byte `uv_buf_t`
   with its 32-bit length first; the loop pin, the auxiliary threads' CPUs
-  and `THREAD_PRIORITY_BELOW_NORMAL` read back as asked. One difference
-  from Linux: libuv on Windows reports every directory's size as 0, so a
-  `readFile` of a directory succeeds with no bytes there, where Linux
-  fails it with `EISDIR` (section 7).
+  and `THREAD_PRIORITY_BELOW_NORMAL` read back as asked. libuv on Windows
+  reports every directory's size as 0, which is why `readFile` refuses
+  directories by their mode (section 8).
+- **Linux under WSL2** on the Windows host, after the directory refusal:
+  the ring and `ant_uv` suites under LDC, DMD and ThreadSanitizer, with
+  30, 10 and 10 repeated `ant_uv` runs, both examples and the root
+  `dub test`. This supplements `make check` on the 5900XT and does not
+  replace it.
 
 ## 6. Release plan
 
@@ -590,11 +600,6 @@ What runs, and where:
   flood of file reads on the 5900XT beside a busy pool decides.
 - Whether the credit default should follow the ring's capacity or the
   auxiliary pool size; the same flood decides that too.
-- Whether `readFile` should refuse a directory itself, from the mode its
-  `fstat` already returns. libuv on Windows reports a directory's size as
-  0, so a `readFile` of one succeeds there with no bytes and no
-  allocation; on Linux it allocates the reported size and the read fails
-  with `EISDIR`, unless the filesystem also reports 0.
 
 ## 8. Where the implementation departed from the plan
 
@@ -620,3 +625,9 @@ What runs, and where:
   runs only on the loop thread. A resource manager can load into an
   allocator it owns, mimalloc included. The block is handed over as a
   `UvBuffer`, which frees it through the same allocator.
+- **`readFile` refuses directories** (section 5). The plan did not
+  consider them. A directory opens on both platforms; Linux then reported
+  its size, and the read failed with `EISDIR` after the allocation, while
+  Windows reported size 0 and succeeded with no bytes. `readFile` now
+  checks the file type in the `fstat` it already makes and fails with
+  `UV_EISDIR` and size 0 everywhere, before allocating or reading.

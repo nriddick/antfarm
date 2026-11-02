@@ -103,7 +103,8 @@ enum UvOp : ubyte
     /// file's size, so `size > result` means the buffer was too small. With a
     /// null `buffer` the loop allocates the file's size from the request's
     /// `allocator` and hands the block over: see `UvRequest.takeBuffer`. An
-    /// empty file allocates nothing.
+    /// empty file allocates nothing. A directory fails with `UV_EISDIR` and
+    /// `size` 0 on every platform, before anything is allocated or read.
     readFile,
 }
 
@@ -1271,14 +1272,18 @@ private:
     void fsDone(OpSlot* slot, uv_fs_t* req) nothrow @nogc
     {
         immutable result = cast(long) uv_fs_get_result(req);
-        ulong statSize;
+        ulong statSize, statMode;
         if (result >= 0 && (slot.op == UvOp.stat || slot.op == UvOp.fstat
                 || (slot.op == UvOp.readFile && slot.phase == ReadPhase.stat)))
-            statSize = uv_fs_get_statbuf(req).st_size;
+        {
+            auto statbuf = uv_fs_get_statbuf(req);
+            statSize = statbuf.st_size;
+            statMode = statbuf.st_mode;
+        }
         uv_fs_req_cleanup(req);
         if (slot.op == UvOp.readFile)
         {
-            readFileStep(slot, result, statSize);
+            readFileStep(slot, result, statSize, statMode);
             return;
         }
         auto request = slot.request;
@@ -1287,7 +1292,7 @@ private:
         if (request !is null) publish(request, result, statSize);
     }
 
-    void readFileStep(OpSlot* slot, long result, ulong statSize) nothrow @nogc
+    void readFileStep(OpSlot* slot, long result, ulong statSize, ulong statMode) nothrow @nogc
     {
         auto fs = cast(uv_fs_t*) slot.uv;
         final switch (slot.phase)
@@ -1317,6 +1322,15 @@ private:
             if (result < 0 || slot.cancelling)
             {
                 slot.status = result < 0 ? result : UV_ECANCELED;
+                closeReadFile(slot);
+                return;
+            }
+            // A directory opens on both platforms, then reports a size Linux
+            // would fail to read and Windows reports as 0: refuse it here,
+            // before anything is allocated or read, with size 0 everywhere.
+            if ((statMode & UV_S_IFMT) == UV_S_IFDIR)
+            {
+                slot.status = UV_EISDIR;
                 closeReadFile(slot);
                 return;
             }
