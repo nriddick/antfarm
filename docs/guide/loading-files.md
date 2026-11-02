@@ -219,11 +219,13 @@ be any power of two the allocator supports.
 | mimalloc v3 | `options.allocator = mimallocV3ActorAllocator()` | compile with `AntfarmMimallocV3` and link mimalloc |
 | Your own | `ActorAllocator(context, &allocate, &deallocate)` | an arena, a budgeted pool, a switch between arenas and mimalloc, or a wrapper that counts |
 
-For files of a megabyte or more, mimalloc is the better choice. The system
-allocators return a large block to the OS on `free` and fault its pages in
-again on the next allocation; an 8 MiB free cost a tenth to a third of a
-millisecond on the freeing thread, which is the main thread in this
-example, against a microsecond or two with mimalloc
+For files of a megabyte or more, mimalloc is the better choice. On Windows
+and under WSL2 the system allocators returned a large block to the OS on
+`free` and faulted its pages in again on the next allocation. An 8 MiB free
+then cost a tenth to a third of a millisecond on the freeing thread, which
+is the main thread in this example, against a microsecond or two with
+mimalloc. glibc on native Linux varied from round to round, from a tenth of
+a microsecond to 71 µs
 ([measurements](../performance/file-loading-sdl3-2026-11-02.md)).
 
 An allocator for `readFile` must work like this:

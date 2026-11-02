@@ -502,13 +502,13 @@ struct UvLoopOptions
     /// `fstat` through io_uring (`UV_LOOP_USE_IO_URING_SQPOLL`, libuv 1.49
     /// or later) instead of its auxiliary pool. `create` sets
     /// `UV_USE_IO_URING=1` unless the environment sets it already; a value
-    /// of 0 there keeps the pool. The kernel runs the operations on a
-    /// polling thread of its own, which spins while the ring is busy. It
-    /// suits many reads from files already open; `readFile` stays a pool
-    /// job, because that one kernel thread would copy every whole file in
-    /// turn. libuv falls back to the pool for an operation the ring cannot
-    /// take. Ignored on other systems; `UvLoop.ioUring` reports whether it
-    /// was configured.
+    /// of 0 there keeps the pool. `create` also builds the ring, before the
+    /// loop takes requests, so no request pays its setup. The kernel runs
+    /// the operations on a polling thread of its own, which spins while the
+    /// ring is busy and copies in turn what the pool's threads copy side by
+    /// side; `readFile` stays a pool job for that reason. libuv falls back
+    /// to the pool for an operation the ring cannot take. Ignored on other
+    /// systems; `UvLoop.ioUring` reports whether it was configured.
     bool ioUring;
 }
 
@@ -1642,6 +1642,7 @@ private:
         }
         allocateSlots();
         warmAuxPool();
+        version (linux) if (ioUring_) buildIoUring();
         stepTimer_ = cast(uv_timer_t*) malloc(uv_handle_size(uv_handle_type.UV_TIMER));
         if (stepTimer_ is null) throw new UvLoopException("ant_uv: timer allocation failed");
         immutable trc = uv_timer_init(loop_, stepTimer_);
@@ -1654,6 +1655,25 @@ private:
         asyncOpen_ = true;
         atomicStore!(MemoryOrder.rel)(wakeGate_, 0UL);
         done = true;
+    }
+
+    // libuv builds its ring inside the first file operation that could use
+    // it. Build it here, before the loop takes requests, with an fstat of no
+    // descriptor: EBADF through the ring, or through the pool where the
+    // kernel refused the ring. No request then pays for the polling thread
+    // and the ring's mappings. Under ThreadSanitizer, a ring built later
+    // could also map a descriptor number that a readFile job had just closed,
+    // which reads as a race: libuv closes descriptors and creates the ring
+    // with raw system calls, which TSan does not see.
+    version (linux) void buildIoUring()
+    {
+        auto fs = cast(uv_fs_t*) calloc(1, uv_req_size(uv_req_type.UV_FS));
+        if (fs is null) throw new UvLoopException("ant_uv: io_uring warm-up allocation failed");
+        scope (exit) free(fs);
+        // Nothing else is active yet, so the run returns after the fstat.
+        if (uv_fs_fstat(loop_, fs, -1, &onRingBuilt) == 0)
+            uv_run(loop_, uv_run_mode.UV_RUN_DEFAULT);
+        uv_fs_req_cleanup(fs);
     }
 
     // libuv builds its polling ring only on 5.10.186 or later; earlier
@@ -1903,6 +1923,9 @@ private extern (C) void onFsDone(uv_fs_t* req) nothrow @nogc
     auto slot = cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) req);
     ownerOf(slot).fsDone(slot, req);
 }
+
+// The fstat that builds the io_uring ring at create; its EBADF is expected.
+private extern (C) void onRingBuilt(uv_fs_t*) nothrow @nogc {}
 
 // Runs on one of libuv's auxiliary threads.
 private extern (C) void onReadJob(uv_work_t* work) nothrow @nogc

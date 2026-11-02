@@ -535,11 +535,18 @@ What runs, and where:
   no abandonment instead.
 - **Stability:** 30 consecutive LDC runs, 10 DMD and 10 ThreadSanitizer
   runs of the loop suite, and 10 ThreadSanitizer runs of the ring suite,
-  without a failure. ThreadSanitizer needs two suppressions, both explained
-  in `tests/ant_uv/tsan.supp`: druntime's GC suspend handler and races
-  internal to druntime's uninstrumented GC allocator. libuv itself is
-  deliberately not suppressed, because suppressing calls from it would also
-  hide the mutexes that order its auxiliary threads' writes.
+  without a failure. On the 5900XT, after the fixes to the timers case and
+  to where the io_uring ring is built, 50 LDC, 100 DMD, 50 io_uring,
+  20 ThreadSanitizer, 90 io_uring ThreadSanitizer, 20 mimalloc and 20
+  io_uring mimalloc runs of the loop suite passed. ThreadSanitizer needs two
+  suppressions, both explained in `tests/ant_uv/tsan.supp`: druntime's GC
+  suspend handler and races internal to druntime's uninstrumented GC
+  allocator. libuv itself is deliberately not suppressed, because
+  suppressing calls from it would also hide the mutexes that order its
+  auxiliary threads' writes. libuv closes descriptors and creates its ring
+  with raw system calls, which ThreadSanitizer does not see, so a ring
+  built late could map a descriptor number a `readFile` job had just
+  closed and read as a race; `create` builds it first for that reason too.
 - **`make check`** runs the ring lanes always and the loop lanes when
   `pkg-config` finds libuv 1.19 or later, printing the reason when it skips
   them.
@@ -599,7 +606,9 @@ What runs, and where:
   auxiliary pool size; the same flood decides that too.
 - Whether `UvLoopOptions.ioUring` should become the Linux default. The same
   flood decides, since the kernel's polling thread spins while the ring is
-  busy and nothing in `ant_uv` places it.
+  busy and nothing in `ant_uv` places it. On the 5900XT's cached reads the
+  pool was already the faster path
+  ([measurements](../performance/file-loading-sdl3-2026-11-02.md#native-linux-on-the-ryzen-9-5900xt)).
 
 ## 8. Where the implementation departed from the plan
 
@@ -635,8 +644,11 @@ What runs, and where:
   keeps the loop thread's allocation only where the allocator needs it.
 - **io_uring is an option** (section 2). `UvLoopOptions.ioUring` configures
   libuv's ring on Linux and sets `UV_USE_IO_URING=1` unless the user set
-  it; without both, libuv uses the pool. It doubled random reads from an
-  open file and is not used for `readFile` (section 3.2).
+  it; without both, libuv uses the pool. `create` builds the ring before
+  the loop takes requests, where libuv would build it inside the first file
+  operation. Random reads from an open file ran twice as fast through it
+  under WSL2, and at three quarters of the pool's rate on native Linux on
+  the 5900XT. It is not used for `readFile` (section 3.2).
 - **`readFile` refuses directories** (section 5). The plan did not
   consider them. A directory opens on both platforms; Linux then reported
   its size, and the read failed with `EISDIR` after the allocation, while

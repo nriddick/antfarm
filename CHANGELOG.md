@@ -72,8 +72,14 @@ where the implementation departed from the plan.
       later.
     - `UvLoop.ioUring` reports whether it took effect, and `summary()`
       names the path file operations take.
-    - Random 64 KiB reads from an open file doubled, to 10.8 GiB/s, level
-      with SDL3's io_uring.
+    - `create` builds libuv's ring before the loop takes requests, with an
+      `fstat` of no descriptor. libuv would otherwise build it inside the
+      first file operation, which then paid for the polling thread and the
+      ring's mappings.
+    - Under WSL2 on the test laptop, random 64 KiB reads from an open file
+      doubled, to 10.8 GiB/s, level with SDL3's io_uring. On native Linux
+      on the 5900XT they went the other way, 21 GiB/s through the ring
+      against 29 through the pool, whose four threads copy side by side.
     - `readFile` stays a pool job. Through the ring, the kernel's one
       polling thread copied every whole file in turn, at a fifth to a half
       of the job's rate.
@@ -87,9 +93,11 @@ where the implementation departed from the plan.
     `submitBatch` and `controlCapacity`, now constants, and gains
     `allocator`.
   - The README and the loading guide recommend mimalloc for large files.
-    The system allocators return a large block to the OS on `free`: an
-    8 MiB free cost the freeing thread 100 to 350 µs, against 1 to 2 µs
-    with mimalloc.
+    On Windows and under WSL2 the system allocators returned a large block
+    to the OS on `free`: an 8 MiB free cost the freeing thread 100 to
+    350 µs, against 1 to 2 µs with mimalloc. With glibc 2.44 on the 5900XT
+    the same free cost from 0.1 to 71 µs, varying from round to round, and
+    mimalloc loaded 8 MiB files 6 to 13% faster.
   - `readFile` refuses a directory with `UV_EISDIR` and `size` 0 on every
     platform. It reads the file type from the `fstat` it already makes,
     before allocating or reading. Without the check, Linux allocated the
@@ -121,8 +129,10 @@ where the implementation departed from the plan.
   - `make -C tests/ant_uv run-iouring` runs the suite with
     `UvLoopOptions.ioUring` on every loop. `make check` runs it when
     `pkg-config` finds libuv 1.49. Through the ring, an open of a FIFO with
-    no writer completed at once (Linux 6.6), so that lane checks for no
-    abandonment instead.
+    no writer completed at once (Linux 6.6 and 7.3), so that lane checks for
+    no abandonment instead. The lane also checks that `create` built the
+    ring: the kernel's polling thread runs before the first request. Where
+    the kernel refuses the ring, it says so and skips that check.
 - Windows x64:
   - `scripts/build-libuv-windows.py` builds the pinned libuv 1.53.0 from
     its release archive, whose SHA-256 it checks, with CMake (on PATH or
@@ -157,6 +167,22 @@ where the implementation departed from the plan.
 - Fixed `ant_uv/examples/read_files.d`, which no longer compiled once
   `takeBuffer` returned a `UvBuffer`. It frees the file with
   `UvBuffer.free`, which returns the block to the allocator that made it.
+- Fixed two intermittent failures of the `ant_uv` suite, found on the
+  5900XT.
+  - The timers case failed "timer fired early" twice in about 950 runs,
+    under DMD and ThreadSanitizer. It required a timer to fire no more
+    than 1 ms early, measured from a precise time taken at submit. libuv's
+    loop time is whole milliseconds, and on a 1000 Hz kernel it reads
+    `CLOCK_MONOTONIC_COARSE`, so a timer can fire up to a tick plus a
+    millisecond early. libuv alone fired 164 of 28,000 timers more than
+    1 ms early, and none 2 ms early; the earliest was 1.39 ms. The case
+    now allows 2 ms.
+  - ThreadSanitizer with `ioUring` reported a race on a file descriptor in
+    10 of 90 runs. libuv built its ring inside the first file operation and
+    mapped a descriptor number that a `readFile` job had just closed. libuv
+    closes descriptors and creates the ring with raw system calls, which
+    ThreadSanitizer does not see, so it was a false report. With the ring
+    built at `create`, none of 90 such runs reported it.
 - Fixed an intermittent `make check` failure, present since 2.1.1, at
   `tests/ant_fibers/smoke.d:1751`. It failed about 5% of runs under each of
   DMD and LDC. The test waited for `terminated`, then for
@@ -188,6 +214,13 @@ where the implementation departed from the plan.
   - `ant_uv`'s submit costs 0.1 to 1.2 µs at any size.
   - SDL's rings keep the lowest single-file latency.
   - `SDL_SetMemoryFunctions` with mimalloc ran stably.
+  - Native Linux on the 5900XT, added to the record:
+    - `ant_uv` loaded batched 16 KiB files at 7.9 GiB/s against SDL
+      io_uring's 3.0, and 8 MiB files at 14.8 against 5.0 (16.7 against
+      11.0 with mimalloc).
+    - SDL kept the single-file lead, 4.7 against 15 µs at p50.
+    - Reads from an open file ran faster through the pool than through
+      `ioUring`.
   - The benchmark's first, GC-allocating version showed druntime's 19
     parallel mark threads spinning at full CPU after a collection in some
     processes. That is unexplained and left open.
@@ -230,8 +263,25 @@ pinned archive with GCC 13.3) ran the lanes that need no CMake. The ring and
 LDC, 10 DMD and 10 ThreadSanitizer runs of `ant_uv`, both examples and the
 root `dub test`. The same lanes passed again after the whole-file job, the
 constructors and the loop's default allocator, with the io_uring lane and
-20 of its repeats added on Linux. It is not the Linux gate: `make check` on
-the 5900XT has not been re-run since these changes.
+20 of its repeats added on Linux. That was not the Linux gate, which
+follows.
+
+The Linux gate on the 5900XT (2026-11-02): CachyOS with Linux 7.3.1, LDC
+1.43.0, DMD 2.113.0, libuv 1.53.0 and glibc 2.44.
+- `make check` passed on 619f2cb as pulled from the Windows host, with the
+  io_uring lane, and again with the two fixes above.
+- Repeated runs of the `ant_uv` suite on 619f2cb:
+  - Passed: 100 LDC, 100 io_uring, 30 ThreadSanitizer, 30 mimalloc and
+    30 io_uring mimalloc runs.
+  - Failed: 1 of 50 DMD runs and 4 of 30 io_uring ThreadSanitizer runs,
+    the two failures fixed above.
+- With the fixes, every repeated run passed: 50 LDC, 100 DMD, 50 io_uring,
+  20 ThreadSanitizer, 90 io_uring ThreadSanitizer, 20 mimalloc and
+  20 io_uring mimalloc.
+- Also passed: `ant_uv`'s mimalloc lane, both examples through Dub with the
+  C runtime and with mimalloc, and `tools/perf/file_loading` natively.
+- The pinned libuv archive's SHA-256 matched here too, and its signature
+  verified against the key that libuv's `MAINTAINERS.md` lists at v1.53.0.
 
 ## 2.1.1 — 2026-10-28
 

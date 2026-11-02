@@ -74,13 +74,17 @@ pool first. `loop.auxThreads` reads back what each thread ended up with.
 On Linux, `options.ioUring = true` has libuv issue `open`, `close`, `read`,
 `write`, `stat` and `fstat` through io_uring instead of the pool (libuv 1.49
 and Linux 5.10.186 or later). `create` sets `UV_USE_IO_URING=1` unless the
-environment already sets it, and an explicit `0` there keeps the pool. The
+environment already sets it, and an explicit `0` there keeps the pool.
+`create` builds the ring, so the first request does not pay for it. The
 kernel runs the operations on a polling thread of its own, which spins while
-the ring is busy and which `auxCpus` does not place. That suits many reads
-from files already open, such as a pack file: random 64 KiB reads ran twice
-as fast as through the pool. `readFile` stays a pool job, because the one
-polling thread would copy every whole file in turn; through the ring, 8 MiB
-files loaded at a fifth to a half of the job's rate
+the ring is busy and which `auxCpus` does not place. Whether that pays
+depends on the system, so measure on the target. Random 64 KiB reads from
+an open pack file ran twice as fast as through the pool under WSL2, where
+system calls cost more. On native Linux on a Ryzen 9 5900XT they ran at
+three quarters of the pool's rate: the pool's four threads copy side by
+side, and the ring's one thread copies in turn. `readFile` stays a pool job
+for the same reason; through the ring, 8 MiB files loaded at a fifth to a
+half of the job's rate
 ([measurements](../docs/performance/file-loading-sdl3-2026-11-02.md)).
 `loop.ioUring` reports whether the option took effect; where the kernel
 refuses the ring, libuv falls back to the pool.
@@ -166,12 +170,15 @@ it, or free it with `freeBuffer`; `submit` refuses the request until you do
 one or the other. `UvBuffer.free` returns the block to its allocator from
 any thread. If the read fails, the loop frees the block itself.
 
-For files of a megabyte or more, prefer mimalloc v3. The system allocators
-return a large block to the OS when it is freed and fault its pages in again
-on the next allocation. On the test laptop, freeing an 8 MiB file cost the
-freeing thread 100 to 350 µs on Windows and Linux, against 1 to 2 µs with
-mimalloc, and 8 MiB loads ran at 8.0 GiB/s against 12.8 on Windows, 11.5
-against 17.1 on Linux
+For files of a megabyte or more, prefer mimalloc v3, whose cost is low and
+steady. On the test laptop the system allocators returned a large block to
+the OS when it was freed and faulted its pages in again on the next
+allocation. Freeing an 8 MiB file cost the freeing thread 100 to 350 µs on
+Windows and under WSL2, against 1 to 2 µs with mimalloc. 8 MiB loads ran at
+8.0 GiB/s against 12.8 on Windows, and 11.5 against 17.1 under WSL2. On
+native Linux with glibc 2.44 the same free cost from 0.1 to 71 µs, varying
+from round to round, against about 1 µs with mimalloc, which loaded 8 MiB
+files 6 to 13% faster
 ([file loading against SDL3](../docs/performance/file-loading-sdl3-2026-11-02.md)).
 `mimallocV3ActorAllocator()` is in `antfarm.actors.mimalloc`, compiled only
 with `AntfarmMimallocV3` and needing mimalloc linked. With Dub, depend on

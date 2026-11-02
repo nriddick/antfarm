@@ -4,9 +4,11 @@
  + order and ring retention, timers, credits under a flood, a full request
  + ring, cancellation, close with work in flight, a failing step hook,
  + Fibers on the loop thread, files read by worker Fibers on a GroupHost,
- + readFile's allocators, and abandonment of an operation that cannot
- + finish. Built with `AntfarmMimallocV3` and the real mimalloc library, it
- + also reads into mimalloc v3. Linux and Windows.
+ + readFile's allocators, the per-operation constructors, whole-file reads
+ + cancelled in flight, and abandonment of an operation that cannot finish.
+ + With ANTUV_TEST_IO_URING=1 every loop uses io_uring, and create must have
+ + built the ring. Built with `AntfarmMimallocV3` and the real mimalloc
+ + library, it also reads into mimalloc v3. Linux and Windows.
  +/
 module uv_test;
 
@@ -130,7 +132,8 @@ bool allFinished(const(UvRequest)[] requests)
 }
 
 // ANTUV_TEST_IO_URING=1 runs every loop with UvLoopOptions.ioUring, so open,
-// close, read, write, stat and fstat go through the ring (Linux only).
+// close, read, write, stat and fstat go through the ring (Linux only), and
+// adds ioUringRingAtCreate.
 __gshared bool gIoUring;
 
 UvLoopOptions testOptions()
@@ -138,6 +141,24 @@ UvLoopOptions testOptions()
     UvLoopOptions o;
     o.ioUring = gIoUring;
     return o;
+}
+
+// libuv's io_uring polling threads in this process, by the name the kernel
+// gives them (`iou-sqp-<pid>`).
+version (linux) size_t pollingThreads()
+{
+    import std.algorithm.searching : startsWith;
+    import std.file : dirEntries, readText, SpanMode;
+    size_t n;
+    foreach (entry; dirEntries("/proc/self/task", SpanMode.shallow))
+    {
+        try
+        {
+            if (readText(entry.name ~ "/comm").startsWith("iou-sqp")) ++n;
+        }
+        catch (Exception) {} // the thread exited meanwhile
+    }
+    return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +248,32 @@ void lifecycleAndPlacement(ProcessorId[] cpus)
     auto again = loop.close();
     check(again.loopClose == 0, "second close");
     pass("lifecycle, loop pin, auxiliary pool size, CPUs and priority");
+}
+
+// With UvLoopOptions.ioUring, create builds libuv's ring before the loop
+// takes requests, so the kernel's polling thread runs before the first
+// request. Left to itself, libuv builds the ring inside that request.
+version (linux) void ioUringRingAtCreate()
+{
+    // An earlier loop's polling thread exits shortly after its close.
+    check(waitUntil(() => pollingThreads() == 0), "an earlier ring's polling thread lingers");
+    auto loop = UvLoop.create(testOptions());
+    check(loop.ioUring, "io_uring not configured");
+    // The thread takes its name when it first runs: allow it a moment.
+    if (waitUntil(() => pollingThreads() != 0, 1.seconds))
+    {
+        check(loop.close().loopClose == 0, "ring close report");
+        pass("create builds the io_uring ring before the first request");
+        return;
+    }
+    // No polling thread yet: a request tells a refused ring, where libuv
+    // uses the pool, from one that nothing has built.
+    auto r = UvRequest.stat("/");
+    check(readNow(loop, &r) && r.succeeded, "stat through the loop");
+    check(!waitUntil(() => pollingThreads() != 0, 200.msecs),
+        "the first request built the ring, not create");
+    check(loop.close().loopClose == 0, "ring close report");
+    printf("SKIP io_uring ring at create: the kernel refused the ring\n");
 }
 
 void delegate() nopProducer(UvLoop loop, UvRequest[] mine)
@@ -327,10 +374,15 @@ void timers()
         check(loop.submit(&r) == UvSubmit.accepted, "timer submit");
     }
     check(waitUntil(() => atomicLoad(state.count) == n), "timers did not fire");
+    // libuv's loop time is whole milliseconds, and on Linux it reads
+    // CLOCK_MONOTONIC_COARSE when that ticks every millisecond or faster.
+    // Measured from a precise time taken at submit, a timer can therefore
+    // fire up to a tick plus a millisecond early (1.39 ms in libuv alone on
+    // a 1000 Hz kernel), so the bound is 2 ms.
     foreach (i, ref r; records)
     {
         check(r.done && r.result == 0, "timer result");
-        check(atomicLoad(state.elapsed[i]) >= (cast(long) r.timeoutMs - 1) * 10_000, "timer fired early");
+        check(atomicLoad(state.elapsed[i]) >= (cast(long) r.timeoutMs - 2) * 10_000, "timer fired early");
     }
     loop.close();
     pass("timers fire after their timeout");
@@ -1341,6 +1393,7 @@ int main()
 
     layout();
     lifecycleAndPlacement(cpus);
+    version (linux) if (gIoUring) ioUringRingAtCreate();
     nopOrdering();
     timers();
     completionRetention();
