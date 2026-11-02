@@ -579,8 +579,8 @@ What runs, and where:
   and from a loop-affine resource manager. The latency measurement, a full
   `make check` and the native Windows matrix with the pinned libuv build
   are done.
-- **2.2.1:** sockets, pipes and process spawn in the binding as the first
-  consumer needs them.
+- **2.2.1:** UDP sockets as designed in section 9, then TCP streams, pipes
+  and process spawn as the first consumer needs them.
 - **Later:** the Element Farm, once its ordering and membership contract is
   written, as a second channel kind rather than a drop-in; `ant_uv` in the
   C ABI after production use; a loop inside a pool worker (the park-owner
@@ -643,3 +643,253 @@ What runs, and where:
   Windows reported size 0 and succeeded with no bytes. `readFile` now
   checks the file type in the `fstat` it already makes and fails with
   `UV_EISDIR` and size 0 everywhere, before allocating or reading.
+
+## 9. 2.2.1: UDP sockets
+
+Status: design, 2026-11-02, before any code. The first consumer's netcode
+was discussed in enough detail to fix the transport's shape; section 9.1
+records what was taken from it. The decisions below are made; section 9.11
+lists what is not.
+
+### 9.1 What the first consumer asks
+
+OMMe's network layer, as planned:
+
+- An authoritative server, often on the player's own machine. Clients send
+  at 120 Hz; the server polls at 240 Hz, sampling packets inside a transmit
+  window rather than simulating at that rate; the client simulates at
+  240 Hz and sends on alternate ticks.
+- Two classes of data. Critical events (deterministic, sequence-numbered,
+  with parity across about a second of history, and a snapshot when one is
+  missed) and fluid samples such as movement, reconstructed from whatever
+  arrives. Physics objects are reported by clients at about 10 Hz and
+  corrected by the server past a tolerance. A snapshot larger than one
+  datagram is fountain-coded, so it needs no reliable channel.
+- The main thread polls the receive ring at its tick, parses datagrams into
+  its own ring buffers and FEC history, and releases them within the tick.
+  It builds the tick's outgoing packets and submits them at the tick's end.
+- Clock sync runs continuously from transmit and arrival timestamps on
+  ordinary packets, and aligns the client's tick grid to the server's by a
+  phase nudge and a rate drift.
+- Sessions, authentication, replay windows and packet formats are the
+  application's, as section 4 already says of request meaning. The
+  transport carries no cryptography. The only code that parses a stranger's
+  bytes is the application's session lookup and MAC check.
+- One loop for files and network, on a core the main thread does not share.
+
+What that asks of the transport: datagram in, datagram out, timestamps at
+the loop thread's precision, a bounded receive window that drops rather
+than backs up, and nothing else.
+
+### 9.2 The socket
+
+A UDP socket is a long-lived object the loop owns, in a table indexed by a
+small integer id. A request creates it and a request closes it. Its
+options are a caller-owned `UvUdpOptions`, valid until the open publishes,
+like a request's `path`:
+
+| Option | Meaning |
+| --- | --- |
+| `bind` | the local `UvAddress`; port 0 for any; dual-stack by default |
+| `connect` | optional peer: sends omit the address, and ICMP errors reach the socket |
+| `completions`, `tag` | the ring that receives datagrams, and the element tag that names this socket on it |
+| `window` | receive buffers, fixed for the socket's life |
+| `maxDatagram` | bytes of data per buffer; a larger datagram is truncated and flagged |
+| `reuseAddress`, `broadcast`, `ipv6Only`, `ttl` | libuv's socket options, applied at open |
+| `receiveBufferSize`, `sendBufferSize` | the kernel's, when nonzero |
+| `multicast` | a group to join, with its interface |
+
+`UvAddress` is 32 bytes inline: family, port, a 16-byte address and the
+IPv6 scope. It is the same type in the options, in a send, and in a
+received datagram's header, with constructors from text and a formatter.
+The loop converts it to a `sockaddr` at the point of use.
+
+The socket's counters (received, dropped, truncated, errors, sent, send
+errors) are atomics the application reads by id between the open's and the
+close's publications. An id is reused after close; the discipline is a file
+descriptor's.
+
+### 9.3 Requests
+
+| Request | Inputs | Outputs |
+| --- | --- | --- |
+| `udpOpen(&options)` | the options, valid until publication | `result` = the socket id |
+| `udpSend(socket, bytes, peer)` | the bytes, valid until publication; `peer` ignored on a connected socket; `stampAt` optional | `result` = bytes sent |
+| `udpClose(socket)` | | `result` |
+| `resolve(host, port, addresses)` | a NUL-terminated host; a caller-owned `UvAddress[]` to fill | `result` = addresses found, at most the slice's length |
+
+`resolve` is `getaddrinfo` on libuv's pool, which is the system resolver.
+It answers with addresses, not trust; the application's handshake is what
+makes a server trusted.
+
+### 9.4 The receive path
+
+At open the socket allocates its window from the loop's allocator: `window`
+buffers of 64 + `maxDatagram` bytes, 64-aligned. The first 64 bytes are
+the header, so the data is 64-aligned too:
+
+```d
+struct UvDatagram
+{
+    long arrivalNanos;   // the loop's clock, in libuv's receive callback
+    uint length;
+    uint flags;          // truncated: the OS discarded the rest
+    UvAddress peer;
+    uint socket;
+    // 8 bytes spare; data at offset 64
+    inout(ubyte)[] bytes() inout;
+    void release();      // back to its socket's window, from any thread
+}
+```
+
+The loop thread keeps the window's free list. Buffers released from other
+threads go onto an atomic LIFO that the loop drains into the free list
+when it next allocates, the frame pool's remote-list shape, so a release is
+one CAS and the receive path never locks. The loop starts receiving at
+open with `uv_udp_recv_start`; its allocation callback pops a buffer and
+offers libuv the data region; its receive callback fills the header and
+pushes one element on the socket's ring: `tag` the socket's tag,
+`generation` a per-socket receive counter, `pointer` the header, and the
+payload the length and flags, the arrival time and the socket id, so a
+consumer can route without touching the buffer's line. A callback with no
+datagram, which libuv makes to hand a buffer back, returns it to the free
+list.
+
+**Drop and count.** When the window is exhausted the allocation callback
+returns an empty buffer, libuv reports `UV_ENOBUFS`, and the socket counts
+a drop. Nothing is retried and nothing queues outside the window. This is
+the right rule for real-time traffic: a stalled consumer loses the newest
+packets rather than accumulating stale ones, and the count says it
+happened. It also keeps the ring from ever filling, provided its capacity
+is at least the sum of the windows of the sockets that share it, which
+`udpOpen` checks. The pending-delivery FIFO of section 3.2 is for request
+completions and does not apply here.
+
+**Sizing.** The window covers only the unparsed backlog, not the
+application's histories, which are its own copies. At 120 Hz in and a
+240 Hz drain that is one or two packets plus bursts; 64 is half a second
+of headroom for a client. A server sizes its one socket's window from its
+maximum client count times a few packets. Both are fixed at open; a socket
+that needs more is closed and reopened.
+
+**Batching.** libuv's `recvmmsg` mode (`UV_UDP_RECVMMSG`) delivers several
+datagrams from one 64 KiB buffer and changes ownership to a reference
+count per chunk. It waits for a measured need; at a server's 12,000
+packets a second the per-datagram path is about a tenth of the loop thread.
+
+### 9.5 The send path
+
+`udpSend` keeps the caller's bytes until publication, as `write` does. At
+dequeue the loop calls `uv_udp_try_send`, one `sendto` with no request
+object, and publishes at once; only `UV_EAGAIN` falls back to `uv_udp_send`
+with the slot, whose stride grows to cover `uv_udp_send_t`. A connected
+socket omits the address. `uv_udp_try_send2`, which is `sendmmsg`, can take
+a drain batch later without changing the request.
+
+**`stampAt`.** When set, the loop writes its transmit time, nanoseconds as
+a little-endian 64-bit integer, at `bytes[stampAt .. stampAt + 8]` just
+before the system call. The bytes are the loop's until publication
+already; this is the first time the loop writes into a send buffer, and it
+is why the field exists.
+
+### 9.6 Timestamps
+
+Transport time is the loop's monotonic clock, `MonoTime`, converted to
+nanoseconds so that Windows and Linux agree on the unit; `UvLoop.nanos()`
+converts for the application, which compares arrivals with its own
+`MonoTime` the same way. The transmit stamp includes the microseconds from
+`submit` to the loop's drain and excludes the kernel and the NIC, which
+only hardware timestamping could see. The arrival stamp is when libuv's
+callback ran, which includes the loop thread's wake latency when it was
+asleep, tens of microseconds. These four numbers, a client's transmit and
+the server's arrival, the server's transmit and the client's arrival, are
+what clock sync consumes, at a precision a tick-timed poll could not give:
+at 120 Hz a tick is eight milliseconds. Game time, a tick number or
+simulation timestamp written by the application into the packet, is a
+separate quantity and the transport never reads it.
+
+### 9.7 Ownership and threads
+
+- A received datagram is the consumer's from the pop until `release`,
+  which any thread may call. The loop never touches a datagram after
+  pushing it.
+- Datagrams keep their window alive past close: `udpClose` stops
+  receiving, closes the handle and publishes, and the window's memory is
+  freed by the last `release`.
+- The options struct and a send's bytes are the caller's until the
+  request publishes.
+- The receive ring is the application's `SlotRing`, consumed by one thread
+  or several; the tick-fenced release of the loading guide applies when a
+  datagram outlives its tick, for instance under a fork-join over a
+  server's batch.
+- Open, close and send hold a credit while in libuv; a `try_send` that
+  succeeds holds it only during the drain. Receives hold none, being
+  bounded by the window.
+
+### 9.8 Placement
+
+One loop serves files and network. File bytes move on the pool threads,
+and a completion costs the loop microseconds, so the two do not compete;
+what would delay packet handling is a heavy `step` hook, and the rule is
+to keep it under about 100 µs and send heavier loop-side logic to the
+workers. The loop's CPU is chosen from `CacheAwarePool.topology()` by core
+and class, never by number: a core the main thread does not share, and on
+a hybrid chip an E-core, with libuv's pool on E-cores too. On the
+i7-12700H, logical processors 0 and 1 are the two SMT threads of the same
+P-core, so "main on 0, loop on 1" halves the main thread's core while the
+loop is busy, and 12 to 19 are the E-cores; on the 5900XT, 1 is a
+different core from 0 and the sibling is 16. A second loop on the main
+thread's core would be the worst placement: two runnable threads on one
+logical processor time-slice. The one-loop-per-process claim stays; lifting
+it is modest but nothing here needs it.
+
+### 9.9 What the application does with it
+
+```d
+tick:
+    table.step();                                 // assets
+    while (recvRing.tryPop(e))
+    {
+        auto d = cast(UvDatagram*) e.pointer;
+        // session by index, MAC, replay window, parse into the ring buffers
+        d.release();
+    }
+    // simulate; on alternate ticks build the packets in this tick's arena
+    foreach (ref r; outgoing) loop.submit(&r);   // stampAt set, completions = sendRing
+    // the arena is reused once sendRing has published its sends
+```
+
+The client's tick itself is a time grid corrected by clock sync's phase and
+rate, which is `threadpool.hybrid`'s cadence arithmetic (`cadenceGrid`,
+`decideCadence`, the drift slew) run on the main thread with `sleepUntil`.
+The worker policy verbs stay unused; the arithmetic gains its first user.
+
+### 9.10 Validation
+
+- Loopback on both platforms: send and receive in order; a connected
+  socket; a window of two exhausted under a burst, with the drop counted
+  and nothing lost once the consumer releases; truncation flagged; close
+  with datagrams outstanding, freed by the last release; `resolve` of
+  `localhost` into a slice too small; `stampAt` written where asked; the
+  ring-capacity check refusing an open.
+- ThreadSanitizer on Linux, with releases from several threads.
+- The Windows lane, under LDC and DMD.
+- A round trip between two processes on loopback, for the transport's own
+  latency against the file figures.
+- `netem` on Linux for loss, reordering and jitter, and a soak at 120 Hz
+  with a hundred simulated clients, for the drop counter and the window
+  arithmetic.
+- Windows: confirm libuv disables `SIO_UDP_CONNRESET`, so an ICMP port
+  unreachable does not fail later receives on the socket.
+
+### 9.11 Open
+
+- Whether `UvLoop.nanos()` should be the only public clock, or
+  `arrivalNanos` should also be offered as `MonoTime`.
+- Socket options changed after open. None are planned; a socket is closed
+  and reopened.
+- IPv6 scope handling across the two platforms, which `UvAddress` carries
+  but no consumer exercises yet.
+- TCP streams, pipes and process spawn: the rest of 2.2.1, sharing the
+  socket table and taking the stream shape of `uv_read_start`, which is
+  the receive path above with a byte stream in place of datagrams.

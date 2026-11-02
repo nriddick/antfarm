@@ -172,8 +172,10 @@ lanes, and the native Windows matrix passes with a pinned libuv build
 was dropped: `pool.processors` already keeps the loop's CPU out of the
 worker set.
 
-- 2.2.1: sockets, pipes and process spawn as the first consumer needs
-  them.
+- 2.2.1: UDP sockets, designed in
+  [the event loop design's section 9](docs/design/event-loop.md#9-221-udp-sockets)
+  from the first consumer's netcode; then TCP streams, pipes and process
+  spawn as it needs them.
 
 ## Later
 

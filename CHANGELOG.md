@@ -191,6 +191,13 @@ where the implementation departed from the plan.
   - The benchmark's first, GC-allocating version showed druntime's 19
     parallel mark threads spinning at full CPU after a collection in some
     processes. That is unexplained and left open.
+- Design: [event-loop.md](docs/design/event-loop.md) gains section 9, the
+  2.2.1 UDP design, written before its code from the first consumer's
+  netcode: a loop-owned socket with a fixed receive window that drops and
+  counts, one element per datagram on the application's ring, releases
+  from any thread, a transmit stamp the loop writes into the packet, and
+  timestamps in nanoseconds for clock sync. One loop serves files and
+  network, placed by core and class from the topology.
 
 Validation so far, Linux x86-64 (Ryzen 9 5900XT, LDC 1.43.0, DMD 2.113.0,
 libuv 1.53.0): `make check` passed with both new suites in it, each under
