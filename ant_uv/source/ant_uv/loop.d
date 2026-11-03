@@ -48,7 +48,7 @@ import antfarm.allocation : allocateAligned64, freeAligned64;
 import antfarm.ring : RingElement, RingPush, SlotRing;
 import core.atomic;
 import core.stdc.stdlib : calloc, free, getenv, malloc, strtol;
-import core.stdc.string : memset;
+import core.stdc.string : memcpy, memset;
 import core.thread : Thread;
 import core.time : convClockFreq, Duration, MonoTime, msecs, seconds, usecs;
 import threadpool.pin : PinOutcome, pinProcessor;
@@ -107,6 +107,20 @@ enum UvOp : ubyte
     /// directory fails with `UV_EISDIR` and `size` 0 on every platform,
     /// before anything is allocated or read.
     readFile,
+    /// Open a UDP socket as `udpOptions` says and start receiving into its
+    /// ring; `result` is the socket id and `size` the port bound.
+    udpOpen,
+    /// Send `buffer[0 .. length]` from socket `file` to `address`, or to
+    /// the connected peer; `result` is the bytes sent. With `stampAt` set,
+    /// the loop writes its transmit time into the bytes first.
+    udpSend,
+    /// Close socket `file`: stop receiving, close the handle, publish once
+    /// it is closed. Datagrams the application still holds stay valid.
+    udpClose,
+    /// Resolve the host at `path` on libuv's pool into the `UvAddress`es at
+    /// `buffer`, `length` of them, each with `address.port`; `result` is how
+    /// many were written.
+    resolve,
 }
 
 /// Where a `UvRequest` is in its life. Read it with `UvRequest.state`.
@@ -201,6 +215,15 @@ struct UvRequest
     /// Application data the loop never reads, except that it becomes the
     /// `tag` of the completion ring element.
     ulong user;
+    /// `udpSend`: the peer, ignored on a connected socket. `resolve`: its
+    /// `port` goes into every address found.
+    UvAddress address;
+    /// `udpOpen`: how to open the socket; the caller's until publication.
+    const(UvUdpOptions)* udpOptions;
+    /// `udpSend`: unless `uint.max`, the loop writes its transmit time,
+    /// `UvLoop.nanos` as a little-endian 64-bit integer, at
+    /// `buffer[stampAt .. stampAt + 8]` just before the system call.
+    uint stampAt = uint.max;
 
     /// Advanced once after publication, if set.
     FiberGenerationTrigger trigger;
@@ -405,6 +428,51 @@ struct UvRequest
     {
         return UvRequest.init;
     }
+
+    /// Open a UDP socket; `options` stays the caller's until publication.
+    static UvRequest udpOpen(const(UvUdpOptions)* options) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.udpOpen;
+        r.udpOptions = options;
+        return r;
+    }
+
+    /// Send `bytes` from `socket` to `peer`, or to the connected peer when
+    /// `peer` is unset; `bytes` stays the caller's until publication.
+    static UvRequest udpSend(int socket, const(ubyte)[] bytes, UvAddress peer = UvAddress.init)
+        nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.udpSend;
+        r.file = socket;
+        r.buffer = cast(ubyte*) bytes.ptr; // only read, unless `stampAt` is set
+        r.length = bytes.length;
+        r.address = peer;
+        return r;
+    }
+
+    /// Close `socket`.
+    static UvRequest udpClose(int socket) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.udpClose;
+        r.file = socket;
+        return r;
+    }
+
+    /// Resolve `host` on libuv's pool into `into`, each address with `port`;
+    /// `result` is how many were written.
+    static UvRequest resolve(const(char)* host, ushort port, UvAddress[] into) nothrow @nogc
+    {
+        UvRequest r;
+        r.op = UvOp.resolve;
+        r.path = host;
+        r.buffer = cast(ubyte*) into.ptr;
+        r.length = into.length; // addresses, not bytes
+        r.address.port = port;
+        return r;
+    }
 }
 
 /// A file that `readFile` read into a block the loop allocated, handed over
@@ -446,6 +514,441 @@ struct UvBuffer
         allocator_.deallocate(allocator_.context, block_, capacity_, alignment_);
         this = UvBuffer.init;
     }
+}
+
+// ---- UDP ---------------------------------------------------------------------
+
+/// Which protocol a `UvAddress` names.
+enum UvFamily : ushort
+{
+    /// Unset.
+    none,
+    /// IPv4: `bytes[0 .. 4]`.
+    ipv4,
+    /// IPv6: `bytes[0 .. 16]` and `scope_`.
+    ipv6,
+}
+
+/// An IPv4 or IPv6 socket address, 32 bytes, the one type `ant_uv` uses
+/// wherever it names an address: a socket's `bind` and `connect`, a send's
+/// peer, a resolved name, and a received datagram's sender.
+struct UvAddress
+{
+    /// The protocol; `none` is unset.
+    UvFamily family;
+    /// The port, in host byte order.
+    ushort port;
+    /// The address in network order: 4 bytes for IPv4, 16 for IPv6.
+    ubyte[16] bytes;
+    /// IPv6 scope (zone) id; 0 for none.
+    uint scope_;
+    private ulong reserved_;
+
+    /// True unless `family` is `none`.
+    @property bool valid() const nothrow @nogc { return family != UvFamily.none; }
+
+    /// Parse dotted IPv4 text; `none` when it does not parse.
+    static UvAddress ipv4(const(char)* text, ushort port) nothrow @nogc
+    {
+        sockaddr_in sa;
+        if (uv_ip4_addr(text, port, &sa) != 0) return UvAddress.init;
+        return fromSockaddr(cast(const(sockaddr)*) &sa);
+    }
+
+    /// Parse IPv6 text, with an optional `%zone`; `none` when it does not parse.
+    static UvAddress ipv6(const(char)* text, ushort port) nothrow @nogc
+    {
+        sockaddr_in6 sa;
+        if (uv_ip6_addr(text, port, &sa) != 0) return UvAddress.init;
+        return fromSockaddr(cast(const(sockaddr)*) &sa);
+    }
+
+    /// 127.0.0.1 at `port`.
+    static UvAddress loopback4(ushort port) nothrow @nogc
+    {
+        auto a = any4(port);
+        a.bytes[0] = 127;
+        a.bytes[3] = 1;
+        return a;
+    }
+
+    /// 0.0.0.0 at `port`.
+    static UvAddress any4(ushort port) nothrow @nogc
+    {
+        UvAddress a;
+        a.family = UvFamily.ipv4;
+        a.port = port;
+        return a;
+    }
+
+    /// ::1 at `port`.
+    static UvAddress loopback6(ushort port) nothrow @nogc
+    {
+        auto a = any6(port);
+        a.bytes[15] = 1;
+        return a;
+    }
+
+    /// :: at `port`; dual-stack unless the socket is `ipv6Only`.
+    static UvAddress any6(ushort port) nothrow @nogc
+    {
+        UvAddress a;
+        a.family = UvFamily.ipv6;
+        a.port = port;
+        return a;
+    }
+
+    /// "1.2.3.4:80" or "[::1]:80" written into `buffer` (64 bytes always
+    /// suffice), returned as the slice written; "unset" for `none`.
+    char[] format(char[] buffer) const nothrow @nogc
+    {
+        import core.stdc.stdio : snprintf;
+        if (buffer.length == 0) return buffer;
+        char[46] text = 0;
+        sockaddr_storage storage;
+        int n;
+        if (toSockaddr(this, &storage) == 0)
+            n = snprintf(buffer.ptr, buffer.length, "unset");
+        else if (family == UvFamily.ipv4)
+        {
+            uv_ip4_name(cast(const(sockaddr_in)*) &storage, text.ptr, text.length);
+            n = snprintf(buffer.ptr, buffer.length, "%s:%u", text.ptr, cast(uint) port);
+        }
+        else
+        {
+            uv_ip6_name(cast(const(sockaddr_in6)*) &storage, text.ptr, text.length);
+            n = snprintf(buffer.ptr, buffer.length, "[%s]:%u", text.ptr, cast(uint) port);
+        }
+        if (n < 0) return buffer[0 .. 0];
+        return buffer[0 .. n < buffer.length ? n : buffer.length - 1];
+    }
+}
+
+static assert(UvAddress.sizeof == 32);
+
+// Network byte order on the little-endian targets this builds for.
+private ushort toNetworkOrder(ushort v) pure nothrow @nogc @safe
+{
+    version (LittleEndian) return cast(ushort)((v << 8) | (v >> 8));
+    else return v;
+}
+
+// A UvAddress as a sockaddr in `storage`: the bytes it occupies, 0 for `none`.
+private uint toSockaddr(ref const UvAddress a, sockaddr_storage* storage) nothrow @nogc
+{
+    memset(storage, 0, sockaddr_storage.sizeof);
+    final switch (a.family)
+    {
+    case UvFamily.none:
+        return 0;
+    case UvFamily.ipv4:
+    {
+        auto sa = cast(sockaddr_in*) storage;
+        sa.sin_family = cast(typeof(sa.sin_family)) AF_INET;
+        sa.sin_port = toNetworkOrder(a.port);
+        memcpy(&sa.sin_addr, a.bytes.ptr, 4);
+        return sockaddr_in.sizeof;
+    }
+    case UvFamily.ipv6:
+    {
+        auto sa = cast(sockaddr_in6*) storage;
+        sa.sin6_family = cast(typeof(sa.sin6_family)) AF_INET6;
+        sa.sin6_port = toNetworkOrder(a.port);
+        memcpy(&sa.sin6_addr, a.bytes.ptr, 16);
+        sa.sin6_scope_id = a.scope_;
+        return sockaddr_in6.sizeof;
+    }
+    }
+}
+
+private UvAddress fromSockaddr(const(sockaddr)* sa) nothrow @nogc
+{
+    UvAddress a;
+    if (sa is null) return a;
+    if (sa.sa_family == AF_INET)
+    {
+        auto v4 = cast(const(sockaddr_in)*) sa;
+        a.family = UvFamily.ipv4;
+        a.port = toNetworkOrder(v4.sin_port);
+        memcpy(a.bytes.ptr, &v4.sin_addr, 4);
+    }
+    else if (sa.sa_family == AF_INET6)
+    {
+        auto v6 = cast(const(sockaddr_in6)*) sa;
+        a.family = UvFamily.ipv6;
+        a.port = toNetworkOrder(v6.sin6_port);
+        memcpy(a.bytes.ptr, &v6.sin6_addr, 16);
+        a.scope_ = v6.sin6_scope_id;
+    }
+    return a;
+}
+
+/// How `udpOpen` opens a socket. The record is the caller's until the open
+/// publishes; the ring and the strings must outlive the socket.
+struct UvUdpOptions
+{
+    /// The local address. Port 0 takes any, and the open publishes the one
+    /// bound as `size`.
+    UvAddress bind;
+    /// Optional peer: sends then omit the address, and errors the network
+    /// reports about the peer reach the socket.
+    UvAddress connect;
+    /// The ring every datagram goes to, one element each. Its capacity must
+    /// cover the windows of every socket that shares it.
+    SlotRing!RingElement* completions;
+    /// The element tag that names this socket on the ring.
+    ulong tag;
+    /// Receive buffers, fixed for the socket's life. A datagram arriving
+    /// while every buffer is held is dropped and counted.
+    uint window = 64;
+    /// Data bytes per buffer. A larger datagram is cut to this and flagged.
+    uint maxDatagram = 1472;
+    /// `SO_REUSEADDR` at bind.
+    bool reuseAddress;
+    /// Allow broadcast sends.
+    bool broadcast;
+    /// An IPv6 bind takes no IPv4-mapped traffic.
+    bool ipv6Only;
+    /// Time to live; 0 leaves the OS default.
+    int ttl;
+    /// The kernel's receive buffer; 0 leaves the OS default.
+    int receiveBufferSize;
+    /// The kernel's send buffer; 0 leaves the OS default.
+    int sendBufferSize;
+    /// A multicast group to join, as text, or null.
+    const(char)* multicastGroup;
+    /// The interface address for the group, or null for the OS's choice.
+    const(char)* multicastInterface;
+}
+
+/// `UvDatagram.flags` bits.
+enum UvDatagramFlag : uint
+{
+    /// The OS cut the datagram to the socket's `maxDatagram`.
+    truncated = 1,
+}
+
+/// A received datagram: the first 64 bytes of one of its socket's receive
+/// buffers, with the data at offset 64. The consumer's from the pop until
+/// `release`.
+struct UvDatagram
+{
+    union
+    {
+        /// The loop's clock when libuv delivered it (`UvLoop.nanos`).
+        long arrivalNanos;
+        private UvDatagram* next_; // while on the window's free or return list
+    }
+    /// Data bytes, at most the socket's `maxDatagram`.
+    uint length;
+    /// `UvDatagramFlag` bits.
+    uint flags;
+    /// The sender.
+    UvAddress peer;
+    /// The socket id it arrived on.
+    uint socket;
+    private uint reserved_;
+    private UdpWindow* window_;
+
+    /// The data.
+    inout(ubyte)[] bytes() inout nothrow @nogc
+    {
+        return (cast(inout(ubyte)*) &this)[UvDatagram.sizeof .. UvDatagram.sizeof + length];
+    }
+
+    /// Return the buffer to its socket's window, from any thread, once.
+    void release() nothrow @nogc
+    {
+        if (window_ !is null) window_.release(&this);
+    }
+}
+
+static assert(UvDatagram.sizeof == 64);
+
+/// A UDP socket's counters, read with `UvLoop.udpStats`.
+struct UvUdpStats
+{
+    /// Datagrams delivered to the ring.
+    ulong received;
+    /// Datagrams lost to an exhausted window or a full ring.
+    ulong dropped;
+    /// Delivered datagrams the OS cut to `maxDatagram`.
+    ulong truncated;
+    /// Receive errors libuv reported.
+    ulong errors;
+    /// Sends that succeeded.
+    ulong sent;
+    /// Sends that failed.
+    ulong sendErrors;
+}
+
+// A socket's receive window: `count` buffers of `stride` bytes, each a
+// UvDatagram header and `maxDatagram` data bytes. The loop thread takes
+// buffers from the free list; any thread returns them through the atomic
+// list; the last reference frees the memory, so datagrams outlive a close.
+private struct UdpWindow
+{
+    void* memory_;
+    size_t stride_;
+    uint count_;
+    UvDatagram* free_;     // loop thread only
+    UvDatagram* spare_;    // read into and discarded while the window is exhausted
+    shared size_t remote_; // UvDatagram*, released from any thread
+    shared uint refs_;     // datagrams held outside the window, plus one for the socket
+
+    static UdpWindow* create(uint count, uint maxDatagram) nothrow @nogc
+    {
+        auto w = cast(UdpWindow*) calloc(1, UdpWindow.sizeof);
+        if (w is null) return null;
+        w.stride_ = (UvDatagram.sizeof + maxDatagram + 63) & ~cast(size_t) 63;
+        w.count_ = count;
+        w.memory_ = allocateAligned64(w.stride_ * (count + 1));
+        if (w.memory_ is null)
+        {
+            free(w);
+            return null;
+        }
+        foreach_reverse (i; 0 .. count + 1)
+        {
+            auto d = cast(UvDatagram*)(cast(ubyte*) w.memory_ + i * w.stride_);
+            *d = UvDatagram.init;
+            d.window_ = w;
+            if (i == count)
+            {
+                w.spare_ = d;
+                continue;
+            }
+            d.next_ = w.free_;
+            w.free_ = d;
+        }
+        atomicStore(w.refs_, 1u);
+        return w;
+    }
+
+    // Loop thread: a free buffer, or null when the window is exhausted.
+    UvDatagram* take() nothrow @nogc
+    {
+        if (free_ is null)
+        {
+            auto returned = cast(UvDatagram*) atomicExchange!(MemoryOrder.acq_rel)(&remote_, size_t(0));
+            while (returned !is null)
+            {
+                auto next = returned.next_;
+                returned.next_ = free_;
+                free_ = returned;
+                returned = next;
+            }
+        }
+        auto d = free_;
+        if (d !is null) free_ = d.next_;
+        return d;
+    }
+
+    // Loop thread: a buffer back without a datagram.
+    void giveBack(UvDatagram* d) nothrow @nogc
+    {
+        d.next_ = free_;
+        free_ = d;
+    }
+
+    // Any thread: a held datagram comes back.
+    void release(UvDatagram* d) nothrow @nogc
+    {
+        for (;;)
+        {
+            immutable head = atomicLoad!(MemoryOrder.acq)(remote_);
+            d.next_ = cast(UvDatagram*) head;
+            if (cas(&remote_, head, cast(size_t) d)) break;
+        }
+        drop();
+    }
+
+    // One reference fewer; the last frees the window.
+    void drop() nothrow @nogc
+    {
+        if (atomicFetchSub!(MemoryOrder.acq_rel)(refs_, 1u) == 1)
+        {
+            freeAligned64(memory_);
+            free(&this);
+        }
+    }
+}
+
+// One entry of the loop's socket table.
+private struct UdpSocket
+{
+    uv_udp_t* handle;
+    UdpWindow* window;
+    SlotRing!RingElement* ring;
+    UvLoop owner;
+    UvRequest* closeRequest;
+    ulong tag;
+    ulong sequence;
+    uint id;
+    uint maxDatagram;
+    bool inUse;
+    bool closing;
+    bool connected;
+    shared UvUdpStats stats;
+}
+
+// Windows reserved on one ring by the sockets that share it.
+private struct RingCommit
+{
+    SlotRing!RingElement* ring;
+    uint committed;
+}
+
+// On the loop thread, inside libuv's receive callback: deliver one datagram,
+// hand back an empty buffer, or count an error.
+private void deliverDatagram(UdpSocket* s, ptrdiff_t nread, const(uv_buf_t)* buf,
+    const(sockaddr)* addr, uint flags) nothrow @nogc
+{
+    auto d = buf !is null && buf.base !is null
+        ? cast(UvDatagram*)(buf.base - UvDatagram.sizeof) : null;
+    immutable spare = d !is null && d is s.window.spare_;
+    if (nread == 0 && addr is null)
+    {
+        if (d !is null && !spare) s.window.giveBack(d);
+        return;
+    }
+    if (nread < 0)
+    {
+        if (d !is null && !spare) s.window.giveBack(d);
+        atomicOp!"+="(s.stats.errors, 1);
+        return;
+    }
+    if (d is null) return;
+    if (spare)
+    {
+        // The window was exhausted: the datagram was read so the socket moves
+        // on, and is discarded.
+        atomicOp!"+="(s.stats.dropped, 1);
+        return;
+    }
+    d.arrivalNanos = UvLoop.nanos();
+    d.length = cast(uint) nread;
+    d.flags = (flags & UV_UDP_PARTIAL) != 0 ? UvDatagramFlag.truncated : 0;
+    d.peer = fromSockaddr(addr);
+    d.socket = s.id;
+    RingElement e;
+    e.tag = s.tag;
+    e.generation = ++s.sequence;
+    e.pointer = cast(ulong) cast(size_t) d;
+    e.payload[0] = d.length | (cast(ulong) d.flags << 32);
+    e.payload[1] = cast(ulong) d.arrivalNanos;
+    e.payload[2] = s.id;
+    atomicFetchAdd!(MemoryOrder.acq_rel)(s.window.refs_, 1u);
+    if (s.ring.tryPush(e) == RingPush.pushed)
+    {
+        atomicOp!"+="(s.stats.received, 1);
+        if (d.flags & UvDatagramFlag.truncated) atomicOp!"+="(s.stats.truncated, 1);
+        return;
+    }
+    // Never the last reference: the socket holds one while open.
+    atomicFetchSub!(MemoryOrder.acq_rel)(s.window.refs_, 1u);
+    s.window.giveBack(d);
+    atomicOp!"+="(s.stats.dropped, 1);
 }
 
 /// What the application's step hook did in one loop iteration.
@@ -568,9 +1071,12 @@ private enum ulong tagSubmit = 1;
 private enum ulong tagCancel = 2;
 private enum ulong gateClosed = 1UL << 63;
 private enum uint noSlot = uint.max;
+private enum int alreadyPublished = 1; // a start that published synchronously
 private enum size_t readChunk = size_t(1) << 30; // a Windows uv_buf_t length is 32-bit
 private enum uint submitBatch = 64; // requests dequeued per loop iteration
 private enum uint controlCapacity = 256; // control ring slots (cancellations)
+private enum uint maxUdpSockets = 256; // open UDP sockets per loop
+private enum size_t maxRingCommits = 64; // distinct rings UDP sockets may deliver to
 
 private enum State : int { starting, open, failed, closed }
 private enum ClosePhase : ubyte { open, grace, cancelling }
@@ -850,6 +1356,30 @@ final class UvLoop
     /// The kernel may still refuse the ring, and libuv then uses its pool.
     @property bool ioUring() const nothrow @nogc { return ioUring_; }
 
+    /// The loop's clock: `MonoTime` in nanoseconds, the unit of every
+    /// transport timestamp (`UvDatagram.arrivalNanos`, `UvRequest.stampAt`).
+    /// Any thread; the caller's own `MonoTime` compares through it.
+    static long nanos() nothrow @nogc
+    {
+        return convClockFreq(MonoTime.currTime.ticks, MonoTime.ticksPerSecond, 1_000_000_000);
+    }
+
+    /// A UDP socket's counters, meaningful between its open's and its
+    /// close's publications; an id out of range reads as zeros.
+    UvUdpStats udpStats(int socket) const nothrow @nogc
+    {
+        UvUdpStats r;
+        if (socket < 0 || socket >= maxUdpSockets || udpSockets_ is null) return r;
+        auto s = &udpSockets_[socket];
+        r.received = atomicLoad(s.stats.received);
+        r.dropped = atomicLoad(s.stats.dropped);
+        r.truncated = atomicLoad(s.stats.truncated);
+        r.errors = atomicLoad(s.stats.errors);
+        r.sent = atomicLoad(s.stats.sent);
+        r.sendErrors = atomicLoad(s.stats.sendErrors);
+        return r;
+    }
+
     /// One line: libuv version, loop CPU, ring, credits, file I/O path,
     /// auxiliary threads.
     string summary() const
@@ -901,6 +1431,9 @@ private:
     PendingDelivery* pending_;
     size_t pendingCap_, pendingHead_, pendingCount_;
     bool ioUring_; // set before the loop opens; read anywhere after
+    UdpSocket* udpSockets_; // maxUdpSockets entries, allocated before the loop opens
+    uint socketsClosing_;
+    RingCommit[maxRingCommits] ringCommits_;
     ClosePhase closePhase_;
     long phaseDeadline_;
     bool loopAbandoned_;
@@ -968,11 +1501,25 @@ private:
     {
         if (r.callback !is null && r.completions !is null) return false;
         version (Windows)
-            if (r.length > uint.max && (r.op == UvOp.read || r.op == UvOp.write)) return false;
+            if (r.length > uint.max && (r.op == UvOp.read || r.op == UvOp.write
+                    || r.op == UvOp.udpSend)) return false;
         final switch (r.op)
         {
         case UvOp.nop, UvOp.timer:
             return true;
+        case UvOp.udpOpen:
+        {
+            auto o = r.udpOptions;
+            return o !is null && o.completions !is null && o.bind.valid && o.window != 0
+                && o.maxDatagram != 0;
+        }
+        case UvOp.udpSend:
+            return r.file >= 0 && (r.buffer !is null || r.length == 0)
+                && (r.stampAt == uint.max || cast(ulong) r.stampAt + 8 <= r.length);
+        case UvOp.udpClose:
+            return r.file >= 0;
+        case UvOp.resolve:
+            return r.path !is null && (r.buffer !is null || r.length == 0);
         case UvOp.open, UvOp.stat:
             return r.path !is null;
         case UvOp.close, UvOp.fstat:
@@ -1106,7 +1653,7 @@ private:
 
     bool settled() nothrow @nogc
     {
-        return requests_.drained && slotsInUse_ == 0 && pendingCount_ == 0;
+        return requests_.drained && slotsInUse_ == 0 && pendingCount_ == 0 && socketsClosing_ == 0;
     }
 
     void runOnce(bool progress, long deadline) nothrow @nogc
@@ -1208,6 +1755,15 @@ private:
             slot.request = null;
             publish(request, UV_ECANCELED, 0, UvRequestState.abandoned);
         }
+        foreach (i; 0 .. maxUdpSockets)
+        {
+            auto s = &udpSockets_[i];
+            if (!s.inUse || s.closeRequest is null) continue;
+            loopAbandoned_ = true; // libuv still holds the handle
+            auto request = s.closeRequest;
+            s.closeRequest = null;
+            publish(request, UV_ECANCELED, 0, UvRequestState.abandoned);
+        }
         atomicStore(undelivered_, atomicLoad(undelivered_) + pendingCount_);
         pendingCount_ = 0;
     }
@@ -1225,6 +1781,16 @@ private:
         if (request.op == UvOp.nop)
         {
             publish(request, 0, 0);
+            return;
+        }
+        if (request.op == UvOp.udpOpen)
+        {
+            openUdp(request);
+            return;
+        }
+        if (request.op == UvOp.udpClose)
+        {
+            closeUdp(request);
             return;
         }
         auto slot = takeSlot();
@@ -1279,6 +1845,15 @@ private:
             break;
         case UvOp.readFile:
             rc = startReadJob(slot, request);
+            break;
+        case UvOp.udpOpen, UvOp.udpClose:
+            assert(0);
+        case UvOp.udpSend:
+            rc = sendUdp(slot, request);
+            if (rc == alreadyPublished) return;
+            break;
+        case UvOp.resolve:
+            rc = startResolve(slot, request);
             break;
         }
         if (rc < 0)
@@ -1375,6 +1950,285 @@ private:
     void readJobDone(OpSlot* slot, int status) nothrow @nogc
     {
         finishReadFile(slot, status == UV_ECANCELED ? UV_ECANCELED : slot.status);
+    }
+
+    // ---- UDP sockets ----------------------------------------------------------
+
+    UdpSocket* udpSocket(int id) nothrow @nogc
+    {
+        if (id < 0 || id >= maxUdpSockets) return null;
+        auto s = &udpSockets_[id];
+        return s.inUse ? s : null;
+    }
+
+    // Reserve `window` elements of `ring` for a socket: false when the ring
+    // could not hold the windows that would share it, or the table is full.
+    bool commitRing(SlotRing!RingElement* ring, uint window) nothrow @nogc
+    {
+        RingCommit* entry = null;
+        foreach (ref c; ringCommits_)
+            if (c.ring is ring)
+            {
+                entry = &c;
+                break;
+            }
+        if (entry is null)
+            foreach (ref c; ringCommits_)
+                if (c.ring is null)
+                {
+                    entry = &c;
+                    break;
+                }
+        if (entry is null) return false;
+        immutable total = cast(ulong) entry.committed + window;
+        if (total > ring.capacity) return false;
+        entry.ring = ring;
+        entry.committed = cast(uint) total;
+        return true;
+    }
+
+    void uncommitRing(SlotRing!RingElement* ring, uint window) nothrow @nogc
+    {
+        foreach (ref c; ringCommits_)
+            if (c.ring is ring)
+            {
+                c.committed -= window;
+                if (c.committed == 0) c.ring = null;
+                return;
+            }
+    }
+
+    // udpOpen is synchronous on the loop thread: it publishes before it returns.
+    void openUdp(UvRequest* request) nothrow @nogc
+    {
+        auto o = request.udpOptions;
+        uint index = maxUdpSockets;
+        foreach (i; 0 .. maxUdpSockets)
+            if (!udpSockets_[i].inUse)
+            {
+                index = i;
+                break;
+            }
+        if (index == maxUdpSockets)
+        {
+            publish(request, UV_EMFILE, 0);
+            return;
+        }
+        // The record is read-only; the ring it names is the application's to write.
+        auto ring = cast(SlotRing!RingElement*) o.completions;
+        if (!commitRing(ring, o.window))
+        {
+            publish(request, UV_ENOBUFS, 0);
+            return;
+        }
+        auto s = &udpSockets_[index];
+        *s = UdpSocket.init;
+        s.owner = this;
+        s.id = index;
+        s.tag = o.tag;
+        s.ring = ring;
+        s.maxDatagram = o.maxDatagram;
+        s.handle = cast(uv_udp_t*) malloc(uv_handle_size(uv_handle_type.UV_UDP));
+        s.window = UdpWindow.create(o.window, o.maxDatagram);
+        int rc = s.handle is null || s.window is null ? UV_ENOMEM : uv_udp_init(loop_, s.handle);
+        if (rc < 0)
+        {
+            if (s.window !is null) s.window.drop();
+            free(s.handle);
+            s.handle = null;
+            uncommitRing(ring, o.window);
+            publish(request, rc, 0);
+            return;
+        }
+        uv_handle_set_data(cast(uv_handle_t*) s.handle, s);
+        ushort port;
+        rc = configureUdp(s, o, port);
+        if (rc < 0)
+        {
+            // The handle is initialized: libuv frees it from its close callback.
+            uv_handle_set_data(cast(uv_handle_t*) s.handle, null);
+            uv_close(cast(uv_handle_t*) s.handle, &onUdpHandleFreed);
+            s.handle = null;
+            s.window.drop();
+            uncommitRing(ring, o.window);
+            publish(request, rc, 0);
+            return;
+        }
+        s.inUse = true;
+        publish(request, index, port);
+    }
+
+    // Bind, options, connect, read back the port, and start receiving.
+    int configureUdp(UdpSocket* s, const(UvUdpOptions)* o, out ushort port) nothrow @nogc
+    {
+        sockaddr_storage storage;
+        if (toSockaddr(o.bind, &storage) == 0) return UV_EINVAL;
+        immutable flags = (o.ipv6Only ? UV_UDP_IPV6ONLY : 0) | (o.reuseAddress ? UV_UDP_REUSEADDR : 0);
+        int rc = uv_udp_bind(s.handle, cast(const(sockaddr)*) &storage, flags);
+        if (rc == 0 && o.broadcast) rc = uv_udp_set_broadcast(s.handle, 1);
+        if (rc == 0 && o.ttl != 0) rc = uv_udp_set_ttl(s.handle, o.ttl);
+        if (rc == 0 && o.receiveBufferSize != 0)
+        {
+            int value = o.receiveBufferSize;
+            rc = uv_recv_buffer_size(cast(uv_handle_t*) s.handle, &value);
+        }
+        if (rc == 0 && o.sendBufferSize != 0)
+        {
+            int value = o.sendBufferSize;
+            rc = uv_send_buffer_size(cast(uv_handle_t*) s.handle, &value);
+        }
+        if (rc == 0 && o.multicastGroup !is null)
+            rc = uv_udp_set_membership(s.handle, o.multicastGroup, o.multicastInterface,
+                uv_membership.UV_JOIN_GROUP);
+        if (rc == 0 && o.connect.valid)
+        {
+            sockaddr_storage peer;
+            if (toSockaddr(o.connect, &peer) == 0) rc = UV_EINVAL;
+            else rc = uv_udp_connect(s.handle, cast(const(sockaddr)*) &peer);
+            s.connected = rc == 0;
+        }
+        if (rc == 0)
+        {
+            int length = sockaddr_storage.sizeof;
+            rc = uv_udp_getsockname(s.handle, cast(sockaddr*) &storage, &length);
+            if (rc == 0) port = fromSockaddr(cast(const(sockaddr)*) &storage).port;
+        }
+        if (rc == 0) rc = uv_udp_recv_start(s.handle, &onUdpAlloc, &onUdpRecv);
+        return rc;
+    }
+
+    void closeUdp(UvRequest* request) nothrow @nogc
+    {
+        auto s = udpSocket(request.file);
+        if (s is null || s.closing)
+        {
+            publish(request, UV_EBADF, 0);
+            return;
+        }
+        s.closeRequest = request;
+        beginUdpClose(s);
+    }
+
+    void beginUdpClose(UdpSocket* s) nothrow @nogc
+    {
+        s.closing = true;
+        ++socketsClosing_;
+        uv_udp_recv_stop(s.handle);
+        uv_close(cast(uv_handle_t*) s.handle, &onUdpClosed);
+    }
+
+    // libuv's close callback: the handle is gone; the window goes with the
+    // last datagram the application returns.
+    void udpClosed(UdpSocket* s) nothrow @nogc
+    {
+        free(s.handle);
+        s.handle = null;
+        uncommitRing(s.ring, s.window.count_);
+        s.window.drop();
+        s.window = null;
+        auto request = s.closeRequest;
+        s.closeRequest = null;
+        s.inUse = false;
+        s.closing = false;
+        --socketsClosing_;
+        if (request !is null) publish(request, 0, 0);
+    }
+
+    void closeAllUdp() nothrow @nogc
+    {
+        if (udpSockets_ is null) return;
+        foreach (i; 0 .. maxUdpSockets)
+        {
+            auto s = &udpSockets_[i];
+            if (s.inUse && !s.closing) beginUdpClose(s);
+        }
+    }
+
+    // A send goes out at once when the socket can take it, and publishes
+    // here; otherwise it waits in libuv with the slot.
+    int sendUdp(OpSlot* slot, UvRequest* request) nothrow @nogc
+    {
+        auto s = udpSocket(request.file);
+        if (s is null || s.closing) return UV_EBADF;
+        sockaddr_storage storage;
+        const(sockaddr)* addr = null;
+        if (!s.connected)
+        {
+            if (toSockaddr(request.address, &storage) == 0) return UV_EINVAL;
+            addr = cast(const(sockaddr)*) &storage;
+        }
+        if (request.stampAt != uint.max)
+        {
+            immutable now = nanos();
+            foreach (i; 0 .. 8)
+                request.buffer[request.stampAt + i] = cast(ubyte)(now >> (8 * i));
+        }
+        auto buf = makeBuf(request.buffer, request.length);
+        immutable n = uv_udp_try_send(s.handle, &buf, 1, addr);
+        if (n >= 0)
+        {
+            atomicOp!"+="(s.stats.sent, 1);
+            slot.request = null;
+            finishSlot(slot);
+            publish(request, n, 0);
+            return alreadyPublished;
+        }
+        if (n != UV_EAGAIN)
+        {
+            atomicOp!"+="(s.stats.sendErrors, 1);
+            return n;
+        }
+        slot.file = request.file;
+        immutable rc = armed(slot, uv_udp_send(cast(uv_udp_send_t*) slot.uv, s.handle, &buf, 1,
+            addr, &onUdpSendDone));
+        if (rc < 0) atomicOp!"+="(s.stats.sendErrors, 1);
+        return rc;
+    }
+
+    void udpSendDone(OpSlot* slot, int status) nothrow @nogc
+    {
+        auto s = udpSocket(slot.file);
+        if (s !is null)
+        {
+            if (status < 0) atomicOp!"+="(s.stats.sendErrors, 1);
+            else atomicOp!"+="(s.stats.sent, 1);
+        }
+        auto request = slot.request;
+        slot.request = null;
+        releaseSlot(slot);
+        if (request !is null) publish(request, status < 0 ? status : cast(long) request.length, 0);
+    }
+
+    int startResolve(OpSlot* slot, UvRequest* request) nothrow @nogc
+    {
+        addrinfo hints;
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        return armed(slot, uv_getaddrinfo(loop_, cast(uv_getaddrinfo_t*) slot.uv, &onResolved,
+            request.path, null, &hints));
+    }
+
+    void resolved(OpSlot* slot, int status, addrinfo* found) nothrow @nogc
+    {
+        auto request = slot.request;
+        long result = status;
+        if (status == 0 && request !is null)
+        {
+            auto into = (cast(UvAddress*) request.buffer)[0 .. request.length];
+            size_t n;
+            for (auto ai = found; ai !is null && n < into.length; ai = ai.ai_next)
+            {
+                auto a = fromSockaddr(ai.ai_addr);
+                if (!a.valid) continue;
+                a.port = request.address.port;
+                into[n++] = a;
+            }
+            result = cast(long) n;
+        }
+        if (found !is null) uv_freeaddrinfo(found);
+        slot.request = null;
+        releaseSlot(slot);
+        if (request !is null) publish(request, result, 0);
     }
 
     // libuv calls the request's callback from uv_run only, so naming the slot
@@ -1704,14 +2558,17 @@ private:
         immutable fsSize = uv_req_size(uv_req_type.UV_FS);
         immutable timerSize = uv_handle_size(uv_handle_type.UV_TIMER);
         immutable workSize = uv_req_size(uv_req_type.UV_WORK);
+        immutable sendSize = uv_req_size(uv_req_type.UV_UDP_SEND);
+        immutable resolveSize = uv_req_size(uv_req_type.UV_GETADDRINFO);
         if (fsSize > jobFsBytes)
             throw new UvLoopException("ant_uv: this libuv's uv_fs_t is larger than a readFile job reserves");
-        slotStride_ = (max(fsSize, timerSize, workSize) + 63) & ~cast(size_t) 63;
+        slotStride_ = (max(fsSize, timerSize, workSize, sendSize, resolveSize) + 63) & ~cast(size_t) 63;
         slotMemory_ = allocateAligned64(slotStride_ * slotCount_);
         slots_ = cast(OpSlot*) calloc(slotCount_, OpSlot.sizeof);
         pendingCap_ = slotCount_ + options_.ringCapacity;
         pending_ = cast(PendingDelivery*) calloc(pendingCap_, PendingDelivery.sizeof);
-        if (slotMemory_ is null || slots_ is null || pending_ is null)
+        udpSockets_ = cast(UdpSocket*) calloc(maxUdpSockets, UdpSocket.sizeof);
+        if (slotMemory_ is null || slots_ is null || pending_ is null || udpSockets_ is null)
             throw new UvLoopException("ant_uv: slot allocation failed");
         foreach (i; 0 .. slotCount_)
         {
@@ -1749,6 +2606,8 @@ private:
         slots_ = null;
         free(pending_);
         pending_ = null;
+        free(udpSockets_);
+        udpSockets_ = null;
     }
 
     void closeWakeGate() nothrow @nogc
@@ -1771,6 +2630,7 @@ private:
             loopClose_ = UV_EBUSY;
             return;
         }
+        closeAllUdp(); // sockets the application left open; their windows outlive them
         uv_close(cast(uv_handle_t*) async_, null);
         uv_close(cast(uv_handle_t*) stepTimer_, null);
         uv_run(loop_, uv_run_mode.UV_RUN_DEFAULT);
@@ -1937,6 +2797,49 @@ private extern (C) void onReadJobDone(uv_work_t* work, int status) nothrow @nogc
 {
     auto slot = cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) work);
     ownerOf(slot).readJobDone(slot, status);
+}
+
+private extern (C) void onUdpAlloc(uv_handle_t* handle, size_t, uv_buf_t* buf) nothrow @nogc
+{
+    auto s = cast(UdpSocket*) uv_handle_get_data(handle);
+    auto d = s.window.take();
+    // Window exhausted: the spare takes the datagram, which is then dropped.
+    // An empty buffer would leave it unread on Linux and stall the socket on
+    // Windows.
+    if (d is null) d = s.window.spare_;
+    buf.base = cast(char*) d + UvDatagram.sizeof;
+    buf.len = cast(typeof(buf.len)) s.maxDatagram;
+}
+
+private extern (C) void onUdpRecv(uv_udp_t* handle, ptrdiff_t nread, const(uv_buf_t)* buf,
+    const(sockaddr)* addr, uint flags) nothrow @nogc
+{
+    deliverDatagram(cast(UdpSocket*) uv_handle_get_data(cast(uv_handle_t*) handle), nread, buf,
+        addr, flags);
+}
+
+private extern (C) void onUdpSendDone(uv_udp_send_t* req, int status) nothrow @nogc
+{
+    auto slot = cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) req);
+    ownerOf(slot).udpSendDone(slot, status);
+}
+
+private extern (C) void onUdpClosed(uv_handle_t* handle) nothrow @nogc
+{
+    auto s = cast(UdpSocket*) uv_handle_get_data(handle);
+    s.owner.udpClosed(s);
+}
+
+// A handle whose open failed after uv_udp_init: nothing else refers to it.
+private extern (C) void onUdpHandleFreed(uv_handle_t* handle) nothrow @nogc
+{
+    free(handle);
+}
+
+private extern (C) void onResolved(uv_getaddrinfo_t* req, int status, addrinfo* found) nothrow @nogc
+{
+    auto slot = cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) req);
+    ownerOf(slot).resolved(slot, status, found);
 }
 
 private extern (C) void onOpTimer(uv_timer_t* timer) nothrow @nogc

@@ -18,6 +18,21 @@ module ant_uv.binding;
 
 import core.stdc.config : c_long;
 
+// The socket address types libuv takes and returns are the C library's, which
+// druntime declares per platform.
+version (Windows)
+{
+    public import core.sys.windows.winsock2 : sockaddr, sockaddr_in, sockaddr_in6,
+        sockaddr_storage, addrinfo, AF_UNSPEC, AF_INET, AF_INET6, SOCK_DGRAM;
+}
+else version (Posix)
+{
+    public import core.sys.posix.sys.socket : sockaddr, sockaddr_storage, AF_UNSPEC, AF_INET,
+        AF_INET6, SOCK_DGRAM;
+    public import core.sys.posix.netinet.in_ : sockaddr_in, sockaddr_in6;
+    public import core.sys.posix.netdb : addrinfo;
+}
+
 extern (C) nothrow @nogc:
 
 /// Opaque libuv types: only pointers to them are used.
@@ -29,11 +44,17 @@ struct uv_async_t;
 /// ditto
 struct uv_timer_t;
 /// ditto
+struct uv_udp_t;
+/// ditto
 struct uv_req_t;
 /// ditto
 struct uv_fs_t;
 /// ditto
 struct uv_work_t;
+/// ditto
+struct uv_udp_send_t;
+/// ditto
+struct uv_getaddrinfo_t;
 
 /// `uv_handle_type`, as in libuv's `UV_HANDLE_TYPE_MAP`.
 enum uv_handle_type : int
@@ -163,6 +184,29 @@ alias uv_walk_cb = extern (C) void function(uv_handle_t* handle, void* arg) noth
 alias uv_work_cb = extern (C) void function(uv_work_t* req) nothrow @nogc;
 /// ditto
 alias uv_after_work_cb = extern (C) void function(uv_work_t* req, int status) nothrow @nogc;
+/// ditto
+alias uv_alloc_cb = extern (C) void function(uv_handle_t* handle, size_t suggested, uv_buf_t* buf)
+    nothrow @nogc;
+/// ditto
+alias uv_udp_recv_cb = extern (C) void function(uv_udp_t* handle, ptrdiff_t nread,
+    const(uv_buf_t)* buf, const(sockaddr)* addr, uint flags) nothrow @nogc;
+/// ditto
+alias uv_udp_send_cb = extern (C) void function(uv_udp_send_t* req, int status) nothrow @nogc;
+/// ditto
+alias uv_getaddrinfo_cb = extern (C) void function(uv_getaddrinfo_t* req, int status,
+    addrinfo* res) nothrow @nogc;
+
+/// `uv_udp_flags`: the ones `ant_uv` passes or reads.
+enum uint UV_UDP_IPV6ONLY = 1;  ///
+enum uint UV_UDP_PARTIAL = 2;   /// a received datagram was truncated to the buffer
+enum uint UV_UDP_REUSEADDR = 4; ///
+
+/// `uv_membership`.
+enum uv_membership : int
+{
+    UV_LEAVE_GROUP = 0, ///
+    UV_JOIN_GROUP,      ///
+}
 
 /// `UV_FS_O_*` open flags.
 version (Windows)
@@ -192,22 +236,31 @@ else version (Posix)
 /// are negated errno values; Windows codes are libuv's own numbers.
 version (Windows)
 {
-    enum int UV_EBADF = -4083;     ///
-    enum int UV_EBUSY = -4082;     ///
-    enum int UV_ECANCELED = -4081; ///
-    enum int UV_EINVAL = -4071;    ///
-    enum int UV_EISDIR = -4068;    ///
-    enum int UV_ENOMEM = -4057;    ///
+    enum int UV_EADDRINUSE = -4091; ///
+    enum int UV_EAGAIN = -4088;     ///
+    enum int UV_EBADF = -4083;      ///
+    enum int UV_EBUSY = -4082;      ///
+    enum int UV_ECANCELED = -4081;  ///
+    enum int UV_EINVAL = -4071;     ///
+    enum int UV_EISDIR = -4068;     ///
+    enum int UV_EMFILE = -4066;     ///
+    enum int UV_ENOBUFS = -4060;    ///
+    enum int UV_ENOMEM = -4057;     ///
 }
 else version (Posix)
 {
-    import core.stdc.errno : EBADF, EBUSY, ECANCELED, EINVAL, EISDIR, ENOMEM;
-    enum int UV_EBADF = -EBADF;         ///
-    enum int UV_EBUSY = -EBUSY;         ///
-    enum int UV_ECANCELED = -ECANCELED; ///
-    enum int UV_EINVAL = -EINVAL;       ///
-    enum int UV_EISDIR = -EISDIR;       ///
-    enum int UV_ENOMEM = -ENOMEM;       ///
+    import core.stdc.errno : EADDRINUSE, EAGAIN, EBADF, EBUSY, ECANCELED, EINVAL, EISDIR, EMFILE,
+        ENOBUFS, ENOMEM;
+    enum int UV_EADDRINUSE = -EADDRINUSE; ///
+    enum int UV_EAGAIN = -EAGAIN;         ///
+    enum int UV_EBADF = -EBADF;           ///
+    enum int UV_EBUSY = -EBUSY;           ///
+    enum int UV_ECANCELED = -ECANCELED;   ///
+    enum int UV_EINVAL = -EINVAL;         ///
+    enum int UV_EISDIR = -EISDIR;         ///
+    enum int UV_EMFILE = -EMFILE;         ///
+    enum int UV_ENOBUFS = -ENOBUFS;       ///
+    enum int UV_ENOMEM = -ENOMEM;         ///
 }
 /// End of file; the same number on every platform.
 enum int UV_EOF = -4095;
@@ -288,3 +341,30 @@ ptrdiff_t uv_fs_get_result(const(uv_fs_t)* req); ///
 void* uv_fs_get_ptr(const(uv_fs_t)* req); ///
 const(char)* uv_fs_get_path(const(uv_fs_t)* req); ///
 uv_stat_t* uv_fs_get_statbuf(uv_fs_t* req); ///
+
+// ---- UDP ----
+int uv_udp_init(uv_loop_t* loop, uv_udp_t* handle); ///
+int uv_udp_bind(uv_udp_t* handle, const(sockaddr)* addr, uint flags); ///
+int uv_udp_connect(uv_udp_t* handle, const(sockaddr)* addr); ///
+int uv_udp_getsockname(const(uv_udp_t)* handle, sockaddr* name, int* namelen); ///
+int uv_udp_set_membership(uv_udp_t* handle, const(char)* multicastAddr,
+    const(char)* interfaceAddr, uv_membership membership); ///
+int uv_udp_set_broadcast(uv_udp_t* handle, int on); ///
+int uv_udp_set_ttl(uv_udp_t* handle, int ttl); ///
+int uv_udp_send(uv_udp_send_t* req, uv_udp_t* handle, const(uv_buf_t)* bufs, uint nbufs,
+    const(sockaddr)* addr, uv_udp_send_cb cb); ///
+int uv_udp_try_send(uv_udp_t* handle, const(uv_buf_t)* bufs, uint nbufs,
+    const(sockaddr)* addr); ///
+int uv_udp_recv_start(uv_udp_t* handle, uv_alloc_cb allocCb, uv_udp_recv_cb recvCb); ///
+int uv_udp_recv_stop(uv_udp_t* handle); ///
+int uv_send_buffer_size(uv_handle_t* handle, int* value); ///
+int uv_recv_buffer_size(uv_handle_t* handle, int* value); ///
+
+// ---- addresses and names ----
+int uv_ip4_addr(const(char)* ip, int port, sockaddr_in* addr); ///
+int uv_ip6_addr(const(char)* ip, int port, sockaddr_in6* addr); ///
+int uv_ip4_name(const(sockaddr_in)* src, char* dst, size_t size); ///
+int uv_ip6_name(const(sockaddr_in6)* src, char* dst, size_t size); ///
+int uv_getaddrinfo(uv_loop_t* loop, uv_getaddrinfo_t* req, uv_getaddrinfo_cb cb,
+    const(char)* node, const(char)* service, const(addrinfo)* hints); ///
+void uv_freeaddrinfo(addrinfo* ai); ///

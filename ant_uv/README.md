@@ -187,6 +187,67 @@ with `AntfarmMimallocV3` and needing mimalloc linked. With Dub, depend on
 configuration. The adapter itself is described in
 [the allocation guide](../docs/guide/sizing-and-allocation.md#the-mimalloc-v3-adapter).
 
+## UDP sockets
+
+A UDP socket is an object the loop owns, opened and closed by requests.
+Sends are requests; received datagrams are not: they arrive on a ring the
+application names at open, one element each, in buffers from a window the
+socket owns, and the application returns the buffers from any thread.
+The design and the netcode it was shaped by are
+[section 9 of the event loop design](../docs/design/event-loop.md#9-221-udp-sockets).
+
+```d
+UvUdpOptions options;
+options.bind = UvAddress.loopback4(0);        // port 0: any; the open publishes it as size
+options.completions = ring;                   // a SlotRing!RingElement the application owns
+options.tag = 1;                              // names this socket on the ring
+options.window = 64;                          // receive buffers, fixed for the socket's life
+options.maxDatagram = 1200;                   // data bytes per buffer
+auto open = UvRequest.udpOpen(&options);      // options stay yours until publication
+...                                           // open.result is the socket, open.size the port
+
+auto send = UvRequest.udpSend(socket, bytes, peer);  // peer omitted on a connected socket
+send.stampAt = 0;                             // the loop writes its transmit time at bytes[0 .. 8]
+
+RingElement e;
+while (ring.tryPop(e))                        // e.tag names the socket
+{
+    auto d = cast(UvDatagram*) cast(size_t) e.pointer;
+    // d.bytes, d.peer, d.arrivalNanos, d.flags
+    d.release();                              // back to the window, from any thread
+}
+```
+
+`UvAddress` is the one address type: `ipv4`/`ipv6` parse text, `loopback4`,
+`any4`, `loopback6` and `any6` build the usual ones, and `format` writes
+`1.2.3.4:80` or `[::1]:80`. `UvRequest.resolve(host, port, slice)` fills a
+caller-owned slice from `getaddrinfo` on libuv's pool; it answers with
+addresses, not trust.
+
+The window is the whole flow-control story. A datagram that arrives while
+every buffer is held is read and discarded, and the socket counts it in
+`loop.udpStats(socket).dropped`; nothing queues outside the window, so a
+stalled consumer loses the newest packets rather than piling up stale
+ones. Size the window for the backlog between your polls, not for your own
+histories, which are your copies. The ring's capacity must cover the windows
+of every socket that shares it, which `udpOpen` checks (`UV_ENOBUFS`). A
+datagram larger than `maxDatagram` is cut and flagged `truncated`. A
+datagram you still hold stays valid across its socket's close; the window
+is freed by the last `release`.
+
+Every transport timestamp is `UvLoop.nanos()`, the loop's monotonic clock
+in nanoseconds: `arrivalNanos` is when libuv delivered the datagram, and
+`stampAt` is written just before the send's system call. Those are the
+inputs to clock synchronization; the game's own time is yours to put in the
+packet.
+
+Options set at open and fixed for the socket's life: `connect` (a peer, so
+sends omit the address and the network's errors about it reach the socket),
+`reuseAddress`, `broadcast`, `ipv6Only`, `ttl`, the kernel buffer sizes,
+and a multicast group. Sessions, authentication, replay protection and
+packet formats are the application's; the transport carries no
+cryptography.
+
 ## Completion
 
 After publication the loop delivers through the targets the request named,

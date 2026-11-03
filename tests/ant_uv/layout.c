@@ -54,6 +54,25 @@ long antuv_c_constant(int which)
 #ifdef UV_LOOP_USE_IO_URING_SQPOLL /* libuv 1.49 and later */
     case 27: return UV_LOOP_USE_IO_URING_SQPOLL;
 #endif
+    case 28: return UV_EAGAIN;
+    case 29: return UV_ENOBUFS;
+    case 30: return UV_EADDRINUSE;
+    case 31: return UV_EMFILE;
+    case 32: return UV_UDP;
+    case 33: return UV_UDP_SEND;
+    case 34: return UV_GETADDRINFO;
+    case 35: return UV_UDP_IPV6ONLY;
+    case 36: return UV_UDP_PARTIAL;
+    case 37: return UV_UDP_REUSEADDR;
+    case 38: return UV_JOIN_GROUP;
+    case 39: return sizeof(struct sockaddr_in);
+    case 40: return sizeof(struct sockaddr_in6);
+    case 41: return offsetof(struct sockaddr_in6, sin6_addr);
+    case 42: return offsetof(struct sockaddr_in6, sin6_scope_id);
+    case 43: return offsetof(struct addrinfo, ai_addr);
+    case 44: return offsetof(struct addrinfo, ai_next);
+    case 45: return AF_INET;
+    case 46: return AF_INET6;
     }
     return -1;
 }

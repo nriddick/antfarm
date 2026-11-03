@@ -358,6 +358,13 @@ are not promised yet.
   smoke disables DRuntime's parallel GC marking, whose mark stack TSan
   reports, and runs outside `make check`; the Fiber gate stays the DMD/LDC
   smoke, release, deterministic-migration and repeated-stress matrix.
+  druntime's stop-the-world is not TSan-clean either: TSan holds the
+  suspend signal until its thread next calls an interceptor or an
+  instrumented atomic, which a thread spinning on the uninstrumented GC
+  lock (LDC 1.42's only pauses and yields) or parked in a raw futex never
+  does, so a collection that begins then waits for that thread forever. The
+  `ant_uv` suite's TSan build met this once its heap grew, deterministically,
+  and runs with the collector disabled; the plain lanes cover collection.
 - druntime's parallel GC marking: in a GC-allocating benchmark on Windows
   (LDC 1.42), all 19 mark threads of some processes spun at full CPU after
   a collection, over a minute in the one inspected, saturating the machine. A

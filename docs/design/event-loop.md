@@ -658,10 +658,14 @@ What runs, and where:
 
 ## 9. 2.2.1: UDP sockets
 
-Status: design, 2026-11-02, before any code. The first consumer's netcode
-was discussed in enough detail to fix the transport's shape; section 9.1
-records what was taken from it. The decisions below are made; section 9.11
-lists what is not.
+Status: designed and implemented on 2026-11-02, in that order. The suite's
+loopback case covers the sockets on Windows and Linux. One departure from
+the first draft, kept in section 9.4: a full window reads into a spare
+buffer and discards, since returning libuv an empty buffer leaves the
+datagram unread on Linux and stops the receive on Windows. The first
+consumer's netcode was discussed in enough detail to fix the transport's
+shape; section 9.1 records what was taken from it. The decisions below are
+made; section 9.11 lists what is not.
 
 ### 9.1 What the first consumer asks
 
@@ -768,8 +772,12 @@ datagram, which libuv makes to hand a buffer back, returns it to the free
 list.
 
 **Drop and count.** When the window is exhausted the allocation callback
-returns an empty buffer, libuv reports `UV_ENOBUFS`, and the socket counts
-a drop. Nothing is retried and nothing queues outside the window. This is
+hands libuv a spare buffer the socket keeps for the purpose; the datagram
+is read into it and discarded, and the socket counts a drop. (Returning an
+empty buffer instead makes libuv report `UV_ENOBUFS` and leaves the
+datagram unread: on Linux the level-triggered poll then reports it again at
+once, a spin, and on Windows no further read is queued, a stall.) Nothing
+is retried and nothing queues outside the window. This is
 the right rule for real-time traffic: a stalled consumer loses the newest
 packets rather than accumulating stale ones, and the count says it
 happened. It also keeps the ring from ever filling, provided its capacity

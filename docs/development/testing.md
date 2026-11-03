@@ -90,6 +90,11 @@ To run the fiber smoke suite under ThreadSanitizer, build it with
 `DFLAGS='-fsanitize=thread -d-version=TSan -g -O1' dub build :ant_fibers -c unittest --compiler=ldc2`.
 In that build `tests/ant_fibers/smoke.d` sets `gcopt=parallel:0`, because druntime's
 parallel GC marking intermittently reports a race in its own mark stack.
+The `ant_uv` suite's TSan build also sets `disable:1`: TSan holds druntime's
+suspend signal until the thread next calls an interceptor or an instrumented
+atomic, which a thread spinning on the GC's lock or parked in a raw futex never
+does, so a collection that begins while a pool worker is in either state never
+completes. The suite's heap stays small, and its plain lanes collect.
 When also enabling profiling explicitly, pass `"--DRT-gcopt=parallel:0 profile:1"`
 to preserve that setting.
 

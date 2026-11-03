@@ -5,15 +5,23 @@
  + ring, cancellation, close with work in flight, a failing step hook,
  + Fibers on the loop thread, files read by worker Fibers on a GroupHost,
  + readFile's allocators, the per-operation constructors, whole-file reads
- + cancelled in flight, and abandonment of an operation that cannot finish.
- + With ANTUV_TEST_IO_URING=1 every loop uses io_uring, and create must have
- + built the ring. Built with `AntfarmMimallocV3` and the real mimalloc
- + library, it also reads into mimalloc v3. Linux and Windows.
+ + cancelled in flight, UDP sockets on the loopback, and abandonment of an
+ + operation that cannot finish. With ANTUV_TEST_IO_URING=1 every loop uses
+ + io_uring, and create must have built the ring. Built with
+ + `AntfarmMimallocV3` and the real mimalloc library, it also reads into
+ + mimalloc v3. Linux and Windows.
  +/
 module uv_test;
 
+// Under ThreadSanitizer the collector never runs. druntime stops the world
+// with a signal, and TSan holds an asynchronous signal until its thread next
+// calls an interceptor or an instrumented atomic. A thread spinning on the
+// GC's own lock (uninstrumented, and it only pauses and yields) or parked in
+// a raw futex never does, so a collection that begins while any thread is in
+// such a state waits for it forever. The suite's heap is small; the plain
+// lanes cover collection. Parallel marking is off for the same reason.
 version (TSan)
-    extern(C) __gshared string[] rt_options = ["gcopt=parallel:0"];
+    extern(C) __gshared string[] rt_options = ["gcopt=parallel:0 disable:1"];
 
 import ant_fibers;
 import ant_uv;
@@ -188,6 +196,15 @@ void layout()
     immutable sqpoll = antuv_c_constant(27); // -1: a uv.h older than 1.49
     check(sqpoll == -1 || sqpoll == uv_loop_option.UV_LOOP_USE_IO_URING_SQPOLL,
         "UV_LOOP_USE_IO_URING_SQPOLL");
+    immutable long[] udpExpected = [UV_EAGAIN, UV_ENOBUFS, UV_EADDRINUSE, UV_EMFILE,
+        uv_handle_type.UV_UDP, uv_req_type.UV_UDP_SEND, uv_req_type.UV_GETADDRINFO,
+        UV_UDP_IPV6ONLY, UV_UDP_PARTIAL, UV_UDP_REUSEADDR, uv_membership.UV_JOIN_GROUP,
+        sockaddr_in.sizeof, sockaddr_in6.sizeof, sockaddr_in6.sin6_addr.offsetof,
+        sockaddr_in6.sin6_scope_id.offsetof, addrinfo.ai_addr.offsetof, addrinfo.ai_next.offsetof,
+        AF_INET, AF_INET6];
+    foreach (i, value; udpExpected)
+        check(antuv_c_constant(cast(int)(28 + i)) == value,
+            "UDP constant " ~ (28 + i).to!string ~ " differs from the C headers");
     check(antuv_c_constant(20) >= UV_MINIMUM_VERSION && uv_version() >= UV_MINIMUM_VERSION,
         "libuv older than 1.19");
     printf("  uv.h %#lx, library %#x\n", antuv_c_constant(20), uv_version());
@@ -1282,6 +1299,215 @@ void readFileCancelStorm(string path, const(ubyte)[] expected)
     pass("readFile cancelled in flight publishes once and frees every block");
 }
 
+// A UDP socket pair on the loopback: stamped sends through a connected
+// client to a server, replies to the datagram's sender, the window exhausted
+// and counted, releases from another thread, truncation, a close with a
+// datagram still held, the ring-capacity check, malformed sends, resolution
+// into a slice, address text, and a socket left open at the loop's close.
+void udpLoopback()
+{
+    auto loop = UvLoop.create(testOptions());
+    auto ring = Ring.create(256);
+    bool submitNow(UvRequest* r)
+    {
+        return loop.submit(r) == UvSubmit.accepted && waitUntil(() => r.finished);
+    }
+    UvDatagram* popped(ulong tag, string what)
+    {
+        RingElement e;
+        check(ring.tryPop(e) && e.tag == tag, what);
+        auto d = cast(UvDatagram*) cast(size_t) e.pointer;
+        check((e.payload[0] & 0xFFFF_FFFF) == d.length && (e.payload[0] >> 32) == d.flags
+            && e.payload[1] == cast(ulong) d.arrivalNanos && e.payload[2] == d.socket,
+            "the element describes its datagram");
+        return d;
+    }
+    long stampIn(const(ubyte)[] bytes)
+    {
+        long stamp;
+        foreach (k; 0 .. 8) stamp |= cast(long) bytes[k] << (8 * k);
+        return stamp;
+    }
+
+    UvUdpOptions serverOptions;
+    serverOptions.bind = UvAddress.loopback4(0);
+    serverOptions.completions = ring;
+    serverOptions.tag = 1;
+    serverOptions.window = 16;
+    serverOptions.maxDatagram = 64;
+    auto open = UvRequest.udpOpen(&serverOptions);
+    check(submitNow(&open) && open.succeeded, "server open");
+    immutable server = cast(int) open.result;
+    immutable serverPort = cast(ushort) open.size;
+    check(serverPort != 0, "the server's bound port");
+
+    auto clientOptions = serverOptions;
+    clientOptions.connect = UvAddress.loopback4(serverPort);
+    clientOptions.tag = 2;
+    open = UvRequest.udpOpen(&clientOptions);
+    check(submitNow(&open) && open.succeeded, "client open");
+    immutable client = cast(int) open.result;
+    immutable clientPort = cast(ushort) open.size;
+    check(client != server && clientPort != 0, "the client's id and port");
+
+    // Eight stamped datagrams, delivered in order with the sender named.
+    ubyte[32] packet;
+    foreach (i; 0 .. 8)
+    {
+        packet[8] = cast(ubyte) i;
+        packet[9 .. $] = cast(ubyte)(0x40 + i);
+        auto send = UvRequest.udpSend(client, packet[]);
+        send.stampAt = 0;
+        immutable before = UvLoop.nanos();
+        check(submitNow(&send) && send.succeeded && send.result == packet.length, "client send");
+        immutable stamp = stampIn(packet[]);
+        check(stamp >= before && stamp <= UvLoop.nanos(), "the transmit stamp");
+    }
+    check(waitUntil(() => loop.udpStats(server).received == 8), "the server received eight");
+    UvAddress clientAddress;
+    foreach (i; 0 .. 8)
+    {
+        auto d = popped(1, "an element per datagram");
+        check(d.socket == server && d.length == packet.length && d.flags == 0, "the header");
+        check(d.peer.family == UvFamily.ipv4 && d.peer.port == clientPort
+            && d.peer.bytes[0 .. 4] == [cast(ubyte) 127, 0, 0, 1], "the sender");
+        check(d.arrivalNanos >= stampIn(d.bytes) && d.arrivalNanos <= UvLoop.nanos(),
+            "arrival after transmit");
+        check(d.bytes[8] == i && d.bytes[9] == 0x40 + i && d.bytes.length == packet.length, "the data");
+        clientAddress = d.peer;
+        d.release();
+    }
+    {
+        RingElement e;
+        check(!ring.tryPop(e), "nothing more on the ring");
+    }
+
+    // A reply to the sender arrives on the client's tag.
+    auto reply = UvRequest.udpSend(server, cast(const(ubyte)[]) "pong", clientAddress);
+    check(submitNow(&reply) && reply.result == 4, "server reply");
+    check(waitUntil(() => loop.udpStats(client).received == 1), "the client received the reply");
+    {
+        auto d = popped(2, "the reply's element");
+        check(d.bytes == cast(const(ubyte)[]) "pong" && d.peer.port == serverPort, "the reply");
+        d.release();
+    }
+
+    // Twenty-four sends into a window of sixteen that nobody releases: the
+    // rest are read, dropped and counted, and the socket keeps working.
+    foreach (i; 0 .. 24)
+    {
+        packet[8] = cast(ubyte) i;
+        auto send = UvRequest.udpSend(client, packet[]);
+        check(submitNow(&send) && send.succeeded, "burst send");
+    }
+    bool burstSettled()
+    {
+        auto s = loop.udpStats(server);
+        return s.received + s.dropped == 32;
+    }
+    check(waitUntil(&burstSettled), "the burst delivered or dropped");
+    auto stats = loop.udpStats(server);
+    check(stats.received == 24 && stats.dropped == 8, "sixteen delivered, eight dropped");
+    UvDatagram*[] held;
+    {
+        RingElement e;
+        while (ring.tryPop(e)) held ~= cast(UvDatagram*) cast(size_t) e.pointer;
+    }
+    check(held.length == 16, "sixteen held");
+    spawn({ foreach (d; held) d.release(); }).join();
+    packet[8] = 99;
+    {
+        auto send = UvRequest.udpSend(client, packet[]);
+        check(submitNow(&send) && send.succeeded, "send after the releases");
+    }
+    check(waitUntil(() => loop.udpStats(server).received == 25), "delivered after the releases");
+    {
+        auto d = popped(1, "the element after the releases");
+        check(d.bytes[8] == 99, "the data after the releases");
+        d.release();
+    }
+
+    // A datagram larger than maxDatagram is cut and flagged.
+    auto big = pattern(5, 100);
+    {
+        auto send = UvRequest.udpSend(client, big);
+        check(submitNow(&send) && send.result == 100, "a big send");
+    }
+    check(waitUntil(() => loop.udpStats(server).received == 26), "the big one delivered");
+    {
+        auto d = popped(1, "the big one's element");
+        check(d.length == 64 && (d.flags & UvDatagramFlag.truncated) != 0 && d.bytes == big[0 .. 64],
+            "truncated to maxDatagram");
+        check(loop.udpStats(server).truncated == 1, "truncation counted");
+        d.release();
+    }
+
+    // A datagram held across its socket's close stays readable; its release
+    // frees the window. A second close is EBADF.
+    packet[8] = 7;
+    {
+        auto send = UvRequest.udpSend(client, packet[]);
+        check(submitNow(&send) && send.succeeded, "the last send to the server");
+    }
+    check(waitUntil(() => loop.udpStats(server).received == 27), "the last one delivered");
+    {
+        auto d = popped(1, "the last one's element");
+        auto close = UvRequest.udpClose(server);
+        check(submitNow(&close) && close.succeeded, "server close");
+        check(d.bytes[8] == 7 && d.socket == server, "held across the close");
+        d.release();
+        close = UvRequest.udpClose(server);
+        check(submitNow(&close) && close.result == UV_EBADF, "closing a closed socket");
+    }
+
+    // The ring's capacity is checked against the windows that share it: the
+    // client holds 16 of 256.
+    auto third = serverOptions;
+    third.window = 241;
+    open = UvRequest.udpOpen(&third);
+    check(submitNow(&open) && open.result == UV_ENOBUFS, "a window the ring cannot hold");
+    third.window = 240;
+    open = UvRequest.udpOpen(&third);
+    check(submitNow(&open) && open.succeeded, "a window that fills the ring exactly");
+    {
+        auto close = UvRequest.udpClose(cast(int) open.result);
+        check(submitNow(&close) && close.succeeded, "third close");
+    }
+
+    // Malformed sends are refused at submit; an unopened socket at publication.
+    {
+        auto bad = UvRequest.udpSend(client, packet[]);
+        bad.stampAt = packet.length - 4;
+        check(loop.submit(&bad) == UvSubmit.invalid, "a stamp past the end");
+        bad = UvRequest.udpSend(-1, packet[]);
+        check(loop.submit(&bad) == UvSubmit.invalid, "no socket");
+        bad = UvRequest.udpSend(200, packet[]);
+        check(submitNow(&bad) && bad.result == UV_EBADF, "an unopened socket");
+    }
+
+    // Resolution on the pool, into a slice of one and of several.
+    UvAddress[1] one;
+    auto resolve = UvRequest.resolve("localhost", 7, one[]);
+    check(submitNow(&resolve) && resolve.result == 1 && one[0].valid && one[0].port == 7,
+        "localhost into one address");
+    UvAddress[8] several;
+    resolve = UvRequest.resolve("localhost", 7, several[]);
+    check(submitNow(&resolve) && resolve.result >= 1 && resolve.result <= several.length,
+        "localhost into several");
+    char[64] text;
+    check(UvAddress.loopback4(80).format(text[]) == "127.0.0.1:80", "IPv4 text");
+    check(UvAddress.ipv6("::1", 80).format(text[]) == "[::1]:80", "IPv6 text");
+    check(!UvAddress.ipv4("not an address", 1).valid, "a parse failure is unset");
+    check(UvAddress.init.format(text[]) == "unset", "unset text");
+
+    // The client is left open: the loop's close closes it.
+    auto report = loop.close();
+    check(report.loopClose == 0 && report.abandoned == 0 && report.failure is null, "UDP close report");
+    ring.destroy();
+    pass("UDP on the loopback: stamped sends, replies, a dropped burst, truncation, "
+        ~ "holds across close, the ring check, and resolution");
+}
+
 // An operation that blocks in an auxiliary thread cannot be cancelled by
 // libuv: close abandons it and leaves the loop allocated. The test then
 // unblocks it so the auxiliary thread is free again. Linux opens a FIFO
@@ -1407,6 +1633,7 @@ int main()
     readFileAllocators(dir, paths[8], contents[8], paths[0]);
     constructorsAndDefaultAllocator(paths[8], contents[8]);
     readFileCancelStorm(paths[8], contents[8]);
+    udpLoopback();
     version (AntfarmMimallocV3) mimallocReads(paths[8], contents[8]);
     abandonBlocked(dir);
     printf("ALL UV TESTS PASSED (%lld ms)\n", (MonoTime.currTime - started).total!"msecs");

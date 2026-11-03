@@ -225,12 +225,46 @@ where the implementation departed from the plan.
     parallel mark threads spinning at full CPU after a collection in some
     processes. That is unexplained and left open.
 - Design: [event-loop.md](docs/design/event-loop.md) gains section 9, the
-  2.2.1 UDP design, written before its code from the first consumer's
-  netcode: a loop-owned socket with a fixed receive window that drops and
-  counts, one element per datagram on the application's ring, releases
-  from any thread, a transmit stamp the loop writes into the packet, and
-  timestamps in nanoseconds for clock sync. One loop serves files and
-  network, placed by core and class from the topology.
+  UDP design, written before its code from the first consumer's netcode:
+  a loop-owned socket with a fixed receive window that drops and counts,
+  one element per datagram on the application's ring, releases from any
+  thread, a transmit stamp the loop writes into the packet, and timestamps
+  in nanoseconds for clock sync. One loop serves files and network, placed
+  by core and class from the topology.
+- `ant_uv` UDP sockets, as section 9 designs them (planned as 2.2.1, landed
+  on this branch):
+  - `UvRequest.udpOpen(&options)`, `udpSend(socket, bytes, peer)` with
+    `stampAt`, `udpClose(socket)` and `resolve(host, port, slice)`;
+    `UvAddress` as the one address type, with `UvUdpOptions`,
+    `UvDatagram` and `UvUdpStats`.
+  - The socket's receive window is fixed at open. When it is exhausted the
+    datagram is read into a spare buffer and discarded, so the socket keeps
+    going, and the drop is counted; returning libuv an empty buffer would
+    instead leave the datagram unread on Linux, a spin, and stop the
+    receive on Windows.
+  - `udpOpen` refuses, with `UV_ENOBUFS`, a window the ring could not hold
+    beside the windows already delivering to it.
+  - A held datagram outlives its socket's close; the window is freed by
+    the last `release`, from any thread.
+  - `UvLoop.nanos()` is the clock of every transport timestamp.
+  - The binding gains libuv's UDP, address and `getaddrinfo` functions,
+    the socket address types from druntime, and nineteen oracle checks
+    against the C headers: error codes, handle and request types, UDP
+    flags, `sockaddr_in`/`sockaddr_in6`/`addrinfo` sizes and offsets, and
+    the address families.
+  - The suite's loopback case: stamped sends through a connected client,
+    replies to the datagram's sender, a 24-datagram burst into a window of
+    16 with eight dropped and counted, releases from another thread,
+    truncation, a datagram held across its socket's close, the ring
+    check, malformed sends, resolution into a slice, address text, and a
+    socket left open at the loop's close.
+  - The suite's ThreadSanitizer build runs with druntime's collector
+    disabled. TSan holds the GC's suspend signal until the thread next
+    calls an interceptor or an instrumented atomic, which a thread spinning
+    on the uninstrumented GC lock or parked in a raw futex never does; once
+    the suite's heap grew enough for a collection to begin during the
+    worker-Fiber reads, every TSan run deadlocked there. The plain lanes
+    collect ([ROADMAP](ROADMAP.md)).
 
 Validation so far, Linux x86-64 (Ryzen 9 5900XT, LDC 1.43.0, DMD 2.113.0,
 libuv 1.53.0): `make check` passed with both new suites in it, each under
@@ -282,6 +316,17 @@ The Linux gate on the 5900XT (2026-11-02): CachyOS with Linux 7.3.1, LDC
   C runtime and with mimalloc, and `tools/perf/file_loading` natively.
 - The pinned libuv archive's SHA-256 matched here too, and its signature
   verified against the key that libuv's `MAINTAINERS.md` lists at v1.53.0.
+
+The UDP sockets (2026-11-02 and 03, Windows host, rebased onto the 5900XT's
+fixes above): the Windows `ant_uv` lane passed under both compilers with
+the loopback case in it, then 30 LDC and 10 DMD runs of the suite before
+the rebase and 10 LDC and 5 DMD after it. Under WSL2 the `ant_uv` suite
+passed under LDC, DMD and ThreadSanitizer, with io_uring, with io_uring
+under ThreadSanitizer, and with mimalloc, as did both examples and 30 LDC,
+10 DMD, 10 ThreadSanitizer, 10 io_uring and 20 io_uring ThreadSanitizer
+runs, the last without the descriptor suppression that the ring built at
+create made unnecessary. The ThreadSanitizer build ran with the collector
+disabled, as above. The Linux gate on the 5900XT has not run on this tree.
 
 ## 2.1.1 — 2026-10-28
 
