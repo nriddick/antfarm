@@ -29,6 +29,18 @@ the C ABI.
   the resident exporting its own D domain instead. The page lists eight
   open questions, among them whether per-spawn completion callbacks and
   events earn their place before the loop has a C surface.
+- Design: [c-abi-2.md](docs/design/c-abi-2.md) and
+  [c-abi-2-onboarding.md](docs/design/c-abi-2-onboarding.md) mock up a C
+  ABI 2 from a review of ABI 1's coverage against the D API index and the
+  Fiber sketch. ABI 1 covers the core, actors, waves, private roots, the
+  dispatcher and the two hosts nearly in full; the gaps cluster in the
+  plain host (no attachments, timed wait, host-pumped parks, resolve or
+  Fibers), in policy (the hosts fold a D `Error` into `AF_RUNTIME_ERROR`
+  where the Fiber sketch aborts) and in what a hot-swapped module needs
+  (a function table). ABI 2 keeps every ABI 1 symbol, accepts ABI 1
+  option layouts by their version, adds those rows, a build query, cost
+  hints and GC control, and keeps room for the loop. The onboarding page
+  is the guide ABI 2 would ship with, from archive choice to teardown.
 
 ## 2.2.0 development
 

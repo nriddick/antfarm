@@ -193,6 +193,15 @@ archive once a release carries the fix.
   Fibers before a reload, and two C hosts for the test suite. The
   surface is proposed, not built; the page's section 9 lists what is
   open.
+- 2.2.x: C ABI 2, mocked up in [docs/design/c-abi-2.md](docs/design/c-abi-2.md)
+  with its [onboarding guide](docs/design/c-abi-2-onboarding.md): the
+  coverage review of ABI 1 against the D surface and the Fiber sketch
+  coalesced into one versioned surface. Option structures that negotiate
+  their version, the plain host brought level with the D host
+  (attachments, a timed wait, transferred parks, Fibers, resolve), one
+  generated function table for modules, a D `Error` aborting at every
+  export, build info, cost hints, GC control and the queries C lacked.
+  Nothing is built; the page's section 7 lists what is open.
 
 ## Later
 
