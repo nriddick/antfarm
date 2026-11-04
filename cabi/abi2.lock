@@ -72,6 +72,10 @@ PROTO af_status af_dispatcher_start(const af_dispatcher_options *, const af_proc
 PROTO af_status af_dispatcher_stop(af_dispatcher *)
 PROTO af_status af_druntime_attach_thread(void)
 PROTO af_status af_druntime_detach_thread(void)
+PROTO af_status af_druntime_gc_collect(void)
+PROTO af_status af_druntime_gc_disable(void)
+PROTO af_status af_druntime_gc_enable(void)
+PROTO af_status af_druntime_gc_minimize(void)
 PROTO af_status af_druntime_init(void)
 PROTO af_status af_druntime_shutdown(void)
 PROTO af_node *af_fork(af_node *parent, af_node **children, size_t count)
@@ -88,14 +92,19 @@ PROTO af_status af_group_stop_workers(af_group_host *)
 PROTO af_status af_group_token(af_group_host *, uint32_t llc, af_token **out)
 PROTO af_status af_group_wake(af_group_host *, uint32_t llc)
 PROTO af_status af_host_abandon(af_host *)
+PROTO af_status af_host_attach(af_host *, const af_attachment *)
+PROTO af_status af_host_attach_park(af_host *, af_private_roots *)
 PROTO af_status af_host_close(af_host *)
 PROTO af_status af_host_create(const af_host_options *, af_host **out)
 PROTO af_status af_host_create_actors(af_host *, size_t capacity, const af_actor_allocator *, af_actor_runtime **out)
 PROTO af_farm *af_host_farm(af_host *)
 PROTO void af_host_options_default(af_host_options *out)
 PROTO af_status af_host_register_producer(af_host *, af_tier, af_token **out)
+PROTO af_status af_host_resolve(const af_host_options *, af_processor *out, size_t capacity, size_t *count)
 PROTO af_status af_host_state(const af_host *, uint32_t *out_state)
 PROTO af_status af_host_step(af_host *)
+PROTO af_status af_host_summary(const af_host *, char *out, size_t capacity, size_t *len)
+PROTO af_status af_host_wait_until(af_host *, af_host_predicate, void *context, uint64_t timeout_ns)
 PROTO af_status af_host_wake(af_host *)
 PROTO const char *af_last_error_message(void)
 PROTO int32_t af_last_os_error(void)
@@ -194,6 +203,8 @@ CONST AF_HOST_CLOSED 2
 CONST AF_HOST_FAILED 1
 CONST AF_HOST_OPEN 0
 CONST AF_HOST_STOPPING 4
+CONST AF_HOST_TIMED_OUT 112
+CONST AF_HOST_WORKER_FAILED 113
 CONST AF_IDLE_PARK 0
 CONST AF_IDLE_SPIN 1
 CONST AF_INVALID 1
@@ -275,6 +286,15 @@ LAYOUT F af_actor_state_span count 16 8
 LAYOUT S af_actor_wave_handle 16 8
 LAYOUT F af_actor_wave_handle _wave 0 8
 LAYOUT F af_actor_wave_handle _generation 8 8
+LAYOUT S af_attachment 56 8
+LAYOUT F af_attachment struct_size 0 4
+LAYOUT F af_attachment abi_version 4 4
+LAYOUT F af_attachment name 8 8
+LAYOUT F af_attachment emit 16 8
+LAYOUT F af_attachment drained 24 8
+LAYOUT F af_attachment finish 32 8
+LAYOUT F af_attachment context 40 8
+LAYOUT F af_attachment reserved 48 8
 LAYOUT S af_body 16 8
 LAYOUT F af_body words 0 8
 LAYOUT F af_body count 8 8
@@ -328,15 +348,19 @@ LAYOUT S af_entry 24 8
 LAYOUT F af_entry call 0 8
 LAYOUT F af_entry body 8 8
 LAYOUT F af_entry body_words 16 8
-LAYOUT S af_group_options 112 8
+LAYOUT S af_group_options 168 8
 LAYOUT F af_group_options struct_size 0 4
 LAYOUT F af_group_options abi_version 4 4
-LAYOUT F af_group_options host 8 88
-LAYOUT F af_group_options group_mode 96 4
-LAYOUT F af_group_options group_index 100 4
-LAYOUT F af_group_options farm_per_group 104 4
-LAYOUT F af_group_options reserved 108 4
-LAYOUT S af_host_options 88 8
+LAYOUT F af_group_options host 8 120
+LAYOUT F af_group_options group_mode 128 4
+LAYOUT F af_group_options group_index 132 4
+LAYOUT F af_group_options farm_per_group 136 4
+LAYOUT F af_group_options reserved 140 4
+LAYOUT F af_group_options caller_processor 144 8
+LAYOUT F af_group_options worker_tokens 152 4
+LAYOUT F af_group_options reserved2 156 4
+LAYOUT F af_group_options reserved3 160 8
+LAYOUT S af_host_options 120 8
 LAYOUT F af_host_options struct_size 0 4
 LAYOUT F af_host_options abi_version 4 4
 LAYOUT F af_host_options workers 8 4
@@ -355,6 +379,12 @@ LAYOUT F af_host_options small_table_threshold 68 4
 LAYOUT F af_host_options huge_pages 72 4
 LAYOUT F af_host_options skip_smt_siblings 76 4
 LAYOUT F af_host_options reserved 80 8
+LAYOUT F af_host_options wait_timeout_ns 88 8
+LAYOUT F af_host_options max_emit_rounds 96 4
+LAYOUT F af_host_options group_mode 100 4
+LAYOUT F af_host_options group_index 104 4
+LAYOUT F af_host_options farm_per_group 108 4
+LAYOUT F af_host_options reserved2 112 8
 LAYOUT S af_node 56 8
 LAYOUT F af_node private_words 0 32
 LAYOUT F af_node run 32 8

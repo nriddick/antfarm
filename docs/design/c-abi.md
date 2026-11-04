@@ -1,5 +1,8 @@
 # C ABI 1
 
+ABI 2 (2.2.1) is a superset of this surface: [c-abi-2.md](c-abi-2.md) has
+what it adds and how an ABI 1 program moves.
+
 Status: ABI 1 shipped in Ant Farm 1.9.0. The public transport is
 defined by [antfarm.h](../../include/antfarm.h), public actors in
 [antfarm_actors.h](../../include/antfarm_actors.h), private actors in

@@ -101,6 +101,12 @@ OPAQUE_STRUCTS = {"af_actor_message", "af_private_root_handle"}
 ABI_LOCK = ROOT / "cabi" / "abi2.lock"
 ABI_LOCK_PREVIOUS = ROOT / "cabi" / "abi1.lock"
 ABI_LOCK_EXEMPT = {"CONST AF_ABI_VERSION"}
+# Versioned option structures that grew in ABI 2. Their ABI 1 images are
+# accepted by their own size and version, and frozen in
+# tests/cabi/abi1_images.h, which the runtime and group tests fill; the lock
+# cannot see that acceptance, so their layout rows are exempt here. Every
+# other layout row of ABI 1 must survive verbatim.
+ABI_LOCK_GROWN = {"af_host_options", "af_group_options"}
 ABI_LOCK_HEADER = """# C ABI 2 lock: header prototypes, numeric constants and struct layouts.
 # The declaration audit in scripts/check-c-abi.py fails on any difference.
 # Within ABI 2 only additions are compatible; regenerate deliberately with
@@ -183,7 +189,7 @@ def check_abi_lock(rows, write):
     report = []
     for line in previous:
         key = lock_key(line)
-        if key in ABI_LOCK_EXEMPT:
+        if key in ABI_LOCK_EXEMPT or (key.startswith("LAYOUT ") and key.split()[2] in ABI_LOCK_GROWN):
             continue
         if key not in current:
             report.append(f"removed: {line!r}")
@@ -330,6 +336,8 @@ def runtime_checks(compiler, build, core):
     execute(binary, "borrowed", death="cannot destroy a borrowed host Farm")
     execute(binary, "nested", death="runtime control operation inside Farm callback")
     execute(binary, "error", death="D Error inside an export: injected D Error")
+    execute(binary, "gc-callback", death="GC control inside Farm callback")
+    execute(binary, "emit-control", death="control operation inside runtime callback")
     actors = native_runtime("tests/cabi/actors_host.c", build, libraries, compiler, probe=True)
     execute(actors)
     execute(actors, "borrowed", death="cannot destroy a host-owned actor runtime")

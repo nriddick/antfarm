@@ -41,6 +41,27 @@ the C ABI.
   option layouts by their version, adds those rows, a build query, cost
   hints and GC control, and keeps room for the loop. The onboarding page
   is the guide ABI 2 would ship with, from archive choice to teardown.
+- C ABI 2, the first two rounds built. `AF_ABI_VERSION` is 2 and every
+  option structure is accepted by its own version: an ABI 1 image by its
+  ABI 1 size with version 1, or the current layout with version 2. The
+  host options grew (a wait deadline, the emission-round bound, LLC
+  groups) and the group options with them (the caller's processor, the
+  worker-token switch); their ABI 1 images are frozen in
+  `tests/cabi/abi1_images.h`, and every other prototype, constant and
+  layout row of `cabi/abi1.lock` must stay verbatim beside the new
+  `cabi/abi2.lock`, which the audit enforces. New in antfarm.h:
+  `af_build_info_get`, `af_cost_for_chunk`, `af_root_cost_hint`,
+  `AF_COST_AUTO` on every write, `af_used_large_pages`; in the actors
+  header, capacity and quiescence; on the plain host, attachments
+  (`af_host_attach`), a park transferred to the host
+  (`af_host_attach_park`), `af_host_wait_until` with `AF_HOST_TIMED_OUT`
+  and `AF_HOST_WORKER_FAILED`, `af_host_resolve` and `af_host_summary`;
+  GC collect, minimize, enable and disable for a C resident. A D `Error`
+  inside any runtime export now aborts through the fatal handler rather
+  than becoming `AF_RUNTIME_ERROR`. The module table, Fibers and the loop
+  remain proposals in the design page. Validated with `check-c-abi.py`
+  under LDC and DMD on Windows, and under LDC, DMD and the ThreadSanitizer
+  core lane on WSL (2026-11-04).
 
 ## 2.2.0 development
 

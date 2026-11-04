@@ -1,7 +1,7 @@
 /* Optional druntime-inclusive non-Fiber FarmHost. Link with antfarm_core. */
 #ifndef ANTFARM_RUNTIME_H
 #define ANTFARM_RUNTIME_H
-#include "antfarm_actors.h"
+#include "antfarm_private.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -12,10 +12,23 @@ enum { AF_CALLER_UNCHANGED = 0, AF_CALLER_CONFINE = 1, AF_CALLER_PIN = 2 };
 enum { AF_IDLE_PARK = 0, AF_IDLE_SPIN = 1 };
 enum { AF_HOST_OPEN = 0, AF_HOST_FAILED = 1, AF_HOST_CLOSED = 2,
        AF_HOST_ABANDONED = 3, AF_HOST_STOPPING = 4 };
-/* Initialize with af_host_options_default. Requires struct_size == sizeof
-   (af_host_options), abi_version from AF_ABI_VERSION_MIN to AF_ABI_VERSION and
-   reserved == 0. Truncated and larger option structures are rejected with
-   AF_INVALID. */
+enum { AF_GROUP_AUTOMATIC = 0, AF_GROUP_ALL = 1, AF_GROUP_ONLY = 2 };
+/* ABI 2 statuses of the runtime range. */
+enum { AF_HOST_TIMED_OUT = 112, AF_HOST_WORKER_FAILED = 113 };
+typedef struct af_processor {
+    uint16_t group, processor;
+    uint16_t llc, reserved;
+} af_processor;
+/* Initialize with af_host_options_default. Accepted by its own size and
+   version: struct_size == sizeof (af_host_options) with abi_version
+   AF_ABI_VERSION, or the ABI 1 image (88 bytes, the fields through reserved)
+   with abi_version 1, the ABI 2 fields then taking their defaults. Reserved
+   words are zero; any other size or version is AF_INVALID.
+   ABI 2 fields: wait_timeout_ns bounds af_host_wait_until when that call is
+   passed AF_WAIT_FOREVER (default AF_WAIT_FOREVER: no deadline);
+   max_emit_rounds bounds the emission rounds of one step (16; positive);
+   group_mode, group_index and farm_per_group select the host's LLC groups as
+   the group host's options do (AF_GROUP_AUTOMATIC, 0, 0). */
 typedef struct af_host_options {
     uint32_t struct_size, abi_version;
     uint32_t workers, caller_consumes, caller_placement, idle;
@@ -24,6 +37,9 @@ typedef struct af_host_options {
     uint64_t bulk_quota_words, small_quota_words;
     uint32_t extra_consumers, small_table_threshold, huge_pages, skip_smt_siblings;
     uint64_t reserved;
+    uint64_t wait_timeout_ns;
+    uint32_t max_emit_rounds, group_mode, group_index, farm_per_group;
+    uint64_t reserved2;
 } af_host_options;
 
 /* The D runtime session (hence the prefix: unrelated to af_actor_runtime).
@@ -97,16 +113,70 @@ af_status af_host_close(af_host *);
    leaked. Keep retained code/contexts resident. This is for unrecoverable failure. */
 af_status af_host_abandon(af_host *);
 
+/* ABI 2. One emitter or service the host drives from every step, on the
+   control thread. emit runs with the host's control token once per emission
+   round and returns the items it published (zero is not drained); the token
+   is the host's: write with it, never unregister or keep it. drained is the
+   close precondition (NULL: always drained). finish runs after consumers stop
+   and before runtimes, parks and the Farm are destroyed. All three return
+   promptly, never wait for a worker, never throw or longjmp, and make no
+   control call (fatal, as in any runtime callback). context stays live until
+   finish has run or the host is abandoned. The structure is copied; at least
+   one callback is required. */
+typedef struct af_attachment {
+    uint32_t struct_size, abi_version;
+    const char *name;                       /* for the host's reports; may be NULL */
+    size_t (*emit)(void *context, af_token *);
+    uint32_t (*drained)(void *context);
+    void (*finish)(void *context);
+    void *context;
+    uint64_t reserved;
+} af_attachment;
+af_status af_host_attach(af_host *, const af_attachment *);
+/* Transfers a park created on af_host_farm(host): step pumps it with the
+   host's token and the automatic cost, close requires it empty (live roots
+   block close; take tracked outcomes in a wait predicate, the host never
+   does) and destroys it. Never pump or destroy it yourself afterwards. */
+af_status af_host_attach_park(af_host *, af_private_roots *);
+typedef uint32_t (*af_host_predicate)(void *context);
+/* while (!done(context)) step, on the control thread. AF_OK once done returns
+   nonzero; AF_HOST_TIMED_OUT when timeout_ns elapsed first (AF_WAIT_FOREVER
+   selects the options' wait_timeout_ns), the host still open; AF_HOST_WORKER_
+   FAILED when a pool worker failed, after which only close and abandon remain.
+   done runs before every step and may take outcomes and poll; it is a runtime
+   callback, so a control call inside it is fatal. */
+af_status af_host_wait_until(af_host *, af_host_predicate, void *context, uint64_t timeout_ns);
+/* The worker CPU set the options would select, without starting it. Query
+   with NULL/0; AF_FULL writes the required count and no partial output.
+   Control thread only. */
+af_status af_host_resolve(const af_host_options *, af_processor *out, size_t capacity, size_t *count);
+/* The host's one-line summary, NUL-terminated, into out; len receives its
+   length without the terminator. AF_FULL when capacity < len + 1, writing
+   nothing but len. Attached threads. */
+af_status af_host_summary(const af_host *, char *out, size_t capacity, size_t *len);
+/* The D garbage collector, for a host that embeds the runtime from C.
+   Attached threads, outside Farm callbacks and runtime callbacks (fatal). A
+   collection suspends attached threads, pool workers included, for its
+   duration; unattached C threads keep running. */
+af_status af_druntime_gc_collect(void);
+af_status af_druntime_gc_minimize(void);
+af_status af_druntime_gc_enable(void);
+af_status af_druntime_gc_disable(void);
+
 /* Status diagnostics use af_last_error_message()/af_last_os_error(). No D
    exception crosses these exports: a D Exception is AF_RUNTIME_ERROR with its
    message, a D Error aborts through the fatal handler. Callbacks still must
    not throw/longjmp. */
 #ifdef __cplusplus
 }
-static_assert(sizeof(af_host_options) == 88 && alignof(af_host_options) == 8 &&
-              offsetof(af_host_options, idle_timeout_ns) == 24, "host options layout");
+static_assert(sizeof(af_host_options) == 120 && alignof(af_host_options) == 8 &&
+              offsetof(af_host_options, idle_timeout_ns) == 24 &&
+              offsetof(af_host_options, wait_timeout_ns) == 88, "host options layout");
+static_assert(sizeof(af_attachment) == 56 && offsetof(af_attachment, context) == 40, "attachment layout");
 #else
-_Static_assert(sizeof(af_host_options) == 88 && _Alignof(af_host_options) == 8 &&
-               offsetof(af_host_options, idle_timeout_ns) == 24, "host options layout");
+_Static_assert(sizeof(af_host_options) == 120 && _Alignof(af_host_options) == 8 &&
+               offsetof(af_host_options, idle_timeout_ns) == 24 &&
+               offsetof(af_host_options, wait_timeout_ns) == 88, "host options layout");
+_Static_assert(sizeof(af_attachment) == 56 && offsetof(af_attachment, context) == 40, "attachment layout");
 #endif
 #endif

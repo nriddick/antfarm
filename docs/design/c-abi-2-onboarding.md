@@ -1,12 +1,12 @@
-# Onboarding to C ABI 2, a mockup
+# Onboarding to C ABI 2
 
-Status: mockup, 2026-11-04, on `2.2.1-progress`. This page is written as
-the onboarding guide ABI 2 would ship with, so that the surface proposed
-in [c-abi-2.md](c-abi-2.md) can be judged from the side of the C
-programmer who meets it first. Nothing it names beyond ABI 1 exists yet;
-where a call is ABI 1 today the text says so. The examples under
-`examples/` it refers to are the ABI 1 ones; the ABI 2 ones would sit
-beside them.
+Status: in progress on `2.2.1-progress`. This page is written as the
+onboarding guide ABI 2 ships with, so that the surface in
+[c-abi-2.md](c-abi-2.md) can be judged from the side of the C programmer
+who meets it first. Sections 2 to 5 and 8 to 11 describe calls that exist
+and are tested (2026-11-04); the Fibers of section 6 and the module table
+of section 7 remain proposals, and the text says so where a call is ABI 1
+today. The examples under `examples/` it refers to are the ABI 1 ones.
 
 ## 1. Choose your archive
 

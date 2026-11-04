@@ -1,6 +1,8 @@
-# C ABI 2, a mockup
+# C ABI 2
 
-Status: mockup, 2026-11-04, on `2.2.1-progress`, before any code. This page
+Status: in progress on `2.2.1-progress`. Of section 4, the antfarm.h,
+actors, runtime and groups rows are built, tested and locked (2026-11-04);
+the table, Fibers and the loop remain proposals. This page
 coalesces two things into one versioned surface: the review of what
 [ABI 1](c-abi.md) covers against the D API index, and the
 [Fiber sketch](fiber-c-abi.md). It is written as the design ABI 2 would
@@ -52,8 +54,11 @@ their own version. ABI 2 is one archive pair that accepts both layouts.
 - Wake-class calls need no druntime attachment; control calls need the
   control thread; services from other threads need attachment.
 - Callbacks never throw, `longjmp` or retain their borrowed arguments.
-- The lock admits additions only within a version. `cabi/abi2.lock` starts
-  as `abi1.lock` plus ABI 2's rows.
+- The lock admits additions only within a version. `cabi/abi2.lock` is the
+  current surface; `abi1.lock` stays, and the audit requires every
+  prototype and constant row of it to remain verbatim. The two option
+  structures that grew have their ABI 1 images frozen in
+  `tests/cabi/abi1_images.h`, which the tests fill, instead.
 
 ## 3. Decisions
 
@@ -62,7 +67,10 @@ their own version. ABI 2 is one archive pair that accepts both layouts.
 `abi_version == 1` with the ABI 1 size and `abi_version == 2` with the ABI
 2 size, and nothing else. `*_default` fills the ABI 2 layout. New fields
 come after the ABI 1 `reserved` word, which stays zero, so an ABI 1 image
-in memory is a valid prefix. Output structures that may grow
+in memory is a valid prefix. A structure that embeds another, as the group
+options embed the host options, grows with it; its ABI 1 image is
+recognised by its own size and version and decoded as a whole, the
+embedded host by its own. Output structures that may grow
 (`af_fiber_join_result`, `af_build_info`) are versioned the same way.
 
 **`AF_ABI_VERSION` is 2, and there is a build query.** `af_abi_version`
@@ -314,8 +322,10 @@ and a newer module sees the smaller `size`.
 | Pumps a private park on the borrowed host Farm by hand | Still allowed; `af_host_attach_park` is the alternative |
 | Ships the headers to a plugin and resolves exports | Can hand it `af_api_get()` instead; on Windows this removes the export requirement |
 
-The lock: `cabi/abi2.lock` is `abi1.lock` plus the rows above, and the
-audit runs both, so an ABI 1 prototype that drifts fails in either.
+The lock: `cabi/abi2.lock` is the current surface, and the audit also
+holds every ABI 1 prototype and constant row, so one that drifts fails;
+the ABI 1 images of the two structures that grew are held by
+`tests/cabi/abi1_images.h`.
 
 ## 6. Validation
 

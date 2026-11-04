@@ -29,11 +29,8 @@ typedef struct af_node {
     af_node_callback run, join;
     void *context;
 } af_node;
-typedef struct af_processor {
-    uint16_t group, processor;
-    uint16_t llc, reserved;
-} af_processor;
-/* Enumerate eligible processors in topology order. NULL/0 queries count.
+/* af_processor is declared in antfarm_runtime.h.
+   Enumerate eligible processors in topology order. NULL/0 queries count.
    AF_FULL reports required count and writes no partial output. */
 af_status af_processors(af_processor *out, size_t capacity, size_t *count);
 typedef struct af_dispatcher_options {

@@ -19,7 +19,6 @@ extern(C) alias ForCallback = void function(void*, size_t) nothrow @nogc;
 extern(C) alias ReduceLeaf = void function(void*, size_t, size_t, const(void)*, void*) nothrow @nogc;
 extern(C) alias ReduceJoin = void function(void*, const(void)*, const(void)*, void*) nothrow @nogc;
 struct af_node { ulong[4] private_words; NodeCallback run, join; void* context; }
-struct af_processor { ushort group, processor, llc, reserved; }
 struct af_dispatcher_options
 {
     uint struct_size, abi_version;

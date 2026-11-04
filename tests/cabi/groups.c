@@ -1,4 +1,5 @@
 #include "antfarm_groups.h"
+#include "abi1_images.h"
 #include "threads.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,6 +85,23 @@ int main(void) {
     CHECK(af_group_start(&o,body,stop,workers,&bad)==AF_INVALID && bad==NULL);
     af_group_options_default(&o); o.reserved=1;
     size_t count=99; CHECK(af_group_resolve(&o,NULL,0,&count)==AF_INVALID && count==0);
+    /* ABI 2: the two new fields, and the ABI 1 image by its own size and version. */
+    af_group_options_default(&o);
+    CHECK(o.worker_tokens==1 && o.caller_processor.group==0xFFFF && o.caller_processor.processor==0xFFFF);
+    o.worker_tokens=2; CHECK(af_group_resolve(&o,NULL,0,&count)==AF_INVALID);
+    af_group_options_default(&o); o.caller_processor.reserved=1; CHECK(af_group_resolve(&o,NULL,0,&count)==AF_INVALID);
+    af_group_options_default(&o); o.reserved3=1; CHECK(af_group_resolve(&o,NULL,0,&count)==AF_INVALID);
+    af_group_options_default(&o); o.host.abi_version=1; CHECK(af_group_resolve(&o,NULL,0,&count)==AF_INVALID); /* an ABI 2 group carries an ABI 2 host */
+    af1_group_options image; af1_group_options_default(&image); image.host.workers=0;
+    ok(af_group_resolve((const af_group_options *)&image,NULL,0,&count)); CHECK(count==0);
+    ok(af_group_start((const af_group_options *)&image,body,stop,workers,&host));
+    ok(af_group_stop_workers(host)); ok(af_group_close(host)); host=NULL;
+    af_processor cpus[128]; size_t n=0; ok(af_processors(cpus,128,&n)); CHECK(n>0);
+    af_group_options_default(&o); o.host.workers=0; o.worker_tokens=0;
+    o.caller_processor=cpus[0]; o.caller_processor.llc=0; /* pin the caller to the first eligible processor */
+    ok(af_group_start(&o,body,stop,workers,&host));
+    uint32_t pinned=99; ok(af_group_caller_llc(host,&pinned)); CHECK(pinned==cpus[0].llc);
+    ok(af_group_stop_workers(host)); ok(af_group_close(host)); host=NULL;
     exercise(0); exercise(2);
     /* An immediate stop may precede a worker's first body. Such a worker has
        no user resources to clean up and need not call the user stop hook. */

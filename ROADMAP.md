@@ -201,7 +201,9 @@ archive once a release carries the fix.
   (attachments, a timed wait, transferred parks, Fibers, resolve), one
   generated function table for modules, a D `Error` aborting at every
   export, build info, cost hints, GC control and the queries C lacked.
-  Nothing is built; the page's section 7 lists what is open.
+  The antfarm.h, actors, runtime and groups rows are built, tested and
+  locked (2026-11-04); the table, Fibers and the loop remain proposals.
+  The page's section 7 lists what is open.
 
 ## Later
 

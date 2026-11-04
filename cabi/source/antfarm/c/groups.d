@@ -4,7 +4,6 @@ import antfarm : fatal;
 import core.thread : Thread;
 import antfarm.c.core;
 import antfarm.c.runtime;
-import antfarm.c.forkjoin : af_processor;
 import core.atomic;
 import core.memory : GC;
 import core.stdc.stdlib : malloc, free;
@@ -13,14 +12,29 @@ import threadpool.groups : GroupHost, GroupHostOptions, groupFarmOf;
 import threadpool.host : HostGroups, CallerPlacement, WorkerIdle;
 import threadpool.hybrid : WorkerSelf;
 import threadpool.pool : CacheAwarePool;
+import threadpool.topology : ProcessorId;
 
 struct af_group_options
 {
     uint struct_size, abi_version;
     af_host_options host;
     uint group_mode, group_index, farm_per_group, reserved;
+    // ABI 2
+    af_processor caller_processor;
+    uint worker_tokens, reserved2;
+    ulong reserved3;
 }
-static assert(af_group_options.sizeof == 112);
+static assert(af_group_options.sizeof == 168 && af_group_options.group_mode.offsetof == 128
+    && af_group_options.caller_processor.offsetof == 144);
+/// The ABI 1 image, with the ABI 1 host image inside; accepted by its own
+/// size and version.
+struct af_group_options_v1
+{
+    uint struct_size, abi_version;
+    af_host_options_v1 host;
+    uint group_mode, group_index, farm_per_group, reserved;
+}
+static assert(af_group_options_v1.sizeof == 112 && af_group_options_v1.group_mode.offsetof == 96);
 extern(C) alias GroupBody = uint function(af_group_host*, uint, uint, void*) nothrow @nogc;
 extern(C) alias GroupStop = void function(af_group_host*, uint, uint, void*) nothrow @nogc;
 private struct FarmLink { af_farm* farm; FarmLink* next; }
@@ -42,15 +56,29 @@ private uint options(const(af_group_options)* supplied, out GroupHostOptions opt
 {
     af_group_options defaults;
     if (supplied is null) { af_group_options_default(&defaults); supplied = &defaults; }
-    if (supplied.struct_size != af_group_options.sizeof) return setError(AF_INVALID, "invalid group options size");
-    const o = *supplied;
-    const h = o.host;
-    if (!abiVersionOk(o.abi_version) || o.reserved || o.farm_per_group > 1 || o.group_mode > 2 ||
+    // The image by its own size and version: ABI 1 (an ABI 1 host inside) or
+    // the current layout. Read only the head before trusting the rest.
+    af_group_options o;
+    af_host_options h;
+    auto head = cast(const(uint)*) supplied;
+    if (head[1] == 1 && head[0] == af_group_options_v1.sizeof)
+    {
+        auto v1 = cast(const(af_group_options_v1)*) supplied;
+        af_group_options_default(&o);
+        if (auto s = hostOptionsFrom(&v1.host, h)) return s;
+        o.group_mode = v1.group_mode; o.group_index = v1.group_index;
+        o.farm_per_group = v1.farm_per_group; o.reserved = v1.reserved;
+    }
+    else if (head[1] == AF_ABI_VERSION && head[0] == af_group_options.sizeof)
+    {
+        o = *supplied;
+        if (auto s = hostOptionsFrom(&o.host, h)) return s;
+    }
+    else return setError(AF_INVALID, "invalid group options size or version");
+    if (o.reserved || o.reserved2 || o.reserved3 || o.farm_per_group > 1 || o.group_mode > 2 ||
         o.group_index >= ushort.max || (o.group_mode != 2 && o.group_index != 0) ||
-        h.struct_size != af_host_options.sizeof || !abiVersionOk(h.abi_version) || h.reserved ||
-        h.caller_consumes > 1 || h.caller_placement > 2 || h.idle > 1 || h.huge_pages > 1 ||
-        h.skip_smt_siblings > 1 || (h.idle_timeout_ns != ulong.max && h.idle_timeout_ns > long.max))
-        return setError(AF_INVALID, "invalid group or host options");
+        o.worker_tokens > 1 || o.caller_processor.reserved)
+        return setError(AF_INVALID, "invalid group options");
     opt = GroupHostOptions.init;
     opt.workers = h.workers;
     opt.groups = o.group_mode == 0 ? HostGroups.automatic() : o.group_mode == 1 ? HostGroups.all() : HostGroups.only(cast(ushort)o.group_index);
@@ -65,6 +93,8 @@ private uint options(const(af_group_options)* supplied, out GroupHostOptions opt
     opt.farm.extraConsumers = h.extra_consumers; opt.farm.smallThreshold = h.small_table_threshold;
     opt.farm.hugePages = h.huge_pages != 0;
     opt.farmPerGroup = o.farm_per_group != 0;
+    opt.callerProcessor = ProcessorId(o.caller_processor.group, o.caller_processor.processor);
+    opt.workerTokens = o.worker_tokens != 0;
     return AF_OK;
 }
 private uint valid(af_group_host* h) nothrow @nogc
@@ -119,6 +149,8 @@ extern(C) void af_group_options_default(af_group_options* outOptions) nothrow @n
     outOptions.host.caller_consumes = 0;
     outOptions.host.caller_placement = 1;
     outOptions.farm_per_group = 1;
+    outOptions.caller_processor = af_processor(ushort.max, ushort.max, 0, 0);
+    outOptions.worker_tokens = 1;
 }
 extern(C) uint af_group_resolve(const(af_group_options)* supplied, af_processor* output, size_t capacity, size_t* count) nothrow
 {

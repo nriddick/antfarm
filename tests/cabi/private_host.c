@@ -39,7 +39,34 @@ static void exercise(unsigned workers) {
     af_private_roots_destroy(park); CHECK(af_host_close(host) == AF_OK);
     printf("C private host passed: %u workers\n", workers);
 }
+/* ABI 2: the park transferred to the host, which pumps it from step and
+   destroys it at close. */
+static uint32_t park_empty(void *context) { return af_private_roots_live((af_private_roots *)context) == 0; }
+static void exercise_attached(unsigned workers) {
+    af_host_options hopt; af_host_options_default(&hopt);
+    hopt.workers = workers; hopt.idle_timeout_ns = AF_WAIT_FOREVER;
+    af_host *host = NULL; CHECK(af_host_create(&hopt, &host) == AF_OK);
+    af_farm *farm = af_host_farm(host); test_atomic calls = {0};
+    af_private_root_options o; af_private_root_options_default(&o);
+    o.state.bytes = sizeof(unsigned); o.step = step; o.user = &calls;
+    af_private_roots *park = NULL; CHECK(af_private_roots_create(farm, &o, NULL, &park) == AF_OK);
+    af_farm *other = NULL; af_private_roots *foreign = NULL;
+    CHECK(af_create(NULL, &other) == AF_OK && af_private_roots_create(other, &o, NULL, &foreign) == AF_OK);
+    CHECK(af_host_attach_park(host, foreign) == AF_INVALID); /* not this host's Farm */
+    CHECK(af_host_attach_park(host, NULL) == AF_INVALID);
+    af_private_roots_destroy(foreign); af_destroy(other);
+    CHECK(af_host_attach_park(host, park) == AF_OK);
+    for (unsigned i = 0; i < 50; ++i) { unsigned initial = 0;
+        CHECK(af_private_root_spawn_copy(park, &initial, AF_PRIVATE_NO_DEADLINE, NULL) == AF_OK); }
+    CHECK(af_host_close(host) == AF_BUSY); /* live roots block close */
+    CHECK(af_host_wait_until(host, park_empty, park, AF_WAIT_FOREVER) == AF_OK);
+    CHECK(test_load(&calls) == 50);
+    antfarm_test_collect();
+    CHECK(af_host_close(host) == AF_OK); /* destroys the park */
+    printf("C private host passed: %u workers, park transferred to the host\n", workers);
+}
 int main(void) {
     CHECK(af_druntime_init() == AF_OK); exercise(0); exercise(2);
+    exercise_attached(0); exercise_attached(2);
     CHECK(af_druntime_shutdown() == AF_OK); return 0;
 }

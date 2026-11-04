@@ -6,11 +6,24 @@
 extern "C" {
 #endif
 typedef struct af_group_host af_group_host;
-enum { AF_GROUP_AUTOMATIC = 0, AF_GROUP_ALL = 1, AF_GROUP_ONLY = 2 };
+/* AF_GROUP_AUTOMATIC, AF_GROUP_ALL and AF_GROUP_ONLY are in antfarm_runtime.h.
+   Accepted by its own size and version: sizeof (af_group_options) with
+   abi_version AF_ABI_VERSION and an ABI 2 host inside, or the ABI 1 image
+   (112 bytes: an 88-byte host, then group_mode, group_index, farm_per_group,
+   reserved) with abi_version 1 and an ABI 1 host inside. The host's own
+   group_mode, group_index and farm_per_group are ignored here: the group
+   fields select the groups. ABI 2 fields: caller_processor pins the caller to
+   one processor and keeps it out of the worker set ({0xFFFF, 0xFFFF}, the
+   default: placement follows host.caller_placement; llc is ignored, reserved
+   is zero); worker_tokens (1) plans one small-tier token per worker for
+   af_group_token, 0 only the caller's plus extra_small_producers. */
 typedef struct af_group_options {
     uint32_t struct_size, abi_version;
     af_host_options host;
     uint32_t group_mode, group_index, farm_per_group, reserved;
+    af_processor caller_processor;
+    uint32_t worker_tokens, reserved2;
+    uint64_t reserved3;
 } af_group_options;
 /* A worker body owns its consumer view; return 0 when idle, 1 on progress.
    The pool arms, rechecks body, then parks. stop must unsubscribe/destroy the
@@ -55,8 +68,10 @@ af_status af_group_stop_workers(af_group_host *);
 af_status af_group_close(af_group_host *);
 #ifdef __cplusplus
 }
-static_assert(sizeof(af_group_options) == 112, "group options layout");
+static_assert(sizeof(af_group_options) == 168 && offsetof(af_group_options, group_mode) == 128 &&
+              offsetof(af_group_options, caller_processor) == 144, "group options layout");
 #else
-_Static_assert(sizeof(af_group_options) == 112, "group options layout");
+_Static_assert(sizeof(af_group_options) == 168 && offsetof(af_group_options, group_mode) == 128 &&
+               offsetof(af_group_options, caller_processor) == 144, "group options layout");
 #endif
 #endif
