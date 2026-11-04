@@ -172,6 +172,14 @@ lanes, and the native Windows matrix passes with a pinned libuv build
 was dropped: `pool.processors` already keeps the loop's CPU out of the
 worker set.
 
+Open: libuv 1.53.0's io_uring submit path lacks the full fence that the
+SQPOLL wakeup protocol needs, so a loop with `ioUring` can lose a request
+(about 1 in 100 runs of the `ant_uv` suite on the 5900XT; the CHANGELOG has
+the measurement). Choose between reporting it upstream and waiting, pinning
+a patched libuv on Linux as Windows pins one, and having the loop kick its
+ring when a request waits too long. Bound the gate's io_uring lane with a
+timeout either way.
+
 - 2.2.1: UDP sockets, designed in
   [the event loop design's section 9](docs/design/event-loop.md#9-221-udp-sockets)
   from the first consumer's netcode; then TCP streams, pipes and process

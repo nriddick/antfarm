@@ -87,7 +87,10 @@ for the same reason; through the ring, 8 MiB files loaded at a fifth to a
 half of the job's rate
 ([measurements](../docs/performance/file-loading-sdl3-2026-11-02.md)).
 `loop.ioUring` reports whether the option took effect; where the kernel
-refuses the ring, libuv falls back to the pool.
+refuses the ring, libuv falls back to the pool. With libuv 1.53.0 a ring
+request can be lost to a missing fence in libuv's submit path, about once
+in a hundred runs of the test suite on a Ryzen 9 5900XT; the CHANGELOG has
+the measurement. The pool path has no such hazard.
 
 One `UvLoop` may be open per process at a time.
 

@@ -359,7 +359,34 @@ under ThreadSanitizer, and with mimalloc, as did both examples and 30 LDC,
 10 DMD, 10 ThreadSanitizer, 10 io_uring and 20 io_uring ThreadSanitizer
 runs, the last without the descriptor suppression that the ring built at
 create made unnecessary. The ThreadSanitizer build ran with the collector
-disabled, as above. The Linux gate on the 5900XT has not run on this tree.
+disabled, as above.
+
+The Linux gate on the 5900XT (2026-11-04) ran on the UDP sockets with the
+abandoned-`readFile` handoff above rebased on top of them: `make check`
+passed, as did 50 LDC, 30 DMD, 30 ThreadSanitizer, 30 io_uring
+ThreadSanitizer, 20 mimalloc and 20 io_uring mimalloc runs of the `ant_uv`
+suite, and both examples with the mimalloc configuration through Dub. The
+plain io_uring lane hung in 3 of 250 runs, and in 2 of 250 runs of the tree
+before the UDP sockets, at different cases each time: the libuv submit
+fence below, older than both changes.
+
+Known, in libuv 1.53.0 with `UvLoopOptions.ioUring`: a file operation
+through the ring can hang for good, about once in a hundred runs of the
+`ant_uv` suite on the 5900XT under Linux 7.3.1. Every hang looks the same:
+the kernel's polling thread asleep, the loop thread in `epoll_wait`, and
+one submitted request that never completes. libuv's `uv__iou_submit`
+stores the ring's tail with release ordering, then loads the wakeup flag
+with acquire ordering, and nothing orders that store before that load:
+io_uring's documentation asks for a full fence there, because the polling
+thread sets the flag and re-reads the tail before it sleeps, and x86 lets
+a load pass an earlier store. libuv 1.53.0 built from its archive with a
+full fence added at that point hung in 0 of 500 runs against 4 of 500 for
+the same build without it, the two alternating under the same load. The
+fix is upstream's; its `v1.x` branch still lacks it. Until a fixed libuv is
+pinned on Linux as one is on Windows, or the loop kicks its ring when a
+request waits too long, a loop with `ioUring` can lose a request; the pool
+path is unaffected. The gate's io_uring lane has no timeout, so the hang
+stalls `make check` when it strikes ([ROADMAP](ROADMAP.md)).
 
 ## 2.1.1 — 2026-10-28
 

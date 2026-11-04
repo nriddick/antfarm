@@ -663,7 +663,10 @@ What runs, and where:
   the loop takes requests, where libuv would build it inside the first file
   operation. Random reads from an open file ran twice as fast through it
   under WSL2, and at three quarters of the pool's rate on native Linux on
-  the 5900XT. It is not used for `readFile` (section 3.2).
+  the 5900XT. It is not used for `readFile` (section 3.2). libuv 1.53.0
+  can lose a ring request to a missing fence in its submit path, about
+  once in a hundred suite runs on the 5900XT; the CHANGELOG has the
+  measurement and the ROADMAP the choices.
 - **`readFile` refuses directories** (section 5). The plan did not
   consider them. A directory opens on both platforms; Linux then reported
   its size, and the read failed with `EISDIR` after the allocation, while
