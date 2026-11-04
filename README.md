@@ -16,9 +16,9 @@ application has been written against them yet. Expect them to change
 between minor versions until one has; [CHANGELOG.md](CHANGELOG.md) records
 each change.
 
-The released version is the latest tag and the top heading of [CHANGELOG.md](CHANGELOG.md); what each
-release changed is in [CHANGELOG.md](CHANGELOG.md), including the
-[C/C++ ABI](docs/design/c-abi.md).
+The released version is the latest tag; its heading in [CHANGELOG.md](CHANGELOG.md)
+follows the development sections at the top, and what each release changed
+is there, including the [C/C++ ABI](docs/design/c-abi.md).
 Supported platforms are Linux x86-64 and Windows x64.
 
 ## Three rules

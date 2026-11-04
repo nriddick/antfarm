@@ -1,6 +1,6 @@
 # Ant Farm architecture
 
-Ant Farm (the version is the latest tag and the top heading of [CHANGELOG.md](CHANGELOG.md)) is one repository
+Ant Farm (the released version is the latest tag; its heading in [CHANGELOG.md](CHANGELOG.md) follows the development sections) is one repository
 with five cooperating packages and one optional one (`ant_uv`, which needs
 libuv). They separate transport, worker placement, stateful identities,
 suspendable control flow and I/O so an application can choose the narrowest

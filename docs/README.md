@@ -96,7 +96,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/fiber-c-abi.md](design/fiber-c-abi.md) | see which Fiber functionality should cross the C ABI, its shape there (status-returning waits, value handles, bodies cleared at retirement) and the reload rule for a hot-swapped module |
 | [design/c-abi-2.md](design/c-abi-2.md) | see C ABI 2, built in part: what ABI 1 cannot absorb (option structures that negotiate their version, one generated function table for modules, a D `Error` aborting at every export), the additions per header and which are built, the migration from ABI 1 and the validation plan |
 | [design/c-abi-2-onboarding.md](design/c-abi-2-onboarding.md) | read the onboarding guide for ABI 2: archives, build and link, a host with workers, actors and parks, Fibers and a reloadable module (proposed), thread rules, failures and teardown |
-| [../ant_uv/README.md](../ant_uv/README.md) | use `ant_uv`: create the loop, submit file and timer requests, wait from Fibers, cancel and close |
+| [../ant_uv/README.md](../ant_uv/README.md) | use `ant_uv`: create the loop, submit file and timer requests, open UDP sockets, wait from Fibers, cancel and close |
 
 ## Development
 
@@ -137,16 +137,16 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | CyDo agent session routing and local iteration | [development/agent-workflow.md](development/agent-workflow.md) |
 | Farm ordering audit and real-atomic TSan lanes | [design/farm-ordering.md](design/farm-ordering.md) |
 | Farm `Live` lifecycle design record, subscribe scan evidence and open obligations | [design/farm-live-lifecycle.md](design/farm-live-lifecycle.md) |
-| C ABI headers, compatibility and runtime separation | [design/c-abi.md](design/c-abi.md) |
+| C ABI 1 headers, build and runtime separation | [design/c-abi.md](design/c-abi.md) |
 | Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |
 | Fiber scheduler model and invariants | [design/ant_fibers.md](design/ant_fibers.md) |
 | Fibers across the C ABI, a sketch | [design/fiber-c-abi.md](design/fiber-c-abi.md) |
-| C ABI 2, in progress | [design/c-abi-2.md](design/c-abi-2.md) |
+| C ABI 2: version negotiation, the two locks, the module table, migration | [design/c-abi-2.md](design/c-abi-2.md) |
 | Onboarding to C ABI 2 | [design/c-abi-2-onboarding.md](design/c-abi-2-onboarding.md) |
 | Event loop beside the worker pool (libuv) design and release plan | [design/event-loop.md](design/event-loop.md) |
 | `ant_uv` request, completion, cancellation, close and `readFile` allocation contracts | [ant_uv/README.md](../ant_uv/README.md) |
 | Loading files through the loop: the load, use and unload pattern and the choice of allocator | [guide/loading-files.md](guide/loading-files.md) |
-| Test suites (`tests/farm`, `tests/actors`, `tests/private`, `tests/threadpool`, `tests/ant_fibers`) | each suite's README and [development/testing.md](development/testing.md) |
+| Test suites (`tests/farm`, `tests/actors`, `tests/private`, `tests/threadpool`, `tests/ant_fibers`) | [development/testing.md](development/testing.md), and a suite's README where it has one |
 | Benchmark harness and optimization gate | [tools/perf/README.md](../tools/perf/README.md) |
 | What changed in each candidate and its compatibility notes | [CHANGELOG.md](../CHANGELOG.md) (current and latest release), [releases/](releases/) (older) |
 | Remaining and deferred work | [ROADMAP.md](../ROADMAP.md) |

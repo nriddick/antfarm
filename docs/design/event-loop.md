@@ -13,7 +13,8 @@ measurements, the Element Farm prototype, and the OMMe game-engine
 requirements) into one plan. The study's records stay on the `exp/slot-ring`
 branch.
 
-**Implemented on `2.2.0-progress`**: the 2.2.0 content of section 6, in
+**Implemented on `2.2.0-progress`**: the 2.2.0 content of section 6 and the
+UDP sockets of section 9, in
 `antfarm/ring.d`, `ant_uv/` (guide: [ant_uv/README.md](../../ant_uv/README.md)),
 `tests/ring/`, `tests/ant_uv/` and `tools/perf/slot_ring.d`. Where the
 implementation settled a point the plan left open, or departed from it, this
@@ -561,9 +562,9 @@ What runs, and where:
   with raw system calls, which ThreadSanitizer does not see, so a ring
   built late could map a descriptor number a `readFile` job had just
   closed and read as a race; `create` builds it first for that reason too.
-- **`make check`** runs the ring lanes always and the loop lanes when
-  `pkg-config` finds libuv 1.19 or later, printing the reason when it skips
-  them.
+- **`make check`** runs the ring lanes always and the loop lanes against
+  the pinned libuv that `scripts/build-libuv.py` builds, printing the reason
+  when the pin cannot be built and it skips them.
 - **Latency**, measured
   ([uv-latency-2026-10-30.md](../performance/uv-latency-2026-10-30.md)):
   a request's round trip from `submit` to the waiter running again. It is
@@ -594,14 +595,16 @@ What runs, and where:
   - `ant_uv` with `UvLoop`, its rings and credits, cancellation, the
     completion sink, auxiliary pool placement, file, whole-file and timer
     requests, `UvFibers` and `submitAndWait`;
-  - the slot-ring harness ported to the shipped ring.
+  - the slot-ring harness ported to the shipped ring;
+  - the UDP sockets of section 9, which landed on the same branch after
+    this plan was written.
 
   That is everything an application needs to load files from worker Fibers
   and from a loop-affine resource manager. The latency measurement, a full
   `make check` and the native Windows matrix with the pinned libuv build
   are done.
-- **2.2.1:** UDP sockets as designed in section 9, then TCP streams, pipes
-  and process spawn as the first consumer needs them.
+- **2.2.1:** TCP streams, pipes and process spawn as the first consumer
+  needs them.
 - **Later:** the Element Farm, once its ordering and membership contract is
   written, as a second channel kind rather than a drop-in; `ant_uv` in the
   C ABI after production use; a loop inside a pool worker (the park-owner

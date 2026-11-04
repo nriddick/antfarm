@@ -16,7 +16,7 @@ which runs DMD's Ddoc generator into the ignored `.build/docs/` directory
 Windows included, with the raw command:
 
 ```sh
-dmd -D -Dd.build\docs -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool\source antfarm\package.d antfarm\templates.d antfarm\parallel.d antfarm\actors\package.d antfarm\actors\actor.d antfarm\actors\wave.d antfarm\actors\private_actor.d antfarm\actors\mimalloc.d threadpool\source\threadpool\host.d
+dmd -D -Dd.build\docs -op -o- -version=AntfarmMimallocV3 -I. -Ithreadpool\source -Iforkjoin\source antfarm\package.d antfarm\templates.d antfarm\parallel.d antfarm\actors\package.d antfarm\actors\actor.d antfarm\actors\wave.d antfarm\actors\private_actor.d antfarm\actors\mimalloc.d threadpool\source\threadpool\host.d threadpool\source\threadpool\groups.d forkjoin\source\forkjoin\package.d forkjoin\source\forkjoin\node.d forkjoin\source\forkjoin\deque.d forkjoin\source\forkjoin\dispatcher.d forkjoin\source\forkjoin\range.d forkjoin\source\forkjoin\frames.d forkjoin\source\forkjoin\invoke.d
 ```
 
 Ddoc omits declarations that carry no doc comment, so the generated pages

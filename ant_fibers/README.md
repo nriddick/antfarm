@@ -69,7 +69,9 @@ a waiter already re-parked, manual-reset behavior, and timed waits.
 ## Run one lane on the current thread
 
 [examples/hello_fibers.d](examples/hello_fibers.d) is the smallest complete
-program. Its essential lifecycle is:
+program. Run it from this directory with `dub run -c hello` (add
+`--compiler=ldc2` for LDC); it prints `fiber yielded, slept, and completed`.
+Its essential lifecycle is:
 
 ```d
 auto farm = AntFarm.create(2, 8, 1, 0, 0, 1, 4096,

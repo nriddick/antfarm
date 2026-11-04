@@ -20,7 +20,7 @@ Ant Farm local targets (there is no CI). See CONTRIBUTING.md for details.
 Correctness gate (Linux x86-64; needs DMD, LDC with the TSan runtime, Dub, Python 3):
   make check               full matrix, LDC and DMD, stops at the first failure
                            (bare `make` runs this)
-  make check-quick         core C/C++ ABI, root, review, threadpool, fibers, examples
+  make check-quick         core C/C++ ABI, root, review, threadpool, fibers, fork-join, ring, examples
                            (LDC/Dub, Python 3, C11/C++11; no DMD/TSan)
   make check-betterc       BetterC modules and native C callback/hook smoke
   make check-c-abi         native C/C++ core and non-Fiber runtime ABI checks
@@ -49,7 +49,7 @@ Reference (needs DMD):
 Windows integration (native x64, Dub, Python 3, LDC and DMD; no Bash or TSan):
   make check-windows      native Windows matrix (WINDOWS_CHECK_ARGS selects lanes)
   python scripts/check-windows.py --quick
-                          focused LDC packages, review and examples; no make needed
+                          focused LDC packages, ring, review and examples; no make needed
 
 Longer or optional (not run by make check):
   make check-soak          private-actor TSan loop for at least 121 s

@@ -159,6 +159,6 @@ archive takes the pin's place once a release carries the fence.
 | File | What it is |
 | --- | --- |
 | [sqpoll_lost_wakeup.c](sqpoll_lost_wakeup.c) | the reproduction, a libuv program |
-| [libuv-1.53.0-sqpoll-wakeup-fence.patch](libuv-1.53.0-sqpoll-wakeup-fence.patch) | the fence, applied by `scripts/build-libuv.py` to the pinned build |
+| [libuv-1.53.0-sqpoll-wakeup-fence.patch](libuv-1.53.0-sqpoll-wakeup-fence.patch) | the fence as a patch against 1.53.0, kept as the record's artifact; the pinned fork carries it, so the build script no longer applies it |
 | [run.sh](run.sh) | builds libuv as released and with the patch, runs eight copies of the reproduction against each |
 | [results.txt](results.txt) | that run on the 5900XT |

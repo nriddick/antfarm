@@ -5,11 +5,11 @@ actors, runtime and groups rows and the table are built, tested and
 locked (2026-11-04); Fibers and the loop remain proposals. This page
 coalesces two things into one versioned surface: the review of what
 [ABI 1](c-abi.md) covers against the D API index, and the
-[Fiber sketch](fiber-c-abi.md). It is written as the design ABI 2 would
-have, so that its shape can be judged before anything is built. ABI 1, its
-six headers and `cabi/abi1.lock` are unchanged by it. The companion
-[onboarding page](c-abi-2-onboarding.md) is the same proposal from the
-side of the C programmer who meets it first.
+[Fiber sketch](fiber-c-abi.md). It was written as the design before
+anything was built and is kept in step as the rounds land. ABI 1's lock,
+`cabi/abi1.lock`, stays frozen beside the headers, which now carry ABI 2.
+The companion [onboarding page](c-abi-2-onboarding.md) is the same surface
+from the side of the C programmer who meets it first.
 
 ## 1. Why a 2
 
@@ -56,7 +56,8 @@ their own version. ABI 2 is one archive pair that accepts both layouts.
 - Callbacks never throw, `longjmp` or retain their borrowed arguments.
 - The lock admits additions only within a version. `cabi/abi2.lock` is the
   current surface; `abi1.lock` stays, and the audit requires every
-  prototype and constant row of it to remain verbatim. The two option
+  prototype and constant row of it but the version constant to remain
+  verbatim. The two option
   structures that grew have their ABI 1 images frozen in
   `tests/cabi/abi1_images.h`, which the tests fill, instead.
 
@@ -248,8 +249,10 @@ Fiber header. Other group attachments wait for a consumer.
 
 ### antfarm_forkjoin.h
 
-Unchanged. The helper decision (map, scan, invoke, task groups, frame
-allocation) stays with the roadmap; ABI 2 does not pre-empt it.
+Only moved: `af_processor` now lives in antfarm_runtime.h, which this
+header includes, and the dispatcher options accept the version range. The
+helper decision (map, scan, invoke, task groups, frame allocation) stays
+with the roadmap; ABI 2 does not pre-empt it.
 
 ### antfarm_fibers.h
 
@@ -329,7 +332,8 @@ unresolved symbol but libc's, loaded by path and run through the table.
 | Ships the headers to a plugin and resolves exports | Can hand it `af_api_get()` instead; on Windows this removes the export requirement |
 
 The lock: `cabi/abi2.lock` is the current surface, and the audit also
-holds every ABI 1 prototype and constant row, so one that drifts fails;
+holds every ABI 1 prototype and constant row but the version constant, so
+one that drifts fails;
 the ABI 1 images of the two structures that grew are held by
 `tests/cabi/abi1_images.h`.
 

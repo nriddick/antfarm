@@ -1,4 +1,4 @@
-/* Optional druntime-inclusive dispatcher. MIT License. C ABI 1 additions. */
+/* Optional druntime-inclusive dispatcher. MIT License. Added in ABI 1, kept in ABI 2. */
 #ifndef ANTFARM_FORKJOIN_H
 #define ANTFARM_FORKJOIN_H
 #include "antfarm_runtime.h"

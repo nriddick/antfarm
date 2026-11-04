@@ -193,7 +193,8 @@ for message/file limits and `sourceType`/`truncated` fields.
 - every runtime is `quiescent`;
 - every park has `live == 0`;
 - every attachment is drained;
-- no extra producer is outstanding.
+- no extra producer is outstanding;
+- the control token is still in `host.token`, not moved out.
 
 If any check fails, it throws and the host stays usable: drain and call it
 again. Otherwise it performs the canonical

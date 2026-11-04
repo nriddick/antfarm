@@ -82,6 +82,20 @@ the C ABI.
   then refuses a copy with the runtime section withheld. The table's
   Fiber and loop sections are reserved. Validated as the host round was,
   on Windows and WSL under both compilers and the TSan core lane.
+- Documentation and onboarding review, from the root README outward, with
+  every first program, example and documented command run on Windows and
+  WSL; all print what their pages say. Fixed: the `ant_uv` examples on
+  Windows under DMD, which replaces a caller's `LIB` with its own, so
+  `ant_uv/dub.sdl` now names the pinned import library's directory; the
+  release-version sentence in README and ARCHITECTURE; a `.gitattributes`
+  that keeps shell scripts LF, so `make check` runs from a Windows clone
+  under WSL; the Fiber README's missing run command; the
+  `make check-mimalloc` gate, now the pinned libuv rather than
+  `pkg-config`; the reference index's raw Ddoc command, now the same
+  sources as `make docs`; and the pages that still described
+  `pkg-config`, the old Windows libuv script, ABI 1 as the lock, a D
+  `Error` as a status, UDP as future work, or one extracted quickstart
+  program where both run.
 
 ## 2.2.0 development
 
@@ -197,7 +211,7 @@ where the implementation departed from the plan.
 - Tests: `tests/ring` and `tests/ant_uv`, each under LDC, DMD and
   ThreadSanitizer. `ant_uv`'s layout check compares the binding with a C
   translation unit compiled against the real `uv.h`. `make check` runs both
-  suites, `ant_uv` only when `pkg-config` finds libuv 1.19 or later;
+  suites, `ant_uv` against the pinned libuv (the pin entry below);
   `make check-quick` runs the ring. `make check-mimalloc` adds `ant_uv`'s
   reads into the real mimalloc v3. The API docs check covers the ring and
   `ant_uv`.
@@ -206,8 +220,8 @@ where the implementation departed from the plan.
     counting allocator and the C runtime. Every request publishes once, a
     cancelled one owns no block, and every block is freed exactly once.
   - `make -C tests/ant_uv run-iouring` runs the suite with
-    `UvLoopOptions.ioUring` on every loop. `make check` runs it when
-    `pkg-config` finds libuv 1.49. Through the ring, an open of a FIFO with
+    `UvLoopOptions.ioUring` on every loop. `make check` runs it against
+    the pinned libuv. Through the ring, an open of a FIFO with
     no writer completed at once (Linux 6.6 and 7.3), so that lane checks for
     no abandonment instead. The lane also checks that `create` built the
     ring: the kernel's polling thread runs before the first request. Where
@@ -228,13 +242,12 @@ where the implementation departed from the plan.
   archive. A release archive takes its place once a release carries the
   fence. The gate's io_uring lane runs under a 900 s timeout.
 - Windows x64:
-  - `scripts/build-libuv-windows.py` builds the pinned libuv 1.53.0 from
-    its release archive, whose SHA-256 it checks, with CMake (on PATH or
-    Visual Studio's). The archive's signature was checked against the
-    signing maintainer's key, listed in libuv's `MAINTAINERS.md`, when it
-    was pinned. It installs `uv.dll`, its import library `uv.lib` and the
-    headers under `.build/libuv/1.53.0/`; the DLL carries its own C
-    runtime, so D programs keep their static one.
+  - `scripts/build-libuv.py` (first as `build-libuv-windows.py`, then one
+    script for both platforms, as the pin entry above says) builds the
+    pinned libuv with CMake (on PATH or Visual Studio's), checking the
+    archive's SHA-256. It installs `uv.dll`, its import library `uv.lib`
+    and the headers under `.build/libuv/pinned/`; the DLL carries its own
+    C runtime, so D programs keep their static one.
   - `scripts/check-windows.py` gains a `ring` lane, also in `--quick`, and
     an `ant_uv` lane: the suite, with its layout oracle compiled by MSVC
     against that `uv.h`, then both examples. Without libuv the default

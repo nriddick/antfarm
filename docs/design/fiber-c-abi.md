@@ -149,7 +149,7 @@ private-root deadlines can sleep to the same grid.
 `antfarm_fibers.h` with the status range 128 to 143, its D wrapper
 `cabi/source/antfarm/c/fibers.d`, and `ant_fibers/source` added to the
 runtime archive's sources. The core stays BetterC and unchanged. Every
-new row is an addition to the ABI 1 lock; nothing existing moves.
+new row is an addition to the ABI 2 lock; nothing existing moves.
 
 ## 3. The surface
 

@@ -74,7 +74,7 @@ typedef struct af_options {
     uint32_t huge_pages, reserved;
 } af_options;
 
-AF_STATIC_ASSERT(sizeof(void *) == 8, "Ant Farm ABI 1 requires 64-bit pointers");
+AF_STATIC_ASSERT(sizeof(void *) == 8, "Ant Farm C ABI requires 64-bit pointers");
 AF_STATIC_ASSERT(sizeof(af_completion_hook) == 16, "completion hook size");
 AF_STATIC_ASSERT(offsetof(af_completion_hook, context) == 0, "hook context offset");
 AF_STATIC_ASSERT(offsetof(af_completion_hook, call) == 8, "hook callback offset");

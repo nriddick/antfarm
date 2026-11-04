@@ -1,4 +1,4 @@
-/* Runtime-free public actors, C ABI 1. Link antfarm_core. */
+/* Runtime-free public actors, C ABI 2. Link antfarm_core. */
 #ifndef ANTFARM_ACTORS_H
 #define ANTFARM_ACTORS_H
 #include "antfarm.h"

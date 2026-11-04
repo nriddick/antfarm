@@ -161,8 +161,8 @@ Implemented on the branch (see the CHANGELOG's 2.2.0 section):
 - `ant_uv`: the hand-declared libuv binding, `UvLoop` with its request and
   control rings, credits, cancellation, the completion sink, a three-phase
   close with abandonment, direct placement of libuv's auxiliary threads,
-  `UvFibers` and `submitAndWait`. Optional; `make check` skips it without
-  libuv. `readFile` is one pool job, and `UvLoopOptions.ioUring` puts the
+  `UvFibers` and `submitAndWait`. Optional; `make check` builds the pinned
+  libuv and skips it only when that fails. `readFile` is one pool job, and `UvLoopOptions.ioUring` puts the
   other file operations on io_uring, after a comparison with SDL3's AsyncIO
   ([record](docs/performance/file-loading-sdl3-2026-11-02.md)).
 
@@ -181,9 +181,9 @@ pull request with the same fence, #4921, was closed in 2025 over older
 kernels' barriers, so the discussion may return. Move the pin to a release
 archive once a release carries the fix.
 
-- 2.2.1: UDP sockets, designed in
+- 2.2.0 (on `2.2.0-progress`) delivered the UDP sockets designed in
   [the event loop design's section 9](docs/design/event-loop.md#9-221-udp-sockets)
-  from the first consumer's netcode; then TCP streams, pipes and process
+  from the first consumer's netcode. 2.2.1: TCP streams, pipes and process
   spawn as it needs them.
 - 2.2.1: Fibers across the C ABI, sketched in
   [docs/design/fiber-c-abi.md](docs/design/fiber-c-abi.md) from the first

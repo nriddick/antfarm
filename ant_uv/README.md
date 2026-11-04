@@ -30,9 +30,11 @@ from [the project's fork](https://github.com/nriddick/libuv/tree/linux-sqpoll-wa
 until a release carries it. The script needs CMake and a C compiler, and
 downloads the archive once. On Linux the result is a
 static `libuv.a`, which Dub builds when it is missing and links into the
-program. On Windows it is `uv.dll` with its import library `uv.lib`: put
-the installation's `lib` on the linker's `LIB` path and its `bin` on
-`PATH` when the program runs. The system libuv is not used.
+program. On Windows it is `uv.dll` with its import library `uv.lib`: Dub
+links the import library from that installation (not through `LIB`, which
+DMD replaces with its own), and the program needs the installation's `bin`
+on `PATH` when it runs; a direct compiler command names `uv.lib` by path,
+as the Windows runner does. The system libuv is not used.
 
 [read_files.d](examples/read_files.d) is the smallest complete program:
 worker Fibers on a `GroupHost` read files through the loop.
@@ -44,6 +46,8 @@ walks through it.
 dub run --single ant_uv/examples/read_files.d -- /etc/hostname /etc/os-release
 dub run --single ant_uv/examples/load_assets.d
 ```
+
+On Windows, name two files of your own in place of the `/etc` paths.
 
 ## Create the loop
 

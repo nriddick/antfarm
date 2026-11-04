@@ -52,13 +52,15 @@ lane matrix, prerequisites, focused entry points, and optional lanes are in
 
 For a portable local iteration check, run `make check-quick`. It runs the BetterC/native-C link check, root
 unit tests, plain review-torture suite, threadpool unit tests, fiber smoke suite, fork-join suite,
-and LDC debug/release examples. It includes the core C/C++ ABI check and needs the LDC toolchain (including Dub), Python
+the ring suite, and LDC debug/release examples. It includes the core C/C++ ABI check and needs the LDC toolchain (including Dub), Python
 3, GNU make, Bash and C11/C++11 compilers; it uses neither DMD nor TSan. `make check` retains the full
 matrix and remains the correctness gate.
 
 On Windows x64, use `python -B scripts/check-windows.py` for the native
-integration matrix, or add `--quick` for LDC packages, review and examples.
-It needs neither Bash nor GNU make. Coverage, focused selectors and exclusions
+integration matrix, or add `--quick` for LDC packages, ring, review and examples.
+It needs neither Bash nor GNU make. Shell scripts stay LF in a Windows clone
+(`.gitattributes`), so `make check` also runs from one under WSL. Coverage,
+focused selectors and exclusions
 are in [docs/development/testing.md](docs/development/testing.md#windows-x64-integration).
 
 The full gate accepts `CHECK_SMALL_CPUS` and `CHECK_ONE_LLC_CPUS` as `taskset -c`
@@ -96,13 +98,15 @@ During implementation of changes to the Farm, actors, or shared lifecycle:
   for actors. Do not weaken an ordering without the proof that replaces it.
 - Keep the TSan lanes meaningful: do not add annotations that hide a weakened
   edge (see [docs/design/farm-ordering.md](docs/design/farm-ordering.md)).
-- A C ABI change keeps the headers, the D `extern(C)` definitions and
-  [cabi/abi1.lock](cabi/abi1.lock) in step. `make check-c-abi` checks
-  prototypes, struct layouts and numeric constants between headers and D, and
-  the headers against the lock, in every lane except `--tsan`. Within ABI 1
-  only additions are compatible: regenerate the lock with
-  `python3 scripts/check-c-abi.py --write-abi-lock` and commit it with the
-  header change.
+- A C ABI change keeps the headers, the D `extern(C)` definitions,
+  [cabi/abi2.lock](cabi/abi2.lock) and the generated function table in step.
+  `make check-c-abi` checks prototypes, struct layouts and numeric constants
+  between headers and D, the headers against that lock, every row of
+  [cabi/abi1.lock](cabi/abi1.lock) against the headers (ABI 2 is a superset
+  of ABI 1), and the table against the headers, in every lane except
+  `--tsan`. Within ABI 2 only additions are compatible: regenerate the lock
+  with `python3 scripts/check-c-abi.py --write-abi-lock` and the table with
+  `--write-api-table`, and commit both with the header change.
 - D test code stays on druntime threads and atomics. Native C ABI tests use
   native threads to verify runtime independence and foreign-thread attachment.
   Any new example is a compile target in `examples/run_examples.py`.

@@ -170,7 +170,9 @@ run "${make_cmd[@]}" -C tests/ring run run-dmd run-tsan
 # source archive once, checks it and builds it with CMake. Where that fails
 # (no CMake, no C compiler, no archive) the lane is skipped with the reason
 # printed, never silently.
+libuv_pinned=0
 if run python3 scripts/build-libuv.py; then
+    libuv_pinned=1
     run "${make_cmd[@]}" -C tests/ant_uv run run-dmd run-tsan
     # The same suite with file operations through io_uring (Linux 5.10.186
     # or later), bounded: a lost ring request would otherwise hang the gate.
@@ -185,8 +187,11 @@ if [[ "$mimalloc" -eq 1 ]]; then
         exit 1
     fi
     run "${make_cmd[@]}" -C tests/actors run-mimalloc run-mimalloc-tsan
-    if pkg-config --exists 'libuv >= 1.19' 2>/dev/null; then
+    # The same pinned libuv as the ant_uv lane above; the system one is not used.
+    if [[ "$libuv_pinned" -eq 1 ]]; then
         run "${make_cmd[@]}" -C tests/ant_uv run-mimalloc
+    else
+        echo "SKIP ant_uv mimalloc: the pinned libuv could not be built"
     fi
 fi
 

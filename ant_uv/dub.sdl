@@ -10,12 +10,13 @@ dependency "antfarm" path=".."
 dependency "threadpool" path="../threadpool"
 dependency "ant_fibers" path="../ant_fibers"
 // The pinned libuv of scripts/build-libuv.py. Linux links its static
-// archive, built here when missing. Windows links its import library uv.lib:
-// the installation's lib directory on LIB, and its bin (uv.dll) on PATH at
-// run time.
+// archive, built here when missing. Windows links its import library uv.lib
+// from that installation (DMD replaces a caller's LIB with its own, so the
+// directory is named here) and needs its bin (uv.dll) on PATH at run time.
 preGenerateCommands "python3 \"$PACKAGE_DIR/../scripts/build-libuv.py\"" platform="linux"
 extraDependencyFiles "../.build/libuv/pinned/lib/libuv.a" platform="linux"
 lflags "$PACKAGE_DIR/../.build/libuv/pinned/lib/libuv.a" "-ldl" platform="linux"
+lflags "/LIBPATH:$PACKAGE_DIR/../.build/libuv/pinned/lib" platform="windows"
 libs "uv" platform="windows"
 
 toolchainRequirements {

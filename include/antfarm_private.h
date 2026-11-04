@@ -1,4 +1,4 @@
-/* Runtime-free private roots and child cohorts, C ABI 1. Link antfarm_core. */
+/* Runtime-free private roots and child cohorts, C ABI 2. Link antfarm_core. */
 #ifndef ANTFARM_PRIVATE_H
 #define ANTFARM_PRIVATE_H
 #include "antfarm_actors.h"

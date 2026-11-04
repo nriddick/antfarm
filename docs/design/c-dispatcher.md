@@ -16,7 +16,7 @@ FarmHost, GroupHost and the dispatcher cannot each own workers concurrently.
 ## First program
 
 [cabi/examples/forkjoin.c](../../cabi/examples/forkjoin.c) computes the sum of
-`[0, 1_000_000)` through a C reduction callback and prints `499999500000`:
+`[0, 1_000_000)` through a C reduction callback and prints `sum = 499999500000`:
 
 ```sh
 python3 scripts/build-c-abi.py --runtime
@@ -34,7 +34,8 @@ selects up to 128 eligible CPUs. Default options use one shared Farm; set
 [dispatcher options](forkjoin.md), including deque size, polling cadence,
 steal preference, parking and overflow behavior. Start validates boolean,
 size/version and reserved fields, clears the output on failure and contains
-D exceptions. The runtime never takes ownership of the supplied CPU array.
+D exceptions (a D `Error` aborts through the fatal handler, as in every
+runtime export). The runtime never takes ownership of the supplied CPU array.
 
 ## Continuation trees and lifetime
 
@@ -170,8 +171,10 @@ The regular runtime C lane builds and runs the example,
 [continuation tests](../../tests/cabi/forkjoin.c) and
 [GroupHost tests](../../tests/cabi/groups.c), including release death cases.
 The C++ declaration audit includes both headers, callback prototypes, sizes,
-alignment, offsets and every new ABI lock row. All previous lock rows must
-remain identical. `python3 scripts/check-c-abi.py --runtime-only` runs the
+alignment, offsets and every new ABI lock row. Every ABI 1 prototype and
+constant row, and every layout row but those of the option structures that
+grew in ABI 2, must remain identical ([c-abi-2.md](c-abi-2.md)).
+`python3 scripts/check-c-abi.py --runtime-only` runs the
 runtime tests; `--compiler dmd` selects DMD. These lanes are part of the full
 Linux gate and the existing native Windows C ABI lane. Execution on Windows
 is a separate validation obligation, not established by compiling on Linux.

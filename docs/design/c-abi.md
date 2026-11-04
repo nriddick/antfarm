@@ -207,8 +207,10 @@ at producer registration is recoverable. Cross-Farm tokens, invalid
 callbacks or cost classes, overflow, and impossible singleton payload sizes
 retain the core's fatal contract; `af_can_fit` provides a nonfatal sizing query.
 Released or forged handles and concurrent handle destruction are invalid C
-memory accesses; the API cannot diagnose use-after-free. No D exception crosses C. Runtime wrappers catch exceptions and return a status
-with a diagnostic from `af_last_error_message()` and `af_last_os_error()`.
+memory accesses; the API cannot diagnose use-after-free. No D exception crosses C. Runtime wrappers catch a D `Exception` and return a status
+with a diagnostic from `af_last_error_message()` and `af_last_os_error()`; a D
+`Error` aborts through the fatal handler (ABI 2; ABI 1 folded it into
+`AF_RUNTIME_ERROR`).
 Status-returning operations replace that thread's diagnostic; core queries and
 hot publication/consumption do not. Messages are borrowed, NUL-terminated and
 truncated to 511 bytes. Creation/registration clear valid output pointers on
@@ -221,22 +223,27 @@ Farm, or return control to the failed operation. If it returns, the library
 aborts. The setter configures the same fatal implementation used by the core.
 
 Initialize options with `af_options_default` or `af_host_options_default`.
-For both structures, ABI 1 requires `struct_size == sizeof(the structure)`,
-`abi_version == AF_ABI_VERSION`, and zero reserved fields. Smaller and larger
-sizes return `AF_INVALID`; the implementation checks the size prefix before
-reading the rest of the structure. The caller still supplies valid, suitably
-aligned storage; the size field cannot validate an allocation's actual extent.
+Every option structure requires `struct_size == sizeof(the structure)`,
+`abi_version` from `AF_ABI_VERSION_MIN` to `AF_ABI_VERSION`, and zero
+reserved fields; the implementation checks the size prefix before reading
+the rest of the structure. A structure that grew in ABI 2 (the host and the
+group options) also accepts its ABI 1 image, by its ABI 1 size with version
+1; any other size returns `AF_INVALID`. The caller still supplies valid,
+suitably aligned storage; the size field cannot validate an allocation's
+actual extent.
 
-Keep this exact-size rule for ABI 1. Version identifies the contract; size
-independently catches a mismatched binding/layout before a full structure read.
-It does not currently promise append-only compatibility. A future extension
-must specify supported prefix sizes and defaults field by field, or change ABI
-version. Accepting arbitrary shorter sizes with a zero-filled tail would leave
-partial fields and required geometry undefined by the interface.
-Numeric enum values and exported symbol names are defined by the ABI 1 headers.
-[cabi/abi1.lock](../../cabi/abi1.lock) records them with every prototype and
-struct layout; the C ABI check fails on any difference, and only additions are
-compatible within ABI 1.
+Size catches a mismatched binding or layout before a full structure read;
+version says which layout the caller filled. Arbitrary shorter sizes with a
+zero-filled tail are not accepted, since they would leave partial fields and
+required geometry undefined by the interface. [c-abi-2.md](c-abi-2.md) has
+the negotiation rule in full.
+Numeric enum values and exported symbol names are defined by the headers.
+[cabi/abi2.lock](../../cabi/abi2.lock) records them with every prototype and
+struct layout, and the C ABI check fails on any difference; within ABI 2 only
+additions are compatible. [cabi/abi1.lock](../../cabi/abi1.lock) is the ABI 1
+surface, frozen: every prototype and constant row of it but the version
+constant, and every layout row but those of the two structures that grew,
+must remain in the headers.
 Keep internal ring offsets private; the five-word Thead is not a C ABI promise.
 
 ## Runtime-free public actors

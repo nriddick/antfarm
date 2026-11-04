@@ -185,7 +185,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", choices=("all", "ldc2", "dmd"), default="all")
     selection = parser.add_mutually_exclusive_group()
-    selection.add_argument("--quick", action="store_true", help="LDC packages, review and examples only")
+    selection.add_argument("--quick", action="store_true", help="LDC packages, ring, review and examples only")
     selection.add_argument("--lanes", nargs="+", choices=LANES, help="run only selected lanes")
     parser.add_argument("--timeout", type=int, default=300, help="seconds per build or run (default: 300)")
     parser.add_argument("--allow-hardware-skips", action="store_true",

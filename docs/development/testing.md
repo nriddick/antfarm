@@ -22,7 +22,7 @@ lists every target.
 | --- | --- | --- |
 | Docs links | `make check-docs`: tracked Markdown relative links and heading anchors (no network), plus `scripts/check-api-docs.py`, the API symbol/coverage check over the Ddoc of the public runtime modules | Python 3, DMD |
 | Runtime-free core | `make check-betterc`: compile core/parallel/actors with BetterC, then link a native C main and execute all three write forms with C callbacks and hooks, without druntime | LDC, C11 compiler |
-| C ABI | `make check-c-abi`: native C/C++ whole-archive core linking and export/runtime-symbol audits, header/D declaration and layout audit against the ABI 1 lock (`cabi/abi1.lock`; skipped by `--tsan`), exception-disabled C++ factories and fault-injected rollback, NDEBUG-safe checks, concurrent registration, release contract deaths, partial/zero writes, concurrent joins and callback-before-return; public actor kinds, direct copy/init and placement-new destruction, copied-owner arbitration, caller-owned messages, strided partial batches, provenance, reservation accounting, native threads and final-access checks; wave admission/rollback, parallel phases, generations and callback-tail joins; private roots/cohorts, debug/release nested results, continuation/subset/slab reuse, allocation rollback, deadlines/cancellation, aligned C++ placement-new and explicit host pumping; optional runtime lifecycle, GC roots, native foreign threads and parked hosts. The full gate also runs the native C/core, public actor, private actor, wave and C++ ownership tests under TSan (`--tsan`) | LDC, DMD, C11/C++11 compilers; runtime needs two worker CPUs |
+| C ABI | `make check-c-abi`: native C/C++ whole-archive core linking and export/runtime-symbol audits, header/D declaration and layout audit against the ABI 2 lock (`cabi/abi2.lock`, with `cabi/abi1.lock` held as a frozen subset) and the generated function table (skipped by `--tsan`), exception-disabled C++ factories and fault-injected rollback, NDEBUG-safe checks, concurrent registration, release contract deaths, partial/zero writes, concurrent joins and callback-before-return; public actor kinds, direct copy/init and placement-new destruction, copied-owner arbitration, caller-owned messages, strided partial batches, provenance, reservation accounting, native threads and final-access checks; wave admission/rollback, parallel phases, generations and callback-tail joins; private roots/cohorts, debug/release nested results, continuation/subset/slab reuse, allocation rollback, deadlines/cancellation, aligned C++ placement-new and explicit host pumping; optional runtime lifecycle, GC roots, native foreign threads and parked hosts. The full gate also runs the native C/core, public actor, private actor, wave and C++ ownership tests under TSan (`--tsan`) | LDC, DMD, C11/C++11 compilers; runtime needs two worker CPUs |
 | Root suite | `dub test` (module `unittest` blocks plus `tests/farm/antfarm_test.d`) | LDC, DMD |
 | Threadpool suite | `dub test :threadpool` (including the FarmHost placement tests on synthetic snapshots) | LDC, DMD |
 | Fiber suite | `dub test :ant_fibers` (smoke suite and module unittests) | LDC, DMD |
@@ -33,14 +33,14 @@ lists every target.
 | Actor torture | `tests/actors`: deterministic interleavings and sustained contention for the public actors | LDC, DMD, LDC TSan |
 | Review torture | `tests/farm`: adversarial Farm tests | LDC, LDC TSan |
 | Private actors | `tests/private`: unit suite, the extracted private-actor documentation programs, and the fatal-death harness | LDC, DMD, LDC TSan |
-| Examples | `examples/`: the First payload program extracted from [quickstart.md](../guide/quickstart.md#what-the-dispatcher-does-for-you-the-raw-ring-one-thread), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
+| Examples | `examples/`: both complete quickstart programs (the fork-join reduction and the First payload program) extracted from [quickstart.md](../guide/quickstart.md), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
 | Ring | `make -C tests/ring run run-dmd run-tsan`: the `antfarm.ring` suite | LDC, DMD, LDC TSan |
 | `ant_uv` | `make -C tests/ant_uv run run-dmd run-tsan` against the pinned libuv that `scripts/build-libuv.py` builds (below), then `run-iouring`, the same suite with `UvLoopOptions.ioUring`, under a 900 s timeout; where the pin cannot be built, the lane is skipped with the reason printed | LDC, DMD, LDC TSan, CMake, C compiler |
 
 `make check-quick` runs the BetterC/native-C and core C/C++ ABI checks, root unit suite, `make -C tests/farm run`
-(including `sweep_cursor`), threadpool unit suite, fiber smoke suite, fork-join suite, and
-`python3 examples/run_examples.py --ldc-only`. The examples include the quickstart
-payload and actor/headless programs in LDC debug and release with 0 and 2
+(including `sweep_cursor`), threadpool unit suite, fiber smoke suite, fork-join suite, the ring suite, and
+`python3 examples/run_examples.py --ldc-only`. The examples include both quickstart
+programs and the actor/headless programs in LDC debug and release with 0 and 2
 workers; the terminal front end is omitted. This target needs the LDC toolchain
 (including Dub), Python 3, GNU make, Bash and C11/C++11 compilers, without DMD or a TSan runtime. It prints `ALL QUICK CHECKS PASSED` on success; the full `make check`
 matrix remains the correctness gate.
@@ -276,7 +276,7 @@ establish timing results or replace `make check`.
   another `make check` run.
 - `make check-mimalloc` runs the normal matrix, then the real allocator lanes
   (`actors_torture` with the pinned mimalloc v3.5.3, release and TSan, and,
-  when libuv is present, `ant_uv`'s reads into mimalloc). It needs the
+  when the pinned libuv builds, `ant_uv`'s reads into mimalloc). It needs the
   submodule (`git submodule update --init --recursive`), CMake and a C
   toolchain. See [../../third_party/README.md](../../third_party/README.md).
   Other allocator targets (`run-mimalloc-debug`, `run-mimalloc-dmd`) are in
@@ -296,7 +296,8 @@ gated. The method, the modes and the flagging rule are in
 
 `make check` extracts and runs two kinds of Markdown program:
 
-- The complete First payload program in [quickstart.md](../guide/quickstart.md#what-the-dispatcher-does-for-you-the-raw-ring-one-thread), by
+- Both complete quickstart programs, the fork-join reduction and the First
+  payload program, in [quickstart.md](../guide/quickstart.md), by
   `examples/run_examples.py`.
 - The six complete private-actor programs in the
   [private-actor guides](../guide/private-actors.md), by

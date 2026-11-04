@@ -1,8 +1,9 @@
 # ant_uv tests: the binding's layout against the real uv.h, and UvLoop
 # behaviour (lifecycle, placement, ordering, timers, files from worker
 # Fibers, cancellation, backpressure, close, failure, abandonment, Fibers
-# on the loop thread, readFile's allocators). Needs libuv 1.19 or later and
-# its header. run-mimalloc adds reads into the real mimalloc v3, built from
+# on the loop thread, readFile's allocators). Links the pinned libuv that
+# scripts/build-libuv.py builds (UV_PREFIX names another installation).
+# run-mimalloc adds reads into the real mimalloc v3, built from
 # the third_party/mimalloc submodule by the actors suite's rule.
 ROOT := ../..
 DC ?= ldc2
