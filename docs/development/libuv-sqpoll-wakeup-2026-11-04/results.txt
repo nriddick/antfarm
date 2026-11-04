@@ -1,0 +1,20 @@
+host: 7.3.1-1-cachyos; cc (GCC) 16.2.1 20260810; 8 copies, 20000 iterations each
+=== libuv 1.53.0 released
+copy 1: 20000 iterations, every stat completed in time
+copy 2: 20000 iterations, every stat completed in time
+copy 3: 20000 iterations, every stat completed in time
+copy 4: iteration 6891: the first stat completed 0.017 ms after the second was submitted (the second 0.017 ms after): it had been in the ring, unread, until the second submission woke the polling thread (lost wakeup)
+copy 5: 20000 iterations, every stat completed in time
+copy 6: iteration 1868: the first stat completed 0.017 ms after the second was submitted (the second 0.017 ms after): it had been in the ring, unread, until the second submission woke the polling thread (lost wakeup)
+copy 7: 20000 iterations, every stat completed in time
+copy 8: 20000 iterations, every stat completed in time
+=== libuv 1.53.0 fenced
+copy 1: 20000 iterations, every stat completed in time
+copy 2: 20000 iterations, every stat completed in time
+copy 3: 20000 iterations, every stat completed in time
+copy 4: 20000 iterations, every stat completed in time
+copy 5: 20000 iterations, every stat completed in time
+copy 6: 20000 iterations, every stat completed in time
+copy 7: 20000 iterations, every stat completed in time
+copy 8: 20000 iterations, every stat completed in time
+done after 427 s

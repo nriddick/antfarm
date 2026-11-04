@@ -1,0 +1,15 @@
+--- a/src/unix/linux.c
++++ b/src/unix/linux.c
+@@ -868,6 +868,12 @@
+                         *iou->sqtail + 1,
+                         memory_order_release);
+ 
++  /* The kernel's SQPOLL thread sets NEED_WAKEUP, then re-reads the tail
++   * before it sleeps. The tail store must be visible before the flags load,
++   * which needs a full fence; release/acquire does not order store->load.
++   */
++  atomic_thread_fence(memory_order_seq_cst);
++
+   flags = atomic_load_explicit((_Atomic uint32_t*) iou->sqflags,
+                                memory_order_acquire);
+ 
