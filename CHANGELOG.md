@@ -58,10 +58,30 @@ the C ABI.
   and `AF_HOST_WORKER_FAILED`, `af_host_resolve` and `af_host_summary`;
   GC collect, minimize, enable and disable for a C resident. A D `Error`
   inside any runtime export now aborts through the fatal handler rather
-  than becoming `AF_RUNTIME_ERROR`. The module table, Fibers and the loop
-  remain proposals in the design page. Validated with `check-c-abi.py`
-  under LDC and DMD on Windows, and under LDC, DMD and the ThreadSanitizer
-  core lane on WSL (2026-11-04).
+  than becoming `AF_RUNTIME_ERROR`. Fibers and the loop remain proposals
+  in the design page. Validated with `check-c-abi.py` under LDC and DMD on
+  Windows, and under LDC, DMD and the ThreadSanitizer core lane on WSL
+  (2026-11-04).
+- C ABI 2, the module table. `include/antfarm_api.h` is generated from
+  the six headers by `scripts/check-c-abi.py --write-api-table`: one
+  section per header, one function pointer per function in header order
+  named without the `af_` prefix, each section behind a size word so a
+  module can check for a member appended after its build. The core's
+  `api.d` fills its three sections with typed function addresses and lays
+  the other three out as pointers; the runtime archive's `api_runtime.d`
+  installs its sections at `af_druntime_init`, since the BetterC core
+  cannot reference them. `af_api_get` returns the static table; a
+  resident may hand a module a copy with sections withheld. The
+  declaration audit regenerates the three files and fails if the
+  committed ones differ, and the lock holds the table's layouts. Tests: a
+  core-only program sees the three core sections and no runtime section,
+  and calls through the table; a runtime program sees the runtime
+  sections appear at init, and loads `tests/cabi/api_module.c`, built as
+  a DLL or shared object with no unresolved symbol but libc's, by path,
+  which creates a host, publishes and closes through the table alone,
+  then refuses a copy with the runtime section withheld. The table's
+  Fiber and loop sections are reserved. Validated as the host round was,
+  on Windows and WSL under both compilers and the TSan core lane.
 
 ## 2.2.0 development
 

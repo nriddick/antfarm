@@ -1,8 +1,8 @@
 # C ABI 2
 
 Status: in progress on `2.2.1-progress`. Of section 4, the antfarm.h,
-actors, runtime and groups rows are built, tested and locked (2026-11-04);
-the table, Fibers and the loop remain proposals. This page
+actors, runtime and groups rows and the table are built, tested and
+locked (2026-11-04); Fibers and the loop remain proposals. This page
 coalesces two things into one versioned surface: the review of what
 [ABI 1](c-abi.md) covers against the D API index, and the
 [Fiber sketch](fiber-c-abi.md). It is written as the design ABI 2 would
@@ -269,22 +269,22 @@ typedef struct af_api_core {
     uint32_t (*abi_version)(void);
     void (*options_default)(af_options *);
     af_status (*create)(const af_options *, af_farm **);
-    /* ... every antfarm.h function, in header order, generated from the lock */
+    /* ... every antfarm.h function, in header order, named without af_ */
 } af_api_core;
-/* af_api_actors, af_api_private, af_api_runtime, af_api_forkjoin,
-   af_api_groups and af_api_fibers likewise; af_api_uv is reserved. */
+/* af_api_actors, af_api_private_roots, af_api_runtime, af_api_forkjoin and
+   af_api_groups likewise. */
 typedef struct af_api {
     size_t size;
     uint32_t abi_version, reserved;
     const af_api_core *core;
     const af_api_actors *actors;
-    const af_api_private *private_roots;
-    const af_api_runtime *runtime;      /* NULL in a core-only program */
+    const af_api_private_roots *private_roots;
+    const af_api_runtime *runtime;      /* NULL until af_druntime_init succeeded */
     const af_api_forkjoin *forkjoin;
     const af_api_groups *groups;
-    const af_api_fibers *fibers;
+    const void *fibers;                 /* reserved */
     const void *uv;                     /* reserved for the loop */
-    const void *reserved_sections[7];
+    const void *reserved_sections[6];
 } af_api;
 /* The library's table: static, never freed. A resident may hand a module
    a copy with sections set to NULL to withhold them. */
@@ -292,11 +292,17 @@ const af_api *af_api_get(void);
 ```
 
 The generator is `scripts/check-c-abi.py --write-api-table`, which reads
-the lock's `PROTO` rows and writes the header and the D-side table; the
-audit fails if either differs from the lock. A module built against an
+the six headers and writes `antfarm_api.h`, the core's `api.d` (its three
+sections filled with typed function addresses, the other three laid out
+as pointers) and the runtime archive's `api_runtime.d`, which installs
+its sections into the core's table at `af_druntime_init`, since the
+BetterC core cannot reference them. The declaration audit regenerates the
+three and fails if the committed ones differ. A module built against an
 older ABI 2 checks `size` on a section before using a member appended
 later; a resident built against an older ABI 2 passes its shorter table,
-and a newer module sees the smaller `size`.
+and a newer module sees the smaller `size`. The test module
+`tests/cabi/api_module.c` is built as a DLL or shared object with no
+unresolved symbol but libc's, loaded by path and run through the table.
 
 ### Status registry
 

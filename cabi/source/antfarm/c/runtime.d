@@ -5,6 +5,7 @@ import antfarm.c.core;
 import antfarm.actors.cabi;
 import antfarm.actors.private_cabi : af_private_roots, af_private_roots_pump, af_private_roots_live,
     af_private_roots_destroy;
+import antfarm.c.api_runtime : installRuntimeSections;
 import core.atomic : atomicLoad, atomicOp;
 import core.lifetime : move;
 import core.memory : GC;
@@ -298,6 +299,7 @@ uint af_druntime_init()
         owner = Thread.getThis();
         active = true;
         markRuntimeLinked();
+        installRuntimeSections();
         return setError(AF_OK);
     }
     catch (Throwable e)

@@ -3,10 +3,11 @@
 Status: in progress on `2.2.1-progress`. This page is written as the
 onboarding guide ABI 2 ships with, so that the surface in
 [c-abi-2.md](c-abi-2.md) can be judged from the side of the C programmer
-who meets it first. Sections 2 to 5 and 8 to 11 describe calls that exist
-and are tested (2026-11-04); the Fibers of section 6 and the module table
-of section 7 remain proposals, and the text says so where a call is ABI 1
-today. The examples under `examples/` it refers to are the ABI 1 ones.
+who meets it first. Sections 2 to 5 and 7 to 11 describe calls that exist
+and are tested (2026-11-04); the Fibers of section 6, and the Fiber
+section of the table in section 7, remain proposals, and the text says so
+where a call is ABI 1 today. The examples under `examples/` it refers to
+are the ABI 1 ones.
 
 ## 1. Choose your archive
 

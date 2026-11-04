@@ -8,7 +8,8 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ["antfarm/package.d", "antfarm/allocation.d", "cabi/source/antfarm/c/core.d",
         "antfarm/actors/actor.d", "antfarm/actors/wave.d", "cabi/source/antfarm/actors/cabi.d",
-        "antfarm/actors/private_actor.d", "cabi/source/antfarm/actors/private_cabi.d"]
+        "antfarm/actors/private_actor.d", "cabi/source/antfarm/actors/private_cabi.d",
+        "cabi/source/antfarm/c/api.d"]
 
 
 def run(command, **kwargs):
@@ -49,7 +50,8 @@ def build_core(compiler, build, audit=False, sanitize=False, debug=False):
 
 
 def build_runtime(compiler, build):
-    sources = ["cabi/source/antfarm/c/runtime.d", "cabi/source/antfarm/c/forkjoin.d", "cabi/source/antfarm/c/groups.d", "antfarm/templates.d", "antfarm/parallel.d",
+    sources = ["cabi/source/antfarm/c/runtime.d", "cabi/source/antfarm/c/forkjoin.d", "cabi/source/antfarm/c/groups.d",
+               "cabi/source/antfarm/c/api_runtime.d", "antfarm/templates.d", "antfarm/parallel.d",
                "antfarm/actors/package.d"]
     sources += [str(p.relative_to(ROOT)) for p in sorted((ROOT / "threadpool/source").rglob("*.d"))]
     sources += [str(p.relative_to(ROOT)) for p in sorted((ROOT / "forkjoin/source").rglob("*.d"))]
