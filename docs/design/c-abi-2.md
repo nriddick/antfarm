@@ -190,7 +190,7 @@ typedef struct af_host_options {
     /* ABI 1 fields through reserved, unchanged ... */
     uint64_t wait_timeout_ns;           /* af_host_wait_until default; AF_WAIT_FOREVER */
     uint32_t max_emit_rounds;           /* attachment rounds per step; 16 */
-    uint32_t group_mode, group_index, farm_per_group;  /* AF_GROUP_* as the group host */
+    uint32_t group_mode, group_index, farm_per_group;  /* AF_GROUP_*; farm_per_group 0 only */
     uint64_t reserved2;
 } af_host_options;
 /* One emitter or service driven from every step, on the control thread.
@@ -238,22 +238,24 @@ parks empty, and returns `AF_BUSY` with the first blocker named otherwise.
 `group_mode` takes `AF_GROUP_AUTOMATIC` (0, the default: the group with
 the most eligible CPUs), `AF_GROUP_ALL` (1) or `AF_GROUP_ONLY` (2, with
 `group_index` naming the group; `group_index` is 0 otherwise).
-`farm_per_group` is 0 or 1, and only changes anything when more than one
-group is selected. The plain host's C surface reaches one Farm, the
-caller group's: `af_host_farm`, `af_host_register_producer`,
-`af_host_create_actors`, attachments and transferred parks all publish
-there. The paths to more than one group, as built:
+On the plain host `farm_per_group` must be 0; `af_host_create` and
+`af_host_resolve` return `AF_INVALID` for 1, with a message naming the
+group host. The plain host's C surface reaches one Farm:
+`af_host_farm`, `af_host_register_producer`, `af_host_create_actors`,
+attachments and transferred parks all publish into it, so one Farm per
+group would leave every other group's workers without work from C. The
+paths to more than one group, as built:
 
 | Path | Farms | C publishes through | Who consumes it |
 |---|---|---|---|
 | `af_host`, `AF_GROUP_ALL`, `farm_per_group` 0 | one, homed on the caller's group | everything the plain host offers | every selected group's workers; the other groups' are cross-group consumers |
-| `af_host`, `AF_GROUP_ALL`, `farm_per_group` 1 | one per group | the caller group's Farm only | that group's workers; the others get no work from C |
+| `af_host`, `farm_per_group` 1 | refused (`AF_INVALID`) | | |
 | `af_group_start`, `AF_GROUP_ALL` (`farm_per_group` 1 is its default) | one per group | `af_group_farm(llc)` and `af_group_token(llc)` per thread; private parks on any group's Farm, pumped by your code | your worker bodies, each told its group |
 | `af_dispatcher_start`, `farm_per_group` 1 | one per group | fork-join roots; each participant spills children into its own group's Farm | that group's participants |
 
-On the 5900XT (two CCDs, 16 workers) 100,000 bodies published through an
-attachment ran on CPUs 0-15 with `farm_per_group` 0 and on CPUs 0-7 only
-with 1. Public actor runtimes need an owned Farm, so they are not
+Before the refusal, on the 5900XT (two CCDs, 16 workers), 100,000 bodies
+published through an attachment ran on CPUs 0-15 with `farm_per_group` 0
+and on CPUs 0-7 only with 1. Public actor runtimes need an owned Farm, so they are not
 available on a group host's Farms (`AF_INVALID`); on the plain host
 `af_host_create_actors` places them on the caller group's Farm.
 
@@ -402,8 +404,9 @@ the ABI 1 images of the two structures that grew are held by
 5. The fork-join helpers, per the roadmap.
 6. The Fiber sketch's remaining items: per-spawn completion, events before
    the loop, the failure object, tag scan versus list, DMD GC metadata.
-7. The plain host with `farm_per_group` 1. Its C surface reaches only the
-   caller group's Farm, so the other groups' Farms stay idle. Either refuse
-   1 on `af_host` until a per-group surface exists, or add one (a Farm and
-   token by group, an attachment or actor runtime bound to a group), as the
-   D `FarmHost` has with `farmOf`, `tokenOf` and `createRuntime(llc)`.
+7. A per-group surface for the plain host, deferred: a Farm and token by
+   group, and an attachment, park or actor runtime bound to a group, as
+   the D `FarmHost` has with `farmOf`, `tokenOf` and `createRuntime(llc)`.
+   Until it exists `af_host` refuses `farm_per_group` 1, and the group
+   host is the C path to one Farm per group. Accepting 1 later is a
+   compatible change.

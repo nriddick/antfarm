@@ -30,17 +30,16 @@ typedef struct af_processor {
    group_mode picks the LLC groups that supply workers: AF_GROUP_AUTOMATIC
    (the default: the group with the most eligible CPUs), AF_GROUP_ALL (every
    group with one) or AF_GROUP_ONLY (group group_index, below 0xFFFF;
-   group_index is 0 in the other modes). farm_per_group is 0 (default) or 1
-   and matters only when several groups are selected: 0 gives one Farm,
-   homed on the caller's group, that every selected group's workers consume
-   (the other groups' workers are cross-group consumers); 1 gives each group
-   its own Farm, consumed by that group's workers only. This host's C
-   surface reaches one Farm, the caller group's: af_host_farm,
-   af_host_register_producer, af_host_create_actors, attachments and
-   transferred parks all publish there. With 1 the other groups' workers
-   therefore receive no work from C. To use several groups from C, keep 0
-   here, or use the group host (antfarm_groups.h), whose af_group_farm,
-   af_group_token and af_group_wake take the group. */
+   group_index is 0 in the other modes). Every selected group's workers
+   consume one Farm, homed on the caller's group; with several groups the
+   other groups' workers are cross-group consumers. farm_per_group must be
+   0: af_host_create and af_host_resolve return AF_INVALID for 1. This
+   host's C surface reaches one Farm (af_host_farm, af_host_register_producer,
+   af_host_create_actors, attachments and transferred parks all publish
+   into it), so one Farm per group would leave the other groups' workers
+   without work from C. For one Farm per group use the group host
+   (antfarm_groups.h), whose af_group_farm, af_group_token and af_group_wake
+   take the group. A per-group surface for this host is deferred. */
 typedef struct af_host_options {
     uint32_t struct_size, abi_version;
     uint32_t workers, caller_consumes, caller_placement, idle;

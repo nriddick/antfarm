@@ -208,6 +208,17 @@ package uint hostOptionsFrom(const(void)* supplied, out af_host_options o) nothr
         return setError(AF_INVALID, "invalid host options");
     return AF_OK;
 }
+// The plain host's C surface reaches one Farm, the caller group's, so one
+// Farm per group would leave every other group's workers without work from
+// C. Refused until a per-group surface exists; the group host has one.
+// (The group host ignores its embedded host's farm_per_group.)
+private uint plainHostOptions(ref const af_host_options o) nothrow @nogc @system
+{
+    if (o.farm_per_group != 0)
+        return setError(AF_INVALID, "farm_per_group 1 is not available on the plain host; "
+            ~ "use the group host (af_group_start) for one Farm per group");
+    return AF_OK;
+}
 package void toFarmHostOptions(ref const af_host_options o, ref FarmHostOptions options) nothrow @system
 {
     options.workers = o.workers;
@@ -386,6 +397,7 @@ uint af_host_create(const(af_host_options)* supplied, af_host** outHost)
     if (auto status = control()) return status;
     af_host_options o;
     if (auto status = hostOptionsFrom(supplied, o)) return status;
+    if (auto status = plainHostOptions(o)) return status;
     auto h = cast(af_host*) malloc(af_host.sizeof);
     if (h is null) return setError(AF_ALLOCATION_FAILED, "host handle allocation failed");
     *h = af_host.init;
@@ -575,6 +587,7 @@ uint af_host_resolve(const(af_host_options)* supplied, af_processor* output, siz
     if (output is null && capacity) return setError(AF_INVALID, "null host resolution output");
     af_host_options o;
     if (auto status = hostOptionsFrom(supplied, o)) return status;
+    if (auto status = plainHostOptions(o)) return status;
     try
     {
         FarmHostOptions options;

@@ -227,6 +227,12 @@ int main(int argc, char **argv) {
     af_host_options_default(&bad); bad.reserved2 = 1; CHECK(af_host_create(&bad, &invalid) == AF_INVALID);
     af_host_options_default(&bad); bad.group_mode = 3; CHECK(af_host_create(&bad, &invalid) == AF_INVALID);
     af_host_options_default(&bad); bad.group_index = 1; CHECK(af_host_create(&bad, &invalid) == AF_INVALID);
+    /* One Farm per group is the group host's; the plain host refuses it, in create and resolve. */
+    af_host_options_default(&bad); bad.group_mode = AF_GROUP_ALL; bad.farm_per_group = 1;
+    CHECK(af_host_create(&bad, &invalid) == AF_INVALID && invalid == NULL);
+    CHECK(strstr(af_last_error_message(), "af_group_start") != NULL);
+    { size_t n = 99; CHECK(af_host_resolve(&bad, NULL, 0, &n) == AF_INVALID && n == 0); }
+    bad.farm_per_group = 0; { size_t n = 0; check(af_host_resolve(&bad, NULL, 0, &n)); CHECK(n > 0); }
     af_host_options_default(&bad); bad.wait_timeout_ns = (uint64_t)INT64_MAX + 1; CHECK(af_host_create(&bad, &invalid) == AF_INVALID);
     af_build_info info = { sizeof info, AF_ABI_VERSION, NULL, NULL, 0, 0 };
     check(af_build_info_get(&info)); CHECK(info.features & AF_FEATURE_RUNTIME);

@@ -111,15 +111,13 @@ most eligible CPUs. To spread the workers over every group:
 
 ```c
 options.group_mode = AF_GROUP_ALL;   /* AF_GROUP_AUTOMATIC, AF_GROUP_ALL, AF_GROUP_ONLY + group_index */
-options.farm_per_group = 0;          /* 0 or 1; 0 is the default */
 ```
 
-Keep `farm_per_group` at 0 on this host. It gives one Farm that every
-group's workers consume, and everything this guide publishes reaches it.
-With 1 each group gets its own Farm, but the plain host only reaches the
-caller group's: `af_host_farm`, producers, actors, attachments and parks
-all publish there, and the other groups' workers sit idle. When you want
-one Farm per group, use the group host: `af_group_start` with
+Every group's workers then consume the host's one Farm, and everything
+this guide publishes reaches it. `farm_per_group` stays 0 on this host:
+`af_host_create` returns `AF_INVALID` for 1, because the plain host's C
+calls reach only one Farm and the other groups' Farms would get no work.
+When you want one Farm per group, use the group host: `af_group_start` with
 `AF_GROUP_ALL` (one Farm per group is its default), then `af_group_farm`,
 `af_group_token` and `af_group_wake` with the group you mean, and a worker
 body that consumes its own group's Farm. Private parks can live on any

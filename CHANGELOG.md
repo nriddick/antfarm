@@ -100,7 +100,8 @@ the C ABI.
   `make check` passed (365 s), the actors and `ant_uv` mimalloc lanes
   passed, and the new C ABI programs ran 60 times each under LDC and DMD
   without a failure. A plain host with `AF_GROUP_ALL` (16 workers on two
-  LLC groups) published, waited and closed with `farm_per_group` 0 and 1.
+  LLC groups) published, waited and closed with `farm_per_group` 0 and 1
+  (1 is now refused; see below).
   Fixed: `af_host_attach_park` accepted the same park twice. The park was
   then counted twice against close's park check, so close went ahead with
   another park still allocated, and close destroyed the transferred park
@@ -115,12 +116,17 @@ the C ABI.
   read the Farm before attaching. `group_mode` and `farm_per_group`
   now spell out their values and which Farm each C path reaches. The
   plain host's C surface publishes only into the caller group's Farm, so
-  with `farm_per_group` 1 the other groups' workers get no work from C
-  (measured: bodies ran on CPUs 0-7 only, against 0-15 with 0). The
-  ABI 2 page and the onboarding guide list the paths to several groups
-  (the plain host with one shared Farm, the group host with one Farm per
-  group, the dispatcher) and record the plain host's `farm_per_group` 1
-  as an open item.
+  with `farm_per_group` 1 the other groups' workers got no work from C
+  (measured: bodies ran on CPUs 0-7 only, against 0-15 with 0). The plain
+  host now refuses it: `af_host_create` and `af_host_resolve` return
+  `AF_INVALID` for `farm_per_group` 1, naming the group host; the group
+  host's own field, and its embedded host's (ignored there), are
+  unaffected. A per-group surface for the plain host is deferred (open
+  item 7 of the ABI 2 page); accepting 1 later is compatible. The ABI 2
+  page and the onboarding guide list the paths to several groups (the
+  plain host with one shared Farm, the group host with one Farm per
+  group, the dispatcher). Test: `runtime.c` checks the refusal in create
+  and resolve.
 
 ## 2.2.0 development
 
