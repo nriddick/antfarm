@@ -36,6 +36,21 @@ static void check_options(void) {
     o.struct_size = 4; CHECK(af_create(&o, &f) == AF_INVALID && f == NULL);
     CHECK(strstr(af_last_error_message(), "size") && af_last_os_error() == 0);
     af_options_default(&o); ++o.abi_version; CHECK(af_create(&o, &f) == AF_INVALID);
+    af_options_default(&o); o.abi_version = 0; CHECK(af_create(&o, &f) == AF_INVALID);
+    af_options_default(&o); o.abi_version = AF_ABI_VERSION_MIN; /* an ABI 1 image is accepted */
+    CHECK(af_create(&o, &f) == AF_OK && af_used_large_pages(f) <= 1); af_destroy(f);
+    CHECK(af_used_large_pages(NULL) == 0);
+    af_build_info info = { sizeof info, AF_ABI_VERSION, NULL, NULL, 0, 0 };
+    CHECK(af_build_info_get(&info) == AF_OK && info.library_version && info.compiler);
+    CHECK(strstr(info.library_version, "2.2") && !(info.features & AF_FEATURE_RUNTIME));
+    info.struct_size = 4; CHECK(af_build_info_get(&info) == AF_INVALID);
+    info.struct_size = sizeof info; info.abi_version = 0; CHECK(af_build_info_get(&info) == AF_INVALID);
+    CHECK(af_build_info_get(NULL) == AF_INVALID);
+    CHECK(af_cost_for_chunk(128) == 0 && af_cost_for_chunk(256) == 0 && af_cost_for_chunk(24) == 3);
+    CHECK(af_cost_for_chunk(16) == AF_DEFAULT_COST && af_cost_for_chunk(1) == AF_MAX_COST && af_cost_for_chunk(0) == AF_MAX_COST);
+    CHECK(af_root_cost_hint(0, 6, 0) == af_cost_for_chunk(32) && af_root_cost_hint(1, 6, 0) == af_cost_for_chunk(32));
+    CHECK(af_root_cost_hint(8, 6, 0) == af_cost_for_chunk(1) && af_root_cost_hint(15, 6, 0) == af_cost_for_chunk(2));
+    CHECK(af_root_cost_hint(63, 6, 0) == af_cost_for_chunk(8));
     af_options_default(&o); o.reserved = 1; CHECK(af_create(&o, &f) == AF_INVALID);
     af_options_default(&o); o.ring_mib = 3; CHECK(af_create(&o, &f) == AF_INVALID);
     af_options_default(&o); o.huge_pages = 2; CHECK(af_create(&o, &f) == AF_INVALID);
@@ -81,6 +96,10 @@ static void serial(void) {
         af_consume_next(v); n = af_write_fixed(f, add, data, 1, 1, t, 7, &hook);
     }
     CHECK(n == 1); while (hooks < tables + 1) af_consume_next(v);
+    n = 0; for (unsigned i = 0; i < 64 && !n; ++i) { /* AF_COST_AUTO derives the class */
+        af_consume_next(v); n = af_write_fixed(f, add, data, 1, 1, t, AF_COST_AUTO, &hook);
+    }
+    CHECK(n == 1); while (hooks < tables + 2) af_consume_next(v);
     release_view(v); af_unregister_producer(f, t); af_destroy(f);
 }
 

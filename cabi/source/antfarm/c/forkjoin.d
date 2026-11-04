@@ -171,7 +171,7 @@ extern(C) uint af_dispatcher_start(const(af_dispatcher_options)* supplied,
     if (supplied is null) { af_dispatcher_options_default(&defaults); supplied = &defaults; }
     if (supplied.struct_size != af_dispatcher_options.sizeof) return setError(AF_INVALID, "invalid dispatcher options size");
     const o = *supplied;
-    if (o.abi_version != AF_ABI_VERSION || o.reserved || o.sibling_first > 1 || o.park > 1 ||
+    if (!abiVersionOk(o.abi_version) || o.reserved || o.sibling_first > 1 || o.park > 1 ||
         o.farm_per_group > 1 || o.caller_consumes > 1 || o.spill_inline > 1 || o.body_steps == 0 ||
         o.avg_cost > 7 || o.deque_capacity == 0 || o.deque_capacity > (1u << 30) ||
         count > maxParticipants || (cpus is null && count) || (cpus !is null && count == 0))

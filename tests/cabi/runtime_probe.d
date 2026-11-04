@@ -13,3 +13,9 @@ extern(C) void antfarm_test_cleanup_failure(af_host* h)
     h.value.attach(HostAttachment("test cleanup", null, null,
         () { throw new Exception("injected terminal cleanup failure"); }));
 }
+// ABI 2: an Error reaches the fatal handler, never a status.
+extern(C) void antfarm_test_error_failure(af_host* h)
+{
+    h.value.attach(HostAttachment("test error", null, null,
+        () { throw new Error("injected D Error"); }));
+}

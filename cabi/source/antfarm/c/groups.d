@@ -45,9 +45,9 @@ private uint options(const(af_group_options)* supplied, out GroupHostOptions opt
     if (supplied.struct_size != af_group_options.sizeof) return setError(AF_INVALID, "invalid group options size");
     const o = *supplied;
     const h = o.host;
-    if (o.abi_version != AF_ABI_VERSION || o.reserved || o.farm_per_group > 1 || o.group_mode > 2 ||
+    if (!abiVersionOk(o.abi_version) || o.reserved || o.farm_per_group > 1 || o.group_mode > 2 ||
         o.group_index >= ushort.max || (o.group_mode != 2 && o.group_index != 0) ||
-        h.struct_size != af_host_options.sizeof || h.abi_version != AF_ABI_VERSION || h.reserved ||
+        h.struct_size != af_host_options.sizeof || !abiVersionOk(h.abi_version) || h.reserved ||
         h.caller_consumes > 1 || h.caller_placement > 2 || h.idle > 1 || h.huge_pages > 1 ||
         h.skip_smt_siblings > 1 || (h.idle_timeout_ns != ulong.max && h.idle_timeout_ns > long.max))
         return setError(AF_INVALID, "invalid group or host options");

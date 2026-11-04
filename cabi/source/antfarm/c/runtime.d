@@ -69,8 +69,21 @@ private uint control() nothrow @nogc @system
     if (callbackDepth) fatal("C runtime control operation inside runtime callback");
     return AF_OK;
 }
+// ABI 2: a D Error never becomes a status. The scheduler or the host it
+// came from is in no state to hand back to a caller; the handler sees the
+// message, then abort follows.
+private __gshared char[512] errorText;
+private void abortOnError(Throwable e) nothrow @nogc @system
+{
+    enum prefix = "C ABI: D Error inside an export: ";
+    size_t n;
+    foreach (c; prefix) errorText[n++] = c;
+    foreach (c; e.msg) { if (n == errorText.length) break; errorText[n++] = c; }
+    fatal(errorText[0 .. n]);
+}
 private uint exception(Throwable e) nothrow @nogc @system
 {
+    if (cast(Error) e !is null) abortOnError(e);
     return setError(cast(FarmHostResolveException) e !is null ? AF_INVALID :
         cast(FarmHostNotDrained) e !is null ? AF_BUSY : AF_RUNTIME_ERROR, e.msg);
 }
@@ -116,6 +129,7 @@ uint af_druntime_init()
         CacheAwarePool.topology();
         owner = Thread.getThis();
         active = true;
+        markRuntimeLinked();
         return setError(AF_OK);
     }
     catch (Throwable e)
@@ -204,7 +218,7 @@ uint af_host_create(const(af_host_options)* supplied, af_host** outHost)
     if (supplied is null) { af_host_options_default(&defaults); supplied = &defaults; }
     if (supplied.struct_size != af_host_options.sizeof) return setError(AF_INVALID, "invalid host options size");
     const o = *supplied;
-    if (o.abi_version != AF_ABI_VERSION || o.reserved || o.caller_consumes > 1 ||
+    if (!abiVersionOk(o.abi_version) || o.reserved || o.caller_consumes > 1 ||
         o.caller_placement > 2 || o.idle > 1 || o.huge_pages > 1 || o.skip_smt_siblings > 1 ||
         (o.idle_timeout_ns != ulong.max && o.idle_timeout_ns > long.max))
         return setError(AF_INVALID, "invalid host options");

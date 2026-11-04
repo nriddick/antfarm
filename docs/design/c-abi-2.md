@@ -149,7 +149,7 @@ enum { AF_FEATURE_RUNTIME = 1u << 0, AF_FEATURE_IO_URING = 1u << 1,
        AF_FEATURE_MIMALLOC = 1u << 2, AF_FEATURE_TSAN = 1u << 3 };
 typedef struct af_build_info {
     uint32_t struct_size, abi_version;   /* in: the caller's layout */
-    const char *version;                 /* borrowed, static: "2.2.1" */
+    const char *library_version;         /* borrowed, static: "2.2.1-dev" */
     const char *compiler;                /* "ldc2 1.42.0" or "dmd 2.112.1" */
     uint32_t features, reserved;
 } af_build_info;

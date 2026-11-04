@@ -27,8 +27,9 @@ typedef void (*af_actor_destructor)(void *user, void *state, size_t state_bytes)
    cleans its own partial object; the library frees storage without destruction.
    index is the logical index, including first_index on batch retries. */
 typedef af_status (*af_actor_initializer)(void *user, void *state, size_t state_bytes, size_t index);
-/* Initialize with af_actor_kind_options_default. ABI 1 requires struct_size ==
-   sizeof(af_actor_kind_options), abi_version == AF_ABI_VERSION and reserved == 0. */
+/* Initialize with af_actor_kind_options_default. Requires struct_size ==
+   sizeof(af_actor_kind_options), abi_version from AF_ABI_VERSION_MIN to
+   AF_ABI_VERSION and reserved == 0. */
 typedef struct af_actor_kind_options {
     uint32_t struct_size, abi_version;
     af_actor_handler handler;
@@ -66,6 +67,10 @@ af_status af_actor_runtime_create(af_farm *, size_t capacity, const af_actor_all
    retired actors, and reclamation until the slot returns. Zero is not a join. */
 size_t af_actor_runtime_live(const af_actor_runtime *);
 size_t af_actor_runtime_ready(const af_actor_runtime *);
+size_t af_actor_runtime_capacity(const af_actor_runtime *); /* configured slots */
+/* 1 when destroy would not abort: no occupied slot, queued work or held gate.
+   Not a lifetime fence: join callers and consumers first. */
+uint32_t af_actor_runtime_quiescent(const af_actor_runtime *);
 /* Zero is empty, backpressure or contention, not a join. maximum is capped at
    256. The token must belong to this runtime's Farm. */
 size_t af_actor_runtime_flush(af_actor_runtime *, af_token *, size_t maximum, uint32_t avg_cost);

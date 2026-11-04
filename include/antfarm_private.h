@@ -77,8 +77,9 @@ typedef struct af_private_child_options {
     uint64_t reserved; /* must be 0 */
 } af_private_child_options;
 
-/* Defaults leave state/step unset. Exact struct size/version and zero reserved
-   words required; Boolean fields must be 0/1. State bytes>0, alignments power-of-two. The native allocator
+/* Defaults leave state/step unset. Exact struct size, an ABI version from
+   AF_ABI_VERSION_MIN to AF_ABI_VERSION and zero reserved words required;
+   Boolean fields must be 0/1. State bytes>0, alignments power-of-two. The native allocator
    supports through 64; custom allocators can support larger alignments.
    Options are copied. Metadata and descendants inherit the allocator and its
    context. All allocation callbacks must be thread-safe and correctly aligned.

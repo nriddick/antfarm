@@ -305,6 +305,8 @@ uint af_actor_runtime_create(af_farm* f, size_t capacity, const(af_actor_allocat
 }
 size_t af_actor_runtime_live(const(af_actor_runtime)* r) { requireRuntime(r); return r.impl.live; }
 size_t af_actor_runtime_ready(const(af_actor_runtime)* r) { requireRuntime(r); return r.impl.ready; }
+size_t af_actor_runtime_capacity(const(af_actor_runtime)* r) { requireRuntime(r); return r.impl.capacity; }
+uint af_actor_runtime_quiescent(const(af_actor_runtime)* r) { requireRuntime(r); return r.impl.quiescent; }
 size_t af_actor_runtime_flush(af_actor_runtime* r, af_token* t, size_t maximum, uint cost)
 {
     requireRuntime(r);
@@ -338,7 +340,7 @@ uint af_actor_kind_register(af_actor_runtime* r, const(af_actor_kind_options)* o
     *output = null;
     if (options is null || options.struct_size != af_actor_kind_options.sizeof)
         return setError(AF_INVALID, "invalid actor kind options size");
-    if (options.abi_version != AF_ABI_VERSION || options.reserved != 0)
+    if (!abiVersionOk(options.abi_version) || options.reserved != 0)
         return setError(AF_INVALID, "invalid actor kind options version or reserved field");
     if (r is null || r.impl is null || options.handler is null ||
         options.state_bytes == 0 || options.state_alignment == 0 ||

@@ -7,6 +7,7 @@
 extern void antfarm_test_collect(void);
 extern void antfarm_test_busy_attachment(af_host *, int *);
 extern void antfarm_test_cleanup_failure(af_host *);
+extern void antfarm_test_error_failure(af_host *);
 static unsigned *results;
 static test_atomic pending, foreign_ready, foreign_stop;
 static af_host *live_host;
@@ -137,6 +138,10 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         af_set_fatal_handler(fatal_notice, &pending);
         live_host = make_host(0); af_farm *f = af_host_farm(live_host);
+        if (!strcmp(argv[1], "error")) { /* a D Error in close aborts; it is never a status */
+            antfarm_test_error_failure(live_host); af_host_close(live_host);
+            fprintf(stderr, "death case returned: error\n"); return 0;
+        }
         if (!strcmp(argv[1], "borrowed")) af_destroy(f);
         af_token *t = NULL; check(af_host_register_producer(live_host, AF_SMALL, &t));
         af_write_fixed(f, nested, NULL, 0, 1, t, 3, NULL); af_host_step(live_host);
@@ -145,6 +150,11 @@ int main(int argc, char **argv) {
     af_host_options bad; af_host_options_default(&bad); bad.struct_size = 4;
     CHECK(af_host_create(&bad, &invalid) == AF_INVALID && invalid == NULL);
     af_host_options_default(&bad); bad.reserved = 1; CHECK(af_host_create(&bad, &invalid) == AF_INVALID);
+    af_host_options_default(&bad); bad.abi_version = 0; CHECK(af_host_create(&bad, &invalid) == AF_INVALID);
+    af_host_options_default(&bad); bad.abi_version = AF_ABI_VERSION_MIN; /* an ABI 1 image is accepted */
+    af_host *previous = NULL; check(af_host_create(&bad, &previous)); check(af_host_close(previous));
+    af_build_info info = { sizeof info, AF_ABI_VERSION, NULL, NULL, 0, 0 };
+    check(af_build_info_get(&info)); CHECK(info.features & AF_FEATURE_RUNTIME);
     af_host_options_default(&bad); bad.workers = 100000; CHECK(af_host_create(&bad, &invalid) == AF_INVALID);
     uint32_t state = 99;
     CHECK(af_host_wake(NULL) == AF_INVALID);

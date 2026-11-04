@@ -154,7 +154,7 @@ uint af_private_roots_create(af_farm* farm, const(af_private_root_options)* o,
     if (farm is null || o is null || o.struct_size != af_private_root_options.sizeof)
         return setError(AF_INVALID, "invalid private Farm/options size");
     immutable slab = o.storage != 0;
-    if (o.abi_version != AF_ABI_VERSION || o.tracking > 1 || o.reclamation > 1 || o.storage > 1
+    if (!abiVersionOk(o.abi_version) || o.tracking > 1 || o.reclamation > 1 || o.storage > 1
         || o.reserved != 0 || o.step is null
         || !geometry(o.state.bytes, o.state.alignment) || !erasedRootGeometry(o.capacity, o.batch_limit, o.tracking != 0)
         || (a is null && o.state.alignment > 64)
@@ -242,7 +242,7 @@ uint af_private_children_create(void* c, const(af_private_child_options)* o, af_
     *output = null;
     if (o is null || o.struct_size != af_private_child_options.sizeof)
         return setError(AF_INVALID, "invalid private child options size");
-    if (o.abi_version != AF_ABI_VERSION || o.storage > 1 || o.subsets > 1 || o.reserved != 0
+    if (!abiVersionOk(o.abi_version) || o.storage > 1 || o.subsets > 1 || o.reserved != 0
         || !geometry(o.state.bytes, o.state.alignment)
         || (o.result_bytes ? !geometry(o.result_bytes, o.result_alignment) : o.result_alignment != 1))
         return setError(AF_INVALID, "invalid private child options");

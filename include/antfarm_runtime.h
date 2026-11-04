@@ -12,9 +12,10 @@ enum { AF_CALLER_UNCHANGED = 0, AF_CALLER_CONFINE = 1, AF_CALLER_PIN = 2 };
 enum { AF_IDLE_PARK = 0, AF_IDLE_SPIN = 1 };
 enum { AF_HOST_OPEN = 0, AF_HOST_FAILED = 1, AF_HOST_CLOSED = 2,
        AF_HOST_ABANDONED = 3, AF_HOST_STOPPING = 4 };
-/* Initialize with af_host_options_default. ABI 1 requires struct_size == sizeof
-   (af_host_options), abi_version == AF_ABI_VERSION and reserved == 0. Truncated
-   and larger option structures are rejected with AF_INVALID. */
+/* Initialize with af_host_options_default. Requires struct_size == sizeof
+   (af_host_options), abi_version from AF_ABI_VERSION_MIN to AF_ABI_VERSION and
+   reserved == 0. Truncated and larger option structures are rejected with
+   AF_INVALID. */
 typedef struct af_host_options {
     uint32_t struct_size, abi_version;
     uint32_t workers, caller_consumes, caller_placement, idle;
@@ -97,7 +98,9 @@ af_status af_host_close(af_host *);
 af_status af_host_abandon(af_host *);
 
 /* Status diagnostics use af_last_error_message()/af_last_os_error(). No D
-   exception crosses these exports. Callbacks still must not throw/longjmp. */
+   exception crosses these exports: a D Exception is AF_RUNTIME_ERROR with its
+   message, a D Error aborts through the fatal handler. Callbacks still must
+   not throw/longjmp. */
 #ifdef __cplusplus
 }
 static_assert(sizeof(af_host_options) == 88 && alignof(af_host_options) == 8 &&

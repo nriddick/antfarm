@@ -50,7 +50,7 @@ On Windows, `cl /std:c11 /MT /c /Iinclude`, then `ldc2` with
 ```c
 af_build_info info = { sizeof info, AF_ABI_VERSION };
 if (af_build_info_get(&info) != AF_OK || af_abi_version() != 2) { /* mismatch */ }
-printf("antfarm %s, %s, features %#x\n", info.version, info.compiler, info.features);
+printf("antfarm %s, %s, features %#x\n", info.library_version, info.compiler, info.features);
 ```
 
 ## 3. A first program on the core

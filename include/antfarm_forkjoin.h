@@ -53,7 +53,8 @@ void af_dispatcher_options_default(af_dispatcher_options *out);
 /* Runtime control thread. NULL options selects one shared Farm. NULL/0 CPUs
    selects up to 128 eligible processors; otherwise CPUs[0] pins the caller,
    the remainder are workers. group/processor are input; llc is informational.
-   All options require exact size, ABI version and zero reserved fields.
+   All options require exact size, an ABI version from AF_ABI_VERSION_MIN to
+   AF_ABI_VERSION, and zero reserved fields.
    Only one running dispatcher/pool. Failures clear *out and undo startup. */
 af_status af_dispatcher_start(const af_dispatcher_options *, const af_processor *, size_t count, af_dispatcher **out);
 /* Quiesce external submitters first. Drains detached and submitted roots,

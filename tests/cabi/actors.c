@@ -39,7 +39,7 @@ static void retire(fixture *x, af_actor_owner *o, unsigned mode) {
     CHECK(af_actor_reclaim(x->runtime, o) == AF_ACTOR_RECLAIMED);
 }
 static void teardown(fixture *x) {
-    CHECK(af_actor_runtime_live(x->runtime) == 0);
+    CHECK(af_actor_runtime_live(x->runtime) == 0 && af_actor_runtime_quiescent(x->runtime) == 1);
     release_view(x->view); af_actor_runtime_destroy(x->runtime);
     af_unregister_producer(x->farm, x->token); af_destroy(x->farm);
 }
@@ -69,6 +69,7 @@ static void basic(void) {
     const af_actor_kind *kind = test_kind(x.runtime, sizeof initial, 64, handler, &r);
     check(af_actor_create_copy(x.runtime, kind, &initial, &o));
     CHECK(initial.calls == 7 && af_actor_runtime_live(x.runtime) == 1);
+    CHECK(af_actor_runtime_capacity(x.runtime) >= 1 && af_actor_runtime_quiescent(x.runtime) == 0);
     CHECK(af_actor_create_copy(x.runtime, kind, &initial, &extra) == AF_FULL && !extra._slot);
     CHECK(af_actor_reclaim(x.runtime, &o) == AF_ACTOR_RECLAIM_BUSY);
     af_actor_handle h; af_actor_owner_handle(&o, &h);

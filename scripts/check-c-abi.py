@@ -93,13 +93,19 @@ D_STRUCT_NAMES = {"af_completion_hook": "TableCompletionHook"}
 # Header structs that are deliberately opaque storage (C sees padding words, D
 # a typed value): size and alignment are compared, fields are not.
 OPAQUE_STRUCTS = {"af_actor_message", "af_private_root_handle"}
-# The ABI 1 freeze as a test: header prototypes, numeric constants and the
-# layout rows above. The audit proves header == D; the lock proves neither moved.
-ABI_LOCK = ROOT / "cabi" / "abi1.lock"
-ABI_LOCK_HEADER = """# C ABI 1 lock: header prototypes, numeric constants and struct layouts.
+# The ABI freezes as tests: header prototypes, numeric constants and the
+# layout rows above. The audit proves header == D; the locks prove neither
+# moved. abi2.lock is the current surface, exact. abi1.lock is ABI 1's, and
+# every row of it but the version constant must still be present verbatim:
+# ABI 2 is a superset.
+ABI_LOCK = ROOT / "cabi" / "abi2.lock"
+ABI_LOCK_PREVIOUS = ROOT / "cabi" / "abi1.lock"
+ABI_LOCK_EXEMPT = {"CONST AF_ABI_VERSION"}
+ABI_LOCK_HEADER = """# C ABI 2 lock: header prototypes, numeric constants and struct layouts.
 # The declaration audit in scripts/check-c-abi.py fails on any difference.
-# Within ABI 1 only additions are compatible; regenerate deliberately with
-# scripts/check-c-abi.py --write-abi-lock and review the diff.
+# Within ABI 2 only additions are compatible; regenerate deliberately with
+# scripts/check-c-abi.py --write-abi-lock and review the diff. Every row of
+# abi1.lock but the version constant must remain here verbatim.
 """
 DECLARATION_TRAITS = r"""
 #include <cstddef>
@@ -164,16 +170,37 @@ def lock_key(line):
     return " ".join(line.split()[:words])
 
 
+def lock_rows(path):
+    if not path.exists():
+        raise RuntimeError(f"{path.relative_to(ROOT)} is missing; see --write-abi-lock")
+    return [line for line in path.read_text().splitlines() if line and not line.startswith("#")]
+
+
 def check_abi_lock(rows, write):
+    # ABI 1 first: its rows must survive verbatim whatever the current lock says.
+    current = {lock_key(line): line for line in rows}
+    previous = lock_rows(ABI_LOCK_PREVIOUS)
+    report = []
+    for line in previous:
+        key = lock_key(line)
+        if key in ABI_LOCK_EXEMPT:
+            continue
+        if key not in current:
+            report.append(f"removed: {line!r}")
+        elif current[key] != line:
+            report.append(f"changed: {line!r} -> {current[key]!r}")
+    if report:
+        raise RuntimeError("C ABI 2 breaks ABI 1 rows of " + str(ABI_LOCK_PREVIOUS.relative_to(ROOT))
+                           + " (ABI 2 must keep every ABI 1 prototype, constant and layout):\n"
+                           + "\n".join(report))
+    print(f"ABI 1 lock honoured: {len(previous)} rows", flush=True)
     if write:
         ABI_LOCK.write_text(ABI_LOCK_HEADER + "\n".join(rows) + "\n", newline="\n")
         print(f"ABI lock written: {ABI_LOCK.relative_to(ROOT)}, {len(rows)} rows", flush=True)
         return
-    if not ABI_LOCK.exists():
-        raise RuntimeError(f"{ABI_LOCK.relative_to(ROOT)} is missing; see --write-abi-lock")
-    locked = [line for line in ABI_LOCK.read_text().splitlines() if line and not line.startswith("#")]
+    locked = lock_rows(ABI_LOCK)
     if locked == rows:
-        print(f"ABI lock matched: {len(rows)} rows", flush=True)
+        print(f"ABI 2 lock matched: {len(rows)} rows", flush=True)
         return
     old = {lock_key(line): line for line in locked}
     new = {lock_key(line): line for line in rows}
@@ -182,8 +209,8 @@ def check_abi_lock(rows, write):
     report += [f"added:   {new[k]!r}" for k in new if k not in old]
     if not report:
         report = ["row order changed"]
-    raise RuntimeError("C ABI 1 differs from " + str(ABI_LOCK.relative_to(ROOT))
-                       + " (only additions are ABI-1-compatible; regenerate with --write-abi-lock"
+    raise RuntimeError("C ABI 2 differs from " + str(ABI_LOCK.relative_to(ROOT))
+                       + " (only additions are ABI-2-compatible; regenerate with --write-abi-lock"
                        " only for those):\n" + "\n".join(report))
 
 
@@ -302,6 +329,7 @@ def runtime_checks(compiler, build, core):
     execute(binary)
     execute(binary, "borrowed", death="cannot destroy a borrowed host Farm")
     execute(binary, "nested", death="runtime control operation inside Farm callback")
+    execute(binary, "error", death="D Error inside an export: injected D Error")
     actors = native_runtime("tests/cabi/actors_host.c", build, libraries, compiler, probe=True)
     execute(actors)
     execute(actors, "borrowed", death="cannot destroy a host-owned actor runtime")
@@ -352,7 +380,7 @@ def main():
     selection.add_argument("--runtime-only", action="store_true")
     p.add_argument("--tsan", action="store_true", help="Linux LDC native C/core ThreadSanitizer lane")
     p.add_argument("--write-abi-lock", action="store_true",
-                   help="regenerate cabi/abi1.lock after the declaration audit, then stop")
+                   help="regenerate cabi/abi2.lock after the declaration audit, then stop")
     args = p.parse_args()
     if args.tsan and (os.name != "posix" or args.compiler != "ldc2" or args.runtime_only):
         p.error("--tsan requires Linux LDC and checks the core")

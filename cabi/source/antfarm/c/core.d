@@ -1,13 +1,24 @@
-// C ABI 1. Built once with BetterC; the optional runtime links this same core.
+// C ABI 2, a superset of ABI 1. Built once with BetterC; the optional runtime
+// links this same core.
 module antfarm.c.core;
 import antfarm;
 import core.atomic : atomicOp, atomicLoad, MemoryOrder;
 import core.stdc.stdlib : malloc, free;
 import core.stdc.string : memcpy;
 
-enum uint AF_ABI_VERSION = 1;
+enum uint AF_ABI_VERSION = 2, AF_ABI_VERSION_MIN = 1;
+enum uint AF_COST_AUTO = uint.max;
+enum uint AF_FEATURE_RUNTIME = 1, AF_FEATURE_IO_URING = 2, AF_FEATURE_MIMALLOC = 4, AF_FEATURE_TSAN = 8;
+/// What af_build_info reports; the CHANGELOG's development series.
+enum string AF_LIBRARY_VERSION = "2.2.1-dev";
 enum uint AF_OK = 0, AF_INVALID = 1, AF_FULL = 2, AF_RETRY = 3,
     AF_ALLOCATION_FAILED = 4, AF_SYSTEM_ERROR = 5, AF_BUSY = 6, AF_RUNTIME_ERROR = 7;
+/// ABI 2 accepts every option layout from ABI 1 on; the structure's own
+/// version says which one the caller filled. Shared by every wrapper.
+bool abiVersionOk(uint abiVersion) nothrow @nogc @safe
+{
+    return abiVersion >= AF_ABI_VERSION_MIN && abiVersion <= AF_ABI_VERSION;
+}
 
 struct af_farm
 {
@@ -29,6 +40,36 @@ struct af_options
     ulong small_quota_words;
     uint huge_pages, reserved;
 }
+struct af_build_info
+{
+    uint struct_size, abi_version;
+    const(char)* library_version;
+    const(char)* compiler;
+    uint features, reserved;
+}
+static assert(af_build_info.sizeof == 32 && af_build_info.features.offsetof == 24);
+// The runtime archive reports itself at af_druntime_init; the BetterC core has
+// no other way to see it.
+private __gshared bool runtimeLinked;
+void markRuntimeLinked() nothrow @nogc @system { runtimeLinked = true; }
+private static immutable string libraryVersion = AF_LIBRARY_VERSION;
+// "LDC 2.112" or "Digital Mars D 2.112": the vendor and the front-end version,
+// built at compile time without the runtime.
+private char[32] compilerTextOf() pure nothrow @nogc @safe
+{
+    char[32] text = 0;
+    size_t n;
+    foreach (c; __VENDOR__) text[n++] = c;
+    text[n++] = ' ';
+    enum uint v = __VERSION__;
+    text[n++] = cast(char) ('0' + v / 1000);
+    text[n++] = '.';
+    text[n++] = cast(char) ('0' + v / 100 % 10);
+    text[n++] = cast(char) ('0' + v / 10 % 10);
+    text[n++] = cast(char) ('0' + v % 10);
+    return text;
+}
+private static immutable char[32] compilerText = compilerTextOf();
 static assert((void*).sizeof == 8 && size_t.sizeof == 8);
 static assert(af_options.sizeof == 56 && af_options.small_quota_words.offsetof == 40);
 static assert(af_entry.sizeof == 24 && af_entry.body_words.offsetof == 16);
@@ -99,8 +140,15 @@ private void requireWrite(af_farm* f, af_token* t, uint cost,
 {
     requireFarm(f);
     if (t is null || t.owner !is f) fatal("C ABI foreign or null producer token");
-    if (cost > MAX_AVG_COST) fatal("avgCost out of range");
+    if (cost > MAX_AVG_COST && cost != AF_COST_AUTO) fatal("avgCost out of range");
     if (hook !is null && hook.call is null) fatal("table completion hook requires a callback");
+}
+// AF_COST_AUTO: the class the private root pump would derive for this table.
+private uint resolveCost(af_farm* f, uint cost, size_t count) nothrow @nogc @system
+{
+    if (cost != AF_COST_AUTO) return cost;
+    return rootCostHintFor(count, cast(ulong) atomicLoad!(MemoryOrder.raw)(f.impl.Cf),
+        f.impl.smallThreshold);
 }
 private void requireWalk() nothrow @nogc @system
 {
@@ -149,7 +197,7 @@ uint af_create(const(af_options)* options, af_farm** outFarm)
     if (options is null) { af_options_default(&defaults); options = &defaults; }
     // Read only the size prefix before trusting the supplied layout.
     if (options.struct_size != af_options.sizeof) return setError(AF_INVALID, "invalid options size");
-    if (options.abi_version != AF_ABI_VERSION || options.reserved || options.huge_pages > 1)
+    if (!abiVersionOk(options.abi_version) || options.reserved || options.huge_pages > 1)
         return setError(AF_INVALID, "invalid options version or reserved fields");
     FarmCreateError error;
     auto f = AntFarm.tryCreate(options.ring_mib, options.segments, options.expected_consumers,
@@ -207,7 +255,7 @@ size_t af_write(af_farm* f, const(af_entry)* entries, size_t n, af_token* t,
 {
     requireWrite(f, t, cost, hook);
     span(entries, n);
-    return f.impl.write(Entries(entries, n), t.value, cost, hook);
+    return f.impl.write(Entries(entries, n), t.value, resolveCost(f, cost, n), hook);
 }
 size_t af_write_bodies(af_farm* f, Callback call, const(af_body)* bodies, size_t n,
     af_token* t, uint cost, const(TableCompletionHook)* hook)
@@ -215,7 +263,7 @@ size_t af_write_bodies(af_farm* f, Callback call, const(af_body)* bodies, size_t
     requireWrite(f, t, cost, hook);
     if (call is null) fatal("null payload callback");
     span(bodies, n);
-    return f.impl.write(call, Bodies(bodies, n), t.value, cost, hook);
+    return f.impl.write(call, Bodies(bodies, n), t.value, resolveCost(f, cost, n), hook);
 }
 size_t af_write_fixed(af_farm* f, Callback call, const(ulong)* bodies, size_t width,
     size_t n, af_token* t, uint cost, const(TableCompletionHook)* hook)
@@ -224,8 +272,8 @@ size_t af_write_fixed(af_farm* f, Callback call, const(ulong)* bodies, size_t wi
     if (call is null) fatal("null payload callback");
     if (width && n > size_t.max / width) fatal("C ABI fixed body size overflow");
     span(bodies, width * n);
-    return f.impl.write(call, FixedBodies(bodies, width, n), width, t.value, cost,
-        hook);
+    return f.impl.write(call, FixedBodies(bodies, width, n), width, t.value,
+        resolveCost(f, cost, n), hook);
 }
 uint af_view_create(af_view** outView)
 {
@@ -267,3 +315,27 @@ void af_view_destroy(af_view* v)
 const(char)* af_last_error_message() { return diagnostic.ptr; }
 int af_last_os_error() { return osDiagnostic; }
 void af_set_fatal_handler(FatalHandler handler, void* context) { setFatalHandler(handler, context); }
+uint af_build_info_get(af_build_info* info)
+{
+    if (info is null) return setError(AF_INVALID, "null build info");
+    if (info.struct_size != af_build_info.sizeof) return setError(AF_INVALID, "invalid build info size");
+    if (!abiVersionOk(info.abi_version)) return setError(AF_INVALID, "invalid build info version");
+    info.library_version = libraryVersion.ptr;
+    info.compiler = compilerText.ptr;
+    uint features;
+    if (runtimeLinked) features |= AF_FEATURE_RUNTIME;
+    version (AntfarmMimallocV3) features |= AF_FEATURE_MIMALLOC;
+    version (TSan) features |= AF_FEATURE_TSAN;
+    info.features = features;
+    info.reserved = 0;
+    return setError(AF_OK);
+}
+uint af_cost_for_chunk(uint chunk) { return avgCostForChunk(chunk); }
+uint af_root_cost_hint(size_t count, ulong consumers, uint smallThreshold)
+{
+    return rootCostHintFor(count, consumers, smallThreshold);
+}
+uint af_used_large_pages(const(af_farm)* f)
+{
+    return f !is null && f.impl !is null && f.impl.usedLargePages;
+}

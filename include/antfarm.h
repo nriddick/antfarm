@@ -1,4 +1,4 @@
-/* Ant Farm C ABI 1. MIT License. Windows/Linux, 64-bit. */
+/* Ant Farm C ABI 2, a superset of ABI 1. MIT License. Windows/Linux, 64-bit. */
 #ifndef ANTFARM_H
 #define ANTFARM_H
 #include <stddef.h>
@@ -13,7 +13,11 @@ extern "C" {
 #define AF_ALIGNOF(t) _Alignof(t)
 #endif
 
-#define AF_ABI_VERSION 1u
+#define AF_ABI_VERSION 2u
+#define AF_ABI_VERSION_MIN 1u /* oldest option layout still accepted */
+/* avg_cost that derives the class from the table's count, the Farm's live
+   consumers and its small-table threshold, as the private root pump does. */
+#define AF_COST_AUTO UINT32_MAX
 #define AF_DEFAULT_COST 3u
 #define AF_MAX_COST 7u
 typedef struct af_farm af_farm;
@@ -44,6 +48,7 @@ typedef struct af_body {
    112-127. 11-63 stay unassigned: actor retire (16-20) and reclaim (32-34)
    outcomes share their return value with AF_INVALID. AF_RETRY is registered
    but no ABI 1 function returns it: af_subscribe retries internally.
+   ABI 2 keeps every ABI 1 value and adds within the same ranges.
    Return conventions: af_status for operations; a uint32_t documented as a
    yes/no answer is exactly 0 or 1; a uint32_t documented as an outcome enum
    returns only that enum's values. */
@@ -55,9 +60,11 @@ enum {
 };
 typedef uint32_t af_tier;
 enum { AF_SMALL = 0, AF_BULK = 1 };
-/* Initialize with af_options_default. ABI 1 requires struct_size == sizeof
-   (af_options), abi_version == AF_ABI_VERSION and reserved == 0. Size is a
-   layout check, not support for truncated or future option structures. */
+/* Initialize with af_options_default. Requires struct_size == sizeof
+   (af_options), abi_version from AF_ABI_VERSION_MIN to AF_ABI_VERSION and
+   reserved == 0: an ABI 1 image of an option structure is accepted unchanged,
+   its own version saying which layout the caller filled. Size is a layout
+   check, not support for truncated or future option structures. */
 typedef struct af_options {
     uint32_t struct_size, abi_version;
     uint32_t ring_mib, segments, expected_consumers, max_bulk_producers;
@@ -78,7 +85,30 @@ AF_STATIC_ASSERT(sizeof(af_options) == 56 && offsetof(af_options, small_quota_wo
 AF_STATIC_ASSERT(AF_ALIGNOF(af_options) == 8 && AF_ALIGNOF(af_entry) == 8 &&
                  AF_ALIGNOF(af_body) == 8 && AF_ALIGNOF(af_completion_hook) == 8, "natural ABI alignment");
 
+/* Returns AF_ABI_VERSION of the linked library. A program built against an
+   older header sees a larger value and keeps working: the surface is a superset. */
 uint32_t af_abi_version(void);
+/* Build features. RUNTIME is set once af_druntime_init has succeeded (the
+   core cannot see the runtime archive before that); MIMALLOC and TSAN come
+   from the archive's build; IO_URING is reserved for the loop. */
+enum { AF_FEATURE_RUNTIME = 1u, AF_FEATURE_IO_URING = 2u, AF_FEATURE_MIMALLOC = 4u, AF_FEATURE_TSAN = 8u };
+typedef struct af_build_info {
+    uint32_t struct_size, abi_version;   /* in: the caller's layout */
+    const char *library_version;         /* borrowed, static, NUL-terminated: "2.2.1-dev" */
+    const char *compiler;                /* borrowed, static: D vendor and front-end version */
+    uint32_t features, reserved;
+} af_build_info;
+AF_STATIC_ASSERT(sizeof(af_build_info) == 32 && offsetof(af_build_info, features) == 24, "build info layout");
+/* Fills the three outputs. AF_INVALID for a null, wrong-size or wrong-version
+   input. Any thread; never free the strings. */
+af_status af_build_info_get(af_build_info *);
+/* antfarm's cost helpers, pure, any thread. cost_for_chunk: the class whose
+   claims hold chunk entries; 128 or more gives 0, 0 or 1 gives AF_MAX_COST, a
+   chunk between powers of two rounds down. root_cost_hint: the cheapest class
+   whose claims over a table of count entries reach min(count, consumers),
+   consumers being the Farm's live view count; small_threshold 0 is the default. */
+uint32_t af_cost_for_chunk(uint32_t chunk);
+uint32_t af_root_cost_hint(size_t count, uint64_t consumers, uint32_t small_threshold);
 void af_options_default(af_options *out);
 /* NULL options uses defaults. A valid out is cleared even on failure.
    Geometry and invalid settings return AF_INVALID; OS mapping/mutex failures
@@ -86,6 +116,7 @@ void af_options_default(af_options *out);
 af_status af_create(const af_options *options, af_farm **out);
 /* NULL is a no-op. All participants must be released and threads joined. */
 void af_destroy(af_farm *farm);
+uint32_t af_used_large_pages(const af_farm *farm); /* 1 when the ring got huge pages */
 uint32_t af_can_fit(const af_farm *farm, af_callback call, size_t body_words, af_tier tier);
 af_status af_register_producer(af_farm *farm, af_tier tier, af_token **out);
 /* Consumes token. Use only with its issuing Farm. */
@@ -95,8 +126,9 @@ void af_unregister_producer(af_farm *farm, af_token *token);
    Zero publishes no table and invokes no hook. Retry the remaining suffix.
    Bodies are copied before return; pointed-to objects are NOT copied.
    Pointers may be NULL only for zero-length spans. Length arithmetic is checked.
-   Cost must be 0..7. Invalid callbacks, spans, tokens or impossible singleton
-   sizes are fatal. The token and input storage have one exclusive writer.
+   Cost must be 0..7 or AF_COST_AUTO. Invalid callbacks, spans, tokens or
+   impossible singleton sizes are fatal. The token and input storage have one
+   exclusive writer.
 
    The optional hook joins all callbacks in this physical table and CAN RUN
    BEFORE WRITE RETURNS. Reserve a completion credit before publication.
@@ -130,7 +162,10 @@ const char *af_last_error_message(void);
 int32_t af_last_os_error(void);
 typedef void (*af_fatal_handler)(const char *, size_t, void *);
 /* Install at quiescence. Handler may log/dump; it must not throw, longjmp or
-   re-enter Farm operations. If it returns, abort follows. NULL resets it. */
+   re-enter Farm operations. If it returns, abort follows. NULL resets it.
+   A D Error inside any export, the runtime archive's included, reaches this
+   handler and aborts; it never becomes a status (ABI 2; ABI 1 folded it into
+   AF_RUNTIME_ERROR). */
 void af_set_fatal_handler(af_fatal_handler, void *context);
 
 /* Handles are exclusive owning capabilities, not copyable values. A token

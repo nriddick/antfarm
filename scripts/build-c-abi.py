@@ -35,7 +35,7 @@ def library(build, name):
 def build_core(compiler, build, audit=False, sanitize=False, debug=False):
     build.mkdir(parents=True, exist_ok=True)
     sources = list(CORE)
-    flags = ["-g", "-fsanitize=thread"] if sanitize else []
+    flags = ["-g", "-fsanitize=thread", "-d-version=TSan"] if sanitize else []
     if audit:
         flags.append(("-version=" if compiler == "dmd" else "-d-version=") + "AntfarmWriteAuditHooks")
         flags.append(("-version=" if compiler == "dmd" else "-d-version=") + "AntfarmCActorTestHooks")
