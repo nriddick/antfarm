@@ -8,7 +8,13 @@ ROOT := ../..
 DC ?= ldc2
 DFLAGS ?= -g -O1
 CC ?= cc
-UV_LIBS ?= -luv
+# The pinned libuv, built by scripts/build-libuv.py from the release archive
+# with the local patches applied, the same as on Windows. UV_PREFIX names
+# another installation (include/uv.h, lib/libuv.a).
+UV_PREFIX ?= $(ROOT)/.build/libuv/1.53.0
+UV_LIBRARY := $(UV_PREFIX)/lib/libuv.a
+UV_LIBS ?= $(UV_LIBRARY) -L-ldl
+UV_CFLAGS ?= -I$(UV_PREFIX)/include
 TSAN_OPTIONS ?= history_size=7 halt_on_error=1 report_thread_leaks=0
 IMPORTS := -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$(ROOT)/ant_uv/source
 MIMALLOC_LIBRARY := $(ROOT)/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a
@@ -16,11 +22,14 @@ MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
 .PHONY: run run-iouring run-dmd run-tsan run-mimalloc clean
 
-layout.o: layout.c
-	$(CC) -O1 -c layout.c -o $@
+$(UV_LIBRARY):
+	python3 $(ROOT)/scripts/build-libuv.py
 
-uv_test: uv_test.d layout.o $(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(ROOT)/antfarm/ring.d
-	$(DC) $(DFLAGS) -i $(IMPORTS) uv_test.d layout.o -L$(UV_LIBS) -of=$@ -od=.obj-ldc
+layout.o: layout.c $(UV_LIBRARY)
+	$(CC) -O1 $(UV_CFLAGS) -c layout.c -o $@
+
+uv_test: uv_test.d layout.o $(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(ROOT)/antfarm/ring.d $(UV_LIBRARY)
+	$(DC) $(DFLAGS) -i $(IMPORTS) uv_test.d layout.o $(UV_LIBS) -of=$@ -od=.obj-ldc
 
 run: uv_test
 	./uv_test
@@ -31,11 +40,11 @@ run-iouring: uv_test
 	ANTUV_TEST_IO_URING=1 ./uv_test
 
 run-dmd: layout.o
-	dmd -g -i $(IMPORTS) uv_test.d layout.o -L$(UV_LIBS) -of=uv_test_dmd -od=.obj-dmd
+	dmd -g -i $(IMPORTS) uv_test.d layout.o $(UV_LIBS) -of=uv_test_dmd -od=.obj-dmd
 	./uv_test_dmd
 
 run-tsan: layout.o
-	ldc2 -g -O1 -fsanitize=thread -d-version=TSan -i $(IMPORTS) uv_test.d layout.o -L$(UV_LIBS) -of=uv_test_tsan -od=.obj-tsan
+	ldc2 -g -O1 -fsanitize=thread -d-version=TSan -i $(IMPORTS) uv_test.d layout.o $(UV_LIBS) -of=uv_test_tsan -od=.obj-tsan
 	TSAN_OPTIONS='$(TSAN_OPTIONS) suppressions=tsan.supp' ./uv_test_tsan
 
 $(MIMALLOC_LIBRARY):
@@ -43,7 +52,7 @@ $(MIMALLOC_LIBRARY):
 
 run-mimalloc: layout.o $(MIMALLOC_LIBRARY)
 	$(DC) $(DFLAGS) -d-version=AntfarmMimallocV3 -i $(IMPORTS) uv_test.d layout.o \
-		$(MIMALLOC_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) -L$(UV_LIBS) -of=uv_test_mimalloc -od=.obj-mimalloc
+		$(MIMALLOC_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) $(UV_LIBS) -of=uv_test_mimalloc -od=.obj-mimalloc
 	./uv_test_mimalloc
 
 clean:

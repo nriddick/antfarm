@@ -133,6 +133,18 @@ where the implementation departed from the plan.
     no abandonment instead. The lane also checks that `create` built the
     ring: the kernel's polling thread runs before the first request. Where
     the kernel refuses the ring, it says so and skips that check.
+- One pinned libuv on both platforms. `scripts/build-libuv.py`, which
+  replaces `build-libuv-windows.py`, fetches the libuv 1.53.0 release
+  archive once, checks its SHA-256, applies the local patches it lists,
+  each described in a `docs/development` record, and builds it with CMake
+  into `.build/libuv/1.53.0/`: on Windows `uv.dll` with `uv.lib` as before,
+  on Linux a position-independent static `libuv.a`. The `ant_uv` Makefile,
+  Dub (`ant_uv/dub.sdl`), the perf tools and `make check` build and link
+  that installation on Linux too; the system libuv is no longer used, so a
+  fix the pin carries reaches every build. The one patch so far is the
+  SQPOLL wakeup fence
+  ([record](docs/development/libuv-sqpoll-wakeup-2026-11-04/README.md)).
+  The gate's io_uring lane runs under a 900 s timeout.
 - Windows x64:
   - `scripts/build-libuv-windows.py` builds the pinned libuv 1.53.0 from
     its release archive, whose SHA-256 it checks, with CMake (on PATH or
@@ -370,23 +382,22 @@ plain io_uring lane hung in 3 of 250 runs, and in 2 of 250 runs of the tree
 before the UDP sockets, at different cases each time: the libuv submit
 fence below, older than both changes.
 
-Known, in libuv 1.53.0 with `UvLoopOptions.ioUring`: a file operation
-through the ring can hang for good, about once in a hundred runs of the
-`ant_uv` suite on the 5900XT under Linux 7.3.1. Every hang looks the same:
-the kernel's polling thread asleep, the loop thread in `epoll_wait`, and
-one submitted request that never completes. libuv's `uv__iou_submit`
-stores the ring's tail with release ordering, then loads the wakeup flag
-with acquire ordering, and nothing orders that store before that load:
-io_uring's documentation asks for a full fence there, because the polling
-thread sets the flag and re-reads the tail before it sleeps, and x86 lets
-a load pass an earlier store. libuv 1.53.0 built from its archive with a
-full fence added at that point hung in 0 of 500 runs against 4 of 500 for
-the same build without it, the two alternating under the same load. The
-fix is upstream's; its `v1.x` branch still lacks it. Until a fixed libuv is
-pinned on Linux as one is on Windows, or the loop kicks its ring when a
-request waits too long, a loop with `ioUring` can lose a request; the pool
-path is unaffected. The gate's io_uring lane has no timeout, so the hang
-stalls `make check` when it strikes ([ROADMAP](ROADMAP.md)).
+Found by that gate, in libuv 1.53.0 with `UvLoopOptions.ioUring`: a file
+operation through the ring can hang for good, about once in a hundred
+runs of the `ant_uv` suite on the 5900XT under Linux 7.3.1. Every hang
+looks the same: the kernel's polling thread asleep, the loop thread in
+`epoll_wait`, and one submitted request that never completes. libuv's
+`uv__iou_submit` stores the ring's tail with release ordering, then loads
+the wakeup flag with acquire ordering, and nothing orders that store
+before that load: the polling thread sets the flag and re-reads the tail
+before it sleeps, with a full fence between, and the submitter needs the
+same, as liburing has; x86 lets a load pass an earlier store. libuv 1.53.0
+built from its archive with a full fence added at that point hung in 0 of
+500 runs against 4 of 500 for the same build without it, the two
+alternating under the same load. The pinned libuv below carries that
+fence; the fix is upstream's to take, and its `v1.x` branch still lacks
+it. [The record](docs/development/libuv-sqpoll-wakeup-2026-11-04/README.md)
+has the reproduction, the patch and the issue draft.
 
 ## 2.1.1 — 2026-10-28
 

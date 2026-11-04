@@ -9,10 +9,14 @@ importPaths "source"
 dependency "antfarm" path=".."
 dependency "threadpool" path="../threadpool"
 dependency "ant_fibers" path="../ant_fibers"
-// The system libuv (1.19 or later). On Windows, the import library uv.lib
-// of scripts/build-libuv-windows.py's pinned build: its lib directory on LIB,
-// and its bin (uv.dll) on PATH at run time.
-libs "uv"
+// The pinned libuv of scripts/build-libuv.py. Linux links its static
+// archive, built here when missing. Windows links its import library uv.lib:
+// the installation's lib directory on LIB, and its bin (uv.dll) on PATH at
+// run time.
+preGenerateCommands "python3 \"$PACKAGE_DIR/../scripts/build-libuv.py\"" platform="linux"
+extraDependencyFiles "../.build/libuv/1.53.0/lib/libuv.a" platform="linux"
+lflags "$PACKAGE_DIR/../.build/libuv/1.53.0/lib/libuv.a" "-ldl" platform="linux"
+libs "uv" platform="windows"
 
 toolchainRequirements {
 	dmd ">=2.112.0"

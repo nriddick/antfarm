@@ -294,7 +294,7 @@ ant_uv's idle p50 ranged from 20 to 44 µs across rounds.
 
 ## Reproduce
 
-Build the pinned libuv (`scripts/build-libuv-windows.py` on Windows), SDL 3
+Build the pinned libuv (`scripts/build-libuv.py`), SDL 3
 and mimalloc (`make -C tests/actors .build/mimalloc-v3.5.3/libmimalloc.a`).
 Then, from `tools/perf`:
 

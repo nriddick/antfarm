@@ -168,17 +168,17 @@ Implemented on the branch (see the CHANGELOG's 2.2.0 section):
 
 The round-trip latency is measured, `make check` passes with the new
 lanes, and the native Windows matrix passes with a pinned libuv build
-(`scripts/build-libuv-windows.py`) and the `ring` and `ant_uv` lanes. `reservedProcessors`
+(`scripts/build-libuv.py`) and the `ring` and `ant_uv` lanes. `reservedProcessors`
 was dropped: `pool.processors` already keeps the loop's CPU out of the
 worker set.
 
-Open: libuv 1.53.0's io_uring submit path lacks the full fence that the
-SQPOLL wakeup protocol needs, so a loop with `ioUring` can lose a request
-(about 1 in 100 runs of the `ant_uv` suite on the 5900XT; the CHANGELOG has
-the measurement). Choose between reporting it upstream and waiting, pinning
-a patched libuv on Linux as Windows pins one, and having the loop kick its
-ring when a request waits too long. Bound the gate's io_uring lane with a
-timeout either way.
+Open upstream: libuv 1.53.0's io_uring submit path lacks the full fence
+that the SQPOLL wakeup protocol needs, so a loop with `ioUring` could lose
+a request. The pinned libuv carries the fence on both platforms
+(`scripts/build-libuv.py` applies
+[the patch](docs/development/libuv-sqpoll-wakeup-2026-11-04/libuv-1.53.0-sqpoll-wakeup-fence.patch));
+the record's issue draft goes to libuv. Drop the patch from the script's
+list once a pinned release carries the fix.
 
 - 2.2.1: UDP sockets, designed in
   [the event loop design's section 9](docs/design/event-loop.md#9-221-udp-sockets)

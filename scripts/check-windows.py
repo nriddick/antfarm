@@ -27,7 +27,7 @@ def load_script(name, path):
 
 build_api = load_script("cabi_build", "scripts/build-c-abi.py")
 # The pinned build's installation.
-DEFAULT_LIBUV = load_script("libuv_build", "scripts/build-libuv-windows.py").PREFIX
+DEFAULT_LIBUV = load_script("libuv_build", "scripts/build-libuv.py").PREFIX
 
 
 def libuv_missing(prefix):
@@ -192,7 +192,7 @@ def parse_args(argv=None):
                         help="accept missing CPUs/groups for live affinity and host probes")
     parser.add_argument("--libuv", type=Path,
                         help="libuv installation (include/uv.h, lib/uv.lib, bin/uv.dll) for the ant_uv "
-                             "lane; default: the pinned build of scripts/build-libuv-windows.py")
+                             "lane; default: the pinned build of scripts/build-libuv.py")
     args = parser.parse_args(argv)
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -221,7 +221,7 @@ def main(argv=None):
         args.libuv = (args.libuv or DEFAULT_LIBUV).resolve()
         missing = libuv_missing(args.libuv)
         if missing is not None:
-            hint = "; python -B scripts/build-libuv-windows.py builds the pinned one"
+            hint = "; python -B scripts/build-libuv.py builds the pinned one"
             if explicit:
                 raise RuntimeError("ant_uv needs libuv: " + str(missing) + " not found" + hint)
             print("SKIP ant_uv: " + str(missing) + " not found" + hint, flush=True)

@@ -166,19 +166,17 @@ run "${make_cmd[@]}" -C tests/farm run run-tsan
 run "${make_cmd[@]}" -C tests/private run run-dmd run-tsan doc-example death
 run "${make_cmd[@]}" -C examples check
 run "${make_cmd[@]}" -C tests/ring run run-dmd run-tsan
-# ant_uv needs libuv (1.19+) and its header; without them the lane is
+# ant_uv links the pinned libuv: scripts/build-libuv.py fetches the release
+# archive once, checks it, applies the local patches and builds it with
+# CMake. Where that fails (no CMake, no C compiler, no archive) the lane is
 # skipped with the reason printed, never silently.
-if pkg-config --exists 'libuv >= 1.19' 2>/dev/null; then
+if run python3 scripts/build-libuv.py; then
     run "${make_cmd[@]}" -C tests/ant_uv run run-dmd run-tsan
-    # The same suite with file operations through io_uring, which needs
-    # libuv 1.49 and Linux 5.10.186.
-    if pkg-config --exists 'libuv >= 1.49' 2>/dev/null; then
-        run "${make_cmd[@]}" -C tests/ant_uv run-iouring
-    else
-        echo "SKIP ant_uv io_uring: libuv 1.49 or later not found by pkg-config"
-    fi
+    # The same suite with file operations through io_uring (Linux 5.10.186
+    # or later), bounded: a lost ring request would otherwise hang the gate.
+    run timeout 900 "${make_cmd[@]}" -C tests/ant_uv run-iouring
 else
-    echo "SKIP ant_uv: libuv 1.19 or later not found by pkg-config"
+    echo "SKIP ant_uv: the pinned libuv could not be built (see above)"
 fi
 
 if [[ "$mimalloc" -eq 1 ]]; then

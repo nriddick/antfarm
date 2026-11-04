@@ -22,11 +22,14 @@ Status: new in 2.2.0, on Linux x86-64 and Windows x64.
 dependency "antfarm:ant_uv" path="path/to/antfarm"
 ```
 
-It links libuv 1.19 or later (`libs "uv"`), so install the library and its
-header first. On Linux that is the system libuv. On Windows,
-`python -B scripts/build-libuv-windows.py` builds the pinned libuv 1.53.0
-into `.build/libuv/1.53.0/`; put its `lib` on the linker's `LIB` path and
-its `bin`, which holds `uv.dll`, on `PATH` when the program runs.
+It links the pinned libuv 1.53.0 that `python3 scripts/build-libuv.py`
+builds into `.build/libuv/1.53.0/` from the release archive, checksummed,
+with the local patches of `docs/development` applied; it needs CMake and a
+C compiler, and downloads the archive once. On Linux the result is a
+static `libuv.a`, which Dub builds when it is missing and links into the
+program. On Windows it is `uv.dll` with its import library `uv.lib`: put
+the installation's `lib` on the linker's `LIB` path and its `bin` on
+`PATH` when the program runs. The system libuv is not used.
 
 [read_files.d](examples/read_files.d) is the smallest complete program:
 worker Fibers on a `GroupHost` read files through the loop.
@@ -87,10 +90,12 @@ for the same reason; through the ring, 8 MiB files loaded at a fifth to a
 half of the job's rate
 ([measurements](../docs/performance/file-loading-sdl3-2026-11-02.md)).
 `loop.ioUring` reports whether the option took effect; where the kernel
-refuses the ring, libuv falls back to the pool. With libuv 1.53.0 a ring
-request can be lost to a missing fence in libuv's submit path, about once
-in a hundred runs of the test suite on a Ryzen 9 5900XT; the CHANGELOG has
-the measurement. The pool path has no such hazard.
+refuses the ring, libuv falls back to the pool. libuv 1.53.0 as released
+can lose a ring request to a missing fence in its submit path, about once
+in a hundred runs of the test suite on a Ryzen 9 5900XT; the pinned build
+carries the fix
+([record](../docs/development/libuv-sqpoll-wakeup-2026-11-04/README.md)),
+and a program linking another libuv does not.
 
 One `UvLoop` may be open per process at a time.
 

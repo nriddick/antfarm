@@ -24,15 +24,21 @@ check-tail check-throughput check-dual: check-%:
 	$(DC) -g -unittest -i -I$(ROOT)/threadpool/source $*.d $(FARM_SOURCES) -of=$*_tests
 	./$*_tests --DRT-testmode=test-only
 
-# Needs libuv (1.19+); not part of `all`.
-uv_latency: uv_latency.d $(ROOT)/antfarm/ring.d $(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(FIBER_SOURCES) $(THREADPOOL_SOURCES)
-	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$(ROOT)/ant_uv/source \
-		uv_latency.d -L-luv -of=$@ -od=.obj-uv_latency
+# The pinned libuv (scripts/build-libuv.py); UV_PREFIX names another
+# installation. Not part of `all`.
+UV_PREFIX ?= $(ROOT)/.build/libuv/1.53.0
+UV_LIBRARY := $(UV_PREFIX)/lib/libuv.a
+UV_LIBS ?= $(UV_LIBRARY) -L-ldl
+$(UV_LIBRARY):
+	python3 $(ROOT)/scripts/build-libuv.py
 
-# Needs libuv (1.19+), SDL 3.2+ and the pinned mimalloc; not part of `all`.
-UV_LIBS ?= -L-luv
+uv_latency: uv_latency.d $(ROOT)/antfarm/ring.d $(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(FIBER_SOURCES) $(THREADPOOL_SOURCES) $(UV_LIBRARY)
+	$(DC) $(DFLAGS) -i -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$(ROOT)/ant_uv/source \
+		uv_latency.d $(UV_LIBS) -of=$@ -od=.obj-uv_latency
+
+# Needs the pinned libuv, SDL 3.2+ and the pinned mimalloc; not part of `all`.
 SDL3_LIBS ?= -L-lSDL3
-file_loading: file_loading.d $(ROOT)/antfarm/ring.d $(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(FIBER_SOURCES) $(THREADPOOL_SOURCES) $(MIMALLOC_LIBRARY)
+file_loading: file_loading.d $(ROOT)/antfarm/ring.d $(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(FIBER_SOURCES) $(THREADPOOL_SOURCES) $(MIMALLOC_LIBRARY) $(UV_LIBRARY)
 	$(DC) $(DFLAGS) $(MIMALLOC_VERSION) -i -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source \
 		-I$(ROOT)/ant_uv/source file_loading.d $(MIMALLOC_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) $(UV_LIBS) $(SDL3_LIBS) \
 		-of=$@ -od=.obj-file_loading

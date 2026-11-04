@@ -35,7 +35,7 @@ lists every target.
 | Private actors | `tests/private`: unit suite, the extracted private-actor documentation programs, and the fatal-death harness | LDC, DMD, LDC TSan |
 | Examples | `examples/`: the First payload program extracted from [quickstart.md](../guide/quickstart.md#what-the-dispatcher-does-for-you-the-raw-ring-one-thread), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
 | Ring | `make -C tests/ring run run-dmd run-tsan`: the `antfarm.ring` suite | LDC, DMD, LDC TSan |
-| `ant_uv` | `make -C tests/ant_uv run run-dmd run-tsan` when `pkg-config` finds libuv 1.19 or later, then `run-iouring`, the same suite with `UvLoopOptions.ioUring`, from libuv 1.49; each skip prints its reason. With libuv 1.53.0 the io_uring lane can hang, about once in a hundred runs on the 5900XT, on a lost SQPOLL wakeup in libuv's submit path (CHANGELOG); it has no timeout yet | LDC, DMD, LDC TSan, libuv |
+| `ant_uv` | `make -C tests/ant_uv run run-dmd run-tsan` against the pinned libuv that `scripts/build-libuv.py` builds (below), then `run-iouring`, the same suite with `UvLoopOptions.ioUring`, under a 900 s timeout; where the pin cannot be built, the lane is skipped with the reason printed | LDC, DMD, LDC TSan, CMake, C compiler |
 
 `make check-quick` runs the BetterC/native-C and core C/C++ ABI checks, root unit suite, `make -C tests/farm run`
 (including `sweep_cursor`), threadpool unit suite, fiber smoke suite, fork-join suite, and
@@ -165,7 +165,7 @@ the installation for the native C link test. No Bash, GNU make or administrator
 privileges are needed:
 
 ```text
-python -B scripts/build-libuv-windows.py
+python -B scripts/build-libuv.py
 python -B scripts/check-windows.py
 python -B scripts/check-windows.py --quick
 python -B scripts/check-windows.py --compiler dmd --lanes threadpool examples
@@ -192,16 +192,22 @@ interpreter and arguments.
 | `private` | Private actor suite and six extracted documentation programs |
 | `examples` | both complete quickstart programs (fork-join reduction and raw payload), plus actor/headless examples in debug/release with 0 and 2 workers |
 
-The `ant_uv` lane needs libuv. `scripts/build-libuv-windows.py` downloads
-the pinned libuv 1.53.0 release archive, checks its SHA-256, and builds it
-with CMake (on PATH, or the one Visual Studio installs) into
-`.build/libuv/1.53.0/`: `include/`, the import library `lib/uv.lib` and
-`bin/uv.dll`. The DLL carries its own C runtime, so the D programs keep
-their static one. `--archive` takes a copy of the archive already on disk.
-The runner uses that installation, or the one `--libuv DIR` names, and puts
-its `bin` on PATH for the runs. Without one, the default matrix skips the
-lane, prints the reason, and says `ant_uv skipped` in its pass line, as
-`make check` skips it without libuv; `--lanes ant_uv` or `--libuv` makes a
+The `ant_uv` lane needs libuv, the same pinned one on both platforms.
+`scripts/build-libuv.py` downloads the libuv 1.53.0 release archive once,
+checks its SHA-256 (the signature was checked when pinning), applies the
+local patches it lists, each described in a `docs/development` record,
+and builds it with CMake into `.build/libuv/1.53.0/`. On Windows (CMake on
+PATH, or the one Visual Studio installs) that is `include/`, the import
+library `lib/uv.lib` and `bin/uv.dll`; the DLL carries its own C runtime,
+so the D programs keep their static one. On Linux it is `include/` and a
+position-independent `lib/libuv.a`, which the `ant_uv` Makefile, Dub and
+the perf tools build when it is missing and link statically. `--archive`
+takes a copy of the archive already on disk; `--force` rebuilds, as a
+changed patch list does by itself. The Windows runner uses that
+installation, or the one `--libuv DIR` names, and puts its `bin` on PATH
+for the runs. Without one, the default matrix skips the lane, prints the
+reason, and says `ant_uv skipped` in its pass line, as `make check` skips
+it when the pin cannot be built; `--lanes ant_uv` or `--libuv` makes a
 missing libuv an error.
 
 The runner forces `ANTFARM_HUGE_PAGES=0`, keeps generated binaries and Dub's
