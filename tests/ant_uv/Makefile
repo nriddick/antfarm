@@ -8,10 +8,10 @@ ROOT := ../..
 DC ?= ldc2
 DFLAGS ?= -g -O1
 CC ?= cc
-# The pinned libuv, built by scripts/build-libuv.py from the release archive
-# with the local patches applied, the same as on Windows. UV_PREFIX names
-# another installation (include/uv.h, lib/libuv.a).
-UV_PREFIX ?= $(ROOT)/.build/libuv/1.53.0
+# The pinned libuv, built by scripts/build-libuv.py from the pinned source
+# archive, the same as on Windows. UV_PREFIX names another installation
+# (include/uv.h, lib/libuv.a).
+UV_PREFIX ?= $(ROOT)/.build/libuv/pinned
 UV_LIBRARY := $(UV_PREFIX)/lib/libuv.a
 UV_LIBS ?= $(UV_LIBRARY) -L-ldl
 UV_CFLAGS ?= -I$(UV_PREFIX)/include

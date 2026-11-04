@@ -26,7 +26,7 @@ check-tail check-throughput check-dual: check-%:
 
 # The pinned libuv (scripts/build-libuv.py); UV_PREFIX names another
 # installation. Not part of `all`.
-UV_PREFIX ?= $(ROOT)/.build/libuv/1.53.0
+UV_PREFIX ?= $(ROOT)/.build/libuv/pinned
 UV_LIBRARY := $(UV_PREFIX)/lib/libuv.a
 UV_LIBS ?= $(UV_LIBRARY) -L-ldl
 $(UV_LIBRARY):

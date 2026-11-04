@@ -193,17 +193,22 @@ interpreter and arguments.
 | `examples` | both complete quickstart programs (fork-join reduction and raw payload), plus actor/headless examples in debug/release with 0 and 2 workers |
 
 The `ant_uv` lane needs libuv, the same pinned one on both platforms.
-`scripts/build-libuv.py` downloads the libuv 1.53.0 release archive once,
-checks its SHA-256 (the signature was checked when pinning), applies the
-local patches it lists, each described in a `docs/development` record,
-and builds it with CMake into `.build/libuv/1.53.0/`. On Windows (CMake on
-PATH, or the one Visual Studio installs) that is `include/`, the import
-library `lib/uv.lib` and `bin/uv.dll`; the DLL carries its own C runtime,
-so the D programs keep their static one. On Linux it is `include/` and a
-position-independent `lib/libuv.a`, which the `ant_uv` Makefile, Dub and
-the perf tools build when it is missing and link statically. `--archive`
-takes a copy of the archive already on disk; `--force` rebuilds, as a
-changed patch list does by itself. The Windows runner uses that
+`scripts/build-libuv.py` downloads one source archive once, checks its
+SHA-256, applies the local patches it lists, if any, and builds it with
+CMake into `.build/libuv/pinned/`. The pin is named in the script: at
+present libuv's `v1.x` branch at `716390f` (1.53.1-dev) plus the SQPOLL
+wakeup fence of libuv pull request #5409, as the commit
+`nriddick/libuv@a937b3b` of the project's fork, whose archive GitHub serves
+by hash; no patch is applied. A release archive from `dist.libuv.org`,
+signed by a maintainer, takes its place once a release carries the fence.
+On Windows (CMake on PATH, or the one Visual Studio installs) the
+installation is `include/`, the import library `lib/uv.lib` and
+`bin/uv.dll`; the DLL carries its own C runtime, so the D programs keep
+their static one. On Linux it is `include/` and a position-independent
+`lib/libuv.a`, which the `ant_uv` Makefile, Dub and the perf tools build
+when it is missing and link statically. `--archive` takes a copy of the
+archive already on disk; `--force` rebuilds, as a changed pin or patch
+list does by itself. The Windows runner uses that
 installation, or the one `--libuv DIR` names, and puts its `bin` on PATH
 for the runs. Without one, the default matrix skips the lane, prints the
 reason, and says `ant_uv skipped` in its pass line, as `make check` skips

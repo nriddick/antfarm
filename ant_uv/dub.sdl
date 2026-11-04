@@ -14,8 +14,8 @@ dependency "ant_fibers" path="../ant_fibers"
 // the installation's lib directory on LIB, and its bin (uv.dll) on PATH at
 // run time.
 preGenerateCommands "python3 \"$PACKAGE_DIR/../scripts/build-libuv.py\"" platform="linux"
-extraDependencyFiles "../.build/libuv/1.53.0/lib/libuv.a" platform="linux"
-lflags "$PACKAGE_DIR/../.build/libuv/1.53.0/lib/libuv.a" "-ldl" platform="linux"
+extraDependencyFiles "../.build/libuv/pinned/lib/libuv.a" platform="linux"
+lflags "$PACKAGE_DIR/../.build/libuv/pinned/lib/libuv.a" "-ldl" platform="linux"
 libs "uv" platform="windows"
 
 toolchainRequirements {

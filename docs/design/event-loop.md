@@ -447,13 +447,15 @@ API libuv provides for exactly this purpose**:
   creation, by `uv_version()`, with optional newer entry points gated
   separately.
 
-Linking: a pinned libuv source archive built by CMake on both platforms,
-checksummed, with local patches applied, in the style of OMMe's Jolt
-bridge; the system libuv is not used, so a fix the pin carries reaches
-every build. Nothing is pulled in by the core packages. As built
-(`scripts/build-libuv.py`), the library is libuv 1.53.0: on Windows
-`uv.dll` with its import library `uv.lib`, the DLL carrying its own C
-runtime so D programs keep their static one; on Linux a static `libuv.a`.
+Linking: one pinned libuv source archive built by CMake on both
+platforms, checksummed, in the style of OMMe's Jolt bridge; the system
+libuv is not used, so a fix the pin carries reaches every build. Nothing
+is pulled in by the core packages. As built (`scripts/build-libuv.py`),
+the library is at present libuv's `v1.x` at 1.53.1-dev plus the SQPOLL
+wakeup fence of libuv pull request #5409, from the project's fork: on
+Windows `uv.dll` with its import library `uv.lib`, the DLL carrying its
+own C runtime so D programs keep their static one; on Linux a static
+`libuv.a`.
 
 ### 3.6 The resource manager on the loop thread
 
@@ -667,7 +669,7 @@ What runs, and where:
   the 5900XT. It is not used for `readFile` (section 3.2). libuv 1.53.0
   as released can lose a ring request to a missing fence in its submit
   path, about once in a hundred suite runs on the 5900XT; the pinned
-  build carries the fix, which is before upstream
+  build carries the fix, libuv pull request #5409 from the project's fork
   ([record](../development/libuv-sqpoll-wakeup-2026-11-04/README.md)).
 - **`readFile` refuses directories** (section 5). The plan did not
   consider them. A directory opens on both platforms; Linux then reported

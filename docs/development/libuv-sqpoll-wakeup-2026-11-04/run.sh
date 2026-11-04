@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 # Reproduces the lost SQPOLL wakeup in libuv 1.53.0 and shows the fence
-# removes it: builds libuv from the pinned archive twice, as released and
+# removes it: builds libuv 1.53.0 from its release archive twice, as released and
 # with the patch in this directory applied, then runs COPIES copies of
 # sqpoll_lost_wakeup.c against each for ITERATIONS iterations.
 #
 #   docs/development/libuv-sqpoll-wakeup-2026-11-04/run.sh [work-dir]
 #
-# Needs Linux 5.10.186 or later, a C compiler, CMake, and the archive, which
-# scripts/build-libuv.py downloads into .build/libuv/ when it is missing.
-# COPIES (8) and ITERATIONS (20000) scale the run; at 9 to 12 ms per
-# iteration a full run is about four minutes per build.
+# Needs Linux 5.10.186 or later, a C compiler, CMake, and the 1.53.0 release
+# archive, downloaded into the work directory when it is missing and checked
+# against its SHA-256. COPIES (8) and ITERATIONS (20000) scale the run; at 9
+# to 12 ms per iteration a full run is about four minutes per build.
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ROOT=$(cd "$HERE/../../.." && pwd)
 W=${1:-$(mktemp -d "${TMPDIR:-/tmp}/libuv-sqpoll-wakeup.XXXXXX")}
 COPIES=${COPIES:-8}
 ITERATIONS=${ITERATIONS:-20000}
@@ -20,10 +19,10 @@ mkdir -p "$W"
 W=$(cd "$W" && pwd)
 cd "$W"
 
-# The archive the pin uses, fetched and checked by the pin script.
-python3 "$ROOT/scripts/build-libuv.py" > /dev/null
-ARCHIVE=$ROOT/.build/libuv/$(ls "$ROOT/.build/libuv" | grep -E '^libuv-v.*\.tar\.gz$' | head -1)
-echo "archive: $ARCHIVE"
+# The 1.53.0 release archive, as the record's measurements used it.
+ARCHIVE=$W/libuv-v1.53.0.tar.gz
+[ -f "$ARCHIVE" ] || curl -fsSL -o "$ARCHIVE" https://dist.libuv.org/dist/v1.53.0/libuv-v1.53.0.tar.gz
+echo "cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64  $ARCHIVE" | sha256sum -c
 for v in released fenced; do
   rm -rf "$v"; mkdir "$v"
   tar -xzf "$ARCHIVE" -C "$v" --strip-components=1

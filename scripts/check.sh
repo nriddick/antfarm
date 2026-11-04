@@ -166,10 +166,10 @@ run "${make_cmd[@]}" -C tests/farm run run-tsan
 run "${make_cmd[@]}" -C tests/private run run-dmd run-tsan doc-example death
 run "${make_cmd[@]}" -C examples check
 run "${make_cmd[@]}" -C tests/ring run run-dmd run-tsan
-# ant_uv links the pinned libuv: scripts/build-libuv.py fetches the release
-# archive once, checks it, applies the local patches and builds it with
-# CMake. Where that fails (no CMake, no C compiler, no archive) the lane is
-# skipped with the reason printed, never silently.
+# ant_uv links the pinned libuv: scripts/build-libuv.py fetches the pinned
+# source archive once, checks it and builds it with CMake. Where that fails
+# (no CMake, no C compiler, no archive) the lane is skipped with the reason
+# printed, never silently.
 if run python3 scripts/build-libuv.py; then
     run "${make_cmd[@]}" -C tests/ant_uv run run-dmd run-tsan
     # The same suite with file operations through io_uring (Linux 5.10.186

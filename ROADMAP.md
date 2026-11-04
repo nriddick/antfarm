@@ -172,13 +172,14 @@ lanes, and the native Windows matrix passes with a pinned libuv build
 was dropped: `pool.processors` already keeps the loop's CPU out of the
 worker set.
 
-Open upstream: libuv 1.53.0's io_uring submit path lacks the full fence
-that the SQPOLL wakeup protocol needs, so a loop with `ioUring` could lose
-a request. The pinned libuv carries the fence on both platforms
-(`scripts/build-libuv.py` applies
-[the patch](docs/development/libuv-sqpoll-wakeup-2026-11-04/libuv-1.53.0-sqpoll-wakeup-fence.patch));
-the record's issue draft goes to libuv. Drop the patch from the script's
-list once a pinned release carries the fix.
+Open upstream: libuv's io_uring submit path lacks the full fence that the
+SQPOLL wakeup protocol needs, so a loop with `ioUring` could lose a
+request. [libuv pull request #5409](https://github.com/libuv/libuv/pull/5409)
+(issue #5408) carries the fence, and the pinned libuv is the fork branch
+behind it, `v1.x` plus that commit (`scripts/build-libuv.py`). An earlier
+pull request with the same fence, #4921, was closed in 2025 over older
+kernels' barriers, so the discussion may return. Move the pin to a release
+archive once a release carries the fix.
 
 - 2.2.1: UDP sockets, designed in
   [the event loop design's section 9](docs/design/event-loop.md#9-221-udp-sockets)

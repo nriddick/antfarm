@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Build the pinned libuv for ant_uv, the same on Linux and Windows: the
-checksummed release archive, the local patches listed below applied, then
+"""Build the pinned libuv for ant_uv, the same on Linux and Windows: one
+checksummed source archive, the local patches listed below if any, then
 CMake. Linux installs a static libuv.a with the headers under
-.build/libuv/<version>/; Windows installs uv.dll with its import library
-uv.lib and the headers there. Both lanes, Dub and the perf tools link that
-installation, never the system libuv."""
+.build/libuv/pinned/; Windows installs uv.dll with its import library uv.lib
+and the headers there. The lanes, Dub and the perf tools link that
+installation, never the system libuv. A changed pin or patch list rebuilds
+it; --force rebuilds regardless."""
 import argparse
 import hashlib
 import os
@@ -17,20 +18,26 @@ import tarfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "1.53.0"
-ARCHIVE = "libuv-v" + VERSION + ".tar.gz"
-URL = "https://dist.libuv.org/dist/v" + VERSION + "/" + ARCHIVE
-# Signed by Santiago Gimeno (612F 0EAD 9401 6223 79DF 4402 F28C 3C8D A33C 03BE,
-# listed in libuv's MAINTAINERS.md); the signature was checked when pinning.
-SHA256 = "cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64"
-# Unified diffs against the archive's tree, applied in this order. Each is
-# described in the docs/development record beside it; drop one once the
-# pinned release carries it.
-PATCHES = [
-    ROOT / "docs/development/libuv-sqpoll-wakeup-2026-11-04/libuv-1.53.0-sqpoll-wakeup-fence.patch",
-]
+# The pin: libuv's v1.x branch at 716390f (1.53.1-dev, 58 commits past the
+# 1.53.0 release) plus the SQPOLL wakeup fence of libuv pull request #5409
+# (issue #5408), from the project's fork, branch linux-sqpoll-wakeup-fence.
+# GitHub serves a commit's archive by its hash, so the URL names exactly this
+# tree, and the checksum guards the bytes. Move back to a release archive
+# (https://dist.libuv.org/dist/v<version>/libuv-v<version>.tar.gz, signed by a
+# maintainer listed in libuv's MAINTAINERS.md; 1.53.0's SHA-256 was
+# cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64) once a
+# release carries the fence.
+COMMIT = "a937b3b818be90525cddd38aee7246dc5ad21bdc"
+LABEL = "1.53.1-dev+sqpoll-fence (libuv v1.x 716390f, nriddick/libuv@" + COMMIT[:7] + ")"
+URL = "https://github.com/nriddick/libuv/archive/" + COMMIT + ".tar.gz"
+ARCHIVE = "libuv-" + COMMIT[:12] + ".tar.gz"
+SHA256 = "bef003e1c336eca8b9b84118e16a2c79b8aed9b83b3a01895b135008110eff30"
+# Unified diffs against the archive's tree, applied in this order, each
+# described in a docs/development record. None at present: the fence lives
+# in the pinned tree itself.
+PATCHES = []
 WORK = ROOT / ".build/libuv"
-PREFIX = WORK / VERSION
+PREFIX = WORK / "pinned"
 WINDOWS = os.name == "nt"
 
 
@@ -88,8 +95,8 @@ def fetch(archive):
 
 def apply_patch(tree, patch):
     """Apply one unified diff to the files under `tree`. Each hunk must match
-    exactly once, so a patch that no longer fits the archive fails here
-    rather than building something else."""
+    exactly once, so a patch that no longer fits the tree fails here rather
+    than building something else."""
     lines = patch.read_text().splitlines()
     i = 0
     files = 0
@@ -101,7 +108,7 @@ def apply_patch(tree, patch):
             raise RuntimeError(f"{patch.name}: malformed file header at line {i + 1}")
         target = tree / re.sub(r"^[ab]/", "", lines[i + 1][4:].split("\t")[0])
         if not target.is_file():
-            raise RuntimeError(f"{patch.name}: {target} is not in the archive")
+            raise RuntimeError(f"{patch.name}: {target} is not in the tree")
         text = target.read_text().splitlines(keepends=True)
         i += 2
         hunks = 0
@@ -134,8 +141,8 @@ def apply_patch(tree, patch):
         raise RuntimeError(f"{patch.name}: no file headers")
 
 
-def patch_stamp():
-    return "".join(f"{sha256(p)}  {p.name}\n" for p in PATCHES)
+def stamp():
+    return f"{URL}\n{SHA256}\n" + "".join(f"{sha256(p)}  {p.name}\n" for p in PATCHES)
 
 
 def installed():
@@ -144,8 +151,8 @@ def installed():
     else:
         present = (PREFIX / "lib/libuv.a").exists()
     present = present and (PREFIX / "include/uv.h").exists()
-    stamp = PREFIX / "patches.sha256"
-    return present and stamp.exists() and stamp.read_text() == patch_stamp()
+    record = PREFIX / "pin.txt"
+    return present and record.exists() and record.read_text() == stamp()
 
 
 def main(argv=None):
@@ -163,7 +170,7 @@ def main(argv=None):
         if not patch.is_file():
             raise RuntimeError(f"patch not found: {patch}")
     if installed() and not args.force:
-        print("libuv", VERSION, "already installed in", PREFIX)
+        print("libuv", LABEL, "already installed in", PREFIX)
         return
     WORK.mkdir(parents=True, exist_ok=True)
     archive = fetch(args.archive)
@@ -173,7 +180,10 @@ def main(argv=None):
         shutil.rmtree(stale, ignore_errors=True)
     with tarfile.open(archive) as tar:
         tar.extractall(source, filter="data")
-    tree = source / ("libuv-v" + VERSION)
+    trees = [p for p in source.iterdir() if p.is_dir()]
+    if len(trees) != 1:
+        raise RuntimeError(f"{archive.name}: expected one top-level directory, found {len(trees)}")
+    tree = trees[0]
     for patch in PATCHES:
         apply_patch(tree, patch)
     cmake = find_cmake(args.cmake)
@@ -197,8 +207,8 @@ def main(argv=None):
         shutil.copy2(build / "Release/uv.dll", PREFIX / "bin/uv.dll")
     else:
         shutil.copy2(build / "libuv.a", PREFIX / "lib/libuv.a")
-    (PREFIX / "patches.sha256").write_text(patch_stamp())
-    print("libuv", VERSION, "installed in", PREFIX, "with", len(PATCHES), "patch(es)", flush=True)
+    (PREFIX / "pin.txt").write_text(stamp())
+    print("libuv", LABEL, "installed in", PREFIX, flush=True)
 
 
 if __name__ == "__main__":

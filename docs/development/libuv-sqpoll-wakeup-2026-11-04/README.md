@@ -2,10 +2,10 @@
 
 With `UV_LOOP_USE_IO_URING_SQPOLL`, libuv 1.53.0 can submit a file
 operation that never completes. The cause is a missing fence in its submit
-path. This record has the reproduction, the patch that the pinned libuv of
-`scripts/build-libuv.py` carries on both platforms, and an issue draft for
-libuv. Drop the patch from the script's list once a pinned release carries
-the fix.
+path. This record has the reproduction, the patch, and the issue draft
+that became [libuv#5408](https://github.com/libuv/libuv/issues/5408) and
+[pull request #5409](https://github.com/libuv/libuv/pull/5409); the
+outcome section at the end says where the fix lives for this project.
 
 ## How it was found
 
@@ -138,6 +138,21 @@ then never completes**
 > copies for a few minutes.
 
 Attach `sqpoll_lost_wakeup.c` and the patch.
+
+## Outcome
+
+Filed on 4 November 2026 as
+[libuv#5408](https://github.com/libuv/libuv/issues/5408), with
+[pull request #5409](https://github.com/libuv/libuv/pull/5409) from the
+project's fork, branch
+[`linux-sqpoll-wakeup-fence`](https://github.com/nriddick/libuv/tree/linux-sqpoll-wakeup-fence),
+one commit on libuv's `v1.x`. Its message notes that an earlier pull
+request with the same fence, #4921, was closed in 2025 unmerged, over
+whether older kernels' barriers make the case unsalvageable. Since that
+day the project's pinned libuv (`scripts/build-libuv.py`) is that fork
+commit, `v1.x` at 1.53.1-dev plus the fence, and the patch here is no
+longer applied by the script; it stays as the record's artifact. A release
+archive takes the pin's place once a release carries the fence.
 
 ## Files
 

@@ -134,17 +134,20 @@ where the implementation departed from the plan.
     ring: the kernel's polling thread runs before the first request. Where
     the kernel refuses the ring, it says so and skips that check.
 - One pinned libuv on both platforms. `scripts/build-libuv.py`, which
-  replaces `build-libuv-windows.py`, fetches the libuv 1.53.0 release
-  archive once, checks its SHA-256, applies the local patches it lists,
-  each described in a `docs/development` record, and builds it with CMake
-  into `.build/libuv/1.53.0/`: on Windows `uv.dll` with `uv.lib` as before,
-  on Linux a position-independent static `libuv.a`. The `ant_uv` Makefile,
-  Dub (`ant_uv/dub.sdl`), the perf tools and `make check` build and link
-  that installation on Linux too; the system libuv is no longer used, so a
-  fix the pin carries reaches every build. The one patch so far is the
-  SQPOLL wakeup fence
-  ([record](docs/development/libuv-sqpoll-wakeup-2026-11-04/README.md)).
-  The gate's io_uring lane runs under a 900 s timeout.
+  replaces `build-libuv-windows.py`, fetches one source archive once,
+  checks its SHA-256, applies the local patches it lists, if any, and
+  builds it with CMake into `.build/libuv/pinned/`: on Windows `uv.dll`
+  with `uv.lib` as before, on Linux a position-independent static
+  `libuv.a`. The `ant_uv` Makefile, Dub (`ant_uv/dub.sdl`), the perf tools
+  and `make check` build and link that installation on Linux too; the
+  system libuv is no longer used, so a fix the pin carries reaches every
+  build. The pin is libuv's `v1.x` branch at `716390f` (1.53.1-dev, 58
+  commits past the 1.53.0 release, among them UDP and async fixes) plus
+  the SQPOLL wakeup fence of pull request #5409, as the commit
+  `nriddick/libuv@a937b3b` of the project's fork; it replaces a first
+  version of the pin that applied the fence as a local patch to the 1.53.0
+  archive. A release archive takes its place once a release carries the
+  fence. The gate's io_uring lane runs under a 900 s timeout.
 - Windows x64:
   - `scripts/build-libuv-windows.py` builds the pinned libuv 1.53.0 from
     its release archive, whose SHA-256 it checks, with CMake (on PATH or
@@ -394,10 +397,13 @@ before it sleeps, with a full fence between, and the submitter needs the
 same, as liburing has; x86 lets a load pass an earlier store. libuv 1.53.0
 built from its archive with a full fence added at that point hung in 0 of
 500 runs against 4 of 500 for the same build without it, the two
-alternating under the same load. The pinned libuv below carries that
-fence; the fix is upstream's to take, and its `v1.x` branch still lacks
-it. [The record](docs/development/libuv-sqpoll-wakeup-2026-11-04/README.md)
-has the reproduction, the patch and the issue draft.
+alternating under the same load. Reported as
+[libuv#5408](https://github.com/libuv/libuv/issues/5408) with
+[pull request #5409](https://github.com/libuv/libuv/pull/5409); the
+pinned libuv below is the project's fork with that fence until a release
+carries it.
+[The record](docs/development/libuv-sqpoll-wakeup-2026-11-04/README.md)
+has the reproduction and the patch.
 
 ## 2.1.1 — 2026-10-28
 
