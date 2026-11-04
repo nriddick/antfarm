@@ -185,6 +185,14 @@ archive once a release carries the fix.
   [the event loop design's section 9](docs/design/event-loop.md#9-221-udp-sockets)
   from the first consumer's netcode; then TCP streams, pipes and process
   spawn as it needs them.
+- 2.2.1: Fibers across the C ABI, sketched in
+  [docs/design/fiber-c-abi.md](docs/design/fiber-c-abi.md) from the first
+  consumer's module boundary: bodies as C callbacks on the resident's
+  domain, status-returning waits with sticky cancellation, 16-byte value
+  handles, a tag that lets the resident cancel and count a module's
+  Fibers before a reload, and two C hosts for the test suite. The
+  surface is proposed, not built; the page's section 9 lists what is
+  open.
 
 ## Later
 

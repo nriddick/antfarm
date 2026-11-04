@@ -93,6 +93,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/coroutine-replacement.md](design/coroutine-replacement.md) | review the measured deque experiment and proposed druntime/async-I/O coroutine tiers |
 | [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
 | [design/event-loop.md](design/event-loop.md) | see the 2.2.x design of one libuv loop thread beside the pool: the slot ring, the loop thread and its placement, credits, cancellation, completion delivery and close, and where the implementation departed from the plan |
+| [design/fiber-c-abi.md](design/fiber-c-abi.md) | see which Fiber functionality should cross the C ABI, its shape there (status-returning waits, value handles, bodies cleared at retirement) and the reload rule for a hot-swapped module |
 | [../ant_uv/README.md](../ant_uv/README.md) | use `ant_uv`: create the loop, submit file and timer requests, wait from Fibers, cancel and close |
 
 ## Development
@@ -137,6 +138,7 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | C ABI headers, compatibility and runtime separation | [design/c-abi.md](design/c-abi.md) |
 | Threadpool topology, worker and Director contracts | [design/threadpool.md](design/threadpool.md) |
 | Fiber scheduler model and invariants | [design/ant_fibers.md](design/ant_fibers.md) |
+| Fibers across the C ABI, a sketch | [design/fiber-c-abi.md](design/fiber-c-abi.md) |
 | Event loop beside the worker pool (libuv) design and release plan | [design/event-loop.md](design/event-loop.md) |
 | `ant_uv` request, completion, cancellation, close and `readFile` allocation contracts | [ant_uv/README.md](../ant_uv/README.md) |
 | Loading files through the loop: the load, use and unload pattern and the choice of allocator | [guide/loading-files.md](guide/loading-files.md) |

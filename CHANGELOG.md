@@ -4,6 +4,32 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
+## 2.2.1 development
+
+Opened 2026-11-04 on `2.2.1-progress`, from `2.2.0-progress` at `f6730c0`,
+while 2.2.0's Linux integration proceeds. The series continues the event
+loop's transports as the first consumer needs them and takes Fibers across
+the C ABI.
+
+- Design: [fiber-c-abi.md](docs/design/fiber-c-abi.md) sketches which
+  Fiber functionality should cross the C ABI, from the first consumer's
+  module boundary (a resident D host and a hot-swapped engine module
+  behind a versioned C ABI). Proposed: bodies as `uint32_t body(void*)`
+  callbacks whose nonzero return is a 24-bit failure code; every
+  scheduler boundary as a status-returning export, with cancellation a
+  sticky `AF_FIBER_CANCELLED` that is its own channel, never a failure
+  (the return value keeps its meaning afterwards and the disposition
+  records the request), and a D `Error` inside any export aborting
+  through the fatal handler rather than becoming a status; 16-byte value
+  handles; bodies and contexts kept in a task record cleared at
+  retirement, so a recycled task holds no pointer into the module; a
+  spawn tag with `cancel_tagged` and `count_tagged` as the reload rule;
+  events, semaphores and signals from any native thread; a caller-driven
+  host and `af_group_start_fibers` for C programs and the test suite,
+  the resident exporting its own D domain instead. The page lists eight
+  open questions, among them whether per-spawn completion callbacks and
+  events earn their place before the loop has a C surface.
+
 ## 2.2.0 development
 
 Opened 2026-10-30 on `2.2.0-progress`, from 2.1.1. The series' feature is an
