@@ -104,6 +104,30 @@ yourself, and either serves whatever is attached to the host. Wake after
 every accepted table and on idle polls, from any thread: a sleeping
 consumer pins space the producer cannot reclaim.
 
+### More than one LLC group
+
+By default the host takes workers from one LLC group, the one with the
+most eligible CPUs. To spread the workers over every group:
+
+```c
+options.group_mode = AF_GROUP_ALL;   /* AF_GROUP_AUTOMATIC, AF_GROUP_ALL, AF_GROUP_ONLY + group_index */
+options.farm_per_group = 0;          /* 0 or 1; 0 is the default */
+```
+
+Keep `farm_per_group` at 0 on this host. It gives one Farm that every
+group's workers consume, and everything this guide publishes reaches it.
+With 1 each group gets its own Farm, but the plain host only reaches the
+caller group's: `af_host_farm`, producers, actors, attachments and parks
+all publish there, and the other groups' workers sit idle. When you want
+one Farm per group, use the group host: `af_group_start` with
+`AF_GROUP_ALL` (one Farm per group is its default), then `af_group_farm`,
+`af_group_token` and `af_group_wake` with the group you mean, and a worker
+body that consumes its own group's Farm. Private parks can live on any
+group's Farm. Public actor runtimes cannot: they need an owned Farm, so
+on a group host there is none. `af_host_resolve` and `af_group_resolve`
+show the CPUs and groups a set of options would select, without starting
+anything.
+
 ## 5. Actors and parks on the host
 
 Host-owned public actors are ABI 1: `af_host_create_actors`, then kinds,
@@ -122,11 +146,19 @@ af_host_attach_park(host, park);     /* step pumps it; close drains and destroys
 ```
 
 After attachment you spawn roots, take tracked outcomes and cancel as
-before, but never pump or destroy the park yourself. Anything else that
+before, but never pump or destroy the park yourself: both are fatal on a
+transferred park. A park transfers once; a second `af_host_attach_park`
+is `AF_INVALID`. Anything else that
 needs the control thread's attention each step, a queue you drain into
 tables or a service that must know when consumers stop, is an attachment:
 
 ```c
+static size_t emit(void *context, af_token *token) {
+    struct telemetry *t = context;     /* t->farm read before attaching */
+    return af_write_bodies(t->farm, record, t->pending, t->count, token, AF_COST_AUTO, NULL);
+}
+
+state.farm = af_host_farm(host);       /* here, not inside emit */
 af_attachment a = { sizeof a, AF_ABI_VERSION, "telemetry", emit, drained, finish, &state, 0 };
 af_host_attach(host, &a);
 ```
@@ -134,7 +166,10 @@ af_host_attach(host, &a);
 `emit` runs with the host's token once per emission round and returns
 how many items it published; zero does not mean drained. `drained` is
 what close checks. `finish` runs after consumers stop and before the Farm
-goes. None of the three may wait for a worker.
+goes. None of the three may wait for a worker, and none may make an
+`af_host_*` control call, `af_host_farm` included: the call is fatal
+inside a runtime callback. So emit gets the token but not the Farm; read
+the Farm once before attaching and keep it in the context, as above.
 
 ## 6. Fibers on the host
 

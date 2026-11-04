@@ -2,6 +2,7 @@
 #include "antfarm_runtime.h"
 #include "threads.h"
 #include <stdio.h>
+#include <string.h>
 extern void antfarm_test_collect(void);
 static uint32_t step(void *u, void *s, size_t bytes, af_private_context *ctx) {
     (void)ctx; CHECK(bytes == sizeof(unsigned)); unsigned *n = (unsigned *)s;
@@ -56,17 +57,49 @@ static void exercise_attached(unsigned workers) {
     CHECK(af_host_attach_park(host, NULL) == AF_INVALID);
     af_private_roots_destroy(foreign); af_destroy(other);
     CHECK(af_host_attach_park(host, park) == AF_OK);
+    /* A park transfers once. Before the guard a second attach was accepted,
+       counted the park twice against the close check below (letting close
+       pass with spare still allocated), and close destroyed it twice. */
+    CHECK(af_host_attach_park(host, park) == AF_INVALID);
+    af_private_roots *spare = NULL; CHECK(af_private_roots_create(farm, &o, NULL, &spare) == AF_OK);
     for (unsigned i = 0; i < 50; ++i) { unsigned initial = 0;
         CHECK(af_private_root_spawn_copy(park, &initial, AF_PRIVATE_NO_DEADLINE, NULL) == AF_OK); }
     CHECK(af_host_close(host) == AF_BUSY); /* live roots block close */
     CHECK(af_host_wait_until(host, park_empty, park, AF_WAIT_FOREVER) == AF_OK);
     CHECK(test_load(&calls) == 50);
     antfarm_test_collect();
+    CHECK(af_host_close(host) == AF_BUSY); /* the untransferred spare pins the Farm */
+    af_private_roots_destroy(spare);
     CHECK(af_host_close(host) == AF_OK); /* destroys the park */
     printf("C private host passed: %u workers, park transferred to the host\n", workers);
 }
-int main(void) {
-    CHECK(af_druntime_init() == AF_OK); exercise(0); exercise(2);
+static void fatal_notice(const char *s, size_t n, void *context) {
+    (void)context; fprintf(stderr, "C_FATAL_OBSERVER: %.*s\n", (int)n, s); fflush(stderr);
+}
+/* Death cases: the caller's pump or destroy of a transferred park. */
+static int transferred(const char *which) {
+    af_set_fatal_handler(fatal_notice, NULL);
+    af_host_options hopt; af_host_options_default(&hopt); hopt.workers = 0;
+    af_host *host = NULL; CHECK(af_host_create(&hopt, &host) == AF_OK);
+    af_farm *farm = af_host_farm(host);
+    af_private_root_options o; af_private_root_options_default(&o);
+    o.state.bytes = sizeof(unsigned); o.step = step;
+    af_private_roots *park = NULL; CHECK(af_private_roots_create(farm, &o, NULL, &park) == AF_OK);
+    CHECK(af_host_attach_park(host, park) == AF_OK);
+    if (!strcmp(which, "pump-transferred")) {
+        af_token *token = NULL; CHECK(af_host_register_producer(host, AF_SMALL, &token) == AF_OK);
+        af_private_roots_pump(park, token, 0, AF_PRIVATE_AUTO_COST);
+    } else if (!strcmp(which, "destroy-transferred")) {
+        af_private_roots_destroy(park);
+    } else {
+        fprintf(stderr, "unknown case %s\n", which); return 2;
+    }
+    fprintf(stderr, "death case returned: %s\n", which); return 0;
+}
+int main(int argc, char **argv) {
+    CHECK(af_druntime_init() == AF_OK);
+    if (argc > 1) return transferred(argv[1]);
+    exercise(0); exercise(2);
     exercise_attached(0); exercise_attached(2);
     CHECK(af_druntime_shutdown() == AF_OK); return 0;
 }

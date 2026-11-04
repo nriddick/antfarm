@@ -26,9 +26,21 @@ typedef struct af_processor {
    words are zero; any other size or version is AF_INVALID.
    ABI 2 fields: wait_timeout_ns bounds af_host_wait_until when that call is
    passed AF_WAIT_FOREVER (default AF_WAIT_FOREVER: no deadline);
-   max_emit_rounds bounds the emission rounds of one step (16; positive);
-   group_mode, group_index and farm_per_group select the host's LLC groups as
-   the group host's options do (AF_GROUP_AUTOMATIC, 0, 0). */
+   max_emit_rounds bounds the emission rounds of one step (16; positive).
+   group_mode picks the LLC groups that supply workers: AF_GROUP_AUTOMATIC
+   (the default: the group with the most eligible CPUs), AF_GROUP_ALL (every
+   group with one) or AF_GROUP_ONLY (group group_index, below 0xFFFF;
+   group_index is 0 in the other modes). farm_per_group is 0 (default) or 1
+   and matters only when several groups are selected: 0 gives one Farm,
+   homed on the caller's group, that every selected group's workers consume
+   (the other groups' workers are cross-group consumers); 1 gives each group
+   its own Farm, consumed by that group's workers only. This host's C
+   surface reaches one Farm, the caller group's: af_host_farm,
+   af_host_register_producer, af_host_create_actors, attachments and
+   transferred parks all publish there. With 1 the other groups' workers
+   therefore receive no work from C. To use several groups from C, keep 0
+   here, or use the group host (antfarm_groups.h), whose af_group_farm,
+   af_group_token and af_group_wake take the group. */
 typedef struct af_host_options {
     uint32_t struct_size, abi_version;
     uint32_t workers, caller_consumes, caller_placement, idle;
@@ -120,7 +132,10 @@ af_status af_host_abandon(af_host *);
    close precondition (NULL: always drained). finish runs after consumers stop
    and before runtimes, parks and the Farm are destroyed. All three return
    promptly, never wait for a worker, never throw or longjmp, and make no
-   control call (fatal, as in any runtime callback). context stays live until
+   control call (fatal, as in any runtime callback). That includes
+   af_host_farm: emit receives the token, not the Farm, so read
+   af_host_farm(host) before af_host_attach and keep it in context; the
+   writes take that Farm with the lent token. context stays live until
    finish has run or the host is abandoned. The structure is copied; at least
    one callback is required. */
 typedef struct af_attachment {
@@ -136,7 +151,10 @@ af_status af_host_attach(af_host *, const af_attachment *);
 /* Transfers a park created on af_host_farm(host): step pumps it with the
    host's token and the automatic cost, close requires it empty (live roots
    block close; take tracked outcomes in a wait predicate, the host never
-   does) and destroys it. Never pump or destroy it yourself afterwards. */
+   does) and destroys it. A park transfers once: a second attach, to this or
+   another host, is AF_INVALID. Afterwards af_private_roots_pump and
+   af_private_roots_destroy on it are fatal; live, collect, spawn,
+   take_outcome and cancel_all stay yours, on the control thread. */
 af_status af_host_attach_park(af_host *, af_private_roots *);
 typedef uint32_t (*af_host_predicate)(void *context);
 /* while (!done(context)) step, on the control thread. AF_OK once done returns

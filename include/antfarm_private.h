@@ -105,7 +105,8 @@ void af_private_roots_collect(af_private_roots *);
 /* limit=0 uses configured limit; otherwise 1..configured limit. avg_cost is
    0..7 or AUTO_COST. Returns publications, not completed work. tables counts child and
    resume publications too: use it to wake parked workers. Keep pumping and
-   consuming during waits; zero is not a join. Never calls consumer callbacks. */
+   consuming during waits; zero is not a join. Never calls consumer callbacks.
+   Fatal on a park transferred with af_host_attach_park: the host pumps it. */
 af_private_pump_count af_private_roots_pump(af_private_roots *, af_token *, size_t limit, uint32_t avg_cost);
 /* Copy is for byte-copyable state. Init writes directly to final aligned state
    (e.g. placement-new). Failure cleans its own partial object; no destructor is
@@ -133,7 +134,8 @@ int64_t af_private_clock_now(void);
 int64_t af_private_clock_frequency(void);
 /* NULL no-op. Collects once, then fatally rejects live roots/untaken outcomes.
    Join cancellers and all park users first. Stored destructors run on consumers,
-   after descendants; only root raw-byte free follows the reclamation option. */
+   after descendants; only root raw-byte free follows the reclamation option.
+   Fatal on a park transferred with af_host_attach_park, as its pump is. */
 void af_private_roots_destroy(af_private_roots *);
 
 /* Child cohorts are owned/disposed by their parent. Never free them yourself or

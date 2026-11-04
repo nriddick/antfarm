@@ -14,6 +14,9 @@ struct af_private_roots
     af_farm* farm;
     af_actor_allocator allocator;
     bool entered, tracking;
+    // Set by af_host_attach_park (ABI 2): the host pumps and destroys the
+    // park from then on, so the caller's pump and destroy are fatal.
+    bool hostOwned;
 }
 alias af_private_children = ErasedChildPark;
 struct af_private_root_handle { PrivateRootHandle value; }
@@ -192,13 +195,36 @@ size_t af_private_roots_live(af_private_roots* p)
 { enter(p); scope(exit) p.entered = false; return p.impl.live; }
 void af_private_roots_collect(af_private_roots* p)
 { enter(p); scope(exit) p.entered = false; p.impl.collectCompleted(); }
-af_private_pump_count af_private_roots_pump(af_private_roots* p, af_token* token, size_t limit, uint cost)
+extern(D) private void requireCallerOwned(af_private_roots* p) nothrow @nogc @system
+{
+    if (p.hostOwned) fatal("C ABI private root park transferred to a host");
+}
+// The pump and destroy behind the exports, without the transfer check: the
+// host's attachment (antfarm.c.runtime) drives a transferred park through them.
+extern(D) package(antfarm) af_private_pump_count pumpPark(af_private_roots* p, af_token* token, size_t limit, uint cost)
+    nothrow @nogc @system
 {
     enter(p); scope(exit) p.entered = false;
     if (token is null || token.owner !is p.farm) fatal("C ABI foreign or null private producer token");
     if (cost > 7 && cost != rootCostHintAuto) fatal("avgCost out of range");
     auto n = erasedRootPump(p.impl, token.value, limit, cost);
     return af_private_pump_count(n.roots, n.tables);
+}
+extern(D) package(antfarm) void destroyPark(af_private_roots* p) nothrow @nogc @system
+{
+    enter(p);
+    p.impl.destroy();
+    auto farm = p.farm;
+    auto saved = p.allocator;
+    if (saved.deallocate !is null) saved.deallocate(saved.context, p, af_private_roots.sizeof, af_private_roots.alignof);
+    else ActorAllocator.cRuntime().deallocate(null, p, af_private_roots.sizeof, af_private_roots.alignof);
+    atomicOp!"-="(farm.privateParks, 1UL);
+}
+af_private_pump_count af_private_roots_pump(af_private_roots* p, af_token* token, size_t limit, uint cost)
+{
+    if (p is null) fatal("C ABI null private root park");
+    requireCallerOwned(p);
+    return pumpPark(p, token, limit, cost);
 }
 uint af_private_root_spawn_copy(af_private_roots* p, const(void)* initial, long deadline, af_private_root_handle* handle)
 { return spawnRoot(p, initial, null, null, 0, deadline, handle); }
@@ -227,13 +253,8 @@ long af_private_clock_frequency() { return erasedPrivateClockFrequency(); }
 void af_private_roots_destroy(af_private_roots* p)
 {
     if (p is null) return;
-    enter(p);
-    p.impl.destroy();
-    auto farm = p.farm;
-    auto saved = p.allocator;
-    if (saved.deallocate !is null) saved.deallocate(saved.context, p, af_private_roots.sizeof, af_private_roots.alignof);
-    else ActorAllocator.cRuntime().deallocate(null, p, af_private_roots.sizeof, af_private_roots.alignof);
-    atomicOp!"-="(farm.privateParks, 1UL);
+    requireCallerOwned(p);
+    destroyPark(p);
 }
 uint af_private_children_create(void* c, const(af_private_child_options)* o, af_private_children** output)
 {

@@ -484,7 +484,10 @@ def runtime_checks(compiler, build, core):
     actors = native_runtime("tests/cabi/actors_host.c", build, libraries, compiler, probe=True)
     execute(actors)
     execute(actors, "borrowed", death="cannot destroy a host-owned actor runtime")
-    execute(native_runtime("tests/cabi/private_host.c", build, libraries, compiler, probe=True))
+    private_host = native_runtime("tests/cabi/private_host.c", build, libraries, compiler, probe=True)
+    execute(private_host)
+    for case in ("pump-transferred", "destroy-transferred"):
+        execute(private_host, case, death="private root park transferred to a host")
     embedded = build / ("embedded.exe" if os.name == "nt" else "embedded")
     build_api.run([compiler, "-O", "-I.", "-Icabi/source", "-Ithreadpool/source", "-Iforkjoin/source",
                    "tests/cabi/embedded.d", *libraries,

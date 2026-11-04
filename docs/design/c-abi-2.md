@@ -208,8 +208,9 @@ typedef struct af_attachment {
     uint64_t reserved;
 } af_attachment;
 af_status af_host_attach(af_host *, const af_attachment *);
-/* Transfers the park: step pumps it with the host token, close requires
-   it drained and destroys it. Never af_private_roots_destroy it after. */
+/* Transfers the park, once (a second attach is AF_INVALID): step pumps it
+   with the host token, close requires it drained and destroys it. Its pump
+   and destroy are fatal for the caller afterwards. */
 af_status af_host_attach_park(af_host *, af_private_roots *);
 typedef uint32_t (*af_host_predicate)(void *context);
 /* while (!done(context)) step, with the worker-failure check and the
@@ -231,6 +232,30 @@ af_status af_druntime_gc_disable(void);
 in the same emission rounds as attachments. `af_host_close` requires every
 attachment drained, the Fiber domain drained and retired, and transferred
 parks empty, and returns `AF_BUSY` with the first blocker named otherwise.
+
+#### Several LLC groups from C
+
+`group_mode` takes `AF_GROUP_AUTOMATIC` (0, the default: the group with
+the most eligible CPUs), `AF_GROUP_ALL` (1) or `AF_GROUP_ONLY` (2, with
+`group_index` naming the group; `group_index` is 0 otherwise).
+`farm_per_group` is 0 or 1, and only changes anything when more than one
+group is selected. The plain host's C surface reaches one Farm, the
+caller group's: `af_host_farm`, `af_host_register_producer`,
+`af_host_create_actors`, attachments and transferred parks all publish
+there. The paths to more than one group, as built:
+
+| Path | Farms | C publishes through | Who consumes it |
+|---|---|---|---|
+| `af_host`, `AF_GROUP_ALL`, `farm_per_group` 0 | one, homed on the caller's group | everything the plain host offers | every selected group's workers; the other groups' are cross-group consumers |
+| `af_host`, `AF_GROUP_ALL`, `farm_per_group` 1 | one per group | the caller group's Farm only | that group's workers; the others get no work from C |
+| `af_group_start`, `AF_GROUP_ALL` (`farm_per_group` 1 is its default) | one per group | `af_group_farm(llc)` and `af_group_token(llc)` per thread; private parks on any group's Farm, pumped by your code | your worker bodies, each told its group |
+| `af_dispatcher_start`, `farm_per_group` 1 | one per group | fork-join roots; each participant spills children into its own group's Farm | that group's participants |
+
+On the 5900XT (two CCDs, 16 workers) 100,000 bodies published through an
+attachment ran on CPUs 0-15 with `farm_per_group` 0 and on CPUs 0-7 only
+with 1. Public actor runtimes need an owned Farm, so they are not
+available on a group host's Farms (`AF_INVALID`); on the plain host
+`af_host_create_actors` places them on the caller group's Farm.
 
 ### antfarm_groups.h
 
@@ -377,3 +402,8 @@ the ABI 1 images of the two structures that grew are held by
 5. The fork-join helpers, per the roadmap.
 6. The Fiber sketch's remaining items: per-spawn completion, events before
    the loop, the failure object, tag scan versus list, DMD GC metadata.
+7. The plain host with `farm_per_group` 1. Its C surface reaches only the
+   caller group's Farm, so the other groups' Farms stay idle. Either refuse
+   1 on `af_host` until a per-group surface exists, or add one (a Farm and
+   token by group, an attachment or actor runtime bound to a group), as the
+   D `FarmHost` has with `farmOf`, `tokenOf` and `createRuntime(llc)`.

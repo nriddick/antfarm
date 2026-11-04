@@ -3,8 +3,7 @@ module antfarm.c.runtime;
 import antfarm : AntFarm, fatal, inFarmCallback, DEFAULT_SMALL_TABLE_THRESHOLD, Token, rootCostHintAuto;
 import antfarm.c.core;
 import antfarm.actors.cabi;
-import antfarm.actors.private_cabi : af_private_roots, af_private_roots_pump, af_private_roots_live,
-    af_private_roots_destroy;
+import antfarm.actors.private_cabi : af_private_roots, af_private_roots_live, pumpPark, destroyPark;
 import antfarm.c.api_runtime : installRuntimeSections;
 import core.atomic : atomicLoad, atomicOp;
 import core.lifetime : move;
@@ -267,11 +266,11 @@ private size_t parkPump(AttachmentRecord* rec, ref Token token) nothrow @nogc @s
 {
     move(token, rec.token.value);
     scope(exit) move(rec.token.value, token);
-    return af_private_roots_pump(rec.park, &rec.token, 0, rootCostHintAuto).tables;
+    return pumpPark(rec.park, &rec.token, 0, rootCostHintAuto).tables;
 }
 private void parkFinish(AttachmentRecord* rec) nothrow @nogc @system
 {
-    af_private_roots_destroy(rec.park);
+    destroyPark(rec.park);
     rec.park = null;
     --rec.host.attachedParks;
 }
@@ -526,6 +525,9 @@ uint af_host_attach_park(af_host* h, af_private_roots* park)
     if (auto status = hostControl(h)) return status;
     if (park is null) return setError(AF_INVALID, "null private park");
     if (park.farm !is h.farm) return setError(AF_INVALID, "park was not created on this host's Farm");
+    // One owner: a second transfer would count the park twice against the
+    // close check and destroy it twice.
+    if (park.hostOwned) return setError(AF_INVALID, "park was already transferred to a host");
     if (h.value.state != HostState.open) return setError(AF_INVALID, "host is not open");
     auto rec = newRecord(h);
     if (rec is null) return setError(AF_ALLOCATION_FAILED, "park record allocation failed");
@@ -538,6 +540,7 @@ uint af_host_attach_park(af_host* h, af_private_roots* park)
             () => parkFinish(rec)));
     }
     catch (Throwable e) { free(rec); return exception(e); }
+    park.hostOwned = true;
     ++h.attachedParks;
     rec.next = h.attachments;
     h.attachments = rec;

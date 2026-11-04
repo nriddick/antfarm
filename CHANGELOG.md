@@ -96,6 +96,31 @@ the C ABI.
   `pkg-config`, the old Windows libuv script, ABI 1 as the lock, a D
   `Error` as a status, UDP as future work, or one extracted quickstart
   program where both run.
+- C ABI 2, verified on the Linux host (5900XT, two CCDs) at `862fb01`:
+  `make check` passed (365 s), the actors and `ant_uv` mimalloc lanes
+  passed, and the new C ABI programs ran 60 times each under LDC and DMD
+  without a failure. A plain host with `AF_GROUP_ALL` (16 workers on two
+  LLC groups) published, waited and closed with `farm_per_group` 0 and 1.
+  Fixed: `af_host_attach_park` accepted the same park twice. The park was
+  then counted twice against close's park check, so close went ahead with
+  another park still allocated, and close destroyed the transferred park
+  twice (here it hit the reentry fatal reading freed memory). A park now
+  transfers once (a second attach is `AF_INVALID`), and the caller's
+  `af_private_roots_pump` or `af_private_roots_destroy` on a transferred
+  park is fatal; the host drives it through internal entry points.
+  Tests: `private_host.c` checks the refused second attach and that an
+  untransferred park still blocks close, plus two death cases; the new
+  test failed against the unfixed archives. Documented: emit receives
+  the token but not the Farm, and `af_host_farm` is a control call, so
+  read the Farm before attaching. `group_mode` and `farm_per_group`
+  now spell out their values and which Farm each C path reaches. The
+  plain host's C surface publishes only into the caller group's Farm, so
+  with `farm_per_group` 1 the other groups' workers get no work from C
+  (measured: bodies ran on CPUs 0-7 only, against 0-15 with 0). The
+  ABI 2 page and the onboarding guide list the paths to several groups
+  (the plain host with one shared Farm, the group host with one Farm per
+  group, the dispatcher) and record the plain host's `farm_per_group` 1
+  as an open item.
 
 ## 2.2.0 development
 
