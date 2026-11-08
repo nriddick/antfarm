@@ -173,7 +173,7 @@ run "${make_cmd[@]}" -C tests/ring run run-dmd run-tsan
 libuv_pinned=0
 if run python3 scripts/build-libuv.py; then
     libuv_pinned=1
-    run "${make_cmd[@]}" -C tests/ant_uv run run-dmd run-tsan
+    run "${make_cmd[@]}" -C tests/ant_uv run run-dmd run-tsan run-dip1000
     # The same suite with file operations through io_uring (Linux 5.10.186
     # or later), bounded: a lost ring request would otherwise hang the gate.
     run timeout 900 "${make_cmd[@]}" -C tests/ant_uv run-iouring

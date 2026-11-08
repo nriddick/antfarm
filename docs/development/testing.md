@@ -35,7 +35,7 @@ lists every target.
 | Private actors | `tests/private`: unit suite, the extracted private-actor documentation programs, and the fatal-death harness | LDC, DMD, LDC TSan |
 | Examples | `examples/`: both complete quickstart programs (the fork-join reduction and the First payload program) extracted from [quickstart.md](../guide/quickstart.md), run in debug and release only; and the six actor examples, debug and release with 0 and 2 workers, plus an LDC TSan build (`fiber_cancel_at` with 0 workers only) | LDC, DMD; TSan on the actor examples only |
 | Ring | `make -C tests/ring run run-dmd run-tsan`: the `antfarm.ring` suite | LDC, DMD, LDC TSan |
-| `ant_uv` | `make -C tests/ant_uv run run-dmd run-tsan` against the pinned libuv that `scripts/build-libuv.py` builds (below), then `run-iouring`, the same suite with `UvLoopOptions.ioUring`, under a 900 s timeout; where the pin cannot be built, the lane is skipped with the reason printed | LDC, DMD, LDC TSan, CMake, C compiler |
+| `ant_uv` | `make -C tests/ant_uv run run-dmd run-tsan run-dip1000` against the pinned libuv that `scripts/build-libuv.py` builds (below); `run-dip1000` builds the suite with `-preview=dip1000`, which holds the `@safe` surface's scope rules; then `run-iouring`, the same suite with `UvLoopOptions.ioUring`, under a 900 s timeout; where the pin cannot be built, the lane is skipped with the reason printed | LDC, DMD, LDC TSan, CMake, C compiler |
 
 `make check-quick` runs the BetterC/native-C and core C/C++ ABI checks, root unit suite, `make -C tests/farm run`
 (including `sweep_cursor`), threadpool unit suite, fiber smoke suite, fork-join suite, the ring suite, and
@@ -186,7 +186,7 @@ interpreter and arguments.
 | `forkjoin` | The fork-join suite via Dub (`dub test :forkjoin -- --DRT-testmode=run-main`): frame pool, deque, admission, paths, ranges, completion and the 2.1.0 wrappers |
 | `ordering` | Raw ring-store audit, controlled Farm ordering, Live subscription schedules, and leaf reuse |
 | `ring` | The `antfarm.ring` suite (`tests/ring`) |
-| `ant_uv` | The `ant_uv` suite (`tests/ant_uv`) against the pinned libuv, with its layout oracle compiled by MSVC against the real `uv.h`; then both `ant_uv` examples |
+| `ant_uv` | The `ant_uv` suite (`tests/ant_uv`) against the pinned libuv, with its layout oracle compiled by MSVC against the real `uv.h`; the suite again under `-preview=dip1000`; then both `ant_uv` examples |
 | `review` | Plain torture suite (including T28 subscription cohorts), sweep cursor, T19 flood/lap and concurrent first mapping creation; quick omits the last two |
 | `actors` | Public actor deterministic/contention suite with the mimalloc stub |
 | `private` | Private actor suite and six extracted documentation programs |

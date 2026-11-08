@@ -136,13 +136,15 @@ class Checks:
                         "/external:I", libuv / "include", "/external:W0", "/Fo" + str(layout)], BUILD)
         env = dict(self.env)
         env["PATH"] = str(libuv / "bin") + os.pathsep + env.get("PATH", "")
-        # The suite, then both examples as a user builds them.
-        for name, sources, arguments in (
-                ("uv_test", ["tests/ant_uv/uv_test.d", layout], ()),
-                ("read_files", ["ant_uv/examples/read_files.d"], ("README.md", "ant_uv/README.md")),
-                ("load_assets", ["ant_uv/examples/load_assets.d"], ())):
+        # The suite, the suite under DIP1000 (which holds the @safe surface's
+        # scope rules), then both examples as a user builds them.
+        for name, sources, arguments, extra in (
+                ("uv_test", ["tests/ant_uv/uv_test.d", layout], (), ()),
+                ("uv_test_dip1000", ["tests/ant_uv/uv_test.d", layout], (), ("-preview=dip1000",)),
+                ("read_files", ["ant_uv/examples/read_files.d"], ("README.md", "ant_uv/README.md"), ()),
+                ("load_assets", ["ant_uv/examples/load_assets.d"], (), ())):
             binary = BUILD / (name + "_" + self.compiler + ".exe")
-            self.run([self.compiler, *self.flags, "-i", "-I.", "-Ithreadpool/source",
+            self.run([self.compiler, *self.flags, *extra, "-i", "-I.", "-Ithreadpool/source",
                       "-Iant_fibers/source", "-Iant_uv/source", "-Iforkjoin/source", *sources,
                       libuv / "lib/uv.lib",
                       "-of=" + str(binary), "-od=" + str(BUILD / (name + "_obj_" + self.compiler))])

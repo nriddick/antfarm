@@ -262,38 +262,38 @@ struct UvRequest
 
     /// The request's state, read with acquire: after `done` or `abandoned`
     /// the outputs are visible.
-    @property UvRequestState state() const nothrow @nogc
+    @property UvRequestState state() const scope nothrow @nogc @safe
     {
         return cast(UvRequestState) atomicLoad!(MemoryOrder.acq)(state_);
     }
 
     /// True once the loop published `done`.
-    @property bool done() const nothrow @nogc
+    @property bool done() const scope nothrow @nogc @safe
     {
         return state == UvRequestState.done;
     }
 
     /// True once the loop published, `done` or `abandoned`.
-    @property bool finished() const nothrow @nogc
+    @property bool finished() const scope nothrow @nogc @safe
     {
         immutable s = state;
         return s == UvRequestState.done || s == UvRequestState.abandoned;
     }
 
     /// True when published `done` with a non-negative result.
-    @property bool succeeded() const nothrow @nogc
+    @property bool succeeded() const scope nothrow @nogc @safe
     {
         return done && result >= 0;
     }
 
     /// The ticket `UvLoop.submit` assigned to the latest accepted submission.
-    @property ulong ticket() const nothrow @nogc
+    @property ulong ticket() const scope nothrow @nogc @safe
     {
         return ticket_;
     }
 
     /// libuv's name for a negative `result` ("ECANCELED"), else "".
-    const(char)[] errorName() const nothrow @nogc
+    const(char)[] errorName() const scope nothrow @nogc @trusted
     {
         import core.stdc.string : strlen;
         if (result >= 0) return "";
@@ -304,7 +304,7 @@ struct UvRequest
     /// True when `buffer` holds the block the loop allocated for a
     /// `readFile`. The request owns it, and `submit` refuses the request,
     /// until `takeBuffer` or `freeBuffer`.
-    @property bool ownsBuffer() const nothrow @nogc
+    @property bool ownsBuffer() const scope nothrow @nogc @safe
     {
         return owned_.block_ !is null;
     }
@@ -312,7 +312,7 @@ struct UvRequest
     /// Hand over the block the loop allocated for a `readFile`, as a
     /// `UvBuffer` that frees it, and clear `buffer`. Empty when the request
     /// owns none, as after reading an empty file.
-    UvBuffer takeBuffer() nothrow @nogc
+    UvBuffer takeBuffer() nothrow @nogc @safe
     {
         if (owned_.block_ is null) return UvBuffer.init;
         auto taken = owned_;
@@ -324,7 +324,7 @@ struct UvRequest
 
     /// Free the block the loop allocated for a `readFile`, if the request
     /// owns one.
-    void freeBuffer() nothrow @nogc
+    void freeBuffer() nothrow @nogc @safe
     {
         auto taken = takeBuffer();
         taken.free();
@@ -334,11 +334,24 @@ struct UvRequest
     // Each sets only its operation's inputs. Set the delivery targets and
     // `user` on the result. A record is reusable once published, but a fresh
     // one carries nothing over from the last operation.
+    //
+    // Attributes. A constructor that takes a slice is `@trusted`: it stores
+    // the slice's bounds and dereferences nothing; the loop reads and writes
+    // within them. One that takes a `const(char)*` is `@system`, since
+    // nothing proves the pointer NUL-terminated; its `string` form copies
+    // through `toStringz` and is `@trusted`. The pointer forms are templates
+    // over the pointer's type so that a string literal, which converts to
+    // both, picks the `string` form. Every pointer, slice and string
+    // parameter is `return scope`: the record refers to it, so under DIP1000
+    // the record cannot outlive it in `@safe` code.
 
     /// Read all of `path` into a block allocated from `allocator`, or from
-    /// the loop's default when `allocator` is unset, at `alignment`.
-    static UvRequest readFile(const(char)* path, ActorAllocator allocator = ActorAllocator.init,
-        size_t alignment = 64) nothrow @nogc
+    /// the loop's default when `allocator` is unset, at `alignment`. The
+    /// pointer form takes a NUL-terminated path the caller keeps valid until
+    /// publication; the `string` form copies it (`toStringz`).
+    static UvRequest readFile(P : const(char)*)(return scope P path,
+        ActorAllocator allocator = ActorAllocator.init, size_t alignment = 64)
+        nothrow @nogc @system
     {
         UvRequest r;
         r.op = UvOp.readFile;
@@ -348,8 +361,17 @@ struct UvRequest
         return r;
     }
 
+    /// ditto
+    static UvRequest readFile(return scope string path,
+        ActorAllocator allocator = ActorAllocator.init, size_t alignment = 64) nothrow @trusted
+    {
+        import std.string : toStringz;
+        return readFile(toStringz(path), allocator, alignment);
+    }
+
     /// Read all of `path` into `buffer`, stopping when it is full.
-    static UvRequest readFile(const(char)* path, ubyte[] buffer) nothrow @nogc
+    static UvRequest readFile(P : const(char)*)(return scope P path, return scope ubyte[] buffer)
+        nothrow @nogc @system
     {
         UvRequest r;
         r.op = UvOp.readFile;
@@ -359,8 +381,17 @@ struct UvRequest
         return r;
     }
 
+    /// ditto
+    static UvRequest readFile(return scope string path, return scope ubyte[] buffer)
+        nothrow @trusted
+    {
+        import std.string : toStringz;
+        return readFile(toStringz(path), buffer);
+    }
+
     /// `uv_fs_open(path, flags, mode)`; `result` is the file.
-    static UvRequest open(const(char)* path, int flags, int mode = 0x1A4) nothrow @nogc
+    static UvRequest open(P : const(char)*)(return scope P path, int flags, int mode = 0x1A4)
+        nothrow @nogc @system
     {
         UvRequest r;
         r.op = UvOp.open;
@@ -370,8 +401,15 @@ struct UvRequest
         return r;
     }
 
+    /// ditto
+    static UvRequest open(return scope string path, int flags, int mode = 0x1A4) nothrow @trusted
+    {
+        import std.string : toStringz;
+        return open(toStringz(path), flags, mode);
+    }
+
     /// `uv_fs_close(file)`.
-    static UvRequest close(int file) nothrow @nogc
+    static UvRequest close(int file) nothrow @nogc @safe
     {
         UvRequest r;
         r.op = UvOp.close;
@@ -381,7 +419,7 @@ struct UvRequest
 
     /// Read up to `buffer.length` bytes of `file` at `offset` into `buffer`;
     /// `result` is the bytes read, 0 at end of file.
-    static UvRequest read(int file, ubyte[] buffer, long offset) nothrow @nogc
+    static UvRequest read(int file, return scope ubyte[] buffer, long offset) nothrow @nogc @trusted
     {
         UvRequest r;
         r.op = UvOp.read;
@@ -393,7 +431,8 @@ struct UvRequest
     }
 
     /// Write `bytes` to `file` at `offset`; `result` is the bytes written.
-    static UvRequest write(int file, const(ubyte)[] bytes, long offset) nothrow @nogc
+    static UvRequest write(int file, return scope const(ubyte)[] bytes, long offset)
+        nothrow @nogc @trusted
     {
         UvRequest r;
         r.op = UvOp.write;
@@ -405,7 +444,7 @@ struct UvRequest
     }
 
     /// `uv_fs_stat(path)`; `size` is the file's size.
-    static UvRequest stat(const(char)* path) nothrow @nogc
+    static UvRequest stat(P : const(char)*)(return scope P path) nothrow @nogc @system
     {
         UvRequest r;
         r.op = UvOp.stat;
@@ -413,8 +452,15 @@ struct UvRequest
         return r;
     }
 
+    /// ditto
+    static UvRequest stat(return scope string path) nothrow @trusted
+    {
+        import std.string : toStringz;
+        return stat(toStringz(path));
+    }
+
     /// `uv_fs_fstat(file)`; `size` is the file's size.
-    static UvRequest fstat(int file) nothrow @nogc
+    static UvRequest fstat(int file) nothrow @nogc @safe
     {
         UvRequest r;
         r.op = UvOp.fstat;
@@ -423,7 +469,7 @@ struct UvRequest
     }
 
     /// Published `timeoutMs` milliseconds of loop time after it starts.
-    static UvRequest timer(ulong timeoutMs) nothrow @nogc
+    static UvRequest timer(ulong timeoutMs) nothrow @nogc @safe
     {
         UvRequest r;
         r.op = UvOp.timer;
@@ -432,13 +478,17 @@ struct UvRequest
     }
 
     /// Published in order with the requests around it.
-    static UvRequest nop() nothrow @nogc
+    static UvRequest nop() nothrow @nogc @safe
     {
         return UvRequest.init;
     }
 
     /// Open a UDP socket; `options` stays the caller's until publication.
-    static UvRequest udpOpen(const(UvUdpOptions)* options) nothrow @nogc
+    /// The `ref` form is `@trusted`: it stores the address and dereferences
+    /// nothing, and a submit that holds the caller until publication
+    /// (`submitAndBlock`, `submitAndWait`) is what makes a local `options`
+    /// sound.
+    static UvRequest udpOpen(return scope const(UvUdpOptions)* options) nothrow @nogc @safe
     {
         UvRequest r;
         r.op = UvOp.udpOpen;
@@ -446,10 +496,16 @@ struct UvRequest
         return r;
     }
 
+    /// ditto
+    static UvRequest udpOpen(return ref const UvUdpOptions options) nothrow @nogc @trusted
+    {
+        return udpOpen(&options);
+    }
+
     /// Send `bytes` from `socket` to `peer`, or to the connected peer when
     /// `peer` is unset; `bytes` stays the caller's until publication.
-    static UvRequest udpSend(int socket, const(ubyte)[] bytes, UvAddress peer = UvAddress.init)
-        nothrow @nogc
+    static UvRequest udpSend(int socket, return scope const(ubyte)[] bytes,
+        UvAddress peer = UvAddress.init) nothrow @nogc @trusted
     {
         UvRequest r;
         r.op = UvOp.udpSend;
@@ -461,7 +517,7 @@ struct UvRequest
     }
 
     /// Close `socket`.
-    static UvRequest udpClose(int socket) nothrow @nogc
+    static UvRequest udpClose(int socket) nothrow @nogc @safe
     {
         UvRequest r;
         r.op = UvOp.udpClose;
@@ -470,8 +526,11 @@ struct UvRequest
     }
 
     /// Resolve `host` on libuv's pool into `into`, each address with `port`;
-    /// `result` is how many were written.
-    static UvRequest resolve(const(char)* host, ushort port, UvAddress[] into) nothrow @nogc
+    /// `result` is how many were written. The pointer form takes a
+    /// NUL-terminated host the caller keeps valid until publication; the
+    /// `string` form copies it (`toStringz`).
+    static UvRequest resolve(P : const(char)*)(return scope P host, ushort port,
+        return scope UvAddress[] into) nothrow @nogc @system
     {
         UvRequest r;
         r.op = UvOp.resolve;
@@ -480,6 +539,14 @@ struct UvRequest
         r.length = into.length; // addresses, not bytes
         r.address.port = port;
         return r;
+    }
+
+    /// ditto
+    static UvRequest resolve(return scope string host, ushort port, return scope UvAddress[] into)
+        nothrow @trusted
+    {
+        import std.string : toStringz;
+        return resolve(toStringz(host), port, into);
     }
 }
 
@@ -496,27 +563,27 @@ struct UvBuffer
     private ActorAllocator allocator_;
 
     /// The file's bytes, at the start of the block. Empty after `free`.
-    @property inout(ubyte)[] bytes() inout nothrow @nogc
+    @property inout(ubyte)[] bytes() inout nothrow @nogc @trusted
     {
         return block_[0 .. length_];
     }
 
     /// Bytes allocated: the file's size when the loop opened it, so at
     /// least `bytes.length`.
-    @property size_t capacity() const nothrow @nogc
+    @property size_t capacity() const nothrow @nogc @safe
     {
         return capacity_;
     }
 
     /// The block's alignment, as the request asked.
-    @property size_t alignment() const nothrow @nogc
+    @property size_t alignment() const nothrow @nogc @safe
     {
         return alignment_;
     }
 
     /// Return the block to its allocator and empty this copy. Does nothing
     /// when it is already empty.
-    void free() nothrow @nogc
+    void free() nothrow @nogc @trusted
     {
         if (block_ is null) return;
         allocator_.deallocate(allocator_.context, block_, capacity_, alignment_);
@@ -553,26 +620,46 @@ struct UvAddress
     private ulong reserved_;
 
     /// True unless `family` is `none`.
-    @property bool valid() const nothrow @nogc { return family != UvFamily.none; }
+    @property bool valid() const nothrow @nogc @safe { return family != UvFamily.none; }
 
-    /// Parse dotted IPv4 text; `none` when it does not parse.
-    static UvAddress ipv4(const(char)* text, ushort port) nothrow @nogc
+    /// Parse dotted IPv4 text; `none` when it does not parse or is
+    /// `addressTextMax` bytes or longer. `@trusted`: the text is copied into
+    /// a NUL-terminated buffer of that size before libuv reads it.
+    static UvAddress ipv4(scope const(char)[] text, ushort port) nothrow @nogc @trusted
     {
+        char[addressTextMax] terminated = void;
+        if (!terminate(text, terminated)) return UvAddress.init;
         sockaddr_in sa;
-        if (uv_ip4_addr(text, port, &sa) != 0) return UvAddress.init;
+        if (uv_ip4_addr(terminated.ptr, port, &sa) != 0) return UvAddress.init;
         return fromSockaddr(cast(const(sockaddr)*) &sa);
     }
 
-    /// Parse IPv6 text, with an optional `%zone`; `none` when it does not parse.
-    static UvAddress ipv6(const(char)* text, ushort port) nothrow @nogc
+    /// Parse IPv6 text, with an optional `%zone`; `none` as for `ipv4`.
+    static UvAddress ipv6(scope const(char)[] text, ushort port) nothrow @nogc @trusted
     {
+        char[addressTextMax] terminated = void;
+        if (!terminate(text, terminated)) return UvAddress.init;
         sockaddr_in6 sa;
-        if (uv_ip6_addr(text, port, &sa) != 0) return UvAddress.init;
+        if (uv_ip6_addr(terminated.ptr, port, &sa) != 0) return UvAddress.init;
         return fromSockaddr(cast(const(sockaddr)*) &sa);
+    }
+
+    /// Longest address text the parsers take, NUL included: room for the
+    /// longest IPv6 text with a zone name.
+    enum size_t addressTextMax = 128;
+
+    // `text` copied into `into` with a NUL after it; false when it does not fit.
+    private static bool terminate(scope const(char)[] text, ref char[addressTextMax] into)
+        nothrow @nogc @safe
+    {
+        if (text.length >= into.length) return false;
+        into[0 .. text.length] = text[];
+        into[text.length] = 0;
+        return true;
     }
 
     /// 127.0.0.1 at `port`.
-    static UvAddress loopback4(ushort port) nothrow @nogc
+    static UvAddress loopback4(ushort port) nothrow @nogc @safe
     {
         auto a = any4(port);
         a.bytes[0] = 127;
@@ -581,7 +668,7 @@ struct UvAddress
     }
 
     /// 0.0.0.0 at `port`.
-    static UvAddress any4(ushort port) nothrow @nogc
+    static UvAddress any4(ushort port) nothrow @nogc @safe
     {
         UvAddress a;
         a.family = UvFamily.ipv4;
@@ -590,7 +677,7 @@ struct UvAddress
     }
 
     /// ::1 at `port`.
-    static UvAddress loopback6(ushort port) nothrow @nogc
+    static UvAddress loopback6(ushort port) nothrow @nogc @safe
     {
         auto a = any6(port);
         a.bytes[15] = 1;
@@ -598,7 +685,7 @@ struct UvAddress
     }
 
     /// :: at `port`; dual-stack unless the socket is `ipv6Only`.
-    static UvAddress any6(ushort port) nothrow @nogc
+    static UvAddress any6(ushort port) nothrow @nogc @safe
     {
         UvAddress a;
         a.family = UvFamily.ipv6;
@@ -608,7 +695,7 @@ struct UvAddress
 
     /// "1.2.3.4:80" or "[::1]:80" written into `buffer` (64 bytes always
     /// suffice), returned as the slice written; "unset" for `none`.
-    char[] format(char[] buffer) const nothrow @nogc
+    char[] format(return scope char[] buffer) const scope nothrow @nogc @trusted
     {
         import core.stdc.stdio : snprintf;
         if (buffer.length == 0) return buffer;
@@ -738,7 +825,9 @@ enum UvDatagramFlag : uint
 
 /// A received datagram: the first 64 bytes of one of its socket's receive
 /// buffers, with the data at offset 64. The consumer's from the pop until
-/// `release`.
+/// `release`. `@safe` code never sees this type: it pops `UvReceived` from
+/// a `UvInbox` (`ant_uv.safe`), which carries the same header by value and
+/// releases the buffer once.
 struct UvDatagram
 {
     union
@@ -1214,6 +1303,9 @@ final class UvLoop
     /// never blocks. On `accepted` the loop owns the request until it
     /// publishes; otherwise the caller keeps it. A request still owning a
     /// `readFile` allocation is `invalid` until `takeBuffer` or `freeBuffer`.
+    /// `@system`: the loop keeps the pointer until publication. `@safe` code
+    /// submits through `submitAndBlock`, a Fiber's `submitAndWait`, or a
+    /// `UvOutbox`.
     UvSubmit submit(UvRequest* request) nothrow @nogc
     {
         if (request is null || !wellFormed(request)) return UvSubmit.invalid;
@@ -1242,6 +1334,33 @@ final class UvLoop
         return pushed == RingPush.full ? UvSubmit.full : UvSubmit.closed;
     }
 
+    /// Submit `request` and hold the calling thread in short sleeps until
+    /// the loop publishes it, retrying while the request ring is full. The
+    /// request is the caller's again when this returns, whatever it
+    /// returns, so a request on the caller's stack is sound: this is how
+    /// `@safe` code outside a Fiber submits, for example to open a socket
+    /// or resolve a name during setup. The request may name an `event` or a
+    /// `trigger` but not a `callback` or a `completions` ring, whose
+    /// deliveries would follow the return (`invalid`). Any thread but the
+    /// loop's, where it would wait for itself (`UvLoopException`).
+    UvSubmit submitAndBlock(scope ref UvRequest request) @trusted
+    {
+        if (onLoopThread)
+            throw new UvLoopException(
+                "ant_uv: submitAndBlock on the loop thread would wait for itself");
+        if (request.callback !is null || request.completions !is null) return UvSubmit.invalid;
+        for (;;)
+        {
+            immutable r = submit(&request);
+            if (r == UvSubmit.accepted) break;
+            if (r != UvSubmit.full) return r;
+            Thread.sleep(50.usecs);
+        }
+        while (!request.finished)
+            Thread.sleep(50.usecs);
+        return UvSubmit.accepted;
+    }
+
     /// Ask the loop to cancel `request`'s latest submission. Any thread that
     /// owns the request's lifetime. A request not yet started is published
     /// with `UV_ECANCELED` without reaching libuv; a timer is stopped; file
@@ -1263,7 +1382,7 @@ final class UvLoop
 
     /// Wake the loop thread out of `uv_run`. Any thread, including from a
     /// Farm callback; a no-op once the loop has closed.
-    void wake() nothrow @nogc
+    void wake() nothrow @nogc @trusted
     {
         immutable before = atomicFetchAdd!(MemoryOrder.acq_rel)(wakeGate_, 1UL);
         if ((before & gateClosed) == 0)
@@ -1333,19 +1452,19 @@ final class UvLoop
 
     /// The loop whose thread is calling, or null on any other thread: how
     /// the `start`, `step` and `stop` hooks and loop-thread Fibers reach it.
-    static @property UvLoop current() nothrow @nogc
+    static @property UvLoop current() nothrow @nogc @safe
     {
         return tlsCurrent_;
     }
 
     /// True on the loop thread.
-    @property bool onLoopThread() const nothrow @nogc
+    @property bool onLoopThread() const nothrow @nogc @safe
     {
         return thread_ !is null && Thread.getThis() is thread_;
     }
 
     /// True until `close` begins or the loop fails.
-    @property bool isOpen() const nothrow @nogc
+    @property bool isOpen() const nothrow @nogc @safe
     {
         return atomicLoad!(MemoryOrder.acq)(state_) == State.open
             && atomicLoad!(MemoryOrder.acq)(closeRequested_) == 0
@@ -1353,53 +1472,53 @@ final class UvLoop
     }
 
     /// True once the loop thread recorded a failure.
-    @property bool failed() const nothrow @nogc
+    @property bool failed() const nothrow @nogc @safe
     {
         return atomicLoad!(MemoryOrder.acq)(failed_) != 0;
     }
 
     /// Requests accepted so far (tickets issued, including refused pushes'
     /// discarded tickets).
-    @property ulong submitted() const nothrow @nogc { return atomicLoad(tickets_); }
+    @property ulong submitted() const nothrow @nogc @safe { return atomicLoad(tickets_); }
     /// Requests published so far.
-    @property ulong completed() const nothrow @nogc { return atomicLoad(completed_); }
+    @property ulong completed() const nothrow @nogc @safe { return atomicLoad(completed_); }
     /// Requests published with `UV_ECANCELED` so far.
-    @property ulong cancelled() const nothrow @nogc { return atomicLoad(cancelled_); }
+    @property ulong cancelled() const nothrow @nogc @safe { return atomicLoad(cancelled_); }
     /// Most operations in libuv at once so far.
-    @property ulong maxInFlight() const nothrow @nogc { return atomicLoad(maxInFlight_); }
+    @property ulong maxInFlight() const nothrow @nogc @safe { return atomicLoad(maxInFlight_); }
     /// Completions that waited for room in a completion ring so far.
-    @property ulong deferredDeliveries() const nothrow @nogc { return atomicLoad(deferred_); }
+    @property ulong deferredDeliveries() const nothrow @nogc @safe { return atomicLoad(deferred_); }
     /// The credit limit in effect.
-    @property uint credits() const nothrow @nogc { return slotCount_; }
+    @property uint credits() const nothrow @nogc @safe { return slotCount_; }
 
     /// `readFile` jobs that `close` abandoned and that have not ended. Each
     /// may still call its allocator and write into its `buffer`; when it
     /// ends it frees the block it allocated and leaves this count. Zero
     /// after `close` means no abandoned job will touch an allocator again.
     /// Any thread, at any time; zero before `close`.
-    @property uint abandonedJobs() const nothrow @nogc
+    @property uint abandonedJobs() const nothrow @nogc @trusted
     {
         auto cell = abandonedJobs_;
         return cell is null ? 0 : atomicLoad!(MemoryOrder.acq)(*cell);
     }
     /// libuv's auxiliary threads as placed by `create`.
-    @property const(UvAuxThread)[] auxThreads() const nothrow @nogc { return auxThreads_; }
+    @property const(UvAuxThread)[] auxThreads() const nothrow @nogc @safe { return auxThreads_; }
     /// True when `UvLoopOptions.ioUring` took effect: Linux 5.10.186 or
     /// later, libuv accepted the option, and `UV_USE_IO_URING` is positive.
     /// The kernel may still refuse the ring, and libuv then uses its pool.
-    @property bool ioUring() const nothrow @nogc { return ioUring_; }
+    @property bool ioUring() const nothrow @nogc @safe { return ioUring_; }
 
     /// The loop's clock: `MonoTime` in nanoseconds, the unit of every
     /// transport timestamp (`UvDatagram.arrivalNanos`, `UvRequest.stampAt`).
     /// Any thread; the caller's own `MonoTime` compares through it.
-    static long nanos() nothrow @nogc
+    static long nanos() nothrow @nogc @safe
     {
         return convClockFreq(MonoTime.currTime.ticks, MonoTime.ticksPerSecond, 1_000_000_000);
     }
 
     /// A UDP socket's counters, meaningful between its open's and its
     /// close's publications; an id out of range reads as zeros.
-    UvUdpStats udpStats(int socket) const nothrow @nogc
+    UvUdpStats udpStats(int socket) const nothrow @nogc @trusted
     {
         UvUdpStats r;
         if (socket < 0 || socket >= maxUdpSockets || udpSockets_ is null) return r;

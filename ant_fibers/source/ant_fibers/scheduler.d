@@ -5,6 +5,14 @@
  + word per task (see FiberTask.armWait) and never enter the Farm,
  + and newly-ready fibers collect in `PublishAccumulator` until a producer
  + flushes a useful table. No external thread-pool package is required.
+ +
+ + Attributes: the entry points a Fiber body or a waker calls (`spawn` and
+ + `spawnHandle`, the joins, `FiberEvent`, `FiberSemaphore`,
+ + `FiberGenerationTrigger`, `yieldReady` and the sleeps) are `@trusted`, so
+ + that `@safe` code can spawn, wait and post. None of them takes a pointer
+ + or a length from the caller, so no argument can make them unsafe; what
+ + they trust is the scheduler itself, which the suite and the
+ + ThreadSanitizer lane exercise. The scheduler's internals stay `@system`.
  +/
 module ant_fibers.scheduler;
 
@@ -219,7 +227,7 @@ struct FiberServiceResult
 
 final class FiberCancelled : Exception
 {
-    this() { super("fiber cancelled"); }
+    this() pure nothrow @nogc @safe { super("fiber cancelled"); }
 }
 
 /// Preallocated so the Farm callback can fail a protocol-breaking `Fiber.yield`
@@ -266,7 +274,7 @@ struct TaskHandle
     ulong diagnosticId;
 
     /// Non-blocking, generation-stable status and terminal-data snapshot.
-    FiberJoinResult poll() const nothrow @nogc
+    FiberJoinResult poll() const nothrow @nogc @trusted
     {
         FiberJoinResult result;
         result.task = TaskHandle(cast(FiberTask) slot, generation, diagnosticId);
@@ -322,7 +330,7 @@ struct TaskHandle
     /// Block an external OS thread until this generation terminates or becomes
     /// stale. Managed fibers must use a scheduler-aware join instead of
     /// blocking their worker.
-    FiberJoinResult join() const nothrow @nogc
+    FiberJoinResult join() const nothrow @nogc @trusted
     {
         if (FiberDomain.currentTask !is null)
             return FiberJoinResult(
@@ -342,7 +350,7 @@ struct TaskHandle
 
     /// Timed external blocking join. `timedOut` is returned only while the
     /// same generation remains live after the timeout.
-    FiberJoinResult join(Duration timeout) const nothrow @nogc
+    FiberJoinResult join(Duration timeout) const nothrow @nogc @trusted
     {
         if (FiberDomain.currentTask !is null)
             return FiberJoinResult(
@@ -369,14 +377,14 @@ struct TaskHandle
     /// Suspend the current managed Fiber without blocking its worker until a
     /// task in the same domain terminates. Completion registration and the
     /// terminal recheck are one target-list transaction, so no wake is lost.
-    FiberJoinResult joinFiber()
+    FiberJoinResult joinFiber() @trusted
     {
         return joinFiberImpl(MonoTime.init, false);
     }
 
     /// Scheduler-aware timed join. Timeout wakeup shares the existing indexed
     /// timer arbitration with signal waits and cancellation.
-    FiberJoinResult joinFiber(Duration timeout)
+    FiberJoinResult joinFiber(Duration timeout) @trusted
     {
         return joinFiberImpl(MonoTime.currTime + timeout, true);
     }
@@ -2110,14 +2118,14 @@ final class FiberDomain
     /// one: no GC allocation, no fiber stack mmap. The recycled task's Fiber
     /// is reset in place, so it retains (and is bounded by) its original
     /// stack; stackSize only steers pool matching on the reuse path.
-    FiberTask spawn(void delegate() body, size_t stackSize = 0)
+    FiberTask spawn(void delegate() body, size_t stackSize = 0) @trusted
     {
         return spawnOn(defaultReadyLane, body, stackSize);
     }
 
     /// Function-pointer form avoids constructing a delegate or closure for a
     /// module-level/static body.
-    FiberTask spawn(void function() body, size_t stackSize = 0)
+    FiberTask spawn(void function() body, size_t stackSize = 0) @trusted
     {
         return spawnOn(defaultReadyLane, body, stackSize);
     }
@@ -2238,13 +2246,13 @@ final class FiberDomain
     /// Spawn and capture the admitted generation in one API operation. Under
     /// `FiberRetirement.serviceThreads` this is the safe form: the task may
     /// be recycled as soon as it terminates.
-    TaskHandle spawnHandle(void delegate() body, size_t stackSize = 0)
+    TaskHandle spawnHandle(void delegate() body, size_t stackSize = 0) @trusted
     {
         return spawnHandleOn(defaultReadyLane, body, stackSize);
     }
 
     /// ditto
-    TaskHandle spawnHandle(void function() body, size_t stackSize = 0)
+    TaskHandle spawnHandle(void function() body, size_t stackSize = 0) @trusted
     {
         return spawnHandleOn(defaultReadyLane, body, stackSize);
     }
@@ -2482,7 +2490,7 @@ final class FiberDomain
     }
 
     /// Cooperative yield without entering the long-wait container.
-    static void yieldReady()
+    static void yieldReady() @trusted
     {
         auto task = currentTask;
         assert(task !is null && task.fiber is Fiber.getThis());
@@ -2495,7 +2503,7 @@ final class FiberDomain
     }
 
     /// Suspend the current managed fiber until an absolute monotonic deadline.
-    static void sleepUntil(MonoTime deadline)
+    static void sleepUntil(MonoTime deadline) @trusted
     {
         auto task = currentTask;
         assert(task !is null && task.fiber is Fiber.getThis());
@@ -2539,12 +2547,14 @@ final class FiberDomain
             timers.remove(task);
     }
 
-    static void sleepFor(Duration duration)
+    /// Suspend the current managed fiber for `duration`.
+    static void sleepFor(Duration duration) @trusted
     {
         sleepUntil(MonoTime.currTime + duration);
     }
 
-    static bool currentCancellationRequested() nothrow @nogc
+    /// True when the current managed fiber has a cancellation request pending.
+    static bool currentCancellationRequested() nothrow @nogc @trusted
     {
         auto task = currentTask;
         return task !is null && task.cancellationRequested;
@@ -3341,7 +3351,7 @@ final class FiberEvent
     private shared int posted;
     private UnitWaiters waiters;
 
-    this(FiberDomain domain, FiberEventMode mode = FiberEventMode.autoReset)
+    this(FiberDomain domain, FiberEventMode mode = FiberEventMode.autoReset) @trusted
     {
         if (domain is null)
             throw new Exception("ant_fibers: FiberEvent requires a domain");
@@ -3350,37 +3360,40 @@ final class FiberEvent
         waiters.initialize();
     }
 
-    @property bool isSet() const nothrow @nogc
+    /// True while posted.
+    @property bool isSet() const nothrow @nogc @safe
     {
         return atomicLoad!(MemoryOrder.acq)(posted) != 0;
     }
 
-    void set() nothrow @nogc
+    /// Post from any thread: wake one waiter (auto-reset) or all of them.
+    void set() nothrow @nogc @trusted
     {
         atomicStore!(MemoryOrder.rel)(posted, 1);
         waiters.wake(domain,
             mode == FiberEventMode.manualReset ? size_t.max : 1);
     }
 
-    void reset() nothrow @nogc
+    /// Clear the posted state.
+    void reset() nothrow @nogc @safe
     {
         atomicStore!(MemoryOrder.rel)(posted, 0);
     }
 
     /// Park the current managed fiber until this event is posted.
-    void wait()
+    void wait() @trusted
     {
         cast(void) waitForUnit(this, misuse, false, MonoTime.init);
     }
 
     /// Park until posted or `timeout` elapses; false on timeout.
-    bool wait(Duration timeout)
+    bool wait(Duration timeout) @trusted
     {
         return waitUntil(MonoTime.currTime + timeout);
     }
 
     /// Park until posted or `deadline`; false if the deadline passed first.
-    bool waitUntil(MonoTime deadline)
+    bool waitUntil(MonoTime deadline) @trusted
     {
         return waitForUnit(this, misuse, true, deadline);
     }
@@ -3433,7 +3446,7 @@ final class FiberGenerationTrigger
     package shared int queued_;
     package shared(FiberGenerationTrigger) queueNext_;
 
-    this(FiberDomain domain)
+    this(FiberDomain domain) @trusted
     {
         if (domain is null)
             throw new Exception(
@@ -3442,13 +3455,14 @@ final class FiberGenerationTrigger
         event_ = new FiberEvent(domain, FiberEventMode.autoReset);
     }
 
-    @property ulong completed() const nothrow @nogc
+    /// Completions recorded so far.
+    @property ulong completed() const nothrow @nogc @safe
     {
         return atomicLoad!(MemoryOrder.acq)(completed_);
     }
 
     /// Record one completion from any thread or payload callback.
-    void advance() nothrow @nogc
+    void advance() nothrow @nogc @trusted
     {
         immutable before = atomicFetchAdd!(MemoryOrder.acq_rel)(completed_, 1UL);
         if (before == ulong.max)
@@ -3458,7 +3472,7 @@ final class FiberGenerationTrigger
     }
 
     /// Wait for exactly the next generation assigned to this consumer.
-    void waitNext()
+    void waitNext() @trusted
     {
         auto task = FiberDomain.currentTask;
         if (task is null || task.domain !is domain_)
@@ -3491,7 +3505,7 @@ final class FiberSemaphore
     private shared long permits;
     private UnitWaiters waiters;
 
-    this(FiberDomain domain, long initial = 0)
+    this(FiberDomain domain, long initial = 0) @trusted
     {
         if (domain is null)
             throw new Exception("ant_fibers: FiberSemaphore requires a domain");
@@ -3502,32 +3516,35 @@ final class FiberSemaphore
         atomicStore!(MemoryOrder.raw)(permits, initial);
     }
 
-    @property long available() const nothrow @nogc
+    /// Permits available now.
+    @property long available() const nothrow @nogc @safe
     {
         immutable n = atomicLoad!(MemoryOrder.acq)(permits);
         return n < 0 ? 0 : n;
     }
 
-    void post(long count = 1) nothrow @nogc
+    /// Add `count` permits from any thread, waking one waiter per permit.
+    void post(long count = 1) nothrow @nogc @trusted
     {
         if (count <= 0) return;
         atomicFetchAdd!(MemoryOrder.rel)(permits, count);
         waiters.wake(domain, cast(size_t) count);
     }
 
-    void wait()
+    /// Park the current managed fiber until a permit is available, and take it.
+    void wait() @trusted
     {
         cast(void) waitForUnit(this, misuse, false, MonoTime.init);
     }
 
     /// Wait for a permit or until `timeout` elapses; false on timeout.
-    bool wait(Duration timeout)
+    bool wait(Duration timeout) @trusted
     {
         return waitUntil(MonoTime.currTime + timeout);
     }
 
     /// Wait for a permit until `deadline`; false if it passed first.
-    bool waitUntil(MonoTime deadline)
+    bool waitUntil(MonoTime deadline) @trusted
     {
         return waitForUnit(this, misuse, true, deadline);
     }

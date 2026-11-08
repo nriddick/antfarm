@@ -127,6 +127,28 @@ the C ABI.
   plain host with one shared Farm, the group host with one Farm per
   group, the dispatcher). Test: `runtime.c` checks the refusal in create
   and resolve.
+- The `@safe` surface of `ant_uv` (2026-11-08). `UvInbox` owns the ring
+  sockets deliver to and hands datagrams out as `UvReceived`: the header
+  by value, the data as a slice bound to the value's lifetime, the buffer released once
+  when the value is destroyed, released or handed to the next pop, and an
+  element whose tag is not registered discarded and counted rather than
+  read. `UvOutbox` owns the requests and bytes of in-flight sends and
+  reuses a slot only after its send published. `UvLoop.submitAndBlock`
+  and `submitAndWait` take a request by reference and return after
+  publication, refusing a callback or a completions ring; the path and
+  host constructors gained `string` forms and `UvAddress.ipv4`/`ipv6`
+  parse a slice; the request's accessors, the address helpers, the clock
+  and the statistics are `@safe`. The wake-class surface of `ant_fibers`
+  (spawn, joins, events, semaphores, triggers, yield, sleeps) is
+  `@trusted` so that a Fiber body can be `@safe`; `SlotRing.tryPop` and
+  its readers are `@trusted` while `tryPush` stays `@system` on purpose.
+  [Section 9.12 of the event loop design](docs/design/event-loop.md#912-the-safe-surface-and-its-trusted-contract)
+  lists the hazards, the wrappers and the four properties of the loop they
+  rest on. The suite's `@safe` loopback and Fiber cases run under LDC and
+  DMD on both platforms, and `make -C tests/ant_uv run-dip1000` (the
+  Windows lane's second build) builds the suite with `-preview=dip1000`,
+  which holds the scope rules.
+
 
 ## 2.2.0 development
 

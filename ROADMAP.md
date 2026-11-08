@@ -183,8 +183,11 @@ archive once a release carries the fix.
 
 - 2.2.0 (on `2.2.0-progress`) delivered the UDP sockets designed in
   [the event loop design's section 9](docs/design/event-loop.md#9-221-udp-sockets)
-  from the first consumer's netcode. 2.2.1: TCP streams, pipes and process
-  spawn as it needs them.
+  from the first consumer's netcode. 2.2.1 added the `@safe` surface over
+  the sockets and the Fiber waits
+  ([section 9.12](docs/design/event-loop.md#912-the-safe-surface-and-its-trusted-contract)),
+  and continues with TCP streams, pipes and process spawn as the consumer
+  needs them, the streams taking the inbox's shape.
 - 2.2.1: Fibers across the C ABI, sketched in
   [docs/design/fiber-c-abi.md](docs/design/fiber-c-abi.md) from the first
   consumer's module boundary: bodies as C callbacks on the resident's

@@ -18,7 +18,8 @@ UDP sockets of section 9, in
 `antfarm/ring.d`, `ant_uv/` (guide: [ant_uv/README.md](../../ant_uv/README.md)),
 `tests/ring/`, `tests/ant_uv/` and `tools/perf/slot_ring.d`. Where the
 implementation settled a point the plan left open, or departed from it, this
-page now says what was built; the departures are listed in section 8.
+page now says what was built; the departures are listed in section 8. On
+`2.2.1-progress`: the `@safe` surface of section 9.12.
 
 The line this design draws: **Ant Farm supplies a ring and an optional,
 separately linked subpackage that owns one libuv loop thread; the
@@ -938,3 +939,67 @@ The worker policy verbs stay unused; the arithmetic gains its first user.
 - TCP streams, pipes and process spawn: the rest of 2.2.1, sharing the
   socket table and taking the stream shape of `uv_read_start`, which is
   the receive path above with a byte stream in place of datagrams.
+
+### 9.12 The `@safe` surface and its trusted contract
+
+Status: built 2026-11-08, as `ant_uv.safe` plus the annotations in
+`ant_uv.loop`, `ant_uv.fibers`, `antfarm.ring` and `ant_fibers.scheduler`,
+with the suite's `@safe` loopback and Fiber cases. The reason to have one
+is concrete: the application's session lookup and MAC check are the only
+code that reads a stranger's bytes, their length fields come off the wire,
+and under `-release` the compiler keeps array bounds checks only in `@safe`
+code. The loop, the ring, the windows and the libuv binding stay `@system`:
+they reuse memory on purpose and run inside C callbacks, and their trust
+base is libuv.
+
+**The seam.** Each hazard the type system cannot see gets one small
+`@trusted` wrapper with an argument local to it, and a runtime check where
+the argument would otherwise rest on the caller's discipline.
+
+| Hazard | Wrapper | What makes it sound |
+| --- | --- | --- |
+| The element's `pointer` is an integer; a consumer with the raw header can widen `length`, release twice, or keep a slice past release | `UvInbox.tryPop` yields `UvReceived`: the header by value, the data as a slice the `return` attribute binds to the value, one release in the destructor; the element's tag must be registered | the loop completes the header before it pushes the element and repeats the length in the payload, which the pop compares; nothing but the loop pushes to the ring, since `SlotRing.tryPush` is `@system` |
+| The loop keeps a request and its bytes until publication; a GC request has no root while it sits in a ring slot | `UvOutbox` owns requests and bytes on the C heap and reuses a slot only once its request published | publication is the only way a request comes back |
+| A request on a Fiber's or a thread's stack | `submitAndWait(loop, ref request)` and `UvLoop.submitAndBlock(ref request)`, with `scope ref` parameters | they return only after publication, and refuse a `callback` or a `completions` ring, whose deliveries would follow the return |
+| A `const(char)*` nobody proved NUL-terminated | the `string` forms of the path and host constructors; `UvAddress.ipv4` and `ipv6` over a slice | the text is copied to a terminated buffer before libuv reads it; the pointer forms are templates over the pointer type, so a literal picks the `string` form |
+| Slices the constructors store | `read`, `write`, `udpSend` and `resolve` take `return scope` slices, `udpOpen` a `return ref` record | the record cannot outlive what it refers to under DIP1000, and the submit wrappers hold the caller until the loop is done with it |
+
+**The contract.** The wrappers rest on four properties of the loop, the
+hardened but unverified part, which the loopback suite and the
+ThreadSanitizer lane exercise: the receive callback sets the header's
+length from the read count before it pushes the element, and the element
+repeats it; a window stays alive while any of its datagrams is held, by the
+reference count; a release from any thread is one compare-and-swap onto the
+return list; publication is the only way a request returns to its owner,
+and the delivery targets are snapshotted before it. Each `@trusted` body
+says which property it uses.
+
+**What `@safe` does not buy** is protection against a bug inside the loop
+or libuv. What it buys is that the parsing code cannot grow the
+integer-to-pointer and escape patterns the loop needs, that its bounds
+checks survive release builds, and that under DIP1000 a datagram's bytes
+cannot leave the value that holds them. Without DIP1000 the `return` and
+`return scope` annotations are inert and the rule is documented rather than
+enforced; the suite builds itself with `-preview=dip1000` (`run-dip1000`,
+and the Windows lane's second build) so the library's own `@safe` code is
+held to it, and that build checks at compile time that a datagram's bytes
+can neither be returned past the value nor assigned to a longer-lived
+slice. (`return scope` on the method would not do: it tracks what the
+value's pointers point at, which is heap memory, not the value's own
+lifetime; `return`, which treats the slice as a reference into the value,
+is the binding that holds.)
+
+**The wake-class surface of `ant_fibers`**, `spawn` and `spawnHandle`, the
+joins, `FiberEvent`, `FiberSemaphore`, `FiberGenerationTrigger`,
+`yieldReady` and the sleeps, is `@trusted` so that a Fiber body can be
+`@safe`: none of those entry points takes a pointer or a length from the
+caller, and what they trust is the scheduler itself.
+
+**Left `@system`**: `UvLoop.create` and `close`, `UvInbox.destroy`,
+`UvLoop.submit` and `cancel` with a pointer, `UvDatagram`, and `SlotRing`'s
+`create`, `destroy` and `tryPush`. Setup and teardown are the resident's
+privileged code, and `tryPush` is the provenance guarantee the inbox rests
+on. Open: whether `UvRequest.takeBuffer` should be `return scope`, so that
+a request built over a local can hand its block out under DIP1000; and the
+TCP streams, which should take the inbox's shape from the start, a read
+chunk arriving as the same kind of scoped value a datagram does.

@@ -235,6 +235,9 @@ while (ring.tryPop(e))                        // e.tag names the socket
 }
 ```
 
+That is the raw path, for `@system` code; [From `@safe` code](#from-safe-code)
+has the one a consumer's tick should use.
+
 `UvAddress` is the one address type: `ipv4`/`ipv6` parse text, `loopback4`,
 `any4`, `loopback6` and `any6` build the usual ones, and `format` writes
 `1.2.3.4:80` or `[::1]:80`. `UvRequest.resolve(host, port, slice)` fills a
@@ -265,6 +268,63 @@ and a multicast group. Sessions, authentication, replay protection and
 packet formats are the application's; the transport carries no
 cryptography.
 
+## From `@safe` code
+
+Parsing a stranger's bytes is where memory safety earns its keep, and
+`-release` keeps array bounds checks only in `@safe` code. So the shapes a
+consumer's tick uses are `@safe`, and each of the few `@trusted` wrappers
+behind them rests on one property of the loop, listed as
+[the trusted contract](../docs/design/event-loop.md#912-the-safe-surface-and-its-trusted-contract)
+in the design.
+
+```d
+auto inbox = new UvInbox(256);                 // the ring, owned; a power of two
+auto options = inbox.options(1, 64, 1200);     // completions, tag, window and maxDatagram set
+options.bind = UvAddress.loopback4(0);
+auto open = UvRequest.udpOpen(options);        // by reference
+loop.submitAndBlock(open);                     // returns after publication: the request is yours again
+immutable socket = cast(int) open.result;
+
+auto outbox = new UvOutbox(loop, 64, 1200);    // 64 in-flight sends of up to 1200 bytes
+outbox.send(socket, packet[], peer, 0);        // copied in; the transmit stamp lands in the copy
+outbox.settle();                               // published results into sent, failed, lastError
+
+UvReceived d;
+while (inbox.tryPop(d))                        // releases what d held, then fills it
+{
+    auto bytes = d.bytes();                    // bound to d's lifetime under DIP1000
+    // d.peer, d.arrivalNanos, d.flags, d.socket, d.tag
+}                                              // d's destructor releases the last one
+```
+
+- `UvInbox` owns the ring and the tags registered on it through `options`.
+  `tryPop` hands out only elements whose tag it knows, so a request
+  completion pointed at the ring is discarded and counted (`unexpected`),
+  never read as a datagram. Nothing but the loop may push to the ring,
+  which is why `SlotRing.tryPush` stays `@system`.
+- `UvReceived` is the header by value and the data as a scoped slice. It
+  cannot be copied; `core.lifetime.move` carries it past the scope that
+  popped it, `release` returns the buffer early, from any thread, and the
+  destructor returns it otherwise, once.
+- `UvOutbox` owns the requests and bytes of in-flight sends, so no buffer
+  of yours is ever lent to the loop. `send` copies the packet and submits;
+  the oldest slot is reused once its send published, and `full` says every
+  slot is in flight. One thread sends at a time; `close` waits for the
+  sends to publish and frees the memory.
+- `UvLoop.submitAndBlock(request)` and `submitAndWait(loop, request)` take
+  a request by reference and return only after publication, so a request
+  on the stack is sound; both refuse a `callback` or a `completions` ring,
+  whose deliveries would follow the return. The `string` forms of
+  `readFile`, `open`, `stat` and `resolve` copy the text (`toStringz`);
+  `UvAddress.ipv4` and `ipv6` parse a slice.
+- `UvLoop.create` and `close`, `UvInbox.destroy`, `UvLoop.submit` with a
+  pointer, `UvDatagram` and `SlotRing.tryPush` stay `@system`: setup,
+  teardown and the raw ring are the resident's privileged code.
+
+Build the consumer with `-preview=dip1000` to have the compiler hold the
+scope rules; the suite builds itself that way in
+`make -C tests/ant_uv run-dip1000`.
+
 ## Completion
 
 After publication the loop delivers through the targets the request named,
@@ -287,7 +347,8 @@ trigger or event alive.
 ## Fibers
 
 **On worker threads.** Use `submitAndWait` with an event of the Fiber's
-domain, or `submit` followed by `trigger.waitNext()`. If the Fiber is
+domain (the request by reference from `@safe` code, by pointer from
+`@system` code), or `submit` followed by `trigger.waitNext()`. If the Fiber is
 cancelled while it waits, `submitAndWait` cancels the request, holds the
 thread in short sleeps until the loop publishes it, then rethrows
 `FiberCancelled`. A Fiber's cancellation is sticky, so it cannot park again,

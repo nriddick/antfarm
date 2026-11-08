@@ -5,9 +5,10 @@
  + ring, cancellation, close with work in flight, a failing step hook,
  + Fibers on the loop thread, files read by worker Fibers on a GroupHost,
  + readFile's allocators, the per-operation constructors, whole-file reads
- + cancelled in flight, UDP sockets on the loopback, a whole-file read
- + abandoned inside its allocator, and abandonment of an operation that
- + cannot finish. With ANTUV_TEST_IO_URING=1 every loop uses io_uring, and
+ + cancelled in flight, UDP sockets on the loopback and the `@safe` surface
+ + over them, Fibers spawned from `@safe` code, a whole-file read abandoned
+ + inside its allocator, and abandonment of an operation that cannot
+ + finish. With ANTUV_TEST_IO_URING=1 every loop uses io_uring, and
  + create must have built the ring. Built with `AntfarmMimallocV3` and the
  + real mimalloc library, it also reads into mimalloc v3. Linux and Windows.
  +/
@@ -28,6 +29,7 @@ import ant_uv;
 import ant_uv.binding;
 import antfarm.ring;
 import core.atomic;
+import core.lifetime : move;
 import core.stdc.config : c_long;
 import core.stdc.errno : errno;
 import core.stdc.stdio : fflush, printf, stdout;
@@ -64,7 +66,7 @@ extern (C) c_long antuv_c_constant(int which); // C long: 32-bit on Windows
 
 alias Ring = SlotRing!RingElement;
 
-void check(bool condition, string what, int line = __LINE__)
+void check(bool condition, string what, int line = __LINE__) @trusted
 {
     if (!condition)
     {
@@ -74,13 +76,13 @@ void check(bool condition, string what, int line = __LINE__)
     }
 }
 
-void pass(string name)
+void pass(string name) @trusted
 {
     printf("PASS %.*s\n", cast(int) name.length, name.ptr);
     fflush(stdout);
 }
 
-bool waitUntil(scope bool delegate() done, Duration timeout = 10.seconds)
+bool waitUntil(scope bool delegate() done, Duration timeout = 10.seconds) @trusted
 {
     immutable deadline = MonoTime.currTime + timeout;
     while (!done())
@@ -1508,6 +1510,300 @@ void udpLoopback()
         ~ "holds across close, the ring check, and resolution");
 }
 
+// ---- the @safe surface --------------------------------------------------------
+// The shapes @safe code uses over the loopback: an inbox and an outbox,
+// datagrams as values released by destruction, by hand or by the next pop,
+// the blocking submit, the slice address parsers and the string resolve.
+// What stays @system here: the loop's creation and close, the inbox's
+// destruction, and one forged element pushed to exercise the tag registry.
+
+struct SafeSockets
+{
+    int server, client;
+    ushort serverPort, clientPort;
+}
+
+SafeSockets safeOpen(UvLoop loop, UvInbox inbox) @safe
+{
+    SafeSockets s;
+    auto serverOptions = inbox.options(1, 8, 64);
+    auto clientOptions = inbox.options(2, 8, 64);
+    serverOptions.bind = UvAddress.loopback4(0);
+    auto open = UvRequest.udpOpen(serverOptions);
+    check(loop.submitAndBlock(open) == UvSubmit.accepted && open.succeeded,
+        "server open through the blocking submit");
+    s.server = cast(int) open.result;
+    s.serverPort = cast(ushort) open.size;
+
+    clientOptions.bind = UvAddress.loopback4(0);
+    clientOptions.connect = UvAddress.ipv4("127.0.0.1", s.serverPort);
+    check(clientOptions.connect.valid && clientOptions.connect.port == s.serverPort,
+        "an address parsed from a slice");
+    check(!UvAddress.ipv4("300.1.1.1", 1).valid && !UvAddress.ipv6("not::an::address", 1).valid,
+        "slice parse failures are unset");
+    open = UvRequest.udpOpen(clientOptions);
+    check(loop.submitAndBlock(open) == UvSubmit.accepted && open.succeeded,
+        "client open through the blocking submit");
+    s.client = cast(int) open.result;
+    s.clientPort = cast(ushort) open.size;
+    check(s.client != s.server && s.clientPort != 0, "the client's id and port");
+    return s;
+}
+
+// A loopback send publishes within microseconds; a full outbox waits for
+// its oldest slot.
+UvSubmit sendWhenFree(UvOutbox outbox, int socket, scope const(ubyte)[] packet,
+    UvAddress peer = UvAddress.init, uint stampAt = uint.max) @safe
+{
+    immutable deadline = MonoTime.currTime + 10.seconds;
+    for (;;)
+    {
+        immutable r = outbox.send(socket, packet, peer, stampAt);
+        if (r != UvSubmit.full || MonoTime.currTime >= deadline) return r;
+        Thread.sleep(10.usecs);
+    }
+}
+
+void safeExchange(UvLoop loop, UvInbox inbox, UvOutbox outbox, SafeSockets s) @safe
+{
+    import std.bitmanip : Endian, peek;
+
+    // Six stamped packets through four slots: a slot is reused once its
+    // send published, and the stamp lands in the outbox's copy.
+    ubyte[32] packet;
+    foreach (i; 0 .. 6)
+    {
+        packet[8] = cast(ubyte) i;
+        check(sendWhenFree(outbox, s.client, packet[], UvAddress.init, 0) == UvSubmit.accepted,
+            "a stamped send through the outbox");
+    }
+    check(waitUntil(() => loop.udpStats(s.server).received == 6), "six received through the outbox");
+    check(waitUntil(() => outbox.settle() == 0), "every send published");
+    check(outbox.accepted == 6 && outbox.sent == 6 && outbox.failed == 0 && outbox.lastError == 0,
+        "the outbox's counts");
+    UvAddress sender;
+    {
+        UvReceived d;
+        foreach (i; 0 .. 6)
+        {
+            check(inbox.tryPop(d) && d.held && d.tag == 1 && d.socket == s.server && d.flags == 0,
+                "a datagram per send, with its header");
+            auto bytes = d.bytes();
+            check(bytes.length == packet.length && bytes[8] == i, "its data");
+            immutable stamp = bytes.peek!(long, Endian.littleEndian)();
+            check(stamp > 0 && stamp <= d.arrivalNanos, "stamped before arrival");
+            sender = d.peer;
+        }
+        check(!inbox.tryPop(d) && !d.held, "the ring is empty, and the pop released the last one");
+    }
+    check(inbox.popped == 6 && sender.port == s.clientPort && sender.family == UvFamily.ipv4,
+        "the sender");
+
+    // A reply reaches the client's tag. The value is moved out of its scope;
+    // the source holds nothing, the destination reads the datagram and
+    // releases it by hand, idempotently.
+    UvReceived kept;
+    {
+        UvReceived d;
+        check(sendWhenFree(outbox, s.server, cast(const(ubyte)[]) "pong", sender) == UvSubmit.accepted,
+            "a reply through the outbox");
+        check(waitUntil(() => loop.udpStats(s.client).received == 1), "the reply arrived");
+        check(inbox.tryPop(d) && d.tag == 2 && d.bytes == cast(const(ubyte)[]) "pong", "the reply");
+        kept = move(d);
+        check(!d.held && kept.held && kept.bytes.length == 4, "moved out: the source holds nothing");
+    }
+    check(kept.bytes == cast(const(ubyte)[]) "pong" && kept.peer.port == s.serverPort,
+        "the moved value reads its datagram");
+    kept.release();
+    check(!kept.held && kept.bytes.length == 0, "released by hand: empty");
+    kept.release();
+
+    // Eight datagrams on the ring exhaust a window of eight and the ninth is
+    // dropped; values hold them past the pop; destroying the values frees
+    // the window and the next one arrives.
+    {
+        UvReceived[8] held;
+        foreach (i; 0 .. 9)
+        {
+            packet[8] = cast(ubyte)(10 + i);
+            check(sendWhenFree(outbox, s.client, packet[]) == UvSubmit.accepted, "a burst send");
+        }
+        check(waitUntil(() {
+            auto st = loop.udpStats(s.server);
+            return st.received + st.dropped == 15;
+        }), "the burst delivered or dropped");
+        check(loop.udpStats(s.server).received == 14 && loop.udpStats(s.server).dropped == 1,
+            "eight delivered, one dropped");
+        foreach (i; 0 .. 8)
+            check(inbox.tryPop(held[i]) && held[i].held && held[i].bytes[8] == 10 + i,
+                "eight held in values, in order");
+        UvReceived none;
+        check(!inbox.tryPop(none), "nothing more on the ring");
+        packet[8] = 99;
+        check(sendWhenFree(outbox, s.client, packet[]) == UvSubmit.accepted,
+            "a send while the values hold the window");
+        check(waitUntil(() => loop.udpStats(s.server).dropped == 2), "dropped while held");
+    }
+    packet[8] = 100;
+    check(sendWhenFree(outbox, s.client, packet[]) == UvSubmit.accepted,
+        "a send after the values were destroyed");
+    check(waitUntil(() => loop.udpStats(s.server).received == 15),
+        "delivered once destruction released the window");
+    {
+        UvReceived d;
+        check(inbox.tryPop(d) && d.bytes[8] == 100, "the datagram after the release");
+    }
+
+    // Resolution from a string; the blocking submit's refusal of a callback;
+    // the clock and the formatter from @safe.
+    UvAddress[4] found;
+    auto resolve = UvRequest.resolve("localhost", 7, found[]);
+    check(loop.submitAndBlock(resolve) == UvSubmit.accepted && resolve.result >= 1
+        && found[0].valid && found[0].port == 7, "localhost resolved from a string");
+    auto nop = UvRequest.nop();
+    nop.callback = &noopCallback;
+    check(loop.submitAndBlock(nop) == UvSubmit.invalid, "the blocking submit refuses a callback");
+    nop = UvRequest.nop();
+    check(loop.submitAndBlock(nop) == UvSubmit.accepted && nop.done, "a nop through the blocking submit");
+    check(UvLoop.nanos() > 0, "the clock from @safe");
+    char[64] text;
+    check(UvAddress.ipv6("::1", 80).format(text[]) == "[::1]:80", "formatting from @safe");
+}
+
+void safeAfterForgery(UvLoop loop, UvInbox inbox, UvOutbox outbox, SafeSockets s) @safe
+{
+    ubyte[16] packet;
+    packet[0] = 42;
+    check(sendWhenFree(outbox, s.client, packet[]) == UvSubmit.accepted, "a send behind the forged element");
+    check(waitUntil(() => loop.udpStats(s.server).received == 16), "it arrived");
+    {
+        UvReceived d;
+        check(inbox.tryPop(d) && d.bytes.length == 16 && d.bytes[0] == 42,
+            "the pop skipped the forged element to the datagram");
+        check(inbox.unexpected == 1, "the forged element counted as unexpected");
+    }
+    auto close = UvRequest.udpClose(s.client);
+    check(loop.submitAndBlock(close) == UvSubmit.accepted && close.succeeded, "client close from @safe");
+    close = UvRequest.udpClose(s.server);
+    check(loop.submitAndBlock(close) == UvSubmit.accepted && close.succeeded, "server close from @safe");
+    outbox.close();
+    check(outbox.send(s.client, packet[]) == UvSubmit.invalid, "a closed outbox refuses");
+}
+
+// DIP1000 is on when @safe code may take a local's address into a scope
+// pointer; no version identifier says so.
+enum dip1000Enabled = __traits(compiles, () @safe { int x; scope int* p = &x; });
+
+static if (dip1000Enabled)
+{
+    // Under DIP1000 a datagram's bytes cannot leave the value holding them,
+    // neither returned nor assigned to a longer-lived slice, while reading
+    // them in place is fine. (A nested function with a `ref` parameter
+    // would have `return` inferred for it, so the checks use locals.)
+    static assert(!__traits(compiles, {
+        static const(ubyte)[] leak() @safe { UvReceived d; return d.bytes(); }
+    }));
+    static assert(!__traits(compiles, {
+        static const(ubyte)[] leak() @safe
+        {
+            const(ubyte)[] outer;
+            {
+                UvReceived d;
+                outer = d.bytes();
+            }
+            return outer;
+        }
+    }));
+    static assert(__traits(compiles, {
+        static size_t fine() @safe
+        {
+            UvReceived d;
+            auto bytes = d.bytes();
+            return bytes.length;
+        }
+    }));
+}
+
+void safeUdpLoopback()
+{
+    auto loop = UvLoop.create(testOptions());
+    auto inbox = new UvInbox(64);
+    check(inbox.capacity == 64, "the inbox's ring");
+    auto sockets = safeOpen(loop, inbox);
+    auto outbox = new UvOutbox(loop, 4, 64);
+    check(outbox.slots == 4 && outbox.capacity == 64, "the outbox's shape");
+    safeExchange(loop, inbox, outbox, sockets);
+    // An element from anywhere but the loop is discarded by tag, never read
+    // as a datagram.
+    {
+        RingElement forged;
+        forged.tag = 77;
+        forged.pointer = 0xDEAD;
+        check(inbox.ring.tryPush(forged) == RingPush.pushed, "a forged element pushed by @system code");
+    }
+    safeAfterForgery(loop, inbox, outbox, sockets);
+    // The registry's refusals: windows beyond the ring, and a zero window.
+    bool threw;
+    try inbox.options(3, 64);
+    catch (Exception) threw = true;
+    check(threw, "windows beyond the ring's capacity are refused");
+    threw = false;
+    try inbox.options(1, 0);
+    catch (Exception) threw = true;
+    check(threw, "a zero window is refused");
+    auto report = loop.close();
+    check(report.loopClose == 0 && report.abandoned == 0 && report.failure is null,
+        "close report after the @safe surface");
+    inbox.destroy();
+    pass("the @safe surface on the loopback: inbox and outbox, values released by destruction, "
+        ~ "by hand and by the next pop, a moved value, the held window, the blocking submit, "
+        ~ "parsers from slices, a forged element discarded");
+}
+
+// A Fiber on the loop thread spawned from @safe code: the wait by reference
+// for a timer and a stat from a string, a sleep, a semaphore, and the
+// refusal of a request that names a callback.
+void safeFiberWait(string path)
+{
+    UvFibers fibers;
+    shared int finished;
+    UvLoopOptions options = testOptions();
+    // `create` returns once the loop serves, before the start hook has
+    // run, so the Fiber is spawned from the hook itself.
+    options.start = () {
+        auto loop = UvLoop.current;
+        fibers = new UvFibers(loop);
+        fibers.spawn(() @safe {
+            auto domain = fibers.domain;
+            auto r = UvRequest.timer(1);
+            r.event = new FiberEvent(domain);
+            check(submitAndWait(loop, r) == UvSubmit.accepted && r.done, "a timer awaited by reference");
+            r = UvRequest.stat(path);
+            r.event = new FiberEvent(domain);
+            check(submitAndWait(loop, r) == UvSubmit.accepted && r.succeeded && r.size == 4096,
+                "stat from a string, awaited by reference");
+            r = UvRequest.nop();
+            r.event = new FiberEvent(domain);
+            r.callback = &noopCallback;
+            check(submitAndWait(loop, r) == UvSubmit.invalid, "the wait refuses a callback");
+            FiberDomain.sleepFor(1.msecs);
+            auto gate = new FiberSemaphore(domain, 1);
+            gate.wait();
+            gate.post();
+            check(gate.available == 1, "a semaphore from @safe");
+            atomicStore(finished, 1);
+        });
+    };
+    options.step = () => fibers.step();
+    options.stop = () { fibers.shutdown(); };
+    auto loop = UvLoop.create(options);
+    check(waitUntil(() => atomicLoad(finished) == 1), "the @safe Fiber finished");
+    auto report = loop.close();
+    check(report.failure is null, "close after the @safe Fiber");
+    pass("@safe Fiber bodies on the loop thread: spawn, the wait by reference for a timer and a "
+        ~ "stat from a string, a sleep, a semaphore, a callback refused");
+}
+
 // A whole-file read abandoned inside its allocator, which waits for the
 // thread that calls close: close abandons the job, the job frees the block
 // itself once the allocator returns, and abandonedJobs says when it ended.
@@ -1698,11 +1994,13 @@ int main()
     closeInFlight();
     stepFailure();
     loopFibers(paths[7], contents[7]);
+    safeFiberWait(statPath);
     workerFiberReads(paths, contents);
     readFileAllocators(dir, paths[8], contents[8], paths[0]);
     constructorsAndDefaultAllocator(paths[8], contents[8]);
     readFileCancelStorm(paths[8], contents[8]);
     udpLoopback();
+    safeUdpLoopback();
     version (AntfarmMimallocV3) mimallocReads(paths[8], contents[8]);
     abandonReadFileInAllocator(paths[8]);
     abandonBlocked(dir);

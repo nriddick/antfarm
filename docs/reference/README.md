@@ -135,6 +135,8 @@ Parallel loop adapters are a separate module:
 | The loop thread: lifecycle, placement and failures | `UvLoop`, `UvLoop.create`, `UvLoop.close`, `UvLoop.current`, `UvLoop.summary`, `UvLoop.auxThreads`, `UvLoopOptions`, `UvStepResult`, `UvAuxPriority`, `UvAuxThread`, `UvCloseReport`, `UvLoopException`, `noProcessor` | [ant_uv/README.md](../../ant_uv/README.md), [event loop design](../design/event-loop.md#31-the-loop-thread) |
 | Requests and their completion | `UvRequest`, `UvOp`, `UvRequestState`, `UvSubmit`, `UvCompletionCallback`, `UvLoop.submit`, `UvLoop.cancel`, `UvLoop.wake` | [event loop design](../design/event-loop.md#33-completion-delivery) |
 | Fibers and the loop | `UvFibers`, `submitAndWait` | [ant_uv/README.md](../../ant_uv/README.md) |
+| UDP sockets | `UvUdpOptions`, `UvDatagram`, `UvDatagramFlag`, `UvAddress`, `UvFamily`, `UvUdpStats`, `UvLoop.udpStats`, `UvLoop.nanos` | [ant_uv/README.md](../../ant_uv/README.md#udp-sockets), [event loop design](../design/event-loop.md#9-221-udp-sockets) |
+| The `@safe` surface | `UvInbox`, `UvReceived`, `UvOutbox`, `UvLoop.submitAndBlock` | [ant_uv/README.md](../../ant_uv/README.md#from-safe-code), [event loop design](../design/event-loop.md#912-the-safe-surface-and-its-trusted-contract) |
 | Files the loop allocates for `readFile` | `UvBuffer`, `UvRequest.takeBuffer`, `UvRequest.freeBuffer`, `UvRequest.ownsBuffer`, `UvRequest.allocator`, `UvRequest.alignment`, `ActorAllocator` | [ant_uv/README.md](../../ant_uv/README.md#where-readfile-puts-a-file), [loading files](../guide/loading-files.md#where-the-bytes-live) |
 
 ## Group host

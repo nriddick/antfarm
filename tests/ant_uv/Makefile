@@ -21,7 +21,7 @@ IMPORTS := -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$
 MIMALLOC_LIBRARY := $(ROOT)/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
-.PHONY: run run-iouring run-dmd run-tsan run-mimalloc clean
+.PHONY: run run-iouring run-dmd run-tsan run-dip1000 run-mimalloc clean
 
 $(UV_LIBRARY):
 	python3 $(ROOT)/scripts/build-libuv.py
@@ -48,6 +48,13 @@ run-tsan: layout.o
 	ldc2 -g -O1 -fsanitize=thread -d-version=TSan -i $(IMPORTS) uv_test.d layout.o $(UV_LIBS) -of=uv_test_tsan -od=.obj-tsan
 	TSAN_OPTIONS='$(TSAN_OPTIONS) suppressions=tsan.supp' ./uv_test_tsan
 
+# The suite built with -preview=dip1000, which holds the @safe surface's
+# scope rules (ant_uv.safe) at compile time and runs its compile-time
+# escape checks.
+run-dip1000: layout.o
+	$(DC) $(DFLAGS) -preview=dip1000 -i $(IMPORTS) uv_test.d layout.o $(UV_LIBS) -of=uv_test_dip1000 -od=.obj-dip1000
+	./uv_test_dip1000
+
 $(MIMALLOC_LIBRARY):
 	$(MAKE) -C $(ROOT)/tests/actors .build/mimalloc-v3.5.3/libmimalloc.a
 
@@ -57,5 +64,5 @@ run-mimalloc: layout.o $(MIMALLOC_LIBRARY)
 	./uv_test_mimalloc
 
 clean:
-	rm -rf uv_test uv_test_dmd uv_test_tsan uv_test_mimalloc layout.o .obj-ldc .obj-dmd \
-		.obj-tsan .obj-mimalloc
+	rm -rf uv_test uv_test_dmd uv_test_tsan uv_test_dip1000 uv_test_mimalloc layout.o .obj-ldc \
+		.obj-dmd .obj-tsan .obj-dip1000 .obj-mimalloc

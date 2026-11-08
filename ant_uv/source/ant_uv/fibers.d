@@ -32,6 +32,21 @@ import core.time : Duration, MonoTime, seconds;
 /// serves the loop; on any other thread it holds the thread in short sleeps.
 /// Queued work and timers publish at once on cancel; file work libuv already
 /// started holds the wait until it finishes.
+///
+/// The `ref` form is `@trusted`: however the call ends, the loop holds the
+/// request no longer, so a request on the Fiber's stack is sound. It
+/// refuses a request that names a `callback` or a `completions` ring
+/// (`invalid`), whose deliveries would follow the return. The pointer form
+/// is the same wait for `@system` callers and leaves that combination to
+/// them, as the ownership rules do: a callback that only counts is
+/// harmless after the Fiber moved on, one that reads the request is not.
+UvSubmit submitAndWait(UvLoop loop, scope ref UvRequest request) @trusted
+{
+    if (request.callback !is null || request.completions !is null) return UvSubmit.invalid;
+    return submitAndWait(loop, &request);
+}
+
+/// ditto
 UvSubmit submitAndWait(UvLoop loop, UvRequest* request)
 {
     import core.time : usecs;
@@ -132,10 +147,10 @@ final class UvFibers
     }
 
     /// The domain: spawn into it, and make `FiberEvent`s for its Fibers.
-    @property FiberDomain domain() nothrow @nogc { return domain_; }
+    @property FiberDomain domain() nothrow @nogc @safe { return domain_; }
 
     /// Spawn a Fiber that runs on the loop thread.
-    FiberTask spawn(void delegate() body, size_t stackSize = 0)
+    FiberTask spawn(void delegate() body, size_t stackSize = 0) @safe
     {
         auto task = domain_.spawn(body, stackSize);
         loop_.wake();
@@ -143,7 +158,7 @@ final class UvFibers
     }
 
     /// ditto
-    TaskHandle spawnHandle(void delegate() body, size_t stackSize = 0)
+    TaskHandle spawnHandle(void delegate() body, size_t stackSize = 0) @safe
     {
         auto handle = domain_.spawnHandle(body, stackSize);
         loop_.wake();

@@ -169,7 +169,10 @@ struct SlotRing(T = RingElement)
 
     /// Publish `value`, or return `full` or `closed` and leave it with the
     /// caller. Any thread. Lock-free: a failed CAS means another producer
-    /// reserved, and the retry reloads the cursor.
+    /// reserved, and the retry reloads the cursor. `@system` on purpose: a
+    /// consumer such as `ant_uv`'s `UvInbox` trusts that every element on
+    /// its ring came from the loop, which holds only while `@safe` code
+    /// cannot push.
     RingPush tryPush(ref const T value) nothrow @nogc @system
     {
         return pushImpl(value);
@@ -214,8 +217,11 @@ struct SlotRing(T = RingElement)
 
     /// Copy out the oldest published element and free its slot. False when
     /// the next position is empty or reserved but not yet published, which
-    /// is not the same as drained (see `drained`). Any thread.
-    bool tryPop(ref T value) nothrow @nogc @system
+    /// is not the same as drained (see `drained`). Any thread. `@trusted`:
+    /// the element is plain data copied out of the ring's own slot, so no
+    /// caller input can break it; the same holds for `close` and the
+    /// readers below.
+    bool tryPop(ref T value) nothrow @nogc @trusted
     {
         auto position = atomicLoad!(MemoryOrder.raw)(dequeue_);
         Slot* slot;
@@ -242,13 +248,13 @@ struct SlotRing(T = RingElement)
 
     /// Refuse every later push with `RingPush.closed`. Pushes that reserved
     /// before the close still publish. Idempotent; any thread.
-    void close() nothrow @nogc @system
+    void close() nothrow @nogc @trusted
     {
         atomicOp!"|="(enqueue_, closedBit);
     }
 
     /// True once `close` ran.
-    @property bool closed() const nothrow @nogc @system
+    @property bool closed() const nothrow @nogc @trusted
     {
         return (atomicLoad!(MemoryOrder.acq)(enqueue_) & closedBit) != 0;
     }
@@ -256,7 +262,7 @@ struct SlotRing(T = RingElement)
     /// True once `close` ran and every position reserved before it has been
     /// claimed by a consumer. With several consumers, a consumer may still be
     /// copying its last element out; nothing remains to be popped.
-    @property bool drained() const nothrow @nogc @system
+    @property bool drained() const nothrow @nogc @trusted
     {
         immutable word = atomicLoad!(MemoryOrder.acq)(enqueue_);
         if ((word & closedBit) == 0) return false;
@@ -266,7 +272,7 @@ struct SlotRing(T = RingElement)
     /// Reserved minus claimed positions: elements published or about to be.
     /// A snapshot of two cursors, exact only when no thread is pushing or
     /// popping.
-    @property size_t length() const nothrow @nogc @system
+    @property size_t length() const nothrow @nogc @trusted
     {
         immutable claimed = atomicLoad!(MemoryOrder.acq)(dequeue_);
         immutable reserved = atomicLoad!(MemoryOrder.acq)(enqueue_) & ~closedBit;
