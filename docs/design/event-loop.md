@@ -19,7 +19,8 @@ UDP sockets of section 9, in
 `tests/ring/`, `tests/ant_uv/` and `tools/perf/slot_ring.d`. Where the
 implementation settled a point the plan left open, or departed from it, this
 page now says what was built; the departures are listed in section 8. On
-`2.2.1-progress`: the `@safe` surface of section 9.12.
+`2.2.1-progress`: the `@safe` surface of section 9.12 and the TCP streams
+of section 10.
 
 The line this design draws: **Ant Farm supplies a ring and an optional,
 separately linked subpackage that owns one libuv loop thread; the
@@ -936,9 +937,8 @@ The worker policy verbs stay unused; the arithmetic gains its first user.
   and reopened.
 - IPv6 scope handling across the two platforms, which `UvAddress` carries
   but no consumer exercises yet.
-- TCP streams, pipes and process spawn: the rest of 2.2.1, sharing the
-  socket table and taking the stream shape of `uv_read_start`, which is
-  the receive path above with a byte stream in place of datagrams.
+- Pipes and process spawn: the rest of 2.2.1, sharing the socket table.
+  TCP streams are section 10.
 
 ### 9.12 The `@safe` surface and its trusted contract
 
@@ -1000,6 +1000,107 @@ caller, and what they trust is the scheduler itself.
 `create`, `destroy` and `tryPush`. Setup and teardown are the resident's
 privileged code, and `tryPush` is the provenance guarantee the inbox rests
 on. Open: whether `UvRequest.takeBuffer` should be `return scope`, so that
-a request built over a local can hand its block out under DIP1000; and the
-TCP streams, which should take the inbox's shape from the start, a read
-chunk arriving as the same kind of scoped value a datagram does.
+a request built over a local can hand its block out under DIP1000. The TCP
+streams of section 10 took the inbox's shape: a chunk arrives as the same
+kind of scoped value a datagram does, and a stream's events as values that
+hold nothing.
+
+## 10. 2.2.1: TCP streams
+
+Status: designed and implemented on 2026-11-08, after the `@safe` surface,
+whose shape the streams take. The loopback suite covers them on Windows
+and Linux. Pipes and process spawn remain.
+
+### 10.1 Shape
+
+A TCP listener and a TCP stream are entries in the table UDP sockets use,
+with the same ids, the same ring delivery, the same window and the same
+header for what arrives. The decisions:
+
+- **Two-step accept.** A listener's element names the accepted stream and
+  its peer; the application then submits `tcpStart` with the ring, window
+  and chunk size that stream should have, or `tcpClose` to refuse it. One
+  extra request per connection buys the application the choice of where a
+  connection's bytes go, and a refusal that reads nothing.
+- **Chunks are datagrams.** A stream's receive window is a UDP socket's:
+  buffers of a header and `chunkBytes`, the same `UvDatagram` header with
+  `peer` the stream's peer, the same `UvReceived` on the `@safe` side.
+  What differs is the rule when the window is exhausted.
+- **Backpressure by pausing, not dropping.** The window is the stream's
+  receive credit: when every buffer is held the loop calls `uv_read_stop`,
+  and resumes once a buffer returns. A release says nothing to the loop,
+  so while any stream is paused the loop's iteration deadline is capped at
+  a millisecond, the cadence the pending-delivery queue already uses, and
+  each iteration rechecks the paused windows. The cost is one scan of the
+  table per millisecond while a stream is paused, nothing otherwise. The
+  alternative, a wake from `release`, would need the window to reach the
+  loop from any thread after the loop may have closed, and was rejected.
+- **Events as pointer-free elements.** An accepted connection, the end of
+  a stream and a read error are elements with `pointer` 0: the socket id
+  and the kind in `payload[0]`, the libuv code or the packed peer in the
+  rest. The rule a raw consumer follows is that an element with `pointer`
+  0 is never a datagram. `UvInbox.tryPop` decodes them into `UvReceived`
+  with `held` false, so one loop handles everything a ring carries. An
+  event is delivered through the pending queue when the ring is full, so
+  the end of a stream is never lost.
+- **Writes** try `uv_try_write` first and publish at once when the socket
+  takes everything; otherwise the rest waits in libuv with the request's
+  credit. A result is the whole length or an error. The bound on writes in
+  flight is the application's, which the outbox's slots provide.
+- **Triggers on sockets.** Every socket kind takes a
+  `FiberGenerationTrigger` advanced once per element pushed, once the
+  element is on the ring, so a Fiber waits with `waitNext` and then pops.
+  The handshake, chat and file transfer the first consumer plans are Fiber
+  shaped, and this is what they wait on.
+- **Nagle off by default.** The streams carry control traffic that waits
+  on nothing; `noDelay` is an option for the case that wants batching.
+- **Close by family.** `udpClose` on a stream and `tcpClose` on a UDP
+  socket are `UV_EINVAL`. A closed stream's pending writes publish
+  `UV_ECANCELED`; a connect in flight is cancelled by closing its socket,
+  and publishes `UV_ECANCELED`; chunks held past the close keep the window
+  alive, as datagrams do.
+- **A listener that cannot place a connection** accepts and closes it, so
+  the kernel's queue moves on, and counts it in `dropped`: the table is
+  full, or its ring was. A listener reserves `backlog` ring slots.
+
+### 10.2 Requests
+
+| Request | Inputs | Outputs |
+| --- | --- | --- |
+| `tcpListen(&options)` | `bind`, `backlog`, `completions`, `tag`, `ipv6Only`, `trigger` | `result` = the listener's id, `size` = the port bound |
+| `tcpConnect(&options)` | `connect`, optional `bind`, the stream options | `result` = the stream's id, `size` = the local port; reading has started |
+| `tcpStart(socket, &options)` | an accepted stream; `completions`, `tag`, `window`, `chunkBytes`, `noDelay`, `keepAliveSeconds`, buffer sizes, `trigger` | `result` = the id; `UV_EINVAL` when it reads already |
+| `tcpWrite(socket, bytes)` | the bytes, valid until publication | `result` = bytes written |
+| `tcpShutdown(socket)` | | `result` |
+| `tcpClose(socket)` | a listener or a stream | `result`, once the handle is closed |
+
+`UvTcpOptions` is one record for the three setup requests; `UvInbox`
+hands out the listener's and the stream's forms with the ring and the tag
+set. `UvSocketStats` replaces `UvUdpStats` (which stays as its alias) with
+one more counter, the times a stream paused.
+
+### 10.3 Validation
+
+The suite's loopback case: a listener on any port; a connect and the
+accept event naming the server-side stream and the client's port; a
+second `tcpStart` refused; chunks both ways with their peers and arrival
+stamps; a kibibyte into a window of four 64-byte chunks, the reader
+pausing, the held values holding the window, their destruction resuming
+the read, every byte arriving in order; the end of the stream after the
+peer's shutdown, a write still possible from the other side, a write on
+the shut side failing; the end of the stream after the peer's close, a
+write to a closed stream `UV_EBADF`, `udpClose` refusing a stream; a
+connect with no listener failing and leaving the table clean. A second
+case drives a loop-thread Fiber from one trigger shared by a listener and
+a stream. Both run under LDC and DMD on Windows and Linux, and under the
+ThreadSanitizer and DIP1000 builds.
+
+### 10.4 Open
+
+- Pipes and process spawn: the next transports, sharing the table and the
+  stream shape, as the first consumer needs them.
+- `uv_stream_get_write_queue_size` as a statistic, for an application
+  that wants the kernel-side backlog rather than its own count.
+- The C ABI for the loop stays deferred (section 7 of the ABI 2 page).
+- Whether a stream should offer `recvmmsg`-style batching of small
+  chunks; the per-chunk element costs what a datagram's does.

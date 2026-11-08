@@ -126,6 +126,28 @@ enum UvOp : ubyte
     /// `buffer`, `length` of them, each with `address.port`; `result` is how
     /// many were written.
     resolve,
+    /// Listen for TCP connections as `tcpOptions` says: bind, listen, and
+    /// push one element per accepted connection on the ring; `result` is the
+    /// listener's socket id and `size` the port bound. An accepted stream
+    /// reads nothing until `tcpStart` names its ring and window; `tcpClose`
+    /// refuses it.
+    tcpListen,
+    /// Connect a TCP stream to `tcpOptions.connect` and start reading into
+    /// its window; `result` is the socket id and `size` the local port.
+    tcpConnect,
+    /// Start reading accepted stream `file` as `tcpOptions` says; `result`
+    /// is the socket id.
+    tcpStart,
+    /// Write `buffer[0 .. length]` to stream `file`; `result` is the bytes
+    /// written, all of them unless the write failed.
+    tcpWrite,
+    /// Shut the write side of stream `file` once its pending writes are out;
+    /// reading continues until the peer's end of stream.
+    tcpShutdown,
+    /// Close listener or stream `file`: stop reading, cancel pending writes
+    /// (they publish `UV_ECANCELED`), close the handle, and publish once it
+    /// is closed. Chunks the application still holds stay valid.
+    tcpClose,
 }
 
 /// Where a `UvRequest` is in its life. Read it with `UvRequest.state`.
@@ -188,7 +210,8 @@ struct UvRequest
     int flags;
     /// `open`: permission bits for a created file (0644 by default).
     int mode = 0x1A4;
-    /// `close`, `read`, `write`, `fstat`: the file.
+    /// `close`, `read`, `write`, `fstat`: the file. `udpSend`, `udpClose`,
+    /// `tcpStart`, `tcpWrite`, `tcpShutdown`, `tcpClose`: the socket.
     int file = -1;
     /// `open`, `stat`, `readFile`: a NUL-terminated path, valid until
     /// publication.
@@ -228,6 +251,9 @@ struct UvRequest
     UvAddress address;
     /// `udpOpen`: how to open the socket; the caller's until publication.
     const(UvUdpOptions)* udpOptions;
+    /// `tcpListen`, `tcpConnect`, `tcpStart`: how to set the socket up; the
+    /// caller's until publication.
+    const(UvTcpOptions)* tcpOptions;
     /// `udpSend`: unless `uint.max`, the loop writes its transmit time,
     /// `UvLoop.nanos` as a little-endian 64-bit integer, at
     /// `buffer[stampAt .. stampAt + 8]` just before the system call.
@@ -548,6 +574,87 @@ struct UvRequest
         import std.string : toStringz;
         return resolve(toStringz(host), port, into);
     }
+
+    /// Listen for TCP connections; `options` stays the caller's until
+    /// publication. The `ref` forms here are `@trusted` as `udpOpen`'s is.
+    static UvRequest tcpListen(return scope const(UvTcpOptions)* options) nothrow @nogc @safe
+    {
+        UvRequest r;
+        r.op = UvOp.tcpListen;
+        r.tcpOptions = options;
+        return r;
+    }
+
+    /// ditto
+    static UvRequest tcpListen(return ref const UvTcpOptions options) nothrow @nogc @trusted
+    {
+        return tcpListen(&options);
+    }
+
+    /// Connect a TCP stream to `options.connect`; `options` stays the
+    /// caller's until publication.
+    static UvRequest tcpConnect(return scope const(UvTcpOptions)* options) nothrow @nogc @safe
+    {
+        UvRequest r;
+        r.op = UvOp.tcpConnect;
+        r.tcpOptions = options;
+        return r;
+    }
+
+    /// ditto
+    static UvRequest tcpConnect(return ref const UvTcpOptions options) nothrow @nogc @trusted
+    {
+        return tcpConnect(&options);
+    }
+
+    /// Start reading accepted stream `socket` as `options` says; `options`
+    /// stays the caller's until publication.
+    static UvRequest tcpStart(int socket, return scope const(UvTcpOptions)* options)
+        nothrow @nogc @safe
+    {
+        UvRequest r;
+        r.op = UvOp.tcpStart;
+        r.file = socket;
+        r.tcpOptions = options;
+        return r;
+    }
+
+    /// ditto
+    static UvRequest tcpStart(int socket, return ref const UvTcpOptions options)
+        nothrow @nogc @trusted
+    {
+        return tcpStart(socket, &options);
+    }
+
+    /// Write `bytes` to stream `socket`; `bytes` stays the caller's until
+    /// publication.
+    static UvRequest tcpWrite(int socket, return scope const(ubyte)[] bytes) nothrow @nogc @trusted
+    {
+        UvRequest r;
+        r.op = UvOp.tcpWrite;
+        r.file = socket;
+        r.buffer = cast(ubyte*) bytes.ptr; // only read
+        r.length = bytes.length;
+        return r;
+    }
+
+    /// Shut the write side of stream `socket`.
+    static UvRequest tcpShutdown(int socket) nothrow @nogc @safe
+    {
+        UvRequest r;
+        r.op = UvOp.tcpShutdown;
+        r.file = socket;
+        return r;
+    }
+
+    /// Close listener or stream `socket`.
+    static UvRequest tcpClose(int socket) nothrow @nogc @safe
+    {
+        UvRequest r;
+        r.op = UvOp.tcpClose;
+        r.file = socket;
+        return r;
+    }
 }
 
 /// A file that `readFile` read into a block the loop allocated, handed over
@@ -814,20 +921,118 @@ struct UvUdpOptions
     const(char)* multicastGroup;
     /// The interface address for the group, or null for the OS's choice.
     const(char)* multicastInterface;
+    /// Advanced once per element the socket pushes on the ring, so a Fiber
+    /// can `waitNext` and then pop; null for none. Kept alive by its owner.
+    FiberGenerationTrigger trigger;
 }
 
-/// `UvDatagram.flags` bits.
+/// How `tcpListen`, `tcpConnect` and `tcpStart` set a socket up. The record
+/// is the caller's until the request publishes; the ring must outlive the
+/// socket.
+struct UvTcpOptions
+{
+    /// `tcpListen`: the local address, port 0 for any. `tcpConnect`: an
+    /// optional local address to bind first.
+    UvAddress bind;
+    /// `tcpConnect`: the peer.
+    UvAddress connect;
+    /// The ring the socket delivers to: one element per accepted connection
+    /// for a listener; one per chunk or stream event for a stream.
+    SlotRing!RingElement* completions;
+    /// The element tag that names this socket on the ring.
+    ulong tag;
+    /// A stream's receive buffers, fixed for its life. When every buffer is
+    /// held the loop stops reading, and resumes within about a millisecond
+    /// of a release; nothing is dropped. A listener reserves `backlog` ring
+    /// slots instead.
+    uint window = 16;
+    /// Data bytes per receive buffer: the most one chunk carries.
+    uint chunkBytes = 4096;
+    /// `tcpListen`: pending connections the kernel queues.
+    int backlog = 128;
+    /// Disable Nagle's algorithm so a write goes out at once. On by
+    /// default: the streams carry control traffic that waits on nothing.
+    bool noDelay = true;
+    /// TCP keep-alive probes after this many idle seconds; 0 leaves them off.
+    uint keepAliveSeconds;
+    /// An IPv6 bind takes no IPv4-mapped traffic.
+    bool ipv6Only;
+    /// The kernel's receive buffer; 0 leaves the OS default.
+    int receiveBufferSize;
+    /// The kernel's send buffer; 0 leaves the OS default.
+    int sendBufferSize;
+    /// Advanced once per element the socket pushes on the ring, so a Fiber
+    /// can `waitNext` and then pop; null for none. Kept alive by its owner.
+    FiberGenerationTrigger trigger;
+}
+
+/// `UvDatagram.flags` bits, and the kinds of stream event. A stream event is
+/// an element with `pointer` 0 and no buffer: `payload[0]` holds the socket
+/// id in its low 32 bits and the kind above them, `payload[1]` the libuv
+/// status of an error, and `payload[1 .. 4]` the peer of an accepted
+/// connection (`unpackAddress`). `UvReceived` presents them by value.
 enum UvDatagramFlag : uint
 {
     /// The OS cut the datagram to the socket's `maxDatagram`.
     truncated = 1,
+    /// A stream event: the peer ended its side. Reading stopped; the stream
+    /// may still be written to until it is closed.
+    endOfStream = 2,
+    /// A stream event: reading failed with the libuv code in `status`, and
+    /// stopped.
+    streamError = 4,
+    /// A listener's event: a connection was accepted as the stream named
+    /// by `socket`, from `peer`. It reads nothing until `tcpStart`.
+    accepted = 8,
+}
+
+/// The kind of a stream event, in bits 32 and up of its element's
+/// `payload[0]`.
+enum StreamEvent : uint
+{
+    /// A listener accepted a connection: the new stream's id and its peer.
+    accepted = 1,
+    /// The peer ended its side of the stream.
+    endOfStream = 2,
+    /// Reading failed with the libuv code in `payload[1]`.
+    error = 3,
+}
+
+/// Pack an address into `payload[1 .. 4]` of a stream event's element.
+void packAddress(ref const UvAddress a, ref ulong[4] payload) nothrow @nogc @safe
+{
+    payload[1] = cast(ulong) a.family | (cast(ulong) a.port << 16) | (cast(ulong) a.scope_ << 32);
+    ulong lo, hi;
+    foreach (i; 0 .. 8)
+    {
+        lo |= cast(ulong) a.bytes[i] << (8 * i);
+        hi |= cast(ulong) a.bytes[8 + i] << (8 * i);
+    }
+    payload[2] = lo;
+    payload[3] = hi;
+}
+
+/// The address `packAddress` put in `payload`.
+UvAddress unpackAddress(ref const ulong[4] payload) nothrow @nogc @safe
+{
+    UvAddress a;
+    a.family = cast(UvFamily)(payload[1] & 0xFFFF);
+    a.port = cast(ushort)(payload[1] >> 16);
+    a.scope_ = cast(uint)(payload[1] >> 32);
+    foreach (i; 0 .. 8)
+    {
+        a.bytes[i] = cast(ubyte)(payload[2] >> (8 * i));
+        a.bytes[8 + i] = cast(ubyte)(payload[3] >> (8 * i));
+    }
+    return a;
 }
 
 /// A received datagram: the first 64 bytes of one of its socket's receive
 /// buffers, with the data at offset 64. The consumer's from the pop until
-/// `release`. `@safe` code never sees this type: it pops `UvReceived` from
-/// a `UvInbox` (`ant_uv.safe`), which carries the same header by value and
-/// releases the buffer once.
+/// `release`. A stream's chunks use the same header, with `peer` the
+/// stream's peer. `@safe` code never sees this type: it pops `UvReceived`
+/// from a `UvInbox` (`ant_uv.safe`), which carries the same header by value
+/// and releases the buffer once.
 struct UvDatagram
 {
     union
@@ -862,27 +1067,36 @@ struct UvDatagram
 
 static assert(UvDatagram.sizeof == 64);
 
-/// A UDP socket's counters, read with `UvLoop.udpStats`.
-struct UvUdpStats
+/// A socket's counters, read with `UvLoop.socketStats`.
+struct UvSocketStats
 {
-    /// Datagrams delivered to the ring.
+    /// Elements delivered to the ring: datagrams, chunks and stream events,
+    /// or a listener's accepted connections.
     ulong received;
-    /// Datagrams lost to an exhausted window or a full ring.
+    /// Datagrams lost to an exhausted window or a full ring; connections a
+    /// listener refused because the table or its ring was full; stream
+    /// elements a closed ring refused.
     ulong dropped;
     /// Delivered datagrams the OS cut to `maxDatagram`.
     ulong truncated;
-    /// Receive errors libuv reported.
+    /// Receive and accept errors libuv reported.
     ulong errors;
-    /// Sends that succeeded.
+    /// Sends and writes that succeeded.
     ulong sent;
-    /// Sends that failed.
+    /// Sends and writes that failed.
     ulong sendErrors;
+    /// Times a stream's reading paused on an exhausted window.
+    ulong paused;
 }
 
-// A socket's receive window: `count` buffers of `stride` bytes, each a
-// UvDatagram header and `maxDatagram` data bytes. The loop thread takes
-// buffers from the free list; any thread returns them through the atomic
-// list; the last reference frees the memory, so datagrams outlive a close.
+/// ditto
+alias UvUdpStats = UvSocketStats;
+
+// A socket's receive window, for datagrams and for a stream's chunks:
+// `count` buffers of `stride` bytes, each a UvDatagram header and
+// `maxDatagram` data bytes. The loop thread takes buffers from the free
+// list; any thread returns them through the atomic list; the last reference
+// frees the memory, so datagrams outlive a close.
 private struct UdpWindow
 {
     void* memory_;
@@ -925,20 +1139,30 @@ private struct UdpWindow
     // Loop thread: a free buffer, or null when the window is exhausted.
     UvDatagram* take() nothrow @nogc
     {
-        if (free_ is null)
-        {
-            auto returned = cast(UvDatagram*) atomicExchange!(MemoryOrder.acq_rel)(&remote_, size_t(0));
-            while (returned !is null)
-            {
-                auto next = returned.next_;
-                returned.next_ = free_;
-                free_ = returned;
-                returned = next;
-            }
-        }
+        if (free_ is null) collectReturned();
         auto d = free_;
         if (d !is null) free_ = d.next_;
         return d;
+    }
+
+    // Loop thread: true when no buffer is free, after collecting the ones
+    // other threads returned.
+    bool exhausted() nothrow @nogc
+    {
+        if (free_ is null) collectReturned();
+        return free_ is null;
+    }
+
+    void collectReturned() nothrow @nogc
+    {
+        auto returned = cast(UvDatagram*) atomicExchange!(MemoryOrder.acq_rel)(&remote_, size_t(0));
+        while (returned !is null)
+        {
+            auto next = returned.next_;
+            returned.next_ = free_;
+            free_ = returned;
+            returned = next;
+        }
     }
 
     // Loop thread: a buffer back without a datagram.
@@ -971,22 +1195,37 @@ private struct UdpWindow
     }
 }
 
-// One entry of the loop's socket table.
-private struct UdpSocket
+private enum SocketKind : ubyte { udp, tcpListener, tcpStream }
+
+// One entry of the loop's socket table: a UDP socket, a TCP listener or a
+// TCP stream. `handle` is a uv_udp_t or a uv_tcp_t.
+private struct Socket
 {
-    uv_udp_t* handle;
-    UdpWindow* window;
+    uv_handle_t* handle;
+    UdpWindow* window;          // UDP, and a stream once it reads
     SlotRing!RingElement* ring;
+    FiberGenerationTrigger trigger;
     UvLoop owner;
     UvRequest* closeRequest;
+    OpSlot* connectSlot;        // a tcpConnect in flight
+    UvAddress peer;             // a stream's peer, copied into each chunk
     ulong tag;
     ulong sequence;
     uint id;
-    uint maxDatagram;
+    uint maxDatagram;           // a stream's chunkBytes
+    uint committed;             // ring slots reserved: the window, or a listener's backlog
+    SocketKind kind;
     bool inUse;
     bool closing;
-    bool connected;
-    shared UvUdpStats stats;
+    bool connected;             // UDP: a peer was connected; stream: the connection is up
+    bool reading;               // stream: uv_read_start done
+    bool paused;                // stream: reading stopped on an exhausted window
+    bool ended;                 // stream: end of stream or an error was delivered
+    shared UvSocketStats stats;
+
+    uv_udp_t* udp() nothrow @nogc { return cast(uv_udp_t*) handle; }
+    uv_tcp_t* tcp() nothrow @nogc { return cast(uv_tcp_t*) handle; }
+    uv_stream_t* stream() nothrow @nogc { return cast(uv_stream_t*) handle; }
 }
 
 // Windows reserved on one ring by the sockets that share it.
@@ -998,7 +1237,7 @@ private struct RingCommit
 
 // On the loop thread, inside libuv's receive callback: deliver one datagram,
 // hand back an empty buffer, or count an error.
-private void deliverDatagram(UdpSocket* s, ptrdiff_t nread, const(uv_buf_t)* buf,
+private void deliverDatagram(Socket* s, ptrdiff_t nread, const(uv_buf_t)* buf,
     const(sockaddr)* addr, uint flags) nothrow @nogc
 {
     auto d = buf !is null && buf.base !is null
@@ -1040,6 +1279,7 @@ private void deliverDatagram(UdpSocket* s, ptrdiff_t nread, const(uv_buf_t)* buf
     {
         atomicOp!"+="(s.stats.received, 1);
         if (d.flags & UvDatagramFlag.truncated) atomicOp!"+="(s.stats.truncated, 1);
+        if (s.trigger !is null) s.trigger.advance();
         return;
     }
     // Never the last reference: the socket holds one while open.
@@ -1176,7 +1416,8 @@ private enum int alreadyPublished = 1; // a start that published synchronously
 private enum size_t readChunk = size_t(1) << 30; // a Windows uv_buf_t length is 32-bit
 private enum uint submitBatch = 64; // requests dequeued per loop iteration
 private enum uint controlCapacity = 256; // control ring slots (cancellations)
-private enum uint maxUdpSockets = 256; // open UDP sockets per loop
+private enum uint maxSockets = 256; // open sockets per loop, of every kind
+private enum long pausedPollMs = 1; // how often a paused stream's window is rechecked
 private enum size_t maxRingCommits = 64; // distinct rings UDP sockets may deliver to
 
 private enum State : int { starting, open, failed, closed }
@@ -1225,6 +1466,7 @@ private struct PendingDelivery
 {
     SlotRing!RingElement* ring;
     RingElement element;
+    FiberGenerationTrigger trigger; // advanced once the element is on the ring
 }
 
 // One placement record per auxiliary thread, written by that thread.
@@ -1439,6 +1681,7 @@ final class UvLoop
             if (!asked) asked = cancel(request);
             bool progress = drainControls();
             if (retryPending()) progress = true;
+            if (resumePaused()) progress = true;
             if (closePhase_ == ClosePhase.cancelling)
             {
                 if (cancelQueued()) progress = true;
@@ -1516,21 +1759,25 @@ final class UvLoop
         return convClockFreq(MonoTime.currTime.ticks, MonoTime.ticksPerSecond, 1_000_000_000);
     }
 
-    /// A UDP socket's counters, meaningful between its open's and its
-    /// close's publications; an id out of range reads as zeros.
-    UvUdpStats udpStats(int socket) const nothrow @nogc @trusted
+    /// A socket's counters, meaningful between its open's and its close's
+    /// publications; an id out of range reads as zeros.
+    UvSocketStats socketStats(int socket) const nothrow @nogc @trusted
     {
-        UvUdpStats r;
-        if (socket < 0 || socket >= maxUdpSockets || udpSockets_ is null) return r;
-        auto s = &udpSockets_[socket];
+        UvSocketStats r;
+        if (socket < 0 || socket >= maxSockets || sockets_ is null) return r;
+        auto s = &sockets_[socket];
         r.received = atomicLoad(s.stats.received);
         r.dropped = atomicLoad(s.stats.dropped);
         r.truncated = atomicLoad(s.stats.truncated);
         r.errors = atomicLoad(s.stats.errors);
         r.sent = atomicLoad(s.stats.sent);
         r.sendErrors = atomicLoad(s.stats.sendErrors);
+        r.paused = atomicLoad(s.stats.paused);
         return r;
     }
+
+    /// ditto
+    alias udpStats = socketStats;
 
     /// One line: libuv version, loop CPU, ring, credits, file I/O path,
     /// auxiliary threads.
@@ -1583,8 +1830,9 @@ private:
     PendingDelivery* pending_;
     size_t pendingCap_, pendingHead_, pendingCount_;
     bool ioUring_; // set before the loop opens; read anywhere after
-    UdpSocket* udpSockets_; // maxUdpSockets entries, allocated before the loop opens
+    Socket* sockets_; // maxSockets entries, allocated before the loop opens
     uint socketsClosing_;
+    uint pausedStreams_; // streams whose reading stopped on an exhausted window
     RingCommit[maxRingCommits] ringCommits_;
     ClosePhase closePhase_;
     long phaseDeadline_;
@@ -1658,7 +1906,7 @@ private:
         if (r.callback !is null && r.completions !is null) return false;
         version (Windows)
             if (r.length > uint.max && (r.op == UvOp.read || r.op == UvOp.write
-                    || r.op == UvOp.udpSend)) return false;
+                    || r.op == UvOp.udpSend || r.op == UvOp.tcpWrite)) return false;
         final switch (r.op)
         {
         case UvOp.nop, UvOp.timer:
@@ -1673,6 +1921,27 @@ private:
             return r.file >= 0 && (r.buffer !is null || r.length == 0)
                 && (r.stampAt == uint.max || cast(ulong) r.stampAt + 8 <= r.length);
         case UvOp.udpClose:
+            return r.file >= 0;
+        case UvOp.tcpListen:
+        {
+            auto o = r.tcpOptions;
+            return o !is null && o.completions !is null && o.bind.valid && o.backlog > 0;
+        }
+        case UvOp.tcpConnect:
+        {
+            auto o = r.tcpOptions;
+            return o !is null && o.completions !is null && o.connect.valid && o.window != 0
+                && o.chunkBytes != 0;
+        }
+        case UvOp.tcpStart:
+        {
+            auto o = r.tcpOptions;
+            return r.file >= 0 && o !is null && o.completions !is null && o.window != 0
+                && o.chunkBytes != 0;
+        }
+        case UvOp.tcpWrite:
+            return r.file >= 0 && (r.buffer !is null || r.length == 0);
+        case UvOp.tcpShutdown, UvOp.tcpClose:
             return r.file >= 0;
         case UvOp.resolve:
             return r.path !is null && (r.buffer !is null || r.length == 0);
@@ -1761,6 +2030,7 @@ private:
         {
             bool progress = drainControls();
             if (retryPending()) progress = true;
+            if (resumePaused()) progress = true;
             immutable now = MonoTime.currTime.ticks;
             if (closePhase_ == ClosePhase.open && atomicLoad!(MemoryOrder.acq)(closeRequested_) != 0)
             {
@@ -1796,11 +2066,12 @@ private:
                 }
                 if (phaseDeadline_ < deadline) deadline = phaseDeadline_;
             }
-            if (pendingCount_ != 0)
+            if (pendingCount_ != 0 || pausedStreams_ != 0)
             {
-                // A completion ring's consumer frees room without telling the
-                // loop: retry on a short timer rather than only on wakes.
-                immutable retry = now + toTicks(1.msecs);
+                // A completion ring's consumer frees room, and a chunk's
+                // holder releases it, without telling the loop: retry on a
+                // short timer rather than only on wakes.
+                immutable retry = now + toTicks(pausedPollMs.msecs);
                 if (retry < deadline) deadline = retry;
             }
             runOnce(progress, deadline);
@@ -1917,9 +2188,9 @@ private:
             slot.request = null;
             publish(request, UV_ECANCELED, 0, UvRequestState.abandoned);
         }
-        foreach (i; 0 .. maxUdpSockets)
+        foreach (i; 0 .. maxSockets)
         {
-            auto s = &udpSockets_[i];
+            auto s = &sockets_[i];
             if (!s.inUse || s.closeRequest is null) continue;
             loopAbandoned_ = true; // libuv still holds the handle
             auto request = s.closeRequest;
@@ -1968,15 +2239,27 @@ private:
             publish(request, 0, 0);
             return;
         }
-        if (request.op == UvOp.udpOpen)
+        // Socket setup and teardown publish from the loop thread without a
+        // slot; connects, writes and shutdowns are operations like any other.
+        switch (request.op)
         {
+        case UvOp.udpOpen:
             openUdp(request);
             return;
-        }
-        if (request.op == UvOp.udpClose)
-        {
-            closeUdp(request);
+        case UvOp.udpClose:
+            closeSocket(request, false);
             return;
+        case UvOp.tcpListen:
+            listenTcp(request);
+            return;
+        case UvOp.tcpStart:
+            startTcp(request);
+            return;
+        case UvOp.tcpClose:
+            closeSocket(request, true);
+            return;
+        default:
+            break;
         }
         auto slot = takeSlot();
         slot.request = request;
@@ -2033,7 +2316,7 @@ private:
         case UvOp.readFile:
             rc = startReadJob(slot, request);
             break;
-        case UvOp.udpOpen, UvOp.udpClose:
+        case UvOp.udpOpen, UvOp.udpClose, UvOp.tcpListen, UvOp.tcpStart, UvOp.tcpClose:
             assert(0);
         case UvOp.udpSend:
             rc = sendUdp(slot, request);
@@ -2041,6 +2324,16 @@ private:
             break;
         case UvOp.resolve:
             rc = startResolve(slot, request);
+            break;
+        case UvOp.tcpConnect:
+            rc = connectTcp(slot, request);
+            break;
+        case UvOp.tcpWrite:
+            rc = writeTcp(slot, request);
+            if (rc == alreadyPublished) return;
+            break;
+        case UvOp.tcpShutdown:
+            rc = shutdownTcp(slot, request);
             break;
         }
         if (rc < 0)
@@ -2165,14 +2458,119 @@ private:
         finishReadFile(slot, status == UV_ECANCELED ? UV_ECANCELED : slot.status);
     }
 
-    // ---- UDP sockets ----------------------------------------------------------
+    // ---- the socket table -----------------------------------------------------
 
-    UdpSocket* udpSocket(int id) nothrow @nogc
+    Socket* socketAt(int id) nothrow @nogc
     {
-        if (id < 0 || id >= maxUdpSockets) return null;
-        auto s = &udpSockets_[id];
+        if (id < 0 || id >= maxSockets) return null;
+        auto s = &sockets_[id];
         return s.inUse ? s : null;
     }
+
+    // A fresh table entry, not yet in use, or null when the table is full.
+    Socket* allocateSocket(SocketKind kind) nothrow @nogc
+    {
+        foreach (i; 0 .. maxSockets)
+        {
+            auto s = &sockets_[i];
+            if (s.inUse) continue;
+            *s = Socket.init;
+            s.owner = this;
+            s.id = i;
+            s.kind = kind;
+            return s;
+        }
+        return null;
+    }
+
+    // Undo a setup that failed before the entry was in use: an initialized
+    // handle is closed and freed by libuv; the window and the ring
+    // reservation go now.
+    void discardSocket(Socket* s) nothrow @nogc
+    {
+        if (s.handle !is null)
+        {
+            uv_handle_set_data(s.handle, null);
+            uv_close(s.handle, &onHandleFreed);
+            s.handle = null;
+        }
+        if (s.window !is null)
+        {
+            s.window.drop();
+            s.window = null;
+        }
+        if (s.ring !is null && s.committed != 0) uncommitRing(s.ring, s.committed);
+        *s = Socket.init;
+    }
+
+    // udpClose and tcpClose: the request publishes from the close callback.
+    void closeSocket(UvRequest* request, bool stream) nothrow @nogc
+    {
+        auto s = socketAt(request.file);
+        if (s is null || s.closing)
+        {
+            publish(request, UV_EBADF, 0);
+            return;
+        }
+        if ((s.kind == SocketKind.udp) == stream)
+        {
+            publish(request, UV_EINVAL, 0);
+            return;
+        }
+        s.closeRequest = request;
+        beginSocketClose(s);
+    }
+
+    void beginSocketClose(Socket* s) nothrow @nogc
+    {
+        s.closing = true;
+        ++socketsClosing_;
+        if (s.kind == SocketKind.udp)
+            uv_udp_recv_stop(s.udp);
+        else if (s.reading)
+        {
+            uv_read_stop(s.stream);
+            s.reading = false;
+        }
+        if (s.paused)
+        {
+            s.paused = false;
+            --pausedStreams_;
+        }
+        uv_close(s.handle, &onSocketClosed);
+    }
+
+    // libuv's close callback: the handle is gone; a window goes with the
+    // last buffer the application returns.
+    void socketClosed(Socket* s) nothrow @nogc
+    {
+        free(s.handle);
+        s.handle = null;
+        if (s.ring !is null && s.committed != 0) uncommitRing(s.ring, s.committed);
+        if (s.window !is null)
+        {
+            s.window.drop();
+            s.window = null;
+        }
+        auto request = s.closeRequest;
+        s.closeRequest = null;
+        s.inUse = false;
+        s.closing = false;
+        --socketsClosing_;
+        if (request !is null) publish(request, 0, 0);
+    }
+
+    void closeAllSockets() nothrow @nogc
+    {
+        if (sockets_ is null) return;
+        foreach (i; 0 .. maxSockets)
+        {
+            auto s = &sockets_[i];
+            if (s.inUse && !s.closing) beginSocketClose(s);
+        }
+    }
+
+    // ---- UDP sockets ----------------------------------------------------------
 
     // Reserve `window` elements of `ring` for a socket: false when the ring
     // could not hold the windows that would share it, or the table is full.
@@ -2215,14 +2613,8 @@ private:
     void openUdp(UvRequest* request) nothrow @nogc
     {
         auto o = request.udpOptions;
-        uint index = maxUdpSockets;
-        foreach (i; 0 .. maxUdpSockets)
-            if (!udpSockets_[i].inUse)
-            {
-                index = i;
-                break;
-            }
-        if (index == maxUdpSockets)
+        auto s = allocateSocket(SocketKind.udp);
+        if (s is null)
         {
             publish(request, UV_EMFILE, 0);
             return;
@@ -2231,138 +2623,84 @@ private:
         auto ring = cast(SlotRing!RingElement*) o.completions;
         if (!commitRing(ring, o.window))
         {
+            *s = Socket.init;
             publish(request, UV_ENOBUFS, 0);
             return;
         }
-        auto s = &udpSockets_[index];
-        *s = UdpSocket.init;
-        s.owner = this;
-        s.id = index;
         s.tag = o.tag;
         s.ring = ring;
+        s.trigger = cast(FiberGenerationTrigger) o.trigger; // the record is const, the trigger is the owner's
+        s.committed = o.window;
         s.maxDatagram = o.maxDatagram;
-        s.handle = cast(uv_udp_t*) malloc(uv_handle_size(uv_handle_type.UV_UDP));
+        s.handle = cast(uv_handle_t*) malloc(uv_handle_size(uv_handle_type.UV_UDP));
         s.window = UdpWindow.create(o.window, o.maxDatagram);
-        int rc = s.handle is null || s.window is null ? UV_ENOMEM : uv_udp_init(loop_, s.handle);
+        int rc = s.handle is null || s.window is null ? UV_ENOMEM : uv_udp_init(loop_, s.udp);
         if (rc < 0)
         {
-            if (s.window !is null) s.window.drop();
-            free(s.handle);
+            free(s.handle); // not initialized: nothing in libuv refers to it
             s.handle = null;
-            uncommitRing(ring, o.window);
+            discardSocket(s);
             publish(request, rc, 0);
             return;
         }
-        uv_handle_set_data(cast(uv_handle_t*) s.handle, s);
+        uv_handle_set_data(s.handle, s);
         ushort port;
         rc = configureUdp(s, o, port);
         if (rc < 0)
         {
-            // The handle is initialized: libuv frees it from its close callback.
-            uv_handle_set_data(cast(uv_handle_t*) s.handle, null);
-            uv_close(cast(uv_handle_t*) s.handle, &onUdpHandleFreed);
-            s.handle = null;
-            s.window.drop();
-            uncommitRing(ring, o.window);
+            discardSocket(s);
             publish(request, rc, 0);
             return;
         }
         s.inUse = true;
-        publish(request, index, port);
+        publish(request, s.id, port);
     }
 
     // Bind, options, connect, read back the port, and start receiving.
-    int configureUdp(UdpSocket* s, const(UvUdpOptions)* o, out ushort port) nothrow @nogc
+    int configureUdp(Socket* s, const(UvUdpOptions)* o, out ushort port) nothrow @nogc
     {
         sockaddr_storage storage;
         if (toSockaddr(o.bind, &storage) == 0) return UV_EINVAL;
         immutable flags = (o.ipv6Only ? UV_UDP_IPV6ONLY : 0) | (o.reuseAddress ? UV_UDP_REUSEADDR : 0);
-        int rc = uv_udp_bind(s.handle, cast(const(sockaddr)*) &storage, flags);
-        if (rc == 0 && o.broadcast) rc = uv_udp_set_broadcast(s.handle, 1);
-        if (rc == 0 && o.ttl != 0) rc = uv_udp_set_ttl(s.handle, o.ttl);
+        int rc = uv_udp_bind(s.udp, cast(const(sockaddr)*) &storage, flags);
+        if (rc == 0 && o.broadcast) rc = uv_udp_set_broadcast(s.udp, 1);
+        if (rc == 0 && o.ttl != 0) rc = uv_udp_set_ttl(s.udp, o.ttl);
         if (rc == 0 && o.receiveBufferSize != 0)
         {
             int value = o.receiveBufferSize;
-            rc = uv_recv_buffer_size(cast(uv_handle_t*) s.handle, &value);
+            rc = uv_recv_buffer_size(s.handle, &value);
         }
         if (rc == 0 && o.sendBufferSize != 0)
         {
             int value = o.sendBufferSize;
-            rc = uv_send_buffer_size(cast(uv_handle_t*) s.handle, &value);
+            rc = uv_send_buffer_size(s.handle, &value);
         }
         if (rc == 0 && o.multicastGroup !is null)
-            rc = uv_udp_set_membership(s.handle, o.multicastGroup, o.multicastInterface,
+            rc = uv_udp_set_membership(s.udp, o.multicastGroup, o.multicastInterface,
                 uv_membership.UV_JOIN_GROUP);
         if (rc == 0 && o.connect.valid)
         {
             sockaddr_storage peer;
             if (toSockaddr(o.connect, &peer) == 0) rc = UV_EINVAL;
-            else rc = uv_udp_connect(s.handle, cast(const(sockaddr)*) &peer);
+            else rc = uv_udp_connect(s.udp, cast(const(sockaddr)*) &peer);
             s.connected = rc == 0;
         }
         if (rc == 0)
         {
             int length = sockaddr_storage.sizeof;
-            rc = uv_udp_getsockname(s.handle, cast(sockaddr*) &storage, &length);
+            rc = uv_udp_getsockname(s.udp, cast(sockaddr*) &storage, &length);
             if (rc == 0) port = fromSockaddr(cast(const(sockaddr)*) &storage).port;
         }
-        if (rc == 0) rc = uv_udp_recv_start(s.handle, &onUdpAlloc, &onUdpRecv);
+        if (rc == 0) rc = uv_udp_recv_start(s.udp, &onUdpAlloc, &onUdpRecv);
         return rc;
-    }
-
-    void closeUdp(UvRequest* request) nothrow @nogc
-    {
-        auto s = udpSocket(request.file);
-        if (s is null || s.closing)
-        {
-            publish(request, UV_EBADF, 0);
-            return;
-        }
-        s.closeRequest = request;
-        beginUdpClose(s);
-    }
-
-    void beginUdpClose(UdpSocket* s) nothrow @nogc
-    {
-        s.closing = true;
-        ++socketsClosing_;
-        uv_udp_recv_stop(s.handle);
-        uv_close(cast(uv_handle_t*) s.handle, &onUdpClosed);
-    }
-
-    // libuv's close callback: the handle is gone; the window goes with the
-    // last datagram the application returns.
-    void udpClosed(UdpSocket* s) nothrow @nogc
-    {
-        free(s.handle);
-        s.handle = null;
-        uncommitRing(s.ring, s.window.count_);
-        s.window.drop();
-        s.window = null;
-        auto request = s.closeRequest;
-        s.closeRequest = null;
-        s.inUse = false;
-        s.closing = false;
-        --socketsClosing_;
-        if (request !is null) publish(request, 0, 0);
-    }
-
-    void closeAllUdp() nothrow @nogc
-    {
-        if (udpSockets_ is null) return;
-        foreach (i; 0 .. maxUdpSockets)
-        {
-            auto s = &udpSockets_[i];
-            if (s.inUse && !s.closing) beginUdpClose(s);
-        }
     }
 
     // A send goes out at once when the socket can take it, and publishes
     // here; otherwise it waits in libuv with the slot.
     int sendUdp(OpSlot* slot, UvRequest* request) nothrow @nogc
     {
-        auto s = udpSocket(request.file);
-        if (s is null || s.closing) return UV_EBADF;
+        auto s = socketAt(request.file);
+        if (s is null || s.closing || s.kind != SocketKind.udp) return UV_EBADF;
         sockaddr_storage storage;
         const(sockaddr)* addr = null;
         if (!s.connected)
@@ -2377,7 +2715,7 @@ private:
                 request.buffer[request.stampAt + i] = cast(ubyte)(now >> (8 * i));
         }
         auto buf = makeBuf(request.buffer, request.length);
-        immutable n = uv_udp_try_send(s.handle, &buf, 1, addr);
+        immutable n = uv_udp_try_send(s.udp, &buf, 1, addr);
         if (n >= 0)
         {
             atomicOp!"+="(s.stats.sent, 1);
@@ -2392,7 +2730,7 @@ private:
             return n;
         }
         slot.file = request.file;
-        immutable rc = armed(slot, uv_udp_send(cast(uv_udp_send_t*) slot.uv, s.handle, &buf, 1,
+        immutable rc = armed(slot, uv_udp_send(cast(uv_udp_send_t*) slot.uv, s.udp, &buf, 1,
             addr, &onUdpSendDone));
         if (rc < 0) atomicOp!"+="(s.stats.sendErrors, 1);
         return rc;
@@ -2400,7 +2738,7 @@ private:
 
     void udpSendDone(OpSlot* slot, int status) nothrow @nogc
     {
-        auto s = udpSocket(slot.file);
+        auto s = socketAt(slot.file);
         if (s !is null)
         {
             if (status < 0) atomicOp!"+="(s.stats.sendErrors, 1);
@@ -2410,6 +2748,448 @@ private:
         slot.request = null;
         releaseSlot(slot);
         if (request !is null) publish(request, status < 0 ? status : cast(long) request.length, 0);
+    }
+
+    // ---- TCP streams ----------------------------------------------------------
+
+    // A TCP handle initialized on the loop and named by `s`; the libuv code
+    // when that fails.
+    int initTcp(Socket* s) nothrow @nogc
+    {
+        s.handle = cast(uv_handle_t*) malloc(uv_handle_size(uv_handle_type.UV_TCP));
+        if (s.handle is null) return UV_ENOMEM;
+        immutable rc = uv_tcp_init(loop_, s.tcp);
+        if (rc < 0)
+        {
+            free(s.handle);
+            s.handle = null;
+            return rc;
+        }
+        uv_handle_set_data(s.handle, s);
+        return 0;
+    }
+
+    int bindTcp(Socket* s, ref const UvAddress address, bool ipv6Only, out ushort port)
+        nothrow @nogc
+    {
+        sockaddr_storage storage;
+        if (toSockaddr(address, &storage) == 0) return UV_EINVAL;
+        int rc = uv_tcp_bind(s.tcp, cast(const(sockaddr)*) &storage, ipv6Only ? UV_TCP_IPV6ONLY : 0);
+        if (rc < 0) return rc;
+        return localPort(s, port);
+    }
+
+    int localPort(Socket* s, out ushort port) nothrow @nogc
+    {
+        sockaddr_storage storage;
+        int length = sockaddr_storage.sizeof;
+        immutable rc = uv_tcp_getsockname(s.tcp, cast(sockaddr*) &storage, &length);
+        if (rc == 0) port = fromSockaddr(cast(const(sockaddr)*) &storage).port;
+        return rc;
+    }
+
+    // Nagle, keep-alive and the kernel buffers, on a connected stream.
+    int applyStreamOptions(Socket* s, const(UvTcpOptions)* o) nothrow @nogc
+    {
+        int rc = uv_tcp_nodelay(s.tcp, o.noDelay ? 1 : 0);
+        if (rc == 0 && o.keepAliveSeconds != 0) rc = uv_tcp_keepalive(s.tcp, 1, o.keepAliveSeconds);
+        if (rc == 0 && o.receiveBufferSize != 0)
+        {
+            int value = o.receiveBufferSize;
+            rc = uv_recv_buffer_size(s.handle, &value);
+        }
+        if (rc == 0 && o.sendBufferSize != 0)
+        {
+            int value = o.sendBufferSize;
+            rc = uv_send_buffer_size(s.handle, &value);
+        }
+        return rc;
+    }
+
+    // Give a stream its ring and window and start reading; undone on failure.
+    int startReading(Socket* s, const(UvTcpOptions)* o) nothrow @nogc
+    {
+        auto ring = cast(SlotRing!RingElement*) o.completions;
+        if (!commitRing(ring, o.window)) return UV_ENOBUFS;
+        auto window = UdpWindow.create(o.window, o.chunkBytes);
+        if (window is null)
+        {
+            uncommitRing(ring, o.window);
+            return UV_ENOMEM;
+        }
+        s.ring = ring;
+        s.tag = o.tag;
+        s.trigger = cast(FiberGenerationTrigger) o.trigger; // the record is const, the trigger is the owner's
+        s.committed = o.window;
+        s.maxDatagram = o.chunkBytes;
+        s.window = window;
+        int rc = applyStreamOptions(s, o);
+        if (rc == 0) rc = uv_read_start(s.stream, &onStreamAlloc, &onStreamRead);
+        if (rc < 0)
+        {
+            window.drop();
+            uncommitRing(ring, o.window);
+            s.window = null;
+            s.ring = null;
+            s.trigger = null;
+            s.committed = 0;
+            return rc;
+        }
+        s.reading = true;
+        return 0;
+    }
+
+    // tcpListen is synchronous on the loop thread.
+    void listenTcp(UvRequest* request) nothrow @nogc
+    {
+        auto o = request.tcpOptions;
+        auto s = allocateSocket(SocketKind.tcpListener);
+        if (s is null)
+        {
+            publish(request, UV_EMFILE, 0);
+            return;
+        }
+        auto ring = cast(SlotRing!RingElement*) o.completions;
+        immutable reserve = cast(uint) o.backlog;
+        if (!commitRing(ring, reserve))
+        {
+            *s = Socket.init;
+            publish(request, UV_ENOBUFS, 0);
+            return;
+        }
+        s.ring = ring;
+        s.tag = o.tag;
+        s.trigger = cast(FiberGenerationTrigger) o.trigger; // the record is const, the trigger is the owner's
+        s.committed = reserve;
+        ushort port;
+        int rc = initTcp(s);
+        if (rc == 0) rc = bindTcp(s, o.bind, o.ipv6Only, port);
+        if (rc == 0) rc = uv_listen(s.stream, o.backlog, &onConnection);
+        if (rc < 0)
+        {
+            discardSocket(s);
+            publish(request, rc, 0);
+            return;
+        }
+        s.inUse = true;
+        publish(request, s.id, port);
+    }
+
+    // libuv's connection callback on a listener: accept into a new table
+    // entry and tell the ring, or take the connection and close it when
+    // there is no room, so the kernel's queue moves on.
+    void connection(Socket* listener, int status) nothrow @nogc
+    {
+        if (status < 0)
+        {
+            atomicOp!"+="(listener.stats.errors, 1);
+            return;
+        }
+        auto s = allocateSocket(SocketKind.tcpStream);
+        if (s is null)
+        {
+            refuseConnection(listener);
+            return;
+        }
+        int rc = initTcp(s);
+        if (rc == 0) rc = uv_accept(listener.stream, s.stream);
+        if (rc < 0)
+        {
+            discardSocket(s);
+            atomicOp!"+="(listener.stats.errors, 1);
+            return;
+        }
+        s.connected = true;
+        s.inUse = true;
+        sockaddr_storage storage;
+        int length = sockaddr_storage.sizeof;
+        if (uv_tcp_getpeername(s.tcp, cast(sockaddr*) &storage, &length) == 0)
+            s.peer = fromSockaddr(cast(const(sockaddr)*) &storage);
+        RingElement e;
+        e.tag = listener.tag;
+        e.generation = ++listener.sequence;
+        e.payload[0] = s.id | (cast(ulong) StreamEvent.accepted << 32);
+        packAddress(s.peer, e.payload);
+        if (listener.ring.tryPush(e) == RingPush.pushed)
+        {
+            atomicOp!"+="(listener.stats.received, 1);
+            if (listener.trigger !is null) listener.trigger.advance();
+            return;
+        }
+        // The ring would not take it: the connection is closed, as a
+        // dropped datagram is discarded.
+        atomicOp!"+="(listener.stats.dropped, 1);
+        beginSocketClose(s);
+    }
+
+    void refuseConnection(Socket* listener) nothrow @nogc
+    {
+        auto h = cast(uv_tcp_t*) malloc(uv_handle_size(uv_handle_type.UV_TCP));
+        if (h is null || uv_tcp_init(loop_, h) < 0)
+        {
+            free(h);
+            atomicOp!"+="(listener.stats.errors, 1);
+            return;
+        }
+        cast(void) uv_accept(listener.stream, cast(uv_stream_t*) h);
+        uv_close(cast(uv_handle_t*) h, &onHandleFreed);
+        atomicOp!"+="(listener.stats.dropped, 1);
+    }
+
+    // tcpStart is synchronous on the loop thread.
+    void startTcp(UvRequest* request) nothrow @nogc
+    {
+        auto s = socketAt(request.file);
+        if (s is null || s.closing || s.kind != SocketKind.tcpStream)
+        {
+            publish(request, UV_EBADF, 0);
+            return;
+        }
+        if (s.reading || s.ring !is null || !s.connected)
+        {
+            publish(request, UV_EINVAL, 0);
+            return;
+        }
+        immutable rc = startReading(s, request.tcpOptions);
+        publish(request, rc < 0 ? rc : s.id, 0);
+    }
+
+    // A connect takes a slot for its uv_connect_t; the socket is in the
+    // table from here, so a close can reach it, and reads nothing yet.
+    int connectTcp(OpSlot* slot, UvRequest* request) nothrow @nogc
+    {
+        auto o = request.tcpOptions;
+        auto s = allocateSocket(SocketKind.tcpStream);
+        if (s is null) return UV_EMFILE;
+        ushort port;
+        int rc = initTcp(s);
+        if (rc == 0 && o.bind.valid) rc = bindTcp(s, o.bind, o.ipv6Only, port);
+        sockaddr_storage peer;
+        if (rc == 0 && toSockaddr(o.connect, &peer) == 0) rc = UV_EINVAL;
+        if (rc < 0)
+        {
+            discardSocket(s);
+            return rc;
+        }
+        s.peer = o.connect;
+        s.connectSlot = slot;
+        s.inUse = true;
+        slot.file = s.id;
+        rc = armed(slot, uv_tcp_connect(cast(uv_connect_t*) slot.uv, s.tcp,
+            cast(const(sockaddr)*) &peer, &onConnected));
+        if (rc < 0)
+        {
+            s.connectSlot = null;
+            s.inUse = false;
+            discardSocket(s);
+        }
+        return rc;
+    }
+
+    void tcpConnected(OpSlot* slot, int status) nothrow @nogc
+    {
+        auto s = socketAt(slot.file);
+        auto request = slot.request;
+        slot.request = null;
+        releaseSlot(slot);
+        if (s !is null) s.connectSlot = null;
+        if (s is null || s.closing)
+        {
+            // Closed while connecting: the close publishes on its own.
+            if (request !is null) publish(request, status < 0 ? status : UV_ECANCELED, 0);
+            return;
+        }
+        if (status < 0)
+        {
+            beginSocketClose(s); // no close request: the entry frees itself
+            if (request !is null) publish(request, status, 0);
+            return;
+        }
+        s.connected = true;
+        ushort port;
+        int rc = request is null ? UV_ECANCELED : startReading(s, request.tcpOptions);
+        if (rc == 0) rc = localPort(s, port);
+        if (rc < 0)
+        {
+            beginSocketClose(s);
+            if (request !is null) publish(request, rc, 0);
+            return;
+        }
+        publish(request, s.id, port);
+    }
+
+    // libuv's read callback on a stream: deliver a chunk, deliver the end or
+    // an error as an event, or pause on an exhausted window.
+    void streamRead(Socket* s, ptrdiff_t nread, const(uv_buf_t)* buf) nothrow @nogc
+    {
+        auto d = buf !is null && buf.base !is null
+            ? cast(UvDatagram*)(buf.base - UvDatagram.sizeof) : null;
+        if (nread == 0)
+        {
+            if (d !is null) s.window.giveBack(d);
+            return;
+        }
+        if (nread == UV_ENOBUFS)
+        {
+            // The alloc callback found no buffer; pause until one returns.
+            pauseStream(s);
+            return;
+        }
+        if (nread < 0)
+        {
+            if (d !is null) s.window.giveBack(d);
+            stopStream(s);
+            if (nread != UV_EOF) atomicOp!"+="(s.stats.errors, 1);
+            pushStreamEvent(s, nread == UV_EOF ? StreamEvent.endOfStream : StreamEvent.error, nread);
+            return;
+        }
+        if (d is null) return;
+        d.arrivalNanos = nanos();
+        d.length = cast(uint) nread;
+        d.flags = 0;
+        d.peer = s.peer;
+        d.socket = s.id;
+        RingElement e;
+        e.tag = s.tag;
+        e.generation = ++s.sequence;
+        e.pointer = cast(ulong) cast(size_t) d;
+        e.payload[0] = d.length;
+        e.payload[1] = cast(ulong) d.arrivalNanos;
+        e.payload[2] = s.id;
+        atomicFetchAdd!(MemoryOrder.acq_rel)(s.window.refs_, 1u);
+        // A full ring holds the chunk in the pending queue, in order, rather
+        // than dropping it; a closed ring has no consumer, and the chunk is
+        // discarded and counted.
+        if (deliver(s.ring, e, s.trigger))
+            atomicOp!"+="(s.stats.received, 1);
+        else
+        {
+            atomicFetchSub!(MemoryOrder.acq_rel)(s.window.refs_, 1u);
+            s.window.giveBack(d);
+            atomicOp!"+="(s.stats.dropped, 1);
+        }
+        if (s.window.exhausted()) pauseStream(s);
+    }
+
+    void pauseStream(Socket* s) nothrow @nogc
+    {
+        if (s.paused || !s.reading) return;
+        uv_read_stop(s.stream);
+        s.paused = true;
+        ++pausedStreams_;
+        atomicOp!"+="(s.stats.paused, 1);
+    }
+
+    void stopStream(Socket* s) nothrow @nogc
+    {
+        if (s.reading)
+        {
+            uv_read_stop(s.stream);
+            s.reading = false;
+        }
+        if (s.paused)
+        {
+            s.paused = false;
+            --pausedStreams_;
+        }
+        s.ended = true;
+    }
+
+    // Resume every paused stream whose window has a buffer again. Called
+    // each loop iteration; the iteration's deadline is capped while any
+    // stream is paused, since a release says nothing to the loop.
+    bool resumePaused() nothrow @nogc
+    {
+        if (pausedStreams_ == 0) return false;
+        bool progress;
+        foreach (i; 0 .. maxSockets)
+        {
+            auto s = &sockets_[i];
+            if (!s.inUse || !s.paused || s.closing) continue;
+            if (s.window.exhausted()) continue;
+            s.paused = false;
+            --pausedStreams_;
+            progress = true;
+            immutable rc = uv_read_start(s.stream, &onStreamAlloc, &onStreamRead);
+            if (rc < 0)
+            {
+                stopStream(s);
+                atomicOp!"+="(s.stats.errors, 1);
+                pushStreamEvent(s, StreamEvent.error, rc);
+            }
+        }
+        return progress;
+    }
+
+    void pushStreamEvent(Socket* s, StreamEvent kind, long status) nothrow @nogc
+    {
+        RingElement e;
+        e.tag = s.tag;
+        e.generation = ++s.sequence;
+        e.payload[0] = s.id | (cast(ulong) kind << 32);
+        e.payload[1] = cast(ulong) status;
+        if (deliver(s.ring, e, s.trigger)) atomicOp!"+="(s.stats.received, 1);
+        else atomicOp!"+="(s.stats.dropped, 1);
+    }
+
+    // A write goes out at once when the socket takes all of it, and
+    // publishes here; otherwise the rest waits in libuv with the slot.
+    int writeTcp(OpSlot* slot, UvRequest* request) nothrow @nogc
+    {
+        auto s = socketAt(request.file);
+        if (s is null || s.closing || s.kind != SocketKind.tcpStream || !s.connected) return UV_EBADF;
+        auto buf = makeBuf(request.buffer, request.length);
+        immutable n = request.length == 0 ? 0 : uv_try_write(s.stream, &buf, 1);
+        if (n >= 0 && cast(size_t) n == request.length)
+        {
+            atomicOp!"+="(s.stats.sent, 1);
+            slot.request = null;
+            finishSlot(slot);
+            publish(request, n, 0);
+            return alreadyPublished;
+        }
+        if (n < 0 && n != UV_EAGAIN)
+        {
+            atomicOp!"+="(s.stats.sendErrors, 1);
+            return n;
+        }
+        immutable written = n > 0 ? cast(size_t) n : 0;
+        slot.file = request.file;
+        auto rest = makeBuf(request.buffer + written, request.length - written);
+        immutable rc = armed(slot, uv_write(cast(uv_write_t*) slot.uv, s.stream, &rest, 1,
+            &onWriteDone));
+        if (rc < 0) atomicOp!"+="(s.stats.sendErrors, 1);
+        return rc;
+    }
+
+    void tcpWriteDone(OpSlot* slot, int status) nothrow @nogc
+    {
+        auto s = socketAt(slot.file);
+        if (s !is null)
+        {
+            if (status < 0) atomicOp!"+="(s.stats.sendErrors, 1);
+            else atomicOp!"+="(s.stats.sent, 1);
+        }
+        auto request = slot.request;
+        slot.request = null;
+        releaseSlot(slot);
+        if (request !is null) publish(request, status < 0 ? status : cast(long) request.length, 0);
+    }
+
+    int shutdownTcp(OpSlot* slot, UvRequest* request) nothrow @nogc
+    {
+        auto s = socketAt(request.file);
+        if (s is null || s.closing || s.kind != SocketKind.tcpStream || !s.connected) return UV_EBADF;
+        slot.file = request.file;
+        return armed(slot, uv_shutdown(cast(uv_shutdown_t*) slot.uv, s.stream, &onShutdownDone));
+    }
+
+    void tcpShutdownDone(OpSlot* slot, int status) nothrow @nogc
+    {
+        auto request = slot.request;
+        slot.request = null;
+        releaseSlot(slot);
+        if (request !is null) publish(request, status, 0);
     }
 
     int startResolve(OpSlot* slot, UvRequest* request) nothrow @nogc
@@ -2532,6 +3312,13 @@ private:
             timerDone(slot, UV_ECANCELED);
             return;
         }
+        if (slot.op == UvOp.tcpConnect)
+        {
+            // Closing the handle ends the connect with UV_ECANCELED.
+            auto s = socketAt(slot.file);
+            if (s !is null && !s.closing) beginSocketClose(s);
+            return;
+        }
         // Only work libuv has not started can be cancelled; started work
         // completes, and a readFile job stops at its next step, which it
         // learns from `stop`.
@@ -2622,27 +3409,36 @@ private:
         }
     }
 
-    void deliver(SlotRing!RingElement* ring, ref RingElement e) nothrow @nogc
+    // True when the element is on the ring or queued to reach it; false
+    // when it never will (a closed ring, or no room to queue it). A trigger
+    // is advanced once the element is on the ring.
+    bool deliver(SlotRing!RingElement* ring, ref RingElement e,
+        FiberGenerationTrigger trigger = null) nothrow @nogc
     {
         if (pendingCount_ == 0)
         {
             immutable r = ring.tryPush(e);
-            if (r == RingPush.pushed) return;
+            if (r == RingPush.pushed)
+            {
+                if (trigger !is null) trigger.advance();
+                return true;
+            }
             if (r == RingPush.closed)
             {
                 bump(undelivered_);
-                return;
+                return false;
             }
         }
         // Full, or older deliveries wait: keep order, hold credit, retry.
         if (pendingCount_ == pendingCap_)
         {
             bump(undelivered_);
-            return;
+            return false;
         }
-        pending_[(pendingHead_ + pendingCount_) % pendingCap_] = PendingDelivery(ring, e);
+        pending_[(pendingHead_ + pendingCount_) % pendingCap_] = PendingDelivery(ring, e, trigger);
         ++pendingCount_;
         bump(deferred_);
+        return true;
     }
 
     bool retryPending() nothrow @nogc
@@ -2654,6 +3450,7 @@ private:
             immutable r = p.ring.tryPush(p.element);
             if (r == RingPush.full) break;
             if (r == RingPush.closed) bump(undelivered_);
+            else if (p.trigger !is null) p.trigger.advance();
             pendingHead_ = (pendingHead_ + 1) % pendingCap_;
             --pendingCount_;
             progress = true;
@@ -2775,16 +3572,20 @@ private:
         immutable workSize = uv_req_size(uv_req_type.UV_WORK);
         immutable sendSize = uv_req_size(uv_req_type.UV_UDP_SEND);
         immutable resolveSize = uv_req_size(uv_req_type.UV_GETADDRINFO);
+        immutable connectSize = uv_req_size(uv_req_type.UV_CONNECT);
+        immutable writeSize = uv_req_size(uv_req_type.UV_WRITE);
+        immutable shutdownSize = uv_req_size(uv_req_type.UV_SHUTDOWN);
         if (fsSize > jobFsBytes)
             throw new UvLoopException("ant_uv: this libuv's uv_fs_t is larger than a readFile job reserves");
-        slotStride_ = (max(fsSize, timerSize, workSize, sendSize, resolveSize) + 63) & ~cast(size_t) 63;
+        slotStride_ = (max(fsSize, timerSize, workSize, sendSize, resolveSize, connectSize, writeSize,
+            shutdownSize) + 63) & ~cast(size_t) 63;
         slotMemory_ = allocateAligned64(slotStride_ * slotCount_);
         slots_ = cast(OpSlot*) calloc(slotCount_, OpSlot.sizeof);
         pendingCap_ = slotCount_ + options_.ringCapacity;
         pending_ = cast(PendingDelivery*) calloc(pendingCap_, PendingDelivery.sizeof);
-        udpSockets_ = cast(UdpSocket*) calloc(maxUdpSockets, UdpSocket.sizeof);
+        sockets_ = cast(Socket*) calloc(maxSockets, Socket.sizeof);
         if (abandonedJobs_ is null) abandonedJobs_ = cast(shared(uint)*) calloc(1, uint.sizeof);
-        if (slotMemory_ is null || slots_ is null || pending_ is null || udpSockets_ is null
+        if (slotMemory_ is null || slots_ is null || pending_ is null || sockets_ is null
             || abandonedJobs_ is null)
             throw new UvLoopException("ant_uv: slot allocation failed");
         foreach (i; 0 .. slotCount_)
@@ -2824,8 +3625,8 @@ private:
         slots_ = null;
         free(pending_);
         pending_ = null;
-        free(udpSockets_);
-        udpSockets_ = null;
+        free(sockets_);
+        sockets_ = null;
     }
 
     void closeWakeGate() nothrow @nogc
@@ -2848,7 +3649,7 @@ private:
             loopClose_ = UV_EBUSY;
             return;
         }
-        closeAllUdp(); // sockets the application left open; their windows outlive them
+        closeAllSockets(); // sockets the application left open; their windows outlive them
         uv_close(cast(uv_handle_t*) async_, null);
         uv_close(cast(uv_handle_t*) stepTimer_, null);
         uv_run(loop_, uv_run_mode.UV_RUN_DEFAULT);
@@ -3019,7 +3820,7 @@ private extern (C) void onReadJobDone(uv_work_t* work, int status) nothrow @nogc
 
 private extern (C) void onUdpAlloc(uv_handle_t* handle, size_t, uv_buf_t* buf) nothrow @nogc
 {
-    auto s = cast(UdpSocket*) uv_handle_get_data(handle);
+    auto s = cast(Socket*) uv_handle_get_data(handle);
     auto d = s.window.take();
     // Window exhausted: the spare takes the datagram, which is then dropped.
     // An empty buffer would leave it unread on Linux and stall the socket on
@@ -3032,7 +3833,7 @@ private extern (C) void onUdpAlloc(uv_handle_t* handle, size_t, uv_buf_t* buf) n
 private extern (C) void onUdpRecv(uv_udp_t* handle, ptrdiff_t nread, const(uv_buf_t)* buf,
     const(sockaddr)* addr, uint flags) nothrow @nogc
 {
-    deliverDatagram(cast(UdpSocket*) uv_handle_get_data(cast(uv_handle_t*) handle), nread, buf,
+    deliverDatagram(cast(Socket*) uv_handle_get_data(cast(uv_handle_t*) handle), nread, buf,
         addr, flags);
 }
 
@@ -3042,16 +3843,64 @@ private extern (C) void onUdpSendDone(uv_udp_send_t* req, int status) nothrow @n
     ownerOf(slot).udpSendDone(slot, status);
 }
 
-private extern (C) void onUdpClosed(uv_handle_t* handle) nothrow @nogc
+private extern (C) void onSocketClosed(uv_handle_t* handle) nothrow @nogc
 {
-    auto s = cast(UdpSocket*) uv_handle_get_data(handle);
-    s.owner.udpClosed(s);
+    auto s = cast(Socket*) uv_handle_get_data(handle);
+    s.owner.socketClosed(s);
 }
 
-// A handle whose open failed after uv_udp_init: nothing else refers to it.
-private extern (C) void onUdpHandleFreed(uv_handle_t* handle) nothrow @nogc
+// A handle whose setup failed after its init, or a connection refused for
+// want of a table entry: nothing else refers to it.
+private extern (C) void onHandleFreed(uv_handle_t* handle) nothrow @nogc
 {
     free(handle);
+}
+
+private extern (C) void onConnection(uv_stream_t* server, int status) nothrow @nogc
+{
+    auto s = cast(Socket*) uv_handle_get_data(cast(uv_handle_t*) server);
+    s.owner.connection(s, status);
+}
+
+private extern (C) void onConnected(uv_connect_t* req, int status) nothrow @nogc
+{
+    auto slot = cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) req);
+    ownerOf(slot).tcpConnected(slot, status);
+}
+
+// A stream's window has no spare: with every buffer held, the read callback
+// sees UV_ENOBUFS and reading pauses until a release.
+private extern (C) void onStreamAlloc(uv_handle_t* handle, size_t, uv_buf_t* buf) nothrow @nogc
+{
+    auto s = cast(Socket*) uv_handle_get_data(handle);
+    auto d = s.window.take();
+    if (d is null)
+    {
+        buf.base = null;
+        buf.len = 0;
+        return;
+    }
+    buf.base = cast(char*) d + UvDatagram.sizeof;
+    buf.len = cast(typeof(buf.len)) s.maxDatagram;
+}
+
+private extern (C) void onStreamRead(uv_stream_t* stream, ptrdiff_t nread, const(uv_buf_t)* buf)
+    nothrow @nogc
+{
+    auto s = cast(Socket*) uv_handle_get_data(cast(uv_handle_t*) stream);
+    s.owner.streamRead(s, nread, buf);
+}
+
+private extern (C) void onWriteDone(uv_write_t* req, int status) nothrow @nogc
+{
+    auto slot = cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) req);
+    ownerOf(slot).tcpWriteDone(slot, status);
+}
+
+private extern (C) void onShutdownDone(uv_shutdown_t* req, int status) nothrow @nogc
+{
+    auto slot = cast(OpSlot*) uv_req_get_data(cast(uv_req_t*) req);
+    ownerOf(slot).tcpShutdownDone(slot, status);
 }
 
 private extern (C) void onResolved(uv_getaddrinfo_t* req, int status, addrinfo* found) nothrow @nogc

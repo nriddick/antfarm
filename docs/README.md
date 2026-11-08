@@ -92,11 +92,11 @@ For contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md), then
 | [design/forkjoin.md](design/forkjoin.md) | get the fork-join dispatcher's frame, deque, parking and admission contracts, and what the benchmarks found |
 | [design/coroutine-replacement.md](design/coroutine-replacement.md) | review the measured deque experiment and proposed druntime/async-I/O coroutine tiers |
 | [design/ant_fibers.md](design/ant_fibers.md) | get the Fiber scheduler model and synchronization invariants |
-| [design/event-loop.md](design/event-loop.md) | see the 2.2.x design of one libuv loop thread beside the pool: the slot ring, the loop thread and its placement, credits, cancellation, completion delivery and close, and where the implementation departed from the plan |
+| [design/event-loop.md](design/event-loop.md) | see the 2.2.x design of one libuv loop thread beside the pool: the slot ring, the loop thread and its placement, credits, cancellation, completion delivery and close, where the implementation departed from the plan, the UDP sockets of 2.2.0 (section 9), the `@safe` surface and its trusted contract (9.12) and the TCP streams of 2.2.1 (section 10) |
 | [design/fiber-c-abi.md](design/fiber-c-abi.md) | see which Fiber functionality should cross the C ABI, its shape there (status-returning waits, value handles, bodies cleared at retirement) and the reload rule for a hot-swapped module |
 | [design/c-abi-2.md](design/c-abi-2.md) | see C ABI 2, built in part: what ABI 1 cannot absorb (option structures that negotiate their version, one generated function table for modules, a D `Error` aborting at every export), the additions per header and which are built, the migration from ABI 1 and the validation plan |
 | [design/c-abi-2-onboarding.md](design/c-abi-2-onboarding.md) | read the onboarding guide for ABI 2: archives, build and link, a host with workers, actors and parks, Fibers and a reloadable module (proposed), thread rules, failures and teardown |
-| [../ant_uv/README.md](../ant_uv/README.md) | use `ant_uv`: create the loop, submit file and timer requests, open UDP sockets, wait from Fibers, cancel and close |
+| [../ant_uv/README.md](../ant_uv/README.md) | use `ant_uv`: create the loop, submit file and timer requests, open UDP sockets and TCP streams, use the `@safe` surface, wait from Fibers, cancel and close |
 
 ## Development
 

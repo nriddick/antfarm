@@ -148,8 +148,25 @@ the C ABI.
   DMD on both platforms, and `make -C tests/ant_uv run-dip1000` (the
   Windows lane's second build) builds the suite with `-preview=dip1000`,
   which holds the scope rules.
-
-
+- TCP streams in `ant_uv` (2026-11-08), designed in
+  [section 10 of the event loop design](docs/design/event-loop.md#10-221-tcp-streams)
+  and taking the `@safe` surface's shape. A listener and a stream are
+  sockets in the UDP sockets' table: `tcpListen`, `tcpConnect`,
+  `tcpStart`, `tcpWrite`, `tcpShutdown` and `tcpClose`, with
+  `UvTcpOptions` for the three setup requests. An accepted connection is
+  an element on the listener's ring naming the new stream and its peer;
+  the application starts it with its own ring, window and chunk size, or
+  closes it. A stream's chunks arrive as datagrams do, in the same header
+  and window; when every buffer is held the loop stops reading and
+  resumes within about a millisecond of a release, so nothing is dropped.
+  The end of a stream and a read error are pointer-free elements, which
+  `UvInbox.tryPop` presents as `UvReceived` values holding nothing. Every
+  socket kind takes a `FiberGenerationTrigger` advanced per element
+  pushed, so a Fiber waits with `waitNext` and then pops. `UvSocketStats`
+  and `socketStats` replace the UDP names, which stay as aliases.
+  `UvInbox.streamOptions`, `listenOptions` and `UvOutbox.write` extend the
+  `@safe` surface. The suite's loopback case and a trigger-driven Fiber
+  case pass under LDC and DMD on Windows, with and without DIP1000.
 ## 2.2.0 development
 
 Opened 2026-10-30 on `2.2.0-progress`, from 2.1.1. The series' feature is an

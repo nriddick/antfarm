@@ -6,7 +6,8 @@
  + Fibers on the loop thread, files read by worker Fibers on a GroupHost,
  + readFile's allocators, the per-operation constructors, whole-file reads
  + cancelled in flight, UDP sockets on the loopback and the `@safe` surface
- + over them, Fibers spawned from `@safe` code, a whole-file read abandoned
+ + over them, TCP streams on the loopback and a Fiber woken by their
+ + trigger, Fibers spawned from `@safe` code, a whole-file read abandoned
  + inside its allocator, and abandonment of an operation that cannot
  + finish. With ANTUV_TEST_IO_URING=1 every loop uses io_uring, and
  + create must have built the ring. Built with `AntfarmMimallocV3` and the
@@ -120,7 +121,7 @@ ProcessorId[] threadCpus()
     return cpus;
 }
 
-ubyte[] pattern(size_t seed, size_t length)
+ubyte[] pattern(size_t seed, size_t length) @safe
 {
     auto bytes = new ubyte[length];
     ulong x = seed * 0x9E37_79B9_7F4A_7C15UL + 1;
@@ -207,6 +208,12 @@ void layout()
     foreach (i, value; udpExpected)
         check(antuv_c_constant(cast(int)(28 + i)) == value,
             "UDP constant " ~ (28 + i).to!string ~ " differs from the C headers");
+    immutable long[] tcpExpected = [uv_handle_type.UV_TCP, uv_handle_type.UV_STREAM,
+        uv_req_type.UV_CONNECT, uv_req_type.UV_WRITE, uv_req_type.UV_SHUTDOWN, UV_ECONNREFUSED,
+        UV_ECONNRESET, UV_ENOTCONN, UV_EPIPE, UV_ECONNABORTED, cast(long) UV_TCP_IPV6ONLY];
+    foreach (i, value; tcpExpected)
+        check(antuv_c_constant(cast(int)(47 + i)) == value,
+            "TCP constant " ~ (47 + i).to!string ~ " differs from the C headers");
     check(antuv_c_constant(20) >= UV_MINIMUM_VERSION && uv_version() >= UV_MINIMUM_VERSION,
         "libuv older than 1.19");
     printf("  uv.h %#lx, library %#x\n", antuv_c_constant(20), uv_version());
@@ -1760,6 +1767,258 @@ void safeUdpLoopback()
         ~ "parsers from slices, a forged element discarded");
 }
 
+
+// ---- TCP streams --------------------------------------------------------------
+
+UvSubmit writeWhenFree(UvOutbox outbox, int socket, scope const(ubyte)[] bytes) @safe
+{
+    immutable deadline = MonoTime.currTime + 10.seconds;
+    for (;;)
+    {
+        immutable r = outbox.write(socket, bytes);
+        if (r != UvSubmit.full || MonoTime.currTime >= deadline) return r;
+        Thread.sleep(10.usecs);
+    }
+}
+
+// Pop the next element within `timeout`, false when none comes.
+bool popWithin(UvInbox inbox, ref UvReceived into, Duration timeout = 10.seconds) @safe
+{
+    immutable deadline = MonoTime.currTime + timeout;
+    while (!inbox.tryPop(into))
+    {
+        if (MonoTime.currTime >= deadline) return false;
+        Thread.sleep(100.usecs);
+    }
+    return true;
+}
+
+void tcpExercise(UvLoop loop, UvInbox inbox) @safe
+{
+    // A listener on any port.
+    auto listenOptions = inbox.listenOptions(10, 8);
+    listenOptions.bind = UvAddress.loopback4(0);
+    auto listen = UvRequest.tcpListen(listenOptions);
+    check(loop.submitAndBlock(listen) == UvSubmit.accepted && listen.succeeded, "listen");
+    immutable listener = cast(int) listen.result;
+    immutable port = cast(ushort) listen.size;
+    check(port != 0, "the listener's port");
+
+    // A connect, and the accept event naming the server-side stream and the
+    // client's port. The accepted stream reads nothing until it is started;
+    // a second start is refused.
+    auto clientOptions = inbox.streamOptions(11, 4, 64);
+    clientOptions.connect = UvAddress.loopback4(port);
+    auto connect = UvRequest.tcpConnect(clientOptions);
+    check(loop.submitAndBlock(connect) == UvSubmit.accepted && connect.succeeded, "connect");
+    immutable client = cast(int) connect.result;
+    immutable clientPort = cast(ushort) connect.size;
+    check(client != listener && clientPort != 0, "the client's id and port");
+    int server;
+    {
+        UvReceived d;
+        check(popWithin(inbox, d) && !d.held && d.tag == 10
+            && d.flags == UvDatagramFlag.accepted, "the accept event");
+        check(d.peer.family == UvFamily.ipv4 && d.peer.port == clientPort, "the accepted peer");
+        server = cast(int) d.socket;
+        check(server != client && server != listener, "the accepted stream's id");
+        check(loop.socketStats(listener).received == 1, "the listener counted it");
+        check(!inbox.tryPop(d), "nothing else yet");
+    }
+    auto serverOptions = inbox.streamOptions(12, 4, 64);
+    auto start = UvRequest.tcpStart(server, serverOptions);
+    check(loop.submitAndBlock(start) == UvSubmit.accepted && start.result == server, "tcpStart");
+    start = UvRequest.tcpStart(server, serverOptions);
+    check(loop.submitAndBlock(start) == UvSubmit.accepted && start.result == UV_EINVAL,
+        "a second start is refused");
+
+    // Chunks both ways through the outbox, each naming its peer.
+    auto outbox = new UvOutbox(loop, 4, 2048);
+    check(outbox.write(client, cast(const(ubyte)[]) "hello") == UvSubmit.accepted, "client write");
+    {
+        UvReceived d;
+        check(popWithin(inbox, d) && d.held && d.tag == 12 && d.socket == server, "the chunk's header");
+        check(d.bytes == cast(const(ubyte)[]) "hello" && d.peer.port == clientPort,
+            "the chunk and its peer");
+        check(d.arrivalNanos > 0 && d.arrivalNanos <= UvLoop.nanos(), "stamped on arrival");
+    }
+    check(outbox.write(server, cast(const(ubyte)[]) "world") == UvSubmit.accepted, "server write");
+    {
+        UvReceived d;
+        check(popWithin(inbox, d) && d.tag == 11 && d.bytes == cast(const(ubyte)[]) "world"
+            && d.peer.port == port, "the reply chunk and the server's port");
+    }
+
+    // Back pressure: a kibibyte into a window of four chunks of 64 bytes.
+    // Four chunks fill the window and the reader pauses; the values hold
+    // them and nothing more arrives; destroying the values resumes the read
+    // and the rest arrives, in order, nothing lost.
+    auto big = pattern(7, 1024);
+    check(writeWhenFree(outbox, client, big) == UvSubmit.accepted, "a kibibyte written");
+    check(waitUntil(() => loop.socketStats(server).paused >= 1), "the reader paused");
+    size_t got;
+    {
+        UvReceived[4] held;
+        foreach (i; 0 .. 4)
+        {
+            check(popWithin(inbox, held[i]) && held[i].held && held[i].tag == 12, "a chunk held");
+            check(held[i].bytes == big[got .. got + held[i].bytes.length], "the chunk in order");
+            got += held[i].bytes.length;
+        }
+        check(got > 0 && got <= 4 * 64, "at most the window's bytes before the pause");
+        Thread.sleep(5.msecs);
+        UvReceived none;
+        check(!inbox.tryPop(none), "nothing more while the values hold the window");
+    }
+    immutable deadline = MonoTime.currTime + 10.seconds;
+    while (got < big.length)
+    {
+        UvReceived d;
+        check(popWithin(inbox, d) && d.held, "a chunk after the release");
+        check(d.bytes == big[got .. got + d.bytes.length], "the chunk in order after the release");
+        got += d.bytes.length;
+        check(MonoTime.currTime < deadline, "the rest arrived in time");
+    }
+    check(got == big.length, "every byte arrived");
+    check(waitUntil(() => outbox.settle() == 0), "the writes published");
+    check(outbox.failed == 0, "no write failed");
+
+    // The client ends its side: the server sees the end of the stream and
+    // can still write; a write on the shut side fails.
+    auto shut = UvRequest.tcpShutdown(client);
+    check(loop.submitAndBlock(shut) == UvSubmit.accepted && shut.succeeded, "client shutdown");
+    {
+        UvReceived d;
+        check(popWithin(inbox, d) && !d.held && d.flags == UvDatagramFlag.endOfStream
+            && d.socket == server && d.tag == 12, "end of stream on the server side");
+    }
+    check(outbox.write(server, cast(const(ubyte)[]) "after") == UvSubmit.accepted,
+        "a write after the peer's shutdown");
+    {
+        UvReceived d;
+        check(popWithin(inbox, d) && d.tag == 11 && d.bytes == cast(const(ubyte)[]) "after",
+            "received after the shutdown of the other side");
+    }
+    {
+        auto late = UvRequest.tcpWrite(client, cast(const(ubyte)[]) "late");
+        check(loop.submitAndBlock(late) == UvSubmit.accepted && late.result < 0,
+            "a write on the shut side fails");
+    }
+
+    // Closing the server's stream ends the client's; a write to a closed
+    // stream is EBADF; udpClose refuses a stream.
+    auto close = UvRequest.tcpClose(server);
+    check(loop.submitAndBlock(close) == UvSubmit.accepted && close.succeeded, "server stream close");
+    {
+        UvReceived d;
+        check(popWithin(inbox, d) && !d.held && d.flags == UvDatagramFlag.endOfStream
+            && d.socket == client && d.tag == 11, "end of stream on the client after the close");
+    }
+    {
+        auto w = UvRequest.tcpWrite(server, cast(const(ubyte)[]) "x");
+        check(loop.submitAndBlock(w) == UvSubmit.accepted && w.result == UV_EBADF,
+            "a write to a closed stream");
+        auto wrong = UvRequest.udpClose(client);
+        check(loop.submitAndBlock(wrong) == UvSubmit.accepted && wrong.result == UV_EINVAL,
+            "udpClose refuses a stream");
+    }
+    close = UvRequest.tcpClose(client);
+    check(loop.submitAndBlock(close) == UvSubmit.accepted && close.succeeded, "client close");
+
+    // With the listener closed, a connect to its port fails and leaves the
+    // table clean: a new listen takes a slot.
+    close = UvRequest.tcpClose(listener);
+    check(loop.submitAndBlock(close) == UvSubmit.accepted && close.succeeded, "listener close");
+    auto refusedOptions = inbox.streamOptions(13, 4, 64);
+    refusedOptions.connect = UvAddress.loopback4(port);
+    auto refused = UvRequest.tcpConnect(refusedOptions);
+    check(loop.submitAndBlock(refused) == UvSubmit.accepted && refused.result < 0,
+        "a connect with no listener fails");
+    listen = UvRequest.tcpListen(listenOptions);
+    check(loop.submitAndBlock(listen) == UvSubmit.accepted && listen.succeeded,
+        "listen again after the failures");
+    close = UvRequest.tcpClose(cast(int) listen.result);
+    check(loop.submitAndBlock(close) == UvSubmit.accepted && close.succeeded, "second listener close");
+    outbox.close();
+    check(inbox.unexpected == 0, "no unexpected elements");
+}
+
+void tcpLoopback()
+{
+    auto loop = UvLoop.create(testOptions());
+    auto inbox = new UvInbox(64);
+    tcpExercise(loop, inbox);
+    auto report = loop.close();
+    check(report.loopClose == 0 && report.abandoned == 0 && report.failure is null, "TCP close report");
+    inbox.destroy();
+    pass("TCP streams on the loopback: listen, the accept event, connect, chunks both ways with "
+        ~ "their peers, the held window pausing and resuming the read, end of stream after a "
+        ~ "shutdown and after a close, the refusals");
+}
+
+// A loop-thread Fiber served by the sockets' trigger: one trigger counts
+// the listener's accept and the stream's chunk, and the Fiber waits on it
+// instead of polling the inbox.
+void tcpFiberTrigger()
+{
+    UvFibers fibers;
+    UvInbox inbox;
+    shared int finished;
+    UvLoopOptions options = testOptions();
+    options.start = () {
+        auto loop = UvLoop.current;
+        fibers = new UvFibers(loop);
+        fibers.spawn(() @safe {
+            auto domain = fibers.domain;
+            auto trigger = new FiberGenerationTrigger(domain);
+            inbox = new UvInbox(32);
+            auto listenOptions = inbox.listenOptions(20, 4);
+            listenOptions.bind = UvAddress.loopback4(0);
+            listenOptions.trigger = trigger;
+            auto listen = UvRequest.tcpListen(listenOptions);
+            listen.event = new FiberEvent(domain);
+            check(submitAndWait(loop, listen) == UvSubmit.accepted && listen.succeeded, "listen (Fiber)");
+            auto clientOptions = inbox.streamOptions(21, 4, 64);
+            clientOptions.connect = UvAddress.loopback4(cast(ushort) listen.size);
+            auto connect = UvRequest.tcpConnect(clientOptions);
+            connect.event = new FiberEvent(domain);
+            check(submitAndWait(loop, connect) == UvSubmit.accepted && connect.succeeded, "connect (Fiber)");
+            trigger.waitNext();
+            UvReceived d;
+            check(inbox.tryPop(d) && d.flags == UvDatagramFlag.accepted && d.tag == 20,
+                "the accept woke the Fiber");
+            immutable server = cast(int) d.socket;
+            auto serverOptions = inbox.streamOptions(22, 4, 64);
+            serverOptions.trigger = trigger;
+            auto start = UvRequest.tcpStart(server, serverOptions);
+            start.event = new FiberEvent(domain);
+            check(submitAndWait(loop, start) == UvSubmit.accepted && start.result == server, "start (Fiber)");
+            ubyte[5] hello = [104, 101, 108, 108, 111];
+            auto write = UvRequest.tcpWrite(cast(int) connect.result, hello[]);
+            write.event = new FiberEvent(domain);
+            check(submitAndWait(loop, write) == UvSubmit.accepted && write.result == 5, "write (Fiber)");
+            trigger.waitNext();
+            check(inbox.tryPop(d) && d.held && d.tag == 22 && d.bytes == hello[], "the chunk woke the Fiber");
+            d.release();
+            foreach (socket; [server, cast(int) connect.result, cast(int) listen.result])
+            {
+                auto close = UvRequest.tcpClose(socket);
+                close.event = new FiberEvent(domain);
+                check(submitAndWait(loop, close) == UvSubmit.accepted && close.succeeded, "close (Fiber)");
+            }
+            atomicStore(finished, 1);
+        });
+    };
+    options.step = () => fibers.step();
+    options.stop = () { fibers.shutdown(); };
+    auto loop = UvLoop.create(options);
+    check(waitUntil(() => atomicLoad(finished) == 1), "the trigger-driven Fiber finished");
+    auto report = loop.close();
+    check(report.failure is null && report.loopClose == 0, "close after the trigger-driven Fiber");
+    inbox.destroy();
+    pass("a loop-thread Fiber woken by a listener's and a stream's trigger: accept, start, write, chunk");
+}
+
 // A Fiber on the loop thread spawned from @safe code: the wait by reference
 // for a timer and a stat from a string, a sleep, a semaphore, and the
 // refusal of a request that names a callback.
@@ -2001,6 +2260,8 @@ int main()
     readFileCancelStorm(paths[8], contents[8]);
     udpLoopback();
     safeUdpLoopback();
+    tcpLoopback();
+    tcpFiberTrigger();
     version (AntfarmMimallocV3) mimallocReads(paths[8], contents[8]);
     abandonReadFileInAllocator(paths[8]);
     abandonBlocked(dir);

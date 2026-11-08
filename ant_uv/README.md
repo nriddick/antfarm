@@ -268,6 +268,52 @@ and a multicast group. Sessions, authentication, replay protection and
 packet formats are the application's; the transport carries no
 cryptography.
 
+## TCP streams
+
+A TCP listener and a TCP stream are sockets in the same table as UDP
+sockets, opened and closed by requests, delivering to a ring the
+application names. Where a UDP socket drops when its window is full, a
+stream pauses: the loop stops reading when every buffer is held and resumes
+within about a millisecond of a release, so nothing is lost and the window
+is the stream's receive credit.
+
+```d
+auto listen = UvRequest.tcpListen(options);       // bind and listen; result = listener id, size = port
+auto connect = UvRequest.tcpConnect(options);     // result = stream id, size = local port; reading starts
+auto start = UvRequest.tcpStart(socket, options); // an accepted stream: its ring, window and chunk size
+auto write = UvRequest.tcpWrite(socket, bytes);   // result = bytes written; bytes are yours until publication
+auto shut = UvRequest.tcpShutdown(socket);        // the FIN, after the pending writes
+auto close = UvRequest.tcpClose(socket);          // listener or stream; held chunks stay valid
+```
+
+What arrives on the ring:
+
+- A listener pushes one element per accepted connection: `pointer` 0,
+  `payload[0]` the new stream's id with `StreamEvent.accepted` above it in
+  bits 32 and up, `payload[1 .. 4]` the peer (`unpackAddress`). The stream
+  reads nothing until `tcpStart` gives it a ring, a window and a chunk
+  size, or `tcpClose` refuses it.
+- A stream pushes one element per chunk, shaped as a datagram's: the
+  header's `peer` is the stream's peer and `length` is at most
+  `chunkBytes`. A full ring holds a chunk in the loop's pending queue
+  rather than dropping it.
+- The end of the stream and a read error are events: `pointer` 0, the kind
+  in `payload[0]`, the libuv code in `payload[1]`. Reading stops; the
+  stream may still be written until it is closed.
+
+An element with `pointer` 0 is never a datagram, so a raw consumer checks
+that before it casts; `UvInbox.tryPop` presents all three events as
+`UvReceived` with `held` false and `flags` naming them.
+
+A write goes out at once when the socket takes all of it and publishes
+there; otherwise the rest waits in libuv with the request's credit, and the
+result is the whole length or an error. `noDelay` is on by default, since
+the streams carry control traffic that waits on nothing. Every socket kind
+accepts a `trigger`, a `FiberGenerationTrigger` advanced once per element
+pushed, so a Fiber waits with `waitNext` and then pops instead of polling.
+Statistics are `loop.socketStats(id)` for every kind; `udpStats` is the
+same call under its older name.
+
 ## From `@safe` code
 
 Parsing a stranger's bytes is where memory safety earns its keep, and
@@ -311,6 +357,12 @@ while (inbox.tryPop(d))                        // releases what d held, then fil
   the oldest slot is reused once its send published, and `full` says every
   slot is in flight. One thread sends at a time; `close` waits for the
   sends to publish and frees the memory.
+- Streams take the same shapes. `inbox.listenOptions` and
+  `inbox.streamOptions` register a listener's and a stream's tags,
+  `outbox.write` copies a write in, and `tryPop` presents a listener's
+  accepted connection, a stream's end and a read error as values with
+  `held` false and `flags` naming the event, so one loop over the inbox
+  handles datagrams, chunks and events alike.
 - `UvLoop.submitAndBlock(request)` and `submitAndWait(loop, request)` take
   a request by reference and return only after publication, so a request
   on the stack is sound; both refuse a `callback` or a `completions` ring,

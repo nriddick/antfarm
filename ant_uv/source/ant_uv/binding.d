@@ -55,6 +55,16 @@ struct uv_work_t;
 struct uv_udp_send_t;
 /// ditto
 struct uv_getaddrinfo_t;
+/// ditto
+struct uv_stream_t;
+/// ditto
+struct uv_tcp_t;
+/// ditto
+struct uv_connect_t;
+/// ditto
+struct uv_write_t;
+/// ditto
+struct uv_shutdown_t;
 
 /// `uv_handle_type`, as in libuv's `UV_HANDLE_TYPE_MAP`.
 enum uv_handle_type : int
@@ -195,11 +205,24 @@ alias uv_udp_send_cb = extern (C) void function(uv_udp_send_t* req, int status) 
 /// ditto
 alias uv_getaddrinfo_cb = extern (C) void function(uv_getaddrinfo_t* req, int status,
     addrinfo* res) nothrow @nogc;
+/// ditto
+alias uv_connection_cb = extern (C) void function(uv_stream_t* server, int status) nothrow @nogc;
+/// ditto
+alias uv_read_cb = extern (C) void function(uv_stream_t* stream, ptrdiff_t nread,
+    const(uv_buf_t)* buf) nothrow @nogc;
+/// ditto
+alias uv_write_cb = extern (C) void function(uv_write_t* req, int status) nothrow @nogc;
+/// ditto
+alias uv_connect_cb = extern (C) void function(uv_connect_t* req, int status) nothrow @nogc;
+/// ditto
+alias uv_shutdown_cb = extern (C) void function(uv_shutdown_t* req, int status) nothrow @nogc;
 
 /// `uv_udp_flags`: the ones `ant_uv` passes or reads.
 enum uint UV_UDP_IPV6ONLY = 1;  ///
 enum uint UV_UDP_PARTIAL = 2;   /// a received datagram was truncated to the buffer
 enum uint UV_UDP_REUSEADDR = 4; ///
+/// `uv_tcp_flags`.
+enum uint UV_TCP_IPV6ONLY = 1;  ///
 
 /// `uv_membership`.
 enum uv_membership : int
@@ -236,31 +259,41 @@ else version (Posix)
 /// are negated errno values; Windows codes are libuv's own numbers.
 version (Windows)
 {
-    enum int UV_EADDRINUSE = -4091; ///
-    enum int UV_EAGAIN = -4088;     ///
-    enum int UV_EBADF = -4083;      ///
-    enum int UV_EBUSY = -4082;      ///
-    enum int UV_ECANCELED = -4081;  ///
-    enum int UV_EINVAL = -4071;     ///
-    enum int UV_EISDIR = -4068;     ///
-    enum int UV_EMFILE = -4066;     ///
-    enum int UV_ENOBUFS = -4060;    ///
-    enum int UV_ENOMEM = -4057;     ///
+    enum int UV_EADDRINUSE = -4091;   ///
+    enum int UV_EAGAIN = -4088;       ///
+    enum int UV_EBADF = -4083;        ///
+    enum int UV_EBUSY = -4082;        ///
+    enum int UV_ECANCELED = -4081;    ///
+    enum int UV_ECONNABORTED = -4079; ///
+    enum int UV_ECONNREFUSED = -4078; ///
+    enum int UV_ECONNRESET = -4077;   ///
+    enum int UV_EINVAL = -4071;       ///
+    enum int UV_EISDIR = -4068;       ///
+    enum int UV_EMFILE = -4066;       ///
+    enum int UV_ENOBUFS = -4060;      ///
+    enum int UV_ENOMEM = -4057;       ///
+    enum int UV_ENOTCONN = -4053;     ///
+    enum int UV_EPIPE = -4047;        ///
 }
 else version (Posix)
 {
-    import core.stdc.errno : EADDRINUSE, EAGAIN, EBADF, EBUSY, ECANCELED, EINVAL, EISDIR, EMFILE,
-        ENOBUFS, ENOMEM;
-    enum int UV_EADDRINUSE = -EADDRINUSE; ///
-    enum int UV_EAGAIN = -EAGAIN;         ///
-    enum int UV_EBADF = -EBADF;           ///
-    enum int UV_EBUSY = -EBUSY;           ///
-    enum int UV_ECANCELED = -ECANCELED;   ///
-    enum int UV_EINVAL = -EINVAL;         ///
-    enum int UV_EISDIR = -EISDIR;         ///
-    enum int UV_EMFILE = -EMFILE;         ///
-    enum int UV_ENOBUFS = -ENOBUFS;       ///
-    enum int UV_ENOMEM = -ENOMEM;         ///
+    import core.stdc.errno : EADDRINUSE, EAGAIN, EBADF, EBUSY, ECANCELED, ECONNABORTED,
+        ECONNREFUSED, ECONNRESET, EINVAL, EISDIR, EMFILE, ENOBUFS, ENOMEM, ENOTCONN, EPIPE;
+    enum int UV_EADDRINUSE = -EADDRINUSE;     ///
+    enum int UV_EAGAIN = -EAGAIN;             ///
+    enum int UV_EBADF = -EBADF;               ///
+    enum int UV_EBUSY = -EBUSY;               ///
+    enum int UV_ECANCELED = -ECANCELED;       ///
+    enum int UV_ECONNABORTED = -ECONNABORTED; ///
+    enum int UV_ECONNREFUSED = -ECONNREFUSED; ///
+    enum int UV_ECONNRESET = -ECONNRESET;     ///
+    enum int UV_EINVAL = -EINVAL;             ///
+    enum int UV_EISDIR = -EISDIR;             ///
+    enum int UV_EMFILE = -EMFILE;             ///
+    enum int UV_ENOBUFS = -ENOBUFS;           ///
+    enum int UV_ENOMEM = -ENOMEM;             ///
+    enum int UV_ENOTCONN = -ENOTCONN;         ///
+    enum int UV_EPIPE = -EPIPE;               ///
 }
 /// End of file; the same number on every platform.
 enum int UV_EOF = -4095;
@@ -359,6 +392,25 @@ int uv_udp_recv_start(uv_udp_t* handle, uv_alloc_cb allocCb, uv_udp_recv_cb recv
 int uv_udp_recv_stop(uv_udp_t* handle); ///
 int uv_send_buffer_size(uv_handle_t* handle, int* value); ///
 int uv_recv_buffer_size(uv_handle_t* handle, int* value); ///
+
+// ---- TCP streams ----
+int uv_tcp_init(uv_loop_t* loop, uv_tcp_t* handle); ///
+int uv_tcp_bind(uv_tcp_t* handle, const(sockaddr)* addr, uint flags); ///
+int uv_tcp_connect(uv_connect_t* req, uv_tcp_t* handle, const(sockaddr)* addr,
+    uv_connect_cb cb); ///
+int uv_tcp_nodelay(uv_tcp_t* handle, int enable); ///
+int uv_tcp_keepalive(uv_tcp_t* handle, int enable, uint delay); ///
+int uv_tcp_getsockname(const(uv_tcp_t)* handle, sockaddr* name, int* namelen); ///
+int uv_tcp_getpeername(const(uv_tcp_t)* handle, sockaddr* name, int* namelen); ///
+int uv_listen(uv_stream_t* stream, int backlog, uv_connection_cb cb); ///
+int uv_accept(uv_stream_t* server, uv_stream_t* client); ///
+int uv_read_start(uv_stream_t* stream, uv_alloc_cb allocCb, uv_read_cb readCb); ///
+int uv_read_stop(uv_stream_t* stream); ///
+int uv_write(uv_write_t* req, uv_stream_t* handle, const(uv_buf_t)* bufs, uint nbufs,
+    uv_write_cb cb); ///
+int uv_try_write(uv_stream_t* handle, const(uv_buf_t)* bufs, uint nbufs); ///
+int uv_shutdown(uv_shutdown_t* req, uv_stream_t* handle, uv_shutdown_cb cb); ///
+size_t uv_stream_get_write_queue_size(const(uv_stream_t)* stream); ///
 
 // ---- addresses and names ----
 int uv_ip4_addr(const(char)* ip, int port, sockaddr_in* addr); ///

@@ -137,6 +137,7 @@ Parallel loop adapters are a separate module:
 | Fibers and the loop | `UvFibers`, `submitAndWait` | [ant_uv/README.md](../../ant_uv/README.md) |
 | UDP sockets | `UvUdpOptions`, `UvDatagram`, `UvDatagramFlag`, `UvAddress`, `UvFamily`, `UvUdpStats`, `UvLoop.udpStats`, `UvLoop.nanos` | [ant_uv/README.md](../../ant_uv/README.md#udp-sockets), [event loop design](../design/event-loop.md#9-221-udp-sockets) |
 | The `@safe` surface | `UvInbox`, `UvReceived`, `UvOutbox`, `UvLoop.submitAndBlock` | [ant_uv/README.md](../../ant_uv/README.md#from-safe-code), [event loop design](../design/event-loop.md#912-the-safe-surface-and-its-trusted-contract) |
+| TCP streams | `UvTcpOptions`, `StreamEvent`, `packAddress`, `unpackAddress`, `UvSocketStats`, `UvLoop.socketStats` | [ant_uv/README.md](../../ant_uv/README.md#tcp-streams), [event loop design](../design/event-loop.md#10-221-tcp-streams) |
 | Files the loop allocates for `readFile` | `UvBuffer`, `UvRequest.takeBuffer`, `UvRequest.freeBuffer`, `UvRequest.ownsBuffer`, `UvRequest.allocator`, `UvRequest.alignment`, `ActorAllocator` | [ant_uv/README.md](../../ant_uv/README.md#where-readfile-puts-a-file), [loading files](../guide/loading-files.md#where-the-bytes-live) |
 
 ## Group host

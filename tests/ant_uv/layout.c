@@ -73,6 +73,17 @@ long antuv_c_constant(int which)
     case 44: return offsetof(struct addrinfo, ai_next);
     case 45: return AF_INET;
     case 46: return AF_INET6;
+    case 47: return UV_TCP;
+    case 48: return UV_STREAM;
+    case 49: return UV_CONNECT;
+    case 50: return UV_WRITE;
+    case 51: return UV_SHUTDOWN;
+    case 52: return UV_ECONNREFUSED;
+    case 53: return UV_ECONNRESET;
+    case 54: return UV_ENOTCONN;
+    case 55: return UV_EPIPE;
+    case 56: return UV_ECONNABORTED;
+    case 57: return UV_TCP_IPV6ONLY;
     }
     return -1;
 }

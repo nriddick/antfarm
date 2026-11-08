@@ -2,13 +2,15 @@
  + The `@safe` surface of `ant_uv`: the shapes through which code that must
  + not read a stranger's bytes through a raw pointer uses the loop.
  +
- + - `UvInbox` owns the ring UDP sockets deliver to and hands datagrams out
- +   as `UvReceived`: the header by value, the data as a scoped slice, the
- +   buffer released once, when the value is destroyed, released or handed
- +   to the next `tryPop`.
- + - `UvOutbox` owns the requests and bytes of in-flight sends. `send`
- +   copies a packet in and submits; a slot is reused only after the loop
- +   published it.
+ + - `UvInbox` owns the ring sockets deliver to and hands what arrives out
+ +   as `UvReceived`: a datagram or a stream chunk as the header by value
+ +   and the data as a scoped slice, the buffer released once, when the
+ +   value is destroyed, released or handed to the next `tryPop`; a stream
+ +   event (a connection accepted, the end of a stream, a read error) as
+ +   the header alone, with no buffer held.
+ + - `UvOutbox` owns the requests and bytes of in-flight sends and writes.
+ +   `send` and `write` copy a packet in and submit; a slot is reused only
+ +   after the loop published it.
  + - `UvLoop.submitAndBlock` and the `ref` form of `submitAndWait`
  +   (`ant_uv.fibers`) take a request by reference and return only after
  +   publication, so a request on the caller's stack is sound.
@@ -35,12 +37,15 @@ import core.stdc.string : memcpy;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, seconds, usecs;
 
-/// A received datagram as `@safe` code holds it: the header copied out, the
-/// data as a slice that lives no longer than this value, and the buffer
-/// returned to its socket's window exactly once, when the value is
-/// destroyed, released, or handed to the next `UvInbox.tryPop`. It cannot
-/// be copied; move it (`core.lifetime.move`) to keep a datagram past the
-/// scope that popped it, and release it from any thread.
+/// What a socket delivered, as `@safe` code holds it: a datagram or a
+/// stream chunk as the header copied out and the data as a slice that lives
+/// no longer than this value, the buffer returned to its socket's window
+/// exactly once, when the value is destroyed, released, or handed to the
+/// next `UvInbox.tryPop`; or a stream event, `held` false and `flags`
+/// naming it (`accepted`: `socket` is the new stream and `peer` its peer;
+/// `endOfStream`; `streamError` with `status`). It cannot be copied; move it
+/// (`core.lifetime.move`) to keep a datagram past the scope that popped it,
+/// and release it from any thread.
 struct UvReceived
 {
     /// The loop's clock when libuv delivered it (`UvLoop.nanos`).
@@ -51,8 +56,10 @@ struct UvReceived
     uint socket;
     /// The element tag that names that socket on the inbox's ring.
     ulong tag;
-    /// The sender.
+    /// The sender; a stream's peer; the accepted connection's peer.
     UvAddress peer;
+    /// A `streamError` event's libuv code; 0 otherwise.
+    int status;
     private UvDatagram* datagram_;
     private uint length_;
 
@@ -91,12 +98,13 @@ struct UvReceived
     }
 }
 
-/// The ring one or more UDP sockets deliver to, owned, with the sockets'
-/// tags registered so that `tryPop` knows which elements are datagrams.
-/// Register every socket through `options` before opening it, from the
-/// thread that sets up; then pop from one thread or several. Nothing else
-/// may push to the ring: a request that names it as `completions` is
-/// discarded by tag and counted in `unexpected`.
+/// The ring one or more sockets deliver to, owned, with the sockets' tags
+/// registered so that `tryPop` knows which elements are theirs. Register
+/// every socket through `options`, `streamOptions` or `listenOptions`
+/// before opening it, from the thread that sets up; then pop from one
+/// thread or several. Nothing else may push to the ring: a request that
+/// names it as `completions` is discarded by tag and counted in
+/// `unexpected`.
 final class UvInbox
 {
     private SlotRing!RingElement* ring_;
@@ -136,7 +144,51 @@ final class UvInbox
     {
         if (window == 0 || maxDatagram == 0)
             throw new Exception("ant_uv: UvInbox.options: window and maxDatagram must be nonzero");
-        size_t total = window;
+        register(tag, window);
+        UvUdpOptions o;
+        o.completions = ring_;
+        o.tag = tag;
+        o.window = window;
+        o.maxDatagram = maxDatagram;
+        return o;
+    }
+
+    /// Options for a TCP stream that delivers here, for `tcpConnect` (set
+    /// `connect` on the result) or `tcpStart`: `completions`, `tag`,
+    /// `window` and `chunkBytes` set, the rest at their defaults. Registers
+    /// the tag as `options` does.
+    UvTcpOptions streamOptions(ulong tag, uint window = 16, uint chunkBytes = 4096) @safe
+    {
+        if (window == 0 || chunkBytes == 0)
+            throw new Exception("ant_uv: UvInbox.streamOptions: window and chunkBytes must be nonzero");
+        register(tag, window);
+        UvTcpOptions o;
+        o.completions = ring_;
+        o.tag = tag;
+        o.window = window;
+        o.chunkBytes = chunkBytes;
+        return o;
+    }
+
+    /// Options for a TCP listener that delivers its accepted connections
+    /// here, for `tcpListen` (set `bind` on the result): `completions`,
+    /// `tag` and `backlog` set. The tag is registered with `backlog` ring
+    /// slots, the most connections that can wait on the ring at once.
+    UvTcpOptions listenOptions(ulong tag, int backlog = 128) @safe
+    {
+        if (backlog <= 0)
+            throw new Exception("ant_uv: UvInbox.listenOptions: backlog must be positive");
+        register(tag, cast(uint) backlog);
+        UvTcpOptions o;
+        o.completions = ring_;
+        o.tag = tag;
+        o.backlog = backlog;
+        return o;
+    }
+
+    private void register(ulong tag, uint slots) @safe
+    {
+        size_t total = slots;
         uint slot = count_;
         foreach (i; 0 .. count_)
         {
@@ -146,25 +198,20 @@ final class UvInbox
                 total += entries_[i].window;
         }
         if (total > capacity)
-            throw new Exception("ant_uv: UvInbox.options: the windows registered exceed the ring's capacity");
+            throw new Exception("ant_uv: UvInbox: the windows registered exceed the ring's capacity");
         if (slot == count_)
         {
             if (count_ == maxEntries)
-                throw new Exception("ant_uv: UvInbox.options: every tag slot is taken");
+                throw new Exception("ant_uv: UvInbox: every tag slot is taken");
             count_++;
         }
-        entries_[slot] = Entry(tag, window);
-        UvUdpOptions o;
-        o.completions = ring_;
-        o.tag = tag;
-        o.window = window;
-        o.maxDatagram = maxDatagram;
-        return o;
+        entries_[slot] = Entry(tag, slots);
     }
 
-    /// Pop the next datagram into `into`, releasing whatever it held first.
-    /// False when no datagram is on the ring. Any thread; several threads
-    /// may pop at once, each receiving distinct datagrams.
+    /// Pop the next element into `into`, releasing whatever it held first:
+    /// a datagram, a stream chunk, or a stream event. False when nothing is
+    /// on the ring. Any thread; several threads may pop at once, each
+    /// receiving distinct elements.
     bool tryPop(ref UvReceived into) nothrow @nogc @trusted
     {
         into.release();
@@ -175,6 +222,32 @@ final class UvInbox
             {
                 atomicOp!"+="(unexpected_, 1);
                 continue;
+            }
+            if (e.pointer == 0)
+            {
+                // A stream event: no buffer, the socket and the kind in the
+                // first payload word, the rest as the kind says.
+                into.arrivalNanos = 0;
+                into.socket = cast(uint) e.payload[0];
+                into.tag = e.tag;
+                into.status = 0;
+                into.peer = UvAddress.init;
+                final switch (cast(StreamEvent)(e.payload[0] >> 32))
+                {
+                case StreamEvent.accepted:
+                    into.flags = UvDatagramFlag.accepted;
+                    into.peer = unpackAddress(e.payload);
+                    break;
+                case StreamEvent.endOfStream:
+                    into.flags = UvDatagramFlag.endOfStream;
+                    break;
+                case StreamEvent.error:
+                    into.flags = UvDatagramFlag.streamError;
+                    into.status = cast(int) e.payload[1];
+                    break;
+                }
+                atomicOp!"+="(popped_, 1);
+                return true;
             }
             auto d = cast(UvDatagram*) cast(size_t) e.pointer;
             // The loop completed the header before it pushed the element
@@ -192,6 +265,7 @@ final class UvInbox
             into.socket = d.socket;
             into.tag = e.tag;
             into.peer = d.peer;
+            into.status = 0;
             into.datagram_ = d;
             into.length_ = d.length;
             atomicOp!"+="(popped_, 1);
@@ -206,7 +280,7 @@ final class UvInbox
         return ring_.capacity;
     }
 
-    /// Datagrams handed out so far.
+    /// Elements handed out so far.
     @property ulong popped() const nothrow @nogc @safe
     {
         return atomicLoad(popped_);
@@ -245,12 +319,12 @@ final class UvInbox
     }
 }
 
-/// Sends from `@safe` code: `slots` requests and their byte buffers, owned
-/// by the outbox at stable addresses, each reused only after the loop
-/// published it. `send` copies a packet in and submits; `stampAt` asks the
-/// loop to write its transmit time into the copy. One thread sends at a
-/// time. A send's result is read when its slot is reused or by `settle`,
-/// into `sent`, `failed` and `lastError`.
+/// Sends and stream writes from `@safe` code: `slots` requests and their
+/// byte buffers, owned by the outbox at stable addresses, each reused only
+/// after the loop published it. `send` and `write` copy a packet in and
+/// submit; `stampAt` asks the loop to write its transmit time into a send's
+/// copy. One thread sends at a time. A result is read when its slot is
+/// reused or by `settle`, into `sent`, `failed` and `lastError`.
 final class UvOutbox
 {
     private UvLoop loop_;
@@ -303,14 +377,31 @@ final class UvOutbox
     UvSubmit send(int socket, scope const(ubyte)[] packet, UvAddress peer = UvAddress.init,
         uint stampAt = uint.max) nothrow @nogc @trusted
     {
+        return submitCopy(packet, (ubyte[] copy) {
+            auto r = UvRequest.udpSend(socket, copy, peer);
+            r.stampAt = stampAt;
+            return r;
+        });
+    }
+
+    /// Copy `bytes` into the oldest slot and submit it as a write to stream
+    /// `socket`. The answers are `send`'s; the loop's result is the bytes
+    /// written, all of them unless the write failed.
+    UvSubmit write(int socket, scope const(ubyte)[] bytes) nothrow @nogc @trusted
+    {
+        return submitCopy(bytes, (ubyte[] copy) => UvRequest.tcpWrite(socket, copy));
+    }
+
+    private UvSubmit submitCopy(scope const(ubyte)[] packet,
+        scope UvRequest delegate(ubyte[] copy) nothrow @nogc @safe make) nothrow @nogc @system
+    {
         if (!open_ || packet.length > capacity_) return UvSubmit.invalid;
         auto slot = &slots_[next_];
         if (slot.state == UvRequestState.queued) return UvSubmit.full;
         account(slot);
         auto bytes = bytes_ + cast(size_t) next_ * stride_;
         if (packet.length != 0) memcpy(bytes, packet.ptr, packet.length);
-        *slot = UvRequest.udpSend(socket, bytes[0 .. packet.length], peer);
-        slot.stampAt = stampAt;
+        *slot = make(bytes[0 .. packet.length]);
         immutable r = loop_.submit(slot);
         if (r == UvSubmit.accepted)
         {
@@ -340,11 +431,11 @@ final class UvOutbox
     @property uint slots() const nothrow @nogc @safe { return count_; }
     /// Bytes a packet may have.
     @property uint capacity() const nothrow @nogc @safe { return capacity_; }
-    /// Sends the loop accepted.
+    /// Sends and writes the loop accepted.
     @property ulong accepted() const nothrow @nogc @safe { return accepted_; }
-    /// Sends published with a non-negative result, as read so far.
+    /// Sends and writes published with a non-negative result, as read so far.
     @property ulong sent() const nothrow @nogc @safe { return sent_; }
-    /// Sends published with an error or abandoned, as read so far.
+    /// Sends and writes published with an error or abandoned, as read so far.
     @property ulong failed() const nothrow @nogc @safe { return failed_; }
     /// The libuv code of the latest failure read (`UV_ECANCELED` for an
     /// abandoned send); 0 when none failed.
@@ -384,7 +475,7 @@ final class UvOutbox
 
     private void account(UvRequest* slot) nothrow @nogc @system
     {
-        if (slot.user != 0 || slot.op != UvOp.udpSend) return;
+        if (slot.user != 0 || (slot.op != UvOp.udpSend && slot.op != UvOp.tcpWrite)) return;
         immutable s = slot.state;
         if (s != UvRequestState.done && s != UvRequestState.abandoned) return;
         slot.user = 1;
