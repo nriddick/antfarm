@@ -316,6 +316,20 @@ const(char)* uv_strerror(int err);    ///
 const(char)* uv_err_name(int err);    ///
 int uv_os_setenv(const(char)* name, const(char)* value); ///
 
+// ---- allocator ----
+/// The allocator libuv uses for its own memory; `uv_replace_allocator`
+/// takes it process-wide, before libuv's first allocation.
+alias uv_malloc_func = extern (C) void* function(size_t size) nothrow @nogc;
+/// ditto
+alias uv_realloc_func = extern (C) void* function(void* memory, size_t size) nothrow @nogc;
+/// ditto
+alias uv_calloc_func = extern (C) void* function(size_t count, size_t size) nothrow @nogc;
+/// ditto
+alias uv_free_func = extern (C) void function(void* memory) nothrow @nogc;
+/// ditto
+int uv_replace_allocator(uv_malloc_func malloc_func, uv_realloc_func realloc_func,
+    uv_calloc_func calloc_func, uv_free_func free_func);
+
 // ---- loops ----
 size_t uv_loop_size();                ///
 int uv_loop_init(uv_loop_t* loop);    ///

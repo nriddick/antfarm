@@ -50,6 +50,11 @@ import ant_uv.binding;
 // mimalloc v3 adapter is antfarm.actors.mimalloc.mimallocV3ActorAllocator.
 public import antfarm.actors.actor : ActorAllocator;
 import antfarm.allocation : allocateAligned64, freeAligned64;
+// Network memory (receive windows, socket handles, and libuv's own
+// allocations): the C runtime, or the secure mimalloc instance when the
+// build links it (AntfarmMimallocSecure).
+import antfarm.secure_allocation : secureAllocateAligned64, secureAllocatorLinked, secureCalloc,
+    secureFree, secureFreeAligned64, secureMalloc, secureRealloc;
 import antfarm.ring : RingElement, RingPush, SlotRing;
 import core.atomic;
 import core.stdc.stdlib : calloc, free, getenv, malloc, strtol;
@@ -75,6 +80,52 @@ else version (Windows)
         THREAD_PRIORITY_LOWEST;
     import threadpool.sys.win_bindings : GetThreadGroupAffinity, GROUP_AFFINITY,
         SetThreadGroupAffinity;
+}
+
+// libuv's own allocations (handles' internal buffers, requests, getaddrinfo
+// results, io_uring and threadpool bookkeeping) follow the network memory
+// above: with the secure instance linked they go there as well. libuv takes
+// its allocator process-wide and before its first allocation, so it is set
+// while the C runtime starts, before any D code. Memory libuv allocated
+// earlier (another library used it first) is still freed correctly:
+// secureFree hands memory the secure instance does not own to the C runtime.
+private __gshared bool libuvAllocatorSecure;
+
+private extern (C) void* antUvSecureMalloc(size_t size) nothrow @nogc
+{
+    return secureMalloc(size);
+}
+
+private extern (C) void* antUvSecureRealloc(void* memory, size_t size) nothrow @nogc
+{
+    return secureRealloc(memory, size);
+}
+
+private extern (C) void* antUvSecureCalloc(size_t count, size_t size) nothrow @nogc
+{
+    return secureCalloc(count, size);
+}
+
+private extern (C) void antUvSecureFree(void* memory) nothrow @nogc
+{
+    secureFree(memory);
+}
+
+pragma(crt_constructor)
+private extern (C) void antUvInstallSecureAllocator() nothrow @nogc
+{
+    if (!secureAllocatorLinked()) return;
+    libuvAllocatorSecure = uv_replace_allocator(&antUvSecureMalloc, &antUvSecureRealloc,
+        &antUvSecureCalloc, &antUvSecureFree) == 0;
+}
+
+/// True when libuv allocates from the secure mimalloc instance
+/// (`antfarm.secure_allocation`, build option `AntfarmMimallocSecure`), as
+/// ant_uv's receive windows, outboxes and socket handles then do. False in
+/// other builds, where all of them use the C runtime.
+bool uvAllocatorIsSecure() nothrow @nogc @trusted
+{
+    return libuvAllocatorSecure; // written once, before main
 }
 
 /// The "no processor" sentinel for `UvLoopOptions.cpu`.
@@ -1092,7 +1143,8 @@ struct UvSocketStats
 /// ditto
 alias UvUdpStats = UvSocketStats;
 
-// A socket's receive window, for datagrams and for a stream's chunks:
+// A socket's receive window, for datagrams and for a stream's chunks, in
+// network memory (antfarm.secure_allocation):
 // `count` buffers of `stride` bytes, each a UvDatagram header and
 // `maxDatagram` data bytes. The loop thread takes buffers from the free
 // list; any thread returns them through the atomic list; the last reference
@@ -1109,14 +1161,14 @@ private struct UdpWindow
 
     static UdpWindow* create(uint count, uint maxDatagram) nothrow @nogc
     {
-        auto w = cast(UdpWindow*) calloc(1, UdpWindow.sizeof);
+        auto w = cast(UdpWindow*) secureCalloc(1, UdpWindow.sizeof);
         if (w is null) return null;
         w.stride_ = (UvDatagram.sizeof + maxDatagram + 63) & ~cast(size_t) 63;
         w.count_ = count;
-        w.memory_ = allocateAligned64(w.stride_ * (count + 1));
+        w.memory_ = secureAllocateAligned64(w.stride_ * (count + 1));
         if (w.memory_ is null)
         {
-            free(w);
+            secureFree(w);
             return null;
         }
         foreach_reverse (i; 0 .. count + 1)
@@ -1189,8 +1241,8 @@ private struct UdpWindow
     {
         if (atomicFetchSub!(MemoryOrder.acq_rel)(refs_, 1u) == 1)
         {
-            freeAligned64(memory_);
-            free(&this);
+            secureFreeAligned64(memory_);
+            secureFree(&this);
         }
     }
 }
@@ -2544,7 +2596,7 @@ private:
     // last buffer the application returns.
     void socketClosed(Socket* s) nothrow @nogc
     {
-        free(s.handle);
+        secureFree(s.handle);
         s.handle = null;
         if (s.ring !is null && s.committed != 0) uncommitRing(s.ring, s.committed);
         if (s.window !is null)
@@ -2632,12 +2684,12 @@ private:
         s.trigger = cast(FiberGenerationTrigger) o.trigger; // the record is const, the trigger is the owner's
         s.committed = o.window;
         s.maxDatagram = o.maxDatagram;
-        s.handle = cast(uv_handle_t*) malloc(uv_handle_size(uv_handle_type.UV_UDP));
+        s.handle = cast(uv_handle_t*) secureMalloc(uv_handle_size(uv_handle_type.UV_UDP));
         s.window = UdpWindow.create(o.window, o.maxDatagram);
         int rc = s.handle is null || s.window is null ? UV_ENOMEM : uv_udp_init(loop_, s.udp);
         if (rc < 0)
         {
-            free(s.handle); // not initialized: nothing in libuv refers to it
+            secureFree(s.handle); // not initialized: nothing in libuv refers to it
             s.handle = null;
             discardSocket(s);
             publish(request, rc, 0);
@@ -2756,12 +2808,12 @@ private:
     // when that fails.
     int initTcp(Socket* s) nothrow @nogc
     {
-        s.handle = cast(uv_handle_t*) malloc(uv_handle_size(uv_handle_type.UV_TCP));
+        s.handle = cast(uv_handle_t*) secureMalloc(uv_handle_size(uv_handle_type.UV_TCP));
         if (s.handle is null) return UV_ENOMEM;
         immutable rc = uv_tcp_init(loop_, s.tcp);
         if (rc < 0)
         {
-            free(s.handle);
+            secureFree(s.handle);
             s.handle = null;
             return rc;
         }
@@ -2924,10 +2976,10 @@ private:
 
     void refuseConnection(Socket* listener) nothrow @nogc
     {
-        auto h = cast(uv_tcp_t*) malloc(uv_handle_size(uv_handle_type.UV_TCP));
+        auto h = cast(uv_tcp_t*) secureMalloc(uv_handle_size(uv_handle_type.UV_TCP));
         if (h is null || uv_tcp_init(loop_, h) < 0)
         {
-            free(h);
+            secureFree(h);
             atomicOp!"+="(listener.stats.errors, 1);
             return;
         }
@@ -3849,11 +3901,11 @@ private extern (C) void onSocketClosed(uv_handle_t* handle) nothrow @nogc
     s.owner.socketClosed(s);
 }
 
-// A handle whose setup failed after its init, or a connection refused for
-// want of a table entry: nothing else refers to it.
+// A socket handle whose setup failed after its init, or a connection
+// refused for want of a table entry: nothing else refers to it.
 private extern (C) void onHandleFreed(uv_handle_t* handle) nothrow @nogc
 {
-    free(handle);
+    secureFree(handle);
 }
 
 private extern (C) void onConnection(uv_stream_t* server, int status) nothrow @nogc

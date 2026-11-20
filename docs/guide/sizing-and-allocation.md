@@ -254,8 +254,10 @@ pin with `MI_SECURE=CHECKED` and its symbols renamed `afsec_`
 ([third_party/README.md](../../third_party/README.md#the-secure-instance)):
 frees of pointers it does not own are ignored rather than followed, free
 lists are encoded and randomized, and a write past a network buffer lands
-among other network buffers instead of actor state. Without the version
-every function is the C runtime's. Pair `secureAllocateAligned64` with
+among other network buffers instead of actor state. ant_uv takes its
+receive windows, outboxes and socket handles from it and installs it as
+libuv's allocator (`uvAllocatorIsSecure`). Without the version every
+function is the C runtime's. Pair `secureAllocateAligned64` with
 `secureFreeAligned64` and `secureMalloc`, `secureCalloc` and `secureRealloc`
 with `secureFree`; memory the instance does not own that reaches
 `secureFree` or `secureRealloc` goes to the C runtime and is counted by

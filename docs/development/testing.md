@@ -275,10 +275,12 @@ establish timing results or replace `make check`.
   optional; wrap it in `timeout`. Invoking a soak does not itself require
   another `make check` run.
 - `make check-mimalloc` runs the normal matrix, then the real allocator lanes
-  (`actors_torture` with the pinned mimalloc v3.7.0, release and TSan, and,
-  when the pinned libuv builds, `ant_uv`'s reads into mimalloc). It needs the
-  submodule (`git submodule update --init --recursive`), CMake and a C
-  toolchain. See [../../third_party/README.md](../../third_party/README.md).
+  (`actors_torture` with the pinned mimalloc v3.7.0, release and TSan; the
+  secure instance's lanes in `tests/mimalloc_secure`; and, when the pinned
+  libuv builds, `ant_uv`'s reads into mimalloc and its suite with network
+  memory and libuv in the secure instance, with and without io_uring). It
+  needs the submodule (`git submodule update --init --recursive`), CMake,
+  a C toolchain and Python 3. See [../../third_party/README.md](../../third_party/README.md).
   Other allocator targets (`run-mimalloc-debug`, `run-mimalloc-dmd`) are in
   [../../tests/actors/Makefile](../../tests/actors/Makefile).
 

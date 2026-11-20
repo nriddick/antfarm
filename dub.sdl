@@ -49,8 +49,9 @@ configuration "mimalloc-v3" {
 // mimalloc-v3 plus the secure instance for network memory
 // (antfarm.secure_allocation): the pinned source built again with
 // MI_SECURE=CHECKED and its symbols renamed afsec_ by
-// scripts/build-mimalloc-secure.py, which needs Python 3. Windows is not
-// yet verified.
+// scripts/build-mimalloc-secure.py, which needs Python 3. ant_uv routes its
+// receive windows, outboxes, socket handles and libuv's allocations there.
+// Windows is not yet verified.
 configuration "mimalloc-v3-secure" {
 	targetType "library"
 	versions "AntfarmMimallocV3" "AntfarmMimallocSecure"

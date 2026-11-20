@@ -11,7 +11,10 @@
  + inside its allocator, and abandonment of an operation that cannot
  + finish. With ANTUV_TEST_IO_URING=1 every loop uses io_uring, and
  + create must have built the ring. Built with `AntfarmMimallocV3` and the
- + real mimalloc library, it also reads into mimalloc v3. Linux and Windows.
+ + real mimalloc library, it also reads into mimalloc v3; with
+ + `AntfarmMimallocSecure` and the secure archive, receive windows, outboxes,
+ + socket handles and libuv's allocations are in the secure instance.
+ + Linux and Windows.
  +/
 module uv_test;
 
@@ -29,6 +32,8 @@ import ant_fibers;
 import ant_uv;
 import ant_uv.binding;
 import antfarm.ring;
+import antfarm.secure_allocation : secureAllocatorLinked, secureAllocatorName, secureForeignFrees,
+    secureMimallocVersion, secureOwns;
 import core.atomic;
 import core.lifetime : move;
 import core.stdc.config : c_long;
@@ -1398,6 +1403,8 @@ void udpLoopback()
     {
         auto d = popped(2, "the reply's element");
         check(d.bytes == cast(const(ubyte)[]) "pong" && d.peer.port == serverPort, "the reply");
+        check(secureOwns(d) == secureAllocatorLinked() && secureOwns(d.bytes.ptr) == secureAllocatorLinked(),
+            "the receive window is network memory");
         d.release();
     }
 
@@ -1767,6 +1774,21 @@ void safeUdpLoopback()
         ~ "parsers from slices, a forged element discarded");
 }
 
+
+// Network memory (antfarm.secure_allocation): with AntfarmMimallocSecure,
+// libuv allocates from the secure instance (installed before main), and by
+// the end of the suite neither libuv nor ant_uv has freed memory the secure
+// instance did not own: every allocation and free stayed paired. Without
+// it, both are the C runtime and nothing is counted. udpLoopback checks
+// that a receive window lies in the secure instance.
+void networkMemory()
+{
+    check(uvAllocatorIsSecure() == secureAllocatorLinked(), "libuv's allocator follows the build");
+    version (AntfarmMimallocSecure)
+        check(secureMimallocVersion() == 30_700, "the secure instance is the pinned mimalloc");
+    check(secureForeignFrees() == 0, "no foreign memory reached the secure allocator");
+    pass("network memory: " ~ secureAllocatorName() ~ (uvAllocatorIsSecure() ? ", libuv included" : ""));
+}
 
 // ---- TCP streams --------------------------------------------------------------
 
@@ -2265,6 +2287,7 @@ int main()
     version (AntfarmMimallocV3) mimallocReads(paths[8], contents[8]);
     abandonReadFileInAllocator(paths[8]);
     abandonBlocked(dir);
+    networkMemory();
     printf("ALL UV TESTS PASSED (%lld ms)\n", (MonoTime.currTime - started).total!"msecs");
     return 0;
 }

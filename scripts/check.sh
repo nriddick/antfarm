@@ -192,7 +192,8 @@ if [[ "$mimalloc" -eq 1 ]]; then
     run "${make_cmd[@]}" -C tests/mimalloc_secure all
     # The same pinned libuv as the ant_uv lane above; the system one is not used.
     if [[ "$libuv_pinned" -eq 1 ]]; then
-        run "${make_cmd[@]}" -C tests/ant_uv run-mimalloc
+        run "${make_cmd[@]}" -C tests/ant_uv run-mimalloc run-mimalloc-secure
+        run timeout 900 "${make_cmd[@]}" -C tests/ant_uv run-mimalloc-secure-iouring
     else
         echo "SKIP ant_uv mimalloc: the pinned libuv could not be built"
     fi

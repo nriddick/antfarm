@@ -4,7 +4,8 @@
 # on the loop thread, readFile's allocators). Links the pinned libuv that
 # scripts/build-libuv.py builds (UV_PREFIX names another installation).
 # run-mimalloc adds reads into the real mimalloc v3, built from
-# the third_party/mimalloc submodule by the actors suite's rule.
+# the third_party/mimalloc submodule by the actors suite's rule;
+# run-mimalloc-secure puts network memory and libuv in the secure instance.
 ROOT := ../..
 DC ?= ldc2
 DFLAGS ?= -g -O1
@@ -19,9 +20,11 @@ UV_CFLAGS ?= -I$(UV_PREFIX)/include
 TSAN_OPTIONS ?= history_size=7 halt_on_error=1 report_thread_leaks=0
 IMPORTS := -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$(ROOT)/ant_uv/source
 MIMALLOC_LIBRARY := $(ROOT)/tests/actors/.build/mimalloc-v3.7.0/libmimalloc.a
+MIMALLOC_SECURE_LIBRARY := $(ROOT)/tests/actors/.build/mimalloc-v3.7.0-secure/libmimalloc-secure.a
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
-.PHONY: run run-iouring run-dmd run-tsan run-dip1000 run-mimalloc clean
+.PHONY: run run-iouring run-dmd run-tsan run-dip1000 run-mimalloc run-mimalloc-secure \
+	run-mimalloc-secure-iouring clean
 
 $(UV_LIBRARY):
 	python3 $(ROOT)/scripts/build-libuv.py
@@ -63,6 +66,24 @@ run-mimalloc: layout.o $(MIMALLOC_LIBRARY)
 		$(MIMALLOC_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) $(UV_LIBS) -of=uv_test_mimalloc -od=.obj-mimalloc
 	./uv_test_mimalloc
 
+$(MIMALLOC_SECURE_LIBRARY):
+	$(MAKE) -C $(ROOT)/tests/actors .build/mimalloc-v3.7.0-secure/libmimalloc-secure.a
+
+# Network memory in the secure mimalloc instance (antfarm.secure_allocation):
+# receive windows, outboxes, socket handles and libuv's own allocations,
+# beside the fast instance; with and without io_uring.
+uv_test_mimalloc_secure: uv_test.d layout.o $(MIMALLOC_LIBRARY) $(MIMALLOC_SECURE_LIBRARY) \
+		$(wildcard $(ROOT)/ant_uv/source/ant_uv/*.d) $(ROOT)/antfarm/secure_allocation.d
+	$(DC) $(DFLAGS) -d-version=AntfarmMimallocV3 -d-version=AntfarmMimallocSecure -i $(IMPORTS) \
+		uv_test.d layout.o $(MIMALLOC_LIBRARY) $(MIMALLOC_SECURE_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) \
+		$(UV_LIBS) -of=$@ -od=.obj-mimalloc-secure
+
+run-mimalloc-secure: uv_test_mimalloc_secure
+	./uv_test_mimalloc_secure
+
+run-mimalloc-secure-iouring: uv_test_mimalloc_secure
+	ANTUV_TEST_IO_URING=1 ./uv_test_mimalloc_secure
+
 clean:
-	rm -rf uv_test uv_test_dmd uv_test_tsan uv_test_dip1000 uv_test_mimalloc layout.o .obj-ldc \
-		.obj-dmd .obj-tsan .obj-dip1000 .obj-mimalloc
+	rm -rf uv_test uv_test_dmd uv_test_tsan uv_test_dip1000 uv_test_mimalloc uv_test_mimalloc_secure \
+		layout.o .obj-ldc .obj-dmd .obj-tsan .obj-dip1000 .obj-mimalloc .obj-mimalloc-secure

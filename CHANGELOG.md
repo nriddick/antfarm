@@ -35,6 +35,19 @@ second, secure mimalloc instance for memory that holds network bytes.
   mixing both instances with disjoint ownership, 64 short-lived threads
   released at exit, and the C runtime fallback. Windows runner
   `tests/mimalloc_secure/run-windows.ps1`, not yet run there.
+- ant_uv: network memory goes through `antfarm.secure_allocation`:
+  receive windows (UDP datagrams and stream chunks), `UvOutbox` requests
+  and bytes, and UDP and TCP socket handles. With `AntfarmMimallocSecure`,
+  a `crt_constructor` installs the secure instance as libuv's allocator
+  (`uv_replace_allocator`) before any D code runs; `uvAllocatorIsSecure()`
+  reports it, and memory libuv allocated earlier still goes back to the C
+  runtime. Default builds are unchanged: the same C runtime calls as
+  before. `make -C tests/ant_uv run-mimalloc-secure` and
+  `run-mimalloc-secure-iouring` (in `make check-mimalloc`) check that a
+  receive window lies in the secure instance, that libuv's allocator was
+  replaced, and that by the end of the suite nothing foreign reached the
+  secure allocator; one handle allocated with `malloc` instead fails that
+  check (negative control).
 
 ## 2.2.1 development
 

@@ -29,10 +29,10 @@ module ant_uv.safe;
 import ant_uv.binding : UV_ECANCELED;
 import ant_uv.loop;
 import antfarm : fatal;
-import antfarm.allocation : allocateAligned64, freeAligned64;
+import antfarm.secure_allocation : secureAllocateAligned64, secureCalloc, secureFree,
+    secureFreeAligned64;
 import antfarm.ring : RingElement, SlotRing;
 import core.atomic;
-import core.stdc.stdlib : calloc, free;
 import core.stdc.string : memcpy;
 import core.thread : Thread;
 import core.time : Duration, MonoTime, seconds, usecs;
@@ -352,12 +352,12 @@ final class UvOutbox
         count_ = slots;
         capacity_ = capacity;
         stride_ = (cast(size_t) capacity + 63) & ~cast(size_t) 63;
-        slots_ = cast(UvRequest*) calloc(slots, UvRequest.sizeof);
-        bytes_ = cast(ubyte*) allocateAligned64(stride_ * slots);
+        slots_ = cast(UvRequest*) secureCalloc(slots, UvRequest.sizeof);
+        bytes_ = cast(ubyte*) secureAllocateAligned64(stride_ * slots);
         if (slots_ is null || bytes_ is null)
         {
-            free(slots_);
-            freeAligned64(bytes_);
+            secureFree(slots_);
+            secureFreeAligned64(bytes_);
             slots_ = null;
             bytes_ = null;
             throw new Exception("ant_uv: UvOutbox: out of memory");
@@ -456,9 +456,9 @@ final class UvOutbox
                 throw new Exception("ant_uv: UvOutbox.close: sends still in flight");
             Thread.sleep(50.usecs);
         }
-        free(slots_);
+        secureFree(slots_);
         slots_ = null;
-        freeAligned64(bytes_);
+        secureFreeAligned64(bytes_);
         bytes_ = null;
     }
 
@@ -469,8 +469,8 @@ final class UvOutbox
         if (slots_ is null) return;
         foreach (i; 0 .. count_)
             if (slots_[i].state == UvRequestState.queued) return;
-        free(slots_);
-        freeAligned64(bytes_);
+        secureFree(slots_);
+        secureFreeAligned64(bytes_);
     }
 
     private void account(UvRequest* slot) nothrow @nogc @system

@@ -482,6 +482,20 @@ Shut down in this order:
 The loop thread is not a daemon, so a loop left open keeps the process
 alive at exit.
 
+## Network memory
+
+Receive windows, outboxes, socket handles and libuv's own allocations come
+from `antfarm.secure_allocation`: the C runtime, or, in a build with
+`AntfarmMimallocSecure` (Dub configuration `mimalloc-v3-secure` of
+`antfarm`), a second mimalloc instance built with `MI_SECURE=CHECKED`. It
+validates every pointer passed to free and keeps its free lists encoded,
+and its heaps hold nothing but network memory. libuv's allocator is set
+process-wide while the C runtime starts, before any libuv call;
+`uvAllocatorIsSecure()` reports it. See
+[sizing-and-allocation.md](../docs/guide/sizing-and-allocation.md#network-memory-the-secure-instance).
+Files read with `readFile` keep the allocator you choose. Windows is not
+yet verified.
+
 ## Failures
 
 If the `start` or `step` hook throws, the loop stops calling the step,
