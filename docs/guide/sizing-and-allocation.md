@@ -239,10 +239,10 @@ auto runtime = ActorRuntime.create(farm, capacity,
     mimallocV3ActorAllocator());
 ```
 
-The upstream source is pinned as a submodule at v3.5.3, commit
-`d4881d338125e1cb7c47ba4cfb398d6f7c0c8d45`. The actor torture binary keeps a
+The upstream source is pinned as a submodule at v3.7.0, commit
+`1ed67b5156a763441d2ec3c20221a7b3cd866129`. The actor torture binary keeps a
 fast local C-ABI stub and adds a real static-link lane that asserts
-`mi_version() == 30503`. With `MI_OVERRIDE=OFF`, only the explicit actor policy
+`mi_version() == 30700`. With `MI_OVERRIDE=OFF`, only the explicit actor policy
 uses mimalloc; the D runtime and ordinary `malloc` remain unchanged.
 
 Long-running resident-memory behavior and throughput/latency benchmarks remain

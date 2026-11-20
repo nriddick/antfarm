@@ -37,7 +37,7 @@ def main():
     p.add_argument('--seconds', type=float, default=3)
     p.add_argument('--repeats', type=int, default=5)
     p.add_argument('--suite', choices=['lifecycle', 'batch', 'child'], default='lifecycle')
-    p.add_argument('--mimalloc-version', type=int, default=30503,
+    p.add_argument('--mimalloc-version', type=int, default=30700,
                    help='expected mi_version() value (30500 reproduces the historical pin)')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)

@@ -84,8 +84,8 @@ Coverage includes:
 - the optional mimalloc v3 adapter's exact pointer/size/alignment forwarding
   and 128-byte-aligned actor state, using a local ABI stub rather than
   requiring mimalloc for the core suite;
-- a real static link against the pinned mimalloc v3.5.3 submodule, checked at
-  runtime with `mi_version() == 30503`; and
+- a real static link against the pinned mimalloc v3.7.0 submodule, checked at
+  runtime with `mi_version() == 30700`; and
 - 8,192 actor-state frees from eight threads other than the allocation thread,
   plus foreign-thread frees of each runtime and stable-slot array. The same
   test runs against release, `MI_DEBUG=FULL`, and mimalloc-instrumented

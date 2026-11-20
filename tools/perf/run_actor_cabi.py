@@ -31,7 +31,7 @@ def main():
     obj, binary = out / "d.o", out / "actor_cabi"
     build.run(["ldc2", "-betterC", "-O2", "-release", "-I.", "-Icabi/source", "-c",
                "tools/perf/actor_cabi.d", "-of=" + str(obj)])
-    archive = ROOT / "tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a"
+    archive = ROOT / "tests/actors/.build/mimalloc-v3.7.0/libmimalloc.a"
     build.run(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Iinclude",
                "-Ithird_party/mimalloc/include", "tools/perf/actor_cabi.c", obj, lib,
                archive, "-pthread", "-lrt", "-latomic", "-o", binary])

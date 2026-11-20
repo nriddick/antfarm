@@ -8,7 +8,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$buildDir = Join-Path $PSScriptRoot ('.build/mimalloc-v3.5.3-windows-' + $Configuration.ToLowerInvariant())
+$buildDir = Join-Path $PSScriptRoot ('.build/mimalloc-v3.7.0-windows-' + $Configuration.ToLowerInvariant())
 $libraryDir = Join-Path $buildDir 'lib'
 $debugLevel = if ($Configuration -eq 'Debug') { 'FULL' } else { 'OFF' }
 $libraryName = if ($Configuration -eq 'Debug') { 'mimalloc-debug.lib' } else { 'mimalloc.lib' }

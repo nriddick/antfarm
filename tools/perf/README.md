@@ -230,7 +230,7 @@ D erased scalar creation, C scalar creation and C batch creation. States are
 64 and 4096 bytes; both paths use the same copy sources, 64-byte alignment,
 allocator, cohort capacity and native threads. It covers one/four creators,
 local/remote reclamation and CRT/mimalloc. The pinned mimalloc archive must
-already exist at `tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a`.
+already exist at `tests/actors/.build/mimalloc-v3.7.0/libmimalloc.a`.
 
 Separate counted runs require exactly one final-state allocation/free and
 `state_bytes` allocated bytes per actor; timed runs disable those counters.

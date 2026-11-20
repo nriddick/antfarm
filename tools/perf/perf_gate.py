@@ -32,7 +32,7 @@ def require_linux(parser):
 # and moved the benchmark to tools/perf/.
 LAYOUTS=dict(
     package=dict(marker='antfarm/package.d',benchmark='tools/perf/actor_churn.d',
-        archive='tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a',
+        archive='tests/actors/.build/mimalloc-v3.7.0/libmimalloc.a',
         sources=['antfarm/package.d','antfarm/allocation.d','antfarm/actors/package.d','antfarm/actors/actor.d',
             'antfarm/actors/wave.d','antfarm/actors/private_actor.d','antfarm/actors/mimalloc.d']),
     flat=dict(marker='antfarm.d',benchmark='perftest/actor_churn.d',
@@ -127,7 +127,7 @@ def runone(cmd,cpus,seconds,child_affinity=None,env=None):
         pinned_external_fraction=pinned_external,benchmark_cpu_seconds=child_cpu,wall_seconds=elapsed,
         contaminated=bool(reasons),reasons=reasons,
         rate=float(rate[2]) if rate else None,metric=rate[1] if rate else None,fields=fields,
-        valid=proc.returncode==0 and rate is not None and float(rate[2])>0 and 'mimalloc_version=30503' in stdout and 'hugePages=false' in stdout)
+        valid=proc.returncode==0 and rate is not None and float(rate[2])>0 and 'mimalloc_version=30700' in stdout and 'hugePages=false' in stdout)
 
 def boot_ci(ratios):
     rng=random.Random(1729);n=len(ratios)
@@ -137,7 +137,7 @@ def boot_ci(ratios):
 def main():
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--repo',type=P,default=P(__file__).resolve().parents[2]);p.add_argument('--base',required=True);p.add_argument('--candidate')
-    p.add_argument('--archive',type=P,help="Defaults to the REPO layout's archive: tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a (actor_torture/.build/... before 1.8.2)");p.add_argument('--output',type=P,required=True)
+    p.add_argument('--archive',type=P,help="Defaults to the REPO layout's archive: tests/actors/.build/mimalloc-v3.7.0/libmimalloc.a (actor_torture/.build/... before 1.8.2)");p.add_argument('--output',type=P,required=True)
     p.add_argument('--boundary',action='store_true',help='Collect >=20 matched pairs per cell (default 20): the rerun for flagged cells')
     p.add_argument('--control',action='store_true',help='Compare base to itself and require byte-identical binaries')
     p.add_argument('--modes',default='actor,wave,inbox,private,private-remote,tree,tree-wait,tree-cont,tree-pipelined,dtor,subset,subset-whole,subset-whole-unreserved,tree-cancel,private-tracked')

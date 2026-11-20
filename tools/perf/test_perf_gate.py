@@ -31,7 +31,7 @@ BASE_SHA = 'a' * 40
 CAND_SHA = 'b' * 40
 REFS = {'BASE': BASE_SHA, BASE_SHA: BASE_SHA, 'CAND': CAND_SHA, CAND_SHA: CAND_SHA,
         'ALIAS': BASE_SHA, 'HEAD': BASE_SHA}
-ARCHIVE_REL = 'tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a'
+ARCHIVE_REL = 'tests/actors/.build/mimalloc-v3.7.0/libmimalloc.a'
 BASE_RATE = 1000.0
 
 
@@ -919,7 +919,7 @@ class CpuTelemetryTests(unittest.TestCase):
 
     def sample(self, after, child_cpu=0, timeout=False, returncode=0, cpus=(0,)):
         proc = mock.Mock(returncode=returncode)
-        output = ('Mactor_cycles/s=1 mimalloc_version=30503 hugePages=false', '')
+        output = ('Mactor_cycles/s=1 mimalloc_version=30700 hugePages=false', '')
         proc.communicate.side_effect = ([subprocess.TimeoutExpired('bench', .5), output]
                                         if timeout else [output])
         with contextlib.ExitStack() as stack:

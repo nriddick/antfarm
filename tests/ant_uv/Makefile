@@ -18,7 +18,7 @@ UV_LIBS ?= $(UV_LIBRARY) -L-ldl
 UV_CFLAGS ?= -I$(UV_PREFIX)/include
 TSAN_OPTIONS ?= history_size=7 halt_on_error=1 report_thread_leaks=0
 IMPORTS := -I$(ROOT) -I$(ROOT)/threadpool/source -I$(ROOT)/ant_fibers/source -I$(ROOT)/ant_uv/source
-MIMALLOC_LIBRARY := $(ROOT)/tests/actors/.build/mimalloc-v3.5.3/libmimalloc.a
+MIMALLOC_LIBRARY := $(ROOT)/tests/actors/.build/mimalloc-v3.7.0/libmimalloc.a
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
 .PHONY: run run-iouring run-dmd run-tsan run-dip1000 run-mimalloc clean
@@ -56,7 +56,7 @@ run-dip1000: layout.o
 	./uv_test_dip1000
 
 $(MIMALLOC_LIBRARY):
-	$(MAKE) -C $(ROOT)/tests/actors .build/mimalloc-v3.5.3/libmimalloc.a
+	$(MAKE) -C $(ROOT)/tests/actors .build/mimalloc-v3.7.0/libmimalloc.a
 
 run-mimalloc: layout.o $(MIMALLOC_LIBRARY)
 	$(DC) $(DFLAGS) -d-version=AntfarmMimallocV3 -i $(IMPORTS) uv_test.d layout.o \

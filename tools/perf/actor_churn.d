@@ -115,7 +115,7 @@ version (AntfarmMimallocV3)
 
 // Peak resident set (VmHWM) and, in mimalloc builds, the effective values of
 // the screened options, printed once at exit. Option indices are mi_option_t
-// ordinals from the pinned v3.5.3 header.
+// ordinals from the pinned v3.7.0 header (unchanged since v3.5.3).
 private void reportProcess(string allocatorName)
 {
     version (linux)

@@ -2610,7 +2610,7 @@ version (AntfarmMimallocStub)
 
 version (AntfarmMimallocReal)
 {
-    private enum int pinnedMimallocVersion = 30_503;
+    private enum int pinnedMimallocVersion = 30_700;
     private enum size_t crossThreadActorCount = 512;
     private enum size_t crossThreadReclaimerCount = 8;
     private enum size_t crossThreadRounds = 16;
@@ -2669,7 +2669,7 @@ version (AntfarmMimallocReal)
     private void testPinnedMimallocCrossThreadFree()
     {
         check(mi_version() == pinnedMimallocVersion,
-            "real actor lane linked pinned mimalloc v3.5.3");
+            "real actor lane linked pinned mimalloc v3.7.0");
         auto farm = AntFarm.create(2, 4, 1, 0, 0, 1, 256);
         check(farm !is null, "real mimalloc Farm allocation");
         scope (exit) farm.destroy();
@@ -2729,7 +2729,7 @@ version (AntfarmMimallocReal)
                 "foreign thread destroyed mimalloc actor runtime");
         }
 
-        printf("pinned mimalloc v3.5.3 cross-thread free: %llu states OK\n",
+        printf("pinned mimalloc v3.7.0 cross-thread free: %llu states OK\n",
             cast(ulong) crossThreadRounds * crossThreadActorCount);
         fflush(stdout);
     }

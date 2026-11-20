@@ -4,6 +4,21 @@ Older release notes are in [docs/releases/](docs/releases/):
 [1.8.0 and its release candidates](docs/releases/1.8.md) and
 [1.7 and earlier](docs/releases/1.7-and-earlier.md).
 
+## 2.2.2 development
+
+Opened 2026-11-20 on `2.2.2-progress`, from `2.2.1-progress` at `7c39b60`.
+The series moves the allocator pin to mimalloc v3.7.0 and adds an optional
+second, secure mimalloc instance for memory that holds network bytes.
+
+- mimalloc: the `third_party/mimalloc` pin moves from v3.5.3 to v3.7.0
+  (`1ed67b51`). Every build path, the actor suite's `mi_version()`
+  assertion (now 30700), the perf gate's version check and the guides
+  follow; dated performance records keep their 3.5.3 labels. The four
+  `mi_option` ordinals actor_churn prints are unchanged. v3.7.0 brings the
+  heap-destroy fixes of 3.6.0 and the `MI_SECURE_NO_STATIC_GUARD` option
+  (mimalloc#1474), which lets a secure build coexist with the D garbage
+  collector.
+
 ## 2.2.1 development
 
 Opened 2026-11-04 on `2.2.1-progress`, from `2.2.0-progress` at `f6730c0`,

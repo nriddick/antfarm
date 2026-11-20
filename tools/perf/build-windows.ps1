@@ -2,7 +2,7 @@ param([string] $Compiler = 'ldc2')
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$archive = Join-Path $root 'tests/actors/.build/mimalloc-v3.5.3-windows-release/lib/mimalloc.lib'
+$archive = Join-Path $root 'tests/actors/.build/mimalloc-v3.7.0-windows-release/lib/mimalloc.lib'
 if (-not (Test-Path -LiteralPath $archive)) {
     throw 'Build the Release allocator with tests/actors/run-mimalloc-windows.ps1 first.'
 }

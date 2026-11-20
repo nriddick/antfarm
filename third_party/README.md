@@ -2,8 +2,8 @@
 
 ## mimalloc
 
-The `mimalloc` submodule is pinned to upstream release **v3.5.3**, commit
-`d4881d338125e1cb7c47ba4cfb398d6f7c0c8d45`.
+The `mimalloc` submodule is pinned to upstream release **v3.7.0**, commit
+`1ed67b5156a763441d2ec3c20221a7b3cd866129`.
 
 Initialize it after cloning Ant Farm:
 
