@@ -17,7 +17,14 @@ second, secure mimalloc instance for memory that holds network bytes.
   `mi_option` ordinals actor_churn prints are unchanged. v3.7.0 brings the
   heap-destroy fixes of 3.6.0 and the `MI_SECURE_NO_STATIC_GUARD` option
   (mimalloc#1474), which lets a secure build coexist with the D garbage
-  collector.
+  collector. It is slower on actor_churn: against 3.5.3, same source,
+  paired rounds on the Ryzen 9 5900XT (LDC 1.43 `-O2 -release`, 34 cells
+  at 0 and 6 consumers, 5 rounds, none contaminated), most cells change
+  by -0.2% to -4.5%, subset-whole by -4.5% to -8.2%, tree, tree-wait and
+  tree-cancel by +0.3% to +3.2%; the worst cells, rerun on an idle host,
+  repeat within a point. The 3.6.1 evaluation of 2026-11-01 measured
+  within 1.5% of 3.5.3, so the cost appears to postdate 3.6.1 (not
+  bisected). PERFORMANCE.md still reports 3.5.3.
 - mimalloc: an optional secure instance for network memory.
   `antfarm.secure_allocation` (`secureAllocateAligned64`, `secureMalloc`,
   `secureCalloc`, `secureRealloc`, `secureFree`, `secureOwns`, ...) is the C
