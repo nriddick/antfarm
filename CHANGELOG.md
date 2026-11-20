@@ -18,6 +18,23 @@ second, secure mimalloc instance for memory that holds network bytes.
   heap-destroy fixes of 3.6.0 and the `MI_SECURE_NO_STATIC_GUARD` option
   (mimalloc#1474), which lets a secure build coexist with the D garbage
   collector.
+- mimalloc: an optional secure instance for network memory.
+  `antfarm.secure_allocation` (`secureAllocateAligned64`, `secureMalloc`,
+  `secureCalloc`, `secureRealloc`, `secureFree`, `secureOwns`, ...) is the C
+  runtime by default; with `AntfarmMimallocSecure` (Dub configuration
+  `mimalloc-v3-secure`) it is the pinned mimalloc built again by
+  `scripts/build-mimalloc-secure.py` with `MI_SECURE=CHECKED`,
+  `MI_SECURE_NO_STATIC_GUARD` and every symbol renamed `afsec_`, linked
+  beside the fast instance or alone. The script reads ELF and COFF symbol
+  tables itself, rewrites the `/INCLUDE:` directives that keep the renamed
+  instance's Windows TLS callbacks, and fails on any unprefixed definition,
+  unprefixed mimalloc reference or collision. `tests/mimalloc_secure`
+  (in `make check-mimalloc`) links it with and without the fast instance
+  under LDC and DMD: versions, a CHECKED free of foreign memory, D GC
+  collections, read-only sealed pages and no static guard page, 8 threads
+  mixing both instances with disjoint ownership, 64 short-lived threads
+  released at exit, and the C runtime fallback. Windows runner
+  `tests/mimalloc_secure/run-windows.ps1`, not yet run there.
 
 ## 2.2.1 development
 

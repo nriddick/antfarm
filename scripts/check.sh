@@ -187,6 +187,9 @@ if [[ "$mimalloc" -eq 1 ]]; then
         exit 1
     fi
     run "${make_cmd[@]}" -C tests/actors run-mimalloc run-mimalloc-tsan
+    # The secure instance (antfarm.secure_allocation): beside the fast one,
+    # alone, and the C runtime fallback without the option.
+    run "${make_cmd[@]}" -C tests/mimalloc_secure all
     # The same pinned libuv as the ant_uv lane above; the system one is not used.
     if [[ "$libuv_pinned" -eq 1 ]]; then
         run "${make_cmd[@]}" -C tests/ant_uv run-mimalloc

@@ -55,6 +55,7 @@ COVERAGE_MODULES = [
     "ant_uv/source/ant_uv/loop.d",
     "ant_uv/source/ant_uv/fibers.d",
     "ant_uv/source/ant_uv/safe.d",
+    "antfarm/secure_allocation.d",
 ]
 
 # Everything compiled for the inventory; the index may name symbols here.

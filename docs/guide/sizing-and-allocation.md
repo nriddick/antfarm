@@ -245,6 +245,28 @@ fast local C-ABI stub and adds a real static-link lane that asserts
 `mi_version() == 30700`. With `MI_OVERRIDE=OFF`, only the explicit actor policy
 uses mimalloc; the D runtime and ordinary `malloc` remain unchanged.
 
+### Network memory: the secure instance
+
+`antfarm.secure_allocation` is the allocator for memory that holds bytes a
+peer controls. With the version `AntfarmMimallocSecure` (Dub configuration
+`mimalloc-v3-secure`) it is a second mimalloc instance built from the same
+pin with `MI_SECURE=CHECKED` and its symbols renamed `afsec_`
+([third_party/README.md](../../third_party/README.md#the-secure-instance)):
+frees of pointers it does not own are ignored rather than followed, free
+lists are encoded and randomized, and a write past a network buffer lands
+among other network buffers instead of actor state. Without the version
+every function is the C runtime's. Pair `secureAllocateAligned64` with
+`secureFreeAligned64` and `secureMalloc`, `secureCalloc` and `secureRealloc`
+with `secureFree`; memory the instance does not own that reaches
+`secureFree` or `secureRealloc` goes to the C runtime and is counted by
+`secureForeignFrees`.
+
+Secure levels cost allocation speed. `CHECKED` itself is not yet measured;
+on actor_churn the levels on either side of it, `MINIMAL` and `ON`, measured
+0 to -33% and -18 to -57% against the fast instance (Ryzen 9 5900XT, a
+mimalloc 3.6.2 development build, November 2026). That is why the secure
+instance holds only network memory and is a build option.
+
 Long-running resident-memory behavior and throughput/latency benchmarks remain
 deferred. Platform-specific static/shared link coverage also remains before
 promotion. Explicit `mi_heap_t` or arena ownership belongs in a later arena

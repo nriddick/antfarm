@@ -45,3 +45,21 @@ configuration "mimalloc-v3" {
 	extraDependencyFiles "tests/actors/.build/mimalloc-v3.7.0-windows/lib/mimalloc.lib" platform="windows-x86_64"
 	lflags "$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-windows/lib/mimalloc.lib" platform="windows-x86_64"
 }
+
+// mimalloc-v3 plus the secure instance for network memory
+// (antfarm.secure_allocation): the pinned source built again with
+// MI_SECURE=CHECKED and its symbols renamed afsec_ by
+// scripts/build-mimalloc-secure.py, which needs Python 3. Windows is not
+// yet verified.
+configuration "mimalloc-v3-secure" {
+	targetType "library"
+	versions "AntfarmMimallocV3" "AntfarmMimallocSecure"
+	preGenerateCommands "make -C \"$PACKAGE_DIR/tests/actors\" .build/mimalloc-v3.7.0/libmimalloc.a .build/mimalloc-v3.7.0-secure/libmimalloc-secure.a" platform="linux"
+	extraDependencyFiles "tests/actors/.build/mimalloc-v3.7.0/libmimalloc.a" "tests/actors/.build/mimalloc-v3.7.0-secure/libmimalloc-secure.a" platform="linux"
+	lflags "$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0/libmimalloc.a" "$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-secure/libmimalloc-secure.a" "-lpthread" "-lrt" "-latomic" platform="linux"
+	preGenerateCommands "cmake -S \"$PACKAGE_DIR/third_party/mimalloc\" -B \"$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-windows\" -DCMAKE_BUILD_TYPE=Release -DMI_OVERRIDE=OFF -DMI_BUILD_SHARED=OFF -DMI_BUILD_STATIC=ON -DMI_BUILD_OBJECT=OFF -DMI_BUILD_TESTS=OFF -DMI_OPT_ARCH=OFF -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=\"$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-windows/lib\" -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE=\"$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-windows/lib\"" platform="windows-x86_64"
+	preGenerateCommands "cmake --build \"$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-windows\" --config Release --target mimalloc-static --parallel" platform="windows-x86_64"
+	preGenerateCommands "python \"$PACKAGE_DIR/scripts/build-mimalloc-secure.py\" --build-dir \"$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-secure-windows\" --fast-archive \"$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-windows/lib/mimalloc.lib\"" platform="windows-x86_64"
+	extraDependencyFiles "tests/actors/.build/mimalloc-v3.7.0-windows/lib/mimalloc.lib" "tests/actors/.build/mimalloc-v3.7.0-secure-windows/mimalloc-secure.lib" platform="windows-x86_64"
+	lflags "$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-windows/lib/mimalloc.lib" "$PACKAGE_DIR/tests/actors/.build/mimalloc-v3.7.0-secure-windows/mimalloc-secure.lib" platform="windows-x86_64"
+}

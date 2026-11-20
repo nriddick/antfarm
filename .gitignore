@@ -100,3 +100,9 @@ tools/perf/uv_latency
 tools/perf/.obj-uv_latency/
 tools/perf/file_loading
 tools/perf/.obj-file_loading/
+tests/mimalloc_secure/secure_test
+tests/mimalloc_secure/secure_test_dmd
+tests/mimalloc_secure/secure_test_alone
+tests/mimalloc_secure/secure_test_off
+tests/mimalloc_secure/.obj-*/
+tests/mimalloc_secure/.build/

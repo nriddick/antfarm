@@ -23,6 +23,10 @@ MIMALLOC_DEBUG_LIBRARY := $(MIMALLOC_DEBUG_BUILD)/libmimalloc-debug.a
 MIMALLOC_TSAN_BUILD := .build/mimalloc-v3.7.0-tsan
 MIMALLOC_TSAN_LIBRARY := $(MIMALLOC_TSAN_BUILD)/libmimalloc-debug.a
 MIMALLOC_TSAN_CC ?= clang
+# The secure instance (MI_SECURE=CHECKED, no static guard, symbols renamed
+# afsec_) for antfarm.secure_allocation; scripts/build-mimalloc-secure.py.
+MIMALLOC_SECURE_BUILD := .build/mimalloc-v3.7.0-secure
+MIMALLOC_SECURE_LIBRARY := $(MIMALLOC_SECURE_BUILD)/libmimalloc-secure.a
 MIMALLOC_SYSTEM_LIBS ?= -L-lpthread -L-lrt -L-latomic
 
 .PHONY: all run run-tsan run-dmd run-mimalloc run-mimalloc-dmd \
@@ -88,6 +92,10 @@ $(MIMALLOC_TSAN_LIBRARY): $(MIMALLOC_SOURCE)/CMakeLists.txt
 		-DMI_BUILD_OBJECT=OFF -DMI_BUILD_TESTS=OFF -DMI_OPT_ARCH=OFF
 	cmake --build $(MIMALLOC_TSAN_BUILD) --config Debug \
 		--target mimalloc-static --parallel
+
+$(MIMALLOC_SECURE_LIBRARY): $(MIMALLOC_SOURCE)/CMakeLists.txt $(MIMALLOC_LIBRARY) $(ROOT)/scripts/build-mimalloc-secure.py
+	python3 $(ROOT)/scripts/build-mimalloc-secure.py --source $(MIMALLOC_SOURCE) \
+		--build-dir $(MIMALLOC_SECURE_BUILD) --fast-archive $(MIMALLOC_LIBRARY)
 
 actors_torture_mimalloc: $(SOURCES) $(MIMALLOC_LIBRARY)
 	$(DC) $(DFLAGS) $(LDC_REAL_VERSIONS) $(SOURCES) \
