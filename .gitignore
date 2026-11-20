@@ -93,6 +93,7 @@ tests/ant_uv/uv_test
 tests/ant_uv/uv_test_dmd
 tests/ant_uv/uv_test_tsan
 tests/ant_uv/uv_test_mimalloc
+tests/ant_uv/uv_test_dip1000
 tests/ant_uv/uv_test_mimalloc_secure
 tests/ant_uv/.obj-*/
 ant_uv/examples/read_files

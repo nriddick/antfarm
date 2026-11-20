@@ -30,11 +30,16 @@ void* allocateAligned64(size_t bytes) nothrow @nogc @system
 
 unittest
 {
-    // Exercise both the rounding boundary and Microsoft's separate overhead.
-    foreach (n; [size_t.max, size_t.max - 62, size_t.max - 63])
+    // The rounding guard, then Microsoft's separate overhead guard. Elsewhere
+    // size_t.max - 63 reaches aligned_alloc, whose null for an impossible
+    // size the optimizer may assume away.
+    foreach (n; [size_t.max, size_t.max - 62])
         assert(allocateAligned64(n) is null);
     version (CRuntime_Microsoft)
+    {
+        assert(allocateAligned64(size_t.max - 63) is null);
         assert(allocateAligned64(size_t.max - 127) is null);
+    }
     foreach (n; [size_t(1), 63, 64, 65, 4096])
     {
         auto p = allocateAligned64(n);

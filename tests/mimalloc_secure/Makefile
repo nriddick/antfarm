@@ -1,8 +1,7 @@
 # The secure mimalloc instance behind antfarm.secure_allocation: linked
 # beside the fast instance (run, run-dmd), alone (run-alone), and the
-# module's C runtime fallback without the option (run-off). The DMD lanes
-# also run the module's unittest (LDC's optimizer folds the null checks in
-# antfarm.allocation's own unittest, so the LDC lanes leave unittests out).
+# module's C runtime fallback without the option (run-off). Every lane also
+# runs the unittests of antfarm.secure_allocation and antfarm.allocation.
 # Both archives come from the actors suite's rules (the pinned
 # third_party/mimalloc).
 ROOT := ../..
@@ -21,9 +20,9 @@ $(MIMALLOC_LIBRARY) $(MIMALLOC_SECURE_LIBRARY):
 	$(MAKE) -C $(ROOT)/tests/actors $(patsubst $(ROOT)/tests/actors/%,%,$@)
 
 run: $(MIMALLOC_LIBRARY) $(MIMALLOC_SECURE_LIBRARY)
-	$(DC) $(DFLAGS) -d-version=AntfarmMimallocV3 -d-version=AntfarmMimallocSecure -I$(ROOT) \
+	$(DC) $(DFLAGS) -unittest -d-version=AntfarmMimallocV3 -d-version=AntfarmMimallocSecure -I$(ROOT) \
 		$(SOURCES) $(MIMALLOC_LIBRARY) $(MIMALLOC_SECURE_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) -of=secure_test -od=.obj-ldc
-	./secure_test
+	./secure_test --DRT-testmode=run-main
 
 run-dmd: $(MIMALLOC_LIBRARY) $(MIMALLOC_SECURE_LIBRARY)
 	dmd -g -unittest -version=AntfarmMimallocV3 -version=AntfarmMimallocSecure -I$(ROOT) \
@@ -31,12 +30,12 @@ run-dmd: $(MIMALLOC_LIBRARY) $(MIMALLOC_SECURE_LIBRARY)
 	./secure_test_dmd --DRT-testmode=run-main
 
 run-alone: $(MIMALLOC_SECURE_LIBRARY)
-	$(DC) $(DFLAGS) -d-version=AntfarmMimallocSecure -I$(ROOT) \
+	$(DC) $(DFLAGS) -unittest -d-version=AntfarmMimallocSecure -I$(ROOT) \
 		$(SOURCES) $(MIMALLOC_SECURE_LIBRARY) $(MIMALLOC_SYSTEM_LIBS) -of=secure_test_alone -od=.obj-alone
-	./secure_test_alone
+	./secure_test_alone --DRT-testmode=run-main
 
 run-off:
-	dmd -g -unittest -I$(ROOT) $(SOURCES) -of=secure_test_off -od=.obj-off
+	$(DC) $(DFLAGS) -unittest -I$(ROOT) $(SOURCES) -of=secure_test_off -od=.obj-off
 	./secure_test_off --DRT-testmode=run-main
 
 clean:
