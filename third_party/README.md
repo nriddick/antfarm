@@ -53,7 +53,13 @@ Dub's `mimalloc-v3-secure` configuration builds and links both archives
 and sets `AntfarmMimallocV3` and `AntfarmMimallocSecure`.
 `tests/mimalloc_secure` checks it (`make -C tests/mimalloc_secure all`,
 part of `make check-mimalloc`); `tests/mimalloc_secure/run-windows.ps1` is
-the Windows runner, not yet verified there.
+the Windows runner, and it also runs the ant_uv suite with the secure
+instance. The script builds the secure instance as C everywhere
+(`MI_USE_CXX=OFF`). Under MSVC mimalloc otherwise compiles as C++, with a
+`std::atomic` template instance for each of its types. The fast archive
+stays C++ there. On Windows the script renames 607 symbols against Linux's
+603: the TLS and CRT callbacks and TLS slot indices there, thread-local
+variables and a pthread key on Linux.
 
 To update the pin deliberately:
 

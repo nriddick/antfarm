@@ -240,7 +240,7 @@ their own skips within a native suite; Fiber multi-LLC and FarmHost
 multi-group topology tests still run there, but do not establish live
 cross-LLC routing. Use the separate
 [Windows mimalloc commands](../../tests/actors/README.md) for
-real allocator pairing.
+real allocator pairing, the secure instance included.
 
 The runner's failure/selection tests include a real Windows child-tree timeout
 probe. The example tests also protect Linux's existing TSan and terminal matrix:

@@ -234,6 +234,18 @@ Using CMake's default Debug CRT instead introduces an unresolved
 archives, links the real allocator, and runs the full actor suite including
 cross-thread frees. It does not modify the pinned submodule.
 
+The secure instance (`antfarm.secure_allocation`) has its own runner. It
+builds the fast and secure archives with the same CRT, runs
+`tests/mimalloc_secure` beside the fast instance, alone and without the
+option, then the `ant_uv` suite with network memory and libuv's allocator in
+the secure instance (skipped when `python -B scripts/build-libuv.py` has not
+built the pinned libuv):
+
+```powershell
+./tests/mimalloc_secure/run-windows.ps1 -Compiler ldc2
+./tests/mimalloc_secure/run-windows.ps1 -Compiler dmd
+```
+
 The ordinary library build contains neither the deterministic hook branches
 nor a mimalloc link dependency. The Makefile builds the pinned static source
 with allocator override disabled. The root Dub configuration `mimalloc-v3`

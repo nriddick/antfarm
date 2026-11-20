@@ -45,11 +45,24 @@ ROOT = P(__file__).resolve().parent.parent
 # content. Anything else that is not a mimalloc name stops the build.
 SHARED_OK = [r'_ZSt15get_new_handlerv', r'\?\?_C@.*', r'__real@[0-9a-f]+', r'__xmm@[0-9a-f]+',
              r'__ymm@[0-9a-f]+', r'__zmm@[0-9a-f]+']
+# Inline definitions from the Windows SDK and UCRT headers (winnt.h's
+# NtCurrentTeb, time.h's time, the vcruntime ISA default), which MSVC emits
+# as select-any COMDATs in every object that uses them. Accepted only from a
+# COFF object and only in a COMDAT section with IMAGE_COMDAT_SELECT_ANY, where
+# the linker keeps one copy; the same name defined any other way stops the
+# build like any unknown definition.
+COFF_HEADER_COMDATS = {'NtCurrentTeb', 'time', '__isa_available_default'}
 MI_NAME = re.compile(r'_*mi_\w+')
 MSVC_MANGLED = re.compile(r'\?(_*mi_\w+)@@')
 COMMON = ['-DMI_OVERRIDE=OFF', '-DMI_BUILD_SHARED=OFF', '-DMI_BUILD_STATIC=ON', '-DMI_BUILD_OBJECT=OFF',
           '-DMI_BUILD_TESTS=OFF', '-DMI_OPT_ARCH=OFF', '-DMI_NO_LIB_SUFFIX=ON',
-          '-DMI_SECURE_NO_STATIC_GUARD=ON']
+          '-DMI_SECURE_NO_STATIC_GUARD=ON',
+          # Plain C everywhere. mimalloc compiles as C++ under MSVC and clang-cl,
+          # which defines a std::atomic template instance for every mimalloc
+          # type (COMDATs the check would have to accept wholesale); its C
+          # path uses the MSVC interlocked intrinsics. GCC and Clang build C
+          # by default, so this changes nothing there.
+          '-DMI_USE_CXX=OFF']
 
 
 def fail(msg):
@@ -84,7 +97,9 @@ def archive_members(path):
 
 
 def elf_symbols(obj):
-    """(name, defined) for each global or weak symbol of a 64-bit little-endian ELF object."""
+    """(name, defined, select_any) for each global or weak symbol of a 64-bit little-endian ELF object.
+
+    select_any is always False: the COMDAT allowance is for COFF only."""
     if obj[4] != 2 or obj[5] != 1:
         raise ValueError('only 64-bit little-endian ELF is supported')
     shoff, = struct.unpack_from('<Q', obj, 0x28)
@@ -101,16 +116,28 @@ def elf_symbols(obj):
                 continue
             start = strtab[4] + st_name
             name = obj[start:obj.index(b'\0', start)].decode('latin-1')
-            out.append((name, st_shndx != 0))
+            out.append((name, st_shndx != 0, False))
     return out
 
 
 def coff_symbols(obj):
-    """(name, defined) for each external symbol of a COFF object (MSVC, clang-cl, MinGW)."""
+    """(name, defined, select_any) for each external symbol of a COFF object (MSVC, clang-cl, MinGW).
+
+    select_any: defined in a COMDAT section whose selection is IMAGE_COMDAT_SELECT_ANY."""
     machine, nsections, _, symptr, nsyms = struct.unpack_from('<HHIII', obj, 0)
     if machine == 0 and nsections == 0xFFFF:
         raise ValueError('anonymous COFF object (/GL, /bigobj or an import stub) is not supported')
+    optional, = struct.unpack_from('<H', obj, 16)
+    comdat = [struct.unpack_from('<I', obj, 20 + optional + k * 40 + 36)[0] & 0x1000 != 0  # IMAGE_SCN_LNK_COMDAT
+              for k in range(nsections)]
     strtab = symptr + nsyms * 18
+    select_any, i = set(), 0
+    while i < nsyms:  # section definitions: IMAGE_SYM_CLASS_STATIC, value 0, one aux record
+        value, section, _, storage, naux = struct.unpack_from('<IhHBB', obj, symptr + i * 18 + 8)
+        if storage == 3 and value == 0 and naux >= 1 and 0 < section <= nsections and comdat[section - 1]:
+            if obj[symptr + (i + 1) * 18 + 14] == 2:  # IMAGE_COMDAT_SELECT_ANY
+                select_any.add(section)
+        i += 1 + naux
     out, i = [], 0
     while i < nsyms:
         raw = obj[symptr + i * 18: symptr + i * 18 + 18]
@@ -121,14 +148,16 @@ def coff_symbols(obj):
         else:
             name = raw[:8].rstrip(b'\0').decode('latin-1')
         if storage in (2, 105):  # IMAGE_SYM_CLASS_EXTERNAL, WEAK_EXTERNAL
-            out.append((name, section > 0 or (section == 0 and value > 0) or storage == 105))
+            out.append((name, section > 0 or (section == 0 and value > 0) or storage == 105,
+                        storage == 2 and section in select_any))
         i += 1 + naux
     return out
 
 
 def archive_symbols(path):
-    """Defined and undefined external names over every object in the archive."""
-    defined, undefined = set(), set()
+    """Defined and undefined external names over every object in the archive, and the
+    defined names whose every definition is a COFF select-any COMDAT."""
+    defined, undefined, any_defs, other_defs = set(), set(), set(), set()
     for member, body in archive_members(path):
         try:
             if body[:4] == b'\x7fELF':
@@ -139,9 +168,11 @@ def archive_symbols(path):
                 raise ValueError('unknown object format')
         except (ValueError, struct.error) as e:
             fail(f'{path}: member {member}: {e}')
-        for name, is_def in syms:
+        for name, is_def, is_any in syms:
             (defined if is_def else undefined).add(name)
-    return defined, undefined - defined
+            if is_def:
+                (any_defs if is_any else other_defs).add(name)
+    return defined, undefined - defined, any_defs - other_defs
 
 
 def identifier(symbol):
@@ -231,17 +262,18 @@ def main():
     for log in out.glob('*.log'):
         log.unlink()
     shared_ok = [re.compile(p) for p in SHARED_OK + a.allow]
-    is_shared = lambda s: any(p.fullmatch(s) for p in shared_ok)
+    is_shared = lambda s, select_any: (any(p.fullmatch(s) for p in shared_ok)
+                                       or (s in COFF_HEADER_COMDATS and s in select_any))
 
     # 1. probe
     probe = cmake_build(a, src, out / 'probe', [])
-    defined, _ = archive_symbols(probe)
+    defined, _, select_any = archive_symbols(probe)
     table, unknown = set(), []
     for s in sorted(defined):
         ident = identifier(s)
         if ident:
             table.add(ident)
-        elif not is_shared(s):
+        elif not is_shared(s, select_any):
             unknown.append(s)
     if unknown:
         fail(f'{probe}: defined externals that are neither mimalloc names nor known shared '
@@ -273,9 +305,9 @@ def main():
     flag = f'/FI"{prefix_h}"' if style == 'msvc' else f'-include "{prefix_h}"'
     env = {k: (os.environ.get(k, '') + ' ' + flag).strip() for k in ('CFLAGS', 'CXXFLAGS')}
     built = cmake_build(a, tree, out / 'build', [], env)
-    defined, undefined = archive_symbols(built)
+    defined, undefined, select_any = archive_symbols(built)
     unprefixed_defs = sorted(s for s in defined if not s.startswith(a.prefix)
-                             and not (s.startswith('?' + a.prefix)) and not is_shared(s))
+                             and not (s.startswith('?' + a.prefix)) and not is_shared(s, select_any))
     unprefixed_refs = sorted(s for s in undefined if identifier(s))
     problems = []
     if unprefixed_defs:
@@ -285,14 +317,14 @@ def main():
                         'instance):\n  ' + '\n  '.join(unprefixed_refs))
     collisions = []
     if a.fast_archive:
-        fast_defined, _ = archive_symbols(a.fast_archive)
+        fast_defined, _, fast_select_any = archive_symbols(a.fast_archive)
         both = sorted(fast_defined & defined)
-        collisions = [s for s in both if not is_shared(s)]
+        collisions = [s for s in both if not is_shared(s, select_any & fast_select_any)]
         if collisions:
             problems.append(f'definitions also in {a.fast_archive}:\n  ' + '\n  '.join(collisions))
-        shared = [s for s in both if is_shared(s)]
+        shared = [s for s in both if is_shared(s, select_any & fast_select_any)]
     else:
-        shared = sorted(s for s in defined if is_shared(s))
+        shared = sorted(s for s in defined if is_shared(s, select_any))
     if problems:
         fail(f'{built}:\n' + '\n'.join(problems))
 
@@ -303,9 +335,11 @@ def main():
                   defined=len(defined), shared_definitions=shared, fast_archive=str(a.fast_archive or ''),
                   forced_include=style)
     (out / 'report.json').write_text(json.dumps(report, indent=1) + '\n')
+    # MSVC folds every string literal into a COMDAT constant: list them in report.json only.
+    listed = ', '.join(shared) if len(shared) <= 8 else f'{len(shared)} (listed in report.json)'
     print(f'mimalloc-secure {version} {a.secure} ({a.config}): {len(table)} symbols renamed to {a.prefix}*, '
           f'{directives} linker directives rewritten, 0 unprefixed definitions or references, '
-          f'shared: {", ".join(shared) or "none"} -> {final}')
+          f'shared: {listed or "none"} -> {final}')
 
 
 if __name__ == '__main__':

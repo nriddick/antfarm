@@ -6,8 +6,8 @@
  +   a free of memory it does not own returns without touching it (an
  +   unchecked build follows the pointer into metadata that is not there);
  + - the D garbage collector collects with the secure instance live (no guard
- +   page in the static data it scans), and on Linux the secure instance's
- +   sealed process pages are read-only;
+ +   page in the static data it scans), and on Linux and Windows the secure
+ +   instance's sealed process pages are read-only;
  + - eight threads allocate from both instances, check that ownership never
  +   overlaps, free each other's blocks and collect;
  + - 64 short-lived threads use the secure instance, and its thread count
@@ -103,6 +103,21 @@ version (linux) version (AntfarmMimallocSecure)
     }
 }
 
+version (Windows) version (AntfarmMimallocSecure)
+{
+    extern (C) extern __gshared ubyte afsec__mi_process;
+
+    // The page protection of the page holding `address` (PAGE_READONLY, ...).
+    uint protection(size_t address)
+    {
+        import core.sys.windows.winbase : VirtualQuery;
+        import core.sys.windows.winnt : MEMORY_BASIC_INFORMATION;
+        MEMORY_BASIC_INFORMATION info;
+        if (VirtualQuery(cast(void*) address, &info, info.sizeof) == 0) return 0;
+        return info.Protect;
+    }
+}
+
 enum T = 8, N = 20_000;
 
 version (AntfarmMimallocV3) version (AntfarmMimallocSecure)
@@ -170,6 +185,22 @@ void main()
             check(permissions(base) == "r--p" && permissions(base + 4096) == "r--p",
                 "the secure instance's sealed process pages are read-only");
             check(permissions(base + 8192) == "rw-p", "no guard page in its static process data");
+        }
+        version (Windows)
+        {
+            import core.sys.windows.winnt : PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY;
+            // MSVC cannot page-align _mi_process (MI_SECURE_SEALED_ALIGNED is 0), so
+            // its front area has a third page of slack and the two sealed pages
+            // start at the first page boundary after its first byte
+            // (mi_process_get_sealed_once in mimalloc/heap/process.h).
+            immutable sealed = (cast(size_t) &afsec__mi_process + 4096) & ~size_t(4095);
+            printf("secure process data protection: %#x %#x %#x
+",
+                protection(sealed), protection(sealed + 4096), protection(sealed + 8192));
+            check(protection(sealed) == PAGE_READONLY && protection(sealed + 4096) == PAGE_READONLY,
+                "the secure instance's sealed process pages are read-only");
+            immutable rest = protection(sealed + 8192); // copy-on-write until the image page is first written
+            check(rest == PAGE_READWRITE || rest == PAGE_WRITECOPY, "no guard page in its static process data");
         }
         secureFree(held);
 

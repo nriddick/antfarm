@@ -40,8 +40,9 @@ second, secure mimalloc instance for memory that holds network bytes.
   under LDC and DMD: versions, a CHECKED free of foreign memory, D GC
   collections, read-only sealed pages and no static guard page, 8 threads
   mixing both instances with disjoint ownership, 64 short-lived threads
-  released at exit, and the C runtime fallback. Windows runner
-  `tests/mimalloc_secure/run-windows.ps1`, not yet run there.
+  released at exit, and the C runtime fallback. On Windows,
+  `tests/mimalloc_secure/run-windows.ps1` runs the same lanes and the
+  ant_uv suite with the secure instance (validation below).
 - ant_uv: network memory goes through `antfarm.secure_allocation`:
   receive windows (UDP datagrams and stream chunks), `UvOutbox` requests
   and bytes, and UDP and TCP socket handles. With `AntfarmMimallocSecure`,
@@ -55,6 +56,61 @@ second, secure mimalloc instance for memory that holds network bytes.
   replaced, and that by the end of the suite nothing foreign reached the
   secure allocator; one handle allocated with `malloc` instead fails that
   check (negative control).
+
+Windows x64 (2026-11-20, `17b3174` plus the Windows follow-up): Windows 11
+build 26200, i7-12700H (20 logical processors, one LLC), LDC 1.42.0, DMD
+2.112.1, MSVC 14.51 and the pinned libuv fork `a937b3b`. `python -B
+scripts/check-windows.py` passed as one complete invocation under both
+compilers; the T1 second-group timer and `farmPerGroup` routing skip on
+this single-LLC host as before, and both fork-join admission runs measured
+zero idle CPU. On v3.7.0, `tests/actors/run-mimalloc-windows.ps1` passed
+under LDC and DMD, Release and Debug (`MI_DEBUG=FULL`).
+`tests/mimalloc_secure/run-windows.ps1`, run here for the first time,
+passes under LDC and DMD with the fixes below: the three
+`secure_test` lanes with their unittests, then the ant_uv suite with both
+instances and the secure one installed as `uv.dll`'s allocator ("network
+memory: mimalloc-secure, libuv included"). In repeated runs, 30 LDC and
+30 DMD runs each of that suite and of the two-instance `secure_test` all
+passed. As on Linux, one TCP handle allocated with `malloc` fails the
+foreign-free check. The secure build
+renames 607 symbols and rewrites 16 linker directives, with no unprefixed definition or
+reference. Linux renames 603: Windows has 8 names of its own (the three
+TLS and CRT callbacks, four TLS slot indices, `_mi_arena_externs`), Linux 4
+(its two thread-local theap pointers, the pthread key, `mi_theap_realpath`).
+In the copied source no `/INCLUDE:` names an unrenamed symbol but the CRT's
+`_tls_used`. Dub's `mimalloc-v3` and `mimalloc-v3-secure`
+configurations built, linked and ran a consumer under both compilers.
+Fixed for Windows:
+
+- `build-mimalloc-secure.py` builds the secure instance as C
+  (`MI_USE_CXX=OFF`). MSVC compiles mimalloc as C++ by default, and the
+  probe archive then defined `std::atomic` template instances and other
+  C++ library inlines, which the check refused; GCC and Clang already built C. Three header
+  inlines remain (`NtCurrentTeb`, `time`, `__isa_available_default`). They
+  are accepted only from COFF objects, and only as select-any COMDATs. The
+  fast archive stays C++ under MSVC.
+- `secure_test` checks the sealed process pages on Windows too, with
+  `VirtualQuery`. MSVC cannot page-align `_mi_process`, so the sealed pages
+  start at the first page boundary after its first byte. They read 0x2 0x2
+  0x4: two read-only pages, then writable data.
+- `run-windows.ps1` builds `secure_test` with `-unittest`, as the Makefile
+  does, and adds the ant_uv lane, skipped without a libuv installation.
+  The build script prints more than eight shared definitions as a count
+  (387 on MSVC, 380 of them string-literal constants); `report.json` lists
+  them all.
+- Dub's Windows commands build both archives with the static CRT
+  (`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`) that LDC and DMD link by
+  default, as the PowerShell runners do. With CMake's default `/MD`, the
+  secure archive referenced `__imp__time64`, which the static CRT does not
+  provide, and the consumer failed to link.
+
+Linux under WSL2 on the same machine (Ubuntu 24.04, LDC 1.42.0, DMD
+2.112.1, CMake 4.4.5, GCC 13.3), on a copy of the same tree: `make -C
+tests/mimalloc_secure all` and the ant_uv `run-mimalloc`,
+`run-mimalloc-secure` and `run-mimalloc-secure-iouring` lanes passed. The
+build script still renames 603 symbols there and rewrites no directive.
+Not run on Windows: ThreadSanitizer, io_uring, and the actor_churn
+comparison of 3.7.0 against 3.5.3.
 
 ## 2.2.1 development
 
