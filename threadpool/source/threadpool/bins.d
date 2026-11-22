@@ -19,13 +19,6 @@ import std.traits : isIntegral, isSomeString;
 import threadpool.hybrid : WorkerSelf, currentWorker;
 import threadpool.resolution : GroupDisposition, PoolResolution;
 
-/// How a registered set of C is laid out against the CPU map.
-private enum BinAxis : ubyte
-{
-    llc,          // bins[llcIndex] — P and E on that LLC share one C
-    llcAndClass,  // bins[llcIndex * classCount + classIndex]
-}
-
 private struct BinLabel
 {
     enum Tag : ubyte { none, num, str }
@@ -67,18 +60,13 @@ private struct Registry(C)
     static __gshared C[]       bins;
     static __gshared BinLabel[] labels;
     static __gshared ushort    llcCount;
-    static __gshared ushort    classCount;
-    static __gshared BinAxis   axis;
     /// Per physical group: accepted in the validating resolution.
     static __gshared bool[]    staffedMask;
 }
 
-private size_t slotIndex(C)(ushort llc, ubyte cls) @nogc nothrow
+private size_t slotIndex(C)(ushort llc) @nogc nothrow
 {
-    auto classN = Registry!C.classCount;
-    if (Registry!C.axis == BinAxis.llc || classN <= 1)
-        return llc;
-    return cast(size_t) llc * classN + cls;
+    return llc;
 }
 
 private bool inTable(C)(size_t idx) @nogc nothrow
@@ -102,48 +90,21 @@ C[] makeBins(C)(const PoolResolution plan, scope C delegate(ref const GroupDispo
 /// slot must be non-null. Not thread-safe. Setup only.
 void install(C)(C[] bins, const PoolResolution plan)
 {
-    installChecked!C(bins, plan, BinAxis.llc, 1);
-}
-
-/// One C per (physical group × dense class): `bins.length` must equal
-/// `plan.physicalGroupCount * classCount`, indexed `llc * classCount + class`.
-/// For class or pointer C, every slot an accepted worker resolves to must be
-/// non-null. Not thread-safe. Setup only.
-void install(C)(C[] bins, const PoolResolution plan, ushort classCount)
-{
-    installChecked!C(bins, plan, BinAxis.llcAndClass, classCount);
-}
-
-private void installChecked(C)(C[] bins, const PoolResolution plan, BinAxis axis,
-    ushort classCount)
-{
     import std.conv : to;
 
     if (plan is null)
         throw new Exception("threadpool: install requires a PoolResolution");
     immutable groups = plan.physicalGroupCount;
-    immutable classN = axis == BinAxis.llc || classCount == 0 ? ushort(1) : classCount;
-    immutable want = cast(size_t) groups * classN;
-    if (groups == 0 || bins.length != want)
-        throw new Exception("threadpool: install!" ~ C.stringof ~ " needs " ~ want.to!string
-            ~ " slots (" ~ groups.to!string ~ " physical groups x " ~ classN.to!string
-            ~ " classes), got " ~ bins.length.to!string
+    if (groups == 0 || bins.length != groups)
+        throw new Exception("threadpool: install!" ~ C.stringof ~ " needs " ~ groups.to!string
+            ~ " slots (one per physical group), got " ~ bins.length.to!string
             ~ "; build the table with makeBins from the same resolution");
     static if (is(C == class) || is(C == interface) || is(C == T*, T))
     {
         string missing;
-        auto reported = new bool[](bins.length);
-        foreach (ref c; plan.cpus)
-        {
-            if (!c.accepted) continue;
-            immutable idx = classN <= 1 ? c.llcIndex : cast(size_t) c.llcIndex * classN + c.tableClass;
-            if (bins[idx] is null && !reported[idx])
-            {
-                reported[idx] = true;
-                missing ~= (missing.length ? ", " : "") ~ (classN <= 1 ? c.llcIndex.to!string
-                    : c.llcIndex.to!string ~ "/class " ~ c.tableClass.to!string);
-            }
-        }
+        foreach (ref g; plan.groups)
+            if (g.isAccepted && bins[g.llcIndex] is null)
+                missing ~= (missing.length ? ", " : "") ~ g.llcIndex.to!string;
         if (missing.length)
             throw new Exception("threadpool: install!" ~ C.stringof
                 ~ " has null slots for accepted groups: " ~ missing);
@@ -156,8 +117,6 @@ private void installChecked(C)(C[] bins, const PoolResolution plan, BinAxis axis
     Registry!C.bins = bins;
     Registry!C.labels = new BinLabel[](bins.length);
     Registry!C.llcCount = groups;
-    Registry!C.classCount = classN;
-    Registry!C.axis = axis;
     Registry!C.staffedMask = staffed;
 }
 
@@ -174,8 +133,6 @@ void uninstall(C)()
     Registry!C.bins = null;
     Registry!C.labels = null;
     Registry!C.llcCount = 0;
-    Registry!C.classCount = 0;
-    Registry!C.axis = BinAxis.llc;
     Registry!C.staffedMask = null;
 }
 
@@ -192,7 +149,7 @@ C* home(C)() @nogc nothrow
 C* homeFor(C)(WorkerSelf* w) @nogc nothrow
 {
     if (w is null || Registry!C.bins.length == 0) return null;
-    auto idx = slotIndex!C(w.llcIndex, w.classIndex);
+    auto idx = slotIndex!C(w.llcIndex);
     if (!inTable!C(idx)) return null;
     return &Registry!C.bins[idx];
 }
@@ -218,7 +175,7 @@ private C* searchNuma(C, L)(WorkerSelf* w, L label) @nogc nothrow
     if (w is null || Registry!C.bins.length == 0) return null;
     foreach (i; 0 .. w.numaLlcCount)
     {
-        auto idx = slotIndex!C(w.numaLlcs[i], w.classIndex);
+        auto idx = slotIndex!C(w.numaLlcs[i]);
         if (inTable!C(idx) && Registry!C.labels[idx].matches(label))
             return &Registry!C.bins[idx];
     }
@@ -236,10 +193,10 @@ bool setLabel(C, L)(C* c, L label)
 }
 
 /// Not thread-safe. Setup only. Do not call concurrently with `search`.
-bool setLabel(C, L)(ushort llc, L label, ubyte classIndex = 0)
+bool setLabel(C, L)(ushort llc, L label)
 {
     if (Registry!C.bins.length == 0) return false;
-    auto idx = slotIndex!C(llc, classIndex);
+    auto idx = slotIndex!C(llc);
     if (!inTable!C(idx)) return false;
     Registry!C.labels[idx].set(label);
     return true;
@@ -247,10 +204,10 @@ bool setLabel(C, L)(ushort llc, L label, ubyte classIndex = 0)
 
 /// Direct table access. Null if uninstalled or OOB. Not NUMA-filtered.
 /// Thread-safe after `install!C` (SDL / producer threads use this).
-C* at(C)(ushort llc, ubyte classIndex = 0) @nogc nothrow
+C* at(C)(ushort llc) @nogc nothrow
 {
     if (Registry!C.bins.length == 0) return null;
-    auto idx = slotIndex!C(llc, classIndex);
+    auto idx = slotIndex!C(llc);
     if (!inTable!C(idx)) return null;
     return &Registry!C.bins[idx];
 }
@@ -310,7 +267,6 @@ unittest
     WorkerSelf w0;
     w0.llcIndex = 0;
     w0.numaIndex = 0;
-    w0.classIndex = 0;
     w0.numaLlcCount = 2;
     w0.numaLlcs[0] = 0;
     w0.numaLlcs[1] = 1;
@@ -380,18 +336,6 @@ unittest
         assert(e.msg.canFind("accepted groups: 0"));
     }
     assert(threw, "a null slot for an accepted group must not install");
-
-    // LLC x class: every slot an accepted worker resolves to must exist.
-    auto hybrid = twoGroupPlan(false, true);
-    assert(hybrid.topology.classCount == 2);
-    threw = false;
-    try
-        install([new Bin(0), new Bin(1), null, new Bin(3)], hybrid, 2);
-    catch (Exception e)
-        threw = true;
-    assert(threw);
-    install([new Bin(0), new Bin(1), new Bin(2), new Bin(3)], hybrid, 2);
-    assert(at!Bin(1, 1).g == 3);
 }
 
 unittest

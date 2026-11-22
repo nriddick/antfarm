@@ -137,6 +137,7 @@ Rate[2] runMtTopo(size_t n, Topo topo, ProcessorId[] lps)
     options.groups = HostGroups.only(group);
     options.pool.processors = lps;
     options.pool.skipSmtSiblings = topo.skipSmt;
+    options.pool.placement = WorkerPlacement.pin; // pinned workers, as recorded
     options.caller = CallerPlacement.unchanged; // the control thread stays unpinned
     options.idleTimeout = Duration.max;         // park until woken, as before
     options.farm.ringMiB = ringMiBFromUlongs(ln);

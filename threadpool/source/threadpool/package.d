@@ -14,14 +14,16 @@ public import threadpool.topology : TopologySnapshot, LogicalProcessor, LlcDomai
     CpuListException, GroupingSource, noLlcIndex, OsScopeSource, scopeOsToCallingThread;
 public import threadpool.pool : CacheAwarePool, PoolOptions,
     Director, Selection;
-version (ThreadpoolCadence) public import threadpool.pool : Cadence;
 public import threadpool.resolution : PoolResolution, resolvePool, Reject,
     StartState, CpuDisposition, RequestDisposition, GroupDisposition,
-    ResolutionException, reasonsText;
-public import threadpool.pin : PinOutcome, pinProcessor, liveOsMask;
+    SetDisposition, WorkerDisposition, autoUnstaffed, autoWorkersOf,
+    effectivePlacement, ResolutionException, reasonsText;
+public import threadpool.pin : PinOutcome, WorkerPlacement, WorkerQos, pinProcessor, liveOsMask;
 public import threadpool.hybrid : WorkerSelf, currentWorker, bindNumaNeighborhood,
     WorkerBody, WorkerStop, ManagedWorkerHooks, ManagedPumpResult, IdleKind,
-    anyArmed, wakeOneArmed, wakeOneArmedIn;
+    anyArmed, wakeOneArmed, wakeOneArmedIn, monoNanos, defaultLeadMicros, defaultHoldMicros;
+public import threadpool.timing : TimingStats, parkOvershootBuckets, parkOvershootBoundsMicros,
+    burstArrivalBuckets, burstArrivalBoundsMicros;
 public import threadpool.bins : makeBins, install, uninstall, binStaffed, setLabel, home,
     search, at;
 public import threadpool.stats : PoolStats;

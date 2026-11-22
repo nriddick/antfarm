@@ -8,10 +8,35 @@ version (Windows)
 version (linux)
     version = ThreadpoolOs;
 
-/// Result of pinning a thread to one processor.
+/// The power and scheduling hint every pool worker carries. Windows 11
+/// thread power throttling; nothing on Linux.
+enum WorkerQos : ubyte
+{
+    high,      /// throttling off (HighQoS): prefer performance cores and full speed
+    eco,       /// throttling on (EcoQoS): prefer efficiency cores
+    unchanged, /// leave the thread as the OS created it
+}
+
+/// What the OS is told about where a pool worker may run. A worker belongs
+/// to a set, the accepted processors of one physical group.
+enum WorkerPlacement : ubyte
+{
+    /// `free` when the process can reach only one physical group, `group`
+    /// otherwise.
+    automatic,
+    /// Nothing: the worker may run wherever the process may. The processor
+    /// filters then decide how many workers there are and nothing else.
+    free,
+    /// One hard affinity mask over the worker's set.
+    group,
+    /// One processor of the set per worker.
+    pin,
+}
+
+/// Result of placing a thread: pinning it, or confining it to a set.
 enum PinOutcome : ubyte
 {
-    pinned,           /// the thread now runs only on the processor
+    pinned,           /// the placement was applied
     unknownProcessor, /// the id names no discovered processor
     outsideOsScope,   /// the processor is outside the frozen OS scope
     osRejected,       /// the OS refused the affinity change

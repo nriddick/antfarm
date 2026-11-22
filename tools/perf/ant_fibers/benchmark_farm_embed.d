@@ -268,6 +268,8 @@ double runPool(size_t n, uint avgCost, ProcessorId[] lps, bool spin)
     atomicStore(gHits, 0);
     PoolOptions opt;
     opt.processors = lps;
+    opt.workers = cast(uint) lps.length; // one pinned worker per listed CPU
+    opt.placement = WorkerPlacement.pin;
     opt.managedWorker = ManagedWorkerHooks(&poolStart, &poolPump, &poolStop);
     auto pool = new CacheAwarePool(opt);
     pool.start();
@@ -293,6 +295,7 @@ double runFiberPump(size_t n, uint avgCost, ProcessorId[] lps)
     opt.groups = HostGroups.only(group);
     opt.pool.processors = lps;
     opt.pool.skipSmtSiblings = false;
+    opt.pool.placement = WorkerPlacement.pin;
     opt.caller = CallerPlacement.unchanged; // the producer thread stays unpinned
     opt.idleTimeout = Duration.max;         // park until woken, as before
     opt.farm.ringMiB = ringMiBFromUlongs(ln);

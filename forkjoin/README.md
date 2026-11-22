@@ -53,7 +53,10 @@ threads runs in the same 102 ms under tcmalloc, glibc or mimalloc, where
 Idle participants pop their own deque (LIFO: the newest, smallest subtree),
 then poll the Farm, then steal from the top of another deque (FIFO: the
 oldest, largest subtree): the last successful victim first, then the SMT
-sibling, then one random same-LLC victim seven times in eight. A full deque
+sibling (for a participant pinned to a core), then one random same-LLC victim
+seven times in eight. Pool workers are unconfined, masked to their LLC group
+or pinned by `DispatcherOptions.placement`; the default is the pool's rule,
+unconfined where the process reaches one group and masked otherwise. A full deque
 runs its surplus inline on the forking thread (`DispatcherOptions.spillInline`,
 the default since 2.1.1); the children already on the deque stay stealable.
 With `spillInline = false` the surplus goes to the home Farm as one table and

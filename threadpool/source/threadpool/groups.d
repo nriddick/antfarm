@@ -37,7 +37,7 @@ import threadpool.host : autoWorkers, CallerPlacement, FarmHostOptions, FarmHost
     WorkerIdle, defaultHostPoolOptions;
 import threadpool.hybrid : anyArmed, ManagedPumpResult, ManagedWorkerHooks, wakeOneArmed,
     wakeOneArmedIn, WorkerBody, WorkerSelf, WorkerStop;
-import threadpool.pin : PinOutcome, pinProcessor, ThreadAffinity, confineCallingThread,
+import threadpool.pin : PinOutcome, pinProcessor, ThreadAffinity, WorkerPlacement, confineCallingThread,
     restoreCallingThread;
 import threadpool.pool : CacheAwarePool, Director, PoolOptions;
 import threadpool.resolution : GroupDisposition, PoolResolution;
@@ -308,8 +308,9 @@ final class GroupHost
             auto lp = snap.byId(options.callerProcessor);
             enforce(lp !is null && snap.isEligible(*lp),
                 format("GroupHost: callerProcessor %s is unknown or ineligible", options.callerProcessor));
-            foreach (id; resolution_.workers)
-                enforce(id != options.callerProcessor, "GroupHost: callerProcessor is also a worker");
+            enforce(resolution_.placement == WorkerPlacement.free
+                    || !resolution_.isAccepted(options.callerProcessor),
+                "GroupHost: callerProcessor is also a worker CPU");
             callerCpus_ = [options.callerProcessor];
             callerPlacement_ = CallerPlacement.pin;
             callerGroup_ = lp.llcIndex;
@@ -525,7 +526,7 @@ private:
         {
             foreach (g; groups_)
             {
-                uint consumers = cast(uint) resolution_.workersIn(g).length * viewsPerWorker
+                uint consumers = resolution_.workerCountIn(g) * viewsPerWorker
                     + (callerConsumes && g == callerGroup_ ? 1 : 0) + f.extraConsumers;
                 farms_ ~= createOne(consumers == 0 ? 1 : consumers, smallProducers, g);
             }
@@ -576,7 +577,6 @@ private:
     void startPool()
     {
         auto poolOptions = options_.pool;
-        poolOptions.processors = resolution_.workers.dup;
         gAttachments = options_.attachments;
         gHostConsumes = true;
         foreach (ref a; gAttachments) if (a.consumes) gHostConsumes = false;

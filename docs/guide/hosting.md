@@ -4,7 +4,7 @@
 around its actors:
 - one Farm sized for its participants;
 - the calling thread's producer `Token`;
-- pinned pool workers that consume the Farm;
+- pool workers that consume the Farm;
 - the runtimes and parks it creates;
 - a progress loop with an opt-in deadline;
 - the documented shutdown order.
@@ -34,7 +34,7 @@ void add(scope ref ActorBorrow!Counter actor, scope ref ActorContext context)
 
 void main()
 {
-    auto host = new FarmHost(2);    // two pinned workers in one LLC
+    auto host = new FarmHost(2);    // two workers in one LLC
     scope (exit) host.closeOrAbandon();
 
     auto runtime = host.createRuntime(1);
@@ -69,17 +69,18 @@ abandoned hangs process exit.
 ## Placement
 
 `FarmHost.resolve(options)` returns the worker selection that the
-constructor will start, as a `PoolResolution`: the workers are accepted,
-every other CPU that passed the `options.pool` filters is
-`Reject.notSelected`, and each physical group reports its `candidates` beside
-its `accepted` count. It changes nothing, but it does warm topology
+constructor will start, as a `PoolResolution`: each selected group's CPUs
+are accepted as its set, with its worker count beside it
+(`resolution.sets`), every other CPU that passed the `options.pool` filters
+is `Reject.notSelected`, and each physical group reports its `candidates`
+beside its `accepted` and `workers` counts. It changes nothing, but it does warm topology
 discovery (which freezes the OS scope), including when it throws
 `FarmHostResolveException`. Call it once before concurrent construction or
 resolve calls: that first discovery is an unlocked setup operation. On Linux
 a racing first call is benign; on Windows it can spuriously refuse the
 caller with `outsideOsScope`.
 
-A live host reports the same selection, now with every worker's pin outcome,
+A live host reports the same selection, now with every worker's start state,
 as `host.resolution` (the pool's own `pool.resolution`), and the caller's
 confine or pin set as `host.callerCpus`. `host.summary()` prints workers,
 caller placement, Farm participants and sizing in one line, and
@@ -89,15 +90,32 @@ The defaults are:
 - **One physical group.** Workers come from the accepted LLC with the most
   accepted CPUs. The host never spills into another group: asking for more
   workers than the group has is a `FarmHostResolveException` that names `span`.
-- **One worker per core.** `skipSmtSiblings` is on in
-  `defaultHostPoolOptions`.
+- **Cores, not SMT siblings.** `skipSmtSiblings` is on in
+  `defaultHostPoolOptions`, so a group's set is one CPU per core.
+- **Fewer workers than CPUs.** With `autoWorkers`, a set of one or two CPUs
+  is fully staffed and a larger one leaves one CPU in eight, and at least
+  one, without a worker. An explicit `workers` count may fill a set;
+  `host.toString` then notes that the group has no unstaffed processor.
+- **Workers are not pinned.** `options.pool.placement` is
+  `WorkerPlacement.automatic`: on a machine where the process can reach one
+  physical group the workers run unconfined (`free`), and the CPU filters
+  then decide how many workers there are and nothing else; with several
+  groups each worker gets a hard affinity mask over its group's set
+  (`group`). `pin` gives each worker one CPU, as before 2.2.2. A worker
+  belongs to its group whatever the placement: it consumes that group's Farm
+  and `home!T` names that group. See
+  [where workers run](../../threadpool/README.md#where-workers-run).
 - **Caller confined** (`CallerPlacement.confine`). The constructing thread's
-  affinity is restricted to the home group's CPUs that no worker owns, SMT
-  siblings included. With `autoWorkers`, the group's last accepted CPU is
-  left free for it. `close()` and `abandon()` restore the previous affinity.
-  Threads the caller creates meanwhile inherit the confined mask.
-  `CallerPlacement.pin` uses one CPU instead. `CallerPlacement.unchanged`
-  leaves the caller alone and notes it as an external participant.
+  affinity is restricted to the home group's CPUs, SMT siblings included: it
+  is one more thread in the group, and the CPU the automatic count leaves
+  unstaffed is what it runs on. `close()` and `abandon()` restore the
+  previous affinity. Threads the caller creates meanwhile inherit the
+  confined mask on Linux; the pool's own workers do not.
+  `CallerPlacement.pin` uses one CPU instead: the home set's last, taken out
+  of the set when the workers are masked or pinned. Under `free` nothing
+  keeps workers off it, which `host.toString` notes.
+  `CallerPlacement.unchanged` leaves the caller alone and notes it as an
+  external participant.
 - **`workers == 0`** starts no pool. The calling thread is the only consumer.
 
 `HostGroups.only(g)` pins the choice to one group.

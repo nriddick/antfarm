@@ -30,13 +30,16 @@ import threadpool.bins : home;
 import threadpool.groups : GroupAttachment, GroupHost, GroupHostOptions, GroupSlot;
 import threadpool.hybrid : ManagedWorkerHooks, WorkerSelf, gWorkers;
 import threadpool.worker : requestStop;
-import threadpool.pool : CacheAwarePool, Director, PoolOptions;
-import threadpool.resolution : PoolResolution, Reject, reasonsText, resolvePool;
+import threadpool.pin : WorkerPlacement;
+import threadpool.pool : CacheAwarePool, Director, PoolOptions, poolAutoWorkers = autoWorkers;
+import threadpool.resolution : GroupTake, PoolResolution, Reject, autoWorkersOf, reasonsText, resolvePool;
 import threadpool.topology : ProcessorId, TopologySnapshot, formatCpuList, liveTopology;
 
-/// `FarmHostOptions.workers` sentinel: every CPU the host can staff in the
-/// selected group(s), after the caller reservation.
-enum uint autoWorkers = uint.max;
+/// `FarmHostOptions.workers` sentinel: the automatic count of every selected
+/// group's set. A set of one or two CPUs is fully staffed; a larger one
+/// leaves one CPU in eight, and at least one, without a worker
+/// (`autoWorkersOf`). The same sentinel as `PoolOptions.workers` takes.
+alias autoWorkers = poolAutoWorkers;
 
 /// What an idle pool worker does after its final empty check.
 /// Non-exhaustive: do not `final switch` on it.
@@ -55,12 +58,15 @@ enum WorkerIdle : ubyte
 enum CallerPlacement : ubyte
 {
     /// Restrict the caller's affinity to the home group's online, in-scope
-    /// CPUs that no worker owns (SMT siblings of workers included). When
-    /// every such CPU is a worker, the whole home group, noted as "caller
-    /// shares worker CPUs" in `FarmHost.summary`. Restored by close.
+    /// CPUs, SMT siblings included. The caller is then one more thread in
+    /// the group; the CPU the automatic worker count leaves unstaffed is
+    /// what it runs on. Restored by close.
     confine,
-    /// Pin the caller to one CPU: the reserved one, else a free home-group
-    /// CPU, else the last home worker CPU (shared). Restored by close.
+    /// Pin the caller to one CPU. Under `WorkerPlacement.group` or `pin`
+    /// that is the home set's last CPU, taken out of the set; a set of one
+    /// CPU gives a home-group CPU outside the set, else the shared one.
+    /// Under `WorkerPlacement.free` no mask keeps workers off it, which
+    /// `FarmHost.toString` notes. Restored by close.
     pin,
     /// Leave the caller's affinity alone. `FarmHost.toString` notes that
     /// the caller is an external participant that may run in another group.
@@ -189,14 +195,14 @@ package(threadpool) final class HostPlan
 {
     const FarmHostOptions options;     /// as given
     const PoolResolution  candidates;  /// user filters over every group
-    /// `candidates` narrowed to the workers, in start (snapshot) order;
-    /// every other candidate is `Reject.notSelected`. Never null.
+    /// `candidates` narrowed to the selected groups' sets and their worker
+    /// counts; every other candidate is `Reject.notSelected`. Never null.
     PoolResolution        resolution;
     ushort                farmGroup;   /// 0 and meaningless when workers == 0
     const(ushort)[]       groups;      /// groups supplying workers, home first
     CallerPlacement       caller;      /// effective (unchanged when workers == 0)
     const(ProcessorId)[]  callerCpus;  /// confine/pin set; empty when unchanged
-    bool                  callerSharesWorkerCpu; /// no free home-group CPU was left
+    bool                  callerSharesWorkerCpu; /// the home set has no CPU without a worker
     bool                  callerConsumes;        /// the caller owns a ConsumerView
     uint nativeConsumers;   /// workers in the home group
     uint foreignConsumers;  /// workers in another group (span only)
@@ -228,10 +234,10 @@ package(threadpool) final class HostPlan
 
         string s = workers == 0
             ? "FarmHost: no workers, the caller consumes"
-            : format("FarmHost: %s worker%s on group%s %s {%s}%s, idle %s",
+            : format("FarmHost: %s worker%s on group%s %s (%s)%s, %s, idle %s",
                 workers, workers == 1 ? "" : "s", groups.length == 1 ? "" : "s",
-                groupsText(groups), formatCpuList(resolution.workers),
-                crossGroup ? " (crossGroup)" : "", idleText());
+                groupsText(groups), setsText(), crossGroup ? " (crossGroup)" : "",
+                placementText(), idleText());
         if (workers != 0)
             s ~= format("; caller %s%s%s", caller,
                 callerCpus.length ? " {" ~ formatCpuList(callerCpus) ~ "}" : "",
@@ -241,6 +247,28 @@ package(threadpool) final class HostPlan
         s ~= format("; Farm %s MiB, k %s%s", options.farm.ringMiB, options.farm.k,
             options.farmPerGroup && groups.length > 1 ? ", one per group" : "");
         return s;
+    }
+
+    /// `"7 of {0-7}"` per set, in group order.
+    private string setsText() const
+    {
+        import std.format : format;
+
+        string s;
+        foreach (ref set; resolution.sets)
+            s ~= format("%s%s of {%s}", s.length ? ", " : "", set.workers, formatCpuList(set.processors));
+        return s;
+    }
+
+    private string placementText() const
+    {
+        final switch (resolution.placement)
+        {
+            case WorkerPlacement.automatic:
+            case WorkerPlacement.free:  return "unconfined";
+            case WorkerPlacement.group: return "masked to their group";
+            case WorkerPlacement.pin:   return "pinned";
+        }
     }
 
     private string idleText() const
@@ -1439,6 +1467,8 @@ package(threadpool) HostPlan planHost(ref const TopologySnapshot snap, const Far
     if (hooks.managedWorker.start !is null || hooks.managedWorker.pump !is null
         || hooks.managedWorker.stop !is null || hooks.managedWorker.poolStopped !is null)
         problems ~= "pool.managedWorker must be empty (the host owns worker hooks)";
+    if (hooks.workers != autoWorkers)
+        problems ~= "pool.workers must be autoWorkers (the host's own workers option sets the count)";
     if (options.idle == WorkerIdle.park && options.idleTimeout <= Duration.zero)
         problems ~= "idleTimeout must be positive (Duration.max parks until woken)";
     if (options.maxEmitRounds == 0)
@@ -1450,7 +1480,8 @@ package(threadpool) HostPlan planHost(ref const TopologySnapshot snap, const Far
     const(ProcessorId)[] callerCpus;
     bool callerShares;
     ushort farmGroup;
-    ProcessorId[] chosen;     // home-first preference order
+    GroupTake[] takes;        // home first
+    ProcessorId[] removed;    // a pinned caller's CPU, taken out of the home set
     ushort[] groups;
     if (options.workers != 0)
     {
@@ -1459,73 +1490,143 @@ package(threadpool) HostPlan planHost(ref const TopologySnapshot snap, const Far
             throw new FarmHostResolveException(problems);
         immutable home = groups[0];
         farmGroup = home;
-        const homeAccepted = candidates.workersIn(home);
-        immutable reserve = options.caller != CallerPlacement.unchanged;
+        immutable masked = candidates.placement != WorkerPlacement.free;
+        const homeSet = candidates.processorsIn(home);
+
+        // Home-group CPUs in the frozen OS scope and online.
+        ProcessorId[] homeEligible, outsideSet;
+        foreach (ref c; candidates.cpus)
+            if (c.llcIndex == home && !(c.reasons & (Reject.osExcluded | Reject.offline)))
+            {
+                homeEligible ~= c.id;
+                if (!c.accepted) outsideSet ~= c.id;
+            }
+
+        // A pinned caller takes the home set's last CPU out of the set when
+        // the workers are held to it by a mask or a pin, unless an explicit
+        // worker count needs that CPU.
+        if (options.caller == CallerPlacement.pin && masked && homeSet.length >= 2)
+        {
+            size_t every;
+            foreach (g; groups)
+                every += candidates.processorsIn(g).length;
+            if (options.workers == autoWorkers || options.workers < every)
+                removed = [homeSet[$ - 1]];
+        }
+        size_t sizeOf(ushort g)
+        {
+            return candidates.processorsIn(g).length - (g == home ? removed.length : 0);
+        }
 
         size_t available;
         foreach (g; groups)
-            available += candidates.workersIn(g).length;
-        size_t n;
+            available += sizeOf(g);
         if (options.workers == autoWorkers)
-            n = reserve && homeAccepted.length >= 2 ? available - 1 : available;
+        {
+            foreach (g; groups)
+                takes ~= GroupTake(g, autoWorkersOf(sizeOf(g)));
+        }
         else if (options.workers > available)
             problems ~= format("%s workers requested but group%s %s ha%s %s accepted CPU%s; "
                 ~ "request fewer workers or opt into HostGroups.span to add a group (cross-group)",
                 options.workers, groups.length == 1 ? "" : "s", groupsText(groups),
                 groups.length == 1 ? "s" : "ve", available, available == 1 ? "" : "s");
         else
-            n = options.workers;
+        {
+            // An explicit count fills the home group first, then the next.
+            size_t left = options.workers;
+            foreach (g; groups)
+            {
+                immutable n = left < sizeOf(g) ? left : sizeOf(g);
+                takes ~= GroupTake(g, cast(uint) n);
+                left -= n;
+            }
+        }
 
-        // Home group first; with autoWorkers and a reservation, the home
-        // group's last accepted CPU stays free for the caller.
-        immutable homeTake = options.workers == autoWorkers && n < available
-            ? homeAccepted.length - 1
-            : (n < homeAccepted.length ? n : homeAccepted.length);
-        chosen ~= homeAccepted[0 .. homeTake];
-        foreach (g; groups[1 .. $])
-            foreach (id; candidates.workersIn(g))
-                if (chosen.length < n) chosen ~= id;
+        size_t staffed;
+        foreach (ref t; takes)
+            staffed += t.workers;
 
         if (groups.length > 1)
         {
-            ushort processorGroup = chosen.length ? chosen[0].group : 0;
-            foreach (id; chosen)
-                if (id.group != processorGroup)
+            bool first = true, mixed;
+            ushort processorGroup;
+            foreach (ref t; takes)
+            {
+                if (t.workers == 0) continue;
+                foreach (id; candidates.processorsIn(t.llc))
                 {
-                    problems ~= "HostGroups.span/all across Windows processor groups is not supported yet";
-                    break;
+                    if (first) { processorGroup = id.group; first = false; }
+                    else if (id.group != processorGroup) mixed = true;
                 }
+            }
+            if (mixed)
+                problems ~= "HostGroups.span/all across Windows processor groups is not supported yet";
         }
 
-        if (reserve && n != 0)
+        foreach (ref t; takes)
         {
-            // Home-group CPUs in the frozen OS scope and online, minus workers.
-            ProcessorId[] homeEligible, free;
-            foreach (ref c; candidates.cpus)
-                if (c.llcIndex == home && !(c.reasons & (Reject.osExcluded | Reject.offline)))
-                {
-                    homeEligible ~= c.id;
-                    if (!chosen.canFind(c.id)) free ~= c.id;
-                }
-            caller = options.caller;
-            callerShares = free.length == 0;
-            if (callerShares)
-                notes ~= format("caller shares worker CPUs: every CPU of group %s is a worker", home);
-            if (options.caller == CallerPlacement.confine)
-                callerCpus = callerShares ? homeEligible : free;
-            else if (homeTake < homeAccepted.length)
-                callerCpus = [homeAccepted[$ - 1]]; // the reserved CPU
-            else
-                callerCpus = [free.length ? free[$ - 1] : homeAccepted[$ - 1]];
+            immutable n = sizeOf(t.llc);
+            if (t.workers != 0 && t.workers == n && n > 2)
+                notes ~= format("group %s has no unstaffed processor: %s workers on %s CPUs",
+                    t.llc, t.workers, n);
         }
-        else if (n != 0)
+        if (!masked && staffed != 0)
+        {
+            if (candidates.groups.length > 1)
+            {
+                uint reachable;
+                foreach (ref gd; candidates.groups)
+                    if (gd.eligible != 0) reachable++;
+                if (reachable > 1)
+                    notes ~= "workers are not confined to their groups (placement free)";
+            }
+            bool narrowed;
+            foreach (g; groups)
+                foreach (ref c; candidates.cpus)
+                    if (c.llcIndex == g && !c.accepted
+                        && !(c.reasons & (Reject.osExcluded | Reject.offline)))
+                        narrowed = true;
+            if (narrowed)
+                notes ~= "placement free: the processor filters set the worker count only";
+        }
+
+        immutable homeWorkers = takes.length ? takes[0].workers : 0;
+        if (options.caller != CallerPlacement.unchanged && staffed != 0)
+        {
+            caller = options.caller;
+            if (options.caller == CallerPlacement.confine)
+            {
+                callerCpus = homeEligible;
+                callerShares = homeWorkers >= homeSet.length && outsideSet.length == 0;
+                if (callerShares)
+                    notes ~= format("caller shares worker CPUs: every CPU of group %s has a worker", home);
+            }
+            else if (removed.length)
+                callerCpus = removed;
+            else if (masked && outsideSet.length)
+                callerCpus = [outsideSet[$ - 1]];
+            else
+            {
+                callerCpus = [homeSet[$ - 1]];
+                callerShares = true;
+                notes ~= masked
+                    ? format("caller shares worker CPUs: group %s has one accepted CPU", home)
+                    : format("caller pinned to %s, which unconfined workers may also use",
+                        formatCpuList(callerCpus));
+            }
+        }
+        else if (staffed != 0)
             notes ~= format("caller placement unchanged: the control thread is an external "
                 ~ "participant and may run outside group %s", home);
 
         // Every physical group not supplying workers, with its reason.
         foreach (ref gd; candidates.groups)
         {
-            if (groups.canFind(gd.llcIndex) || gd.physical == 0) continue;
+            bool used;
+            foreach (ref t; takes)
+                if (t.llc == gd.llcIndex && t.workers != 0) used = true;
+            if (used || gd.physical == 0) continue;
             notes ~= gd.isAccepted
                 ? format("group %s not used: %s accepted CPU%s not selected", gd.llcIndex,
                     gd.accepted, gd.accepted == 1 ? "" : "s")
@@ -1539,7 +1640,7 @@ package(threadpool) HostPlan planHost(ref const TopologySnapshot snap, const Far
         throw new FarmHostResolveException(problems);
 
     auto result = new HostPlan(options, candidates);
-    result.resolution = candidates.narrowedTo(chosen);
+    result.resolution = candidates.narrowedTo(takes, removed);
     result.farmGroup = farmGroup;
     result.groups = groups;
     result.caller = caller;
@@ -1547,19 +1648,20 @@ package(threadpool) HostPlan planHost(ref const TopologySnapshot snap, const Far
     result.callerSharesWorkerCpu = callerShares;
     result.callerConsumes = callerConsumes;
 
-    foreach (id; result.resolution.workers)
+    foreach (ref w; result.resolution.workers)
     {
-        if (candidates[id].llcIndex == farmGroup) result.nativeConsumers++;
+        if (w.llcIndex == farmGroup) result.nativeConsumers++;
         else result.foreignConsumers++;
     }
     immutable external = cast(ulong)(callerConsumes ? 1 : 0) + options.farm.extraConsumers;
-    immutable consumers = external + chosen.length;
+    immutable workerTotal = result.resolution.workers.length;
+    immutable consumers = external + workerTotal;
     immutable smallProducers = 1UL + options.farm.extraSmallProducers;
     result.externalConsumers = cast(uint) external;
 
     if (consumers < 1 || consumers > MAX_CONSUMERS_LIMIT)
         problems ~= format("%s consumers (%s workers + %s external) exceed the Farm's %s-view limit",
-            consumers, chosen.length, external, MAX_CONSUMERS_LIMIT);
+            consumers, workerTotal, external, MAX_CONSUMERS_LIMIT);
     if (smallProducers > uint.max)
         problems ~= "extraSmallProducers overflows the small producer count";
     if (problems.length)

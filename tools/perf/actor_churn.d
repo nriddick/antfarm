@@ -1160,6 +1160,18 @@ void main(string[] args)
         hostOptions.idle = WorkerIdle.spin;
         hostOptions.pool = PoolOptions.init;
         hostOptions.pool.processors = cpus[1 .. $];
+        // The consumers are pinned to those CPUs, as every recorded cell is.
+        // ANTFARM_CHURN_PLACEMENT=free|group|pin chooses another placement.
+        import threadpool.pin : WorkerPlacement;
+        hostOptions.pool.placement = WorkerPlacement.pin;
+        if (auto placement = getenv("ANTFARM_CHURN_PLACEMENT"))
+        {
+            import core.stdc.string : strcmp;
+            if (strcmp(placement, "free") == 0) hostOptions.pool.placement = WorkerPlacement.free;
+            else if (strcmp(placement, "group") == 0) hostOptions.pool.placement = WorkerPlacement.group;
+            else if (strcmp(placement, "pin") == 0) hostOptions.pool.placement = WorkerPlacement.pin;
+            else enforce(false, "ANTFARM_CHURN_PLACEMENT must be free, group or pin");
+        }
         hostOptions.farm.ringMiB = 8;
         hostOptions.farm.k = 8;
         hostOptions.farm.quotaSmall = quota;

@@ -114,7 +114,7 @@ int main()
     auto summary = res.summary();
     printf("%.*s\n", cast(int) summary.length, summary.ptr);
     auto bins = makeBins!FarmBin(res, (ref const g) => g.isAccepted
-        ? FarmBin(AntFarm.create(16, 8, g.accepted, 0, 0, 8, 4096,
+        ? FarmBin(AntFarm.create(16, 8, g.workers, 0, 0, 8, 4096,
             DEFAULT_SMALL_TABLE_THRESHOLD, false))
         : FarmBin.init);
     install(bins, res);
@@ -163,7 +163,7 @@ int main()
         immutable want = g.isAccepted ? perGroup : 0;
         if (g.isAccepted)
             printf("group %u: %u workers received %lld payloads (want %d)\n",
-                g.llcIndex, g.accepted, got, want);
+                g.llcIndex, g.workers, got, want);
         ok = ok && got == want;
     }
     printf("received %lld payloads in %u groups  sum=%lld (want %lld x 42)\n",
@@ -173,6 +173,6 @@ int main()
         fprintf(stderr, "hello_antfarm: unexpected counts\n");
         return 1;
     }
-    printf("hello_antfarm: pinned workers consumed payloads in each accepted LLC group\n");
+    printf("hello_antfarm: each accepted LLC group's workers consumed its payloads\n");
     return 0;
 }

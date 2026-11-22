@@ -1,6 +1,7 @@
 # Threadpool design
 
-`threadpool` discovers cache and processor topology, pins persistent workers,
+`threadpool` discovers cache and processor topology, runs persistent workers
+that each belong to one LLC group,
 and lets an application associate its own state with LLC and NUMA locality. It
 does not own a task queue or define a work-stealing policy. A worker is a
 locator and execution context for application-owned work.
@@ -14,10 +15,11 @@ for composition with Ant Farm and `ant_fibers`.
 The package provides:
 
 - one immutable process topology snapshot;
-- one persistent worker for each selected logical processor;
-- lifetime pinning to the selected processor;
+- persistent workers in sets, one set per selected physical group;
+- a placement for them: unconfined, masked to their group, or pinned;
 - raw `@nogc nothrow` and managed GC-enabled worker hooks;
-- a single-owner Director for idle and wake policy;
+- a single-owner Director for idle and wake policy, readiness for expected
+  bursts, and the workers' timing records;
 - type-specific LLC and NUMA registries for caller-owned objects;
 - Windows and Linux topology, affinity, wait, and wake backends;
 - counters and retained managed-worker failures.
@@ -87,13 +89,14 @@ topology to the package's dense P/E table classes; higher efficiency class is
 treated as the performance class when heterogeneous classes are present. A
 homogeneous machine has one effective class.
 
-Each worker receives a `WorkerSelf` containing its LLC, NUMA, class, CPU-set,
-worker index, and NUMA-local LLC neighborhood. `currentWorker()` returns a TLS
+Each worker receives a `WorkerSelf` containing its LLC, NUMA node, worker
+index, and NUMA-local LLC neighborhood. `currentWorker()` returns a TLS
 pointer to that record on pool workers and `null` elsewhere. It identifies the
-currently pinned worker; applications must not retain it beyond worker
-lifetime.
+calling worker; applications must not retain it beyond worker lifetime. A
+worker has no P/E class and no processor of its own: which CPU it runs on is
+the OS's choice within its placement.
 
-## Worker selection and pinning
+## Worker selection and placement
 
 `PoolOptions` filters the topology before start:
 
@@ -101,6 +104,42 @@ lifetime.
   `parseCpuList` or the topology helpers;
 - `enablePCores` and `enableECores` select classes;
 - `skipSmtSiblings` keeps the first LP of each physical core.
+
+The CPUs of one physical group that pass the filters are that group's **set**.
+A set has workers, and they are interchangeable: a worker is identified by its
+group and an ordinal, never by a CPU.
+
+`PoolOptions.placement` (`WorkerPlacement`) is what the OS is told:
+
+| value | a worker may run on | Windows | Linux |
+| --- | --- | --- | --- |
+| `free` | anything the process may | nothing: a new thread has the process's affinity | `sched_setaffinity` over the frozen OS scope, because a thread inherits its creator's mask and a host narrows its caller before it starts the pool |
+| `group` | its set | one hard `GROUP_AFFINITY` mask over the set | `sched_setaffinity` over the set |
+| `pin` | one CPU of the set | a CPU-set preference and a one-CPU mask | a one-CPU mask |
+| `automatic` (default) | `free` when the process can reach one physical group, `group` otherwise | | |
+
+- Under `free` the filters decide the size of the set, and so the worker
+  count, and nothing else: no mask keeps a worker off an E-core or an SMT
+  sibling. `group` is how a filter is enforced.
+- `group` uses a hard mask and not CPU Sets, which are a preference that did
+  not hold when measured.
+- One mask names one Windows processor group. A set that spans two cannot be
+  masked, and `start` says so before it creates a thread.
+- Under `pin` the workers take the set's first CPUs.
+
+The automatic worker count of a set of `n` CPUs is `autoWorkersOf(n)`: all of
+one or two, otherwise `n` less one in eight (rounded down) and at least one
+less. It is the same under every placement. A masked set with as many busy
+workers as CPUs was as late as a pin when measured, and parking workers in
+one had park overshoots of 5 to 27 ms; the measurements and their limits are
+in [the timekeeping note](cadence.md). The rule is a default:
+`PoolOptions.workers` gives an exact total instead, handed out in group
+order (a group the count does not reach gets no set), and `start` throws
+when the accepted CPUs are fewer. Hosts set their own count and require
+`pool.workers` left alone.
+
+Every worker has the same thread QoS (`PoolOptions.qos`: `high`, `eco` or
+`unchanged`) and the same spin count (`spinIters`).
 
 Both platforms omit processors marked `affinityExcluded` by discovery, even
 when explicitly listed in the options. Windows OS parking alone does not
@@ -114,7 +153,7 @@ The physical topology counts remain unchanged.
 snapshot is the whole test seam. `CacheAwarePool.resolve()` previews it
 without starting anything; `start()` uses the same function, so the preview
 equals the start-time selection. After `start`, `pool.resolution` adds each worker's
-`StartState` and `PinOutcome`; after a failed start or a shutdown it keeps the
+`StartState` and placement outcome; after a failed start or a shutdown it keeps the
 last attempt's report.
 
 The report covers everything that was considered:
@@ -125,26 +164,38 @@ The report covers everything that was considered:
 - `requests`: one `RequestDisposition` per `processors` entry in request
   order, marking unknown ids and duplicates (a duplicate never adds a worker);
 - `groups`: one `GroupDisposition` per physical group with physical,
-  eligible, candidates, accepted and started counts, and the reasons common
-  to every member of a group that has no workers;
-- `workers`: the accepted CPUs; the index is the `workerIndex`.
+  eligible, candidates, accepted, workers and started counts, and the reasons
+  common to every member of a group that has no workers;
+- `sets`: one `SetDisposition` per group with workers: its accepted CPUs,
+  its worker count, and the index of its first worker;
+- `workers`: one `WorkerDisposition` per worker, set by set; the index is
+  the `workerIndex`. It names the worker's group and ordinal, its CPU when
+  pinned, and after `start` its `StartState`;
+- `placement`: what `automatic` resolved to.
+
+An accepted CPU is one in a set. `CpuDisposition.workerIndex` names the worker
+pinned there under `pin`, and is `uint.max` otherwise.
 
 `Reject.notSelected` is a policy reason, not a filter: the CPU passed every
 filter, but a placement policy above the pool left it out. `resolvePool`
 never sets it and it is never combined with another reason. `FarmHost`
-narrows its filter-only resolution to the CPUs it chose, so one resolution
-answers both "would the filters allow it?" (`reasons & ~notSelected` is
-`none`) and "is it a worker?". `GroupDisposition.candidates` counts the
-filter-passing CPUs (accepted plus `notSelected`); a group with candidates
-but no workers was eligible but not chosen. The host's pool starts from that
-narrowed resolution, so `host.pool.resolution is host.resolution`.
+narrows its filter-only resolution to the groups it chose and the worker
+count of each (and takes a pinned caller's CPU out of its set), so one
+resolution answers both "would the filters allow it?" (`reasons &
+~notSelected` is `none`) and "is it in a set?". A smaller worker count keeps
+the whole set: there are fewer workers on the same CPUs.
+`GroupDisposition.candidates` counts the filter-passing CPUs (accepted plus
+`notSelected`); a group with candidates but no workers was eligible but not
+chosen. The host's pool starts from that narrowed resolution, so
+`host.pool.resolution is host.resolution`.
 
 Filtering is silent at start by design. `enforceRequested()` is the opt-in
 contract check: it throws `ResolutionException` naming every unknown, rejected
 (with reasons) or duplicate request. `toString` prints a group table and every
 CPU; `summary()` is one line and is included in start-failure messages.
 `acceptedCpus`, `rejectedCpus`, `acceptedGroups`, `rejectedGroups`,
-`unknownRequests` and `workersIn(llc)` separate the report for callers.
+`unknownRequests`, `workerCountIn(llc)`, `processorsIn(llc)` and `setOf(llc)`
+separate the report for callers.
 
 ### OS scope
 
@@ -170,11 +221,14 @@ diagnostics only.
 
 `pinProcessor(LogicalProcessor)` (`@nogc`) and `pinProcessor(ProcessorId)`
 (looks the id up first; `unknownProcessor` if absent) are the only pin
-functions, and pool workers use the same path. A pin outside the frozen scope
-never happens, including a raw pin from application code, so this library
-cannot escape a launch `taskset`. If the OS narrows affinity after discovery
-the scope does not shrink; the next pin fails with `osRejected` and pool
-startup unwinds with that outcome in `pool.resolution`. Windows group affinity
+functions, and `confineCallingThread(cpus, previous)` the only mask; pinned
+and masked pool workers use the same paths. A pin or a mask outside the
+frozen scope never happens, including a raw pin from application code, so
+this library cannot escape a launch `taskset`. If the OS narrows affinity
+after discovery the scope does not shrink; the next pin or mask fails with
+`osRejected` and pool startup unwinds with that outcome in
+`pool.resolution`. An unconfined worker asks for nothing, so it starts, and
+stays inside whatever the process now has. Windows group affinity
 can otherwise widen a thread beyond the process mask, which the recheck
 prevents. Cgroup cpusets are honoured at launch (the launch mask is already a
 subset) and enforced live by the kernel; dynamic cpuset tracking is deferred.
@@ -183,10 +237,10 @@ Windows processes stay unrestricted; that path still needs hardware
 validation.
 
 Start fails if no processor is selected, another pool is already live, or any
-worker cannot be pinned. The first message includes `summary()`; the pin
-message names each failing `g:lp` with its `PinOutcome`. The implementation does not silently continue with a
-migrating worker. Windows applies CPU-set affinity and optional performance or
-EcoQoS policy. Linux uses scheduler affinity and its native wait backend.
+worker's placement is refused. The first message includes `summary()`; the
+placement message names each failing worker with its `PinOutcome`. The
+implementation never falls back to another placement. Windows also applies
+the thread QoS; Linux has none to apply.
 
 Only one `CacheAwarePool` may be running in the process. This matches the
 process-wide TLS locator, worker table, installed registries, and wake slots.
@@ -220,7 +274,7 @@ does not call its body again.
 ### Managed worker hooks
 
 `ManagedWorkerHooks` provides `start`, `pump`, and `stop` callbacks on the
-pinned worker. A successful start is paired with exactly one stop on that same
+worker. A successful start is paired with exactly one stop on that same
 thread. `WorkerSelf.context` is reserved for caller-owned persistent state.
 The optional `poolStopped` callback runs once per run on the thread that calls
 `shutdown` (or whose `start` failed), after every worker has joined, even when
@@ -232,7 +286,7 @@ would otherwise settle.
 - `again` retries immediately;
 - `idle` applies Director policy;
 - `until(deadlineTicks)` applies Director policy but bounds the park by an
-  absolute `MonoTime` deadline.
+  absolute `MonoTime` deadline, which the park holds precisely (below).
 
 Managed callbacks may allocate and throw. An escaping failure stops the worker
 system. Both this lane and FarmHost capture the first failure immediately into
@@ -253,11 +307,11 @@ and timer state.
 `start()` performs the following transaction:
 
 1. Validate options and claim the process-wide live-pool slot.
-2. Discover topology and select logical processors.
-3. Create the worker table and OS wait slots.
-4. Spawn one thread per selected processor.
-5. Pin every worker and run any managed start hook.
-6. Wait for the pin/start handshake from all workers.
+2. Discover topology and resolve the sets and their worker counts.
+3. Create the worker table, the timing records and the OS wait slots.
+4. Spawn one thread per worker.
+5. Place every worker and run any managed start hook.
+6. Wait for the placement/start handshake from all workers.
 7. Release the workers into their pump loops.
 
 Failure during setup requests stop, joins created workers, destroys wait
@@ -278,22 +332,80 @@ Farm, or Fiber domain before shutting the pool down. The old
 
 A running pool grants one move-only `Director`. The Director is the sole owner
 of policy mutation; acquiring a second Director while one is live fails.
-Selections filter workers by LLC, P/E class, string label, or integer tag.
+Selections filter workers by LLC, string label or integer number, and take
+so many of the matches with `take(n)` and `skip(n)`; `label` and `number`
+mark the selected workers.
 
 For the selected workers, the Director can choose:
 
-- `spin`: retry after a bounded pause loop;
+- `spin`: retry after a bounded pause loop, never parking and never arming
+  the wake slot;
 - `wait`: park until signalled;
-- `sleep`: park for a relative duration;
-- `sleepUntil`: park until an absolute time;
+- `sleep`: park for a relative duration, a bound on how long a publication
+  made without a wake can wait;
 - `signal`: wake without changing policy.
 
-`cadence` (align work visits to a repeating time grid, with `nudge` for a
-one-shot phase shift and `drift` for a sequenced slew of the period) is
-compiled only with `version (ThreadpoolCadence)`: it has no in-tree user,
-and its arithmetic and tests stay with it until one appears. Policy fields
-are published before a worker's epoch is advanced and its OS wait primitive
-is signalled.
+Policy fields are published before a worker's epoch is advanced and its OS
+wait primitive is signalled.
+
+### Readiness for an expected burst
+
+`expect(atNanos)` tells the selected workers when the next burst of
+publication is due, as an instant on `MonoTime` in nanoseconds
+(`monoNanos()`). It is an overlay on `wait` and `sleep`, not a policy:
+
+1. A worker in a window it has entered does one round of PAUSEs and pumps
+   again.
+2. Inside `[instant - lead, instant + hold)` an idle worker enters the
+   window and does the same.
+3. Before it, the worker parks precisely until the lead before the instant.
+   Work, `signal`, a new `expect` that needs it, a policy change or stop ends
+   the park at once; an earlier managed deadline bounds it, and so does a
+   `sleep` policy's duration.
+4. With nothing expected, or after the hold, the worker follows its policy.
+
+`readiness(leadMicros, holdMicros)` sets the window; the defaults are 1,500
+and 250. The tests of rules 1 and 2 sit in both worker loops ahead of the
+wake-slot arm, so a polling worker is never armed. `expect` stores the
+instant and wakes the worker unless the instant it replaces is still ahead
+and no later than the new one; waking a worker that is not armed is one
+exchange with no system call.
+
+The pool keeps no period, no beat number and no slew. The caller owns the
+grid, if there is one, and gives each instant as it knows it: an instant is
+converted once and its error does not add up, bursts need not be periodic,
+and a publisher that stops calling leaves the workers on their policy. The
+shipped `cadence`, `nudge` and `drift` verbs kept a copy of the grid in each
+worker; they are removed, with the three faults that lived in that copy (a
+spin lead that ignored wakes, two pump rounds per beat, a `drift` that
+jumped the phase). `cadenceGrid` remains as a pure function for callers that
+keep a grid.
+
+A window costs processor time, so `expect` is for a chosen few workers
+(`take`). Workers that wake together and poll can also hold each other up:
+under a group mask a worker's park sometimes ends only when another worker
+of its set stops polling. [The timekeeping note](cadence.md) has the
+measurements.
+
+### Timing records
+
+Each worker keeps a record that only it writes, on its own cache lines, so
+no worker's path has a shared counter. `Selection.timing()` sums the records
+of the workers it matches into a `TimingStats` while they run;
+`resetTiming()` asks each worker to clear its own.
+
+- Per expected instant: `ready` (the worker looked within 100 µs of it),
+  `busy` (it was running work found before it), `parkedLate` (its park
+  returned more than 100 µs after it; `missedWindows` when after the whole
+  window) and `spinningLate` (it was polling and next looked more than
+  100 µs after it), each with a count over 1 ms and the worst.
+- `parkOvershoot`: deadline parks that ran to their deadline, by how far
+  past it they returned. For choosing the lead.
+- `burstArrival` and `emptyWindows`: when a window's first work came. For
+  choosing the hold.
+- `stalls`: for a worker under `spin`, gaps of more than 100 µs between idle
+  polls with no work between them, sampled about every 256 PAUSEs.
+- `parks` and `timedParks`.
 
 Producer threads do not need Director ownership. `pool.wakeAll()` is a
 thread-safe, non-owning notification which leaves each worker's idle policy
@@ -313,11 +425,33 @@ The spin and park counters (`PoolStats`) are compiled only with
 `version (ThreadpoolStats)`: a process-wide atomic add per pause cost 7.8%
 of throughput on consumer-bound workloads under `WorkerIdle.spin`.
 
-Each worker owns one atomic ACTIVE/ARMED wait slot. After an idle pump it
-exchanges ACTIVE to ARMED with acquire/release ordering, checks stop, and
-pumps again. Only a second idle result may enter the OS wait, comparing against
-ARMED. A scope guard exchanges back to ACTIVE on every path, including a
-managed exception. The final managed result supplies the park deadline.
+Each worker owns one atomic wait slot. After an idle pump that is not a
+polling round it exchanges ACTIVE to ARMED with acquire/release ordering,
+checks stop, and pumps again. Only a second idle result may enter the OS
+wait, comparing against ARMED. A scope guard exchanges back to ACTIVE on
+every path, including a managed exception. The final managed result supplies
+the park deadline.
+
+A park with a deadline (a managed deadline, or the lead before an expected
+instant; the earlier when there are both) holds it precisely. A `sleep`
+policy's duration is not a deadline: it is the same wait's timeout, which
+ends on the system timer tick, so one park ends at whichever comes first.
+
+- **Windows.** The worker waits on a high-resolution waitable timer and a
+  wake event of its own. It first moves its slot from ARMED to a third
+  state, TIMED; a wake that finds TIMED signals the event where one that
+  finds ARMED calls `WakeByAddressSingle`. A wake that lands before the move
+  makes it fail and the park return at once. The event is reset before the
+  move and never after, so a signal meant for this park is never cleared; a
+  signal left by a waker of an earlier park that arrives after the reset
+  ends this park early, and the loop's work check absorbs it. The handles
+  are kept per worker index for the life of the process, so a waker that
+  outlives its pool signals a live handle. Where the system has no
+  high-resolution timer an ordinary one is used, and a worker index of
+  1,024 or more falls back to a millisecond timeout.
+- **Linux.** One futex wait with an absolute `CLOCK_MONOTONIC` deadline
+  (`FUTEX_WAIT_BITSET`), the clock `MonoTime` reads. The slot and the wake
+  path are unchanged.
 
 Every notification performs an acquire/release exchange to ACTIVE, including
 ACTIVE-to-ACTIVE notifications; the previous value decides whether an OS wake
@@ -334,25 +468,22 @@ The bin registry is parameterized by the installed type, so unrelated
 application components can install independent tables.
 
 Tables are keyed by the physical `llcIndex` and validated against a
-`PoolResolution`; there is no unvalidated install. Two layouts are supported:
+`PoolResolution`; there is no unvalidated install. `install(bins, res)` takes
+one object per physical group, so `bins.length` must equal
+`res.physicalGroupCount`.
 
-- `install(bins, res)`: one object per physical group, so `bins.length` must
-  equal `res.physicalGroupCount`;
-- `install(bins, res, classCount)`: one object per `(group, dense class)` pair,
-  `bins.length == physicalGroupCount * classCount`.
-
-For class or pointer types, every slot an accepted worker resolves to must be
-non-null; groups without accepted workers may hold null. A compacted table
+For class or pointer types, the slot of every group with workers must be
+non-null; groups without workers may hold null. A compacted table
 (one slot per accepted group) or a missing slot is rejected with the groups
 named. `makeBins!T(res, make)` builds a correctly sized table, calling `make`
 once per physical group with its `GroupDisposition`. The install records which
 groups were accepted, readable as `binStaffed!T(llc)`.
 
-Workers call `home!T()` to find the slot for their pinned LLC and class.
+Workers call `home!T()` to find the slot of their group.
 `home!T` is valid only on pool-managed threads and returns null elsewhere. It
-names the group the worker was assigned at start, not the CPU the thread is
-running on now: it does not follow re-pinning or OS migration.
-Control or producer threads call `at!T(llc, class)` for direct addressing.
+names the group the worker belongs to, not the CPU the thread is running on
+now: under `free` on a machine with several groups the two can differ.
+Control or producer threads call `at!T(llc)` for direct addressing.
 `search!T(label)` searches labeled slots in the current worker's NUMA-local LLC
 neighborhood, which may include groups without accepted workers; off a pool
 worker it searches the complete installed table. The neighborhood holds at
@@ -370,7 +501,7 @@ unchanged.
 ## Group host
 
 `threadpool.groups.GroupHost` is the one owner of the pool, the caller's
-placement, the Farms and the tokens for a program with pinned workers. The
+placement, the Farms and the tokens for a program with pool workers. The
 fork-join dispatcher is built on it, and so is a `FarmHost` with workers: it
 constructs a `GroupHost` with one shared Farm (or one per group with
 `FarmHostOptions.farmPerGroup`) and its consuming worker body as the single
@@ -388,7 +519,17 @@ placement, so it may exist beside an open host of either kind. It resolves worke
 selection, `autoWorkers`, caller confinement and the reasons for unused
 groups are the same as `FarmHost`'s; `HostGroups.all` selects every group
 with an accepted CPU, home first, and `callerProcessor` pins the caller to
-one exact CPU kept out of the worker set.
+one exact CPU kept out of the worker sets.
+
+`planHost` hands workers to sets. `autoWorkers` gives every selected group
+its automatic count; an explicit count fills the home group first and then
+the next, and may leave a set with no unstaffed CPU, which the plan notes.
+A confined caller has the home group's eligible CPUs, SMT siblings included,
+and is one more thread in the group. A pinned caller takes the home set's
+last CPU out of the set when the workers are masked or pinned and the count
+does not need it; under `free` nothing keeps workers off it, which the plan
+notes. The plan also notes workers that are not confined to their groups
+(`free` on several) and filters that set the count only.
 
 With `farmPerGroup` it creates one Farm per selected group, sized for that
 group's workers (plus the caller's view when the caller consumes in that
@@ -445,8 +586,8 @@ the pool.
 ## Ant Farm embedding
 
 The usual non-Fiber embedding installs one Farm-bearing object per accepted
-physical group, sized for that group's workers (`res.workersIn(g).length` or
-`GroupDisposition.accepted` native consumers). Each worker then owns a
+physical group, sized for that group's workers (`res.workerCountIn(g)` or
+`GroupDisposition.workers` native consumers). Each worker then owns a
 persistent `ConsumerView` and calls `consumeNext()` from its pump. A table
 that aliases one Farm into every slot is legal but deliberately cross-group:
 every accepted worker, including those of other groups, is then a consumer of
@@ -479,19 +620,19 @@ coverage rules. Those scheduler contracts live in
 
 Do not relabel or uninstall state while workers can look it up. Do not start or
 shut down the same pool concurrently. Managed per-worker context is initialized
-and destroyed on its pinned worker.
+and destroyed on its worker.
 
 ## OS backends
 
 Windows topology is built from CPU-set and logical-processor relationship
-records. Affinity uses CPU Sets so processor groups and hybrid scheduling
-policy remain visible to the OS. `WaitOnAddress` is resolved dynamically and
+records. A pin is a CPU-set preference plus a one-CPU mask; a group mask is
+a `GROUP_AFFINITY` over the set. `WaitOnAddress` is resolved dynamically and
 required on the supported Windows 10 1803+ floor. If it is unavailable, pool
-startup throws before allocating wait slots or starting workers; there is no
-event fallback.
+startup throws before allocating wait slots or starting workers. Deadline
+parks wait on a timer and an event instead, as above.
 
-Linux topology is built from sysfs and scheduler-visible CPUs, then pinning is
-applied with the native affinity API. Linux wait/wake uses its native backend.
+Linux topology is built from sysfs and scheduler-visible CPUs, and placement
+is applied with `sched_setaffinity`. Linux wait/wake is the futex.
 Both implementations normalize their results into the same immutable dense
 topology model. Unsupported operating systems fail explicitly.
 
@@ -501,16 +642,18 @@ contract.
 
 ## Observability and validation
 
-`snapshotStats()` reports aggregate worker execution, spin, park, wake, and
-related counters without transferring queue ownership. Managed failures are
+`Selection.timing()` reports the workers' own records (above).
+`snapshotStats()` reports the process-wide spin and park counters, which are
+compiled only with `version (ThreadpoolStats)`. Managed failures are
 available only after workers have joined.
 
 The test suite covers captured Windows topology records, synthetic processor
 groups and LLC identities, a simulated 256-processor, four-group, two-node
-Windows host whose group-relative indices all alias, Linux topology parsing, bin/class lookup, NUMA-local
-search, worker selection, pin/start failure, Director
-ownership and filtering, cadence arithmetic, wake behavior, managed hook
-lifecycle, and live topology/pinning where the host supports it.
+Windows host whose group-relative indices all alias, Linux topology parsing, bin lookup, NUMA-local
+search, sets and worker counts, every placement with each worker's affinity
+read back, placement/start failure, Director ownership and filtering, the
+readiness window and its counts, wakes and stops against deadline parks,
+managed hook lifecycle, and live topology where the host supports it.
 
 The topology hello is the portable inspection example. The Ant Farm hello is
 the integration example. `benchmarks/live_hybrid.d` is hardware

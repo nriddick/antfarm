@@ -96,6 +96,7 @@ void main(string[] args)
     options.caller = CallerPlacement.unchanged;
     // Park until woken: the pool's former default, one wake per burst.
     options.idleTimeout = Duration.max;
+    options.pool.placement = WorkerPlacement.pin; // pinned workers, as recorded
     if (workers != 0)
     {
         options.pool.processors = pickWorkers(CacheAwarePool.topology(), workers);

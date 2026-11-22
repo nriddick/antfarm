@@ -132,6 +132,10 @@ run env ASAN_OPTIONS=detect_leaks=0:detect_stack_use_after_return=0 .build/forkj
 run dub run :threadpool -c confine-test --compiler=ldc2
 select_cpus CHECK_SMALL_CPUS 4 4
 run "${cpu_pin[@]}" dub run :threadpool -c confine-test --compiler=ldc2
+# Wakes and stops against parks that hold a deadline (an absolute futex
+# wait), then readiness windows under every placement: structure, not timing.
+run dub run :threadpool -c wait-races --compiler=ldc2
+run dub run :threadpool -c expect-test --compiler=ldc2
 # CHECK_SMALL_CPUS selects the small mask; CHECK_ONE_LLC_CPUS selects host-test CPUs.
 # SKIP worker cases fails unless
 # ALLOW_HOST_SKIP=1. timeout so an exit hang fails the lane.

@@ -4,12 +4,14 @@ import core.atomic;
 import core.lifetime : move;
 import core.thread;
 import core.time : Duration, MonoTime, msecs;
+import std.conv : to;
 import std.exception : enforce;
 
 import threadpool.hybrid;
-import threadpool.pin : PinOutcome;
+import threadpool.pin : PinOutcome, WorkerPlacement, WorkerQos;
 import threadpool.resolution;
 import threadpool.stats;
+import threadpool.timing : TimingStats, WorkerTiming, gTiming, microsToTicks;
 import threadpool.topology;
 import threadpool.worker;
 
@@ -27,29 +29,36 @@ else version (linux)
     import threadpool.sys.linux_wait;
 }
 
-/// Best-effort wake grid for idle workers. Late workers pull by default.
-struct Cadence
-{
-    bool skipMissed = false;
-    Duration spinLead;
-}
+/// `PoolOptions.workers` and `FarmHostOptions.workers` sentinel: the
+/// automatic count of every set. A set of one or two CPUs is fully staffed;
+/// a larger one leaves one CPU in eight, and at least one, without a worker
+/// (`autoWorkersOf`).
+enum uint autoWorkers = uint.max;
 
 struct PoolOptions
 {
     bool skipSmtSiblings = false;
     bool enablePCores    = true;
     bool enableECores    = true;
-    bool highQosOnP      = true;
-    bool ecoQosOnE       = true;
-    uint pSpinIters      = 128;
-    uint eSpinIters      = 16;
+    /// What the OS is told about where a worker may run.
+    WorkerPlacement placement = WorkerPlacement.automatic;
+    /// Workers in total. `autoWorkers` gives every set its automatic count.
+    /// Any other number is taken exactly, filling the sets in group order,
+    /// and may leave a set no CPU without a worker; `start` throws when the
+    /// accepted CPUs are fewer. A host has its own count
+    /// (`FarmHostOptions.workers`) and requires this one left alone.
+    uint workers = autoWorkers;
+    /// Thread QoS of every worker.
+    WorkerQos qos        = WorkerQos.high;
+    /// PAUSE iterations of one `spin` round.
+    uint spinIters       = 128;
     /// Exact CPUs to consider, group-qualified. Empty = no CPU-list filter.
     /// Build with `parseCpuList("0-7,16-23")` or topology helpers. Duplicates
-    /// collapse to one worker; `resolve().requests` reports them.
+    /// collapse to one CPU; `resolve().requests` reports them.
     const(ProcessorId)[] processors;
-    /// Called on the pinned worker. `true` = more work, `false` = idle.
+    /// Called on the worker. `true` = more work, `false` = idle.
     WorkerBody workerBody;
-    /// Optional; called once on each pinned worker after its `workerBody`
+    /// Optional; called once on each worker after its `workerBody`
     /// loop exits during `shutdown`. Release per-worker state here, for
     /// example by unsubscribing a thread-local `ConsumerView`.
     WorkerStop workerStop;
@@ -67,12 +76,12 @@ struct Selection
     private CacheAwarePool pool;
     private bool filterLlc;
     private ushort llcIndex;
-    private bool wantP;
-    private bool wantE;
     private bool filterLabel;
-    private string label;
+    private string wantLabel;
     private bool filterNumber;
-    private long number;
+    private long wantNumber;
+    private size_t skipCount;
+    private size_t takeCount = size_t.max;
 
     Selection llc(ushort i)
     {
@@ -82,25 +91,11 @@ struct Selection
         return s;
     }
 
-    @property Selection classP()
-    {
-        auto s = this;
-        s.wantP = true;
-        return s;
-    }
-
-    @property Selection classE()
-    {
-        auto s = this;
-        s.wantE = true;
-        return s;
-    }
-
     Selection labeled(string name)
     {
         auto s = this;
         s.filterLabel = true;
-        s.label = name;
+        s.wantLabel = name;
         return s;
     }
 
@@ -108,8 +103,48 @@ struct Selection
     {
         auto s = this;
         s.filterNumber = true;
-        s.number = n;
+        s.wantNumber = n;
         return s;
+    }
+
+    /// At most `n` of the workers the other filters match, in worker order.
+    /// `skip` applies before `take` whatever the order they are written in.
+    Selection take(size_t n)
+    {
+        auto s = this;
+        s.takeCount = n;
+        return s;
+    }
+
+    /// All but the first `n` of the workers the other filters match.
+    Selection skip(size_t n)
+    {
+        auto s = this;
+        s.skipCount = n;
+        return s;
+    }
+
+    /// Label the selected workers; `labeled(name)` then selects them.
+    void label(string name)
+    {
+        enforceOwner();
+        forEachSelected!((size_t i, ref WorkerRec r) { r.label = name; })(this);
+    }
+
+    /// Number the selected workers; `numbered(n)` then selects them.
+    void number(long n)
+    {
+        enforceOwner();
+        forEachSelected!((size_t i, ref WorkerRec r) { r.hasNumber = true; r.number = n; })(this);
+    }
+
+    /// Workers this selection matches now.
+    size_t count()
+    {
+        enforceOwner();
+        size_t n;
+        forEachSelected!((size_t i, ref WorkerRec r) { n++; })(this);
+        return n;
     }
 
     void spin(uint iters = 0)
@@ -117,7 +152,7 @@ struct Selection
         enforceOwner();
         forEachSelected!((size_t i, ref WorkerRec r)
         {
-            immutable n = iters != 0 ? iters : (r.isP ? pool.options.pSpinIters : pool.options.eSpinIters);
+            immutable n = iters != 0 ? iters : pool.options.spinIters;
             atomicStore(r.spinIters, n);
             atomicStore!(MemoryOrder.rel)(r.kind, IdleKind.spin);
             bump(r);
@@ -138,18 +173,6 @@ struct Selection
         })(this);
     }
 
-    void sleepUntil(MonoTime t)
-    {
-        enforceOwner();
-        forEachSelected!((size_t i, ref WorkerRec r)
-        {
-            atomicStore(r.sleepUntilTicks, t.ticks);
-            atomicStore!(MemoryOrder.rel)(r.kind, IdleKind.sleepUntil);
-            bump(r);
-            wakeWorker(cast(uint) i);
-        })(this);
-    }
-
     void wait()
     {
         enforceOwner();
@@ -161,47 +184,6 @@ struct Selection
         })(this);
     }
 
-    // The cadence, nudge and drift verbs have no in-tree user; they stay
-    // behind `version (ThreadpoolCadence)` with their tests until one appears
-    // (cleanup plan 2.0, step 2).
-    version (ThreadpoolCadence)
-    {
-    void cadence(Duration period)
-    {
-        cadence(MonoTime.currTime, period, Cadence.init);
-    }
-
-    void cadence(Duration period, Cadence opt)
-    {
-        cadence(MonoTime.currTime, period, opt);
-    }
-
-    void cadence(MonoTime epoch, Duration period, Cadence opt = Cadence.init)
-    {
-        enforceOwner();
-        enforce(period > Duration.zero, "threadpool: cadence period must be > 0");
-        immutable periodTicks = Selection.durationToTicks(period);
-        enforce(periodTicks > 0, "threadpool: cadence period is shorter than one tick");
-        immutable leadTicks = opt.spinLead > Duration.zero
-            ? Selection.durationToTicks(opt.spinLead) : 0;
-        immutable seq = ++pool.driftSeq;
-        forEachSelected!((size_t i, ref WorkerRec r)
-        {
-            atomicStore(r.cadenceEpochTicks, epoch.ticks);
-            atomicStore(r.cadencePeriodTicks, periodTicks);
-            atomicStore(r.cadenceDriftTicks, 0);
-            atomicStore(r.cadenceDriftUntilTicks, 0);
-            atomicStore(r.cadenceDriftSeq, seq);
-            atomicStore(r.cadenceSkip, opt.skipMissed ? 1u : 0u);
-            atomicStore(r.cadenceSpinLeadTicks, leadTicks);
-            atomicStore!(MemoryOrder.rel)(r.kind, IdleKind.cadence);
-            bump(r);
-            wakeWorker(cast(uint) i);
-        })(this);
-    }
-
-    } // version (ThreadpoolCadence)
-
     void signal()
     {
         enforceOwner();
@@ -211,41 +193,97 @@ struct Selection
         })(this);
     }
 
-    version (ThreadpoolCadence)
-    {
-    /// One-shot phase step. Positive delays beats; negative pulls them sooner.
-    void nudge(Duration phase)
+    /// A burst of publication is expected at `atNanos`: `MonoTime` in
+    /// nanoseconds (`monoNanos`, the clock `ant_uv`'s `UvLoop.nanos` reads).
+    ///
+    /// Each selected worker that is idle parks precisely until the lead
+    /// before the instant, polls without parking until the hold after it
+    /// (`readiness`), and then goes back to its policy (`wait`, `sleep`).
+    /// Work that is available is never delayed: a wake ends the park, and a
+    /// polling worker sees work within one round. A worker under `spin`
+    /// polls all the time and ignores this.
+    ///
+    /// The pool keeps no period and no beat: the caller says when each burst
+    /// is due, and a caller that stops calling leaves the workers on their
+    /// policy. A worker finishes the window it is in, so the next instant
+    /// may be given before or after the burst of this one. Giving it while
+    /// the workers are still busy with the burst or polling costs one store
+    /// and one exchange for each; a worker that has already parked is woken
+    /// to take the new instant up.
+    ///
+    /// A polling worker costs processor time for the length of the window,
+    /// so select the workers that should be ready (`take`), not all of them.
+    void expect(long atNanos)
     {
         enforceOwner();
-        immutable ticks = durationToTicks(phase);
+        immutable at = scaleClock(atNanos, 1_000_000_000L, MonoTime.ticksPerSecond);
+        immutable now = MonoTime.currTime.ticks;
         forEachSelected!((size_t i, ref WorkerRec r)
         {
-            atomicFetchAdd(r.cadenceEpochTicks, ticks);
-            bump(r);
+            immutable old = atomicExchange(&r.expectTicks, at);
+            // A worker parked to the old instant's lead wakes in time for
+            // the new one only when the old is still ahead and no later.
+            if (old <= now || at < old)
+                wakeWorker(cast(uint) i);
+        })(this);
+    }
+
+    /// Withdraw the instant given to `expect`. A worker in a window
+    /// finishes it; one parked to the lead wakes there and finds nothing.
+    void expectNothing()
+    {
+        enforceOwner();
+        forEachSelected!((size_t i, ref WorkerRec r)
+        {
+            atomicStore(r.expectTicks, expectNone);
+        })(this);
+    }
+
+    /// How long before an expected instant the selected workers start to
+    /// poll, and how long after it they go on polling when nothing has
+    /// come. Both in microseconds.
+    ///
+    /// The lead has to cover how late the park brings a worker back, which
+    /// `timing().parkOvershoot` reports; the hold, how late the burst is
+    /// published, which `timing().burstArrival` reports.
+    void readiness(uint leadMicros = defaultLeadMicros, uint holdMicros = defaultHoldMicros)
+    {
+        enforceOwner();
+        immutable lead = microsToTicks(leadMicros);
+        immutable hold = microsToTicks(holdMicros);
+        forEachSelected!((size_t i, ref WorkerRec r)
+        {
+            atomicStore(r.leadTicks, lead);
+            atomicStore(r.holdTicks, hold);
             wakeWorker(cast(uint) i);
         })(this);
     }
 
-    /// Sequenced slew: new sequence, add `perBeat` to the period until
-    /// `|period-delta|` accumulates to `until`, then return to nominal.
-    /// `until <= 0` or `perBeat == 0` is a no-op slew.
-    void drift(Duration perBeat, Duration until)
+    /// What the selected workers have recorded about their timing, summed.
+    /// Read while they run: each count is whole, and the counts of one
+    /// worker may be a few events apart.
+    TimingStats timing()
     {
         enforceOwner();
-        immutable driftTicks = durationToTicks(perBeat);
-        immutable untilTicks = absTicks(durationToTicks(until));
-        immutable seq = ++pool.driftSeq;
+        TimingStats sum;
         forEachSelected!((size_t i, ref WorkerRec r)
         {
-            atomicStore(r.cadenceDriftTicks, driftTicks);
-            atomicStore(r.cadenceDriftUntilTicks, untilTicks);
-            atomicStore!(MemoryOrder.rel)(r.cadenceDriftSeq, seq);
-            bump(r);
-            wakeWorker(cast(uint) i);
+            if (i < gTiming.length) gTiming[i].addTo(sum);
         })(this);
+        return sum;
     }
 
-    } // version (ThreadpoolCadence)
+    /// Start the selected workers' timing records again from zero. Each
+    /// worker clears its own record the next time it writes to it, so a
+    /// `timing()` read straight after may still show the old counts.
+    void resetTiming()
+    {
+        enforceOwner();
+        forEachSelected!((size_t i, ref WorkerRec r)
+        {
+            atomicFetchAdd(r.timingEpoch, 1);
+        })(this);
+    }
 
 private:
     void enforceOwner()
@@ -256,10 +294,8 @@ private:
     bool matches(ref const WorkerRec r) const
     {
         if (filterLlc && r.llcIndex != llcIndex) return false;
-        if (wantP && !r.isP) return false;
-        if (wantE && r.isP) return false;
-        if (filterLabel && r.label != label) return false;
-        if (filterNumber && (!r.hasNumber || r.number != number)) return false;
+        if (filterLabel && r.label != wantLabel) return false;
+        if (filterNumber && (!r.hasNumber || r.number != wantNumber)) return false;
         return true;
     }
 
@@ -274,18 +310,18 @@ private:
         return scaleClock(d.total!"hnsecs", 10_000_000L, MonoTime.ticksPerSecond);
     }
 
-    static long absTicks(long t) @nogc nothrow
-    {
-        return t >= 0 ? t : -t;
-    }
 }
 
 pragma(inline, true)
 private void forEachSelected(alias action)(ref Selection sel)
 {
+    size_t seen;
     foreach (i, ref r; gWorkers)
     {
         if (!sel.matches(r)) continue;
+        immutable k = seen++;
+        if (k < sel.skipCount) continue;
+        if (k - sel.skipCount >= sel.takeCount) break;
         action(i, r);
     }
 }
@@ -329,28 +365,23 @@ struct Director
     }
 
     Selection llc(ushort i) { return all.llc(i); }
-    @property Selection classP() { return all.classP; }
-    @property Selection classE() { return all.classE; }
     Selection labeled(string name) { return all.labeled(name); }
     Selection numbered(long n) { return all.numbered(n); }
+    Selection take(size_t n) { return all.take(n); }
+    Selection skip(size_t n) { return all.skip(n); }
 
     void spin(uint iters = 0) { all.spin(iters); }
     void sleep(Duration d) { all.sleep(d); }
-    void sleepUntil(MonoTime t) { all.sleepUntil(t); }
     void wait() { all.wait(); }
     void signal() { all.signal(); }
-    version (ThreadpoolCadence)
+    void expect(long atNanos) { all.expect(atNanos); }
+    void expectNothing() { all.expectNothing(); }
+    void readiness(uint leadMicros = defaultLeadMicros, uint holdMicros = defaultHoldMicros)
     {
-    void cadence(Duration period) { all.cadence(period); }
-    void cadence(Duration period, Cadence opt) { all.cadence(period, opt); }
-    void cadence(MonoTime epoch, Duration period, Cadence opt = Cadence.init)
-    {
-        all.cadence(epoch, period, opt);
+        all.readiness(leadMicros, holdMicros);
     }
-    void nudge(Duration phase) { all.nudge(phase); }
-    void drift(Duration perBeat, Duration until) { all.drift(perBeat, until); }
-    }
-
+    TimingStats timing() { return all.timing(); }
+    void resetTiming() { all.resetTiming(); }
     private this(CacheAwarePool p)
     {
         pool = p;
@@ -363,7 +394,6 @@ final class CacheAwarePool
     private Thread[] threads;
     private const(TopologySnapshot)* snap;
     private bool directorHeld;
-    private uint driftSeq;
     private Throwable[] failures;
     private PoolResolution lastResolution;
 
@@ -386,7 +416,7 @@ final class CacheAwarePool
     }
 
     /// After `start`: the resolution including each worker's `StartState` and
-    /// `PinOutcome`. After a failed start or a shutdown: the last attempt's
+    /// placement outcome. After a failed start or a shutdown: the last attempt's
     /// resolution. Null before the first `start`.
     @property const(PoolResolution) resolution() const
     {
@@ -397,7 +427,11 @@ final class CacheAwarePool
     /// Call after registry setup (`install` / `setLabel` / `installExchange`).
     void start()
     {
-        start(resolve());
+        auto planned = resolve();
+        enforce(options.workers == autoWorkers || planned.workerCount == options.workers,
+            "threadpool: " ~ options.workers.to!string ~ " workers requested but the accepted CPUs take "
+            ~ planned.workerCount.to!string ~ "; " ~ planned.summary());
+        start(planned);
     }
 
     /// Start the workers of `planned`, a resolution against the discovered
@@ -419,61 +453,70 @@ final class CacheAwarePool
             lastResolution = res;
             snap = cachedSnapshot();
             enforce(snap !is null, "threadpool: topology not discovered");
-            auto selected = res.workers;
-            enforce(selected.length > 0,
+            immutable count = res.workers.length;
+            enforce(count > 0,
                 "threadpool: no logical processors selected; " ~ res.summary());
-
-            ushort classCount = snap.classCount;
-            if (classCount == 0) classCount = 1;
+            // One affinity mask names one Windows processor group, so a set
+            // that spans two cannot be masked. Say so before any thread starts.
+            version (Windows)
+                if (res.placement == WorkerPlacement.group)
+                    foreach (ref set; res.sets)
+                        foreach (id; set.processors)
+                            enforce(id.group == set.processors[0].group && id.lp < 64,
+                                "threadpool: the set of physical group " ~ set.llcIndex.to!string
+                                ~ " spans Windows processor groups and cannot be masked;"
+                                ~ " use WorkerPlacement.free or pin; " ~ res.summary());
 
             resetStats();
             gWorkerBody = options.workerBody;
             gWorkerStop = options.workerStop;
             gManagedWorkerHooks = options.managedWorker;
             failures = null;
-            gWorkers = new WorkerRec[](selected.length);
-            gPinOutcome = new PinOutcome[](selected.length);
-            createWaitSlots(cast(uint) selected.length);
-            gArmedBits = new shared(ulong)[(selected.length + 63) / 64];
+            gWorkers = new WorkerRec[](count);
+            gTiming = new WorkerTiming[](count);
+            gPinOutcome = new PinOutcome[](count);
+            createWaitSlots(cast(uint) count);
+            gArmedBits = new shared(ulong)[(count + 63) / 64];
             resetWorkerHandshake();
             directorHeld = false;
             atomicStore(gRunning, 1);
 
+            // What an unconfined worker may run on: the frozen OS scope.
+            ProcessorId[] scopeProcessors;
+            foreach (ref p; snap.processors)
+                if (snap.isEligible(p)) scopeProcessors ~= ProcessorId.of(p);
+
             gLivePool = this;
             try
             {
-                foreach (i, id; selected)
+                foreach (i, ref w; res.workers)
                 {
-                    auto lp = snap.byId(id);
-                    auto tc = tableClassIndex(lp.efficiencyClass, snap.maxEfficiencyClass, classCount);
-                    auto isP = (classCount <= 1) || (tc == classP);
+                    auto set = res.setOf(w.llcIndex);
+                    enforce(set !is null && set.processors.length != 0, "threadpool: worker without a set");
+                    auto first = snap.byId(set.processors[0]);
+                    enforce(first !is null, "threadpool: a set names an unknown processor");
                     WorkerSelf self;
-                    self.llcIndex = lp.llcIndex;
-                    self.numaIndex = lp.numaIndex;
-                    self.classIndex = tc;
-                    self.cpuSetId = lp.cpuSetId;
+                    self.llcIndex = w.llcIndex;
+                    self.numaIndex = first.numaIndex;
                     self.workerIndex = cast(uint) i;
-                    self.spinIters = isP ? options.pSpinIters : options.eSpinIters;
-                    self.isP = isP;
+                    self.spinIters = options.spinIters;
                     bindNumaNeighborhood(self, *snap);
 
                     import threadpool.failure : FailureCapture;
                     gWorkers[i].failure = new FailureCapture;
-                    gWorkers[i].group = lp.group;
-                    gWorkers[i].lpIndex = lp.lpIndex;
-                    gWorkers[i].llcIndex = lp.llcIndex;
-                    gWorkers[i].classIndex = tc;
-                    gWorkers[i].isP = isP;
+                    gWorkers[i].llcIndex = w.llcIndex;
                     atomicStore(gWorkers[i].kind, IdleKind.wait);
                     atomicStore(gWorkers[i].spinIters, self.spinIters);
+                    atomicStore(gWorkers[i].leadTicks, microsToTicks(defaultLeadMicros));
+                    atomicStore(gWorkers[i].holdTicks, microsToTicks(defaultHoldMicros));
 
                     SpawnSpec spec;
                     spec.self = self;
-                    spec.processor = lp;
-                    spec.ecoQos = !isP && options.ecoQosOnE;
-                    spec.applyQos = isP ? options.highQosOnP : options.ecoQosOnE;
-                    if (isP && options.highQosOnP)
-                        spec.ecoQos = false;
+                    spec.placement = res.placement;
+                    spec.processors = set.processors;
+                    spec.scopeProcessors = scopeProcessors;
+                    spec.processor = w.pinned ? snap.byId(w.processor) : null;
+                    spec.qos = options.qos;
                     threads ~= spawnWorker(spec);
                 }
 
@@ -488,8 +531,8 @@ final class CacheAwarePool
                     }
                 lastResolution = res.withStart(gPinOutcome);
                 if (atomicLoad(gPinOk) != cast(int) threads.length)
-                    throw new Exception("threadpool: failed to pin worker(s) "
-                        ~ lastResolution.pinFailures() ~ "; " ~ lastResolution.summary());
+                    throw new Exception("threadpool: failed to place worker(s) "
+                        ~ lastResolution.placeFailures() ~ "; " ~ lastResolution.summary());
                 releaseWorkers();
             }
             catch (Throwable e)
@@ -557,23 +600,6 @@ final class CacheAwarePool
         enforce(!directorHeld, "threadpool: director already held");
         directorHeld = true;
         return Director(this);
-    }
-
-    /// Tag a spawned worker. Not thread-safe vs another tag on the same LP.
-    void tag(ProcessorId id, string label)
-    {
-        auto r = findRec(id);
-        enforce(r !is null, "threadpool: no worker on that processor");
-        r.label = label;
-    }
-
-    /// Tag a spawned worker with an integer.
-    void tag(ProcessorId id, long n)
-    {
-        auto r = findRec(id);
-        enforce(r !is null, "threadpool: no worker on that processor");
-        r.hasNumber = true;
-        r.number = n;
     }
 
     /// Wake one armed or parked worker, if any (does not change policy).
@@ -668,14 +694,6 @@ final class CacheAwarePool
     }
 
 private:
-    WorkerRec* findRec(ProcessorId id) @nogc nothrow
-    {
-        foreach (ref r; gWorkers)
-            if (r.group == id.group && r.lpIndex == id.lp)
-                return &r;
-        return null;
-    }
-
     void joinAll()
     {
         foreach (t; threads)
@@ -692,6 +710,7 @@ private:
             destroyWaitSlots();
             gArmedBits = null;
             gWorkers = null;
+            gTiming = null;
             gWorkerBody = null;
             gWorkerStop = null;
             if (gManagedWorkerHooks.poolStopped !is null)
@@ -734,15 +753,29 @@ unittest
 
     PoolOptions all;
     auto got = resolveTest(snap, all);
-    assert(got.workers == [ProcessorId(0, 0), ProcessorId(1, 0), ProcessorId(1, 1)]);
+    assert(got.processorsIn(0) == [ProcessorId(0, 0), ProcessorId(1, 0), ProcessorId(1, 1)]);
+    assert(got.workerCount == 2, "three CPUs: one is left unstaffed");
 
     PoolOptions byId;
     byId.processors = [ProcessorId(1, 0)];
     got = resolveTest(snap, byId);
-    assert(got.workers == [ProcessorId(1, 0)]);
+    assert(got.processorsIn(0) == [ProcessorId(1, 0)] && got.workerCount == 1);
     assert(got[ProcessorId(0, 0)].reasons == Reject.notRequested);
     assert(got[ProcessorId(1, 1)].reasons == Reject.notRequested);
     assert(got.requests.length == 1 && got.requests[0].accepted);
+
+    // An explicit count is taken exactly, and may staff every CPU.
+    PoolOptions exact;
+    exact.workers = 3;
+    got = resolveTest(snap, exact);
+    assert(got.workerCount == 3 && got.sets[0].unstaffed == 0);
+    exact.workers = 1;
+    got = resolveTest(snap, exact);
+    assert(got.workerCount == 1 && got.processorsIn(0).length == 3, "fewer workers, the same set");
+    // More than the accepted CPUs: the preview shows what fits, start refuses.
+    exact.workers = 4;
+    got = resolveTest(snap, exact);
+    assert(got.workerCount == 3);
 }
 
 unittest
@@ -759,7 +792,7 @@ unittest
 
     PoolOptions opt;
     auto got = resolveTest(snap, opt);
-    assert(got.workers == [ProcessorId(0, 0), ProcessorId(0, 1)],
+    assert(got.processorsIn(0) == [ProcessorId(0, 0), ProcessorId(0, 1)] && got.workerCount == 2,
         "parking is informational; offline is skipped");
     assert(got[ProcessorId(0, 1)].osParked && got[ProcessorId(0, 1)].accepted);
     assert(got[ProcessorId(0, 2)].reasons == Reject.offline);
@@ -777,17 +810,17 @@ unittest
 
     PoolOptions opt;
     auto res = resolveTest(snap, opt);
-    assert(res.workers == [ProcessorId(0, 0)]);
+    assert(res.processorsIn(0) == [ProcessorId(0, 0)] && res.workerCount == 1);
     assert(res[ProcessorId(0, 1)].reasons == Reject.osExcluded);
     opt.processors = [ProcessorId(0, 1)];
     res = resolveTest(snap, opt);
-    assert(res.workers.length == 0);
+    assert(res.workers.length == 0 && res.sets.length == 0);
     assert(res[ProcessorId(0, 0)].reasons == Reject.notRequested);
     assert(res[ProcessorId(0, 1)].reasons == Reject.osExcluded,
         "an explicitly listed CPU outside the OS scope stays excluded");
     opt.processors = [ProcessorId(0, 0), ProcessorId(0, 1)];
     res = resolveTest(snap, opt);
-    assert(res.workers == [ProcessorId(0, 0)]);
+    assert(res.processorsIn(0) == [ProcessorId(0, 0)] && res.workerCount == 1);
     assert(res.requests[0].accepted && res.requests[1].known && !res.requests[1].accepted);
 }
 
@@ -836,7 +869,7 @@ unittest
     assert(pool.workerCount >= 1);
     assert(pool.resolution.started);
     assert(pool.resolution.sameSelection(preview));
-    assert(pool.resolution[ProcessorId(0, 0)].start == StartState.pinned);
+    assert(pool.resolution.workers[0].start == StartState.placed);
 
     auto d = pool.director();
     // The single-owner handle is move-only: a copy (explicit, by-value
@@ -866,11 +899,13 @@ unittest
         dead = true;
     assert(dead, "moved-from director must not apply policy");
 
-    pool.tag(ProcessorId(0, 0), "drain");
-    pool.tag(ProcessorId(0, 0), 3);
+    d2.all.label("drain");
+    d2.all.number(3);
+    assert(d2.labeled("drain").count == 1 && d2.numbered(4).count == 0);
+    assert(d2.take(0).count == 0 && d2.skip(1).count == 0 && d2.skip(0).take(5).count == 1);
     d2.labeled("drain").spin(4);
     d2.numbered(3).wait();
-    d2.classP.llc(0).signal();
+    d2.llc(0).signal();
     pool.wakeAll();
 
     foreach (_; 0 .. 200)
@@ -1047,12 +1082,11 @@ unittest
     gWorkers = new WorkerRec[6];
     foreach (ref rec; gWorkers)
     {
-        rec.isP = true;
         rec.label = "selected";
         rec.hasNumber = true;
         rec.number = 7;
     }
-    gWorkers[1].isP = false;
+    gWorkers[1].llcIndex = 2;
     gWorkers[2].llcIndex = 1;
     gWorkers[3].label = "other";
     gWorkers[4].number = 8;
@@ -1061,7 +1095,7 @@ unittest
     pool.directorHeld = true;
     Selection all;
     all.pool = pool;
-    auto selected = all.llc(0).classP.labeled("selected").numbered(7);
+    auto selected = all.llc(0).labeled("selected").numbered(7);
     auto rec = &gWorkers[0];
     selected.spin(11);
     assert(atomicLoad(rec.spinIters) == 11 && atomicLoad(rec.kind) == IdleKind.spin);
@@ -1069,49 +1103,43 @@ unittest
     assert(atomicLoad(rec.sleepNs) == 0);
     selected.sleep(msecs(2));
     assert(atomicLoad(rec.sleepNs) == 2_000_000 && atomicLoad(rec.kind) == IdleKind.sleep);
-    auto epoch = MonoTime.currTime;
-    selected.sleepUntil(epoch);
-    assert(atomicLoad(rec.sleepUntilTicks) == epoch.ticks
-        && atomicLoad(rec.kind) == IdleKind.sleepUntil);
     selected.wait();
     assert(atomicLoad(rec.kind) == IdleKind.wait);
-    version (ThreadpoolCadence)
-    {
-    selected.cadence(epoch, msecs(10), Cadence(true, msecs(1)));
-    assert(atomicLoad(rec.kind) == IdleKind.cadence);
-    assert(atomicLoad(rec.cadenceEpochTicks) == epoch.ticks);
-    assert(atomicLoad(rec.cadencePeriodTicks) == Selection.durationToTicks(msecs(10)));
-    assert(atomicLoad(rec.cadenceSkip) == 1);
-    assert(atomicLoad(rec.cadenceSpinLeadTicks) == Selection.durationToTicks(msecs(1)));
-    selected.nudge(msecs(-1));
-    assert(atomicLoad(rec.cadenceEpochTicks) == epoch.ticks - Selection.durationToTicks(msecs(1)));
-    selected.drift(msecs(2), msecs(4));
-    assert(atomicLoad(rec.cadenceDriftTicks) == Selection.durationToTicks(msecs(2)));
-    assert(atomicLoad(rec.cadenceDriftUntilTicks) == Selection.durationToTicks(msecs(4)));
-    assert(atomicLoad(rec.cadenceDriftSeq) == pool.driftSeq);
-    }
-    // spin, sleep, sleep, sleepUntil, wait bump the epoch; cadence, nudge
-    // and drift add three more when they are compiled in.
-    version (ThreadpoolCadence) enum expectedEpoch = 8;
-    else enum expectedEpoch = 5;
+    // spin, sleep, sleep and wait each bump the epoch.
+    enum expectedEpoch = 4;
+
+    // expect stores the instant in ticks; readiness, the lead and the hold.
+    assert(atomicLoad(rec.expectTicks) == expectNone);
+    immutable soon = monoNanos() + 5_000_000_000;
+    selected.expect(soon);
+    assert(atomicLoad(rec.expectTicks) == scaleClock(soon, 1_000_000_000L, MonoTime.ticksPerSecond));
+    assert(atomicLoad(gWorkers[1].expectTicks) == expectNone, "only the selected workers");
+    selected.readiness(700, 90);
+    assert(atomicLoad(rec.leadTicks) == microsToTicks(700) && atomicLoad(rec.holdTicks) == microsToTicks(90));
+    selected.expectNothing();
+    assert(atomicLoad(rec.expectTicks) == expectNone);
+    // timing sums the selection's records, and reset asks each worker to clear.
+    auto savedTiming = gTiming;
+    scope (exit) gTiming = savedTiming;
+    gTiming = new WorkerTiming[](gWorkers.length);
+    atomicStore(gTiming[0].windows, 3UL);
+    atomicStore(gTiming[1].windows, 5UL);
+    assert(selected.timing().windows == 3 && selected.timing().workers == 1);
+    assert(all.timing().windows == 8 && all.timing().workers == 6);
+    selected.resetTiming();
+    assert(atomicLoad(rec.timingEpoch) == 1 && atomicLoad(gWorkers[1].timingEpoch) == 0);
     assert(atomicLoad(rec.epoch) == expectedEpoch);
     selected.signal();
     assert(atomicLoad(rec.epoch) == expectedEpoch);
     foreach (ref excluded; gWorkers[1 .. $])
         assert(atomicLoad(excluded.epoch) == 0 && atomicLoad(excluded.kind) == IdleKind.wait);
-    all.classE.spin();
-    assert(atomicLoad(gWorkers[1].spinIters) == pool.options.eSpinIters);
+    all.llc(2).spin();
+    assert(atomicLoad(gWorkers[1].spinIters) == pool.options.spinIters);
     assert(atomicLoad(gWorkers[1].epoch) == 1);
-    assert(!all.classP.classE.matches(*rec));
+    assert(!all.llc(1).llc(0).labeled("other").matches(*rec));
 
     // Spans past long.max / ticksPerSecond nanoseconds (~9.2 s on POSIX) wrapped.
     import core.time : hours, seconds;
-    version (ThreadpoolCadence)
-    {
-    selected.cadence(epoch, seconds(30), Cadence(false, seconds(12)));
-    assert(atomicLoad(rec.cadencePeriodTicks) == 30 * MonoTime.ticksPerSecond);
-    assert(atomicLoad(rec.cadenceSpinLeadTicks) == 12 * MonoTime.ticksPerSecond);
-    }
     assert(Selection.durationToTicks(hours(1)) == 3600 * MonoTime.ticksPerSecond);
     assert(Selection.durationToTicks(-seconds(10)) == -10 * MonoTime.ticksPerSecond);
     selected.sleep(seconds(30));

@@ -20,7 +20,7 @@ import std.stdio : writeln;
 void main()
 {
     Dispatcher d;
-    d.start();                 // the caller plus a pinned worker per eligible CPU
+    d.start();                 // the caller plus a worker per eligible CPU
     scope (exit) d.stop();
     writeln("sum of squares: ", forkJoinReduce!((ulong x) => x * x,
         (ulong a, ulong b) => a + b)(iota(1UL, 257UL), 0UL, 16));
@@ -31,8 +31,8 @@ Run it with `dub run --single first.d` from the repository root; it prints
 `sum of squares: 5625216`. What it relies on:
 
 - `Dispatcher.start()` with no arguments takes every eligible processor:
-  the calling thread is participant 0 and each other processor gets a pinned
-  pool worker, with one Farm per last-level-cache group underneath
+  the calling thread is participant 0 and there is a pool worker for each
+  other processor, with one Farm per last-level-cache group underneath
   ([forkjoin/README.md](../../forkjoin/README.md)). `start(cpus, options)`
   chooses processors and tuning.
 - `forkJoinReduce!(fn, combine)(range, seed, grain)` splits the range in
@@ -144,7 +144,7 @@ Things the example relies on:
   same-thread consumer, then destroy the Farm. All producers and consumers must
   be quiescent before Farm destruction.
 
-For the multi-threaded version, with one consumer per pinned worker, build and
+For the multi-threaded version, with one consumer per pool worker, build and
 run [examples/iota_sum.d](../../examples/iota_sum.d):
 
 ```text
@@ -171,12 +171,12 @@ things cooperate:
 - **Actors** add execution state above the distributor. A public actor owns
   POD state and a caller-owned inbox; a private hierarchy owns a parent-owned
   cohort tree. Neither creates threads: the program supplies whatever pump and
-  consumers it wants, here the host's on-thread consumer or pinned pool
+  consumers it wants, here the host's on-thread consumer or pool
   workers.
 
 ## Run the public service
 
-The second program adds pinned workers and a public actor service on a
+The second program adds pool workers and a public actor service on a
 `FarmHost`:
 
 ```text
@@ -191,7 +191,7 @@ public service: 36 ordered replies, balance=234, workers=0, closing-callback-cou
 ```
 
 The trailing `0` consumes on the calling thread; `/tmp/public_service 2` uses
-two pinned pool workers in one LLC and prints `workers=2` with the same counts.
+two pool workers in one LLC and prints `workers=2` with the same counts.
 LDC works with the same command (`ldc2 -g -i -I. -Iexamples -Ithreadpool/source
 examples/public_service.d -of=/tmp/public_service`). If the program prints
 nothing or aborts, check the toolchain first.
@@ -199,7 +199,7 @@ nothing or aborts, check the toolchain first.
 the Windows commands.
 
 `main` built a `FarmHost` (`threadpool.host`): one Farm, the calling thread's
-producer token, and, for a nonzero argument, pinned pool workers in one LLC.
+producer token, and, for a nonzero argument, pool workers in one LLC.
 It created the actor runtime through the host, waited for each reply with
 `host.waitUntil`, and
 `scope (exit) host.closeOrAbandon();` ran the shutdown order. If `close()`
@@ -218,5 +218,5 @@ The examples count their own callbacks or watch a platform-specific predicate.
 The shared rules are in
 [../reference/actor-lifecycle.md](../reference/actor-lifecycle.md).
 
-Follow the [onboarding path](../README.md#run-something) for pinned workers,
+Follow the [onboarding path](../README.md#run-something) for pool workers,
 representation choice, and sizing.

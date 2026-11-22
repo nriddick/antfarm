@@ -79,6 +79,12 @@ long[] workerWaiter(UvLoop loop, uint loopCpu, size_t samples)
     foreach (ref p; snap.processors)
         if (snap.isEligible(p) && p.lpIndex != loopCpu) workerCpus ~= ProcessorId.of(p);
     o.pool.processors = workerCpus;
+    // One pinned worker per accepted CPU, as the recorded runs had.
+    import threadpool.pin : WorkerPlacement;
+    o.pool.placement = WorkerPlacement.pin;
+    uint accepted;
+    foreach (ref set; GroupHost.resolve(o).sets) accepted += cast(uint) set.processors.length;
+    o.workers = accepted;
     auto host = new GroupHost(o);
     fibers.spawn(() {
         UvRequest r;

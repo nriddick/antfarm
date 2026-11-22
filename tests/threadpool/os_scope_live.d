@@ -133,15 +133,23 @@ int child(ProcessorId[] expected)
         scope (exit) pool.shutdown();
         auto res = pool.resolution;
         assert(res.started && res.sameSelection(preview));
-        assert(res.workers == expected);
-        assert(pool.workerCount == expected.length);
+        ProcessorId[] accepted;
+        foreach (ref c; res.cpus)
+            if (c.accepted) accepted ~= c.id;
+        assert(accepted == expected);
+        uint staffed;
+        foreach (ref set; res.sets)
+            staffed += autoWorkersOf(set.processors.length);
+        assert(pool.workerCount == staffed && res.workerCount == staffed);
+        foreach (ref w; res.workers)
+            assert(w.start == StartState.placed);
         foreach (ref c; res.cpus)
         {
             assert(!(c.reasons & Reject.notRequested));
             if (expected.canFind(c.id))
-                assert(c.accepted && c.start == StartState.pinned);
+                assert(c.accepted);
             else
-                assert((c.reasons & Reject.osExcluded) && c.start == StartState.notStarted);
+                assert(c.reasons & Reject.osExcluded);
         }
 
         // 5. Group level, on multi-LLC hardware only.

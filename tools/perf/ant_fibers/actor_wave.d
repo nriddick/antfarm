@@ -449,6 +449,7 @@ private SweepResult runBenchmark(BenchmarkConfig config,
     options.groups = HostGroups.only(group);
     options.pool.processors = workerLps;
     options.pool.skipSmtSiblings = false; // `--smt` selected the siblings already
+    options.pool.placement = WorkerPlacement.pin; // pinned workers, as recorded
     options.caller = CallerPlacement.unchanged; // the control thread stays unpinned
     // Keep workers polling for this throughput characterization. Parking and
     // wake policy are a separate effect that would dominate short waves.

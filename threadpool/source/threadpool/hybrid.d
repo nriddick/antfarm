@@ -5,6 +5,8 @@ import core.time : MonoTime;
 import core.thread : Thread;
 import threadpool.stats;
 import threadpool.failure : FailureCapture;
+import threadpool.timing : WorkerTiming, count, countArrival, countLate, countOvershoot, gTiming,
+    microsToTicks;
 import threadpool.topology : TopologySnapshot, fillNumaLlcs, maxNumaLlcs;
 
 version (Windows)
@@ -14,23 +16,15 @@ version (linux)
 
 version (Windows)
 {
-    import threadpool.sys.win_wait : parkWorker, prepareWorkerWait, cancelWorkerWait, wakeWorker;
+    import threadpool.sys.win_wait : parkWorker, parkWorkerUntil, prepareWorkerWait, cancelWorkerWait,
+        wakeWorker;
     enum uint kWaitForever = 0xFFFF_FFFF;
 }
 else version (linux)
 {
-    import threadpool.sys.linux_wait : parkWorker, prepareWorkerWait, cancelWorkerWait, wakeWorker;
+    import threadpool.sys.linux_wait : parkWorker, parkWorkerUntil, prepareWorkerWait, cancelWorkerWait,
+        wakeWorker;
     enum uint kWaitForever = uint.max;
-}
-
-version (LDC)
-{
-    import ldc.attributes : optStrategy;
-    enum eLoopUda = optStrategy("optsize");
-}
-else
-{
-    enum eLoopUda;
 }
 
 /// Idle policy written by the director, read by the owning worker.
@@ -38,20 +32,14 @@ enum IdleKind : uint
 {
     spin = 0,
     sleep = 1,
-    sleepUntil = 2,
     wait = 3,
-    cadence = 4,
 }
 
 /// Per-spawned-worker row. Director matching uses identity/tags; workers
 /// only load policy fields.
 struct WorkerRec
 {
-    ushort group;
-    ushort lpIndex;
     ushort llcIndex;
-    ubyte  classIndex;
-    bool   isP;
     bool   hasNumber;
     long   number;
     string label;
@@ -60,15 +48,48 @@ struct WorkerRec
     shared uint  kind = IdleKind.wait;
     shared uint  spinIters = 64;
     shared ulong sleepNs;
-    shared long  sleepUntilTicks;
-    shared long  cadenceEpochTicks;
-    shared long  cadencePeriodTicks;
-    shared uint  cadenceDriftSeq;
-    shared long  cadenceDriftTicks;
-    shared long  cadenceDriftUntilTicks;
-    shared uint  cadenceSkip;
-    shared long  cadenceSpinLeadTicks;
     shared uint  epoch;
+    /// The instant given to `expect`, in `MonoTime` ticks; `expectNone` for none.
+    shared long  expectTicks = expectNone;
+    /// How long before that instant to be polling, and how long after it.
+    shared long  leadTicks;
+    shared long  holdTicks;
+    /// Bumped by `resetTiming`; the worker clears its record when it sees it.
+    shared uint  timingEpoch;
+}
+
+/// `WorkerRec.expectTicks` when nothing is expected.
+enum long expectNone = long.min;
+
+/// The defaults of `Selection.readiness`, in microseconds.
+enum uint defaultLeadMicros = 1_500;
+enum uint defaultHoldMicros = 250; /// ditto
+
+/// What an idle worker does about the instant it was told to expect.
+enum Readiness : ubyte
+{
+    none, /// nothing is expected, or the hold has run out: the base policy
+    park, /// the instant is more than the lead away: park until the lead before it
+    poll, /// inside the window: poll without parking
+}
+
+/// `at`, `lead` and `hold` in `MonoTime` ticks. The window is
+/// `[at - lead, at + hold)`; with no lead and no hold there is none, and the
+/// instant is ignored.
+Readiness readinessAt(long now, long at, long lead, long hold) @nogc nothrow pure @safe
+{
+    if (at == expectNone || (lead <= 0 && hold <= 0)) return Readiness.none;
+    if (now < saturatingAdd(at, -lead)) return Readiness.park;
+    if (now < saturatingAdd(at, hold)) return Readiness.poll;
+    return Readiness.none;
+}
+
+/// `MonoTime` in nanoseconds: the clock `Selection.expect` takes its instant
+/// on, and the one `ant_uv`'s `UvLoop.nanos` reads.
+long monoNanos() @nogc nothrow
+{
+    import core.time : convClockFreq;
+    return convClockFreq(MonoTime.currTime.ticks, MonoTime.ticksPerSecond, 1_000_000_000);
 }
 
 __gshared WorkerRec[] gWorkers;
@@ -240,21 +261,28 @@ struct ManagedPumpResult
 
 __gshared ManagedWorkerHooks gManagedWorkerHooks;
 
-/// Pinned pool thread. A locator into the CPU-mapped hierarchy of C.
+/// A pool worker's own record: a locator into the CPU-mapped hierarchy of C.
+/// The worker belongs to physical group `llcIndex`; which processor it runs
+/// on is not part of it.
 /// Push/pull are methods of C (`home!C()`), not of this type.
 struct WorkerSelf
 {
     ushort llcIndex;
     ushort numaIndex;
-    ubyte  classIndex;
-    uint   cpuSetId;
     uint   workerIndex;
     uint   spinIters;
-    bool   isP;
-    long   lastCadenceBeat;
-    uint   driftSeqSeen;
-    long   driftAccum;
     void*  context;       /// caller-owned per-worker managed state
+    // The worker's own bookkeeping for readiness windows and its timing
+    // record. Nothing else reads or writes these.
+    package long windowEnd;        /// ticks; 0 when it is in no window
+    package long windowAt;         /// the instant of the window it is in
+    package long lastPoll;         /// ticks of its last idle poll in that window
+    package long parkedFor = expectNone; /// the instant whose lead its last deadline park ran to
+    package long lastStallSample;  /// ticks of the last spin-policy sample; 0 for none
+    package uint spinDebt;         /// PAUSEs since that sample
+    package uint timingEpoch;      /// the `WorkerRec.timingEpoch` its record belongs to
+    package bool windowSawWork;    /// work was found in the window it is in
+    package bool windowCrossed;    /// the window's instant has been accounted for
     ushort numaLlcCount;
     ushort[maxNumaLlcs] numaLlcs;
 
@@ -356,204 +384,262 @@ void cadenceGrid(long now, long epoch, long period, out long beat, out long next
     next = beat + period;
 }
 
-/// `runNow` → body pulls immediately. Else park until `deadline`.
-struct CadenceDecision
+/// What `pollRound` tells the worker loop. The loop keeps the two facts it
+/// needs on the productive path, "work was done since the last idle poll" and
+/// "tell me about the next work found", in locals, so a body call that finds
+/// work costs it no load or store of the worker's record.
+enum Poll : uint
 {
-    bool runNow;
-    long deadline;
-    long beat;
+    park = 0,  /// go on to arm the wake slot and park
+    again = 1, /// a round of PAUSEs was done: pump again
+    watch = 2, /// in a window that has seen no work yet: report the first with `noteBurst`
 }
 
-CadenceDecision decideCadence(long now, long epoch, long period,
-    bool skipMissed, long lastBeat) @nogc nothrow pure
+/// The first work found in a readiness window: when it came, against the
+/// window's instant. Finding work is a look too, so when it is the first
+/// look after the instant it settles whether the worker was ready for it.
+void noteBurst(ref WorkerSelf self) @nogc nothrow
 {
-    CadenceDecision d;
-    long beat, next;
-    cadenceGrid(now, epoch, period, beat, next);
-    d.beat = beat;
-    if (period <= 0)
-    {
-        d.runNow = true;
-        d.deadline = now;
-        return d;
-    }
-    if (now < epoch)
-    {
-        d.runNow = false;
-        d.deadline = epoch;
-        return d;
-    }
-    // Default: if a whole period passed since we last aligned, pull now
-    // (late homogeneous consumer). Skip: always wait for the next beat.
-    if (!skipMissed && lastBeat != 0 && now >= lastBeat + period)
-    {
-        d.runNow = true;
-        d.deadline = now;
-        return d;
-    }
-    d.runNow = false;
-    d.deadline = next;
-    return d;
+    self.windowSawWork = true;
+    if (self.workerIndex >= gTiming.length) return;
+    auto t = &gTiming[self.workerIndex];
+    immutable now = MonoTime.currTime.ticks;
+    countArrival(*t, now - self.windowAt);
+    if (self.windowCrossed || now < self.windowAt) return;
+    self.windowCrossed = true;
+    // Late only if the worker was away: a burst published late is not the
+    // worker's lateness, and its last idle poll then came after the instant.
+    if (now - self.lastPoll <= microsToTicks(100)
+        || !countLate(t.spinningLate, t.spinningLate1ms, t.worstSpinningLate, now - self.windowAt))
+        count(t.ready);
 }
 
-/// Apply a sequenced slew: on a new `seq`, reset the accumulator and add
-/// `drift` to `period` each beat until `|period-delta|` reaches `until`.
-/// `until <= 0` or `drift == 0` means nominal period.
-long effectiveCadencePeriod(long period, long drift, long until, uint seq,
-    ref uint seqSeen, ref long accum) @nogc nothrow
+/// The worker's own timing record, cleared first if `resetTiming` asked.
+private WorkerTiming* timingOf(ref WorkerSelf self, WorkerRec* rec) @nogc nothrow
 {
-    if (seq != seqSeen)
+    auto t = &gTiming[self.workerIndex];
+    immutable epoch = atomicLoad!(MemoryOrder.raw)(rec.timingEpoch);
+    if (epoch != self.timingEpoch)
     {
-        seqSeen = seq;
-        accum = 0;
+        self.timingEpoch = epoch;
+        t.clear();
     }
-    if (period < 1)
-        period = 1;
-    if (until <= 0 || drift == 0)
-        return period;
-    if (accum >= until)
-        return period;
-    long eff = period + drift;
-    if (eff < 1)
-        eff = 1;
-    immutable step = drift >= 0 ? drift : -drift;
-    accum += step;
-    return eff;
+    return t;
 }
 
+private void spinPauses(uint n) @nogc nothrow
+{
+    foreach (i; 0 .. n)
+    {
+        atomicPause();
+        // A process-wide counter per pause cost 7.8% on consumer-bound
+        // workloads (hosting.md); counted only when built for it.
+        version (ThreadpoolStats)
+            atomicFetchAdd(gSpins, 1);
+    }
+}
+
+/// An idle worker that polls instead of parking: under the `spin` policy, or
+/// inside a readiness window. Does one round of PAUSEs and returns
+/// `Poll.again`, and the loop then pumps again; returns `Poll.park` when the
+/// worker should go on to arm its wake slot and park. Called before the slot
+/// is armed, so a polling worker is never armed and waking it is one
+/// exchange with no system call. `worked`: the body made progress since the
+/// last call.
+///
+/// Reads the clock only when an instant is set or a window is open.
+uint pollRound(ref WorkerSelf self, bool worked) @nogc nothrow
+{
+    version (ThreadpoolOs)
+    {
+        if (self.workerIndex >= gWorkers.length || self.workerIndex >= gTiming.length) return Poll.park;
+        auto rec = &gWorkers[self.workerIndex];
+        immutable n = atomicLoad!(MemoryOrder.raw)(rec.spinIters);
+        if (atomicLoad!(MemoryOrder.acq)(rec.kind) == IdleKind.spin)
+        {
+            spinPauses(n);
+            sampleStall(self, rec, n, worked);
+            return Poll.again;
+        }
+        immutable at = atomicLoad!(MemoryOrder.raw)(rec.expectTicks);
+        if (at == expectNone && self.windowEnd == 0)
+            return Poll.park;
+        immutable now = MonoTime.currTime.ticks;
+        if (self.windowEnd != 0 && now >= self.windowEnd)
+            leaveWindow(self, rec, now, worked);
+        if (self.windowEnd == 0)
+        {
+            immutable hold = atomicLoad!(MemoryOrder.raw)(rec.holdTicks);
+            if (readinessAt(now, at, atomicLoad!(MemoryOrder.raw)(rec.leadTicks), hold) != Readiness.poll)
+                return Poll.park;
+            enterWindow(self, rec, at, hold, now);
+        }
+        else if (!self.windowCrossed && now >= self.windowAt)
+        {
+            // The instant passed between the last poll and this one.
+            auto t = timingOf(self, rec);
+            self.windowCrossed = true;
+            if (worked)
+                count(t.busy);
+            else if (!countLate(t.spinningLate, t.spinningLate1ms, t.worstSpinningLate, now - self.windowAt))
+                count(t.ready);
+        }
+        self.lastPoll = now;
+        spinPauses(n);
+        return self.windowSawWork ? Poll.again : Poll.again | Poll.watch;
+    }
+    else
+        return Poll.park;
+}
+
+private void enterWindow(ref WorkerSelf self, WorkerRec* rec, long at, long hold, long now) @nogc nothrow
+{
+    auto t = timingOf(self, rec);
+    count(t.windows);
+    self.windowEnd = saturatingAdd(at, hold);
+    self.windowAt = at;
+    self.windowSawWork = false;
+    self.windowCrossed = now >= at;
+    if (self.windowCrossed)
+    {
+        // It came into the window after the instant. If its last park ran to
+        // this window's lead, the park was late; otherwise it was working.
+        if (self.parkedFor != at)
+            count(t.busy);
+        else if (!countLate(t.parkedLate, t.parkedLate1ms, t.worstParkedLate, now - at))
+            count(t.ready);
+    }
+    self.parkedFor = expectNone;
+}
+
+private void leaveWindow(ref WorkerSelf self, WorkerRec* rec, long now, bool worked) @nogc nothrow
+{
+    auto t = timingOf(self, rec);
+    if (!self.windowSawWork) count(t.emptyWindows);
+    // It did not look between the instant and the window's end. Either it
+    // was running work it had found before the instant, or it was away from
+    // its processor for the rest of the window.
+    if (!self.windowCrossed)
+    {
+        if (worked)
+            count(t.busy);
+        else if (!countLate(t.spinningLate, t.spinningLate1ms, t.worstSpinningLate, now - self.windowAt))
+            count(t.ready);
+    }
+    self.windowEnd = 0;
+}
+
+/// A `spin` worker reads the clock about every 256 PAUSEs and counts a gap
+/// of more than 100 µs with no work in it as a stall. A round of more than
+/// 1,024 PAUSEs is itself tens of microseconds, so there it does not sample.
+private void sampleStall(ref WorkerSelf self, WorkerRec* rec, uint n, bool worked) @nogc nothrow
+{
+    if (n > 1_024) return;
+    // Work since the last poll: the gap being measured is not idle time.
+    if (worked) self.lastStallSample = 0;
+    self.spinDebt += n ? n : 1;
+    if (self.spinDebt < 256) return;
+    self.spinDebt = 0;
+    immutable now = MonoTime.currTime.ticks;
+    if (self.lastStallSample != 0)
+    {
+        auto t = timingOf(self, rec);
+        countLate(t.stalls, t.stalls1ms, t.worstStall, now - self.lastStallSample);
+    }
+    self.lastStallSample = now;
+}
+
+/// The park of an idle worker, after it armed its wake slot and found
+/// nothing a second time.
 void applyIdlePolicy(ref WorkerSelf self, ref shared(int) runFlag,
     bool hasManagedDeadline = false, long managedDeadline = 0) @nogc nothrow
 {
     version (ThreadpoolOs)
     {
-        if (self.workerIndex >= gWorkers.length) return;
+        if (self.workerIndex >= gWorkers.length || self.workerIndex >= gTiming.length) return;
         auto rec = &gWorkers[self.workerIndex];
         immutable kind = atomicLoad!(MemoryOrder.acq)(rec.kind);
         if (kind == IdleKind.spin)
         {
-            immutable n = atomicLoad(rec.spinIters);
-            foreach (i; 0 .. n)
-            {
-                atomicPause();
-                // A process-wide counter per pause cost 7.8% on consumer-bound
-                // workloads (hosting.md); counted only when built for it.
-                version (ThreadpoolStats)
-                {
-                    if (self.isP)
-                        atomicFetchAdd(gSpinsP, 1);
-                    else
-                        atomicFetchAdd(gSpinsE, 1);
-                }
-            }
+            // The policy turned to spin after `pollRound` looked.
+            spinPauses(atomicLoad(rec.spinIters));
             return;
         }
         version (ThreadpoolStats)
+            atomicFetchAdd(gParks, 1);
+
+        // A deadline is held precisely: by the worker's timer on Windows, by
+        // an absolute futex deadline on Linux. There are two kinds, the lead
+        // before an expected instant and a managed deadline, and the park
+        // takes the earlier.
+        long deadline;
+        bool hasDeadline;
+        long leadOf = expectNone;
+        immutable at = atomicLoad!(MemoryOrder.raw)(rec.expectTicks);
+        if (at != expectNone)
         {
-            if (self.isP)
-                atomicFetchAdd(gParksP, 1);
-            else
-                atomicFetchAdd(gParksE, 1);
+            immutable lead = atomicLoad!(MemoryOrder.raw)(rec.leadTicks);
+            final switch (readinessAt(MonoTime.currTime.ticks, at, lead,
+                atomicLoad!(MemoryOrder.raw)(rec.holdTicks)))
+            {
+                case Readiness.poll:
+                    return; // the window opened since `pollRound` looked
+                case Readiness.park:
+                    deadline = saturatingAdd(at, -lead);
+                    hasDeadline = true;
+                    leadOf = at;
+                    break;
+                case Readiness.none:
+                    break;
+            }
         }
-        if (kind == IdleKind.wait)
+        if (hasManagedDeadline && (!hasDeadline || managedDeadline < deadline))
         {
-            if (hasManagedDeadline)
-                parkUntilTicks(self.workerIndex, runFlag, managedDeadline);
-            else
-                parkWorker(self.workerIndex, runFlag, kWaitForever);
-            return;
+            deadline = managedDeadline;
+            hasDeadline = true;
+            leadOf = expectNone;
         }
+
+        // A `sleep` policy's re-poll bound stays on the system timer tick,
+        // as the wait's own timeout, so one park ends at whichever of the
+        // deadline and the bound comes first.
+        uint bound = uint.max;
         if (kind == IdleKind.sleep)
         {
-            immutable ns = atomicLoad(rec.sleepNs);
-            if (hasManagedDeadline)
+            bound = nsToMs(atomicLoad(rec.sleepNs));
+            if (bound == 0)
             {
-                immutable span = scaleClock(ns > long.max ? long.max : cast(long) ns,
-                    1_000_000_000L, MonoTime.ticksPerSecond);
-                immutable nominal = saturatingAdd(MonoTime.currTime.ticks, span);
-                parkUntilTicks(self.workerIndex, runFlag,
-                    managedDeadline < nominal ? managedDeadline : nominal);
+                Thread.yield();
+                return;
             }
-            else
-                parkMs(self.workerIndex, runFlag, nsToMs(ns));
+        }
+        auto t = timingOf(self, rec);
+        if (!hasDeadline)
+        {
+            count(t.parks);
+            parkWorker(self.workerIndex, runFlag, bound == uint.max ? kWaitForever : bound);
             return;
         }
-        if (kind == IdleKind.sleepUntil)
+        count(t.timedParks);
+        parkWorkerUntil(self.workerIndex, runFlag, deadline, bound);
+        // A park that ran to its deadline says how late the timer and the
+        // scheduler brought the worker back. One that a wake or the bound
+        // ended early says nothing.
+        immutable after = MonoTime.currTime.ticks;
+        if (after >= deadline)
         {
-            immutable ticks = atomicLoad(rec.sleepUntilTicks);
-            auto now = MonoTime.currTime.ticks;
-            if (ticks <= now)
-                return;
-            immutable deadline = hasManagedDeadline && managedDeadline < ticks
-                ? managedDeadline : ticks;
-            parkUntilTicks(self.workerIndex, runFlag, deadline);
-            return;
-        }
-        if (kind == IdleKind.cadence)
-        {
-            immutable epoch = atomicLoad(rec.cadenceEpochTicks);
-            immutable period = atomicLoad(rec.cadencePeriodTicks);
-            immutable drift = atomicLoad(rec.cadenceDriftTicks);
-            immutable until = atomicLoad(rec.cadenceDriftUntilTicks);
-            immutable dseq = atomicLoad(rec.cadenceDriftSeq);
-            immutable skip = atomicLoad(rec.cadenceSkip) != 0;
-            immutable lead = atomicLoad(rec.cadenceSpinLeadTicks);
-            auto now = MonoTime.currTime.ticks;
-            immutable eff = effectiveCadencePeriod(period, drift, until, dseq,
-                self.driftSeqSeen, self.driftAccum);
-            auto d = decideCadence(now, epoch, eff, skip, self.lastCadenceBeat);
-            self.lastCadenceBeat = d.beat;
-            if (d.runNow)
-                return;
-            immutable deadline = hasManagedDeadline && managedDeadline < d.deadline
-                ? managedDeadline : d.deadline;
-            parkCadence(self, runFlag, deadline, lead);
-        }
-    }
-}
-
-private void parkUntilTicks(uint workerIndex, ref shared(int) runFlag, long ticks) @nogc nothrow
-{
-    auto now = MonoTime.currTime.ticks;
-    if (ticks <= now)
-        return;
-    parkMs(workerIndex, runFlag, parkMsUntil(ticks, now, MonoTime.ticksPerSecond));
-}
-
-/// Milliseconds to park for a tick deadline after `now` (`ticks > now`).
-/// A far deadline saturates and is clamped to the longest finite park.
-uint parkMsUntil(long ticks, long now, long ticksPerSecond) @nogc nothrow pure @safe
-{
-    if (ticks <= now) return 0;
-    immutable ns = scaleClock(saturatingAdd(ticks, -now), ticksPerSecond, 1_000_000_000L);
-    return nsToMs(cast(ulong) ns);
-}
-
-private void parkCadence(ref WorkerSelf self, ref shared(int) runFlag,
-    long deadline, long spinLead) @nogc nothrow
-{
-    auto now = MonoTime.currTime.ticks;
-    if (deadline <= now)
-        return;
-    if (spinLead <= 0)
-    {
-        parkUntilTicks(self.workerIndex, runFlag, deadline);
-        return;
-    }
-    long parkUntil = deadline;
-    if (deadline - now > spinLead)
-        parkUntil = deadline - spinLead;
-    parkUntilTicks(self.workerIndex, runFlag, parkUntil);
-    if (!atomicLoad!(MemoryOrder.acq)(runFlag))
-        return;
-    while (atomicLoad!(MemoryOrder.acq)(runFlag) && MonoTime.currTime.ticks < deadline)
-    {
-        atomicPause();
-        version (ThreadpoolStats)
-        {
-            if (self.isP)
-                atomicFetchAdd(gSpinsP, 1);
-            else
-                atomicFetchAdd(gSpinsE, 1);
+            countOvershoot(*t, after - deadline);
+            self.parkedFor = leadOf;
+            // A park that ran past the whole window: the worker was never
+            // ready for that instant, and no window will be entered for it.
+            if (leadOf != expectNone
+                && after >= saturatingAdd(leadOf, atomicLoad!(MemoryOrder.raw)(rec.holdTicks)))
+            {
+                count(t.windows);
+                count(t.missedWindows);
+                countLate(t.parkedLate, t.parkedLate1ms, t.worstParkedLate, after - leadOf);
+                self.parkedFor = expectNone;
+            }
         }
     }
 }
@@ -567,51 +653,41 @@ private uint nsToMs(ulong ns) @nogc nothrow pure @safe
     return cast(uint) ms;
 }
 
-private void parkMs(uint workerIndex, ref shared(int) runFlag, uint ms) @nogc nothrow
-{
-    version (ThreadpoolOs)
-    {
-        if (ms == 0)
-        {
-            Thread.yield();
-            return;
-        }
-        parkWorker(workerIndex, runFlag, ms);
-    }
-}
-
-private void workerLoop(ref WorkerSelf self, ref shared(int) runFlag) @nogc nothrow
+void workerLoop(ref WorkerSelf self, ref shared(int) runFlag) @nogc nothrow
 {
     version (ThreadpoolOs)
     {
         auto body_ = gWorkerBody;
         if (body_ is null)
             body_ = &idleBody;
+        bool worked, watch;
         while (atomicLoad!(MemoryOrder.acq)(runFlag))
         {
             if (body_(&self))
+            {
+                worked = true;
+                if (watch) { watch = false; noteBurst(self); }
                 continue;
+            }
+            // Polling, under `spin` or in a readiness window: no wake slot.
+            immutable poll = pollRound(self, worked);
+            worked = false;
+            watch = (poll & Poll.watch) != 0;
+            if (poll & Poll.again) continue;
             if (!prepareWorkerWait(self.workerIndex)) break;
             armWorkerBit(self.workerIndex);
             scope (exit) { disarmWorkerBit(self.workerIndex); cancelWorkerWait(self.workerIndex); }
             if (!atomicLoad!(MemoryOrder.acq)(runFlag)) break;
-            if (body_(&self)) continue;
+            if (body_(&self))
+            {
+                worked = true;
+                continue;
+            }
             applyIdlePolicy(self, runFlag);
         }
         if (auto stop = gWorkerStop)
             stop(&self);
     }
-}
-
-void pCoreWorkerLoop(ref WorkerSelf self, ref shared(int) runFlag) @nogc nothrow
-{
-    workerLoop(self, runFlag);
-}
-
-@eLoopUda
-void eCoreWorkerLoop(ref WorkerSelf self, ref shared(int) runFlag) @nogc nothrow
-{
-    workerLoop(self, runFlag);
 }
 
 unittest
@@ -634,14 +710,6 @@ unittest
     assert(scaleClock(long.min, 10_000_000, ns) == -long.max);
     assert(saturatingAdd(long.max - 1, 5) == long.max);
     assert(saturatingAdd(long.min + 1, -5) == long.min);
-
-    // Far deadlines park for their real length instead of collapsing to a
-    // zero-length park (Thread.yield) on POSIX and QPC-rate clocks alike.
-    foreach (tps; [ns, 10_000_000L])
-        foreach (secs; [10L, 30, 3600])
-            assert(parkMsUntil(5 + secs * tps, 5, tps) == secs * 1000);
-    assert(parkMsUntil(5, 5, ns) == 0);
-    assert(parkMsUntil(long.max, 0, ns) == uint.max - 1);
 }
 
 unittest
@@ -655,28 +723,27 @@ unittest
     assert(beat == 20 && next == 30);
     cadenceGrid(3, 10, 10, beat, next);
     assert(beat == 10 && next == 10);
+}
 
-    auto onGrid = decideCadence(5, 0, 10, false, 0);
-    assert(!onGrid.runNow && onGrid.deadline == 10);
+unittest
+{
+    // The window is [at - lead, at + hold).
+    assert(readinessAt(0, expectNone, 15, 3) == Readiness.none);
+    assert(readinessAt(84, 100, 15, 3) == Readiness.park);
+    assert(readinessAt(85, 100, 15, 3) == Readiness.poll);
+    assert(readinessAt(100, 100, 15, 3) == Readiness.poll);
+    assert(readinessAt(102, 100, 15, 3) == Readiness.poll);
+    assert(readinessAt(103, 100, 15, 3) == Readiness.none, "the hold has run out");
+    assert(readinessAt(100, 100, 0, 0) == Readiness.none, "no lead and no hold: no window");
+    assert(readinessAt(50, 100, 0, 0) == Readiness.none, "and no park to the instant either");
+    assert(readinessAt(50, 100, 0, 3) == Readiness.park && readinessAt(100, 100, 0, 3) == Readiness.poll,
+        "a hold alone: wake at the instant, then poll");
+    // Instants near the ends of the clock do not wrap.
+    assert(readinessAt(0, long.max, 15, 3) == Readiness.park);
+    assert(readinessAt(long.max - 1, long.max, 15, long.max) == Readiness.poll);
+    assert(readinessAt(0, long.min + 1, long.max, 3) == Readiness.none);
 
-    auto lateDefault = decideCadence(25, 0, 10, false, 10);
-    assert(lateDefault.runNow);
-
-    auto lateSkip = decideCadence(25, 0, 10, true, 10);
-    assert(!lateSkip.runNow && lateSkip.deadline == 30);
-
-    auto firstIdle = decideCadence(25, 0, 10, false, 0);
-    assert(!firstIdle.runNow && firstIdle.deadline == 30);
-
-    uint seqSeen;
-    long accum;
-    assert(effectiveCadencePeriod(10, 2, 6, 1, seqSeen, accum) == 12);
-    assert(accum == 2);
-    assert(effectiveCadencePeriod(10, 2, 6, 1, seqSeen, accum) == 12);
-    assert(accum == 4);
-    assert(effectiveCadencePeriod(10, 2, 6, 1, seqSeen, accum) == 12);
-    assert(accum == 6);
-    assert(effectiveCadencePeriod(10, 2, 6, 1, seqSeen, accum) == 10);
-    assert(effectiveCadencePeriod(10, 3, 6, 2, seqSeen, accum) == 13);
-    assert(accum == 3);
+    immutable a = monoNanos();
+    immutable b = monoNanos();
+    assert(b >= a && a > 0);
 }

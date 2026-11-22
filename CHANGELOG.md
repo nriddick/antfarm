@@ -8,7 +8,10 @@ Older release notes are in [docs/releases/](docs/releases/):
 
 Opened 2026-11-20 on `2.2.2-progress`, from `2.2.1-progress` at `7c39b60`.
 The series moves the allocator pin to mimalloc v3.7.0 and adds an optional
-second, secure mimalloc instance for memory that holds network bytes.
+second, secure mimalloc instance for memory that holds network bytes. It
+also changes the threadpool's API incompatibly: workers belong to a cache
+group and are no longer pinned by default, the P/E class axis is gone, and
+`expect` replaces `cadence`.
 
 - mimalloc: the `third_party/mimalloc` pin moves from v3.5.3 to v3.7.0
   (`1ed67b51`). Every build path, the actor suite's `mi_version()`
@@ -56,6 +59,120 @@ second, secure mimalloc instance for memory that holds network bytes.
   replaced, and that by the end of the suite nothing foreign reached the
   secure allocator; one handle allocated with `malloc` instead fails that
   check (negative control).
+
+- threadpool, breaking: a worker belongs to a physical group, not to a
+  processor. The accepted CPUs of a group are its set, and its workers are
+  interchangeable. `PoolOptions.placement` (`WorkerPlacement`) says what the
+  OS is told: `free` (nothing on Windows; the frozen OS scope on Linux,
+  where a thread would otherwise inherit its creator's mask), `group` (one
+  hard affinity mask over the set), `pin` (one CPU each, the behaviour until
+  now) or `automatic`, the default: `free` when the process can reach one
+  physical group and `group` otherwise. Under `free` the CPU filters decide
+  the worker count and nothing else. The automatic count leaves CPUs of a
+  set without a worker: none of one or two, otherwise one in eight (rounded
+  down) and at least one (`autoWorkersOf`), under every placement; it
+  replaces the host's reserved caller CPU. `PoolOptions.workers` and the
+  hosts' `workers` give an exact count instead. `PoolResolution` reports `sets`
+  (`SetDisposition`), `workers` as `WorkerDisposition` records (group,
+  ordinal, the CPU when pinned, `StartState.placed` or `placeFailed`),
+  `placement`, `workerCount`, `workerCountIn`, `processorsIn` and `setOf`,
+  and `GroupDisposition` gains `workers`; `workersIn`, the per-CPU `start`
+  and `pin` fields and `StartState.pinned`/`pinFailed` are gone. A set that
+  spans two Windows processor groups cannot be masked, and `start` throws
+  before it creates a thread.
+- threadpool, breaking: the P/E class axis is removed. There is no
+  `Selection.classP`/`classE`, no `install(bins, plan, classCount)`, no
+  class argument to `at!` and `setLabel`, and no `WorkerSelf.classIndex`,
+  `isP` or `cpuSetId`. `PoolOptions.qos` (`WorkerQos.high`, `eco`,
+  `unchanged`) and `spinIters` replace `highQosOnP`/`ecoQosOnE` and
+  `pSpinIters`/`eSpinIters`, and `PoolStats` is `parks` and `spins`.
+  `enablePCores` and `enableECores` remain CPU filters.
+- threadpool, breaking: `pool.tag(ProcessorId, ...)` is replaced by
+  `Selection.label(name)` and `Selection.number(n)` through the Director;
+  `take(n)`, `skip(n)` and `count()` choose and count the workers of a
+  selection.
+- threadpool, breaking: the Director's `cadence`, `nudge`, `drift` and
+  `sleepUntil`, the `Cadence` options and `version (ThreadpoolCadence)` are
+  removed, with `decideCadence` and `effectiveCadencePeriod`. The pool keeps
+  no period: `Selection.expect(atNanos)` gives the selected workers the
+  instant of the next burst on `monoNanos()`, and an idle worker parks until
+  the lead before it, polls until the hold after it (`readiness`: 1,500 and
+  250 µs by default) and returns to its policy; `expectNothing` withdraws
+  it. A grid, its nudges and its slew stay with the caller, and
+  `cadenceGrid` remains as a pure function. The shipped cadence reached 28%
+  of 240 Hz beats on the Windows host, and its per-worker grid state had
+  three faults: a spin lead that ignored wakes, two pump rounds a beat, and
+  a `drift` that jumped the phase.
+- threadpool: a park that has a deadline holds it precisely. That is a
+  managed deadline (fiber timers) or the lead before an expected instant.
+  Windows waits on a high-resolution waitable timer and a wake event per
+  worker, with a third wake-slot state so a waker signals the event; Linux
+  uses a futex wait with an absolute `CLOCK_MONOTONIC` deadline. A
+  `sleep(d)` policy's re-poll bound stays on the system timer tick, as the
+  same wait's timeout. On the Windows host, idle workers given a 5 ms
+  managed deadline now call their service hook 520 times in 100 ms where
+  they called it 210 times. A worker under `spin`, or polling in a
+  readiness window, no longer arms its wake slot.
+- threadpool: each worker keeps a timing record that only it writes.
+  `Selection.timing()` sums them into a `TimingStats`: for each expected
+  instant whether the worker was ready, busy, late out of its park (and
+  whether it missed the window) or away from its processor; park overshoot
+  and burst arrival histograms; stalls of workers under `spin`; parks.
+  `resetTiming()` restarts them.
+- hosts: `planHost` hands workers to sets. `autoWorkers` is each selected
+  group's automatic count; an explicit count fills the home group first and
+  may leave a set no unstaffed CPU, which the plan notes. A confined caller
+  has the home group's eligible CPUs. A pinned caller takes the home set's
+  last CPU out of the set when the workers are masked or pinned and the
+  count does not need it. `summary()` names each set, its worker count and
+  the placement. The C ABI's `af_host_resolve` and `af_group_resolve`
+  return one entry per worker with its group, and `0xFFFF` for group and
+  processor unless the worker is pinned.
+- forkjoin: `DispatcherOptions.placement` chooses the workers' placement on
+  a host the dispatcher owns (`automatic` by default). The sibling-first
+  steal applies to pinned participants only.
+- tools/perf: the harnesses that name their CPUs ask for
+  `WorkerPlacement.pin` and an exact count, so recorded cells keep meaning
+  what they say; `ANTFARM_CHURN_PLACEMENT=free|group|pin` selects another
+  placement for actor_churn's host path.
+- tests: every placement is started live with each worker's affinity read
+  back (`confine-test`, and `affinity-test` on Windows, which also checks
+  that a narrowed process refuses masks and pins and holds unconfined
+  workers). `wait-races` adds wakes and stops against deadline parks and is
+  now also in `make check`; the Windows wait unit test covers a wake before
+  the park and a stale wake signal. The host planner's counts, caller rules
+  and notes are tested on synthetic topologies. `expect-test` drives
+  readiness windows at 240 Hz under every placement and once under the
+  hosts' `sleep(1 ms)` policy, asserts their structure and prints the
+  lateness it measured.
+
+Measured on the Windows host on 2026-11-22 (i7-12700H, one LLC group; the
+method and its limits are in [docs/design/cadence.md](docs/design/cadence.md)):
+
+- Readiness through the pool: four workers given each instant at 240 Hz
+  with a 1,500 µs lead, four 20 s runs per placement (one with the
+  placements in reverse order), about 19,200 windows a run. Not ready
+  within 100 µs: 16 to 28 windows unconfined, 273 to 1,094 under a group
+  mask over the 14 accepted CPUs, 699 to 1,596 pinned. More than 1 ms late:
+  none, 0 to 2, and 517 to 1,112.
+- Throughput: actor_churn's host path (4 consumers, `spin`), interleaved
+  against the 2.2.1 loop. Pinned as before it is within 1 to 2%. Unconfined it
+  is level on `private` and about 7% lower on `tree`. The laptop throttled
+  during the `tree` runs, so these are rough.
+- Fork-join: fib(36) on 20 participants took 48.0, 48.2 and 48.5 ms
+  pinned, masked and unconfined (medians of 7).
+
+Linux: the new paths build and pass the threadpool, fork-join and fibers
+lanes under WSL2, with each placement's affinity read back. That is a
+functional check on one LLC group. Native validation, and the behaviour of
+the defaults on a machine with several LLC groups, are open.
+
+Windows x64 (2026-11-22, the threadpool change above on `4df7f0f`): the
+same host and toolchain as below. `python -B scripts/check-windows.py`
+passed as one complete invocation under both compilers, with `expect-test`
+in its threadpool lane. The T1 second-group timer and `farmPerGroup`
+routing skip on this single-LLC host as before, so no test body that needs
+two LLC groups has run with this change, here or under WSL2.
 
 Windows x64 (2026-11-20, `17b3174` plus the Windows follow-up): Windows 11
 build 26200, i7-12700H (20 logical processors, one LLC), LDC 1.42.0, DMD

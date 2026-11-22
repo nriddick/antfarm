@@ -218,7 +218,7 @@ private void putPackageRecord(ref ubyte[] b, ulong mask, ushort group)
 void checkFullProcessorGroups()
 {
     import threadpool.pool : PoolOptions;
-    import threadpool.resolution : resolvePool, Reject;
+    import threadpool.resolution : PoolResolution, resolvePool, Reject;
 
     ubyte[] cpu, slp;
     foreach (g; 0 .. 2)
@@ -259,12 +259,20 @@ void checkFullProcessorGroups()
         assert(snap.byId(ids[$ - 1]).l3.sizeBytes == 32 * 1024 * 1024);
         assert(snap.byId(ids[$ - 1]).smtSibling);
     }
+    static ProcessorId[] acceptedOf(const PoolResolution r)
+    {
+        ProcessorId[] ids;
+        foreach (ref c; r.cpus)
+            if (c.accepted) ids ~= c.id;
+        return ids;
+    }
     PoolOptions opt;
     auto res = resolvePool(snap, opt);
-    assert(res.workers.length == 128 && res.acceptedGroupCount == 2);
+    assert(acceptedOf(res).length == 128 && res.acceptedGroupCount == 2);
+    assert(res.workerCount == 2 * (64 - 8), "sixty-four CPUs leave eight unstaffed");
     opt.skipSmtSiblings = true;
     res = resolvePool(snap, opt);
-    assert(res.workers.length == 64);
+    assert(acceptedOf(res).length == 64 && res.workerCount == 2 * (32 - 4));
     assert(res[ProcessorId(1, 63)].reasons == Reject.smtSecondary);
 
     auto restricted = parseWindowsTopology(cpu, slp,
@@ -275,11 +283,11 @@ void checkFullProcessorGroups()
     opt = PoolOptions.init;
     opt.processors = parseCpuList("0:63,1:63,1:63,0:0,2:0");
     res = resolvePool(restricted, opt);
-    assert(res.workers == [ProcessorId(0, 63), ProcessorId(1, 63)]);
+    assert(acceptedOf(res) == [ProcessorId(0, 63), ProcessorId(1, 63)] && res.workerCount == 2);
     assert(res.requests[2].duplicate && res.requests[2].accepted);
     assert(res[ProcessorId(0, 0)].reasons == Reject.osExcluded);
     assert(res.requests[4].unknown);
-    assert(parseCpuList(formatCpuList(res.workers)) == res.workers);
+    assert(parseCpuList(formatCpuList(acceptedOf(res))) == acceptedOf(res));
 }
 
 /// An LLC is not necessarily confined to one Windows processor group.
@@ -448,7 +456,10 @@ void checkSimulatedFourGroupHost()
 
         PoolOptions opt;
         auto res = resolvePool(snap, opt);
-        assert(res.workers.length == 256 && res.acceptedGroupCount == 16);
+        assert(res.acceptedGroupCount == 16);
+        foreach (ref set; res.sets)
+            assert(set.processors.length == 16 && set.workers == 14);
+        assert(res.workerCount == 16 * 14);
     }
 
     SimulatedHost h;
@@ -648,7 +659,6 @@ unittest
     WorkerSelf w;
     w.llcIndex = llcG0[0];
     w.numaIndex = 0;
-    w.classIndex = 0;
     bindNumaNeighborhood(w, snap);
     assert(w.homeLlc == llcG0[0]);
     assert(w.llcIsNumaLocal(llcG1[0]));

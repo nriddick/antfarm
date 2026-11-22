@@ -3,7 +3,7 @@ module threadpool.worker;
 import core.atomic;
 import core.thread;
 import threadpool.hybrid;
-import threadpool.pin : PinOutcome;
+import threadpool.pin : PinOutcome, WorkerPlacement, WorkerQos;
 import threadpool.topology;
 
 version (Windows)
@@ -35,10 +35,16 @@ __gshared PinOutcome[] gPinOutcome;
 struct SpawnSpec
 {
     WorkerSelf self;
-    /// Into the published topology snapshot; lives for the process.
+    /// `free`, `group` or `pin`.
+    WorkerPlacement placement;
+    /// The worker's set: what a `group` worker is confined to.
+    const(ProcessorId)[] processors;
+    /// Every processor of the frozen OS scope: what a `free` worker may use.
+    const(ProcessorId)[] scopeProcessors;
+    /// Under `pin`: the one processor, in the published topology snapshot,
+    /// which lives for the process. Null otherwise.
     const(LogicalProcessor)* processor;
-    bool       ecoQos;
-    bool       applyQos;
+    WorkerQos  qos;
 }
 
 void resetWorkerHandshake() @nogc nothrow
@@ -78,10 +84,10 @@ private void workerMain(SpawnSpec spec)
 {
     version (ThreadpoolOs)
     {
-        auto outcome = pinProcessor(*spec.processor);
+        auto outcome = placeCallingWorker(spec);
         bool pinned = outcome == PinOutcome.pinned;
-        if (pinned && spec.applyQos)
-            applyPowerThrottling(spec.ecoQos);
+        if (pinned && spec.qos != WorkerQos.unchanged)
+            applyPowerThrottling(spec.qos == WorkerQos.eco);
         gPinOutcome[spec.self.workerIndex] = outcome;
         if (pinned)
             atomicFetchAdd(gPinOk, 1);
@@ -99,15 +105,46 @@ private void workerMain(SpawnSpec spec)
         scope (exit) setCurrentWorker(null);
         if (gManagedWorkerHooks.pump !is null)
             managedWorkerLoop(spec.self);
-        else if (spec.self.isP)
-            pCoreWorkerLoop(spec.self, gRunFlag);
         else
-            eCoreWorkerLoop(spec.self, gRunFlag);
+            workerLoop(spec.self, gRunFlag);
     }
     else
     {
         throw new Error("threadpool: workers are not implemented in v1 on this OS");
     }
+}
+
+/// Apply the worker's placement to the calling thread.
+///
+/// `free` leaves a Windows thread alone: it starts with the process's
+/// affinity whatever its creator's is. A Linux thread inherits its creator's
+/// mask, and a host confines or pins its caller before it starts the pool,
+/// so there a `free` worker takes the whole frozen OS scope explicitly.
+private PinOutcome placeCallingWorker(ref SpawnSpec spec)
+{
+    version (ThreadpoolOs)
+    {
+        final switch (spec.placement)
+        {
+            case WorkerPlacement.automatic:
+            case WorkerPlacement.free:
+                version (linux)
+                {
+                    ThreadAffinity inherited;
+                    return confineCallingThread(spec.scopeProcessors, inherited);
+                }
+                else
+                    return PinOutcome.pinned;
+            case WorkerPlacement.group:
+                ThreadAffinity previous;
+                return confineCallingThread(spec.processors, previous);
+            case WorkerPlacement.pin:
+                return spec.processor is null ? PinOutcome.unknownProcessor
+                    : pinProcessor(*spec.processor);
+        }
+    }
+    else
+        return PinOutcome.osRejected;
 }
 
 private void managedWorkerLoop(ref WorkerSelf self)
@@ -119,11 +156,21 @@ private void managedWorkerLoop(ref WorkerSelf self)
         if (hooks.start !is null)
             hooks.start(&self);
         started = true;
+        bool worked, watch;
         while (atomicLoad!(MemoryOrder.acq)(gRunFlag))
         {
             auto result = hooks.pump(&self);
             if (result.retry)
+            {
+                worked = true;
+                if (watch) { watch = false; noteBurst(self); }
                 continue;
+            }
+            // Polling, under `spin` or in a readiness window: no wake slot.
+            immutable poll = pollRound(self, worked);
+            worked = false;
+            watch = (poll & Poll.watch) != 0;
+            if (poll & Poll.again) continue;
             version (ThreadpoolOs)
             {
                 if (!prepareWorkerWait(self.workerIndex)) break;
@@ -131,7 +178,11 @@ private void managedWorkerLoop(ref WorkerSelf self)
                 scope (exit) { disarmWorkerBit(self.workerIndex); cancelWorkerWait(self.workerIndex); }
                 if (!atomicLoad!(MemoryOrder.acq)(gRunFlag)) break;
                 result = hooks.pump(&self);
-                if (result.retry) continue;
+                if (result.retry)
+                {
+                    worked = true;
+                    continue;
+                }
                 applyIdlePolicy(self, gRunFlag, result.hasDeadline,
                                 result.deadlineTicks);
             }

@@ -37,8 +37,10 @@ typedef struct af_group_options {
 typedef uint32_t (*af_group_body)(af_group_host *, uint32_t worker_index, uint32_t llc, void *context);
 typedef void (*af_group_stop)(af_group_host *, uint32_t worker_index, uint32_t llc, void *context);
 void af_group_options_default(af_group_options *out);
-/* Resolves the worker CPU set without starting it. Query with NULL/0;
-   AF_FULL writes required count and no partial output. Control thread only. */
+/* Resolves the workers without starting them: one entry per worker, as
+   af_host_resolve (llc is the worker's cache group; group and processor are
+   0xFFFF unless the pool pins it). Query with NULL/0; AF_FULL writes
+   required count and no partial output. Control thread only. */
 af_status af_group_resolve(const af_group_options *, af_processor *out, size_t capacity, size_t *count);
 af_status af_group_start(const af_group_options *, af_group_body, af_group_stop, void *context, af_group_host **out);
 af_status af_group_caller_llc(af_group_host *, uint32_t *out);

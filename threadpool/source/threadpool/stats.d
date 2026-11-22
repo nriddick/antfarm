@@ -1,24 +1,21 @@
 module threadpool.stats;
 
+/// Counted only in builds with `version (ThreadpoolStats)`.
 struct PoolStats
 {
-    ulong parksP, parksE, spinsP, spinsE;
+    ulong parks, spins;
 }
 
 /// Process-wide counters mutated by workers (@nogc). Snapshot copies them out.
-shared ulong gParksP;
-shared ulong gParksE;
-shared ulong gSpinsP;
-shared ulong gSpinsE;
+shared ulong gParks;
+shared ulong gSpins;
 
 void resetStats() @nogc nothrow
 {
     import core.atomic : atomicStore;
 
-    atomicStore(gParksP, 0);
-    atomicStore(gParksE, 0);
-    atomicStore(gSpinsP, 0);
-    atomicStore(gSpinsE, 0);
+    atomicStore(gParks, 0);
+    atomicStore(gSpins, 0);
 }
 
 PoolStats copyCounters() @nogc nothrow
@@ -26,9 +23,7 @@ PoolStats copyCounters() @nogc nothrow
     import core.atomic : atomicLoad;
 
     PoolStats s;
-    s.parksP = atomicLoad(gParksP);
-    s.parksE = atomicLoad(gParksE);
-    s.spinsP = atomicLoad(gSpinsP);
-    s.spinsE = atomicLoad(gSpinsE);
+    s.parks = atomicLoad(gParks);
+    s.spins = atomicLoad(gSpins);
     return s;
 }

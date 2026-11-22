@@ -167,7 +167,12 @@ extern(C) uint af_group_resolve(const(af_group_options)* supplied, af_processor*
         if (output is null && capacity == 0) return setError(AF_OK);
         if (capacity < *count) return setError(AF_FULL, "group resolution output too small");
         auto topo = CacheAwarePool.topology();
-        foreach (i, id; res.workers) output[i] = af_processor(id.group, id.lp, topo.byId(id).llcIndex, 0);
+        // One entry per worker with its physical group. A worker has a
+        // processor of its own only when pinned; otherwise group and
+        // processor are 0xFFFF, as in `caller_processor`'s "none".
+        foreach (i, ref w; res.workers)
+            output[i] = w.pinned ? af_processor(w.processor.group, w.processor.lp, w.llcIndex, 0)
+                : af_processor(ushort.max, ushort.max, w.llcIndex, 0);
         return setError(AF_OK);
     }
     catch (Throwable e) { return runtimeException(e); }

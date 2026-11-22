@@ -163,9 +163,14 @@ typedef uint32_t (*af_host_predicate)(void *context);
    done runs before every step and may take outcomes and poll; it is a runtime
    callback, so a control call inside it is fatal. */
 af_status af_host_wait_until(af_host *, af_host_predicate, void *context, uint64_t timeout_ns);
-/* The worker CPU set the options would select, without starting it. Query
-   with NULL/0; AF_FULL writes the required count and no partial output.
-   Control thread only. */
+/* The workers the options would select, without starting them: one entry
+   per worker, with the cache group it belongs to in llc. A worker has a
+   processor of its own only when the pool pins it; otherwise group and
+   processor are 0xFFFF, since the default placement leaves workers
+   unconfined (one cache group reachable) or masks them to their group's
+   accepted processors. The automatic count also leaves some processors of a
+   group without a worker. Query with NULL/0; AF_FULL writes the required
+   count and no partial output. Control thread only. */
 af_status af_host_resolve(const af_host_options *, af_processor *out, size_t capacity, size_t *count);
 /* The host's one-line summary, NUL-terminated, into out; len receives its
    length without the terminator. AF_FULL when capacity < len + 1, writing

@@ -354,7 +354,7 @@ void singleton()
 
     // A user-started pool is rejected and neither shut down nor disturbed.
     PoolOptions options;
-    options.processors = [first.resolution.workers[0]];
+    options.processors = [first.resolution.sets[0].processors[0]];
     options.workerBody = &userBody;
     auto user = new CacheAwarePool(options);
     user.start();
@@ -1404,7 +1404,7 @@ void farmPerGroupRouting()
 void rejectedPoolShutdown()
 {
     PoolOptions options;
-    options.processors = [FarmHost.resolve(guarded(1)).workers[0]];
+    options.processors = [FarmHost.resolve(guarded(1)).sets[0].processors[0]];
     options.workerBody = &blockedBody;
     options.workerStop = &blockedStop;
     atomicStore(blockedEntered, 0);

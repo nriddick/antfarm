@@ -15,7 +15,7 @@ LANES = ("packages", "threadpool", "forkjoin", "ordering", "ring", "ant_uv", "re
          "private", "examples")
 QUICK_LANES = ("packages", "ring", "review", "examples")
 HARDWARE_SKIPS = ("SKIP worker cases", "SKIP affinity regression", "SKIP confine-test",
-                  "SKIP worker Fiber reads")
+                  "SKIP expect-test", "SKIP worker Fiber reads")
 
 
 def load_script(name, path):
@@ -105,7 +105,7 @@ class Checks:
 
     def threadpool(self):
         self.run([sys.executable, "-B", "scripts/check-c-abi.py", "--compiler", self.compiler, "--runtime-only"])
-        for config in ("affinity-test", "confine-test", "wait-races", "host-test"):
+        for config in ("affinity-test", "confine-test", "wait-races", "expect-test", "host-test"):
             self.dub("run", ":threadpool", "-c", config)
         self.dub("run", ":threadpool", "-c", "wait-races", "--build=release")
         if self.compiler == "ldc2":

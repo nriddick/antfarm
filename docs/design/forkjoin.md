@@ -126,7 +126,12 @@ when a deque is full. One frame pointer is the unit in both.
   `DispatcherOptions.oneFarm()` shares one Farm. An unknown or ineligible
   processor and `bodySteps == 0` are rejected with an exception. SMT
   siblings are matched on `(group, package, core)`, as the topology keys
-  cores.
+  cores; only a participant pinned to a processor has one, which is the
+  caller always and a pool worker under `WorkerPlacement.pin`.
+  `DispatcherOptions.placement` chooses the workers' placement on a host
+  the dispatcher owns (`automatic`: the pool's rule). The processors given
+  to `start` are then the workers' sets: under `free` they set the worker
+  count only. The tuning defaults were measured with pinned workers.
 - **Map and scan.** `forkJoinMap` runs the loop tree over a source slice
   paired with an output slice that splits identically. `forkJoinScan` runs
   two passes over one retained tree: pass one writes `fn(element)` into the

@@ -8,7 +8,7 @@ Ant Farm is a fixed-memory M:N job distributor and concurrency framework,
 implemented in D, with a C ABI and C++ ownership adapters. Producers publish
 tables of work into a shared ring; any subscribed consumer may claim them. It suits
 unordered compute where the next available worker should take the work.
-Use it alone, or add pinned workers, actors, and suspendable Fibers.
+Use it alone, or add cache-group workers, actors, and suspendable Fibers.
 
 **Status: alpha, for now indefinitely.** The interfaces are being settled
 toward a definite shape, and what ships is tested and measured, but no
@@ -58,7 +58,7 @@ The fork-join dispatcher (`import forkjoin;`, [forkjoin/README.md](forkjoin/READ
 runs on the threadpool with one work-stealing deque per participant and the
 Farm as its admission and overflow channel.
 The D actor programs in [examples/](examples/README.md) run on a `FarmHost`
-(`import threadpool.host;`), which runs one Farm's pinned workers on the
+(`import threadpool.host;`), which runs one Farm's workers on the
 `GroupHost` and owns the token, the actor runtimes and the shutdown order.
 
 ## Start here
@@ -91,7 +91,7 @@ import std.stdio : writeln;
 void main()
 {
     Dispatcher d;
-    d.start();                 // the caller plus a pinned worker per eligible CPU
+    d.start();                 // the caller plus a worker per eligible CPU
     scope (exit) d.stop();
     writeln("sum of squares: ", forkJoinReduce!((ulong x) => x * x,
         (ulong a, ulong b) => a + b)(iota(1UL, 257UL), 0UL, 16));
@@ -104,9 +104,9 @@ is bit-identical for any worker count. The [quickstart](docs/guide/quickstart.md
 explains what it relies on and then shows the same sum on the raw ring,
 one thread, which is what the dispatcher does underneath.
 
-Next, run a complete actor service on pinned workers:
+Next, run a complete actor service on pool workers:
 `dub run --single examples/public_service.d -- 2` (`0` consumes on the
-calling thread; `2` adds two pinned workers in one LLC). Every D example
+calling thread; `2` adds two workers in one LLC). Every D example
 carries the same kind of header; the direct compiler commands are in
 [examples/README.md](examples/README.md#build). Then follow the
 [documentation map](docs/README.md#run-something).

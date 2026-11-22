@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Nathan Riddick. Design derived from citor by Vitalii
 // Shutov (MIT); see the repository LICENSE.
-/// The dispatcher: a `threadpool.groups.GroupHost` owns the pinned pool, the
+/// The dispatcher: a `threadpool.groups.GroupHost` owns the pool, the
 /// caller's pin and the Farms; its workers plus the calling thread are the
 /// participants, the caller as participant 0. Each participant finds its
 /// home Farm through the host's `GroupSlot` registry and holds one producer
@@ -42,6 +42,7 @@ import antfarm;
 import threadpool;
 import threadpool.groups : GroupAttachment, GroupHost, GroupHostOptions, GroupSlot, groupFarmOf, groupToken;
 import threadpool.host : HostGroups, CallerPlacement, WorkerIdle;
+import threadpool.pin : WorkerPlacement;
 import forkjoin.frames : releaseFrames;
 import forkjoin.node;
 import forkjoin.deque;
@@ -73,8 +74,15 @@ struct DispatcherOptions
     /// One random steal probe in N goes to another LLC group; 0 picks
     /// victims uniformly over every participant.
     uint crossDiv = 8;
-    /// Probe the SMT sibling's deque before a random victim.
+    /// Probe the SMT sibling's deque before a random victim. Only a pinned
+    /// worker has a core, so this applies under `WorkerPlacement.pin` (and
+    /// to the caller, which `start(cpus)` pins to `cpus[0]`).
     bool siblingFirst = true;
+    /// Where the pool workers of a host the dispatcher owns may run:
+    /// unconfined, masked to their LLC group, or pinned one to each of the
+    /// processors given to `start`. `automatic` is the pool's rule:
+    /// unconfined when the process reaches one LLC group, masked otherwise.
+    WorkerPlacement placement = WorkerPlacement.automatic;
     /// Scheduling steps per worker-body call before returning to the pool.
     uint bodySteps = 1024;
     /// Cap of the exponential pause backoff after failed steps; 0 pauses once.
@@ -99,8 +107,8 @@ struct DispatcherOptions
     /// every thread count (fwbench `widetree`).
     bool spillInline = true;
 
-    /// The documented default shape: one Farm shared by every group, workers
-    /// pinned, idle workers parked. Equal to `DispatcherOptions.init`.
+    /// The documented default shape: one Farm shared by every group, idle
+    /// workers parked. Equal to `DispatcherOptions.init`.
     static DispatcherOptions oneFarm() nothrow @nogc @safe { return DispatcherOptions.init; }
 
     /// The scaling shape: one Farm per LLC group, consumed only by its own
@@ -818,11 +826,14 @@ struct Dispatcher
         if (host.callerCpus.length == 1)
             if (auto lp = topo.byId(host.callerCpus[0]))
                 coreOf[0] = (cast(ulong) lp.group << 32) | (cast(ulong) lp.packageIndex << 16) | lp.coreIndex;
-        foreach (i, id; res.workers)
+        foreach (i, ref worker; res.workers)
         {
-            auto lp = topo.byId(id);
+            llcOfId[i + 1] = worker.llcIndex;
+            // Only a pinned worker has a core, and so an SMT sibling.
+            coreOf[i + 1] = ulong.max;
+            if (!worker.pinned) continue;
+            auto lp = topo.byId(worker.processor);
             enforce(lp !is null, "forkjoin: a pool worker's processor is unknown");
-            llcOfId[i + 1] = lp.llcIndex;
             // A core is unique per (group, package, core index): Linux core
             // ids repeat across packages, Windows ones across groups.
             coreOf[i + 1] = (cast(ulong) lp.group << 32) | (cast(ulong) lp.packageIndex << 16) | lp.coreIndex;
@@ -889,8 +900,8 @@ struct Dispatcher
         ho.idleTimeout = Duration.max; // park until woken; wakeOne does the waking
         ho.pool.skipSmtSiblings = false;
         ho.pool.processors = cpus[1 .. $];
-        ho.pool.pSpinIters = 1;
-        ho.pool.eSpinIters = 1;
+        ho.pool.placement = opt.placement;
+        ho.pool.spinIters = 1;
         ho.farm.ringMiB = opt.ringMiB;
         ho.farm.quotaSmall = opt.smallQuota;
         ho.farm.extraSmallProducers = 1; // the shared submit token
@@ -915,7 +926,7 @@ struct Dispatcher
         // workers) before the failure path frees the participant tables.
         host = new GroupHost(ho);
         ownsHost_ = true;
-        enforce(host.resolution.workers == res.workers, "forkjoin: the host started a different selection: "
+        enforce(host.resolution.sameSelection(res), "forkjoin: the host started a different selection: "
             ~ "planned " ~ res.summary() ~ "; started " ~ host.resolution.summary());
         start(host);
     }

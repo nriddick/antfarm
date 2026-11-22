@@ -13,7 +13,7 @@ else version (linux)
 
 __gshared shared(int) calls, arrived, releasePump, pending, completed, stops;
 __gshared int pauseAt;
-__gshared bool deadlineMode, throwArmed;
+__gshared bool deadlineMode, throwArmed, farDeadline;
 
 bool pump(WorkerSelf*) nothrow @nogc
 {
@@ -43,6 +43,10 @@ ManagedPumpResult managedPump(WorkerSelf* worker)
         return ManagedPumpResult.until((MonoTime.currTime
             + (visit == 1 ? 60.seconds : 1.msecs)).ticks);
     }
+    // A park to a deadline a minute away: the worker waits on its timer and
+    // its wake event (Windows) or on an absolute futex deadline (Linux), so
+    // only a wake or a stop can end the park in time.
+    if (farDeadline) return ManagedPumpResult.until((MonoTime.currTime + 60.seconds).ticks);
     return ManagedPumpResult.idle;
 }
 
@@ -56,13 +60,15 @@ bool await(ref shared int flag)
 }
 
 void runRace(bool managed, int boundary, bool stopRace = false,
-             bool deadline = false, bool throwOnRecheck = false)
+             bool deadline = false, bool throwOnRecheck = false, bool far = false)
 {
     foreach (p; [&calls, &arrived, &releasePump, &pending, &completed, &stops])
         atomicStore(*p, 0);
     pauseAt = boundary;
     deadlineMode = deadline;
     throwArmed = throwOnRecheck;
+    farDeadline = far;
+    immutable began = MonoTime.currTime;
     auto topology = CacheAwarePool.topology();
     auto lp = topology.processors[0];
     PoolOptions options;
@@ -78,6 +84,8 @@ void runRace(bool managed, int boundary, bool stopRace = false,
         if (!reached) atomicStore(releasePump, 1);
         assert(reached, "worker did not reach the forced empty boundary");
     }
+    // With no forced boundary, give the worker time to be inside its park.
+    if (stopRace && boundary == 0) Thread.sleep(20.msecs);
     if (stopRace) requestStop();
     else if (!deadline && !throwOnRecheck)
     {
@@ -95,6 +103,10 @@ void runRace(bool managed, int boundary, bool stopRace = false,
     assert(progressed, "publication/deadline required a rescue wake");
     if (managed) assert(atomicLoad(stops) == 1);
     assert(pool.workerFailures().length == (throwOnRecheck ? 1 : 0));
+    // A wake or a stop that missed a timed park would leave it to its
+    // deadline, a minute away, and the join above would wait for that.
+    if (far)
+        assert(MonoTime.currTime - began < 10.seconds, "a timed park outlived its wake or stop");
 }
 
 void suite()
@@ -106,6 +118,9 @@ void suite()
     }
     runRace(true, 0, false, true);
     runRace(true, 0, false, false, true);
+    // The same publication and stop races against a park that holds a deadline.
+    foreach (boundary; [0, 1, 2]) runRace(true, boundary, false, false, false, true);
+    foreach (boundary; [0, 1, 2]) runRace(true, boundary, true, false, false, true);
 }
 
 version (Windows)
@@ -145,6 +160,6 @@ void main()
     version (Windows) waitApiRequired();
     suite();
     version (Windows)
-        writeln("armed wait races passed: address backend");
-    else writeln("armed wait races passed: futex backend");
+        writeln("armed wait races passed: address backend, and timer parks");
+    else writeln("armed wait races passed: futex backend, and deadline parks");
 }

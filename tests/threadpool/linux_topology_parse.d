@@ -591,9 +591,9 @@ unittest
     assert(res.groups.length == 2);
     assert(res.groups[0].physical == 15);
     assert(res.groups[1].physical == 16);
-    assert(res.workers.length == 31);
-    assert(res.workersIn(0).length == 15);
-    assert(res.workersIn(1).length == 16);
+    assert(res.processorsIn(0).length == 15);
+    assert(res.processorsIn(1).length == 16);
+    assert(res.workerCountIn(0) == 14 && res.workerCountIn(1) == 14 && res.workerCount == 28);
     assert(res[ProcessorId(0, 5)].reasons & Reject.offline);
     assert(!res[ProcessorId(0, 5)].accepted);
 }

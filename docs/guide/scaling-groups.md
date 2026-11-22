@@ -192,6 +192,18 @@ path, within one round's spread. The paragraph above is kept as the
 record of what was measured when; the cost it names is now compiled out by
 default.
 
+Since 2.2.2 a worker under `spin` no longer arms its wait slot or consumes a
+second time: a round is one consume and `PoolOptions.spinIters` PAUSEs (one
+count for every worker; the per-class pair is gone). Workers are also no
+longer pinned by default. On the i7-12700H Windows host (2026-11-22, same
+command with 4 consumers, interleaved against the 2.2.1 loop) the host path
+pinned as before was within 1 to 2% of the old loop, and unconfined it was level
+on `private` and about 7% lower on `tree` until the laptop throttled; a group
+mask over exactly as many CPUs as consumers was 8% lower and fell to a
+fraction of the baseline once it did. These are one noisy host's numbers;
+`ANTFARM_CHURN_PLACEMENT=free|group|pin` selects the placement for a
+re-measurement.
+
 What to tune:
 
 - **Fewer workers** when consumers are the bottleneck: fewer consumers polling
@@ -201,8 +213,7 @@ What to tune:
   default: after its final empty check the worker parks at once, for up to
   `FarmHostOptions.idleTimeout`, 1 ms, or until the host's publication
   wrappers wake it) or `WorkerIdle.spin`; the spin count is
-  `FarmHostOptions.pool.pSpinIters` (and `eSpinIters` on efficiency-class
-  workers). The measurement above used `spin` with the default counts; `park`
+  `FarmHostOptions.pool.spinIters`. The measurement above used `spin` with the default counts; `park`
   avoids the spin burn at the cost of wake latency. The publication wrappers
   wake a parked worker at once, so their latency stays small; a raw-token
   publication that no wrapper announces waits up to `idleTimeout` for the
@@ -210,7 +221,7 @@ What to tune:
 - **A hand-written consumer loop** on the raw Farm, for maximum throughput on
   consumer-bound fine-grained workloads, as the benchmark's non-host path
   does: subscribe a `ConsumerView`, then loop
-  `if (!view.consumeNext()) pause();`. You then own the pinning, the producer
+  `if (!view.consumeNext()) pause();`. You then own the placement, the producer
   token and the teardown that the host otherwise provides.
 
 To measure on your own machine, run the same command with and without the

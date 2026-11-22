@@ -6,14 +6,17 @@ module confine_live;
 // confineCallingThread narrows the calling thread to two OS-scope CPUs and
 // restoreCallingThread puts back the exact mask it captured. stopRequested
 // turns true when a managed pump throws, and is false on an unstarted or
-// shut-down pool.
+// shut-down pool. Every worker placement is started in turn and each worker
+// reads its own affinity back: the whole OS scope when unconfined (even when
+// the thread that starts the pool is narrowed), its set under a group mask,
+// one CPU when pinned.
 
 version (linux) version = ConfineTestOs;
 version (Windows) version = ConfineTestOs;
 
 version (ConfineTestOs)
 {
-import core.atomic : atomicLoad, cas;
+import core.atomic : atomicLoad, atomicOp, atomicStore, cas;
 import core.thread : Thread;
 import core.time : MonoTime, seconds;
 import std.exception : enforce;
@@ -107,6 +110,77 @@ void confineAndRestore(const(ProcessorId)[] cpus)
     writeln("PASS confine ", formatCpuList(target), " and restore ", formatCpuList(before));
 }
 
+__gshared ProcessorId[][] gWorkerMasks; // index == workerIndex
+__gshared shared(int) gMasksRead;
+
+void readOwnMask(WorkerSelf* w)
+{
+    gWorkerMasks[w.workerIndex] = callerMask();
+    atomicOp!"+="(gMasksRead, 1);
+}
+
+ManagedPumpResult idlePump(WorkerSelf*)
+{
+    return ManagedPumpResult.idle();
+}
+
+void placements(const(ProcessorId)[] cpus)
+{
+    import std.conv : to;
+
+    // Up to four CPUs of one physical group.
+    auto snap = discover();
+    immutable llc = snap.byId(cpus[0]).llcIndex;
+    ProcessorId[] set;
+    foreach (id; cpus)
+        if (snap.byId(id).llcIndex == llc && set.length < 4) set ~= id;
+    immutable workers = autoWorkersOf(set.length);
+    auto unconfined = callerMask();
+    foreach (placement; [WorkerPlacement.free, WorkerPlacement.group, WorkerPlacement.pin])
+    {
+        PoolOptions options;
+        options.processors = set;
+        options.placement = placement;
+        options.managedWorker = ManagedWorkerHooks(&readOwnMask, &idlePump, null, null);
+        gWorkerMasks = new ProcessorId[][](workers);
+        atomicStore(gMasksRead, 0);
+        auto pool = new CacheAwarePool(options);
+        // A host narrows its caller before it starts the pool. That must not
+        // leak into the workers: start with the caller on one CPU.
+        ThreadAffinity previous;
+        enforce(confineCallingThread(set[0 .. 1], previous) == PinOutcome.pinned, "narrow the caller");
+        {
+            scope (exit) enforce(restoreCallingThread(previous), "restore the caller");
+            pool.start();
+        }
+        scope (exit) pool.shutdown();
+        enforce(pool.workerCount == workers && pool.resolution.started
+            && pool.resolution.placement == placement, "started " ~ pool.resolution.summary());
+        auto deadline = MonoTime.currTime + 10.seconds;
+        while (atomicLoad(gMasksRead) < workers)
+        {
+            enforce(MonoTime.currTime < deadline, "workers never reported their affinity");
+            Thread.yield();
+        }
+        foreach (i, mask; gWorkerMasks)
+        {
+            const(ProcessorId)[] expected = unconfined;
+            if (placement == WorkerPlacement.group) expected = set;
+            if (placement == WorkerPlacement.pin)
+            {
+                enforce(pool.resolution.workers[i].pinned
+                    && pool.resolution.workers[i].processor == set[i], "worker i takes the set's CPU i");
+                expected = set[i .. i + 1];
+            }
+            enforce(mask == expected, "placement " ~ placement.to!string ~ ": worker " ~ i.to!string
+                ~ " has " ~ formatCpuList(mask) ~ ", expected " ~ formatCpuList(expected));
+        }
+        writeln("PASS placement ", placement, ": ", workers, " workers of {", formatCpuList(set), "} each on ",
+            placement == WorkerPlacement.pin ? "its own CPU"
+                : formatCpuList(placement == WorkerPlacement.group ? set : unconfined));
+    }
+}
+
 void stopRequestedOnFailure(ProcessorId cpu)
 {
     PoolOptions options;
@@ -140,6 +214,7 @@ int main()
         return 0;
     }
     confineAndRestore(cpus);
+    placements(cpus);
     stopRequestedOnFailure(cpus[0]);
     return 0;
 }

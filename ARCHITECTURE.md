@@ -18,7 +18,7 @@ application
     +<-- wave completion --> Fiber trigger                    |
                                                              |
                                                         threadpool
-                                                 pinned worker pumps
+                                                  group worker pumps
 ```
 
 ## Responsibilities
@@ -105,13 +105,15 @@ file I/O, are placed by the loop when it starts. The contract is
 
 ### Threadpool
 
-The pool discovers CPU/cache topology, pins persistent workers, and associates
-application-owned state with LLC and NUMA domains. It does not impose a job
-queue. A worker body can pump a Farm, an application queue, or any other source.
+The pool discovers CPU/cache topology, runs persistent workers that each
+belong to one LLC group, and associates application-owned state with LLC and
+NUMA domains. Workers run unconfined, masked to their group or pinned
+(`PoolOptions.placement`). It does not impose a job queue. A worker body can
+pump a Farm, an application queue, or any other source.
 
-One owner controls Director policy. Workers may spin, wait, or sleep (cadence
-wakes exist only behind `version (ThreadpoolCadence)`); ordinary producers use
-`wakeAll()`.
+One owner controls Director policy. Workers may spin, wait, or sleep, and a
+publisher that knows when its next burst is due can have chosen workers
+awake and polling for it (`expect`); ordinary producers use `wakeAll()`.
 
 ### Fibers
 
@@ -139,7 +141,7 @@ example. It exercises the complete non-Fiber path:
 
 1. Discover processor and LLC topology.
 2. Create one Farm sized for the selected worker count.
-3. Install a `FarmBin` so every pinned worker can locate that Farm.
+3. Install a `FarmBin` so every worker can locate that Farm.
 4. Start a `CacheAwarePool` whose worker body subscribes one persistent
    thread-local `ConsumerView` and calls `consumeNext()`, and whose
    `workerStop` hook unsubscribes that view.

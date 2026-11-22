@@ -66,6 +66,14 @@ configuration "host-test" {
     versions "FarmHostTestHooks"
 }
 
+// Live readiness windows: `dub run -c expect-test [-- seconds leadMicros]`.
+// A publisher gives some workers each burst's instant (`Selection.expect`)
+// under every placement; the structure is asserted and the lateness printed.
+configuration "expect-test" {
+    targetType "executable"
+    mainSourceFile "../tests/threadpool/expect_live.d"
+}
+
 // wake() racing a worker-failure shutdown: `dub run -c wakefail`.
 configuration "wakefail" {
     targetType "executable"

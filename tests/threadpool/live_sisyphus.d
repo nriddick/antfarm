@@ -1,8 +1,16 @@
 module live_sisyphus;
 
+// Live hardware check for the i7-12700H fixture (`dub run -c live-test`): one
+// LLC group of 20 logical processors, 6 SMT P-cores (LP 0 to 11) and 8
+// E-cores (LP 12 to 19). Other hosts print the topology and skip.
+//
+// It checks the discovered shape, the automatic worker counts, the bins and
+// labels a worker finds, a restart, and that a class filter is enforced by a
+// group mask and a pin and only sets the count for unconfined workers.
+
 import core.atomic;
 import core.thread;
-import core.time : msecs;
+import core.time : MonoTime, msecs;
 import std.stdio;
 import threadpool;
 
@@ -33,49 +41,34 @@ struct LiveC2 { int y = 2; }
 
 struct WorkBag
 {
-    shared int pLeft;
-    shared int eLeft;
+    shared int left;
 }
 
-__gshared uint ranP = uint.max;
-__gshared uint ranE = uint.max;
-__gshared ushort homeP = ushort.max;
-__gshared ushort homeE = ushort.max;
-__gshared ushort numaCountP;
-__gshared ushort foreignP;
+__gshared uint ranOn = uint.max;
+__gshared ushort homeOf = ushort.max;
+__gshared ushort numaCount;
+__gshared ushort foreign;
+__gshared bool binsFound;
 shared int gBodyTicks;
+shared ulong gSeenLps; // one bit per LP a body call ran on
 
 extern (D) bool liveBody(WorkerSelf* w) @nogc nothrow
 {
     atomicFetchAdd(gBodyTicks, 1);
     auto bag = home!WorkBag();
     if (bag is null) return false;
-    if (w.isP)
-    {
-        auto n = atomicLoad(bag.pLeft);
-        if (n == 0) return false;
-        if (cas(&bag.pLeft, n, n - 1))
-        {
-            ranP = currentLp();
-            homeP = w.homeLlc;
-            numaCountP = w.numaLlcCount;
-            foreignP = w.foreignLlcCount;
-            auto c1 = home!LiveC1();
-            auto c2 = home!LiveC2();
-            if (c1 is null || c1.x != 1) return false;
-            if (c2 is null || c2.y != 2) return false;
-            if (search!(LiveC1, string)("llc0") !is c1) return false;
-            return true;
-        }
-        return true;
-    }
-    auto n = atomicLoad(bag.eLeft);
+    auto n = atomicLoad(bag.left);
     if (n == 0) return false;
-    if (cas(&bag.eLeft, n, n - 1))
+    if (cas(&bag.left, n, n - 1))
     {
-        ranE = currentLp();
-        homeE = w.homeLlc;
-        return true;
+        ranOn = currentLp();
+        homeOf = w.homeLlc;
+        numaCount = w.numaLlcCount;
+        foreign = w.foreignLlcCount;
+        auto c1 = home!LiveC1();
+        auto c2 = home!LiveC2();
+        binsFound = c1 !is null && c1.x == 1 && c2 !is null && c2.y == 2
+            && search!(LiveC1, string)("llc0") is c1;
     }
     return true;
 }
@@ -83,6 +76,8 @@ extern (D) bool liveBody(WorkerSelf* w) @nogc nothrow
 extern (D) bool tickBody(WorkerSelf*) @nogc nothrow
 {
     atomicFetchAdd(gBodyTicks, 1);
+    immutable lp = currentLp();
+    if (lp < 64) atomicOp!"|="(gSeenLps, 1UL << lp);
     return false;
 }
 
@@ -118,6 +113,25 @@ bool looksLikeSisyphus(const(TopologySnapshot) s)
         && s.classCount == 2;
 }
 
+/// Start a spinning pool with `opt`, let it run, and return the LPs its body
+/// calls were seen on as a mask.
+ulong seenUnder(PoolOptions opt, uint expectedWorkers, WorkerPlacement expectedPlacement)
+{
+    atomicStore(gSeenLps, 0UL);
+    atomicStore(gBodyTicks, 0);
+    opt.workerBody = &tickBody;
+    auto pool = new CacheAwarePool(opt);
+    pool.start();
+    scope (exit) pool.shutdown();
+    assert(pool.workerCount == expectedWorkers, pool.resolution.summary());
+    assert(pool.resolution.placement == expectedPlacement, pool.resolution.summary());
+    auto d = pool.director();
+    d.spin();
+    Thread.sleep(msecs(300));
+    assert(atomicLoad(gBodyTicks) > 0, "no worker body ran");
+    return atomicLoad(gSeenLps);
+}
+
 int main()
 {
     auto s = CacheAwarePool.topology();
@@ -140,15 +154,18 @@ int main()
             assert(p.efficiencyClass == 0);
     }
 
+    // The default pool: one set of all 20 LPs, two left without a worker,
+    // unconfined since the process reaches one group.
     PoolOptions liveOpt;
     liveOpt.workerBody = &liveBody;
     auto livePool = new CacheAwarePool(liveOpt);
     auto res = livePool.resolve();
+    assert(res.placement == WorkerPlacement.free && res.sets.length == 1);
+    assert(res.sets[0].processors.length == 20 && res.workerCount == 18 && res.sets[0].unstaffed == 2);
     auto c1s = makeBins!LiveC1(res, (ref const g) => LiveC1.init);
     auto c2s = makeBins!LiveC2(res, (ref const g) => LiveC2.init);
     auto bags = makeBins!WorkBag(res, (ref const g) => WorkBag.init);
-    bags[0].pLeft = 1;
-    bags[0].eLeft = 1;
+    bags[0].left = 1;
     install(c1s, res);
     install(c2s, res);
     install(bags, res);
@@ -164,23 +181,21 @@ int main()
         auto pool = livePool;
         pool.start();
         scope (exit) pool.shutdown();
-        assert(pool.workerCount == 20);
+        assert(pool.workerCount == 18);
         auto d = pool.director();
         d.spin();
         foreach (_; 0 .. 200)
         {
-            if (ranP != uint.max && ranE != uint.max)
+            if (ranOn != uint.max)
                 break;
             Thread.sleep(msecs(5));
         }
     }
-    writefln("P job on LP %s, E job on LP %s", ranP, ranE);
-    assert(ranP != uint.max, "P job did not run");
-    assert(ranE != uint.max, "E job did not run");
-    assert(ranP <= 11, "P job must run on a P-core LP");
-    assert(ranE >= 12 && ranE <= 19, "E job must run on an E-core LP");
-    assert(homeP == 0 && homeE == 0, "SISYPHUS workers have LLC 0 as home");
-    assert(numaCountP == 1 && foreignP == 0, "one NUMA, one LLC: no foreign bins");
+    writefln("the job ran on LP %s", ranOn);
+    assert(ranOn != uint.max, "the job did not run");
+    assert(binsFound, "a worker finds its group's bins and the labelled one");
+    assert(homeOf == 0, "SISYPHUS workers have LLC 0 as home");
+    assert(numaCount == 1 && foreign == 0, "one NUMA, one LLC: no foreign bins");
 
     {
         atomicStore(gBodyTicks, 0);
@@ -190,7 +205,7 @@ int main()
         pool.start();
         pool.shutdown();
         pool.start();
-        assert(pool.workerCount == 20);
+        assert(pool.workerCount == 18);
         {
             auto d = pool.director();
             d.spin();
@@ -206,15 +221,31 @@ int main()
         writeln("restart ok");
     }
 
+    // A class filter. Twelve P LPs leave one unstaffed; eight E LPs, one.
+    enum ulong pMask = 0xFFF, eMask = 0xFF000;
     {
-        PoolOptions opt;
-        opt.enableECores = false;
-        opt.workerBody = &tickBody;
-        auto pool = new CacheAwarePool(opt);
-        pool.start();
-        scope (exit) pool.shutdown();
-        assert(pool.workerCount == 12, "P-only pool should be 12 SMT P LPs");
-        writeln("enableECores=false has no E workers; shutdown() returned");
+        PoolOptions pOnly;
+        pOnly.enableECores = false;
+
+        // A group mask and a pin enforce the filter.
+        pOnly.placement = WorkerPlacement.group;
+        auto seen = seenUnder(pOnly, 11, WorkerPlacement.group);
+        assert((seen & ~pMask) == 0, "a P-only group mask let a worker onto an E-core");
+        pOnly.placement = WorkerPlacement.pin;
+        seen = seenUnder(pOnly, 11, WorkerPlacement.pin);
+        assert(seen == 0x7FF, "eleven pinned workers take the set's first eleven LPs");
+
+        // Unconfined, it sets the count and nothing else.
+        pOnly.placement = WorkerPlacement.automatic;
+        seen = seenUnder(pOnly, 11, WorkerPlacement.free);
+        writefln("P-only, unconfined: 11 workers seen on LPs %b (the filter sets the count only)", seen);
+
+        PoolOptions eOnly;
+        eOnly.enablePCores = false;
+        eOnly.placement = WorkerPlacement.group;
+        seen = seenUnder(eOnly, 7, WorkerPlacement.group);
+        assert(seen != 0 && (seen & ~eMask) == 0, "an E-only group mask let a worker onto a P-core");
+        writeln("class filters: enforced by a group mask and a pin");
     }
 
     writeln("live-sisyphus: pass");
