@@ -129,15 +129,11 @@ private PinOutcome placeCallingWorker(ref SpawnSpec spec)
             case WorkerPlacement.automatic:
             case WorkerPlacement.free:
                 version (linux)
-                {
-                    ThreadAffinity inherited;
-                    return confineCallingThread(spec.scopeProcessors, inherited);
-                }
+                    return confineStartingWorker(spec.scopeProcessors);
                 else
                     return PinOutcome.pinned;
             case WorkerPlacement.group:
-                ThreadAffinity previous;
-                return confineCallingThread(spec.processors, previous);
+                return confineStartingWorker(spec.processors);
             case WorkerPlacement.pin:
                 return spec.processor is null ? PinOutcome.unknownProcessor
                     : pinProcessor(*spec.processor);

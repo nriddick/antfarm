@@ -133,6 +133,22 @@ PinOutcome confineCallingThread(const(ProcessorId)[] cpus, out ThreadAffinity pr
         return PinOutcome.osRejected;
 }
 
+/// Confine a starting pool worker to `cpus`, which its resolution already
+/// checked against the topology and the frozen OS scope. Unlike
+/// `confineCallingThread` it keeps no previous affinity and does not touch
+/// the GC heap: a pool's workers place themselves while other threads may
+/// be collecting, and a worker spinning on the GC lock there can hold up a
+/// collection's suspend (it hung the fork-join ThreadSanitizer lane).
+package(threadpool) PinOutcome confineStartingWorker(const(ProcessorId)[] cpus) nothrow
+{
+    if (cpus.length == 0)
+        return PinOutcome.unknownProcessor;
+    version (ThreadpoolOs)
+        return confineWorkerOs(cpus) ? PinOutcome.pinned : PinOutcome.osRejected;
+    else
+        return PinOutcome.osRejected;
+}
+
 /// Diagnostics only: what the OS reports right now (Linux: the calling
 /// thread's mask; Windows: the process mask). Never feeds eligibility, which
 /// uses the scope frozen in the snapshot. Empty when the query fails or the
@@ -232,6 +248,13 @@ version (Windows)
         return SetThreadGroupAffinity(self, &ga, null) != 0;
     }
 
+    // confineOs allocates nothing on Windows.
+    private bool confineWorkerOs(const(ProcessorId)[] cpus) nothrow
+    {
+        ThreadAffinity unused;
+        return confineOs(cpus, unused);
+    }
+
     private bool restoreOs(ref const ThreadAffinity previous) nothrow
     {
         GROUP_AFFINITY ga = previous.affinity;
@@ -299,6 +322,25 @@ else version (linux)
         foreach (id; cpus)
             set[id.lp / (cpu_mask.sizeof * 8)] |= cast(cpu_mask)(1UL << (id.lp % (cpu_mask.sizeof * 8)));
         return sched_setaffinity(0, setsize, cast(cpu_set_t*) set.ptr) == 0;
+    }
+
+    private bool confineWorkerOs(const(ProcessorId)[] cpus) nothrow @nogc
+    {
+        import core.sys.posix.unistd : _SC_NPROCESSORS_CONF, sysconf;
+
+        auto conf = sysconf(_SC_NPROCESSORS_CONF);
+        auto count = conf > 0 ? cast(size_t) conf : size_t(1024);
+        foreach (id; cpus)
+            if (cast(size_t) id.lp + 1 > count) count = cast(size_t) id.lp + 1;
+        auto setsize = CPU_ALLOC_SIZE(count);
+        auto set = CPU_ALLOC(count);
+        if (set is null) return false;
+        scope (exit) CPU_FREE(set);
+        auto words = (cast(cpu_mask*) set)[0 .. setsize / cpu_mask.sizeof];
+        words[] = 0;
+        foreach (id; cpus)
+            words[id.lp / (cpu_mask.sizeof * 8)] |= cast(cpu_mask)(1UL << (id.lp % (cpu_mask.sizeof * 8)));
+        return sched_setaffinity(0, setsize, set) == 0;
     }
 
     private bool restoreOs(ref const ThreadAffinity previous) nothrow
