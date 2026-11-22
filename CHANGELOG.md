@@ -164,8 +164,39 @@ method and its limits are in [docs/design/cadence.md](docs/design/cadence.md)):
 
 Linux: the new paths build and pass the threadpool, fork-join and fibers
 lanes under WSL2, with each placement's affinity read back. That is a
-functional check on one LLC group. Native validation, and the behaviour of
-the defaults on a machine with several LLC groups, are open.
+functional check on one LLC group.
+
+- threadpool: a worker whose park returns after its instant but inside the
+  window serves the rest of that window, and is counted parked late. When
+  the publisher had already named the next instant (as soon as the burst is
+  out, the usual pattern) such an instant was in no window and in no count:
+  at a 100 µs lead on the 5900XT 12,176 of 19,200 instants were missing.
+  `expect-test` gains a leg with no lead that fails without the fix (4 of
+  964 windows) and names `free`, `group` and `pin` instead of `automatic`,
+  which is `group` on a machine with two LLC groups. The Windows figures
+  above predate it.
+- threadpool: a starting worker sets its `free` (Linux) or `group` mask
+  without allocating on the GC heap. Through `confineCallingThread` it
+  allocated two `cpu_set_t` copies, and a pool starting during a
+  collection could hold the collection up: the fork-join ThreadSanitizer
+  lane hung in most runs on the 5900XT (6 of 6 passed on `17b3174`, 12 of
+  12 with the fix). Not built on Windows, where the path allocated
+  nothing.
+
+Native Linux on the 5900XT (2026-11-22, two LLC groups, Linux 7.3.1, LDC
+1.43.0, DMD 2.113.0, `92e1cd5`; the record is in
+[docs/design/cadence.md](docs/design/cadence.md), "Linux on the 5900XT"):
+`make check-mimalloc` passes, with the second-group timer and
+`farmPerGroup` routing running; `wait-races` and `expect-test` pass under
+ThreadSanitizer. Every placement's affinity was read back across both
+groups. At the default 1,500 µs lead every placement had 0 to 14 of about
+19,200 windows a run not ready within 100 µs; a lead under 500 µs loses to
+an idle state's exit (250 to 500 µs late in up to a third of parks), which
+a latency request removes. Fork-join is level between
+`group` and `pin`, 4% behind `17b3174` on core-only CPU sets under both.
+On actor_churn's host path under `spin`, `subset` and `subset-whole` are 9
+to 18% behind `17b3174` under every placement; putting a spinning worker's
+wake-slot arm back recovers them, for a reason not yet found. Open.
 
 Windows x64 (2026-11-22, the threadpool change above on `4df7f0f`): the
 same host and toolchain as below. `python -B scripts/check-windows.py`

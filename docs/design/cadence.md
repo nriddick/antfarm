@@ -1052,6 +1052,11 @@ build differs from section 5, and what the pool itself then measured.
   Instants that pass while a worker is still stalled in an earlier park are
   not recorded at all, so under long stalls `windows` falls short of the
   instants given.
+- **A park that returns after its instant but inside its window serves the
+  rest of that window**, even when `expect` has named the next instant
+  meanwhile (a publisher names it as soon as the burst is out, and that
+  call wakes the worker). Before `11d5db0` such an instant was in no window
+  and in no count; see "Linux on the 5900XT" below.
 - **The fork-join dispatcher has `DispatcherOptions.placement`**, automatic
   by default. Its steal from an SMT sibling applies to pinned participants
   only.
@@ -1069,6 +1074,12 @@ next instant to four of the pool's 13 workers. 240 Hz, lead 1,500 µs, hold
 masked, pinned, and a fourth in the reverse order, since this laptop slows
 as it warms. About 19,200 windows a run. The figures are the workers' own
 timing records, in run order with the reversed run last.
+
+These runs predate `11d5db0`. A park that returned after its instant but
+inside the hold, once the next instant had been named, was then in no
+count, so "not ready within 100 µs" undercounts such late parks and the
+shortfall in "windows recorded" includes them. The table has not been
+rerun.
 
 | placement | not ready within 100 µs | of those, the park ran past the whole window | over 1 ms late | worst | windows recorded |
 |---|---|---|---|---|---|
@@ -1120,10 +1131,107 @@ What these do not show:
 - The system timer period during the readiness runs. It was not recorded.
 - A machine with several LLC groups, where `group` is the default. The
   masked row is a mask over this host's six P-core primaries and eight
-  E-cores.
+  E-cores. The 5900XT below has two.
 - Whether readying fewer workers, or workers on separate instants, avoids
   the missed windows under a mask. Not tried.
 - Throughput on a host that does not throttle. The 5900XT is the place.
+
+### Linux on the 5900XT (2026-11-22)
+
+Ryzen 9 5900XT: 16 cores with SMT, two L3 groups (`{0-7,16-23}` and
+`{8-15,24-31}`), Linux 7.3.1 (CachyOS, `HZ=1000`, `menu` idle governor, a
+shallow C2 advertised at 18 µs), LDC 1.43.0, DMD 2.113.0, on `92e1cd5`.
+`make check-mimalloc` passes, now with the second-group timer and
+`farmPerGroup` routing running instead of skipping. It did not before
+`92e1cd5`: a starting `free` or `group` worker confined itself through
+`confineCallingThread`, which allocates on the GC heap on Linux, and the
+fork-join ThreadSanitizer lane hung in most runs with a collection waiting
+on workers that spun on the GC lock. Workers now set their mask without
+the GC heap.
+
+**Placement.** `automatic` resolves to `group` here. Every placement was
+started across both groups from a caller pinned to one CPU, and each
+worker read back its own affinity: its group's CPUs under `group`, one CPU
+of its group under `pin`, the whole scope (not the caller's CPU) under
+`free`. A bare pool has 14 workers per group of 16 accepted CPUs, a host
+(one per core) 7 per group of 8. Under `taskset -c 0-7` `automatic` is
+`free`; over `4-11` it is two sets of 4 with 3 workers each. A pinned
+caller takes CPU 7 out of the home set, which leaves 6 workers there
+(`host_plan.d` asserts this): the caller's CPU and the unstaffed one.
+
+Measurements below are from a build of the timing fix before two later
+changes (how a closed window is classified, and how a starting worker sets
+its mask), which do not touch the paths measured, unless named.
+
+**Readiness** (`expect-test`, release, the workers' records; four workers
+of 14 at 240 Hz, hold 250 µs, 20 s a run, about 19,204 windows, every run
+recording all of them). Windows not ready within 100 µs, per run:
+
+| lead | `free` | `group` | `pin` |
+|---|---|---|---|
+| 1,500 µs (four runs, the last reversed) | 1, 0, 3, 0 | 9, 7, 9, 14 | 0, 2, 2, 2 (one over 1 ms; worst 1.0 ms) |
+| 500 µs (forward, reversed) | 6, 1 | 11, 7 | 9, 4 |
+| 250 µs | 242, 874 | 40, 519 | 252, 120 |
+| 100 µs | 7,914, 8,492 | 7,607, 7,973 | 1,887, 2,151 |
+
+Under the hosts' `sleep(1 ms)` 0 to 16 of about 964 windows were late at
+every lead. At the default lead `group` had 7 to 14 late windows a run
+against 0 to 3 for `free` and `pin`, none of them over 1 ms; one `pin`
+window was 1.0 ms late. The laptop's order (unconfined, masked, pinned) is
+not visible here.
+
+**What a short lead runs into is an idle state, not the placement.** A
+standalone probe (four threads under one group mask, `FUTEX_WAIT_BITSET`
+to an absolute deadline `lead` before each instant, then polling until the
+hold of 250 µs after it) shows that it depends on both the park and the
+polling between parks. With 350 µs of polling (lead 100 µs) a park of 1 or
+2 ms ended 100 µs or more late 0.3% and 2% of the time, and one of 3 to
+8 ms 28 to 37%, almost all of them 250 to 500 µs late. With the park held
+at 3.4 ms, a lead of 100 µs gave 30 to 35% late, 500 µs 1 to 2% and
+1,500 µs about 0.5% (three runs each). `clock_nanosleep` behaves the same.
+Holding `/dev/cpu_dma_latency` at 0 for the run brings a 100 µs lead to
+under 2% late under every placement. The late parks are therefore an idle
+state's exit, by inference about 300 µs on this host against the 18 µs the
+firmware states; which state, and why a longer poll keeps the core out of
+it, were not established. A 1,500 µs lead at 240 Hz, and `sleep(1 ms)`,
+which never parks longer than 1 ms, stay clear of it. A lead under about
+500 µs needs a latency request from the process.
+
+**Fork-join** (fib(38), medians of 11, three rounds interleaved with the
+same benchmark built on `17b3174`, the pinned 2.2.1 behaviour):
+
+| CPUs named | `17b3174` | `pin` | `group` |
+|---|---|---|---|
+| `0-7` (one group's cores) | 115.8 ms | 120.9 (+4.4%) | 120.8 (+4.4%) |
+| `0-15` (both groups' cores) | 68.0 | 71.0 (+4.3%) | 71.2 (+4.7%) |
+| `0-7,16-23` (one group with SMT) | 100.2 | 100.1 | 100.1 |
+| `0-31` | 60.7 | 60.6 | 60.9 |
+
+`group` and `pin` are level with each other everywhere, so the new default
+placement costs nothing; the 4% on core-only sets is common to both and
+was not traced. `free` is not comparable on a named subset: on Linux it
+takes the whole scope, so participants roam both groups (up to 13% slower
+on `0-7` and `0-15`, faster on `0-7,16-23`, where it reaches 16 cores).
+
+**Throughput, actor_churn's host path** (6 consumers under `spin` on CPUs
+1 to 6, one group; paired rounds against `17b3174`, 340 runs, none
+contaminated). Under `pin` and `group` alike: `subset` at 1% −17%, at 10%
+−9%, `subset-whole` −12%, `private` +3%, the other eleven cells within
+1.4%. `free` adds occasional rounds 36 to 57% slower and −22% on `actor`
+(consumers on the other group). The subset loss follows from a spinning
+worker no longer arming its wake slot: putting the arm, check and disarm
+back under `spin` returns `subset` at 1% to −2% and `subset-whole` to +1%,
+while a second check alone, or a full fence, recovers `subset-whole` only.
+Nothing reads the armed state on that path (`FarmHost.wake` returns at
+once under `spin`), so why the arm helps is open. The spin count moves
+these cells a long way in both versions: at 64, `subset` at 1% and 10% is
+26 to 46% faster than `17b3174` at 128 and `subset-whole` is level, and
+`17b3174` at 64 is faster again.
+
+Not measured here: fiber timer and managed deadline lateness (a worker
+that only parks, with no polling between, may be the worst case for the
+idle state above), the idle cost of a default host, the perf gate against
+its recorded baselines, and `uv_latency`.
 
 ### For OMMe
 
