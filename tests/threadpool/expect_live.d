@@ -208,9 +208,11 @@ int main(string[] args)
     }
     // `reverse` runs the placements in the other order, for a measurement
     // on a machine that slows down as it warms up.
-    auto placements = [WorkerPlacement.automatic, WorkerPlacement.group, WorkerPlacement.pin];
+    // Each placement by name: `automatic` is `group` on a machine with
+    // several LLC groups, which would leave `free` unrun there.
+    auto placements = [WorkerPlacement.free, WorkerPlacement.group, WorkerPlacement.pin];
     if (args.length > 3 && args[3] == "reverse")
-        placements = [WorkerPlacement.pin, WorkerPlacement.group, WorkerPlacement.automatic];
+        placements = [WorkerPlacement.pin, WorkerPlacement.group, WorkerPlacement.free];
     foreach (placement; placements)
         run(placement, lead, seconds_, Duration.max);
     // The hosts' default policy, once: a 1 ms re-poll bound under the lead.
