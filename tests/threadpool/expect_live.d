@@ -68,7 +68,8 @@ void report(string name, TimingStats t, ulong beats)
 /// `repoll` is the base policy: `Duration.max` for `wait`, otherwise
 /// `sleep(repoll)`, the bound hosts run with (`idleTimeout`, 1 ms by
 /// default), which cuts each park before a window into shorter ones.
-void run(WorkerPlacement placement, uint leadMicros, double seconds_, Duration repoll)
+void run(WorkerPlacement placement, uint leadMicros, double seconds_, Duration repoll,
+    uint holdMicros = defaultHoldMicros)
 {
     enum long period = 4_166_667; // 240 Hz in nanoseconds
     atomicStore(gPending, 0L);
@@ -87,7 +88,7 @@ void run(WorkerPlacement placement, uint leadMicros, double seconds_, Duration r
     auto ready = director.take(readyCount);
     auto rest = director.skip(readyCount);
     enforce(ready.count == readyCount && rest.count == workers - readyCount, "take and skip split the pool");
-    ready.readiness(leadMicros, defaultHoldMicros);
+    ready.readiness(leadMicros, holdMicros);
 
     // Parked until told otherwise: no window, no deadline park.
     Thread.sleep(50.msecs);
@@ -114,8 +115,8 @@ void run(WorkerPlacement placement, uint leadMicros, double seconds_, Duration r
     }, "the last burst");
 
     auto t = ready.timing();
-    writefln("placement %s, lead %s us, %s: %s workers, %s ready", pool.resolution.placement, leadMicros,
-        repoll == Duration.max ? "wait" : "sleep(1 ms)", workers, readyCount);
+    writefln("placement %s, lead %s us, hold %s us, %s: %s workers, %s ready", pool.resolution.placement,
+        leadMicros, holdMicros, repoll == Duration.max ? "wait" : "sleep(1 ms)", workers, readyCount);
     report("ready workers", t, beats);
 
     // Structure.
@@ -130,7 +131,10 @@ void run(WorkerPlacement placement, uint leadMicros, double seconds_, Duration r
         && t.burstArrival[].sum + t.emptyWindows + t.missedWindows + readyCount >= t.windows,
         "each window found work, ended empty or was missed");
     enforce(t.missedWindows <= t.parkedLate && t.busy <= t.windows);
-    enforce(t.burstArrival[].sum > 0, "the ready workers found bursts inside their windows");
+    // A park that returns after its instant runs the body before it opens
+    // the window, so the burst it takes then is in no arrival bucket and the
+    // window ends empty. With no lead every park does.
+    enforce(leadMicros == 0 || t.burstArrival[].sum > 0, "the ready workers found bursts inside their windows");
     enforce(t.timedParks >= t.windows / 2, "the ready workers parked to the lead before their windows");
     // Under `wait` a park runs to its lead. Under `sleep` the re-poll bound
     // may end every one of them first, on the system timer tick.
@@ -215,8 +219,13 @@ int main(string[] args)
         placements = [WorkerPlacement.pin, WorkerPlacement.group, WorkerPlacement.free];
     foreach (placement; placements)
         run(placement, lead, seconds_, Duration.max);
+    // No lead and a long hold: every park before a window ends at or after
+    // its instant, by which time the publisher has named the next one. The
+    // worker still serves the window it parked for, and it is counted
+    // (about one window per instant, asserted in `run`).
+    run(WorkerPlacement.free, 0, seconds_ < 1 ? seconds_ : 1, Duration.max, 1_000);
     // The hosts' default policy, once: a 1 ms re-poll bound under the lead.
     run(WorkerPlacement.automatic, lead, seconds_ < 1 ? seconds_ : 1, 1.msecs);
-    writeln("PASS expect-test: windows, parks and counts hold under every placement, and under sleep");
+    writeln("PASS expect-test: windows, parks and counts hold under every placement, with no lead, and under sleep");
     return 0;
 }

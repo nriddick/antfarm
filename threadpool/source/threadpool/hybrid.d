@@ -278,6 +278,7 @@ struct WorkerSelf
     package long windowAt;         /// the instant of the window it is in
     package long lastPoll;         /// ticks of its last idle poll in that window
     package long parkedFor = expectNone; /// the instant whose lead its last deadline park ran to
+    package long parkEnded;        /// ticks at which that park returned
     package long lastStallSample;  /// ticks of the last spin-policy sample; 0 for none
     package uint spinDebt;         /// PAUSEs since that sample
     package uint timingEpoch;      /// the `WorkerRec.timingEpoch` its record belongs to
@@ -463,16 +464,54 @@ uint pollRound(ref WorkerSelf self, bool worked) @nogc nothrow
         }
         immutable at = atomicLoad!(MemoryOrder.raw)(rec.expectTicks);
         if (at == expectNone && self.windowEnd == 0)
+        {
+            self.parkedFor = expectNone; // withdrawn: no window is owed
             return Poll.park;
+        }
         immutable now = MonoTime.currTime.ticks;
         if (self.windowEnd != 0 && now >= self.windowEnd)
             leaveWindow(self, rec, now, worked);
         if (self.windowEnd == 0)
         {
             immutable hold = atomicLoad!(MemoryOrder.raw)(rec.holdTicks);
-            if (readinessAt(now, at, atomicLoad!(MemoryOrder.raw)(rec.leadTicks), hold) != Readiness.poll)
-                return Poll.park;
-            enterWindow(self, rec, at, hold, now);
+            bool entered;
+            immutable old = self.parkedFor;
+            if (old != expectNone && self.parkEnded >= old)
+            {
+                // The park that prepared for `old` returned after that
+                // instant but inside its window (one past the window is
+                // counted where it returned). `expect` may already name the
+                // next instant: a publisher names it as soon as the burst is
+                // out, and that call is what woke the worker. The worker
+                // serves the rest of the window it parked for, and its
+                // lateness is recorded there.
+                if (now < saturatingAdd(old, hold))
+                {
+                    enterWindow(self, rec, old, hold, now);
+                    entered = true;
+                }
+                else
+                {
+                    // That window closed before the worker polled. If its
+                    // park was late, it missed the window; otherwise it was
+                    // back in time and ran work past the window's end.
+                    auto t = timingOf(self, rec);
+                    count(t.windows);
+                    if (countLate(t.parkedLate, t.parkedLate1ms, t.worstParkedLate, self.parkEnded - old))
+                        count(t.missedWindows);
+                    else
+                        count(t.busy);
+                    self.parkedFor = expectNone;
+                }
+            }
+            else if (old != at)
+                self.parkedFor = expectNone; // replaced before it came
+            if (!entered)
+            {
+                if (readinessAt(now, at, atomicLoad!(MemoryOrder.raw)(rec.leadTicks), hold) != Readiness.poll)
+                    return Poll.park;
+                enterWindow(self, rec, at, hold, now);
+            }
         }
         else if (!self.windowCrossed && now >= self.windowAt)
         {
@@ -630,6 +669,7 @@ void applyIdlePolicy(ref WorkerSelf self, ref shared(int) runFlag,
         {
             countOvershoot(*t, after - deadline);
             self.parkedFor = leadOf;
+            self.parkEnded = after;
             // A park that ran past the whole window: the worker was never
             // ready for that instant, and no window will be entered for it.
             if (leadOf != expectNone
